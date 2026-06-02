@@ -52,6 +52,32 @@ def main():
     parser.add_argument("--symbol", default="XAUUSD+")
     parser.add_argument("--port", type=int, default=8050)
     parser.add_argument("--no-dashboard", action="store_true")
+    # ── 自学习层开关 (T1-T4, 2026-06-02 集成) ──
+    parser.add_argument("--use-router", action="store_true",
+                        help="MAB 多策略路由 (4 策略共享 paper, 默认关闭=单策略 baseline)")
+    parser.add_argument("--use-scheduler", action="store_true",
+                        help="SelfLearningScheduler 动态调权 (依赖 --use-router)")
+    parser.add_argument("--use-scorer", action="store_true",
+                        help="WeightedScorer 加权打分 (依赖 --use-router)")
+    parser.add_argument("--use-calibrator", action="store_true",
+                        help="ProbabilityCalibrator 校准 confidence (依赖 --use-scorer)")
+    parser.add_argument("--use-meta-monitor", action="store_true",
+                        help="MetaLearnerMonitor 跟踪模型校准 (paper 路径始终记录)")
+    parser.add_argument("--use-factor-monitor", action="store_true",
+                        help="FactorMonitor 跟踪因子 IC 衰减")
+    parser.add_argument("--use-alerter", action="store_true",
+                        help="Alerter 告警 (circuit / 大额 trade / drift)")
+    parser.add_argument("--enable-circuit", action="store_true",
+                        help="开启 CircuitBreaker (默认 False=baseline, P3 调优 10%%)")
+    parser.add_argument("--use-retrain", action="store_true",
+                        help="启用 RetrainScheduler (T8: 每 N 笔触发 walkforward)")
+    parser.add_argument("--retrain-every-n", type=int, default=200,
+                        help="retrain 频率 (默认 200 笔)")
+    parser.add_argument("--router-seed", type=int, default=42,
+                        help="MABRouter 随机种子 (P1-D 默认 42)")
+    parser.add_argument("--router-arms", nargs="+",
+                        default=["multi_factor_m15", "trend_following", "mean_reversion", "breakout"],
+                        help="MABRouter 候选策略名 (默认 4 个 M15)")
     args = parser.parse_args()
 
     setup_logging()
@@ -318,12 +344,23 @@ def run_paper(args):
 
     流程：
     1. 从 DataStore 加载 M15 历史 bar
-    2. 用 PaperTrader 跑 multi_factor_m15 策略
+    2. 默认: 单一 multi_factor_m15 策略 (baseline, +407.51%)
+       启用 --use-router 后: MABRouter 4 策略共享 (T1, 2026-06-02)
     3. 输出：详细报告（PnL / Sharpe / DD / 逐笔成交）
 
     与回测模式的区别：
     - 回测 = backtrader 内部撮合（OHLC + SL/TP in-bar check）
     - paper = 复现实盘链路（signal → 风控 → 模拟撮合 → 状态机）
+
+    自学习层开关 (T1-T4, 2026-06-02 集成):
+    - --use-router:        MABRouter 4 策略共享 (T1)
+    - --use-scheduler:     SelfLearningScheduler 调权 (T5)
+    - --use-scorer:        WeightedScorer (T3 注: 暂未接入 router, 仅做示例)
+    - --use-calibrator:    ProbabilityCalibrator.calibrate(signal.confidence) (T3)
+    - --use-meta-monitor:  MetaLearnerMonitor.on_observation() (T6)
+    - --use-factor-monitor: FactorMonitor.on_bar() (T7)
+    - --use-alerter:       Alerter 告警 (T4)
+    - --enable-circuit:    CircuitBreaker (默认 False=baseline, P3 调优 10%)
     """
     from data.store import DataStore
     from strategy.registry import strategy_registry
@@ -333,9 +370,133 @@ def run_paper(args):
 
     logger.info("=" * 60)
     logger.info(f"PAPER REPLAY — {args.symbol} @ {args.timeframe}")
+    if args.use_router:
+        logger.info(f"  [T1] MABRouter 启用: {args.router_arms} (seed={args.router_seed})")
+        if args.use_scheduler:
+            logger.info(f"  [T5] SelfLearningScheduler 启用 (动态调权)")
+        if args.use_calibrator:
+            logger.info(f"  [T3] ProbabilityCalibrator 启用 (calibrate confidence)")
+        if args.use_meta_monitor:
+            logger.info(f"  [T6] MetaLearnerMonitor 启用 (记录 close 校准)")
+        if args.use_factor_monitor:
+            logger.info(f"  [T7] FactorMonitor 启用 (每根 bar 记录 IC)")
+        if args.use_alerter:
+            logger.info(f"  [T4] Alerter 启用 (circuit/大额/drift 告警)")
+        if args.use_retrain:
+            logger.info(f"  [T8] RetrainScheduler 启用 (每 {args.retrain_every_n} 笔 walkforward)")
+    if args.enable_circuit:
+        logger.info(f"  [P3] CircuitBreaker 启用 (10% 日损阈值)")
     logger.info("=" * 60)
 
-    # ── 加载策略（注册表里已注册的） ──
+    # ── 加载数据 ──
+    store = DataStore("data/market_data.db")
+
+    # ── 路径 A: --use-router MAB 多策略 ──
+    if args.use_router:
+        from strategy.mab_router import MABRouter
+        from execution.mab_paper_runner import MABPaperRunner
+
+        # 加载候选策略
+        strats = {}
+        # 注: 事件 skip 过滤 (nfp/fomc/gvz) 只在 multi_factor_m15 / ma_cross_h4 等
+        # P0 之后的 strategy 里实装. trend_following / mean_reversion / breakout 早期 strategy
+        # 没有这些字段, 强 merge 会 KeyError. 故只对支持字段的 strategy 设.
+        overrides_partial = {
+            "sl_atr": 3.0, "tp_atr": 4.0, "cooldown_bars": 3,
+        }
+        overrides_full = {
+            **overrides_partial,
+            "enable_nfp_skip": True, "nfp_skip_days": 1,
+            "enable_dual_event_skip": True,
+            "enable_gvz_gate": True, "gvz_drop_pct": -2.0,
+        }
+        for n in args.router_arms:
+            if n not in strategy_registry.list():
+                logger.error(f"Strategy '{n}' not registered. Available: {strategy_registry.list()}")
+                return
+            s = strategy_registry.create(n, args.symbol, args.timeframe)
+            # 检查 strategy params 里有没有 full override 字段
+            has_event_fields = all(k in s.params for k in overrides_full)
+            if has_event_fields:
+                s.params = {**s.params, **overrides_full}
+            else:
+                s.params = {**s.params, **overrides_partial}
+                logger.debug(f"  Strategy {n} 无事件 skip 字段, 只设 SL/TP")
+            strats[n] = s
+
+        router = MABRouter(strategies=list(strats.keys()), seed=args.router_seed)
+
+        # 自学习层 (按 flag 装配)
+        scheduler = None
+        if args.use_scheduler:
+            from strategy.scheduler import SelfLearningScheduler
+            scheduler = SelfLearningScheduler(router=router, check_interval=50)
+
+        calibrator = None
+        if args.use_calibrator:
+            from alpha.probability_calibrator import ProbabilityCalibrator
+            # 默认用 identity (无校准, 跟现实一致; P0-7 实测的 calibrator 可从 json 加载)
+            calibrator = ProbabilityCalibrator.identity()
+            logger.info(f"  [T3] calibrator: identity (无校准 baseline)")
+
+        meta_monitor = None
+        if args.use_meta_monitor:
+            from live.meta_learner_monitor import MetaLearnerMonitor
+            meta_monitor = MetaLearnerMonitor(model_names=list(strats.keys()))
+
+        factor_monitor = None
+        if args.use_factor_monitor:
+            from live.factor_monitor import FactorMonitor
+            from alpha.registry import factor_registry as f_reg
+            factor_names = f_reg.list() if hasattr(f_reg, 'list') else []
+            if not factor_names:
+                # fallback: 4 个老因子
+                factor_names = ["rsi_14", "macd_hist", "adx", "bb_width"]
+            factor_monitor = FactorMonitor(factor_names=factor_names, window=500)
+
+        alerter = None
+        if args.use_alerter:
+            from monitor.alerter import Alerter
+            alerter = Alerter({"log_file": "logs/alerts.log", "min_level": "INFO"})
+
+        retrain_scheduler = None
+        if args.use_retrain:
+            from strategy.retrain_scheduler import RetrainScheduler
+            retrain_scheduler = RetrainScheduler(
+                trigger_every_n_trades=args.retrain_every_n,
+                min_trades_before_first=args.retrain_every_n,
+                walkforward_script="scripts/walkforward_p0_6.py",
+                calibrator_path="data/charts/calibrator_bucket.json",
+                timeout_sec=300,
+            )
+
+        runner = MABPaperRunner(
+            strategies=strats, router=router,
+            scheduler=scheduler, calibrator=calibrator,
+            meta_monitor=meta_monitor, factor_monitor=factor_monitor,
+            alerter=alerter, retrain_scheduler=retrain_scheduler,
+            # Kelly 动态仓位: risk_per_trade_pct=2% 让 engine 按 (equity * 2% / sl_distance) 自动算手数
+            # XAUUSD 2025-2026 ATR ~$50-100, sl_distance ~$150-300, 自动 lots ~ 0.001-0.005 (对 $500 账户)
+            # min_lots=0.001 (0.1 oz) 允许 0.001 lot 起步, 跟 broker 步进一致
+            initial_balance=500.0, default_lots=0.001, max_lots=0.01, min_lots=0.001,
+            risk_per_trade_pct=2.0,
+            enable_circuit=args.enable_circuit,
+        )
+        try:
+            runner.load_data(store, args.symbol, args.timeframe)
+        except ValueError as e:
+            logger.error(str(e))
+            return
+
+        t0 = _time.time()
+        report = runner.run()
+        elapsed = _time.time() - t0
+        runner.print_report(report)
+        print(f"  Runtime       : {elapsed:.2f}s")
+        print()
+        return
+
+    # ── 路径 B: 单一策略 baseline (default, +407.51%) ──
     strategy_name = "multi_factor_m15"
     if strategy_name not in strategy_registry.list():
         logger.error(f"Strategy '{strategy_name}' not registered. "
@@ -363,8 +524,6 @@ def run_paper(args):
         **override_params,
     )
 
-    # ── 加载数据 ──
-    store = DataStore("data/market_data.db")
     trader = PaperTrader(
         strategy=strategy,
         initial_balance=500.0,
@@ -374,7 +533,7 @@ def run_paper(args):
         # 事件/GVZ 过滤已在 strategy 内（sweep R5 实测最优）
         # 显式禁掉 pre_trade/circuit，让 738 笔全过
         # （sweep R5 跑出 DD 40% / +$2038）
-        enable_circuit=False,
+        enable_circuit=args.enable_circuit,  # T2 改: 默认 False, 启用 --enable-circuit 打开
     )
     try:
         trader.load_data(store, args.symbol, args.timeframe)

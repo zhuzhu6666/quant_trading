@@ -93,8 +93,14 @@ C:\Users\zhu\AppData\Local\Programs\Python\Python312\python.exe -m pip install -
 # 回测 (默认 M15, 扫描 SL/TP/CD 12 组合)
 python main.py --mode backtest --timeframe M15
 
-# 模拟盘 (复现实盘链路)
+# 模拟盘 (复现实盘链路) — 单一策略 baseline, 显式无事件过滤, +407.51% / 738t / Sharpe 1.807
 python main.py --mode paper --timeframe M15
+
+# 模拟盘 — MAB 多策略 (T1-T10 全栈, 2026-06-02 集成)
+python main.py --mode paper --timeframe M15 \
+  --use-router --use-scheduler --use-calibrator \
+  --use-meta-monitor --use-factor-monitor --use-alerter \
+  --use-retrain --retrain-every-n 300
 
 # 实盘 (stub, 需配 MT5 — 当前 balance=0 阻塞)
 python main.py --mode live

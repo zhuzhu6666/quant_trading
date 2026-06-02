@@ -250,17 +250,26 @@ quant_trading/
 
 ---
 
-## 6. 待办优先级 (P0 7/7 + P1 6/7 + P3 circuit 调优 全完)
+## 6. 待办优先级 (P0 7/7 + P1 6/7 + P3 circuit 调优 + 集成层 全完)
 
-按你"先做有真实价值"原则推荐:
+按"先做有真实价值"原则推荐:
 
 ### 6.1 立刻能做 (无外部依赖, 1-2 小时)
 - **P2 因子 DSL**: 类 WorldQuant BRAIN 表达层
 - **P2 SL/TP bid-ask**: P0-7 校准的下一步, 让 OOS 更真实
 - **P3 进一步**: 单笔 0.01 → 0.005 手, 接 P0-7 校准到 scoring
 
-### 6.2 ~~等用户输入~~ (无)
-P1-G 合规检查已确认不需要
+### 6.2 集成层完成 (2026-06-02)
+- ✅ **T1** MABRouter 4 策略共享 paper (`execution/mab_paper_runner.py`)
+- ✅ **T2** main.py `--use-router` 等 8 个 flag 接入
+- ✅ **T3** ProbabilityCalibrator.calibrate(signal.confidence)
+- ✅ **T4** Alerter 接入 (大额 trade / drift / circuit)
+- ✅ **T5** SelfLearningScheduler.on_trade_close 接入
+- ✅ **T6** MetaLearnerMonitor.on_observation 接入
+- ✅ **T7** FactorMonitor.on_bar 接入
+- ✅ **T8** RetrainScheduler (每 N 笔触发 walkforward, 7.3s/run)
+- ✅ **T9** regime 隔离 (MABRouter select 已是 per-regime)
+- ✅ **T10** drift → 自动 retrain (MetaLearner SEVERE_DRIFT 触发)
 
 ### 6.3 阻塞
 - **T1.2 L2/T&S/基本面**: broker 余额/支持
