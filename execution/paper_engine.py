@@ -57,7 +57,7 @@ class PaperExecutionEngine:
     """
 
     # 合约/费用参数（XAUUSD+ Bybit 实盘一致）
-    CONTRACT_SIZE = 100        # 100 oz/lot
+    CONTRACT_SIZE = 100        # 100 oz/lot (XAUUSD+ Bybit 实盘 1 lot = 100 oz)
     COMMISSION_PER_LOT = 6.0   # $6/lot 单边
     SLIPPAGE_BPS = 2.0         # 2bps
     DIGITS = 2

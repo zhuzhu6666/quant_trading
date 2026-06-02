@@ -130,7 +130,7 @@ python scripts/baseline_all_strategies.py
 ## 核心原则
 
 1. **先回测, 后实盘** — 至少 2K 根 bar, 样本外衰减<150% 才算过验证
-2. **风控第一** — 单笔风险 4-6% 账户, $500+0.01+3ATR SL 是结构性不匹配
+2. **风控第一** — 单笔风险 4-6% 账户, $500+0.01 lot (1 oz XAUUSD, contract_size=100) + 3 ATR SL ≈ $21 = 4.2% 账户, 跟 P0 原则一致
 3. **参数不贪** — 12 组合全过, 过拟合=未来函数=假
 4. **数据质量** — MT5 真实 tick, 不用 Yahoo Finance
 5. **本地代理** — claude CLI 走 `ANTHROPIC_BASE_URL=http://127.0.0.1:15721` → deepseek-v4-flash

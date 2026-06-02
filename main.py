@@ -475,11 +475,10 @@ def run_paper(args):
             scheduler=scheduler, calibrator=calibrator,
             meta_monitor=meta_monitor, factor_monitor=factor_monitor,
             alerter=alerter, retrain_scheduler=retrain_scheduler,
-            # Kelly 动态仓位: risk_per_trade_pct=2% 让 engine 按 (equity * 2% / sl_distance) 自动算手数
-            # XAUUSD 2025-2026 ATR ~$50-100, sl_distance ~$150-300, 自动 lots ~ 0.001-0.005 (对 $500 账户)
-            # min_lots=0.001 (0.1 oz) 允许 0.001 lot 起步, 跟 broker 步进一致
-            initial_balance=500.0, default_lots=0.001, max_lots=0.01, min_lots=0.001,
-            risk_per_trade_pct=2.0,
+            # baseline 等比例: 0.01 lot × 100 contract = 1 oz XAUUSD
+            # 3 ATR SL × \$7 ATR × 1 oz = \$21 单笔 = 4.2% 账户 (P0 风控原则)
+            # max_lots=2.0 跟 baseline 一致, 共享 4 策略仓位
+            initial_balance=500.0, default_lots=0.01, max_lots=2.0,
             enable_circuit=args.enable_circuit,
         )
         try:
