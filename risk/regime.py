@@ -472,11 +472,12 @@ class RegimeDetector:
         dxy_dates = set(dxy_df["date"].astype(str).tolist())
 
         # Build a daily XAUUSD close series aligned to those dates
+        # 改用 bars 表 (INTEGER time) 走实时 D1, 删 candles 僵尸表 (2026-06-02)
         try:
             xau_df = pd.read_sql_query(
-                "SELECT date(time) AS d, close FROM candles "
-                "WHERE symbol_id = (SELECT id FROM symbols WHERE name LIKE 'XAUUSD%' LIMIT 1) "
-                "AND timeframe = 'D1' AND date(time) <= ? "
+                "SELECT date(time, 'unixepoch') AS d, close FROM bars "
+                "WHERE symbol = (SELECT name FROM symbols WHERE name LIKE 'XAUUSD%' LIMIT 1) "
+                "AND timeframe = 'D1' AND date(time, 'unixepoch') <= ? "
                 "ORDER BY time DESC LIMIT 60",
                 conn,
                 params=(today,),

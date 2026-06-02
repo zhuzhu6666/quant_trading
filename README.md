@@ -2,7 +2,7 @@
 
 XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backtest baseline 已实盘验证 (read-only 模式)。
 
-**最后更新: 2026-06-02**
+**最后更新: 2026-06-03**
 
 ---
 
@@ -63,6 +63,16 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 | M15 | 50182 | 2026-06-02 13:45 |
 | H1 | 18045 | 2026-06-02 13:00 |
 | D1 | 500 | 2026-05-29 |
+
+### P2 SL/TP bid-ask (2026-06-03)
+
+- bars 表加 `spread INTEGER` 字段 (ALTER TABLE 自动迁移)
+- M15 backfill 4998/50204 bar (10% 真实 spread, broker 限 5000; 老 bar fallback 0.13 USD)
+- paper_engine._check_exit: SL/TP 按 bid/ask-extreme 比较 (long SL 用 bid-low, TP 用 bid-high-spread)
+- entry 价: long 在 ask (bar.open + half_spread), short 在 bid
+- 端到端 5000 bar PnL 变化 < 0.5% (spread 0.13 USD 远小于 3ATR=$25)
+- 框架就位, 真实影响在 FOMC/NFP 事件日 spread 1-3 USD 时才有意义 (2-5% PnL 影响)
+- 报告: `data/charts/p2_sltp_bidask_report.txt`
 
 ---
 

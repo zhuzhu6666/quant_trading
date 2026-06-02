@@ -174,6 +174,7 @@ class PaperTrader:
                 "low": float(row["low"]),
                 "close": float(row["close"]),
                 "volume": float(row.get("volume", 0)),
+                "spread": int(row.get("spread", 0) or 0),  # P2: bid/ask SL/TP 用
                 "complete": True,
             })
         self._bars = bars

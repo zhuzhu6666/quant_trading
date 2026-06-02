@@ -89,6 +89,7 @@ class SyncOrchestrator:
         report = SyncReport(run_type="initial", symbol=symbol, started_utc=now_str)
 
         logger.info(f"[SyncOrch] full_sync: {symbol} x {timeframes}, n_bars={n_bars}")
+        insert_results: list[InsertResult] = []   # 累积真实 InsertResult 传给 save_status (修 bug 2026-06-02)
         for tf in timeframes:
             tf_info = TIMEFRAME_MAP.get(tf, (tf, 15))
             tf_minutes = tf_info[1]
@@ -109,15 +110,12 @@ class SyncOrchestrator:
                 "total_db": ins.total_db_bars,
                 "error": ins.error or "",
             })
+            insert_results.append(ins)
             report.total_inserted += ins.inserted
             report.total_dups += filt.dup_count
             report.total_incomplete += filt.incomplete_count
 
-        self.inserter.save_status(
-            [InsertResult(symbol=symbol, timeframe=tf, inserted=0, total_db_bars=0, duration_sec=0)
-             for tf in timeframes],
-            symbol,
-        )
+        self.inserter.save_status(insert_results, symbol)
         report.elapsed_sec = _time.time() - t0
         logger.info(f"[SyncOrch] full_sync 完成: +{report.total_inserted} bars "
                     f"({report.elapsed_sec:.1f}s)")
@@ -140,6 +138,7 @@ class SyncOrchestrator:
 
         # 取上次 sync 状态, 找到每个 tf 的 last_bar_time
         status = self.inserter.load_status()
+        insert_results: list[InsertResult] = []   # 累积真实 InsertResult 传给 save_status (修 bug 2026-06-02)
         for tf in timeframes:
             tf_info = TIMEFRAME_MAP.get(tf, (tf, 15))
             tf_minutes = tf_info[1]
@@ -171,15 +170,12 @@ class SyncOrchestrator:
                 "total_db": ins.total_db_bars,
                 "error": ins.error or "",
             })
+            insert_results.append(ins)
             report.total_inserted += ins.inserted
             report.total_dups += filt.dup_count
             report.total_incomplete += filt.incomplete_count
 
-        self.inserter.save_status(
-            [InsertResult(symbol=symbol, timeframe=tf, inserted=0, total_db_bars=0, duration_sec=0)
-             for tf in timeframes],
-            symbol,
-        )
+        self.inserter.save_status(insert_results, symbol)
         report.elapsed_sec = _time.time() - t0
         logger.info(f"[SyncOrch] incremental 完成: +{report.total_inserted} bars "
                     f"({report.elapsed_sec:.1f}s)")

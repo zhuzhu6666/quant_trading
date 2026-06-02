@@ -48,11 +48,17 @@ class DataStore:
                     time INTEGER NOT NULL,
                     open REAL, high REAL, low REAL, close REAL,
                     volume REAL DEFAULT 0,
+                    spread INTEGER DEFAULT 0,
                     UNIQUE(symbol, timeframe, time)
                 )
             """)
+            # 兼容旧 db：检测到没 spread 列就 ALTER TABLE 加
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(bars)").fetchall()]
+            if "spread" not in cols:
+                conn.execute("ALTER TABLE bars ADD COLUMN spread INTEGER DEFAULT 0")
+                logger.info("[DataStore] bars 表新增 spread 列 (旧库迁移)")
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_bars_sym_tf_time 
+                CREATE INDEX IF NOT EXISTS idx_bars_sym_tf_time
                 ON bars(symbol, timeframe, time)
             """)
             conn.execute("""
@@ -67,24 +73,24 @@ class DataStore:
         """插入单根完成bar"""
         with self._conn() as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO bars 
-                   (symbol, timeframe, time, open, high, low, close, volume)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR REPLACE INTO bars
+                   (symbol, timeframe, time, open, high, low, close, volume, spread)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (symbol, timeframe, int(bar["time"]),
                  bar["open"], bar["high"], bar["low"], bar["close"],
-                 bar.get("volume", 0)),
+                 bar.get("volume", 0), int(bar.get("spread", 0) or 0)),
             )
 
     def insert_bars(self, bars: list[dict], symbol: str, timeframe: str):
         """批量插入bar"""
         with self._conn() as conn:
             conn.executemany(
-                """INSERT OR REPLACE INTO bars 
-                   (symbol, timeframe, time, open, high, low, close, volume)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR REPLACE INTO bars
+                   (symbol, timeframe, time, open, high, low, close, volume, spread)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(symbol, timeframe, int(b["time"]),
                   b["open"], b["high"], b["low"], b["close"],
-                  b.get("volume", 0)) for b in bars],
+                  b.get("volume", 0), int(b.get("spread", 0) or 0)) for b in bars],
             )
 
     def load_bars(self, symbol: str, timeframe: str,

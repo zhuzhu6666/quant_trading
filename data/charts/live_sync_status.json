@@ -1,17 +1,17 @@
 {
-  "last_sync_utc": "2026-06-02T11:01:06Z",
+  "last_sync_utc": "2026-06-02T16:38:38Z",
   "per_tf": {
     "M15": {
       "inserted_last": 0,
-      "total_bars": 0
-    },
-    "M5": {
-      "inserted_last": 0,
-      "total_bars": 0
+      "total_bars": 50204
     },
     "H1": {
       "inserted_last": 0,
-      "total_bars": 0
+      "total_bars": 18050
+    },
+    "D1": {
+      "inserted_last": 0,
+      "total_bars": 501
     }
   }
 }

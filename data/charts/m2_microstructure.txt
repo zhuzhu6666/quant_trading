@@ -1,0 +1,43 @@
+M2.2: 微观结构快照 (2026-06-03)
+======================================================================
+
+时间: 2026-06-02T21:01:23+00:00
+标的: XAUUSD+
+
+当前微观结构:
+  symbol: XAUUSD+
+  point: 0.01
+  digits: 2
+  trade_contract_size: 100.0
+  volume_min: 0.01
+  volume_step: 0.01
+  swap_long: -83.46
+  swap_short: 25.5
+  margin_initial: 0.0
+  spread_current_points: 14
+  last_bid: 4487.19
+  last_ask: 4487.33
+  tick_time: 2026-06-02T21:01:23+00:00
+
+差异 vs baseline (2026-06-02): 3 项
+  [WARN] swap_long: None → -83.46
+  [WARN] swap_short: None → 25.5
+  [INFO] spread_avg_points: 13.0 → None
+
+======================================================================
+解读
+======================================================================
+⚠️  2 项 WARN: spread/swap 微调, 影响 PnL 0.5-2%
+
+----------------------------------------------------------------------
+已知 baseline (2026-06-02):
+  symbol: XAUUSD+
+  point: 0.01
+  digits: 2
+  trade_contract_size: 100.0
+  volume_min: 0.01
+  volume_step: 0.01
+  swap_long: None
+  swap_short: None
+  spread_avg_points: 13.0
+  margin_initial: 0.0

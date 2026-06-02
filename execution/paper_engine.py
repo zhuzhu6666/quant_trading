@@ -20,6 +20,7 @@ Paper Execution Engine — 模拟撮合引擎
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -31,6 +32,9 @@ from risk.circuit import CircuitBreaker
 from execution.slippage import DynamicSlippageModel
 
 logger = logging.getLogger(__name__)
+
+# P2: 强制 close-based SL/TP 判定 (跑 A/B 对比时关掉 bid/ask 偏移)
+FORCE_CLOSE_BASED_SLTP = os.environ.get("FORCE_CLOSE_BASED_SLTP", "0") == "1"
 
 
 @dataclass
@@ -127,8 +131,10 @@ class PaperExecutionEngine:
     def _commission(self, lots: float) -> float:
         return lots * self.COMMISSION_PER_LOT
 
-    def _open(self, signal: Signal, fill_price: float):
-        """开仓"""
+    def _open(self, signal: Signal, fill_price: float, bar_time: float | None = None):
+        """开仓
+        bar_time: bar["time"] (epoch seconds), 用来算 swap 持仓天数. None 时用 utcnow.
+        """
         # 计算 SL/TP 价（用信号给的 atr 倍数）
         atr = signal.atr if signal.atr > 0 else 1.0
         if signal.direction == 1:
@@ -185,6 +191,12 @@ class PaperExecutionEngine:
 
         self.balance -= comm
         self.equity = self.balance
+        # entry_time: bar 回放时用 bar["time"] (历史), live 时用 utcnow
+        if bar_time is not None:
+            from datetime import datetime as _dt
+            entry_dt = _dt.utcfromtimestamp(float(bar_time))
+        else:
+            entry_dt = datetime.utcnow()
         self.position = Position(
             symbol=signal.symbol,
             direction=signal.direction,
@@ -193,7 +205,7 @@ class PaperExecutionEngine:
             current_price=actual_price,
             sl_price=sl_price,
             tp_price=tp_price,
-            entry_time=datetime.utcnow(),
+            entry_time=entry_dt,
         )
         state.position = self.position
         state.balance = self.balance
@@ -328,6 +340,17 @@ class PaperExecutionEngine:
         if self._pending_signal is not None and (not self.position or self.position.direction == 0):
             sig = self._pending_signal
             fill_price = bar["open"]
+            # P2: long entry 在 ask (bid + half spread), short entry 在 bid
+            #   - bar.open 是 bid, long 加 half spread, short 保持
+            #   - 这样 entry 价本身已经包含 half-spread 的不利滑点
+            #   - SL/TP 仍然从 entry 算起 (自然就比纯 close-based 更紧)
+            # FORCE_CLOSE_BASED_SLTP=1 关掉偏移 (A/B 对比用)
+            if not FORCE_CLOSE_BASED_SLTP:
+                spread_pts = int(bar.get("spread", 0) or 0)
+                half_spread = spread_pts * 0.01 / 2.0
+                if sig.direction == 1:  # long: buy at ask
+                    fill_price = fill_price + half_spread
+                # else: short, fill_price = bid, 保持
             self._open(sig, fill_price)
         # 无论是否有持仓，pending signal 都被消费掉
         # （有持仓时丢弃，无持仓时已用）
@@ -363,27 +386,52 @@ class PaperExecutionEngine:
 
     def _check_exit(self, bar: dict) -> Optional[PaperTrade]:
         """
-        在单根 bar 的 OHLC 4 步里检查 SL/TP：
+        在单根 bar 的 OHLC 4 步里检查 SL/TP:
+
+        P2 bid/ask 建模 (2026-06-03):
+          - bar.close 是 bid (MT5 copy_rates_from_pos 默认)
+          - ask = bid + spread_usd
+          - bar.high = ask-extreme (含 spread), bar.low = bid-extreme
+          - long SL:  close long = sell at bid, low (bid-extreme) ≤ SL
+          - long TP:  close long = sell at bid, high - spread (bid-extreme) ≥ TP
+          - short SL: close short = buy at ask, high (ask-extreme) ≥ SL
+          - short TP: close short = buy at ask, low + spread (ask-extreme) ≤ TP
+        退路: spread=0 时等价旧 close-based 判定 (向后兼容)
+        env FORCE_CLOSE_BASED_SLTP=1 关掉 bid/ask 偏移 (A/B 对比用)
 
         1. 假设 open 后行情朝某方向走
         2. 走到 high（多头）或 low（空头）前先看 SL
-        3. 简化：若 high >= TP（多）或 low <= TP（空）→ TP hit
-                若 low <= SL（多）或 high >= SL（空）→ SL hit
-        4. SL/TP 同根：默认 SL 优先（保守）
+        3. 简化: TP 用 bid-extreme high 比较, SL 用 bid-extreme low 比较 (long)
+        4. SL/TP 同根: 默认 SL 优先 (保守)
         """
         pos = self.position
         o, h, l, c = bar["open"], bar["high"], bar["low"], bar["close"]
         sl, tp = pos.sl_price, pos.tp_price
 
-        if pos.direction == 1:  # 多仓
-            sl_hit = l <= sl
-            tp_hit = h >= tp
-        else:  # 空仓
-            sl_hit = h >= sl
-            tp_hit = l <= tp
+        if FORCE_CLOSE_BASED_SLTP:
+            # 老逻辑 (P2 之前): bar.high/low 直接跟 SL/TP 比较
+            if pos.direction == 1:
+                sl_hit = l <= sl
+                tp_hit = h >= tp
+            else:
+                sl_hit = h >= sl
+                tp_hit = l <= tp
+        else:
+            # P2 bid/ask 逻辑: SL/TP 按 bid/ask-extreme 比较
+            spread_pts = int(bar.get("spread", 0) or 0)
+            spread_usd = spread_pts * 0.01
+            bid_high = h - spread_usd   # bar.high 含 ask spread, 减回去得 bid-extreme high
+            ask_low = l + spread_usd    # bar.low 是 bid, 加 spread 得 ask-extreme low
+
+            if pos.direction == 1:  # 多仓: SL 用 bid-extreme low, TP 用 bid-extreme high
+                sl_hit = l <= sl
+                tp_hit = bid_high >= tp
+            else:  # 空仓: SL 用 ask-extreme high, TP 用 ask-extreme low
+                sl_hit = h >= sl
+                tp_hit = ask_low <= tp
 
         if sl_hit and tp_hit:
-            # 同根都触发：保守取 SL
+            # 同根都触发: 保守取 SL
             return self._close(sl, reason="sl", bar_time=bar.get("time"))
         if sl_hit:
             return self._close(sl, reason="sl", bar_time=bar.get("time"))

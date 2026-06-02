@@ -1,0 +1,17 @@
+P2: spread backfill 报告 (2026-06-03)
+============================================================
+
+DB: data/market_data.db
+Symbol: XAUUSD+
+Source: MT5 copy_rates_from_pos (spread points * 0.01 = USD/oz)
+
+Timeframe    Total   WithSpread   Pulled   Sample
+------------------------------------------------------------
+M5         200199         4581     5000       13
+M15         50204         4998     5000       13
+M30         25000         4897     5000       10
+H1          18050         4999     5000        8
+H4           5000         4821     5000        7
+D1            501          498     2118        2
+
+老 bar (broker 不返回的) 保留 spread=0, 运行时 fallback 0.13 USD

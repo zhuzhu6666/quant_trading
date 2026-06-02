@@ -1,0 +1,16 @@
+M2.1: 未来函数 (look-ahead) 扫描报告 (2026-06-03)
+======================================================================
+
+扫描目录: execution, strategy, alpha, core
+可疑模式定义:
+  - bar\[i\+\d+\]: future bar index access
+  - \.iloc\[i\+\d+\]: future iloc access
+  - \.shift\(\-\d+\): negative shift (look forward)
+  - fill_price\s*=\s*.*\.close: fill_price from close (should be open or signal.price)
+
+总发现: 0
+
+======================================================================
+结论 (2026-06-03)
+======================================================================
+✓ 无静态可发现 look-ahead 模式. 进一步动态测试需注入未来 bar.

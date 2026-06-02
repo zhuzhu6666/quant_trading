@@ -171,10 +171,17 @@ quant_trading/
 - **Regime 分类**: `risk/regime.py`
 
 ### 2.5 数据
-- **DataStore**: `data/store.py` (50K bar M15 XAUUSD+)
+- **DataStore**: `data/store.py` (50K bar M15 XAUUSD+, 9 字段含 spread)
 - **外部数据加载**: `data/external_loader.py` (DXY / SLV/GLD/TLT / FOMC/NFP/CPI/PCE)
 - **事件日历**: db 内 `events` 表 (105 条, 2024-2026)
 - **Tick 生成**: `data/tick_generator.py` (Brownian bridge)
+- **P2 spread backfill**: `scripts/p2_backfill_spread.py` (MT5 → bars.spread, 10% 真实覆盖)
+
+### 2.6 P2 SL/TP bid-ask (2026-06-03)
+- **paper_engine._check_exit**: bid/ask-extreme 判定 (long SL 用 low, TP 用 high-spread)
+- **paper_engine._open**: long entry 在 ask (bar.open + half_spread)
+- **FORCE_CLOSE_BASED_SLTP env**: 关掉 bid/ask 偏移 (A/B 对比用)
+- **报告**: `data/charts/p2_sltp_bidask_report.txt` (close-based vs bid/ask)
 
 ---
 
@@ -332,7 +339,9 @@ quant_trading/
 - `data/decision_log.db` (P9 决策日志)
 - `data/charts/` — 30 份报告 + 5 个 discovery run json + factor_health report
 - `config/factor_lifecycle.yaml` — L1+L2 配置
-- `data/live_sync_status.json` — T16 sync 状态
+- `~/.hermes/scripts/live_sync_5m.py` — T16 调度脚本 (Hermes cron job 54c849d80e9d 每 5min 调, 强制 Python 3.12)
+- `data/charts/live_sync_status.json` — T16 sync 状态 (`last_sync_utc` 实时, `per_tf.inserted_last` / `total_bars` 字段 2026-06-02 修 orchestrator bug 后正常更新)
+- ⚠ db 清理 (2026-06-02 23:40): `candles` 表 (TEXT time, 6 timeframe 卡 2026-05-29, 没人用) 已 DROP TABLE, 备份在 `data/market_data.db.pre_drop_candles.bak`。`regime.py:477` 改走 `bars` (INTEGER time, 实时)。**唯一表**: bars + macro_daily + etf_daily + events + symbols
 
 ---
 

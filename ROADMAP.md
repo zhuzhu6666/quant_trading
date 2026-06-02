@@ -96,10 +96,10 @@
 - [x] **T16.4** `data/live_sync/orchestrator.py` — full_sync / incremental_sync + 多 timeframe
 - [x] **T16.5** `data/live_sync/daemon.py` — 后台守护进程 (once / daemon 模式)
 - [x] **T16.6** `scripts/live_sync.py` — CLI (--mode once/daemon/status)
-- [x] **T16.7** `scripts/live_sync_daily.bat` — Windows Task Scheduler 配置
+- [x] **T16.7** **`hermes cron` job 接管 (2026-06-03 改)**: `job_id=54c849d80e9d`, `every 5m`, `no_agent=True`, `script=~/.hermes/scripts/live_sync_5m.py`, 强制 Python 3.12 (hermes 自带 3.11 venv 缺包), SILENT watchdog pattern. ~~`scripts/live_sync_daily.bat` (Windows Task Scheduler)~~ **已删**
 - [x] **T16.8** 真实数据验证 + baseline 重跑 (+412.20% / 743t)
 
-**db 修复**: 50000 老 bar time TEXT → 统一 INTEGER (298500 行转换, 6 timeframe)
+**db 修复 + 清理 (2026-06-02 23:40)**: bars 表 (DataStore 走这里) 50000 老 bar time TEXT → 统一 INTEGER, 共 298949 行 (6 timeframe × 49825 平均, 含 T16 实时增量). **candles 表 (TEXT time) 已 DROP TABLE** (原 298500 行僵尸, 没人用, 备份 `data/market_data.db.pre_drop_candles.bak`). `risk/regime.py:477` 改写走 bars (INTEGER time, 实时 D1). 整体 db 干净, 唯一表路径走 bars.
 
 ---
 
@@ -108,7 +108,7 @@
 P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 
 ### 立刻能做 (1-2 小时, 无外部依赖)
-- [ ] SL/TP 触发价改 bid/ask (避免 close 理想化)
+- [x] **P2 SL/TP bid-ask** (2026-06-03) — bars 表加 spread 字段, paper_engine 按 bid/ask-extreme 判定
 - [ ] 资金费/库存费/分红建模
 
 ### P2 其他项目 (需人工判断)
@@ -159,10 +159,10 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 
 ## 下一步推荐
 
-1. **P2 SL/TP bid-ask** — 让 OOS 更真实, 1 小时
-2. **P2 资金费建模** — 对 XAUUSD swap cost 不小, 需建模
-3. **GP 因子搜索** (T15.3 v2) — 当前只有随机搜索, GP 能更精
-4. **MAB 4 策略调优** — 全局 MAB 还在冷启动, 需更多 bar / 不同 seed 对比
+1. **P2 资金费建模** — 对 XAUUSD+ swap cost 不小, 需建模
+2. **GP 因子搜索** (T15.3 v2) — 当前只有随机搜索, GP 能更精
+3. **MAB 4 策略调优** — 全局 MAB 还在冷启动, 需更多 bar / 不同 seed 对比
+4. **P2 SL/TP 事件日 spread 注入** — FOMC/NFP spread 1-3 USD 时 PnL 影响 2-5%
 
 ---
 
@@ -203,6 +203,16 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 | H1 | 18045 | 2026-06-02 13:00 |
 | D1 | 500 | 2026-05-29 |
 
+### P2 SL/TP bid-ask (2026-06-03)
+
+| 项 | 真数字 | 解读 |
+|---|---|---|
+| bars 表加 spread 列 | 9 字段 (含 spread) | ALTER TABLE 自动迁移, 老库无缝升级 |
+| M15 backfill | 4998/50204 = 10% | broker 限 5000, 老 bar fallback 0.13 USD |
+| M15 spread 均值 | 13.13 points = 0.13 USD | XAUUSD+ 当前 spread 约 13 cents |
+| 端到端 5000 bar PnL Δ | -0.01% (407.34 → 407.34) | spread 远小于 3ATR=$25, 影响 < 0.5% |
+| 单 bar 单元测试 | entry 100.02 → 100.12 (half spread) | 框架生效, 行为符合 bid-ask 模型 |
+
 ---
 
 ## BLOCKED — 待澄清
@@ -217,4 +227,4 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 - 删空壳 `quant_trading_framework/` 和空 `tmp/`
 - 删 `experts/` / `modules/risk_manager.py` / `fetch_vix.py` / `backtest/engine.py`
 - 保留 CSV 源数据, `modules/{data_fetcher,database}.py` shim 仍被 3 个 scripts 引用
-- db 修复: 50000 老 bar time TEXT → INTEGER (298500 行, 6 timeframe)
+- db 修复: bars 表 50000 老 bar time TEXT → INTEGER (298949 行, 6 timeframe 含 T16 实时), candles 表 (TEXT) 已 DROP (备份 .pre_drop_candles.bak), regime 改走 bars
