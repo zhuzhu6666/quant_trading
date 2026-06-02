@@ -22,26 +22,39 @@ quant_trading/
 │   ├── event_bus.py                 # 进程内事件总线
 │   └── state.py                     # 全局状态 (position / balance / circuit flag)
 │
-├── data/                            # 数据层 (9 文件)
+├── data/                            # 数据层 (10 文件)
 │   ├── store.py                     # DataStore — SQLite 读写
 │   ├── feed.py                      # bar 流喂入
 │   ├── bar_builder.py               # tick → bar
 │   ├── tick_generator.py            # Brownian bridge tick 生成 (T1.2)
 │   ├── tick_receiver.py             # 实盘 tick 接收
 │   ├── news_cache.py                # 事件日历 / GVZ 读
-│   └── external_loader.py           # P0-3: 跨资产/事件/ETF 对齐
+│   ├── external_loader.py           # P0-3: 跨资产/事件/ETF 对齐
+│   └── live_sync/                   # ★ T16: 实时数据同步 (5 文件)
+│       ├── mt5_puller.py            # MT5 bar 拉取 (history + incremental)
+│       ├── bar_filter.py            # 去重 + 当前 bar skip + 完整性检查
+│       ├── db_inserter.py           # DataStore 包装 + 重试 + 状态持久化
+│       ├── orchestrator.py          # full_sync / incremental_sync + 多 TF
+│       └── daemon.py                # 后台守护进程 (once / daemon 模式)
 │
 ├── db/                              # analytics 库 (3 文件)
 │   ├── schema.py                    # strategy_perf / decision_log DDL
 │   └── store.py                     # AnalyticsStore
 │
-├── alpha/                           # 因子/ML/校准 (7 文件)
+├── alpha/                           # 因子/ML/校准/DSL (15 文件)
 │   ├── registry.py                  # 22 因子注册 (P0-1 8 + P0-3 7 + 7 旧)
 │   ├── factor_engine.py             # 流式因子计算 + IC 分析
 │   ├── ic_tracker.py                # 滚动 IC 追踪
 │   ├── factor_attribution.py        # 边际 IC 归因
 │   ├── regime_classifier.py         # sklearn LogReg (P0 旧)
-│   └── probability_calibrator.py    # P0-7: 桶级 + Platt 校准
+│   ├── probability_calibrator.py    # P0-7: 桶级 + Platt 校准
+│   ├── factor_health.py             # ★ T14.1: 因子健康评分 (5 维, 0-100)
+│   ├── registry_adapter.py          # ★ T14.2: 动态 register/unregister + 事件流
+│   ├── persistent_registry.py       # ★ T15.5: 跨进程恢复 shadow 因子
+│   ├── factor_dsl.py                # ★ T15.1: DSL parser + AST + 20+ 算子 + 沙箱
+│   ├── factor_score_evaluator.py    # ★ T15.2: DSL 候选 IC 评分 + cross-validation
+│   ├── factor_search.py             # ★ T15.3: 随机搜索 (100 候选 0.4s)
+│   └── factor_discovery.py          # ★ T15.4: orchestrator (search→eval→dedup→register)
 │
 ├── factors/                         # 老接口因子 (4 文件 + 测试)
 │   ├── aroon.py / cci.py / mfi.py / williams_r.py
@@ -54,22 +67,25 @@ quant_trading/
 │   ├── gold_momentum.py             # 黄金动量 H1
 │   ├── trend_following.py / mean_reversion.py / breakout.py  # M15
 │
-├── strategy/                        # 策略框架 (8 文件)
+├── strategy/                        # 策略框架 (9 文件)
 │   ├── base.py                      # BaseStrategy / Signal
 │   ├── signal_bus.py                # 跨策略信号
 │   ├── registry.py                  # 策略注册表
 │   ├── portfolio.py                 # 仓位计算
 │   ├── mab_router.py                # ★ MAB Thompson sampling
 │   ├── scheduler.py                 # 自学习调度 (C6)
-│   └── scorer.py                    # 加权打分融合
+│   ├── scorer.py                    # 加权打分融合
+│   └── retrain_scheduler.py         # ★ T8: 周期 retrain hook
 │
-├── execution/                       # 11 文件
+├── execution/                       # 13 文件
 │   ├── oms.py                       # Order 状态机
 │   ├── router.py                    # ExecutionRouter (P1-B algos 集成)
 │   ├── paper_engine.py              # PaperEngine 简化版
 │   ├── paper_trader.py              # ★ PaperTrader (主 paper 路径)
 │   ├── mt5_bridge.py                # ★ MT5 整合 (P1-A, filling mode + fetch)
 │   ├── algos.py                     # ★ T1.1 智能路由 (TWAP/VWAP/POV/IS)
+│   ├── mab_paper_runner.py          # ★ T1: MAB 多策略共享 paper (4 策略 + 7 组件)
+│   ├── event_filter.py              # ★ T13: SharedEventFilter (NFP/FOMC+CPI/GVZ)
 │   ├── slippage.py                  # 动态滑点
 │   ├── market_impact.py             # Almgren-Chriss
 │   ├── match_replay.py              # Brownian bridge 撮合回放
@@ -100,7 +116,10 @@ quant_trading/
 │   ├── alerts.py                    # Alert 接口
 │   └── dashboard.py                 # 监控面板
 │
-├── scripts/                         # 18 测试 + 工具脚本
+├── scripts/                         # 35+ 脚本 (测试 + 工具 + 入口)
+│   ├── live_sync.py                 # ★ T16: 实时数据同步 CLI
+│   ├── live_sync_daily.bat          # ★ T16: Windows Task Scheduler 配置
+│   ├── discover_factors.py          # ★ L2: 因子发现 CLI
 │   ├── P0 系列: test_p0_factors / factor_pca / factor_ic_rolling
 │   ├── P0-5/6: train_xgb_walkforward / walkforward_p0_6
 │   ├── P0-7: test_probability_calibrator
@@ -251,29 +270,21 @@ quant_trading/
 
 ---
 
-## 6. 待办优先级 (P0 7/7 + P1 6/7 + P3 circuit 调优 + 集成层 全完)
+## 6. 待办优先级 (P0/P1/P3 + T1-T16 集成层 全完)
 
 按"先做有真实价值"原则推荐:
 
 ### 6.1 立刻能做 (无外部依赖, 1-2 小时)
-- **P2 因子 DSL**: 类 WorldQuant BRAIN 表达层
-- **P2 SL/TP bid-ask**: P0-7 校准的下一步, 让 OOS 更真实
-- **P3 进一步**: 单笔 0.01 → 0.005 手, 接 P0-7 校准到 scoring
+- **P2 SL/TP bid-ask**: 让 OOS 更真实
+- **P2 资金费建模**: XAUUSD swap cost 不小
+- **GP 因子搜索** (T15.3 v2): 当前只有随机搜索, GP 能更精
 
 ### 6.2 集成层完成 (2026-06-02)
-- ✅ **T1** MABRouter 4 策略共享 paper (`execution/mab_paper_runner.py`)
-- ✅ **T2** main.py `--use-router` 等 8 个 flag 接入
-- ✅ **T3** ProbabilityCalibrator.calibrate(signal.confidence)
-- ✅ **T4** Alerter 接入 (大额 trade / drift / circuit)
-- ✅ **T5** SelfLearningScheduler.on_trade_close 接入
-- ✅ **T6** MetaLearnerMonitor.on_observation 接入
-- ✅ **T7** FactorMonitor.on_bar 接入
-- ✅ **T8** RetrainScheduler (每 N 笔触发 walkforward, 7.3s/run)
-- ✅ **T9** regime 隔离 (MABRouter select 已是 per-regime)
-- ✅ **T10** drift → 自动 retrain (MetaLearner SEVERE_DRIFT 触发)
-- ✅ **T13** SharedEventFilter (MAB 业务层关键, 共享 NFP/FOMC+CPI/GVZ skip, 50K bar 跳 19906 bar)
-- ✅ **T14.1-3** L1 因子生命周期 (FactorHealth 5 维评分 + RegistryAdapter 动态 register/unregister + main.py 接入)
-- ✅ **T15.1-8** L2 因子 DSL (parser + AST + 20+ 算子 + evaluator + 搜索 + orchestrator + persistent registry + 1000 候选真实跑)
+- ✅ **T1-T10** MAB 多策略 + 7 个自学习组件 + RetrainScheduler
+- ✅ **T13** SharedEventFilter (MAB 业务层关键, 50K bar 跳 19906 bar)
+- ✅ **T14.1-3** L1 因子生命周期 (FactorHealth + RegistryAdapter + main.py 接入)
+- ✅ **T15.1-8** L2 因子 DSL (parser + 搜索 + orchestrator + persistent registry + 真实跑)
+- ✅ **T16.1-8** 实时数据同步 (MT5→db + 增量 + 多TF + Windows Task Scheduler)
 
 ### 6.3 阻塞
 - **T1.2 L2/T&S/基本面**: broker 余额/支持
@@ -316,15 +327,17 @@ quant_trading/
 
 ## 9. 数据 / 报告
 
-- `data/market_data.db` (50K M15 bar, +macro +events +etf)
+- `data/market_data.db` (50K+ M15 bar + macro/events/etf, time 全 INTEGER)
 - `data/analytics.db` (strategy_perf + decision_log)
 - `data/decision_log.db` (P9 决策日志)
-- `data/charts/*.txt` (24 份报告) + `*.png` (3 张图) + `*.npy` (4 个数值) + `*.json` (2 个校准器)
+- `data/charts/` — 30 份报告 + 5 个 discovery run json + factor_health report
+- `config/factor_lifecycle.yaml` — L1+L2 配置
+- `data/live_sync_status.json` — T16 sync 状态
 
 ---
 
 **最后扫描时间**: 2026-06-02
-**项目代码量**: ~5000 行 Python (核心路径)
-**测试覆盖**: P0+P1 主体, 关键路径全过
-**真 PnL 记录**: 6 个场景, 数字齐全
-**阻塞**: 仅 P1-G (等规则) + 外部依赖项
+**项目代码量**: ~8000 行 Python (核心路径 + L1/L2/T16)
+**测试覆盖**: P0+P1+T1-T16 关键路径全过
+**真 PnL 记录**: 6 个场景 (baseline / MAB / T13 / circuit / L1 / L2), 数字齐全
+**阻塞**: 仅 P1-G (跳过) + 外部依赖项
