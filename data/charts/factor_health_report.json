@@ -1,0 +1,341 @@
+{
+  "summary": {
+    "total": 22,
+    "healthy": 0,
+    "watch": 2,
+    "decaying": 20,
+    "unknown": 0
+  },
+  "factors": [
+    {
+      "factor": "rsi_14",
+      "score": 22.98,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 26.09,
+        "ic_stability": 0.0,
+        "regime_consistency": 26.09,
+        "decay_rate": 23.24,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0078,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "macd_hist",
+      "score": 14.65,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 12.07,
+        "ic_stability": 0.0,
+        "regime_consistency": 12.07,
+        "decay_rate": 24.11,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0058,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "adx",
+      "score": 15.87,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 17.38,
+        "ic_stability": 0.0,
+        "regime_consistency": 17.38,
+        "decay_rate": 4.37,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0029,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "bb_width",
+      "score": 38.54,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 31.24,
+        "ic_stability": 45.14,
+        "regime_consistency": 31.24,
+        "decay_rate": 57.66,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0271,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "di_spread",
+      "score": 33.95,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 33.94,
+        "ic_stability": 19.22,
+        "regime_consistency": 33.94,
+        "decay_rate": 47.43,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.018,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "stoch_k",
+      "score": 13.62,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 12.23,
+        "ic_stability": 0.0,
+        "regime_consistency": 12.23,
+        "decay_rate": 12.81,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0046,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "atr_ratio",
+      "score": 40.9,
+      "status": "WATCH",
+      "components": {
+        "mean_abs_ic": 30.85,
+        "ic_stability": 54.19,
+        "regime_consistency": 30.85,
+        "decay_rate": 65.55,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0243,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "ema_slope",
+      "score": 13.49,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 11.57,
+        "ic_stability": 0.0,
+        "regime_consistency": 11.57,
+        "decay_rate": 15.47,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0033,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "supertrend_str",
+      "score": 21.98,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 17.27,
+        "ic_stability": 3.25,
+        "regime_consistency": 17.27,
+        "decay_rate": 59.69,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0125,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "keltner_width",
+      "score": 41.02,
+      "status": "WATCH",
+      "components": {
+        "mean_abs_ic": 31.18,
+        "ic_stability": 55.25,
+        "regime_consistency": 31.18,
+        "decay_rate": 62.59,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0242,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "obv_slope",
+      "score": 29.85,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 22.33,
+        "ic_stability": 37.38,
+        "regime_consistency": 22.33,
+        "decay_rate": 39.77,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0134,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "vol_ma_ratio",
+      "score": 17.52,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 19.49,
+        "ic_stability": 0.0,
+        "regime_consistency": 19.49,
+        "decay_rate": 8.27,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0093,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "engulfing",
+      "score": 20.91,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 23.31,
+        "ic_stability": 0.0,
+        "regime_consistency": 23.31,
+        "decay_rate": 19.29,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.007,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "pin_bar",
+      "score": 16.47,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 10.4,
+        "ic_stability": 0.0,
+        "regime_consistency": 10.4,
+        "decay_rate": 52.34,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0074,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "inside_bar",
+      "score": 16.56,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 17.07,
+        "ic_stability": 0.0,
+        "regime_consistency": 17.07,
+        "decay_rate": 13.16,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0071,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "dxy_corr_20",
+      "score": 27.82,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 21.36,
+        "ic_stability": 0.0,
+        "regime_consistency": 21.36,
+        "decay_rate": 100.0,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0383,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "slv_gld_ratio",
+      "score": 17.57,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 13.55,
+        "ic_stability": 0.0,
+        "regime_consistency": 13.55,
+        "decay_rate": 44.38,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0093,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "real_yield_chg",
+      "score": 12.06,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 11.02,
+        "ic_stability": 0.0,
+        "regime_consistency": 11.02,
+        "decay_rate": 4.51,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0005,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "hours_to_fomc",
+      "score": 14.75,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 15.56,
+        "ic_stability": 0.0,
+        "regime_consistency": 15.56,
+        "decay_rate": 4.14,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0013,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "hours_to_nfp",
+      "score": 23.66,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 23.34,
+        "ic_stability": 0.0,
+        "regime_consistency": 23.34,
+        "decay_rate": 46.6,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0145,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "hour_utc",
+      "score": 16.97,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 13.9,
+        "ic_stability": 0.0,
+        "regime_consistency": 13.9,
+        "decay_rate": 36.34,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0025,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "day_of_week",
+      "score": 38.18,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 26.16,
+        "ic_stability": 58.43,
+        "regime_consistency": 26.16,
+        "decay_rate": 58.0,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0155,
+      "n_obs_needed": 100
+    }
+  ]
+}

@@ -77,6 +77,10 @@ def main():
                         help="启用 SharedEventFilter (T13: NFP/FOMC+CPI/GVZ 共享 skip)")
     parser.add_argument("--no-event-filter", action="store_true",
                         help="显式禁用 SharedEventFilter (覆盖 --use-event-filter 之外的默认)")
+    parser.add_argument("--factor-health-report", action="store_true",
+                        help="T14.1 跑 paper 前先评估 22 因子健康分, 落盘 data/charts/factor_health_report.txt")
+    parser.add_argument("--factor-health-data", type=str, default=None,
+                        help="T14.1 评估时用的 bar CSV 路径 (默认 data/market_data.db M15)")
     parser.add_argument("--router-seed", type=int, default=42,
                         help="MABRouter 随机种子 (P1-D 默认 42)")
     parser.add_argument("--router-arms", nargs="+",
@@ -374,6 +378,66 @@ def run_paper(args):
 
     logger.info("=" * 60)
     logger.info(f"PAPER REPLAY — {args.symbol} @ {args.timeframe}")
+    if args.factor_health_report:
+        logger.info(f"  [T14.1] 跑因子健康评估 (落盘 factor_health_report.txt)")
+
+    # T14.1 因子健康评估 (跑 paper 前的轻量步骤, 算 22 因子 IC + 健康分)
+    if args.factor_health_report:
+        from alpha.ic_tracker import ICTracker
+        from alpha.factor_engine import FactorEngine
+        from alpha.factor_health import FactorHealth
+        from alpha.registry_adapter import RegistryAdapter
+        from data.store import DataStore
+        from pathlib import Path
+        import json as _json
+
+        store = DataStore("data/market_data.db")
+        df = store.load_bars(args.symbol, args.timeframe)
+        if df.empty:
+            logger.warning(f"[T14.1] 无 {args.timeframe} 数据, 跳过健康评估")
+        else:
+            # 注入跨资产/事件列 (DXY/SLV/real_yield/hours_to_fomc/nfp)
+            # 没这些列, 5 个跨资产/事件因子会算 nan (n_obs=0)
+            from data.external_loader import ExternalDataLoader
+            ext = ExternalDataLoader("data/market_data.db")
+            ext_df = ext.align_to_bars(df)
+            # align_to_bars 只返回外部列, 需手动 join 回原 bar
+            df = df.join(ext_df, how="left")
+            logger.info(f"[T14.1] 加载 {len(df)} {args.timeframe} bar (含跨资产列, {len(ext_df.columns)} ext cols)")
+            engine = FactorEngine(df)
+            # 算所有 22 因子
+            factor_data = engine.compute_all()
+            logger.info(f"[T14.1] 算 {len(factor_data)} 因子值")
+
+            # 算 forward return (1 bar)
+            forward_returns = df["close"].pct_change().shift(-1).fillna(0).values
+
+            # 喂 ICTracker
+            ic_tracker = ICTracker(window=min(5000, len(df)))
+            for name, vals in factor_data.items():
+                ic_tracker.update(name, vals, forward_returns)
+
+            # 评估 (先建 health, 再用 health 的结果给 adapter 当 independence 参考)
+            health = FactorHealth(ic_tracker, active_factor_names=[])
+            report = health.report()
+            report_dict = health.report_dict()
+
+            # 拿到 ACTIVE 列表后, 二次评估 (这次有 ACTIVE 列表, independence 准)
+            active_now = health.get_active_factors(min_score=70)
+            health2 = FactorHealth(ic_tracker, active_factor_names=active_now)
+            report2 = health2.report()
+
+            # 落盘 (第二次评估含 independence)
+            out_dir = Path("data/charts")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            txt_path = out_dir / "factor_health_report.txt"
+            txt_path.write_text(report2, encoding="utf-8")
+            json_path = out_dir / "factor_health_report.json"
+            json_path.write_text(_json.dumps(health2.report_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info(f"[T14.1] 报告落盘: {txt_path}, {json_path}")
+            logger.info(f"[T14.1] ACTIVE 因子: {active_now}")
+            logger.info("\n" + report2)
+
     if args.use_router:
         logger.info(f"  [T1] MABRouter 启用: {args.router_arms} (seed={args.router_seed})")
         if args.use_scheduler:

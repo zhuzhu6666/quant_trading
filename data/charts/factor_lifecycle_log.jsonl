@@ -1,0 +1,5 @@
+{"timestamp": 1780393442.4546256, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780393442.4546256, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780393442.4556007, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780393442.4556007, "event": "unregister", "factor": "dsl_f2", "source": "removed", "description": "", "score": 0.0, "status": "UNKNOWN", "reason": "test_unregister"}
+{"timestamp": 1780393442.456573, "event": "unregister", "factor": "rsi_14", "source": "removed", "description": "", "score": 0.0, "status": "UNKNOWN", "reason": "test_force (forced)"}
