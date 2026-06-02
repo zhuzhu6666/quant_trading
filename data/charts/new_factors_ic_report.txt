@@ -1,0 +1,22 @@
+P0-1 新因子 IC 报告 — XAUUSD+ M15 50K bar
+Period: 2024-04-17 13:30:00 → 2026-05-29 14:15:00
+
+Factor                    IC    abs_IC  Status      N_valid  Group   
+macd_hist            -0.0218    0.0218  ACTIVE        49999  base    
+bb_width             +0.0120    0.0120  fading        49980  base    
+ema_slope            -0.0114    0.0114  fading        49975  NEW     
+di_spread            +0.0057    0.0057  dead          49986  base    
+inside_bar           +0.0046    0.0046  dead          49999  NEW     
+pin_bar              -0.0046    0.0046  dead          49999  NEW     
+rsi_14               +0.0019    0.0019  dead          49986  base    
+obv_slope            +0.0018    0.0018  dead          49979  NEW     
+adx                  +0.0015    0.0015  dead          49986  base    
+atr_ratio            +0.0014    0.0014  dead          49986  base    
+vol_ma_ratio         +0.0012    0.0012  dead          49980  NEW     
+engulfing            +0.0008    0.0008  dead          49999  NEW     
+keltner_width        -0.0004    0.0004  dead          49980  NEW     
+supertrend_dir       -0.0003    0.0003  dead          49999  NEW     
+stoch_k              -0.0002    0.0002  dead          49986  base    
+
+baseline mean abs_IC: 0.0063
+新因子  mean abs_IC: 0.0031

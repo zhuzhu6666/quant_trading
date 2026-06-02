@@ -1,0 +1,60 @@
+# =============================================================================
+# Global Settings — 配置文件
+# =============================================================================
+
+system:
+  mode: backtest             # backtest | paper | live
+  clock: realtime            # realtime | simulated
+  log_level: INFO
+  log_dir: logs/
+
+mt5:
+  account: 9823690
+  server: Bybit-Live-2
+  symbol: XAUUSD+
+  password_env: MT5_PASSWORD
+  
+commission:
+  type: fixed                 # fixed | percentage
+  value: 6.0                  # $6/lot
+
+risk:
+  max_daily_loss_pct: 5.0     # 日内最大亏损
+  max_position_lots: 0.5      # 最大持仓
+  max_trades_per_day: 20      # 日内最大交易次数
+  single_trade_risk_usd: 2.0  # 单笔最大亏损
+  circuit_breaker:
+    consecutive_losses: 5     # 连续亏损N笔→熔断
+    slippage_pct: 0.5         # 滑点超N%→熔断
+    volatility_mult: 3.0      # ATR×N→减仓
+
+position:
+  sizing_method: risk_fixed   # risk_fixed | kelly | equal
+  risk_per_trade_pct: 2.0     # 每笔风险占资金%
+  max_leverage: 500           # Bybit最大杠杆
+
+execution:
+  default_type: market         # market | limit | stop
+  slippage_model: fixed        # fixed | percentage | adaptive
+  slippage_value: 0.02         # 2bps
+  retry_attempts: 3
+  retry_delay_ms: 500
+  timeout_seconds: 10
+
+data:
+  store_backend: sqlite        # sqlite | influxdb
+  db_path: data/market_data.db
+  tick_buffer_size: 10000
+  bar_timeframes: [M5, M15, M30, H1, H4, D1]
+  warmup_bars: 500
+
+alpha:
+  factor_decay_hours: 24       # IC衰减周期
+  min_ic_threshold: 0.02       # 最低IC阈值
+  rolling_window_days: 20      # IC滚动窗口
+
+monitor:
+  dashboard_port: 8050
+  websocket_port: 8051
+  alert_channels: [log]         # log | dingtalk | wechat
+  metrics_interval_seconds: 1

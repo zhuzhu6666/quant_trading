@@ -1,0 +1,22 @@
+P1-E A/B 测试报告
+
+Bar 范围: 5000 (M15, RANGING regime, seed=42 固定)
+
+A: 原始 baseline (multi_factor 排前)
+  baseline: {'multi_factor_m15': (376, 362), 'trend_following': (18, 30), 'mean_reversion': (457, 786), 'breakout': (530, 792)}
+  n_trades: 66  WR: 51.5%  PnL: +552.90  final: 1048.88
+  choices: {'multi_factor_m15': 4848, 'trend_following': 152, 'mean_reversion': 0, 'breakout': 0}
+
+B: 反 baseline (mean_reversion 排前)
+  baseline: {'multi_factor_m15': (362, 376), 'trend_following': (30, 18), 'mean_reversion': (786, 457), 'breakout': (792, 530)}
+  n_trades: 73  WR: 42.5%  PnL: -62.48  final: 433.14
+  choices: {'multi_factor_m15': 0, 'trend_following': 1084, 'mean_reversion': 3669, 'breakout': 247}
+
+C: 均匀 baseline (强制探索)
+  baseline: {'multi_factor_m15': (1, 1), 'trend_following': (1, 1), 'mean_reversion': (1, 1), 'breakout': (1, 1)}
+  n_trades: 65  WR: 50.8%  PnL: +693.42  final: 1189.46
+  choices: {'multi_factor_m15': 947, 'trend_following': 2294, 'mean_reversion': 1260, 'breakout': 499}
+
+== 关键诊断 ==
+A vs C  PnL 差: -140.52
+B vs A  PnL 差: -615.37

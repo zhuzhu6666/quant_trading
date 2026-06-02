@@ -1,0 +1,18 @@
+P0-6 Walk-Forward 训练报告 — XAUUSD+ M15 50000 bar
+Period: 2024-04-17 13:30:00 → 2026-05-29 14:15:00
+Config: train=2月, test=1月, step=1月
+Features: ['dxy_corr_20', 'macd_hist', 'bb_width', 'di_spread', 'hour_utc']
+
+== Per-Fold ==
+  Fold 1  train 2024-04-18 → 2025-07-08  test 2025-07-08 → 2026-02-13
+    acc=0.5312  AUC=0.5395  lift=+0.0142  n_test=2880
+  Fold 2  train 2024-11-25 → 2026-02-13  test 2026-02-13 → 2026-05-22
+    acc=0.5428  AUC=0.5328  lift=+0.0339  n_test=1297
+
+== Summary (2 folds) ==
+  acc  mean=0.5370  std=0.0058
+  AUC  mean=0.5362  std=0.0033
+  lift mean=+0.0241  std=0.0098
+
+== Pooled OOS ==
+  n=4177  acc=0.5348  AUC=0.5376  lift=+0.0203

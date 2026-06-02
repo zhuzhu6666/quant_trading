@@ -1,0 +1,16 @@
+MAB-driven Paper — XAUUSD+ M15, 50K bar
+
+Final: $1405.88  ret=+181.18%  WR=51.7%  DD=66.27%  PF=1.12  trades=590  sharpe=1.105
+
+Per-Strategy selected/wins:
+  multi_factor_m15      selected=  514  wins= 262  WR= 51.0%
+  trend_following       selected=   76  wins=  43  WR= 56.6%
+  mean_reversion        selected=    0  wins=   0  WR=  0.0%
+  breakout              selected=    0  wins=   0  WR=  0.0%
+
+Per-Strategy router 后验:
+        strategy  total_alpha  total_beta  expected_win_rate
+multi_factor_m15       2147.0      2067.0           0.509492
+ trend_following        138.0       188.0           0.423313
+        breakout       2655.0      3965.0           0.401057
+  mean_reversion       2290.0      3935.0           0.367871

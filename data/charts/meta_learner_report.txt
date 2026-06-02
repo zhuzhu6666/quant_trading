@@ -1,0 +1,16 @@
+P0-7 Meta-Learner 监控报告
+输入: data\charts\walkforward_oos.npy
+OOS 样本: 4177 bar
+
+== Status ==
+  xgboost: n=2500  avg_pred=0.5159  actual_wr=0.4700  gap=+0.0459  [OK]
+  logreg: n=2500  avg_pred=0.5000  actual_wr=0.4700  gap=+0.0300  [OK]
+  baseline: n=2500  avg_pred=0.5000  actual_wr=0.4700  gap=+0.0300  [OK]
+
+== XGBoost 校准 ==
+  [0.2, 0.3)  n=3  avg_pred=0.2566  actual_wr=0.3333
+  [0.3, 0.4)  n=45  avg_pred=0.3690  actual_wr=0.2667
+  [0.4, 0.5)  n=165  avg_pred=0.4601  actual_wr=0.4364
+  [0.5, 0.6)  n=209  avg_pred=0.5472  actual_wr=0.5359
+  [0.6, 0.7)  n=69  avg_pred=0.6343  actual_wr=0.4638
+  [0.7, 0.8)  n=9  avg_pred=0.7261  actual_wr=0.6667

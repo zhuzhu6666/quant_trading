@@ -1,0 +1,3 @@
+v2 End-to-End: ret=+325.17%  WR=49.0%  DD=59.47%  PF=1.17  trades=857  sharpe=1.279
+Scheduler events: 34
+Decision log rows: 16324

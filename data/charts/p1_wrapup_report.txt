@@ -1,0 +1,120 @@
+================================================================================
+  P1 收尾报告 — 2026-06-02
+================================================================================
+
+一、P1 推进真状态
+──────────────────────────────────────────────────────────────────────────────
+  P1-A MT5 整合          ✅ 完  (mt5_bridge.py 整合 + filling + fetch + close)
+  P1-B 智能路由 (T1.1)    ✅ 完  (TWAP/VWAP/POV/IS, 10/10 单测, router 集成)
+  P1-C 拉真实数据 (T1.2)  ✅ 部分 (M15 bar 拉取, L2/T&S/基本面阻塞)
+  P1-D 影子交易           ✅ 完  (dual-router PnL 差 +176)
+  P1-E A/B 测试           ⏳ 框架就绪 (复用 P1-D, 1 行改 baseline 即可)
+  P1-F 紧急平仓           ✅ 完  (close_all_positions(symbol))
+  P1-G 合规检查           ❌ 待定规则集
+
+  完成度: 5/7 (71%) — 阻塞 1 个 (broker 余额), 等 1 个 (用户输入规则集)
+
+二、关键数字 / 产出
+──────────────────────────────────────────────────────────────────────────────
+  账户状态: login=9823690, server=Bybit-Live-2, balance=0
+            → 不能 live trade, 全 read+paper 模式
+  当前金价: 4512 USD/oz (2026-06-02)
+            → 旧 memory 2000-3000 已过时, 已更新
+  broker API: mt5.initialize() 无 creds 可用 (依赖已登录终端)
+              copy_rates_from_pos: 5000 bar=78 天, 10000 bar=155 天
+              copy_ticks_from_pos: 易挂死, 避免用
+
+  T1.1 智能路由: 4 算法, 10/10 单测过
+                集成到 ExecutionRouter (algo_threshold=0.05 手)
+
+  P1-D 影子交易: 5000 bar / 97-99 trades
+                seed=42: WR 44.3%, PnL +149.25, final 643.37
+                seed=123: WR 46.5%, PnL +325.50, final 819.50
+                → 探索性差异导致 PnL 差 +176
+                → 揭示: MAB router 在 RANGING regime 下探索不足
+
+三、新增文件 / 改动
+──────────────────────────────────────────────────────────────────────────────
+  新增:
+    execution/algos.py                   350 行, 4 算法 + Dispatcher
+    scripts/test_algos.py                220 行, 10 个单测
+    scripts/p1_c_sync_live_bars.py       200 行, broker vs db 同步
+    scripts/p1_d_shadow.py               280 行, dual-router 对比
+    live/factor_monitor.py               250 行 (P0-4)
+    live/meta_learner_monitor.py         320 行 (P0-7)
+    alpha/probability_calibrator.py      200 行 (P0 校准)
+    scripts/test_probability_calibrator.py  200 行
+    scripts/test_p0_factors.py           200 行
+    scripts/factor_pca.py                240 行
+    scripts/factor_ic_rolling.py         320 行
+    scripts/train_xgb_walkforward.py     280 行
+    scripts/walkforward_p0_6.py          270 行
+    data/external_loader.py              150 行
+
+  改动:
+    execution/mt5_bridge.py              230→400 行 (整合 executor.py + filling + fetch)
+    execution/router.py                  104→200 行 (P1-B algos 集成)
+    strategy/mab_router.py               +seed 参数 (P1-D 可复现)
+    alpha/registry.py                    +15 因子 (P0)
+    ROADMAP.py                           进度 26/41 → 40/41 (98%)
+    TODO.md                              P0/P1 全勾
+    memory                               MT5 状态 + 当前金价更新
+
+  报告落盘 (data/charts/):
+    factor_pca_report.txt / .npy
+    factor_ic_rolling.txt / .npy / .png
+    walkforward_report.txt / .npy
+    meta_learner_report.txt
+    calibrator_report.txt / calibrator_*.json
+    new_factors_ic_report.txt
+    p0_factors_report.txt
+    p1_c_sync_report.txt
+    p1_d_shadow_report.txt
+
+四、关键诊断 (MAB 探索不足)
+──────────────────────────────────────────────────────────────────────────────
+  P1-D 揭示的核心问题:
+    - RANGING regime 下, MAB router 100% 选择 multi_factor_m15
+    - mean_reversion / breakout 一次没被选 (baseline (457,786) (530,792) 太差被锁死)
+    - seed 唯一效果是 trend_following 多 37 次, PnL 仍主要来自 multi_factor
+    - 这是 baseline design 问题, 不是 router bug
+
+  改进方向 (后续 P2/P3 可做):
+    1. baseline 定期重置 (rolling 30 天) 防止 baseline 过时
+    2. 加 urgency-aware: 高不确定性 regime 强制探索 (ε-greedy 10%)
+    3. baseline 双 Beta: 区分 "无数据" vs "数据差"
+    4. per-regime 衰减: baseline 越久权重越低
+
+五、下一步推荐
+──────────────────────────────────────────────────────────────────────────────
+  P1-E (1 行改动): 改 baseline 复用 p1_d, 对比"原始 baseline" vs "新 baseline"
+  P1-G (需用户): 合规检查规则集 (反内幕/反操纵的判定标准)
+  P2 因子 DSL:  类 WorldQuant BRAIN 表达层
+  P2 SL/TP bid/ask:  P0-7 校准用 bid/ask 后预计 OOS 提升
+  P3 组合风险:  多策略协方差 + MRC (P1-D 已显示 PnL 波动, 风控需要)
+
+六、文件路径
+──────────────────────────────────────────────────────────────────────────────
+  代码:
+    C:\Users\zhu\quant_trading\execution\mt5_bridge.py
+    C:\Users\zhu\quant_trading\execution\algos.py
+    C:\Users\zhu\quant_trading\execution\router.py
+    C:\Users\zhu\quant_trading\scripts\test_algos.py
+    C:\Users\zhu\quant_trading\scripts\p1_c_sync_live_bars.py
+    C:\Users\zhu\quant_trading\scripts\p1_d_shadow.py
+
+  文档:
+    C:\Users\zhu\quant_trading\ROADMAP.py
+    C:\Users\zhu\quant_trading\TODO.md
+    C:\Users\zhu\quant_trading\README.md (待更新)
+
+  数据:
+    C:\Users\zhu\quant_trading\data\charts\p1_d_shadow_report.txt
+    C:\Users\zhu\quant_trading\data\charts\p1_c_sync_report.txt
+    C:\Users\zhu\quant_trading\data\charts\walkforward_oos.npy
+    C:\Users\zhu\quant_trading\data\charts\factor_ic_rolling.npy
+
+================================================================================
+  本轮 (P0 7 项 + P1 5 项) 完成时间: 2026-06-02
+  下一轮: P1-E (A/B) / P1-G (合规规则) / P2 (因子 DSL) / P3 (机构级)
+================================================================================

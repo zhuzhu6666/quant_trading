@@ -1,0 +1,30 @@
+"""
+Quant Trading System — requirements
+
+Python 3.12 required (not hermes venv 3.11)
+"""
+
+# Core
+numpy>=1.26
+pandas>=2.1
+pyyaml>=6.0
+
+# MT5 (optional — for live/paper trading)
+MetaTrader5>=5.0
+
+# Dashboard (optional)
+fastapi>=0.109
+uvicorn[standard]>=0.27
+
+# Backtest (optional — for backtrader engine)
+backtrader>=1.9.78
+
+# Data analysis
+scipy>=1.11
+scikit-learn>=1.3
+
+# Logging
+loguru>=0.7
+
+# WebSocket
+websockets>=12.0

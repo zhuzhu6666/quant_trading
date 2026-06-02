@@ -1,0 +1,8 @@
+4 因子 IC 报告 — XAUUSD+ M15, 50K bar
+Period: 2024-04-17 13:30:00 → 2026-05-29 14:15:00
+
+Factor              IC    abs_IC  Status      N_valid
+mfi            +0.0112    0.0112  fading        49985
+cci            +0.0072    0.0072  dead          49980
+aroon_up       +0.0047    0.0047  dead          49986
+williams_r     -0.0002    0.0002  dead          49986

@@ -1,0 +1,23 @@
+P0-7 概率校准器测试报告
+
+输入: data\charts\walkforward_oos.npy (4177 bar)
+拟合集: 2088 bar, 评估集: 2089 bar
+
+桶级校准表 (10 桶):
+  [0.1, 0.2)  n=1  avg_pred=0.1832  actual_wr=0.0000
+  [0.2, 0.3)  n=13  avg_pred=0.2688  actual_wr=0.5385
+  [0.3, 0.4)  n=94  avg_pred=0.3609  actual_wr=0.4681
+  [0.4, 0.5)  n=736  avg_pred=0.4634  actual_wr=0.4796
+  [0.5, 0.6)  n=1043  avg_pred=0.5421  actual_wr=0.5139
+  [0.6, 0.7)  n=185  avg_pred=0.6299  actual_wr=0.5892
+  [0.7, 0.8)  n=15  avg_pred=0.7282  actual_wr=0.6000
+  [0.8, 0.9)  n=1  avg_pred=0.8344  actual_wr=1.0000
+
+校准效果对比:
+  raw      Brier=0.2527  LogLoss=0.6994
+  bucket   Brier=0.2494  LogLoss=0.7006  Brier 改善 +0.0033
+  platt    Brier=0.2527  LogLoss=0.6994  Brier 改善 +0.0000
+
+最优方法: bucket
+
+注: 把 calibrator_*.json 喂给 WeightedScorer.score() 前调 calibrate_signal_confidence() 即可
