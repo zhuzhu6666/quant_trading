@@ -1,9 +1,9 @@
 {
   "summary": {
-    "total": 22,
+    "total": 28,
     "healthy": 0,
-    "watch": 2,
-    "decaying": 20,
+    "watch": 6,
+    "decaying": 22,
     "unknown": 0
   },
   "factors": [
@@ -335,6 +335,96 @@
       },
       "n_obs": 5000,
       "rolling_ic": -0.0155,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "dsl_f2",
+      "score": 19.25,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 17.72,
+        "ic_stability": 0.0,
+        "regime_consistency": 17.72,
+        "decay_rate": 36.18,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0124,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "dsl_f3",
+      "score": 14.37,
+      "status": "DECAYING",
+      "components": {
+        "mean_abs_ic": 14.72,
+        "ic_stability": 0.0,
+        "regime_consistency": 14.72,
+        "decay_rate": 5.41,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": 0.0034,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "dsl_33138906_000",
+      "score": 49.71,
+      "status": "WATCH",
+      "components": {
+        "mean_abs_ic": 46.0,
+        "ic_stability": 43.94,
+        "regime_consistency": 46.0,
+        "decay_rate": 83.25,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0411,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "dsl_42869207_001",
+      "score": 51.33,
+      "status": "WATCH",
+      "components": {
+        "mean_abs_ic": 47.19,
+        "ic_stability": 47.48,
+        "regime_consistency": 47.19,
+        "decay_rate": 85.18,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0421,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "dsl_82875133_002",
+      "score": 53.08,
+      "status": "WATCH",
+      "components": {
+        "mean_abs_ic": 46.23,
+        "ic_stability": 56.2,
+        "regime_consistency": 46.23,
+        "decay_rate": 91.03,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0423,
+      "n_obs_needed": 100
+    },
+    {
+      "factor": "dsl_90758882_000",
+      "score": 51.27,
+      "status": "WATCH",
+      "components": {
+        "mean_abs_ic": 45.74,
+        "ic_stability": 50.78,
+        "regime_consistency": 45.74,
+        "decay_rate": 86.73,
+        "independence": 50.0
+      },
+      "n_obs": 5000,
+      "rolling_ic": -0.0422,
       "n_obs_needed": 100
     }
   ]

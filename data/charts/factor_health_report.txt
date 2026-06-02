@@ -2,11 +2,15 @@
   FACTOR HEALTH REPORT
 ========================================================================
 
-  WATCH (2 factors):
+  WATCH (6 factors):
+    dsl_82875133_002          score= 53.1  rolling_ic=-0.0423  n_obs=5000
+    dsl_42869207_001          score= 51.3  rolling_ic=-0.0421  n_obs=5000
+    dsl_90758882_000          score= 51.3  rolling_ic=-0.0422  n_obs=5000
+    dsl_33138906_000          score= 49.7  rolling_ic=-0.0411  n_obs=5000
     keltner_width             score= 41.0  rolling_ic=+0.0242  n_obs=5000
     atr_ratio                 score= 40.9  rolling_ic=+0.0243  n_obs=5000
 
-  DECAYING (20 factors):
+  DECAYING (22 factors):
     bb_width                  score= 38.5  rolling_ic=+0.0271  n_obs=5000
     day_of_week               score= 38.2  rolling_ic=-0.0155  n_obs=5000
     di_spread                 score= 34.0  rolling_ic=+0.0180  n_obs=5000
@@ -16,6 +20,7 @@
     rsi_14                    score= 23.0  rolling_ic=+0.0078  n_obs=5000
     supertrend_str            score= 22.0  rolling_ic=-0.0125  n_obs=5000
     engulfing                 score= 20.9  rolling_ic=+0.0070  n_obs=5000
+    dsl_f2                    score= 19.2  rolling_ic=-0.0124  n_obs=5000
     slv_gld_ratio             score= 17.6  rolling_ic=+0.0093  n_obs=5000
     vol_ma_ratio              score= 17.5  rolling_ic=-0.0093  n_obs=5000
     hour_utc                  score= 17.0  rolling_ic=-0.0025  n_obs=5000
@@ -24,6 +29,7 @@
     adx                       score= 15.9  rolling_ic=+0.0029  n_obs=5000
     hours_to_fomc             score= 14.8  rolling_ic=+0.0013  n_obs=5000
     macd_hist                 score= 14.7  rolling_ic=-0.0058  n_obs=5000
+    dsl_f3                    score= 14.4  rolling_ic=+0.0034  n_obs=5000
     stoch_k                   score= 13.6  rolling_ic=-0.0046  n_obs=5000
     ema_slope                 score= 13.5  rolling_ic=-0.0033  n_obs=5000
     real_yield_chg            score= 12.1  rolling_ic=+0.0005  n_obs=5000

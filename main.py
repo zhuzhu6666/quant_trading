@@ -44,6 +44,13 @@ def setup_logging(log_dir: str = "logs"):
 
 
 def main():
+    # 启动时恢复 shadow 因子 (跨进程持久化, T15.5)
+    try:
+        from alpha.persistent_registry import restore_from_log
+        restore_from_log()
+    except Exception as e:
+        logger.warning(f"恢复 shadow 因子失败 (非致命): {e}")
+
     parser = argparse.ArgumentParser(description="Quant Trading System")
     parser.add_argument("--mode", default="backtest",
                         choices=["backtest", "paper", "live", "dashboard"])

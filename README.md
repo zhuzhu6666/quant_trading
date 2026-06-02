@@ -102,6 +102,13 @@ python main.py --mode paper --timeframe M15 \
   --use-meta-monitor --use-factor-monitor --use-alerter \
   --use-retrain --retrain-every-n 300 --use-event-filter
 
+# 因子健康评估 (T14.1, 22 builtin + 已 register dsl 因子)
+python main.py --mode paper --timeframe M15 --factor-health-report
+
+# L2 因子发现 (T15.5, DSL 搜索 + 自动 register)
+python scripts/discover_factors.py --n-candidates 1000 --top-k 50 \
+  --forward-periods 1,5,20 --auto-register
+
 # 实盘 (stub, 需配 MT5 — 当前 balance=0 阻塞)
 python main.py --mode live
 

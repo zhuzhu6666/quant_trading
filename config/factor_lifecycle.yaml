@@ -1,0 +1,55 @@
+# ─────────────────────────────────────────
+# L1 + L2 因子自动化配置
+# 2026-06-02
+# ─────────────────────────────────────────
+
+# L1 因子生命周期
+factor_lifecycle:
+  # 健康分阈值
+  healthy_threshold: 70.0
+  watch_threshold: 40.0
+  decaying_days_threshold: 14    # DECAYING 持续 14 天才淘汰
+  active_ic_threshold: 0.02     # |rolling_ic| >= 此值才算 ACTIVE
+  min_n_obs: 100                # 最少观察点数 (评估所需)
+
+  # 调度 (T14.2 v2)
+  ic_rolling_cron: "0 0 * * *"   # 每日 00:00
+  health_eval_cron: "0 1 * * *" # 每日 01:00
+  pca_full_cron: "0 2 * * 0"     # 每周日 02:00
+
+  # 自动接入
+  auto_register_new: false       # 需人工 review (T14.2 v2 可改 true)
+  new_factor_shadow_days: 30
+
+# L2 因子 DSL
+factor_dsl:
+  # Search 配置
+  search:
+    strategy: random             # random | gp (T15.3 v2)
+    n_candidates: 500            # 单次 run 候选数 (T15.4)
+    top_k: 30
+    max_depth: 4
+    seed: 42
+    pca_correlation_threshold: 0.5  # |corr| > 此值视为冗余, 跟现有 22 因子去重
+    min_score_to_keep: 30.0
+    forward_periods: [1, 5, 20]    # 多窗口 cross-validation
+    shadow_required: false
+    shadow_duration_days: 30
+
+  # 评估
+  evaluation:
+    min_n_obs: 30               # 最少 IC 序列长度
+    score_weights:
+      mean_abs_ic: 0.5
+      ic_stability: 0.3
+      decay_rate: 0.2
+
+  # 算子白名单
+  operators:
+    ts: [ts_mean, ts_std, ts_sum, ts_min, ts_max, ts_corr,
+         ts_rank, ts_decay_linear, delta, delay]
+    cs: [rank, normalize, quantile]
+    math: [sign, abs, log, sqrt, power]
+
+  # 叶子白名单 (允许的列名)
+  leaves: [close, volume, open, high, low, dxy, real_yield_10y, gvz, vix]

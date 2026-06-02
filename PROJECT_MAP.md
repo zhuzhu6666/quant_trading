@@ -272,6 +272,8 @@ quant_trading/
 - ✅ **T9** regime 隔离 (MABRouter select 已是 per-regime)
 - ✅ **T10** drift → 自动 retrain (MetaLearner SEVERE_DRIFT 触发)
 - ✅ **T13** SharedEventFilter (MAB 业务层关键, 共享 NFP/FOMC+CPI/GVZ skip, 50K bar 跳 19906 bar)
+- ✅ **T14.1-3** L1 因子生命周期 (FactorHealth 5 维评分 + RegistryAdapter 动态 register/unregister + main.py 接入)
+- ✅ **T15.1-8** L2 因子 DSL (parser + AST + 20+ 算子 + evaluator + 搜索 + orchestrator + persistent registry + 1000 候选真实跑)
 
 ### 6.3 阻塞
 - **T1.2 L2/T&S/基本面**: broker 余额/支持

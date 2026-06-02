@@ -1,0 +1,286 @@
+{
+  "config": {
+    "n_candidates": 200,
+    "top_k": 20,
+    "max_depth": 3,
+    "seed": 42,
+    "pca_correlation_threshold": 0.7,
+    "min_score_to_keep": 30.0,
+    "forward_periods": [
+      1,
+      5
+    ],
+    "shadow_required": false,
+    "shadow_duration_days": 30
+  },
+  "search": {
+    "n_total": 200,
+    "n_valid": 146,
+    "n_healthy": 0,
+    "n_watch": 9,
+    "n_decaying": 37,
+    "elapsed_sec": 0.98,
+    "avg_time_per_expr": 0.0049,
+    "top_k": [
+      {
+        "expression": "sqrt(delay(ts_std(gvz, 30), 10))",
+        "abs_ic_mean": 0.038428336157125494,
+        "ic_stability": 43.89865277871864,
+        "ic_decay_rate": 2.1077237521571495,
+        "n_obs": 97,
+        "score": 52.38376391217834,
+        "status": "WATCH",
+        "computation_time_sec": 0.0075795650482177734,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "close",
+        "abs_ic_mean": 0.05425041578407035,
+        "ic_stability": 19.797885045155205,
+        "ic_decay_rate": 0.4910490638636361,
+        "n_obs": 99,
+        "score": 42.885554682854455,
+        "status": "WATCH",
+        "computation_time_sec": 0.006009817123413086,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "close",
+        "abs_ic_mean": 0.05425041578407035,
+        "ic_stability": 19.797885045155205,
+        "ic_decay_rate": 0.4910490638636361,
+        "n_obs": 99,
+        "score": 42.885554682854455,
+        "status": "WATCH",
+        "computation_time_sec": 0.009420394897460938,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "close",
+        "abs_ic_mean": 0.05425041578407035,
+        "ic_stability": 19.797885045155205,
+        "ic_decay_rate": 0.4910490638636361,
+        "n_obs": 99,
+        "score": 42.885554682854455,
+        "status": "WATCH",
+        "computation_time_sec": 0.005994319915771484,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "close",
+        "abs_ic_mean": 0.05425041578407035,
+        "ic_stability": 19.797885045155205,
+        "ic_decay_rate": 0.4910490638636361,
+        "n_obs": 99,
+        "score": 42.885554682854455,
+        "status": "WATCH",
+        "computation_time_sec": 0.00597071647644043,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "abs(close)",
+        "abs_ic_mean": 0.05425041578407035,
+        "ic_stability": 19.797885045155205,
+        "ic_decay_rate": 0.4910490638636361,
+        "n_obs": 99,
+        "score": 42.885554682854455,
+        "status": "WATCH",
+        "computation_time_sec": 0.005000114440917969,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "close",
+        "abs_ic_mean": 0.05425041578407035,
+        "ic_stability": 19.797885045155205,
+        "ic_decay_rate": 0.4910490638636361,
+        "n_obs": 99,
+        "score": 42.885554682854455,
+        "status": "WATCH",
+        "computation_time_sec": 0.006015300750732422,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "close",
+        "abs_ic_mean": 0.05425041578407035,
+        "ic_stability": 19.797885045155205,
+        "ic_decay_rate": 0.4910490638636361,
+        "n_obs": 99,
+        "score": 42.885554682854455,
+        "status": "WATCH",
+        "computation_time_sec": 0.0060002803802490234,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "close",
+        "abs_ic_mean": 0.05425041578407035,
+        "ic_stability": 19.797885045155205,
+        "ic_decay_rate": 0.4910490638636361,
+        "n_obs": 99,
+        "score": 42.885554682854455,
+        "status": "WATCH",
+        "computation_time_sec": 0.012998580932617188,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "log(volume)",
+        "abs_ic_mean": 0.03854685204390071,
+        "ic_stability": 0.6145827141303517,
+        "ic_decay_rate": 1.020446845595607,
+        "n_obs": 99,
+        "score": 39.45780083618946,
+        "status": "DECAYING",
+        "computation_time_sec": 0.0059986114501953125,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "log(volume)",
+        "abs_ic_mean": 0.03854685204390071,
+        "ic_stability": 0.6145827141303517,
+        "ic_decay_rate": 1.020446845595607,
+        "n_obs": 99,
+        "score": 39.45780083618946,
+        "status": "DECAYING",
+        "computation_time_sec": 0.00500035285949707,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "sqrt(log(volume))",
+        "abs_ic_mean": 0.03860024850840925,
+        "ic_stability": 0.408623555723997,
+        "ic_decay_rate": 1.0253040541118505,
+        "n_obs": 99,
+        "score": 39.42271132092182,
+        "status": "DECAYING",
+        "computation_time_sec": 0.00599980354309082,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "volume",
+        "abs_ic_mean": 0.03787255702364121,
+        "ic_stability": 3.396683043083226,
+        "ic_decay_rate": 0.9570962641098045,
+        "n_obs": 99,
+        "score": 39.09720870694166,
+        "status": "DECAYING",
+        "computation_time_sec": 0.0,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "volume",
+        "abs_ic_mean": 0.03787255702364121,
+        "ic_stability": 3.396683043083226,
+        "ic_decay_rate": 0.9570962641098045,
+        "n_obs": 99,
+        "score": 39.09720870694166,
+        "status": "DECAYING",
+        "computation_time_sec": 0.004967212677001953,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "volume",
+        "abs_ic_mean": 0.03787255702364121,
+        "ic_stability": 3.396683043083226,
+        "ic_decay_rate": 0.9570962641098045,
+        "n_obs": 99,
+        "score": 39.09720870694166,
+        "status": "DECAYING",
+        "computation_time_sec": 0.006936073303222656,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "volume",
+        "abs_ic_mean": 0.03787255702364121,
+        "ic_stability": 3.396683043083226,
+        "ic_decay_rate": 0.9570962641098045,
+        "n_obs": 99,
+        "score": 39.09720870694166,
+        "status": "DECAYING",
+        "computation_time_sec": 0.009705305099487305,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "real_yield_10y",
+        "abs_ic_mean": 0.05111096840620604,
+        "ic_stability": 0.0,
+        "ic_decay_rate": 0.3014667273284166,
+        "n_obs": 99,
+        "score": 31.58481874967135,
+        "status": "DECAYING",
+        "computation_time_sec": 0.0,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "real_yield_10y",
+        "abs_ic_mean": 0.05111096840620604,
+        "ic_stability": 0.0,
+        "ic_decay_rate": 0.3014667273284166,
+        "n_obs": 99,
+        "score": 31.58481874967135,
+        "status": "DECAYING",
+        "computation_time_sec": 0.0060122013092041016,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "real_yield_10y",
+        "abs_ic_mean": 0.05111096840620604,
+        "ic_stability": 0.0,
+        "ic_decay_rate": 0.3014667273284166,
+        "n_obs": 99,
+        "score": 31.58481874967135,
+        "status": "DECAYING",
+        "computation_time_sec": 0.005998373031616211,
+        "forward_period": 1,
+        "error": ""
+      },
+      {
+        "expression": "real_yield_10y",
+        "abs_ic_mean": 0.05111096840620604,
+        "ic_stability": 0.0,
+        "ic_decay_rate": 0.3014667273284166,
+        "n_obs": 99,
+        "score": 31.58481874967135,
+        "status": "DECAYING",
+        "computation_time_sec": 0.004999876022338867,
+        "forward_period": 1,
+        "error": ""
+      }
+    ]
+  },
+  "after_dedup": [
+    {
+      "expression": "sqrt(delay(ts_std(gvz, 30), 10))",
+      "abs_ic_mean": 0.038428336157125494,
+      "ic_stability": 43.89865277871864,
+      "ic_decay_rate": 2.1077237521571495,
+      "n_obs": 97,
+      "score": 52.38376391217834,
+      "status": "WATCH",
+      "computation_time_sec": 0.0075795650482177734,
+      "forward_period": 1,
+      "error": ""
+    }
+  ],
+  "promoted": [
+    "dsl_97486440_000"
+  ],
+  "removed": [],
+  "log_path": "data\\charts\\factor_discovery\\run_20260602_180519.json"
+}
