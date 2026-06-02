@@ -109,6 +109,10 @@ python main.py --mode paper --timeframe M15 --factor-health-report
 python scripts/discover_factors.py --n-candidates 1000 --top-k 50 \
   --forward-periods 1,5,20 --auto-register
 
+# 实时数据同步 (T16, MT5 → db 正增长)
+python scripts/live_sync.py --mode once --type incremental --timeframes M15,H1,D1
+python scripts/live_sync.py --mode status  # 查看当前 db bar 数
+
 # 实盘 (stub, 需配 MT5 — 当前 balance=0 阻塞)
 python main.py --mode live
 

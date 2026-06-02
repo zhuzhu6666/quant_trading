@@ -1,0 +1,17 @@
+{
+  "last_sync_utc": "2026-06-02T11:01:06Z",
+  "per_tf": {
+    "M15": {
+      "inserted_last": 0,
+      "total_bars": 0
+    },
+    "M5": {
+      "inserted_last": 0,
+      "total_bars": 0
+    },
+    "H1": {
+      "inserted_last": 0,
+      "total_bars": 0
+    }
+  }
+}
