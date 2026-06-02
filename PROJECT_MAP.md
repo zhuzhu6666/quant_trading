@@ -169,8 +169,9 @@ quant_trading/
 | **baseline_all_strategies** | +407.51% | 738 | - | 同上, 同一路径 |
 | **mab_paper 修后** | +380.58% | 596 | 1.452 | MAB router + 事件 skip 真的生效 |
 | **mab_paper_v2 修后** | +181.18% | 590 | 1.105 | v2 行为差异 (trend 选 76 次 vs v1 17 次) |
-| **paper w/ circuit 10%** | -9.54% | 123 | -0.105 | P3 调优后默认值 |
-| **paper w/ circuit 5% (原)** | -33.61% | 62 | -0.872 | 频繁触发 (13+ 次) |
+| **MAB T1-T13 全栈 (新)** | +120.75% | 639 | 0.894 | main.py --use-router + T13 EventFilter, 业务层跟 baseline 同量级 |
+| paper w/ circuit 10% | -9.54% | 123 | -0.105 | P3 调优后默认值 |
+| paper w/ circuit 5% (原) | -33.61% | 62 | -0.872 | 频繁触发 (13+ 次) |
 
 ### 3.2 因子 (22 个, 4 有效)
 
@@ -270,6 +271,7 @@ quant_trading/
 - ✅ **T8** RetrainScheduler (每 N 笔触发 walkforward, 7.3s/run)
 - ✅ **T9** regime 隔离 (MABRouter select 已是 per-regime)
 - ✅ **T10** drift → 自动 retrain (MetaLearner SEVERE_DRIFT 触发)
+- ✅ **T13** SharedEventFilter (MAB 业务层关键, 共享 NFP/FOMC+CPI/GVZ skip, 50K bar 跳 19906 bar)
 
 ### 6.3 阻塞
 - **T1.2 L2/T&S/基本面**: broker 余额/支持

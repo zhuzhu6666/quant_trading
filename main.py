@@ -73,6 +73,10 @@ def main():
                         help="启用 RetrainScheduler (T8: 每 N 笔触发 walkforward)")
     parser.add_argument("--retrain-every-n", type=int, default=200,
                         help="retrain 频率 (默认 200 笔)")
+    parser.add_argument("--use-event-filter", action="store_true",
+                        help="启用 SharedEventFilter (T13: NFP/FOMC+CPI/GVZ 共享 skip)")
+    parser.add_argument("--no-event-filter", action="store_true",
+                        help="显式禁用 SharedEventFilter (覆盖 --use-event-filter 之外的默认)")
     parser.add_argument("--router-seed", type=int, default=42,
                         help="MABRouter 随机种子 (P1-D 默认 42)")
     parser.add_argument("--router-arms", nargs="+",
@@ -384,6 +388,8 @@ def run_paper(args):
             logger.info(f"  [T4] Alerter 启用 (circuit/大额/drift 告警)")
         if args.use_retrain:
             logger.info(f"  [T8] RetrainScheduler 启用 (每 {args.retrain_every_n} 笔 walkforward)")
+        if args.use_event_filter:
+            logger.info(f"  [T13] SharedEventFilter 启用 (NFP/FOMC+CPI/GVZ 共享 skip, 避免 OOH 跳爆仓)")
     if args.enable_circuit:
         logger.info(f"  [P3] CircuitBreaker 启用 (10% 日损阈值)")
     logger.info("=" * 60)
@@ -470,11 +476,22 @@ def run_paper(args):
                 timeout_sec=300,
             )
 
+        event_filter = None
+        if args.use_event_filter and not args.no_event_filter:
+            from execution.event_filter import SharedEventFilter
+            event_filter = SharedEventFilter(
+                enable_nfp_skip=True, nfp_skip_days=1,
+                enable_dual_event_skip=True,
+                enable_gvz_gate=True, gvz_drop_pct=-2.0,
+                db_path="data/market_data.db",
+            )
+
         runner = MABPaperRunner(
             strategies=strats, router=router,
             scheduler=scheduler, calibrator=calibrator,
             meta_monitor=meta_monitor, factor_monitor=factor_monitor,
             alerter=alerter, retrain_scheduler=retrain_scheduler,
+            event_filter=event_filter,
             # baseline 等比例: 0.01 lot × 100 contract = 1 oz XAUUSD
             # 3 ATR SL × \$7 ATR × 1 oz = \$21 单笔 = 4.2% 账户 (P0 风控原则)
             # max_lots=2.0 跟 baseline 一致, 共享 4 策略仓位

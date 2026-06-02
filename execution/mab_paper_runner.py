@@ -95,6 +95,7 @@ class MABPaperRunner:
         factor_monitor=None,        # FactorMonitor
         alerter=None,               # monitor.alerter.Alerter
         retrain_scheduler=None,     # RetrainScheduler (T8)
+        event_filter=None,          # SharedEventFilter (T13, 默认 None = 不过滤)
     ):
         self.strategies = strategies
         self.router = router
@@ -105,6 +106,7 @@ class MABPaperRunner:
         self.factor_monitor = factor_monitor
         self.alerter = alerter
         self.retrain_scheduler = retrain_scheduler
+        self.event_filter = event_filter
 
         # 用一个"虚拟单策略"包装纸引擎: 选 multi_factor 跟其它策略共享风控参数
         # 实现上挑第一个 strategy, 让 PaperTrader 帮我们管 SL/TP/撮合/熔断
@@ -299,6 +301,11 @@ class MABPaperRunner:
 
             regime = batch_regimes[i]
 
+            # T13: 共享事件过滤器 — NFP/FOMC+CPI/GVZ 跳过 (避免 OOH 跳爆仓)
+            skip, reason = (False, "")
+            if self.event_filter is not None:
+                skip, reason = self.event_filter.should_skip(bar["time"])
+
             # 1. router 选策略
             chosen = self.router.select(regime)
             if chosen is None or chosen not in self.strategies:
@@ -307,8 +314,12 @@ class MABPaperRunner:
                 continue
             self._strategy_picks[chosen] = self._strategy_picks.get(chosen, 0) + 1
 
-            # 2. 调该 strategy 取 signal
+            # 2. 调该 strategy 取 signal (strategy 自带 skip 仍生效)
             signal = self.strategies[chosen].on_bar(bar)
+
+            # 3. T13: 共享事件过滤 — 跳过该 bar 任何新信号
+            if skip and signal is not None and signal.direction in (1, -1):
+                signal = None  # event skip 强制覆盖
 
             # 3. calibrator 矫正 confidence (T3)
             if signal is not None and self.calibrator is not None and signal.confidence is not None:
@@ -508,4 +519,10 @@ class MABPaperRunner:
             else:
                 print("    (no events)")
             print(f"  Stats: {self.retrain_scheduler.stats()}")
+        if self.event_filter is not None:
+            print("-" * 72)
+            print("  EventFilter (T13) stats:")
+            st = self.event_filter.stats()
+            for k, v in st.items():
+                print(f"    {k}: {v}")
         print("=" * 72)

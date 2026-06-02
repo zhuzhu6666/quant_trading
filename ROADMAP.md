@@ -8,6 +8,7 @@
 ## 进度摘要
 
 **代码层完成: 41/41 (100%)** ← P1-E 完成, 全部代码层任务收尾
+**集成层完成: T1-T13 (13/13)** ← 2026-06-02 全集成, MAB 业务上能跑不爆仓
 **文档整理: 2026-06-02** ← 合并 ROADMAP.py + TODO.md → ROADMAP.md; 删 6 个废弃临时脚本
 
 | 阶段 | 状态 | 备注 |
@@ -131,6 +132,17 @@
 | XGBoost OOS | acc 0.5211 / AUC 0.5276 | 比 LogReg AUC 高 0.007 |
 | Walk-Forward | 2 fold, mean lift +2.41% | 真实接近 live, 比 split 一次高一个数量级 |
 | 校准 | 4.6% gap, 6-bin 表 | xgb [0.6,0.7] 过度自信 +17% |
+
+## 集成层真结果存档 (2026-06-02, T1-T13)
+
+| 配置 | PnL | Trades | Sharpe | DD | 备注 |
+|---|---|---|---|---|---|
+| **baseline** (单策略 + 策略自带 skip + circuit 关闭) | **+407.51%** | 738 | **1.807** | 39.77% | PROJECT_MAP 标的对齐 |
+| MAB T1-T10 全栈, 无 T13 | +20.53% | 841 | -0.436 | **169%** | 4 策略共享, breakout/trend OOH 跳爆仓 |
+| MAB T1-T10 + **T13 EventFilter** | **+120.75%** | 639 | **0.894** | **64%** | 共享 NFP/FOMC+CPI/GVZ skip, 跳 19906 bar (40%) |
+| MAB T1-T13 + circuit 10% | -30.63% | 69 | -0.569 | 37% | T13 后 circuit 冗余, 反而阻止开仓 |
+
+**结论**: T13 EventFilter 是 MAB 业务层关键修复, 把 DD 从 169% 降到 64%, PnL 从 +20% 升到 +121%. 跟 baseline +407% 还有 286pp 差距, 来自 MAB 4 策略冷启动 + 探索期 (router.alpha/beta 在跑 50K bar 仍未收敛到 multi_factor 主导).
 
 ## P1 真结果存档 (2026-06-02)
 
