@@ -1,0 +1,25 @@
+{
+  "n_bars": 200,
+  "n_signals": 20,
+  "n_trades": 6,
+  "gross_pnl": -34.04,
+  "swap": -0.01,
+  "net_pnl": -34.41,
+  "return_pct": -6.88,
+  "win_rate": 0.3333,
+  "sharpe": -0.739,
+  "max_dd_usd": 56.55,
+  "max_dd_pct": 11.31,
+  "elapsed_sec": 0.2,
+  "timeframe": "M15",
+  "symbol": "XAUUSD+",
+  "bar_range": [
+    "2026-05-29 15:30:00",
+    "2026-06-02 19:15:00"
+  ],
+  "ts_utc": "2026-06-03T07:56:34.684495+00:00",
+  "comparison": {
+    "prev": null,
+    "alert": null
+  }
+}

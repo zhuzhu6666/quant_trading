@@ -1,7 +1,7 @@
 # 项目框架总览 (PROJECT_MAP)
 
-> 最后更新: 2026-06-03 下午
-> 项目状态: 41/41 ROADMAP 任务代码层完成 (100%) + 自进化差距 3/3 闭环 (T15.5 + Calibrator + GP)
+> 最后更新: 2026-06-03 下午 (8 项接入完成, L1-L5 自循环全闭环)
+> 项目状态: 41/41 代码层完成 (100%) + 自进化差距 3/3 闭环 + 8 项 cron 接入完成 (L1-L5 全自循环)
 > 真实 PnL 数字 / 风险点 / 阻塞项 全部记录
 
 ---
@@ -125,6 +125,13 @@ quant_trading/
 │   ├── discover_factors.py          # ★ L2: 因子发现 CLI (random search v1)
 │   ├── test_gp_search.py            # ★ T15.3 v2: GP vs random A/B 验证
 │   ├── test_gp_search_v2.py         # ★ T15.3 v2: GP 变体 (100x10 vs 50x30) 对比
+│   ├── auto_discover_daemon.py       # ★ PR-2.1: L2 GP 发现 cron 化
+│   ├── promote_shadow_to_active.py   # ★ PR-2.5: shadow -> DISCOVERED 升级检查
+│   ├── drift_research_daemon.py      # ★ PR-3.2: SEVERE_DRIFT -> GP re-search
+│   ├── t13_skip_backfill.py          # ★ PR-3.4: T13 skip 期间数据补 batch
+│   ├── regime_retrain.py             # ★ PR-3.7: Regime 分类器周期重训
+│   ├── daily_paper_dryrun.py         # ★ PR-1.8: 日终 paper dryrun
+│   ├── test_calibrator_autosave.py   # ★ PR-1.3: walkforward 末尾 fit+save 验证
 │   ├── P0 系列: test_p0_factors / factor_pca / factor_ic_rolling
 │   ├── P0-5/6: train_xgb_walkforward / walkforward_p0_6
 │   ├── P0-7: test_probability_calibrator

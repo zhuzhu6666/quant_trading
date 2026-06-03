@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 def restore_from_log(lifecycle_log_path: str = "data/charts/factor_lifecycle_log.jsonl",
-                      verbose: bool = True) -> int:
+                      verbose: bool = True,
+                      adapter: "RegistryAdapter | None" = None) -> int:
     """
     从 lifecycle log 恢复所有 shadow / discovered 因子.
 
@@ -60,7 +61,8 @@ def restore_from_log(lifecycle_log_path: str = "data/charts/factor_lifecycle_log
     if not latest_event:
         return 0
 
-    adapter = RegistryAdapter()
+    if adapter is None:
+        adapter = RegistryAdapter()
     restored = 0
     for name, ev in latest_event.items():
         event_type = ev.get("event")

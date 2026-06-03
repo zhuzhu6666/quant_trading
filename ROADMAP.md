@@ -1,7 +1,7 @@
 # 项目路线图 (ROADMAP)
 
 > 单源待办 — 替代旧的 `ROADMAP.py` (Python dict 形式, 已废) 和 `TODO.md` (重复)
-> 2026-06-03 下午快照
+> 2026-06-03 下午快照 (8 项接入完成)
 
 ---
 
@@ -153,6 +153,16 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 ### 立刻能做 (1-2 小时, 无外部依赖)
 - [x] **P2 SL/TP bid-ask** (2026-06-03) — bars 表加 spread 字段, paper_engine 按 bid/ask-extreme 判定
 - [x] **P2 资金费建模** (2026-06-03 下午) — swap_cost = rate * volume * hold_days, paper_engine wiring 完, A/B 通过
+
+### P2 自主进化 8 项接入 (2026-06-03 下午全完成)
+- [x] **PR-1.3** Calibrator retrain 后自动 save: walkforward 末尾 fit+save, 备份 .json.bak
+- [x] **PR-1.6** 影子因子默认 vote_weight=0 永久 (开启需显式 CLI)
+- [x] **PR-1.8** 日终 paper dryrun cron: scripts/daily_paper_dryrun.py
+- [x] **PR-2.1** L2 GP 发现 cron 化: scripts/auto_discover_daemon.py (auto_register 默认开)
+- [x] **PR-2.5** shadow 7 天 HEALTHY -> DISCOVERED 升级: scripts/promote_shadow_to_active.py
+- [x] **PR-3.2** SEVERE_DRIFT -> GP re-search: scripts/drift_research_daemon.py + main.py --use-drift-research
+- [x] **PR-3.4** T13 skip -> meta-learner batch: scripts/t13_skip_backfill.py (补 19,909 bar / 40% 数据)
+- [x] **PR-3.7** Regime 周期重训: scripts/regime_retrain.py (LogisticRegression, 41ms @ 4949 sample)
 
 ### P2 其他项目 (需人工判断)
 - [ ] Survivorship bias 检测

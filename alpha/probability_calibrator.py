@@ -166,6 +166,52 @@ class ProbabilityCalibrator:
         with open(p, "r", encoding="utf-8") as f:
             return cls.from_dict(json.load(f))
 
+    @classmethod
+    def fit_from_predictions(cls, probs, y_true, n_buckets: int = 8,
+                             method: str = "bucket") -> "ProbabilityCalibrator":
+        """
+        从一组 OOS 预测概率 + 真实标签拟合 calibrator. 供 walkforward / retrain 调用.
+        桶级 (bucket): 把 [0,1] 分成 n_buckets 段, 每段用该段实际命中率校准.
+        """
+        import numpy as np
+        probs = np.asarray(probs, dtype=float)
+        y_true = np.asarray(y_true, dtype=int)
+        mask = ~np.isnan(probs) & ~np.isnan(y_true)
+        probs, y_true = probs[mask], y_true[mask]
+        if len(probs) < n_buckets * 5:
+            # 样本不够, 回退 identity
+            logger.warning(f"fit_from_predictions: only {len(probs)} samples, "
+                           f"need >={n_buckets * 5}, returning identity")
+            return cls.identity()
+        cal = cls(method=method)
+        # 桶边界
+        edges = np.linspace(0.0, 1.0, n_buckets + 1)
+        buckets = []   # [lo, hi, wr] 3-tuple (与 _calibrate_bucket 兼容)
+        bucket_n = []   # 单独记录每桶样本数 (用于 audit log)
+        for i in range(n_buckets):
+            lo, hi = float(edges[i]), float(edges[i + 1])
+            in_bucket = (probs >= lo) & (probs < hi if i < n_buckets - 1 else probs <= hi)
+            n_in = int(in_bucket.sum())
+            if n_in < 5:
+                fallback = float(y_true.mean()) if len(y_true) > 0 else 0.5
+                buckets.append([lo, hi, round(fallback, 4)])
+                bucket_n.append(n_in)
+                continue
+            emp_rate = float(y_true[in_bucket].mean())
+            buckets.append([lo, hi, round(emp_rate, 4)])
+            bucket_n.append(n_in)
+            logger.debug(f"  bucket [{lo:.3f},{hi:.3f}] n={n_in} emp={emp_rate:.4f}")
+        cal.buckets = buckets
+        cal.method = "bucket"
+        # 把 n 计数存到 meta 字段 (to_dict 不动, 单独属性供 audit)
+        cal._bucket_n = bucket_n
+        cal._fit_n_samples = int(len(probs))
+        cal._fit_n_pos = int(y_true.sum())
+        logger.info(f"fit_from_predictions: {len(probs)} samples, "
+                    f"{n_buckets} buckets, method=bucket, "
+                    f"n_per_bucket={bucket_n}")
+        return cal
+
 
 # ── 跟 WeightedScorer 集成 ─────────────────────────────
 

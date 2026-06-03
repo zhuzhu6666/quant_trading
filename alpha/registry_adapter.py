@@ -139,6 +139,34 @@ class RegistryAdapter:
         logger.info(f"[RegistryAdapter] unregister {name} (reason: {reason})")
         return True
 
+    def promote(self, name: str, new_source: str = SOURCE_DISCOVERED,
+                reason: str = "") -> bool:
+        """
+        晋升因子来源: shadow -> discovered (or other). 不改函数, 只改 meta + 落 event.
+        用于 cron 化的 shadow -> ACTIVE 升级检查.
+        """
+        if name not in self._meta:
+            logger.warning(f"[RegistryAdapter] promote: {name} 不在 meta, 跳过")
+            return False
+        old_source = self._meta[name].get("source", SOURCE_BUILTIN)
+        if old_source == new_source:
+            return False
+        if old_source == SOURCE_REMOVED:
+            logger.warning(f"[RegistryAdapter] promote: {name} 已被移除, 跳过")
+            return False
+        if old_source == SOURCE_BUILTIN:
+            logger.warning(f"[RegistryAdapter] promote: {name} 是 builtin, 不可降级/升级")
+            return False
+        self._meta[name]["source"] = new_source
+        self._meta[name]["promote_time"] = _time.time()
+        self._meta[name]["prev_source"] = old_source
+        self._log_event(FactorLifecycleEvent(
+            timestamp=_time.time(), event="promote", factor=name,
+            source=new_source, reason=reason or f"{old_source} -> {new_source}",
+        ))
+        logger.info(f"[RegistryAdapter] promote {name}: {old_source} -> {new_source}")
+        return True
+
     def force_unregister(self, name: str, reason: str = "") -> bool:
         """强制删除 (包括 builtin)"""
         if name not in factor_registry:

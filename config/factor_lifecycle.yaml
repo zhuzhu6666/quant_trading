@@ -35,6 +35,8 @@ factor_dsl:
     forward_periods: [1, 5, 20]    # 多窗口 cross-validation
     shadow_required: false
     shadow_duration_days: 30
+    shadow_vote_weight: 0    # 默认 0 (关闭), 开启需 CLI: --include-shadow-factors --shadow-vote-weight 1.0
+                              # 校准见 scripts/test_shadow_calibration.py (vw=1.0 拖累 PnL)
 
   # 评估
   evaluation:

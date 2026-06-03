@@ -73,8 +73,16 @@ def main():
                         help="ProbabilityCalibrator 加载路径 (default: data/charts/calibrator_bucket.json, 缺失时回退 identity)")
     parser.add_argument("--calibrator-save", action="store_true",
                         help="启用 calibrator 定时保存 (每 N 笔 trade 把当前 calibrator 落盘, 默认 off)")
+    parser.add_argument("--use-drift-research", action="store_true",
+                        help="(PR-3.2) SEVERE_DRIFT triggers GP re-search subprocess")
+    parser.add_argument("--drift-n-bars", type=int, default=5000,
+                        help="re-search N bars (default 5000)")
+    parser.add_argument("--drift-pop", type=int, default=50,
+                        help="re-search GP pop size (default 50)")
+    parser.add_argument("--drift-gen", type=int, default=30,
+                        help="re-search GP gen (default 30)")
     parser.add_argument("--use-meta-monitor", action="store_true",
-                        help="MetaLearnerMonitor 跟踪模型校准 (paper 路径始终记录)")
+                        help="MetaLearnerMonitor track model calibration (paper always logs)")
     parser.add_argument("--use-factor-monitor", action="store_true",
                         help="FactorMonitor 跟踪因子 IC 衰减")
     parser.add_argument("--use-alerter", action="store_true",
@@ -543,6 +551,13 @@ def run_paper(args):
         if args.use_meta_monitor:
             from live.meta_learner_monitor import MetaLearnerMonitor
             meta_monitor = MetaLearnerMonitor(model_names=list(strats.keys()))
+            # PR-3.2: SEVERE_DRIFT -> 触发 GP re-search
+            if args.use_drift_research:
+                from scripts.drift_research_daemon import make_drift_handler
+                meta_monitor.drift_handler = make_drift_handler(
+                    n_bars=args.drift_n_bars, pop=args.drift_pop, gen=args.drift_gen,
+                )
+                logger.info(f"  [PR-3.2] drift_handler installed: SEVERE_DRIFT -> re-search")
 
         factor_monitor = None
         if args.use_factor_monitor:

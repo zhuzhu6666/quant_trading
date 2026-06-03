@@ -227,6 +227,25 @@ def main():
     print(f"\n→ 落盘: {out_dir / 'walkforward_oos.npy'}")
     print(f"→ 落盘: {out_dir / 'walkforward_report.txt'}")
 
+    # 5.5) 训练 calibrator (用 OOS prob+y 重训, 落盘供 main.py 启动加载)
+    try:
+        from alpha.probability_calibrator import ProbabilityCalibrator
+        cal = ProbabilityCalibrator.fit_from_predictions(
+            oos_prob, oos_y, n_buckets=8, method="bucket"
+        )
+        cal_path = Path("data/charts/calibrator_bucket.json")
+        cal_path.parent.mkdir(parents=True, exist_ok=True)
+        # 备份上一版
+        bak = cal_path.with_suffix(".json.bak")
+        if cal_path.exists():
+            import shutil
+            shutil.copy2(cal_path, bak)
+        cal.save(str(cal_path))
+        print(f"\n  [P0-6->P0-7] Calibrator saved: {cal_path} (method={cal.method}, "
+              f"buckets={len(cal.buckets)}, platt=({cal.platt_a:.3f},{cal.platt_b:.3f}))")
+    except Exception as e:
+        print(f"\n  [P0-6->P0-7] WARNING: calibrator fit/save failed: {type(e).__name__}: {e}")
+
     # 6) 框架就位判断
     print(f"\n" + "=" * 78)
     print(f"  P0-6 框架就位判断")

@@ -76,6 +76,8 @@ class MetaLearnerMonitor:
     severe_threshold: float = 0.10    # > 10% → SEVERE_DRIFT
     min_obs: int = 50                 # 至少 50 obs 才报
     alert_callback: Callable | None = None
+    # 漂移触发重搜索/重训的回调 (PR-3.2)
+    drift_handler: Callable | None = None
 
     # {model_name: deque of (pred_prob, y_true, bar_ts)}
     _history: dict[str, deque] = field(default_factory=dict)
@@ -122,6 +124,12 @@ class MetaLearnerMonitor:
             self._last_alert_ts[model_name] = bar_ts
             if self.alert_callback:
                 self.alert_callback(model_name, level, gap, msg)
+            # SEVERE_DRIFT -> 触发 re-search handler (PR-3.2)
+            if level == "SEVERE_DRIFT" and self.drift_handler:
+                try:
+                    self.drift_handler(model_name, level, gap, msg)
+                except Exception as e:
+                    logger.warning(f"[MetaLearnerMonitor] drift_handler error: {e}")
 
     def status(self) -> list[MetaLearnerStatus]:
         result = []

@@ -1,0 +1,55 @@
+{
+  "ts": "2026-06-03T08:06:00.412394+00:00",
+  "config": {
+    "n_bars": 3000,
+    "pop": 20,
+    "gen": 10,
+    "top_k": 5,
+    "score_threshold": 50.0,
+    "dry_run": true
+  },
+  "data_range": [
+    "2026-04-17 03:00:00",
+    "2026-06-02 19:15:00"
+  ],
+  "gp_result": {
+    "elapsed_sec": 2.2,
+    "best_score": 58.07372568877708,
+    "best_expr": "log(log(log(log(ts_sum(delay(close, 20), 30)))))",
+    "best_history": [
+      58.1,
+      58.1,
+      58.1,
+      58.1,
+      58.1,
+      58.1,
+      58.1,
+      58.1,
+      58.1,
+      58.1,
+      58.1
+    ]
+  },
+  "kept": [
+    {
+      "expr": "log(log(log(log(ts_sum(delay(close, 20), 30)))))",
+      "score": 58.07372568877708,
+      "abs_ic": 0.04382055354831591,
+      "status": "WATCH"
+    },
+    {
+      "expr": "log(log(ts_sum(delay(close, 20), 30)))",
+      "score": 58.0678653542092,
+      "abs_ic": 0.0438107798091582,
+      "status": "WATCH"
+    },
+    {
+      "expr": "log(close)",
+      "score": 54.53275713894779,
+      "abs_ic": 0.058853786590059534,
+      "status": "WATCH"
+    }
+  ],
+  "promoted": [],
+  "skipped": []
+}

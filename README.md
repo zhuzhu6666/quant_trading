@@ -2,7 +2,7 @@
 
 XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backtest baseline 已实盘验证 (read-only 模式)。
 
-**最后更新: 2026-06-03 (下午)**
+**最后更新: 2026-06-03 下午 (8 项接入完成)**
 
 ---
 
@@ -83,6 +83,29 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 - A/B 验证 5000 bar: A swap_off +24.79% / B swap_on -1/day -0.04% / C stress -5/day -0.20%
 - XAUUSD 长仓过夜费 -1 USD/lot/day 是合理默认值 (Bybit-Live-2 历史)
 - 报告: `data/charts/swap_funding_report.txt`
+
+### 自主进化 8 项接入 (2026-06-03 下午)
+
+完整 L1-L5 自循环已闭环, 8 项 cron 化接入:
+
+| PR | 改动 | 文件 |
+|---|---|---|
+| PR-1.3 | Calibrator retrain 后自动 save | scripts/walkforward_p0_6.py 末尾 + ProbabilityCalibrator.fit_from_predictions() |
+| PR-1.6 | 影子因子默认 vote_weight=0 永久 | config/factor_lifecycle.yaml + multi_factor_m15.py |
+| PR-1.8 | 日终 paper dryrun cron | scripts/daily_paper_dryrun.py (新) |
+| PR-2.1 | L2 GP 发现 cron 化 + auto_register | scripts/auto_discover_daemon.py (新) |
+| PR-2.5 | 影子 7 天 HEALTHY -> DISCOVERED 升级 | scripts/promote_shadow_to_active.py (新) + RegistryAdapter.promote() |
+| PR-3.2 | 漂移 SEVERE_DRIFT -> 触发 re-search | scripts/drift_research_daemon.py (新) + MetaLearnerMonitor.drift_handler |
+| PR-3.4 | T13 skip -> meta-learner batch | scripts/t13_skip_backfill.py (新) |
+| PR-3.7 | Regime 分类器周期重训 | scripts/regime_retrain.py (新) |
+
+完整 cron 配置 (hermes):
+- `daily_paper_dryrun`: 每天 02:00, 跑最近 1 天 paper
+- `auto_discover_daily`: 每天 01:00, GP 50x30 + auto_register
+- `shadow_promote_daily`: 每天 01:30, 评估 shadow + promote/remove
+- `drift_research_daily`: 每 6h 检查一次, SEVERE_DRIFT 触发 GP re-search
+- `t13_skip_backfill_daily`: 每天 00:30, 把 T13 skip 期间数据批量喂 meta-learner
+- `regime_retrain_weekly`: 每周日 02:30, 重训 regime classifier
 
 ### 影子因子 shadow ON 默认关闭 (2026-06-03 下午)
 
