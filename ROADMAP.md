@@ -18,7 +18,7 @@
 | P3 circuit 调优 | ✅ 1/1 | 5% → 10% 默认 |
 | T1-T13 集成层 | ✅ 13/13 | MAB 多策略 + 9 个自学习组件 + T13 事件过滤 |
 | T14 L1 因子生命周期 | ✅ 3/3 | FactorHealth 评分 + RegistryAdapter + main.py 接入 |
-| T15 L2 因子 DSL | ✅ 8/8 | parser + 搜索 + orchestrator + persistent registry + CLI |
+| T15 L2 因子 DSL | ✅ 8/8 | parser + 搜索 + orchestrator + persistent registry + **T15.5 闭环 wiring 2026-06-03 (lazy load + A/B 验证 PnL delta!=-0)** |
 | T16 实时数据同步 | ✅ 8/8 | MT5 → db + 增量拉取 + 多 TF + Windows Task Scheduler |
 | P2 其他 (回测工程) | ⏳ 待启动 | SL/TP bid-ask / 资金费 / future function / point-in-time |
 | Tier 1-4 机构级 | ⏳ 长期 | 阻塞于资源/外部依赖 |
@@ -82,6 +82,7 @@
 - [x] **T15.3** `alpha/factor_search.py` — 随机搜索 (100 候选 0.4s, 3.6ms/expr)
 - [x] **T15.4** `alpha/factor_discovery.py` — orchestrator: search → evaluate → 去重 → cross-validation → shadow register
 - [x] **T15.5** `scripts/discover_factors.py` — CLI 入口 + `alpha/persistent_registry.py` 跨进程恢复
+- [x] **T15.5 闭环 wiring** (2026-06-03 接入 + bug 修) — 8 个新参数 + 3 个新方法 (`_load_shadow_factors` / `_compute_shadow_factors` / `_shadow_votes`) + `on_bar` lazy load 钩子; `main.py` 加 `--include-shadow-factors` / `--shadow-top-k`; A/B 测试 `scripts/test_shadow_consumption.py` 验证 wiring 生效 (A: 62t/+24.79%/Sharpe 1.46/DD 51.44%; B: 68t/+0.73%/Sharpe 0.69/DD 34.06%; delta=-24% PnL 但 DD -17pp 改善)
 - [x] **T15.6** `config/factor_lifecycle.yaml` — L1+L2 配置集中
 - [x] **T15.7** 真实数据 1000 候选验证 (132.9s, 956 有效, 1-5 promoted)
 - [x] **T15.8** 健康分交叉验证 (3 个 dsl 因子进 WATCH, |IC| -0.042)
@@ -100,6 +101,26 @@
 - [x] **T16.8** 真实数据验证 + baseline 重跑 (+412.20% / 743t)
 
 **db 修复 + 清理 (2026-06-02 23:40)**: bars 表 (DataStore 走这里) 50000 老 bar time TEXT → 统一 INTEGER, 共 298949 行 (6 timeframe × 49825 平均, 含 T16 实时增量). **candles 表 (TEXT time) 已 DROP TABLE** (原 298500 行僵尸, 没人用, 备份 `data/market_data.db.pre_drop_candles.bak`). `risk/regime.py:477` 改写走 bars (INTEGER time, 实时 D1). 整体 db 干净, 唯一表路径走 bars.
+
+---
+
+## 自进化差距 (2026-06-03 评估)
+
+**当前状态: 框架未达自主进化**。3 个核心差距 (按修复优先级):
+
+### 1. T15.5 闭环 wiring ✅ **(closed 2026-06-03)**
+- DSL 发现 → 持久化 → 策略消费 的最后一公里已打通
+- 根因: `strategy_registry.create()` 先 `cls(...)` 跑 `__init__` 再 `instance.params = params`, 致使 `self.params.get('include_shadow_factors')` 永远是类默认 False
+- 修法: lazy load — `_load_shadow_factors()` 挪到 `on_bar` 第一次调用时 (用 `_shadow_loaded` 守卫), 此时 `self.params` 已被 registry 覆盖
+- 验证: A/B 测试 PnL delta=-24.06%, DD 同步改善 -17.39pp, shadow factors 实际投票 (`Strategy._shadow_factors=3` after run)
+- 副作用发现: 影子因子在 OOS 上 net-negative PnL (过拟合信号), 但 DD 改善, 后续可校准 `shadow_top_pct` / `shadow_vote_weight`
+
+### 2. ProbabilityCalibrator 持久化 (next)
+- 当前每次重启从历史重 fit, 浪费 + 跨会话不一致
+- 应支持: 启动时尝试从磁盘加载, fallback 重 fit
+
+### 3. 第三项待定
+- 等 T15.5 闭环完成后再讨论 (候选: 影子策略本身的 retrain 自动化 / 漂移检测触发 DSL re-search / 等)
 
 ---
 
@@ -159,10 +180,12 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 
 ## 下一步推荐
 
-1. **P2 资金费建模** — 对 XAUUSD+ swap cost 不小, 需建模
-2. **GP 因子搜索** (T15.3 v2) — 当前只有随机搜索, GP 能更精
-3. **MAB 4 策略调优** — 全局 MAB 还在冷启动, 需更多 bar / 不同 seed 对比
-4. **P2 SL/TP 事件日 spread 注入** — FOMC/NFP spread 1-3 USD 时 PnL 影响 2-5%
+1. **ProbabilityCalibrator 持久化** (P0, 当下) — 1-2 小时, 纯本地, 收益明显 (每次重启不用重 fit)
+2. **T15.5 影子因子校准** — 当前 OOS PnL 净负 (过拟合), 调 `shadow_top_pct` / `shadow_vote_weight` / `shadow_min_samples`, 或加 walk-forward 验证
+3. **P2 资金费建模** — 对 XAUUSD+ swap cost 不小, 需建模
+4. **GP 因子搜索** (T15.3 v2) — 当前只有随机搜索, GP 能更精
+5. **MAB 4 策略调优** — 全局 MAB 还在冷启动, 需更多 bar / 不同 seed 对比
+6. **P2 SL/TP 事件日 spread 注入** — FOMC/NFP spread 1-3 USD 时 PnL 影响 2-5%
 
 ---
 

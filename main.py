@@ -93,6 +93,10 @@ def main():
     parser.add_argument("--router-arms", nargs="+",
                         default=["multi_factor_m15", "trend_following", "mean_reversion", "breakout"],
                         help="MABRouter 候选策略名 (默认 4 个 M15)")
+    parser.add_argument('--include-shadow-factors', action='store_true',
+                        help='T15.5 enable DSL-discovered shadow/discovered factors as extra votes (default off)')
+    parser.add_argument('--shadow-top-k', type=int, default=3,
+                        help='T15.5 max top-K shadow factors to consume (default 3)')
     args = parser.parse_args()
 
     setup_logging()
@@ -385,6 +389,9 @@ def run_paper(args):
 
     logger.info("=" * 60)
     logger.info(f"PAPER REPLAY — {args.symbol} @ {args.timeframe}")
+
+    if args.include_shadow_factors:
+        logger.info(f"  [T15.5] shadow factors ENABLED (top_k={args.shadow_top_k})")
     if args.factor_health_report:
         logger.info(f"  [T14.1] 跑因子健康评估 (落盘 factor_health_report.txt)")
 

@@ -50,7 +50,7 @@ quant_trading/
 │   ├── probability_calibrator.py    # P0-7: 桶级 + Platt 校准
 │   ├── factor_health.py             # ★ T14.1: 因子健康评分 (5 维, 0-100)
 │   ├── registry_adapter.py          # ★ T14.2: 动态 register/unregister + 事件流
-│   ├── persistent_registry.py       # ★ T15.5: 跨进程恢复 shadow 因子
+│   ├── persistent_registry.py       # ★ T15.5: 跨进程恢复 shadow 因子 (闭环 2026-06-03)
 │   ├── factor_dsl.py                # ★ T15.1: DSL parser + AST + 20+ 算子 + 沙箱
 │   ├── factor_score_evaluator.py    # ★ T15.2: DSL 候选 IC 评分 + cross-validation
 │   ├── factor_search.py             # ★ T15.3: 随机搜索 (100 候选 0.4s)
@@ -61,7 +61,7 @@ quant_trading/
 │   └── _test_factors.py
 │
 ├── strategies/                      # 7 交易策略
-│   ├── multi_factor_m15.py         # ★ 主策略 (M15, 4 因子合成)
+│   ├── multi_factor_m15.py         # ★ 主策略 (M15, 4 因子合成) — T15.5 闭环 (2026-06-03): _load_shadow_factors / _compute_shadow_factors / _shadow_votes + lazy load
 │   ├── ma_cross_h4.py               # MA cross H4
 │   ├── macd_bb.py                   # MACD + BB H1
 │   ├── gold_momentum.py             # 黄金动量 H1
@@ -118,6 +118,7 @@ quant_trading/
 │
 ├── scripts/                         # 35+ 脚本 (测试 + 工具 + 入口)
 │   ├── live_sync.py                 # ★ T16: 实时数据同步 CLI
+│   ├── test_shadow_consumption.py   # ★ T15.5 闭环: A/B 验证 shadow 因子接进投票 (2026-06-03, PnL delta=-24.06% 闭环确认)
 │   ├── live_sync_daily.bat          # ★ T16: Windows Task Scheduler 配置
 │   ├── discover_factors.py          # ★ L2: 因子发现 CLI
 │   ├── P0 系列: test_p0_factors / factor_pca / factor_ic_rolling
@@ -183,6 +184,12 @@ quant_trading/
 - **FORCE_CLOSE_BASED_SLTP env**: 关掉 bid/ask 偏移 (A/B 对比用)
 - **报告**: `data/charts/p2_sltp_bidask_report.txt` (close-based vs bid/ask)
 
+### 2.7 T15.5 闭环 wiring ✅ (2026-06-03 closed)
+- **strategies/multi_factor_m15.py**: `_load_shadow_factors` / `_compute_shadow_factors` / `_shadow_votes` (3 新方法 + 8 新参数 + lazy load 守卫)
+- **main.py CLI**: `--include-shadow-factors` / `--shadow-top-k` (单策略 + MAB overrides 两条路径都通)
+- **scripts/test_shadow_consumption.py**: A/B 验证 (5000 bar, baseline vs shadow-on)
+- **A/B 结果**: A=62t/+24.79%/Sharpe 1.46/DD 51.44%/PF 1.11/$623.94; B=68t/+0.73%/Sharpe 0.69/DD 34.06%/PF 1.01/$503.64; **delta=-24.06% PnL 但 DD -17.39pp 改善** (wiring 闭环确认, 影子因子 OOS 净负 → 校准 `top_pct` / `vote_weight`)
+
 ---
 
 ## 3. 真状态数字 (2026-06-02)
@@ -246,6 +253,7 @@ quant_trading/
   - P0-7 校准接 scoring (减少弱信号)
 - ⚠ mab_paper_v2 行为跟 v1 差异大, 内部 baseline 设计待查
 - ⚠ 22 因子 18 noise, 因子库饱和, P2 因子 DSL / 合成 待启动
+- ✅ T15.5 闭环 wiring 已修 (2026-06-03): lazy load 绕过 registry kwargs 时序, A/B delta=-24.06% 闭环确认
 
 ---
 
@@ -282,6 +290,8 @@ quant_trading/
 按"先做有真实价值"原则推荐:
 
 ### 6.1 立刻能做 (无外部依赖, 1-2 小时)
+- **ProbabilityCalibrator 持久化** (P0, 当下): 启动时从磁盘加载, fallback 重 fit
+- **T15.5 影子因子校准**: 当前 OOS PnL 净负 (过拟合), 调 `shadow_top_pct` / `shadow_vote_weight` / `shadow_min_samples`
 - **P2 SL/TP bid-ask**: 让 OOS 更真实
 - **P2 资金费建模**: XAUUSD swap cost 不小
 - **GP 因子搜索** (T15.3 v2): 当前只有随机搜索, GP 能更精
@@ -290,7 +300,7 @@ quant_trading/
 - ✅ **T1-T10** MAB 多策略 + 7 个自学习组件 + RetrainScheduler
 - ✅ **T13** SharedEventFilter (MAB 业务层关键, 50K bar 跳 19906 bar)
 - ✅ **T14.1-3** L1 因子生命周期 (FactorHealth + RegistryAdapter + main.py 接入)
-- ✅ **T15.1-8** L2 因子 DSL (parser + 搜索 + orchestrator + persistent registry + 真实跑)
+- ✅ **T15.1-8** L2 因子 DSL (parser + 搜索 + orchestrator + persistent registry + T15.5 闭环 wiring 2026-06-03)
 - ✅ **T16.1-8** 实时数据同步 (MT5→db + 增量 + 多TF + Windows Task Scheduler)
 
 ### 6.3 阻塞

@@ -68,6 +68,15 @@ class MultiFactorM15Strategy(BaseStrategy):
         'tp_atr': 3.0,
         'cooldown_bars': 3,
         'bb_percentile': 80,
+        # Shadow / discovered 因子接入层（DSL 发现的因子自动推入投票，默认关闭）
+        'include_shadow_factors': False,
+        'shadow_top_k': 3,
+        'shadow_recompute_every': 8,
+        'shadow_rank_window': 50,
+        'shadow_min_samples': 30,
+        'shadow_vote_weight': 1.0,
+        'shadow_top_pct': 0.7,
+        'shadow_bottom_pct': 0.3,
         # ── 事件 + 波动率过滤（默认关，可由 main.py 启用）──
         'enable_nfp_skip': False,
         'nfp_skip_days': 1,
@@ -100,6 +109,15 @@ class MultiFactorM15Strategy(BaseStrategy):
         self._cpi_dates: set[str] = set()
         self._gvz_series: dict[str, float] = {}
         self._load_news_cache()
+        # Shadow / discovered 因子状态（默认空列表，开关在 include_shadow_factors）
+        # 注意: 这里不能直接调 _load_shadow_factors()，因为 strategy_registry.create() 是
+        # 先 cls(...) 跑 __init__ 再 instance.params = params，此时 self.params 还是类默认。
+        # 真正的加载挪到 on_bar 第一次调用时（lazy load），届时 self.params 已被 registry 更新。
+        self._shadow_factors: list = []
+        self._shadow_value_history: dict = {}
+        self._bars_since_shadow_recompute: int = 0
+        self._last_shadow_active: int = 0
+        self._shadow_loaded: bool = False
 
     # ── 通用指标计算 ──────────────────────────────────────────
 
@@ -332,6 +350,30 @@ class MultiFactorM15Strategy(BaseStrategy):
         elif stoch_k < p['stoch_thresh']:
             votes_short += 1
 
+
+        # ---- Shadow / discovered 因子投票（默认关闭，include_shadow_factors=True 时启用）----
+        # Lazy load: registry.create() 在 __init__ 之后才覆盖 self.params, 所以这里 load
+        if p.get('include_shadow_factors', False) and not self._shadow_loaded:
+            self._shadow_factors = self._load_shadow_factors(
+                top_k=p.get('shadow_top_k', 3)
+            )
+            self._shadow_loaded = True
+            if self._shadow_factors:
+                names = [n for n, _, _ in self._shadow_factors]
+                logger.info(f"[{self.name}] shadow factors loaded ({len(names)}): {names}")
+            else:
+                logger.warning(f"[{self.name}] shadow requested but none in lifecycle log")
+        if p.get('include_shadow_factors', False) and self._shadow_factors:
+            self._bars_since_shadow_recompute += 1
+            if self._bars_since_shadow_recompute >= int(p.get('shadow_recompute_every', 8)):
+                self._compute_shadow_factors()
+                self._bars_since_shadow_recompute = 0
+            sv_l, sv_s, n_active = self._shadow_votes()
+            votes_long += sv_l
+            votes_short += sv_s
+            self._last_shadow_active = n_active
+        else:
+            self._last_shadow_active = 0
         # 决定方向：至少N票
         direction = 0
         if votes_long >= p['votes_needed']:
@@ -409,6 +451,7 @@ class MultiFactorM15Strategy(BaseStrategy):
                 'atr': round(atr, 2),
                 'votes_long': votes_long,
                 'votes_short': votes_short,
+                'shadow_active': self._last_shadow_active,
                 'close': close,
             },
         )
@@ -428,8 +471,13 @@ class MultiFactorM15Strategy(BaseStrategy):
         self._bb_widths.clear()
         self._cooldown = 0
         self._bar_count = 0
+        # Shadow 状态重置
+        self._shadow_value_history.clear()
+        self._bars_since_shadow_recompute = 0
+        self._last_shadow_active = 0
+        self._shadow_loaded = False  # 重新 lazy load
         self._load_news_cache()
-        logger.info(f"[{self.name}] Initialized, min_bars={self._min_bars}")
+        logger.info(f"[{self.name}] Initialized, min_bars={self._min_bars}, shadow_factors={len(self._shadow_factors)}")
 
     def _load_news_cache(self):
         """从 SQLite 加载事件日历和 GVZ（缺失/异常时静默）"""
@@ -454,3 +502,117 @@ class MultiFactorM15Strategy(BaseStrategy):
                 self._gvz_series = load_gvz_series(db_path)
         except Exception as e:
             logger.debug(f"[{self.name}] news cache load skipped: {e}")
+
+
+    # ---- Shadow / discovered 因子消费层（T15.5 闭环，2026-06-03 接入）----
+    def _load_shadow_factors(self, top_k: int = 3) -> list:
+        """从 lifecycle_log 读出现在还活着的 shadow / discovered 因子。"""
+        from collections import deque
+        from pathlib import Path
+        import json as _json
+        try:
+            from alpha.registry import factor_registry
+        except Exception as e:
+            logger.debug(f"[{self.name}] alpha.registry import failed: {e}")
+            return []
+
+        log_path = Path("data/charts/factor_lifecycle_log.jsonl")
+        if not log_path.exists():
+            return []
+
+        # 按时间顺序读，register 覆盖、unregister 删除，得到最终活跃集合
+        latest = {}
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    name = ev.get("factor")
+                    if not name:
+                        continue
+                    if ev.get("event") == "register" and ev.get("source") in ("shadow", "discovered"):
+                        latest[name] = ev.get("description", "")
+                    elif ev.get("event") == "unregister":
+                        latest.pop(name, None)
+        except Exception as e:
+            logger.debug(f"[{self.name}] lifecycle log read failed: {e}")
+            return []
+
+        # 防御：只取真正在当前 registry 里的（防止 dangling）
+        result = []
+        for name, desc in latest.items():
+            if name in factor_registry:
+                result.append((name, factor_registry.get(name), desc))
+            if len(result) >= top_k:
+                break
+        return result
+
+    def _compute_shadow_factors(self) -> None:
+        """在 self._bars 上重算所有 shadow 因子的最新值，写入各自的滚动 deque。"""
+        try:
+            import pandas as _pd
+            import numpy as _np
+        except Exception:
+            return
+
+        if not self._shadow_factors or len(self._bars) < self._min_bars:
+            return
+
+        try:
+            df = _pd.DataFrame(list(self._bars))
+        except Exception as e:
+            logger.debug(f"[{self.name}] bars->df for shadow compute failed: {e}")
+            return
+
+        window = int(self.params.get("shadow_rank_window", 50))
+        for name, func, _desc in self._shadow_factors:
+            try:
+                vals = func(df)
+                if vals is None or len(vals) == 0:
+                    continue
+                last = float(vals[-1])
+                if _np.isnan(last):
+                    continue
+                hist = self._shadow_value_history.get(name)
+                if hist is None:
+                    from collections import deque
+                    hist = deque(maxlen=window)
+                    self._shadow_value_history[name] = hist
+                hist.append(last)
+            except Exception as e:
+                logger.debug(f"[{self.name}] shadow factor {name} compute failed: {e}")
+
+    def _shadow_votes(self) -> tuple:
+        """分位 ranking 投票：top_pct 之上 long，bottom_pct 之下 short。"""
+        import numpy as _np
+        p = self.params
+        top_pct = p.get("shadow_top_pct", 0.7)
+        bot_pct = p.get("shadow_bottom_pct", 0.3)
+        min_samples = p.get("shadow_min_samples", 30)
+        weight = int(p.get("shadow_vote_weight", 1.0))
+
+        votes_long = 0
+        votes_short = 0
+        n_active = 0
+
+        for name, _func, _desc in self._shadow_factors:
+            hist = self._shadow_value_history.get(name)
+            if hist is None or len(hist) < min_samples:
+                continue
+            n_active += 1
+            arr = _np.fromiter(hist, dtype=float)
+            latest = arr[-1]
+            n = len(arr) - 1
+            if n <= 0:
+                continue
+            rank = float(_np.sum(arr[:-1] <= latest)) / n
+            if rank >= top_pct:
+                votes_long += weight
+            elif rank <= bot_pct:
+                votes_short += weight
+        return votes_long, votes_short, n_active

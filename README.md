@@ -15,7 +15,8 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 - ✅ **P3** circuit 调优: 5% → 10% 默认
 - ✅ **T1-T13 集成层**: MAB 多策略 + SelfLearningScheduler + WeightedScorer + ProbabilityCalibrator + MetaLearnerMonitor + FactorMonitor + Alerter + RetrainScheduler + SharedEventFilter (T13 业务关键)
 - ✅ **T14 L1 因子生命周期**: FactorHealth 5 维评分 + RegistryAdapter 动态 register/unregister
-- ✅ **T15 L2 因子 DSL**: parser + AST + 20+ 算子 + 搜索 + 自动发现 + 持久化
+- ✅ **T15 L2 因子 DSL** (T15.1-4 + T15.6-8): parser + AST + 20+ 算子 + 搜索 + 自动发现 + 持久化
+- ✅ **T15.5 闭环 (2026-06-03)**: shadow/discovered 因子接进 multi_factor_m15 投票管道 (lazy load 绕过 registry kwargs 时序 bug); A/B 测试 PnL delta=-24.06% (DD 同步改善 -17.39pp), wiring 已生效
 - ✅ **T16 实时数据同步**: MT5 → db 正增长 (增量拉取 + 多 timeframe + Windows Task Scheduler)
 
 ### PnL 数字
@@ -73,6 +74,32 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 - 端到端 5000 bar PnL 变化 < 0.5% (spread 0.13 USD 远小于 3ATR=$25)
 - 框架就位, 真实影响在 FOMC/NFP 事件日 spread 1-3 USD 时才有意义 (2-5% PnL 影响)
 - 报告: `data/charts/p2_sltp_bidask_report.txt`
+
+### 自进化状态评估 (2026-06-03)
+
+**框架当前未达到自主进化**。识别出 3 个核心差距 (按修复优先级):
+
+1. **T15.5 闭环 wiring** ✅ **(2026-06-03 closed)** — lazy load 绕过 `strategy_registry.create()` 的 kwargs 时序 bug; A/B 测试 PnL delta=-24.06% (68t/+0.73%/Sharpe 0.69/DD 34.06%) vs A (62t/+24.79%/Sharpe 1.46/DD 51.44%); 影子因子在 OOS 上 OOS filter 有效 (DD 降 17pp) 但信号偏弱 (PnL 跌), 待校准 (top_pct/vote_weight)
+
+2. **ProbabilityCalibrator 持久化** (next)
+   - 当前每次重启从历史重新 fit (Isotonic / Platt), 浪费计算 + 跨会话不一致
+   - 应支持从磁盘加载, 同时保留 fallback fit 路径
+
+3. **第三项待定** — 等 T15.5 闭环后再讨论
+
+**今日工作日志 (2026-06-03)**
+
+- 策略层: `strategies/multi_factor_m15.py` +157 行
+  - 8 个新参数 (include_shadow_factors / shadow_top_k / shadow_recompute_every / shadow_rank_window / shadow_min_samples / shadow_vote_weight / shadow_top_pct / shadow_bottom_pct)
+  - 3 个新方法: `_load_shadow_factors` (从 lifecycle_log 读活跃 shadow 因子) / `_compute_shadow_factors` (滚动重算) / `_shadow_votes` (分位 ranking 投票)
+  - `__init__` 状态初始化 + `on_init` 状态重置 + `on_bar` 投票钩子 + signal meta 加 `shadow_active`
+- 入口层: `main.py` +7 行
+  - 新增 CLI 参数 `--include-shadow-factors` (默认 off) / `--shadow-top-k` (默认 3)
+  - 已接进单策略 `override_params` 和 MAB `overrides_full`
+- 测试层: `scripts/test_shadow_consumption.py` (新增, A/B 验证: 5000 bar, baseline vs shadow-on)
+- A/B 测试输出: A 与 B PnL 不同 (delta=-24.06%, DD -17.39pp) → wiring 闭环确认
+- 修过的 bug: `strategy_registry.create()` 先 `cls(...)` 再 `instance.params = params`, 导致 `__init__` 读 `self.params` 时拿的是类默认, 影子加载分支永远不进。修法: lazy load 移到 `on_bar` 第一个调用时, 此时 `self.params` 已被 registry 覆盖
+- 影子因子在 OOS 上净负 PnL 但 DD 改善, 后续需校准 `shadow_top_pct` / `shadow_vote_weight`
 
 ---
 
