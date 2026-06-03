@@ -96,6 +96,7 @@ class SyncOrchestrator:
             pull = self.puller.pull_history(symbol, tf, n=n_bars)
             if pull.error:
                 logger.warning(f"[SyncOrch] {tf} 拉取失败: {pull.error}")
+                all_errors.append(f"{tf}: {pull.error}")
                 report.per_tf.append({"tf": tf, "error": pull.error})
                 continue
 
@@ -139,6 +140,7 @@ class SyncOrchestrator:
         # 取上次 sync 状态, 找到每个 tf 的 last_bar_time
         status = self.inserter.load_status()
         insert_results: list[InsertResult] = []   # 累积真实 InsertResult 传给 save_status (修 bug 2026-06-02)
+        all_errors: list[str] = []                # 2026-06-03: collect per-tf pull errors so save_status marks the run as error
         for tf in timeframes:
             tf_info = TIMEFRAME_MAP.get(tf, (tf, 15))
             tf_minutes = tf_info[1]
@@ -156,6 +158,7 @@ class SyncOrchestrator:
             pull = self.puller.pull_incremental(symbol, tf, since_time=since_time or 0, max_bars=200)
             if pull.error:
                 logger.warning(f"[SyncOrch] {tf} 增量拉取失败: {pull.error}")
+                all_errors.append(f"{tf}: {pull.error}")
                 report.per_tf.append({"tf": tf, "error": pull.error})
                 continue
 
@@ -175,7 +178,7 @@ class SyncOrchestrator:
             report.total_dups += filt.dup_count
             report.total_incomplete += filt.incomplete_count
 
-        self.inserter.save_status(insert_results, symbol)
+        self.inserter.save_status(insert_results, symbol, error="; ".join(all_errors))
         report.elapsed_sec = _time.time() - t0
         logger.info(f"[SyncOrch] incremental 完成: +{report.total_inserted} bars "
                     f"({report.elapsed_sec:.1f}s)")

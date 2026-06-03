@@ -1,15 +1,15 @@
 === Daily Paper Dryrun (20260603) ===
-Range: 2026-05-29 15:30:00 -> 2026-06-02 19:15:00
-n_bars=200, n_signals=20, n_trades=6
+Range: 2026-05-28 16:30:00 -> 2026-06-02 19:15:00
+n_bars=288, n_signals=29, n_trades=9
 
-Gross PnL:    $-34.04
-Swap total:   $-0.01
-Net PnL:      $-34.41
-Return:       -6.88%
-Win rate:     33.3%
-Sharpe:       -0.739
+Gross PnL:    $+20.94
+Swap total:   $-0.05
+Net PnL:      $+20.35
+Return:       +4.07%
+Win rate:     55.6%
+Sharpe:       0.335
 Max DD:       $56.55 (11.31%)
-Elapsed:      0.2s
+Elapsed:      0.3s
 
 Comparison vs prev:
   (no previous dryrun for comparison)

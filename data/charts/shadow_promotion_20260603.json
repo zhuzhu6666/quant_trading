@@ -1,10 +1,10 @@
 {
-  "ts": "2026-06-03T08:04:15.206413+00:00",
+  "ts": "2026-06-03T08:15:01.018544+00:00",
   "config": {
     "n_bars": 4000,
-    "healthy_threshold": 50.0,
+    "healthy_threshold": 70.0,
     "watch_threshold": 40.0,
-    "min_age_days": 0.0,
+    "min_age_days": 1.0,
     "dry_run": false
   },
   "data_range": [
@@ -13,27 +13,11 @@
   ],
   "decisions": [
     {
-      "name": "dsl_f1",
-      "age_days": 0.0,
-      "health_score": 0.0,
-      "status": "DEAD",
-      "decision": "remove",
-      "abs_ic": 0.0
-    },
-    {
-      "name": "dsl_f3",
-      "age_days": 0.0,
-      "health_score": 32.76,
-      "status": "DECAYING",
-      "decision": "remove",
-      "abs_ic": 0.0371
-    },
-    {
       "name": "dsl_33138906_000",
       "age_days": 0.0,
       "health_score": 53.65,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0616
     },
     {
@@ -41,7 +25,7 @@
       "age_days": 0.0,
       "health_score": 53.78,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0608
     },
     {
@@ -49,7 +33,7 @@
       "age_days": 0.0,
       "health_score": 53.78,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0589
     },
     {
@@ -57,7 +41,7 @@
       "age_days": 0.0,
       "health_score": 60.08,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0657
     },
     {
@@ -65,7 +49,7 @@
       "age_days": 0.0,
       "health_score": 60.93,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0622
     },
     {
@@ -73,7 +57,7 @@
       "age_days": 0.0,
       "health_score": 60.93,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0622
     },
     {
@@ -81,7 +65,7 @@
       "age_days": 0.0,
       "health_score": 60.92,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0622
     },
     {
@@ -89,7 +73,7 @@
       "age_days": 0.0,
       "health_score": 60.92,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0622
     },
     {
@@ -97,12 +81,13 @@
       "age_days": 0.0,
       "health_score": 60.91,
       "status": "WATCH",
-      "decision": "promote",
+      "decision": "watch",
       "abs_ic": 0.0622
     }
   ],
   "summary": {
-    "promoted": [
+    "promoted": [],
+    "watched": [
       "dsl_33138906_000",
       "dsl_42869207_001",
       "dsl_82875133_002",
@@ -113,10 +98,6 @@
       "dsl_auto_65421034_003",
       "dsl_auto_14076536_004"
     ],
-    "watched": [],
-    "removed": [
-      "dsl_f1",
-      "dsl_f3"
-    ]
+    "removed": []
   }
 }

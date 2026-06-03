@@ -17,7 +17,7 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 - ✅ **T14 L1 因子生命周期**: FactorHealth 5 维评分 + RegistryAdapter 动态 register/unregister
 - ✅ **T15 L2 因子 DSL** (T15.1-4 + T15.6-8): parser + AST + 20+ 算子 + 搜索 + 自动发现 + 持久化
 - ✅ **T15.5 闭环 (2026-06-03)**: shadow/discovered 因子接进 multi_factor_m15 投票管道 (lazy load 绕过 registry kwargs 时序 bug); A/B 测试 PnL delta=-24.06% (DD 同步改善 -17.39pp), wiring 已生效
-- ✅ **T16 实时数据同步**: MT5 → db 正增长 (增量拉取 + 多 timeframe + Windows Task Scheduler)
+- ⏸ **T16 实时数据同步** (2026-06-03 **暂停**): Python MetaTrader5 5.0.5735 vs MT5 terminal 2026 版本 IPC pipe 名字 hash 不匹配, 包 `WaitNamedPipeW` 一直 timeout (7 种 path 变体 + 重装 + 短长 timeout 全败; 同会话 `CreateFileW` 手动连 `MT5.Terminal.781AEDD6...` pipe 100% 成功). db 50K M15 bar 是历史一次性 `scripts/fetch_mt5_data.py` 拉的. cron job 54c849d80e9d 配了但 `script=~/.hermes/scripts/live_sync_5m.py` 0 字节空, last_status=error. **影响范围**: 仅 T16 增量, 7 策略/MAB/影子/GP/校准/全部 PnL 数字全走 db 离线, 不受影响. 改按需手动: `python scripts/live_sync.py --mode once --type incremental --timeframes M15,H1,D1`. 报告: `data/charts/live_sync_status.json` (M15 50204 bars, inserted_last=0).
 
 ### PnL 数字
 
@@ -288,3 +288,23 @@ python main.py --mode dashboard --port 8050
 3. **参数不贪** — 12 组合全过, 过拟合=未来函数=假
 4. **数据质量** — MT5 真实 tick, 不用 Yahoo Finance
 5. **本地代理** — claude CLI 走 `ANTHROPIC_BASE_URL=http://127.0.0.1:15721` → deepseek-v4-flash
+
+---
+
+## Audit 验证状态 (2026-06-03 反查代码)
+
+参考: `data/charts/framework_audit_20260603.md`
+
+| 项 | 状态 | 验证 |
+|---|---|---|
+| BUG-1 daily_loss_pct abs() | ✅ 已修 | `core/state.py:91` `max(0, -net_pnl)` |
+| BUG-2 circuit reset 覆写 peak | ✅ 已修 | `risk/circuit.py:122-134` 不再调 reset_daily |
+| BUG-3 forward_periods 无效 | ✅ 已修 | `alpha/factor_engine.py:81-140` 多周期+mean |
+| BUG-4 SL slippage 方向 | ❌ **audit 描述错, 代码实际对** | `paper_engine.py:252` close_dir=-pos.direction 是正确 (long sell 应 price-slip) |
+| BUG-5 break_even 单独计 | ✅ 已修 | `state.py:33+131-133` |
+| OPT-1 WAL+busy_timeout | ⏳ 未查 | — |
+| OPT-2 _trades 无上限 | ⏸ 未改 | 长跑需定期 flush |
+| OPT-3 EventBus async publish | ⏸ 未用 | 全走 publish_sync |
+| OPT-4 死代码 | ⏸ 保留 | `strategy/portfolio.py` / `on_tick` / `active_orders` / `live/executor.py` |
+| OPT-5 event_filter strptime 重复解析 | ⏸ **未修** | `event_filter.py:118-124` 50K bar × 50 FOMC = 2.5M 次 |
+

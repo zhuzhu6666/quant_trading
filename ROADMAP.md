@@ -19,7 +19,7 @@
 | T1-T13 集成层 | ✅ 13/13 | MAB 多策略 + 9 个自学习组件 + T13 事件过滤 |
 | T14 L1 因子生命周期 | ✅ 3/3 | FactorHealth 评分 + RegistryAdapter + main.py 接入 |
 | T15 L2 因子 DSL | ✅ 8/8 | parser + 搜索 + orchestrator + persistent registry + **T15.5 闭环 wiring 2026-06-03 (lazy load + A/B 验证 PnL delta!=-0)** |
-| T16 实时数据同步 | ✅ 8/8 | MT5 → db + 增量拉取 + 多 TF + Windows Task Scheduler |
+| T16 实时数据同步 | ⏸ **暂停 (2026-06-03)** | Python MT5 包 vs terminal 2026 IPC pipe hash 不匹配, 改按需手动 (见 T16.7) |
 | P0-ETF/CB (新因子纬度) | ✅ 11/11 因子 | GLD/SLV 持仓 / 央行黄金 / 实际利率百分位 |
 | P0-COT (CFTC 持仓) | ✅ 6/6 因子 | 856 周 GOLD COT (2010-2026, 16.4 年历史) |
 | P0-BUGFIX | ✅ 4/4 | daily_loss_pct / circuit peak_equity / IC多周期 / break_even |
@@ -93,7 +93,7 @@
 
 ---
 
-## T16 实时数据同步 (2026-06-02)
+## T16 实时数据同步 (⏸ 暂停 2026-06-03)
 
 - [x] **T16.1** `data/live_sync/mt5_puller.py` — MT5 实时 bar 拉取 (history + incremental + 字段映射 tick_volume→volume + 当前 bar 检测)
 - [x] **T16.2** `data/live_sync/bar_filter.py` — 去重(db max time) + 当前 bar skip + 完整性检查
@@ -101,8 +101,8 @@
 - [x] **T16.4** `data/live_sync/orchestrator.py` — full_sync / incremental_sync + 多 timeframe
 - [x] **T16.5** `data/live_sync/daemon.py` — 后台守护进程 (once / daemon 模式)
 - [x] **T16.6** `scripts/live_sync.py` — CLI (--mode once/daemon/status)
-- [x] **T16.7** **`hermes cron` job 接管 (2026-06-03 改)**: `job_id=54c849d80e9d`, `every 5m`, `no_agent=True`, `script=~/.hermes/scripts/live_sync_5m.py`, 强制 Python 3.12 (hermes 自带 3.11 venv 缺包), SILENT watchdog pattern. ~~`scripts/live_sync_daily.bat` (Windows Task Scheduler)~~ **已删**
-- [x] **T16.8** 真实数据验证 + baseline 重跑 (+412.20% / 743t)
+- [⏸] **T16.7** ~~hermes cron 5min 自动同步~~ **暂停 (2026-06-03)**: Python MetaTrader5 5.0.5735 包 vs MT5 terminal 2026 IPC pipe hash 不匹配, 包 `WaitNamedPipeW` 一直 timeout (7 path 变体+重装全败, CreateFileW 同 pipe 100% 成功). cron job 54c849d80e9d `last_status=error`. **回退**: 手动跑 `python scripts/live_sync.py --mode once --type incremental --timeframes M15,H1,D1` (需 MT5 包版本兼容)
+- [x] **T16.8** 历史数据回填 (2026-06-02 一次性 fetch): M15 50204 / M5 200199 / H1 18050 / D1 500
 
 **db 修复 + 清理 (2026-06-02 23:40)**: bars 表 (DataStore 走这里) 50000 老 bar time TEXT → 统一 INTEGER, 共 298949 行 (6 timeframe × 49825 平均, 含 T16 实时增量). **candles 表 (TEXT time) 已 DROP TABLE** (原 298500 行僵尸, 没人用, 备份 `data/market_data.db.pre_drop_candles.bak`). `risk/regime.py:477` 改写走 bars (INTEGER time, 实时 D1). 整体 db 干净, 唯一表路径走 bars.
 
@@ -283,10 +283,12 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 ## P0-ETF/CB/COT + BUGFIX (2026-06-03) — 因子纬度扩展 + 质量修复
 
 ### P0-BUGFIX (4/4) ✅
-- **BUG-1**: `core/state.py` `daily_loss_pct` abs() → max(0, -pnl) (盈利日不再误熔断)
-- **BUG-2**: `risk/circuit.py` `reset()` 不再覆写 `peak_equity` (DD 统计修正)
-- **BUG-3**: `alpha/factor_engine.py` IC 多周期 `forward_periods` 真实实现 (1/5/10/20-bar)
-- **BUG-5**: `core/state.py` + `paper_engine.py` 零净利交易 break_even 单独计
+- **BUG-1**: `core/state.py` `daily_loss_pct` abs() → max(0, -pnl) (盈利日不再误熔断) ✅ 已验
+- **BUG-2**: `risk/circuit.py` `reset()` 不再覆写 `peak_equity` (DD 统计修正) ✅ 已验
+- **BUG-3**: `alpha/factor_engine.py` IC 多周期 `forward_periods` 真实实现 (1/5/10/20-bar) ✅ 已验
+- **BUG-5**: `core/state.py` + `paper_engine.py` 零净利交易 break_even 单独计 ✅ 已验
+- **BUG-4 (audit 描述错)**: 报告说 `paper_engine._apply_slippage` SL 滑点方向倒转, 代码验证实际是对的 (`close_dir = -pos.direction`, long sell 应 `price - slip`). 不需要修.
+- **OPT-5 未修**: `execution/event_filter.py:118-124` 50K bar × 50 FOMC 重复 strptime 2.5M 次, 非阻塞, 50K bar 跑 5-10s 不痛.
 
 ### P0-ETF (GLD/SLV 持仓) ✅
 - **数据**: `etf_holdings` 表, GLD/SLV close → 1208 行价格代理 + 5 行真实 SEC 提取

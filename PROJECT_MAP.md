@@ -189,6 +189,17 @@ quant_trading/
 - **Tick 生成**: `data/tick_generator.py` (Brownian bridge)
 - **P2 spread backfill**: `scripts/p2_backfill_spread.py` (MT5 → bars.spread, 10% 真实覆盖)
 
+### 2.5.1 T16 实时数据同步 — ⏸ **暂停 (2026-06-03)**
+- **根因**: Python MetaTrader5 5.0.5735 包与 MT5 terminal 2026 版本 IPC pipe 名字 hash 不匹配, 包 `WaitNamedPipeW` 一直 timeout
+- **验证**:
+  - 7 种 `path` 变体 + 重装 + 短长 timeout 全 `IPC timeout -10005`
+  - 同会话 `CreateFileW` 手动连 `MT5.Terminal.781AEDD6...` pipe 100% 成功 (handle 180)
+  - 15s 监视期 pipe 数量完全不变 (109 → 109), 包不起新进程
+- **影响范围**: 仅 T16 增量. 7 策略 / MAB / 影子 / GP / 校准 / 全部 PnL 数字**全走 db 50K bar 离线**, 不受 MT5 状态影响
+- **db 数据来源**: `scripts/fetch_mt5_data.py` 历史一次性 fetch (M15 50204 根, 2024-04 ~ 2026-06-02)
+- **cron 状态**: `job_id=54c849d80e9d`, `every 5m`, `last_status=error` (script 0 字节空文件)
+- **回退**: `python scripts/live_sync.py --mode once --type incremental --timeframes M15,H1,D1` (需 MT5 包版本兼容)
+
 ### 2.6 P2 SL/TP bid-ask (2026-06-03)
 - **paper_engine._check_exit**: bid/ask-extreme 判定 (long SL 用 low, TP 用 high-spread)
 - **paper_engine._open**: long entry 在 ask (bar.open + half_spread)

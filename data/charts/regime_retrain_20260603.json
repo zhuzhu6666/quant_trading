@@ -1,20 +1,20 @@
 {
-  "ts": "2026-06-03T08:11:04.726527+00:00",
+  "ts": "2026-06-03T08:15:03.093730+00:00",
   "config": {
-    "n_bars": 5000,
+    "n_bars": 8000,
     "model_path": "data/regime_classifier.pkl"
   },
-  "n_samples": 4949,
-  "n_pos": 2466,
-  "n_neg": 2483,
+  "n_samples": 7949,
+  "n_pos": 4015,
+  "n_neg": 3934,
   "regime_dist": {
-    "RANGING": 2897,
-    "LOW_VOL": 1190,
-    "TRENDING_DOWN": 376,
-    "HIGH_VOL": 90,
-    "TRENDING_UP": 396
+    "HIGH_VOL": 316,
+    "RANGING": 4730,
+    "TRENDING_DOWN": 588,
+    "TRENDING_UP": 694,
+    "LOW_VOL": 1621
   },
-  "train_acc": 0.5298040008082441,
-  "elapsed_ms": 41.1,
+  "train_acc": 0.5279909422568877,
+  "elapsed_ms": 99.1,
   "model_path": "data/regime_classifier.pkl"
 }

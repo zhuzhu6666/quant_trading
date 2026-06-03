@@ -1,17 +1,37 @@
 {
-  "last_sync_utc": "2026-06-03T08:07:26Z",
+  "last_sync_utc": "2026-06-03T15:40:57Z",
+  "last_attempt_utc": "2026-06-03T15:40:57Z",
+  "last_status": "ok",
   "per_tf": {
     "M15": {
       "inserted_last": 0,
-      "total_bars": 50204
+      "total_bars": 50292,
+      "error": ""
     },
     "H1": {
       "inserted_last": 0,
-      "total_bars": 18050
+      "total_bars": 18072,
+      "error": ""
     },
     "D1": {
       "inserted_last": 0,
-      "total_bars": 501
+      "total_bars": 502,
+      "error": ""
+    },
+    "M5": {
+      "inserted_last": 1,
+      "total_bars": 200531,
+      "error": ""
+    },
+    "M30": {
+      "inserted_last": 0,
+      "total_bars": 25146,
+      "error": ""
+    },
+    "H4": {
+      "inserted_last": 0,
+      "total_bars": 5018,
+      "error": ""
     }
   }
 }
