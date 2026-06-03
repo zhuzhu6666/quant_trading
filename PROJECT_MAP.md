@@ -119,6 +119,7 @@ quant_trading/
 ├── scripts/                         # 35+ 脚本 (测试 + 工具 + 入口)
 │   ├── live_sync.py                 # ★ T16: 实时数据同步 CLI
 │   ├── test_shadow_consumption.py   # ★ T15.5 闭环: A/B 验证 shadow 因子接进投票 (2026-06-03, PnL delta=-24.06% 闭环确认)
+│   ├── test_calibrator_persistence.py # ★ Task #2: calibrator load/save/roundtrip/missing/platt 5/5 (2026-06-03)
 │   ├── live_sync_daily.bat          # ★ T16: Windows Task Scheduler 配置
 │   ├── discover_factors.py          # ★ L2: 因子发现 CLI
 │   ├── P0 系列: test_p0_factors / factor_pca / factor_ic_rolling
@@ -254,6 +255,7 @@ quant_trading/
 - ⚠ mab_paper_v2 行为跟 v1 差异大, 内部 baseline 设计待查
 - ⚠ 22 因子 18 noise, 因子库饱和, P2 因子 DSL / 合成 待启动
 - ✅ T15.5 闭环 wiring 已修 (2026-06-03): lazy load 绕过 registry kwargs 时序, A/B delta=-24.06% 闭环确认
+- ✅ ProbabilityCalibrator 持久化 (2026-06-03): 启动时 load calibrator_bucket.json (8 桶桶级), 缺失回退 identity, 测试 5/5
 
 ---
 
@@ -290,8 +292,9 @@ quant_trading/
 按"先做有真实价值"原则推荐:
 
 ### 6.1 立刻能做 (无外部依赖, 1-2 小时)
-- **ProbabilityCalibrator 持久化** (P0, 当下): 启动时从磁盘加载, fallback 重 fit
 - **T15.5 影子因子校准**: 当前 OOS PnL 净负 (过拟合), 调 `shadow_top_pct` / `shadow_vote_weight` / `shadow_min_samples`
+- **ProbabilityCalibrator 校准 A/B**: 校准 on vs off 跑 MAB 5000 bar, 看 Sharpe/DD 变化
+- **自进化差距 #3 (跟用户对齐)**: 候选: 影子 retrain 自动化 / 漂移→DSL re-search / Calibrator 定时 save
 - **P2 SL/TP bid-ask**: 让 OOS 更真实
 - **P2 资金费建模**: XAUUSD swap cost 不小
 - **GP 因子搜索** (T15.3 v2): 当前只有随机搜索, GP 能更精

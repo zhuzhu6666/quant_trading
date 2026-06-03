@@ -68,6 +68,11 @@ def main():
                         help="WeightedScorer 加权打分 (依赖 --use-router)")
     parser.add_argument("--use-calibrator", action="store_true",
                         help="ProbabilityCalibrator 校准 confidence (依赖 --use-scorer)")
+    parser.add_argument("--calibrator-path", type=str,
+                        default="data/charts/calibrator_bucket.json",
+                        help="ProbabilityCalibrator 加载路径 (default: data/charts/calibrator_bucket.json, 缺失时回退 identity)")
+    parser.add_argument("--calibrator-save", action="store_true",
+                        help="启用 calibrator 定时保存 (每 N 笔 trade 把当前 calibrator 落盘, 默认 off)")
     parser.add_argument("--use-meta-monitor", action="store_true",
                         help="MetaLearnerMonitor 跟踪模型校准 (paper 路径始终记录)")
     parser.add_argument("--use-factor-monitor", action="store_true",
@@ -519,9 +524,20 @@ def run_paper(args):
         calibrator = None
         if args.use_calibrator:
             from alpha.probability_calibrator import ProbabilityCalibrator
-            # 默认用 identity (无校准, 跟现实一致; P0-7 实测的 calibrator 可从 json 加载)
-            calibrator = ProbabilityCalibrator.identity()
-            logger.info(f"  [T3] calibrator: identity (无校准 baseline)")
+            from pathlib import Path as _Path  # 局部 import, 避开其他函数同名 local
+            # 优先从磁盘加载已有的 calibrator (P0-7 跑过的桶级 / Platt), 缺失时回退 identity
+            cal_path = _Path(args.calibrator_path)
+            if cal_path.exists():
+                try:
+                    calibrator = ProbabilityCalibrator.load(str(cal_path))
+                    logger.info(f"  [T3] calibrator: {calibrator.method} (loaded from {cal_path}, "
+                                f"buckets={len(calibrator.buckets)}, platt=({calibrator.platt_a:.3f}, {calibrator.platt_b:.3f}))")
+                except Exception as e:
+                    logger.warning(f"  [T3] calibrator load failed ({e}), fallback to identity")
+                    calibrator = ProbabilityCalibrator.identity()
+            else:
+                logger.info(f"  [T3] calibrator: identity (无 {cal_path}, 不校准 baseline)")
+                calibrator = ProbabilityCalibrator.identity()
 
         meta_monitor = None
         if args.use_meta_monitor:

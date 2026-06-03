@@ -77,13 +77,11 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 
 ### 自进化状态评估 (2026-06-03)
 
-**框架当前未达到自主进化**。识别出 3 个核心差距 (按修复优先级):
+**框架自主进化差距 2/3 已闭环**。剩余 1 项 (第三项) 待定。
 
 1. **T15.5 闭环 wiring** ✅ **(2026-06-03 closed)** — lazy load 绕过 `strategy_registry.create()` 的 kwargs 时序 bug; A/B 测试 PnL delta=-24.06% (68t/+0.73%/Sharpe 0.69/DD 34.06%) vs A (62t/+24.79%/Sharpe 1.46/DD 51.44%); 影子因子在 OOS 上 OOS filter 有效 (DD 降 17pp) 但信号偏弱 (PnL 跌), 待校准 (top_pct/vote_weight)
 
-2. **ProbabilityCalibrator 持久化** (next)
-   - 当前每次重启从历史重新 fit (Isotonic / Platt), 浪费计算 + 跨会话不一致
-   - 应支持从磁盘加载, 同时保留 fallback fit 路径
+2. **ProbabilityCalibrator 持久化** ✅ **(2026-06-03 closed)** — main.py 启动时优先 `load("data/charts/calibrator_bucket.json")` (已有 P0-7 实测桶级 8 桶), 缺失回退 identity; 新 CLI `--calibrator-path` / `--calibrator-save`; 测试 5/5 通过 (load/roundtrip/missing/platt)
 
 3. **第三项待定** — 等 T15.5 闭环后再讨论
 
@@ -100,6 +98,18 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 - A/B 测试输出: A 与 B PnL 不同 (delta=-24.06%, DD -17.39pp) → wiring 闭环确认
 - 修过的 bug: `strategy_registry.create()` 先 `cls(...)` 再 `instance.params = params`, 导致 `__init__` 读 `self.params` 时拿的是类默认, 影子加载分支永远不进。修法: lazy load 移到 `on_bar` 第一个调用时, 此时 `self.params` 已被 registry 覆盖
 - 影子因子在 OOS 上净负 PnL 但 DD 改善, 后续需校准 `shadow_top_pct` / `shadow_vote_weight`
+
+### Task #2 工作日志: ProbabilityCalibrator 持久化 (2026-06-03)
+
+- 入口层: `main.py` 启动时优先从 `data/charts/calibrator_bucket.json` 加载 calibrator (P0-7 实测的 8 桶桶级表), 文件缺失回退 identity, load 失败 fallback identity
+- 新增 CLI flag: `--calibrator-path` (默认 `data/charts/calibrator_bucket.json`) / `--calibrator-save` (预留, 定时保存)
+- 测试层: `scripts/test_calibrator_persistence.py` (5/5 通过)
+  - TEST 1: 加载真实 calibrator_bucket.json → method=bucket, 8 buckets
+  - TEST 2: 校准值与 identity 不同 (0.75→0.60, 0.85→1.00 等)
+  - TEST 3: save→load roundtrip 保留所有字段
+  - TEST 4: 文件不存在时回退 identity, 不崩
+  - TEST 5: fit Platt → save → load → predict 一致
+- Smoke test: `python main.py --mode paper --use-router --use-scorer --use-calibrator` 日志确认 `calibrator: bucket (loaded from data\charts\calibrator_bucket.json, buckets=8, platt=(1.000, 0.000))`
 
 ---
 

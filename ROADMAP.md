@@ -106,7 +106,7 @@
 
 ## 自进化差距 (2026-06-03 评估)
 
-**当前状态: 框架未达自主进化**。3 个核心差距 (按修复优先级):
+**当前状态: 2/3 闭环** (T15.5 wiring + ProbabilityCalibrator 持久化)。剩 1 项 (自进化差距 #3) 待定。
 
 ### 1. T15.5 闭环 wiring ✅ **(closed 2026-06-03)**
 - DSL 发现 → 持久化 → 策略消费 的最后一公里已打通
@@ -115,12 +115,15 @@
 - 验证: A/B 测试 PnL delta=-24.06%, DD 同步改善 -17.39pp, shadow factors 实际投票 (`Strategy._shadow_factors=3` after run)
 - 副作用发现: 影子因子在 OOS 上 net-negative PnL (过拟合信号), 但 DD 改善, 后续可校准 `shadow_top_pct` / `shadow_vote_weight`
 
-### 2. ProbabilityCalibrator 持久化 (next)
-- 当前每次重启从历史重 fit, 浪费 + 跨会话不一致
-- 应支持: 启动时尝试从磁盘加载, fallback 重 fit
+### 2. ProbabilityCalibrator 持久化 ✅ **(closed 2026-06-03)**
+- 启动时优先从 `data/charts/calibrator_bucket.json` 加载 (P0-7 实测 8 桶桶级表), 文件缺失 / 加载失败回退 identity
+- main.py 新增 CLI: `--calibrator-path` (默认 `data/charts/calibrator_bucket.json`) / `--calibrator-save` (预留)
+- `scripts/test_calibrator_persistence.py` 5/5 通过 (load / 校准生效 / roundtrip / 缺失回退 / Platt 一致)
+- 副作用: 校准后信号变化 (0.75→0.60, 0.85→1.00), 后续可在 MAB paper 跑 A/B 验证 (校准 on vs off 对 PnL 影响)
 
-### 3. 第三项待定
-- 等 T15.5 闭环完成后再讨论 (候选: 影子策略本身的 retrain 自动化 / 漂移检测触发 DSL re-search / 等)
+### 3. 第三项待定 (next)
+- 候选: 影子策略 retrain 自动化 / 漂移检测触发 DSL re-search / Calibrator 定时 save (现在只 load) / 等
+- 等跟用户对齐后再启动
 
 ---
 
@@ -180,12 +183,13 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 
 ## 下一步推荐
 
-1. **ProbabilityCalibrator 持久化** (P0, 当下) — 1-2 小时, 纯本地, 收益明显 (每次重启不用重 fit)
-2. **T15.5 影子因子校准** — 当前 OOS PnL 净负 (过拟合), 调 `shadow_top_pct` / `shadow_vote_weight` / `shadow_min_samples`, 或加 walk-forward 验证
-3. **P2 资金费建模** — 对 XAUUSD+ swap cost 不小, 需建模
-4. **GP 因子搜索** (T15.3 v2) — 当前只有随机搜索, GP 能更精
-5. **MAB 4 策略调优** — 全局 MAB 还在冷启动, 需更多 bar / 不同 seed 对比
-6. **P2 SL/TP 事件日 spread 注入** — FOMC/NFP spread 1-3 USD 时 PnL 影响 2-5%
+1. **T15.5 影子因子校准** — 当前 OOS PnL 净负 (过拟合), 调 `shadow_top_pct` / `shadow_vote_weight` / `shadow_min_samples`, 或加 walk-forward 验证
+2. **ProbabilityCalibrator 校准 A/B 验证** — 校准 on vs off 跑 MAB 5000 bar, 看 Sharpe/DD 变化
+3. **自进化差距 #3 (跟用户对齐)** — 候选: 影子 retrain 自动化 / 漂移→DSL re-search / Calibrator 定时 save
+4. **P2 资金费建模** — 对 XAUUSD+ swap cost 不小, 需建模
+5. **GP 因子搜索** (T15.3 v2) — 当前只有随机搜索, GP 能更精
+6. **MAB 4 策略调优** — 全局 MAB 还在冷启动, 需更多 bar / 不同 seed 对比
+7. **P2 SL/TP 事件日 spread 注入** — FOMC/NFP spread 1-3 USD 时 PnL 影响 2-5%
 
 ---
 
