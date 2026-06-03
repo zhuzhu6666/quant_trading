@@ -252,3 +252,80 @@
 {"timestamp": 1780464778.9482594, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
 {"timestamp": 1780464778.9482594, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
 {"timestamp": 1780464778.9482594, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465174.3706176, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465174.3706176, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465174.3706176, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465174.3706176, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465174.3706176, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465174.3806093, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465174.3806093, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465182.4875731, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465182.4885728, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465182.4885728, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465182.4885728, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465182.489574, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465182.489574, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465182.4905736, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465194.6160274, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465194.6160274, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465194.6160274, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465194.6160274, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465194.6160274, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465194.6160274, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465194.6160274, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465204.045988, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465204.045988, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465204.045988, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465204.045988, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465204.0507963, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465204.0507963, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465204.0507963, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465234.4170668, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465234.4170668, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465234.4170668, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465234.4170668, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465234.4170668, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465234.4170668, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780465234.4170668, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466845.9175549, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466845.9175549, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466845.9175549, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466845.9175549, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466845.9175549, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466845.9175549, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466845.9175549, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466909.3668058, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466909.3668058, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466909.3668058, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466909.3668058, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466909.3668058, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466909.3668058, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466909.3668058, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466929.0549796, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466929.0554912, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466929.0560644, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466929.0560644, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466929.057025, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466929.057025, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466929.057025, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466938.1596782, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466938.1596782, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466938.1596782, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466938.1606796, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466938.1606796, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466938.1606796, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466938.1616845, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466964.2969232, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466964.297924, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466964.297924, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466964.2989216, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466964.2989216, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466964.2989216, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780466964.2999206, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780467135.8089676, "event": "register", "factor": "dsl_f1", "source": "shadow", "description": "pct_change(close, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780467135.8089676, "event": "register", "factor": "dsl_f2", "source": "discovered", "description": "close - ts_mean(close, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780467135.8089676, "event": "register", "factor": "dsl_f3", "source": "shadow", "description": "ts_mean(volume, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780467135.8104734, "event": "register", "factor": "dsl_33138906_000", "source": "shadow", "description": "ts_min(open, 3)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780467135.810814, "event": "register", "factor": "dsl_42869207_001", "source": "shadow", "description": "ts_sum(open, 5)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780467135.810814, "event": "register", "factor": "dsl_82875133_002", "source": "shadow", "description": "ts_mean(open, 20)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
+{"timestamp": 1780467135.810814, "event": "register", "factor": "dsl_90758882_000", "source": "shadow", "description": "ts_min(close, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}

@@ -1,0 +1,7 @@
+P2 Swap/Funding Model Report (2026-06-03)
+5000 M15 bar, swap on vs off vs stress
+========================================================================
+
+  A swap_off:         +24.79% / $623.94
+  B swap_on (-1/day): +24.75% / $623.73  (delta -0.04%)
+  C stress (-5/day):  +24.59% / $622.93  (delta -0.20%)

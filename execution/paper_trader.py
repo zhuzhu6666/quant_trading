@@ -105,7 +105,11 @@ class PaperTrader:
                  single_risk_usd: float = 35.0,
                  volatility_mult: float = 3.0,
                  risk_per_trade_pct: float = 0.0,  # 0=固定 default_lots，>0 启用动态仓位
-                 enable_circuit: bool = True):
+                 enable_circuit: bool = True,
+                 # P2: 资金费/隔夜利息 (XAUUSD+ 典型 -1.0/lot/day long, 0 short)
+                 enable_swap: bool = True,
+                 swap_long_per_lot_per_day: float = -1.0,
+                 swap_short_per_lot_per_day: float = 0.0):
         self.strategy = strategy
 
         # 实例化风控层
@@ -141,6 +145,9 @@ class PaperTrader:
             pre_trade=self.pre_trade,
             circuit_breaker=self.circuit_breaker,
             atr_source=_atr_source,
+            enable_swap=enable_swap,
+            swap_long_per_lot_per_day=swap_long_per_lot_per_day,
+            swap_short_per_lot_per_day=swap_short_per_lot_per_day,
         )
         self.warmup_bars = warmup_bars
         self._bars: list[dict] = []

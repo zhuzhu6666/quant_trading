@@ -48,6 +48,7 @@ class PaperTrade:
     time: float
     pnl: float = 0.0
     commission: float = 0.0
+    swap: float = 0.0          # P2: 资金费/隔夜利息 (signed: 负=成本)
     reason: str = ""          # "open" | "sl" | "tp" | "signal_flip" | "eod"
     strategy: str = ""
 
@@ -74,7 +75,13 @@ class PaperExecutionEngine:
                  pre_trade: Optional[PreTradeChecker] = None,
                  circuit_breaker: Optional[CircuitBreaker] = None,
                  atr_source: Optional[callable] = None,
-                 slippage_model: Optional[DynamicSlippageModel] = None):
+                 slippage_model: Optional[DynamicSlippageModel] = None,
+                 # P2: 资金费/隔夜利息 (XAUUSD+ 典型: long=-1.0/lot/day, short=0)
+                 # swap 单位: USD per lot per day, 负值=成本, 正值=返佣
+                 # 对 0.01 lot 持仓 1 天, -1.0 -> -0.01 USD
+                 swap_long_per_lot_per_day: float = -1.0,
+                 swap_short_per_lot_per_day: float = 0.0,
+                 enable_swap: bool = True):
         self.initial_balance = initial_balance
         self.default_lots = default_lots
         self.max_position_lots = max_position_lots
@@ -86,6 +93,10 @@ class PaperExecutionEngine:
         self.atr_source = atr_source
         # 动态滑点模型（None = 保留固定 2bps）
         self.slippage_model = slippage_model
+        # P2: swap/funding 资金费 (隔夜利息)
+        self.enable_swap = enable_swap
+        self.swap_long_per_lot_per_day = swap_long_per_lot_per_day
+        self.swap_short_per_lot_per_day = swap_short_per_lot_per_day
         # 当前 bar 上下文（供 _apply_slippage 使用）
         self._current_bar: dict | None = None
         self._current_atr: float | None = None
@@ -247,7 +258,27 @@ class PaperExecutionEngine:
         else:
             pnl = (pos.entry_price - actual_price) * pos.volume * self.CONTRACT_SIZE
 
-        net_pnl = pnl - comm
+        # P2: 资金费/隔夜利息 (swap/funding)
+        # 持仓秒数 → 天数 → swap_rate (USD/lot/day) × 手数
+        swap_cost = 0.0
+        if self.enable_swap and pos.entry_time is not None and bar_time is not None:
+            try:
+                from datetime import datetime as _dt
+                if isinstance(pos.entry_time, _dt):
+                    entry_ts = pos.entry_time.timestamp()
+                else:
+                    entry_ts = float(pos.entry_time)
+                hold_sec = max(0.0, float(bar_time) - entry_ts)
+                hold_days = hold_sec / 86400.0
+                swap_rate = self.swap_long_per_lot_per_day if pos.direction == 1 else self.swap_short_per_lot_per_day
+                # swap_rate 是 USD per lot per day, pos.volume 是 lots
+                # 成本: rate × lots × days (rate 已是 signed, 负值=成本, 正值=返佣)
+                swap_cost = swap_rate * pos.volume * hold_days
+            except Exception as e:
+                logger.debug(f"swap calc skipped: {e}")
+                swap_cost = 0.0
+
+        net_pnl = pnl - comm + swap_cost  # swap_cost 负 = 扣钱
         self.balance += net_pnl
         self.equity = self.balance
 
@@ -274,13 +305,14 @@ class PaperExecutionEngine:
             time=bar_time if bar_time is not None else (pos.entry_time.timestamp() if pos.entry_time else 0.0),
             pnl=net_pnl,
             commission=comm,
+            swap=swap_cost,
             reason=reason,
         )
         self._trades.append(trade)
 
         logger.info(
             f"CLOSE reason={reason} ticket={trade.ticket} "
-            f"price={actual_price:.2f} pnl=${net_pnl:+.2f} "
+            f"price={actual_price:.2f} pnl=${net_pnl:+.2f} (swap=${swap_cost:+.2f}) "
             f"bal=${self.balance:.2f}"
         )
 
@@ -351,7 +383,7 @@ class PaperExecutionEngine:
                 if sig.direction == 1:  # long: buy at ask
                     fill_price = fill_price + half_spread
                 # else: short, fill_price = bid, 保持
-            self._open(sig, fill_price)
+            self._open(sig, fill_price, bar_time=bar.get("time"))
         # 无论是否有持仓，pending signal 都被消费掉
         # （有持仓时丢弃，无持仓时已用）
         self._pending_signal = None
