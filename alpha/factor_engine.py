@@ -83,40 +83,59 @@ class FactorEngine:
         """
         IC分析：每个因子与未来收益的相关性
 
-        返回: DataFrame with columns: factor, ic_mean, ic_std, ir, decay_half_life
+        支持多周期 IC（default [1, 5, 10, 20]）:
+          - 旧版 (BUG-3): 只算 1-bar forward return, 跟 forward_periods 形参脱钩
+          - 新版: 对每个 fp 算 close[i+fp]/close[i] - 1, 输出多列 ic_1/ic_5/ic_10/ic_20 + ic_mean
         """
         if self.df is None or "close" not in self.df.columns:
             return pd.DataFrame()
 
         forward_periods = forward_periods or [1, 5, 10, 20]
         close = self.df["close"].values
+        n_close = len(close)
         records = []
+
+        # 预计算每个 fp 的 forward return (NaN 末端补齐以便后续 slice)
+        fwd_rets_by_fp: dict[int, np.ndarray] = {}
+        for fp in forward_periods:
+            if fp >= n_close:
+                continue
+            fwd = np.full(n_close, np.nan, dtype=np.float64)
+            fwd[:n_close - fp] = close[fp:] / close[:n_close - fp] - 1.0
+            fwd_rets_by_fp[fp] = fwd
 
         for name, values in self._factor_cache.items():
             if values is None or len(values) < 50:
                 continue
 
-            # 未来收益
-            fwd_ret = (close[1:] - close[:-1]) / close[:-1]
+            # 多周期 IC
+            per_fp_ic: dict[int, float] = {}
+            for fp, fwd in fwd_rets_by_fp.items():
+                n = min(len(values), len(fwd))
+                vals = values[:n]
+                rets = fwd[:n]
+                mask = ~(np.isnan(vals) | np.isnan(rets))
+                if mask.sum() < 30:
+                    continue
+                ic = float(np.corrcoef(vals[mask], rets[mask])[0, 1])
+                per_fp_ic[fp] = round(ic, 4)
 
-            # 确保对齐
-            n = min(len(values) - 1, len(fwd_ret))
-            vals = values[:n]
-            rets = fwd_ret[:n]
-
-            # 过滤NaN
-            mask = ~(np.isnan(vals) | np.isnan(rets))
-            if mask.sum() < 30:
+            if not per_fp_ic:
                 continue
 
-            ic = np.corrcoef(vals[mask], rets[mask])[0, 1]
-
-            records.append({
+            # 跟旧版兼容: 默认用 1-bar IC 作为主 ic, 顺带报全周期
+            primary_ic = per_fp_ic.get(1, 0.0)
+            ic_values = list(per_fp_ic.values())
+            record = {
                 "factor": name,
-                "ic": round(ic, 4),
-                "abs_ic": round(abs(ic), 4),
-                "n_valid": int(mask.sum()),
-            })
+                "ic": primary_ic,
+                "abs_ic": round(abs(primary_ic), 4),
+                "ic_mean": round(float(np.mean(ic_values)), 4) if ic_values else 0.0,
+                "n_valid": int(min(len(values), n_close)),
+            }
+            for fp, ic_val in per_fp_ic.items():
+                record[f"ic_{fp}"] = ic_val
+            records.append(record)
 
         return pd.DataFrame(records).sort_values("abs_ic", ascending=False)
 

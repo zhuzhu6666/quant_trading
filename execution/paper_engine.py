@@ -289,9 +289,12 @@ class PaperExecutionEngine:
         if net_pnl > 0:
             state.daily.winning_trades += 1
             state.daily.consecutive_losses = 0
-        else:
+        elif net_pnl < 0:
             state.daily.losing_trades += 1
             state.daily.consecutive_losses += 1
+        else:
+            # BUG-5: 零净利单独计
+            state.daily.break_even_trades += 1
         state.daily.net_pnl = self.balance - self.initial_balance
         state.daily.peak_equity = max(state.daily.peak_equity, self.balance)
 

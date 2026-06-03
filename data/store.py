@@ -68,6 +68,58 @@ class DataStore:
                     bid REAL, ask REAL, last REAL, volume REAL DEFAULT 0
                 )
             """)
+            # P0-ETF (2026-06-03): ETF 持仓/资金流表
+            # 跟 etf_daily (price-only) 区分, 主键 (symbol, date)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS etf_holdings (
+                    symbol TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    total_tonnes REAL,         -- GLD = 金衡盎司 / 32150.7, SLV 同
+                    total_shares REAL,         -- shares outstanding (百万股)
+                    aum_usd REAL,              -- AUM in USD
+                    PRIMARY KEY (symbol, date)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_etf_holdings_sym_date
+                ON etf_holdings(symbol, date)
+            """)
+            # P0-CB (2026-06-03): 央行黄金月度净买入 (吨)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cb_gold (
+                    country TEXT NOT NULL,    -- 'CHINA' / 'RUSSIA' / 'TURKEY' / 'INDIA' / 'TOTAL'
+                    date TEXT NOT NULL,       -- 月末
+                    total_tonnes REAL,        -- 累计持仓 (吨)
+                    monthly_chg_tonnes REAL,  -- 当月净买入 (吨), 可负
+                    PRIMARY KEY (country, date)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cb_gold_country_date
+                ON cb_gold(country, date)
+            """)
+            # P0-COT (2026-06-03): CFTC COT 黄金持仓 (周度)
+            # 含 4 类持仓者: M_Money(投机) / Prod_Merc(商业) / Swap(互换) / Other
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cot_gold (
+                    report_date TEXT NOT NULL,         -- 周报日期 (YYYY-MM-DD)
+                    open_interest INTEGER,             -- 总未平仓合约
+                    mm_long INTEGER,                  -- Managed Money (非商业/投机) 多
+                    mm_short INTEGER,                 -- Managed Money 空
+                    mm_spread INTEGER,                -- Managed Money 跨期
+                    pm_long INTEGER,                  -- Producer/Merchant (商业/对冲) 多
+                    pm_short INTEGER,                 -- Producer/Merchant 空
+                    swap_long INTEGER,                -- Swap 互换 多
+                    swap_short INTEGER,               -- Swap 互换 空
+                    other_long INTEGER,               -- Other Reportable 多
+                    other_short INTEGER,              -- Other Reportable 空
+                    PRIMARY KEY (report_date)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cot_gold_date
+                ON cot_gold(report_date)
+            """)
 
     def insert_bar(self, bar: dict, symbol: str, timeframe: str):
         """插入单根完成bar"""
@@ -123,6 +175,53 @@ class DataStore:
                 "INSERT INTO ticks (symbol, time, bid, ask, last, volume) VALUES (?,?,?,?,?,?)",
                 [(symbol, t["time"], t["bid"], t["ask"], t["last"], t.get("volume", 0))
                  for t in ticks],
+            )
+
+    def insert_etf_holding(self, symbol: str, date: str,
+                           total_tonnes: float | None = None,
+                           total_shares: float | None = None,
+                           aum_usd: float | None = None):
+        """插入/更新单日 ETF 持仓 (INSERT OR REPLACE)"""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO etf_holdings
+                   (symbol, date, total_tonnes, total_shares, aum_usd)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (symbol, date, total_tonnes, total_shares, aum_usd),
+            )
+
+    def insert_cb_gold(self, country: str, date: str,
+                       total_tonnes: float | None = None,
+                       monthly_chg_tonnes: float | None = None):
+        """插入/更新单月央行黄金 (INSERT OR REPLACE)"""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO cb_gold
+                   (country, date, total_tonnes, monthly_chg_tonnes)
+                   VALUES (?, ?, ?, ?)""",
+                (country, date, total_tonnes, monthly_chg_tonnes),
+            )
+
+    def insert_cot_gold(self, report_date: str,
+                        open_interest: int | None = None,
+                        mm_long: int | None = None,
+                        mm_short: int | None = None,
+                        mm_spread: int | None = None,
+                        pm_long: int | None = None,
+                        pm_short: int | None = None,
+                        swap_long: int | None = None,
+                        swap_short: int | None = None,
+                        other_long: int | None = None,
+                        other_short: int | None = None):
+        """插入/更新单周 COT 黄金 (INSERT OR REPLACE)"""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO cot_gold
+                   (report_date, open_interest, mm_long, mm_short, mm_spread,
+                    pm_long, pm_short, swap_long, swap_short, other_long, other_short)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (report_date, open_interest, mm_long, mm_short, mm_spread,
+                 pm_long, pm_short, swap_long, swap_short, other_long, other_short),
             )
 
     def bar_count(self, symbol: str, timeframe: str) -> int:

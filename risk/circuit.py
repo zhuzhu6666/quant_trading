@@ -120,10 +120,14 @@ class CircuitBreaker:
         ))
 
     def reset(self):
-        """重置熔断（跨日后）"""
+        """重置熔断（跨日后）
+
+        注意: 不调 state.reset_daily() — daily stats 的重置由调用方 (paper_trader._reset_daily_stats
+        / mab_paper_runner) 负责, 它们用 DailyStats(date, peak_equity=peak) 保留 peak。
+        这里只清 circuit 自己的状态 (ATR 序列 + 滑点累计 + 触发标志)。
+        """
         state.is_circuit_breaker = False
         state.circuit_reason = ""
-        state.reset_daily()
         self._atr_history.clear()
         self._slippage_sum = 0.0
         self._slippage_count = 0

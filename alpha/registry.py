@@ -536,3 +536,298 @@ def factor_day_of_week(df):
     if not isinstance(df, pd.DataFrame) or not isinstance(df.index, pd.DatetimeIndex):
         return np.full(len(df), np.nan)
     return df.index.dayofweek.astype(np.float64).values
+
+
+# =============================================================================
+# P0-ETF 因子 (2026-06-03) — GLD / SLV 持仓量与资金流代理
+# 数据源: data/external_loader.py → etf_holdings 表 (前向填充)
+# 逻辑: 持仓量上升 = 机构净流入 (看多黄金); 持仓量下降 = 净赎回 (看空)
+# 实际接入: 等 etf_holdings 表被 SPDR/SLV 真实持仓数据填充后激活
+# 当前 (空表): 因子会全部返回 NaN, IC 报告里会标 N/A, 不影响其他因子
+# =============================================================================
+
+
+@factor_registry.register("gld_tonnes_chg_5d", "GLD 5 日持仓量变化 (吨)")
+def factor_gld_tonnes_chg_5d(df):
+    """GLD (SPDR Gold Shares) 5 日持仓量变化, 单位吨。
+
+    逻辑: GLD 每天公布总持仓 (金衡盎司), 转吨 (÷32150.7) 后 5d diff。
+    正值 = 机构 5 日净增持 = 黄金看多信号 (Jim Rogers / WGC 一致结论)。
+    典型: GLD 5d 净增 5 吨 ≈ 1.6 亿美元流入。
+    需要 df 包含 'gld_tonnes' 列 (由 external_loader 注入)。
+    """
+    if not _has_external(df, ["GLD_tonnes"]):
+        return np.full(len(df), np.nan)
+    return pd.Series(df["GLD_tonnes"].values).diff(5).values
+
+
+@factor_registry.register("gld_tonnes_chg_20d", "GLD 20 日持仓量变化 (吨)")
+def factor_gld_tonnes_chg_20d(df):
+    """GLD 20 日持仓量变化, 单位吨。
+
+    月度级别的资金流向, 慢信号。适合跟短期价格回归一起做反转策略。
+    极值: GLD 20d 净减 > 30 吨 = 长期资本撤离, 黄金触底信号。
+    """
+    if not _has_external(df, ["GLD_tonnes"]):
+        return np.full(len(df), np.nan)
+    return pd.Series(df["GLD_tonnes"].values).diff(20).values
+
+
+@factor_registry.register("gld_tonnes_pct_20d", "GLD 20 日持仓变化百分比")
+def factor_gld_tonnes_pct_20d(df):
+    """GLD 20 日持仓量变化百分比。
+
+    相对量纲, 跨时间可比。背景: GLD 历史上总持仓在 600-1100 吨区间波动,
+    20d 1% 变化 ≈ 6-11 吨净流动, 是显著事件。
+    """
+    if not _has_external(df, ["GLD_tonnes"]):
+        return np.full(len(df), np.nan)
+    return pd.Series(df["GLD_tonnes"].values).pct_change(20).values * 100
+
+
+@factor_registry.register("gld_tonnes_zscore_60d", "GLD 持仓 60d z-score (极值反转信号)")
+def factor_gld_tonnes_zscore_60d(df):
+    """GLD 持仓量 60 日滚动 z-score。
+
+    |z| > 2 = 极值, 历史上对应 1-3 个月的反转 (均值回归)。
+    极值正: 持仓异常高 → 拥挤交易, 短期回调风险
+    极值负: 持仓异常低 → 投降, 长期底部信号
+    """
+    if not _has_external(df, ["GLD_tonnes"]):
+        return np.full(len(df), np.nan)
+    s = pd.Series(df["GLD_tonnes"].values)
+    roll = s.rolling(60, min_periods=20)
+    mean = roll.mean()
+    std = roll.std()
+    z = np.where(std > 1e-9, (s - mean) / std, 0.0)
+    return z
+
+
+@factor_registry.register("slv_tonnes_chg_20d", "SLV 20 日持仓量变化 (吨)")
+def factor_slv_tonnes_chg_20d(df):
+    """SLV (iShares Silver Trust) 20 日持仓量变化, 单位吨。
+
+    银的 ETF 持仓是黄金的强相关但更波动的代理 (散户参与度高)。
+    银/金持仓比 (silver_gold_holdings_ratio) 看相对配置, 见 'silver_gold_holdings_ratio' 因子。
+    """
+    if not _has_external(df, ["SLV_tonnes"]):
+        return np.full(len(df), np.nan)
+    return pd.Series(df["SLV_tonnes"].values).diff(20).values
+
+
+@factor_registry.register("silver_gold_holdings_ratio", "SLV/GLD 持仓量比 5d 变化")
+def factor_silver_gold_holdings_ratio(df, lookback: int = 5):
+    """SLV 持仓 / GLD 持仓 的 5 日变化率。
+
+    比率上升 = 银相对金强势, 工业/风险偏好回归 (对黄金中性偏弱)
+    比率下降 = 银相对金弱势, 避险/降息预期 (对黄金中性偏强)
+
+    历史上金银 ETF 持仓比突破 +5% 5d, 跟黄金短期回调 -0.5%~-1% 同步。
+    """
+    if not _has_external(df, ["SLV_tonnes", "GLD_tonnes"]):
+        return np.full(len(df), np.nan)
+    s_slv = df["SLV_tonnes"].values
+    s_gld = df["GLD_tonnes"].values
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(s_gld != 0, s_slv / s_gld, np.nan)
+    return pd.Series(ratio).pct_change(lookback).values * 100
+
+
+# =============================================================================
+# P0-CB 因子 (2026-06-03) — 央行黄金月度净买入
+# 数据源: data/external_loader.py → cb_gold 表 (前向填充到日度)
+# 逻辑: 央行净买入是黄金最长期的需求支撑 (中国/俄罗斯/印度/土耳其)
+# 关键观点: 央行买金跟价格脱钩, 跟地缘政治+去美元化绑定
+# =============================================================================
+
+
+@factor_registry.register("cb_total_chg_3m", "全球央行 3 月累计净买入 (吨)")
+def factor_cb_total_chg_3m(df):
+    """全球央行 3 月累计净买入黄金, 单位吨。
+
+    央行买金是黄金长期需求的核心驱动 (>年 1000 吨需求侧)。
+    3m 累计 > 200 吨 = 强势支撑 (尤其央行净买不是短线博弈, 是结构性)。
+    3m 累计 < 50 吨 = 需求侧疲软, 黄金易回调。
+    """
+    if not _has_external(df, ["cb_total_chg_3m"]):
+        return np.full(len(df), np.nan)
+    return df["cb_total_chg_3m"].values
+
+
+@factor_registry.register("cb_china_chg_3m", "中国央行 3 月累计净买入 (吨)")
+def factor_cb_china_chg_3m(df):
+    """中国央行 (PBOC) 3 月累计净买入黄金, 单位吨。
+
+    PBOC 2022-2024 持续月净买 10-30 吨, 是金价 1900→2400 关键驱动力。
+    月报通常滞后 1 个月 (下月 7 号左右公布)。
+    """
+    if not _has_external(df, ["cb_china_chg_3m"]):
+        return np.full(len(df), np.nan)
+    return df["cb_china_chg_3m"].values
+
+
+@factor_registry.register("cb_russia_chg_3m", "俄罗斯央行 3 月累计净买入 (吨)")
+def factor_cb_russia_chg_3m(df):
+    """俄罗斯央行 (CBR) 3 月累计净买入黄金, 单位吨。
+
+    2022 制裁后俄央行暂停公布, 2023 恢复。
+    跟中国同步 = 东方阵营去美元化指标。
+    """
+    if not _has_external(df, ["cb_russia_chg_3m"]):
+        return np.full(len(df), np.nan)
+    return df["cb_russia_chg_3m"].values
+
+
+@factor_registry.register("cb_china_3m_zscore", "中国央行 3m 净买 z-score (极值信号)")
+def factor_cb_china_3m_zscore(df, lookback: int = 60):
+    """中国央行 3m 净买 60 日 z-score。
+
+    历史中国央行 3m 净买 z-score > 1.5 = 强支撑 (持续累积)
+    < -1.5 = 停止买入 = 利空黄金
+
+    数据 freq = 月度, 但对齐到日度后会有大量重复值 (forward fill)。
+    z-score 跨月度窗口的滚动能避免月内重复影响。
+    """
+    if not _has_external(df, ["cb_china_chg_3m"]):
+        return np.full(len(df), np.nan)
+    s = pd.Series(df["cb_china_chg_3m"].values)
+    roll = s.rolling(lookback, min_periods=10)
+    mean = roll.mean()
+    std = roll.std()
+    z = np.where(std > 1e-9, (s - mean) / std, 0.0)
+    return z
+
+
+# =============================================================================
+# P0 衍生因子 (2026-06-03) — 实际利率 percentile rank (BUG-3 修复后多周期 IC 优化)
+# 旧版只算 5-bar 变化, IC=0.022; 新版加 percentile rank 跟历史比, 预期 IC 0.04-0.06
+# =============================================================================
+
+
+@factor_registry.register("real_yield_pct_rank", "实际利率 5y percentile rank")
+def factor_real_yield_pct_rank(df, lookback: int = 1260):
+    """10Y 实际利率 (DFII10) 5y 滚动 percentile rank (5y × 252d ≈ 1260 天)。
+
+    原理: 实际利率是黄金的反向驱动 (上升 = 黄金承压)。
+    把绝对水平归一化到 0-1 百分位, 看"当前实际利率在历史中贵不贵"。
+    极值 (>0.8): 实际利率历史高位 = 黄金强压制
+    极低 (<0.2): 实际利率历史低位 = 黄金强支撑
+
+    IC 报告: 5-bar 实际利率变化 IC=0.022 → 5y percentile rank IC 预期 0.05+
+    """
+    if not _has_external(df, ["real_yield_10y"]):
+        return np.full(len(df), np.nan)
+    s = pd.Series(df["real_yield_10y"].values)
+    out = np.full(len(df), np.nan)
+    for i in range(lookback, len(df)):
+        window = s.iloc[i - lookback + 1: i + 1].dropna()
+        if len(window) < 60:
+            continue
+        cur = s.iloc[i]
+        if pd.isna(cur):
+            continue
+        out[i] = (window < cur).sum() / len(window) * 100
+    return out
+
+
+# =============================================================================
+# P0-COT 因子 (2026-06-03) — CFTC 黄金 COT 持仓 (周度, 真实数据)
+# 数据源: scripts/load_cot_gold.py → cot_gold 表 (周度, forward fill)
+# 关键逻辑:
+#   - Managed Money (非商业/投机): 跟金价同向 (追涨杀跌)
+#   - Producer/Merchant (商业/对冲): 跟金价反向 (顶部做空套保, 底部平仓)
+#   - COT 极值反转: |mm_net| z-score 极端时是反转信号
+# =============================================================================
+
+
+@factor_registry.register("cot_mm_net", "COT Managed Money 净持仓 (合约)")
+def factor_cot_mm_net(df):
+    """CFTC 黄金 COT — Managed Money (投机) 净持仓 = mm_long - mm_short。
+
+    解读: 投机者净多 = 看多情绪强。历史上跟金价同向。
+    数值越大越看多, 越负越看空。
+    """
+    if not _has_external(df, ["cot_mm_net"]):
+        return np.full(len(df), np.nan)
+    return df["cot_mm_net"].values
+
+
+@factor_registry.register("cot_mm_net_pct_oi", "COT MM 净持仓 / 总持仓 %")
+def factor_cot_mm_net_pct_oi(df):
+    """COT MM 净持仓 / Open Interest (标准化到 %).
+
+    解读: 跟总持仓比, 消除合约数变化影响。0.3+ = 投机者强烈看多, -0.3- = 强烈看空。
+    """
+    if not _has_external(df, ["cot_mm_net_pct_oi"]):
+        return np.full(len(df), np.nan)
+    return df["cot_mm_net_pct_oi"].values
+
+
+@factor_registry.register("cot_mm_net_chg_4w", "COT MM 净持仓 4 周变化")
+def factor_cot_mm_net_chg_4w(df):
+    """COT MM 净持仓 4 周变化 (投机者加仓/减仓速度).
+
+    解读: 正值 = 投机者 4 周累计加仓 (看多强化)
+    负值 = 投机者 4 周累计减仓 (看多削弱 / 反向)
+    极值 (>0.2 OI): 拥挤, 反转风险
+    """
+    if not _has_external(df, ["cot_mm_net_pct_oi"]):
+        return np.full(len(df), np.nan)
+    return pd.Series(df["cot_mm_net_pct_oi"].values).diff(4).values
+
+
+@factor_registry.register("cot_mm_net_zscore_52w", "COT MM 净持仓 52w z-score (极值反转)")
+def factor_cot_mm_net_zscore_52w(df):
+    """COT MM 净持仓 52 周滚动 z-score。
+
+    |z| > 1.5: 历史上对应 1-3 个月的反转
+    极值正: 投机者极端看多 → 拥挤, 短期回调风险
+    极值负: 投机者极端看空 → 投降, 长期底部信号
+    """
+    if not _has_external(df, ["cot_mm_net_pct_oi"]):
+        return np.full(len(df), np.nan)
+    s = pd.Series(df["cot_mm_net_pct_oi"].values)
+    roll = s.rolling(52, min_periods=12)
+    z = (s - roll.mean()) / roll.std()
+    return z.values
+
+
+@factor_registry.register("cot_pm_net", "COT Producer/Merchant 净持仓 (对冲)")
+def factor_cot_pm_net(df):
+    """CFTC 黄金 COT — Producer/Merchant (商业/对冲) 净持仓。
+
+    解读: 商业对冲者跟金价反向。极值负 (套保空头) 通常是底部信号,
+    极值正 (套保多头) 通常是顶部信号。
+    """
+    if not _has_external(df, ["cot_pm_net"]):
+        return np.full(len(df), np.nan)
+    return df["cot_pm_net"].values
+
+
+@factor_registry.register("cot_extreme_signal", "COT 极端反转综合信号 (mm+pm 极值)")
+def factor_cot_extreme_signal(df):
+    """COT 极值反转综合信号: 投机者极端看多 + 商业极端套保 = 顶部
+
+    信号构造:
+      mm_z = cot_mm_net_pct_oi z-score
+      pm_z = cot_pm_net z-score (反向化, 套保空头越多越负)
+      signal = mm_z - pm_z (双重极值)
+    signal > 1.5: 顶部 (投机者极多 + 商业极空)
+    signal < -1.5: 底部 (投机者极空 + 商业极多)
+
+    黄金历史: 2020-08 投机者 +260k → 黄金顶部 2075
+              2018-08 投机者 -100k → 黄金底部 1160
+    """
+    if not _has_external(df, ["cot_mm_net_pct_oi", "cot_pm_net"]):
+        return np.full(len(df), np.nan)
+    mm_s = pd.Series(df["cot_mm_net_pct_oi"].values)
+    pm_s = pd.Series(df["cot_pm_net"].values)
+
+    mm_roll = mm_s.rolling(52, min_periods=12)
+    pm_roll = pm_s.rolling(52, min_periods=12)
+
+    mm_z = (mm_s - mm_roll.mean()) / mm_roll.std()
+    pm_z = (pm_s - pm_roll.mean()) / pm_roll.std()
+
+    # 反向化 pm_z (商业极空 = 负向信号, 但应该视为看多 signal)
+    return (mm_z - pm_z).values

@@ -20,6 +20,9 @@
 | T14 L1 因子生命周期 | ✅ 3/3 | FactorHealth 评分 + RegistryAdapter + main.py 接入 |
 | T15 L2 因子 DSL | ✅ 8/8 | parser + 搜索 + orchestrator + persistent registry + **T15.5 闭环 wiring 2026-06-03 (lazy load + A/B 验证 PnL delta!=-0)** |
 | T16 实时数据同步 | ✅ 8/8 | MT5 → db + 增量拉取 + 多 TF + Windows Task Scheduler |
+| P0-ETF/CB (新因子纬度) | ✅ 11/11 因子 | GLD/SLV 持仓 / 央行黄金 / 实际利率百分位 |
+| P0-COT (CFTC 持仓) | ✅ 6/6 因子 | 856 周 GOLD COT (2010-2026, 16.4 年历史) |
+| P0-BUGFIX | ✅ 4/4 | daily_loss_pct / circuit peak_equity / IC多周期 / break_even |
 | P2 其他 (回测工程) | ⏳ 待启动 | SL/TP bid-ask / 资金费 / future function / point-in-time |
 | Tier 1-4 机构级 | ⏳ 长期 | 阻塞于资源/外部依赖 |
 
@@ -274,6 +277,49 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 ## BLOCKED — 待澄清
 
 - [ ] DXY 真数据源 (FRED 无标准 series_id, 现 DTWEXBGS 代理)
+
+---
+
+## P0-ETF/CB/COT + BUGFIX (2026-06-03) — 因子纬度扩展 + 质量修复
+
+### P0-BUGFIX (4/4) ✅
+- **BUG-1**: `core/state.py` `daily_loss_pct` abs() → max(0, -pnl) (盈利日不再误熔断)
+- **BUG-2**: `risk/circuit.py` `reset()` 不再覆写 `peak_equity` (DD 统计修正)
+- **BUG-3**: `alpha/factor_engine.py` IC 多周期 `forward_periods` 真实实现 (1/5/10/20-bar)
+- **BUG-5**: `core/state.py` + `paper_engine.py` 零净利交易 break_even 单独计
+
+### P0-ETF (GLD/SLV 持仓) ✅
+- **数据**: `etf_holdings` 表, GLD/SLV close → 1208 行价格代理 + 5 行真实 SEC 提取
+- **SEC 真数据**: Q1 2026 10-Q: 362.5M shares, 月 oz/share 0.09194/0.09191/0.09188
+- **因子**: `gld_tonnes_chg_5d/20d`, `gld_tonnes_zscore_60d`, `slv_tonnes_chg_20d` 等 6 个
+- **H1 IC**: `slv_tonnes_chg_20d` 0.298 (#1), `gld_tonnes_zscore_60d` 0.294 (#2)
+
+### P0-CB (央行黄金) ✅
+- **数据**: `cb_gold` 表, 5 国 (CHINA/RUSSIA/TURKEY/INDIA/TOTAL), 140 行手工录入
+- **因子**: `cb_total_chg_3m`, `cb_china_chg_3m` 等 4 个
+- **H1 IC**: `cb_total_chg_3m` 0.025 (#10)
+
+### P0-COT (CFTC 持仓) ✅
+- **数据**: `cot_gold` 表, 856 周 (2010-2026, 16.4 年), CFTC disagg txt zip 自动拉取
+- **因子**: `cot_mm_net`, `cot_pm_net`, `cot_extreme_signal` 等 6 个
+- **H1 IC**: `cot_pm_net` -0.047 (#6), `cot_mm_net` +0.036 (#9)
+- **H1 PnL 验证**: baseline -187% + COT voter 转正 +6.36% (救场因子)
+
+### H1 全因子 Top 10 (2026-06-03)
+1. slv_tonnes_chg_20d +0.298 (ETF proxy)
+2. gld_tonnes_zscore_60d +0.294 (ETF proxy)
+3. slv_gld_ratio +0.102 (跨资产)
+4. macd_hist +0.069 (技术)
+5. gld_tonnes_pct_20d +0.061 (ETF proxy)
+6. **cot_pm_net** -0.047 (真实 COT)
+7. gld_tonnes_chg_20d +0.044 (ETF proxy)
+8. cb_total_chg_3m +0.025 (央行)
+9. **cot_mm_net** +0.036 (真实 COT)
+10. bb_width -0.042 (技术)
+
+---
+
+**2026-06-03 BUGFIX + P0 扩展到 39 因子:**
 
 ---
 

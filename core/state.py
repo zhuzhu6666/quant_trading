@@ -30,6 +30,7 @@ class DailyStats:
     total_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
+    break_even_trades: int = 0     # BUG-5: 跟赢/亏区分
     consecutive_losses: int = 0
     gross_pnl: float = 0.0
     net_pnl: float = 0.0
@@ -80,9 +81,14 @@ class State:
 
     @property
     def daily_loss_pct(self) -> float:
+        """日内亏损百分比（只算亏损, 盈盈利日返回 0）。
+
+        旧版用 abs(net_pnl) 导致大盈盈利日被误判为亏损熔断。
+        """
         if self.balance <= 0:
             return 0.0
-        return abs(self.daily.net_pnl) / self.balance * 100
+        # 只算亏损: net_pnl < 0 时返回正值百分比, net_pnl >= 0 时返回 0
+        return max(0.0, -self.daily.net_pnl) / self.balance * 100
 
     def update_equity(self, current_price: float):
         """根据当前价格更新权益"""
@@ -119,9 +125,12 @@ class State:
             if pnl > 0:
                 self.daily.winning_trades += 1
                 self.daily.consecutive_losses = 0
-            else:
+            elif pnl < 0:
                 self.daily.losing_trades += 1
                 self.daily.consecutive_losses += 1
+            else:
+                # BUG-5: 零净利单独计 (commission 跟 pnl 抵消的边界)
+                self.daily.break_even_trades += 1
 
     def reset_daily(self):
         """每日重置"""
