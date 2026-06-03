@@ -2,7 +2,7 @@
 
 XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backtest baseline 已实盘验证 (read-only 模式)。
 
-**最后更新: 2026-06-03**
+**最后更新: 2026-06-03 (下午)**
 
 ---
 
@@ -75,15 +75,39 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 - 框架就位, 真实影响在 FOMC/NFP 事件日 spread 1-3 USD 时才有意义 (2-5% PnL 影响)
 - 报告: `data/charts/p2_sltp_bidask_report.txt`
 
+### P2 资金费/过夜费建模 (2026-06-03 下午)
+
+- `execution/paper_engine.py` 加 3 参数: `enable_swap=True`, `swap_long_per_lot_per_day=-1.0`, `swap_short_per_lot_per_day=0.0`
+- `PaperTrade` 加 `swap: float=0` 字段, `_close` 计算: `swap_cost = swap_rate * pos.volume * hold_days` (USD)
+- Bug 修复: `_close` 路径 `bar_time` 透传, 避免 entry_time 落到 utcnow
+- A/B 验证 5000 bar: A swap_off +24.79% / B swap_on -1/day -0.04% / C stress -5/day -0.20%
+- XAUUSD 长仓过夜费 -1 USD/lot/day 是合理默认值 (Bybit-Live-2 历史)
+- 报告: `data/charts/swap_funding_report.txt`
+
+### 影子因子 shadow ON 默认关闭 (2026-06-03 下午)
+
+32 组合扫描: `shadow_vote_weight < 1` 等于无影响 (整数票 floor), `vw >= 1` 拖累 PnL
+- 最佳: vw=0 = baseline (+24.79%)
+- 最差: vw=1.0 + tp=0.8: -19.59% / DD 54.37%
+- 默认改 `shadow_vote_weight=0` (实质关闭, 保留 lazy load 机制)
+- 开启需显式: `--include-shadow-factors --shadow-vote-weight 1.0`
+- 报告: `data/charts/shadow_calibration_report.txt`
+
+### ProbabilityCalibrator 校准 A/B (2026-06-03 下午)
+
+P0-7 桶级 calibrator 在 3000 bar OOS 段**反伤** PnL (-30%, Sharpe 1.85 vs 3.59)
+- wiring 验证通过, 但 calibrator 本身需 retrain (P0-7 OOS 段已变, 桶表 stale)
+- 下一步: 周期性重训 calibrator (跟 P0-7 重训同节奏)
+
 ### 自进化状态评估 (2026-06-03)
 
-**框架自主进化差距 2/3 已闭环**。剩余 1 项 (第三项) 待定。
+**框架自主进化差距 3/3 已闭环**。剩余 1 项 (第三项) 待定。
 
 1. **T15.5 闭环 wiring** ✅ **(2026-06-03 closed)** — lazy load 绕过 `strategy_registry.create()` 的 kwargs 时序 bug; A/B 测试 PnL delta=-24.06% (68t/+0.73%/Sharpe 0.69/DD 34.06%) vs A (62t/+24.79%/Sharpe 1.46/DD 51.44%); 影子因子在 OOS 上 OOS filter 有效 (DD 降 17pp) 但信号偏弱 (PnL 跌), 待校准 (top_pct/vote_weight)
 
 2. **ProbabilityCalibrator 持久化** ✅ **(2026-06-03 closed)** — main.py 启动时优先 `load("data/charts/calibrator_bucket.json")` (已有 P0-7 实测桶级 8 桶), 缺失回退 identity; 新 CLI `--calibrator-path` / `--calibrator-save`; 测试 5/5 通过 (load/roundtrip/missing/platt)
 
-3. **第三项待定** — 等 T15.5 闭环后再讨论
+3. **L2 GP 因子搜索 (T15.3 v2)** ✅ **(2026-06-03 closed)** — alpha/factor_search_gp.py 实现 Genetic Programming 引擎 (population/tournament/crossover/mutate/elite); 5000 bar A/B 对比: A random 1000c top1=70.38 (10.9s); B GP 100x10 top1=72.17 (17.1s) +1.79 vs random; C GP 50x30 top1=72.74 (24.2s) +2.36 vs random; GP 历史曲线 63.8→72.7, 代际持续爬坡; 推荐配置 pop>=50, gen>=20 — 等 T15.5 闭环后再讨论
 
 **今日工作日志 (2026-06-03)**
 
@@ -136,7 +160,7 @@ quant_trading/
 │                            # regime_classifier / probability_calibrator /
 │                            # factor_health ★ / registry_adapter ★ /
 │                            # factor_dsl ★ / factor_score_evaluator ★ /
-│                            # factor_search ★ / factor_discovery ★ /
+│                            # factor_search ★ / factor_search_gp ★ / factor_discovery ★ /
 │                            # persistent_registry ★
 ├── execution/               # oms / router / paper_trader ★ / mt5_bridge ★ /
 │                            # algos (TWAP/VWAP/POV/IS) / slippage / impact /
@@ -201,7 +225,13 @@ python main.py --mode paper --timeframe M15 \
 python main.py --mode paper --timeframe M15 --factor-health-report
 
 # L2 因子发现 (DSL 搜索 + 自动 register)
+# L2 因子发现 v1 (random search)
 python scripts/discover_factors.py --n-candidates 1000 --top-k 50 \
+  --forward-periods 1,5,20 --auto-register
+
+# L2 因子发现 v2 (GP search, 推荐)
+python scripts/test_gp_search.py  # A/B 验证 + 落盘 gp_run_*.json
+# 自定义 GP: 直接 import FactorSearchGP (pop=100 gen=20 即可超过 random)
   --forward-periods 1,5,20 --auto-register
 
 # 实时数据同步 (T16)

@@ -1,7 +1,7 @@
 # 项目框架总览 (PROJECT_MAP)
 
-> 最后更新: 2026-06-02
-> 项目状态: 41/41 ROADMAP 任务代码层完成 (100%)
+> 最后更新: 2026-06-03 下午
+> 项目状态: 41/41 ROADMAP 任务代码层完成 (100%) + 自进化差距 3/3 闭环 (T15.5 + Calibrator + GP)
 > 真实 PnL 数字 / 风险点 / 阻塞项 全部记录
 
 ---
@@ -52,6 +52,7 @@ quant_trading/
 │   ├── registry_adapter.py          # ★ T14.2: 动态 register/unregister + 事件流
 │   ├── persistent_registry.py       # ★ T15.5: 跨进程恢复 shadow 因子 (闭环 2026-06-03)
 │   ├── factor_dsl.py                # ★ T15.1: DSL parser + AST + 20+ 算子 + 沙箱
+│   ├── factor_search_gp.py          # ★ T15.3 v2: Genetic Programming 引擎 (2026-06-03, 5000 bar A/B 赢 random +2.36)
 │   ├── factor_score_evaluator.py    # ★ T15.2: DSL 候选 IC 评分 + cross-validation
 │   ├── factor_search.py             # ★ T15.3: 随机搜索 (100 候选 0.4s)
 │   └── factor_discovery.py          # ★ T15.4: orchestrator (search→eval→dedup→register)
@@ -121,7 +122,9 @@ quant_trading/
 │   ├── test_shadow_consumption.py   # ★ T15.5 闭环: A/B 验证 shadow 因子接进投票 (2026-06-03, PnL delta=-24.06% 闭环确认)
 │   ├── test_calibrator_persistence.py # ★ Task #2: calibrator load/save/roundtrip/missing/platt 5/5 (2026-06-03)
 │   ├── live_sync_daily.bat          # ★ T16: Windows Task Scheduler 配置
-│   ├── discover_factors.py          # ★ L2: 因子发现 CLI
+│   ├── discover_factors.py          # ★ L2: 因子发现 CLI (random search v1)
+│   ├── test_gp_search.py            # ★ T15.3 v2: GP vs random A/B 验证
+│   ├── test_gp_search_v2.py         # ★ T15.3 v2: GP 变体 (100x10 vs 50x30) 对比
 │   ├── P0 系列: test_p0_factors / factor_pca / factor_ic_rolling
 │   ├── P0-5/6: train_xgb_walkforward / walkforward_p0_6
 │   ├── P0-7: test_probability_calibrator

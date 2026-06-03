@@ -1,0 +1,26 @@
+=== T15.3 v2: GP vs Random factor search A/B ===
+Data: 5000 M15 bars, 2024-04-17 13:30:00 -> 2024-07-03 04:00:00
+
+--- A: Random search (1000 candidates, max_depth=4) ---
+  elapsed:         7.4s
+  n_valid:         724/1000
+  top-1 score:     70.65
+  top-1 expr:      ts_sum(delay(close, 50), 20)
+  top-5 scores:    [70.7, 65.0, 63.5, 63.1, 63.1]
+
+--- B: GP search (pop=50, gen=20, max_depth=4) ---
+  elapsed:         15.8s (1050 evals)
+  top-1 score:     64.23
+  top-1 expr:      sqrt(sqrt(delay(delay(sqrt(sqrt(open)), 3), 20)))
+  top-5 scores:    [64.2, 64.2, 64.2, 64.2, 64.2]
+  best_history:    [62.6, 62.6, 62.6, 62.6, 62.6, 62.6, 62.7, 62.7, 62.7, 62.7, 62.7, 62.7, 62.7, 62.7, 64.2, 64.2, 64.2, 64.2, 64.2, 64.2, 64.2]
+  avg_history:     [45.6, 48.6, 58.8, 61.3, 62.6, 62.6, 62.5, 61.8, 62.6, 62.6, 62.7, 61.8, 62.7, 61.9, 62.5, 62.6, 61.8, 62.2, 63.1, 63.5, 62.9]
+
+--- SUMMARY ---
+  random top1:   70.65
+  GP top1:       64.23
+  delta:         -6.42 (-9.1%)
+  random top5:   [70.7, 65.0, 63.5, 63.1, 63.1]
+  GP top5:       [64.2, 64.2, 64.2, 64.2, 64.2]
+  time ratio:    GP/random = 2.14x
+  GP saved to:   data\charts\factor_discovery\gp_run_20260603_143856.json

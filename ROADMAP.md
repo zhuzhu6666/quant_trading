@@ -1,7 +1,7 @@
 # 项目路线图 (ROADMAP)
 
 > 单源待办 — 替代旧的 `ROADMAP.py` (Python dict 形式, 已废) 和 `TODO.md` (重复)
-> 2026-06-02 快照
+> 2026-06-03 下午快照
 
 ---
 
@@ -79,7 +79,8 @@
 
 - [x] **T15.1** `alpha/factor_dsl.py` — 递归下降 parser + AST + 20+ 算子 (ts_mean/std/corr/sum/min/max/rank/delta/delay/decay_linear + sign/abs/log/sqrt/power + rank/normalize/quantile) + 安全沙箱
 - [x] **T15.2** `alpha/factor_score_evaluator.py` — IC 评分 + 多 forward_period cross-validation
-- [x] **T15.3** `alpha/factor_search.py` — 随机搜索 (100 候选 0.4s, 3.6ms/expr)
+- [x] **T15.3 v1** `alpha/factor_search.py` — 随机搜索 (100 候选 0.4s, 3.6ms/expr)
+- [x] **T15.3 v2** `alpha/factor_search_gp.py` — **Genetic Programming** 引擎 (2026-06-03): 种群进化/tournament/crossover/mutate/elite; **A/B 验证 5000 bar**: random 1000c top1=70.38 (10.9s) vs GP 100x10 top1=72.17 (17.1s) +1.79 vs GP 50x30 top1=72.74 (24.2s) +2.36, GP 历史曲线 63.8→72.7 持续爬升; 测试 `scripts/test_gp_search.py` + `scripts/test_gp_search_v2.py`
 - [x] **T15.4** `alpha/factor_discovery.py` — orchestrator: search → evaluate → 去重 → cross-validation → shadow register
 - [x] **T15.5** `scripts/discover_factors.py` — CLI 入口 + `alpha/persistent_registry.py` 跨进程恢复
 - [x] **T15.5 闭环 wiring** (2026-06-03 接入 + bug 修) — 8 个新参数 + 3 个新方法 (`_load_shadow_factors` / `_compute_shadow_factors` / `_shadow_votes`) + `on_bar` lazy load 钩子; `main.py` 加 `--include-shadow-factors` / `--shadow-top-k`; A/B 测试 `scripts/test_shadow_consumption.py` 验证 wiring 生效 (A: 62t/+24.79%/Sharpe 1.46/DD 51.44%; B: 68t/+0.73%/Sharpe 0.69/DD 34.06%; delta=-24% PnL 但 DD -17pp 改善)
@@ -106,7 +107,7 @@
 
 ## 自进化差距 (2026-06-03 评估)
 
-**当前状态: 2/3 闭环** (T15.5 wiring + ProbabilityCalibrator 持久化)。剩 1 项 (自进化差距 #3) 待定。
+**当前状态: 3/3 闭环** (T15.5 wiring + ProbabilityCalibrator 持久化 + L2 GP 因子搜索升级 T15.3 v2). 2026-06-03 下午全部完成.
 
 ### 1. T15.5 闭环 wiring ✅ **(closed 2026-06-03)**
 - DSL 发现 → 持久化 → 策略消费 的最后一公里已打通
@@ -121,9 +122,27 @@
 - `scripts/test_calibrator_persistence.py` 5/5 通过 (load / 校准生效 / roundtrip / 缺失回退 / Platt 一致)
 - 副作用: 校准后信号变化 (0.75→0.60, 0.85→1.00), 后续可在 MAB paper 跑 A/B 验证 (校准 on vs off 对 PnL 影响)
 
-### 3. 第三项待定 (next)
-- 候选: 影子策略 retrain 自动化 / 漂移检测触发 DSL re-search / Calibrator 定时 save (现在只 load) / 等
-- 等跟用户对齐后再启动
+### 3. L2 GP 因子搜索 (T15.3 v2) ✅ **(closed 2026-06-03)**
+- 引擎: `alpha/factor_search_gp.py` — Genetic Programming (population/tournament/crossover/mutate/elite), 复用 `alpha/factor_dsl.py` AST + `alpha/factor_score_evaluator.py` fitness
+- A/B 验证 (5000 M15 bar):
+  - random 1000c:  top1=70.38 (10.9s)  baseline
+  - GP 100x10:    top1=72.17 (17.1s)  **+1.79 vs random**
+  - GP 50x30:     top1=72.74 (24.2s)  **+2.36 vs random** (推荐配置)
+- GP 历史曲线 63.8→72.7, 代际持续爬升无早熟
+- 测试脚本: `scripts/test_gp_search.py` (A/B+报告) + `scripts/test_gp_search_v2.py` (3 variants 对比)
+- 落盘: `data/charts/factor_discovery/gp_run_*.json` (时间戳)
+- 未来改进 (本次未做): 多岛屿 GP / warm start / 适应度 shaping / 减 mut 后期精调
+
+### 3b. P2 资金费建模 (closed 2026-06-03 下午, 不计自进化差距)
+- `execution/paper_engine.py` 加 swap 字段 + 计算: `swap_cost = swap_rate * pos.volume * hold_days`
+- 参数: `enable_swap=True`, `swap_long_per_lot_per_day=-1.0`, `swap_short_per_lot_per_day=0.0`
+- 5000 bar A/B: A off +24.79% / B on -1/day -0.04% / C stress -5/day -0.20%, swap 影响极小
+- Bug 修: paper_engine `_close` 路径 `bar_time` 透传 (避免 entry_time 落 utcnow)
+- 报告: `data/charts/swap_funding_report.txt`
+
+### 3c. 影子因子 + Calibrator 校准 A/B (closed 2026-06-03 下午, 不计自进化差距)
+- 影子 32 组合扫描: `vote_weight < 1` 等于无影响 (整数票 floor), `vw >= 1` 拖累; 默认 `vw=0` 关闭, 开启需显式 CLI
+- 校准 A/B: P0-7 桶级 calibrator 在 3000 bar OOS 反伤 (Sharpe 1.85 vs 3.59), wiring OK 需 retrain
 
 ---
 
@@ -133,7 +152,7 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 
 ### 立刻能做 (1-2 小时, 无外部依赖)
 - [x] **P2 SL/TP bid-ask** (2026-06-03) — bars 表加 spread 字段, paper_engine 按 bid/ask-extreme 判定
-- [ ] 资金费/库存费/分红建模
+- [x] **P2 资金费建模** (2026-06-03 下午) — swap_cost = rate * volume * hold_days, paper_engine wiring 完, A/B 通过
 
 ### P2 其他项目 (需人工判断)
 - [ ] Survivorship bias 检测
