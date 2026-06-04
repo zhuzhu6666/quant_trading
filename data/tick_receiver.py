@@ -40,6 +40,10 @@ class TickReceiver:
         self.buffer = deque(maxlen=buffer_size)
         self._running = False
         self._last_tick_time: float = 0.0
+        # BUG-21 (audit 2026-06-04): deque 满时静默丢, 加计数 + warn
+        self._dropped_count: int = 0
+        # BUG-20 (audit 2026-06-04): except 后 sleep 1s 改成指数 backoff
+        self._reconnect_attempt: int = 0
 
     async def start(self):
         """启动tick接收"""
@@ -70,8 +74,19 @@ class TickReceiver:
                     "volume": tick.volume,
                     "time": ts,
                 }
+                # BUG-21: deque 满时, append 会静默丢最旧,
+                # 之前 count == maxlen 时再 append 触发, 计数 + warn
+                if len(self.buffer) == self.buffer.maxlen:
+                    self._dropped_count += 1
+                    if self._dropped_count % 100 == 1:
+                        logger.warning(
+                            f"[BUG-21] tick buffer full (size={self.buffer.maxlen}), "
+                            f"dropped {self._dropped_count} ticks so far"
+                        )
                 self.buffer.append(tick_data)
                 self._last_tick_time = ts
+                # 成功拿到 tick, 重置 backoff
+                self._reconnect_attempt = 0
 
                 # 推送到EventBus
                 await bus.publish(Event(
@@ -85,7 +100,14 @@ class TickReceiver:
 
             except Exception:
                 logger.exception("Tick receive error")
-                await asyncio.sleep(1)
+                # BUG-20: 指数 backoff, max 60s
+                self._reconnect_attempt += 1
+                backoff = min(60, 1 * (2 ** (self._reconnect_attempt - 1)))
+                logger.warning(
+                    f"[BUG-20] reconnect attempt {self._reconnect_attempt}, "
+                    f"sleeping {backoff}s"
+                )
+                await asyncio.sleep(backoff)
 
     def stop(self):
         """停止tick接收"""
