@@ -59,6 +59,15 @@ class FactorEngine:
         if self.df is None:
             return None
 
+        # FOOTGUN-9 (audit 2026-06-04): compute() 验 df 有必要列
+        # compute_all() 已有 "close" in columns 检查, compute() 没
+        # 因子函数访问 self.df["close"] 不存在会 KeyError
+        if self.df.empty or "close" not in self.df.columns:
+            logger.warning(
+                f"Factor '{name}' skip: df missing 'close' column or empty"
+            )
+            return None
+
         func = factor_registry.get(name)
         if func is None:
             logger.warning(f"Factor '{name}' not registered")
