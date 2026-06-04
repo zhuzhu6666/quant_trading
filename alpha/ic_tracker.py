@@ -32,11 +32,21 @@ class ICTracker:
 
     def update(self, name: str, factor_values: np.ndarray,
                forward_returns: np.ndarray):
-        """更新因子观察值"""
+        """更新因子观察值
+
+        BUG-16 (audit 2026-06-04): factor_values 和 forward_returns 长度
+        不等时, 旧版用 min() 静默截断, caller 无感。修复后 raise ValueError。
+        """
         if name not in self._history:
             self._history[name] = deque(maxlen=self.window)
 
-        n = min(len(factor_values), len(forward_returns))
+        if len(factor_values) != len(forward_returns):
+            raise ValueError(
+                f"factor_values len={len(factor_values)} != "
+                f"forward_returns len={len(forward_returns)} for factor {name!r}"
+            )
+
+        n = len(factor_values)
         for i in range(n):
             if not (np.isnan(factor_values[i]) or np.isnan(forward_returns[i])):
                 self._history[name].append((factor_values[i], forward_returns[i]))

@@ -480,6 +480,23 @@ def factor_hours_to_nfp(df):
     return _compute_event_distance(df, "evt_nfp")
 
 
+def _infer_bars_per_day(df) -> int:
+    """BUG-22 (audit 2026-06-04): 从 df.index 推 bars_per_day, 替代 hardcode 96
+
+    若 df.index 是 DatetimeIndex 且有 freq, 用 24*60/freq_minutes。
+    否则 fallback 96 (M15)。
+    """
+    try:
+        idx = df.index
+        if hasattr(idx, "inferred_freq") and idx.inferred_freq:
+            minutes = pd.Timedelta(idx.inferred_freq).total_seconds() / 60
+            if minutes > 0:
+                return int(24 * 60 / minutes)
+    except Exception:
+        pass
+    return 96  # M15 fallback
+
+
 def _compute_event_distance(df: pd.DataFrame, evt_col: str) -> np.ndarray:
     """通用事件距离计算: 找下一次事件日, 返回天数 (浮点, 0=当天)。
 
@@ -501,8 +518,8 @@ def _compute_event_distance(df: pd.DataFrame, evt_col: str) -> np.ndarray:
     if len(event_indices) == 0:
         return out
 
-    # 累计天数 (假设 96 根 M15 bar / 天, 24*4)
-    bars_per_day = 96
+    # 累计天数 (BUG-22 audit 2026-06-04: bars_per_day hardcode 96, 应从 df 推)
+    bars_per_day = _infer_bars_per_day(df)
     for i in range(n):
         # 找最近未来事件 (index 差)
         future = event_indices[event_indices >= i]
