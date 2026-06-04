@@ -80,16 +80,30 @@ def inject_event_spreads(conn, events: list[tuple[int, str]], points: int, hours
 
 
 def restore_db():
-    """还原 db 到事件注入前的状态."""
-    if Path(DB_BACKUP).exists():
-        shutil.copy(DB_BACKUP, DB_PATH)
-        return True
-    return False
+    """还原 db 到事件注入前的状态.
+
+    BUG-14 (audit 2026-06-04): 失败时 caller 应当 raise SystemExit,
+    不能让注入的事件 spread 留在 live db 里污染后续 run。
+    """
+    if not Path(DB_BACKUP).exists():
+        raise FileNotFoundError(
+            f"DB backup {DB_BACKUP} 不存在, 无法还原, "
+            f"已注入的事件 spread 会留在 live db 里!"
+        )
+    shutil.copy(DB_BACKUP, DB_PATH)
+    # 验证还原成功
+    if not Path(DB_PATH).exists():
+        raise IOError(f"Restore failed: {DB_PATH} 不存在 after copy")
+    return True
 
 
 def backup_db():
     if not Path(DB_BACKUP).exists():
         shutil.copy(DB_PATH, DB_BACKUP)
+        # 验证 backup 成功 (BUG-14: 防止 shutil.copy 静默失败)
+        assert Path(DB_BACKUP).exists(), (
+            f"BUG-14: backup {DB_BACKUP} 创建后不存在, shutil.copy 静默失败"
+        )
 
 
 def run_paper_and_summarize(enable_circuit: bool = False) -> dict:
@@ -173,9 +187,14 @@ def main():
     # 4) 还原
     conn.close()
     print(f"\n[还原] DB 还原到 {DB_PATH}")
-    restore_ok = restore_db()
-    if not restore_ok:
-        print("  ⚠️  没找到 backup, db 可能保留注入状态")
+    # BUG-14 (audit 2026-06-04): restore_db 现在 raise on 失败, 不再静默
+    try:
+        restore_db()
+        print("  ✅ DB 还原成功")
+    except (FileNotFoundError, IOError) as e:
+        print(f"  ❌ Restore failed: {e}")
+        # abort: 不写 report (会误导), 退出码 1
+        raise SystemExit(1) from e
 
     # 5) 写报告
     REPORT.parent.mkdir(parents=True, exist_ok=True)
