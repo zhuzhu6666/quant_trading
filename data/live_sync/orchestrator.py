@@ -52,7 +52,8 @@ class SyncOrchestrator:
 
     def __init__(self, db_path: str = "data/market_data.db"):
         self.puller = MT5Puller()
-        self.filter = BarFilter(db_path=db_path)
+        # P3 (audit 2026-06-04 BUG-12): 注入 puller, BarFilter 用 server epoch
+        self.filter = BarFilter(db_path=db_path, mt5_puller=self.puller)
         self.inserter = DBInserter(db_path=db_path)
         self.db_path = db_path
 

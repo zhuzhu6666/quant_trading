@@ -246,3 +246,16 @@ class MT5Puller:
         if tick is None:
             return None
         return datetime.utcfromtimestamp(tick.time)
+
+    def get_server_time_epoch(self) -> Optional[float]:
+        """P3 (audit 2026-06-04 BUG-12): 返回 broker server time 的 epoch float。
+
+        BarFilter 拿这个直接跟 bar.time (也是 broker epoch) 比较,
+        避免 broker/local timezone 差异导致当前 bar 误判。
+        """
+        if not self._check_connect():
+            return None
+        tick = mt5.symbol_info_tick("XAUUSD+")
+        if tick is None:
+            return None
+        return float(tick.time)

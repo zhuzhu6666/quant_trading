@@ -39,8 +39,31 @@ class BarFilter:
         # result.kept: 需要入库的新 bar
     """
 
-    def __init__(self, db_path: str = "data/market_data.db"):
+    def __init__(self, db_path: str = "data/market_data.db",
+                 mt5_puller=None):
+        """
+        Args:
+            db_path: sqlite db path
+            mt5_puller: P3 (audit 2026-06-04 BUG-12) — 可选, 注入 MT5Puller
+                用于用 broker server epoch 判当前 bar。
+                broker time vs local time 可能差数小时, 不对齐会让正在
+                形成的 bar 误入库 (frozen close 写入 db)。
+                不传 / 拿不到 → fallback 本地 epoch (向后兼容)。
+        """
         self.db_path = db_path
+        self._puller = mt5_puller
+
+    def _now_epoch(self) -> float:
+        """P3: 返回 'MT5 server time' 对应的 epoch, 拿不到 fallback 本地"""
+        import time as _time
+        if self._puller is not None:
+            try:
+                ts = self._puller.get_server_time_epoch()
+                if ts is not None:
+                    return ts
+            except Exception as e:
+                logger.debug(f"[BarFilter] puller.get_server_time_epoch failed: {e}")
+        return _time.time()
 
     def filter(self, bars: list[dict], symbol: str, timeframe: str,
                tf_minutes: int = 15) -> FilterResult:
@@ -72,9 +95,10 @@ class BarFilter:
             return result
 
         # 2. 当前 bar 检测 (正在形成的, 未 close)
-        #    简单规则: 如果最新 bar 的 time + tf_minutes*60 > 当前时间, 就是当前 bar
-        import time as _time
-        now = _time.time()
+        #    P3 (audit 2026-06-04 BUG-12): 用 broker server epoch 判,
+        #    不再用本地 epoch, 避免 broker/local 时间差导致正在形成的
+        #    bar 误入库。
+        now = self._now_epoch()
         last_bar = bars[-1]
         bar_end_time = last_bar["time"] + tf_minutes * 60  # 该 bar 的收盘时间
         if bar_end_time > now:
