@@ -453,17 +453,22 @@ class PaperExecutionEngine:
                 tp_hit = l <= tp
         else:
             # P2 bid/ask 逻辑: SL/TP 按 bid/ask-extreme 比较
+            # P8 (audit 2026-06-04 BUG-1): 修复 TP 触发"过于保守"
+            # - 长仓 SL: bid-extreme low (bar.low) <= SL → 正确
+            # - 长仓 TP: ask-extreme high (bar.high) >= TP, 不再减 spread
+            #   旧版 tp_hit = bid_high (h - spread) >= TP, 把触发推后 ~spread
+            # - 短仓 SL: ask-extreme high (bar.high) >= SL → 正确
+            # - 短仓 TP: ask-extreme low (l + spread) <= TP → 正确
             spread_pts = int(bar.get("spread", 0) or 0)
             spread_usd = spread_pts * 0.01
-            bid_high = h - spread_usd   # bar.high 含 ask spread, 减回去得 bid-extreme high
-            ask_low = l + spread_usd    # bar.low 是 bid, 加 spread 得 ask-extreme low
+            ask_low = l + spread_usd   # bar.low 是 bid, 加 spread 得 ask-extreme low
 
-            if pos.direction == 1:  # 多仓: SL 用 bid-extreme low, TP 用 bid-extreme high
-                sl_hit = l <= sl
-                tp_hit = bid_high >= tp
-            else:  # 空仓: SL 用 ask-extreme high, TP 用 ask-extreme low
-                sl_hit = h >= sl
-                tp_hit = ask_low <= tp
+            if pos.direction == 1:  # 多仓
+                sl_hit = l <= sl        # bid-low <= SL
+                tp_hit = h >= tp        # ask-high >= TP (P8: 不再减 spread)
+            else:  # 空仓
+                sl_hit = h >= sl        # ask-high >= SL
+                tp_hit = ask_low <= tp  # ask-low <= TP
 
         if sl_hit and tp_hit:
             # 同根都触发: 保守取 SL
