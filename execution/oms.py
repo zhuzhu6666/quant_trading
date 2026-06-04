@@ -137,7 +137,18 @@ class OrderManager:
             self._transition(order, OrderStatus.PARTIAL_FILLED)
 
     def cancel(self, ticket: int):
-        self._transition(ticket, OrderStatus.CANCELLED)
+        """BUG-4 (audit 2026-06-04) 修复:
+        _transition 返回 False 时 (无效转移) raise RuntimeError, 不再静默
+        _archive 错状态。原 bug: 比如 FILLED→CANCELLED 失败, 但 _archive
+        仍塞, history 出现 "FILLED 状态被 cancel 成功的" 假记录。
+        """
+        if not self._transition(ticket, OrderStatus.CANCELLED):
+            order = self._orders.get(ticket)
+            cur_status = order.status.value if order else "NOT_FOUND"
+            raise RuntimeError(
+                f"Cannot cancel ticket {ticket}: invalid transition from {cur_status} "
+                f"to CANCELLED"
+            )
         self._archive(ticket)
 
     def reject(self, ticket: int, reason: str = ""):
