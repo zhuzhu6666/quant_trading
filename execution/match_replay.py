@@ -97,8 +97,9 @@ class MatchReplayEngine:
         side=1 (buy) 吃 ask, side=-1 (sell) 吃 bid. size 单位: 手.
         返回 {filled_price, filled_size, level, slippage_ticks, partial}.
         """
-        if not self._book["bids"] and not self._book["asks"]:
-            self._book = self._build_book()
+        # P9 (audit 2026-06-04 FOOTGUN-7): 每次 match_order 都 rebuild book
+        # 原 lazy 逻辑: book 空才建, 之后不再更新, 后续 bar 仍是旧 book
+        self._book = self._build_book()
 
         if side == 1:
             # buy: 从最低 ask 开始吃
