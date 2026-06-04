@@ -110,6 +110,14 @@ class PaperTrader:
                  enable_swap: bool = True,
                  swap_long_per_lot_per_day: float = -1.0,
                  swap_short_per_lot_per_day: float = 0.0):
+        # FOOTGUN-2 (audit 2026-06-04): risk_per_trade_pct=0 静默禁用动态仓位
+        # 显式 warning 提醒 caller, 避免把 0 误解为 "0% 风险"
+        if risk_per_trade_pct == 0.0:
+            logger.warning(
+                "[FOOTGUN-2] risk_per_trade_pct=0.0, dynamic sizing DISABLED, "
+                "using fixed default_lots=%.2f. 如果想 0%% 风险请传 None 或 >0",
+                default_lots,
+            )
         self.strategy = strategy
 
         # 实例化风控层
