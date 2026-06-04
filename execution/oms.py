@@ -43,6 +43,7 @@ class Order:
     sl: float = 0.0
     tp: float = 0.0
     fill_price: float = 0.0     # 实际成交价
+    filled_volume: float = 0.0  # BUG-3 (audit 2026-06-04): 累计已成交量
     status: OrderStatus = OrderStatus.NEW
     create_time: float = 0.0
     update_time: float = 0.0
@@ -60,11 +61,14 @@ class OrderManager:
     """
 
     VALID_TRANSITIONS = {
-        OrderStatus.NEW: [OrderStatus.PENDING, OrderStatus.REJECTED],
+        OrderStatus.NEW: [OrderStatus.PENDING, OrderStatus.SUBMITTED,
+                          OrderStatus.REJECTED],
         OrderStatus.PENDING: [OrderStatus.SUBMITTED, OrderStatus.CANCELLED, OrderStatus.REJECTED],
         OrderStatus.SUBMITTED: [OrderStatus.PARTIAL_FILLED, OrderStatus.FILLED,
                                  OrderStatus.CANCELLED, OrderStatus.REJECTED],
-        OrderStatus.PARTIAL_FILLED: [OrderStatus.FILLED, OrderStatus.CANCELLED],
+        # P16: PARTIAL→PARTIAL 允许 (累加 partial_fill), 仍可去 FILLED / CANCELLED
+        OrderStatus.PARTIAL_FILLED: [OrderStatus.PARTIAL_FILLED, OrderStatus.FILLED,
+                                     OrderStatus.CANCELLED],
         # Terminal states
         OrderStatus.FILLED: [],
         OrderStatus.CANCELLED: [],
@@ -92,7 +96,9 @@ class OrderManager:
             sl=sl, tp=tp, create_time=time.time(), update_time=time.time(),
             meta=meta,
         )
-        self._transition(order, OrderStatus.NEW)
+        # P16 (BUG-3 修复期间发现): create 应当直接设 status=NEW,
+        # 不应 _transition(NEW, NEW) (那会 invalid)
+        order.status = OrderStatus.NEW
         self._orders[ticket] = order
         return order
 
@@ -106,15 +112,29 @@ class OrderManager:
         order.fill_price = fill_price
         if volume:
             order.volume = volume
+        order.filled_volume = volume if volume else order.volume  # BUG-3
         self._transition(order, OrderStatus.FILLED)
         self._archive(order)
 
     def partial_fill(self, ticket: int, fill_price: float, filled_vol: float):
+        """BUG-3 (audit 2026-06-04) 修复:
+        累计 filled_volume, == volume 时自动 transition 到 FILLED + 归档。
+        原版不归档, 订单永远停在 PARTIAL_FILLED, 泄漏内存 + ticket_number 单调递增。
+        """
         order = self._orders.get(ticket)
         if not order:
             return
         order.fill_price = fill_price
-        self._transition(order, OrderStatus.PARTIAL_FILLED)
+        order.filled_volume = (order.filled_volume or 0.0) + filled_vol
+        if order.filled_volume >= order.volume - 1e-9:
+            # 全成, transition FILLED + 归档
+            order.filled_volume = order.volume
+            self._transition(order, OrderStatus.FILLED)
+            self._archive(order)
+            logger.info(f"Order {ticket} partial fills aggregate to full, archived")
+        else:
+            # 部分成, 仍保持活跃
+            self._transition(order, OrderStatus.PARTIAL_FILLED)
 
     def cancel(self, ticket: int):
         self._transition(ticket, OrderStatus.CANCELLED)
@@ -156,7 +176,13 @@ class OrderManager:
         return True
 
     def _archive(self, ticket_or_order):
-        order = ticket_or_order if isinstance(ticket_or_order, Order) else self._orders.pop(ticket_or_order, None)
+        # P16 (BUG-3 修复): 真正从 _orders 弹出, 不只是 append 到 _history
+        # 原 bug: 之前只 append, _orders 永远不释放, 内存泄漏
+        if isinstance(ticket_or_order, Order):
+            order = ticket_or_order
+            self._orders.pop(order.ticket, None)
+        else:
+            order = self._orders.pop(ticket_or_order, None)
         if order:
             self._history.append(order)
 
