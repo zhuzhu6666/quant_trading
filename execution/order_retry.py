@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 import logging
+import time as _time
 from typing import Callable, Optional
 import numpy as np
 
@@ -38,6 +39,9 @@ class OrderRejectionSimulator:
         "backoff_factor": 2.0,
         "max_backoff_ms": 5000,
         "seed": 42,
+        # P10 (audit 2026-06-04 FOOTGUN-6): sleep_backoff 默认 True (实盘行为)
+        # paper test 想加速可传 False
+        "sleep_backoff": True,
     }
 
     def __init__(self, config: dict | None = None):
@@ -75,7 +79,10 @@ class OrderRejectionSimulator:
             self._attempts += 1
             if self.should_reject(is_event_day, is_low_liquidity):
                 if attempt < max_retries - 1:
-                    _ = self.backoff_delay_ms(attempt)
+                    delay_ms = self.backoff_delay_ms(attempt)
+                    # P10 (FOOTGUN-6): 之前算出来不 sleep, 实盘接入会风暴
+                    if self.config.get("sleep_backoff", True):
+                        _time.sleep(delay_ms / 1000.0)
                 continue
             success, reason = order_fn()
             if success:
