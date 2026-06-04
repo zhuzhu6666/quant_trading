@@ -83,8 +83,26 @@ ws.onmessage = (e)=>{
     async def root():
         return HTMLResponse(DASHBOARD_HTML)
 
+    # P11 (audit 2026-06-04 ARCH-7): 起 _broadcast_loop 后台任务
+    # 之前 _broadcast() 定义了但从未启动, WebSocket 收不到任何数据
+    @app.on_event("startup")
+    async def _start_broadcast_loop():
+        import asyncio
+        from config import load_config, cfg_get
+        cfg = load_config()
+        interval = cfg_get(cfg, "monitor", "metrics_interval_seconds", default=1.0)
+        async def loop():
+            while True:
+                try:
+                    await _broadcast()
+                except Exception as e:
+                    logger.warning(f"broadcast failed: {e}")
+                await asyncio.sleep(interval)
+        asyncio.create_task(loop())
+
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket):
+        global _ws_clients  # P11: 避免闭包 UnboundLocalError
         await ws.accept()
         _ws_clients.add(ws)
         try:
@@ -95,6 +113,7 @@ ws.onmessage = (e)=>{
 
     async def _broadcast():
         """推送当前状态到所有WebSocket客户端"""
+        global _ws_clients  # P11: 同上
         if not _ws_clients:
             return
 
