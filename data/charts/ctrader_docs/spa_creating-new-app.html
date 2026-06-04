@@ -1,0 +1,107 @@
+<!--
+  Source: https://help.ctrader.com/open-api/creating-new-app/
+  Fetched: 2026-06-05 via Playwright
+  Method: SPA render → document.querySelector('main, .md-content')?.innerText
+-->
+<pre>
+Open API
+Documentation
+Documentation
+Use cases
+Create your application
+Table of contents
+Choose the purpose of your application
+Define the key functionality and processes
+Create the application UI
+Register your application
+Code the key functionality
+Debug and test your application
+Deploy and distribute your application
+Protobuf and JSON
+Essential tutorials
+Error handling
+Protobuf references
+SDKs
+Terms of use
+Privacy Policy
+Support
+FAQ
+Create your application¶
+
+Creating your application from scratch may seem daunting. To make this process significantly less challenging, you can divide it into smaller steps, forming an easy-to-follow roadmap.
+
+Below, we provide the key stages that this roadmap could include.
+
+Choose the purpose of your application¶
+
+For your app to be downloaded and used, it has to deliver value to the end users. As a result, any good application starts with defining the need it is supposed to address.
+
+Address user needs
+
+Here are some examples of the user needs you may choose to address.
+
+Traders may want to keep track of their performance all the time, not just inside cTrader. An app for wearable devices may prove very successful.
+Users with a followership could need a way to automatically inform their subscribers of new trades. You can easily provide such functionality using cTrader Open API and an API provided by a popular messenger service.
+Pro traders who partner with a broker may want a custom trading terminal that funnels users into creating new accounts with this broker. By integrating with the Open API you can easily satisfy this request.
+
+The purpose of your application does not necessarily have to be unique but it has to be specific and achievable.
+
+Define the key functionality and processes¶
+
+After deciding the need that your application will address, you should create a simple bullet point list outlining its key functionality.
+
+This bullet point list should not be very long (four to five points maximum) and should answer the following questions:
+
+What information will my app show to end users?
+What actions should end users be able to perform inside the application?
+What controls will my application have for end users to interact with?
+
+Be mindful of constraints
+
+When answering the questions above, always keep in mind the limitations imposed by your preferred programming language and UI framework.
+
+Create the application UI¶
+
+You now know what your app is supposed to do and what essential features it will include. The next logical step is to create its UI. Broadly speaking, this process usually involves the following:
+
+Define the parameters of the devices where your app will be displayed (for example, typical screen sizes).
+Create mockups of all key screens. You can do this by hand using pen and paper or with a wireframe software.
+Clean up your mockups and turn them into a set of screens containing all major controls. You can do this yourself or outsource the task to a professional graphic designer.
+
+Register your application¶
+
+After deciding the purpose of your application and its key functionality, you should be ready to register the service at the cTrader Open API Portal. You can read a detailed overview of this process in a separate guide.
+
+As detailed in our guide to app and account authentication, do not forget to specify a valid redirect URL for account authentication.
+
+Describe your application
+
+When registering your application, make sure to provide as many details as possible. Spotware carefully evaluates new Open API services and there is a higher chance of your application getting approved if you explicitly describe why it is needed and what it will allow users to do.
+
+Code the key functionality¶
+
+After receiving approval from Spotware, you should proceed with coding your application. As usual, we recommend using the official cTrader Open API SDKs as they contain helpful methods and classes allowing you to save time on implementing essential features.
+
+Here is a small roadmap you can follow when coding a new application.
+
+Create a system for opening a connection.
+Establish a connection to a proxy.
+Add a solution for sending/receiving messages.
+Implement a service for app and account authentication.
+Add custom logic that handles your app’s functionality.
+Debug and test your application¶
+
+Debugging is essential for ensuring that your app behaves as expected. Any modern IDE typically allows for setting breakpoints at certain lines in your code so that you can easily see how your commands are executed. When a breakpoint is hit, execution is paused until you resume it manually.
+
+If you have such an opportunity, you could also recruit your friends as impromptu quality assurance engineers. They can review how your application behaves on different devices and identify errors that may be difficult to spot when debugging alone.
+
+Deploy and distribute your application¶
+
+The process of deployment essentially means making your app available to end users. The details of this process depend on the platform that your app is supposed to run on.
+
+For desktop devices you can simply build your application in release mode and add a custom installer.
+For Android smartphones, you have to sign and release your application following the official Google guidelines.
+For iOS devices, you first need to prepare the app bundle and register your service on App Store Connect.
+For a web project, choose a suitable deployment service (for example, AWS Elastic Beanstalk) and follow its guidelines. Alternatively, procure suitable hosting and deploy your app on a remote server.
+ Back to top
+</pre>

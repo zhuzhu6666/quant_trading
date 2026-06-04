@@ -101,3 +101,10 @@ $RECYCLE.BIN/
 
 # ── 项目特定的"不固化"文件 ─────────────
 # (留空, 一切由上面规则覆盖)
+.env
+
+# cTrader PoC 报告 (含 account_id 痕迹, 不入库)
+data/charts/ctrader_poc_report.txt
+data/charts/ctrader_docs/dummy.txt
+data/charts/ctrader_docs/poc_run2.txt
+data/charts/framework_audit_20260604.md

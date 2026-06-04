@@ -13,6 +13,22 @@ mt5:
   server: Bybit-Live-2
   symbol: XAUUSD+
   password_env: MT5_PASSWORD
+
+# cTrader Open API (并行 MT5 接入, 2026-06-04 起)
+# Pepperstone demo 走 demo.ctraderapi.com:5035 (ssl)
+# Access token (推荐) 走 env: CTRADER_ACCESS_TOKEN, 不需 password
+ctrader:
+  client_id_env: CTRADER_CLIENT_ID
+  client_secret_env: CTRADER_CLIENT_SECRET
+  access_token_env: CTRADER_ACCESS_TOKEN    # Pepperstone demo 提供
+  account_id_env: CTRADER_ACCOUNT_ID
+  host: demo.ctraderapi.com                  # demo=模拟盘, live=实盘 host
+  port: 5035
+  symbol: XAUUSD                            # Pepperstone 是 XAUUSD (无 +)
+  rate_limit_per_sec: 5                     # 跟 SDK 默认对齐, 防 broker 限速
+  request_timeout_sec: 10
+  send_orders: false                        # 安全闸: PoC 阶段默认不下单
+
   
 commission:
   type: fixed                 # fixed | percentage
@@ -29,9 +45,27 @@ risk:
     volatility_mult: 3.0      # ATR×N→减仓
 
 position:
-  sizing_method: risk_fixed   # risk_fixed | kelly | equal
-  risk_per_trade_pct: 2.0     # 每笔风险占资金%
-  max_leverage: 500           # Bybit最大杠杆
+  sizing_method: kelly          # risk_fixed | kelly | equal
+  risk_per_trade_pct: 2.0       # 每笔风险占资金%
+  max_position_lots: 0.1        # 最大仓位手数
+  max_leverage: 500             # Bybit最大杠杆
+
+event_sizing:
+  enabled: true                 # 事件感知动态仓位
+  db_path: data/market_data.db
+  event_times:                  # 假设发布时间 (UTC)
+    FOMC: "19:00"
+    NFP: "13:30"
+    CPI: "13:30"
+    PCE: "13:30"
+  tiers:                        # importance → [{max_hours_before, multiplier}]
+    3:  # HIGH: FOMC, NFP, CPI
+      - {max_hours_before: 4,  multiplier: 0.2}
+      - {max_hours_before: 24, multiplier: 0.5}
+      - {max_hours_before: 72, multiplier: 0.8}
+    2:  # MEDIUM: PCE
+      - {max_hours_before: 4,  multiplier: 0.5}
+      - {max_hours_before: 24, multiplier: 0.8}
 
 execution:
   default_type: market         # market | limit | stop

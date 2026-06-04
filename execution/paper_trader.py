@@ -109,7 +109,8 @@ class PaperTrader:
                  # P2: 资金费/隔夜利息 (XAUUSD+ 典型 -1.0/lot/day long, 0 short)
                  enable_swap: bool = True,
                  swap_long_per_lot_per_day: float = -1.0,
-                 swap_short_per_lot_per_day: float = 0.0):
+                 swap_short_per_lot_per_day: float = 0.0,
+                 event_sizing=None):
         # FOOTGUN-2 (audit 2026-06-04): risk_per_trade_pct=0 静默禁用动态仓位
         # 显式 warning 提醒 caller, 避免把 0 误解为 "0% 风险"
         if risk_per_trade_pct == 0.0:
@@ -156,6 +157,7 @@ class PaperTrader:
             enable_swap=enable_swap,
             swap_long_per_lot_per_day=swap_long_per_lot_per_day,
             swap_short_per_lot_per_day=swap_short_per_lot_per_day,
+            event_sizing=event_sizing,
         )
         self.warmup_bars = warmup_bars
         self._bars: list[dict] = []

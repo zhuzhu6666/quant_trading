@@ -96,6 +96,7 @@ class MABPaperRunner:
         alerter=None,               # monitor.alerter.Alerter
         retrain_scheduler=None,     # RetrainScheduler (T8)
         event_filter=None,          # SharedEventFilter (T13, 默认 None = 不过滤)
+        event_sizing=None,          # EventSizing 事件感知仓位
     ):
         self.strategies = strategies
         self.router = router
@@ -130,6 +131,7 @@ class MABPaperRunner:
             volatility_mult=volatility_mult,
             risk_per_trade_pct=risk_per_trade_pct,
             enable_circuit=enable_circuit,
+            event_sizing=event_sizing,
         )
         # 直接改 engine min_lots (PaperTrader 没暴露, 但 engine 有这个属性)
         self.paper.engine.min_lots = min_lots

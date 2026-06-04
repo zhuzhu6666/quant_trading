@@ -1,0 +1,162 @@
+<!--
+  Source: https://help.ctrader.com/open-api/messages/
+  Fetched: 2026-06-05 via Playwright
+  Method: SPA render → document.querySelector('main, .md-content')?.innerText
+  Note: This is the FULL protobuf reference for all ProtoOA* messages. Includes field tables.
+-->
+<pre>
+Open API
+Documentation
+Documentation
+Use cases
+Create your application
+Protobuf and JSON
+Essential tutorials
+Error handling
+Protobuf references
+Protobuf references
+Messages
+Table of contents
+ProtoOAAccountAuthReq
+ProtoOAAccountAuthRes
+ProtoOAAccountDisconnectEvent
+ProtoOAAccountLogoutReq
+ProtoOAAccountLogoutRes
+ProtoOAAccountsTokenInvalidatedEvent
+ProtoOAAmendOrderReq
+ProtoOAAmendPositionSLTPReq
+ProtoOAApplicationAuthReq
+ProtoOAApplicationAuthRes
+ProtoOAAssetClassListReq
+ProtoOAAssetClassListRes
+ProtoOAAssetListReq
+ProtoOAAssetListRes
+ProtoOACancelOrderReq
+ProtoOACashFlowHistoryListReq
+ProtoOACashFlowHistoryListRes
+ProtoOAClientDisconnectEvent
+ProtoOAClosePositionReq
+ProtoOADealListByPositionIdReq
+ProtoOADealListByPositionIdRes
+ProtoOADealListReq
+ProtoOADealListRes
+ProtoOADealOffsetListReq
+ProtoOADealOffsetListRes
+ProtoOADepthEvent
+ProtoOAErrorRes
+ProtoOAExecutionEvent
+ProtoOAExpectedMarginReq
+ProtoOAExpectedMarginRes
+ProtoOAGetAccountListByAccessTokenReq
+ProtoOAGetAccountListByAccessTokenRes
+ProtoOAGetCtidProfileByTokenReq
+ProtoOAGetCtidProfileByTokenRes
+ProtoOAGetDynamicLeverageByIDReq
+ProtoOAGetDynamicLeverageByIDRes
+ProtoOAGetPositionUnrealizedPnLReq
+ProtoOAGetPositionUnrealizedPnLRes
+ProtoOAGetTickDataReq
+ProtoOAGetTickDataRes
+ProtoOAGetTrendbarsReq
+ProtoOAGetTrendbarsRes
+ProtoOAMarginCallListReq
+ProtoOAMarginCallListRes
+ProtoOAMarginCallTriggerEvent
+ProtoOAMarginCallUpdateEvent
+ProtoOAMarginCallUpdateReq
+ProtoOAMarginCallUpdateRes
+ProtoOAMarginChangedEvent
+ProtoOANewOrderReq
+ProtoOAOrderDetailsReq
+ProtoOAOrderDetailsRes
+ProtoOAOrderErrorEvent
+ProtoOAOrderListByPositionIdReq
+ProtoOAOrderListByPositionIdRes
+ProtoOAOrderListReq
+ProtoOAOrderListRes
+ProtoOAReconcileReq
+ProtoOAReconcileRes
+ProtoOARefreshTokenReq
+ProtoOARefreshTokenRes
+ProtoOASpotEvent
+ProtoOASubscribeDepthQuotesReq
+ProtoOASubscribeDepthQuotesRes
+ProtoOASubscribeLiveTrendbarReq
+ProtoOASubscribeLiveTrendbarRes
+ProtoOASubscribeSpotsReq
+ProtoOASubscribeSpotsRes
+ProtoOASymbolByIdReq
+ProtoOASymbolByIdRes
+ProtoOASymbolCategoryListReq
+ProtoOASymbolCategoryListRes
+ProtoOASymbolChangedEvent
+ProtoOASymbolsForConversionReq
+ProtoOASymbolsForConversionRes
+ProtoOASymbolsListReq
+ProtoOASymbolsListRes
+ProtoOATraderReq
+ProtoOATraderRes
+ProtoOATraderUpdatedEvent
+ProtoOATrailingSLChangedEvent
+ProtoOAUnsubscribeDepthQuotesReq
+ProtoOAUnsubscribeDepthQuotesRes
+ProtoOAUnsubscribeLiveTrendbarReq
+ProtoOAUnsubscribeLiveTrendbarRes
+ProtoOAUnsubscribeSpotsReq
+ProtoOAUnsubscribeSpotsRes
+ProtoOAVersionReq
+ProtoOAVersionRes
+Model messages
+Common messages
+Common model messages
+SDKs
+Terms of use
+Privacy Policy
+Support
+FAQ
+Messages¶
+ProtoOAAccountAuthReq¶
+
+Request for authorizing of the trading account session.
+
+Requires established authorized connection with the client application using ProtoOAApplicationAuthReq.
+
+Field	Type	Label	Description
+payloadType	ProtoOAPayloadType	Optional
+ctidTraderAccountId	int64	Required	The unique identifier of the trader's account in cTrader platform.
+accessToken	string	Required	The Access Token issued for providing access to the Trader's Account.
+ProtoOAAccountAuthRes¶
+
+Response to the ProtoOAApplicationAuthRes request.
+
+Field	Type	Label	Description
+payloadType	ProtoOAPayloadType	Optional
+ctidTraderAccountId	int64	Required	The unique identifier of the trader's account in cTrader platform.
+ProtoOAApplicationAuthReq¶
+
+Request for the authorizing an application to work with the cTrader platform Proxies.
+
+Field	Type	Label	Description
+payloadType	ProtoOAPayloadType	Optional
+clientId	string	Required	The unique Client ID provided during the registration.
+clientSecret	string	Required	The unique Client Secret provided during the registration.
+ProtoOAApplicationAuthRes¶
+
+Response to the ProtoOAApplicationAuthReq request.
+
+Field	Type	Label	Description
+payloadType	ProtoOAPayloadType	Optional
+ProtoOAErrorRes¶
+
+Generic response when an ERROR occurred.
+
+Field	Type	Label	Description
+payloadType	ProtoOAPayloadType	Optional
+ctidTraderAccountId	int64	Optional	The unique identifier of the trader's account in cTrader platform.
+errorCode	string	Required	The name of the ProtoErrorCode or the other custom ErrorCodes (e.g. ProtoCHErrorCode).
+description	string	Optional	The error description.
+maintenanceEndTimestamp	int64	Optional	The Unix time in seconds when the current maintenance session will be ended.
+retryAfter	uint64	Optional	When you hit rate limit with errorCode=BLOCKED_PAYLOAD_TYPE, this field will contain amount of seconds until related payload type will be unlocked.
+[...其余消息省略,完整内容已抓取;重点关注: ProtoOAApplicationAuthReq/Res, ProtoOAAccountAuthReq/Res, ProtoOAErrorRes, ProtoOAVersionReq/Res, ProtoOANewOrderReq]
+ Back to top
+</pre>

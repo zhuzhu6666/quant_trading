@@ -102,6 +102,10 @@ def main():
                         help="启用 SharedEventFilter (T13: NFP/FOMC+CPI/GVZ 共享 skip)")
     parser.add_argument("--no-event-filter", action="store_true",
                         help="显式禁用 SharedEventFilter (覆盖 --use-event-filter 之外的默认)")
+    parser.add_argument("--use-event-sizing", action="store_true", default=True,
+                        help="启用事件感知动态仓位 (默认开启, --no-event-sizing 禁用)")
+    parser.add_argument("--no-event-sizing", action="store_true",
+                        help="禁用事件感知动态仓位")
     parser.add_argument("--factor-health-report", action="store_true",
                         help="T14.1 跑 paper 前先评估 22 因子健康分, 落盘 data/charts/factor_health_report.txt")
     parser.add_argument("--factor-health-data", type=str, default=None,
@@ -505,6 +509,17 @@ def run_paper(args):
     # ── 加载数据 ──
     store = DataStore("data/market_data.db")
 
+    # ── 事件感知仓位 (默认开启) ──
+    event_sizing = None
+    if args.use_event_sizing and not args.no_event_sizing:
+        from execution.event_sizing import EventSizing
+        event_sizing = EventSizing(
+            db_path=cfg_get(CFG, "event_sizing", "db_path",
+                            default="data/market_data.db"),
+            enabled=True,
+        )
+        logger.info(f"  [EventSizing] 启用: {event_sizing.stats()}")
+
     # ── 路径 A: --use-router MAB 多策略 ──
     if args.use_router:
         from strategy.mab_router import MABRouter
@@ -618,11 +633,10 @@ def run_paper(args):
             meta_monitor=meta_monitor, factor_monitor=factor_monitor,
             alerter=alerter, retrain_scheduler=retrain_scheduler,
             event_filter=event_filter,
-            # baseline 等比例: 0.01 lot × 100 contract = 1 oz XAUUSD
-            # 3 ATR SL × \$7 ATR × 1 oz = \$21 单笔 = 4.2% 账户 (P0 风控原则)
-            # max_lots=2.0 跟 baseline 一致, 共享 4 策略仓位
-            initial_balance=500.0, default_lots=0.01, max_lots=2.0,
+            initial_balance=500.0, default_lots=0.01, max_lots=0.1,
+            risk_per_trade_pct=2.0,
             enable_circuit=args.enable_circuit,
+            event_sizing=event_sizing,
         )
         try:
             runner.load_data(store, args.symbol, args.timeframe)
@@ -670,12 +684,11 @@ def run_paper(args):
         strategy=strategy,
         initial_balance=500.0,
         default_lots=0.01,
-        max_lots=2.0,
+        max_lots=0.1,
         warmup_bars=500,
-        # 事件/GVZ 过滤已在 strategy 内（sweep R5 实测最优）
-        # 显式禁掉 pre_trade/circuit，让 738 笔全过
-        # （sweep R5 跑出 DD 40% / +$2038）
-        enable_circuit=args.enable_circuit,  # T2 改: 默认 False, 启用 --enable-circuit 打开
+        risk_per_trade_pct=2.0,
+        enable_circuit=args.enable_circuit,
+        event_sizing=event_sizing,
     )
     try:
         trader.load_data(store, args.symbol, args.timeframe)

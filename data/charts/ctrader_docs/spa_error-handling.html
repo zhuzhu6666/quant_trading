@@ -1,0 +1,113 @@
+<!--
+  Source: https://help.ctrader.com/open-api/error-handling/
+  Fetched: 2026-06-05 via Playwright
+  Method: SPA render → document.querySelector('main, .md-content')?.innerText
+  Note: Angular SPA; this is the post-bootstrap rendered text
+-->
+<pre>
+Open API
+Documentation
+Documentation
+Use cases
+Create your application
+Protobuf and JSON
+Essential tutorials
+Error handling
+Table of contents
+Error handling at the data and domain layer
+Error handling at the domain and application layer
+Protobuf references
+SDKs
+Terms of use
+Privacy Policy
+Support
+FAQ
+Error handling¶
+
+Error handling is a crucial part of any reliable and user-friendly Open API application. Unless you catch and process various errors, your users may experience flawed UI or may be prevented from performing certain essential actions entirely.
+
+Broadly speaking, different error handling processes may be implemented depending on the layer where an error occurs.
+
+At the data and domain layer. In some cases, the cTrader backend may send the ProtoErrorRes message as a response to one of your requests. For operations related to orders, deals or positions, you may also receive the ProtoOAOrderErrorEvent message.
+At the domain and application layer. Users may perform actions that you have not accounted for in your code, resulting in your application behaving unexpectedly.
+
+The mechanisms for handling errors at these levels differ and are described below.
+
+Error handling at the data and domain layer¶
+
+You may receive ProtoErrorRes or ProtoOAOrderErrorEvent in the following situations (note that the list is not exhaustive):
+
+Attempting to place an order for a symbol for which the market is closed.
+Sending an incorrect or an unsupported message.
+Attempting to modify an order that is being executed.
+Sending a message after losing your connection to the cTrader backend.
+
+Analyse errors
+
+Both the ProtoErrorRes and the ProtoOAOrderErrorEvent have the errorCode and description fields that contain precise information about the type of error that has occurred and its description. You can see the full list of all supported error codes in the ProtoErrorCode enum.
+
+To ensure that your application does not break in such cases, you can usually subscribe to callbacks that trigger when you receive an error response. The exact logic of these callbacks as well as how you can subscribe to them depend on the client you are using to establish a connection and listen to the messages stream.
+
+Working with JSON
+
+When operating with JSON, you can still reuse code from this tutorial; however, you would need to slightly modify it depending on your approach to serialisation and deserialisation and your preferred TCP and WebSocket client.
+
+C#
+Python
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+private void SubscribeToErrors(IObservable<IMessage> observable)
+{
+    if (observable is null) throw new ArgumentNullException(nameof(observable));
+
+    observable.ObserveOn(SynchronizationContext.Current).Subscribe(_ => { }, OnError);
+
+    observable.OfType<ProtoOAOrderErrorEvent>().ObserveOn(SynchronizationContext.Current).Subscribe(OnOrderErrorRes);
+}
+
+private void OnOrderErrorRes(ProtoOAErrorRes error)
+{
+    Console.WriteLine($"Error: Error {error.ErrorCode}; {error.Description}");
+}
+
+private void OnErrorRes(ProtoErrorRes error)
+{
+    Console.WriteLine($"Error: Error {error.ErrorCode}; {error.Description}");
+}
+
+Error handling at the domain and application layer¶
+
+The way you handle errors at the domain and application layers depends on your chosen programming language, UI framework and the use cases you implement, making it difficult to provide specific code snippets and solutions.
+
+However, the following recommendations can prove useful regardless of how you choose to integrate with cTrader Open API.
+
+Always implement a dedicated error state for major UI elements. This will prevent your application from breaking entirely and allow for running in a semi-degraded state.
+Implement a secure and reliable logging mechanism that will record errors in a suitable location (for example, local storage). If repeated errors occur, logging should simplify identifying and addressing their cause.
+Create a mechanism for users to inform you of errors. This can be as simple as providing your contact info within the application or as complicated as adding an automatic feedback submission system that triggers on new error events.
+Ensure that any resources used when errors occur are properly cleaned up. While most languages offer garbage collector services, you may want to specify custom resource disposal logic.
+ Back to top
+</pre>

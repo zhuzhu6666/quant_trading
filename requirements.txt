@@ -12,6 +12,11 @@ pyyaml>=6.0
 # MT5 (optional — for live/paper trading)
 MetaTrader5>=5.0
 
+# cTrader (optional — for live/paper trading via Open API)
+# Used by execution/ctrader_bridge.py. Pulls in Twisted + protobuf.
+ctrader-open-api>=0.9
+service_identity>=18.0  # TLS hostname verification, silence Twisted warning
+
 # Dashboard (optional)
 fastapi>=0.109
 uvicorn[standard]>=0.27

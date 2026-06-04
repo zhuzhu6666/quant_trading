@@ -30,6 +30,7 @@ from strategy.base import Signal
 from risk.pre_trade import PreTradeChecker
 from risk.circuit import CircuitBreaker
 from execution.slippage import DynamicSlippageModel
+from execution.event_sizing import EventSizing
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class PaperExecutionEngine:
                  circuit_breaker: Optional[CircuitBreaker] = None,
                  atr_source: Optional[callable] = None,
                  slippage_model: Optional[DynamicSlippageModel] = None,
+                 event_sizing: Optional[EventSizing] = None,
                  # P2: 资金费/隔夜利息 (XAUUSD+ 典型: long=-1.0/lot/day, short=0)
                  # swap 单位: USD per lot per day, 负值=成本, 正值=返佣
                  # 对 0.01 lot 持仓 1 天, -1.0 -> -0.01 USD
@@ -93,6 +95,8 @@ class PaperExecutionEngine:
         self.atr_source = atr_source
         # 动态滑点模型（None = 保留固定 2bps）
         self.slippage_model = slippage_model
+        # 事件感知仓位（None = 不调整）
+        self.event_sizing = event_sizing
         # P2: swap/funding 资金费 (隔夜利息)
         self.enable_swap = enable_swap
         self.swap_long_per_lot_per_day = swap_long_per_lot_per_day
@@ -155,7 +159,7 @@ class PaperExecutionEngine:
             sl_price = fill_price + atr * signal.sl_atr
             tp_price = fill_price - atr * signal.tp_atr
 
-        # ── 动态仓位（Kelly-style） ──────────────────────
+        # ── 动态仓位（Kelly + Event Sizing） ──────────────────
         # risk_per_trade_pct > 0 时按账户余额 × 风险% / 单笔价差 反推手数
         # signal.strength (默认 1.0) 作为额外乘数（FOMC boost 用）
         size_mult = max(0.01, float(getattr(signal, 'strength', 1.0) or 1.0))
@@ -167,12 +171,23 @@ class PaperExecutionEngine:
                 lots = risk_dollars / (pip_risk * self.CONTRACT_SIZE)
             else:
                 lots = self.default_lots
-            # 钳制 [min_lots, max_position_lots]，并按 0.01 取整（MT5 步进）
-            lots = max(self.min_lots, min(round(lots, 2), self.max_position_lots))
         else:
-            # 无 Kelly 时，strength 也作为倍数（但要 max_lots 钳制）
-            lots = round(self.default_lots * size_mult, 2)
-            lots = max(self.min_lots, min(lots, self.max_position_lots))
+            # 无 Kelly 时，strength 也作为倍数
+            lots = self.default_lots * size_mult
+
+        # ── Event multiplier ────────────────────────────────
+        # 事件临近时缩小仓位: mult ∈ [0.2, 1.0]
+        if self.event_sizing is not None and signal.timestamp > 0:
+            event_mult = self.event_sizing.get_multiplier(signal.timestamp)
+            lots *= event_mult
+            if event_mult < 1.0:
+                logger.debug(
+                    f"EVENT SIZING: mult={event_mult:.2f} "
+                    f"lots_after={lots:.4f} (before clamp)"
+                )
+
+        # 统一钳制 [min_lots, max_position_lots]，按 0.01 取整（MT5 步进）
+        lots = max(self.min_lots, min(round(lots, 2), self.max_position_lots))
 
         # ── 前置风控检查 ──────────────────────────────
         if self.pre_trade is not None:

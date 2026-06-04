@@ -56,6 +56,7 @@ def run_paper_dryrun(n_bars: int, timeframe: str, symbol: str) -> dict:
     """
     from strategies.multi_factor_m15 import MultiFactorM15Strategy as MultiFactorM15
     from execution.paper_engine import PaperExecutionEngine
+    from execution.event_sizing import EventSizing
     from alpha.probability_calibrator import ProbabilityCalibrator
 
     logger.info(f'Loading last {n_bars} {timeframe} bars for {symbol}...')
@@ -67,14 +68,16 @@ def run_paper_dryrun(n_bars: int, timeframe: str, symbol: str) -> dict:
 
     # 简化 paper 引擎
     strategy = MultiFactorM15(name="multi_factor_m15", symbol=symbol, timeframe=timeframe)
+    event_sizing = EventSizing(db_path=str(PROJECT_ROOT / 'data' / 'market_data.db'))
     engine = PaperExecutionEngine(
         initial_balance=500.0,
         default_lots=0.01,
-        max_position_lots=0.5,
-        risk_per_trade_pct=0.02,
+        max_position_lots=0.1,
+        risk_per_trade_pct=2.0,
         enable_swap=True,
         swap_long_per_lot_per_day=-1.0,
         swap_short_per_lot_per_day=0.0,
+        event_sizing=event_sizing,
     )
 
     t0 = _time.time()

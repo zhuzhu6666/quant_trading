@@ -62,3 +62,27 @@ def expand_to_window(dates: set[str], days: int = 1) -> set[str]:
         for delta in range(-days, days + 1):
             out.add((base + timedelta(days=delta)).strftime("%Y-%m-%d"))
     return out
+
+
+def load_events_with_importance(
+    db_path: str = "data/market_data.db",
+    min_importance: int = 2,
+) -> list[dict]:
+    """加载 importance >= min_importance 的事件。
+
+    Returns:
+        list of dicts: [{date, type, description, importance}, ...]
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT date, type, description, importance "
+        "FROM events WHERE importance >= ?",
+        (min_importance,),
+    )
+    rows = [
+        {"date": r[0], "type": r[1], "description": r[2], "importance": r[3]}
+        for r in cur.fetchall()
+    ]
+    conn.close()
+    return rows
