@@ -177,7 +177,8 @@ class ExecutionRouter:
             )
 
         # SL/TP 跟到最新一笔
-        state.position.sl_price = order.sl
+        # P5a (audit 2026-06-04 ARCH-3): 走 set_sl_price helper 持锁
+        state.set_sl_price(order.sl)
         state.position.tp_price = order.tp
 
         logger.info(f"FILLED: ticket={order.ticket} price={fill_price:.2f} "

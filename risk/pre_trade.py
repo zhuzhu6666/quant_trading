@@ -45,9 +45,10 @@ class PreTradeChecker:
         
         # 3. 日内亏损检查
         if state.daily_loss_pct >= self.max_daily_loss_pct:
-            state.is_circuit_breaker = True
-            state.circuit_reason = f"日内亏损{state.daily_loss_pct:.1f}%达到上限"
-            return False, state.circuit_reason
+            reason = f"日内亏损{state.daily_loss_pct:.1f}%达到上限"
+            # P5a (BUG-10): 走 mark_breaker 发 event, 不再直写
+            state.mark_breaker(True, reason)
+            return False, reason
 
         # 4. 交易次数检查
         if state.daily.total_trades >= self.max_trades:
@@ -55,9 +56,10 @@ class PreTradeChecker:
 
         # 5. 连续亏损检查
         if state.daily.consecutive_losses >= self.max_consecutive_loss:
-            state.is_circuit_breaker = True
-            state.circuit_reason = f"连续亏损{state.daily.consecutive_losses}笔"
-            return False, state.circuit_reason
+            reason = f"连续亏损{state.daily.consecutive_losses}笔"
+            # P5a (BUG-10): 同上
+            state.mark_breaker(True, reason)
+            return False, reason
 
         # 6. 单笔风险检查
         pip_risk = abs(entry_price - sl_price)

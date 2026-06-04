@@ -106,18 +106,17 @@ class CircuitBreaker:
         return False, "OK"
 
     def trip(self, reason: str):
-        """手动触发熔断"""
+        """手动触发熔断
+
+        P5a (audit 2026-06-04 BUG-10): 走 state.mark_breaker() 发 event,
+        而不是直接赋 state.is_circuit_breaker = True (那样不通知 bus subscribers)。
+        """
         if state.is_circuit_breaker:
             return  # 已触发
-        state.is_circuit_breaker = True
-        state.circuit_reason = reason
+        state.mark_breaker(True, reason)
         logger.warning(f"CIRCUIT BREAKER TRIPPED: {reason}")
-
-        bus.publish_sync(Event(
-            type=EventType.CIRCUIT_BREAK,
-            data={"reason": reason},
-            source="circuit_breaker",
-        ))
+        # 注: state.mark_breaker 已经 publish event, 这里不再 publish
+        # (老代码重复 publish 会被 bus 收到 2 次)
 
     def reset(self):
         """重置熔断（跨日后）
@@ -125,9 +124,9 @@ class CircuitBreaker:
         注意: 不调 state.reset_daily() — daily stats 的重置由调用方 (paper_trader._reset_daily_stats
         / mab_paper_runner) 负责, 它们用 DailyStats(date, peak_equity=peak) 保留 peak。
         这里只清 circuit 自己的状态 (ATR 序列 + 滑点累计 + 触发标志)。
+        P5a: 走 state.mark_breaker(False, "") 而非直写。
         """
-        state.is_circuit_breaker = False
-        state.circuit_reason = ""
+        state.mark_breaker(False, "")
         self._atr_history.clear()
         self._slippage_sum = 0.0
         self._slippage_count = 0

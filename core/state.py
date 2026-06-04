@@ -140,6 +140,39 @@ class State:
             self.is_circuit_breaker = False
             self.circuit_reason = ""
 
+    # ---------------------------------------------------------------------
+    # P5a (audit 2026-06-04 ARCH-3 + BUG-10): 走 helper 的 mutation
+    # 持有 _lock 保证多线程下不会 torn state,
+    # mark_breaker 还会发 EventType.CIRCUIT_BREAK 让 bus subscriber 收到。
+    # ---------------------------------------------------------------------
+
+    def mark_breaker(self, tripped: bool, reason: str = ""):
+        """持锁设熔断 + 同步发 EventType.CIRCUIT_BREAK event (tripped=True)
+
+        reset (tripped=False) 不发 event, 避免误报。daily reset 也走这里
+        一次, 由 reset_daily 内部已 acquire lock, 不会再发 event。
+        """
+        with self._lock:
+            self.is_circuit_breaker = tripped
+            self.circuit_reason = reason
+        # event 在锁外发, 避免持锁时回调递归
+        if tripped:
+            try:
+                from core.event_bus import bus, Event, EventType
+                bus.publish_sync(Event(
+                    type=EventType.CIRCUIT_BREAK,
+                    data={"reason": reason},
+                    source="state.mark_breaker",
+                ))
+            except Exception:
+                # event bus 不可用不应阻断熔断本身
+                pass
+
+    def set_sl_price(self, price: float):
+        """持锁设 position.sl_price (其他字段的 helper 留后续 PR)"""
+        with self._lock:
+            self.position.sl_price = price
+
 
 # 全局单例
 state = State()
