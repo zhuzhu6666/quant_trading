@@ -119,10 +119,12 @@ ws.onmessage = (e)=>{
 
         pos = state.position
         daily = state.daily
+        # ARCH-11 (audit 2026-06-04): pnl 用 state.daily.net_pnl, 不再硬编码 - 100
+        # (原来假设 initial_balance=100, 但 main.py 用 500.0, 算出来差 $400)
         payload = {
             "equity": round(state.equity, 2),
             "balance": round(state.balance, 2),
-            "pnl": round(state.equity - 100, 2),
+            "pnl": round(daily.net_pnl, 2),
             "position": {
                 "dir": "LONG" if pos.direction == 1 else "SHORT" if pos.direction == -1 else "FLAT",
                 "entry": round(pos.entry_price, 2),

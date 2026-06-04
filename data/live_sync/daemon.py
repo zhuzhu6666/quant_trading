@@ -119,6 +119,9 @@ class SyncDaemon:
         # P7 (BUG-13): 主循环内 gap check 阈值, 超过则升级到 full_sync
         # 防止 200 bars 容量撑爆后永久丢失数据
         self._gap_upgrade_threshold_hours = gap_upgrade_threshold_hours
+        # ARCH-12 (audit 2026-06-04): health_file 路径, watchdog 用
+        # daemon 启动时 touch (loop 入口), watchdog 监控 last_heartbeat_utc
+        self.health_file = (PROJECT_ROOT / "logs" / "daemon_health.json")
         self.orch = SyncOrchestrator(db_path=db_path)
         self._running = False
         self._first_run = True
