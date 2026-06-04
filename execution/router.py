@@ -141,18 +141,47 @@ class ExecutionRouter:
         return orders
 
     def on_fill(self, order: Order, fill_price: float):
-        """成交回调"""
+        """成交回调
+
+        P4 (audit 2026-06-04 BUG-2): 累加子单 volume + VWAP entry_price。
+        - 0 (首笔): 初始化
+        - 同向: VWAP 加权, volume 累加
+        - 反向: 本期不处理, warn + skip (TODO: 减仓/翻仓)
+        SL/TP 永远跟到最新一笔。
+        """
         self.oms.fill(order.ticket, fill_price)
 
-        # 更新持仓状态
-        state.position.direction = order.direction
-        state.position.volume = order.volume
-        state.position.entry_price = fill_price
+        if state.position.direction == 0:
+            # 首笔, 初始化
+            state.position.direction = order.direction
+            state.position.volume = order.volume
+            state.position.entry_price = fill_price
+        elif state.position.direction == order.direction:
+            # 同向加仓: VWAP 加权
+            new_vol = state.position.volume + order.volume
+            new_vwap = (
+                (state.position.entry_price * state.position.volume
+                 + fill_price * order.volume)
+                / new_vol
+            )
+            state.position.volume = new_vol
+            state.position.entry_price = new_vwap
+        else:
+            # 反向 fill: 减仓或翻仓, 本期不处理
+            # TODO: 实现减仓/翻仓的 volume 调整 + entry_price 重算
+            logger.warning(
+                f"[P4 BUG-2] on_fill 反向 fill 未处理: "
+                f"current_dir={state.position.direction}, "
+                f"fill_dir={order.direction}, vol={order.volume} "
+                f"(TODO: 减仓/翻仓逻辑)"
+            )
+
+        # SL/TP 跟到最新一笔
         state.position.sl_price = order.sl
         state.position.tp_price = order.tp
 
         logger.info(f"FILLED: ticket={order.ticket} price={fill_price:.2f} "
-                    f"size={order.volume}")
+                    f"size={order.volume} total_vol={state.position.volume:.2f}")
 
     def on_reject(self, order: Order, reason: str):
         """拒绝回调"""
