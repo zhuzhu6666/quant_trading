@@ -44,6 +44,11 @@ def setup_logging(log_dir: str = "logs"):
 
 
 def main():
+    # P1 (audit 2026-06-04): 显式读 settings.yaml, 让 YAML 改 → 行为变
+    # 改用 cfg_get(..., override=X) 模式, 调优值在 main.py 显式声明
+    from config import load_config, cfg_get
+    CFG = load_config()
+
     # 启动时恢复 shadow 因子 (跨进程持久化, T15.5)
     try:
         from alpha.persistent_registry import restore_from_log
