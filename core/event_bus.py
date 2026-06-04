@@ -7,6 +7,7 @@ Event Bus — 架构核心通信层
 
 import asyncio
 import logging
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -43,33 +44,41 @@ class Event:
 class EventBus:
     """
     异步事件总线
-    
+
     特性：
     - 按事件类型订阅
     - 支持优先级（数字越小越先执行）
     - 异常隔离：一个handler异常不影响其他handler
     - 内置事件计数统计
+    - ARCH-6 (audit 2026-06-04): 线程安全, subscribe/unsubscribe/publish_sync 持 RLock
     """
 
     def __init__(self):
         self._subscribers: dict[EventType, list[tuple[int, Callable]]] = defaultdict(list)
         self._stats: dict[EventType, int] = defaultdict(int)
+        # ARCH-6: RLock 让 publish 期间 handler 内 subscribe/unsubscribe 不抛
+        # RuntimeError, 也能让多线程并发 publish / subscribe 安全
+        self._lock = threading.RLock()
 
     def subscribe(self, event_type: EventType, handler: Callable, priority: int = 50):
         """订阅事件。priority越小越先执行。"""
-        self._subscribers[event_type].append((priority, handler))
-        self._subscribers[event_type].sort(key=lambda x: x[0])
+        with self._lock:
+            self._subscribers[event_type].append((priority, handler))
+            self._subscribers[event_type].sort(key=lambda x: x[0])
 
     def unsubscribe(self, event_type: EventType, handler: Callable):
         """取消订阅"""
-        self._subscribers[event_type] = [
-            (p, h) for p, h in self._subscribers[event_type] if h != handler
-        ]
+        with self._lock:
+            self._subscribers[event_type] = [
+                (p, h) for p, h in self._subscribers[event_type] if h != handler
+            ]
 
     async def publish(self, event: Event):
         """发布事件到所有订阅者"""
-        handlers = self._subscribers.get(event.type, [])
-        self._stats[event.type] += 1
+        # ARCH-6: snapshot handlers 在锁内, 实际派发在锁外
+        with self._lock:
+            handlers = list(self._subscribers.get(event.type, []))
+            self._stats[event.type] += 1
 
         for priority, handler in handlers:
             try:
@@ -83,8 +92,10 @@ class EventBus:
 
     def publish_sync(self, event: Event):
         """同步发布（回测模式用）"""
-        handlers = self._subscribers.get(event.type, [])
-        self._stats[event.type] += 1
+        # ARCH-6: snapshot 后再迭代, 期间 handler 内修改 _subscribers 不会炸
+        with self._lock:
+            handlers = list(self._subscribers.get(event.type, []))
+            self._stats[event.type] += 1
 
         for priority, handler in handlers:
             try:

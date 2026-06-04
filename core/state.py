@@ -114,13 +114,23 @@ class State:
                     self.daily.max_drawdown_pct = dd
 
     def record_trade(self, pnl: float, commission: float = 0.0, slippage: float = 0.0):
-        """记录一笔完整交易"""
+        """记录一笔完整交易
+
+        BUG-11 (audit 2026-06-04) 契约: pnl 必须是 NET (已含 commission)
+        - daily.net_pnl += pnl (pnl 已经是 net)
+        - daily.commission 累加 (用于 audit, 不影响 balance)
+        - balance += pnl (不 -commission, 避免双扣)
+        - daily.gross_pnl 累加 (gross = net + commission, 用于 audit)
+
+        若 caller 传的是 gross, 请先在 caller 端做 net = gross - commission。
+        """
         with self._lock:
             self.daily.total_trades += 1
             self.daily.net_pnl += pnl
             self.daily.commission += commission
             self.daily.slippage += slippage
-            self.balance += pnl - commission
+            self.daily.gross_pnl += pnl + commission
+            self.balance += pnl  # pnl is net, 不再 -commission
 
             if pnl > 0:
                 self.daily.winning_trades += 1
@@ -129,13 +139,28 @@ class State:
                 self.daily.losing_trades += 1
                 self.daily.consecutive_losses += 1
             else:
-                # BUG-5: 零净利单独计 (commission 跟 pnl 抵消的边界)
+                # 零净利单独计 (commission 跟 pnl 抵消的边界)
                 self.daily.break_even_trades += 1
 
-    def reset_daily(self):
-        """每日重置"""
+    def reset_daily(self, preserve_peak: bool = True):
+        """每日重置
+
+        ARCH-4 (audit 2026-06-04) 合约: 默认 preserve_peak=True,
+        跟 CircuitBreaker.reset() 的 "caller 构造 DailyStats(date, peak=peak)"
+        约定一致 — peak 不被清零, 否则 circuit.check_all 的分母会跌到 balance。
+
+        preserve_peak=False 显式清 peak (用于 reset_for_test 等场景)。
+        """
         with self._lock:
-            self.daily = DailyStats()
+            if preserve_peak:
+                # 保留 peak, 重置其他
+                old_peak = self.daily.peak_equity
+                old_date = self.daily.date
+                self.daily = DailyStats()
+                self.daily.peak_equity = old_peak
+                self.daily.date = old_date
+            else:
+                self.daily = DailyStats()
             self.active_orders.clear()
             self.is_circuit_breaker = False
             self.circuit_reason = ""

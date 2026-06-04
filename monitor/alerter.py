@@ -55,7 +55,14 @@ if sys.platform == "win32":
 
 
 def _should_send(min_level: str, level: str) -> bool:
-    return LEVEL_ORDER.get(level, 0) >= LEVEL_ORDER.get(min_level, 0)
+    # FOOTGUN-8 (audit 2026-06-04): 未知 level 抛 ValueError, 不再静默 accept
+    if level not in LEVEL_ORDER:
+        raise ValueError(f"unknown level: {level!r}, "
+                         f"expected one of {list(LEVEL_ORDER)}")
+    if min_level not in LEVEL_ORDER:
+        raise ValueError(f"unknown min_level: {min_level!r}, "
+                         f"expected one of {list(LEVEL_ORDER)}")
+    return LEVEL_ORDER[level] >= LEVEL_ORDER[min_level]
 
 
 def _level_prefix(level: str) -> str:
@@ -79,7 +86,15 @@ class Alerter:
         self.dingtalk_webhook: str | None = config.get("dingtalk_webhook")
         self.wecom_webhook: str | None = config.get("wecom_webhook")
         self.log_file: str | None = config.get("log_file")
-        self.min_level: str = config.get("min_level", WARNING).upper()
+        # FOOTGUN-8 (audit 2026-06-04): min_level 拼写错误应当 raise, 不再静默
+        # 用 WARNING 当默认 (跟原行为一致), 但 _should_send 会验
+        min_level_raw = config.get("min_level", WARNING)
+        if min_level_raw not in LEVEL_ORDER:
+            raise ValueError(
+                f"unknown min_level: {min_level_raw!r}, "
+                f"expected one of {list(LEVEL_ORDER)}"
+            )
+        self.min_level: str = min_level_raw.upper()
 
         # 日志目录自动创建
         if self.log_file:
