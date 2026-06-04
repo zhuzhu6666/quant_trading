@@ -103,12 +103,18 @@ class SyncDaemon:
                  timeframes: list[str] = None,
                  db_path: str = "data/market_data.db",
                  gap_threshold_hours: float = 6.0,
-                 heartbeat_sec: int = 300):
+                 heartbeat_sec: int = 300,
+                 max_wait_sec: int = 600):
         self.symbol = symbol
         self.timeframes = timeframes or ["M15"]
         self.db_path = db_path
         self.gap_threshold_hours = gap_threshold_hours
         self.heartbeat_sec = heartbeat_sec
+        # max_wait_sec caps the initial terminal64-poll loop. Default 600s
+        # (10 min) keeps the daemon self-exiting when MT5 is not running
+        # instead of flashing the taskbar forever. Set to 0 to wait forever
+        # (not recommended).
+        self._cli_max_wait_sec = max_wait_sec
         self.orch = SyncOrchestrator(db_path=db_path)
         self._running = False
         self._first_run = True
@@ -160,9 +166,14 @@ class SyncDaemon:
             f"heartbeat={self.heartbeat_sec}s"
         )
 
-        # --- 1. Wait for exactly one terminal64 ---
+        # --- 1. Wait for exactly one terminal64 (bail out after max_wait_sec
+        # so the daemon doesn't sit in a 5s poll loop -- which spawns a
+        # powershell.exe per poll and flashes the taskbar -- when MT5 is
+        # just not running. See commit 2fa5695 incident writeup.) ---
         try:
-            pids = mt5_guard.check_one(poll_sec=5.0, max_wait_sec=0)
+            pids = mt5_guard.check_one(
+                poll_sec=5.0, max_wait_sec=self._cli_max_wait_sec
+            )
         except RuntimeError as e:
             logger.error(f"[SyncDaemon] {e}")
             return
@@ -307,6 +318,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="if last sync is older than this, run full_sync first")
     p.add_argument("--heartbeat-sec", type=int, default=300,
                    help="how often to ping MT5 to detect dead handles")
+    p.add_argument("--max-wait-sec", type=int, default=600,
+                   help="seconds to wait for terminal64.exe at startup "
+                        "before giving up (default 600 = 10 min). Set to "
+                        "0 to wait forever (not recommended).")
     p.add_argument("--max-runs", type=int, default=0,
                    help="stop after N runs (0 = forever), debug only")
     return p
@@ -327,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         timeframes=tfs,
         gap_threshold_hours=args.gap_threshold_hours,
         heartbeat_sec=args.heartbeat_sec,
+        max_wait_sec=args.max_wait_sec,
     )
 
     if args.mode == "once":

@@ -67,18 +67,23 @@ def count_terminal64() -> int:
     return len(_list_terminal64_pids())
 
 
-def check_one(poll_sec: float = 5.0, max_wait_sec: int = 0) -> list[int]:
+def check_one(poll_sec: float = 5.0, max_wait_sec: int = 600) -> list[int]:
     """
     Enforce "exactly one terminal64 is running".
 
     - 0 instances: log and poll every poll_sec seconds until one appears,
-      or max_wait_sec elapses. max_wait_sec=0 means wait forever.
+      or max_wait_sec elapses. max_wait_sec<=0 means wait forever -- and is
+      the foot-gun mode that produced the 2026-06-04 desktop-flicker incident
+      (the daemon sat in a 5s loop that spawned powershell.exe per poll).
+      Callers that genuinely want to wait forever should pass a large
+      explicit value, not 0.
     - 1 instance: log PID and return [pid].
     - >1 instances: raise RuntimeError. Never pick a winner or kill one --
       that's the operator's call. This is the case that produced the
       auto-spawned hidden instance + the manual GUI terminal on 2026-06-03.
 
-    Returns the single PID on success.
+    Returns the single PID on success. Raises RuntimeError on timeout or
+    on multiple terminal64 instances.
     """
     waited = 0.0
     while True:
