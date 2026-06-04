@@ -80,7 +80,8 @@ class FactorAttribution:
         x_full = x_all[mask_all]
         y_full = y[mask_all]
         # 用 lstsq (避免 sklearn)
-        beta_full, _, _, _ = np.linalg.lstsq(x_full, y_full, rcond=None)
+        # BUG-22 (audit 2026-06-04): rcond=1e-10 截掉接近零的奇异值, 防共线炸 beta
+        beta_full, _, _, _ = np.linalg.lstsq(x_full, y_full, rcond=1e-10)
         y_hat_full = x_full @ beta_full
         full_ic = float(np.corrcoef(y_full, y_hat_full)[0, 1])
 
@@ -90,7 +91,8 @@ class FactorAttribution:
             mask[k] = False
             x_drop = x_all[mask_all][:, mask]
             try:
-                beta, _, _, _ = np.linalg.lstsq(x_drop, y_full, rcond=None)
+                # BUG-22 同上
+                beta, _, _, _ = np.linalg.lstsq(x_drop, y_full, rcond=1e-10)
                 y_hat = x_drop @ beta
                 leave_ic = float(np.corrcoef(y_full, y_hat)[0, 1])
             except Exception:
