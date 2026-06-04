@@ -115,6 +115,18 @@ def main():
                         help='T15.5 enable DSL-discovered shadow/discovered factors as extra votes (default off)')
     parser.add_argument('--shadow-top-k', type=int, default=3,
                         help='T15.5 max top-K shadow factors to consume (default 3)')
+
+    # FEAT-1 (audit 2026-06-04): 风险参数 CLI 透传, 覆盖 YAML 默认
+    # 之前只能在 PaperTrader.__init__ hardcode, 改个参数要改代码
+    # 现在 --max-daily-loss-pct=3 临时调紧熔断, --single-risk-usd=5 临时放低单笔
+    parser.add_argument("--max-daily-loss-pct", type=float, default=None,
+                        help="最大日内亏损 %% (覆盖 settings.yaml 默认 5.0)")
+    parser.add_argument("--max-consecutive-loss", type=int, default=None,
+                        help="最大连续亏损笔数 (覆盖 settings.yaml 默认 5)")
+    parser.add_argument("--single-risk-usd", type=float, default=None,
+                        help="单笔最大风险 USD (覆盖 settings.yaml 默认 2.0)")
+    parser.add_argument("--volatility-mult", type=float, default=None,
+                        help="ATR 波动率乘数 (覆盖 settings.yaml 默认 3.0)")
     args = parser.parse_args()
 
     setup_logging()
