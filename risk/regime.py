@@ -59,7 +59,9 @@ ATR_PERIOD: int = 14
 ATR_PERCENTILE_WINDOW: int = 200  # lookback for ATR percentile ranks
 
 # Volatility thresholds
-HIGH_VOL_ATR_PCTILE: float = 100.0   # ATR >= 100th percentile (i.e. highest)
+# P6 (audit 2026-06-04 BUG-7): 100.0 数学上不可达 (公式最大值 N/(N+1)*100 < 100)
+# 改成 95.0, 配合现有 percentile 公式可正常触发 HIGH_VOL
+HIGH_VOL_ATR_PCTILE: float = 95.0
 LOW_VOL_ATR_PCTILE: float = 30.0
 HIGH_VOL_GVZ: float = 20.0
 LOW_VOL_GVZ: float = 12.0
@@ -503,14 +505,30 @@ class RegimeDetector:
             dxy_vals = dxy_vals[-n:]
             xau_vals = xau_vals[-n:]
 
-        # Pearson correlation
-        try:
-            corr = np.corrcoef(dxy_vals, xau_vals)[0, 1]
-        except Exception:
+        # P6 (audit 2026-06-04 BUG-8): 用 log returns 而非 levels
+        # 两个 trending series 的 levels 相关恒 ±1, 改 returns 才反映真实关系
+        return _dxy_corr(dxy_vals, xau_vals)
+
+
+def _dxy_corr(dxy_vals: np.ndarray, xau_vals: np.ndarray) -> bool:
+    """Return True if log returns of DXY and XAU show strong inverse correlation.
+
+    P6 (audit 2026-06-04 BUG-8): 抽出来做单元可测, 用 log returns 替代 levels。
+    接受已对齐的等长数组, 返回 True 当 |corr(log_returns)| > DXY_CORR_THRESHOLD。
+    """
+    if dxy_vals.size < 3 or xau_vals.size < 3:
+        return False
+    try:
+        dxy_ret = np.diff(np.log(dxy_vals))
+        xau_ret = np.diff(np.log(xau_vals))
+        if dxy_ret.size < 2 or xau_ret.size < 2:
             return False
-        if np.isnan(corr):
-            return False
-        return abs(float(corr)) > DXY_CORR_THRESHOLD
+        corr = np.corrcoef(dxy_ret, xau_ret)[0, 1]
+    except Exception:
+        return False
+    if np.isnan(corr):
+        return False
+    return abs(float(corr)) > DXY_CORR_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
