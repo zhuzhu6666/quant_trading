@@ -104,7 +104,8 @@ class SyncDaemon:
                  db_path: str = "data/market_data.db",
                  gap_threshold_hours: float = 6.0,
                  heartbeat_sec: int = 300,
-                 max_wait_sec: int = 600):
+                 max_wait_sec: int = 600,
+                 gap_upgrade_threshold_hours: float = 24.0):
         self.symbol = symbol
         self.timeframes = timeframes or ["M15"]
         self.db_path = db_path
@@ -115,6 +116,9 @@ class SyncDaemon:
         # instead of flashing the taskbar forever. Set to 0 to wait forever
         # (not recommended).
         self._cli_max_wait_sec = max_wait_sec
+        # P7 (BUG-13): 主循环内 gap check 阈值, 超过则升级到 full_sync
+        # 防止 200 bars 容量撑爆后永久丢失数据
+        self._gap_upgrade_threshold_hours = gap_upgrade_threshold_hours
         self.orch = SyncOrchestrator(db_path=db_path)
         self._running = False
         self._first_run = True
@@ -208,6 +212,35 @@ class SyncDaemon:
                 f"{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"
             )
 
+            # P7 (audit 2026-06-04 BUG-13): 主循环里也检查 gap
+            # 启动时 _maybe_recover_from_gap 只跑一次, 之后若 daemon 跑得
+            # 比 incremental_sync 拉的 200 bars 还慢 (周末/长 downtime),
+            # 不升级到 full_sync 会永久丢失数据。
+            gap_hours = self._current_gap_hours()
+            if gap_hours is not None and gap_hours > self._gap_upgrade_threshold_hours:
+                logger.warning(
+                    f"[SyncDaemon] run #{run_count}: gap {gap_hours:.1f}h > "
+                    f"{self._gap_upgrade_threshold_hours:.1f}h, upgrading to full_sync"
+                )
+                try:
+                    report = self.orch.full_sync(
+                        self.symbol, self.timeframes, n_bars=5000
+                    )
+                    logger.info(
+                        f"[SyncDaemon] run #{run_count}: gap-upgrade full_sync +"
+                        f"{report.total_inserted} bars"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[SyncDaemon] run #{run_count} gap-upgrade failed: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                # 跳过 incremental, 直接下一轮
+                if max_runs > 0 and run_count >= max_runs:
+                    break
+                elapsed = _time.time() - t0
+                _time.sleep(max(0, interval_sec - elapsed))
+                continue
             # Periodic heartbeat -- catch dead handles early
             if runs_since_heartbeat >= heartbeat_every:
                 runs_since_heartbeat = 0
@@ -261,6 +294,18 @@ class SyncDaemon:
     # ---------------------------------------------------------------------
     # Internals
     # ---------------------------------------------------------------------
+
+    def _current_gap_hours(self) -> Optional[float]:
+        """P7 (BUG-13): 当前距上次 sync 的 gap (小时), 用于主循环升级判断
+
+        读 status last_sync_utc, 算 (now - last) / 3600。
+        没 status 或 status 没 last_sync_utc → 返回 None (不升级)。
+        """
+        last = _last_sync_utc_from_status()
+        if last is None:
+            return None
+        now = datetime.now(timezone.utc)
+        return (now - last).total_seconds() / 3600.0
 
     def _maybe_recover_from_gap(self) -> Optional[float]:
         """
