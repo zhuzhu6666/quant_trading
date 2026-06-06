@@ -7,6 +7,10 @@
 .claude-setup/
 .playwright-mcp/
 
+# ── MemPalace hooks 日志 ────────────────
+.claude/hooks/*.log
+.claude/hooks/*.log.*
+
 # ── Windows 临时文件 ────────────────────
 AppData/Local/Temp/tasks.txt
 
