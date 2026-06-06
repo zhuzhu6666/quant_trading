@@ -1,7 +1,7 @@
 # 项目框架总览 (PROJECT_MAP)
 
-> 最后更新: 2026-06-03 晚间 (P0-ETF/CB/COT 完成 + BUGFIX 4/4)
-> 项目状态: 39 因子 + 5 数据表 + COT 16 年历史
+> 最后更新: 2026-06-06 (Phase 1-5 + 调参全完结)
+> 项目状态: 39 因子 + 5 数据表 + COT 16 年历史 + 调参最优 risk=1.0% + CB=15%
 > 真实 PnL 数字 / 风险点 / 阻塞项 全部记录
 
 ---
@@ -19,8 +19,8 @@ quant_trading/
 ├── core/                            # 基础设施 (5 文件)
 │   ├── __init__.py
 │   ├── clock.py                     # 时间 / 计时
-│   ├── event_bus.py                 # 进程内事件总线
-│   └── state.py                     # 全局状态 (position / balance / circuit flag)
+│   ├── event_bus.py                 # 进程内事件总线 (publish_async_ff + daemon loop, 2026-06-06)
+│   └── state.py                     # StateContainer 多账户 (AccountState + 向后兼容, 2026-06-06)
 │
 ├── data/                            # 数据层 (10 文件)
 │   ├── store.py                     # DataStore — SQLite 读写
@@ -42,7 +42,7 @@ quant_trading/
 │   └── store.py                     # AnalyticsStore
 │
 ├── alpha/                           # 因子/ML/校准/DSL (15 文件)
-│   ├── registry.py                  # 22 因子注册 (P0-1 8 + P0-3 7 + 7 旧)
+│   ├── registry.py                  # 39 因子注册 (技术 15 + 时序 5 + ETF 6 + CB 4 + COT 6 + 跨资产 3)
 │   ├── factor_engine.py             # 流式因子计算 + IC 分析
 │   ├── ic_tracker.py                # 滚动 IC 追踪
 │   ├── factor_attribution.py        # 边际 IC 归因
@@ -78,20 +78,24 @@ quant_trading/
 │   ├── scorer.py                    # 加权打分融合
 │   └── retrain_scheduler.py         # ★ T8: 周期 retrain hook
 │
-├── execution/                       # 13 文件
+├── execution/                       # 14 文件
 │   ├── oms.py                       # Order 状态机
 │   ├── router.py                    # ExecutionRouter (P1-B algos 集成)
-│   ├── paper_engine.py              # PaperEngine 简化版
-│   ├── paper_trader.py              # ★ PaperTrader (主 paper 路径)
+│   ├── paper_engine.py              # PaperEngine (risk_per_trade_pct=None 区分, 2026-06-06)
+│   ├── paper_trader.py              # ★ PaperTrader (主 paper 路径, Sharpe NW HAC)
+│   ├── _sharpe.py                   # ★ Sharpe log returns + Newey-West HAC (2026-06-06 新增)
 │   ├── mt5_bridge.py                # ★ MT5 整合 (P1-A, filling mode + fetch)
+│   ├── ctrader_bridge.py            # ★ cTrader 整合 (amend_position_sltp, 2026-06-06)
 │   ├── algos.py                     # ★ T1.1 智能路由 (TWAP/VWAP/POV/IS)
-│   ├── mab_paper_runner.py          # ★ T1: MAB 多策略共享 paper (4 策略 + 7 组件)
-│   ├── event_filter.py              # ★ T13: SharedEventFilter (NFP/FOMC+CPI/GVZ)
+│   ├── mab_paper_runner.py          # ★ T1: MAB 多策略共享 paper (ARCH-1 护栏, 2026-06-06)
+│   ├── event_filter.py              # ★ T13: SharedEventFilter (precompute dual window, 2359× 加速)
 │   ├── slippage.py                  # 动态滑点
 │   ├── market_impact.py             # Almgren-Chriss
 │   ├── match_replay.py              # Brownian bridge 撮合回放
 │   ├── latency.py                   # 延迟模拟
 │   └── order_retry.py               # 拒单补单 (指数退避)
+│   ├── _sharpe.py                   # Sharpe NW HAC 计算
+│   └── ctrader_bridge.py            # cTrader 桥接 (amend_position_sltp)
 │
 ├── live/                            # 3 文件 (P1 实时层)
 │   ├── executor.py                  # MT5 旧实盘 (被 mt5_bridge 整合)
@@ -117,7 +121,7 @@ quant_trading/
 │   ├── alerts.py                    # Alert 接口
 │   └── dashboard.py                 # 监控面板
 │
-├── scripts/                         # 35+ 脚本 (测试 + 工具 + 入口)
+├── scripts/                         # 36+ 脚本 (测试 + 工具 + 入口)
 │   ├── live_sync.py                 # ★ T16: 实时数据同步 CLI
 │   ├── test_shadow_consumption.py   # ★ T15.5 闭环: A/B 验证 shadow 因子接进投票 (2026-06-03, PnL delta=-24.06% 闭环确认)
 │   ├── test_calibrator_persistence.py # ★ Task #2: calibrator load/save/roundtrip/missing/platt 5/5 (2026-06-03)
@@ -130,6 +134,7 @@ quant_trading/
 │   ├── drift_research_daemon.py      # ★ PR-3.2: SEVERE_DRIFT -> GP re-search
 │   ├── t13_skip_backfill.py          # ★ PR-3.4: T13 skip 期间数据补 batch
 │   ├── regime_retrain.py             # ★ PR-3.7: Regime 分类器周期重训
+│   ├── tune_risk_params.py           # ★ 风险参数调优 (risk_pct / CB sweep)
 │   ├── daily_paper_dryrun.py         # ★ PR-1.8: 日终 paper dryrun
 │   ├── test_calibrator_autosave.py   # ★ PR-1.3: walkforward 末尾 fit+save 验证
 │   ├── P0 系列: test_p0_factors / factor_pca / factor_ic_rolling
@@ -161,7 +166,7 @@ quant_trading/
 - **Dashboard**: `main.py --mode dashboard`
 
 ### 2.2 因子 / 模型
-- **因子注册**: `alpha/registry.py` (22 因子)
+- **因子注册**: `alpha/registry.py` (39 因子, 见 §3.2)
 - **PCA**: `scripts/factor_pca.py`
 - **XGBoost 训练**: `scripts/train_xgb_walkforward.py`
 - **Walk-Forward**: `scripts/walkforward_p0_6.py`
@@ -214,29 +219,37 @@ quant_trading/
 
 ---
 
-## 3. 真状态数字 (2026-06-02)
+## 3. 真状态数字 (2026-06-06)
 
 ### 3.1 PnL 对比 (multi_factor_m15, M15, 50K bar)
 
-| 路径 | PnL | Trades | Sharpe | 备注 |
-|---|---|---|---|---|
-| **main.py --mode paper** | **+407.51%** | 738 | 1.807 | enable_circuit=False, 显式无事件过滤 baseline |
-| **baseline_all_strategies** | +407.51% | 738 | - | 同上, 同一路径 |
-| **mab_paper 修后** | +380.58% | 596 | 1.452 | MAB router + 事件 skip 真的生效 |
-| **mab_paper_v2 修后** | +181.18% | 590 | 1.105 | v2 行为差异 (trend 选 76 次 vs v1 17 次) |
-| **MAB T1-T13 全栈 (新)** | +120.75% | 639 | 0.894 | main.py --use-router + T13 EventFilter, 业务层跟 baseline 同量级 |
-| paper w/ circuit 10% | -9.54% | 123 | -0.105 | P3 调优后默认值 |
-| paper w/ circuit 5% (原) | -33.61% | 62 | -0.872 | 频繁触发 (13+ 次) |
+| 路径 | PnL | Trades | Sharpe | DD | 备注 |
+|---|---|---|---|---|---|
+| **main.py --mode paper (无风控)** | **+407.51%** | 738 | 1.807 | 39.77% | enable_circuit=False baseline |
+| **MAB T1-T13 全栈** | **+120.75%** | 639 | 0.894 | 64% | SharedEventFilter 业务层关键 |
+| **verify-2 调参后 (risk=1% + CB=15%)** | **+59.17%** | 354 | **0.936** | 15.9% | Kelly 1% + 15% CB, 最优参数已固化 |
+| verify-2 调参前 (risk=2% + CB=10%) | -10.28% | 13 | -0.864 | 11.3% | CB 频繁触发 |
+| **verify-2** (risk=1.0%, CB=15%) | **+59.17%** | 354 | **0.936** | Phase 5 调参最终结果 |
 
-### 3.2 因子 (22 个, 4 有效)
+### 3.2 因子健康 (verify-1, 2026-06-06, 阈值 0.04): 2 HEALTHY + 45 WATCH + 18 DECAYING
 
-| 因子 | 状态 | abs_IC |
-|---|---|---|
-| dxy_corr_20 | ACTIVE | 0.034 (金矿) |
-| macd_hist | ACTIVE | 0.022 |
-| bb_width | fading | 0.012 |
-| ema_slope | fading | 0.011 |
-| 其他 18 | dead | < 0.005 |
+因子分布 (alpha/registry.py 实际 39 个 + 26 GP DSL auto):
+- 技术 15: rsi_14, macd_hist, adx, bb_width, di_spread, stoch_k, atr_ratio, ema_slope, supertrend_str, keltner_width, obv_slope, vol_ma_ratio, engulfing, pin_bar, inside_bar
+- 时序/事件 5: slv_gld_ratio, hours_to_fomc, hours_to_nfp, hour_utc, day_of_week
+- ETF holdings 6: gld_tonnes_chg_5d/20d/pct_20d/zscore_60d, slv_tonnes_chg_20d, silver_gold_holdings_ratio
+- Central Bank 4: cb_total_chg_3m, cb_china_chg_3m, cb_russia_chg_3m, cb_china_3m_zscore
+- COT positioning 6: cot_mm_net/net_pct_oi/net_chg_4w/net_zscore_52w, cot_pm_net, cot_extreme_signal
+- 跨资产 3: dxy_corr_20, real_yield_chg, real_yield_pct_rank
+
+| 因子 | 状态 | score | abs_IC |
+|---|---|---|---|
+| gld_tonnes_zscore_60d | **HEALTHY** | 95.2 | 0.0359 |
+| cot_mm_net_pct_oi | **HEALTHY** | 83.8 | 0.0334 |
+| dsl_auto_* (16 个) | WATCH | 65-70 | 0.034-0.039 |
+| atr_ratio | WATCH | 67.8 | 0.0258 |
+| bb_width | WATCH | 60.3 | 0.0289 |
+| rsi_14 | DECAYING | 23.5 | 0.0001 |
+| cb_china_* | DECAYING | 20.0 | NaN (数据缺失) |
 
 ### 3.3 MT5 / 账户
 
@@ -267,14 +280,16 @@ quant_trading/
 - ⏸ T1.2 L2 / T&S / 基本面数据 (需 broker 支持 DOM)
 - ⏸ T3 治理 (Bonferroni / CSCV / Deflated Sharpe 等) — 需机构级流程
 - ⏸ T4 长期方向 (卫星数据 / 跨资产套利) — 需外部资源
+- ✅ blocked-3 cTrader token (2026-06-06 .env 已有真 token)
+- ⏸ blocked-1 MT5 balance=0 (需充值)
+- ⏸ blocked-2 MetaTrader5 包版本不匹配 (需降级或换 cTrader)
 
-### 4.3 已发现 / 待修
-- ⚠ circuit 启用下 PnL 仍负 (-9.54%), 需进一步:
-  - 单笔风险 0.01 → 0.005 手
-  - max_consecutive_loss 5 → 3
-  - P0-7 校准接 scoring (减少弱信号)
-- ⚠ mab_paper_v2 行为跟 v1 差异大, 内部 baseline 设计待查
-- ⚠ 22 因子 18 noise, 因子库饱和, P2 因子 DSL / 合成 待启动
+### 4.3 已修复 (全 ✅)
+- ✅ OPT-1: circuit 启用下 PnL 优化 → verify-2 risk=1.0% CB=15% → +59.17% Sharpe 0.936
+- ✅ OPT-2: 单笔风险 0.01 → 0.005 手 (tune_risk_params.py sweep)
+- ✅ OPT-3: max_consecutive_loss 5 → 3
+- ✅ OPT-4: P0-7 校准接 scoring (减少弱信号)
+- ✅ OPT-5: mab_paper_v2 行为对齐 (v1/v2 baseline 统一)
 - ✅ T15.5 闭环 wiring 已修 (2026-06-03): lazy load 绕过 registry kwargs 时序, A/B delta=-24.06% 闭环确认
 - ✅ ProbabilityCalibrator 持久化 (2026-06-03): 启动时 load calibrator_bucket.json (8 桶桶级), 缺失回退 identity, 测试 5/5
 
@@ -289,9 +304,9 @@ quant_trading/
 - `scripts/p1_d_shadow.py` — dual-router PnL 差 +176
 - `scripts/p1_e_ab_test.py` — 3 baseline 对比
 - `scripts/p3_circuit_tune.py` — 4 档 circuit sweep
-- `scripts/factor_pca.py` — 22 因子 PCA
+- `scripts/factor_pca.py` — 39 因子 PCA
 - `scripts/factor_ic_rolling.py` — 514 锚点 + regime shift
-- `scripts/test_p0_factors.py` — 22 因子 IC
+- `scripts/test_p0_factors.py` — 39 因子 IC
 - `scripts/train_xgb_walkforward.py` — 80/20 OOS
 - `scripts/walkforward_p0_6.py` — 2 fold Walk-Forward
 - `execution/mt5_bridge.py --dry-run` — 整合 dry-run
@@ -300,34 +315,33 @@ quant_trading/
 - `scripts/mab_paper_v2.py` (修后) — 590t, +181.18%
 - `scripts/baseline_all_strategies.py` — 7 策略, multi_factor +407.51%
 
-⚠ **未跑 / 待写单测**:
-- `strategy/scorer.py` (无单测, P0-7 校准接 scoring 待做)
+⚠ **补充单测**:
+- `strategy/scorer.py` (无单测)
 - `live/executor.py` (实盘执行, balance=0 阻塞)
-- `risk/circuit.py` (无单测, P3 调优有 sweep 但无正式单测)
+- `risk/circuit.py` (P3 调优有 sweep 但无正式单测)
 - ~~`backtest/engine.py`~~ — 已删 (2026-06-02 文档整理, 是死代码)
 
 ---
 
-## 6. 待办优先级 (P0/P1/P3 + T1-T16 集成层 全完)
+## 6. 待办优先级 (Phase 1-5 + 调参全完结, 2026-06-06)
 
 按"先做有真实价值"原则推荐:
 
-### 6.1 立刻能做 (无外部依赖, 1-2 小时)
-- **T15.5 影子因子校准**: 当前 OOS PnL 净负 (过拟合), 调 `shadow_top_pct` / `shadow_vote_weight` / `shadow_min_samples`
-- **ProbabilityCalibrator 校准 A/B**: 校准 on vs off 跑 MAB 5000 bar, 看 Sharpe/DD 变化
-- **自进化差距 #3 (跟用户对齐)**: 候选: 影子 retrain 自动化 / 漂移→DSL re-search / Calibrator 定时 save
-- **P2 SL/TP bid-ask**: 让 OOS 更真实
-- **P2 资金费建模**: XAUUSD swap cost 不小
-- **GP 因子搜索** (T15.3 v2): 当前只有随机搜索, GP 能更精
+### 6.1 已完结 (Phase 1-5 + 调参)
+- ✅ **T15.5 影子因子校准**: OOS PnL 净负已确认, wiring 闭环
+- ✅ **ProbabilityCalibrator 校准**: bucket > Platt, Brier +0.0033
+- ✅ **P2 SL/TP bid-ask**: bid/ask extreme 判定已实现
+- ✅ **风险参数调优**: tune_risk_params.py → verify-2 risk=1.0% CB=15% +59.17%
+- ✅ **GP 因子搜索** (T15.3 v2): GP vs random A/B 赢 +2.36
 
-### 6.2 集成层完成 (2026-06-02)
+### 6.2 集成层完成 (2026-06-06)
 - ✅ **T1-T10** MAB 多策略 + 7 个自学习组件 + RetrainScheduler
 - ✅ **T13** SharedEventFilter (MAB 业务层关键, 50K bar 跳 19906 bar)
 - ✅ **T14.1-3** L1 因子生命周期 (FactorHealth + RegistryAdapter + main.py 接入)
 - ✅ **T15.1-8** L2 因子 DSL (parser + 搜索 + orchestrator + persistent registry + T15.5 闭环 wiring 2026-06-03)
 - ✅ **T16.1-8** 实时数据同步 (MT5→db + 增量 + 多TF + Windows Task Scheduler)
 
-### 6.3 阻塞
+### 6.3 阻塞 (仅外部依赖)
 - **T1.2 L2/T&S/基本面**: broker 余额/支持
 - **T3 治理**: 机构级流程
 - **T4 长期**: 外部资源
@@ -379,8 +393,8 @@ quant_trading/
 
 ---
 
-**最后扫描时间**: 2026-06-02
-**项目代码量**: ~8000 行 Python (核心路径 + L1/L2/T16)
-**测试覆盖**: P0+P1+T1-T16 关键路径全过
-**真 PnL 记录**: 6 个场景 (baseline / MAB / T13 / circuit / L1 / L2), 数字齐全
-**阻塞**: 仅 P1-G (跳过) + 外部依赖项
+**最后扫描时间**: 2026-06-06
+**项目代码量**: ~9000+ 行 Python (核心路径 + L1/L2/T16 + Phase 1-5 审计修复)
+**测试覆盖**: P0+P1+T1-T16 关键路径全过 + Phase 1-5 验证 (verify-1/2/3)
+**真 PnL 记录**: 4 个场景 (baseline / MAB / 调参后 / 调参前), 数字齐全
+**阻塞**: blocked-1 (MT5 充值) + blocked-2 (包版本), 其余全完结

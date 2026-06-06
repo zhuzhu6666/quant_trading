@@ -14,9 +14,9 @@
 
 **踩坑过程** (5 个修复点):
 
-1. **`.env` clientId 大小写错** (肉眼复制) — `27394_REAH...` 第 8 字符 `R` → `r`
+1. **`.env` clientId 大小写错** (肉眼复制) — clientId 第 8 字符大写 → 小写 (portal 字符串原样小写)
 2. **OAuth 拿新 access_token** — 老 token 过期,跑 `scripts/ctrader_oauth.py listen-callback` 走完 OAuth 流
-3. **`.env` account_id 改用新 demo 账户** — broker 给了 5 个新 ID: `[43234861, 43371797, 43570022, 43907963, 47276606]`,其中 `47276606` 是 $1k 标准 demo,`43570022` 是 $100k 测试账户。`5088148` broker 已废
+3. **`.env` account_id 改用新 demo 账户** — broker 给了 5 个新 ID (masked: `[A1, B2, C3, D4, E5]`,其中 **C3** 是 $1k 标准 demo,**B2** 是 $100k 测试账户。旧 ID 已被 broker 废
 4. **bridge bug #1**: `permissionScope` 字段位置错 — `ProtoOACtidTraderAccount` 没这字段,在父 `ProtoOAGetAccountListByAccessTokenRes` 上
 5. **bridge bug #2**: `_resolve_symbol_id` 用 `LightSymbol` 拿 `digits/lotSize` 失败 — `LightSymbol` 只有 7 基础字段,完整 metadata 要走二段式: `SymbolsListReq` 找 ID + `SymbolByIdReq` 拿 digits
 
@@ -174,7 +174,7 @@ event_sizing:
 
 ## 4. 下一步 (下次会话)
 
-1. **跑 live 验证**: `py scripts/ctrader_live_runner.py --live --n-bars 100` 看 cTrader 47276606 账户真成交 + jsonl 记录对账
+1. **跑 live 验证**: `py scripts/ctrader_live_runner.py --live --n-bars 100` 看 cTrader 当前 demo 账户真成交 + jsonl 记录对账
 2. **PnL 对账**: 比对 jsonl pnl 跟 broker `account_info().balance` 差
 3. **阶段 3 预备**:
    - 实现 `ProtoOAAmendPositionSLTPReq` 把 SL/TP 推 server

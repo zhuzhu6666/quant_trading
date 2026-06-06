@@ -3,11 +3,24 @@ State — 全局状态管理
 
 集中管理系统的可查询状态：持仓、余额、订单、当日统计。
 所有模块通过 State 读取共享状态，避免模块间直接耦合。
+
+OPT-4 (audit 2026-06-06): 多账户支持
+─────────────────────────────
+旧: 单实例 global `state = State()`, 一个程序只能跟踪一个账户
+    多 MT5/cTrader 账户 (Bybit-Live-2, Pepperstone-Demo, ...) 共享
+    同一 balance/position, 仓位互相污染
+新: AccountState 单账户 (原 State 类) + State 多账户容器
+    - state.accounts: dict[str, AccountState]  # 多账户
+    - state.default_name: str = "default"         # 向后兼容代理目标
+    - state.balance / position / daily 仍可访问 (代理到 default 账户)
+    - 新建账户: state.create_account("bybit_live_2")
+    - 获取: state.get_account("bybit_live_2")
 """
 
 import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from typing import Dict, Optional
 
 
 @dataclass
@@ -40,24 +53,25 @@ class DailyStats:
     peak_equity: float = 0.0
 
 
-class State:
+class AccountState:
     """
-    线程安全的状态管理器
-    
+    线程安全的单账户状态管理器
+
     只存放运行时状态，不持久化。
     """
 
-    def __init__(self):
+    def __init__(self, name: str = "default", initial_balance: float = 100.0):
+        self.name = name
         self._lock = threading.Lock()
 
         # 账户
-        self.balance: float = 100.0
-        self.equity: float = 100.0
+        self.balance: float = initial_balance
+        self.equity: float = initial_balance
         self.margin_used: float = 0.0
 
         # 持仓
         self.position: Position = Position()
-        
+
         # 当日统计
         self.daily: DailyStats = DailyStats()
 
@@ -186,7 +200,7 @@ class State:
                 from core.event_bus import bus, Event, EventType
                 bus.publish_sync(Event(
                     type=EventType.CIRCUIT_BREAK,
-                    data={"reason": reason},
+                    data={"reason": reason, "account": self.name},
                     source="state.mark_breaker",
                 ))
             except Exception:
@@ -199,5 +213,177 @@ class State:
             self.position.sl_price = price
 
 
-# 全局单例
-state = State()
+# 向后兼容别名: 旧代码用 State() 实例化, 新代码用 AccountState()
+# (重构期间允许过渡, 后续 PR 可全替换)
+State = AccountState
+
+
+class StateContainer:
+    """
+    OPT-4 (audit 2026-06-06): 多账户状态容器
+
+    用法:
+        state = StateContainer()                  # 自动建 "default" 账户
+        bybit = state.create_account("bybit_live_2", initial_balance=500.0)
+        demo = state.create_account("pepperstone_demo", initial_balance=1000.0)
+
+        # 访问默认账户 (向后兼容, 旧代码 state.balance / state.position 不变)
+        state.balance                              # 走 default 账户
+        state.position
+        state.daily
+
+        # 访问指定账户
+        state.accounts["bybit_live_2"].balance
+        state.get_account("bybit_live_2").update_equity(2000.0)
+
+        # 切换默认账户
+        state.set_default("bybit_live_2")
+        state.balance                              # 现在走 bybit_live_2
+    """
+
+    def __init__(self, default_name: str = "default", initial_balance: float = 100.0):
+        self._lock = threading.RLock()
+        self.accounts: Dict[str, AccountState] = {}
+        self.default_name: str = default_name
+        # 自动建默认账户
+        self.create_account(default_name, initial_balance=initial_balance)
+
+    def create_account(self, name: str, initial_balance: float = 100.0) -> AccountState:
+        """新建账户, 名字重复抛 ValueError"""
+        with self._lock:
+            if name in self.accounts:
+                raise ValueError(f"Account {name!r} already exists")
+            acct = AccountState(name=name, initial_balance=initial_balance)
+            self.accounts[name] = acct
+            return acct
+
+    def get_account(self, name: str) -> AccountState:
+        """获取账户, 不存在抛 KeyError"""
+        with self._lock:
+            if name not in self.accounts:
+                raise KeyError(f"Account {name!r} not found. "
+                               f"Existing: {list(self.accounts.keys())}")
+            return self.accounts[name]
+
+    def set_default(self, name: str):
+        """切换默认账户 (之后 state.balance 等代理访问走新默认)"""
+        with self._lock:
+            if name not in self.accounts:
+                raise KeyError(f"Account {name!r} not found")
+            self.default_name = name
+
+    def remove_account(self, name: str):
+        """删除账户 (非默认)"""
+        with self._lock:
+            if name == self.default_name:
+                raise ValueError(f"Cannot remove default account {name!r}")
+            if name not in self.accounts:
+                raise KeyError(f"Account {name!r} not found")
+            del self.accounts[name]
+
+    # ── 向后兼容代理: 旧代码访问 state.balance / state.position 走默认账户 ──
+    def _default(self) -> AccountState:
+        return self.accounts[self.default_name]
+
+    @property
+    def balance(self) -> float:
+        return self._default().balance
+
+    @balance.setter
+    def balance(self, value: float):
+        self._default().balance = value
+
+    @property
+    def equity(self) -> float:
+        return self._default().equity
+
+    @equity.setter
+    def equity(self, value: float):
+        self._default().equity = value
+
+    @property
+    def margin_used(self) -> float:
+        return self._default().margin_used
+
+    @margin_used.setter
+    def margin_used(self, value: float):
+        self._default().margin_used = value
+
+    @property
+    def position(self) -> Position:
+        return self._default().position
+
+    @position.setter
+    def position(self, value: Position):
+        self._default().position = value
+
+    @property
+    def daily(self) -> DailyStats:
+        return self._default().daily
+
+    @daily.setter
+    def daily(self, value: DailyStats):
+        self._default().daily = value
+
+    @property
+    def is_trading(self) -> bool:
+        return self._default().is_trading
+
+    @is_trading.setter
+    def is_trading(self, value: bool):
+        self._default().is_trading = value
+
+    @property
+    def is_circuit_breaker(self) -> bool:
+        return self._default().is_circuit_breaker
+
+    @is_circuit_breaker.setter
+    def is_circuit_breaker(self, value: bool):
+        self._default().is_circuit_breaker = value
+
+    @property
+    def circuit_reason(self) -> str:
+        return self._default().circuit_reason
+
+    @circuit_reason.setter
+    def circuit_reason(self, value: str):
+        self._default().circuit_reason = value
+
+    @property
+    def active_orders(self) -> dict:
+        return self._default().active_orders
+
+    @active_orders.setter
+    def active_orders(self, value: dict):
+        self._default().active_orders = value
+
+    @property
+    def has_position(self) -> bool:
+        return self._default().has_position
+
+    @property
+    def win_rate(self) -> float:
+        return self._default().win_rate
+
+    @property
+    def daily_loss_pct(self) -> float:
+        return self._default().daily_loss_pct
+
+    def update_equity(self, current_price: float):
+        self._default().update_equity(current_price)
+
+    def record_trade(self, pnl: float, commission: float = 0.0, slippage: float = 0.0):
+        self._default().record_trade(pnl, commission, slippage)
+
+    def reset_daily(self, preserve_peak: bool = True):
+        self._default().reset_daily(preserve_peak)
+
+    def mark_breaker(self, tripped: bool, reason: str = ""):
+        self._default().mark_breaker(tripped, reason)
+
+    def set_sl_price(self, price: float):
+        self._default().set_sl_price(price)
+
+
+# 全局单例 (OPT-4: 现在是容器, 旧代码 state.balance 仍 work)
+state = StateContainer()

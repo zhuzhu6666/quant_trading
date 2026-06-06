@@ -31,6 +31,7 @@ from data.store import DataStore
 from strategy.base import BaseStrategy, Signal
 from strategy.mab_router import MABRouter, classify_regime, REGIMES
 from execution.paper_trader import PaperTrader, PaperReport
+from execution._sharpe import sharpe_ratio_log_nw  # OPT-2 (audit 2026-06-06)
 
 
 # ── 报告 dataclass ─────────────────────────────────────
@@ -69,6 +70,44 @@ class MABPaperRunner:
     - PaperTrader 接受单一 strategy, 这里接受 strategy_dict + router
     - 这里集成了 P0/P1/P3/P8/P9 全部可选组件 (5 个 None-safe)
     - PaperReport → MABPaperReport (扩展 MAB 统计)
+
+    ARCH-1 KNOWN ISSUE (audit 2026-06-06): 当前所有 4 个 strategy 共享 1 个 PaperEngine
+    ─────────────────────────────────────────────────────────────────────────────────
+    实现细节 (line 113-138, 336-341):
+      - self.paper = PaperTrader(strategy=primary_strategy, ...) 包装 1 个 PaperEngine
+      - 主循环每 bar router.select(chosen) 选策略, 然后:
+          prev_strategy = self.paper.strategy
+          self.paper.strategy = self.strategies[chosen]  # 临时切换 reference
+          try:
+              engine.on_bar(bar, signal)
+          finally:
+              self.paper.strategy = prev_strategy
+      - 4 策略的 last_indicators / position / SL/TP / equity 全在 1 个 engine 上
+
+    后果:
+      1. 任何时候最多 1 个 active trade — 4 策略独立 alpha 退化为"选最优开仓"
+      2. 共享 SL/TP 行为: strategy 切换不影响既有仓位的 SL/TP (用 primary 的 ATR 算)
+      3. last_indicators 串味: multi_factor / trend / mean_reversion 维护的 indicator
+         互相覆盖 (因为它们都读 self.paper.strategy.last_indicators)
+      4. MAB router 学到"哪个 regime 用哪个策略",但实际仓位/风险都绑到 primary
+      5. 拆解收益预期: 4 引擎后 PnL 不一定更好(独立 position 暴露更多 alpha),
+         但能测出"4 策略真·alpha" vs "当前 primary + MAB 标签"的差
+
+    拆解方案 (TODO, ~1-2 天工作量):
+      - 4 个 strategy → 4 个 PaperEngine,每个 engine 独立 position/equity/last_indicators
+      - 共享 state.daily 风控(全局熔断), 单笔风控各自
+      - 主循环每 bar:
+          * router.select 选 N 个候选(目前是 1 个,可以改成 2-3 个并行)
+          * 对每个被选中的 strategy,调其 on_bar() 取 signal
+          * 把 signal 送对应 engine.on_bar(bar, signal)
+      - MAB stats / 元学习回调:从 4 个 engine 聚合 trades
+
+    为什么这次只加护栏(不动主循环):
+      - 重构期间任何 PnL 变化都难解释(MAB router 学习的是旧行为)
+      - 现有 baseline (+407.51% / -9.54% 等) 是用共享 engine 测的, 不能让现有报告失效
+      - 等 dedicated benchmark (verify-2 跑 fix-4 后的 PnL) 之后, 再安全拆解
+
+    启动时打印一次性警告,提醒 caller 这架构问题:
     """
 
     def __init__(
@@ -86,7 +125,8 @@ class MABPaperRunner:
         max_trades_per_day: int = 20,
         single_risk_usd: float = 35.0,
         volatility_mult: float = 3.0,
-        risk_per_trade_pct: float = 0.0,  # 0=固定 default_lots，>0 启用 Kelly 动态仓位
+        # FOOTGUN-2 fix (audit 2026-06-06): 改 None=禁用 vs 0.0=真 0% 风险
+        risk_per_trade_pct: float | None = None,  # 0=固定 default_lots，>0 启用 Kelly 动态仓位
         enable_circuit: bool = True,
         scheduler=None,             # SelfLearningScheduler
         scorer=None,                # WeightedScorer
@@ -143,6 +183,18 @@ class MABPaperRunner:
         self._trade_records: list[dict] = []  # 每笔 close 一条
         self._equity_curve: list[tuple[float, float]] = []
         self._bar_idx_counter: int = 0  # T8 retrain scheduler 用
+
+        # ARCH-1 (audit 2026-06-06): 启动时一次性警告, 提醒 caller 4 策略共享 1 engine
+        # 不影响功能, 但 caller 应该知道 PnL 数字已偏 MAB primary + 标签
+        if len(strategies) > 1:
+            logger.warning(
+                f"[ARCH-1] MABRunner 共享 1 个 PaperEngine (包装 {primary_name}), "
+                f"4 策略 {list(strategies.keys())} 共用 1 个 position + SL/TP + last_indicators. "
+                f"当前 PnL 数字 (baseline +407.51% / -9.54%) 是 'MAB 选最优开仓' 模式, "
+                f"不是 4 策略独立 alpha. 完整拆解方案见 TODO.md refactor-1. "
+                f"override ARCH-1_QUIET=True 可关闭本警告."
+            )
+        self._arch1_quiet = False  # caller 改 True 关警告
 
     def load_data(self, store: DataStore, symbol: str, timeframe: str,
                   start: str | None = None, end: str | None = None):
@@ -323,15 +375,46 @@ class MABPaperRunner:
             if skip and signal is not None and signal.direction in (1, -1):
                 signal = None  # event skip 强制覆盖
 
-            # 3. calibrator 矫正 confidence (T3)
+            # 3. calibrator 矫正 confidence + strength (T3 + REFACTOR-6)
+            #
+            # REFACTOR-6 (audit 2026-06-06): 让 ProbabilityCalibrator 真被消费
+            # ─────────────────────────────────────────────────────────────
+            # 旧实现: 校准只改 signal.confidence, 但 confidence 没进仓位决策
+            #         (PaperEngine 算 lots 用 signal.strength, 跟 confidence 解耦)
+            #         → 校准结果被算出来就被丢了
+            # 新实现: 把校准因子 (cal/raw) 应用到 signal.strength, 让 PaperEngine
+            #         按校准后 strength 算手数, 校准真影响仓位
+            # 例: raw=0.7, cal=0.4 → strength *= 0.57 (历史经验: 0.7 实际只 0.4, 缩仓)
+            #     raw=0.7, cal=0.85 → strength *= 1.21 (历史经验: 0.7 实际 0.85, 加仓)
             if signal is not None and self.calibrator is not None and signal.confidence is not None:
                 try:
-                    signal.confidence = self.calibrator.calibrate(signal.confidence)
+                    raw_conf = float(signal.confidence)
+                    cal_conf = self.calibrator.calibrate(raw_conf)
+                    signal.confidence = cal_conf
+                    # 把校准因子转到 strength (PaperEngine 真消费)
+                    if raw_conf > 1e-6 and cal_conf > 0:
+                        cal_factor = cal_conf / raw_conf
+                        cur_strength = float(getattr(signal, 'strength', 1.0) or 1.0)
+                        signal.strength = cur_strength * cal_factor
+                        # 记 meta 方便回溯
+                        if not hasattr(signal, 'meta') or signal.meta is None:
+                            signal.meta = {}
+                        signal.meta['cal_factor'] = round(cal_factor, 4)
+                        signal.meta['strength_raw'] = round(cur_strength, 4)
                 except Exception:
                     pass
 
             # 4. 把 strategy 临时换到主策略上 (PaperEngine 内部用 self.paper.strategy 算 ATR 等)
             #    这是为了让 SL/TP 用被选中策略的 last_atr
+            #
+            # ARCH-1 KNOWN ISSUE (audit 2026-06-06): 临时切换 strategy reference 是 hack
+            # ─────────────────────────────────────────────────────────────────────────
+            # 真实问题: 4 策略共享 1 个 PaperEngine, 这里用 try/finally swap reference 让
+            # engine 算 SL/TP 时用"当前策略的 last_atr". 副作用:
+            #   1. 上一个 strategy 的 last_indicators 写到主 engine 后, 切换时丢失
+            #   2. active position 持有中, strategy 切换不会调整 SL/TP (用 primary 的)
+            #   3. 4 策略的 PnL 都被算在 primary 名下, MAB 统计是"按 chosen 标签分" 近似
+            # 修复: 拆 4 个 PaperEngine (见 class docstring ARCH-1 段 + TODO.md refactor-1)
             prev_strategy = self.paper.strategy
             self.paper.strategy = self.strategies[chosen]
             try:
@@ -394,14 +477,13 @@ class MABPaperRunner:
         net_pnl = self.paper.engine.balance - self.paper.engine.initial_balance
         total_return_pct = net_pnl / self.paper.engine.initial_balance * 100
 
+        # Sharpe (OPT-2 audit 2026-06-06: log returns + Newey-West HAC)
+        # ──────────────────────────────────────────────────
+        # 跟 paper_trader._finalize 同一公式, 集中放在 execution/_sharpe.py
+        # 旧: simple returns + iid 假设 → Sharpe 虚高 20-50%
+        # 新: log returns + Newey-West HAC std → 真风险调整后收益
         tf = self.paper.strategy.timeframe
-        bars_per_year = {
-            "M5": 252 * 24 * 12, "M15": 252 * 24 * 4, "M30": 252 * 24 * 2,
-            "H1": 252 * 24, "H4": 252 * 6, "D1": 252,
-        }.get(tf, 252 * 24 * 4)
-        rets = np.diff(eq) / eq[:-1]
-        rets = rets[np.isfinite(rets)]
-        sharpe = float(rets.mean() / rets.std() * math.sqrt(bars_per_year)) if len(rets) > 1 and rets.std() > 1e-12 else 0.0
+        sharpe = sharpe_ratio_log_nw(eq, tf)
 
         peak = np.maximum.accumulate(eq)
         dd = (peak - eq) / peak

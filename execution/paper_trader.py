@@ -35,6 +35,7 @@ import numpy as np
 from data.store import DataStore
 from strategy.base import BaseStrategy
 from execution.paper_engine import PaperExecutionEngine, PaperTrade
+from execution._sharpe import sharpe_ratio_log_nw, TF_BARS_PER_YEAR  # OPT-2 (audit 2026-06-06)
 from risk.pre_trade import PreTradeChecker
 from risk.circuit import CircuitBreaker
 
@@ -104,21 +105,21 @@ class PaperTrader:
                  max_trades_per_day: int = 20,
                  single_risk_usd: float = 35.0,
                  volatility_mult: float = 3.0,
-                 risk_per_trade_pct: float = 0.0,  # 0=固定 default_lots，>0 启用动态仓位
+                 # FOOTGUN-2 fix (audit 2026-06-06): 区分 None=禁用 vs 0.0=真 0% 风险
+                 # None → 固定 default_lots, 0.0 → 拒单 (lots=0), >0 → Kelly
+                 risk_per_trade_pct: float | None = None,
                  enable_circuit: bool = True,
                  # P2: 资金费/隔夜利息 (XAUUSD+ 典型 -1.0/lot/day long, 0 short)
                  enable_swap: bool = True,
                  swap_long_per_lot_per_day: float = -1.0,
                  swap_short_per_lot_per_day: float = 0.0,
                  event_sizing=None):
-        # FOOTGUN-2 (audit 2026-06-04): risk_per_trade_pct=0 静默禁用动态仓位
-        # 显式 warning 提醒 caller, 避免把 0 误解为 "0% 风险"
-        if risk_per_trade_pct == 0.0:
-            logger.warning(
-                "[FOOTGUN-2] risk_per_trade_pct=0.0, dynamic sizing DISABLED, "
-                "using fixed default_lots=%.2f. 如果想 0%% 风险请传 None 或 >0",
-                default_lots,
-            )
+        # FOOTGUN-2 fix (audit 2026-06-06): 改 None=禁用 vs 0.0=真 0% 风险
+        # 旧的"0.0 静默禁用"已修, paper_engine._open 走 3 分支:
+        #   None  → 固定 default_lots × size_mult
+        #   0.0   → lots=0 触发拒单
+        #   > 0   → Kelly 动态仓位
+        # 旧 warning 块已删除 (paper_engine.__init__ 现在发新 warning)
         self.strategy = strategy
 
         # 实例化风控层
@@ -274,19 +275,21 @@ class PaperTrader:
         net_pnl = self.engine.balance - self.engine.initial_balance
         total_return_pct = net_pnl / self.engine.initial_balance * 100
 
-        # Sharpe（每根 bar 收益率 → 年化）
-        # 假设 M15: 1天=24根, 1年=252交易日 → 252*24=6048 根
-        tf_to_bars_per_year = {
-            "M5": 252 * 24 * 12, "M15": 252 * 24 * 4, "M30": 252 * 24 * 2,
-            "H1": 252 * 24, "H4": 252 * 6, "D1": 252,
-        }
-        bars_per_year = tf_to_bars_per_year.get(self.strategy.timeframe, 252 * 24 * 4)
-        rets = np.diff(eq) / eq[:-1]
-        rets = rets[np.isfinite(rets)]
-        if len(rets) > 1 and rets.std() > 1e-12:
-            sharpe = float(rets.mean() / rets.std() * math.sqrt(bars_per_year))
-        else:
-            sharpe = 0.0
+        # Sharpe (OPT-2 audit 2026-06-06: log returns + Newey-West HAC)
+        # ──────────────────────────────────────────────────
+        # 旧: simple returns + iid 假设
+        #   rets = (eq[1] - eq[0]) / eq[0]  (arithmetic returns)
+        #   sharpe = mean(rets) / std(rets) * sqrt(bars_per_year)
+        #   缺陷: ① simple returns 不可加, 跨多期 Sharpe 偏高
+        #         ② iid 假设违反: M15 跨夜 drift + 连续 win/loss + 仓位不调
+        #            都会让 equity 序列强自相关, 真实 std 显著大于 iid 估计
+        #            → Sharpe 虚高 20-50% (Lo, 2002 已知问题)
+        # 新: log returns + Newey-West HAC 标准误 (委托给 _sharpe 模块)
+        #   rets = log(eq[1] / eq[0])       (log returns, 可加)
+        #   var_nw = γ_0 + 2 * Σ_{k=1}^L (1 - k/(L+1)) * γ_k
+        #   L = floor(4 * (T/100)^(2/9))    (NW 1994 自动 lag 选择)
+        #   sharpe = mean(rets) / sqrt(var_nw) * sqrt(bars_per_year)
+        sharpe = sharpe_ratio_log_nw(eq, self.strategy.timeframe)
 
         # 最大回撤
         peak = np.maximum.accumulate(eq)

@@ -8,7 +8,7 @@
 ## 1. 目标 / 非目标
 
 **目标**:
-- cTrader Open API 模拟盘接入 (Pepperstone demo, account 5088148)
+- cTrader Open API 模拟盘接入 (Pepperstone demo, account 见 .env `CTRADER_ACCOUNT_ID`)
 - 跟 MT5Bridge 形态对齐 (connect / market_buy / get_positions / fetch_bars)
 - 4 阶段推进: PoC → 行情 → paper 接入 → bar 同步
 
@@ -42,11 +42,11 @@
 2. `permissionScope` 字段位置:从 `ProtoOACtidTraderAccount` 移到父 `ProtoOAGetAccountListByAccessTokenRes`
 3. `_resolve_symbol_id` 二段式:`SymbolsList` 拿 ID + `SymbolByIdReq` 拿 `digits/lotSize`(LightSymbol 没 metadata)
 
-凭证/账户记录:
-- clientId `27394_rEAh...RCtH` (Pepperstone demo, Active, sandbox)
-- access_token 走 OAuth 流刷(旧 token 过期)
-- demo 账户 ID: `47276606` ($1k 起始) — broker 给的 5 个新 ID 里这个最合适
-- 废账户 `5088148` — broker 已废
+凭证/账户记录(具体值见 .env, 不在此处固化):
+- clientId: portal 拿的 Pepperstone demo app (Active, sandbox)
+- access_token: 走 OAuth 流刷(旧 token 过期, 跑 `scripts/ctrader_oauth.py listen-callback`)
+- demo 账户 ID: 见 .env `CTRADER_ACCOUNT_ID` ($1k 起始, broker 给的 5 个新 ID 里最合适)
+- 旧 account_id broker 已废, 别再用
 
 ---
 
@@ -80,14 +80,14 @@
 
 ```bash
 # 应用凭证 (注册 application 时拿, 长期有效)
-CTRADER_CLIENT_ID=27394_REAHuZKx8ImKjcqa7XN4DoySzmxyakuaNaBbSjqIIWwyEMRCtH
-CTRADER_CLIENT_SECRET=pB0QaHI667DhFHntiXPJrSZ2DTZd82IDBlfgMSZGlwGXHxbcEV
+CTRADER_CLIENT_ID=<from_portal>
+CTRADER_CLIENT_SECRET=<from_portal>
 CTRADER_REDIRECT_URI=http://127.0.0.1:8080/callback    # 必须跟 app 注册时一致
 
 # 账户凭证 (OAuth 拿, 30 天左右过期, scripts/ctrader_oauth.py 自动续)
 CTRADER_ACCESS_TOKEN=...        # listen-callback 后落到 .env
 CTRADER_REFRESH_TOKEN=...       # 同上
-CTRADER_ACCOUNT_ID=5088148      # Pepperstone demo
+CTRADER_ACCOUNT_ID=<from_broker_demo>
 ```
 
 > 鉴权流程(2026-06-04 确认, 从 SDK 源码反推):
@@ -98,8 +98,8 @@ CTRADER_ACCOUNT_ID=5088148      # Pepperstone demo
 > 5. access_token 过期 → 走 grant_type=refresh_token 续期
 > 6. refresh_token 也过期 → 重新走 1-3
 
-> Pepperstone 5088148 是 ctidTraderAccountId, accessToken 是注册 application 的 cTrader ID 账户 OAuth 出来的,
-> 但 scope 选 trading + 选 5088148, token 就能操作那个 demo 账户.
+> Pepperstone demo 账户是 ctidTraderAccountId, accessToken 是注册 application 的 cTrader ID 账户 OAuth 出来的,
+> 但 scope 选 trading + 选对应 demo 账户, token 就能操作那个 demo 账户.
 
 **凭证安全**: `.env` 已在 `.gitignore` (2026-06-04 加), 永不 commit.
 
@@ -151,7 +151,7 @@ ctrader:
 ## 6. PoC 阶段验证清单
 
 - [ ] 1. App auth 成功 (`clientMsgId` 回包)
-- [ ] 2. Account auth 成功 (`accountId=5088148` Pepperstone demo)
+- [ ] 2. Account auth 成功 (`accountId=见 .env CTRADER_ACCOUNT_ID` Pepperstone demo)
 - [ ] 3. `account_info()` 拿回 balance / leverage / currency
 - [ ] 4. `get_positions()` 返回空 (新 demo 账户)
 - [ ] 5. `fetch_bars(M15, 100)` 拿到 100 根 K 线, last close ≈ 4512 USD

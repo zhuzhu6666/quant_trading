@@ -68,9 +68,9 @@ def get_creds():
     if not cid or not sec:
         # 首次 bootstrap: .env 不存在, 提醒用户写一个
         log.error("CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET 未设 (env 也没有 .env)")
-        log.error("首次跑需先在项目根写 .env (一行一对):")
-        log.error("  CTRADER_CLIENT_ID=27394_REAHuZKx8ImKjcqa7XN4DoySzmxyakuaNaBbSjqIIWwyEMRCtH")
-        log.error("  CTRADER_CLIENT_SECRET=pB0QaHI667DhFHntiXPJrSZ2DTZd82IDBlfgMSZGlwGXHxbcEV")
+        log.error("首次跑需先在项目根写 .env (一行一对, 值从 portal 拿):")
+        log.error("  CTRADER_CLIENT_ID=<your_client_id>")
+        log.error("  CTRADER_CLIENT_SECRET=<your_client_secret>")
         log.error("  CTRADER_REDIRECT_URI=http://127.0.0.1:8080/callback")
         log.error("保存后重跑本脚本")
         sys.exit(1)

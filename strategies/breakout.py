@@ -45,6 +45,17 @@ class BreakoutStrategy(BaseStrategy):
         'sl_atr': 2.5,
         'tp_atr': 4.0,
         'cooldown_bars': 8,
+        # REFACTOR-3 (audit 2026-06-06): 4 个 enable_* 事件 skip 字段 (capability 对称)
+        # multi_factor_m15 已有, 这里给辅助策略补齐, 默认全 False (向后兼容)
+        # 实际 skip 由 MABPaperRunner 主循环调 SharedEventFilter 统一处理
+        # 这里加字段是给未来"4 策略独立 PaperEngine"路径 (refactor-1 拆解) 准备的
+        'enable_nfp_skip': False,
+        'nfp_skip_days': 1,
+        'enable_dual_event_skip': False,
+        'enable_fomc_boost': False,
+        'fomc_boost_mult': 1.5,
+        'enable_gvz_gate': False,
+        'gvz_drop_pct': -2.0,
     }
 
     def __init__(self, name: str, symbol: str, timeframe: str = "M15"):

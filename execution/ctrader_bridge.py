@@ -320,7 +320,7 @@ class CTraderBridge:
             if self.account_id not in accounts:
                 logger.error(
                     f"请求的 account_id={self.account_id} 不在 accessToken 绑定列表 {accounts}。"
-                    f"  → 多半 broker 没把这个 app 关联到 Pepperstone demo 5088148,"
+                    f"  → 多半 broker 没把这个 app 关联到对应 demo 账户,"
                     f"  → 或者 accessToken 是别 cTID 用户的 (不是注册 app 那个)"
                 )
                 return False
@@ -438,6 +438,94 @@ class CTraderBridge:
     def market_sell(self, volume: float, sl: float = 0.0, tp: float = 0.0,
                     comment: str = "") -> CTraderOrderResult:
         return self._send_market_order(TRADE_SIDE["SELL"], volume, sl, tp, comment)
+
+    def amend_position_sltp(self, position_id: int,
+                            sl: float = 0.0, tp: float = 0.0,
+                            trailing: bool = False,
+                            guaranteed: bool = False) -> CTraderOrderResult:
+        """
+        REFACTOR-8 (audit 2026-06-06): 把 SL/TP 推到 server 端 (消除 1 bar 延迟)
+
+        调 ProtoOAAmendPositionSLTPReq, 改指定 position 的 stopLoss/takeProfit.
+        cTrader 限制: MARKET 单不能下单时带 SL/TP (per OpenAPI 文档),
+        必须成交后 amend. 本方法专治这个.
+
+        Args:
+            position_id: ProtoOAPosition.positionId (从 get_positions() 拿)
+            sl: 绝对 SL 价格 (e.g. 2034.50). 0 表示不修改当前 SL
+            tp: 绝对 TP 价格 (e.g. 2050.00). 0 表示不修改当前 TP
+            trailing: 是否启用 trailing stop loss (默认 False)
+            guaranteed: 是否启用 guaranteed stop loss (默认 False, French Risk 账户才支持)
+
+        跟 ProtoOA 协议字段对照:
+            stopLoss, takeProfit, trailingStopLoss, guaranteedStopLoss
+            都是 Optional 字段. 0 / False 表示不修改, server 保留旧值.
+
+        Returns:
+            CTraderOrderResult(success, position_id, comment, error_code)
+
+        ⚠️ 风险:
+            1. amend 失败不应重试, 因为 broker 那边 SL/TP 可能已经被 modify 过,
+               重试会出现 stale price 错误. caller 负责 log + alarm.
+            2. 缩放: cTrader server 接受 absolute price, 但 ProtoOAPosition 里
+               stopLoss 是 moneyDigits-scaled. amend 时 caller 传真实价格 (e.g. 2034.5),
+               server 自己 scale. 不像 ClosePositionReq 的 volume * 100.
+        """
+        if not self._connected or not self._account_authed:
+            return CTraderOrderResult(
+                success=False, position_id=position_id,
+                comment="Not connected/authed"
+            )
+        if position_id is None or position_id <= 0:
+            return CTraderOrderResult(
+                success=False, position_id=position_id or 0,
+                comment="position_id required"
+            )
+        # DRY-RUN 安全闸 (跟 market/close 一致)
+        if not self.send_orders:
+            logger.warning(
+                f"[DRY-RUN] amend_position_sltp pos={position_id} "
+                f"sl={sl} tp={tp} trailing={trailing} (send_orders=False)"
+            )
+            return CTraderOrderResult(
+                success=True, position_id=position_id,
+                comment=f"DRY-RUN amend sl={sl} tp={tp} (send_orders=False)",
+            )
+
+        try:
+            req = TradeMsg.ProtoOAAmendPositionSLTPReq()
+            req.ctidTraderAccountId = self.account_id
+            req.positionId = int(position_id)
+            # Proto3 semantics: 0 = 不设, 非 0 = 设
+            if sl > 0:
+                req.stopLoss = float(sl)
+            if tp > 0:
+                req.takeProfit = float(tp)
+            if trailing:
+                req.trailingStopLoss = True
+            if guaranteed:
+                req.guaranteedStopLoss = True
+            # 注: stopLossTriggerMethod 不传, 用 server 默认 (1=TRADE)
+
+            resp = self._send(req, timeout=10.0)
+            # 跟 close_position 一致: amend 异步, 真确认靠 ProtoOAExecutionEvent
+            return CTraderOrderResult(
+                success=True, position_id=position_id,
+                comment=f"amend accepted, awaiting ExecutionEvent; resp={type(resp).__name__}",
+            )
+        except Exception as e:
+            err_code = "AMEND_FAILED"
+            err_msg = str(e)
+            # 协议错误细节
+            if hasattr(e, 'description'):
+                err_msg = f"{e} ({e.description})"
+            logger.error(
+                f"amend_position_sltp failed pos={position_id} sl={sl} tp={tp}: {err_msg}"
+            )
+            return CTraderOrderResult(
+                success=False, position_id=position_id,
+                error_code=err_code, comment=err_msg,
+            )
 
     def _send_market_order(self, side: int, volume: float, sl: float, tp: float,
                            comment: str) -> CTraderOrderResult:

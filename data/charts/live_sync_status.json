@@ -1,36 +1,36 @@
 {
-  "last_sync_utc": "2026-06-03T15:40:57Z",
-  "last_attempt_utc": "2026-06-03T15:40:57Z",
+  "last_sync_utc": "2026-06-04T18:31:29Z",
+  "last_attempt_utc": "2026-06-04T18:31:29Z",
   "last_status": "ok",
   "per_tf": {
     "M15": {
       "inserted_last": 0,
-      "total_bars": 50292,
+      "total_bars": 50396,
       "error": ""
     },
     "H1": {
       "inserted_last": 0,
-      "total_bars": 18072,
+      "total_bars": 18098,
       "error": ""
     },
     "D1": {
       "inserted_last": 0,
-      "total_bars": 502,
+      "total_bars": 503,
       "error": ""
     },
     "M5": {
-      "inserted_last": 1,
-      "total_bars": 200531,
+      "inserted_last": 0,
+      "total_bars": 200581,
       "error": ""
     },
     "M30": {
       "inserted_last": 0,
-      "total_bars": 25146,
+      "total_bars": 25154,
       "error": ""
     },
     "H4": {
       "inserted_last": 0,
-      "total_bars": 5018,
+      "total_bars": 5019,
       "error": ""
     }
   }

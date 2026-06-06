@@ -153,7 +153,13 @@ class MABRouter:
 
     def __init__(self, strategies: list[str],
                  baseline: Optional[dict[str, tuple[float, float]]] = None,
-                 seed: int | None = None):
+                 seed: int | None = None,
+                 # REFACTOR-2 (audit 2026-06-06): 冷启动 round-robin
+                 # 前 warmup_trades 笔 trade 强制 round-robin (按 strategies 顺序轮询),
+                 # 收集真实胜率后再切 Thompson Sampling. 避免 RNG seed 偏差锁死一个策略.
+                 # warmup_trades=0 = 关闭冷启动保护 (默认走 Thompson)
+                 # warmup_trades=50 = 前 50 笔强制 50/len(strats) 笔/策略, 拿真胜率
+                 warmup_trades: int = 50):
         """
         Parameters
         ----------
@@ -165,11 +171,20 @@ class MABRouter:
         seed : int | None
             (P1-D) 随机种子, 用于 Thompson sampling 的可复现.
             None = 用全局 np.random (默认).
+        warmup_trades : int
+            REFACTOR-2: 冷启动期强制 round-robin 笔数.
+            - 0 = 关闭 (默认行为)
+            - 50 = 前 50 笔 trade 强制 round-robin (推荐生产)
+            这 50 笔 trade 仍然 update() 后验, 50 笔之后正常 Thompson
         """
         self.strategies = list(strategies)
         self._rng = np.random.default_rng(seed) if seed is not None else np.random
         self._alpha: dict[str, dict[str, float]] = {}  # regime → strategy → α
         self._beta: dict[str, dict[str, float]] = {}   # regime → strategy → β
+
+        # REFACTOR-2: 冷启动计数器 (per-router 共享, 不分 regime)
+        self._warmup_total = max(0, int(warmup_trades))
+        self._warmup_counter = 0  # 累计 select() 调用次数 (跨 regime 共享)
 
         for regime in REGIMES:
             self._alpha[regime] = {}
@@ -192,19 +207,36 @@ class MABRouter:
         对当前 regime 下每个策略从 Beta(α, β) 独立采样,
         返回采样值最大的策略.
 
-        Parameters
-        ----------
-        regime : str
-            当前市场 regime (REGIMES 之一). 不合法时回落 RANGING.
-
-        Returns
-        -------
-        str
-            选中的策略名.
+        REFACTOR-2 (audit 2026-06-06): 冷启动期走 round-robin
+        ──────────────────────────────────────────────────
+        旧行为: 4 策略都从 Beta(1,1) 采样, RNG seed=42 的话,
+                第一次 sample 最大值的策略会被选 → 真实 trade outcome
+                → alpha/beta 偏移 → 后续 sample 偏向它 → 一旦输 1-2 笔
+                就被锁到"种子选中的策略", 其它 3 策略无数据点
+        新行为: 前 warmup_trades (默认 50) 笔 trade 强制 round-robin,
+                每个策略被选 warmup_trades/len(strategies) 次 (4 策略 50/4=12 笔)
+                → 收集真胜率 (12 笔/策略) → 切 Thompson
         """
         if regime not in REGIMES:
             regime = "RANGING"
 
+        # REFACTOR-2: 冷启动 round-robin
+        if self._warmup_counter < self._warmup_total:
+            # round-robin: counter % len(strategies) 决定选谁
+            idx = self._warmup_counter % len(self.strategies)
+            chosen = self.strategies[idx]
+            self._warmup_counter += 1
+            # log 一次性
+            if self._warmup_counter == 1:
+                logger.info(
+                    f"[REFACTOR-2] 冷启动 round-robin 启用, "
+                    f"前 {self._warmup_total} 笔 trade 强制 round-robin "
+                    f"({self._warmup_total // len(self.strategies)} 笔/策略, "
+                    f"len(strategies)={len(self.strategies)})"
+                )
+            return chosen
+
+        # Thompson Sampling (正常模式)
         best_strategy = self.strategies[0]
         best_sample = -1.0
         for s in self.strategies:
@@ -290,3 +322,24 @@ class MABRouter:
                 "expected_win_rate": round(ev, 6),
             })
         return pd.DataFrame(rows).sort_values("expected_win_rate", ascending=False)
+
+    def warmup_status(self) -> dict:
+        """REFACTOR-2 (audit 2026-06-06): 报告冷启动进度.
+
+        Returns:
+            dict 含:
+              - enabled: bool 是否启用 round-robin
+              - total: int 目标笔数
+              - used: int 已用笔数
+              - remaining: int 剩余笔数
+              - in_warmup: bool 当前是否在冷启动期
+        """
+        used = self._warmup_counter
+        total = self._warmup_total
+        return {
+            "enabled": total > 0,
+            "total": total,
+            "used": min(used, total),
+            "remaining": max(0, total - used),
+            "in_warmup": used < total,
+        }

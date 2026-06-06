@@ -61,12 +61,51 @@ class SharedEventFilter:
         self.db_path = db_path
 
         self._nfp_window: set[str] = set()
-        self._fomc_dates: set[str] = set()
-        self._cpi_dates: set[str] = set()
+        self._fomc_dates: set[str] = set()  # 兼容旧接口 (str)
+        self._cpi_dates: set[str] = set()   # 兼容旧接口 (str)
+        # OPT-5 (audit 2026-06-06): 启动时一次性 strptime → date 对象
+        # 旧实现 (line 118/120/124) 每 bar 调 strptime 50K bar × 100 events = 5M 次
+        # 现在 should_skip 只用 date.fromisoformat (C 实现, ~5× 更快) + 预解析集合
+        self._fomc_date_objs: set = set()  # set[date]
+        self._cpi_date_objs: set = set()   # set[date]
+        self._dual_event_window: set = set()  # 预计算 FOMC ∩ CPI ±3 天 全部 date 集合
         self._gvz_series: dict[str, float] = {}
 
         self._load()
         self._skipped_count = 0  # 统计: 跳过了多少 bar
+
+    def _precompute_dual_event_windows(self):
+        """OPT-5: 预计算 FOMC ∩ CPI ±3 天窗口, 避免 should_skip 里重复算.
+
+        旧实现每 bar 都算 has_fomc AND has_cpi (50K × 100 = 5M strptime).
+        现在 _load 时一次性把 FOMC ∩ CPI ±3 天全部 date 算好, 存在 _dual_event_window.
+        should_skip 只做一次 in-set 查询.
+        """
+        window = 3
+        cpi_set = self._cpi_date_objs
+        if not self._fomc_date_objs or not cpi_set:
+            return
+        # 对每个 FOMC date, 展开 ±3 天, 看是否落在任一 CPI date ±3 天
+        # 实际更高效: 直接展开 FOMC ±3 天, 跟 CPI ∩ 即可
+        from datetime import timedelta
+        combined = set()
+        for d in self._fomc_date_objs:
+            for offset in range(-window, window + 1):
+                combined.add(d + timedelta(days=offset))
+        # 跟 CPI ∩: 只保留 ±3 天有 CPI 的
+        for d in cpi_set:
+            for offset in range(-window, window + 1):
+                combined.add(d + timedelta(days=offset))
+        # 真正的 dual window = 任何 FOMC ±3 天内 AND 任何 CPI ±3 天内的 date
+        # 但有 FOMC AND CPI 都接近的 date — 直接检查: 任一 date, 3 天内有 FOMC AND 3 天内有 CPI
+        # 简单算法: 遍历所有 candidate date (FOMC ±3 ∪ CPI ±3), 检查 3 天内两类是否都有
+        result = set()
+        for d in combined:
+            has_fomc = any(abs((d - fd).days) <= window for fd in self._fomc_date_objs)
+            has_cpi = any(abs((d - cd).days) <= window for cd in cpi_set)
+            if has_fomc and has_cpi:
+                result.add(d)
+        self._dual_event_window = result
 
     def _load(self):
         """从 SQLite 加载事件日历和 GVZ (缺失/异常时静默)"""
@@ -87,7 +126,13 @@ class SharedEventFilter:
             if self.enable_dual_event_skip:
                 self._fomc_dates = load_event_dates(self.db_path, 'FOMC')
                 self._cpi_dates = load_event_dates(self.db_path, 'CPI')
-                logger.info(f"[EventFilter] FOMC: {len(self._fomc_dates)} 个, CPI: {len(self._cpi_dates)} 个")
+                # OPT-5: 一次性 parse str → date 对象
+                from datetime import date
+                self._fomc_date_objs = {date.fromisoformat(d) for d in self._fomc_dates}
+                self._cpi_date_objs = {date.fromisoformat(d) for d in self._cpi_dates}
+                # OPT-5: 预计算 dual event window (避免 should_skip 里每 bar 重算)
+                self._precompute_dual_event_windows()
+                logger.info(f"[EventFilter] FOMC: {len(self._fomc_dates)} 个, CPI: {len(self._cpi_dates)} 个, dual-window: {len(self._dual_event_window)} 天")
 
             if self.enable_gvz_gate:
                 self._gvz_series = load_gvz_series(self.db_path)
@@ -101,30 +146,30 @@ class SharedEventFilter:
 
         Returns:
             (skip, reason) — skip=True 跳过, reason 说明原因
+
+        OPT-5 (audit 2026-06-06): 重写以消除 5M 次 strptime.
+        ─────────────────────────────────────────────────────
+        旧实现:  每 bar 调 datetime.strptime 一次 (bar date) + 双事件时又调 100 次
+                  (50 FOMC × abs diff + 50 CPI × abs diff) = 5M strptime on 50K bars
+        新实现:  bar date 用 date.fromisoformat (C, 5× 快) + 预计算 _dual_event_window
+                  只做 in-set 查询, 单次 ~50ns, 总 ~50K × 50ns = 2.5ms
         """
         try:
             bar_date_str = datetime.utcfromtimestamp(bar_time).strftime("%Y-%m-%d")
         except (OSError, ValueError, OverflowError):
             return False, ""
 
-        # 1. NFP 窗口
+        # 1. NFP 窗口 (set 查 str, O(1))
         if self.enable_nfp_skip and bar_date_str in self._nfp_window:
             self._skipped_count += 1
             return True, "NFP_WINDOW"
 
-        # 2. FOMC + CPI 双事件
-        if self.enable_dual_event_skip and self._fomc_dates and self._cpi_dates:
+        # 2. FOMC + CPI 双事件 (查预计算 _dual_event_window)
+        if self.enable_dual_event_skip and self._dual_event_window:
             try:
-                bd = datetime.strptime(bar_date_str, "%Y-%m-%d").date()
-                has_fomc = any(
-                    abs((bd - datetime.strptime(d, "%Y-%m-%d").date()).days) <= 3
-                    for d in self._fomc_dates
-                )
-                has_cpi = any(
-                    abs((bd - datetime.strptime(d, "%Y-%m-%d").date()).days) <= 3
-                    for d in self._cpi_dates
-                )
-                if has_fomc and has_cpi:
+                # date.fromisoformat 是 C 实现, 比 strptime 快 ~5×
+                bar_date = date.fromisoformat(bar_date_str)
+                if bar_date in self._dual_event_window:
                     self._skipped_count += 1
                     return True, "DUAL_EVENT"
             except (ValueError, TypeError):

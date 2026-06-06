@@ -59,6 +59,31 @@ class EventBus:
         # ARCH-6: RLock 让 publish 期间 handler 内 subscribe/unsubscribe 不抛
         # RuntimeError, 也能让多线程并发 publish / subscribe 安全
         self._lock = threading.RLock()
+        # OPT-3 (audit 2026-06-06): publish_async_fire_and_forget 后台 loop
+        # 解决: 同步 caller (paper path) 想异步跑 async handler 不阻塞
+        # 设计: daemon 线程跑 asyncio loop, 永不退出 (跟程序同寿)
+        # 调用方: bus.publish_async_ff(event) 立即返回, handler 在后台跑
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._async_thread: threading.Thread | None = None
+        self._async_started = threading.Event()  # 启动完成信号
+        self._start_async_loop()
+
+    def _start_async_loop(self):
+        """启动 daemon 线程跑 asyncio event loop, fire-and-forget 异步派发用.
+        幂等: 多次调用只启动 1 个 loop.
+        """
+        if self._async_thread is not None and self._async_thread.is_alive():
+            return
+        def _runner():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._async_loop = loop
+            self._async_started.set()
+            loop.run_forever()
+        t = threading.Thread(target=_runner, name="EventBusAsyncLoop", daemon=True)
+        t.start()
+        # 最多等 1s 等 loop 起来 (通常 < 10ms)
+        self._async_started.wait(timeout=1.0)
 
     def subscribe(self, event_type: EventType, handler: Callable, priority: int = 50):
         """订阅事件。priority越小越先执行。"""
@@ -102,16 +127,52 @@ class EventBus:
                 result = handler(event)
                 if asyncio.iscoroutine(result):
                     logger.warning(
-                        f"Handler {handler.__name__} is async, skipped in sync mode"
+                        f"Handler {handler.__name__} is async, skipped in sync mode "
+                        f"(use bus.publish_async_ff() for non-blocking fire-and-forget)"
                     )
             except Exception:
                 logger.exception(
                     f"Handler {handler.__name__} failed for {event.type.name}"
                 )
 
+    def publish_async_ff(self, event: Event):
+        """OPT-3 (audit 2026-06-06): 异步 fire-and-forget 发布.
+        ──────────────────────────────────────────────────
+        跟 publish_sync 同调用签名 (同步 caller, 立即返回), 但内部把
+        async handler 链投到后台 asyncio loop, 主线程不阻塞.
+
+        旧路径: paper / live 同步循环调 publish_sync, 遇到 async handler 报警告 + 跳过
+        新路径: 调 publish_async_ff, async handler 真在后台跑, 主线程继续 trade loop
+
+        跟 publish (async 方法) 的区别:
+        - publish(event) 是 coroutine, caller 必须 await, 阻塞到所有 handler 完
+        - publish_async_ff(event) 立即返回, 不等 handler
+
+        用法:
+            # 旧: 同步 caller 想跑 async handler (会被警告 + 跳过)
+            bus.publish_sync(event)
+
+            # 新: 同步 caller 真跑 async handler (后台执行, 不阻塞)
+            bus.publish_async_ff(event)
+        """
+        if self._async_loop is None or self._async_loop.is_closed():
+            logger.warning("[OPT-3] async loop 未就绪, fallback 到 publish_sync")
+            return self.publish_sync(event)
+        # 投到后台 loop
+        try:
+            asyncio.run_coroutine_threadsafe(self.publish(event), self._async_loop)
+        except RuntimeError as e:
+            logger.warning(f"[OPT-3] async loop 已关闭, fallback: {e}")
+            self.publish_sync(event)
+
     @property
     def stats(self) -> dict:
         return dict(self._stats)
+
+    @property
+    def async_loop_running(self) -> bool:
+        """OPT-3: 后台 asyncio loop 是否在跑 (publish_async_ff 可用前提)"""
+        return self._async_loop is not None and not self._async_loop.is_closed()
 
 
 # 全局单例

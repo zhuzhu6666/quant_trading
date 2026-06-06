@@ -61,23 +61,25 @@ def probe_filling_mode(symbol: str = "XAUUSD+") -> str:
     if info is None:
         logger.warning(f"Symbol {symbol} not found, cannot probe filling mode")
         return "UNKNOWN"
-    # filling_mode 是 bitmask, 但实际只支持一个
+    # filling_mode 是 enum 0/1/2 (mt5 文档 SymbolInfo.filling_mode):
+    #   0 = FILL_FOK (Fill or Kill, 一次性全部成交或全拒)
+    #   1 = FILL_IOC (Immediate or Cancel, 能成交多少就多少, 剩的撤)
+    #   2 = FILL_RETURN (允许多次 partial fill 直到全部成交)
+    # NOTE: 旧版误以为是 bitmask, 用 `& 1 / & 2 / & 4` 判定, 把 enum 0 误判 FOK (巧合对),
+    #       enum 1 误判 FOK (错! 应该是 IOC), enum 2 误判 IOC (错! 应该是 RETURN)。
+    #       现在按 enum 直接查表, 顺序很重要 (从严格到宽松):
+    #   - FOK: 0 (默认, 黄金/外汇 main)
+    #   - IOC: 1 (XAUUSD 部分 broker 报告)
+    #   - RETURN: 2 (PEPPERSTONE 测试报告)
     fm = info.filling_mode
-    if fm & 1:  # FOK bit
-        return "FOK"
-    if fm & 2:  # IOC bit
-        return "IOC"
-    if fm & 4:  # RETURN bit (实际是 bit 2 = value 4, 但有些 broker 报告 0/1/2)
-        return "RETURN"
-    # 兜底: 按 0/1/2 解释
     if fm == 0:
         return "FOK"
     if fm == 1:
         return "IOC"
     if fm == 2:
         return "RETURN"
-    logger.warning(f"Unknown filling_mode={fm} for {symbol}")
-    return "UNKNOWN"
+    logger.warning(f"Unknown filling_mode={fm} for {symbol}, fallback to FOK")
+    return "FOK"
 
 
 def _filling_constant(mode: str) -> int:

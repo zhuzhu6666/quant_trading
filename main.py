@@ -94,6 +94,10 @@ def main():
                         help="Alerter 告警 (circuit / 大额 trade / drift)")
     parser.add_argument("--enable-circuit", action="store_true",
                         help="开启 CircuitBreaker (默认 False=baseline, P3 调优 10%%)")
+    # REFACTOR-4 (audit 2026-06-06): 让 A/B 路径 PnL 可比 — backtest 也接 Kelly 仓位
+    parser.add_argument("--risk-per-trade-pct", type=float, default=None,
+                        help="单笔风险占账户 %% (覆盖固定 0.01 lot, 让 backtest 跟 paper 路径可比, "
+                             "默认 None=固定 0.01 lot 走历史行为, 推荐 2.0=Kelly)")
     parser.add_argument("--use-retrain", action="store_true",
                         help="启用 RetrainScheduler (T8: 每 N 笔触发 walkforward)")
     parser.add_argument("--retrain-every-n", type=int, default=200,
@@ -129,6 +133,8 @@ def main():
                         help="最大连续亏损笔数 (覆盖 settings.yaml 默认 5)")
     parser.add_argument("--single-risk-usd", type=float, default=None,
                         help="单笔最大风险 USD (覆盖 settings.yaml 默认 2.0)")
+    # NOTE: 模块底部已有 `if __name__ == "__main__": main()` 守卫 (line 736),
+    # `import main` 不会自动跑 argparse + run_*。
     parser.add_argument("--volatility-mult", type=float, default=None,
                         help="ATR 波动率乘数 (覆盖 settings.yaml 默认 3.0)")
     args = parser.parse_args()
@@ -247,6 +253,13 @@ def run_backtest(args):
         tp_atr = params["tp_atr"]
         cooldown_bars = params["cooldown_bars"]
 
+        # REFACTOR-4 (audit 2026-06-06): 让 A 路径接 Kelly 仓位
+        # 从 CLI 读 --risk-per-trade-pct, None=固定 0.01 lot, 2.0=Kelly
+        risk_pct = getattr(args, 'risk_per_trade_pct', None)
+        if risk_pct is not None and risk_pct > 0:
+            logger.info(f"[REFACTOR-4] backtest 走 Kelly 仓位: {risk_pct}% 单笔风险, "
+                        f"对比 paper 路径默认 2.0%")
+
         # ── 辅助：在指定 df 上跑回测，返回指标 dict ──
         def _run_one(df_data):
             c = bt.Cerebro(stdstats=False)
@@ -259,11 +272,16 @@ def run_backtest(args):
             c.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
 
             class _ScanStrategy(bt.Strategy):
+                # REFACTOR-4 (audit 2026-06-06): 接受 risk_per_trade_pct 参数
+                # A 路径 (backtest) 默认 0.01 lot 固定, 加 --risk-per-trade-pct=2.0 走 Kelly
+                # 跟 B 路径 (paper) 默认 2.0% 一致 → A/B PnL 可比
                 params = (
                     ("_sl_atr", sl_atr),
                     ("_tp_atr", tp_atr),
                     ("_cooldown_bars", cooldown_bars),
                     ("warmup_bars", 500),
+                    # 黄金合约规格: 100 oz / lot, ref run_paper line 691
+                    ("_contract_size", 100),
                 )
 
                 di_period = 14; rsi_period = 14; stoch_period = 14
@@ -311,7 +329,19 @@ def run_backtest(args):
                     entry = self.data.close[0]
                     sl = entry - p._sl_atr*a if direction==1 else entry + p._sl_atr*a
                     tp = entry + p._tp_atr*a if direction==1 else entry - p._tp_atr*a
-                    self.buy_bracket(exectype=bt.Order.Close, size=0.01, stopprice=sl, limitprice=tp)
+                    # REFACTOR-4 (audit 2026-06-06): Kelly 仓位计算
+                    # risk_per_trade_pct > 0 走 Kelly: lots = (equity × pct) / (sl_distance × contract)
+                    # risk_per_trade_pct <= 0 走固定 0.01 lot (历史行为)
+                    if risk_pct and risk_pct > 0:
+                        sl_dist = abs(entry - sl)
+                        if sl_dist > 0:
+                            risk_dollars = self.broker.getvalue() * (risk_pct / 100.0)
+                            size = risk_dollars / (sl_dist * p._contract_size)
+                        else:
+                            size = 0.01  # SL=0 保护
+                    else:
+                        size = 0.01  # 历史行为
+                    self.buy_bracket(exectype=bt.Order.Close, size=size, stopprice=sl, limitprice=tp)
 
             c.addstrategy(_ScanStrategy)
             results = c.run(runonce=True)
@@ -418,6 +448,10 @@ def run_paper(args):
     from data.store import DataStore
     from strategy.registry import strategy_registry
     from execution.paper_trader import PaperTrader
+    # cfg_get 在 main() 顶部 import, 但 run_paper 里也要用 (event_sizing db_path)
+    # 直接在这补 import, 避免 NameError (verify-2 fix, 2026-06-06)
+    from config import load_config, cfg_get
+    CFG = load_config()
     # 触发策略注册（@strategy_registry.register 装饰器）
     import strategies  # noqa: F401
 
@@ -634,7 +668,8 @@ def run_paper(args):
             alerter=alerter, retrain_scheduler=retrain_scheduler,
             event_filter=event_filter,
             initial_balance=500.0, default_lots=0.01, max_lots=0.1,
-            risk_per_trade_pct=2.0,
+            risk_per_trade_pct=1.0,
+            max_daily_loss_pct=15.0,
             enable_circuit=args.enable_circuit,
             event_sizing=event_sizing,
         )
@@ -686,7 +721,8 @@ def run_paper(args):
         default_lots=0.01,
         max_lots=0.1,
         warmup_bars=500,
-        risk_per_trade_pct=2.0,
+        risk_per_trade_pct=1.0,
+        max_daily_loss_pct=15.0,
         enable_circuit=args.enable_circuit,
         event_sizing=event_sizing,
     )

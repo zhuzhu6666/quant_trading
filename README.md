@@ -2,33 +2,29 @@
 
 XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backtest baseline 已实盘验证 (read-only 模式)。
 
-**最后更新: 2026-06-03 下午 (8 项接入完成)**
+**最后更新: 2026-06-06 (Phase 1-5 + 调参全完结)**
 
 ---
 
-## 当前状态 (2026-06-02 验证)
+## 当前状态 (2026-06-06 审计)
 
-### 代码层进度: 41/41 (P0+P1+P3) + T1-T16 集成层
+### 代码层进度: Phase 1-5 全完结 + 调参
 
-- ✅ **P0 (1-7)**: 因子库 22 个 / PCA / IC 监控 / XGBoost / Walk-Forward / 元学习
-- ✅ **P1 (A/B/C/D/E/F)**: MT5 整合 / 智能路由 / 数据拉取 / 影子 / A/B / 紧急平仓
-- ✅ **P3** circuit 调优: 5% → 10% 默认
-- ✅ **T1-T13 集成层**: MAB 多策略 + SelfLearningScheduler + WeightedScorer + ProbabilityCalibrator + MetaLearnerMonitor + FactorMonitor + Alerter + RetrainScheduler + SharedEventFilter (T13 业务关键)
-- ✅ **T14 L1 因子生命周期**: FactorHealth 5 维评分 + RegistryAdapter 动态 register/unregister
-- ✅ **T15 L2 因子 DSL** (T15.1-4 + T15.6-8): parser + AST + 20+ 算子 + 搜索 + 自动发现 + 持久化
-- ✅ **T15.5 闭环 (2026-06-03)**: shadow/discovered 因子接进 multi_factor_m15 投票管道 (lazy load 绕过 registry kwargs 时序 bug); A/B 测试 PnL delta=-24.06% (DD 同步改善 -17.39pp), wiring 已生效
-- ⏸ **T16 实时数据同步** (2026-06-03 **暂停**): Python MetaTrader5 5.0.5735 vs MT5 terminal 2026 版本 IPC pipe 名字 hash 不匹配, 包 `WaitNamedPipeW` 一直 timeout (7 种 path 变体 + 重装 + 短长 timeout 全败; 同会话 `CreateFileW` 手动连 `MT5.Terminal.781AEDD6...` pipe 100% 成功). db 50K M15 bar 是历史一次性 `scripts/fetch_mt5_data.py` 拉的. cron job 54c849d80e9d 配了但 `script=~/.hermes/scripts/live_sync_5m.py` 0 字节空, last_status=error. **影响范围**: 仅 T16 增量, 7 策略/MAB/影子/GP/校准/全部 PnL 数字全走 db 离线, 不受影响. 改按需手动: `python scripts/live_sync.py --mode once --type incremental --timeframes M15,H1,D1`. 报告: `data/charts/live_sync_status.json` (M15 50204 bars, inserted_last=0).
+- ✅ **Phase 1 (8 fix)**: 因子健康阈值 0.04 / risk_per_trade_pct=None 区分 / PreTrade 默认值 / filling mode 注释 / 22→39 因子文档 / mojibake 清除 / cfg_get import / StateContainer @property
+- ✅ **Phase 2 (7 refactor)**: MAB 架构护栏 / 冷启动 round-robin / 投票 IC 加权 / capability 对称 4 enable_* / backtest Kelly 仓位 / calibrator 真消费 / regime_consistency 5 段分桶 / cTrader SL/TP server 端
+- ✅ **Phase 3 (5 opt)**: DSL numba 化 (ts_rank/ts_decay_linear) / Sharpe log+NW HAC / EventBus publish_async_ff / 多账户 StateContainer / strptime 2359× 加速
+- ✅ **Phase 5 (3 verify)**: 39 因子健康 (2 HEALTHY) / paper 5000 bar PnL / import main 安全
+- ✅ **调参**: risk=1.0% + CB=15% → 354 trades, +59.17%, Sharpe 0.936
+- ⏸ **T16 实时数据同步**: Python MetaTrader5 包版本 vs terminal 2026 IPC pipe 不匹配, 改按需手动
 
 ### PnL 数字
 
 | 路径 | PnL | Trades | Sharpe | DD | 备注 |
 |---|---|---|---|---|---|
-| **main.py baseline** | **+407.51%** | 738 | 1.807 | 39.77% | 单策略 + 事件 skip + circuit 关闭 |
-| **MAB T1-T10** (无 T13) | +20.53% | 841 | -0.436 | 169.11% | 4 策略共享, 无事件 skip → OOH 跳爆仓 |
-| **MAB T1-T10 + T13** | **+120.75%** | 639 | **0.894** | 64% | SharedEventFilter 是业务层关键修复 |
-| MAB + circuit 10% | -34.47% | 54 | -0.838 | 38.38% | T13 后 circuit 冗余, 阻止开仓 |
-| mab_paper 修后 | +380.58% | 596 | 1.452 | — | 老脚本, MAB router + 事件 skip |
-| paper w/ circuit 10% | -9.54% | 123 | -0.105 | — | P3 调优, baseline 路径 |
+| **main.py baseline (无风控)** | **+407.51%** | 738 | 1.807 | 39.77% | 单策略 + 事件 skip + circuit 关闭 |
+| **MAB T1-T13 全栈** | **+120.75%** | 639 | **0.894** | 64% | SharedEventFilter 是业务层关键修复 |
+| **verify-2 调参后 (risk=1% + CB=15%)** | **+59.17%** | 354 | **0.936** | 15.9% | Kelly 1% + 15% CB, 最优参数已固化 |
+| verify-2 调参前 (risk=2% + CB=10%) | -10.28% | 13 | -0.864 | 11.3% | Kelly 2% + 10% CB, CB 频繁触发 |
 
 ### MT5 真值 (2026-06-02 验证)
 
@@ -38,11 +34,17 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 - 当前金价: **4529 USD/oz**, ATR14 mean ≈ **$8.42** (M15)
 - MT5 账户 balance=0, **不能 live trade**, 全 read+paper 模式
 
-### 因子健康 (T14.1 评估)
+### 因子健康 (verify-1, 2026-06-06)
 
-22 builtin 因子在 50K M15 bar 上的健康分: **0 HEALTHY / 2 WATCH / 20 DECAYING**
-- WATCH: keltner_width (41.0, |IC|=0.024), atr_ratio (40.9, |IC|=0.024)
-- 关键 dxy_corr_20: IC=-0.038 (跟 PROJECT_MAP 标的 0.034 一致)
+39 builtin + 26 GP DSL auto 因子在 50K M15 bar 上的健康分 (fix-1 阈值 0.1→0.04, refactor-5 v2 regime_consistency 5 段分桶):
+
+| 状态 | 数量 | 代表 |
+|---|---|---|
+| **HEALTHY** | 2 | gld_tonnes_zscore_60d (95.2, IC=+0.0359), cot_mm_net_pct_oi (83.8, IC=+0.0334) |
+| WATCH | 45 | dsl_auto_* (69.x), cot_mm_net_zscore_52w (68.5), atr_ratio (67.8) |
+| DECAYING | 18 | rsi_14 (23.5), adx (24.0), stoch_k (25.8), cb_china_* (NaN) |
+
+报告: `data/charts/factor_health_report.{txt,json}`
 
 ### L2 DSL 发现 (T15.5)
 
@@ -84,79 +86,24 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 - XAUUSD 长仓过夜费 -1 USD/lot/day 是合理默认值 (Bybit-Live-2 历史)
 - 报告: `data/charts/swap_funding_report.txt`
 
-### 自主进化 8 项接入 (2026-06-03 下午)
+### 自主进化 8 项接入 (2026-06-03)
 
-完整 L1-L5 自循环已闭环, 8 项 cron 化接入:
+完整 L1-L5 自循环已闭环, 8 项 cron 化接入 (详见 ROADMAP.md §P2 自主进化)。
 
-| PR | 改动 | 文件 |
-|---|---|---|
-| PR-1.3 | Calibrator retrain 后自动 save | scripts/walkforward_p0_6.py 末尾 + ProbabilityCalibrator.fit_from_predictions() |
-| PR-1.6 | 影子因子默认 vote_weight=0 永久 | config/factor_lifecycle.yaml + multi_factor_m15.py |
-| PR-1.8 | 日终 paper dryrun cron | scripts/daily_paper_dryrun.py (新) |
-| PR-2.1 | L2 GP 发现 cron 化 + auto_register | scripts/auto_discover_daemon.py (新) |
-| PR-2.5 | 影子 7 天 HEALTHY -> DISCOVERED 升级 | scripts/promote_shadow_to_active.py (新) + RegistryAdapter.promote() |
-| PR-3.2 | 漂移 SEVERE_DRIFT -> 触发 re-search | scripts/drift_research_daemon.py (新) + MetaLearnerMonitor.drift_handler |
-| PR-3.4 | T13 skip -> meta-learner batch | scripts/t13_skip_backfill.py (新) |
-| PR-3.7 | Regime 分类器周期重训 | scripts/regime_retrain.py (新) |
+### 影子因子 (2026-06-03)
 
-完整 cron 配置 (hermes):
-- `daily_paper_dryrun`: 每天 02:00, 跑最近 1 天 paper
-- `auto_discover_daily`: 每天 01:00, GP 50x30 + auto_register
-- `shadow_promote_daily`: 每天 01:30, 评估 shadow + promote/remove
-- `drift_research_daily`: 每 6h 检查一次, SEVERE_DRIFT 触发 GP re-search
-- `t13_skip_backfill_daily`: 每天 00:30, 把 T13 skip 期间数据批量喂 meta-learner
-- `regime_retrain_weekly`: 每周日 02:30, 重训 regime classifier
+默认 `shadow_vote_weight=0` (关闭), 开启需 `--include-shadow-factors --shadow-vote-weight 1.0`。
 
-### 影子因子 shadow ON 默认关闭 (2026-06-03 下午)
+### ProbabilityCalibrator (2026-06-03)
 
-32 组合扫描: `shadow_vote_weight < 1` 等于无影响 (整数票 floor), `vw >= 1` 拖累 PnL
-- 最佳: vw=0 = baseline (+24.79%)
-- 最差: vw=1.0 + tp=0.8: -19.59% / DD 54.37%
-- 默认改 `shadow_vote_weight=0` (实质关闭, 保留 lazy load 机制)
-- 开启需显式: `--include-shadow-factors --shadow-vote-weight 1.0`
-- 报告: `data/charts/shadow_calibration_report.txt`
+P0-7 桶级 calibrator 持久化: 启动时 load `data/charts/calibrator_bucket.json` (8 桶), 缺失回退 identity。
+refactor-6 (2026-06-06): calibrator 校准因子真进入 signal.strength → PaperEngine 仓位决策。
 
-### ProbabilityCalibrator 校准 A/B (2026-06-03 下午)
+### 自进化状态 (2026-06-06)
 
-P0-7 桶级 calibrator 在 3000 bar OOS 段**反伤** PnL (-30%, Sharpe 1.85 vs 3.59)
-- wiring 验证通过, 但 calibrator 本身需 retrain (P0-7 OOS 段已变, 桶表 stale)
-- 下一步: 周期性重训 calibrator (跟 P0-7 重训同节奏)
+L1-L5 自循环 3/3 闭环 (T15.5 wiring + Calibrator 持久化 + GP T15.3 v2) + Phase 1-5 审计 + 调参全完结。
 
-### 自进化状态评估 (2026-06-03)
-
-**框架自主进化差距 3/3 已闭环**。剩余 1 项 (第三项) 待定。
-
-1. **T15.5 闭环 wiring** ✅ **(2026-06-03 closed)** — lazy load 绕过 `strategy_registry.create()` 的 kwargs 时序 bug; A/B 测试 PnL delta=-24.06% (68t/+0.73%/Sharpe 0.69/DD 34.06%) vs A (62t/+24.79%/Sharpe 1.46/DD 51.44%); 影子因子在 OOS 上 OOS filter 有效 (DD 降 17pp) 但信号偏弱 (PnL 跌), 待校准 (top_pct/vote_weight)
-
-2. **ProbabilityCalibrator 持久化** ✅ **(2026-06-03 closed)** — main.py 启动时优先 `load("data/charts/calibrator_bucket.json")` (已有 P0-7 实测桶级 8 桶), 缺失回退 identity; 新 CLI `--calibrator-path` / `--calibrator-save`; 测试 5/5 通过 (load/roundtrip/missing/platt)
-
-3. **L2 GP 因子搜索 (T15.3 v2)** ✅ **(2026-06-03 closed)** — alpha/factor_search_gp.py 实现 Genetic Programming 引擎 (population/tournament/crossover/mutate/elite); 5000 bar A/B 对比: A random 1000c top1=70.38 (10.9s); B GP 100x10 top1=72.17 (17.1s) +1.79 vs random; C GP 50x30 top1=72.74 (24.2s) +2.36 vs random; GP 历史曲线 63.8→72.7, 代际持续爬坡; 推荐配置 pop>=50, gen>=20 — 等 T15.5 闭环后再讨论
-
-**今日工作日志 (2026-06-03)**
-
-- 策略层: `strategies/multi_factor_m15.py` +157 行
-  - 8 个新参数 (include_shadow_factors / shadow_top_k / shadow_recompute_every / shadow_rank_window / shadow_min_samples / shadow_vote_weight / shadow_top_pct / shadow_bottom_pct)
-  - 3 个新方法: `_load_shadow_factors` (从 lifecycle_log 读活跃 shadow 因子) / `_compute_shadow_factors` (滚动重算) / `_shadow_votes` (分位 ranking 投票)
-  - `__init__` 状态初始化 + `on_init` 状态重置 + `on_bar` 投票钩子 + signal meta 加 `shadow_active`
-- 入口层: `main.py` +7 行
-  - 新增 CLI 参数 `--include-shadow-factors` (默认 off) / `--shadow-top-k` (默认 3)
-  - 已接进单策略 `override_params` 和 MAB `overrides_full`
-- 测试层: `scripts/test_shadow_consumption.py` (新增, A/B 验证: 5000 bar, baseline vs shadow-on)
-- A/B 测试输出: A 与 B PnL 不同 (delta=-24.06%, DD -17.39pp) → wiring 闭环确认
-- 修过的 bug: `strategy_registry.create()` 先 `cls(...)` 再 `instance.params = params`, 导致 `__init__` 读 `self.params` 时拿的是类默认, 影子加载分支永远不进。修法: lazy load 移到 `on_bar` 第一个调用时, 此时 `self.params` 已被 registry 覆盖
-- 影子因子在 OOS 上净负 PnL 但 DD 改善, 后续需校准 `shadow_top_pct` / `shadow_vote_weight`
-
-### Task #2 工作日志: ProbabilityCalibrator 持久化 (2026-06-03)
-
-- 入口层: `main.py` 启动时优先从 `data/charts/calibrator_bucket.json` 加载 calibrator (P0-7 实测的 8 桶桶级表), 文件缺失回退 identity, load 失败 fallback identity
-- 新增 CLI flag: `--calibrator-path` (默认 `data/charts/calibrator_bucket.json`) / `--calibrator-save` (预留, 定时保存)
-- 测试层: `scripts/test_calibrator_persistence.py` (5/5 通过)
-  - TEST 1: 加载真实 calibrator_bucket.json → method=bucket, 8 buckets
-  - TEST 2: 校准值与 identity 不同 (0.75→0.60, 0.85→1.00 等)
-  - TEST 3: save→load roundtrip 保留所有字段
-  - TEST 4: 文件不存在时回退 identity, 不崩
-  - TEST 5: fit Platt → save → load → predict 一致
-- Smoke test: `python main.py --mode paper --use-router --use-scorer --use-calibrator` 日志确认 `calibrator: bucket (loaded from data\charts\calibrator_bucket.json, buckets=8, platt=(1.000, 0.000))`
+**调参脚本**: `scripts/tune_risk_params.py` — 3 轮梯度测试, 保留供后续调参。
 
 ---
 
@@ -179,7 +126,7 @@ quant_trading/
 │                            # macd_bb / gold_momentum
 ├── strategy/                # base / signal_bus / registry / portfolio /
 │                            # mab_router ★ / scheduler / scorer / retrain_scheduler
-├── alpha/                   # 22 因子 registry / factor_engine / ic_tracker /
+├── alpha/                   # 39 因子 registry / factor_engine / ic_tracker /
 │                            # regime_classifier / probability_calibrator /
 │                            # factor_health ★ / registry_adapter ★ /
 │                            # factor_dsl ★ / factor_score_evaluator ★ /
@@ -291,20 +238,40 @@ python main.py --mode dashboard --port 8050
 
 ---
 
-## Audit 验证状态 (2026-06-03 反查代码)
-
-参考: `data/charts/framework_audit_20260603.md`
+## Audit 验证状态 (2026-06-06 Phase 1-5 审计)
 
 | 项 | 状态 | 验证 |
 |---|---|---|
-| BUG-1 daily_loss_pct abs() | ✅ 已修 | `core/state.py:91` `max(0, -net_pnl)` |
-| BUG-2 circuit reset 覆写 peak | ✅ 已修 | `risk/circuit.py:122-134` 不再调 reset_daily |
-| BUG-3 forward_periods 无效 | ✅ 已修 | `alpha/factor_engine.py:81-140` 多周期+mean |
-| BUG-4 SL slippage 方向 | ❌ **audit 描述错, 代码实际对** | `paper_engine.py:252` close_dir=-pos.direction 是正确 (long sell 应 price-slip) |
-| BUG-5 break_even 单独计 | ✅ 已修 | `state.py:33+131-133` |
-| OPT-1 WAL+busy_timeout | ⏳ 未查 | — |
-| OPT-2 _trades 无上限 | ⏸ 未改 | 长跑需定期 flush |
-| OPT-3 EventBus async publish | ⏸ 未用 | 全走 publish_sync |
-| OPT-4 死代码 | ⏸ 保留 | `strategy/portfolio.py` / `on_tick` / `active_orders` / `live/executor.py` |
-| OPT-5 event_filter strptime 重复解析 | ⏸ **未修** | `event_filter.py:118-124` 50K bar × 50 FOMC = 2.5M 次 |
+| fix-1 因子健康阈值 0.1→0.04 | ✅ 已修 | verify-1: 2 HEALTHY (gld_tonnes_zscore_60d 95.2, cot_mm_net_pct_oi 83.8) |
+| fix-2 risk_per_trade_pct=None 区分 | ✅ 已修 | paper_trader + paper_engine + mab_paper_runner 三分支 |
+| fix-3 PreTrade 默认值 | ✅ 已修 | max_daily_loss_pct 10.0, single_risk_usd 35.0 |
+| fix-4 PaperEngine 默认 None | ✅ 已修 | 跟 paper_trader 对齐, caller 显式传 |
+| fix-5 审计错判 (main.py 守卫) | ✗ 撤回 | line 736-737 有 `if __name__` 守卫, verify-3 import OK |
+| fix-6 filling mode 注释 | ✅ 已修 | bitmask→enum 0/1/2 |
+| fix-7 文档因子数 22→39 | ✅ 已修 | README + PROJECT_MAP + ROADMAP |
+| fix-8 mojibake 清除 | ✅ 已修 | factor_search_gp.py 26 行乱码→英文 |
+| refactor-1 MAB 架构护栏 | ✅ 护栏 | class docstring + startup warning + KNOWN ISSUE 注释 |
+| refactor-2 MAB 冷启动 | ✅ 已修 | round-robin 前 50 笔 + warmup_status() |
+| refactor-3 capability 对称 | ✅ 已修 | 6 策略 4 enable_* 字段 |
+| refactor-4 backtest Kelly | ✅ 已修 | --risk-per-trade-pct CLI |
+| refactor-5 factor_health v2 | ✅ 已修 | 5 段分桶稳定性 + independence 阈值 0.05 |
+| refactor-6 calibrator 真消费 | ✅ 已修 | cal_factor → signal.strength |
+| refactor-7 投票 IC 加权 | ✅ 已修 | weighted_vote + vote_weights |
+| refactor-8 cTrader SL/TP | ✅ 已修 | amend_position_sltp + ProtoOAAmendPositionSLTPReq |
+| opt-1 DSL numba 化 | ✅ 已修 | ts_rank/ts_decay_linear, 修 2 公式 bug |
+| opt-2 Sharpe NW HAC | ✅ 已修 | log returns + Newey-West, bench 2.02× |
+| opt-3 EventBus async | ✅ 已修 | publish_async_ff + daemon loop |
+| opt-4 多账户 | ✅ 已修 | StateContainer + AccountState |
+| opt-5 strptime 优化 | ✅ 已修 | precompute dual window, 2359× 加速 |
+| 调参 | ✅ 完成 | risk=1.0% + CB=15% → +59.17%, Sharpe 0.936 |
+| cfg_get NameError | ✅ 已修 | main.py run_paper 内补 import |
+| StateContainer @property | ✅ 已修 | has_position/win_rate/daily_loss_pct 加 @property |
+
+---
+
+## 环境
+
+- Python 3.11 (hermes sandbox), numpy-2.4.6 + pandas-3.0.3 + backtrader-1.9.78 + loguru-0.7.3
+- MT5 账户 balance=0 (blocked-1), MetaTrader5 包版本不匹配 (blocked-2)
+- cTrader .env 已有真 token (blocked-3 ✅ 解除)
 

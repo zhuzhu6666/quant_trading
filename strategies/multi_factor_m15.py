@@ -49,6 +49,10 @@ class MultiFactorM15Strategy(BaseStrategy):
         tp_atr (float): 止盈ATR倍数, default=3.0
         cooldown_bars (int): 交易后冷却bar数, default=3
         bb_percentile (int): BB宽度分位数阈值, default=80
+        vote_weights (list[float]): 3 票权重, REFACTOR-2 用, default=[1.0, 1.0, 1.0] (等权).
+            历史 IC: di_spread=0.021, rsi=0.012, stoch_k=0.012 → 归一化 [1.75, 1.0, 1.0]
+            强信号(di_spread)更值得一票, 让强信号单独足以开仓, 弱信号需 +1 强票凑齐
+        weighted_vote (bool): REFACTOR-2: 启用 vote_weights 加权投票, default=False (向后兼容)
     """
     params = {
         'di_thresh': 0,
@@ -58,6 +62,10 @@ class MultiFactorM15Strategy(BaseStrategy):
         'di_period': 14,
         'rsi_period': 14,
         'stoch_period': 14,
+        # REFACTOR-2 (audit 2026-06-06): IC 加权投票
+        # 默认 False 走旧 3 票等权, 配 weighted_vote=True 改用 vote_weights
+        'weighted_vote': False,
+        'vote_weights': [1.0, 1.0, 1.0],
         'macd_fast': 12,
         'macd_slow': 26,
         'macd_signal': 9,
@@ -329,26 +337,45 @@ class MultiFactorM15Strategy(BaseStrategy):
                 return None
 
         # ── 投票系统 ──
-        votes_long = 0
-        votes_short = 0
+        # REFACTOR-2 (audit 2026-06-06): 加权投票
+        # ──────────────────────────────────────────────────
+        # 旧 3 票等权: 1 强 + 1 弱 = 跟 1 弱 + 1 弱 等价
+        # IC 加权: di_spread (|IC|=0.021) 比 stoch_k (|IC|=0.012) 强 1.75×
+        #   vote_weights = [1.75, 1.0, 1.0] 归一化到 di_spread 上
+        # 强信号(单 di_spread) 1 票 = 1.75, 单独 ≥ 1.5 票阈值, 可单独开仓
+        # 弱信号(单 stoch_k) 1 票 = 1.0, 需配合 1 强票 (1.0+1.75=2.75 ≥ 1.5) 才开
+        #
+        # 等权模式 (weighted_vote=False, 默认, 向后兼容): votes_needed=2 → 2/3 票
+        # 加权模式 (weighted_vote=True): votes_needed=1.5 → 单 di_spread 即可
+        votes_long = 0.0
+        votes_short = 0.0
+        weighted_mode = bool(p.get('weighted_vote', False))
+        if weighted_mode:
+            weights = p.get('vote_weights', [1.0, 1.0, 1.0])
+            # 容错: 长度不够补 1.0
+            if len(weights) < 3:
+                weights = list(weights) + [1.0] * (3 - len(weights))
+            w_di, w_rsi, w_stoch = weights[0], weights[1], weights[2]
+        else:
+            w_di = w_rsi = w_stoch = 1.0
 
         # Vote 1: di_spread > 0 = bullish, < 0 = bearish
         if di_spread > p['di_thresh']:
-            votes_long += 1
+            votes_long += w_di
         elif di_spread < -p['di_thresh']:
-            votes_short += 1
+            votes_short += w_di
 
         # Vote 2: rsi > thresh = bullish, < thresh = bearish
         if rsi > p['rsi_thresh']:
-            votes_long += 1
+            votes_long += w_rsi
         elif rsi < p['rsi_thresh']:
-            votes_short += 1
+            votes_short += w_rsi
 
         # Vote 3: stoch_k > thresh = bullish, < thresh = bearish
         if stoch_k > p['stoch_thresh']:
-            votes_long += 1
+            votes_long += w_stoch
         elif stoch_k < p['stoch_thresh']:
-            votes_short += 1
+            votes_short += w_stoch
 
 
         # ---- Shadow / discovered 因子投票（默认关闭，include_shadow_factors=True 时启用）----

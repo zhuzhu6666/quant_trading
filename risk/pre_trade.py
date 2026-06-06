@@ -22,10 +22,13 @@ class PreTradeChecker:
     所有检查通过后才允许下单。
     """
 
-    def __init__(self, max_daily_loss_pct: float = 5.0,
+    def __init__(self, max_daily_loss_pct: float = 10.0,
                  max_trades: int = 20,
                  max_consecutive_loss: int = 5,
-                 single_risk_usd: float = 2.0):
+                 # FOOTGUN-3 fix (audit 2026-06-06): 默认 2.0 → 35.0
+                 # 0.01 lot × 3ATR SL × 100 oz = $25-30 实际单笔风险, 2.0 默认会拒几乎所有开仓
+                 # PaperTrader 默认已用 35.0, 这里跟 PaperTrader 对齐
+                 single_risk_usd: float = 35.0):
         self.max_daily_loss_pct = max_daily_loss_pct
         self.max_trades = max_trades
         self.max_consecutive_loss = max_consecutive_loss

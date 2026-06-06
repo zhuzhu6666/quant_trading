@@ -71,7 +71,10 @@ class PaperExecutionEngine:
     def __init__(self, initial_balance: float = 500.0,
                  default_lots: float = 0.01,
                  max_position_lots: float = 0.5,
-                 risk_per_trade_pct: float = 0.0,  # 单笔风险占账户% (0=固定 default_lots)
+                 # FOOTGUN-2 fix (audit 2026-06-06): 改 None=禁用 vs 0.0=真 0% 风险
+                 # 默认 None (跟 paper_trader 对齐) — 保持 default_lots 不变,
+                 # 想启用 Kelly 仓位 caller 显式传 >0 (main.py 传 2.0)
+                 risk_per_trade_pct: float | None = None,
                  min_lots: float = 0.01,
                  pre_trade: Optional[PreTradeChecker] = None,
                  circuit_breaker: Optional[CircuitBreaker] = None,
@@ -88,7 +91,15 @@ class PaperExecutionEngine:
         self.default_lots = default_lots
         self.max_position_lots = max_position_lots
         self.min_lots = min_lots
-        self.risk_per_trade_pct = risk_per_trade_pct  # 0 = 禁用动态仓位
+        self.risk_per_trade_pct = risk_per_trade_pct  # None=禁用动态仓位, 0.0=真 0% (拒单), >0=Kelly
+        # FOOTGUN-2 fix: 显式区分 None vs 0
+        if risk_per_trade_pct is None:
+            logger.debug("[FOOTGUN-2] risk_per_trade_pct=None, 禁用 Kelly 动态仓位, 走 fixed default_lots")
+        elif risk_per_trade_pct == 0.0:
+            logger.warning(
+                "[FOOTGUN-2] risk_per_trade_pct=0.0, 真 0%% 风险 → lots * 0 = 0 触发拒单。"
+                "如果想禁用动态仓位, 改传 None; 想固定 default_lots 不变, 传 None 后用 default_lots 字段控制"
+            )
         self.pre_trade = pre_trade
         self.circuit_breaker = circuit_breaker
         # atr_source: 接收 bar 字典，返回当前 ATR 值（用于熔断喂入 + 动态滑点）
@@ -160,10 +171,13 @@ class PaperExecutionEngine:
             tp_price = fill_price - atr * signal.tp_atr
 
         # ── 动态仓位（Kelly + Event Sizing） ──────────────────
-        # risk_per_trade_pct > 0 时按账户余额 × 风险% / 单笔价差 反推手数
+        # risk_per_trade_pct:
+        #   - None  → 禁用动态仓位, 走 fixed default_lots × size_mult
+        #   - 0.0   → 真 0% 风险, lots = 0 → pre_trade 拒单
+        #   - > 0   → Kelly: lots = risk_dollars / (sl_distance × contract_size)
         # signal.strength (默认 1.0) 作为额外乘数（FOMC boost 用）
         size_mult = max(0.01, float(getattr(signal, 'strength', 1.0) or 1.0))
-        if self.risk_per_trade_pct > 0:
+        if self.risk_per_trade_pct is not None and self.risk_per_trade_pct > 0:
             pip_risk = abs(fill_price - sl_price)
             risk_dollars = self.equity * (self.risk_per_trade_pct / 100.0) * size_mult
             if pip_risk > 0:
@@ -171,8 +185,11 @@ class PaperExecutionEngine:
                 lots = risk_dollars / (pip_risk * self.CONTRACT_SIZE)
             else:
                 lots = self.default_lots
+        elif self.risk_per_trade_pct == 0.0:
+            # FOOTGUN-2 fix: 真 0% 风险 = lots=0 (拒单)
+            lots = 0.0
         else:
-            # 无 Kelly 时，strength 也作为倍数
+            # None 或其他: 固定手数 × size_mult
             lots = self.default_lots * size_mult
 
         # ── Event multiplier ────────────────────────────────
