@@ -38,14 +38,15 @@ LOG_FILE="C:\Users\zhu\.mempalace\logs\pre-compact.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 {
-    echo "[$(date -Iseconds 2>/dev/null || date)] PreCompact sweep start"
+    NOW() { printf '%(%Y-%m-%dT%H:%M:%S%z)T' -1; }
+    echo "[$(NOW)] PreCompact sweep start"
     echo "  transcript_path: $TRANSCRIPT_PATH"
     echo "  sessions_root: $SESSIONS_ROOT"
     echo "  palace_dir: $PALACE_DIR"
 
     (cd "$PALACE_DIR" && mempalace sweep "$SESSIONS_ROOT" 2>&1) || echo "  sweep exited non-zero, ignoring"
 
-    echo "[$(date -Iseconds 2>/dev/null || date)] PreCompact sweep done"
+    echo "[$(NOW)] PreCompact sweep done"
 } >> "$LOG_FILE" 2>&1
 
 # 永远 0

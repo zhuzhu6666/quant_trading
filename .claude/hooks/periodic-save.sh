@@ -39,10 +39,12 @@ fi
 # 关键 deviation: mempalace sweep 没有 --wing/--force flag
 # wing 由 CWD 决定,所以必须 cd 到 palace dir
 # sweep 是幂等的(message-level + cursor),所以不用 --force
+# 用 bash 内建 printf '%()T' 取时间,避免依赖 date 命令 (schtasks 启的 bash PATH 缺 date)
+NOW() { printf '%(%Y-%m-%dT%H:%M:%S%z)T' -1; }
 {
-    echo "[$(date -Iseconds 2>/dev/null || date)] Periodic sweep start"
+    echo "[$(NOW)] Periodic sweep start"
     (cd "$PALACE_DIR" && mempalace sweep "$SESSIONS_ROOT" 2>&1) || echo "  sweep exited non-zero, ignoring"
-    echo "[$(date -Iseconds 2>/dev/null || date)] Periodic sweep done"
+    echo "[$(NOW)] Periodic sweep done"
 } >> "$LOG_FILE" 2>&1
 
 exit 0
