@@ -750,11 +750,33 @@ rm -f C:\Users\zhu\quant_trading\.claude\settings.local.json
 
 # 5. 改 .gitignore(可选,删 .claude/hooks/*.log 那两行)
 
-# 6. Git 还原
-git checkout main
+# 6. 7 个 task branch 在 main 上已合并,只需:
 git branch -D chore/mempalace-install chore/mempalace-init chore/mempalace-mine-project \
               chore/mempalace-mine-sessions chore/mempalace-hooks chore/mempalace-schtasks \
               chore/mempalace-mcp-register
 ```
 
 5 分钟内可完全还原到没装之前的状态。9 条文件记忆不受影响。
+
+## Patch log (执行中累积)
+
+- **Task 1 (def474f)**: 顺利。`uv tool uninstall --dry-run` 不支持,改用 `uv tool list` 验证回滚路径
+- **Task 2 (7ff9420)**: 7 个 deviation,见 `docs/superpowers/install-logs/task-02-palace-init.md`。**关键 3 条**:
+  1. `mempalace init --backend` 的合法值是 `chroma`,**不是 `chromadb`** (plan 错)
+  2. `mempalace init` **没有 `--model` flag**;embeddinggemma-300m 是 mine 时按需下载,不在 init 阶段配置(plan 误读 README)。**实际模型要等 Task 3 mine 时从日志确认**
+  3. 配置文件是 `mempalace.yaml` (YAML),不是 `config.json` (JSON);`backends.json` 是额外手写 marker
+  4. 还需要 `--yes --no-llm` 跳过交互
+  5. chroma/ 在 init 时是空的,首次 mine 才落 sqlite
+- **Task 3 (9a46296)**: 5 个 deviation,见 `docs/superpowers/install-logs/task-03-mine-project.md`。**关键 4 条**:
+  1. `mempalace mine --mode` 只有 `{projects,convos,extract}`,**不是 `files`**(plan 错)
+  2. `mempalace search` 用 `--results N`,**不是 `--limit N`**(plan 错)
+  3. `mempalace list-rooms` 不存在,改用 `mempalace status --backend chroma`
+  4. **Embedding 模型实际是 `onnx-mini-lm-l6-v2`**(英文,~120MB,Chroma 默认),**不是 embeddinggemma-300m**——plan 误读 README,这是 v3.4.0 的内置默认。多语言能力受限于此模型,纯中文检索质量可能下降
+  5. **SOCKS 代理环境需 `socksio`**——mempalace 自己的 venv 没装,首次 mine 下载模型时 `ImportError`。**已装** `uv pip install --python <mempalace venv> socksio`。后续 task 沿用
+  6. **Room 没分**——293 文件全进 `general`,plan 要的 code/docs/scripts/root 4 室未实现(v3.4.0 的 projects mode 默认行为)
+- **Task 4 (bb4d0ab)**: 3 个 deviation,见 `docs/superpowers/install-logs/task-04-mine-sessions.md`。**关键 2 条**:
+  1. `mempalace search --json` 也不存在——子代理用 `grep -cE "^\s+\[[0-9]+\]"` 替代 count。后续 task 都需要这个 workaround
+  2. **`--mode convos` 自动推 room**(technical/general/architecture/planning/decisions 5 室)——跟 Task 3 的 `projects` mode 不一样,**convos 推得动,projects 推不动**。Plan 里要的 4 室拆分在 sessions wing 实现了,但 quant-trading wing 没实现
+  3. 验证查询 "dmPolicy pairing" 改写成 "dmPolicy=pairing" 才能直击 trap 文件
+- **Pre-Task 5 预查**: `mempalace mcp --help` 显示**实际是 `mempalace mcp [--backend BACKEND]`**,**没有 `serve` 子命令,没有 `--wing` flag**。Plan 里写的 `["mcp", "serve", "--wing", "quant-trading"]` 100% 错,Task 7 需要改成 `["mcp", "--backend", "chroma"]`
+- **Branch 策略修正**:每任务新 branch + 完成后**立即 merge --no-ff 到 main**,保留 install log 在 main 历史里。原 plan 的"最后统一 git branch -D"导致 log 失,改掉
