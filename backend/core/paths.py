@@ -4,6 +4,9 @@ from pathlib import Path
 # backend/main.py → backend/core/paths.py: project root = parents[2]
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 
+# backend/app.py → backend/core/paths.py: backend dir = parents[1]
+BACKEND_DIR: Path = Path(__file__).resolve().parents[1]
+
 DATA_DIR: Path = PROJECT_ROOT / "data"
 LOGS_DIR: Path = PROJECT_ROOT / "logs"
 CONFIG_DIR: Path = PROJECT_ROOT / "config"
