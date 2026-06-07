@@ -1,10 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
-
-interface Bar { t: number; o: number; h: number; l: number; c: number; v: number; }
+import { Candlestick, CandleBar } from "@/components/charts/candlestick";
 
 export default function MarketPage() {
-  const [bars, setBars] = useState<Bar[]>([]);
+  const [bars, setBars] = useState<CandleBar[]>([]);
   const [tf, setTf] = useState("M15");
   const [loading, setLoading] = useState(false);
 
@@ -12,9 +11,11 @@ export default function MarketPage() {
     setLoading(true);
     fetch(`/api/market/bars?symbol=XAUUSD%2B&timeframe=${tf}&limit=500`)
       .then((r) => r.json())
-      .then((d) => setBars(d.bars))
+      .then((d) => setBars(d.bars as CandleBar[]))
       .finally(() => setLoading(false));
   }, [tf]);
+
+  const last = bars.length > 0 ? bars[bars.length - 1] : null;
 
   return (
     <div className="space-y-4">
@@ -30,19 +31,22 @@ export default function MarketPage() {
           </button>
         ))}
       </div>
-      <div className="bg-bg-card border border-bg-border rounded p-4">
-        {loading ? (
-          <div className="text-fg-muted">加载中...</div>
-        ) : (
-          <div className="num text-sm text-fg-muted">
-            返回 {bars.length} 根 bar
-            {bars.length > 0 && (
-              <div className="mt-2">
-                最新: {new Date(bars[bars.length - 1].t * 1000).toLocaleString()} 收 {bars[bars.length - 1].c}
-              </div>
-            )}
-            <div className="text-xs mt-2 text-fg-muted">⚠ 完整 TradingView LWC 渲染在 Phase 3 (Task 3.x) 实现</div>
+      <div className="bg-bg-card border border-bg-border rounded p-4 space-y-2">
+        <div className="flex items-center justify-between text-sm">
+          <div className="text-fg-muted">
+            {tf} · {loading ? "加载中..." : `${bars.length} 根 bar`}
           </div>
+          {last && (
+            <div className="num text-fg-muted">
+              最新 {new Date(last.t * 1000).toLocaleString()} · 收{" "}
+              <span className={last.c >= last.o ? "text-up" : "text-down"}>{last.c}</span>
+            </div>
+          )}
+        </div>
+        {bars.length > 0 ? (
+          <Candlestick bars={bars} height={480} />
+        ) : (
+          <div className="text-fg-muted text-center py-12">{loading ? "加载中..." : "无数据"}</div>
         )}
       </div>
     </div>
