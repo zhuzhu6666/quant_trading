@@ -8,11 +8,18 @@ export default function MarketPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    // (audit v5 fix B-7: AbortController so switching tf quickly does not let
+    // an old fetch overwrite the new tf's data.)
+    const ctrl = new AbortController();
     setLoading(true);
-    fetch(`/api/market/bars?symbol=XAUUSD%2B&timeframe=${tf}&limit=500`)
+    fetch(`/api/market/bars?symbol=XAUUSD%2B&timeframe=${tf}&limit=500`, { signal: ctrl.signal })
       .then((r) => r.json())
       .then((d) => setBars(d.bars as CandleBar[]))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (e.name !== "AbortError") console.error("bars fetch failed", e);
+      })
+      .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
+    return () => ctrl.abort();
   }, [tf]);
 
   const last = bars.length > 0 ? bars[bars.length - 1] : null;

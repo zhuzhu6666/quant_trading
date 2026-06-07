@@ -30,7 +30,27 @@ export default function ABPage() {
       const d = await r.json();
       setProgress({ pct: d.progress_pct, step: d.current_step, status: d.status });
       if (d.status === "done") {
-        setReport(d.result?.report_excerpt ?? "(no excerpt)");
+        // (audit v5 fix B-6: backend ab_service returns {result_a, result_b, delta_pnl,
+        // delta_sharpe, report_path}; there is no `report_excerpt` key. Read the
+        // report file via /api/reports/<name> instead.)
+        const reportPath: string | undefined = d.result?.report_path;
+        if (reportPath) {
+          const name = reportPath.split(/[\\/]/).pop()!;
+          const rr = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+          if (rr.ok) {
+            const dd = await rr.json();
+            const text = typeof dd.content === "string"
+              ? dd.content
+              : JSON.stringify(dd.content, null, 2);
+            // Show delta_pnl / delta_sharpe summary + the report
+            const summary = `# A/B 完成\n# delta_pnl: ${d.result.delta_pnl}\n# delta_sharpe: ${d.result.delta_sharpe}\n# report: ${reportPath}\n\n`;
+            setReport(summary + text);
+          } else {
+            setReport(`报告读取失败 (${rr.status}); result: ${JSON.stringify(d.result, null, 2)}`);
+          }
+        } else {
+          setReport(JSON.stringify(d.result ?? {}, null, 2));
+        }
         return;
       }
       if (d.status === "error" || d.status === "cancelled") return;

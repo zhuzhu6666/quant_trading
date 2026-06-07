@@ -60,6 +60,97 @@
 
 ---
 
+## 🆕 v5 增量审计 (2026-06-08) — Web Console 专项, 7 P0 真 bug 修了 6 + 1 护栏
+
+> **来源**: `PROJECT_AUDIT_v5.md` 完整阅读 frontend/ 33 ts/tsx + backend/ 16 API + 12 service + 7 lib 后, 用户报"回测页面有 bug" 触发的专项审计。
+> **实测验证**: 31 个 fetch endpoint 全映射, 10 项 import + bench 验算, **8.16x 加速实测 (50K bar: 2462ms → 302ms)**。
+
+### ⚡ v5 1-2 分钟可改 (3 项) ✅ 全部完成
+| # | ID | 任务 | 文件:行号 | 状态 |
+|---|---|---|---|---|
+| 1 | v5-fix-1 ✅ | `sidebar.tsx:9` 链接 `/backtest` 路由不存在 → 新建 `app/(terminal)/backtest/page.tsx` (220 行) | `sidebar.tsx:9` + new file | 已修 |
+| 2 | v5-fix-5 ✅ | paper page emergency confirm 文案撒谎 ("5 秒内输入 'emergency'" 不存在) | `paper/page.tsx:97` | 已修 |
+| 3 | v5-fix-3 ✅ | `api/market.py:78` `df.iterrows()` 慢 15x → vectorized numpy | `api/market.py:68-80` | 已修 8.16x |
+
+### ⚡ v5 5-15 分钟可改 (4 项) ✅ 全部完成
+| # | ID | 任务 | 文件:行号 | 状态 |
+|---|---|---|---|---|
+| 4 | v5-fix-4 ✅ | paper page render 阶段直接 setState (违反 React 规则) → 移到 useEffect | `paper/page.tsx:51-59` | 已修 |
+| 5 | v5-fix-6 ✅ | ab / tuning page 用 `d.result?.report_excerpt` (后端从不返) → 改用 `report_path` + `/api/reports/<name>` | `ab/page.tsx:33` + `tuning/page.tsx:37` | 已修 |
+| 6 | v5-fix-7 ✅ | market page 切 tf useEffect 无 AbortController → 加 cleanup | `market/page.tsx:10-16` | 已修 |
+| 7 | v5-guard-1 🛡️ | `backtest_runner._run_single_backtrader_pass` 是 stub (12 combo 全 0) → backtest page 顶部 bg-warn 警示 + TODO 拆解 | `backtest_runner.py:55-82` + new backtest page | 已加护栏 |
+
+### 🛡️ v5 护栏已加 (1 项, 跟 v3 refactor-1 同模式)
+- backtest_runner stub 状态, 真实 PnL 仍走 `python main.py --mode backtest`
+- 拆解方案见 v5-拆解-1 (1-2 周工作量, 改 backtrader optstrategy 12 combo)
+
+### 🟡 v5 P1 UX 留 future (5 项)
+| # | ID | 任务 | 工作量 |
+|---|---|---|---|
+| 1 | v5-p1-1 | paper page symbol select 改 disabled readonly text | ⚡ 1 分钟 |
+| 2 | v5-p1-4 | candlestick chart 渲染后 fitContent | ⚡ 1 分钟 |
+| 3 | v5-p1-5 | live start/stop 端点改 501 或删 | ⚡ 1 分钟 |
+| 4 | v5-p1-3 | sync daemon_running 字段验证 + 修 | 🔧 30 分钟 |
+| 5 | v5-p1-2 | factors page 改轮询 /api/jobs/{id} 看 run 进度 | 🔧 1 小时 |
+
+### 🏗️ v5 拆解工作 (1 项, 1-2 周)
+- v5-拆解-1: backtest_runner stub 改真 backtrader optstrategy 12 combo
+  - 步骤 1: 把 `main.py:run_backtest` 的 `_ScanStrategy` 抽到 `execution/_scan_strategy.py` (可复用)
+  - 步骤 2: 在 `_run_single_backtrader_pass` 里 import, 跑 backtrader.cerebro.optstrategy
+  - 步骤 3: 12 combo 并行 (concurrent.futures.ProcessPoolExecutor) 加速
+  - 步骤 4: 跟 main.py 同步维护机制 (refactor 拆解方案见 v5-拆解-2)
+  - 风险: 跟 main.py 行为一致性 + 12 combo 4-8 分钟长任务需要前端 timeout 适配
+
+## 🆕 v4 增量审计 (2026-06-06) — 12 finding, 3 真 bug 已修
+
+> **来源**: `PROJECT_AUDIT_v4.md` 完整阅读剩余 ~20% 代码 (live/ + monitor/ + db/ + data/ + docs/ + main.py 601-770 + 8 个新 tests) 后新发现的 12 条 finding。
+> **实测验证**: 10 项 import + 真实例化 (因子数 39 ✅, @property 3/3 ✅, factor_health 阈值 0.04 ✅, etc.)
+
+### ⚡ v4 1-2 小时可改 (3 项) ✅ **全部完成**
+
+| # | ID | 任务 | 文件:行号 | 工作量 | 状态 |
+|---|---|---|---|---|---|
+| 1 | v4-fix-1 ✅ | `orchestrator.full_sync` 漏初始化 `all_errors`, 任一 tf pull 失败 → UnboundLocalError | `data/live_sync/orchestrator.py:94` | ⚡ 30 秒 | 已修 |
+| 2 | v4-fix-2 ✅ | `factor_health._compute_components` decay_rate 写"两边都 0"错 (`0.0 if a else 0.0`), 应"q1≈0 + q4>0"给 100 | `alpha/factor_health.py:187` | ⚡ 30 秒 | 已修 |
+| 3 | v4-fix-3 ✅ | `factor_dsl.py:28` 删 dead import `ast as _ast` (全文无 _ast. 引用) | `alpha/factor_dsl.py:28` | ⚡ 5 秒 | 已修 |
+
+**v4 增量总计: 1 分钟代码改动 + 1 个护栏, 0 风险**
+
+### 🛡️ v4 护栏已加 (4 项, 跟 v3 refactor-1 同模式)
+
+| # | ID | 任务 | 文件 | 拆解方案 | 优先级 |
+|---|---|---|---|---|---|
+| 4 | v4-guard-1 🛡️ | `factor_adx` / `factor_di_spread` 用 EMA(span=14) 平滑, 跟 `risk/regime.py:163-175` Wilder smoothing 不对齐 → regime filter 跟 strategy 投票脱节 | `alpha/registry.py:75-87, 117-125` | 抽 `alpha/_wilder.py` 的 `_wilder_smooth` helper, 3 个引用点共用; 或统一改 regime.py 用 EMA | P2 |
+| 5 | v4-guard-2 🛡️ | `regime.py:481` 查 `symbols` 表 DDL 缺失, DXY_DRIVEN 永远 False (dead branch) | `risk/regime.py:402-403` + `data/store.py` 加 `symbols` 表 | 删了 DXY_DRIVEN 标志或真建表 | P2 |
+| 6 | v4-guard-3 🛡️ | `factor_discovery.py:155` `Path.write_text` 无 `encoding="utf-8"`, Windows locale 可能 GBK | `alpha/factor_discovery.py:155` | 加 1 参, ⚡ 5 秒 cleanup | P3 |
+| 7 | v4-guard-4 🛡️ | `external_loader.py:295` `reindex(method="ffill")` pandas 2.1+ deprecated, 3.0 移除 | `data/external_loader.py:295` | `reindex().ffill()`, pandas 3.0 兼容 | P3 |
+
+### 🔧 v4 拆解工作 (跟 v3 refactor-1 同模式, 1-2 天)
+
+| # | ID | 任务 | 工作量 |
+|---|---|---|---|
+| 8 | v4-拆解-1 | `alpha/_wilder.py` 抽 `_wilder_smooth`, 修 v4-guard-1 (3 文件引用) | 🔧 1 天 |
+| 9 | v4-拆解-2 | regime.py DXY_DRIVEN dead branch 重构 (删或接真 symbols 表) | 🔧 1 天 |
+
+### ⚡ v4 cleanup (5 秒到 30 分钟, 5 项)
+
+| # | ID | 任务 | 工作量 |
+|---|---|---|---|
+| 10 | v4-cleanup-1 | `factor_discovery.py:155` write_text 加 encoding="utf-8" | ⚡ 5 秒 |
+| 11 | v4-cleanup-2 | `external_loader.py:295` reindex().ffill() (pandas 3.0 兼容) | ⚡ 1 分钟 |
+| 12 | v4-cleanup-3 | `monitor/dashboard.py:88` `@app.on_event` 改 `lifespan` (FastAPI 0.93+ deprecation) | 🔧 30 分钟 |
+| 13 | v4-doc-1 | README + PROJECT_AUDIT 改 "L736-737 守卫" → "L769 守卫" (v3 数字偏差) | ⚡ 5 秒 |
+| 14 | v4-doc-2 | `live/` 加 `__init__.py` 转 normal package (避免 PEP 420 namespace fragility) | ⚡ 5 秒 |
+
+### 🏗️ v4 验证 (跑过一次新 baseline 才能上 live, 2 项)
+
+| # | ID | 任务 | 工作量 |
+|---|---|---|---|
+| 15 | v4-verify-1 | 修 3 个新 bug 后重跑 50K bar 调参, PnL 不能 < 50% (v3 baseline 59.17%) | 🔧 1 小时 |
+| 16 | v4-verify-2 | 跑 factor_health v4 评分 (decay_rate 修了后, 应多 1-2 个 HEALTHY) | ⚡ 30 分钟 |
+
+---
+
 ## 🔒 Phase 4: 阻塞项 (3 项,需外部资源)
 
 | # | ID | 任务 | 阻塞原因 | 解决路径 |
@@ -78,7 +169,7 @@
 |---|---|---|---|---|
 | 25 | verify-1 ✅ | 重跑 22 因子健康评估,确认 fix-1 改 0.1→0.04 后 HEALTHY 数变化 | 2026-06-06: 50396 M15 bar, 2 HEALTHY (gld_tonnes_zscore_60d score=95.2 IC=+0.0359; cot_mm_net_pct_oi score=83.8 IC=+0.0334) + 45 WATCH + 18 DECAYING (含 26 GP DSL auto 因子) | ✅ fix-1 价值已确认 |
 | 26 | verify-2 ✅ | 跑 main.py --mode paper 5000 bar,确认 fix-4 改 risk_per_trade_pct=2.0 后 PnL 变化 | 2026-06-06: 50396 M15 bar, 13 trades (W:4/L:9 WR=30.8%), Net PnL=-$51.39 (-10.28%), MaxDD=11.3%, Sharpe=-0.864, CircuitBreaker 10%触发多次. 修复: cfg_get import + StateContainer @property 缺失 | ✅ baseline 已记录 (13 trades, 极少交易因 CB 频繁触发) |
-| 27 | verify-3 ✅ | 跑 `python -c 'import main'` 确认 import 安全 (主代码路径已 fix) | 2026-06-06 ✓ IMPORT OK (line 736-737 守卫工作, 没自动跑 run_paper) | ✅ PASS |
+| 27 | verify-3 ✅ | 跑 `python -c 'import main'` 确认 import 安全 (主代码路径已 fix) | 2026-06-06 ✓ IMPORT OK (**实际守卫在 L769**, v3 报告写 L736 是数字偏差, v4 校准) | ✅ PASS |
 
 ---
 

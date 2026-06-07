@@ -34,7 +34,26 @@ export default function TuningPage() {
       const d = await r.json();
       setProgress({ pct: d.progress_pct, step: d.current_step, status: d.status });
       if (d.status === "done") {
-        setReport(d.result?.report_excerpt ?? "(no excerpt)");
+        // (audit v5 fix B-6: backend tuning_service returns {best, top, all_results,
+        // report_path}; no `report_excerpt` key. Read the report file via
+        // /api/reports/<name> instead.)
+        const reportPath: string | undefined = d.result?.report_path;
+        if (reportPath) {
+          const name = reportPath.split(/[\\/]/).pop()!;
+          const rr = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+          if (rr.ok) {
+            const dd = await rr.json();
+            const text = typeof dd.content === "string"
+              ? dd.content
+              : JSON.stringify(dd.content, null, 2);
+            const summary = `# 调参完成\n# 最优: ${JSON.stringify(d.result.best)}\n# top N: ${d.result.top?.length ?? 0} 组\n# report: ${reportPath}\n\n`;
+            setReport(summary + text);
+          } else {
+            setReport(`报告读取失败 (${rr.status}); result: ${JSON.stringify(d.result, null, 2)}`);
+          }
+        } else {
+          setReport(JSON.stringify(d.result ?? {}, null, 2));
+        }
         return;
       }
       if (d.status === "error" || d.status === "cancelled") return;

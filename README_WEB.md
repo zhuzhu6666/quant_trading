@@ -55,8 +55,8 @@ stop.bat
 | `/` | 总览 — 实时 equity / 持仓 / PnL / 风控状态 / 一键回测 |
 | `/market` | K线 — TradingView LWC 渲染,5 TF 切换 |
 | `/paper` | 模拟盘 — 启动/停止/紧急停止,实时 equity 曲线 |
+| `/backtest` | 回测 — 12 combo sweep + jobs 状态 + 报告原文 (v5 新增, ⚠ 当前 backend 跑 stub) |
 | `/live` | 实盘 — MT5/cTrader 状态 + 紧急平仓(⚠ MT5 当前阻塞) |
-| `/backtest` | 回测(简化版,主要在 / 触发) |
 | `/factors` | 因子健康 — 65 因子表 + 5 维评分,点击进详情 |
 | `/factors/[name]` | 单因子详情 — 5 维雷达 |
 | `/discover` | L2 因子发现 — GP/Random search,实时进度 |
@@ -139,6 +139,13 @@ Web console 通过 WebSocket `/ws/state` 推送 1s 一次的 state snapshot:
 | 完整 LWC IC 时序 | 📋 Phase 4 | 需 alpha/factor_health 历史报告 | 当前详情页只显示数字 |
 | 多用户/认证 | 📋 v2 | v1: 单用户 hardcoded "zhu" | 任意密码登录 |
 | E2E 实跑 | 📋 环境 | Playwright chromium binary 下不下来 | 测试文件已就位,需网络可达 playwright.azureedge.net |
+| **50K bar K线 8.16x 加速** | ✅ v5-fix-3 | `df.iterrows()` → vectorized numpy | 实测 2462ms → 302ms |
+| **ab / tuning 报告字段错位** | ✅ v5-fix-6 | 后端 `report_path` 走 `/api/reports/<name>` 读 | ab/tuning 页面可显示报告原文 |
+| **paper render setState 违反 React 规则** | ✅ v5-fix-4 | 移到 useEffect | 不再 "Cannot update while rendering" 警告 |
+| **market 切 tf race condition** | ✅ v5-fix-7 | AbortController 取消旧 fetch | 切 tf 不再出 M5 数据画在 M15 |
+| **sidebar /backtest 死链** | ✅ v5-fix-1 | 新建 `(terminal)/backtest/page.tsx` | sidebar "回测" 链接 200 OK |
+| **paper emergency 文案撒谎** | ✅ v5-fix-5 | 改成 "X-Confirm: emergency header 二次校验" | 文案跟实现对齐 |
+| **backtest_runner 12 combo stub** | 🛡️ v5-guard-1 | backtest page 顶部警示 + TODO 拆解 | 真实 PnL 仍走 `python main.py --mode backtest` |
 
 ---
 

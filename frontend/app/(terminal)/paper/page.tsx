@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import { EquityCurve, EquityPoint } from "@/components/charts/equity-curve";
 import { fmtNum, fmtPct, fmtUSD, classNames } from "@/lib/format";
@@ -47,16 +47,19 @@ export default function PaperPage() {
   const [equityPoints, setEquityPoints] = useState<EquityPoint[]>([]);
   const [showConfig, setShowConfig] = useState(true);
 
-  // Append equity point on every snapshot update
-  if (snapshot && equityPoints[equityPoints.length - 1]?.v !== snapshot.equity) {
-    const t = Math.floor(new Date(snapshot.server_time).getTime() / 1000);
-    if (!isNaN(t)) {
-      setEquityPoints((prev) => {
-        const next = [...prev, { t, v: snapshot.equity }];
-        return next.length > 200 ? next.slice(-200) : next;
-      });
-    }
-  }
+  // Append equity point on every snapshot update (audit v5 fix B-4: was in render body,
+  // now in useEffect to comply with React rules of no setState during render).
+  useEffect(() => {
+    if (!snapshot) return;
+    setEquityPoints((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.v === snapshot.equity) return prev;  // dedup
+      const t = Math.floor(new Date(snapshot.server_time).getTime() / 1000);
+      if (isNaN(t)) return prev;
+      const next = [...prev, { t, v: snapshot.equity }];
+      return next.length > 200 ? next.slice(-200) : next;
+    });
+  }, [snapshot]);
 
   async function start() {
     setBusy(true);
@@ -94,7 +97,10 @@ export default function PaperPage() {
   }
 
   async function emergencyStop() {
-    if (!window.confirm("确认紧急停止?需在 5 秒内输入 'emergency'(浏览器原生 confirm 已替代)")) return;
+    // (audit v5 fix B-5: previous text mentioned a "5-second emergency input" that
+    // never existed. The real second-factor is the X-Confirm: emergency header
+    // sent below + a backend check in backend/api/paper.py:emergency_stop.)
+    if (!window.confirm("确认紧急停止? 后端会校验 X-Confirm: emergency header (二次校验)。")) return;
     setBusy(true);
     try {
       await fetch("/api/paper/emergency-stop", {
