@@ -37,13 +37,14 @@ export function FactorHealthRadar({ metrics, height = 320 }: Props) {
       type: "radar",
       data: [{
         value: [
-          Math.min(0.1, metrics.abs_ic),
-          metrics.stability,
-          metrics.decay,
-          metrics.regime_consistency,
-          metrics.independence,
+          Number.isFinite(metrics.abs_ic) ? Math.min(0.1, metrics.abs_ic) : 0,
+          Number.isFinite(metrics.stability) ? metrics.stability : 0,
+          Number.isFinite(metrics.decay) ? metrics.decay : 0,
+          Number.isFinite(metrics.regime_consistency) ? metrics.regime_consistency : 0,
+          Number.isFinite(metrics.independence) ? metrics.independence : 0,
         ],
-        name: metrics.score.toFixed(1),
+        // (audit v6-fix-1: score may be NaN for factors with insufficient data.)
+        name: Number.isFinite(metrics.score) ? metrics.score.toFixed(1) : "--",
         lineStyle: { color: "#58a6ff" },
         areaStyle: { color: "rgba(88,166,255,0.2)" },
         itemStyle: { color: "#58a6ff" },

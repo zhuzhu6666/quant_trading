@@ -77,10 +77,14 @@ export default function FactorsPage() {
                   <td className={`p-2 ${f.status === "HEALTHY" ? "text-up" : f.status === "WATCH" ? "text-warn" : "text-down"}`}>
                     {f.status}
                   </td>
-                  <td className="p-2 text-right">{f.score.toFixed(1)}</td>
-                  <td className="p-2 text-right">{f.abs_ic.toFixed(4)}</td>
-                  <td className="p-2 text-right">{f.stability.toFixed(2)}</td>
-                  <td className="p-2 text-right">{f.regime_consistency.toFixed(2)}</td>
+                  {/* (audit v6-fix-1: f.score/abs_ic/stability/regime_consistency may be
+                    undefined for factors with NaN/insufficient data. Guard with
+                    Number.isFinite so the page doesn't crash on TypeError. Show "--"
+                    matching the convention used by paper / topbar / format.ts.) */}
+                  <td className="p-2 text-right">{Number.isFinite(f.score) ? f.score.toFixed(1) : "--"}</td>
+                  <td className="p-2 text-right">{Number.isFinite(f.abs_ic) ? f.abs_ic.toFixed(4) : "--"}</td>
+                  <td className="p-2 text-right">{Number.isFinite(f.stability) ? f.stability.toFixed(2) : "--"}</td>
+                  <td className="p-2 text-right">{Number.isFinite(f.regime_consistency) ? f.regime_consistency.toFixed(2) : "--"}</td>
                 </tr>
               ))}
             </tbody>
