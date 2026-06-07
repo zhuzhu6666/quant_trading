@@ -6,6 +6,8 @@
 # ── IDE / 编辑器临时 ────────────────────
 .claude-setup/
 .playwright-mcp/
+# Playwright test runner 输出 (运行 npx playwright test 自动生成)
+frontend/test-results/
 
 # ── MemPalace hooks 日志 ────────────────
 .claude/hooks/*.log
