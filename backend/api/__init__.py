@@ -1,7 +1,7 @@
 """REST API routers. Aggregated by app.include_router(*routers)."""
 from fastapi import APIRouter
 
-from backend.api import backtest, factor_health, health, market, paper
+from backend.api import backtest, factor_health, health, market, paper, sync
 
 ALL_ROUTERS: list[APIRouter] = [
     health.router,
@@ -9,4 +9,5 @@ ALL_ROUTERS: list[APIRouter] = [
     paper.router,
     market.router,
     factor_health.router,
+    sync.router,
 ]
