@@ -1,4 +1,5 @@
 """FastAPI app factory + lifespan + CORS + router registration."""
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -6,12 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import ALL_ROUTERS
 from backend.core.logging import setup_logging
+from backend.jobs import get_job_manager
 from backend.ws.endpoints import router as ws_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    # Bind the running loop so JobManager.submit() works when called from
+    # a threadpool thread (e.g. FastAPI sync handler) that has no loop of its own.
+    get_job_manager().bind_loop(asyncio.get_running_loop())
     yield
 
 
