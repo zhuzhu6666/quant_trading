@@ -21,12 +21,16 @@ export function FactorHealthRadar({ metrics, height = 320 }: Props) {
     backgroundColor: "transparent",
     textStyle: { color: "#c9d1d9" },
     radar: {
+      // (audit v6-fix-2: backend 5-dim scores are 0-100 (factor_health.py:
+      // _compute_components "0-100 score for each of 5 dims"), not raw
+      // 0-0.1 IC. v5 audit mis-set the max to 0.1, which would clip the
+      // radar at the 100-cap for any factor with mean_abs_ic >= 10.)
       indicator: [
-        { name: "abs_ic",    max: 0.1 },
-        { name: "stability", max: 1.0 },
-        { name: "decay",     max: 1.0 },
-        { name: "regime",    max: 1.0 },
-        { name: "indep",     max: 1.0 },
+        { name: "abs_ic",    max: 100 },
+        { name: "stability", max: 100 },
+        { name: "decay",     max: 100 },
+        { name: "regime",    max: 100 },
+        { name: "indep",     max: 100 },
       ],
       splitArea: { areaStyle: { color: ["#161b22", "#0d1117"] } },
       axisLine: { lineStyle: { color: "#30363d" } },
@@ -37,11 +41,11 @@ export function FactorHealthRadar({ metrics, height = 320 }: Props) {
       type: "radar",
       data: [{
         value: [
-          Number.isFinite(metrics.abs_ic) ? Math.min(0.1, metrics.abs_ic) : 0,
-          Number.isFinite(metrics.stability) ? metrics.stability : 0,
-          Number.isFinite(metrics.decay) ? metrics.decay : 0,
-          Number.isFinite(metrics.regime_consistency) ? metrics.regime_consistency : 0,
-          Number.isFinite(metrics.independence) ? metrics.independence : 0,
+          Number.isFinite(metrics.abs_ic) ? Math.min(100, metrics.abs_ic) : 0,
+          Number.isFinite(metrics.stability) ? Math.min(100, metrics.stability) : 0,
+          Number.isFinite(metrics.decay) ? Math.min(100, metrics.decay) : 0,
+          Number.isFinite(metrics.regime_consistency) ? Math.min(100, metrics.regime_consistency) : 0,
+          Number.isFinite(metrics.independence) ? Math.min(100, metrics.independence) : 0,
         ],
         // (audit v6-fix-1: score may be NaN for factors with insufficient data.)
         name: Number.isFinite(metrics.score) ? metrics.score.toFixed(1) : "--",

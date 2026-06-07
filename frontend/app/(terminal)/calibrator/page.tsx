@@ -50,7 +50,9 @@ export default function CalibratorPage() {
           <div className="flex gap-4 text-xs">
             <span>存在: <span className={status.exists ? "text-up" : "text-down"}>{status.exists ? "是" : "否"}</span></span>
             {status.last_modified && <span>修改: <span className="num text-fg-muted">{status.last_modified}</span></span>}
-            {status.platt && <span>Platt: <span className="num">a={status.platt.a.toFixed(3)} b={status.platt.b.toFixed(3)}</span></span>}
+            {status.platt && status.platt.a != null && status.platt.b != null && (
+              <span>Platt: <span className="num">a={Number.isFinite(status.platt.a) ? status.platt.a.toFixed(3) : "--"} b={Number.isFinite(status.platt.b) ? status.platt.b.toFixed(3) : "--"}</span></span>
+            )}
           </div>
         )}
       </div>
@@ -66,14 +68,25 @@ export default function CalibratorPage() {
               </tr>
             </thead>
             <tbody>
-              {status.buckets.map((b) => (
-                <tr key={b.bin} className="border-b border-bg-border/50">
-                  <td className="p-2 text-right">{b.bin}</td>
-                  <td className="p-2 text-right">{b.raw.toFixed(3)}</td>
-                  <td className="p-2 text-right">{b.calibrated.toFixed(3)}</td>
-                  <td className="p-2 text-right text-fg-muted">{b.n}</td>
+              {/* (audit v7-fix-3: backend /api/calibrator returns buckets as
+                3-tuples [low, high, calibrated_value] (NOT objects with
+                .bin / .raw / .calibrated / .n keys as v5 audit assumed).
+                See calibrator_service / probability_calibrator.py. Adapt
+                on the fly: derive bin label from low/high, calibrated
+                from index 2, and "n" is not stored so we show "--".) */}
+              {status.buckets.map((b, i) => {
+                const low = Array.isArray(b) ? b[0] : (b as any).low;
+                const high = Array.isArray(b) ? b[1] : (b as any).high;
+                const cal = Array.isArray(b) ? b[2] : (b as any).calibrated;
+                return (
+                <tr key={i} className="border-b border-bg-border/50">
+                  <td className="p-2 text-right">{Number.isFinite(low) && Number.isFinite(high) ? `${low.toFixed(2)}–${high.toFixed(2)}` : "--"}</td>
+                  <td className="p-2 text-right">{Number.isFinite(low) ? low.toFixed(3) : "--"}</td>
+                  <td className="p-2 text-right">{Number.isFinite(cal) ? cal.toFixed(3) : "--"}</td>
+                  <td className="p-2 text-right text-fg-muted">--</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

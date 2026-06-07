@@ -3,14 +3,41 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 
 interface Factor {
-  name: string;
-  status: "HEALTHY" | "WATCH" | "DECAYING";
+  // (audit v6-fix-2: backend /api/factor-health/latest returns
+  // { factor, score, status, components: {mean_abs_ic, ic_stability,
+  // regime_consistency, decay_rate, independence}, n_obs, rolling_ic }.
+  // v5 audit misread this from README and the page crashed with
+  // TypeError because every access was undefined. Realigned below.)
+  factor: string;
   score: number;
-  abs_ic: number;
-  stability: number;
-  decay: number;
-  regime_consistency: number;
-  independence: number;
+  status: "HEALTHY" | "WATCH" | "DECAYING";
+  components: {
+    mean_abs_ic: number;
+    ic_stability: number;
+    regime_consistency: number;
+    decay_rate: number;
+    independence: number;
+  };
+  n_obs: number;
+  rolling_ic: number;
+}
+
+// Flatten Factor.components into the table-friendly shape the UI expects.
+// Backend nests the 5-dim 0-100 scores under .components; the table
+// reads them flat. mean_abs_ic is itself a 0-100 score (see
+// factor_health.py:_compute_components docstring "0-100 score for
+// each of 5 dims"), NOT a raw IC value, so we pass it through as-is.
+function flat(f: Factor) {
+  return {
+    name: f.factor,
+    status: f.status,
+    score: f.score,
+    abs_ic: f.components.mean_abs_ic,
+    stability: f.components.ic_stability,
+    decay: f.components.decay_rate,
+    regime_consistency: f.components.regime_consistency,
+    independence: f.components.independence,
+  };
 }
 
 export default function FactorsPage() {
@@ -69,7 +96,9 @@ export default function FactorsPage() {
               </tr>
             </thead>
             <tbody className="num">
-              {report.factors.slice(0, 50).map((f) => (
+              {report.factors.slice(0, 50).map((raw) => {
+                const f = flat(raw);
+                return (
                 <tr key={f.name} className="border-b border-bg-border/50 hover:bg-bg-border/30">
                   <td className="p-2">
                     <Link href={`/factors/${encodeURIComponent(f.name)}`} className="text-accent hover:underline">{f.name}</Link>
@@ -86,7 +115,8 @@ export default function FactorsPage() {
                   <td className="p-2 text-right">{Number.isFinite(f.stability) ? f.stability.toFixed(2) : "--"}</td>
                   <td className="p-2 text-right">{Number.isFinite(f.regime_consistency) ? f.regime_consistency.toFixed(2) : "--"}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

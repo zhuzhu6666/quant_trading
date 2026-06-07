@@ -41,3 +41,15 @@ def list_jobs(status: str | None = None) -> dict:
     mgr = get_job_manager()
     jobs = mgr.list(kind="backtest", status=status)
     return {"jobs": [j.to_dict() for j in jobs]}
+
+
+# (audit v7-fix-5: FastAPI routes GET "/" on a prefix="/api/backtest" router
+# to the path "/api/backtest/" only. The frontend calls "/api/backtest"
+# (no trailing slash) and "/api/backtest/<id>", which are different
+# routes. Add a no-path alias that maps to the same handler so the
+# canonical /api/backtest?status=done query string reaches the backend.
+# Otherwise next.config rewrites pass it through, FastAPI 404s, and the
+# frontend's fetch().json() chokes on the HTML 404 body.)
+@router.get("")
+def list_jobs_noslash(status: str | None = None) -> dict:
+    return list_jobs(status=status)

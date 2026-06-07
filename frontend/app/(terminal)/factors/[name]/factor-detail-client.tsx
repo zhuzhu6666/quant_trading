@@ -4,14 +4,32 @@ import { useParams } from "next/navigation";
 import { FactorHealthRadar } from "@/components/charts/factor-health-radar";
 
 interface Factor {
-  name: string;
-  status: "HEALTHY" | "WATCH" | "DECAYING";
+  // (audit v6-fix-2: real schema from /api/factor-health/latest, see factors/page.tsx)
+  factor: string;
   score: number;
-  abs_ic: number;
-  stability: number;
-  decay: number;
-  regime_consistency: number;
-  independence: number;
+  status: "HEALTHY" | "WATCH" | "DECAYING";
+  components: {
+    mean_abs_ic: number;
+    ic_stability: number;
+    regime_consistency: number;
+    decay_rate: number;
+    independence: number;
+  };
+  n_obs: number;
+  rolling_ic: number;
+}
+
+function flat(f: Factor) {
+  return {
+    name: f.factor,
+    status: f.status,
+    score: f.score,
+    abs_ic: f.components.mean_abs_ic,
+    stability: f.components.ic_stability,
+    decay: f.components.decay_rate,
+    regime_consistency: f.components.regime_consistency,
+    independence: f.components.independence,
+  };
 }
 
 export default function FactorDetailPage() {

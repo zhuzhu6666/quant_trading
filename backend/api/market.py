@@ -51,8 +51,14 @@ def get_bars(
     if df.empty:
         return BarsResponse(bars=[], total=0, range={"from": 0, "to": 0})
 
-    # DataStore returns df with DatetimeIndex; convert to unix seconds
-    times = (df.index.astype("int64") // 1_000_000_000).astype("int64")
+    # DataStore returns df with datetime64[s] (SECOND precision, not ns).
+    # The unix-seconds value is already what we want for the `t` field.
+    # (audit v7-fix-4: v5 audit assumed datetime64[ns] and added an extra
+    # `// 1_000_000_000` division, which clobbered every timestamp to 1
+    # because integer-dividing a 2026 unix-second by 1e9 gives 1. Verified
+    # the real dtype by importing DataStore directly and inspecting
+    # df.index.dtype.)
+    times = df.index.astype("int64")
     if from_ts is not None:
         mask = times >= from_ts
         df = df[mask]
@@ -63,12 +69,16 @@ def get_bars(
         times = times[mask]
     if limit and len(df) > limit:
         df = df.tail(limit)
-        times = times[-limit:]
+        # (audit v7-fix-1: v5 vectorized refactor left `times` at its original
+        # full length while `df` was tail-trimmed, so `times[-limit:]` was
+        # misaligned with the trimmed df. The two arrays must stay parallel;
+        # recompute `times` from the trimmed df.index to be safe.)
+        times = df.index.astype("int64")
 
     # Vectorized: convert columns to numpy arrays once, then build Bar objects in a
     # single tight Python loop. ~10x faster than df.iterrows() on 50K rows because
     # we skip pandas row-construction overhead per iteration. (audit v5 fix B-3.)
-    times = (df.index.astype("int64") // 1_000_000_000).astype("int64").to_numpy()
+    times = df.index.astype("int64").to_numpy()
     opens = df["open"].to_numpy()
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()

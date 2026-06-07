@@ -37,7 +37,10 @@ export default function BacktestPage() {
   const [recentJobs, setRecentJobs] = useState<JobState[]>([]);
 
   async function loadRecent() {
-    const r = await fetch("/api/backtest/?status=done");
+    // (audit v7-fix-2: trailing slash hits Next.js dev 404 because the
+    // FastAPI route is registered as /api/backtest (no slash). The HTML
+    // response then chokes fetch's `r.json()`. Use canonical /api/backtest.)
+    const r = await fetch("/api/backtest?status=done");
     if (!r.ok) return;
     const d = await r.json();
     setRecentJobs((d.jobs || []).slice(0, 5));
