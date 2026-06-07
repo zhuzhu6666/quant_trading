@@ -13,12 +13,12 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [
-    // v7: prefer system Chrome (already installed, ~no extra download) over
-    // the bundled chromium that requires playwright.azureedge.net (often
-    // unreachable in this user's network). Falls back to chromium if Chrome
-    // is missing — see README.
+    // v7: use system Chrome (channel: chrome). The bundled chromium
+    // binary for playwright 1.44 is incomplete in this user's env
+    // (chromium-1117/ only has chrome.dll, no chrome.exe — install
+    // download path is broken for this revision). System Chrome
+    // works fine and avoids the multi-MB download.
     { name: "chrome", use: { ...devices["Desktop Chrome"], channel: "chrome" } },
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
   ],
   // Backend must be running on :8000 + frontend on :3000 before tests.
   // The script `start-e2e.sh` (in project root) handles this.

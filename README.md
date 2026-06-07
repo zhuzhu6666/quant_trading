@@ -218,41 +218,28 @@ python main.py --mode dashboard --port 8050
 
 ## Web 端到端测试 (e2e)
 
-2026-06-08 v7 audit 装的 Playwright e2e 跑 18 路由 + 4 功能验证,1.4 min 全过。
-GitHub Actions 每次 push/PR 自动跑(.github/workflows/e2e.yml)。
+2026-06-08 v7 audit 装的 Playwright e2e 跑 18 路由 + 4 功能验证,1.3 min 全过。
+本地工具,不接 CI (你 push GitHub 是为了回退兜底,不是跑测试)。
 
 ### 本地跑
 
 ```bash
 # 前置: backend :8000 + frontend :3000 在跑 (start.bat / start.sh)
 cd frontend
-
-# 一次性安装 (用户本地)
-npm ci                                                    # 装 @playwright/test
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npx playwright test    # 用系统 Chrome
-
-# 完整装 chromium (需网络可达 playwright.azureedge.net)
-npx playwright install --with-deps chromium
-npx playwright test --project=chromium                    # 用 bundled chromium
+npm ci                                                                 # 装 @playwright/test
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npx playwright test --project=chrome  # 用系统 Chrome
 ```
+
+> 注: 本项目用系统 Chrome (`channel: chrome`) 而**不**用 bundled chromium。
+> 原因是 playwright 1.44 期待的 `chromium-1117` 在本机装出来**缺文件**(只下到
+> `chrome.dll` 228MB,没 `chrome.exe`),是 1.40+ 期间 CDN 路径迁移导致的老 bug。
+> 完整版 `chromium-1223` 倒是装好了,但**版本不对**(playwright 1.60 的)。
+> 系统 Chrome 是最稳的路径。
 
 22 个 spec 包含:
 - `critical_paths.spec.ts` — 18 路由 mount + pageerror/console error 检测
 - `functional_checks.spec.ts` — 4 路由真 DOM 数据验证 (factors 有数字 / calibrator
   bucket 行数 / market K线出现 / backtest 按钮可见)
-
-### CI
-
-`.github/workflows/e2e.yml` 在 `ubuntu-latest` 跑:
-
-1. Python 3.11 + Node 20
-2. `pip install -r requirements.txt` (MetaTrader5 等不可装,continue-on-error)
-3. `npm ci` frontend deps
-4. 启 backend + frontend dev server (各起一个,后台,waitUntil health)
-5. `npx playwright install --with-deps chromium`
-6. `npx playwright test --project=chromium`
-
-失败时自动上传 `playwright-report/` + `test-results/` 截图,7 天保留。
 
 ### 已知 v7 修过但可能回归的 4 类 bug (e2e 守门)
 
