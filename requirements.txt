@@ -17,9 +17,15 @@ MetaTrader5>=5.0
 ctrader-open-api>=0.9
 service_identity>=18.0  # TLS hostname verification, silence Twisted warning
 
-# Dashboard (optional)
-fastapi>=0.109
-uvicorn[standard]>=0.27
+# Web Console backend (Phase 1+, 2026-06-07)
+# Replaces pre-existing dashboard's loose fastapi/uvicorn/websockets pins above
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+websockets>=12.0,<13.0
+httpx>=0.27,<1.0
+python-multipart>=0.0.9,<1.0
 
 # Backtest (optional — for backtrader engine)
 backtrader>=1.9.78
@@ -30,15 +36,3 @@ scikit-learn>=1.3
 
 # Logging
 loguru>=0.7
-
-# WebSocket
-websockets>=12.0
-
-# --- Web Console backend (Phase 1+, 2026-06-07) ---
-fastapi>=0.110,<1.0
-uvicorn[standard]>=0.27,<1.0
-pydantic>=2.6,<3.0
-pydantic-settings>=2.2,<3.0
-websockets>=12.0,<13.0
-httpx>=0.27,<1.0
-python-multipart>=0.0.9,<1.0
