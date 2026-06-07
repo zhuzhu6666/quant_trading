@@ -3,6 +3,12 @@ import { useAppStore } from "./store";
 
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000, 30000];
 
+// Backend WebSocket base URL. In dev, frontend runs on :3000 but WS is on :8000,
+// so we use an explicit env var rather than `location.host` (which would be :3000).
+// Production (single-port via reverse proxy or static mount) sets this to same-origin.
+const WS_BASE_URL: string =
+  process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000";
+
 class WSClient {
   private ws: WebSocket | null = null;
   private url = "";
@@ -12,7 +18,7 @@ class WSClient {
 
   start(path: string = "/ws/state") {
     this.stopped = false;
-    this.url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
+    this.url = `${WS_BASE_URL}${path}`;
     this.connect();
   }
 
