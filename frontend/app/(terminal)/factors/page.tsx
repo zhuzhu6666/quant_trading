@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 
 interface Factor {
   name: string;
@@ -70,7 +71,9 @@ export default function FactorsPage() {
             <tbody className="num">
               {report.factors.slice(0, 50).map((f) => (
                 <tr key={f.name} className="border-b border-bg-border/50 hover:bg-bg-border/30">
-                  <td className="p-2 text-fg">{f.name}</td>
+                  <td className="p-2">
+                    <Link href={`/factors/${encodeURIComponent(f.name)}`} className="text-accent hover:underline">{f.name}</Link>
+                  </td>
                   <td className={`p-2 ${f.status === "HEALTHY" ? "text-up" : f.status === "WATCH" ? "text-warn" : "text-down"}`}>
                     {f.status}
                   </td>
