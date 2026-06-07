@@ -13,6 +13,11 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [
+    // v7: prefer system Chrome (already installed, ~no extra download) over
+    // the bundled chromium that requires playwright.azureedge.net (often
+    // unreachable in this user's network). Falls back to chromium if Chrome
+    // is missing — see README.
+    { name: "chrome", use: { ...devices["Desktop Chrome"], channel: "chrome" } },
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
   ],
   // Backend must be running on :8000 + frontend on :3000 before tests.

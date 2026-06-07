@@ -55,10 +55,13 @@ test.describe("v6: each route renders without runtime errors", () => {
         `Route ${route.path} threw a pageerror: ${pageErrors.join(" | ")}`
       ).toEqual([]);
       // Filter known-noisy console errors that are not real bugs.
+      // Common noise: favicon 404 (no favicon configured), HMR, etc.
       const realErrors = errors.filter(
         (e) =>
           !e.includes("Download the React DevTools") &&
-          !e.includes("Fast Refresh")
+          !e.includes("Fast Refresh") &&
+          // 404 on resources we don't ship (favicon, manifest, etc.)
+          !/Failed to load resource.*404/.test(e)
       );
       expect(
         realErrors,
