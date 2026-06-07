@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from backend.api import (
-    ab_test, backtest, calibrator, config, discover, factor_health, health, market, paper, reports, shadow, sync, tuning,
+    ab_test, backtest, calibrator, config, discover, factor_health, health, live, market, paper, reports, shadow, sync, tuning,
 )
 
 ALL_ROUTERS: list[APIRouter] = [
@@ -19,4 +19,5 @@ ALL_ROUTERS: list[APIRouter] = [
     ab_test.router,
     reports.router,
     config.router,
+    live.router,
 ]
