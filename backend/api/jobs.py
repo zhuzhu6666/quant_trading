@@ -1,0 +1,29 @@
+"""Generic jobs endpoints: list all / cancel any."""
+from fastapi import APIRouter, HTTPException
+
+from backend.jobs import get_job_manager
+
+router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+
+
+@router.get("")
+def list_jobs(kind: str | None = None, status: str | None = None) -> dict:
+    mgr = get_job_manager()
+    jobs = mgr.list(kind=kind, status=status)
+    return {"jobs": [j.to_dict() for j in jobs]}
+
+
+@router.get("/{job_id}")
+def get_job(job_id: str) -> dict:
+    js = get_job_manager().get(job_id)
+    if js is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return js.to_dict()
+
+
+@router.post("/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    ok = get_job_manager().cancel(job_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail="job not running or not found")
+    return {"ok": True, "job_id": job_id}
