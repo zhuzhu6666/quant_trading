@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import ALL_ROUTERS
 from backend.core.logging import setup_logging
+from backend.ws.endpoints import router as ws_router
 
 
 @asynccontextmanager
@@ -22,13 +23,14 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],  # Next.js dev
+        allow_origins=["http://localhost:3000"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
     for r in ALL_ROUTERS:
         app.include_router(r)
+    app.include_router(ws_router)  # WS routes don't use prefix
     return app
 
 
