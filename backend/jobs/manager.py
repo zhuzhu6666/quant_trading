@@ -59,6 +59,10 @@ class JobManager:
     ) -> JobState:
         """Queue a job. fn signature: (progress_cb) -> result (any JSON-serializable).
 
+        Caller is responsible for binding params into fn (e.g. via a closure)
+        if the service function needs them. params are also stored in JobState
+        for visibility via to_dict().
+
         Always schedules onto self._loop (the background loop or the bound loop)
         via run_coroutine_threadsafe, so it works from any thread.
         """

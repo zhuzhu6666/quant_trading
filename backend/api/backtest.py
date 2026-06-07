@@ -19,7 +19,11 @@ class BacktestRequest(BaseModel):
 def run(req: BacktestRequest) -> dict:
     """Submit a backtest job. Returns 202 with job_id (sync API for now)."""
     mgr = get_job_manager()
-    js = mgr.submit("backtest", req.model_dump(), run_backtest)
+    # Bind params via closure: JobManager.submit calls fn(progress_cb) with
+    # no params, so the service function must capture them itself.
+    params = req.model_dump()
+    fn = lambda cb: run_backtest(params, cb)
+    js = mgr.submit("backtest", params, fn)
     return {"job_id": js.id, "status": js.status}
 
 
