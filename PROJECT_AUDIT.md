@@ -1,5 +1,7 @@
 # 量化框架代码级审计报告 v3 (FINAL, 2026-06-06)
 
+> **注**: v4 增量审计 (2026-06-06) 已完成 — 12 条新 finding, 3 真 bug 已修, 1 护栏已加。详见 [`PROJECT_AUDIT_v4.md`](PROJECT_AUDIT_v4.md) (20KB, 完整 v4 报告)。本文件 (v3) 保留作为基线参考。
+
 > 范围: `C:\Users\zhu\quant_trading` (217 文件 / 43,820 行)
 > 本次实际**完整阅读的代码**:
 >
@@ -157,7 +159,8 @@
 
 #### 15. ~~main.py 缺 `if __name__ == "__main__":` 守卫~~ (审计错误, 已撤)
 - ❌ **审计错判**: 我之前以为 `def main():` 直接 module-level 跑
-- ✅ **实际情况**: `main.py:736-737` 有 `if __name__ == "__main__": main()` 守卫
+- ✅ **实际情况**: `main.py:769` 有 `if __name__ == "__main__": main()` 守卫
+  (v3 报告当时写 736-737, **v4 实测校准为 L769**: L736 是注释"# ── 跑回放 ──")
 - ✅ **import main 安全**: 不会自动跑 argparse
 - 教训: 之前读 main.py 用 offset/limit 只看了 1-100 行,没翻到末尾
 

@@ -91,6 +91,7 @@ class SyncOrchestrator:
 
         logger.info(f"[SyncOrch] full_sync: {symbol} x {timeframes}, n_bars={n_bars}")
         insert_results: list[InsertResult] = []   # 累积真实 InsertResult 传给 save_status (修 bug 2026-06-02)
+        all_errors: list[str] = []                # v4-fix-1 (audit 2026-06-06): 跟 incremental_sync 一致, full_sync 也初始化, 避免 pull 失败时 UnboundLocalError
         for tf in timeframes:
             tf_info = TIMEFRAME_MAP.get(tf, (tf, 15))
             tf_minutes = tf_info[1]

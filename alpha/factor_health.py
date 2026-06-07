@@ -184,7 +184,9 @@ class FactorHealth:
                 decay_ratio = mean_q4 / mean_q1
                 comp_decay = max(0.0, min(100.0, decay_ratio * 100.0))
             else:
-                comp_decay = 0.0 if mean_q4 < 1e-6 else 0.0
+                # v4-fix-2 (audit 2026-06-06): 原代码"两边都 0" 漏了"无中生有"高分 case
+                # q1≈0 + q4>0 → 因子从无到有, 不是 decay, 应给 100
+                comp_decay = 100.0 if mean_q4 > 1e-6 else 0.0
         else:
             comp_decay = 50.0  # 数据不够, 中性分
 

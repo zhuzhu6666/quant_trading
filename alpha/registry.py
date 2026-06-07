@@ -74,7 +74,18 @@ def factor_macd_hist(df):
 
 @factor_registry.register("adx", "ADX(14) 趋势强度")
 def factor_adx(df):
-    """Average Directional Index"""
+    """Average Directional Index
+
+    KNOWN ISSUE (audit 2026-06-06 v4 增量审计):
+    本因子用 EMA(span=14) 平滑, 跟 risk/regime.py 的 Wilder smoothing
+    实现不同。两个 ADX 数值不对齐, regime 触发条件 (ADX>25/20) 跟
+    strategy 投票条件 (用 factor_adx) 可能不一致, 造成 regime filter
+    跟 strategy 决策脱节。
+    修法: 抽 _wilder_smooth helper 放到 alpha/_wilder.py, factor_adx
+    + factor_di_spread 跟 regime.py 共用。或: 统一改 regime.py 用 EMA。
+    拆解方案见 TODO.md, 当前 P2 优先级, 待 verify-2 跑出实际 baseline
+    漂移再决定是否做。
+    """
     high, low, close = df["high"].values, df["low"].values, df["close"].values
     n = len(close)
     tr = np.zeros(n)
@@ -114,7 +125,12 @@ def factor_bb_width(df):
 
 @factor_registry.register("di_spread", "ADX方向差 (DI+ - DI-)")
 def factor_di_spread(df):
-    """DI+ minus DI-"""
+    """DI+ minus DI-
+
+    KNOWN ISSUE (audit 2026-06-06 v4 增量审计): 跟 factor_adx 一样用
+    EMA(span=14), 跟 risk/regime.py 的 Wilder smoothing 不对齐, 数值
+    范围和触发点偏差。详见 factor_adx 注释 + TODO.md 拆解。
+    """
     high, low, close = df["high"].values, df["low"].values, df["close"].values
     n = len(close)
     tr = np.zeros(n)
