@@ -35,7 +35,10 @@ fi
 # wing 由 CWD 决定,所以必须 cd 到 palace dir
 # sweep 是幂等的(message-level + cursor),所以不用 --force
 LOG_FILE="C:\Users\zhu\.mempalace\logs\pre-compact.log"
-mkdir -p "$(dirname "$LOG_FILE")"
+# PATH-independent: bash-only dirname + best-effort mkdir
+LOG_DIR="${LOG_FILE%/*}"; [ "$LOG_DIR" = "$LOG_FILE" ] && LOG_DIR="${LOG_FILE%\\*}"
+[ "$LOG_DIR" = "$LOG_FILE" ] && LOG_DIR="."
+[ -d "$LOG_DIR" ] || mkdir -p "$LOG_DIR" 2>/dev/null || true
 
 {
     NOW() { printf '%(%Y-%m-%dT%H:%M:%S%z)T' -1; }

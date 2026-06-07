@@ -17,7 +17,9 @@ fi
 if [ "${1:-}" = "--dry-run" ]; then
     SESSIONS_ROOT="C:\Users\zhu\.claude\projects\C--Users-zhu-quant-trading"
     if [ -d "$SESSIONS_ROOT" ]; then
-        N=$(find "$SESSIONS_ROOT" -name "*.jsonl" 2>/dev/null | wc -l)
+        # PATH-independent count: use bash array (avoid `wc` which is missing in schtasks env)
+        N=0
+        while IFS= read -r _; do N=$((N+1)); done < <(find "$SESSIONS_ROOT" -name "*.jsonl" 2>/dev/null)
         echo "[dry-run] would sweep $N jsonl files in $SESSIONS_ROOT"
     else
         echo "[dry-run] sessions dir not found: $SESSIONS_ROOT"
@@ -29,7 +31,10 @@ fi
 SESSIONS_ROOT="C:\Users\zhu\.claude\projects\C--Users-zhu-quant-trading"
 PALACE_DIR="C:\Users\zhu\.mempalace\sessions"
 LOG_FILE="C:\Users\zhu\.mempalace\logs\periodic-save.log"
-mkdir -p "$(dirname "$LOG_FILE")"
+# PATH-independent: bash-only dirname + best-effort mkdir
+LOG_DIR="${LOG_FILE%/*}"; [ "$LOG_DIR" = "$LOG_FILE" ] && LOG_DIR="${LOG_FILE%\\*}"
+[ "$LOG_DIR" = "$LOG_FILE" ] && LOG_DIR="."
+[ -d "$LOG_DIR" ] || mkdir -p "$LOG_DIR" 2>/dev/null || true
 
 if [ ! -d "$SESSIONS_ROOT" ] || [ ! -d "$PALACE_DIR" ]; then
     # 没会话目录,静默
