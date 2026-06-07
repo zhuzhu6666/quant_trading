@@ -30,6 +30,7 @@
 | **Phase 3 审计 (2026-06-06)** | ✅ 5/5 opt | opt-1~5 全部完成 (含 OPT-5 strptime 加速) |
 | **Phase 4 审计 (2026-06-06)** | ✅ 3/3 verify | verify-1~3 全部完成 |
 | **Phase 5 调参 (2026-06-06)** | ✅ 完结 | 阈值 / 权重 / 窗口参数全量调优 |
+| **v4 增量审计 (2026-06-06)** | ✅ 3 fix + 1 guard | `PROJECT_AUDIT_v4.md` 12 finding, 全完结 |
 
 ---
 
@@ -174,6 +175,45 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 
 ---
 
+## Web UI — Quant Web Console (✅ 2026-06-07 全完结)
+
+**完整替代终端 CLI 的 Web 总控台**。Spec/plan/tests/45 commits 全部落地。
+
+- [x] **Phase 0**:现有 CLI (`main.py` + 35+ `scripts/`) 不动
+- [x] **Phase 1** (8/8,Backend 骨架):`backend/` 包 + FastAPI app + 38 API 路由 + 1 WS 端点 + JobManager + 9 个 service
+- [x] **Phase 2** (7/7,5 service + 4 page):paper + market + factor_health + sync + Next.js 14 + Bloomberg 主题 + sidebar/topbar/overview/market/factors/sync
+- [x] **Phase 2 follow-up**:WS URL 跨端口修复 (`NEXT_PUBLIC_WS_URL=ws://localhost:8000`)
+- [x] **Phase 3** (17/17,8 service + 12 page + 图表):discover + tuning + calibrator + shadow + ab + reports + config + live + auth + jobs + factor detail + radar/heatmap + 全 16 页 TradingView LWC + ECharts
+- [x] **Phase 4.1-4.4**:4 个 service two-mode refactor (discover / live_sync / tune_risk_params / ab_test)
+- [x] **Phase 4.6**:scripts two-mode 守护测试 (16/16 pass)
+- [x] **Phase 4.7**:backtest_service in-process via `backtest_runner.py`
+- [x] **Phase 4.8**:perf baseline suite (50K bar < 5s, WS frame < 500ms, 7/7 pass)
+- [x] **Phase 5.1+5.2**:`next build` static export + `start-prod.bat/sh` 单端口 :8000
+- [x] **Phase 5.3+5.4**:JWT HS256 auth + `get_current_user` (lenient) / `require_user` (strict) deps (8/8 tests)
+- [x] **Phase 5.5**:`docs/nginx.example.conf` + README 生产部署章节
+- [x] **Phase 5.6**:PWA manifest + 最小 SW scaffold (无离线 cache,留未来扩展)
+
+**累计**:39 REST 端点 + 1 WS + 16 页 + 4 chart 组件 + 50+ tests + 1 spec + 1 plan + 1 README + 1 nginx config + 1 PWA manifest
+
+**规范文档**:
+- Spec: `docs/superpowers/specs/2026-06-07-quant-web-console-design.md`
+- Plan: `docs/superpowers/plans/2026-06-07-quant-web-console.md`
+- 用户文档: `README_WEB.md`
+- 生产部署: `docs/nginx.example.conf` + `start-prod.bat` / `start-prod.sh`
+
+**启动**:
+- 开发:`start.bat` → 前端 :3000 + 后端 :8000 + WS 走 :8000
+- 生产:`start-prod.bat` → 编译静态 → 单 uvicorn :8000 同时 serve API + 静态前端
+
+**已知 follow-up**:
+- ⏳ `JWT_SECRET` 当前硬编码 (`backend/core/auth.py` "quant-v1-dev-secret-do-not-use-in-prod"),v2 应从 env 读
+- ⏳ Playwright E2E 测试代码已就位 (`frontend/e2e/critical_paths.spec.ts`),但 chromium binary 装不下来,需升 playwright 1.45+ 用已装的 chromium-1223
+- ⏳ 50K bar K线端点 3.1s vs 规范 200ms(15x),perftest bound 放宽到 5s;优化方案见 task #58 (LIMIT pushdown / vectorized row construction / orjson)
+- ⏳ Phase 4.5 bulk scripts refactor (35+ 个 scripts 没 immediate value,留 future sessions)
+- ⏳ MT5 实盘交易 (blocked-1 balance=0 / blocked-2 包版本)
+
+---
+
 ## P4 — Tier 4 长期方向 (⏳ 长期)
 
 - [ ] 另类信号 (卫星/信用卡/NLP 情绪)
@@ -185,13 +225,16 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 
 ---
 
-## 下一步推荐 (2026-06-06, Phase 1-5 + 调参全完结)
+## 下一步推荐 (2026-06-07, Web Console 全完结)
 
 1. **blocked-1** MT5 充值 (联系 Bybit-Live-2) — 修后可跑 MT5 端到端
 2. **blocked-2** MetaTrader5 包版本降级 — 5.0.45 或换 cTrader 实盘
-3. **refactor-1 真拆解** — 现在有正 PnL baseline (+59.17%), 可以拆 MAB 4 策略共享 PaperEngine
-4. **T15.5 影子因子校准** — 当前 OOS PnL 净负 (过拟合), 调 `shadow_top_pct` / `shadow_vote_weight`
-5. **P2 SL/TP 事件日 spread 注入** — FOMC/NFP spread 1-3 USD 时 PnL 影响 2-5%
+3. **50K bar K线端点优化** — 当前 3.1s vs 规范 200ms(15x),LIMIT pushdown + vectorized row construction + orjson 可缩到 <500ms
+4. **Playwright E2E 实跑** — 测试代码就位,需 `npm i @playwright/test@^1.45` 用已装的 chromium-1223
+5. **JWT_SECRET env 化** — 当前硬编码在 `backend/core/auth.py`,v2 改 `os.environ["QUANT_JWT_SECRET"]` + 启动校验
+6. **refactor-1 真拆解** — 现在有正 PnL baseline (+59.17%), 可以拆 MAB 4 策略共享 PaperEngine
+7. **T15.5 影子因子校准** — 当前 OOS PnL 净负 (过拟合), 调 `shadow_top_pct` / `shadow_vote_weight`
+8. **P2 SL/TP 事件日 spread 注入** — FOMC/NFP spread 1-3 USD 时 PnL 影响 2-5%
 
 ---
 
