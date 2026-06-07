@@ -184,3 +184,72 @@ Web console 通过 WebSocket `/ws/state` 推送 1s 一次的 state snapshot:
 ## 反馈
 
 发现 bug 或想加新功能? 直接在 `ROADMAP.md` "Phase 4 Web UI" 节点追加(plan §7.5 约定)。
+
+---
+
+## 生产部署 (Production Deployment)
+
+### 单端口模式 (推荐用于 VPS/容器)
+
+```cmd
+start-prod.bat
+```
+
+会:
+1. `cd frontend && npm run build` 编译静态 HTML
+2. 拷贝 `frontend/out/*` 到 `backend/static/`
+3. `python -m backend --port 8000` 同时 serve API + 静态前端
+
+浏览器访问 `http://localhost:8000`(或你的域名)。
+
+### nginx 反向代理 (生产环境)
+
+`docs/nginx.example.conf` 是完整的 nginx config 模板,包含:
+- TLS 终止 (Let's Encrypt)
+- `/api/*` 代理到 uvicorn + rate-limit
+- `/api/auth/login` 单独 10 req/min 防爆破
+- `/ws/*` WebSocket 代理 (1h timeout,no buffering)
+- `/_next/static/*` 1 年 immutable 缓存
+- HSTS / X-Frame-Options / Referrer-Policy 安全头
+
+部署步骤:
+1. 拷贝 `docs/nginx.example.conf` → `/etc/nginx/sites-available/quant.conf`
+2. 替换 `quant.example.com` 为你的域名
+3. `ln -s /etc/nginx/sites-available/quant.conf /etc/nginx/sites-enabled/quant.conf`
+4. 申请 cert: `acme.sh --issue -d your.domain --nginx` 或 `certbot --nginx -d your.domain`
+5. 修改 config 里的 `ssl_certificate` 路径
+6. `nginx -t && systemctl reload nginx`
+7. 后台跑 `start-prod.sh` (或 systemd unit)
+
+### systemd unit 示例 (可选)
+
+```ini
+# /etc/systemd/system/quant-web.service
+[Unit]
+Description=Quant Web Console
+After=network.target
+
+[Service]
+Type=simple
+User=quant
+WorkingDirectory=/opt/quant_trading
+ExecStart=/usr/bin/python3.12 -m backend --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`systemctl enable --now quant-web.service`
+
+### 环境变量 (生产)
+
+```env
+# .env (do NOT commit)
+JWT_SECRET=<long-random-string>     # currently hardcoded in backend/core/auth.py; override in v2
+QUANT_DB_PATH=/opt/quant_trading/data/market_data.db
+QUANT_LOG_LEVEL=WARNING
+```
+
+**v1 限制**: `JWT_SECRET` 硬编码在 `backend/core/auth.py` —— v2 会从 env 读取。当前 v1 部署请接受这个限制或在反向代理层做额外鉴权(例如 Basic Auth over nginx)。
