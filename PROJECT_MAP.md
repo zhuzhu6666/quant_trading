@@ -163,7 +163,18 @@ quant_trading/
 - **模拟盘**: `main.py --mode paper` → `execution/paper_trader.py` (PaperTrader, ★)
 - **实盘**: `main.py --mode live` → `live/executor.py` (旧) / `execution/mt5_bridge.py` (新)
 - **MAB paper**: `scripts/mab_paper.py` / `mab_paper_v2.py`
-- **Dashboard**: `main.py --mode dashboard`
+- **CLI Dashboard**: `main.py --mode dashboard` (154 行极简 monitor, 旧)
+
+### 2.1.1 Web 总控台 (2026-06-07, 完整替代 CLI)
+- **开发模式** (推荐): `start.bat` → 前端 `http://localhost:3000` + 后端 `http://localhost:8000`
+- **生产模式**: `start-prod.bat` → 单 uvicorn `http://localhost:8000` (同时 serve API + 静态前端)
+- **Backend**: `backend/` (FastAPI, 39 API 路由 + 1 WS, 9 service, JWT auth)
+- **Frontend**: `frontend/` (Next.js 14 + shadcn/ui, 16 页面, 4 chart 组件, PWA scaffold)
+- **用户文档**: `README_WEB.md` (页面速查 + 启动 + 已知限制)
+- **设计 spec**: `docs/superpowers/specs/2026-06-07-quant-web-console-design.md`
+- **实施 plan**: `docs/superpowers/plans/2026-06-07-quant-web-console.md`
+- **nginx 模板**: `docs/nginx.example.conf` (TLS + WS upgrade + rate-limit + cache)
+- **单端口 prod launcher**: `start-prod.bat` / `start-prod.sh` (build + copy + uvicorn 单端口)
 
 ### 2.2 因子 / 模型
 - **因子注册**: `alpha/registry.py` (39 因子, 见 §3.2)

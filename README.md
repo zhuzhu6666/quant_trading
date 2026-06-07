@@ -1,8 +1,9 @@
 # Python 量化交易框架
 
 XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backtest baseline 已实盘验证 (read-only 模式)。
+**Web 总控台全完结(2026-06-07):39 API 端点 + 16 页面 + JWT auth + PWA scaffold — 见 `README_WEB.md`**
 
-**最后更新: 2026-06-06 (Phase 1-5 + 调参全完结)**
+**最后更新: 2026-06-07 (Web Console Phase 1-5 全完结)**
 
 ---
 
@@ -221,6 +222,10 @@ python main.py --mode dashboard --port 8050
 
 | 想了解 | 看 |
 |---|---|
+| **Web 总控台用户文档** | `README_WEB.md` (页面速查 + 启动方式 + 已知限制) |
+| **Web UI 设计 spec** | `docs/superpowers/specs/2026-06-07-quant-web-console-design.md` |
+| **Web UI 实施 plan** | `docs/superpowers/plans/2026-06-07-quant-web-console.md` |
+| **Web UI nginx 配置模板** | `docs/nginx.example.conf` |
 | 任务清单 / 优先级 / 待办 | `ROADMAP.md` |
 | 框架索引 / 文件路径 / 真 PnL 数字 | `PROJECT_MAP.md` |
 | 自学习调度器细节 | `memory/selflearning-scheduler.md` |
@@ -246,7 +251,7 @@ python main.py --mode dashboard --port 8050
 | fix-2 risk_per_trade_pct=None 区分 | ✅ 已修 | paper_trader + paper_engine + mab_paper_runner 三分支 |
 | fix-3 PreTrade 默认值 | ✅ 已修 | max_daily_loss_pct 10.0, single_risk_usd 35.0 |
 | fix-4 PaperEngine 默认 None | ✅ 已修 | 跟 paper_trader 对齐, caller 显式传 |
-| fix-5 审计错判 (main.py 守卫) | ✗ 撤回 | line 736-737 有 `if __name__` 守卫, verify-3 import OK |
+| fix-5 审计错判 (main.py 守卫) | ✗ 撤回 | L769 有 `if __name__` 守卫 (v3 报告写 L736-737 是数字偏差, v4 实测校准), verify-3 import OK |
 | fix-6 filling mode 注释 | ✅ 已修 | bitmask→enum 0/1/2 |
 | fix-7 文档因子数 22→39 | ✅ 已修 | README + PROJECT_MAP + ROADMAP |
 | fix-8 mojibake 清除 | ✅ 已修 | factor_search_gp.py 26 行乱码→英文 |
