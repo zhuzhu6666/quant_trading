@@ -1,7 +1,7 @@
 # Python 量化交易框架
 
 XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backtest baseline 已实盘验证 (read-only 模式)。
-**Web 总控台全完结(2026-06-07,v8 JWT 真 enforce + CORS/WS env 化: 2026-06-08):41 API 端点(40 REST + 1 WS)+ 16 页面 + JWT auth(真 enforce) + PWA scaffold — 见 `README_WEB.md`**
+**Web 总控台全完结(2026-06-07,v8 JWT 真 enforce + CORS/WS env 化: 2026-06-08,v8.1 总览实盘合并: 2026-06-08):44 API 端点(43 REST + 1 WS)+ 16 页面 + JWT auth(真 enforce) + PWA scaffold — 见 `README_WEB.md`**
 
 **最后更新: 2026-06-07 (Web Console Phase 1-5 全完结)**
 
