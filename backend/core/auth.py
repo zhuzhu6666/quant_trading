@@ -85,3 +85,11 @@ def require_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return payload.get("sub", "zhu")
+
+
+# (audit 2026-06-08: pre-built Annotated alias for ergonomic use in route
+# signatures. Saves writing `Annotated[str, Depends(require_user)]` in every
+# route. Use as `user: RequireUser` in the function signature.)
+from typing import Annotated as _Annotated  # noqa: E402
+from fastapi import Depends as _Depends  # noqa: E402
+RequireUser = _Annotated[str, _Depends(require_user)]

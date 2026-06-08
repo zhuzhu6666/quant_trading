@@ -3,9 +3,20 @@ import { useAppStore } from "./store";
 
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000, 30000];
 
-// Backend WebSocket base URL. In dev, frontend runs on :3000 but WS is on :8000,
-// so we use an explicit env var rather than `location.host` (which would be :3000).
-// Production (single-port via reverse proxy or static mount) sets this to same-origin.
+// Backend WebSocket base URL.
+//
+// In dev mode the Next.js dev server runs on :3000 but FastAPI/uvicorn (which
+// serves the WS endpoint) is on :8000, so we use an explicit env var rather
+// than `location.host` (which would be :3000).
+//
+// In prod (single-port via start-prod), the FastAPI app serves both the API
+// and the static frontend on the same port, so the WS is same-origin.
+//
+// `NEXT_PUBLIC_WS_URL` lets a LAN/QA user override the WS host without
+// rebuilding:  NEXT_PUBLIC_WS_URL=ws://192.168.1.5:8000
+// (audit 2026-06-08: was hardcoded to ws://localhost:8000 which broke LAN
+// access from a phone/tablet even when QUANT_CORS_ALLOWED_ORIGINS allowed
+// the HTTP origin.)
 const WS_BASE_URL: string =
   process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000";
 

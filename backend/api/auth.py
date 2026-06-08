@@ -34,9 +34,14 @@ def login(req: LoginRequest) -> LoginResponse:
 
 
 @router.get("/me")
-def me(user: Annotated[str, Depends(get_current_user)]) -> dict:
-    """Returns the current user. Uses the lenient get_current_user (returns "zhu" if no token)."""
-    return {"user": user, "authenticated": user != "zhu"}
+def me(user: Annotated[str, Depends(get_current_user)], authorization: Annotated[str | None, Header()] = None) -> dict:
+    """Returns the current user. `authenticated` is true iff a valid Bearer
+    token was supplied. (audit 2026-06-08: previously the check was
+    `user != "zhu"`, which is always false in v1 (the default sub is "zhu").
+    The real signal is whether the Authorization header was present and
+    decodeable.)"""
+    has_token = bool(authorization and authorization.lower().startswith("bearer "))
+    return {"user": user, "authenticated": has_token}
 
 
 @router.get("/me-strict")

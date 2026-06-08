@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 interface TopFactor { name: string; expr: string; ic: number; }
 
@@ -18,7 +19,7 @@ export default function DiscoverPage() {
   async function start() {
     setProgress({ pct: 0, step: "提交中...", status: "queued" });
     setTop([]);
-    const r = await fetch("/api/discover", {
+    const r = await authFetch("/api/discover", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -39,7 +40,7 @@ export default function DiscoverPage() {
   async function poll(id: string) {
     for (let i = 0; i < 600; i++) {  // up to 20 min
       await new Promise((r) => setTimeout(r, 2000));
-      const r = await fetch(`/api/discover/${id}`);
+      const r = await authFetch(`/api/discover/${id}`);
       if (!r.ok) break;
       const d = await r.json();
       setProgress({ pct: d.progress_pct, step: d.current_step, status: d.status });

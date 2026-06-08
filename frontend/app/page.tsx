@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { authFetch } from "@/lib/auth";
 import { useAppStore } from "@/lib/store";
 import { fmtNum, fmtPct, fmtUSD, classNames } from "@/lib/format";
 
@@ -11,7 +12,7 @@ export default function Overview() {
   async function runBacktest() {
     setRunning(true);
     try {
-      const r = await fetch("/api/backtest/run", {
+      const r = await authFetch("/api/backtest/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ symbol: "XAUUSD+", timeframe: "M15" }),

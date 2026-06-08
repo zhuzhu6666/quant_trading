@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 interface BrokerStatus {
   mt5: { status: string; error?: string };
@@ -14,7 +15,7 @@ export default function LivePage() {
   const [result, setResult] = useState<string | null>(null);
 
   async function load() {
-    const r = await fetch("/api/live/status");
+    const r = await authFetch("/api/live/status");
     setStatus(await r.json());
   }
   useEffect(() => { load(); }, []);
@@ -24,7 +25,7 @@ export default function LivePage() {
     setBusy(true);
     setResult(null);
     try {
-      const r = await fetch("/api/live/emergency-close", {
+      const r = await authFetch("/api/live/emergency-close", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Confirm": "emergency" },
         body: JSON.stringify({ broker, symbol: symbol || null }),

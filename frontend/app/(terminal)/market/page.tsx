@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 import { Candlestick, CandleBar } from "@/components/charts/candlestick";
 
 export default function MarketPage() {
@@ -12,7 +13,7 @@ export default function MarketPage() {
     // an old fetch overwrite the new tf's data.)
     const ctrl = new AbortController();
     setLoading(true);
-    fetch(`/api/market/bars?symbol=XAUUSD%2B&timeframe=${tf}&limit=500`, { signal: ctrl.signal })
+    authFetch(`/api/market/bars?symbol=XAUUSD%2B&timeframe=${tf}&limit=500`, { signal: ctrl.signal })
       .then((r) => r.json())
       .then((d) => setBars(d.bars as CandleBar[]))
       .catch((e) => {

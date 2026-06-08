@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 interface Job {
   id: string;
@@ -22,12 +23,18 @@ export default function JobsPage() {
   const [kindFilter, setKindFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selected, setSelected] = useState<Job | null>(null);
+  // (audit 2026-06-08: prevent double-click on the cancel button. The
+  // first POST transitions the job from running -> cancelled; a second
+  // POST would 400 with "job not running or not found", which is harmless
+  // but spams the API and the 5s auto-refresh would briefly show a
+  // "running" row between the two POSTs, making the button flash.)
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
 
   async function load() {
     const params = new URLSearchParams();
     if (kindFilter !== "all") params.set("kind", kindFilter);
     if (statusFilter !== "all") params.set("status", statusFilter);
-    const r = await fetch(`/api/jobs?${params}`);
+    const r = await authFetch(`/api/jobs?${params}`);
     const d = await r.json();
     setJobs(d.jobs || []);
   }
@@ -39,12 +46,18 @@ export default function JobsPage() {
   }, [kindFilter, statusFilter]);
 
   async function cancel(id: string) {
-    await fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
-    await load();
+    if (cancellingId) return;  // already cancelling something
+    setCancellingId(id);
+    try {
+      await authFetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+      await load();
+    } finally {
+      setCancellingId(null);
+    }
   }
 
   async function select(id: string) {
-    const r = await fetch(`/api/jobs/${id}`);
+    const r = await authFetch(`/api/jobs/${id}`);
     if (r.ok) setSelected(await r.json());
   }
 
@@ -96,7 +109,13 @@ export default function JobsPage() {
                 <td className="p-2 text-right text-fg-muted">{j.started_at.slice(11, 19)}</td>
                 <td className="p-2 text-right">
                   {j.status === "running" && (
-                    <button onClick={(e) => { e.stopPropagation(); cancel(j.id); }} className="text-xs bg-warn/20 text-warn px-2 py-1 rounded">cancel</button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); cancel(j.id); }}
+                      disabled={cancellingId === j.id || cancellingId !== null}
+                      className="text-xs bg-warn/20 text-warn px-2 py-1 rounded disabled:opacity-50"
+                    >
+                      {cancellingId === j.id ? "cancelling..." : "cancel"}
+                    </button>
                   )}
                 </td>
               </tr>

@@ -59,6 +59,11 @@ export function Candlestick({ bars, height = 480 }: Props) {
     }));
     candleSeriesRef.current.setData(candleData);
     volSeriesRef.current.setData(volData);
+    // (audit 2026-06-08 fix: v5 audit left this out — without fitContent() the
+    // chart's default viewport is the rightmost bars only, so a 500-bar fetch
+    // would visually show only the last ~100 bars with the rest off-screen left.
+    // fitContent() resets the visible range to cover the full data range.)
+    if (bars.length > 0) chartRef.current?.timeScale().fitContent();
   }, [bars]);
 
   return <div ref={containerRef} />;

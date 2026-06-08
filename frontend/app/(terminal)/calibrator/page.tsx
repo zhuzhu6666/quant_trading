@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 interface CalibratorStatus {
   path: string;
@@ -16,7 +17,7 @@ export default function CalibratorPage() {
   const [saved, setSaved] = useState<string | null>(null);
 
   async function load() {
-    const r = await fetch("/api/calibrator");
+    const r = await authFetch("/api/calibrator");
     const d = await r.json();
     setStatus(d);
     setEditing(JSON.stringify(d.buckets ?? [], null, 2));
@@ -27,7 +28,7 @@ export default function CalibratorPage() {
   async function saveBuckets() {
     try {
       const buckets = JSON.parse(editing);
-      const r = await fetch("/api/calibrator/save", {
+      const r = await authFetch("/api/calibrator/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ buckets }),

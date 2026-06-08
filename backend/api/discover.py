@@ -1,5 +1,6 @@
 """POST /api/discover (start job) + GET /api/discover/{id} (status)."""
 from fastapi import APIRouter
+from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.jobs import get_job_manager
@@ -19,7 +20,7 @@ class DiscoverRequest(BaseModel):
 
 
 @router.post("")
-def start(req: DiscoverRequest) -> dict:
+def start(_user: RequireUser, req: DiscoverRequest)-> dict:
     mgr = get_job_manager()
     params = req.model_dump()
     fn = lambda cb: run_discovery(params, cb)
@@ -28,7 +29,7 @@ def start(req: DiscoverRequest) -> dict:
 
 
 @router.get("/{job_id}")
-def get_job(job_id: str) -> dict:
+def get_job(_user: RequireUser, job_id: str)-> dict:
     from backend.jobs import get_job_manager
     from fastapi import HTTPException
     js = get_job_manager().get(job_id)

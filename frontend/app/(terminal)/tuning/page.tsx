@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 export default function TuningPage() {
   const [riskGrid, setRiskGrid] = useState("0.5,1.0,1.5,2.0");
@@ -12,7 +13,7 @@ export default function TuningPage() {
   async function start() {
     setProgress({ pct: 0, step: "提交中...", status: "queued" });
     setReport(null);
-    const r = await fetch("/api/tuning/run", {
+    const r = await authFetch("/api/tuning/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -29,7 +30,7 @@ export default function TuningPage() {
   async function poll(id: string) {
     for (let i = 0; i < 900; i++) {  // up to 30 min
       await new Promise((r) => setTimeout(r, 2000));
-      const r = await fetch(`/api/tuning/${id}`);
+      const r = await authFetch(`/api/tuning/${id}`);
       if (!r.ok) break;
       const d = await r.json();
       setProgress({ pct: d.progress_pct, step: d.current_step, status: d.status });
@@ -40,7 +41,7 @@ export default function TuningPage() {
         const reportPath: string | undefined = d.result?.report_path;
         if (reportPath) {
           const name = reportPath.split(/[\\/]/).pop()!;
-          const rr = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+          const rr = await authFetch(`/api/reports/${encodeURIComponent(name)}`);
           if (rr.ok) {
             const dd = await rr.json();
             const text = typeof dd.content === "string"

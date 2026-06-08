@@ -2,6 +2,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException
+from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.services.paper_service import get_paper_service
@@ -33,7 +34,7 @@ class PaperStopRequest(BaseModel):
 
 
 @router.post("/start")
-def start(req: PaperStartRequest) -> dict:
+def start(_user: RequireUser, req: PaperStartRequest)-> dict:
     svc = get_paper_service()
     try:
         st = svc.start(req.model_dump())
@@ -43,7 +44,7 @@ def start(req: PaperStartRequest) -> dict:
 
 
 @router.post("/stop")
-def stop(req: PaperStopRequest) -> dict:
+def stop(_user: RequireUser, req: PaperStopRequest)-> dict:
     svc = get_paper_service()
     st = svc.stop(req.close_positions)
     return {"status": st.status, "closed_positions": int(req.close_positions)}
@@ -63,7 +64,7 @@ def emergency_stop(
 
 
 @router.get("/status")
-def status() -> dict:
+def status(_user: RequireUser)-> dict:
     svc = get_paper_service()
     st = svc.status()
     return {

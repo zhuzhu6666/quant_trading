@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { setAuth } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -13,6 +14,9 @@ export default function LoginPage() {
     setBusy(true);
     setErr(null);
     try {
+      // Login is the one endpoint that does NOT need a Bearer token (it
+      // issues the token). Use plain fetch here — going through authFetch
+      // would clear the (empty) token and loop back to /login on 401.
       const r = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -20,8 +24,9 @@ export default function LoginPage() {
       });
       const d = await r.json();
       if (d.token) {
-        localStorage.setItem("quant_user", d.user);
-        localStorage.setItem("quant_token", d.token);
+        // (audit 2026-06-08: use the central auth helper so the key names
+        // stay in sync with lib/auth.ts:authFetch.)
+        setAuth(d.token, d.user);
         router.push("/");
       } else {
         setErr("登录失败");

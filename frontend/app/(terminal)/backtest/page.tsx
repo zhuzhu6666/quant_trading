@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 import Link from "next/link";
 import { fmtNum, fmtPct, fmtUSD } from "@/lib/format";
 
@@ -40,7 +41,7 @@ export default function BacktestPage() {
     // (audit v7-fix-2: trailing slash hits Next.js dev 404 because the
     // FastAPI route is registered as /api/backtest (no slash). The HTML
     // response then chokes fetch's `r.json()`. Use canonical /api/backtest.)
-    const r = await fetch("/api/backtest?status=done");
+    const r = await authFetch("/api/backtest?status=done");
     if (!r.ok) return;
     const d = await r.json();
     setRecentJobs((d.jobs || []).slice(0, 5));
@@ -53,7 +54,7 @@ export default function BacktestPage() {
     setJob(null);
     setReportText(null);
     try {
-      const r = await fetch("/api/backtest/run", {
+      const r = await authFetch("/api/backtest/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
@@ -73,7 +74,7 @@ export default function BacktestPage() {
   async function poll(id: string) {
     for (let i = 0; i < 180; i++) {  // up to 6 min
       await new Promise((r) => setTimeout(r, 2000));
-      const r = await fetch(`/api/backtest/${id}`);
+      const r = await authFetch(`/api/backtest/${id}`);
       if (!r.ok) break;
       const d: JobState = await r.json();
       setJob(d);
@@ -81,7 +82,7 @@ export default function BacktestPage() {
         if (d.status === "done" && d.result?.report_path) {
           // Read the txt report from disk via the reports endpoint
           const name = d.result.report_path.split(/[\\/]/).pop()!;
-          const rr = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+          const rr = await authFetch(`/api/reports/${encodeURIComponent(name)}`);
           if (rr.ok) {
             const dd = await rr.json();
             setReportText(typeof dd.content === "string" ? dd.content : JSON.stringify(dd.content, null, 2));

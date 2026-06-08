@@ -1,5 +1,6 @@
 """GET /api/sync/status, POST /api/sync/once."""
 from fastapi import APIRouter
+from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.jobs import get_job_manager
@@ -14,12 +15,12 @@ class OnceRequest(BaseModel):
 
 
 @router.get("/status")
-def status() -> dict:
+def status(_user: RequireUser)-> dict:
     return get_status()
 
 
 @router.post("/once")
-def once(req: OnceRequest) -> dict:
+def once(_user: RequireUser, req: OnceRequest)-> dict:
     mgr = get_job_manager()
     params = req.model_dump()
     fn = lambda cb: run_sync_once(params, cb)

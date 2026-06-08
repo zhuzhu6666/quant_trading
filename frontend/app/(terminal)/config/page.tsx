@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 export default function ConfigPage() {
   const [yamlText, setYamlText] = useState("");
@@ -10,7 +11,7 @@ export default function ConfigPage() {
   const [busy, setBusy] = useState(false);
 
   async function load() {
-    const r = await fetch("/api/config");
+    const r = await authFetch("/api/config");
     const d = await r.json();
     setYamlText(d.yaml);
     setParsed(d.parsed);
@@ -24,7 +25,7 @@ export default function ConfigPage() {
     setBusy(true);
     setSaved(null);
     try {
-      const r = await fetch("/api/config", {
+      const r = await authFetch("/api/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ yaml: yamlText }),

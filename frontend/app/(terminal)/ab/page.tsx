@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 export default function ABPage() {
   const [pathA, setPathA] = useState("baseline");
@@ -12,7 +13,7 @@ export default function ABPage() {
   async function start() {
     setProgress({ pct: 0, step: "提交中...", status: "queued" });
     setReport(null);
-    const r = await fetch("/api/ab/run", {
+    const r = await authFetch("/api/ab/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path_a: pathA, path_b: pathB, n_bars: nBars }),
@@ -25,7 +26,7 @@ export default function ABPage() {
   async function poll(id: string) {
     for (let i = 0; i < 300; i++) {  // up to 10 min
       await new Promise((r) => setTimeout(r, 2000));
-      const r = await fetch(`/api/ab/${id}`);
+      const r = await authFetch(`/api/ab/${id}`);
       if (!r.ok) break;
       const d = await r.json();
       setProgress({ pct: d.progress_pct, step: d.current_step, status: d.status });
@@ -36,7 +37,7 @@ export default function ABPage() {
         const reportPath: string | undefined = d.result?.report_path;
         if (reportPath) {
           const name = reportPath.split(/[\\/]/).pop()!;
-          const rr = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+          const rr = await authFetch(`/api/reports/${encodeURIComponent(name)}`);
           if (rr.ok) {
             const dd = await rr.json();
             const text = typeof dd.content === "string"

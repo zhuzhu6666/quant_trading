@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 interface ReportEntry {
   name: string;
@@ -17,7 +18,7 @@ export default function ReportsPage() {
   const [filter, setFilter] = useState("all");
 
   async function load() {
-    const r = await fetch(`/api/reports?kind=${filter}`);
+    const r = await authFetch(`/api/reports?kind=${filter}`);
     const d = await r.json();
     setReports(d.reports || []);
   }
@@ -27,7 +28,7 @@ export default function ReportsPage() {
     setSelected(name);
     setContent(null);
     setTruncated(false);
-    const r = await fetch(`/api/reports/${encodeURIComponent(name)}`);
+    const r = await authFetch(`/api/reports/${encodeURIComponent(name)}`);
     if (r.ok) {
       const d = await r.json();
       setContent(d.content);

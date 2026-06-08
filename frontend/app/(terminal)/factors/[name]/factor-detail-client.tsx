@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 import { useParams } from "next/navigation";
 import { FactorHealthRadar } from "@/components/charts/factor-health-radar";
 
@@ -40,9 +41,11 @@ export default function FactorDetailPage() {
 
   useEffect(() => {
     async function load() {
-      const r = await fetch("/api/factor-health/latest");
+      const r = await authFetch("/api/factor-health/latest");
       const d = await r.json();
-      const f = (d.report?.factors ?? []).find((x: Factor) => x.name === name);
+      // (audit 2026-06-08: backend schema is {factor, score, status, components:{...}}.
+      // Match against `.factor` (not `.name` which doesn't exist on Factor).)
+      const f = (d.report?.factors ?? []).find((x: Factor) => x.factor === name);
       setFactor(f ?? null);
       setLoading(false);
     }
@@ -52,33 +55,41 @@ export default function FactorDetailPage() {
   if (loading) return <div className="text-fg-muted">加载中...</div>;
   if (!factor) return <div className="text-down">未找到因子: {name}</div>;
 
+  // Flatten the nested Factor (components.*) into the shape both the radar chart
+  // and the side panel expect. (audit 2026-06-08: previously we passed the raw
+  // nested Factor to <FactorHealthRadar metrics={factor} />, which read
+  // metrics.abs_ic → undefined, rendering an all-zero 5-dim radar. Build also
+  // broke with 14 tsc errors because FactorHealthRadar props require the flat
+  // shape.)
+  const f = flat(factor);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
         <a href="/factors" className="text-fg-muted hover:text-fg text-sm">← 返回</a>
-        <h1 className="text-2xl font-bold">{factor.name}</h1>
+        <h1 className="text-2xl font-bold">{factor.factor}</h1>
         <span className={
           factor.status === "HEALTHY" ? "text-up" :
           factor.status === "WATCH" ? "text-warn" : "text-down"
         }>{factor.status}</span>
         {/* (audit v6-fix-1: same Number.isFinite guard as factors/page.tsx. Single
           factor with NaN/insufficient data shouldn't crash the detail view.) */}
-        <span className="text-fg-muted num">score {Number.isFinite(factor.score) ? factor.score.toFixed(1) : "--"}</span>
+        <span className="text-fg-muted num">score {Number.isFinite(f.score) ? f.score.toFixed(1) : "--"}</span>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-bg-card border border-bg-border rounded p-4">
           <div className="text-fg-muted text-sm mb-2">5 维评分雷达</div>
-          <FactorHealthRadar metrics={factor} />
+          <FactorHealthRadar metrics={f} />
         </div>
         <div className="bg-bg-card border border-bg-border rounded p-4">
           <div className="text-fg-muted text-sm mb-2">IC 时序</div>
           <div className="text-fg-muted text-sm">
-            <div className="num">abs IC: <span className="text-fg">{Number.isFinite(factor.abs_ic) ? factor.abs_ic.toFixed(4) : "--"}</span></div>
-            <div className="num">stability: <span className="text-fg">{Number.isFinite(factor.stability) ? factor.stability.toFixed(3) : "--"}</span></div>
-            <div className="num">decay: <span className="text-fg">{Number.isFinite(factor.decay) ? factor.decay.toFixed(3) : "--"}</span></div>
-            <div className="num">regime_consistency: <span className="text-fg">{Number.isFinite(factor.regime_consistency) ? factor.regime_consistency.toFixed(3) : "--"}</span></div>
-            <div className="num">independence: <span className="text-fg">{Number.isFinite(factor.independence) ? factor.independence.toFixed(3) : "--"}</span></div>
+            <div className="num">abs IC: <span className="text-fg">{Number.isFinite(f.abs_ic) ? f.abs_ic.toFixed(4) : "--"}</span></div>
+            <div className="num">stability: <span className="text-fg">{Number.isFinite(f.stability) ? f.stability.toFixed(3) : "--"}</span></div>
+            <div className="num">decay: <span className="text-fg">{Number.isFinite(f.decay) ? f.decay.toFixed(3) : "--"}</span></div>
+            <div className="num">regime_consistency: <span className="text-fg">{Number.isFinite(f.regime_consistency) ? f.regime_consistency.toFixed(3) : "--"}</span></div>
+            <div className="num">independence: <span className="text-fg">{Number.isFinite(f.independence) ? f.independence.toFixed(3) : "--"}</span></div>
           </div>
           <div className="text-xs text-fg-muted mt-4">
             ⚠ 完整 IC 时间序列图(rolling IC)需 alpha/factor_health 历史报告,Phase 4 集成。

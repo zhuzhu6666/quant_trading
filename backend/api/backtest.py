@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend.core.auth import RequireUser
 from backend.jobs import get_job_manager
 from backend.services.backtest_service import run_backtest
 
@@ -16,7 +17,7 @@ class BacktestRequest(BaseModel):
 
 
 @router.post("/run")
-def run(req: BacktestRequest) -> dict:
+def run(_user: RequireUser, req: BacktestRequest) -> dict:
     """Submit a backtest job. Returns 202 with job_id (sync API for now)."""
     mgr = get_job_manager()
     # Bind params via closure: JobManager.submit calls fn(progress_cb) with
@@ -28,7 +29,7 @@ def run(req: BacktestRequest) -> dict:
 
 
 @router.get("/{job_id}")
-def get_job(job_id: str) -> dict:
+def get_job(_user: RequireUser, job_id: str) -> dict:
     mgr = get_job_manager()
     js = mgr.get(job_id)
     if js is None:
@@ -37,7 +38,7 @@ def get_job(job_id: str) -> dict:
 
 
 @router.get("/")
-def list_jobs(status: str | None = None) -> dict:
+def list_jobs(_user: RequireUser, status: str | None = None) -> dict:
     mgr = get_job_manager()
     jobs = mgr.list(kind="backtest", status=status)
     return {"jobs": [j.to_dict() for j in jobs]}
@@ -51,5 +52,5 @@ def list_jobs(status: str | None = None) -> dict:
 # Otherwise next.config rewrites pass it through, FastAPI 404s, and the
 # frontend's fetch().json() chokes on the HTML 404 body.)
 @router.get("")
-def list_jobs_noslash(status: str | None = None) -> dict:
-    return list_jobs(status=status)
+def list_jobs_noslash(_user: RequireUser, status: str | None = None) -> dict:
+    return list_jobs(_user=_user, status=status)

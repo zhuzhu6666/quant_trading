@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 interface Shadow {
   name: string;
@@ -16,7 +17,7 @@ export default function ShadowPage() {
   const [busy, setBusy] = useState<string | null>(null);
 
   async function load() {
-    const r = await fetch("/api/shadow");
+    const r = await authFetch("/api/shadow");
     const d = await r.json();
     setShadows(d.shadows || []);
   }
@@ -26,7 +27,7 @@ export default function ShadowPage() {
   async function act(name: string, action: "promote" | "demote") {
     setBusy(name);
     try {
-      await fetch(`/api/shadow/${action}`, {
+      await authFetch(`/api/shadow/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),

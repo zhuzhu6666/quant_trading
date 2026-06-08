@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 import { useAppStore } from "@/lib/store";
 import { EquityCurve, EquityPoint } from "@/components/charts/equity-curve";
 import { fmtNum, fmtPct, fmtUSD, classNames } from "@/lib/format";
@@ -64,7 +65,7 @@ export default function PaperPage() {
   async function start() {
     setBusy(true);
     try {
-      const r = await fetch("/api/paper/start", {
+      const r = await authFetch("/api/paper/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
@@ -85,7 +86,7 @@ export default function PaperPage() {
   async function stop(close = false) {
     setBusy(true);
     try {
-      await fetch("/api/paper/stop", {
+      await authFetch("/api/paper/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ close_positions: close }),
@@ -103,7 +104,7 @@ export default function PaperPage() {
     if (!window.confirm("确认紧急停止? 后端会校验 X-Confirm: emergency header (二次校验)。")) return;
     setBusy(true);
     try {
-      await fetch("/api/paper/emergency-stop", {
+      await authFetch("/api/paper/emergency-stop", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Confirm": "emergency" },
         body: JSON.stringify({ close_positions: true }),
@@ -115,7 +116,7 @@ export default function PaperPage() {
   }
 
   async function refreshStatus() {
-    const r = await fetch("/api/paper/status");
+    const r = await authFetch("/api/paper/status");
     if (r.ok) setStatus(await r.json());
   }
 
@@ -160,9 +161,16 @@ export default function PaperPage() {
         <div className="bg-bg-card border border-bg-border rounded p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
           <div>
             <label className="text-fg-muted text-xs">symbol</label>
-            <select value={config.symbol} onChange={(e) => setConfig({ ...config, symbol: e.target.value })} className="w-full bg-bg border border-bg-border rounded px-2 py-1">
-              <option>XAUUSD+</option>
-            </select>
+            {/* (audit 2026-06-08: backend PaperStartRequest only supports
+              XAUUSD+ (contract_size=100 oz/lot hard constraint in
+              services/paper_service.py). A <select> with one option is
+              misleading UX — replace with a disabled readonly text input.) */}
+            <input
+              type="text"
+              value="XAUUSD+"
+              disabled
+              className="w-full bg-bg border border-bg-border rounded px-2 py-1 text-fg-muted cursor-not-allowed"
+            />
           </div>
           <div>
             <label className="text-fg-muted text-xs">timeframe</label>

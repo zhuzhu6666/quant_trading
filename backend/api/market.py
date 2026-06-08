@@ -2,6 +2,7 @@
 from typing import Literal
 
 from fastapi import APIRouter, Query
+from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from data.store import DataStore
@@ -39,6 +40,7 @@ VALID_TFS = {"M5", "M15", "M30", "H1", "H4", "D1"}  # noqa: F841 — kept for fu
 
 @router.get("/bars", response_model=BarsResponse)
 def get_bars(
+    _user: RequireUser,
     symbol: str = "XAUUSD+",
     timeframe: Literal["M5", "M15", "M30", "H1", "H4", "D1"] = "M15",
     from_ts: int | None = Query(None, alias="from"),

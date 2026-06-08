@@ -1,5 +1,6 @@
 """POST /api/live/{start,stop,emergency-close} + GET /api/live/status."""
 from fastapi import APIRouter, Header, HTTPException
+from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.services.live_service import emergency_close, get_status
@@ -13,7 +14,7 @@ class EmergencyCloseRequest(BaseModel):
 
 
 @router.get("/status")
-def status() -> dict:
+def status(_user: RequireUser)-> dict:
     return get_status()
 
 
@@ -25,12 +26,12 @@ def emergency(req: EmergencyCloseRequest, x_confirm: str | None = Header(default
 
 
 @router.post("/start")
-def start() -> dict:
+def start(_user: RequireUser)-> dict:
     """Start live trading loop. Not implemented in v1 — placeholder."""
     return {"ok": False, "error": "live trading loop not started via web UI in v1 (use python main.py --mode live)"}
 
 
 @router.post("/stop")
-def stop() -> dict:
+def stop(_user: RequireUser)-> dict:
     """Stop live trading loop. Not implemented in v1 — placeholder."""
     return {"ok": False, "error": "live trading loop not stopped via web UI in v1 (kill python main.py --mode live)"}

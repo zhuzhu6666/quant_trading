@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 import Link from "next/link";
 
 interface Factor {
@@ -45,7 +46,7 @@ export default function FactorsPage() {
   const [running, setRunning] = useState(false);
 
   async function load() {
-    const r = await fetch("/api/factor-health/latest");
+    const r = await authFetch("/api/factor-health/latest");
     const d = await r.json();
     if (d.report) setReport(d.report);
   }
@@ -55,13 +56,31 @@ export default function FactorsPage() {
   async function run() {
     setRunning(true);
     try {
-      await fetch("/api/factor-health/run", {
+      const r = await authFetch("/api/factor-health/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ threshold: 0.04, bar_count: 50000, sync_run: false }),
       });
-      // Poll latest after 30s
-      setTimeout(load, 30000);
+      const d = await r.json();
+      // (audit 2026-06-08: previous code did setTimeout(load, 30000) once
+      // and gave up if the run took >30s (real runs take 5-30s+). Poll
+      // the new job_id via /api/jobs/:id every 2s for up to 2 min, then
+      // refetch /latest. Same pattern as backtest/ab/tuning/discover.)
+      if (d.job_id) {
+        for (let i = 0; i < 60; i++) {
+          await new Promise((res) => setTimeout(res, 2000));
+          const jr = await authFetch(`/api/jobs/${d.job_id}`);
+          if (!jr.ok) break;
+          const jd = await jr.json();
+          if (jd.status === "done" || jd.status === "error" || jd.status === "cancelled") {
+            break;
+          }
+        }
+        await load();
+      } else {
+        // No job_id returned (sync mode?). Just wait a fixed interval.
+        setTimeout(load, 30000);
+      }
     } finally {
       setRunning(false);
     }

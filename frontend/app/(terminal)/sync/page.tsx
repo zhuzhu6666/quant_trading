@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { authFetch } from "@/lib/auth";
 
 interface PerTF { M5?: { last_sync_utc: string; total_bars: number }; M15?: { last_sync_utc: string; total_bars: number }; H1?: { last_sync_utc: string; total_bars: number }; D1?: { last_sync_utc: string; total_bars: number }; }
 
@@ -8,7 +9,7 @@ export default function SyncPage() {
   const [running, setRunning] = useState(false);
 
   async function load() {
-    const r = await fetch("/api/sync/status");
+    const r = await authFetch("/api/sync/status");
     setStatus(await r.json());
   }
   useEffect(() => { load(); }, []);
@@ -16,7 +17,7 @@ export default function SyncPage() {
   async function runOnce() {
     setRunning(true);
     try {
-      await fetch("/api/sync/once", {
+      await authFetch("/api/sync/once", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ timeframes: ["M15", "H1", "D1"], type: "incremental" }),

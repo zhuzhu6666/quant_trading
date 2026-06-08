@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter
+from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.core.paths import CHARTS_DIR
@@ -19,7 +20,7 @@ class RunRequest(BaseModel):
 
 
 @router.post("/run")
-def run(req: RunRequest) -> dict:
+def run(_user: RequireUser, req: RunRequest)-> dict:
     mgr = get_job_manager()
     params = req.model_dump()
     fn = lambda cb: run_factor_health(params, cb)
@@ -28,7 +29,7 @@ def run(req: RunRequest) -> dict:
 
 
 @router.get("/latest")
-def latest() -> dict:
+def latest(_user: RequireUser)-> dict:
     """Read the last-written factor_health_report.json. Returns 404 if not present."""
     p = CHARTS_DIR / "factor_health_report.json"
     if not p.exists():
