@@ -11,7 +11,7 @@
 ```
 quant_trading/
 ├── main.py                          # CLI 入口 (backtest/paper/live/dashboard)
-├── ROADMAP.md                       # 41 项任务路线图 (单源待办, 替代旧 ROADMAP.py + TODO.md)
+├── docs/planning/ROADMAP.md         # 41 项任务路线图 (单源待办, 替代旧 ROADMAP.py + TODO.md)
 ├── README.md                        # 用户文档
 ├── MEMORY.md                        # 1 行自学习调度器引用
 ├── requirements.txt                 # Python 3.12 依赖
@@ -169,8 +169,8 @@ quant_trading/
 - **开发模式** (推荐): `start.bat` → 前端 `http://localhost:3000` + 后端 `http://localhost:8000`
 - **生产模式**: `start-prod.bat` → 单 uvicorn `http://localhost:8000` (同时 serve API + 静态前端)
 - **Backend**: `backend/` (FastAPI, 39 API 路由 + 1 WS, 9 service, JWT auth)
-- **Frontend**: `frontend/` (Next.js 14 + shadcn/ui, 16 页面, 4 chart 组件, PWA scaffold)
-- **用户文档**: `README_WEB.md` (页面速查 + 启动 + 已知限制)
+- **Frontend**: `frontend-v2/` (Vite + React 19 + Tailwind 3, 16 页面, 4 chart 组件, JWT auth)
+- **用户文档**: `docs/user-guide/README.md` (页面速查 + 启动 + 已知限制)
 - **设计 spec**: `docs/superpowers/specs/2026-06-07-quant-web-console-design.md`
 - **实施 plan**: `docs/superpowers/plans/2026-06-07-quant-web-console.md`
 - **nginx 模板**: `docs/nginx.example.conf` (TLS + WS upgrade + rate-limit + cache)
@@ -384,9 +384,12 @@ quant_trading/
 ## 8. 文档清单
 
 - **`README.md`** — 用户文档, 当前状态 + 安装 + 运行
-- **`ROADMAP.md`** — 41 项路线图 (单源待办, P0/P1/P2/P3/Tier1-4 分组, 勾选状态)
+- **`docs/planning/ROADMAP.md`** — 41 项路线图 (单源待办, P0/P1/P2/P3/Tier1-4 分组, 勾选状态)
+- **`docs/audits/`** — 历次审计报告 (v4 / v7 / v8 + refactor-1 设计)
+- **`docs/design/`** — UI 设计 token + 产品定位
+- **`docs/user-guide/README.md`** — Web Console 用户指南
 - ~~`ROADMAP.py`~~ — 已删 (2026-06-02 文档整理, 合并入 ROADMAP.md)
-- ~~`TODO.md`~~ — 已删 (2026-06-02 文档整理, 合并入 ROADMAP.md)
+- ~~`TODO.md`~~ — 已删 (2026-06-09 文档整理,合并入 docs/planning/ROADMAP.md)
 - **`MEMORY.md`** — 1 行链接到自学习调度器
 - **`memory/selflearning-scheduler.md`** — 自学习调度器笔记
 - **`PROJECT_MAP.md`** (本文件) — 完整框架索引

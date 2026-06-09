@@ -1,7 +1,7 @@
 # Python 量化交易框架
 
 XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backtest baseline 已实盘验证 (read-only 模式)。
-**Web 总控台全完结(2026-06-07,v8 JWT 真 enforce + CORS/WS env 化: 2026-06-08,v8.1 总览实盘合并: 2026-06-08):44 API 端点(43 REST + 1 WS)+ 16 页面 + JWT auth(真 enforce) + PWA scaffold — 见 `README_WEB.md`**
+**Web 总控台(Vite + React 19): 14 页面 + JWT auth + 实时推送 + cTrader 实盘 — `frontend-v2/`**
 
 **最后更新: 2026-06-07 (Web Console Phase 1-5 全完结)**
 
@@ -89,7 +89,7 @@ XAUUSD+ 黄金 M15 趋势/回归/因子合成, 7 层架构, 本地 paper + backt
 
 ### 自主进化 8 项接入 (2026-06-03)
 
-完整 L1-L5 自循环已闭环, 8 项 cron 化接入 (详见 ROADMAP.md §P2 自主进化)。
+完整 L1-L5 自循环已闭环, 8 项 cron 化接入 (详见 docs/planning/ROADMAP.md §P2 自主进化)。
 
 ### 影子因子 (2026-06-03)
 
@@ -114,7 +114,7 @@ L1-L5 自循环 3/3 闭环 (T15.5 wiring + Calibrator 持久化 + GP T15.3 v2) +
 quant_trading/
 ├── main.py                  # 入口 (backtest/paper/live/dashboard)
 ├── README.md                # 本文件 (用户文档)
-├── ROADMAP.md               # 单源待办 (P0/P1/P2/P3/Tier1-4 + T1-T16)
+├── docs/planning/ROADMAP.md # 单源待办 (P0/P1/P2/P3/Tier1-4 + T1-T16)
 ├── PROJECT_MAP.md           # 框架索引 + 真状态数字 + 文件路径速查
 ├── requirements.txt         # Python 3.12 依赖
 │
@@ -248,7 +248,7 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npx playwright test --project=chrome  # 用�
 - Endpoint 路径 trailing slash (FastAPI `@router.get("/")` vs no slash) — backtest
 - NaN 渲染未守卫 (字段可能 undefined) — factors/radar
 
-详见 `PROJECT_AUDIT_v7.md` 每类 bug 的根因 + 修法。
+详见 `docs/audits/v7-web-console-playwright-e2e.md` 每类 bug 的根因 + 修法。
 
 ---
 
@@ -256,11 +256,11 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npx playwright test --project=chrome  # 用�
 
 | 想了解 | 看 |
 |---|---|
-| **Web 总控台用户文档** | `README_WEB.md` (页面速查 + 启动方式 + 已知限制) |
+| **Web 总控台用户文档** | `docs/user-guide/README.md` (页面速查 + 启动方式 + 已知限制) |
 | **Web UI 设计 spec** | `docs/superpowers/specs/2026-06-07-quant-web-console-design.md` |
 | **Web UI 实施 plan** | `docs/superpowers/plans/2026-06-07-quant-web-console.md` |
 | **Web UI nginx 配置模板** | `docs/nginx.example.conf` |
-| 任务清单 / 优先级 / 待办 | `ROADMAP.md` |
+| 任务清单 / 优先级 / 待办 | `docs/planning/ROADMAP.md` |
 | 框架索引 / 文件路径 / 真 PnL 数字 | `PROJECT_MAP.md` |
 | 自学习调度器细节 | `memory/selflearning-scheduler.md` |
 | 历史路线图 (旧版规划) | git log `ROADMAP.py` 删除前 |

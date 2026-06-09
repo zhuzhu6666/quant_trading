@@ -3,7 +3,7 @@
 > **来源**: 原 `TODO.md` 第 316-385 行 (2026-06-06 审计时由 Claude 起草)
 > **状态**: 🛡️ **架构护栏已加** (本次完成, 0 风险);真拆解**待执行**(等 verify-2 PnL baseline)
 > **关联代码**: `execution/mab_paper_runner.py:71-105, 113-138, 184-195, 336-358, 386-393`
-> **关联任务**: ROADMAP.md §"Phase 2 审计 refactor" refactor-1 (MABRunner 重构, 1 天)
+> **关联任务**: `docs/planning/ROADMAP.md` §"Phase 2 审计 refactor" refactor-1 (MABRunner 重构, 1 天)
 
 ---
 
@@ -84,5 +84,5 @@ MABPaperRunner
 
 **维护说明**:
 - 本文件于 2026-06-09 从原 `TODO.md` 第 316-385 行迁出(根目录归类整理时)
-- ROADMAP.md 已声明 TODO.md 是"单源待办的过时副本",本文件作为 ARCH-1 详细设计文档保留
-- 真拆解执行时,在此文件 `Status` 行打勾,ROADMAP §"Phase 2 审计 refactor" refactor-1 同步
+- `docs/planning/ROADMAP.md` 已声明 TODO.md 是"单源待办的过时副本",本文件作为 ARCH-1 详细设计文档保留
+- 真拆解执行时,在此文件 `Status` 行打勾,`docs/planning/ROADMAP.md` §"Phase 2 审计 refactor" refactor-1 同步

@@ -30,7 +30,7 @@
 | **Phase 3 审计 (2026-06-06)** | ✅ 5/5 opt | opt-1~5 全部完成 (含 OPT-5 strptime 加速) |
 | **Phase 4 审计 (2026-06-06)** | ✅ 3/3 verify | verify-1~3 全部完成 |
 | **Phase 5 调参 (2026-06-06)** | ✅ 完结 | 阈值 / 权重 / 窗口参数全量调优 |
-| **v4 增量审计 (2026-06-06)** | ✅ 3 fix + 1 guard | `PROJECT_AUDIT_v4.md` 12 finding, 全完结 |
+| **v4 增量审计 (2026-06-06)** | ✅ 3 fix + 1 guard | `docs/audits/v4-quant-framework-audit.md` 12 finding, 全完结 |
 
 ---
 
@@ -118,7 +118,7 @@
 
 ## 自进化差距 (2026-06-06 状态)
 
-**3/3 闭环** + Phase 1-5 审计 + 调参全完结。详见 `PROJECT_AUDIT_v4.md` + `TODO.md`(v3 已清理,历史见 git log)。
+**3/3 闭环** + Phase 1-5 审计 + 调参全完结。详见 `docs/audits/v4-quant-framework-audit.md`(v3 已清理,历史见 git log)。
 
 ---
 
@@ -198,7 +198,7 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 **规范文档**:
 - Spec: `docs/superpowers/specs/2026-06-07-quant-web-console-design.md`
 - Plan: `docs/superpowers/plans/2026-06-07-quant-web-console.md`
-- 用户文档: `README_WEB.md`
+- 用户文档: `docs/user-guide/README.md`
 - 生产部署: `docs/nginx.example.conf` + `start-prod.bat` / `start-prod.sh`
 
 **启动**:
@@ -371,6 +371,10 @@ P2 的"因子 DSL"部分已完成 (T14-T15). 剩余项目按优先级:
 **2026-06-03 BUGFIX + P0 扩展到 39 因子:**
 
 ---
+
+**2026-06-09 文档整理:**
+- TODO.md 重命名为本目录下 + 内容已并入 ROADMAP(2026-06-02 文档整理已完成,本次仅做目录归类)
+- 3 个 PROJECT_AUDIT 移至 docs/audits/,DESIGN/PRODUCT 移至 docs/design/,README_WEB 移至 docs/user-guide/
 
 **2026-06-02 文档整理:**
 - 合并 `TODO.md` + `ROADMAP.py` → 本文件

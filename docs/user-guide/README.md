@@ -2,7 +2,7 @@
 
 > XAUUSD+ 黄金 M15 量化交易框架 — 浏览器 Web 总控台,完整替代终端 CLI。
 
-**最后更新**: 2026-06-08 (v8.1: 总览显示实盘账户 + 实盘开关 + 紧急平仓按钮合并到 /)
+**最后更新**: 2026-06-08 (v9: Vite + React 19 重构,旧版 Next.js 弃用)
 **状态**: Phase 1-5 完成(43 REST 端点 + 1 WS = 44 总 + 16 页面 + JWT auth 真正强制)
 
 ---
@@ -16,7 +16,7 @@
 "C:\Users\zhu\AppData\Local\Programs\Python\Python312\python.exe" -m pip install -r requirements.txt
 
 # 2. 前端依赖(首次需要)
-cd frontend
+cd frontend-v2
 npm install
 cd ..
 
@@ -31,7 +31,7 @@ node --version
 start.bat
 ```
 
-浏览器自动开 `http://localhost:3000`(或者手动访问)。
+浏览器自动开 `http://localhost:5173`(或者手动访问)。后端 :8000 (FastAPI) + 前端 :5173 (Vite + React 19)。前端 `/api/*` 通过 Vite proxy 转到后端。
 
 **Unix**:
 ```bash
@@ -154,7 +154,7 @@ Web console 通过 WebSocket `/ws/state` 推送 1s 一次的 state snapshot:
 - Spec: `docs/superpowers/specs/2026-06-07-quant-web-console-design.md`
 - Plan: `docs/superpowers/plans/2026-06-07-quant-web-console.md`
 - 项目主索引: `PROJECT_MAP.md`
-- Phase 1-5 审计: `PROJECT_AUDIT_v4.md`
+- Phase 1-5 审计: `docs/audits/v4-quant-framework-audit.md`
 
 ---
 
@@ -190,24 +190,15 @@ Web console 通过 WebSocket `/ws/state` 推送 1s 一次的 state snapshot:
 
 ## 反馈
 
-发现 bug 或想加新功能? 直接在 `ROADMAP.md` "Phase 4 Web UI" 节点追加(plan §7.5 约定)。
+发现 bug 或想加新功能? 直接在 `docs/planning/ROADMAP.md` "Phase 4 Web UI" 节点追加(plan §7.5 约定)。
 
 ---
 
 ## 生产部署 (Production Deployment)
 
-### 单端口模式 (推荐用于 VPS/容器)
+### 单端口模式 (暂不支持,新版构建中)
 
-```cmd
-start-prod.bat
-```
-
-会:
-1. `cd frontend && npm run build` 编译静态 HTML
-2. 拷贝 `frontend/out/*` 到 `backend/static/`
-3. `python -m backend --port 8000` 同时 serve API + 静态前端
-
-浏览器访问 `http://localhost:8000`(或你的域名)。
+目前 Vite 版前端暂不支持单端口部署。开发时保持两个终端即可。
 
 ### nginx 反向代理 (生产环境)
 
