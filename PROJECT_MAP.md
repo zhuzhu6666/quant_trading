@@ -162,7 +162,7 @@ quant_trading/
 - **回测**: `main.py --mode backtest` → `main.py:run_backtest()` (backtrader 内联, 走 optstrategy SL/TP/CD 扫描)
 - **模拟盘**: `main.py --mode paper` → `execution/paper_trader.py` (PaperTrader, ★)
 - **实盘**: `main.py --mode live` → `live/executor.py` (旧) / `execution/mt5_bridge.py` (新)
-- **MAB paper**: `scripts/mab_paper.py` / `mab_paper_v2.py`
+- **MAB paper**: `scripts/mab_paper_v2.py` (v1 已于 2026-06-09 清理)
 - **CLI Dashboard**: `main.py --mode dashboard` (154 行极简 monitor, 旧)
 
 ### 2.1.1 Web 总控台 (2026-06-07, 完整替代 CLI)
@@ -322,7 +322,7 @@ quant_trading/
 - `scripts/walkforward_p0_6.py` — 2 fold Walk-Forward
 - `execution/mt5_bridge.py --dry-run` — 整合 dry-run
 - `main.py --mode paper` — PaperTrader 验证
-- `scripts/mab_paper.py` (修后) — 596t, +380.58%
+- `scripts/mab_paper.py` (修后, 已清理) — 596t, +380.58%
 - `scripts/mab_paper_v2.py` (修后) — 590t, +181.18%
 - `scripts/baseline_all_strategies.py` — 7 策略, multi_factor +407.51%
 
@@ -377,7 +377,7 @@ quant_trading/
 | P1-E A/B | `scripts/p1_e_ab_test.py` | `data/charts/p1_e_ab_report.txt` |
 | P1-F 紧急平仓 | `execution/mt5_bridge.py` close_all_positions | (手动验) |
 | P3 circuit 调优 | `risk/circuit.py` + `execution/paper_trader.py` | `scripts/p3_circuit_tune.py` |
-| Bug 修复 | `scripts/mab_paper.py` (line ~154) | `data/charts/mab_paper_bugfix_report.txt` |
+| Bug 修复 (v1, 已清理) | `scripts/mab_paper.py` (line ~154, 历史) | `data/charts/mab_paper_bugfix_report.txt` |
 
 ---
 

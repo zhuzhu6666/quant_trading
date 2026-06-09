@@ -1,4 +1,4 @@
-"""scripts/mab_paper.py — MAB router 驱动的多策略 paper 跑回放
+"""scripts/mab_paper_v2.py — MAB router 驱动的多策略 paper 跑回放 (v2, 现行)
 
 设计:
   1. 加载 50K M15 bar
