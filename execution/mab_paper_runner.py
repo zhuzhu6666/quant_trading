@@ -191,7 +191,7 @@ class MABPaperRunner:
                 f"[ARCH-1] MABRunner 共享 1 个 PaperEngine (包装 {primary_name}), "
                 f"4 策略 {list(strategies.keys())} 共用 1 个 position + SL/TP + last_indicators. "
                 f"当前 PnL 数字 (baseline +407.51% / -9.54%) 是 'MAB 选最优开仓' 模式, "
-                f"不是 4 策略独立 alpha. 完整拆解方案见 TODO.md refactor-1. "
+                f"不是 4 策略独立 alpha. 完整拆解方案见 docs/audits/refactor-1-mab-4-engines.md. "
                 f"override ARCH-1_QUIET=True 可关闭本警告."
             )
         self._arch1_quiet = False  # caller 改 True 关警告
@@ -414,7 +414,7 @@ class MABPaperRunner:
             #   1. 上一个 strategy 的 last_indicators 写到主 engine 后, 切换时丢失
             #   2. active position 持有中, strategy 切换不会调整 SL/TP (用 primary 的)
             #   3. 4 策略的 PnL 都被算在 primary 名下, MAB 统计是"按 chosen 标签分" 近似
-            # 修复: 拆 4 个 PaperEngine (见 class docstring ARCH-1 段 + TODO.md refactor-1)
+            # 修复: 拆 4 个 PaperEngine (见 class docstring ARCH-1 段 + docs/audits/refactor-1-mab-4-engines.md)
             prev_strategy = self.paper.strategy
             self.paper.strategy = self.strategies[chosen]
             try:
