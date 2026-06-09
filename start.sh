@@ -10,7 +10,7 @@ BACKEND_PID=$!
 echo "Backend PID: $BACKEND_PID"
 sleep 3
 
-echo "=== Starting Quant Frontend (port 3000) ==="
-cd frontend
+echo "=== Starting Quant Frontend (port 5173, Vite) ==="
+cd frontend-v2
 trap "kill $BACKEND_PID 2>/dev/null" EXIT
 npm run dev
