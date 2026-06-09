@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 import time as _time
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)  # B1 fix: MABPaperRunner.__init__ line 193 用 logger.warning 之前没 import, rc=1 崩
 
 from data.store import DataStore
 from strategy.base import BaseStrategy, Signal
@@ -204,10 +207,14 @@ class MABPaperRunner:
     def _send_alert(self, level: str, title: str, msg: str, **state):
         if self.alerter is None:
             return
-        from monitor.alerts import AlertLevel
-        level_map = {"INFO": AlertLevel.INFO, "WARN": AlertLevel.WARNING,
-                     "CRITICAL": AlertLevel.CRITICAL}
-        self.alerter.send(level_map.get(level, AlertLevel.INFO), title, msg, **state)
+        # B12 fix: main.py 注入的 alerter 是 monitor.alerter.Alerter (字符串 API),
+        # 之前 _send_alert 传 AlertLevel enum 导致 _should_send() ValueError
+        # "unknown level: <AlertLevel.INFO: 'INFO'>" (enum 直接 str() 是 "AlertLevel.INFO",
+        # 而 LEVEL_ORDER keys 是纯字符串 "INFO" 等). 修法: 跟 monitor.alerter 对齐传字符串.
+        from monitor.alerter import DEBUG, INFO, WARNING, ERROR, CRITICAL  # noqa: F401
+        level_map = {"INFO": INFO, "WARN": WARNING,
+                     "CRITICAL": CRITICAL, "ERROR": ERROR, "DEBUG": DEBUG}
+        self.alerter.send(level_map.get(level, INFO), title, msg, **state)
 
     def _on_trade_close(self, trade) -> None:
         """每笔 trade close 的统一回调 — 把自学习层全接进来"""
