@@ -118,7 +118,7 @@
 
 ## 自进化差距 (2026-06-06 状态)
 
-**3/3 闭环** + Phase 1-5 审计 + 调参全完结。详见 `PROJECT_AUDIT.md` + `TODO.md`。
+**3/3 闭环** + Phase 1-5 审计 + 调参全完结。详见 `PROJECT_AUDIT_v4.md` + `TODO.md`(v3 已清理,历史见 git log)。
 
 ---
 

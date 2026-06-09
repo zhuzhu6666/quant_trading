@@ -247,7 +247,8 @@ ext = ext.reindex(bar_df.index, method="ffill")  # pandas 2.1+ deprecated, 3.0 �
 v3 修的 22→39 因子 + 调参最优 (risk=1%, CB=15%) + audit 状态表 (✅ 8 fix / 7 refactor / 5 opt / 3 verify) **v4 全部确认仍 valid**。
 
 **v3 错数字 1 处**:
-- v3 PROJECT_AUDIT.md:160 + README.md:249 写 "L736-737 有守卫", 实际是 **L769** (`if __name__ == "__main__": main()`)。**实际 L736 是注释,L769 才是真守卫**。**5 行行号偏差**。**修法: 改 README + PROJECT_AUDIT 引用**。
+- v3 PROJECT_AUDIT.md:160 + README.md:249 写 "L736-737 有守卫", 实际是 **L769** (`if __name__ == "__main__": main()`)。**实际 L736 是注释,L769 才是真守卫**。**5 行行号偏差**。**修法: 改 README + v4 引用**。
+注: PROJECT_AUDIT.md (v3) 已于 2026-06-09 清理(被 v4 完整替代),此处保留审计笔录作为历史证据。
 
 **v4 新增的事实**:
 - 11 个新发现已修/已护栏

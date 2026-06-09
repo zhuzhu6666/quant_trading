@@ -1,7 +1,7 @@
 # 量化框架修复 TODO 列表
 
 > 生成时间: 2026-06-06
-> 来源: `PROJECT_AUDIT.md` v3 (FINAL)
+> 来源: `PROJECT_AUDIT_v4.md` (v3 已于 2026-06-09 清理)
 > 状态: **8 fix + 7 refactor + 5 opt + 3 verify + 调参全部完成** + 2 pre-existing bug 已修
 > 最优参数: risk_per_trade_pct=1.0%, max_daily_loss_pct=15.0% (354 trades, +59.17%, Sharpe 0.936)
 > 剩余待办: 2 项 blocked (MT5 充值 + MT5 包版本)
