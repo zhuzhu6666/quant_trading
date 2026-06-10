@@ -824,6 +824,12 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                         last_bar = df_new.iloc[-1]
                         _process_tick(bridge, strategy, df_new, last_bar, broker, tick, log)
                 finally:
+                    # audit 2026-06-10: 后台线程写 _live_state 缓存, WS 1s 推送
+                    # 下次 tick 就能拿到真 broker equity. tick 主体不被阻塞, 失败时静默.
+                    # MT5 路径: bridge 在 finally 里 disconnect, 但 daemon thread
+                    # 持的是同一 bridge 引用, 下次 refresh 时若已断开会自然失败 +
+                    # 静默 log, 不影响主循环.
+                    kickoff_account_refresh(bridge, broker, interval_sec=30.0)
                     bridge.disconnect()
             elif broker == "ctrader":
                 # audit 2026-06-10: 3-tuple + 非阻塞(warming_up 时跳过本 tick)
@@ -842,6 +848,9 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 else:
                     last_bar = df_new.iloc[-1]
                     _process_tick(bridge, strategy, df_new, last_bar, broker, tick, log)
+                    # audit 2026-06-10: 后台线程写 _live_state 缓存, WS 1s 推送
+                    # 下次 tick 就能拿到真 broker equity. tick 主体不被阻塞, 失败时静默.
+                    kickoff_account_refresh(bridge, broker, interval_sec=30.0)
         except Exception as e:
             log(f"tick {tick} error: {type(e).__name__}: {e}\n{traceback.format_exc()[-300:]}")
 
@@ -849,6 +858,74 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             break
 
     log(f"loop stopped after {tick} ticks")
+
+
+# ── Background account/positions cache writer ─────────────────────────
+# audit 2026-06-10: 之前 _process_tick 每 60s 同步调 bridge.account_info() +
+# bridge.get_positions() 写共享缓存. 改读缓存后这个写路径被删了, WS 1s
+# 推送就拿到 start_loop 启动时的占位符 (balance=0, equity=0). 修复:
+# _run_loop 的 60s 等待期间, 后台 daemon thread 调一次 account_info +
+# get_positions, 写 _live_state. tick 主体保持非阻塞, 只有这个 writer
+# 异步. 失败时静默 (下次 tick 重试), 不让后台错误炸主循环.
+def _refresh_account_positions_sync(bridge, broker: str) -> None:
+    """One-shot synchronous write to _live_state. Used by the background
+    thread; tests call this directly. Best-effort: never raises."""
+    try:
+        acct = bridge.account_info() or {}
+    except Exception as e:
+        logger.warning(f"[{broker}] background account_info failed: {e}")
+        return
+    if not acct:
+        return
+    # audit 2026-06-10: ensure the cached account has `ok=True` so the
+    # WS snapshot doesn't mistake it for an error envelope.
+    acct.setdefault("ok", True)
+    acct.setdefault("broker", broker)
+    _live_state["account"] = acct
+    _live_state["account_updated_at"] = time.time()
+    try:
+        pos_raw = bridge.get_positions() or []
+    except Exception as e:
+        logger.warning(f"[{broker}] background get_positions failed: {e}")
+        pos_raw = None
+    if pos_raw is not None:
+        _live_state["positions"] = pos_raw
+        _live_state["positions_updated_at"] = time.time()
+
+
+def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 30.0) -> threading.Thread:
+    """Spawn a daemon thread that periodically calls
+    _refresh_account_positions_sync. Used by _run_loop during its 60s
+    wait so the next WS tick has fresh account/positions data.
+
+    The thread loops: refresh once, then sleep interval_sec, until the
+    global _loop_stop_flag is set OR the process exits (daemon=True).
+    """
+    stop_flag_ref = _loop_stop_flag  # captured at call time
+
+    def _worker():
+        while True:
+            try:
+                if stop_flag_ref is not None and stop_flag_ref.is_set():
+                    break
+                _refresh_account_positions_sync(bridge, broker)
+                # Sleep in small slices so the thread reacts to stop_flag quickly
+                slept = 0.0
+                while slept < interval_sec:
+                    if stop_flag_ref is not None and stop_flag_ref.is_set():
+                        return
+                    time.sleep(min(0.5, interval_sec - slept))
+                    slept += 0.5
+            except Exception as e:
+                logger.warning(f"[{broker}] account-refresh worker error: {e}")
+                time.sleep(1.0)
+
+    t = threading.Thread(
+        target=_worker, daemon=True,
+        name=f"acct-refresh-{broker}",
+    )
+    t.start()
+    return t
 
 
 def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, log) -> None:
