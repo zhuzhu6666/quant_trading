@@ -19,8 +19,6 @@ import SystemPanel from "@/components/panels/SystemPanel";
 type PanelType = "trading" | "factors" | "experiments" | "data" | "system" | null;
 type Broker = "mt5" | "ctrader";
 
-const equityData = Array.from({ length: 20 }, (_, i) => 1000 + Math.sin(i * 0.5) * 50 + i * 10);
-
 export default function MainDashboard() {
   const { snapshot, wsConnected } = useAppStore();
   const [activePanel, setActivePanel] = useState<PanelType>(null);
@@ -124,6 +122,9 @@ export default function MainDashboard() {
   }
 
   const s = snapshot;
+  const equityHistory = useAppStore((st) => st.equityHistory);
+  // Derive a numeric[] for MiniAreaChart compatibility
+  const equityData = equityHistory.map((p) => p.v);
   const pnl = s?.pnl_today ?? 0;
   const equity = s?.equity ?? 1000;
   const balance = s?.balance ?? 1000;
@@ -162,11 +163,11 @@ export default function MainDashboard() {
   }
 
   return (
-    <div className="min-h-screen" style={{ background: "linear-gradient(135deg, #f5f7fa 0%, #e4e9f0 100%)" }}>
-      <div className="max-w-[1200px] mx-auto p-4 md:p-5">
+    <div className="min-h-screen flex flex-col" style={{ background: "linear-gradient(135deg, #f5f7fa 0%, #e4e9f0 100%)" }}>
+      <div className="max-w-[1600px] mx-auto p-3 md:p-4 flex flex-col flex-1 w-full">
 
         {/* Top Bar */}
-        <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/30">
+        <div className="flex items-center justify-between mb-3 pb-2 border-b border-white/30">
           <div className="flex items-center gap-2">
             <span className="text-lg font-bold" style={{ color: "#3b82f6" }}>◆ Quant</span>
             {/* B9 fix: LIVE/PAPER/OFFLINE 角标, 之前 source/isLive 拿了不用 */}
@@ -191,7 +192,7 @@ export default function MainDashboard() {
         </div>
 
         {/* === KPI Row === */}
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5 mb-3">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mb-3">
           <div className="md:col-span-1 col-span-2">
             <KpiCard label="账户权益" value={fmtNum(equity)} subvalue={`余额 ${fmtNum(balance)}`} trend="neutral">
               <div className="w-16 h-8">
@@ -209,9 +210,9 @@ export default function MainDashboard() {
         </div>
 
         {/* === Row 2: Chart + Positions + Risk === */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 flex-1 min-h-0">
           {/* Chart */}
-          <GlassCard className="p-3.5">
+          <GlassCard className="p-2.5 flex flex-col">
             <div className="flex items-center justify-between mb-2">
               <span className="text-[11px] text-fg-muted font-semibold">权益曲线</span>
               <div className="flex gap-1">
@@ -220,14 +221,14 @@ export default function MainDashboard() {
                 ))}
               </div>
             </div>
-            <div className="h-20">
-              <MiniAreaChart data={equityData.map((v, i) => v + Math.random() * 20 - 10)} height={72} color="#3b82f6" />
+            <div className="flex-1 min-h-0 flex items-stretch">
+              <MiniAreaChart data={equityData} height={72} color="#3b82f6" className="w-full" />
             </div>
           </GlassCard>
 
           {/* Positions */}
-          <GlassCard className="p-3.5">
-            <div className="text-[11px] text-fg-muted font-semibold mb-3">持仓 ({s?.n_positions ?? 0})</div>
+          <GlassCard className="p-2.5 flex flex-col">
+            <div className="text-[11px] text-fg-muted font-semibold mb-2">持仓 ({s?.n_positions ?? 0})</div>
             {s?.n_positions && s.n_positions > 0 ? (
               <div className="space-y-3">
                 <div>
@@ -253,8 +254,8 @@ export default function MainDashboard() {
           </GlassCard>
 
           {/* Risk / Quick Actions */}
-          <GlassCard className="p-3.5">
-            <div className="text-[11px] text-fg-muted font-semibold mb-3">快速操作</div>
+          <GlassCard className="p-2.5 flex flex-col">
+            <div className="text-[11px] text-fg-muted font-semibold mb-2">快速操作</div>
             <div className="space-y-2">
               <div className="flex justify-between text-[10px]">
                 <span className="text-fg-muted">熔断</span>
@@ -331,9 +332,9 @@ export default function MainDashboard() {
         </div>
 
         {/* === Function Buttons === */}
-        <div>
-          <div className="text-[10px] text-fg-muted uppercase tracking-wider mb-2.5">功能模块</div>
-          <div className="grid grid-cols-5 gap-2.5">
+        <div className="mt-auto pt-2">
+          <div className="text-[10px] text-fg-muted uppercase tracking-wider mb-2">功能模块</div>
+          <div className="grid grid-cols-5 gap-2">
             {panels.map((p) => (
               <FunctionButton key={p.key} icon={p.icon} label={p.label} description={p.desc} gradient={p.gradient} onClick={() => setActivePanel(p.key)} />
             ))}
