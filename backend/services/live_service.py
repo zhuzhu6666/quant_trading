@@ -796,10 +796,24 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         log(f"strategy warmed up over {len(df)} historical bars; last_atr={strategy.last_atr}")
 
     # 订阅 cTrader 实时报价 (audit 2026-06-08)
+    # audit 2026-06-10: warmup 走 local_db 路径时 bridge 变量未定义,
+    # 之前直接调 bridge.subscribe_spots() 抛 NameError 被 except 吞,
+    # log 误报 "failed (non-fatal)". 修: 从 _get_ctrader() 拿真 bridge, 短等 ready.
     if broker == "ctrader":
         try:
-            bridge.subscribe_spots()
-            log("subscribed to spot events for real-time price")
+            spot_bridge, spot_err, spot_warming = _get_ctrader()
+            if spot_err:
+                log(f"subscribe_spots skipped: {spot_err}")
+            elif spot_warming or not spot_bridge.is_connected:
+                wait_err = _wait_ctrader_ready(spot_bridge, timeout_sec=10.0)
+                if wait_err:
+                    log(f"subscribe_spots skipped: {wait_err}")
+                else:
+                    spot_bridge.subscribe_spots()
+                    log("subscribed to spot events for real-time price")
+            else:
+                spot_bridge.subscribe_spots()
+                log("subscribed to spot events for real-time price")
         except Exception as e:
             log(f"subscribe_spots failed (non-fatal): {e}")
 
@@ -842,15 +856,18 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     log(f"tick {tick}: cTrader still warming up, skip tick")
                     stop_flag.wait(60)
                     continue
+                # audit 2026-06-10: 后台线程写 _live_state 缓存, WS 1s 推送
+                # 下次 tick 就能拿到真 broker equity. tick 主体不被阻塞, 失败时静默.
+                # audit 2026-06-10 fix 2: 提到 fetch_bars 之前, 之前放在 else
+                # 分支里, cTrader broker 不返 history bars 时永远走 if 分支,
+                # kickoff 永远不调. 现在无论 fetch_bars 成败都 kickoff.
+                kickoff_account_refresh(bridge, broker, interval_sec=30.0)
                 df_new = _fetch_bars_with_retry(bridge, timeframe="M15", n_bars=5)
                 if df_new is None or len(df_new) == 0:
                     log(f"tick {tick}: no bars after retry")
                 else:
                     last_bar = df_new.iloc[-1]
                     _process_tick(bridge, strategy, df_new, last_bar, broker, tick, log)
-                    # audit 2026-06-10: 后台线程写 _live_state 缓存, WS 1s 推送
-                    # 下次 tick 就能拿到真 broker equity. tick 主体不被阻塞, 失败时静默.
-                    kickoff_account_refresh(bridge, broker, interval_sec=30.0)
         except Exception as e:
             log(f"tick {tick} error: {type(e).__name__}: {e}\n{traceback.format_exc()[-300:]}")
 

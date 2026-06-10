@@ -124,3 +124,51 @@ class _SyncThread:
 
     def is_alive(self):
         return self._alive
+
+
+# ── Regression: kickoff fires even when fetch_bars returns None ──────────
+# audit 2026-06-10: cTrader broker demo doesn't return history bars.
+# Previous code put kickoff_account_refresh inside the `else` branch
+# (after fetch_bars succeeded), so it never ran in production. Fix: move
+# kickoff above fetch_bars in _run_loop. This test reads the source file
+# and asserts the call ordering — if anyone moves kickoff back inside the
+# else, this test fails.
+def test_kickoff_runs_even_when_fetch_bars_returns_none():
+    """Regression: in _run_loop's cTrader branch, kickoff_account_refresh
+    must be called BEFORE _fetch_bars_with_retry. Otherwise the cTrader
+    demo (which returns 0 history bars) will skip the kickoff forever.
+    """
+    src_path = "C:/Users/zhu/quant_trading/backend/services/live_service.py"
+    src = open(src_path, encoding="utf-8").read()
+    lines = src.splitlines()
+    # Locate _run_loop function start
+    run_loop_start = next(i for i, ln in enumerate(lines) if "def _run_loop" in ln)
+    # Within _run_loop, find the cTrader branch in the main while loop
+    # (i.e. after the "while not stop_flag.is_set():" line, not the warmup block)
+    main_loop_idx = next(
+        i for i, ln in enumerate(lines[run_loop_start:], start=run_loop_start)
+        if "while not stop_flag.is_set" in ln
+    )
+    ctrader_start = None
+    for i in range(main_loop_idx, len(lines)):
+        if lines[i].strip() == 'elif broker == "ctrader":':
+            ctrader_start = i
+            break
+    assert ctrader_start is not None, "could not find cTrader branch in _run_loop main loop"
+    # Find the end of this branch (next line at indent < 16 spaces)
+    end = ctrader_start + 1
+    while end < len(lines):
+        if lines[end].strip() and not lines[end].startswith("                "):
+            break
+        end += 1
+    branch_text = "\n".join(lines[ctrader_start + 1:end])
+    kickoff_pos = branch_text.find("kickoff_account_refresh")
+    fetch_pos = branch_text.find("_fetch_bars_with_retry")
+    assert kickoff_pos > 0, "kickoff_account_refresh not found in cTrader main-loop branch"
+    assert fetch_pos > 0, "_fetch_bars_with_retry not found in cTrader main-loop branch"
+    assert kickoff_pos < fetch_pos, (
+        "REGRESSION: kickoff_account_refresh is AFTER _fetch_bars_with_retry in "
+        "_run_loop's cTrader branch. It must be BEFORE so the cache writer still "
+        "runs when fetch_bars returns None (which is the norm for cTrader demo)."
+    )
+
