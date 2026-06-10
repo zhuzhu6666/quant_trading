@@ -48,6 +48,12 @@ def test_refresh_account_positions_writes_cache():
     assert acct["balance"] == 10000.0
     assert acct["equity"] == 10050.0
     assert acct["currency"] == "USD"
+    # audit 2026-06-10: timestamps must be set so the WS snapshot knows the data is fresh
+    assert live_service._live_state["account_updated_at"] is not None
+    assert live_service._live_state["positions_updated_at"] is not None
+    # timestamps should be very recent (within 5s of now)
+    assert abs(time.time() - live_service._live_state["account_updated_at"]) < 5
+    assert abs(time.time() - live_service._live_state["positions_updated_at"]) < 5
     pos = live_service._live_state["positions"]
     # positions stored as the wrapped endpoint format OR unwrapped list — accept either
     if isinstance(pos, dict):
