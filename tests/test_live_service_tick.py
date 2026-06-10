@@ -181,3 +181,73 @@ def test_process_tick_dry_run_does_not_call_amend(monkeypatch):
         live_service._process_tick(bridge, strategy, _make_df(), _make_df().iloc[-1], "ctrader", tick=1, log=log_fn)
     bridge.market_buy.assert_not_called()
     bridge.amend_position_sltp.assert_not_called()
+
+
+def test_process_tick_calls_amend_after_market_sell(monkeypatch):
+    """SHORT signal → market_sell fills → amend_position_sltp pushes SL/TP to server.
+
+    Catches sign errors in the SHORT sl/tp formula (sl = price + dist, tp = price - dist).
+    With price=4500, atr=7, sl_atr=2, tp_atr=3: sl=4500+14=4514, tp=4500-21=4479.
+    """
+    bridge = _fake_bridge(position_id=888, order_id=99)
+    strategy = MagicMock()
+    strategy.on_bar.return_value = _fake_signal(direction=-1, atr=7.0, sl_atr=2.0, tp_atr=3.0, price=4500.0)
+    strategy.last_atr = 7.0
+    live_service._live_state["account"] = {"ok": True, "balance": 10000.0, "equity": 10000.0}
+    live_service._live_state["positions"] = []
+    log_fn = MagicMock()
+    with monkeypatch.context() as m:
+        m.setattr("os.getenv", lambda k, d="": "1" if k == "CTRADER_SEND_ORDERS" else d)
+        m.setattr("time.sleep", lambda s: None)
+        live_service._process_tick(bridge, strategy, _make_df(), _make_df().iloc[-1], "ctrader", tick=1, log=log_fn)
+    bridge.market_sell.assert_called_once()
+    bridge.amend_position_sltp.assert_called_once()
+    call_args = bridge.amend_position_sltp.call_args
+    assert call_args.kwargs.get("position_id") == 888 or (call_args.args and call_args.args[0] == 888)
+    assert abs(call_args.kwargs.get("sl", call_args.args[1] if len(call_args.args) > 1 else 0) - 4514.0) < 0.01
+    assert abs(call_args.kwargs.get("tp", call_args.args[2] if len(call_args.args) > 2 else 0) - 4479.0) < 0.01
+
+
+def test_process_tick_unwraps_positions_envelope(monkeypatch):
+    """If _live_state['positions'] is the wrapped dict shape (from /api/live/positions
+    endpoint), the shim must unwrap it to a list before iterating. Without the shim,
+    `p.get("position_id")` on a non-dict raises AttributeError."""
+    bridge = _fake_bridge()
+    bridge.market_buy.return_value = MagicMock(success=True, order_id=99, position_id=0, comment="ok")
+    # NO signal — this test verifies the unwrap happens during read (not order path).
+    strategy = MagicMock()
+    strategy.on_bar.return_value = _fake_signal(direction=0)  # no signal
+    strategy.last_atr = 7.0
+    live_service._live_state["account"] = {"ok": True, "balance": 10000.0, "equity": 10000.0}
+    # Envelope shape: {"ok": True, "positions": [...]} — what the endpoint actually writes
+    live_service._live_state["positions"] = {"ok": True, "positions": [{"position_id": 1, "type": "buy", "volume": 0.01}]}
+    log_fn = MagicMock()
+    with monkeypatch.context() as m:
+        m.setattr("time.sleep", lambda s: None)
+        # Should not raise — the shim unwraps the dict to a list
+        live_service._process_tick(bridge, strategy, _make_df(), _make_df().iloc[-1], "ctrader", tick=1, log=log_fn)
+    # Tick log should report 1 position (the one inside the envelope)
+    tick_log_call = [c for c in log_fn.call_args_list if "positions=1" in str(c)]
+    assert len(tick_log_call) == 1
+
+
+def test_process_tick_amend_exception_does_not_crash(monkeypatch):
+    """If amend_position_sltp raises (network blip, broker contract change),
+    the tick must log and continue — not crash the live loop."""
+    bridge = _fake_bridge(position_id=999, order_id=99)
+    bridge.amend_position_sltp.side_effect = RuntimeError("network blip")
+    strategy = MagicMock()
+    strategy.on_bar.return_value = _fake_signal(direction=1)
+    strategy.last_atr = 7.0
+    live_service._live_state["account"] = {"ok": True, "balance": 10000.0, "equity": 10000.0}
+    live_service._live_state["positions"] = []
+    log_fn = MagicMock()
+    with monkeypatch.context() as m:
+        m.setattr("os.getenv", lambda k, d="": "1" if k == "CTRADER_SEND_ORDERS" else d)
+        m.setattr("time.sleep", lambda s: None)
+        # Must not raise
+        live_service._process_tick(bridge, strategy, _make_df(), _make_df().iloc[-1], "ctrader", tick=1, log=log_fn)
+    # 999 not in _local_positions (amend raised before _track_local_sl_tp)
+    assert 999 not in live_service._local_positions
+    # Log captured the exception
+    assert any("amend exception" in str(c) or "network blip" in str(c) for c in log_fn.call_args_list)

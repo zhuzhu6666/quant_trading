@@ -932,8 +932,8 @@ def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, lo
                         pid = p.get("position_id") or p.get("ticket")
                         if pid is None:
                             continue
-                        cres = bridge.close_position(pid)
-                        if getattr(cres, "success", False):
+                        close_res = bridge.close_position(pid)
+                        if getattr(close_res, "success", False):
                             closed += 1
                     log(f"  signal=CLOSE closed={closed}")
                     result = None
@@ -951,14 +951,14 @@ def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, lo
                             pid = int(pos[0].get("position_id") or pos[0].get("ticket") or 0)
                     if pid > 0:
                         try:
-                            ares = bridge.amend_position_sltp(
+                            amend_res = bridge.amend_position_sltp(
                                 position_id=pid, sl=sl_price, tp=tp_price,
                             )
-                            if getattr(ares, "success", False):
+                            if getattr(amend_res, "success", False):
                                 _track_local_sl_tp(pid, sl=sl_price, tp=tp_price)
                                 log(f"  signal={direction_name} ORDER+AMEND OK vol={volume} pos={pid} sl={sl_price:.2f} tp={tp_price:.2f}")
                             else:
-                                log(f"  signal={direction_name} AMEND FAILED pos={pid}: {getattr(ares, 'comment', '?')}")
+                                log(f"  signal={direction_name} AMEND FAILED pos={pid}: {getattr(amend_res, 'comment', '?')}")
                         except Exception as e:
                             log(f"  signal={direction_name} amend exception: {e}")
                     else:
