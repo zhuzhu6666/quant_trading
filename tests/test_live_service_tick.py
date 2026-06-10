@@ -251,3 +251,32 @@ def test_process_tick_amend_exception_does_not_crash(monkeypatch):
     assert 999 not in live_service._local_positions
     # Log captured the exception
     assert any("amend exception" in str(c) or "network blip" in str(c) for c in log_fn.call_args_list)
+
+
+def test_process_tick_amend_falls_back_to_cached_position_id(monkeypatch):
+    """When market_buy returns position_id=0 (broker didn't echo back), the tick
+    must fall back to the latest cached position from _live_state and amend that.
+
+    Catches regression where the fallback picks the wrong position or skips the amend.
+    """
+    bridge = _fake_bridge(position_id=0, order_id=99)  # market_buy returns position_id=0
+    strategy = MagicMock()
+    strategy.on_bar.return_value = _fake_signal(direction=1)
+    strategy.last_atr = 7.0
+    live_service._live_state["account"] = {"ok": True, "balance": 10000.0, "equity": 10000.0}
+    # Pre-populate cache with a known position
+    live_service._live_state["positions"] = [
+        {"position_id": 888, "type": "buy", "volume": 0.01, "price_open": 4500.0}
+    ]
+    log_fn = MagicMock()
+    with monkeypatch.context() as m:
+        m.setattr("os.getenv", lambda k, d="": "1" if k == "CTRADER_SEND_ORDERS" else d)
+        m.setattr("time.sleep", lambda s: None)
+        live_service._process_tick(bridge, strategy, _make_df(), _make_df().iloc[-1], "ctrader", tick=1, log=log_fn)
+    bridge.market_buy.assert_called_once()
+    bridge.amend_position_sltp.assert_called_once()
+    call_args = bridge.amend_position_sltp.call_args
+    amend_pid = call_args.kwargs.get("position_id") or (call_args.args[0] if call_args.args else None)
+    assert amend_pid == 888, f"expected fallback to cached pos 888, got {amend_pid}"
+    # And the local tracker should now have 888
+    assert 888 in live_service._local_positions

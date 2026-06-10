@@ -66,6 +66,11 @@ def _track_local_sl_tp(position_id: int, sl: float, tp: float) -> None:
 # audit 2026-06-08: 旧设计每次 WS 推送 / HTTP 轮询都打 broker,
 # Twisted reactor 排队导致页面切换卡顿. 新设计: live loop 周期更新
 # _live_state 缓存, 所有读取路径都只读缓存, 0 broker 调用.
+# audit 2026-06-10: writers MUST replace the whole list / dict (e.g.
+# _live_state["positions"] = new_list), NOT mutate in place
+# (pos.append(item)). Readers run on different threads (loop tick +
+# HTTP handlers in get_account / get_positions / start_loop); in-place
+# mutation can race with iteration and yield torn reads.
 _live_state: dict = {
     "broker": None,         # "mt5" | "ctrader" | None
     "loop_running": False,
