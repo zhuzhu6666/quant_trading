@@ -191,6 +191,18 @@ ctrader:
 - 复刻 P1-D 思路: 同一信号, 两个 broker 执行, PnL 差异 < $50
 - 这块做完才算真"互证"
 
+### SL/TP 上 server (✅ 2026-06-10 shipped)
+cTrader Open API 的 MARKET 单不支持在 `market_buy`/`market_sell` 协议字段里传
+SL/TP, 之前 SL/TP 只能靠本地 Python 在下一根 bar 的 high/low 上检查
+(1 bar 延迟). 现在改成: market 成交后立即 `bridge.amend_position_sltp()`
+推 server, server 端 0 延迟执行. 实现位置:
+`backend/services/live_service.py::_process_tick` 在 `market_buy`/`market_sell`
+fill 之后 try/except 调 amend, 成功调 `_track_local_sl_tp(position_id, sl, tp)`
+把 SL/TP 镜像写到模块级 `_local_positions: dict[int, _LocalSLTP]` 里(给下次
+amend 失败时 reconciliation 用). amend 失败 / 异常都不崩, 下根 tick 重试.
+测试: `tests/test_live_service_tick.py` (9 tests, 覆盖 LONG/SHORT amend、
+envelope shim、amend-failure-no-update、amend-exception-no-crash、dry-run).
+
 ---
 
 ## 9. 参考
