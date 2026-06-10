@@ -1,12 +1,11 @@
-"""Tests for live_service._process_tick — cTrader SL/TP on server + non-blocking reads.
+"""Tests for live_service._local_positions tracking (Task 1 of cTrader SL/TP refactor).
 
-audit 2026-06-10: Tick used to call bridge.account_info() + bridge.get_positions()
-synchronously, eating 30s+ of FastAPI threadpool time per tick. Now it reads the
-shared _live_state cache and only goes to broker for the amend call.
+audit 2026-06-10: SL/TP local mirror — bridge.amend_position_sltp() success is
+recorded here so the live loop knows what SL/TP sit on the server and can
+reconcile on next tick / broker rejection. Task 2 will add tick-level tests.
 """
 import threading
 import time
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -21,6 +20,8 @@ def _reset_state():
     live_service._live_state["positions"] = []
     yield
     live_service._local_positions.clear()
+    live_service._live_state["account"] = None
+    live_service._live_state["positions"] = []
 
 
 def _fake_bridge(position_id=12345, order_id=99):
@@ -63,4 +64,4 @@ def test_track_local_position_adds_entry():
     entry = live_service._local_positions[42]
     assert entry.sl == 4486.0
     assert entry.tp == 4521.0
-    assert entry.updated_at > 0
+    assert abs(time.time() - entry.updated_at) < 5
