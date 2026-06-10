@@ -847,11 +847,20 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
 
 def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, log) -> None:
-    """处理一根新 bar: 喂 strategy → signal → 调 broker 发单 → 记 log.
-    抽出来让 ctrader / mt5 共用同一条路径.
+    """处理一根新 bar. v3 (audit 2026-06-10):
+      1. strategy.on_bar → signal
+      2. Read account/positions from _live_state cache (NOT sync broker — that
+         ate 30s+ per tick and blocked FastAPI threadpool). Loop is decision-only.
+      3. If signal fires and send_orders=True:
+         a) market_buy / market_sell (no SL/TP — cTrader MARKET 单不支持)
+         b) amend_position_sltp(position_id, sl, tp) — push SL/TP to server.
+            cTrader 协议限制, amend 是 0-latency 的唯一办法.
+         c) On amend success: _track_local_sl_tp. On failure: log, leave stale,
+            next tick retries.
+      4. Update _live_state with current_price from the bar.
     """
     from datetime import datetime as _dt
-    from execution.ctrader_bridge import CTraderOrderResult
+
     # 构造 bar dict
     bar = {
         "open": float(last_bar["open"]),
@@ -863,7 +872,8 @@ def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, lo
         "timeframe": "M15",
         "complete": True,
     }
-    # 1. strategy 算 signal
+
+    # 1. strategy 算 signal (in-process; this is fine to do sync)
     signal = None
     if strategy is not None:
         try:
@@ -871,21 +881,33 @@ def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, lo
         except Exception as e:
             log(f"  strategy.on_bar error: {e}")
 
-    # 2. 读账户 + 持仓 (更新共享缓存, API/WS 都读这里)
-    acct = bridge.account_info() or {}
-    pos = bridge.get_positions() or []
+    # 2. Read account + positions from shared cache (audit 2026-06-10:
+    #    previously called bridge.account_info() + bridge.get_positions()
+    #    synchronously — each is a Twisted round-trip, total 20-30s,
+    #    blocking the FastAPI threadpool). Cache is updated by:
+    #      - /api/live/account endpoint (15s TTL)
+    #      - /api/live/positions endpoint (15s TTL)
+    #      - WS _read_state_snapshot (1s cadence, 15s cache)
+    #    The loop body no longer needs to know real-time equity; signal
+    #    decisions only need the current bar + recent bars.
+    acct = _live_state.get("account") or {}
+    pos = _live_state.get("positions") or []
+    # 兼容 positions 两种形态: list[dict] (从 live_state 取出时) or [] from endpoint
+    if isinstance(pos, dict):
+        pos = pos.get("positions", []) or []
     current_price = float(last_bar["close"])
-    # audit 2026-06-08: 写共享缓存, 让 API/WS 不再直接打 broker.
-    _live_state["account"] = acct
     _live_state["account_updated_at"] = time.time()
-    _live_state["positions"] = pos
     _live_state["positions_updated_at"] = time.time()
-    if bridge.get_spot_price is not None:
-        spot = bridge.get_spot_price()
-        if spot and spot > 0:
-            _live_state["spot_price"] = spot
+    if bridge is not None and hasattr(bridge, "get_spot_price"):
+        try:
+            spot = bridge.get_spot_price()
+            if spot and spot > 0:
+                _live_state["spot_price"] = spot
+                current_price = spot
+        except Exception:
+            pass
 
-    # 3. 发单 (cTrader 走 market_buy/sell + amend SL/TP)
+    # 3. 发单 + SL/TP 上 server
     if signal is not None and signal.direction in (1, -1, 2):
         send_orders = _should_send_orders(broker)
         direction_name = {1: "LONG", -1: "SHORT", 2: "CLOSE"}.get(signal.direction, "?")
@@ -899,25 +921,56 @@ def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, lo
             tp_price = current_price + tp_dist if signal.direction == 1 else current_price - tp_dist
             volume = 0.01  # 固定 0.01 lot, v2 minimal
             try:
+                # 3a) market_buy / market_sell (MARKET 单不传 SL/TP)
                 if signal.direction == 1:
-                    result = bridge.market_buy(volume=volume, sl=sl_price, tp=tp_price)
+                    result = bridge.market_buy(volume=volume, sl=0.0, tp=0.0, comment="quant-live")
                 elif signal.direction == -1:
-                    result = bridge.market_sell(volume=volume, sl=sl_price, tp=tp_price)
+                    result = bridge.market_sell(volume=volume, sl=0.0, tp=0.0, comment="quant-live")
                 else:  # CLOSE
+                    closed = 0
                     for p in pos:
-                        bridge.close_position(p.get("position_id") or p.get("ticket"))
+                        pid = p.get("position_id") or p.get("ticket")
+                        if pid is None:
+                            continue
+                        cres = bridge.close_position(pid)
+                        if getattr(cres, "success", False):
+                            closed += 1
+                    log(f"  signal=CLOSE closed={closed}")
                     result = None
-                if result is None or getattr(result, "success", False):
-                    log(f"  signal={direction_name} ORDER OK vol={volume} sl={sl_price:.2f} tp={tp_price:.2f}")
-                else:
+
+                # 3b) amend SL/TP 到 server (audit 2026-06-10: 消除 1 bar 延迟)
+                if result is not None and getattr(result, "success", False):
+                    pid = getattr(result, "position_id", 0) or 0
+                    if pid <= 0:
+                        # bridge 返回的 orderId 不等于 positionId — 从
+                        # cached positions 找最新匹配的 (audit 2026-06-08:
+                        # market_buy 文档说 "awaiting get_positions() for entry_price").
+                        # 我们读的是 _live_state 缓存, 里面 pos 是上次
+                        # get_positions 拿到的列表.
+                        if pos:
+                            pid = int(pos[0].get("position_id") or pos[0].get("ticket") or 0)
+                    if pid > 0:
+                        try:
+                            ares = bridge.amend_position_sltp(
+                                position_id=pid, sl=sl_price, tp=tp_price,
+                            )
+                            if getattr(ares, "success", False):
+                                _track_local_sl_tp(pid, sl=sl_price, tp=tp_price)
+                                log(f"  signal={direction_name} ORDER+AMEND OK vol={volume} pos={pid} sl={sl_price:.2f} tp={tp_price:.2f}")
+                            else:
+                                log(f"  signal={direction_name} AMEND FAILED pos={pid}: {getattr(ares, 'comment', '?')}")
+                        except Exception as e:
+                            log(f"  signal={direction_name} amend exception: {e}")
+                    else:
+                        log(f"  signal={direction_name} ORDER OK (no position_id, skip amend) vol={volume}")
+                elif result is not None and not getattr(result, "success", False):
                     log(f"  signal={direction_name} ORDER FAILED: {getattr(result, 'error_code', '?')} {getattr(result, 'comment', '')}")
             except Exception as e:
                 log(f"  signal={direction_name} order exception: {e}")
 
-    # 4. 写 log + 把当前价推给 WS (audit 2026-06-08: 总览页需要)
+    # 4. 写 log + 把当前价推给 WS
     log(f"tick {tick}: price={current_price:.2f} balance={acct.get('balance', 0):.2f} positions={len(pos)}"
         + (f" signal={signal.direction}" if signal and signal.direction != 0 else ""))
-    # 把 last price 存到模块级, 供 WS 推送读
     global _latest_price
     _latest_price = current_price
 
