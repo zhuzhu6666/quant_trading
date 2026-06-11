@@ -29,6 +29,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Windows GBK 编码兼容: ✓ ✗ 等 UTF-8 字符不崩终端
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from data.store import DataStore
 
