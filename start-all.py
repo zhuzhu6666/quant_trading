@@ -92,21 +92,23 @@ def main():
     be = subprocess.Popen(
         [PY, "-m", "uvicorn", "backend.app:app",
          "--host", "0.0.0.0", "--port", str(args.backend_port),
-         "--log-level", "info"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, errors="replace",  # BUG-2026-06-12: GBK 编码崩 readline
+         "--log-level", "warning"],
     )
+    # 后端输出直接继承终端，不用 PIPE（PIPE 缓冲区满会卡死 uvicorn）
 
-    # 等后端就绪 (最长 15s)
+    # 轮询 health endpoint 等就绪 (最长 20s)
+    import urllib.request, urllib.error
     ready = False
     t0 = time.time()
-    for line in iter(be.stdout.readline, ""):
-        print(line, end="")
-        if "Application startup complete" in line:
-            ready = True
-            break
-        if time.time() - t0 > 15:
-            break
+    while time.time() - t0 < 20:
+        try:
+            r = urllib.request.urlopen(f"http://localhost:{args.backend_port}/api/health", timeout=2)
+            if r.status == 200:
+                ready = True
+                break
+        except (urllib.error.URLError, ConnectionRefusedError, ConnectionResetError):
+            pass
+        time.sleep(0.5)
     if not ready:
         print("✗ 后端启动超时")
         be.kill()
@@ -116,10 +118,7 @@ def main():
     fe = subprocess.Popen(
         [NPM, "vite", "--port", str(args.frontend_port)],
         cwd=ROOT / "frontend-v2",
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1,
         shell=True,
-        errors="replace",  # BUG-2026-06-12: GBK 编码崩 readline
     )
 
     print(f"\n╔══════════════════════════════════════════════╗")
@@ -130,8 +129,7 @@ def main():
     print(f"╚══════════════════════════════════════════════╝\n")
 
     try:
-        for line in iter(fe.stdout.readline, ""):
-            print(line, end="")
+        fe.wait()  # 等前端进程结束 (用户 Ctrl+C)
     except KeyboardInterrupt:
         print("\n:: 正在停止 ...")
     finally:
