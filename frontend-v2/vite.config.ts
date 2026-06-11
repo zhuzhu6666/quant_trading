@@ -12,8 +12,23 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://localhost:8000", changeOrigin: true },
-      "/ws": { target: "ws://localhost:8000", ws: true },
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on("error", () => {});  // 静默 ECONNABORTED 等 Vite 代理噪音
+        },
+      },
+      "/ws": {
+        target: "ws://localhost:8000",
+        ws: true,
+        configure: (proxy) => {
+          proxy.on("error", () => {});  // 静默 WS 断开噪音 (页面切换/刷新)
+          proxy.on("proxyReqWs", (_: any, req: any) => {
+            req.on("error", () => {});  // 请求级错误也静默
+          });
+        },
+      },
     },
   },
   build: { outDir: "dist", sourcemap: true },
