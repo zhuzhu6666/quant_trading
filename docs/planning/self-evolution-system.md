@@ -1,7 +1,7 @@
 # 自进化量化框架:体系设计文档
 
-> **状态**: 设计完成,实施暂停在 Phase 1 末 + Phase 2.0 接入层 2 步
-> **配套文件**: `docs/planning/ROADMAP.md`(项目级路线图)、`C:\Users\zhu\.claude\plans\optimized-pondering-waterfall.md`(完整 plan)
+> **状态**: 设计完成, 代码已在 `backend/runtime/` 和 `deployment/` 实现
+> **配套文件**: `docs/planning/ROADMAP.md`(项目级路线图)、`PROJECT_MAP.md`(代码索引)
 > **本文档目的**: 记录"为什么是自进化""现状距离目标多远""已做了什么""下一步该走哪条路",给项目维护者(人+AI)一个可重入的入口
 
 ---

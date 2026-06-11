@@ -1,24 +1,24 @@
 {
-  "last_sync_utc": "2026-06-09T19:23:52Z",
-  "last_attempt_utc": "2026-06-09T19:23:52Z",
+  "last_sync_utc": "2026-06-11T15:07:56Z",
+  "last_attempt_utc": "2026-06-11T15:07:56Z",
   "last_status": "ok",
   "per_tf": {
     "M15": {
-      "inserted_last": 9,
-      "total_bars": 50675,
-      "last_sync_utc": "2026-06-09T19:23:52Z",
+      "inserted_last": 167,
+      "total_bars": 50842,
+      "last_sync_utc": "2026-06-11T15:07:56Z",
       "error": ""
     },
     "H1": {
-      "inserted_last": 2,
-      "total_bars": 18168,
-      "last_sync_utc": "2026-06-09T19:23:52Z",
+      "inserted_last": 42,
+      "total_bars": 18210,
+      "last_sync_utc": "2026-06-11T15:07:56Z",
       "error": ""
     },
     "D1": {
-      "inserted_last": 0,
-      "total_bars": 506,
-      "last_sync_utc": "2026-06-09T19:23:52Z",
+      "inserted_last": 2,
+      "total_bars": 508,
+      "last_sync_utc": "2026-06-11T15:07:56Z",
       "error": ""
     },
     "M5": {

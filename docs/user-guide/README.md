@@ -28,7 +28,7 @@ node --version
 
 **Windows** (主用):
 ```cmd
-start.bat
+python start-all.py
 ```
 
 浏览器自动开 `http://localhost:5173`(或者手动访问)。后端 :8000 (FastAPI) + 前端 :5173 (Vite + React 19)。前端 `/api/*` 通过 Vite proxy 转到后端。
@@ -151,10 +151,9 @@ Web console 通过 WebSocket `/ws/state` 推送 1s 一次的 state snapshot:
 
 ## 文档
 
-- Spec: `docs/superpowers/specs/2026-06-07-quant-web-console-design.md`
-- Plan: `docs/superpowers/plans/2026-06-07-quant-web-console.md`
 - 项目主索引: `PROJECT_MAP.md`
-- Phase 1-5 审计: `docs/audits/v4-quant-framework-audit.md`
+- 启动指南: `docs/startup.md`
+- cTrader 接入: `docs/CTRADER_INTEGRATION.md`
 
 ---
 
@@ -174,7 +173,7 @@ Web console 通过 WebSocket `/ws/state` 推送 1s 一次的 state snapshot:
 ### paper 启动失败"already_running"
 
 - 之前 paper 进程没退干净
-- 跑 `stop.bat` 或手动 taskkill
+- `python start-all.py` 重启或手动 taskkill
 
 ### "因子评估"按钮提交后一直 0%
 

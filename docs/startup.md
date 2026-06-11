@@ -1,66 +1,95 @@
-# Quant Trading Web Console — Startup Guide
+# Quant Trading — 启动指南
 
-## 开发模式
+> 最后更新: 2026-06-11 (统一为 start-all.py 入口)
 
-两进程并行：Vite dev server (:5173) + FastAPI backend (:8000)
+---
+
+## 开发模式 (推荐)
+
+单命令启动所有组件:
 
 ```bash
-# 终端 1: 启动后端
 cd C:\Users\zhu\quant_trading
-"C:\Users\zhu\AppData\Local\Programs\Python\Python312\python.exe" -m backend --port 8000
-
-# 终端 2: 启动前端（带 HMR）
-cd C:\Users\zhu\quant_trading\frontend-v2
-npx vite
+python start-all.py
 ```
 
-打开 `http://localhost:5173`。前端自动代理 `/api/*` 到后端。
+自动:
+1. 启动 FastAPI 后端 (`:8000`)
+2. 启动 Vite 前端 dev server (`:5173`)
+3. 开浏览器访问 `http://localhost:5173`
+4. 前端 `/api/*` 通过 Vite proxy 到后端
+
+停止: 在终端按 `Ctrl+C` (同时停止前后端)。
+
+---
 
 ## 生产模式
 
-单端口部署，后端同时提供 API 和静态文件
+目前 Vite 版前端暂不支持单端口部署。开发用 `start-all.py` 即可。
+
+---
+
+## CLI 模式 (无 Web)
 
 ```bash
-start-prod.bat
+# 回测
+python main.py --mode backtest
+
+# 模拟盘 (MAB 全栈)
+python main.py --mode paper --timeframe M15 --use-router --use-scheduler \
+  --use-calibrator --use-meta-monitor --use-factor-monitor \
+  --use-alerter --use-retrain --retrain-every-n 300 --use-event-filter
+
+# 因子健康评估
+python main.py --mode paper --timeframe M15 --factor-health-report
+
+# L2 因子发现
+python scripts/discover_factors.py --n-candidates 1000 --top-k 50 --auto-register
+
+# 实时数据同步 (MT5 需兼容包版本)
+python scripts/live_sync.py --mode once --type incremental --timeframes M15,H1,D1
 ```
 
-流程：
-1. `npm run build` 构建前端到 `frontend-v2/dist/`
-2. 复制 `dist/*` 到 `backend/static/`
-3. 启动 uvicorn 监听 `:8000`
+---
 
-打开 `http://localhost:8000`。
+## cTrader 操作
+
+```bash
+# OAuth 授权 (首次 / token 过期)
+python scripts/ctrader_oauth.py listen-callback
+
+# Token 验证
+python scripts/validate_ctrader_token.py
+
+# 全流测试 (demo 真下单, 验证开→SLTP→平)
+python scripts/test_ctrader_full_flow.py
+```
+
+---
 
 ## 环境要求
 
-- Python 3.12+ (后端)
+- Python 3.11+ (推荐 3.12)
 - Node.js 18+ (前端)
-- MT5/cTrader 终端 (可选，用于实盘数据)
+- cTrader 凭证 (`.env` 配 CTRADER_CLIENT_ID / SECRET / ACCESS_TOKEN / ACCOUNT_ID)
+- MT5 terminal (可选, 仅用于数据同步)
 
-## 依赖安装
+---
 
+## 常见问题
+
+### 端口冲突
+`start-all.py` 会自动检测 :8000 和 :5173 是否可用, 被占用时报错。手动释放:
 ```bash
-# 后端
-pip install -r requirements.txt
-
-# 前端
-cd frontend-v2 && npm install
+# 找占 8000 的进程
+netstat -ano | grep :8000
+taskkill -F -PID <PID>
 ```
 
-## 登录
+### cTrader Token 过期
+```bash
+python scripts/ctrader_oauth.py refresh
+```
 
-默认使用任意密码登录，后端返回 HS256 JWT (24h 过期)。
-
-## 启动脚本说明
-
-| 脚本 | 用途 |
-|------|------|
-| `start.bat` | 开发模式：启动后端 + Vite 前端 |
-| `start-prod.bat` | 生产模式：构建前端 + 复制静态文件 + 启动 uvicorn |
-
-## 验证
-
-1. 打开 http://localhost:8000
-2. 输入任意密码登录
-3. 仪表盘显示实时 KPI 卡片
-4. 点击功能按钮（交易/因子/实验/数据/系统）验证下滑面板
+### WebSocket 离线
+检查后端 :8000 是否在运行, 浏览器 F12 → Console 看 WS 连接错误。
