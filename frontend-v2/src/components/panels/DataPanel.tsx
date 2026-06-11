@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { authFetch } from "@/lib/auth";
 import { CandleBar, Candlestick } from "@/components/charts/Candlestick";
 import { Button, Card, Badge, Skeleton, Table } from "@/components/ui";
@@ -281,21 +281,55 @@ function ExternalDataSection() {
   );
   const [refreshing, setRefreshing] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string[]>([]);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 清理轮询
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
 
   async function handleRefresh() {
     setRefreshing(true);
-    setMsg(null);
+    setMsg("正在刷新...");
+    setProgress([]);
+    setJobId(null);
     try {
       const r = await authFetch("/api/data/external-refresh", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
+      if (!r.ok) { setMsg(`❌ HTTP ${r.status}`); setRefreshing(false); return; }
       const result = await r.json();
-      setMsg(result.status === "ok" ? "✅ 刷新完成" : "❌ 失败");
-      setTimeout(() => { refresh(); setMsg(null); }, 2000);
+      setJobId(result.job_id);
+      setMsg(`⏳ ${result.job_id} 刷新中...`);
+
+      // 轮询进度
+      const jid = result.job_id;
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(async () => {
+        try {
+          const pr = await fetch(`/api/data/external-refresh/${jid}`);
+          const pj = await pr.json();
+          if (pj.output) setProgress(pj.output.slice(-5));
+          if (pj.status === "completed") {
+            setMsg("✅ 刷新完成");
+            clearInterval(pollRef.current!);
+            pollRef.current = null;
+            setRefreshing(false);
+            refresh(); // 更新时效状态
+            setTimeout(() => setMsg(null), 3000);
+          } else if (pj.status === "failed") {
+            setMsg("❌ 刷新失败");
+            clearInterval(pollRef.current!);
+            pollRef.current = null;
+            setRefreshing(false);
+          }
+        } catch { /* 忽略轮询错 */ }
+      }, 2000);
     } catch (e) {
       setMsg(`❌ ${String(e)}`);
-    } finally {
       setRefreshing(false);
     }
   }
@@ -361,6 +395,15 @@ function ExternalDataSection() {
         loading={loading}
         emptyMessage="暂无外部数据状态"
       />
+
+      {/* 刷新进度输出 */}
+      {progress.length > 0 && (
+        <div className="bg-[#f8f9fa] border border-[#dce0e6] rounded-lg p-3 text-xs font-mono max-h-32 overflow-y-auto space-y-0.5">
+          {progress.map((line, i) => (
+            <div key={i} className="text-fg-muted">{line}</div>
+          ))}
+        </div>
+      )}
 
       <div className="text-fg-muted text-xs space-y-1">
         <p>• COT (CFTC 持仓) — 周度更新，每次约 30-60s</p>
