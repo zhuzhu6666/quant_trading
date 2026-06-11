@@ -99,6 +99,17 @@ class FactorHealth:
         else:
             status_str = "DECAYING"
 
+        # Emit health score metric
+        try:
+            from backend.runtime.runtime_state import RuntimeState
+            RuntimeState.shared().emit_metric("factor_health_score", {
+                "factor": name,
+                "status": status_str,
+                "value": round(score, 2),
+            })
+        except Exception:
+            pass
+
         return FactorHealthStatus(
             factor=name, score=round(score, 2), status=status_str,
             components=components, n_obs=n_obs, rolling_ic=round(ic, 4),
