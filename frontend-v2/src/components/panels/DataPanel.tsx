@@ -28,6 +28,7 @@ export default function DataPanel() {
       <TabBar
         tabs={[
           { key: "market", label: "K线" },
+          { key: "external", label: "外部数据" },
           { key: "sync", label: "同步" },
         ]}
         active={activeTab}
@@ -35,6 +36,7 @@ export default function DataPanel() {
       />
 
       {activeTab === "market" && <MarketSection />}
+      {activeTab === "external" && <ExternalDataSection />}
       {activeTab === "sync" && <SyncSection />}
     </div>
   );
@@ -261,6 +263,112 @@ function SyncSection() {
         loading={loading}
         emptyMessage="暂无同步数据"
       />
+    </div>
+  );
+}
+
+/* ===== 外部数据时效 ===== */
+interface ExternalSource {
+  table: string;
+  latest: string;
+  stale: boolean;
+  note?: string;
+}
+
+function ExternalDataSection() {
+  const { data, loading, refresh } = useApi<{ sources: ExternalSource[] }>(
+    "/api/data/external-status"
+  );
+  const [refreshing, setRefreshing] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function handleRefresh() {
+    setRefreshing(true);
+    setMsg(null);
+    try {
+      const r = await authFetch("/api/data/external-refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const result = await r.json();
+      setMsg(result.status === "ok" ? "✅ 刷新完成" : "❌ 失败");
+      setTimeout(() => { refresh(); setMsg(null); }, 2000);
+    } catch (e) {
+      setMsg(`❌ ${String(e)}`);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const sources = data?.sources ?? [];
+
+  const extColumns: Column<ExternalSource>[] = [
+    {
+      key: "table",
+      header: "数据源",
+      render: (item) => <Badge variant="info">{item.table}</Badge>,
+    },
+    {
+      key: "latest",
+      header: "最新日期",
+      align: "right" as const,
+      render: (item) => {
+        if (item.table === "mt5_bars") return <span className="text-fg-muted">{item.note || "⏸"}</span>;
+        return <span>{item.latest}</span>;
+      },
+    },
+    {
+      key: "stale",
+      header: "状态",
+      align: "center" as const,
+      render: (item) => {
+        if (item.table === "mt5_bars") return <Badge variant="ghost">阻塞</Badge>;
+        return item.stale
+          ? <Badge variant="danger">⚠ 过期</Badge>
+          : <Badge variant="success">✓ 正常</Badge>;
+      },
+    },
+    {
+      key: "note",
+      header: "说明",
+      render: (item) => <span className="text-fg-muted text-xs">{item.note || ""}</span>,
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">外部数据时效</h1>
+        <div className="flex items-center gap-2">
+          {msg && (
+            <span className={`text-xs ${msg.includes("✅") ? "text-up" : "text-down"}`}>
+              {msg}
+            </span>
+          )}
+          <Button onClick={handleRefresh} disabled={refreshing} loading={refreshing}>
+            {refreshing ? "刷新中..." : "🔄 一键刷新"}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={refresh}>
+            刷新状态
+          </Button>
+        </div>
+      </div>
+
+      <Table
+        columns={extColumns}
+        data={sources}
+        keyExtractor={(item) => item.table}
+        loading={loading}
+        emptyMessage="暂无外部数据状态"
+      />
+
+      <div className="text-fg-muted text-xs space-y-1">
+        <p>• COT (CFTC 持仓) — 周度更新，每次约 30-60s</p>
+        <p>• Events (经济日历) — 日度更新，每次约 3-10s</p>
+        <p>• ETF (GLD/SLV 持仓) — 季度更新，每次约 30s</p>
+        <p>• MT5 bars — ⏸ 阻塞 (MetaTrader5 IPC pipe 不兼容)</p>
+        <p>• 也可 <code className="bg-gray-200 px-1 rounded">python start-all.py --refresh-data</code> 启动时自动刷新</p>
+      </div>
     </div>
   );
 }
