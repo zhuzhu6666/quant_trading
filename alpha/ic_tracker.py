@@ -50,6 +50,16 @@ class ICTracker:
         for i in range(n):
             if not (np.isnan(factor_values[i]) or np.isnan(forward_returns[i])):
                 self._history[name].append((factor_values[i], forward_returns[i]))
+        # Emit factor_ic metric
+        try:
+            from backend.runtime.runtime_state import RuntimeState
+            ic_val = self.rolling_ic(name)
+            RuntimeState.shared().emit_metric("factor_ic", {
+                "factor": name,
+                "ic": round(ic_val, 4),
+            })
+        except Exception:
+            pass
 
     def rolling_ic(self, name: str) -> float:
         """当前滚动IC"""
