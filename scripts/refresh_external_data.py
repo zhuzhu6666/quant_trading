@@ -45,7 +45,6 @@ FREQ = {
     "cot":        7 * 86400,      # 周度
     "events":     86400,          # 日度
     "etf":        90 * 86400,     # 季度
-    "mt5":        86400,          # 日度 (阻塞中)
 }
 
 
@@ -124,12 +123,6 @@ def status_all(store: DataStore | None = None) -> list[dict]:
         _status_cot(store),
         _status_events(store),
         _status_etf(store),
-        {
-            "table": "mt5_bars",
-            "latest": "⏸ 阻塞",
-            "stale": False,
-            "note": "MetaTrader5 IPC pipe 不兼容, 暂不自动刷新",
-        },
     ]
 
 

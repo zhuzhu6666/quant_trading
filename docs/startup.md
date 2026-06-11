@@ -72,7 +72,7 @@ python scripts/test_ctrader_full_flow.py
 - Python 3.11+ (推荐 3.12)
 - Node.js 18+ (前端)
 - cTrader 凭证 (`.env` 配 CTRADER_CLIENT_ID / SECRET / ACCESS_TOKEN / ACCOUNT_ID)
-- MT5 terminal (可选, 仅用于数据同步)
+- MT5 terminal (可选, 启动 scheduler 后 data_pull 每 10 分钟自动同步)
 
 ---
 

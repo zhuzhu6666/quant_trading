@@ -409,7 +409,7 @@ function ExternalDataSection() {
         <p>• COT (CFTC 持仓) — 周度更新，每次约 30-60s</p>
         <p>• Events (经济日历) — 日度更新，每次约 3-10s</p>
         <p>• ETF (GLD/SLV 持仓) — 季度更新，每次约 30s</p>
-        <p>• MT5 bars — ⏸ 阻塞 (MetaTrader5 IPC pipe 不兼容)</p>
+        <p>• MT5 bars — 由 scheduler data_pull 每 10 分钟自动同步</p>
         <p>• 也可 <code className="bg-gray-200 px-1 rounded">python start-all.py --refresh-data</code> 启动时自动刷新</p>
       </div>
     </div>
