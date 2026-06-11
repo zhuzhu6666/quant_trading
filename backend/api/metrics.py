@@ -29,7 +29,7 @@ def get_metrics_health() -> dict:
     return {
         "enabled": m.enabled,
         "registry_collectors": (
-            list(m._registry._collector_to_names.keys()) if m.enabled else []
+            [str(k) for k in m._registry._collector_to_names.keys()] if m.enabled else []
         ),
         "prometheus_content_type": CONTENT_TYPE_LATEST,
     }

@@ -59,6 +59,7 @@ class SyncOrchestrator:
         self.filter = BarFilter(db_path=db_path, mt5_puller=self.puller)
         self.inserter = DBInserter(db_path=db_path)
         self.db_path = db_path
+        self._quality_gate = DataQualityGate()
 
     def connect(self) -> bool:
         return self.puller.connect()
@@ -112,7 +113,7 @@ class SyncOrchestrator:
                 _df = pd.DataFrame(filt.kept)
                 if not _df.empty and "time" in _df.columns:
                     _df = _df.rename(columns={"time": "ts"})
-                _qr = DataQualityGate().check(symbol, tf, _df)
+                _qr = self._quality_gate.check(symbol, tf, _df)
                 if not _qr.passed:
                     logger.warning(f"[SyncOrch] {tf} quality gate: bad_ratio={_qr.bad_ratio:.3f} gaps={_qr.n_gaps} dups={_qr.n_duplicates} outliers={_qr.n_outliers}")
             except Exception as _e:
@@ -184,7 +185,7 @@ class SyncOrchestrator:
                 _df = pd.DataFrame(filt.kept)
                 if not _df.empty and "time" in _df.columns:
                     _df = _df.rename(columns={"time": "ts"})
-                _qr = DataQualityGate().check(symbol, tf, _df)
+                _qr = self._quality_gate.check(symbol, tf, _df)
                 if not _qr.passed:
                     logger.warning(f"[SyncOrch] {tf} quality gate: bad_ratio={_qr.bad_ratio:.3f} gaps={_qr.n_gaps} dups={_qr.n_duplicates} outliers={_qr.n_outliers}")
             except Exception as _e:

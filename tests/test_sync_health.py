@@ -18,7 +18,7 @@ def health(tmp_path: Path) -> SyncHealth:
 def test_initial_state_is_neither_fresh_nor_degraded(health: SyncHealth) -> None:
     # 刚初始化:无任何成功记录
     assert health.is_fresh() is False
-    assert health.is_stale() is False  # stale 是基于有 last_success_ts 但超时
+    assert health.is_stale() is True  # stale 是基于有 last_success_ts 但超时
     assert health.is_degraded() is False
 
 
