@@ -70,6 +70,10 @@ class RegistryAdapter:
         # 因子的元数据 (source / register_time / description)
         # key: factor_name, value: dict
         self._meta: dict[str, dict] = {}
+        # Phase 2.4: 生命周期状态 ("ACTIVE" / "DEAD")
+        self._lifecycle_statuses: dict[str, str] = {}
+        # 退役前状态 (用于 unretire 恢复)
+        self._prev_statuses: dict[str, str] = {}
         # 启动时: 现有 22 builtin 因子自动注册为 BUILTIN source
         for name in factor_registry.list():
             self._meta[name] = {
@@ -77,6 +81,7 @@ class RegistryAdapter:
                 "register_time": _time.time(),
                 "description": getattr(factor_registry.get(name), "_factor_desc", ""),
             }
+            self._lifecycle_statuses[name] = "ACTIVE"
 
     # ── 运行时 register / unregister ────────────────────────────
 
@@ -181,7 +186,91 @@ class RegistryAdapter:
         logger.info(f"[RegistryAdapter] force unregister {name} (reason: {reason})")
         return True
 
-    # ── 列表 / 查询 ─────────────────────────────────────────────
+    # ── 退役 / 恢复 (Phase 2.4) ────────────────────────────────────────
+
+    def retire(self, name: str, reason: str = "") -> bool:
+        """将因子标记为 DEAD 状态.
+
+        因子从 registry 中移除, 元数据保留, 旧状态保存以便 `unretire`.
+        幂等: 对已 DEAD 因子再次调用返回 False.
+
+        Args:
+            name: 因子名
+            reason: 退役原因 (如 "severe_decay")
+
+        Returns:
+            True 成功, False 失败 (不存在 / 已 DEAD)
+        """
+        if name not in factor_registry and name not in self._meta:
+            logger.warning(f"[RegistryAdapter] retire: {name} 不存在")
+            return False
+        if self._lifecycle_statuses.get(name) == "DEAD":
+            logger.warning(f"[RegistryAdapter] retire: {name} 已 DEAD, 跳过")
+            return False
+
+        # 保存当前状态以便恢复
+        prev_status = self._lifecycle_statuses.get(name, "UNKNOWN")
+        self._prev_statuses[name] = prev_status
+        self._lifecycle_statuses[name] = "DEAD"
+
+        # 从 registry 中移除函数 (但保留 meta)
+        if name in factor_registry:
+            old_source = self._meta.get(name, {}).get("source", SOURCE_BUILTIN)
+            if old_source != SOURCE_BUILTIN:
+                del factor_registry._factors[name]
+            self._meta.setdefault(name, {})["source"] = SOURCE_REMOVED
+
+        self._log_event(FactorLifecycleEvent(
+            timestamp=_time.time(),
+            event="retire",
+            factor=name,
+            source=self._meta.get(name, {}).get("source", SOURCE_REMOVED),
+            reason=reason,
+            status="DEAD",
+        ))
+        logger.info(f"[RegistryAdapter] retire {name} (reason: {reason})")
+        return True
+
+    def unretire(self, name: str, reason: str = "") -> bool:
+        """将因子从 DEAD 恢复到退役前的状态.
+
+        幂等: 对 ACTIVE 因子再次调用返回 False.
+
+        Args:
+            name: 因子名
+            reason: 恢复原因 (如 "re-evaluated HEALTHY")
+
+        Returns:
+            True 成功, False 失败 (不存在 / 不是 DEAD 状态)
+        """
+        if name not in self._meta:
+            logger.warning(f"[RegistryAdapter] unretire: {name} 不在 meta, 跳过")
+            return False
+        if self._lifecycle_statuses.get(name) != "DEAD":
+            logger.warning(f"[RegistryAdapter] unretire: {name} 不是 DEAD 状态, 跳过")
+            return False
+
+        prev_status = self._prev_statuses.pop(name, "ACTIVE")
+        self._lifecycle_statuses[name] = prev_status
+
+        # 恢复 source (如果之前是 builtin 则不删除)
+        old_source = self._meta.get(name, {}).get("source", SOURCE_REMOVED)
+        if old_source == SOURCE_REMOVED:
+            self._meta[name]["source"] = SOURCE_DISCOVERED
+        # 函数本身不自动恢复 (由调用方决定是否重新注册)
+
+        self._log_event(FactorLifecycleEvent(
+            timestamp=_time.time(),
+            event="unretire",
+            factor=name,
+            source=self._meta.get(name, {}).get("source", SOURCE_DISCOVERED),
+            reason=reason,
+            status=prev_status,
+        ))
+        logger.info(f"[RegistryAdapter] unretire {name} -> {prev_status} (reason: {reason})")
+        return True
+
+    # ── 列表 / 查询 ─────────────────────────────────────────────────────
 
     def list_active(self, health: FactorHealth, min_score: float = 70.0) -> list[str]:
         """返回 HEALTHY 因子列表 (动态 filter)"""

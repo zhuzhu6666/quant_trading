@@ -141,6 +141,10 @@ class MultiFactorM15Strategy(BaseStrategy):
             self.params['vote_weights'] = new_config.vote_weights
         if hasattr(new_config, 'shadow_top_k') and new_config.shadow_top_k is not None:
             self.params['shadow_top_k'] = new_config.shadow_top_k
+        if hasattr(new_config, 'include_shadow_factors') and new_config.include_shadow_factors is not None:
+            self.params['include_shadow_factors'] = bool(new_config.include_shadow_factors)
+            if self.params['include_shadow_factors']:
+                logger.info("[%s] shadow factors enabled by RuntimeConfig", self.name)
 
     # ── 通用指标计算 ──────────────────────────────────────────
 
@@ -420,11 +424,20 @@ class MultiFactorM15Strategy(BaseStrategy):
             self._last_shadow_active = n_active
         else:
             self._last_shadow_active = 0
-        # 决定方向：至少N票
+
+        # 动态投票阈值: 启用影子因子时按票池等比缩放
+        # 基础票池 = 3 (内置因子), 影子追加 = shadow_vote_weight
+        # votes_needed 下限 = 2, 上限 = 票池 × 0.5 (多数决)
+        if p.get('include_shadow_factors', False) and self._shadow_factors:
+            shadow_weight = float(p.get('shadow_vote_weight', 0.5))
+            total_pool = 3.0 + min(shadow_weight, 3.0)  # 影子票最多算 3
+            effective_needed = max(2.0, total_pool * 0.5)
+        else:
+            effective_needed = float(p.get('votes_needed', 2.0))
         direction = 0
-        if votes_long >= p['votes_needed']:
+        if votes_long >= effective_needed:
             direction = 1
-        elif votes_short >= p['votes_needed']:
+        elif votes_short >= effective_needed:
             direction = -1
 
         if direction == 0:
@@ -640,7 +653,7 @@ class MultiFactorM15Strategy(BaseStrategy):
         top_pct = p.get("shadow_top_pct", 0.7)
         bot_pct = p.get("shadow_bottom_pct", 0.3)
         min_samples = p.get("shadow_min_samples", 30)
-        weight = int(p.get("shadow_vote_weight", 1.0))
+        weight = float(p.get("shadow_vote_weight", 0.5))
 
         votes_long = 0
         votes_short = 0

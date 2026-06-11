@@ -134,6 +134,75 @@ def classify_regime(closes: np.ndarray,
     return "RANGING"
 
 
+# ── Regime detection → MAB prior auto-boost ───────
+
+# Module-level dict tracking last known regime per router (keyed by id()).
+# Using dict instead of plain global so multiple routers can coexist.
+_last_known_regime: dict[int, str] = {}
+
+
+def auto_regime_boost(df: pd.DataFrame, router) -> dict:
+    """
+    Detect regime change and boost Beta priors for the new regime.
+
+    When the market regime flips, all arms under the *new* regime get
+    ``alpha += 3, beta += 3``, anchoring their Beta posterior toward 0.5
+    so Thompson Sampling explores fresh arms on the new regime instead of
+    being stuck on outdated posteriors from the old regime.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        OHLCV DataFrame. Must contain at least a ``'close'`` column.
+    router : MABRouter
+        The MAB router whose per-regime Beta distributions will be boosted.
+
+    Returns
+    -------
+    dict
+        Keys:
+        - ``previous_regime`` — last known regime before this call (or *None*).
+        - ``current_regime`` — regime detected on this call.
+        - ``boosted`` — *True* if a regime change was detected and boosting
+          was applied.
+    """
+    # 1. Extract latest 200 closing prices
+    closes = df["close"].values[-200:].astype(float)
+    if len(closes) < 200:
+        return {"previous_regime": None, "current_regime": "RANGING", "boosted": False}
+
+    # 2. Classify current regime
+    current_regime = classify_regime(closes)
+
+    # 3. Compare with last known regime for this router
+    router_key = id(router)
+    previous_regime = _last_known_regime.get(router_key)
+    boosted = False
+
+    if previous_regime is not None and previous_regime != current_regime:
+        # 4. Boost all arms under the NEW regime
+        for strategy in router.strategies:
+            a = router._alpha[current_regime].get(strategy, 1.0)
+            b = router._beta[current_regime].get(strategy, 1.0)
+            router._alpha[current_regime][strategy] = a + 3.0
+            router._beta[current_regime][strategy] = b + 3.0
+        boosted = True
+        logger.info(
+            "[auto_regime_boost] Regime changed: %s → %s. "
+            "Boosted α+3, β+3 for all %d arms under new regime.",
+            previous_regime, current_regime, len(router.strategies),
+        )
+
+    # Persist for next call
+    _last_known_regime[router_key] = current_regime
+
+    return {
+        "previous_regime": previous_regime,
+        "current_regime": current_regime,
+        "boosted": boosted,
+    }
+
+
 # ── MAB Router ────────────────────────────────────
 
 class MABRouter:

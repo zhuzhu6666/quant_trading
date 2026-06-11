@@ -1,0 +1,363 @@
+"""deployment/canary.py — 金丝雀晋升/回滚导演 (Phase 2.3, 2026-06-12)
+
+管理因子从 SHADOW → ACTIVE 的多阶段金丝雀部署.
+每个阶段要求最低 OOS bars 数 和 最低累计 PnL 阈值.
+- 满足条件 → 自动晋升下一阶段
+- 未满足 (PnL 低于阈值) → rollback 到 SHADOW
+
+阶段定义:
+    SHADOW     (已发现, 尚未 OOS 测试)
+    CANARY_5   (5 根 OOS bar 验证)
+    CANARY_20  (20 根 OOS bar 验证)
+    CANARY_50  (50 根 OOS bar 验证)
+    ACTIVE     (全部署)
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# ── 阶段常量 ──────────────────────────────────────────────────────────
+SHADOW = "SHADOW"
+CANARY_5 = "CANARY_5"
+CANARY_20 = "CANARY_20"
+CANARY_50 = "CANARY_50"
+ACTIVE = "ACTIVE"
+
+CANARY_STAGES = [SHADOW, CANARY_5, CANARY_20, CANARY_50, ACTIVE]
+
+# 各阶段最低要求: (min_oos_bars, min_oos_pnl)
+# 这里用绝对 PnL (净收益率) 作为阈值, 正收益才晋升
+STAGE_REQUIREMENTS: dict[str, tuple[int, float]] = {
+    SHADOW: (0, 0.0),                # shadow 无要求, 只是起点
+    CANARY_5: (5, 0.001),            # 5 bars, +0.1% 净收益
+    CANARY_20: (20, 0.003),          # 20 bars, +0.3%
+    CANARY_50: (50, 0.005),          # 50 bars, +0.5%
+    ACTIVE: (0, 0.0),                # 最终阶段, 无晋升要求
+}
+
+# PnL 低于此比例 × 阈值时触发 rollback (默认 -50% 阈值即回滚)
+ROLLBACK_PNL_RATIO = -0.5
+
+
+@dataclass
+class CanaryState:
+    """单因子的金丝雀状态"""
+    factor: str
+    stage: str = SHADOW
+    oos_bars: int = 0                  # OOS 样本 bar 数
+    cumulative_pnl: float = 0.0        # 累计 OOS PnL (净收益率)
+    promote_time: float | None = None  # 上次晋升时间戳
+    rollback_count: int = 0            # 累计回滚次数
+    history: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class CanaryEvalContext:
+    """check_promotion 的评估上下文 — 由调用方提供 OOS 结果"""
+    oos_bars: int = 0
+    oos_pnl: float = 0.0
+    # 可选扩展字段
+    additional_metrics: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_pnl_series(cls, pnl_series: list[float]) -> CanaryEvalContext:
+        """从 PnL 序列构造上下文 (算累计值)"""
+        arr = np.asarray(pnl_series, dtype=np.float64)
+        return cls(
+            oos_bars=len(arr),
+            oos_pnl=float(np.sum(arr)),
+        )
+
+
+class CanaryDirector:
+    """
+    金丝雀晋升/回滚导演.
+
+    用法:
+        director = CanaryDirector()
+        ctx = CanaryEvalContext(oos_bars=22, oos_pnl=0.008)
+        action = director.check_promotion("factor_dsl_001", ctx)
+        if action == "promote":
+            director.promote("factor_dsl_001")
+        elif action == "rollback":
+            director.rollback("factor_dsl_001")
+        print(director.summary())
+    """
+
+    def __init__(self,
+                 stage_requirements: dict[str, tuple[int, float]] | None = None,
+                 rollback_pnl_ratio: float = ROLLBACK_PNL_RATIO,
+                 ):
+        self._states: dict[str, CanaryState] = {}
+        self._stage_requirements = stage_requirements or STAGE_REQUIREMENTS
+        self._rollback_pnl_ratio = rollback_pnl_ratio
+
+    # ── 状态查询 ──────────────────────────────────────────────────
+
+    def get_state(self, factor_name: str) -> CanaryState:
+        """获取因子状态 (不存在则创建默认)"""
+        if factor_name not in self._states:
+            self._states[factor_name] = CanaryState(factor=factor_name)
+        return self._states[factor_name]
+
+    def get_stage(self, factor_name: str) -> str:
+        return self.get_state(factor_name).stage
+
+    def can_promote(self, factor_name: str) -> bool:
+        """返回当前阶段是否可以继续晋升 (非最终阶段)"""
+        stage = self.get_stage(factor_name)
+        return stage != ACTIVE
+
+    # ── 晋升检查 ──────────────────────────────────────────────────
+
+    def check_promotion(self,
+                        factor_name: str,
+                        eval_ctx: CanaryEvalContext,
+                        progress_cb: Optional[Callable[[str, float, str], None]] = None,
+                        ) -> str:
+        """
+        检查因子是否满足晋升条件.
+
+        Args:
+            factor_name: 因子名
+            eval_ctx:    OOS 评估上下文 (bars, pnl)
+            progress_cb: 进度回调 (phase, percent, message) — 兼容 evaluate_factors 签名
+
+        Returns:
+            "promote"  | "rollback" | "stay"
+        """
+        cb = progress_cb or (lambda *_: None)
+        state = self.get_state(factor_name)
+        current_stage = state.stage
+
+        cb("check_promotion", 10, f"{factor_name}: stage={current_stage}, "
+                                   f"oos_bars={eval_ctx.oos_bars}, "
+                                   f"oos_pnl={eval_ctx.oos_pnl:.4f}")
+
+        if current_stage == ACTIVE:
+            cb("check_promotion", 100, f"{factor_name}: already ACTIVE, skip")
+            return "stay"
+
+        # 更新统计
+        state.oos_bars = eval_ctx.oos_bars
+        state.cumulative_pnl = eval_ctx.oos_pnl
+        self._record_event(state, "eval", {
+            "oos_bars": eval_ctx.oos_bars,
+            "oos_pnl": round(eval_ctx.oos_pnl, 6),
+        })
+
+        # ── 步骤 1: 检查当前阶段是否需要回滚 ──
+        # Rollback 检查: 当前阶段 (非 SHADOW/ACTIVE) 的 PnL 低于阈值
+        if current_stage not in (SHADOW, ACTIVE):
+            cur_bars, cur_pnl = self._stage_requirements.get(current_stage, (0, 0.0))
+            if (eval_ctx.oos_bars >= cur_bars and cur_pnl > 0
+                    and eval_ctx.oos_pnl < cur_pnl * self._rollback_pnl_ratio):
+                cb("check_promotion", 80, f"{factor_name}: PnL below rollback "
+                                           f"threshold ({eval_ctx.oos_pnl:.4f} < "
+                                           f"{cur_pnl * self._rollback_pnl_ratio:.6f}), "
+                                           f"action=rollback")
+                self._record_event(state, "rollback_check", {
+                    "reason": f"pnl={eval_ctx.oos_pnl:.6f} < "
+                              f"threshold={cur_pnl * self._rollback_pnl_ratio:.6f}",
+                })
+                return "rollback"
+
+        # ── 步骤 2: 检查是否满足下一阶段晋升条件 ──
+        next_stage = self._next_stage(current_stage)
+        if next_stage is None:
+            return "stay"
+
+        min_bars, min_pnl = self._stage_requirements.get(next_stage, (0, 0.0))
+
+        cb("check_promotion", 40, f"{factor_name}: next={next_stage}, "
+                                   f"need {min_bars} bars / {min_pnl} PnL")
+
+        # 条件检查
+        if eval_ctx.oos_bars < min_bars:
+            cb("check_promotion", 100, f"{factor_name}: insufficient bars "
+                                       f"({eval_ctx.oos_bars} < {min_bars})")
+            return "stay"
+
+        if eval_ctx.oos_pnl < min_pnl:
+            cb("check_promotion", 100, f"{factor_name}: insufficient PnL "
+                                       f"({eval_ctx.oos_pnl:.4f} < {min_pnl})")
+            return "stay"
+
+        cb("check_promotion", 100, f"{factor_name}: qualifies for {next_stage}")
+        return "promote"
+
+    # ── 晋升 / 回滚 ───────────────────────────────────────────────
+
+    def promote(self,
+                factor_name: str,
+                progress_cb: Optional[Callable[[str, float, str], None]] = None,
+                ) -> bool:
+        """
+        将因子晋升到下一阶段.
+        返回 True 晋升成功, False 已达最终阶段或失败.
+        """
+        cb = progress_cb or (lambda *_: None)
+        state = self.get_state(factor_name)
+        current = state.stage
+
+        if current == ACTIVE:
+            cb("promote", 100, f"{factor_name}: already ACTIVE")
+            return False
+
+        next_stage = self._next_stage(current)
+        if next_stage is None:
+            return False
+
+        state.stage = next_stage
+        state.promote_time = _now()
+        self._record_event(state, "promote", {
+            "from": current,
+            "to": next_stage,
+        })
+        logger.info(f"[CanaryDirector] promote {factor_name}: {current} -> {next_stage}")
+        cb("promote", 100, f"{factor_name}: {current} -> {next_stage}")
+        return True
+
+    def rollback(self,
+                 factor_name: str,
+                 progress_cb: Optional[Callable[[str, float, str], None]] = None,
+                 ) -> bool:
+        """
+        将因子回滚到 SHADOW 阶段. 保留历史记录.
+        返回 True 回滚成功, False 已在 SHADOW.
+        """
+        cb = progress_cb or (lambda *_: None)
+        state = self.get_state(factor_name)
+        current = state.stage
+
+        if current == SHADOW:
+            cb("rollback", 100, f"{factor_name}: already SHADOW")
+            return False
+
+        state.stage = SHADOW
+        state.rollback_count += 1
+        self._record_event(state, "rollback", {
+            "from": current,
+            "rollback_count": state.rollback_count,
+        })
+        logger.info(f"[CanaryDirector] rollback {factor_name}: {current} -> SHADOW "
+                    f"(rollback #{state.rollback_count})")
+        cb("rollback", 100, f"{factor_name}: {current} -> SHADOW")
+        return True
+
+    # ── 批量操作 ──────────────────────────────────────────────────
+
+    def evaluate_all(self,
+                     eval_results: dict[str, CanaryEvalContext],
+                     progress_cb: Optional[Callable[[str, float, str], None]] = None,
+                     ) -> list[dict]:
+        """
+        批量评估所有因子, 执行晋升/回滚.
+
+        Args:
+            eval_results: {factor_name: CanaryEvalContext}
+            progress_cb:  进度回调
+
+        Returns:
+            [{factor, from_stage, to_stage, action}, ...]
+        """
+        cb = progress_cb or (lambda *_: None)
+        results: list[dict] = []
+        names = list(eval_results.keys())
+        n = len(names)
+
+        for i, name in enumerate(names):
+            ctx = eval_results[name]
+            pct = 10 + 80 * (i + 1) / max(n, 1)
+            cb("evaluate_all", pct, f"{i+1}/{n}: {name}")
+
+            before = self.get_stage(name)
+            action = self.check_promotion(name, ctx, progress_cb=progress_cb)
+
+            if action == "promote":
+                self.promote(name)
+            elif action == "rollback":
+                self.rollback(name)
+
+            after = self.get_stage(name)
+            results.append({
+                "factor": name,
+                "from_stage": before,
+                "to_stage": after,
+                "action": action,
+            })
+
+        cb("evaluate_all", 100, f"evaluated {n} factors")
+        return results
+
+    # ── 报告 ──────────────────────────────────────────────────────
+
+    def summary(self) -> dict:
+        """返回各阶段因子分布"""
+        stages: dict[str, list[str]] = {s: [] for s in CANARY_STAGES}
+        for name, st in self._states.items():
+            stages.setdefault(st.stage, []).append(name)
+        return {
+            stage: {
+                "count": len(items),
+                "factors": items,
+            }
+            for stage, items in stages.items()
+        }
+
+    def summary_text(self) -> str:
+        """可读报告"""
+        data = self.summary()
+        lines = ["=" * 56, "  CANARY DEPLOYMENT SUMMARY", "=" * 56]
+        for stage in CANARY_STAGES:
+            info = data.get(stage, {})
+            names = info.get("factors", [])
+            lines.append(f"  {stage:12s}: {info.get('count', 0):3d} factors")
+            for n in names[:5]:
+                lines.append(f"    - {n}")
+            if len(names) > 5:
+                lines.append(f"    ... (+{len(names) - 5} more)")
+        lines.append("=" * 56)
+        return "\n".join(lines)
+
+    def factor_report(self, factor_name: str) -> dict:
+        """单因子详情报告"""
+        state = self.get_state(factor_name)
+        return {
+            "factor": state.factor,
+            "stage": state.stage,
+            "oos_bars": state.oos_bars,
+            "cumulative_pnl": round(state.cumulative_pnl, 6),
+            "promote_time": state.promote_time,
+            "rollback_count": state.rollback_count,
+            "history": state.history[-10:],  # 最近 10 条
+        }
+
+    # ── 内部 ──────────────────────────────────────────────────────
+
+    def _next_stage(self, current: str) -> str | None:
+        idx = CANARY_STAGES.index(current) if current in CANARY_STAGES else -1
+        if 0 <= idx < len(CANARY_STAGES) - 1:
+            return CANARY_STAGES[idx + 1]
+        return None
+
+    def _record_event(self, state: CanaryState, event: str, detail: dict) -> None:
+        import time
+        state.history.append({
+            "timestamp": time.time(),
+            "event": event,
+            **detail,
+        })
+
+
+def _now() -> float:
+    import time
+    return time.time()

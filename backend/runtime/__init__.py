@@ -10,5 +10,7 @@
 from .loop_host import LoopHost, RunnerFactory
 from .locks import LockPool
 from .runtime_state import LoopStatus, RuntimeState
+from .scheduler import InProcessScheduler, JobInfo
 
-__all__ = ["LoopHost", "RunnerFactory", "LockPool", "LoopStatus", "RuntimeState"]
+__all__ = ["LoopHost", "RunnerFactory", "LockPool", "LoopStatus", "RuntimeState",
+           "InProcessScheduler", "JobInfo"]

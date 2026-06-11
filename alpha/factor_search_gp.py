@@ -144,33 +144,21 @@ import pandas as pd
 
 
 from alpha.factor_dsl import FactorNode, parse_dsl
-
-
-
-
 from alpha.factor_score_evaluator import FactorScoreEvaluator, ExpressionScore
-
-
-
-
 from alpha.factor_search import (
-
-
-
-
     random_node, random_leaf, random_unary_op, random_ts_op,
-
-
-
-
 )
 
+# Task 2.1.6: GP search extensions
+from alpha.search.elite_archive import EliteArchive, EliteRecord
+from alpha.search.map_elites import MAPElites
+from alpha.search.operators import OperatorRegistry
 
-
-
-
-
-
+try:
+    from backend.runtime.runtime_state import RuntimeState
+    _METRICS_AVAILABLE = True
+except Exception:
+    _METRICS_AVAILABLE = False
 
 
 logger = logging.getLogger(__name__)
@@ -668,6 +656,27 @@ def mutate(node, prob_subtree=0.10, prob_const=0.05, max_depth=4):
 
 
 
+def _ast_equal(a: "FactorNode", b: "FactorNode") -> bool:
+    """Recursive structural/value equality of two ASTs."""
+    if a.op != b.op:
+        return False
+    if len(a.args) != len(b.args):
+        return False
+    for arg_a, arg_b in zip(a.args, b.args):
+        if isinstance(arg_a, FactorNode) and isinstance(arg_b, FactorNode):
+            if not _ast_equal(arg_a, arg_b):
+                return False
+        elif isinstance(arg_a, (int, float)) and isinstance(arg_b, (int, float)):
+            if abs(float(arg_a) - float(arg_b)) > 1e-9:
+                return False
+        elif arg_a != arg_b:
+            return False
+    for k in set(list(a.params.keys()) + list(b.params.keys())):
+        if a.params.get(k) != b.params.get(k):
+            return False
+    return True
+
+
 def _depth(node, current=0):
 
 
@@ -903,12 +912,16 @@ class FactorSearchGP:
 
 
 
-    def __init__(self, evaluator: FactorScoreEvaluator):
+    def __init__(self, evaluator: FactorScoreEvaluator, archive=None, novelty_grid=None, operators=None):
 
 
 
 
         self.evaluator = evaluator
+        self.archive = archive
+        self.novelty_grid = novelty_grid
+        self.operators = operators
+        self._source_run_id = None
 
 
 
@@ -953,7 +966,23 @@ class FactorSearchGP:
 
 
 
-        for _ in range(n):
+        # Warmstart from archive if available
+        if self.archive and self.archive.records:
+            seed_count = min(n // 2, 50)
+            warmstart = self.archive.warmstart_seed(seed_count)
+            for rec in warmstart:
+                try:
+                    node = parse_dsl(rec.expr)
+                    pop.append(node)
+                except Exception:
+                    continue
+
+
+
+
+        # Fill remaining with random
+        remaining = n - len(pop)
+        for _ in range(remaining):
 
 
 
@@ -1169,6 +1198,7 @@ class FactorSearchGP:
 
 
         max_runtime_sec: float = 600.0,  # FEAT-3: total wall-clock budget
+        run_id: Optional[str] = None,
 
 
 
@@ -1193,6 +1223,7 @@ class FactorSearchGP:
 
 
         t0 = _time.time()
+        self._source_run_id = run_id
 
 
 
@@ -1291,7 +1322,17 @@ class FactorSearchGP:
 
 
             population = self._step(population, fitness, elite_frac, tournament_k, mut_prob)
-
+            # MAP-Elites novelty injection (5% of population)
+            if self.novelty_grid and self.novelty_grid.occupancy > 5:
+                n_novel = max(1, int(pop_size * 0.05))
+                novel = self.novelty_grid.novelty_cells(n_novel)
+                for i, nv in enumerate(novel):
+                    if i < len(population):
+                        try:
+                            from alpha.factor_dsl import parse_dsl
+                            population[i] = parse_dsl(nv.expr)
+                        except Exception:
+                            continue
 
 
 
@@ -1324,6 +1365,16 @@ class FactorSearchGP:
 
 
 
+
+            # ── 发射 GP 指标 ──
+            if _METRICS_AVAILABLE:
+                try:
+                    rs = RuntimeState.shared()
+                    rs.emit_metric("gp_best_score", {"value": max(fitness)})
+                    if valid_fits:
+                        rs.emit_metric("gp_avg_score", {"value": float(np.mean(valid_fits))})
+                except Exception:
+                    pass
 
             top = self._best_score(scores)
 
@@ -1450,31 +1501,29 @@ class FactorSearchGP:
 
 
 
+        # ── 回写 EliteArchive ──
+        if self.archive:
+            import hashlib
+            for s in (valid[:top_k] if valid else []):
+                expr_hash = hashlib.md5(s.expression.encode()).hexdigest()[:12]
+                self.archive.add(EliteRecord(
+                    expr_hash=expr_hash, expr=s.expression,
+                    score=s.score, generation_added=n_generations,
+                    source_run_id=self._source_run_id or "anonymous",
+                ))
+            if _METRICS_AVAILABLE:
+                try:
+                    RuntimeState.shared().emit_metric(
+                        "gp_elite_added_total", {"value": len(valid[:top_k])}
+                    )
+                except Exception:
+                    pass
+
         if verbose:
-
-
-
-
             logger.info(f"[GP] DONE: gens={n_generations} pop={pop_size} "
-
-
-
-
                         f"top1_score={valid[0].score if valid else 0:.1f} "
-
-
-
-
                         f"top1_expr='{valid[0].expression if valid else 'none'}'  "
-
-
-
-
                         f"elapsed={elapsed:.1f}s")
-
-
-
-
         return result
 
 

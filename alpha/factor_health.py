@@ -432,3 +432,85 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
         lines.append("")
     lines.append("=" * 72)
     out_txt.write_text("\n".join(lines), encoding="utf-8")
+
+
+# ── 退役检查 (Phase 2.4) ──────────────────────────────────────────────
+
+
+@dataclass
+class RetireCandidates:
+    """退役候选列表.
+
+    Attributes:
+        candidates: 建议退役的因子名称列表
+        reason: 退役原因摘要
+    """
+
+    candidates: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+def retirement_check(
+    statuses: list[FactorHealthStatus],
+    days_in_decay: dict[str, float] | None = None,
+) -> RetireCandidates:
+    """检查哪些因子应当退役.
+
+    基于 RuntimeConfig 的退役阈值:
+    - retire_decaying_days: 持续 DECAYING 天数阈值
+    - retire_severe_threshold: 严重健康分阈值 (< 此值立即候选)
+    - retire_grace_hours_severe / retire_grace_hours_mild: 宽限期 (预留)
+
+    Args:
+        statuses: FactorHealthStatus 列表 (通常来自 FactorHealth.evaluate_all)
+        days_in_decay: 可选, 因子名 -> 已持续 DECAYING 天数. 缺失时仅按
+                       健康分阈值筛选.
+
+    Returns:
+        RetireCandidates: 候选列表 + 原因
+
+    用法:
+        statuses = health.evaluate_all()
+        result = retirement_check(statuses, days_in_decay=tracker)
+        if result.candidates:
+            for name in result.candidates:
+                adapter.retire(name)
+    """
+    from config.runtime_config import RuntimeConfig
+
+    cfg = RuntimeConfig()  # 使用默认值; 若需热更可用 shared()
+    try:
+        cfg = RuntimeConfig.shared()
+    except Exception:
+        pass
+
+    severe_threshold = cfg.retire_severe_threshold  # 30.0
+    decaying_days_threshold = float(cfg.retire_decaying_days)  # 7
+
+    candidates: list[str] = []
+    parts: list[str] = []
+
+    for s in statuses:
+        if s.status != "DECAYING":
+            continue
+
+        # 严重衰退: 健康分 < severe_threshold (如 30)
+        if s.score < severe_threshold:
+            candidates.append(s.factor)
+            parts.append(f"{s.factor}:severe(score={s.score:.1f})")
+            continue
+
+        # 中度衰退: 检查持续天数
+        if days_in_decay is not None and s.factor in days_in_decay:
+            days = days_in_decay[s.factor]
+            if days >= decaying_days_threshold:
+                candidates.append(s.factor)
+                parts.append(f"{s.factor}:decayed({days:.1f}d)")
+            continue
+
+        # 无 days_in_decay 数据时, 所有 DECAYING 都入选
+        candidates.append(s.factor)
+        parts.append(f"{s.factor}:DECAYING(score={s.score:.1f})")
+
+    reason = "; ".join(parts) if parts else "no candidates"
+    return RetireCandidates(candidates=candidates, reason=reason)

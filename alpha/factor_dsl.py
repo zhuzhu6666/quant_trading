@@ -141,6 +141,11 @@ except ImportError:
 
 
 # ── 算子白名单 (安全沙箱) ─────────────────────────────────────────
+# 先初始化 OperatorRegistry (幂等)
+from alpha.search.operators import register_standard_ops as _reg_ops
+_reg_ops()
+
+# 旧 ALLOWED_OPS 保留为兼容层
 ALLOWED_OPS = {
     # 时序算子 (参数: x, n 或 x, y, n)
     "ts_mean": ("ts", 2, 2),      # ts_mean(x, n)
@@ -169,9 +174,28 @@ ALLOWED_OPS = {
 
     # 时序衰减
     "ts_decay_linear": ("ts", 2, 2),  # ts_decay_linear(x, n)
+
+    # 新增算子 (同时在 OperatorRegistry 中注册)
+    "signed_log": ("math", 1, 1),     # sign(x) * log(|x| + 1)
+    "zscore": ("ts", 2, 2),           # (x - mean(x, n)) / std(x, n)
 }
 
 ALLOWED_LEAVES = {"close", "volume", "open", "high", "low", "dxy", "real_yield_10y", "gvz", "vix"}
+
+
+def _resolve_op(name: str):
+    """先查 OperatorRegistry, fallback 到 ALLOWED_OPS 兼容层."""
+    meta = None
+    try:
+        from alpha.search.operators import OperatorRegistry
+        meta = OperatorRegistry.shared().get_meta(name)
+    except Exception:
+        pass
+    if meta:
+        return meta
+    if name in ALLOWED_OPS:
+        return ALLOWED_OPS[name]
+    return None
 
 
 # ── AST 节点 ────────────────────────────────────────────────────────
@@ -333,11 +357,12 @@ class FactorParser:
 
     def _parse_func_call(self, name: str) -> FactorNode:
         """函数调用: name(arg1, arg2, ...)"""
-        if name not in ALLOWED_OPS:
+        op_meta = _resolve_op(name)
+        if op_meta is None:
             raise FactorParseError(
                 f"Unknown op: {name!r}. Allowed: {sorted(ALLOWED_OPS)}"
             )
-        cat, min_args, max_args = ALLOWED_OPS[name]
+        cat, min_args, max_args = op_meta
         self._consume("LPAREN")
         args = []
         if self._peek() and self._peek()[0] != "RPAREN":
@@ -403,7 +428,7 @@ class DSLEvaluator:
                     return np.where(right == 0, 0.0, left / right)
 
         # 4. 一元算子
-        if op in ("sign", "abs", "log", "sqrt"):
+        if op in ("sign", "abs", "log", "sqrt", "signed_log"):
             x = self.evaluate(args[0]) if isinstance(args[0], FactorNode) else np.full(len(self.df), float(args[0]))
             if op == "sign":
                 return np.sign(x)
@@ -415,6 +440,9 @@ class DSLEvaluator:
             if op == "sqrt":
                 with np.errstate(invalid="ignore"):
                     return np.sqrt(np.abs(x))
+            if op == "signed_log":
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    return np.sign(x) * np.log(np.abs(x) + 1.0)
 
         # 5. power
         if op == "power":
@@ -443,7 +471,7 @@ class DSLEvaluator:
 
         # 7. 时序算子 (参数: x, n)
         if op in ("ts_mean", "ts_std", "ts_sum", "ts_min", "ts_max",
-                   "ts_rank", "delta", "delay", "ts_decay_linear"):
+                   "ts_rank", "delta", "delay", "ts_decay_linear", "zscore"):
             x = self.evaluate(args[0]) if isinstance(args[0], FactorNode) else np.full(len(self.df), float(args[0]))
             n = int(args[1]) if not isinstance(args[1], FactorNode) else int(self.evaluate(args[1])[0])
             n = max(1, n)
@@ -469,9 +497,12 @@ class DSLEvaluator:
                 return s.shift(n).values
             if op == "ts_decay_linear":
                 # OPT-1: 用 _nb_ts_decay_linear 替代 pd.rolling.apply(lambda np.dot)
-                # 旧: 跟 ts_rank 同样的 Python lambda 瓶颈
-                # 新: numba @njit ~30-50ms (numpy fallback ~150ms)
                 return _nb_ts_decay_linear(x.astype(np.float64), n)
+            if op == "zscore":
+                mean = s.rolling(n, min_periods=n).mean().values
+                std = s.rolling(n, min_periods=n).std().values
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    return np.where(std < 1e-12, 0.0, (x - mean) / std)
 
         # 8. ts_corr (x, y, n)
         if op == "ts_corr":

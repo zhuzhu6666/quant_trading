@@ -86,10 +86,14 @@ _live_state: dict = {
     # open position's unrealized P&L when the loop is running but no closed
     # trades have happened yet.
     "session_pnl": 0.0,
-    "session_trades": 0,     # closed trades count this session
+    "session_trades": 0,
     "session_winning": 0,
     "session_losing": 0,
     "session_max_drawdown_pct": 0.0,
+    "session_peak_equity": 0.0,
+    "session_start_balance": 0.0,
+    "circuit_breaker": False,
+    "circuit_reason": "",
 }
 
 # ── cTrader 缓存 (防 WS 1s 推送反复击中 Twisted reactor)
@@ -492,6 +496,67 @@ _loop_strategy_name: str | None = None  # audit 2026-06-08: 当前 loop 跑的 s
 _loop_state_lock = threading.Lock()
 
 
+def _start_live_scheduler():
+    """注册并启动自进化 Scheduler (5 个 job). 幂等: 已运行时跳过."""
+    from backend.runtime.scheduler import InProcessScheduler
+    from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
+    sched = InProcessScheduler()
+    if getattr(sched, "_started", False):
+        return
+    # 每小时: 完整自进化循环 (GP + OOS + Canary + 退役 + 权重)
+    sched.add_job("evolution_hourly", "0 * * * *", scheduled_evolution_cycle)
+    # 每 30 分钟: 快速 Canary 检查 (仅晋升/回滚, 不跑 GP)
+    sched.add_job("canary_fast", "*/30 * * * *",
+                   lambda: scheduled_evolution_cycle(gp_pop=0, gp_gen=0))
+    # 每小时: 因子健康退役检查 (紧接 evolution, 延迟 10 分钟)
+    from alpha.factor_health import retirement_check
+    from alpha.registry_adapter import RegistryAdapter
+    def _hourly_retire():
+        try:
+            adapter = RegistryAdapter()
+            statuses = adapter.all_statuses() if hasattr(adapter, "all_statuses") else []
+            if statuses:
+                rc = retirement_check(statuses)
+                for name in rc.candidates:
+                    adapter.retire(name, rc.reason)
+        except Exception:
+            pass
+    sched.add_job("retire_hourly", "10 * * * *", _hourly_retire)
+    # 每 5 分钟: 数据同步健康检查
+    from data.live_sync.health import SyncHealth
+    sched.add_job("sync_health", "*/5 * * * *",
+                   lambda: SyncHealth.shared().check_and_log())
+    # 每 10 分钟: 从 MT5 拉新 bar
+    def _pull_new_bars():
+        try:
+            from data.live_sync.orchestrator import SyncOrchestrator
+            orch = SyncOrchestrator()
+            for tf in ["M15", "H1"]:
+                try:
+                    result = orch.incremental_sync("XAUUSD+", tf)
+                    if result and hasattr(result, "inserted"):
+                        logger.info("[sync] %s inserted=%d skipped=%d", tf,
+                                    result.inserted, getattr(result, "skipped", 0))
+                except Exception as e:
+                    logger.debug("[sync] %s failed: %s", tf, e)
+        except Exception as e:
+            logger.debug("[sync] pull failed: %s", e)
+    sched.add_job("data_pull", "*/10 * * * *", _pull_new_bars)
+    sched.start()
+    logger.info("[live] InProcessScheduler started with 5 jobs")
+
+
+def _stop_live_scheduler():
+    """停止 Scheduler. 幂等."""
+    from backend.runtime.scheduler import InProcessScheduler
+    sched = InProcessScheduler()
+    try:
+        sched.stop()
+        logger.info("[live] InProcessScheduler stopped")
+    except Exception as e:
+        logger.debug("[live] scheduler stop: %s", e)
+
+
 def loop_status() -> dict:
     """Whether the live trading loop thread is running. 优先 _live_state 缓存."""
     # 优先共享缓存 (audit 2026-06-08)
@@ -536,10 +601,6 @@ def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
             return {"ok": False, "error": f"unknown broker: {broker}"}
 
         # Pre-flight: broker connection must be live
-        # cTrader Twisted reactor can be flaky; retry once on failure
-        # ⚠️ audit 2026-06-09: 不阻塞等 pre-flight — loop 线程自己会连接重试.
-        # 之前 get_account 等 bridge 超时 10-14s, 卡住请求线程, 所有 API 排队.
-        # 直接填充占位账户, 不等 bridge 响应.
         acct = {"ok": True, "broker": broker, "balance": 0, "equity": 0,
                 "margin": 0, "margin_free": 0, "leverage": 0, "currency": ""}
 
@@ -555,6 +616,8 @@ def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
         _live_state["loop_started_at"] = _loop_started_at
         _live_state["account"] = acct
         _live_state["account_updated_at"] = time.time()
+        # 启动自进化 Scheduler (5 job)
+        _start_live_scheduler()
         _live_state["session_pnl"] = 0.0
         _live_state["session_trades"] = 0
         _live_state["session_winning"] = 0
@@ -603,6 +666,8 @@ def stop_loop() -> dict:
     # 同步到共享缓存
     _live_state["broker"] = None
     _live_state["loop_running"] = False
+    # 停止自进化 Scheduler
+    _stop_live_scheduler()
     _live_state["loop_strategy"] = None
     # audit 2026-06-09: clear session stats so the next /ws/state snapshot
     # doesn't show stale numbers from the previous run.
@@ -819,8 +884,28 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
     # ── Phase 3: 主循环 (60s tick) ──
     tick = 0
+    _current_trade_date: str = ""
     while not stop_flag.is_set():
         tick += 1
+
+        # ── 跨日重置熔断 + 会话统计 ──
+        try:
+            from datetime import datetime as _dt
+            today_str = _dt.utcnow().strftime("%Y-%m-%d")
+            if today_str != _current_trade_date:
+                if _current_trade_date:
+                    log(f"new trading day {today_str}, resetting session stats")
+                _current_trade_date = today_str
+                _live_state["circuit_breaker"] = False
+                _live_state["circuit_reason"] = ""
+                _live_state["session_pnl"] = 0.0
+                _live_state["session_trades"] = 0
+                _live_state["session_winning"] = 0
+                _live_state["session_losing"] = 0
+                _live_state["session_max_drawdown_pct"] = 0.0
+        except Exception:
+            pass
+
         try:
             if broker == "mt5":
                 from execution.mt5_bridge import MT5Bridge
@@ -856,18 +941,28 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     log(f"tick {tick}: cTrader still warming up, skip tick")
                     stop_flag.wait(60)
                     continue
-                # audit 2026-06-10: 后台线程写 _live_state 缓存, WS 1s 推送
-                # 下次 tick 就能拿到真 broker equity. tick 主体不被阻塞, 失败时静默.
-                # audit 2026-06-10 fix 2: 提到 fetch_bars 之前, 之前放在 else
-                # 分支里, cTrader broker 不返 history bars 时永远走 if 分支,
-                # kickoff 永远不调. 现在无论 fetch_bars 成败都 kickoff.
+
                 kickoff_account_refresh(bridge, broker, interval_sec=30.0)
                 df_new = _fetch_bars_with_retry(bridge, timeframe="M15", n_bars=5)
                 if df_new is None or len(df_new) == 0:
                     log(f"tick {tick}: no bars after retry")
                 else:
-                    last_bar = df_new.iloc[-1]
-                    _process_tick(bridge, strategy, df_new, last_bar, broker, tick, log)
+                    # ── Circuit breaker check (每日亏损 + 连续亏损) ──
+                    cb_tripped = _live_state.get("circuit_breaker", False)
+                    if cb_tripped:
+                        log(f"tick {tick}: circuit breaker tripped, skip trading")
+                    else:
+                        # 每日亏损检查
+                        session_pnl = float(_live_state.get("session_pnl", 0.0))
+                        start_balance = float(_live_state.get("session_start_balance", 0.0)) or 1000.0
+                        dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0
+                        if session_pnl < 0 and dd_pct >= 5.0:
+                            _live_state["circuit_breaker"] = True
+                            _live_state["circuit_reason"] = f"daily drawdown {dd_pct:.1f}%"
+                            log(f"tick {tick}: CIRCUIT BREAKER: daily drawdown {dd_pct:.1f}%")
+                        else:
+                            last_bar = df_new.iloc[-1]
+                            _process_tick(bridge, strategy, df_new, last_bar, broker, tick, log)
         except Exception as e:
             log(f"tick {tick} error: {type(e).__name__}: {e}\n{traceback.format_exc()[-300:]}")
 

@@ -573,6 +573,16 @@ class CTraderBridge:
             # 注: stopLossTriggerMethod 不传, 用 server 默认 (1=TRADE)
 
             resp = self._send(req, timeout=10.0)
+            # ⚠️ audit 2026-06-11: amend 可能返回 ProtoOAOrderErrorEvent 而非 raise
+            if type(resp).__name__ == "ProtoOAOrderErrorEvent":
+                err_code = getattr(resp, "errorCode", "?")
+                err_desc = getattr(resp, "description", "")
+                logger.error(f"amend_position_sltp rejected: errorCode={err_code} desc={err_desc!r}")
+                return CTraderOrderResult(
+                    success=False, position_id=position_id,
+                    error_code=err_code,
+                    comment=f"amend rejected: {err_code} — {err_desc}",
+                )
             # 跟 close_position 一致: amend 异步, 真确认靠 ProtoOAExecutionEvent
             return CTraderOrderResult(
                 success=True, position_id=position_id,
@@ -620,6 +630,37 @@ class CTraderBridge:
         # + close_position(). 阶段 3 补 ProtoOAAmendPositionSLTPReq 把 SL/TP 推 server
         try:
             resp = self._send(req, timeout=15.0)
+            # ⚠️ audit 2026-06-11: 可能返回 ProtoOAOrderErrorEvent (风控/参数拒)
+            if type(resp).__name__ == "ProtoOAOrderErrorEvent":
+                err_code = getattr(resp, "errorCode", "?")
+                err_desc = getattr(resp, "description", "")
+                logger.error(f"market_order rejected: errorCode={err_code} desc={err_desc!r}")
+                return CTraderOrderResult(
+                    success=False, error_code=err_code,
+                    comment=f"rejected: {err_code} — {err_desc}",
+                )
+            # ProtoOANewOrderRes 不存在! server 回 ProtoOAExecutionEvent (含 position/order/deal)
+            # 或 ProtoOAExecutionEvent with errorCode.
+            resp_name = type(resp).__name__
+            if resp_name == "ProtoOAExecutionEvent":
+                err_code = getattr(resp, "errorCode", "")
+                if err_code:
+                    logger.error(f"market_order execution error: {err_code}")
+                    return CTraderOrderResult(
+                        success=False, error_code=err_code,
+                        comment=f"execution error: {err_code}",
+                    )
+                # 成功 — 取 positionId 和 orderId
+                pos = getattr(resp, "position", None)
+                order = getattr(resp, "order", None)
+                position_id = pos.positionId if pos else 0
+                order_id = order.orderId if order else 0
+                return CTraderOrderResult(
+                    success=True, order_id=order_id, position_id=position_id,
+                    comment=f"filled: orderId={order_id} posId={position_id}",
+                )
+            # fallback: 未知响应类型 (兼容 old SDK)
+            logger.warning(f"market_order unexpected resp type: {resp_name}")
             order_id = getattr(resp, "orderId", 0)
             # 注: ProtoOANewOrderRes 返回的是 orderId, 真实成交价要从 ProtoOAExecutionEvent push 拿
             # MVP 阶段我们后续调 get_positions() 拉真实 entry_price
@@ -636,40 +677,55 @@ class CTraderBridge:
 
         Args:
             position_id: 要平的仓位 ID; None 时 broker 默认平当前账户所有仓位
-            volume: 部分平仓量 (lots); None 时全平
+            volume: 部分平仓量 (lots); None 时自动查当前仓位 volume 全平
+
+        ⚠️ audit 2026-06-11: ProtoOAClosePositionReq 4 个字段全部 required
+        (payloadType/ctidTraderAccountId/positionId/volume). volume 不能省略.
         """
         if not self.is_connected:
             return CTraderOrderResult(success=False, comment="Not connected")
         if not self._account_authed:
             return CTraderOrderResult(success=False, comment="Account not authed")
+        if position_id is None:
+            return CTraderOrderResult(success=False, comment="position_id required")
         # DRY-RUN 安全闸
         if not self.send_orders:
             logger.warning(f"[DRY-RUN] close_position pos={position_id} vol={volume} (send_orders=False)")
             return CTraderOrderResult(
-                success=True, position_id=position_id or 0,
+                success=True, position_id=position_id,
                 comment="DRY-RUN close (send_orders=False)",
             )
         try:
+            # 如果未传 volume, 自动查仓位 volume
+            if volume is None:
+                positions = self.get_positions()
+                match = [p for p in positions if p["position_id"] == position_id]
+                if not match:
+                    return CTraderOrderResult(
+                        success=False, position_id=position_id,
+                        comment=f"Position {position_id} not found in open positions",
+                    )
+                volume = match[0]["volume"]
+                logger.info(f"  auto-resolved volume={volume} for full close")
+
             req = TradeMsg.ProtoOAClosePositionReq()
             req.ctidTraderAccountId = self.account_id
-            if position_id is not None:
-                req.positionId = int(position_id)
-            if volume is not None:
-                # cTrader volume 字段: 1 lot = 100 (centi-lot) per doc
-                # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
-                req.volume = int(volume * 100)
+            req.positionId = int(position_id)
+            # cTrader volume 字段: 1 lot = 100 (centi-lot) per doc
+            # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
+            req.volume = int(volume * 100)
             resp = self._send(req, timeout=10.0)
             logger.info(f"close_position OK pos={position_id} vol={volume} resp={type(resp).__name__}")
             return CTraderOrderResult(
                 success=True,
-                position_id=position_id or 0,
-                volume=volume or 0.0,
+                position_id=position_id,
+                volume=volume,
                 comment=f"close accepted, awaiting ProtoOAExecutionEvent",
             )
         except Exception as e:
             logger.error(f"close_position failed pos={position_id}: {e}")
             return CTraderOrderResult(
-                success=False, position_id=position_id or 0,
+                success=False, position_id=position_id,
                 error_code="close_failed", comment=str(e),
             )
 
@@ -769,18 +825,22 @@ class CTraderBridge:
             resp = self._send(req, timeout=10.0)
             result = []
             for p in resp.position:
-                if symbol and p.symbolId != self._symbol_id:
+                td = p.tradeData  # symbolId 在 tradeData 里, 不在顶层
+                # ⚠️ audit 2026-06-11: ProtoOAPosition 顶层没有 symbolId;
+                #    symbolId 在嵌套 tradeData (ProtoOATradeData) 里.
+                if symbol and td.symbolId != self._symbol_id:
                     continue
-                # tradeData 是嵌套消息, 取 tradeSide/volume
-                td = p.tradeData
+                # ⚠️ audit 2026-06-11: ProtoOAPosition.price 是 float (type=1=double),
+                #    already real price, 不能除 moneyDigits. spot event 才需要除.
+                #    SL/TP 同理是 float.
                 result.append({
                     "position_id": p.positionId,
-                    "symbol_id": p.symbolId,
+                    "symbol_id": td.symbolId,
                     "type": "buy" if td.tradeSide == TRADE_SIDE["BUY"] else "sell",
                     "volume": td.volume / 100.0,         # centi-lot → lot
-                    "price_open": p.price / (10 ** p.moneyDigits),  # moneyDigits 不是 symbol.digits
-                    "sl": p.stopLoss / (10 ** p.moneyDigits) if p.stopLoss else 0,
-                    "tp": p.takeProfit / (10 ** p.moneyDigits) if p.takeProfit else 0,
+                    "price_open": p.price,
+                    "sl": p.stopLoss or 0,
+                    "tp": p.takeProfit or 0,
                     "profit": None,  # 需 ProtoOAGetPositionUnrealizedPnLReq
                     "swap": p.swap / 100.0,
                     "commission": p.commission / 100.0,

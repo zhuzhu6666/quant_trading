@@ -75,7 +75,16 @@ async def lifespan(app: FastAPI):
         warmup_ctrader(timeout_sec=0.0)
     except Exception as e:
         _lg.warning(f"[lifespan] cTrader warmup failed (non-fatal): {e}")
+
     yield
+
+    # ── 关停 Scheduler (若有残留) ──
+    try:
+        if hasattr(app.state, "_evolution_scheduler"):
+            app.state._evolution_scheduler.stop()
+            _lg.info("[lifespan] InProcessScheduler stopped")
+    except Exception as e:
+        _lg.warning(f"[lifespan] InProcessScheduler stop failed: {e}")
 
 
 def create_app() -> FastAPI:

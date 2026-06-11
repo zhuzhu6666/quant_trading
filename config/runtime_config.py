@@ -93,6 +93,9 @@ class RuntimeConfig:
     sync_interval_sec: int = 300
     sync_recovery_max_attempts: int = 3
 
+    # --- 策略控制 ---
+    include_shadow_factors: bool = False
+
     # --- 评估 ---
     evaluation_embargo_bars: int = 288  # ~3 天 M15
     evaluation_purge_bars: int = 288

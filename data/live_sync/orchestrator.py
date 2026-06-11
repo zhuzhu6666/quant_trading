@@ -8,6 +8,7 @@ data/live_sync/orchestrator.py — 同步编排器 (T16.4, 2026-06-02)
 - 统计 + 日志
 """
 import logging
+import threading
 import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -136,6 +137,7 @@ class SyncOrchestrator:
         report.elapsed_sec = _time.time() - t0
         logger.info(f"[SyncOrch] full_sync 完成: +{report.total_inserted} bars "
                     f"({report.elapsed_sec:.1f}s)")
+        self._trigger_factor_refresh(symbol=symbol)
         return report
 
     def incremental_sync(self, symbol: str = "XAUUSD+",
@@ -208,7 +210,45 @@ class SyncOrchestrator:
         report.elapsed_sec = _time.time() - t0
         logger.info(f"[SyncOrch] incremental 完成: +{report.total_inserted} bars "
                     f"({report.elapsed_sec:.1f}s)")
+        self._trigger_factor_refresh(symbol=symbol)
         return report
+
+    def _trigger_factor_refresh(self, symbol: str = "XAUUSD+", timeframe: str = "M15", n_bars: int = 5000) -> None:
+        """在后台线程触发因子健康重评估 (非阻塞).
+
+        在成功同步后调用, 异步加载最新 bars 并调用 FactorHealth 重评估所有因子.
+        """
+        def _run():
+            try:
+                from data.store import DataStore
+                from alpha.factor_health import evaluate_factors as _evaluate_factors
+                from monitor.evolution_story import EvolutionStory
+
+                logger.info("[SyncOrch] Triggering factor health refresh for %s %s...", symbol, timeframe)
+                ds = DataStore(db_path=self.db_path)
+                df = ds.load_bars(symbol, timeframe, limit=n_bars)
+                if df is None or len(df) < 50:
+                    logger.warning("[SyncOrch] factor refresh skipped: insufficient bars (%s)", len(df) if df is not None else 0)
+                    return
+
+                result = _evaluate_factors(df)
+                summary = {k: result[k] for k in ("total", "healthy", "watch", "decaying", "unknown") if k in result}
+                logger.info(
+                    "[SyncOrch] Factor health refresh complete: total=%d healthy=%d watch=%d decaying=%d unknown=%d",
+                    summary.get("total", 0), summary.get("healthy", 0),
+                    summary.get("watch", 0), summary.get("decaying", 0),
+                    summary.get("unknown", 0),
+                )
+                EvolutionStory.shared().append("factor_health_refreshed", {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    **summary,
+                })
+            except Exception as e:
+                logger.warning("[SyncOrch] factor health refresh failed (non-blocking): %s", e)
+
+        t = threading.Thread(target=_run, daemon=True, name="factor-health-refresh")
+        t.start()
 
     def print_report(self, report: SyncReport):
         """打印可读报告"""

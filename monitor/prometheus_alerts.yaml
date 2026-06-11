@@ -1,0 +1,75 @@
+# Prometheus alert rules for the quant trading system.
+# Deploy to Prometheus via the rule_files directive in prometheus.yml.
+#
+# Groups:
+#   quant_trading_alerts — all quant-trading-specific rules in one group.
+
+groups:
+  - name: quant_trading_alerts
+    interval: 30s
+    rules:
+      # ── 因子健康低位告警 ──────────────────────────────────────
+      # 当 factor_health_score < 30 持续超过 7 天触发。
+      # 表示该因子已长期处于 DECAYING 状态, 应考虑人工介入或自动淘汰。
+      - alert: FactorHealthCritical
+        expr: factor_health_score < 30
+        for: 168h  # 7 days
+        labels:
+          severity: critical
+          team: quant
+        annotations:
+          summary: "Factor {{ $labels.factor }} health score critically low"
+          description: >
+            Factor **{{ $labels.factor }}** (status={{ $labels.status }})
+            has a health score of **{{ $value }}** for over 7 days.
+            Manual intervention or auto-retirement recommended.
+
+      # ── 数据同步滞后告警 ──────────────────────────────────────
+      # data_sync_last_bar_age_seconds > 3600 表示最近一条 bar 距今已
+      # 超过 1 小时。对分钟级策略而言意味着无最新数据可用。
+      - alert: DataSyncStale
+        expr: data_sync_last_bar_age_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+          team: quant
+        annotations:
+          summary: "Data sync stale for {{ $labels.symbol }} {{ $labels.timeframe }}"
+          description: >
+            Data sync bar age for **{{ $labels.symbol }}** ({{ $labels.timeframe }})
+            is **{{ $value | humanizeDuration }}** old, exceeding the 1-hour threshold.
+            Check broker connection and sync orchestrator.
+
+      # ── loop 停止告警 ─────────────────────────────────────────
+      # loop_status == 0 表示某个 runtime loop 处于停止状态。
+      # 按 kind 标签区分 (paper / live / sync / risk)。
+      - alert: LoopDown
+        expr: loop_status == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: quant
+        annotations:
+          summary: "Loop {{ $labels.kind }} is down"
+          description: >
+            Runtime loop **{{ $labels.kind }}** has been stopped
+            (loop_status=0) for over 1 minute. Trigger restart or
+            investigate the cause.
+
+      # ── Canary 回滚激增告警 ───────────────────────────────────
+      # canary_rollback_total 持续增加表示 canary 部署反复失败。
+      # 使用 predict_linear 或简单的 increase 检测短时间内的回滚陡增。
+      # 触发条件: 过去 15 分钟内的回滚次数 >= 3。
+      - alert: CanaryRollbackSurge
+        expr: |
+          increase(canary_rollback_total[15m]) >= 3
+        for: 0m
+        labels:
+          severity: warning
+          team: quant
+        annotations:
+          summary: "Canary rollback surge detected"
+          description: >
+            **{{ $value | humanize }}** canary rollbacks occurred
+            in the last 15 minutes. Investigate canary stages and
+            factor evaluation pipeline.

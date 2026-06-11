@@ -131,3 +131,78 @@ class CircuitBreaker:
         self._slippage_sum = 0.0
         self._slippage_count = 0
         logger.info("Circuit breaker reset")
+
+
+# ── Module-level helper: auto-tune risk parameters ─────────────────────
+
+
+def auto_tune_risk(df: "pd.DataFrame", equity: float = 1000.0) -> dict:
+    """Dynamically tune risk parameters based on volatility (ATR percentile)
+    and current equity.
+
+    1. Compute ATR(14) over the last 100+ bars via :func:`risk.regime._atr`.
+    2. Locate the latest ATR's percentile within its own history (0-100).
+    3. Adjust ``max_daily_loss_pct``:
+       - ATR > 70th pctile → tighten 30% (5.0 * 0.7)
+       - ATR < 30th pctile → loosen 20%  (5.0 * 1.2)
+       - otherwise          → keep 5.0 %
+    4. ``single_trade_risk_usd = max(2.0, equity * 0.002)``  (0.2 % of equity, min $2).
+
+    Returns:
+        {"max_daily_loss_pct", "single_trade_risk_usd", "atr_percentile"}
+    """
+    import numpy as np
+
+    atr_percentile: float = 50.0  # neutral default if we cannot compute
+
+    # ── ATR percentile ──────────────────────────────────────────────
+    # We need at least high + low + close for true ATR.
+    has_hl = "high" in df.columns and "low" in df.columns
+    if "close" in df.columns:
+        closes = df["close"].values
+        if has_hl:
+            highs = df["high"].values
+            lows = df["low"].values
+        else:
+            highs = lows = closes  # will fall through to close-range below
+
+        # Use the last 101 bars (100 + 1 for ATR lookback)
+        n = min(101, len(closes))
+        if n >= 16:  # at least ATR(14) + 1
+            if has_hl:
+                from risk.regime import _atr as _regime_atr
+
+                atr_series = _regime_atr(
+                    highs[-n:], lows[-n:], closes[-n:], period=14
+                )
+            else:
+                # Fallback: close-to-close range as a volatility proxy
+                ranges = np.abs(np.diff(closes[-n:]))
+                # Pad front with NaN so lengths match
+                atr_series = np.empty(n)
+                atr_series[:] = np.nan
+                atr_series[1:] = ranges
+
+            atr_valid = atr_series[~np.isnan(atr_series)]
+            if len(atr_valid) >= 5:
+                last_atr = atr_valid[-1]
+                pct = float(np.sum(atr_valid <= last_atr)) / len(atr_valid) * 100.0
+                # Clamp to 0-100 (the <= can give 100 exactly; cap it)
+                atr_percentile = min(max(pct, 0.0), 100.0)
+
+    # ── Adjust max_daily_loss_pct ───────────────────────────────────
+    if atr_percentile > 70:
+        max_daily_loss_pct = 5.0 * 0.7  # tighten 30 %
+    elif atr_percentile < 30:
+        max_daily_loss_pct = 5.0 * 1.2  # loosen 20 %
+    else:
+        max_daily_loss_pct = 5.0
+
+    # ── Single-trade risk based on equity ───────────────────────────
+    single_trade_risk_usd = max(2.0, equity * 0.002)
+
+    return {
+        "max_daily_loss_pct": round(max_daily_loss_pct, 2),
+        "single_trade_risk_usd": round(single_trade_risk_usd, 2),
+        "atr_percentile": round(atr_percentile, 1),
+    }

@@ -60,6 +60,9 @@ class PaperService:
         ]:
             if config.get(key):
                 cmd.append(flag)
+        # 默认启用熔断 (安全)
+        if config.get("enable_circuit", True):
+            cmd.append("--enable-circuit")
         if config.get("risk_per_trade_pct") is not None:
             cmd += ["--risk-per-trade-pct", str(config["risk_per_trade_pct"])]
 
