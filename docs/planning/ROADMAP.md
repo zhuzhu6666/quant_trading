@@ -19,6 +19,7 @@
 | Phase 1-5 审计 | ✅ 完结 | 8 fix + 7 refactor + 5 opt + 3 verify + 调参 |
 | **自进化全闭环 (P5)** | ✅ **2026-06-11** | Orchestrator + Scheduler + Canary + WeightPolicy + Retire |
 | **cTrader 执行** | ✅ **2026-06-11** | 开→SLTP→平 全流通过, 5 bug 修复 |
+| **外部数据自动刷新** | ✅ **2026-06-12** | `scripts/refresh_external_data.py` + start-all.py 整合 |
 | **因子评估框架** | ✅ **2026-06-11** | PurgedWalkForward + BootstrapCI + CausalCheck + Attribution |
 | **部署层** | ✅ **2026-06-11** | canary.py + weight_policy.py + risk_rebalancer.py |
 | **Web Console** | ✅ 2026-06-07 | Vite + React 19 重构, 43 REST + 1 WS |

@@ -76,6 +76,24 @@ python scripts/test_ctrader_full_flow.py
 
 ---
 
+## 外部数据刷新
+
+```bash
+# 查看各数据源时效
+python scripts/refresh_external_data.py --status
+
+# 自动刷新所有过期数据
+python scripts/refresh_external_data.py --once
+
+# 启动 Web 时自动刷新
+python start-all.py --refresh-data
+
+# 强制刷新某个源
+python scripts/refresh_external_data.py --source cot --force
+```
+
+---
+
 ## 常见问题
 
 ### 端口冲突
