@@ -94,7 +94,7 @@ def main():
          "--host", "0.0.0.0", "--port", str(args.backend_port),
          "--log-level", "info"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1,
+        text=True, bufsize=1, errors="replace",  # BUG-2026-06-12: GBK 编码崩 readline
     )
 
     # 等后端就绪 (最长 15s)
@@ -119,6 +119,7 @@ def main():
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
         shell=True,
+        errors="replace",  # BUG-2026-06-12: GBK 编码崩 readline
     )
 
     print(f"\n╔══════════════════════════════════════════════╗")
