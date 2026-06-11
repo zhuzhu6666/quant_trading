@@ -33,9 +33,22 @@ def main():
     parser.add_argument("--prod", action="store_true", help="生产模式 (build + 单端口 uvicorn)")
     parser.add_argument("--backend-port", type=int, default=BACKEND_PORT)
     parser.add_argument("--frontend-port", type=int, default=FRONTEND_PORT)
+    parser.add_argument("--refresh-data", action="store_true",
+                        help="启动前先刷新外部数据 (COT/Events/ETF)")
     args = parser.parse_args()
 
     os.chdir(ROOT)
+
+    # ── 外部数据刷新 (可选) ──
+    if args.refresh_data:
+        print(":: 检查外部数据时效性 ...")
+        refresh_script = ROOT / "scripts/refresh_external_data.py"
+        if refresh_script.exists():
+            status_code = subprocess.call([sys.executable or "python", str(refresh_script), "--once"])
+            if status_code != 0:
+                print("⚠ 外部数据部分过期, 不影响启动")
+        else:
+            print("  (scripts/refresh_external_data.py 未找到, skip)")
 
     # ── 选 Python ──
     for exe in ["python", "python3", sys.executable]:
