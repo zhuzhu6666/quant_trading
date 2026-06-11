@@ -22,6 +22,7 @@ import numpy as np
 
 from strategy.base import BaseStrategy, Signal
 from strategy.registry import strategy_registry
+from config.runtime_config import shared as rc_shared, subscribe as rc_subscribe, version as rc_version
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,20 @@ class MultiFactorM15Strategy(BaseStrategy):
         self._bars_since_shadow_recompute: int = 0
         self._last_shadow_active: int = 0
         self._shadow_loaded: bool = False
+        # RuntimeConfig 热更新订阅
+        self._config_version = 0
+        rc_subscribe(lambda cfg, _v: self._on_runtime_config_change(cfg, _v))
+
+    def _on_runtime_config_change(self, new_config, _version=None):
+        """RuntimeConfig changed — refresh runtime-updatable params."""
+        if _version is not None:
+            self._config_version = _version
+        if hasattr(new_config, 'shadow_vote_weight') and new_config.shadow_vote_weight is not None:
+            self.params['shadow_vote_weight'] = new_config.shadow_vote_weight
+        if hasattr(new_config, 'vote_weights') and new_config.vote_weights is not None:
+            self.params['vote_weights'] = new_config.vote_weights
+        if hasattr(new_config, 'shadow_top_k') and new_config.shadow_top_k is not None:
+            self.params['shadow_top_k'] = new_config.shadow_top_k
 
     # ── 通用指标计算 ──────────────────────────────────────────
 
@@ -295,6 +310,10 @@ class MultiFactorM15Strategy(BaseStrategy):
     # ── 主入口 ────────────────────────────────────────────────
 
     def on_bar(self, bar: dict) -> Signal | None:
+        # RuntimeConfig 版本检查 — config 变化时自动刷新参数
+        if self._config_version != rc_version():
+            self._on_runtime_config_change(rc_shared(), rc_version())
+
         self._bars.append(bar)
         self._bar_count += 1
 
