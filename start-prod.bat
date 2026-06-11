@@ -9,8 +9,8 @@ set PYTHON=C:\Users\zhu\AppData\Local\Programs\Python\Python312\python.exe
 
 cd /d %PROJECT_ROOT%
 
-echo === Building frontend for static export ===
-cd frontend
+echo === Building frontend (Vite) ===
+cd frontend-v2
 call npm run build
 if errorlevel 1 (
   echo Frontend build failed.
@@ -21,7 +21,7 @@ cd ..
 echo === Copying static output to backend/static/ ===
 if exist backend\static rmdir /s /q backend\static
 mkdir backend\static
-xcopy /e /i /y frontend\out\* backend\static\ >nul
+xcopy /e /i /y frontend-v2\dist\* backend\static\ >nul
 
 echo === Starting uvicorn on port 8000 (serves API + static frontend) ===
 %PYTHON% -m backend --port 8000

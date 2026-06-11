@@ -31,6 +31,7 @@ class JobState:
             "params": self.params,
             "result": self.result,
             "error": self.error,
+            "log_tail": list(self.log_tail),
         }
 
 

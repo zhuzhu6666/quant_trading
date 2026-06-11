@@ -406,3 +406,64 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ── module-level start/stop (供 scripts/live_sync.py 及 Web API 调) ─────
+# audit 2026-06-08: SyncDaemon 原本只能 CLI 跑, 加 module-level
+# start()/stop() 让 Web 端也能启停定时同步。
+import threading as _threading
+import time as _time
+
+_daemon: "SyncDaemon | None" = None
+_daemon_thread: "_threading.Thread | None" = None
+_daemon_running = False
+
+
+def start(interval_seconds: int = 300,
+          timeframes: "list[str] | None" = None,
+          symbol: str = "XAUUSD+") -> dict:
+    """在后台线程启动定时同步守护进程。返回 {daemon_pid, started_at}。"""
+    global _daemon, _daemon_thread, _daemon_running
+    if _daemon_running:
+        return {"daemon_pid": _daemon_thread.ident if _daemon_thread else None,
+                "started_at": getattr(_daemon, "_started_at", None) or "",
+                "msg": "already running"}
+    if timeframes is None:
+        timeframes = ["M15", "H1", "D1"]
+    from datetime import datetime, timezone
+    _daemon = SyncDaemon(symbol=symbol, timeframes=timeframes)
+    _daemon._started_at = datetime.now(timezone.utc).isoformat()
+    _daemon_running = True
+    _daemon_thread = _threading.Thread(
+        target=_daemon.run_daemon,
+        args=(interval_seconds, 0),  # 0 = forever
+        daemon=True,
+    )
+    _daemon_thread.start()
+    return {"daemon_pid": _daemon_thread.ident, "started_at": _daemon._started_at,
+            "interval_seconds": interval_seconds, "timeframes": timeframes}
+
+
+def stop() -> dict:
+    """停止定时同步守护进程。返回 {stopped, last_run}。"""
+    global _daemon, _daemon_thread, _daemon_running
+    if not _daemon_running or _daemon is None:
+        return {"stopped": False, "msg": "not running"}
+    _daemon.stop()
+    if _daemon_thread and _daemon_thread.is_alive():
+        _daemon_thread.join(timeout=5)
+    _daemon_running = False
+    _daemon = None
+    _daemon_thread = None
+    return {"stopped": True}
+
+
+def is_running() -> bool:
+    """守护进程是否正在运行。"""
+    global _daemon_running, _daemon_thread
+    if not _daemon_running:
+        return False
+    if _daemon_thread and not _daemon_thread.is_alive():
+        _daemon_running = False
+        return False
+    return True

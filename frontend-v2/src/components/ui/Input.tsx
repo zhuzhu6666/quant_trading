@@ -12,7 +12,7 @@ export function Input({ label, error, monospace, className, ...props }: InputPro
       {label && <label className="text-xs text-fg-muted font-medium">{label}</label>}
       <input
         className={classNames(
-          "w-full bg-[#0d1117] border border-border rounded px-2.5 py-1.5 text-sm text-[#e6edf3] placeholder:text-fg-placeholder",
+          "w-full bg-white border border-[#dce0e6] rounded px-2.5 py-1.5 text-sm text-[#1a1e24] placeholder:text-[#9ea4ae]",
           "focus:border-accent focus:ring-1 focus:ring-accent/30 outline-none transition-colors duration-150",
           monospace && "num",
           error && "border-down",

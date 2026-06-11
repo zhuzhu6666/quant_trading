@@ -307,3 +307,117 @@ class FactorHealth:
             },
             "factors": [s.to_dict() for s in all_status],
         }
+
+
+# ── module-level orchestrator (供 service 调用) ─────────────────────
+# audit 2026-06-08: backend/services/factor_health_service.py 一直
+# import 不存在的 evaluate_factors/write_report. 这里补上, 内部用
+# ICTracker + FactorHealth 类做实际计算.
+
+def _build_forward_returns(df: "pd.DataFrame", horizon: int = 1) -> "np.ndarray":
+    """算 1 步 forward return: (close[t+horizon] - close[t]) / close[t].
+    最后 horizon 根返 NaN (无未来数据)."""
+    close = df["close"].values
+    n = len(close)
+    fwd = np.full(n, np.nan)
+    if n <= horizon:
+        return fwd
+    fwd[: n - horizon] = (close[horizon:] - close[: n - horizon]) / close[: n - horizon]
+    return fwd
+
+
+def evaluate_factors(
+    df: "pd.DataFrame",
+    threshold: float = 0.04,
+    progress_cb: "Optional[Callable[[str, float, str], None]]" = None,
+) -> dict:
+    """遍历 factor_registry 里所有因子, 算 IC + 健康分, 汇总成 service 期望格式.
+
+    Returns: {
+        "total": int, "healthy": int, "watch": int, "decaying": int, "unknown": int,
+        "factors": [FactorHealthStatus.to_dict() ...]
+    }
+
+    注: 这是 v1 简化版 — 用 1 步 forward return 当 ground truth,
+    没考虑交易成本/regime. v2 应该接 factor_score_evaluator 算多 horizon.
+    """
+    from alpha.registry import factor_registry
+
+    cb = progress_cb or (lambda *_: None)
+    cb("loading_factors", 35, f"scanning {len(factor_registry.list())} factors")
+
+    if len(df) < 50:
+        cb("warning", 38, f"only {len(df)} bars, health report may be sparse")
+
+    fwd_returns = _build_forward_returns(df, horizon=1)
+    tracker = ICTracker(window=min(2000, len(df)))
+    health = FactorHealth(tracker)
+
+    n_factors = len(factor_registry.list())
+    all_status: list[FactorHealthStatus] = []
+    for i, name in enumerate(factor_registry.list()):
+        try:
+            fn = factor_registry.get(name)
+            if fn is None:
+                continue
+            vals = fn(df)
+            # 必须等长 (跟 ICTracker.update 严格校验一致)
+            n = min(len(vals), len(fwd_returns))
+            vals = np.asarray(vals, dtype=np.float64)[:n]
+            fr = fwd_returns[:n]
+            tracker.update(name, vals, fr)
+            status = health.evaluate(name)
+            all_status.append(status)
+        except Exception as e:
+            logger.warning(f"evaluate_factors: {name} failed: {e}")
+            all_status.append(FactorHealthStatus(factor=name, score=0.0, status="DEAD", n_obs=0))
+        if n_factors > 0 and (i + 1) % 5 == 0:
+            cb("evaluating", 35 + 50 * (i + 1) / n_factors, f"{i+1}/{n_factors} factors")
+
+    summary = {
+        "total": len(all_status),
+        "healthy": sum(1 for s in all_status if s.status == "HEALTHY"),
+        "watch": sum(1 for s in all_status if s.status == "WATCH"),
+        "decaying": sum(1 for s in all_status if s.status == "DECAYING"),
+        "unknown": sum(1 for s in all_status if s.status == "UNKNOWN"),
+    }
+    return {
+        **summary,
+        "factors": [s.to_dict() for s in all_status],
+    }
+
+
+def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
+    """把 evaluate_factors 返的 dict 落盘成 json (详细) + txt (可读)."""
+    import json
+    from pathlib import Path as _P
+
+    out_txt = _P(out_txt)
+    out_json = _P(out_json)
+    out_txt.parent.mkdir(parents=True, exist_ok=True)
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+
+    # json
+    out_json.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # txt — 人读报告
+    lines = ["=" * 72, "  FACTOR HEALTH REPORT", "=" * 72, ""]
+    s = {k: v for k, v in result.items() if k in ("total", "healthy", "watch", "decaying", "unknown")}
+    lines.append(f"  Summary: {s}")
+    lines.append("")
+    for status_name in ("HEALTHY", "WATCH", "DECAYING", "DEAD", "UNKNOWN"):
+        group = [f for f in result.get("factors", []) if f.get("status") == status_name]
+        if not group:
+            continue
+        lines.append(f"  {status_name} ({len(group)}):")
+        for f in sorted(group, key=lambda x: -x.get("score", 0)):
+            lines.append(
+                f"    {f.get('factor', '?'):25s} score={f.get('score', 0):5.1f}  "
+                f"rolling_ic={f.get('rolling_ic', 0):+.4f}  n_obs={f.get('n_obs', 0)}"
+            )
+        lines.append("")
+    lines.append("=" * 72)
+    out_txt.write_text("\n".join(lines), encoding="utf-8")

@@ -123,6 +123,11 @@ def main():
                         help='T15.5 enable DSL-discovered shadow/discovered factors as extra votes (default off)')
     parser.add_argument('--shadow-top-k', type=int, default=3,
                         help='T15.5 max top-K shadow factors to consume (default 3)')
+    # Phase 1.2: 新增 shadow_vote_weight CLI(原代码里无此 flag, 默认值在 strategies/multi_factor_m15.py 改 0→0.15)
+    parser.add_argument('--shadow-vote-weight', type=float, default=None,
+                        help='影子因子投票权重 (覆盖 RuntimeConfig.shadow_vote_weight, 默认 None=走 YAML/类默认)')
+    parser.add_argument('--runtime-config-path', type=str, default=None,
+                        help='RuntimeConfig YAML 路径 (默认 config/settings.yaml 的 runtime 段)')
 
     # FEAT-1 (audit 2026-06-04): 风险参数 CLI 透传, 覆盖 YAML 默认
     # 之前只能在 PaperTrader.__init__ hardcode, 改个参数要改代码
@@ -141,6 +146,23 @@ def main():
 
     setup_logging()
     logger.info(f"Starting in {args.mode} mode | {args.symbol} | {args.timeframe}")
+
+    # Phase 1.2: 把 CLI args 同步给 RuntimeConfig(单例)
+    # 设计: CLI 默认值改 None 是不破坏向后兼容的过渡; 当前只对新增的 --shadow-vote-weight 做覆盖
+    try:
+        from config import load_config
+        from config.runtime_config import RuntimeConfig, replace as rc_replace
+
+        yaml_path = args.runtime_config_path or "config/settings.yaml"
+        yaml_cfg = load_config(yaml_path)
+        rc = RuntimeConfig.from_yaml(yaml_cfg)
+        # CLI 覆盖: shadow_vote_weight
+        if args.shadow_vote_weight is not None:
+            rc.shadow_vote_weight = float(args.shadow_vote_weight)
+        rc_replace(rc)
+        logger.info(f"RuntimeConfig loaded from {yaml_path} (canary_min_oos_bars={rc.canary_min_oos_bars})")
+    except Exception as _rc_err:  # noqa: BLE001
+        logger.warning(f"RuntimeConfig load skipped: {_rc_err!r}")
 
     if args.mode == "dashboard":
         run_dashboard(args.port)

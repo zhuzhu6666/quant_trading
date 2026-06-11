@@ -143,8 +143,13 @@ class DBInserter:
             per_tf[r.timeframe] = {
                 "inserted_last": r.inserted,
                 "total_bars": r.total_db_bars,
+                "last_sync_utc": now_str,  # audit 2026-06-08: 前端"最近同步"栏需要
                 "error": r.error or "",
             }
+        # 旧条目没有 last_sync_utc 时回填 (一次全 sync 后所有 tf 都有)
+        for tf_name, info in per_tf.items():
+            if "last_sync_utc" not in info:
+                info["last_sync_utc"] = status.last_sync_utc if status and status.last_sync_utc else ""
 
         # Status string: error if any InsertResult has an error, or caller
         # passed a top-level error (e.g. "all tf pulls failed").

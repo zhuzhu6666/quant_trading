@@ -13,6 +13,7 @@ Schema:
 
 import logging
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -22,16 +23,33 @@ logger = logging.getLogger(__name__)
 
 
 class DataStore:
-    """时序数据存储"""
+    """时序数据存储 — 线程安全单例, 避免并发 _init_db 和 SQLite 锁争用。"""
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, db_path: str = "data/market_data.db"):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+                    cls._instance.db_path = None
+        return cls._instance
 
     def __init__(self, db_path: str = "data/market_data.db"):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        if self._initialized:
+            return
+        with self.__class__._lock:
+            if self._initialized:
+                return
+            self.db_path = Path(db_path)
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_db()
+            self._initialized = True
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=1.0)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -41,6 +59,9 @@ class DataStore:
 
     def _init_db(self):
         with self._conn() as conn:
+            # WAL 模式: 支持并发读写, 避免 live loop 线程和 API 同时读 SQLite 时阻塞5s
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bars (
                     symbol TEXT NOT NULL,
@@ -146,8 +167,20 @@ class DataStore:
             )
 
     def load_bars(self, symbol: str, timeframe: str,
-                  start: str | None = None, end: str | None = None) -> pd.DataFrame:
-        """加载历史bar → DataFrame"""
+                  start: str | None = None, end: str | None = None,
+                  limit: int | None = None) -> pd.DataFrame:
+        """加载历史bar → DataFrame.
+
+        Args:
+            symbol: 品种 (e.g. "XAUUSD+")
+            timeframe: 周期 (e.g. "M15")
+            start: ISO 时间字符串或 None
+            end: ISO 时间字符串或 None
+            limit: 最多返回 N 根 (None=全部). 与 start/end 组合时:
+                - 同时给 limit + (start/end): 仍下推到 SQL (反序+LIMIT 拿最近 N 段)
+                - 只给 limit: 拿最近 N 根 (SQL 反序 + LIMIT N, 再 Python 排正序)
+                - 不给 limit: 全部 (老行为)
+        """
         query = "SELECT * FROM bars WHERE symbol=? AND timeframe=?"
         params = [symbol, timeframe]
 
@@ -158,7 +191,12 @@ class DataStore:
             query += " AND time <= ?"
             params.append(int(pd.Timestamp(end).timestamp()))
 
-        query += " ORDER BY time ASC"
+        if limit is not None:
+            # ★ 反序 + LIMIT 拿最近 N 根, 走 idx_bars_sym_tf_time 索引
+            query += " ORDER BY time DESC LIMIT ?"
+            params.append(int(limit))
+        else:
+            query += " ORDER BY time ASC"
 
         with self._conn() as conn:
             df = pd.read_sql_query(query, conn, params=params)
@@ -166,6 +204,9 @@ class DataStore:
         if not df.empty:
             df["time"] = pd.to_datetime(df["time"], unit="s")
             df.set_index("time", inplace=True)
+            if limit is not None:
+                # 反序拉的, 排回正序保持向后兼容 (其它调用方期望升序)
+                df = df.sort_index()
         return df
 
     def insert_ticks(self, ticks: list[dict], symbol: str):

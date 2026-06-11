@@ -27,6 +27,7 @@ class PaperStartRequest(BaseModel):
     single_risk_usd: float | None = None
     include_shadow_factors: bool = False
     shadow_top_k: int = 3
+    strategy_id: str = "multi_factor_m15"  # audit 2026-06-08: 后端兜底默认 strategy 名字
 
 
 class PaperStopRequest(BaseModel):
@@ -72,5 +73,6 @@ def status(_user: RequireUser)-> dict:
         "started_at": st.started_at,
         "pid": st.pid,
         "config": st.config,
+        "strategy_id": st.strategy_id,
         "last_error": st.last_error,
     }

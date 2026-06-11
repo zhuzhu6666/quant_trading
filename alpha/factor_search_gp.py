@@ -1559,5 +1559,52 @@ def save_gp_result(result: GPResult, output_dir) -> Path:
 
 
 
+    return out_path
+
+
+# === module-level orchestrator (audit 2026-06-08) ===
+# scripts/discover_factors.py 一直 import 不存在的 run_gp_search.
+# 这里补 module-level wrapper, 内部用 FactorScoreEvaluator + FactorSearchGP 跑,
+# 返回 best list[ExpressionScore] 供 service 取 .name/.expr/.ic.
+def run_gp_search(
+    df,
+    pop: int = 100,
+    gen: int = 20,
+    top_k: int = 20,
+    progress_cb=None,
+):
+    """GP search orchestrator. progress_cb 签名 (step, pct, msg)."""
+    from alpha.factor_score_evaluator import FactorScoreEvaluator
+    import threading as _t
+    cb = progress_cb or (lambda *_: None)
+    cb("init_evaluator", 30, f"init FactorScoreEvaluator on {len(df)} bars")
+    evaluator = FactorScoreEvaluator(df, forward_period=1)
+    gp = FactorSearchGP(evaluator)
+    cb("running_gp", 35, f"GP search pop={pop} gen={gen}")
+
+    # 后台线程每 5s 发一次"仍在运行"进度 (GP 本身无进度回调)
+    _keepalive = True
+    def _progress_pinger():
+        pct = 38
+        while _keepalive:
+            import time as _t2
+            _t2.sleep(5)
+            if not _keepalive:
+                break
+            pct = min(pct + 4, 78)
+            cb("running_gp", pct, f"GP search {gen} gen...")
+
+    pinger = _t.Thread(target=_progress_pinger, daemon=True)
+    pinger.start()
+    try:
+        result = gp.run(pop_size=pop, n_generations=gen, top_k=top_k, verbose=False)
+    finally:
+        _keepalive = False
+
+    cb("done_gp", 80, f"got {len(result.best)} best expressions")
+    return result.best
+
+
+
 
     return out_path

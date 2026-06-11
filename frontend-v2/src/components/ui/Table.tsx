@@ -32,7 +32,7 @@ export function Table<T>({
 }: TableProps<T>) {
   if (loading) {
     return (
-      <div className="bg-[#1c2128] border border-border rounded-lg overflow-hidden">
+      <div className="bg-white border border-[#dce0e6] rounded-lg overflow-hidden">
         <Skeleton variant="table-row" count={5} className="m-3" />
       </div>
     );
@@ -40,22 +40,22 @@ export function Table<T>({
 
   if (data.length === 0) {
     return (
-      <div className="bg-[#1c2128] border border-border rounded-lg p-6 text-center text-sm text-fg-muted">
+      <div className="bg-white border border-[#dce0e6] rounded-lg p-6 text-center text-sm text-[#6e7681]">
         {emptyMessage}
       </div>
     );
   }
 
   return (
-    <div className={classNames("overflow-x-auto bg-[#1c2128] border border-border rounded-lg", className)}>
+    <div className={classNames("overflow-x-auto bg-white border border-[#dce0e6] rounded-lg", className)}>
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b border-border">
+          <tr className="border-b border-[#dce0e6]">
             {columns.map((col) => (
               <th
                 key={col.key}
                 className={classNames(
-                  "sticky top-0 bg-[#1c2128] text-xs text-fg-muted font-medium uppercase tracking-wider px-3 py-2.5",
+                  "sticky top-0 bg-white text-xs text-[#6e7681] font-medium uppercase tracking-wider px-3 py-2.5",
                   col.align === "right" && "text-right",
                   col.align === "center" && "text-center",
                   col.align === "left" && "text-left"
@@ -73,16 +73,16 @@ export function Table<T>({
               key={keyExtractor(item, idx)}
               onClick={() => onRowClick?.(item)}
               className={classNames(
-                "border-b border-border/50 transition-colors duration-150",
+                "border-b border-[#dce0e6]/50 transition-colors duration-150",
                 onRowClick && "cursor-pointer",
-                selectedKey === keyExtractor(item, idx) ? "bg-accent-muted" : "hover:bg-[#21262d]"
+                selectedKey === keyExtractor(item, idx) ? "bg-accent-muted" : "hover:bg-[#f5f7fa]"
               )}
             >
               {columns.map((col) => (
                 <td
                   key={col.key}
                   className={classNames(
-                    "px-3 py-2 text-[#e6edf3]",
+                    "px-3 py-2 text-[#1a1e24]",
                     col.align === "right" && "text-right num",
                     col.align === "center" && "text-center"
                   )}

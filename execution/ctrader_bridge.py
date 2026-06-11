@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -71,6 +72,23 @@ TIME_IN_FORCE = {
     "MARKET_ON_CLOSE": 4,
 }
 
+# cTrader depositAssetId → ISO currency code (audit 2026-06-08)
+# 完整列表见 cTrader Open API 文档 "ProtoOACurrencyId" enum.
+# 仅列 Pepperstone demo 常见 5 个; 其它 ID 走 fallback "ASSET_{id}" 字符串.
+_ASSET_ID_TO_CODE = {
+    1:  "USD",
+    2:  "EUR",
+    3:  "GBP",
+    4:  "JPY",
+    5:  "CHF",
+    6:  "AUD",
+    7:  "CAD",
+    8:  "NZD",
+    35: "AUD",  # cTrader 历史 ID 偏移
+    36: "GBP",
+    37: "USD",
+}
+
 
 # ── 主类 ────────────────────────────────────────────────
 
@@ -115,6 +133,14 @@ class CTraderBridge:
         self._symbol_id: int | None = None
         self._forced_symbol_id = forced_symbol_id  # ProtoOASymbol 无 name, 需外部指定 ID
         self._server_version: str = "v0"  # ★ VersionReq 拿, 给后续 Req clientMsgId 用
+        # audit 2026-06-08: 实时报价 (ProtoOASpotEvent 回调更新)
+        self._spot_price: float | None = None
+        self._spot_lock = threading.Lock()
+
+    def has_token(self) -> bool:
+        """检查必要凭证是否已设置 (client_id + client_secret + access_token).
+        用于 live_service 的 pre-flight 检查, 不做网络调用."""
+        return bool(self.client_id and self.client_secret and self.access_token)
 
     # ── 连接管理 ──
 
@@ -164,6 +190,8 @@ class CTraderBridge:
         self._conn_deferred: defer.Deferred = defer.Deferred()
         self._client.setConnectedCallback(lambda c: self._on_connected())
         self._client.setDisconnectedCallback(lambda c, r: self._on_disconnected(r))
+        # audit 2026-06-08: 注册消息回调, 用于接收 ProtoOASpotEvent 实时报价
+        self._client.setMessageReceivedCallback(lambda c, m: self._on_message(c, m))
         # Client service 也需 startService 触发连接尝试
         try:
             self._client.startService()
@@ -206,6 +234,43 @@ class CTraderBridge:
     def _on_disconnected(self, reason):
         logger.warning(f"cTrader Twisted: disconnected ({reason})")
         self._connected = False
+
+    def _on_message(self, client, message):
+        """ProtoOASpotEvent 回调: 更新 _spot_price (线程安全)."""
+        try:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
+            from ctrader_open_api import Protobuf
+            payload = Protobuf.extract(message)
+            if isinstance(payload, ProtoOASpotEvent):
+                bid = (payload.bid or 0) / (10 ** 2)  # moneyDigits=2 for XAUUSD
+                ask = (payload.ask or 0) / (10 ** 2)
+                with self._spot_lock:
+                    self._spot_price = (bid + ask) / 2.0
+        except Exception:
+            pass
+
+    def subscribe_spots(self, symbol_id: int | None = None) -> bool:
+        """订阅实时报价 (ProtoOASubscribeSpotsReq). 成功后 _on_message 会持续收到 spot event."""
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASubscribeSpotsReq
+        sid = symbol_id or self._symbol_id
+        if not sid:
+            logger.error("subscribe_spots: no symbol_id")
+            return False
+        try:
+            req = ProtoOASubscribeSpotsReq()
+            req.ctidTraderAccountId = self.account_id
+            req.symbolId.append(sid)
+            self._send(req, timeout=5.0)
+            logger.info(f"subscribe_spots OK for symbol_id={sid}")
+            return True
+        except Exception as e:
+            logger.warning(f"subscribe_spots failed: {e}")
+            return False
+
+    def get_spot_price(self) -> float | None:
+        """线程安全读最新 spot 价."""
+        with self._spot_lock:
+            return self._spot_price
 
     def disconnect(self):
         """停 client service + 关连接; reactor 留着(全局 reactor 不能跨进程 stop)"""
@@ -610,12 +675,31 @@ class CTraderBridge:
 
     # ── 账户 ──
 
+    def ping(self) -> bool:
+        """轻量探针: 发一个 ProtoOATraderReq 检查连接是否还活着.
+        成功返回 True; 超时/异常返回 False 并标记 _connected=False."""
+        if not self._connected:
+            return False
+        try:
+            req = TradeMsg.ProtoOATraderReq()
+            req.ctidTraderAccountId = self.account_id
+            self._send(req, timeout=5.0)
+            return True
+        except Exception:
+            self._connected = False
+            return False
+
     def account_info(self) -> dict:
         """
         查账户余额/净值.
 
-        ⚠️ ProtoOATrader 没有 equity/freeMargin 字段; 净值要等
-        ProtoOAGetPositionUnrealizedPnLReq 算 (本次 PoC 先回 balance + leverage).
+        ⚠️ ProtoOATrader 没有 equity/freeMargin 字段; 净值需要从持仓的
+        unrealized PnL 累加算出 (另发 ProtoOAGetPositionUnrealizedPnLReq).
+
+        v3 (2026-06-08): 加 _unrealized_pnl() 逐仓查浮动盈亏, 归入 equity.
+        若查询失败 (无持仓时跳空, 或 broker 不支持), 回退 balance.
+
+        Margin 同理: cTrader ProtoOAMarginReq 可查, v3 暂略, 返 0.0。
         """
         if not self.is_connected:
             return {}
@@ -624,20 +708,51 @@ class CTraderBridge:
             req.ctidTraderAccountId = self.account_id
             resp = self._send(req, timeout=10.0)
             t = resp.trader
+            balance = t.balance / 100.0  # cTrader balance 存 centi-unit
+            # equity = balance + 逐仓 unrealized PnL (centi-unit)
+            try:
+                unrealized = self._unrealized_pnl()
+            except Exception:
+                unrealized = 0.0
+            equity = balance + unrealized
+            login = t.traderLogin
+            currency = _ASSET_ID_TO_CODE.get(t.depositAssetId, f"ASSET_{t.depositAssetId}")
             return {
-                "balance": t.balance / 100.0,  # cTrader balance 存 centi-unit
-                "equity": None,                  # 需另查
-                "margin": None,
-                "margin_free": None,
-                "leverage": t.maxLeverage,        # 字段是 maxLeverage 不是 leverage
-                "leverage_in_cents": t.leverageInCents,  # 1 = 100x
-                "currency_asset_id": t.depositAssetId,   # 是 assetId int 不是 currency str
-                "swap_free": t.swapFree,
-                "trader_login": t.traderLogin,
+                "balance": balance,
+                "equity": equity,
+                "margin": 0.0,                # TODO: ProtoOAMarginReq
+                "margin_free": 0.0,           # TODO: ProtoOAMarginReq
+                "login": login,
+                "leverage": t.maxLeverage,
+                "currency": currency,
+                "swap_free": bool(t.swapFree),
             }
         except Exception as e:
             logger.error(f"account_info failed: {e}")
             return {}
+
+    def _unrealized_pnl(self) -> float:
+        """查所有持仓的浮动盈亏总和 (美元, 非 centi-unit).
+        0.0 = 无持仓或 broker 不支持.
+
+        ProtoOAGetPositionUnrealizedPnLRes 返 repeated {positionId,
+        grossUnrealizedPnL, netUnrealizedPnL}, 单位 centi-unit.
+        """
+        try:
+            req = TradeMsg.ProtoOAGetPositionUnrealizedPnLReq()
+            req.ctidTraderAccountId = self.account_id
+            resp = self._send(req, timeout=8.0)
+        except Exception:
+            return 0.0
+        money_digits = getattr(resp, "moneyDigits", 2) or 2
+        divisor = 10 ** money_digits
+        total = 0.0
+        for entry in resp.positionUnrealizedPnL:
+            # netUnrealizedPnL: 扣除佣金后的浮动盈亏
+            pnl = getattr(entry, "netUnrealizedPnL", 0)
+            if pnl:
+                total += pnl / divisor
+        return total
 
     def get_positions(self, symbol: str | None = None) -> list[dict]:
         """
@@ -695,9 +810,19 @@ class CTraderBridge:
         if self._symbol_id is None:
             logger.error("Symbol ID not resolved")
             return None
-        period_map = {"M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5, "M10": 10,
-                      "M15": 15, "M30": 30, "H1": 60, "H4": 240,
-                      "D1": 1440, "W1": 10080, "MN1": 43200}
+        period_map = {
+            "M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5,
+            "M10": 6, "M15": 7, "M30": 8, "H1": 9, "H4": 10,
+            "H12": 11, "D1": 12, "W1": 13, "MN1": 14,
+            # 一些 broker 用了非官方 enum (e.g. TICK=15, QUOTE=16) —
+            # 这里只列主流 14 个, 避免给 server 报 Unknown enum value.
+        }
+        # protobuf enum ≠ minutes; need actual minutes for fromTimestamp calc
+        period_minutes = {
+            "M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5,
+            "M10": 10, "M15": 15, "M30": 30, "H1": 60, "H4": 240,
+            "H12": 720, "D1": 1440, "W1": 10080, "MN1": 43200,
+        }
         period = period_map.get(timeframe)
         if period is None:
             logger.error(f"Unknown timeframe {timeframe}")
@@ -709,14 +834,19 @@ class CTraderBridge:
             logger.error("pandas not installed")
             return None
 
-        # 单次拉一批, cTrader count 上限 ~5000
+        # cTrader 用 range 协议: [fromTimestamp, toTimestamp] 内返所有 bar.
+        # 不传 req.count — 同时设 count + range 会被 server 拒 (audit 2026-06-08).
+        # n_bars 仅用于 fromTimestamp 计算 (保证不超最大范围).
+        # cTrader range 上限 ~5000 根; 超出时 server 仍会返, 但速度慢.
         req = TradeMsg.ProtoOAGetTrendbarsReq()
         req.ctidTraderAccountId = self.account_id
         req.symbolId = self._symbol_id
         req.period = period
-        req.count = min(n_bars, 5000)
         now_min = int(time.time() // 60)
-        req.fromTimestamp = now_min - n_bars * period
+        mins = period_minutes.get(timeframe, 15)
+        # 多取 10% 冗余, 防 server 内部边缘 case
+        lookback_bars = min(n_bars, 5000)
+        req.fromTimestamp = now_min - lookback_bars * mins
         req.toTimestamp = now_min
         try:
             resp = self._send(req, timeout=20.0)

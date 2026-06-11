@@ -16,7 +16,7 @@ export function Card({ children, title, subtitle, className, padding = "md", hov
     <Comp
       onClick={onClick}
       className={classNames(
-        "bg-[#1c2128] border border-border rounded-lg text-left text-[#e6edf3]",
+        "bg-white border border-[#dce0e6] rounded-lg text-left text-[#1a1e24]",
         hover && "transition-all duration-150 hover:shadow-card-hover hover:-translate-y-0.5",
         padding === "sm" ? "p-3" : "p-4",
         onClick && "cursor-pointer w-full",

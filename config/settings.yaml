@@ -92,3 +92,45 @@ monitor:
   websocket_port: 8051
   alert_channels: [log]         # log | dingtalk | wechat
   metrics_interval_seconds: 1
+
+# =============================================================================
+# RuntimeConfig (Phase 1.2) — 可热更新字段
+# 运行中任何修改通过 POST /api/control/runtime/reload 推送给所有 loop
+# 缺失字段使用 config/runtime_config.py 中的默认值
+# =============================================================================
+runtime:
+  # --- 影子因子 ---
+  shadow_vote_weight: 0.15
+  shadow_top_k: 3
+  shadow_recompute_every: 8
+  shadow_rank_window: 50
+  shadow_min_samples: 30
+
+  # --- 因子健康 ---
+  factor_health_healthy_threshold: 70.0
+  factor_health_watch_threshold: 40.0
+  factor_health_min_n_obs: 100
+  factor_health_ic_active_threshold: 0.02
+
+  # --- Canary ---
+  canary_min_oos_bars: 80
+  canary_min_oos_pnl: 0.0
+  canary_min_unreliable_count: 0
+
+  # --- 退役 ---
+  retire_decaying_days: 7
+  retire_grace_hours_severe: 24
+  retire_grace_hours_mild: 72
+  retire_severe_threshold: 30.0
+
+  # --- 调度 ---
+  scheduler_auto_discover_cron: "0 1 * * *"
+  scheduler_promote_cron: "30 1 * * *"
+  scheduler_drift_research_interval_min: 15
+  scheduler_dryrun_cron: "0 2 * * *"
+  scheduler_timezone: "UTC"
+
+  # --- 数据自给 ---
+  sync_interval_sec: 300
+  sync_recovery_max_attempts: 3
+

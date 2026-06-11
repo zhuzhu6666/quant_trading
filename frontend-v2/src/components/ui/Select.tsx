@@ -11,7 +11,7 @@ export function Select({ label, options, className, ...props }: SelectProps) {
       {label && <label className="text-xs text-fg-muted font-medium">{label}</label>}
       <select
         className={classNames(
-          "w-full bg-[#0d1117] border border-border rounded px-2.5 py-1.5 text-sm text-[#e6edf3]",
+          "w-full bg-white border border-[#dce0e6] rounded px-2.5 py-1.5 text-sm text-[#1a1e24]",
           "focus:border-accent focus:ring-1 focus:ring-accent/30 outline-none transition-colors duration-150",
           className
         )}

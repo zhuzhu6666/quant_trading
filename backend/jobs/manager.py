@@ -1,8 +1,11 @@
 """In-process job queue + state. Single-process, in-memory, not persisted (v1)."""
 import asyncio
 import inspect
+import json
 import threading
 import traceback
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
@@ -12,12 +15,13 @@ from backend.jobs.state import JobState, new_job_id
 
 
 class JobManager:
-    """Manages long-running tasks. v1: single process, in-memory dict.
+    """Manages long-running tasks. v1: single process, in-memory dict + JSONL persist.
 
-    Runs a dedicated background event loop in its own thread, so submit()
-    works from any caller (main thread, FastAPI threadpool, sync test
-    harness) without needing the caller's thread to have a running loop.
+    Persisted to data/charts/jobs.jsonl so jobs survive backend restart.
     """
+
+    PERSIST_PATH = Path("data/charts/jobs.jsonl")
+    MAX_PERSISTED = 200
 
     def __init__(self) -> None:
         self._jobs: dict[str, JobState] = {}
@@ -26,6 +30,7 @@ class JobManager:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._ensure_loop()
+        self._load_persisted()
 
     def _ensure_loop(self) -> None:
         with self._lock:
@@ -44,6 +49,60 @@ class JobManager:
             t.start()
             self._thread = t
             self._loop = loop
+
+    def _load_persisted(self) -> None:
+        """Load previously persisted jobs from JSONL into self._jobs."""
+        path = self.PERSIST_PATH
+        if not path.exists():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").strip().splitlines()
+        except Exception:
+            logger.warning("failed to read persisted jobs")
+            return
+        for line in lines[-self.MAX_PERSISTED:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            started_at = datetime.fromisoformat(data["started_at"].rstrip("Z")).replace(tzinfo=None)
+            finished_at = (
+                datetime.fromisoformat(data["finished_at"].rstrip("Z")).replace(tzinfo=None)
+                if data.get("finished_at") else None
+            )
+            js = JobState(
+                id=data["id"],
+                kind=data["kind"],
+                status=data["status"],
+                progress_pct=data.get("progress_pct", 0.0),
+                current_step=data.get("current_step", ""),
+                started_at=started_at,
+                finished_at=finished_at,
+                params=data.get("params", {}),
+                result=data.get("result"),
+                error=data.get("error"),
+                log_tail=data.get("log_tail", []),
+            )
+            self._jobs[js.id] = js
+
+    def _append_persisted(self, js: JobState) -> None:
+        """Append job to JSONL persist file, then trim to MAX_PERSISTED lines."""
+        path = self.PERSIST_PATH
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(str(path), "a", encoding="utf-8") as f:
+                f.write(json.dumps(js.to_dict(), ensure_ascii=False) + "\n")
+            lines = path.read_text(encoding="utf-8").strip().splitlines()
+            if len(lines) > self.MAX_PERSISTED:
+                path.write_text(
+                    "\n".join(lines[-self.MAX_PERSISTED:]) + "\n",
+                    encoding="utf-8",
+                )
+        except Exception:
+            logger.warning("failed to persist job {}", js.id)
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Optional: rebind to a specific loop (e.g. the FastAPI app loop).
@@ -116,6 +175,7 @@ class JobManager:
             from datetime import datetime
             js.finished_at = datetime.utcnow()
             self._tasks.pop(js.id, None)
+            self._append_persisted(js)
 
     def get(self, job_id: str) -> JobState | None:
         return self._jobs.get(job_id)

@@ -82,7 +82,7 @@ class MultiFactorM15Strategy(BaseStrategy):
         'shadow_recompute_every': 8,
         'shadow_rank_window': 50,
         'shadow_min_samples': 30,
-        'shadow_vote_weight': 0,  # 2026-06-03 校准: vw=1.0 在 OOS 拖累, vw=0=baseline (test_shadow_calibration.py 验证)
+        'shadow_vote_weight': 0,  # 2026-06-03 校准: vw=1.0 在 OOS 拖累, vw=0=baseline (test_shadow_calibration.py 验证); Phase 1.2 在此处不动默认,仅通过 RuntimeConfig/CLI shadow_vote_weight=0.15 热更
         'shadow_top_pct': 0.7,
         'shadow_bottom_pct': 0.3,
         # ── 事件 + 波动率过滤（默认关，可由 main.py 启用）──

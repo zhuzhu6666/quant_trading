@@ -196,3 +196,42 @@ class FactorSearch:
                 f"{elapsed:.1f}s ({result.avg_time_per_expr*1000:.1f}ms/expr)"
             )
         return result
+
+
+# ── module-level orchestrator (供 service 调用) ─────────────────────
+# audit 2026-06-08: scripts/discover_factors.py 一直 import 不存在的
+# run_random_search. 这里补 module-level wrapper, 内部用 FactorScoreEvaluator
+# + FactorSearch 跑, 返回 top_k list[ExpressionScore] 供 service 取 .name/.expr/.ic.
+def run_random_search(
+    df: "pd.DataFrame",
+    n: int = 1000,
+    top_k: int = 50,
+    progress_cb: "Optional[Callable[[str, float, str], None]]" = None,
+) -> list:
+    """随机搜索 n 个候选, 返 top_k ExpressionScore 列表.
+    progress_cb 签名 (step, pct, msg)."""
+    from alpha.factor_score_evaluator import FactorScoreEvaluator
+    cb = progress_cb or (lambda *_: None)
+    cb("init_evaluator", 30, f"init FactorScoreEvaluator on {len(df)} bars")
+    evaluator = FactorScoreEvaluator(df, forward_period=1)
+    search = FactorSearch(evaluator)
+    cb("running", 35, f"random_search n={n} top_k={top_k}")
+    # 后台线程每 5s 发一次进度 (random_search 本身无进度回调)
+    import threading as _t
+    _keepalive = True
+    def _pinger():
+        pct = 38
+        while _keepalive:
+            import time
+            time.sleep(5)
+            if not _keepalive: break
+            pct = min(pct + 5, 78)
+            cb("running", pct, f"random search {n} cand...")
+    pinger = _t.Thread(target=_pinger, daemon=True)
+    pinger.start()
+    try:
+        result = search.random_search(n_candidates=n, top_k=top_k, verbose=False)
+    finally:
+        _keepalive = False
+    cb("done_search", 80, f"got {len(result.top_k)} valid expressions")
+    return result.top_k

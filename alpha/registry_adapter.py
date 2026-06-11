@@ -201,12 +201,38 @@ class RegistryAdapter:
     # ── 事件日志 ───────────────────────────────────────────────
 
     def _log_event(self, event: FactorLifecycleEvent):
-        """落盘 jsonl 事件流 (append-only)"""
+        """落盘 jsonl 事件流 (append-only) + 联动 EvolutionStory / Metrics"""
         try:
             with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
         except Exception as e:
             logger.warning(f"[RegistryAdapter] 写事件日志失败: {e}")
+        # Phase 2.0 接入层:同步广播到 EvolutionStory + RuntimeState(可观测,失败不抛)
+        try:
+            from monitor.evolution_story import EvolutionStory
+
+            EvolutionStory.shared().append(
+                event.event,
+                {
+                    "factor": event.factor,
+                    "source": event.source,
+                    "description": event.description,
+                    "score": event.score,
+                    "status": event.status,
+                    "reason": event.reason,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("EvolutionStory.append skipped", exc_info=True)
+        try:
+            from backend.runtime.runtime_state import RuntimeState
+
+            RuntimeState.shared().emit_metric(
+                "factor_lifecycle_events_total",
+                {"event": event.event, "source": event.source or "unknown"},
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("RuntimeState.emit_metric skipped", exc_info=True)
 
     def read_events(self, n: int = 100) -> list[dict]:
         """读最近 n 条事件 (从 jsonl)"""

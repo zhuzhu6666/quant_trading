@@ -1,61 +1,73 @@
-"""Shadow factor service — read/promote/demote via alpha/persistent_registry.jsonl."""
-import json
-from datetime import datetime, timezone
-from pathlib import Path
+"""Shadow factor service — read/promote/demote via alpha/registry_adapter.
+
+audit 2026-06-08: 之前版本写到 shadow_factors.jsonl, 但业务代码 (策略的
+_load_shadow_factors) 真正读的是 factor_lifecycle_log.jsonl, promote/demote
+对 strategy 完全静默无效. 重写后直接用 RegistryAdapter:
+  - promote: shadow → discovered, 改 _meta + 落 lifecycle log
+  - demote:  unregister, builtin 受保护
+  - list:    RegistryAdapter.list_by_source(SOURCE_SHADOW) + get_meta 拿详情
+"""
+from __future__ import annotations
+
+import logging
 from typing import Any
 
-from backend.core.paths import CHARTS_DIR
+from alpha.registry_adapter import (
+    RegistryAdapter,
+    SOURCE_SHADOW,
+    SOURCE_DISCOVERED,
+)
+
+logger = logging.getLogger(__name__)
 
 
-# Shadow factors are persisted in a jsonl log; each line is a JSON record.
-SHADOW_LOG = CHARTS_DIR / "shadow_factors.jsonl"
-
-
-def _read_log() -> list[dict]:
-    if not SHADOW_LOG.exists():
-        return []
-    out = []
-    for line in SHADOW_LOG.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            continue
-    return out
+def _get_adapter() -> RegistryAdapter:
+    """每次调用都新建一个 RegistryAdapter — 简单可靠.
+    内部 _meta dict 是 in-process state, 跟其它 service 共享 (singleton 不会).
+    注意: persistent_registry 启动时也会构造一个, 不会冲突 (RegistryAdapter
+    只读 factor_registry 共享 dict, _meta 各管各的)."""
+    return RegistryAdapter()
 
 
 def list_shadows() -> list[dict]:
-    """Return current shadow factors, deduplicated by name (latest entry wins)."""
-    entries = _read_log()
-    by_name: dict[str, dict] = {}
-    for e in entries:
-        name = e.get("name")
-        if not name:
-            continue
-        by_name[name] = e
-    return list(by_name.values())
+    """返回所有 SOURCE_SHADOW 因子 + 它们的 meta 信息."""
+    adapter = _get_adapter()
+    names = adapter.list_by_source(SOURCE_SHADOW)
+    out: list[dict] = []
+    for name in names:
+        meta = adapter.get_meta(name)
+        out.append({
+            "name": name,
+            "source": meta.get("source", SOURCE_SHADOW),
+            "description": meta.get("description", ""),
+            "register_time": meta.get("register_time"),
+        })
+    return out
 
 
 def promote(name: str) -> dict:
-    """Mark a shadow factor as promoted to active."""
-    return _mutate(name, "active", "promote")
+    """把 shadow 因子晋升到 discovered (改 source + 落 lifecycle log)."""
+    adapter = _get_adapter()
+    if name not in adapter._meta:
+        return {"name": name, "ok": False, "error": f"factor {name!r} not in registry"}
+    if adapter._meta[name].get("source") == SOURCE_DISCOVERED:
+        return {"name": name, "ok": True, "new_status": SOURCE_DISCOVERED, "msg": "already discovered"}
+    ok = adapter.promote(name, new_source=SOURCE_DISCOVERED, reason="manual promote via /api/shadow/promote")
+    if not ok:
+        return {"name": name, "ok": False, "error": "promote() returned False (builtin or already in target state)"}
+    return {"name": name, "ok": True, "new_status": SOURCE_DISCOVERED}
 
 
 def demote(name: str) -> dict:
-    """Mark a shadow factor as demoted (kept in log but flagged shadow)."""
-    return _mutate(name, "shadow", "demote")
-
-
-def _mutate(name: str, new_status: str, action: str) -> dict:
-    CHARTS_DIR.mkdir(parents=True, exist_ok=True)
-    record = {
-        "name": name,
-        "status": new_status,
-        "action": action,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    }
-    with SHADOW_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return {"name": name, "new_status": new_status, "ok": True}
+    """从 registry 移除一个非 builtin 因子.
+    builtin 会受 RegistryAdapter.unregister 保护, 自动跳过."""
+    adapter = _get_adapter()
+    if name not in adapter._meta:
+        return {"name": name, "ok": False, "error": f"factor {name!r} not in registry"}
+    source = adapter._meta[name].get("source", "builtin")
+    if source == "builtin":
+        return {"name": name, "ok": False, "error": "cannot demote builtin factor (protected)"}
+    ok = adapter.unregister(name, reason="manual demote via /api/shadow/demote")
+    if not ok:
+        return {"name": name, "ok": False, "error": "unregister() returned False"}
+    return {"name": name, "ok": True, "new_status": "removed"}

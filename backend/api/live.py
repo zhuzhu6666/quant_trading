@@ -33,6 +33,7 @@ router = APIRouter(prefix="/api/live", tags=["live"])
 
 class StartRequest(BaseModel):
     broker: str = "mt5"  # "mt5" | "ctrader"
+    strategy_name: str = "v1_minimal_ma_cross"  # audit 2026-06-08: v1 loop 没真装 strategy, 仅记录名
 
 
 class EmergencyCloseRequest(BaseModel):
@@ -69,7 +70,7 @@ def start(_user: RequireUser, req: StartRequest) -> dict:
     """Spawn `python main.py --mode live` as a background subprocess.
     Refuses if a loop is already running. Requires the broker to be reachable
     (verified via get_account first)."""
-    return start_loop(req.broker)
+    return start_loop(req.broker, strategy_name=req.strategy_name)
 
 
 @router.post("/stop")

@@ -1,23 +1,21 @@
 @echo off
-REM Quant Web Console — full launcher (backend :8000 + frontend :3000)
 setlocal
-set PROJECT_ROOT=%~dp0
-set PYTHON=C:\Users\zhu\AppData\Local\Programs\Python\Python312\python.exe
+set PY=C:\Users\zhu\AppData\Local\Programs\Python\Python312\python.exe
 
-cd /d %PROJECT_ROOT%
+cd /d C:\Users\zhu\quant_trading
 
-REM 1) Backend (minimized window)
-echo === Starting Quant Backend (port 8000) ===
-start "Quant Backend" /min cmd /c "%PYTHON% -m backend --port 8000"
+echo 1/3 Cleaning old backend...
+taskkill /F /FI "WINDOWTITLE eq Quant Backend" >nul 2>&1
 
-REM 2) Wait for backend to be ready
-timeout /t 4 /nobreak >nul
+echo 2/3 Starting backend...
+start "Quant Backend" /B "%PY%" -m backend --port 8000
 
-REM 3) Frontend (foreground, blocks terminal; user Ctrl+C to stop)
-echo === Starting Quant Frontend (port 3000) ===
-cd /d %PROJECT_ROOT%frontend
-call npm run dev
+echo 3/3 Starting frontend (Vite :5173)...
+cd /d %~dp0frontend-v2
+call npx vite
 
-REM When frontend exits, backend window continues running
-echo === Frontend exited; backend window continues. Run stop.bat to kill backend. ===
+echo Cleaning up backend...
+taskkill /F /FI "WINDOWTITLE eq Quant Backend" >nul 2>&1
+echo Done.
+pause
 endlocal

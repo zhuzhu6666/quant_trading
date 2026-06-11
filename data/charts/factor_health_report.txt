@@ -2,79 +2,77 @@
   FACTOR HEALTH REPORT
 ========================================================================
 
-  HEALTHY (2 factors):
-    gld_tonnes_zscore_60d     score= 95.2  rolling_ic=+0.0359  n_obs=5000
-    cot_mm_net_pct_oi         score= 83.8  rolling_ic=+0.0334  n_obs=5000
+  Summary: {'total': 65, 'healthy': 0, 'watch': 39, 'decaying': 4, 'unknown': 22}
 
-  WATCH (45 factors):
-    dsl_auto_86209368_000     score= 69.8  rolling_ic=-0.0390  n_obs=5000
-    dsl_auto_72708830_004     score= 69.7  rolling_ic=-0.0340  n_obs=5000
-    dsl_auto_75250843_005     score= 69.7  rolling_ic=-0.0340  n_obs=5000
-    dsl_auto_69631333_000     score= 69.7  rolling_ic=-0.0341  n_obs=5000
-    dsl_auto_62286703_001     score= 69.7  rolling_ic=-0.0341  n_obs=5000
-    dsl_auto_19374334_002     score= 69.7  rolling_ic=-0.0341  n_obs=5000
-    dsl_auto_20158887_003     score= 69.7  rolling_ic=-0.0341  n_obs=5000
-    cot_mm_net_zscore_52w     score= 68.5  rolling_ic=+0.0250  n_obs=5000
-    dsl_auto_47246327_004     score= 68.1  rolling_ic=-0.0361  n_obs=5000
-    atr_ratio                 score= 67.8  rolling_ic=+0.0258  n_obs=5000
-    dsl_auto_81658513_000     score= 67.8  rolling_ic=-0.0351  n_obs=5000
-    dsl_auto_18527312_001     score= 67.8  rolling_ic=-0.0351  n_obs=5000
-    dsl_auto_89757829_002     score= 67.2  rolling_ic=-0.0357  n_obs=5000
-    dsl_auto_91538397_001     score= 67.2  rolling_ic=-0.0356  n_obs=5000
-    dsl_90758882_000          score= 67.1  rolling_ic=-0.0360  n_obs=5000
-    dsl_82875133_002          score= 67.0  rolling_ic=-0.0348  n_obs=5000
-    dsl_auto_12577498_002     score= 67.0  rolling_ic=-0.0370  n_obs=5000
-    keltner_width             score= 66.9  rolling_ic=+0.0248  n_obs=5000
-    dsl_auto_23654537_003     score= 66.8  rolling_ic=-0.0362  n_obs=5000
-    dsl_auto_53052042_003     score= 66.3  rolling_ic=-0.0350  n_obs=5000
-    dsl_33138906_000          score= 66.2  rolling_ic=-0.0341  n_obs=5000
-    slv_tonnes_chg_20d        score= 65.9  rolling_ic=+0.0296  n_obs=5000
-    dsl_42869207_001          score= 65.7  rolling_ic=-0.0350  n_obs=5000
-    dsl_auto_88862838_006     score= 65.0  rolling_ic=-0.0361  n_obs=5000
-    dsl_auto_63375114_000     score= 65.0  rolling_ic=-0.0390  n_obs=5000
-    dsl_auto_12239720_001     score= 65.0  rolling_ic=-0.0390  n_obs=5000
-    dsl_auto_29911534_002     score= 65.0  rolling_ic=-0.0390  n_obs=5000
-    dsl_auto_65421034_003     score= 65.0  rolling_ic=-0.0389  n_obs=5000
-    dsl_auto_14076536_004     score= 64.9  rolling_ic=-0.0388  n_obs=5000
-    gld_tonnes_pct_20d        score= 61.2  rolling_ic=+0.0199  n_obs=5000
-    bb_width                  score= 60.3  rolling_ic=+0.0289  n_obs=5000
-    cot_mm_net_chg_4w         score= 53.8  rolling_ic=+0.0137  n_obs=5000
-    di_spread                 score= 53.5  rolling_ic=+0.0111  n_obs=5000
-    cot_pm_net                score= 53.0  rolling_ic=+0.0126  n_obs=5000
-    slv_gld_ratio             score= 50.7  rolling_ic=+0.0110  n_obs=5000
-    silver_gold_holdings_ratio score= 50.4  rolling_ic=+0.0103  n_obs=5000
-    cb_total_chg_3m           score= 44.9  rolling_ic=+0.0045  n_obs=5000
-    cb_russia_chg_3m          score= 44.9  rolling_ic=+0.0045  n_obs=5000
-    day_of_week               score= 44.6  rolling_ic=-0.0098  n_obs=5000
-    dsl_f2                    score= 43.3  rolling_ic=-0.0209  n_obs=5000
-    dxy_corr_20               score= 43.1  rolling_ic=-0.0383  n_obs=5000
-    real_yield_pct_rank       score= 41.9  rolling_ic=-0.0160  n_obs=5000
-    gld_tonnes_chg_20d        score= 41.5  rolling_ic=+0.0125  n_obs=5000
-    hours_to_nfp              score= 41.2  rolling_ic=-0.0145  n_obs=5000
-    supertrend_str            score= 40.5  rolling_ic=-0.0170  n_obs=5000
+  WATCH (39):
+    engulfing                 score= 68.7  rolling_ic=-0.0320  n_obs=2000
+    bb_width                  score= 68.3  rolling_ic=+0.0053  n_obs=2000
+    hour_utc                  score= 65.3  rolling_ic=+0.0222  n_obs=2000
+    keltner_width             score= 65.1  rolling_ic=+0.0113  n_obs=2000
+    vol_ma_ratio              score= 62.3  rolling_ic=-0.0709  n_obs=2000
+    dsl_f2                    score= 62.1  rolling_ic=-0.0072  n_obs=2000
+    stoch_k                   score= 61.4  rolling_ic=-0.0252  n_obs=2000
+    rsi_14                    score= 60.4  rolling_ic=-0.0153  n_obs=2000
+    dsl_auto_86209368_000     score= 59.5  rolling_ic=-0.0171  n_obs=2000
+    di_spread                 score= 59.1  rolling_ic=-0.0187  n_obs=2000
+    atr_ratio                 score= 58.6  rolling_ic=+0.0036  n_obs=2000
+    macd_hist                 score= 57.9  rolling_ic=+0.0101  n_obs=2000
+    dsl_auto_63375114_000     score= 55.5  rolling_ic=-0.0159  n_obs=2000
+    dsl_auto_12239720_001     score= 55.5  rolling_ic=-0.0159  n_obs=2000
+    dsl_auto_29911534_002     score= 55.5  rolling_ic=-0.0159  n_obs=2000
+    dsl_auto_65421034_003     score= 55.5  rolling_ic=-0.0159  n_obs=2000
+    dsl_auto_14076536_004     score= 55.5  rolling_ic=-0.0159  n_obs=2000
+    dsl_auto_18527312_001     score= 55.2  rolling_ic=-0.0162  n_obs=2000
+    dsl_auto_69631333_000     score= 54.4  rolling_ic=-0.0154  n_obs=2000
+    dsl_auto_62286703_001     score= 54.4  rolling_ic=-0.0154  n_obs=2000
+    dsl_auto_81658513_000     score= 54.4  rolling_ic=-0.0158  n_obs=2000
+    dsl_auto_19374334_002     score= 54.4  rolling_ic=-0.0155  n_obs=2000
+    dsl_auto_20158887_003     score= 54.4  rolling_ic=-0.0155  n_obs=2000
+    dsl_auto_72708830_004     score= 54.3  rolling_ic=-0.0155  n_obs=2000
+    dsl_auto_75250843_005     score= 54.3  rolling_ic=-0.0156  n_obs=2000
+    dsl_auto_47246327_004     score= 53.6  rolling_ic=-0.0154  n_obs=2000
+    dsl_42869207_001          score= 53.1  rolling_ic=-0.0133  n_obs=2000
+    dsl_auto_53052042_003     score= 52.2  rolling_ic=-0.0147  n_obs=2000
+    dsl_82875133_002          score= 51.3  rolling_ic=-0.0152  n_obs=2000
+    dsl_auto_23654537_003     score= 51.2  rolling_ic=-0.0153  n_obs=2000
+    dsl_auto_12577498_002     score= 51.2  rolling_ic=-0.0170  n_obs=2000
+    dsl_auto_88862838_006     score= 51.1  rolling_ic=-0.0131  n_obs=2000
+    dsl_33138906_000          score= 50.5  rolling_ic=-0.0117  n_obs=2000
+    dsl_90758882_000          score= 50.3  rolling_ic=-0.0170  n_obs=2000
+    dsl_auto_89757829_002     score= 50.2  rolling_ic=-0.0150  n_obs=2000
+    dsl_auto_91538397_001     score= 50.2  rolling_ic=-0.0150  n_obs=2000
+    ema_slope                 score= 46.5  rolling_ic=+0.0128  n_obs=2000
+    day_of_week               score= 46.4  rolling_ic=-0.0152  n_obs=2000
+    pin_bar                   score= 45.5  rolling_ic=-0.0265  n_obs=2000
 
-  DECAYING (18 factors):
-    engulfing                 score= 39.2  rolling_ic=+0.0078  n_obs=5000
-    macd_hist                 score= 36.3  rolling_ic=-0.0130  n_obs=5000
-    pin_bar                   score= 34.0  rolling_ic=+0.0060  n_obs=5000
-    obv_slope                 score= 32.4  rolling_ic=+0.0078  n_obs=5000
-    ema_slope                 score= 30.4  rolling_ic=-0.0093  n_obs=5000
-    cot_extreme_signal        score= 29.5  rolling_ic=+0.0049  n_obs=5000
-    stoch_k                   score= 25.8  rolling_ic=-0.0124  n_obs=5000
-    gld_tonnes_chg_5d         score= 24.2  rolling_ic=-0.0066  n_obs=5000
-    adx                       score= 24.0  rolling_ic=+0.0055  n_obs=5000
-    inside_bar                score= 23.6  rolling_ic=-0.0064  n_obs=5000
-    rsi_14                    score= 23.5  rolling_ic=-0.0001  n_obs=5000
-    hour_utc                  score= 22.6  rolling_ic=-0.0017  n_obs=5000
-    hours_to_fomc             score= 21.5  rolling_ic=+0.0013  n_obs=5000
-    cot_mm_net                score= 20.5  rolling_ic=+0.0075  n_obs=5000
-    cb_china_chg_3m           score= 20.0  rolling_ic=+nan  n_obs=5000
-    cb_china_3m_zscore        score= 20.0  rolling_ic=+nan  n_obs=5000
-    vol_ma_ratio              score= 18.1  rolling_ic=-0.0052  n_obs=5000
-    real_yield_chg            score= 16.9  rolling_ic=+0.0005  n_obs=5000
+  DECAYING (4):
+    inside_bar                score= 31.0  rolling_ic=+0.0129  n_obs=2000
+    supertrend_str            score= 26.9  rolling_ic=-0.0091  n_obs=2000
+    obv_slope                 score= 25.9  rolling_ic=+0.0091  n_obs=2000
+    adx                       score= 21.4  rolling_ic=-0.0037  n_obs=2000
 
-------------------------------------------------------------------------
-  Active threshold: score >= 70.0
-  Watch threshold:  40.0 <= score < 70.0
-  Decaying:         score < 40.0
+  UNKNOWN (22):
+    dxy_corr_20               score=  0.0  rolling_ic=+0.0000  n_obs=0
+    slv_gld_ratio             score=  0.0  rolling_ic=+0.0000  n_obs=0
+    real_yield_chg            score=  0.0  rolling_ic=+0.0000  n_obs=0
+    hours_to_fomc             score=  0.0  rolling_ic=+0.0000  n_obs=0
+    hours_to_nfp              score=  0.0  rolling_ic=+0.0000  n_obs=0
+    gld_tonnes_chg_5d         score=  0.0  rolling_ic=+0.0000  n_obs=0
+    gld_tonnes_chg_20d        score=  0.0  rolling_ic=+0.0000  n_obs=0
+    gld_tonnes_pct_20d        score=  0.0  rolling_ic=+0.0000  n_obs=0
+    gld_tonnes_zscore_60d     score=  0.0  rolling_ic=+0.0000  n_obs=0
+    slv_tonnes_chg_20d        score=  0.0  rolling_ic=+0.0000  n_obs=0
+    silver_gold_holdings_ratio score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cb_total_chg_3m           score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cb_china_chg_3m           score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cb_russia_chg_3m          score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cb_china_3m_zscore        score=  0.0  rolling_ic=+0.0000  n_obs=0
+    real_yield_pct_rank       score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cot_mm_net                score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cot_mm_net_pct_oi         score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cot_mm_net_chg_4w         score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cot_mm_net_zscore_52w     score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cot_pm_net                score=  0.0  rolling_ic=+0.0000  n_obs=0
+    cot_extreme_signal        score=  0.0  rolling_ic=+0.0000  n_obs=0
+
 ========================================================================

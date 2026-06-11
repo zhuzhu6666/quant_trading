@@ -69,9 +69,9 @@ def start_daemon(
     cb("loading", 5, f"starting daemon interval={interval_seconds}s timeframes={timeframes}")
 
     from data.live_sync import daemon
-    handle = daemon.start(interval_seconds=interval_seconds, timeframes=timeframes)
-    cb("started", 100, f"daemon started pid={handle.pid if hasattr(handle, 'pid') else '?'}")
-    return {"daemon_pid": getattr(handle, "pid", None), "started_at": handle.started_at if hasattr(handle, "started_at") else None}
+    result = daemon.start(interval_seconds=interval_seconds, timeframes=timeframes)
+    cb("started", 100, f"daemon started pid={result.get('daemon_pid', '?')}")
+    return result
 
 
 def stop_daemon(progress_cb: Optional[Callable[[str, float, str], None]] = None) -> dict:
@@ -79,9 +79,9 @@ def stop_daemon(progress_cb: Optional[Callable[[str, float, str], None]] = None)
     cb = progress_cb or (lambda *_: None)
     cb("loading", 5, "stopping daemon")
     from data.live_sync import daemon
-    last_run = daemon.stop()
+    result = daemon.stop()
     cb("stopped", 100, "daemon stopped")
-    return {"stopped": True, "last_run": last_run}
+    return result
 
 
 # Aliases (Phase 3 backend used these names; preserve compatibility)

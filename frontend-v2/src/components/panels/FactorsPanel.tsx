@@ -80,7 +80,7 @@ export default function FactorsPanel() {
             key={t}
             onClick={() => setTab(t)}
             className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all duration-200 ${
-              tab === t ? "bg-white shadow-sm text-fg" : "text-fg-muted hover:text-fg"
+              tab === t ? "bg-[#d4edda] text-[#1a1e24]" : "bg-[#dce0e6] text-[#4a4f59] hover:bg-[#d0d5dd] hover:text-[#1a1e24]"
             }`}
           >
             {t === "factors" ? "因子健康" : t === "discover" ? "因子发现" : "影子因子"}
@@ -167,10 +167,10 @@ function FactorsContent() {
               ? "success"
               : f.status === "WATCH"
                 ? "warning"
-                : "danger"
-          }
-        >
-          {f.status}
+                : "default"
+                }
+                >
+                {f.status}
         </Badge>
       ),
     },
@@ -220,10 +220,11 @@ function FactorsContent() {
           ▶ 重新评估
         </Button>
         {report && (
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <Badge variant="success">{report.healthy} HEALTHY</Badge>
             <Badge variant="warning">{report.watch} WATCH</Badge>
             <Badge variant="danger">{report.decaying} DECAYING</Badge>
+            {(() => { const n = report.factors?.filter((f: any) => !['HEALTHY','WATCH','DECAYING'].includes(f.status)).length; return n > 0 ? <Badge variant="default">{n} UNKNOWN</Badge> : null })()}
           </div>
         )}
       </div>

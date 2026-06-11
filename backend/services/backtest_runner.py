@@ -52,32 +52,39 @@ def _run_single_backtrader_pass(
 ) -> dict:
     """Run one backtrader pass with given params. Returns one row dict.
 
-    NOTE: This is a stub for v1. Full backtrader optstrategy wiring (i.e. the
-    _ScanStrategy class with RSI/DI/Stoch/MACD/BB/ATR signals from
-    main.py:run_backtest) is intentionally deferred — see Phase 4.7+ plan.
-
-    We return a placeholder row with a `note` field so downstream code
-    (JobManager, API) can detect the stub state and so the sweep completes
-    fast without spawning a subprocess. Real PnL still requires the CLI
-    `python main.py --mode backtest`.
-    """
+    audit 2026-06-08: 替换之前的 stub, 改调 strategies.backtest_strategy.run_one
+    做真实回测. 跟 main.py:run_backtest 的 _run_one 共用同一套逻辑."""
     cb = progress_cb or (lambda *_: None)
-    cb("running", 50, f"sl={sl_atr} tp={tp_atr} cd={cooldown_bars}: backtrader pass (stub)")
+    cb("running", 50, f"sl={sl_atr} tp={tp_atr} cd={cooldown_bars}")
+
+    from strategies.backtest_strategy import run_one, INITIAL_BALANCE
+
+    # 分割 train/test (跟 main.py:run_backtest 一致, 70/30)
+    n = len(df)
+    split_idx = int(n * 0.7)
+    df_train = df.iloc[:split_idx].copy()
+    df_test = df.iloc[split_idx:].copy()
+
+    try:
+        train_r = run_one(df_train, sl_atr, tp_atr, cooldown_bars, risk_pct, initial_balance)
+        test_r = run_one(df_test, sl_atr, tp_atr, cooldown_bars, risk_pct, initial_balance)
+    except Exception as e:
+        cb("error", 50, f"backtrader pass failed: {e}")
+        return {
+            "sl_atr": sl_atr, "tp_atr": tp_atr, "cooldown_bars": cooldown_bars,
+            "trades": 0, "win_rate": 0.0, "net_pnl": 0.0, "total_return": 0.0,
+            "sharpe": 0.0, "max_drawdown": 0.0, "error": str(e),
+        }
+
+    train_ret = train_r.get("total_return", 0)
+    decay = (test_r["total_return"] / train_ret) if train_ret != 0 else float("-inf")
 
     return {
-        "sl_atr": sl_atr,
-        "tp_atr": tp_atr,
-        "cooldown_bars": cooldown_bars,
-        "trades": 0,
-        "win_rate": 0.0,
-        "net_pnl": 0.0,
-        "total_return": 0.0,
-        "sharpe": 0.0,
-        "max_drawdown": 0.0,
-        "total_return_test": 0.0,
-        "trades_test": 0,
-        "decay": 0.0,
-        "note": "in-process stub; full backtrader optstrategy wiring is Phase 4.7+",
+        "sl_atr": sl_atr, "tp_atr": tp_atr, "cooldown_bars": cooldown_bars,
+        **train_r,
+        "total_return_test": test_r["total_return"],
+        "trades_test": test_r["trades"],
+        "decay": decay,
     }
 
 

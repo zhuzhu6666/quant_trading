@@ -1,10 +1,11 @@
 """GET /api/market/bars?symbol=&timeframe=&from=&to= — K-line data."""
 from typing import Literal
 
+import pandas as pd
 from fastapi import APIRouter, Query
-from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
+from backend.core.auth import RequireUser
 from data.store import DataStore
 
 router = APIRouter(prefix="/api/market", tags=["market"])
@@ -47,9 +48,15 @@ def get_bars(
     to_ts: int | None = Query(None, alias="to"),
     limit: int = 5000,
 ) -> BarsResponse:
-    """Fetch K-line bars. If from/to not given, return last `limit` bars."""
+    """Fetch K-line bars. If from/to not given, return last `limit` bars.
+
+    audit 2026-06-10: 之前 load_bars 没下推 LIMIT, 每次都拉全表 50K 行 + Python tail,
+    切 K 线 tab 阻塞 1-3s. 现改透传 limit/start/end 到 SQL.
+    """
     store = _get_store()
-    df = store.load_bars(symbol, timeframe)
+    start_iso = pd.Timestamp(from_ts, unit="s").isoformat() if from_ts is not None else None
+    end_iso = pd.Timestamp(to_ts, unit="s").isoformat() if to_ts is not None else None
+    df = store.load_bars(symbol, timeframe, start=start_iso, end=end_iso, limit=limit)
     if df.empty:
         return BarsResponse(bars=[], total=0, range={"from": 0, "to": 0})
 
@@ -60,26 +67,6 @@ def get_bars(
     # because integer-dividing a 2026 unix-second by 1e9 gives 1. Verified
     # the real dtype by importing DataStore directly and inspecting
     # df.index.dtype.)
-    times = df.index.astype("int64")
-    if from_ts is not None:
-        mask = times >= from_ts
-        df = df[mask]
-        times = times[mask]
-    if to_ts is not None:
-        mask = times <= to_ts
-        df = df[mask]
-        times = times[mask]
-    if limit and len(df) > limit:
-        df = df.tail(limit)
-        # (audit v7-fix-1: v5 vectorized refactor left `times` at its original
-        # full length while `df` was tail-trimmed, so `times[-limit:]` was
-        # misaligned with the trimmed df. The two arrays must stay parallel;
-        # recompute `times` from the trimmed df.index to be safe.)
-        times = df.index.astype("int64")
-
-    # Vectorized: convert columns to numpy arrays once, then build Bar objects in a
-    # single tight Python loop. ~10x faster than df.iterrows() on 50K rows because
-    # we skip pandas row-construction overhead per iteration. (audit v5 fix B-3.)
     times = df.index.astype("int64").to_numpy()
     opens = df["open"].to_numpy()
     highs = df["high"].to_numpy()

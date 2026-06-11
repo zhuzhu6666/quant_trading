@@ -15,6 +15,9 @@ from datetime import datetime
 from data.live_sync.mt5_puller import MT5Puller, PullResult, TIMEFRAME_MAP
 from data.live_sync.bar_filter import BarFilter, FilterResult
 from data.live_sync.db_inserter import DBInserter, InsertResult, SyncStatus
+from data.live_sync.quality_gate import DataQualityGate
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +107,16 @@ class SyncOrchestrator:
 
             filt = self.filter.filter(pull.bars, symbol, tf, tf_minutes=tf_minutes)
             ins = self.inserter.insert_bars(filt.kept, symbol, tf)
+            # DataQualityGate check
+            try:
+                _df = pd.DataFrame(filt.kept)
+                if not _df.empty and "time" in _df.columns:
+                    _df = _df.rename(columns={"time": "ts"})
+                _qr = DataQualityGate().check(symbol, tf, _df)
+                if not _qr.passed:
+                    logger.warning(f"[SyncOrch] {tf} quality gate: bad_ratio={_qr.bad_ratio:.3f} gaps={_qr.n_gaps} dups={_qr.n_duplicates} outliers={_qr.n_outliers}")
+            except Exception as _e:
+                logger.warning(f"[SyncOrch] {tf} quality check failed: {_e}")
             report.per_tf.append({
                 "tf": tf,
                 "pulled": pull.n_bars,
@@ -166,6 +179,16 @@ class SyncOrchestrator:
 
             filt = self.filter.filter(pull.bars, symbol, tf, tf_minutes=tf_minutes)
             ins = self.inserter.insert_bars(filt.kept, symbol, tf)
+            # DataQualityGate check
+            try:
+                _df = pd.DataFrame(filt.kept)
+                if not _df.empty and "time" in _df.columns:
+                    _df = _df.rename(columns={"time": "ts"})
+                _qr = DataQualityGate().check(symbol, tf, _df)
+                if not _qr.passed:
+                    logger.warning(f"[SyncOrch] {tf} quality gate: bad_ratio={_qr.bad_ratio:.3f} gaps={_qr.n_gaps} dups={_qr.n_duplicates} outliers={_qr.n_outliers}")
+            except Exception as _e:
+                logger.warning(f"[SyncOrch] {tf} quality check failed: {_e}")
             report.per_tf.append({
                 "tf": tf,
                 "pulled": pull.n_bars,
@@ -206,3 +229,36 @@ class SyncOrchestrator:
         print(f"  Incomplete:     {report.total_incomplete}")
         print(f"  Elapsed:        {report.elapsed_sec:.1f}s")
         print("=" * 72)
+
+
+# ── module-level entry (供 scripts/live_sync.py 直接调) ──────────
+def run_once(
+    timeframes: "list[str] | None" = None,
+    sync_type: str = "incremental",
+    symbol: str = "XAUUSD+",
+    n_bars: int = 5000,
+    db_path: str = "data/market_data.db",
+) -> dict:
+    """Module-level one-shot sync. 内部实例化 SyncOrchestrator.
+    audit 2026-06-08: backend service 通过 scripts/live_sync 调此函数,
+    之前缺 module-level 入口导致 AttributeError."""
+    if timeframes is None:
+        timeframes = ["M15", "H1", "D1"]
+    orch = SyncOrchestrator(db_path=db_path)
+    if not orch.connect():
+        return {"error": "MT5 connect failed", "total_inserted": 0}
+    try:
+        if sync_type == "full":
+            report = orch.full_sync(symbol=symbol, timeframes=timeframes, n_bars=n_bars)
+        else:
+            report = orch.incremental_sync(symbol=symbol, timeframes=timeframes)
+        return {
+            "total_inserted": report.total_inserted,
+            "total_dups": report.total_dups,
+            "per_tf": report.per_tf,
+            "elapsed_sec": report.elapsed_sec,
+            "run_type": report.run_type,
+            "error": report.error or "",
+        }
+    finally:
+        orch.shutdown()

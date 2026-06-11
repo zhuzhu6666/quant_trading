@@ -10,7 +10,7 @@ function TabBar({ tabs, active, onChange }: { tabs: {key:string,label:string}[],
       {tabs.map(t => (
         <button key={t.key} onClick={() => onChange(t.key)}
           className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all duration-200 ${
-            active === t.key ? "bg-white shadow-sm text-fg" : "text-fg-muted hover:text-fg"
+            active === t.key ? "bg-[#d4edda] text-[#1a1e24]" : "bg-[#dce0e6] text-[#4a4f59] hover:bg-[#d0d5dd] hover:text-[#1a1e24]"
           }`}>
           {t.label}
         </button>
@@ -370,7 +370,7 @@ function CalibratorSection() {
             value={editing}
             onChange={(e) => setEditing(e.target.value)}
             rows={10}
-            className="w-full bg-[#0d1117] border border-[#30363d] rounded p-2 font-mono text-xs num text-[#e6edf3] placeholder:text-[#6e7681] focus:border-[#58a6ff] focus:ring-1 focus:ring-[#58a6ff]/30 outline-none transition-colors duration-150"
+            className="w-full bg-white border border-[#dce0e6] rounded p-2 font-mono text-xs num text-[#1a1e24]"
             placeholder="[]"
           />
           <div className="flex gap-2 items-center">
