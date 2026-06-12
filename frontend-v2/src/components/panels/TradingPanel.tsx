@@ -255,7 +255,7 @@ function LiveContent() {
                 <div><span className="text-fg-muted">equity</span> <span className="num float-right">{fmtNum(account.equity ?? 0)}</span></div>
                 <div><span className="text-fg-muted">margin</span> <span className="num float-right">{fmtNum(account.margin ?? 0)}</span></div>
                 <div><span className="text-fg-muted">margin_free</span> <span className="num float-right">{fmtNum(account.margin_free ?? 0)}</span></div>
-                <div><span className="text-fg-muted">leverage</span> <span className="num float-right">{account.leverage ?? "--"}:1</span></div>
+                <div><span className="text-fg-muted">leverage</span> <span className="num float-right">{account.leverage ? `${account.leverage}:1` : "--"}</span></div>
                 <div><span className="text-fg-muted">currency</span> <span className="num float-right">{account.currency ?? "--"}</span></div>
               </div>
             )}

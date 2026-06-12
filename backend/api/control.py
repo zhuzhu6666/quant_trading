@@ -10,7 +10,9 @@ def scheduler_status(_user: RequireUser) -> dict:
     """返回 InProcessScheduler 的当前状态和所有 job 信息."""
     from backend.runtime.scheduler import InProcessScheduler
     try:
-        sched = InProcessScheduler._instance
+        # audit 2026-06-12: 改用构造函数获取 singleton（内部有 double-check locking），
+        # 而不是直接访问私有属性 ._instance
+        sched = InProcessScheduler()
         if sched is None:
             return {"running": False, "jobs": [], "error": "scheduler not initialized"}
         running = sched._started if hasattr(sched, "_started") else False

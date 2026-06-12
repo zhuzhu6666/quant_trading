@@ -212,7 +212,9 @@ class MABPaperRunner:
         # "unknown level: <AlertLevel.INFO: 'INFO'>" (enum 直接 str() 是 "AlertLevel.INFO",
         # 而 LEVEL_ORDER keys 是纯字符串 "INFO" 等). 修法: 跟 monitor.alerter 对齐传字符串.
         from monitor.alerter import DEBUG, INFO, WARNING, ERROR, CRITICAL  # noqa: F401
-        level_map = {"INFO": INFO, "WARN": WARNING,
+        # audit 2026-06-12: 同时处理 "WARN" 和 "WARNING"（alerter 内部用 "WARNING"，
+        # 但 caller 可能传 "WARN"），避免 fallback 到 INFO
+        level_map = {"INFO": INFO, "WARN": WARNING, "WARNING": WARNING,
                      "CRITICAL": CRITICAL, "ERROR": ERROR, "DEBUG": DEBUG}
         self.alerter.send(level_map.get(level, INFO), title, msg, **state)
 

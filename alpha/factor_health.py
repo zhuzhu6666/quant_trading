@@ -341,6 +341,7 @@ def evaluate_factors(
     df: "pd.DataFrame",
     threshold: float = 0.04,
     progress_cb: "Optional[Callable[[str, float, str], None]]" = None,
+    exclude_dead: bool = True,
 ) -> dict:
     """遍历 factor_registry 里所有因子, 算 IC + 健康分, 汇总成 service 期望格式.
 
@@ -365,8 +366,23 @@ def evaluate_factors(
     health = FactorHealth(tracker)
 
     n_factors = len(factor_registry.list())
+    # 跳过 DEAD 因子 (reduce CPU, 避免 builtin DEAD 因子反复评估)
+    dead_names_set: set[str] = set()
+    if exclude_dead:
+        try:
+            from alpha.registry_adapter import RegistryAdapter
+            dead_names_set = set(RegistryAdapter().dead_names())
+        except Exception:
+            pass  # 静默降级 — 仍评估所有因子
+
     all_status: list[FactorHealthStatus] = []
+    n_dead_skipped = 0
     for i, name in enumerate(factor_registry.list()):
+        if name in dead_names_set:
+            n_dead_skipped += 1
+            if n_factors > 0 and (i + 1) % 5 == 0:
+                cb("evaluating", 35 + 50 * (i + 1) / n_factors, f"{i+1}/{n_factors} factors ({n_dead_skipped} DEAD skipped)")
+            continue
         try:
             fn = factor_registry.get(name)
             if fn is None:
@@ -386,11 +402,12 @@ def evaluate_factors(
             cb("evaluating", 35 + 50 * (i + 1) / n_factors, f"{i+1}/{n_factors} factors")
 
     summary = {
-        "total": len(all_status),
+        "total": len(all_status) + n_dead_skipped,
         "healthy": sum(1 for s in all_status if s.status == "HEALTHY"),
         "watch": sum(1 for s in all_status if s.status == "WATCH"),
         "decaying": sum(1 for s in all_status if s.status == "DECAYING"),
         "unknown": sum(1 for s in all_status if s.status == "UNKNOWN"),
+        "dead": n_dead_skipped,
     }
     return {
         **summary,
@@ -416,7 +433,7 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
 
     # txt — 人读报告
     lines = ["=" * 72, "  FACTOR HEALTH REPORT", "=" * 72, ""]
-    s = {k: v for k, v in result.items() if k in ("total", "healthy", "watch", "decaying", "unknown")}
+    s = {k: v for k, v in result.items() if k in ("total", "healthy", "watch", "decaying", "unknown", "dead")}
     lines.append(f"  Summary: {s}")
     lines.append("")
     for status_name in ("HEALTHY", "WATCH", "DECAYING", "DEAD", "UNKNOWN"):

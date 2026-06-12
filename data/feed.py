@@ -7,6 +7,7 @@ Data Feed — 历史数据回放
 
 import logging
 
+import numpy as np
 import pandas as pd
 
 from core.event_bus import bus, Event, EventType
@@ -49,15 +50,27 @@ class DataFeed:
                 continue
 
             bars = []
-            for idx, row in df.iterrows():
+            # audit 2026-06-12 P1-2: iterrows() → numpy 向量化 (8x faster, pitfall-33)
+            times = df.index.to_numpy()
+            opens = df["open"].to_numpy()
+            highs = df["high"].to_numpy()
+            lows = df["low"].to_numpy()
+            closes = df["close"].to_numpy()
+            if "volume" in df.columns:
+                vols = df["volume"].to_numpy()
+            elif "tick_volume" in df.columns:
+                vols = df["tick_volume"].to_numpy()
+            else:
+                vols = np.zeros(len(df))
+            for i in range(len(df)):
                 bars.append({
                     "timeframe": tf,
-                    "time": idx.timestamp(),
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row.get("volume", row.get("tick_volume", 0))),
+                    "time": float(times[i].timestamp()) if hasattr(times[i], "timestamp") else float(times[i]),
+                    "open": float(opens[i]),
+                    "high": float(highs[i]),
+                    "low": float(lows[i]),
+                    "close": float(closes[i]),
+                    "volume": float(vols[i]),
                     "complete": True,
                 })
             self._bars[tf] = bars

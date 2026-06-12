@@ -183,16 +183,24 @@ class PaperTrader:
             raise ValueError(f"No {timeframe} data for {symbol}")
 
         bars = []
-        for idx, row in df.iterrows():
+        # audit 2026-06-12 P1-2: iterrows() → numpy 向量化 (8x faster, pitfall-33)
+        idxs = df.index.to_numpy()
+        opens = df["open"].to_numpy()
+        highs = df["high"].to_numpy()
+        lows = df["low"].to_numpy()
+        closes = df["close"].to_numpy()
+        vols = df["volume"].to_numpy() if "volume" in df.columns else np.zeros(len(df))
+        spreads = df["spread"].to_numpy() if "spread" in df.columns else np.zeros(len(df), dtype=int)
+        for i in range(len(df)):
             bars.append({
                 "timeframe": timeframe,
-                "time": idx.timestamp() if hasattr(idx, "timestamp") else float(idx),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row.get("volume", 0)),
-                "spread": int(row.get("spread", 0) or 0),  # P2: bid/ask SL/TP 用
+                "time": idxs[i].timestamp() if hasattr(idxs[i], "timestamp") else float(idxs[i]),
+                "open": float(opens[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "close": float(closes[i]),
+                "volume": float(vols[i]),
+                "spread": int(spreads[i] or 0),  # P2: bid/ask SL/TP 用
                 "complete": True,
             })
         self._bars = bars

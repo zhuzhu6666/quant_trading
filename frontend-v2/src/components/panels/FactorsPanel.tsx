@@ -7,7 +7,7 @@ import { useApi, useJobPolling } from "@/lib/hooks";
 
 /* ─── Types ─── */
 interface Factor { factor: string; score: number; status: "HEALTHY" | "WATCH" | "DECAYING"; components: { mean_abs_ic: number; ic_stability: number; regime_consistency: number; decay_rate: number; independence: number }; n_obs: number; rolling_ic: number; }
-interface Report { factors: Factor[]; healthy: number; watch: number; decaying: number; }
+interface Report { factors: Factor[]; healthy: number; watch: number; decaying: number; unknown?: number; dead?: number; total?: number; }
 interface TopFactor { name: string; expr: string; ic: number; }
 interface Shadow { name: string; status?: string; action?: string; ts?: string; expr?: string; ic?: number; cv_score?: number; }
 interface ShadowResponse { shadows: Shadow[]; }
@@ -51,11 +51,11 @@ function FactorsContent() {
     authFetch("/api/control/evolution/latest").then(r => r.ok ? r.json().then(d => setLastEvo(d?.ts_iso ?? null)) : undefined).catch(() => {});
   }, []);
 
-  const factors: FlatFactor[] = report ? report.factors.slice(0, 50).map(flat) : [];
+  const factors: FlatFactor[] = report ? report.factors.map(flat) : [];
 
   const columns: Column<FlatFactor>[] = [
     { key: "name", header: "名称", render: (f) => (<Link to={`/factors/${encodeURIComponent(f.name)}`} className="text-accent hover:underline">{f.name}</Link>) },
-    { key: "status", header: "状态", render: (f) => (<Badge variant={f.status === "HEALTHY" ? "success" : f.status === "WATCH" ? "warning" : "default"}>{f.status}</Badge>) },
+    { key: "status", header: "状态", render: (f) => (<Badge variant={f.status === "HEALTHY" ? "success" : f.status === "WATCH" ? "warning" : f.status === "DECAYING" || f.status === "DEAD" ? "danger" : "default"}>{f.status}</Badge>) },
     { key: "score", header: "得分", align: "right", render: (f) => <>{Number.isFinite(f.score) ? f.score.toFixed(1) : "--"}</> },
     { key: "abs_ic", header: "abs IC", align: "right", render: (f) => <>{Number.isFinite(f.abs_ic) ? f.abs_ic.toFixed(4) : "--"}</> },
     { key: "stability", header: "stability", align: "right", render: (f) => <>{Number.isFinite(f.stability) ? f.stability.toFixed(2) : "--"}</> },
@@ -81,10 +81,15 @@ function FactorsContent() {
       <div className="flex items-center gap-4 flex-wrap">
         {report && (
           <div className="flex gap-2 flex-wrap">
+            <span className="text-xs text-fg-muted self-center">{report.total ?? report.factors.length} 总</span>
             <Badge variant="success">{report.healthy} HEALTHY</Badge>
             <Badge variant="warning">{report.watch} WATCH</Badge>
             <Badge variant="danger">{report.decaying} DECAYING</Badge>
-            {(() => { const n = report.factors?.filter((f: any) => !["HEALTHY","WATCH","DECAYING"].includes(f.status)).length; return n > 0 ? <Badge variant="default">{n} UNKNOWN</Badge> : null; })()}
+            {(() => {
+              const dead_count = report.dead ?? ((report.total ?? report.factors.length) - report.healthy - report.watch - report.decaying - (report.unknown ?? 0));
+              return dead_count > 0 ? <Badge variant="danger">{dead_count} DEAD</Badge> : null;
+            })()}
+            {(report.unknown ?? 0) > 0 && <Badge variant="default">{report.unknown} UNKNOWN</Badge>}
           </div>
         )}
         {lastEvo && <span className="text-[10px] text-fg-muted">上次自进化: {new Date(lastEvo).toLocaleString()}</span>}

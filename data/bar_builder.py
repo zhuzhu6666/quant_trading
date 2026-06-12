@@ -10,6 +10,8 @@ Bar Builder — Tick到K线实时聚合
 import logging
 from collections import defaultdict
 
+import numpy as np
+
 from core.event_bus import bus, Event, EventType
 from core.clock import clock
 
@@ -99,13 +101,25 @@ class BarAggregator:
         df需包含: time, open, high, low, close, volume 列
         """
         self._cache[tf] = []
-        for _, row in df.iterrows():
+        # audit 2026-06-12 P1-2: iterrows() → numpy 向量化 (8x faster, pitfall-33)
+        times = df["time"].to_numpy()
+        opens = df["open"].to_numpy()
+        highs = df["high"].to_numpy()
+        lows = df["low"].to_numpy()
+        closes = df["close"].to_numpy()
+        if "volume" in df.columns:
+            vols = df["volume"].to_numpy()
+        elif "tick_volume" in df.columns:
+            vols = df["tick_volume"].to_numpy()
+        else:
+            vols = np.zeros(len(df))
+        for i in range(len(df)):
             bar = {
-                "open": float(row["open"]), "high": float(row["high"]),
-                "low": float(row["low"]), "close": float(row["close"]),
-                "volume": float(row.get("volume", row.get("tick_volume", 0))),
-                "time": row["time"].timestamp() if hasattr(row["time"], "timestamp")
-                         else float(row["time"]),
+                "open": float(opens[i]), "high": float(highs[i]),
+                "low": float(lows[i]), "close": float(closes[i]),
+                "volume": float(vols[i]),
+                "time": times[i].timestamp() if hasattr(times[i], "timestamp")
+                         else float(times[i]),
                 "timeframe": tf, "complete": True,
             }
             self._cache[tf].append(bar)

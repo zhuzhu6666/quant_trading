@@ -29,6 +29,7 @@ def _run_script(*args: str) -> str:
     result = subprocess.run(
         [PYTHON, str(REFRESH_SCRIPT), *args],
         capture_output=True, text=True, timeout=300,
+        errors="replace",  # audit 2026-06-12: Windows GBK 编码下 refresh_external_data.py 输出包含 ✓/✗/⚠ 等 Unicode 字符会崩
     )
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=result.stderr or result.stdout)
@@ -45,6 +46,7 @@ def _run_script_bg(job_id: str, *args: str):
         result = subprocess.run(
             [PYTHON, str(REFRESH_SCRIPT), *args],
             capture_output=True, text=True, timeout=300,
+            errors="replace",  # audit 2026-06-12: 同上，GBK 编码防护
         )
         if result.returncode == 0:
             job["status"] = "completed"

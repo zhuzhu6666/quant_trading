@@ -151,7 +151,7 @@ export default function MainDashboard() {
     { key: "trading", icon: "💹", label: "交易", desc: "模拟盘 · 实盘 · 风控", gradient: "blue" },
     { key: "factors", icon: "🔬", label: "因子", desc: "健康 · 发现 · 影子", gradient: "green" },
     { key: "experiments", icon: "🧪", label: "实验", desc: "调参 · 校准 · A/B", gradient: "amber" },
-    { key: "data", icon: "📈", label: "数据", desc: "K线 · 同步", gradient: "purple" },
+    { key: "data", icon: "📈", label: "数据", desc: "K线 · 外部数据 · 同步", gradient: "purple" },
     { key: "system", icon: "⚙️", label: "系统", desc: "报告 · 配置 · 任务", gradient: "slate" },
   ];
 
@@ -336,7 +336,7 @@ export default function MainDashboard() {
                 <span className={`font-semibold ${wsConnected ? "text-up" : "text-warn"}`}>{wsConnected ? "已连接" : "断开"}</span>
               </div>
               <div className="mt-2 pt-2 border-t border-white/20">
-                <div className="text-[9px] text-fg-muted">熔断: {circuit ? "触发" : "关闭"} · 连亏: {consecLoss} · 杠杆: {s?.leverage ?? "--"}:1</div>
+                <div className="text-[9px] text-fg-muted">熔断: {circuit ? "触发" : "关闭"} · 连亏: {consecLoss} · 杠杆: {s?.leverage ? `${s?.leverage}:1` : "--"}</div>
               </div>
               <div className="text-[9px] text-fg-muted mt-1 italic">
                 {loopStatus.running

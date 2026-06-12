@@ -336,6 +336,14 @@ class RegistryAdapter:
             logger.warning(f"[RegistryAdapter] 读事件日志失败: {e}")
             return []
 
+    def dead_count(self) -> int:
+        """当前 DEAD 因子数量 (包括 builtin 保留在 registry 的)."""
+        return sum(1 for s in self._lifecycle_statuses.values() if s == "DEAD")
+
+    def dead_names(self) -> list[str]:
+        """返回所有 DEAD 因子名."""
+        return [n for n, s in self._lifecycle_statuses.items() if s == "DEAD"]
+
     def stats(self) -> dict:
         """统计当前 registry 状态"""
         all_factors = factor_registry.list()

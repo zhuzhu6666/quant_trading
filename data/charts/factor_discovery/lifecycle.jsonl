@@ -1,7 +1,0 @@
-{"timestamp": 1780394721.5787842, "event": "register", "factor": "dsl_97486440_000", "source": "shadow", "description": "sqrt(delay(ts_std(gvz, 30), 10))", "score": 0.0, "status": "UNKNOWN", "reason": ""}
-{"timestamp": 1780394753.5613406, "event": "register", "factor": "dsl_83064976_000", "source": "shadow", "description": "sign(ts_std(ts_max(gvz, 50), 30))", "score": 0.0, "status": "UNKNOWN", "reason": ""}
-{"timestamp": 1780394753.5613406, "event": "register", "factor": "dsl_57940601_001", "source": "shadow", "description": "ts_max(ts_rank(volume, 50), 30)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
-{"timestamp": 1780395190.1335056, "event": "register", "factor": "dsl_42569127_000", "source": "shadow", "description": "ts_min(high, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
-{"timestamp": 1780395190.1335056, "event": "register", "factor": "dsl_59195975_001", "source": "shadow", "description": "ts_min(ts_min(open, 3), 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
-{"timestamp": 1780395190.1335056, "event": "register", "factor": "dsl_77632207_002", "source": "shadow", "description": "ts_min(open, 10)", "score": 0.0, "status": "UNKNOWN", "reason": ""}
-{"timestamp": 1780395190.134511, "event": "register", "factor": "dsl_56605000_003", "source": "shadow", "description": "sqrt(sqrt(ts_decay_linear(sqrt(abs(open)), 5)))", "score": 0.0, "status": "UNKNOWN", "reason": ""}

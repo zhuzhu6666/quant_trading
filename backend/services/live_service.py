@@ -538,9 +538,9 @@ def _start_live_scheduler():
                         logger.info("[sync] %s inserted=%d skipped=%d", tf,
                                     result.inserted, getattr(result, "skipped", 0))
                 except Exception as e:
-                    logger.debug("[sync] %s failed: %s", tf, e)
+                    logger.warning("[sync] %s failed: %s", tf, e)
         except Exception as e:
-            logger.debug("[sync] pull failed: %s", e)
+            logger.warning("[sync] pull failed: %s", e)
     sched.add_job("data_pull", "*/10 * * * *", _pull_new_bars)
     sched.start()
     logger.info("[live] InProcessScheduler started with 5 jobs")
@@ -907,13 +907,20 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             pass
 
         try:
+            # MT5 单例缓存 (同 cTrader _get_ctrader 模式, 省每次新建 bridge + connect 开销)
             if broker == "mt5":
-                from execution.mt5_bridge import MT5Bridge
-                bridge = MT5Bridge()
-                if not bridge.connect():
-                    log(f"tick {tick}: MT5 connect failed, will retry")
-                    stop_flag.wait(60)
-                    continue
+                from execution.mt5_bridge import MT5Bridge as _MT5B
+                _mt5_bridge = getattr(_run_loop, "_mt5_bridge", None)
+                if _mt5_bridge is not None and _mt5_bridge.is_connected:
+                    bridge = _mt5_bridge
+                else:
+                    bridge = _MT5B()
+                    if not bridge.connect():
+                        log(f"tick {tick}: MT5 connect failed, will retry")
+                        _run_loop._mt5_bridge = None
+                        stop_flag.wait(60)
+                        continue
+                    _run_loop._mt5_bridge = bridge
                 try:
                     df_new = _fetch_bars_with_retry(bridge, timeframe=15, n_bars=5)
                     if df_new is None or len(df_new) == 0:
@@ -925,11 +932,11 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 finally:
                     # audit 2026-06-10: 后台线程写 _live_state 缓存, WS 1s 推送
                     # 下次 tick 就能拿到真 broker equity. tick 主体不被阻塞, 失败时静默.
-                    # MT5 路径: bridge 在 finally 里 disconnect, 但 daemon thread
-                    # 持的是同一 bridge 引用, 下次 refresh 时若已断开会自然失败 +
-                    # 静默 log, 不影响主循环.
+                    # MT5 路径: 单例桥不断开, 下次 tick 复用 (省每次新建 + connect 的阻塞开销).
+                    # 连接断开时 tick 自愈 (新建 bridge + connect).
                     kickoff_account_refresh(bridge, broker, interval_sec=30.0)
-                    bridge.disconnect()
+                    if broker != "mt5":
+                        bridge.disconnect()
             elif broker == "ctrader":
                 # audit 2026-06-10: 3-tuple + 非阻塞(warming_up 时跳过本 tick)
                 bridge, err, warming = _get_ctrader()
