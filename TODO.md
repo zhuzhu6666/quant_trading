@@ -1,54 +1,35 @@
-# TODO — 修复清单 & 剩余工作
+# TODO — 剩余工作（Phase 0-7 已全部完成）
 
-## ✅ 已完成 (PROJECT_AUDIT_v10 修复)
-
-### P0 全部修复 ✅
-| ID | 文件 | 修复 |
-|----|------|------|
-| P0-1 | `execution/oms.py:113` | `volume if volume is not None else order.volume` (原 falsy guard 误杀 volume=0) |
-| P0-2 | `execution/order_retry.py:78` | 最后一次 attempt 不模拟拒绝，直接调 order_fn |
-| P0-3 | `execution/ctrader_bridge.py:224` | BaseBrokerBridge 统一接口，symbol 解析失败检查返回值 |
-| P0-4 | `backend/api/live.py:97` | `/api/live/strategy-status` 加 `_user: RequireUser` |
-| P0-5 | `backend/api/external_data.py:106` | `trigger_refresh()` 加 `_user: RequireUser` |
-| P0-6 | `backend/api/external_data.py:22` | `_cleanup_stale_jobs()` — 1h TTL + 500 条上限 |
-| P0-7 | `DataPanel.tsx:320` | `fetch` → `authFetch` (带 JWT) |
-| P0-8 | `MainDashboard.tsx:165` | `stopLoop`/`emergencyClose` 添加 `if (!r.ok)` 检查 |
-| P0-9 | `MainDashboard.tsx:195` | `innerValue={dd * 100}` 修正 drawdown_pct 合约漂移 |
-
-### P1 部分修复 ✅
-| ID | 文件 | 修复 |
-|----|------|------|
-| P1-1 | `backend/core/auth.py:15` | JWT_SECRET 从环境变量 `QUANT_JWT_SECRET` 读取 |
-| P1-2 | `backend/core/auth.py:39-53` | `get_current_user()` 改为调 `require_user()`，任何错误抛 401 |
+Factor Takeover v4 全部 Phase (0~7) 已完成交付，详见 `docs/UPGRADE_BLUEPRINT.md`。
+以下为剩余边缘项和技术债务。
 
 ---
 
-## 🔴 待修复 (按优先级)
+## 🟡 延期项（蓝图明确标记 [~]）
 
-### ⚡ 5 分钟
-- [ ] **P1-5**: `backend/ws/endpoints.py` — WebSocket 添加 token query param 认证
-- [ ] **P1-24**: `backend/services/live_service.py:126` — `_cache_get_or_refresh` 硬编码 key "ctrader" → MT5 缓存永远 miss
+| # | 项 | 原因 | 触发条件 |
+|---|----|------|---------|
+| D1 | Autoencoder 非线性特征压缩 | §12 过拟合风险，20K bar 极易学噪声 | bar > 100K |
+| D2 | 数据版本控制系统 | DuckDB snapshot 已够用，无需额外系统 | 需要时重构 |
 
-### 🔧 30 分钟
-- [ ] **P1-18~23**: 替换所有 `datetime.utcfromtimestamp`/`datetime.utcnow` (11 处，4 文件)
-- [ ] **P1-6**: `execution/ctrader_bridge.py:250` — spot price 除数 `10**5` 硬编码为 XAUUSD
-- [ ] **P1-10**: `execution/router.py:154-177` — `on_fill` 对反向成交只 log 不处理，仓位漂移
-- [ ] **P1-13**: `execution/market_impact.py:116` — 成本计算用 1.0 而非实际金价 ~$3000
+## 🔧 技术债务（v10 审计遗留，见 `PROJECT_AUDIT_v10.md`）
 
-### 🏗️ 大工程
-- [ ] Pandas 废弃 API 清理 (`DataFrame.append` → `pd.concat`, ~10-20 处真实调用)
-- [ ] 前端 AbortController 全面接入 (8+ 处 polling)
-- [ ] CausalCheck 集成到 AWE (当前注释掉)
-- [ ] 死导入清理 (50+ 处)
-- [ ] `tests/alpha/` 添加 `__init__.py`
+| # | 文件 | 问题 | 说明 |
+|---|------|------|------|
+| TD1 | `execution/ctrader_bridge.py:250` | spot price 除数 `10**5` 硬编码 XAUUSD | 换品种会价格错误 |
+| TD2 | `execution/router.py:154-177` | on_fill 反向成交只 log 不处理 | 仓位漂移风险 |
+| TD3 | `execution/market_impact.py:116` | 成本计算用 1.0 而非实际金价 ~$3000 | 成本低估 3000× |
+| TD4 | 全项目 | `DataFrame.append` → `pd.concat` (~10-20 处) | Pandas 3.x 兼容 |
+| TD5 | 前端 8+ 处 | polling 缺少 AbortController | 组件卸载后 setState 泄漏 |
+| TD6 | 前端 | 死导入清理 (50+ 处) | 代码整洁 |
 
----
+## 📋 已知技术债务（蓝图 Appendix C.1）
 
-## 🧪 基础设施待建 (Phase 5/7 蓝图)
-- [ ] 向量化回测引擎 (alpha/backtest/)
-- [ ] ML 预测管道注册为因子 (XGBoost/LightGBM)
-- [ ] 特征工程自动化 (PCA/KPCA/Autoencoder)
-- [ ] VaR/CVaR 风控引擎
-- [ ] 归因 Dashboard 数据管道
-- [ ] 执行质量分析 (ExecutionAnalytics)
-- [ ] 多品种扩展 (并行管道)
+| # | 问题 | 说明 |
+|---|------|------|
+| 1 | `regime_classifier.py` 因子脱节 | 使用 `[aroon, cci, mfi, williams_r]` 不在 39 因子池 |
+| 2 | GVZ gate stub | `_get_gvz_change()` 永久返回 None |
+| 3 | `train_xgb_walkforward.py` 仅 4 因子 | 非蓝图 68 特征设计 |
+| 4 | `scripts/factor_pca.py` docstring 过时 | 声称 15 因子，实际 39 |
+
+> 以上不阻塞运行。当需要扩展 ML 或多品种时按优先级处理。

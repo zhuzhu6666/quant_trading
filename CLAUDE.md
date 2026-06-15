@@ -2,7 +2,7 @@
 
 ## Project Identity
 
-A production-grade algorithmic trading system focused on gold (XAUUSD) futures, with a **Factor Takeover v4** closed-loop architecture:
+A production-grade algorithmic trading system focused on gold (XAUUSD) futures, with a **Factor Takeover v4** closed-loop architecture — **Phase 0-7 ✅ all complete**:
 因子计算 (StreamingFactorEngine) → 三域归一 (SignalNormalizer) → 两层组合 (PortfolioCompositor) → 执行闸门 (ExecutionGate) → 归因 (AttributionEngine) → 权重自适应 (AdaptiveWeightEngine)
 取代了旧的 multi_factor_m15 投票策略。cTrader demo 为唯一执行通道，MT5 仅作数据源。
 
@@ -18,17 +18,22 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 | **Adaptive Weight** | `alpha/adaptive_weight_engine.py` | 权重自适应：exp(k×score)，锚点回归，DSR/健康分退役，复活 |
 | **GP Classifier** | `alpha/gp_classifier.py` | AST 表达式 → 类型标签（量价/动量/均值回归/波动率/非线性） |
 | Alpha mining | `alpha/search/` | GP/Random search, MAP-Elites, BlendSearch SLSQP |
-| Backend | `backend/` | FastAPI app, REST/WS, scheduler, live loop |
-| Data | `data/` | Market data store (MT5 pull), bar builder, live sync |
-| Execution | `execution/` | cTrader bridge, OMS, slippage, market impact |
-| Frontend | `frontend-v2/` | React/TypeScript UI (Vite + Tailwind) |
-| Risk | `risk/` | Circuit breaker, regime detection |
-| Config | `config/runtime_config.py` | 热更新配置：factor_signal_config, factor_portfolio_weights, awe_* |
+| **Backend** | `backend/` | FastAPI app, REST/WS, scheduler, live loop |
+| **Backtest** | `alpha/backtest/vectorized.py` | 向量化回测引擎 (202K bar 实测) |
+| **ML** | `alpha/ml/` | XGBoost 方向预测器, 概念漂移检测 |
+| **Features** | `alpha/features/` | FeatureDeriver(200+), PCA/KPCA, FeatureSelector |
+| **Data** | `data/` | DuckDB + SQLite 双存储, MT5 拉取, tick 管道 |
+| **Execution** | `execution/` | cTrader bridge, OMS, BaseBrokerBridge, VWAP/TWAP, 执行质量分析 |
+| **Risk** | `risk/` | VaR/CVaR, Kelly, 压力测试, 集中度监控, 跨品种协方差 |
+| **Platform** | `research/` | ExperimentTracker, FactorLibrary, WeeklyReport |
+| **Ops** | `monitor/` | AlertRules(6条), AutoRecovery(心跳+重启) |
+| **Config** | `config/runtime_config.py` | 热更新配置：factor_signal_config, factor_portfolio_weights, awe_* |
+| **Frontend** | `frontend-v2/` | React 19/TypeScript UI (Vite + Tailwind), 5 面板 |
 
 ## Architecture Flow
 
 ```
-每根 M15 bar → StreamingFactorEngine.append_bar(bar)
+每根 M5 bar → StreamingFactorEngine.append_bar(bar)
     → SignalNormalizer.normalize(values)           # 39 因子 → [-1, +1]
     → PortfolioCompositor.compose(signals)          # Tactical 70% + Macro 30%
     → ExecutionGate.filter(composite, ...)          # 信号/MACD/冷却/事件
@@ -63,7 +68,8 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 
 ## Testing
 
-- `pytest tests/alpha/ -v` for Factor Takeover v4 module tests (315+ alpha tests, 497 total)
+- `pytest tests/ -v` — 497 tests (alpha/execution/backend/risk/research 全模块)
+- `pytest tests/alpha/ -v` for Factor Takeover v4 module tests (315+ alpha tests)
 - `pytest tests/alpha/ -v -k <pattern>` for targeted tests
 - Test files mirror source structure: `tests/alpha/`, `tests/execution/`, etc.
 - Key test files: `test_streaming_factor_engine.py`, `test_signal_normalizer.py`, `test_portfolio_compositor.py`, `test_execution_gate.py`, `test_attribution_engine.py`, `test_adaptive_weight_engine.py`, `test_gp_classifier.py`
@@ -71,9 +77,9 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 ## Audit
 
 - `PROJECT_AUDIT_v10.md` — 2026-06-14 全代码库审计 (296 files, 55,578 lines)
-- Alpha 核心管道无 P0 bug，问题集中在执行层和后端鉴权
-- 当前已修复: P0-1~P0-6, P1-1~P1-2 (JWT_SECRET 环境变量化, get_current_user 抛 401, BaseBrokerBridge 统一接口, _cleanup_stale_jobs TTL)
-- 未修复: `TODO.md` 查看
+- 全部 P0 及主要 P1 已修复
+- `docs/UPGRADE_BLUEPRINT.md` — Phase 0-7 全部完成
+- 剩余技术债务: `TODO.md` / 蓝图 Appendix C.1
 
 ## Startup
 

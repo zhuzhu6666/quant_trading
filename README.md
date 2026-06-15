@@ -3,7 +3,7 @@
 XAUUSD 黄金 M5 量化交易系统，**Factor Takeover v4** 架构：因子计算 → 连续信号 → 组合优化 → 执行 → 归因 → 自适应全闭环。
 以因子系统彻底取代旧 `multi_factor_m15` 投票策略。cTrader demo 为唯一执行通道。
 
-**最后更新**: 2026-06-15 | **架构**: Factor Takeover v4
+**最后更新**: 2026-06-15 | **架构**: Factor Takeover v4 | **Phase 0-7**: ✅ 全部完成
 
 ---
 
@@ -11,15 +11,25 @@ XAUUSD 黄金 M5 量化交易系统，**Factor Takeover v4** 架构：因子计�
 
 | 维度 | 状态 |
 |------|------|
+| **Factor Takeover v4** | ✅ Phase 0-7 全部完成（详见 `docs/UPGRADE_BLUEPRINT.md`） |
 | **因子库** | 39 builtin + 26 GP DSL shadow/discovered，实时 39 因子参与组合信号 |
 | **决策管道** | ✅ StreamingFactorEngine → SignalNormalizer → PortfolioCompositor → ExecutionGate |
-| **归因** | ✅ AttributionEngine（线性 MC + Gram-Schmidt 正交，NW-HAC Sharpe 三层窗口）|
-| **权重自适应** | ✅ AdaptiveWeightEngine（exp(k×score)，DSR+健康分退役，多样性约束）
+| **归因** | ✅ AttributionEngine（线性 MC + Gram-Schmidt 正交 + MTM，NW-HAC Sharpe 三层窗口） |
+| **权重自适应** | ✅ AdaptiveWeightEngine（exp(k×score)，DSR+健康分退役，CausalCheck 启用，多样性约束）
 | **GP 分类器** | ✅ GPClassifier（AST 表达式 → 类型标签，接入 SignalNormalizer + PortfolioCompositor）
 | **cTrader** | ✅ demo 真发单 (Pepperstone, Open API)
 | **Web UI** | ✅ Vite + React 19, 5 面板, 权重/归因卡片
 | **Scheduler** | ✅ 9 任务 (evolution/canary/retire/sync/data_pull/awe_adapt/ml_retrain/feature_eng/ml_drift)
 | **MT5 数据** | ✅ 定时拉 K 线填充 DataStore
+| **回测引擎** | ✅ 向量化 (alpha/backtest/vectorized.py, 202K bar 实测)
+| **ML 预测** | ✅ XGBoost 方向预测器注册为因子 + 概念漂移检测
+| **特征工程** | ✅ FeatureDeriver (200+ 特征) + PCA/KPCA 压缩 + FeatureSelector
+| **执行层** | ✅ BaseBrokerBridge 统一接口 (PaperBridge + CTraderBridge), VWAP/TWAP, 执行质量分析
+| **风控** | ✅ VaR/CVaR 引擎 + Kelly 仓位 + 压力测试 + 因子暴露集中度监控
+| **DuckDB** | ✅ data/duckdb_store.py (列式存储, 向量化查询)
+| **Tick 管道** | ✅ data/tick_pipeline/ (MT5→DuckDB→TickBarBuilder)
+| **多品种** | ✅ 并行管道 (XAUUSD+ + EURUSD)
+| **平台/运维** | ✅ ExperimentTracker + FactorLibrary + WeeklyReport + Docker + AutoRecovery + AlertRules
 
 ---
 
@@ -77,7 +87,7 @@ RuntimeConfig 热更新 → 下一 tick 生效
 
 ## 审计状态
 
-详见 `PROJECT_AUDIT_v10.md`（2026-06-14，9 P0 + 24 P1 + 18 P2）。Alpha 核心管道无 P0 bug，问题集中在执行层和后端鉴权。当前已修复：P0-1~P0-6、P1-1~P1-2，其余见 `TODO.md`。
+详见 `PROJECT_AUDIT_v10.md`（2026-06-14，9 P0 + 24 P1 + 18 P2）。全部 P0 及主要 P1 已修复，剩余技术债务见 `TODO.md` 和蓝图 Appendix C.1。
 
 ---
 
@@ -118,6 +128,7 @@ RuntimeConfig 热更新 → 下一 tick 生效
 | `data/charts/factor_trades.jsonl` | 逐笔归因明细 |
 | `data/charts/factor_weight_history.jsonl` | 权重变更记录 |
 | `data/charts/factor_attribution.json` | 归因快照（原子更新，重启恢复） |
+| `data/market_data.duckdb` | DuckDB 列式存储（13 表，结构化市场数据） |
 
 ---
 
@@ -125,8 +136,13 @@ RuntimeConfig 热更新 → 下一 tick 生效
 
 - **后端**: Python 3.11, FastAPI, uvicorn
 - **前端**: React 19, TypeScript, Vite, Tailwind CSS
-- **因子计算**: numpy, pandas, scipy
-- **执行**: cTrader Open API (Twisted)
-- **数据**: SQLite (market_data.db, 37MB), MT5 (数据拉取)
+- **因子计算**: numpy, pandas, scipy, xgboost, lightgbm
+- **执行**: cTrader Open API (Twisted), BaseBrokerBridge 统一接口
+- **数据**: DuckDB (market_data.duckdb) + SQLite (market_data.db), MT5 数据拉取
 - **调度**: APScheduler / threading.Timer
-- **测试**: pytest 497 tests (alpha 管道 315+ tests)
+- **回测**: 向量化引擎 (alpha/backtest/vectorized.py)
+- **风控**: VaR/CVaR, Kelly, 压力测试, 集中度监控
+- **ML**: XGBoost 方向预测器, 概念漂移检测
+- **特征工程**: FeatureDeriver, PCA/KPCA, FeatureSelector
+- **平台**: ExperimentTracker, FactorLibrary, WeeklyReport, Docker, AutoRecovery
+- **测试**: pytest 497 tests
