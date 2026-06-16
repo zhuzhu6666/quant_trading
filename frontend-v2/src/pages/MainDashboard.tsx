@@ -18,7 +18,6 @@ import RiskPanel from "@/components/panels/RiskPanel";
 import OpsPanel from "@/components/panels/OpsPanel";
 import BacktestPanel from "@/components/panels/BacktestPanel";
 import LogCard from "@/components/dashboard/LogCard";
-import StrategyCard from "@/components/dashboard/StrategyCard";
 
 type PanelType = "trading" | "factors" | "experiments" | "data" | "system" | "risk" | "ops" | "backtest" | null;
 
@@ -295,42 +294,9 @@ export default function MainDashboard() {
             />
           </div>
 
-          {/* ── 因子管道 + 策略 ── */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <StrategyCard />
-            <Card title="因子管道" padding="sm">
-              {factorWeights.length > 0 ? (
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-2xs text-text-secondary mb-2 px-1">
-                    <span>因子</span>
-                    <span>权重  |  闸门</span>
-                  </div>
-                  {factorWeights.slice(0, 8).map((fw) => (
-                    <div key={fw.factor} className="flex items-center justify-between py-1 px-1 text-xs border-b border-apple-divider last:border-0 rounded hover:bg-apple-bg/40">
-                      <span className="text-text-primary truncate mr-2 max-w-[200px]" title={fw.factor}>{fw.factor}</span>
-                      <div className="flex items-center gap-3 flex-shrink-0">
-                        <span className="font-semibold num text-text-primary w-14 text-right">{fw.weight.toFixed(3)}</span>
-                        <span className={`text-2xs px-1.5 py-0.5 rounded font-medium ${
-                          fw.weight > 0.05 ? "bg-success/10 text-success" : "bg-text-tertiary/10 text-text-tertiary"
-                        }`}>
-                          {fw.weight > 0.05 ? "通过" : "休眠"}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                  <div className="text-2xs text-text-tertiary text-center pt-1">
-                    最近 8 个活跃因子 · 权重从 AWE 自适应引擎每 30 分钟更新
-                  </div>
-                </div>
-              ) : (
-                <div className="text-sm text-text-secondary py-4 text-center">等待实盘启动后因子数据</div>
-              )}
-            </Card>
-          </div>
-
-          {/* ── Main Grid ── */}
+          {/* ── 三栏: 自主运行 | 因子管道 | 近期开仓 ── */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* ── System Overview ── */}
+            {/* ── 自主运行 ── */}
             <Card className="flex flex-col" padding="md">
               {/* Status Header */}
               <div className="flex items-center justify-between mb-4">
@@ -446,12 +412,42 @@ export default function MainDashboard() {
               </div>
             </Card>
 
+            {/* ── 因子管道 (活跃因子权重 + 闸门状态) ── */}
+            <Card title="因子管道" padding="sm">
+              {factorWeights.length > 0 ? (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-2xs text-text-secondary mb-2 px-1">
+                    <span>因子</span>
+                    <span>权重  |  闸门</span>
+                  </div>
+                  {factorWeights.slice(0, 10).map((fw) => (
+                    <div key={fw.factor} className="flex items-center justify-between py-1 px-1 text-xs border-b border-apple-divider last:border-0 rounded hover:bg-apple-bg/40">
+                      <span className="text-text-primary truncate mr-2 max-w-[160px]" title={fw.factor}>{fw.factor}</span>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="font-semibold num text-text-primary w-12 text-right">{fw.weight.toFixed(3)}</span>
+                        <span className={`text-2xs px-1.5 py-0.5 rounded font-medium ${
+                          fw.weight > 0.05 ? "bg-success/10 text-success" : "bg-text-tertiary/10 text-text-tertiary"
+                        }`}>
+                          {fw.weight > 0.05 ? "通过" : "休眠"}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="text-2xs text-text-tertiary text-center pt-1">
+                    AWE 每 30 分钟自适应更新权重
+                  </div>
+                </div>
+              ) : (
+                <div className="text-sm text-text-secondary py-4 text-center">等待实盘启动后因子数据</div>
+              )}
+            </Card>
+
             {/* ── 近期开仓 (因子通过闸门历史) ── */}
             <RecentTicksCard />
           </div>
 
-          {/* ── 实时日志 (全宽, 详情面板上方) ── */}
-          <div className="max-w-4xl mx-auto w-full">
+          {/* ── 实时日志 (全宽拉伸, 详情面板上方) ── */}
+          <div className="w-full">
             <LogCard />
           </div>
 
