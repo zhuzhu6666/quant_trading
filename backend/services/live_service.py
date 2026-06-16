@@ -1993,6 +1993,12 @@ def _write_live_trade_log_factor(
             "circuit_breaker": bool(state.get("circuit_breaker", False)),
             "v4": True,
         }
+        # ★ v9-fix: 记录闸门结果供前端 RecentTicksCard 显示
+        if gate_result:
+            entry["gate_result"] = {
+                "passed": bool(getattr(gate_result, "passed", False)),
+                "reason": str(getattr(gate_result, "reason", "")),
+            }
         if composite and composite.direction != 0:
             entry["signal"] = {
                 "direction": composite.direction,

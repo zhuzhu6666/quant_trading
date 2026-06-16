@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Button, Card, Badge, Table, Select, Modal } from "@/components/ui";
 import type { Column } from "@/components/ui";
 import { useApi, usePolling } from "@/lib/hooks";
@@ -29,6 +29,7 @@ export default function SystemPanel() {
           { key: "reports", label: "报告" },
           { key: "config", label: "配置" },
           { key: "jobs", label: "任务" },
+          { key: "attribution", label: "归因" },
         ]}
         active={activeTab}
         onChange={setActiveTab}
@@ -37,6 +38,7 @@ export default function SystemPanel() {
       {activeTab === "reports" && <ReportsSection />}
       {activeTab === "config" && <ConfigSection />}
       {activeTab === "jobs" && <JobsSection />}
+      {activeTab === "attribution" && <AttributionSection />}
     </div>
   );
 }
@@ -517,6 +519,147 @@ function JobsSection() {
           {JSON.stringify(selected, null, 2)}
         </pre>
       </Modal>
+    </div>
+  );
+}
+
+/* ===== 归因 (原 MainDashboard 归因概览 + 组合权重) ===== */
+function AttributionSection() {
+  const [factorWeights, setFactorWeights] = useState<{ factor: string; weight: number }[]>([]);
+  const [v4Stats, setV4Stats] = useState<Record<string, any>>({});
+
+  const refreshFactorWeights = useCallback(async () => {
+    try {
+      const r = await authFetch("/api/v4/weights");
+      if (r.ok) {
+        const data = await r.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const latest = new Map<string, number>();
+          for (const entry of data) {
+            if (entry.factor && entry.new !== undefined) {
+              latest.set(entry.factor, entry.new);
+            }
+          }
+          const sorted = [...latest.entries()]
+            .map(([factor, weight]) => ({ factor, weight }))
+            .sort((a, b) => b.weight - a.weight);
+          setFactorWeights(sorted);
+        }
+      }
+    } catch { /* best-effort */ }
+  }, []);
+
+  const refreshV4Stats = useCallback(async () => {
+    try {
+      const r = await authFetch("/api/v4/stats");
+      if (r.ok) setV4Stats(await r.json());
+    } catch { /* best-effort */ }
+  }, []);
+
+  useEffect(() => {
+    refreshFactorWeights();
+    const t = setInterval(refreshFactorWeights, 10000);
+    return () => clearInterval(t);
+  }, [refreshFactorWeights]);
+
+  useEffect(() => {
+    refreshV4Stats();
+    const t = setInterval(refreshV4Stats, 10000);
+    return () => clearInterval(t);
+  }, [refreshV4Stats]);
+
+  return (
+    <div className="space-y-4">
+      <h1 className="text-2xl font-bold">归因概览</h1>
+
+      {/* 归因统计数据 */}
+      <Card title="归因统计" padding="sm">
+        {Object.keys(v4Stats).length > 0 ? (
+          <div className="space-y-2">
+            {v4Stats.win_rate !== undefined && (
+              <div className="flex items-center justify-between text-sm border-b border-apple-divider pb-2 last:border-0 last:pb-0">
+                <span className="text-text-secondary">胜率</span>
+                <span className="font-semibold text-text-primary">
+                  {typeof v4Stats.win_rate === 'number' ? `${(v4Stats.win_rate * 100).toFixed(1)}%` : v4Stats.win_rate}
+                </span>
+              </div>
+            )}
+            {v4Stats.sharpe !== undefined && (
+              <div className="flex items-center justify-between text-sm border-b border-apple-divider pb-2 last:border-0 last:pb-0">
+                <span className="text-text-secondary">Sharpe</span>
+                <span className="font-semibold text-text-primary">
+                  {typeof v4Stats.sharpe === 'number' ? v4Stats.sharpe.toFixed(2) : v4Stats.sharpe}
+                </span>
+              </div>
+            )}
+            {v4Stats.avg_mc !== undefined && (
+              <div className="flex items-center justify-between text-sm border-b border-apple-divider pb-2 last:border-0 last:pb-0">
+                <span className="text-text-secondary">平均 MC</span>
+                <span className="font-semibold text-text-primary">
+                  {typeof v4Stats.avg_mc === 'number' ? v4Stats.avg_mc.toFixed(2) : v4Stats.avg_mc}
+                </span>
+              </div>
+            )}
+            {v4Stats.total_factors !== undefined && (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-text-secondary">因子总数</span>
+                <span className="font-semibold text-text-primary">{v4Stats.total_factors}</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-sm text-text-secondary py-4 text-center">暂无归因数据，启动实盘后自动累积</div>
+        )}
+      </Card>
+
+      {/* 组合权重 */}
+      <Card title="组合权重 (AWE 自适应)" padding="sm">
+        {factorWeights.length > 0 ? (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-2xs text-text-secondary mb-2 px-1">
+              <span>因子</span>
+              <span>权重  |  变化方向</span>
+            </div>
+            {factorWeights.map((fw) => (
+              <div key={fw.factor} className="flex items-center justify-between py-1.5 px-1 text-xs border-b border-apple-divider last:border-0 rounded hover:bg-apple-bg/40">
+                <span className="text-text-primary truncate mr-2 max-w-[240px]" title={fw.factor}>{fw.factor}</span>
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  <div className="w-24 h-2 bg-apple-divider rounded-full overflow-hidden">
+                    <div className="h-full rounded-full" style={{
+                      width: `${Math.min(100, fw.weight * 100)}%`,
+                      background: fw.weight > 0.1 ? "#34C759" : fw.weight > 0.05 ? "#FF9500" : "#8e8e93"
+                    }} />
+                  </div>
+                  <span className="font-semibold num text-text-primary w-14 text-right">{fw.weight.toFixed(4)}</span>
+                </div>
+              </div>
+            ))}
+            <div className="text-2xs text-text-tertiary text-center pt-2">
+              权重由 AdaptiveWeightEngine 每 30 分钟自动更新 · 基于 NW-HAC Sharpe
+            </div>
+          </div>
+        ) : (
+          <div className="text-sm text-text-secondary py-4 text-center">暂无权重数据</div>
+        )}
+      </Card>
+
+      {/* 归因设置 */}
+      <Card title="归因配置" padding="sm">
+        <div className="text-xs text-text-secondary space-y-2">
+          <p>AWE 参数 (从 RuntimeConfig 读取):</p>
+          <ul className="list-disc pl-4 space-y-1">
+            <li>灵敏度: 0.5 (权重更新步长)</li>
+            <li>锚点回归: 0.15 (防权重偏离过大)</li>
+            <li>最小交易数: 50 (before AWE starts)</li>
+            <li>IC 下限: 0.02 (低于此值降权)</li>
+            <li>健康分下限: 60 (低于此值退役)</li>
+            <li>类型上限: 40% (单类型因子权重上限)</li>
+          </ul>
+          <p className="mt-2">
+            归因引擎: 线性 MC + Gram-Schmidt 正交 · NW-HAC Sharpe 评估
+          </p>
+        </div>
+      </Card>
     </div>
   );
 }
