@@ -5,7 +5,6 @@ import { getWSClient } from "@/lib/ws";
 import { authFetch } from "@/lib/auth";
 import { KpiCard } from "@/components/dashboard/KpiCard";
 import { DualRing } from "@/components/dashboard/DualRing";
-import { MiniAreaChart } from "@/components/dashboard/MiniAreaChart";
 import { FunctionButton } from "@/components/dashboard/FunctionButton";
 import { SlidePanel } from "@/components/dashboard/SlidePanel";
 import { Card } from "@/components/ui/Card";
@@ -296,11 +295,6 @@ export default function MainDashboard() {
             />
           </div>
 
-          {/* ── 实时日志 (全宽) ── */}
-          <div className="max-w-4xl mx-auto w-full">
-            <LogCard />
-          </div>
-
           {/* ── 因子管道 + 策略 ── */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <StrategyCard />
@@ -452,32 +446,13 @@ export default function MainDashboard() {
               </div>
             </Card>
 
-            {/* ── Equity Chart ── */}
-            <Card className="flex flex-col" padding="md">
-              <div className="flex items-center justify-between mb-4">
-                <span className="section-label">权益曲线</span>
-                <div className="flex gap-1">
-                  {["1D", "1W", "1M"].map((t) => (
-                    <span
-                      key={t}
-                      className={`px-2.5 py-1 rounded-lg text-xs cursor-pointer transition-all duration-200 ${
-                        t === "1D"
-                          ? "bg-accent-light text-accent font-semibold"
-                          : "text-text-secondary hover:text-text-primary hover:bg-apple-bg"
-                      }`}
-                    >
-                      {t}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <div className="flex-1 min-h-0 flex items-stretch">
-                <MiniAreaChart data={equityData} height={100} color="#0071E3" className="w-full" showArea />
-              </div>
-            </Card>
-
             {/* ── 近期开仓 (因子通过闸门历史) ── */}
             <RecentTicksCard />
+          </div>
+
+          {/* ── 实时日志 (全宽, 详情面板上方) ── */}
+          <div className="max-w-4xl mx-auto w-full">
+            <LogCard />
           </div>
 
           {/* ── Function Buttons ── */}

@@ -1,20 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Button, Card, Badge, MetricCard, Input, Select, ConfirmDialog, Table } from "@/components/ui";
+import { Button, Card, Badge, Select, ConfirmDialog, Table } from "@/components/ui";
 import type { Column } from "@/components/ui";
-import { useAliveRef, useConfirm, usePolling } from "@/lib/hooks";
+import { useConfirm, usePolling } from "@/lib/hooks";
 import { authFetch } from "@/lib/auth";
 import { useAppStore } from "@/lib/store";
-import { EquityCurve, EquityPoint } from "@/components/charts/EquityCurve";
 import { fmtNum, fmtUSD } from "@/lib/format";
-
-/* ─── paper types ─── */
-interface PaperStatus {
-  status: "stopped" | "running" | "starting" | "stopping" | "error";
-  pid?: number;
-  started_at?: string;
-  last_error?: string;
-}
+import { MiniAreaChart } from "@/components/dashboard/MiniAreaChart";
 
 /* ─── Live types ─── */
 interface BrokerStatus {
@@ -33,136 +25,12 @@ function statusBadgeVariant(s: string | undefined): "success" | "warning" | "dan
   return "danger";
 }
 
-const tabs = ["paper", "live"] as const;
-type Tab = (typeof tabs)[number];
-
 export default function TradingPanel() {
-  const [tab, setTab] = useState<Tab>("paper");
-  const snapshot = useAppStore((s) => s.snapshot);
-
-  return (
-    <div className="space-y-4">
-      <div className="flex gap-1 mb-4 p-1 rounded-lg" style={{ background: "rgba(255,255,255,0.5)" }}>
-        {tabs.map((t) => (
-          <button key={t}
-            onClick={() => setTab(t)}
-            className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all duration-200 ${tab === t ? "bg-[#d4edda] text-[#1a1e24]" : "bg-[#dce0e6] text-[#4a4f59] hover:bg-[#d0d5dd] hover:text-[#1a1e24]"}`}
-          >{t === "paper" ? "模拟盘" : "实盘"}</button>
-        ))}
-      </div>
-      {tab === "paper" && <PaperContent />}
-      {tab === "live" && <LiveContent />}
-    </div>
-  );
+  return <LiveContent />;
 }
 
 /* ==================================================================
-   Paper (模拟盘) — 改为状态展示, 不再手动启停
-   ================================================================== */
-function PaperContent() {
-  const snapshot = useAppStore((s) => s.snapshot);
-  const [status, setStatus] = useState<PaperStatus>({ status: "stopped" });
-  const [equityPoints, setEquityPoints] = useState<EquityPoint[]>([]);
-  const aliveRef = useAliveRef();
-  const { confirm, dialogProps: confirmDialogProps } = useConfirm();
-
-  // ── Scheduler 状态 (判断是否自主运行) ──
-  const [schedRunning, setSchedRunning] = useState(false);
-  useEffect(() => {
-    authFetch("/api/control/scheduler").then(r => r.ok ? r.json().then(d => setSchedRunning(d.running)) : undefined).catch(() => {});
-    const t = setInterval(() => {
-      authFetch("/api/control/scheduler").then(r => r.ok ? r.json().then(d => setSchedRunning(d.running)) : undefined).catch(() => {});
-    }, 10000);
-    return () => clearInterval(t);
-  }, []);
-
-  useEffect(() => {
-    if (!snapshot) return;
-    setEquityPoints((prev) => {
-      const last = prev[prev.length - 1];
-      if (last?.v === snapshot.equity) return prev;
-      const t = Math.floor(new Date(snapshot.server_time).getTime() / 1000);
-      if (isNaN(t)) return prev;
-      const next = [...prev, { t, v: snapshot.equity }];
-      return next.length > 200 ? next.slice(-200) : next;
-    });
-  }, [snapshot]);
-
-  async function refreshStatus() {
-    const r = await authFetch("/api/paper/status");
-    if (!aliveRef.current) return;
-    if (r.ok) setStatus(await r.json());
-  }
-
-  useEffect(() => { refreshStatus(); }, []);
-
-  const statusBadgeVariant: "success" | "default" | "warning" = status.status === "running" ? "success" : status.status === "stopped" ? "default" : "warning";
-  const statusLabel = status.status === "running" ? `运行中 (pid ${status.pid})` : status.status === "stopped" ? "已停止 (由 InProcessScheduler 自动调度)" : status.status;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">模拟盘</h1>
-        <Button variant="ghost" size="sm" onClick={refreshStatus}>刷新状态</Button>
-      </div>
-
-      {/* ── Status banner ── */}
-      <Card>
-        <div className="flex items-center gap-4">
-          <div className="flex-1">
-            <div className="text-sm text-fg-muted">状态</div>
-            <div className="flex items-center gap-2 mt-1">
-              <Badge variant={statusBadgeVariant}>{statusLabel}</Badge>
-              {schedRunning && <Badge variant="success">● 自主调度</Badge>}
-            </div>
-            {status.started_at && <div className="text-xs text-fg-muted mt-1">启动于 {status.started_at}</div>}
-            {status.last_error && <div className="text-xs text-down mt-1">{status.last_error}</div>}
-            {schedRunning && (
-              <div className="text-xs text-up mt-2">
-                InProcessScheduler 已启动 — 模拟盘由 daily evolution cycle 自动管理。
-                无需手动启停。
-              </div>
-            )}
-          </div>
-        </div>
-      </Card>
-
-      {/* ── Scheduler 任务状态 ── */}
-      {schedRunning && (
-        <Card>
-          <div className="text-sm text-fg-muted mb-2">自动调度任务</div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
-            <div className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-up" /> 自进化循环 (每小时整点)</div>
-            <div className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-up" /> Canary 检查 (30min)</div>
-            <div className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-up" /> 因子退役 (每小时)</div>
-            <div className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-up" /> 数据同步 (5min)</div>
-          </div>
-        </Card>
-      )}
-
-      {/* ── Equity curve ── */}
-      <Card>
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-sm text-fg-muted">Equity 曲线</div>
-          <div className="text-xs text-fg-muted">{equityPoints.length} 点 (最多 200)</div>
-        </div>
-        <EquityCurve points={equityPoints} height={240} />
-      </Card>
-
-      {/* ── Metrics ── */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <MetricCard label="Equity" value={snapshot ? fmtNum(snapshot.equity) : "--"} />
-        <MetricCard label="今日 PnL" value={snapshot ? fmtUSD(snapshot.pnl_today) : "--"} trend={snapshot ? (snapshot.pnl_today >= 0 ? "up" : "down") : undefined} />
-        <MetricCard label="今日交易" value={snapshot?.daily.trades ?? 0} subvalue={snapshot ? `胜 ${snapshot.daily.win ?? 0} / 负 ${snapshot.daily.loss ?? 0}` : undefined} />
-        <MetricCard label="回撤" value={snapshot ? `${(snapshot.daily.drawdown_pct * 100).toFixed(1)}%` : "--"} subvalue={snapshot ? `连续亏损 ${snapshot.risk.consecutive_loss ?? 0}` : undefined} trend={snapshot && snapshot.daily.drawdown_pct > 0 ? "down" : undefined} />
-      </div>
-      <ConfirmDialog variant="danger" confirmLabel="紧急停止" {...confirmDialogProps} />
-    </div>
-  );
-}
-
-/* ==================================================================
-   Live (实盘) tab — unchanged detail view
+   Live — 实盘交易 (已移除模拟盘, 有回测框架替代)
    ================================================================== */
 function LiveContent() {
   const [status, setStatus] = useState<BrokerStatus | null>(null);
@@ -263,6 +131,13 @@ function LiveContent() {
         ))}
       </div>
 
+      {/* ── 权益曲线 (从总览移入) ── */}
+      <Card title="权益曲线" padding="md">
+        <div className="h-20">
+          <EquityChart />
+        </div>
+      </Card>
+
       {/* Positions table */}
       <Card title="当前持仓">
         <Table columns={columns} data={positions?.positions ?? []} keyExtractor={(p) => String(p.ticket)} emptyMessage={positions ? "无持仓" : "加载中..."} />
@@ -271,4 +146,11 @@ function LiveContent() {
       <ConfirmDialog variant="danger" confirmLabel="紧急平仓" {...dialogProps} />
     </div>
   );
+}
+
+/* ── 权益曲线组件 (从 store 读取 equityHistory) ── */
+function EquityChart() {
+  const equityHistory = useAppStore((st) => st.equityHistory);
+  const data = equityHistory.map((p) => p.v);
+  return <MiniAreaChart data={data} height={80} color="#0071E3" className="w-full" showArea />;
 }
