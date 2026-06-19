@@ -1514,3 +1514,13 @@
 {"ts": 1781849194.1383202, "factor": "f1", "old": 1.15, "new": 1.15, "reason": "score=0.500"}
 {"ts": 1781849194.1463256, "factor": "factor_0", "old": 2.05, "new": 2.05, "reason": "score=0.300"}
 {"ts": 1781849194.1463256, "factor": "factor_1", "old": 0.569, "new": 0.569, "reason": "score=0.300"}
+{"ts": 1781855251.0221531, "factor": "rsi_14", "old": 1.15, "new": 1.15, "reason": "score=51.954"}
+{"ts": 1781855251.0261836, "factor": "rsi_14", "old": 0.0, "new": 0.0, "reason": "dsr_p=1.000>threshold"}
+{"ts": 1781855251.030187, "factor": "test", "old": 1.15, "new": 1.15, "reason": "score=105.108"}
+{"ts": 1781855251.0421836, "factor": "rsi_14", "old": 0.197, "new": 0.197, "reason": "diversity_技术_80%>max"}
+{"ts": 1781855251.0421836, "factor": "di_spread", "old": 0.325, "new": 0.325, "reason": "diversity_技术_80%>max"}
+{"ts": 1781855251.0421836, "factor": "adx", "old": 0.111, "new": 0.111, "reason": "diversity_技术_80%>max"}
+{"ts": 1781855251.0421836, "factor": "dxy_corr_20", "old": 0.95, "new": 0.95, "reason": "score=13.430"}
+{"ts": 1781855251.6267004, "factor": "f1", "old": 1.15, "new": 1.15, "reason": "score=0.500"}
+{"ts": 1781855251.6336975, "factor": "factor_0", "old": 2.05, "new": 2.05, "reason": "score=0.300"}
+{"ts": 1781855251.6336975, "factor": "factor_1", "old": 0.569, "new": 0.569, "reason": "score=0.300"}

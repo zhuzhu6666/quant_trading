@@ -15,7 +15,14 @@ export interface WSnapshot {
   active_strategy: { id: string | null; mode: string; source: string };
   position: { dir: string; entry: number; size: number; unrealized: number };
   daily: { trades: number; win: number; loss: number; pnl: number; drawdown_pct: number };
-  risk: { circuit_breaker: boolean; consecutive_loss: number };
+  risk: {
+    circuit_breaker: boolean;
+    consecutive_loss: number;
+    var?: { var_pct: number; cvar_pct: number; confidence: number };
+    kelly?: { fraction: number; win_rate: number; avg_win: number; avg_loss: number };
+    stress?: { max_drawdown_pct: number; worst_scenario: string };
+    concentration?: { max_type_pct: number; n_types: number };
+  };
   live?: { broker: string; account: any; position: any; n_positions: number } | null;
   paper?: any;
   server_time: string;

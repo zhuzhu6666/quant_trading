@@ -3,10 +3,21 @@ import { authFetch } from "@/lib/auth";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 
-interface Signal {
+interface V4Signal {
   direction: string;
-  indicators: Record<string, number>;
-  dry_run: boolean;
+  score: number;
+  tactical_score: number;
+  macro_score: number;
+  n_active_factors: number;
+  gate_reason: string;
+}
+
+interface V4Status {
+  pipeline_active: boolean;
+  engine_warm: boolean;
+  buffer_size: number;
+  n_attribution_trades: number;
+  awe_conviction: number;
 }
 
 interface StrategyStatus {
@@ -18,19 +29,16 @@ interface StrategyStatus {
   circuit_breaker: boolean;
   circuit_reason: string;
   reason: string;
-  recent_signals: Signal[];
+  recent_signals: V4Signal[];
+  v4_status: V4Status;
 }
 
-const INDICATOR_LABELS: Record<string, string> = {
-  rsi: "RSI", di: "DI", stoch: "随机", macd: "MACD", bb: "布林", atr: "ATR",
+const DIR_LABELS: Record<string, string> = {
+  LONG: "做多", SHORT: "做空", FLAT: "空仓",
 };
 
 const DIR_COLORS: Record<string, string> = {
-  LONG: "#34C759", SHORT: "#FF3B30", FLAT: "#86868B", CLOSE: "#FF9500",
-};
-
-const DIR_LABELS: Record<string, string> = {
-  LONG: "做多", SHORT: "做空", FLAT: "空仓", CLOSE: "平仓",
+  LONG: "#34C759", SHORT: "#FF3B30", FLAT: "#86868B",
 };
 
 export default function StrategyCard() {
@@ -58,11 +66,12 @@ export default function StrategyCard() {
   }
 
   const s = data;
+  const v4 = s.v4_status;
   const lastSignal = s.recent_signals.length > 0 ? s.recent_signals[s.recent_signals.length - 1] : null;
 
   return (
     <Card className="flex flex-col" padding="sm">
-      {/* Header: strategy + status */}
+      {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${s.running ? "bg-success" : "bg-text-tertiary"}`} />
@@ -71,12 +80,40 @@ export default function StrategyCard() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <Badge variant="default">{s.strategy}</Badge>
+          <Badge variant="default">v4</Badge>
           <Badge variant={s.mode === "LIVE" ? "success" : "warning"}>
             {s.mode}
           </Badge>
         </div>
       </div>
+
+      {/* V4 Pipeline Status */}
+      {v4 && (
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs mb-3 pb-3 border-b border-apple-divider">
+          <div className="flex justify-between">
+            <span className="text-text-secondary">管道</span>
+            <span className={v4.pipeline_active ? "text-success" : "text-text-tertiary"}>
+              {v4.pipeline_active ? "活跃" : "未初始化"}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-text-secondary">引擎</span>
+            <span className={v4.engine_warm ? "text-success" : "text-warning"}>
+              {v4.engine_warm ? `就绪 (${v4.buffer_size})` : `预热 ${v4.buffer_size}/50`}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-text-secondary">归因交易</span>
+            <span className="text-text-primary font-mono">{v4.n_attribution_trades} 笔</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-text-secondary">信念分</span>
+            <span className={`font-mono ${v4.awe_conviction >= 0.7 ? "text-success" : v4.awe_conviction >= 0.4 ? "text-text-primary" : "text-warning"}`}>
+              {v4.awe_conviction.toFixed(2)}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Position */}
       <div className="flex items-center gap-3 text-xs mb-3 pb-3 border-b border-apple-divider">
@@ -93,37 +130,50 @@ export default function StrategyCard() {
       {/* Decision reason */}
       <div className="text-xs mb-3">
         <span className="text-text-secondary">状态: </span>
-        <span className={s.circuit_breaker ? "text-danger font-semibold" : s.position.dir !== "FLAT" ? "text-success" : "text-text-primary"}>
+        <span className={s.circuit_breaker ? "text-danger font-semibold" : "text-text-primary"}>
           {s.reason}
         </span>
       </div>
 
-      {/* Recent signal indicators */}
+      {/* Recent Signals (v4 format) */}
       {lastSignal && (
-        <div className="text-2xs space-y-1 pt-2 border-t border-apple-divider">
-          <div className="flex items-center gap-2 mb-2">
+        <div className="text-2xs space-y-2 pt-2 border-t border-apple-divider">
+          <div className="flex items-center gap-2">
             <span className="text-text-secondary">最近信号</span>
             <span className="font-bold" style={{ color: DIR_COLORS[lastSignal.direction] ?? "#86868B" }}>
               {DIR_LABELS[lastSignal.direction] ?? lastSignal.direction}
             </span>
-            {lastSignal.dry_run && <span className="text-warning text-2xs">(dry-run)</span>}
+            <span className="text-text-primary font-mono">
+              score={lastSignal.score.toFixed(3)}
+            </span>
           </div>
-          {lastSignal.indicators && Object.keys(lastSignal.indicators).length > 0 && (
-            <div className="grid grid-cols-3 gap-x-3 gap-y-1">
-              {Object.entries(lastSignal.indicators).map(([k, v]) => (
-                <div key={k} className="flex justify-between">
-                  <span className="text-text-secondary">{INDICATOR_LABELS[k] ?? k}</span>
-                  <span className="text-text-primary font-mono">{typeof v === "number" ? v.toFixed(2) : v}</span>
-                </div>
-              ))}
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+            <div className="flex justify-between">
+              <span className="text-text-secondary">战术层</span>
+              <span className="text-text-primary font-mono">{lastSignal.tactical_score.toFixed(3)}</span>
             </div>
-          )}
+            <div className="flex justify-between">
+              <span className="text-text-secondary">宏观层</span>
+              <span className="text-text-primary font-mono">{lastSignal.macro_score.toFixed(3)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-text-secondary">活跃因子</span>
+              <span className="text-text-primary font-mono">{lastSignal.n_active_factors}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-text-secondary">闸门</span>
+              <span className={lastSignal.gate_reason === "passed" ? "text-success font-mono" : "text-warning font-mono"}>
+                {lastSignal.gate_reason}
+              </span>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* No signal */}
       {!lastSignal && s.running && (
-        <div className="text-2xs text-text-secondary pt-2 border-t border-apple-divider">等待因子信号...</div>
+        <div className="text-2xs text-text-secondary pt-2 border-t border-apple-divider">
+          {v4?.engine_warm ? "等待闸门通过的信号..." : "因子引擎预热中..."}
+        </div>
       )}
     </Card>
   );

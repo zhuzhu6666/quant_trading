@@ -16,6 +16,7 @@ existing bridge.account_info() / get_positions() methods.)
 """
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
+import re
 
 from backend.core.auth import RequireUser
 from backend.services.live_service import (
@@ -94,10 +95,9 @@ def emergency(
 
 @router.get("/strategy-status")
 def strategy_status_endpoint(_user: RequireUser) -> dict:
-    """当前策略、持仓、最近信号及开仓/不开仓原因。"""
-    import os, re
+    """当前因子管道状态、持仓、最近信号及闸门判定。"""
     from pathlib import Path as _Path
-    from backend.services.live_service import _live_state, loop_status as _ls
+    from backend.services.live_service import _live_state, loop_status as _ls, _factor_pipeline
 
     loop = _ls()
     acct = _live_state.get("account") or {}
@@ -106,7 +106,6 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
     cb_reason = _live_state.get("circuit_reason", "")
 
     pos_list = positions.get("positions", []) if isinstance(positions, dict) else positions
-    # ★ P0 fix: PositionInfo dataclass → dict
     if pos_list and hasattr(pos_list[0], '__dataclass_fields__'):
         from backend.ws.endpoints import _position_to_dict
         pos_list = [_position_to_dict(p) for p in pos_list]
@@ -118,10 +117,24 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         pos_dir = "LONG" if p.get("type") == "buy" else "SHORT"
         pos_entry = float(p.get("price_open", 0))
 
-    # 最近信号: 读 live_loop.log + backend.log 末尾
+    # ── v4 因子管道状态 ──
+    pipeline = _factor_pipeline or {}
+    engine = pipeline.get("engine")
+    attr = pipeline.get("attribution")
+    awe = pipeline.get("awe")
+
+    v4_status: dict = {
+        "pipeline_active": bool(pipeline),
+        "engine_warm": engine.is_warm if engine else False,
+        "buffer_size": engine.buffer_size if engine else 0,
+        "n_attribution_trades": sum(s.n_trades for s in attr.get_all_factor_stats().values()) if attr else 0,
+        "awe_conviction": round(awe.composite_conviction(), 3) if awe else 0.5,
+    }
+
+    # 最近信号: 从 live_loop.log 读取 v4 格式
     recent_signals: list[dict] = []
     logs_dir = _Path(__file__).resolve().parent.parent.parent / "logs"
-    for log_name in ["backend.log", "live_loop.log"]:
+    for log_name in ["live_loop.log"]:
         log_path = logs_dir / log_name
         if not log_path.exists():
             continue
@@ -129,31 +142,27 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
             with open(log_path, "rb") as f:
                 f.seek(0, 2)
                 size = f.tell()
-                f.seek(max(size - 12000, 0))
+                f.seek(max(size - 8000, 0))
                 raw = f.read().decode("utf-8", errors="replace")
             lines = raw.splitlines()
-            if size > 12000:
+            if size > 8000:
                 lines = lines[1:]
-            for line in lines[-40:]:
-                m = re.search(r"signal=(\w+)", line)
-                if not m:
-                    continue
-                direction = m.group(1)
-                indicators = {}
-                for key in ["rsi", "di", "stoch", "macd", "bb", "atr"]:
-                    im = re.search(rf"{key}=([\d.\-]+)", line)
-                    if im:
-                        indicators[key] = float(im.group(1))
-                vm = re.search(r"votes\(([\d.]+)/([\d.]+)\)", line)
-                votes = None
-                if vm:
-                    votes = {"long": float(vm.group(1)), "short": float(vm.group(2))}
-                recent_signals.append({
-                    "direction": direction,
-                    "indicators": indicators,
-                    "votes": votes,
-                    "dry_run": "dry-run" in line,
-                })
+            for line in lines[-30:]:
+                m = re.search(
+                    r"signal=(LONG|SHORT)\s+score=([\d.\-]+)\s+"
+                    r"tactical=([\d.\-]+)\s+macro=([\d.\-]+)\s+"
+                    r"n=(\d+)\s+gate=(\S+)",
+                    line,
+                )
+                if m:
+                    recent_signals.append({
+                        "direction": m.group(1),
+                        "score": float(m.group(2)),
+                        "tactical_score": float(m.group(3)),
+                        "macro_score": float(m.group(4)),
+                        "n_active_factors": int(m.group(5)),
+                        "gate_reason": m.group(6),
+                    })
         except Exception:
             pass
 
@@ -163,15 +172,22 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         reason = f"熔断激活: {cb_reason}" if cb_reason else "熔断激活"
     elif not loop.get("running"):
         reason = "实盘未启动"
+    elif not v4_status.get("pipeline_active"):
+        reason = "因子管道未初始化"
+    elif not v4_status.get("engine_warm"):
+        reason = f"因子引擎预热中 ({v4_status.get('buffer_size', 0)}/50 bars)"
     elif pos_dir != "FLAT":
         reason = f"已有 {pos_dir} 持仓 @ {pos_entry:.2f}"
-    elif not _should_send_orders("ctrader"):
-        reason = "DRY-RUN 模式 (不发实单)"
     elif recent_signals:
         last = recent_signals[-1]
-        reason = f"最近信号: {last['direction']}"
+        if last.get("gate_reason", "").startswith("passed"):
+            reason = f"最近信号: {last['direction']} score={last['score']:.3f} (闸门通过)"
+        else:
+            reason = f"最近信号: {last['direction']} score={last['score']:.3f} (闸门: {last.get('gate_reason', '?')})"
+    elif not _should_send_orders("ctrader"):
+        reason = "DRY-RUN 模式 (不发实单)"
     else:
-        reason = "等待策略信号"
+        reason = "等待因子信号"
 
     return {
         "running": loop.get("running", False),
@@ -183,6 +199,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         "circuit_reason": cb_reason,
         "reason": reason,
         "recent_signals": recent_signals[-5:],
+        "v4_status": v4_status,
     }
 
 
