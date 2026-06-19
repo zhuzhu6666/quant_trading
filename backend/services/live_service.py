@@ -1555,8 +1555,8 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
         # ── 跨日重置熔断 + 会话统计 ──
         try:
-            from datetime import datetime, timezone as _dt
-            today_str = _dt.now(timezone.utc).strftime("%Y-%m-%d")
+            from datetime import datetime, timezone
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if today_str != _current_trade_date:
                 if _current_trade_date:
                     log(f"new trading day {today_str}, resetting session stats")

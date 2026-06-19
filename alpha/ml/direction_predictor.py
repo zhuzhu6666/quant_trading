@@ -113,12 +113,14 @@ def _compute_bar_weights(
     return weights
 
 
-def _build_features(df: pd.DataFrame, factor_values: dict[str, np.ndarray]) -> np.ndarray:
+def _build_features(df: pd.DataFrame, factor_values: dict[str, np.ndarray], required_factor_order: list[str] | None = None) -> np.ndarray:
     """从预计算的因子值构造特征矩阵 X。
 
     Args:
         df: OHLCV DataFrame (含 'time' 列用于提取时间特征)
         factor_values: {name: np.ndarray} 全因子值
+        required_factor_order: 若提供, 按此顺序取因子,
+            缺失或全 NaN 者填 0.0 保持列数稳定, 用于推理.
 
     Returns:
         X: (n_bars, n_features) float64 数组
@@ -126,12 +128,24 @@ def _build_features(df: pd.DataFrame, factor_values: dict[str, np.ndarray]) -> n
     n = len(df)
     features: list[np.ndarray] = []
 
-    # 1. 全量因子值 (39+ features), 跳过全 NaN 列
-    for name, vals in factor_values.items():
-        arr = np.asarray(vals, dtype=float)
-        arr[np.isinf(arr)] = np.nan
-        if len(arr) == n and not np.isnan(arr).all():
+    # 1. 全量因子值, 替换 NaN → 0 而非跳过 (保证列数稳定)
+    if required_factor_order is not None:
+        for name in required_factor_order:
+            arr = factor_values.get(name)
+            if arr is not None:
+                arr = np.asarray(arr, dtype=float)
+            if arr is None or len(arr) != n:
+                arr = np.zeros(n, dtype=float)
+            arr[np.isinf(arr)] = 0.0
+            arr = np.nan_to_num(arr, nan=0.0)
             features.append(arr)
+    else:
+        for name, vals in factor_values.items():
+            arr = np.asarray(vals, dtype=float)
+            arr[np.isinf(arr)] = 0.0
+            arr = np.nan_to_num(arr, nan=0.0)
+            if len(arr) == n:
+                features.append(arr)
 
     # 2. 时间特征
     if "time" in df.columns:
@@ -235,6 +249,8 @@ def train_direction_predictor(
 
     # 3. 构造 X, y
     X = _build_features(df, factor_vals)
+    # 备份实际用的特征顺序 (推理时用 required_factor_order 确保列数稳定)
+    _trained_factor_order = list(factor_vals.keys())
     y = _build_labels(df)
 
     # 4. 去 NaN
@@ -320,7 +336,8 @@ def train_direction_predictor(
                 "trained_at": datetime.now(timezone.utc).isoformat(),
                 "n_samples": n_valid,
                 "oos_acc": avg_oos_acc,
-                "n_factors": n_factors,
+                "n_factors": X.shape[1],
+                "trained_factor_order": _trained_factor_order,
             }, f)
 
         # 注册为因子
@@ -389,9 +406,15 @@ def _register_as_factor(model_path: Path, symbol: str, timeframe: str):
             else:
                 factor_vals[name] = np.full(len(df), np.nan)
 
-        X = _build_features(df, factor_vals)
+        X = _build_features(df, factor_vals, required_factor_order=bundle.get("trained_factor_order"))
 
-        # 处理 NaN
+        # 处理 NaN + 特征数兼容 (模型可能用旧版 _build_features 训练, 跳过全 NaN 列)
+        n_expected = model.n_features_in_
+        if X.shape[1] < n_expected:
+            X = np.column_stack([X, np.zeros((X.shape[0], n_expected - X.shape[1]))])
+        elif X.shape[1] > n_expected:
+            X = X[:, :n_expected]
+
         mask = ~np.isnan(X).any(axis=1)
         proba = np.full(len(df), 0.5)
         if mask.sum() > 0:
@@ -431,7 +454,15 @@ def predict(df: pd.DataFrame) -> np.ndarray:
             continue
 
     model = bundle["model"]
-    X = _build_features(df, factor_vals)
+    X = _build_features(df, factor_vals, required_factor_order=bundle.get("trained_factor_order"))
+
+    # 特征数兼容 (旧版 _build_features 跳过全 NaN 列)
+    n_expected = model.n_features_in_
+    if X.shape[1] < n_expected:
+        X = np.column_stack([X, np.zeros((X.shape[0], n_expected - X.shape[1]))])
+    elif X.shape[1] > n_expected:
+        X = X[:, :n_expected]
+
     mask = ~np.isnan(X).any(axis=1)
     proba = np.full(len(df), 0.5)
     if mask.sum() > 0:

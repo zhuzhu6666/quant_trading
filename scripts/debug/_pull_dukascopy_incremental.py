@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # 切换工作目录到项目根 (兼容 Linux/Windows)
-_ROOT = Path(__file__).resolve().parent
+_ROOT = Path(__file__).resolve().parent.parent.parent
 os.chdir(str(_ROOT))
 BASE = "https://datafeed.dukascopy.com/datafeed/XAUUSD"
 
