@@ -73,7 +73,7 @@ function FactorsContent() {
         <Card padding="sm">
           <div className="text-xs text-up flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-up" />
-            自动调度: 因子健康评估由 evolution_hourly (每小时整点) + canary_fast (每 30 分钟) 自动运行
+            自动调度: 因子健康评估由 evolution_hourly (每小时整点) 自动运行
           </div>
         </Card>
       )}
@@ -165,8 +165,7 @@ function DiscoverContent() {
           <div className="flex items-center gap-2 text-xs text-up">
             <span className="w-1.5 h-1.5 rounded-full bg-up" />
             自动调度: GP 因子发现每小时整点执行 (pop=50, gen=20)。
-            Canary 评估每 30 分钟检查晋升/回滚。
-            因子退役每小时检查。
+            评估、晋升/回滚、退役均由 evolution_hourly 自动完成。
           </div>
         </Card>
       )}

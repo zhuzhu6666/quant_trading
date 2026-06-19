@@ -15,7 +15,6 @@ import ExperimentsPanel from "@/components/panels/ExperimentsPanel";
 import DataPanel from "@/components/panels/DataPanel";
 import SystemPanel from "@/components/panels/SystemPanel";
 import RiskPanel from "@/components/panels/RiskPanel";
-import OpsPanel from "@/components/panels/OpsPanel";
 import BacktestPanel from "@/components/panels/BacktestPanel";
 import LogCard from "@/components/dashboard/LogCard";
 
@@ -262,9 +261,8 @@ export default function MainDashboard() {
     { key: "factors", icon: "🔬", label: "因子", desc: "健康 · 发现 · 影子", accent: "#34C759" },
     { key: "experiments", icon: "🧪", label: "实验", desc: "调参 · 校准 · A/B", accent: "#FF9500" },
     { key: "data", icon: "📈", label: "数据", desc: "K线 · 外部数据 · 同步", accent: "#AF52DE" },
-    { key: "system", icon: "⚙️", label: "系统", desc: "报告 · 配置 · 任务", accent: "#5856D6" },
+    { key: "system", icon: "⚙️", label: "系统", desc: "报告 · 配置 · 任务 · 恢复 · 周报", accent: "#5856D6" },
     { key: "risk", icon: "🛡️", label: "风控", desc: "VaR · Kelly · 压力测试", accent: "#FF3B30" },
-    { key: "ops", icon: "🚨", label: "运维", desc: "告警 · 恢复 · 周报", accent: "#FF2D55" },
     { key: "backtest", icon: "📊", label: "回测", desc: "向量回测 · 历史 · 对比", accent: "#5AC8FA" },
   ];
 
@@ -583,9 +581,6 @@ export default function MainDashboard() {
       </SlidePanel>
       <SlidePanel open={activePanel === "risk"} onClose={() => setActivePanel(null)} title="风控中心">
         <RiskPanel />
-      </SlidePanel>
-      <SlidePanel open={activePanel === "ops"} onClose={() => setActivePanel(null)} title="运维中心">
-        <OpsPanel />
       </SlidePanel>
       <SlidePanel open={activePanel === "backtest"} onClose={() => setActivePanel(null)} title="回测中心">
         <BacktestPanel />

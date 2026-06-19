@@ -15,6 +15,8 @@ export default function SystemPanel() {
           { key: "config", label: "配置" },
           { key: "jobs", label: "任务" },
           { key: "attribution", label: "归因" },
+          { key: "recovery", label: "恢复" },
+          { key: "weekly", label: "周报" },
         ]}
         active={activeTab}
         onChange={setActiveTab}
@@ -24,6 +26,8 @@ export default function SystemPanel() {
       {activeTab === "config" && <ConfigSection />}
       {activeTab === "jobs" && <JobsSection />}
       {activeTab === "attribution" && <AttributionSection />}
+      {activeTab === "recovery" && <RecoverySection />}
+      {activeTab === "weekly" && <WeeklySection />}
     </div>
   );
 }
@@ -643,6 +647,118 @@ function AttributionSection() {
           <p className="mt-2">
             归因引擎: 线性 MC + Gram-Schmidt 正交 · NW-HAC Sharpe 评估
           </p>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ===== 恢复 (from OpsPanel) ===== */
+function RecoverySection() {
+  const [recovery, setRecovery] = useState<any>(null);
+  const [recoveryHistory, setRecoveryHistory] = useState<any[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const fetchRecovery = async () => {
+    try {
+      const r = await authFetch("/api/ops/recovery");
+      if (r.ok) setRecovery(await r.json());
+    } catch { /* ignore */ }
+  };
+
+  const fetchRecoveryHistory = async () => {
+    try {
+      const r = await authFetch("/api/ops/recovery/history");
+      if (r.ok) setRecoveryHistory(await r.json());
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => {
+    fetchRecovery();
+    const t = setInterval(fetchRecovery, 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <div className="space-y-4">
+      <h1 className="text-2xl font-bold">AutoRecovery 状态</h1>
+      <Card padding="md">
+        <div className="flex items-center gap-4 mb-4">
+          <span className={`w-2.5 h-2.5 rounded-full ${recovery?.loop_healthy ? "bg-success" : "bg-warning"} animate-pulse-soft`} />
+          <span className="text-sm font-medium">{recovery?.running ? "30s 心跳正常" : "未启动"}</span>
+        </div>
+        <div className="space-y-2 text-sm">
+          <div className="flex items-center justify-between"><span className="text-fg-muted">运行中</span><span>{recovery?.running ? "是" : "否"}</span></div>
+          <div className="flex items-center justify-between"><span className="text-fg-muted">Loop 健康</span><span>{recovery?.loop_healthy ? "健康" : "异常"}</span></div>
+          <div className="flex items-center justify-between"><span className="text-fg-muted">调度健康</span><span>{recovery?.scheduler_healthy ? "健康" : "异常"}</span></div>
+          <div className="flex items-center justify-between"><span className="text-fg-muted">失败次数</span><span>{recovery?.failures ?? 0}</span></div>
+        </div>
+      </Card>
+      <div className="flex justify-end">
+        <Button variant="ghost" size="sm" onClick={() => { setShowHistory(!showHistory); if (!showHistory) fetchRecoveryHistory(); }}>
+          {showHistory ? "收起历史" : "查看历史"}
+        </Button>
+      </div>
+      {showHistory && (
+        <Card title="恢复历史" padding="md">
+          {recoveryHistory.length > 0 ? (
+            <table className="w-full text-sm">
+              <thead><tr className="border-b text-fg-muted text-2xs uppercase"><th className="text-left py-2">时间</th><th className="text-left py-2">操作</th><th className="text-left py-2">状态</th></tr></thead>
+              <tbody>
+                {recoveryHistory.map((item: any, idx: number) => (
+                  <tr key={idx} className="border-b last:border-0">
+                    <td className="py-2">{item.time ? new Date(item.time * 1000).toLocaleString() : "--"}</td>
+                    <td className="py-2">{item.action ?? "--"}</td>
+                    <td className="py-2"><Badge variant={item.status === "success" ? "success" : "danger"}>{item.status ?? "--"}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <div className="text-sm text-fg-muted text-center py-4">暂无恢复历史</div>}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ===== 周报 (from OpsPanel) ===== */
+function WeeklySection() {
+  const [reports, setReports] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchReports = async () => {
+    try {
+      const r = await authFetch("/api/ops/reports/weekly");
+      if (r.ok) setReports(await r.json());
+    } catch { /* ignore */ }
+  };
+
+  const generateReport = async () => {
+    try { setLoading(true);
+      const r = await authFetch("/api/ops/reports/weekly/generate", { method: "POST" });
+      if (r.ok) await fetchReports();
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { fetchReports(); }, []);
+
+  return (
+    <div className="space-y-4">
+      <h1 className="text-2xl font-bold">周报</h1>
+      <Card padding="md">
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-sm text-fg-muted">已生成: <span className="font-medium">{reports?.count ?? 0} 份</span></div>
+          <Button variant="primary" size="sm" onClick={generateReport} loading={loading}>生成周报</Button>
+        </div>
+        <div className="space-y-2">
+          {(reports?.reports ?? []).map((rep: any) => (
+            <div key={rep.name} className="flex items-center justify-between py-2 border-b last:border-0">
+              <span className="text-sm">{rep.name}</span>
+              <span className="text-2xs text-fg-muted">{new Date(rep.modified_at * 1000).toLocaleString()}</span>
+            </div>
+          ))}
+          {(!reports?.reports || reports.reports.length === 0) && <div className="text-sm text-fg-muted text-center py-4">暂无周报</div>}
         </div>
       </Card>
     </div>
