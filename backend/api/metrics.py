@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import Response
 
+from backend.core.auth import RequireUser
 from monitor.metrics import CONTENT_TYPE_LATEST, Metrics
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
@@ -23,7 +24,7 @@ def get_metrics() -> Response:
 
 
 @router.get("/health")
-def get_metrics_health() -> dict:
+def get_metrics_health(_user: RequireUser) -> dict:
     """指标注册状态(JSON),给前端调试用。"""
     m = Metrics.shared()
     return {

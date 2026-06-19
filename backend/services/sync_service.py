@@ -40,10 +40,7 @@ def run_sync_once(params: dict[str, Any], progress_cb: ProgressCB) -> dict:
 
 # ----- Phase 1.1 新增:LoopHost factory -----
 async def sync_runner_factory(state: RuntimeState) -> None:
-    """LoopHost 的 sync 工厂:周期跑一次 orchestrator.run_once。
-
-    Phase 1.4 接入: SyncHealth / recovery.auto_recover。
-    """
+    """LoopHost 的 sync 工厂:周期跑一次 CTraderPuller。"""
     from data.live_sync.health import SyncHealth
 
     loop_status = state.get_loop("sync")
@@ -60,80 +57,34 @@ async def sync_runner_factory(state: RuntimeState) -> None:
             health.record_failure("iteration_exception")
             state.emit_metric("sync_iteration_error", {})
 
-        # Phase 1.4 接入: 若已 degraded,触发自愈
-        if health.is_degraded():
-            from data.live_sync.recovery import auto_recover
-
-            try:
-                rec = await auto_recover(health=health, max_attempts=3)
-                _stdlib_logger.warning("sync auto_recover report: %s", rec)
-                state.emit_metric("sync_recovery_attempted", {"ok": 1 if rec.get("ok") else 0})
-                if rec.get("ok"):
-                    health.record_success()  # 假定自愈已成功,重置连续失败计数
-                    from monitor.evolution_story import EvolutionStory
-                    EvolutionStory.shared().append(
-                        "sync_recovered",
-                        {"attempts": rec.get("attempts"), "action": rec.get("action")},
-                    )
-            except Exception:  # noqa: BLE001
-                _stdlib_logger.exception("auto_recover failed")
-
         await asyncio.sleep(interval_sec)
 
 
 async def _do_one_sync(state: RuntimeState, health) -> None:
-    """一次同步迭代。Phase 1.4 接入 SyncHealth / DataQualityGate。"""
+    """一次同步迭代。委托 CTraderPuller (原 MT5 orchestrator 已移除)。"""
     from monitor.evolution_story import EvolutionStory
 
     health.record_attempt()
     try:
-        from data.live_sync.orchestrator import run_once  # type: ignore
+        from data.live_sync.ctrader_puller import CTraderPuller
+        from config.runtime_config import shared as rcc
 
-        result = run_once()
-    except Exception as e:  # noqa: BLE001
-        _stdlib_logger.debug("orchestrator.run_once failed: %r", e)
-        health.record_failure(f"run_once: {e!r}")
-        state.emit_metric("sync_iteration_skipped", {})
-        return
+        cfg = rcc()
+        symbol = list(cfg.enabled_symbols)[0] if hasattr(cfg, 'enabled_symbols') and cfg.enabled_symbols else "XAUUSD+"
+        results = {}
+        for tf in ["M5", "M15"]:
+            puller = CTraderPuller(symbol=symbol)
+            r = puller.pull_history(symbol=symbol, timeframe=tf, n=50)
+            results[tf] = r.n_bars if hasattr(r, 'n_bars') else 0
 
-    inserted = int(result.get("total_inserted", 0)) if isinstance(result, dict) else 0
-    per_tf = result.get("per_tf", []) if isinstance(result, dict) else []
+        total = sum(results.values())
+        _stdlib_logger.info("sync done: %d bars | %s", total, results)
+        health.record_success()
+        if total > 0:
+            EvolutionStory.shared().append("sync_success", {"inserted": total})
+    except Exception as e:
+        health.record_failure(str(e)[:100])
+        _stdlib_logger.exception("sync failed")
+        EvolutionStory.shared().append("sync_error", {"error": str(e)[:200]})
 
-    # 从 per_tf 提取 last_bar_ts_by_tf(per_tf 元素是 dict,可能含 last_sync_utc / last_bar_ts)
-    last_bar_ts_by_tf: dict[str, float] = {}
-    for entry in per_tf:
-        if not isinstance(entry, dict):
-            continue
-        tf = entry.get("timeframe") or entry.get("tf")
-        ts_raw = entry.get("last_bar_ts") or entry.get("last_sync_utc") or entry.get("last_ts")
-        if not tf or ts_raw is None:
-            continue
-        try:
-            # 接受 ISO 字符串或 epoch float
-            if isinstance(ts_raw, (int, float)):
-                last_bar_ts_by_tf[str(tf)] = float(ts_raw)
-            else:
-                from datetime import datetime, timezone
-
-                dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                last_bar_ts_by_tf[str(tf)] = dt.timestamp()
-        except Exception:  # noqa: BLE001
-            continue
-
-    is_success = (not result.get("error")) if isinstance(result, dict) else False
-    if is_success:
-        health.record_success(last_bar_ts_by_tf=last_bar_ts_by_tf)
-        # 累计事件流(只记 inserted>0 的成功,避免每 5 分钟刷"成功"事件)
-        if inserted > 0:
-            EvolutionStory.shared().append(
-                "sync_success",
-                {"inserted": inserted, "per_tf": last_bar_ts_by_tf},
-            )
-    else:
-        err = str(result.get("error", "unknown")) if isinstance(result, dict) else "unknown"
-        health.record_failure(err)
-        EvolutionStory.shared().append("sync_failure", {"error": err})
-
-    state.emit_metric("sync_iteration_done", {"inserted": inserted})
+    state.emit_metric("sync_iteration_done", {"inserted": total if 'total' in dir() else 0})

@@ -14,8 +14,18 @@ class ConnectionManager:
         self._rooms: dict[str, set[WebSocket]] = defaultdict(set)
         self._lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket, channel: str) -> None:
-        await ws.accept()
+    async def connect(self, ws: WebSocket, channel: str, subprotocol: str | None = None) -> None:
+        """Accept WS connection and join channel.
+
+        Args:
+            ws: WebSocket connection.
+            channel: Room name to join.
+            subprotocol: Echo back the client's subprotocol (browser WebSocket API
+                         requires the server to respond with the same subprotocol
+                         from Sec-WebSocket-Protocol, otherwise the connection is
+                         rejected as 403).
+        """
+        await ws.accept(subprotocol=subprotocol)
         async with self._lock:
             self._rooms[channel].add(ws)
         logger.debug(f"ws connected to {channel} (total={len(self._rooms[channel])})")

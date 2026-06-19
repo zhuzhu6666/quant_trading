@@ -105,12 +105,12 @@ def main():
     print("=" * 78)
 
     # 1) 加载数据
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     bars = store.load_bars("XAUUSD+", "M15")
     assert not bars.empty
     print(f"\nLoaded {len(bars)} bars, {bars.index[0]} → {bars.index[-1]}")
 
-    loader = ExternalDataLoader("data/market_data.db")
+    loader = ExternalDataLoader("data/ctrader_data.duckdb")
     ext = loader.align_to_bars(bars)
     df = bars.join(ext)
 

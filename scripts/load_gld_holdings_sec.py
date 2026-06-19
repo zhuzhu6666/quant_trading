@@ -174,7 +174,7 @@ def main():
             print(f"  {r['month_end']}: {r['oz_per_share']}")
 
         # 写库
-        store = DataStore("data/market_data.db")
+        store = DataStore("data/ctrader_data.duckdb")
         inserted = 0
         for r in unique:
             sh = r.get("shares_outstanding") or 350_000_000

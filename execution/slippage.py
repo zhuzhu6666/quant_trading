@@ -80,19 +80,25 @@ class DynamicSlippageModel:
         return ticks * GOLD_TICK_USD
 
     def get_spread_estimate(self, atr: Optional[float] = None,
-                            is_event: bool = False) -> dict:
-        """调试 / 报告用: 返回各组分"""
+                            is_event: bool = False,
+                            bar: Optional[dict] = None) -> dict:
+        """调试 / 报告用: 返回各组分 (含低流动性加成)"""
         cfg = self.config
         base_ticks = cfg["base_ticks"]
         atr_ticks = (atr * cfg["atr_mult"] / GOLD_TICK_USD) if (atr and atr > 0) else 0.0
         total_ticks = base_ticks + atr_ticks
         event_factor = cfg["event_boost"] if is_event else 1.0
         total_ticks *= event_factor
+        low_liq_factor = 1.0
+        if bar is not None and self._is_low_liquidity_hour(bar):
+            low_liq_factor = cfg.get("low_liquidity_boost", 1.5)
+            total_ticks *= low_liq_factor
         total_ticks = min(total_ticks, cfg["max_ticks"])
         return {
             "base_ticks": base_ticks,
             "atr_component_ticks": atr_ticks,
             "event_boost": event_factor,
+            "low_liquidity_boost": low_liq_factor,
             "max_ticks_cap": cfg["max_ticks"],
             "total_ticks": round(total_ticks, 4),
             "total_usd_per_oz": round(total_ticks * GOLD_TICK_USD, 4),

@@ -1,0 +1,16 @@
+{
+  "last_attempt_ts": 1781848346.636545,
+  "last_success_ts": 1781848346.636545,
+  "consecutive_failures": 0,
+  "last_error": "",
+  "total_attempts": 1788,
+  "total_successes": 2131,
+  "last_bar_ts_by_tf": {
+    "M15": 1781771400,
+    "H1": 1781766000,
+    "M5": 1781772000,
+    "M30": 1781769600,
+    "D1": 1781654400,
+    "M1": 1781772480
+  }
+}

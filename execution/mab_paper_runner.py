@@ -22,7 +22,7 @@ import logging
 import math
 import time as _time
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, timezone, date
 from typing import Optional
 
 import numpy as np
@@ -346,7 +346,7 @@ class MABPaperRunner:
         for i, bar in enumerate(bars):
             self._bar_idx_counter = i
             # 每日 reset
-            bar_date = datetime.utcfromtimestamp(bar["time"]).date()
+            bar_date = datetime.fromtimestamp(bar["time"], tz=timezone.utc).date()
             if last_reset is None:
                 last_reset = bar_date
             elif bar_date != last_reset:
@@ -529,7 +529,7 @@ class MABPaperRunner:
         # 日 PnL
         by_day: dict[date, float] = {}
         for t in closes:
-            d = datetime.utcfromtimestamp(t.time).date()
+            d = datetime.fromtimestamp(t.time, tz=timezone.utc).date()
             by_day[d] = by_day.get(d, 0.0) + t.pnl
         daily_pnl = [v for _, v in sorted(by_day.items())]
 

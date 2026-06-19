@@ -22,7 +22,7 @@ Paper Execution Engine — 模拟撮合引擎
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from core.state import state, Position
@@ -237,9 +237,9 @@ class PaperExecutionEngine:
         # entry_time: bar 回放时用 bar["time"] (历史), live 时用 utcnow
         if bar_time is not None:
             from datetime import datetime as _dt
-            entry_dt = _dt.utcfromtimestamp(float(bar_time))
+            entry_dt = _dt.fromtimestamp(float(bar_time), tz=timezone.utc)
         else:
-            entry_dt = datetime.utcnow()
+            entry_dt = datetime.now(timezone.utc)
         self.position = Position(
             symbol=signal.symbol,
             direction=signal.direction,
@@ -393,7 +393,8 @@ class PaperExecutionEngine:
         # 0.5 熔断检查（用最新权益 + 最新 daily stats）
         if self.circuit_breaker is not None and not self.circuit_breaker.is_tripped:
             tripped, reason = self.circuit_breaker.check_all()
-            # trip 由 check_all 内部完成，这里只打日志
+            if tripped:
+                logger.warning('Circuit breaker tripped: %s', reason)
 
         # 1. 若有持仓，先用本 bar 的 high/low 检查 SL/TP
         #    （SL/TP 是历史已经发生的事，可以基于本 bar 数据判断）

@@ -34,6 +34,7 @@ class Position:
     tp_price: float = 0.0
     entry_time: datetime | None = None
     unrealized_pnl: float = 0.0
+    contract_size: int = 100   # 合约乘数: XAUUSD=100oz/手, 其他品种需要在创建时设置
 
 
 @dataclass
@@ -109,9 +110,9 @@ class AccountState:
         with self._lock:
             if self.position.direction != 0:
                 if self.position.direction == 1:
-                    pnl = (current_price - self.position.entry_price) * self.position.volume * 100
+                    pnl = (current_price - self.position.entry_price) * self.position.volume * self.position.contract_size
                 else:
-                    pnl = (self.position.entry_price - current_price) * self.position.volume * 100
+                    pnl = (self.position.entry_price - current_price) * self.position.volume * self.position.contract_size
                 self.position.unrealized_pnl = pnl
                 self.position.current_price = current_price
                 self.equity = self.balance + pnl

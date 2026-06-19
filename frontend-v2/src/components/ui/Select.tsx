@@ -7,12 +7,12 @@ interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
 
 export function Select({ label, options, className, ...props }: SelectProps) {
   return (
-    <div className="flex flex-col gap-1">
-      {label && <label className="text-xs text-fg-muted font-medium">{label}</label>}
+    <div className="flex flex-col gap-1.5">
+      {label && <label className="text-xs text-text-secondary font-medium">{label}</label>}
       <select
         className={classNames(
-          "w-full bg-white border border-[#dce0e6] rounded px-2.5 py-1.5 text-sm text-[#1a1e24]",
-          "focus:border-accent focus:ring-1 focus:ring-accent/30 outline-none transition-colors duration-150",
+          "w-full bg-apple-bg border border-apple-border rounded-xl px-3.5 py-2.5 text-sm text-text-primary",
+          "focus:border-accent focus:ring-2 focus:ring-accent/20 outline-none transition-all duration-200",
           className
         )}
         {...props}

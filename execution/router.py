@@ -67,8 +67,11 @@ class ExecutionRouter:
         """
         # 1. 计算仓位
         entry_price = signal.price
-        sl_price = entry_price - signal.atr * signal.sl_atr if signal.direction == 1 \
-              else entry_price + signal.atr * signal.sl_atr
+        sl_price = (
+            entry_price - signal.atr * signal.sl_atr
+            if signal.direction == 1
+            else entry_price + signal.atr * signal.sl_atr
+        )
 
         size = self.portfolio.compute_size(entry_price, sl_price, signal.atr)
 
@@ -108,7 +111,7 @@ class ExecutionRouter:
             current_price=entry_price,
             urgency=urgency,
         )
-        children = self.algo_dispatcher.dispatch(parent, algo=algo)
+        children = self.algo_dispatcher.dispatch(parent)
         logger.info(f"[ALGO {algo or 'AUTO'}] {signal.strategy} {size}手 → {len(children)} child orders")
         return self._create_child_orders(signal, children, sl_price, tp_price)
 
@@ -167,19 +170,36 @@ class ExecutionRouter:
             state.position.volume = new_vol
             state.position.entry_price = new_vwap
         else:
-            # 反向 fill: 减仓或翻仓, 本期不处理
-            # TODO: 实现减仓/翻仓的 volume 调整 + entry_price 重算
-            logger.warning(
-                f"[P4 BUG-2] on_fill 反向 fill 未处理: "
-                f"current_dir={state.position.direction}, "
-                f"fill_dir={order.direction}, vol={order.volume} "
-                f"(TODO: 减仓/翻仓逻辑)"
-            )
+            # 反向 fill: 减仓或翻仓
+            remaining = state.position.volume - order.volume
+            if remaining > 1e-10:
+                # 减仓: volume 减少, entry_price 不变
+                state.position.volume = remaining
+                logger.info(
+                    f"[on_fill] reduced position: dir={state.position.direction}, "
+                    f"vol={state.position.volume:.4f} -> {remaining:.4f}"
+                )
+            elif abs(remaining) < 1e-10:
+                # 完全平仓
+                state.position.direction = 0
+                state.position.volume = 0.0
+                state.position.entry_price = 0.0
+                logger.info("[on_fill] position closed (exact match)")
+            else:
+                # 翻仓: 反向开仓
+                state.position.direction = order.direction
+                state.position.volume = abs(remaining)
+                state.position.entry_price = fill_price
+                logger.info(
+                    f"[on_fill] position flipped: dir={order.direction}, "
+                    f"vol={abs(remaining):.4f}"
+                )
 
-        # SL/TP 跟到最新一笔
-        # P5a (audit 2026-06-04 ARCH-3): 走 set_sl_price helper 持锁
-        state.set_sl_price(order.sl)
-        state.position.tp_price = order.tp
+        # SL/TP 跟到最新一笔 (仅首笔/同向加仓时更新, 减仓/平仓/翻仓不覆盖)
+        # v11-fix (P0-6): 防减仓时 order.sl/tp=0 清零保护
+        if state.position.direction == order.direction or state.position.direction == 0:
+            state.set_sl_price(order.sl)
+            state.position.tp_price = order.tp
 
         logger.info(f"FILLED: ticket={order.ticket} price={fill_price:.2f} "
                     f"size={order.volume} total_vol={state.position.volume:.2f}")

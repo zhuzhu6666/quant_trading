@@ -92,9 +92,9 @@ def main():
     print(f"  Features: {FEATURES}")
 
     # 1) 加载
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     bars = store.load_bars("XAUUSD+", "M15")
-    loader = ExternalDataLoader("data/market_data.db")
+    loader = ExternalDataLoader("data/ctrader_data.duckdb")
     ext = loader.align_to_bars(bars)
     df = bars.join(ext)
     engine = FactorEngine(df)

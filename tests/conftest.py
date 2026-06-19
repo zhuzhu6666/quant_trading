@@ -13,3 +13,25 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # Ensure subprocesses spawned by tests can also import `backend.*`.
 os.environ.setdefault("PYTHONPATH", str(PROJECT_ROOT))
+os.environ.setdefault("QUANT_JWT_SECRET", "test-jwt-secret-2026-do-not-use-in-prod")
+
+# ── Auth helper for tests ──
+import pytest
+
+
+@pytest.fixture
+def auth_headers():
+    """Return Authorization headers with a valid test JWT."""
+    from backend.core.auth import create_token
+    token = create_token("test_user")
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def auth_client():
+    """TestClient with valid JWT in default headers."""
+    from backend.app import app
+    from backend.core.auth import create_token
+    from fastapi.testclient import TestClient
+    token = create_token("test_user")
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})

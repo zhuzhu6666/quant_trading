@@ -18,6 +18,7 @@ interface TableProps<T> {
   onRowClick?: (item: T) => void;
   selectedKey?: string;
   className?: string;
+  variant?: "default" | "compact";
 }
 
 export function Table<T>({
@@ -29,33 +30,34 @@ export function Table<T>({
   onRowClick,
   selectedKey,
   className,
+  variant = "default",
 }: TableProps<T>) {
   if (loading) {
     return (
-      <div className="bg-white border border-[#dce0e6] rounded-lg overflow-hidden">
-        <Skeleton variant="table-row" count={5} className="m-3" />
+      <div className="bg-white rounded-2xl shadow-card overflow-hidden">
+        <Skeleton variant="table-row" count={5} className="m-4" />
       </div>
     );
   }
 
   if (data.length === 0) {
     return (
-      <div className="bg-white border border-[#dce0e6] rounded-lg p-6 text-center text-sm text-[#6e7681]">
+      <div className="bg-white rounded-2xl shadow-card p-8 text-center text-sm text-text-secondary">
         {emptyMessage}
       </div>
     );
   }
 
   return (
-    <div className={classNames("overflow-x-auto bg-white border border-[#dce0e6] rounded-lg", className)}>
+    <div className={classNames("overflow-x-auto bg-white rounded-2xl shadow-card", className)}>
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b border-[#dce0e6]">
+          <tr className="border-b border-apple-divider">
             {columns.map((col) => (
               <th
                 key={col.key}
                 className={classNames(
-                  "sticky top-0 bg-white text-xs text-[#6e7681] font-medium uppercase tracking-wider px-3 py-2.5",
+                  "sticky top-0 bg-white text-2xs text-text-secondary font-medium uppercase tracking-wider px-4 py-3",
                   col.align === "right" && "text-right",
                   col.align === "center" && "text-center",
                   col.align === "left" && "text-left"
@@ -73,18 +75,21 @@ export function Table<T>({
               key={keyExtractor(item, idx)}
               onClick={() => onRowClick?.(item)}
               className={classNames(
-                "border-b border-[#dce0e6]/50 transition-colors duration-150",
+                "border-b border-apple-divider transition-colors duration-200",
                 onRowClick && "cursor-pointer",
-                selectedKey === keyExtractor(item, idx) ? "bg-accent-muted" : "hover:bg-[#f5f7fa]"
+                selectedKey === keyExtractor(item, idx)
+                  ? "bg-accent-lighter"
+                  : "hover:bg-apple-bg"
               )}
             >
               {columns.map((col) => (
                 <td
                   key={col.key}
                   className={classNames(
-                    "px-3 py-2 text-[#1a1e24]",
+                    "px-4 py-3 text-text-primary",
                     col.align === "right" && "text-right num",
-                    col.align === "center" && "text-center"
+                    col.align === "center" && "text-center",
+                    variant === "compact" && "py-2"
                   )}
                 >
                   {col.render(item, idx)}

@@ -85,6 +85,7 @@ def restore_from_log(lifecycle_log_path: str = "data/charts/factor_lifecycle_log
             func=make_func(description),
             source=source,
             description=description,
+            log_event=False,
         )
         if ok:
             restored += 1

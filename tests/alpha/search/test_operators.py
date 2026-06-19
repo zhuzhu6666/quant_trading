@@ -178,8 +178,8 @@ def test_register_standard_ops_metadata():
 
     cat, min_a, max_a = reg.get_meta("zscore")
     assert cat == "ts"
-    assert min_a == 1
-    assert max_a == 1
+    assert min_a == 2  # zscore(column, window) 需要 2 个参数
+    assert max_a == 2
 
 
 def test_get_returns_full_record():

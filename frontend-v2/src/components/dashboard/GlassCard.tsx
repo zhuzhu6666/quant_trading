@@ -11,7 +11,7 @@ export function GlassCard({ children, className = "", hover, onClick, style }: G
   return (
     <Comp
       onClick={onClick}
-      className={`glass ${hover ? "glass-hover" : ""} ${onClick ? "cursor-pointer text-left w-full" : ""} ${className}`}
+      className={`glass-card ${hover ? "hover:bg-white/88" : ""} ${onClick ? "cursor-pointer text-left w-full" : ""} ${className}`}
       style={style}
     >
       {children}

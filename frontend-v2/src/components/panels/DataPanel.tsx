@@ -1,24 +1,9 @@
 import { useEffect, useState, useRef } from "react";
 import { authFetch } from "@/lib/auth";
 import { CandleBar, Candlestick } from "@/components/charts/Candlestick";
-import { Button, Card, Badge, Skeleton, Table } from "@/components/ui";
+import { Button, Card, Badge, Skeleton, Table, TabBar } from "@/components/ui";
 import type { Column } from "@/components/ui";
-import { useApi, clearApiCache } from "@/lib/hooks";
-
-function TabBar({ tabs, active, onChange }: { tabs: {key:string,label:string}[], active: string, onChange: (k:string)=>void }) {
-  return (
-    <div className="flex gap-1 mb-4 p-1 rounded-lg" style={{ background: "rgba(255,255,255,0.5)" }}>
-      {tabs.map(t => (
-        <button key={t.key} onClick={() => onChange(t.key)}
-          className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all duration-200 ${
-            active === t.key ? "bg-[#d4edda] text-[#1a1e24]" : "bg-[#dce0e6] text-[#4a4f59] hover:bg-[#d0d5dd] hover:text-[#1a1e24]"
-          }`}>
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
+import { useApi } from "@/lib/hooks";
 
 export default function DataPanel() {
   const [activeTab, setActiveTab] = useState("market");
@@ -49,9 +34,16 @@ function MarketSection() {
   const [tf, setTf] = useState("M15");
   // audit 2026-06-10: 用 useApi 自动享 30s 客户端缓存 + 自动 AbortController,
   // 切 tf / 切 tab 切回不重复拉. 注: tf 变化必须 reset 缓存, 所以 path 含 tf.
-  const { data, loading } = useApi<{ bars: CandleBar[]; total: number; range: any }>(
+  const { data, loading, refresh } = useApi<{ bars: CandleBar[]; total: number; range: any }>(
     `/api/market/bars?symbol=XAUUSD%2B&timeframe=${tf}&limit=500`,
   );
+
+  // 实时刷新: 每 60s 拉新数据 (最后一根 K 线增量 update, 不闪屏)
+  useEffect(() => {
+    const t = setInterval(refresh, 60_000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
   const bars = data?.bars ?? [];
   const last = bars.length > 0 ? bars[bars.length - 1] : null;
 
@@ -177,7 +169,7 @@ function SyncSection() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          timeframes: ["M15", "H1", "D1"],
+          timeframes: ["M5", "M15", "H1", "D1"],
           type: "incremental",
         }),
       });
@@ -310,7 +302,7 @@ function ExternalDataSection() {
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(async () => {
         try {
-          const pr = await fetch(`/api/data/external-refresh/${jid}`);
+          const pr = await authFetch(`/api/data/external-refresh/${jid}`);
           const pj = await pr.json();
           if (pj.output) setProgress(pj.output.slice(-5));
           if (pj.status === "completed") {
@@ -346,21 +338,15 @@ function ExternalDataSection() {
       key: "latest",
       header: "最新日期",
       align: "right" as const,
-      render: (item) => {
-        if (item.table === "mt5_bars") return <span className="text-fg-muted">{item.note || "⏸"}</span>;
-        return <span>{item.latest}</span>;
-      },
+      render: (item) => <span>{item.latest}</span>,
     },
     {
       key: "stale",
       header: "状态",
       align: "center" as const,
-      render: (item) => {
-        if (item.table === "mt5_bars") return <Badge variant="ghost">阻塞</Badge>;
-        return item.stale
+      render: (item) => item.stale
           ? <Badge variant="danger">⚠ 过期</Badge>
-          : <Badge variant="success">✓ 正常</Badge>;
-      },
+          : <Badge variant="success">✓ 正常</Badge>,
     },
     {
       key: "note",
@@ -409,7 +395,7 @@ function ExternalDataSection() {
         <p>• COT (CFTC 持仓) — 周度更新，每次约 30-60s</p>
         <p>• Events (经济日历) — 日度更新，每次约 3-10s</p>
         <p>• ETF (GLD/SLV 持仓) — 季度更新，每次约 30s</p>
-        <p>• MT5 bars — 由 scheduler data_pull 每 10 分钟自动同步</p>
+        <p>• K线 (cTrader) — 由 scheduler data_sync 每 5 分钟自动同步</p>
         <p>• 也可 <code className="bg-gray-200 px-1 rounded">python start-all.py --refresh-data</code> 启动时自动刷新</p>
       </div>
     </div>

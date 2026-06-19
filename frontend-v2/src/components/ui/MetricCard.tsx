@@ -13,26 +13,26 @@ interface MetricCardProps {
 export function MetricCard({ label, value, subvalue, trend, loading, className }: MetricCardProps) {
   if (loading) {
     return (
-      <div className={classNames("bg-white border border-[#dce0e6] rounded-lg p-3", className)}>
+      <div className={classNames("bg-white shadow-card rounded-3xl p-5", className)}>
         <Skeleton variant="metric" />
       </div>
     );
   }
 
   return (
-    <div className={classNames("bg-white border border-[#dce0e6] rounded-lg p-3", className)}>
-      <div className="text-xs text-[#6e7681] font-medium uppercase tracking-wider">{label}</div>
+    <div className={classNames("bg-white shadow-card rounded-3xl p-5", className)}>
+      <div className="section-label">{label}</div>
       <div
         key={String(value)}
         className={classNames(
-          "text-2xl font-bold num mt-0.5 num-enter",
-          trend ? "" : "text-[#1a1e24]"
+          "metric-value mt-1",
+          trend ? "" : "text-text-primary"
         )}
-        style={trend ? { color: trend === "up" ? "#16a34a" : trend === "down" ? "#dc2626" : "#1a1e24" } : undefined}
+        style={trend ? { color: trend === "up" ? "#34C759" : trend === "down" ? "#FF3B30" : "#1D1D1F" } : undefined}
       >
         {typeof value === "number" ? fmtNum(value) : value}
       </div>
-      {subvalue && <div className="text-xs text-fg-muted mt-0.5">{subvalue}</div>}
+      {subvalue && <div className="text-2xs text-text-secondary mt-1">{subvalue}</div>}
     </div>
   );
 }

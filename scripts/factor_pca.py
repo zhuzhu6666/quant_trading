@@ -36,14 +36,14 @@ def main():
     print("=" * 80)
 
     # 1) 加载
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars("XAUUSD+", "M15")
     assert not df.empty
     print(f"\nLoaded {len(df)} bars, {df.index[0]} → {df.index[-1]}")
 
     # 1b) 合并外部数据 (跨资产/事件因子需要 dxy / real_yield / evt_fomc 等)
     from data.external_loader import ExternalDataLoader
-    loader = ExternalDataLoader("data/market_data.db")
+    loader = ExternalDataLoader("data/ctrader_data.duckdb")
     ext = loader.align_to_bars(df)
     df = df.join(ext)
     print(f"合并外部数据后: {df.shape}, 额外列: {len(ext.columns)} 个")

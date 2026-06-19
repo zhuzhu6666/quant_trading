@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import sqlite3
 from datetime import date
 
-DB = "data/market_data.db"
+DB = "data/ctrader_data.duckdb"
 
 
 # (year, month, country, total_tonnes_cumulative, monthly_chg)

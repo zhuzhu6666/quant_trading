@@ -332,7 +332,7 @@ class CausalCheck:
             raise ValueError(
                 f"factor_values shape {a.shape} != forward_returns shape {b.shape}"
             )
-        mask = ~(np.isnan(a) | np.isnan(b))
+        mask = ~(np.isnan(a) | np.isnan(b) | np.isinf(a) | np.isinf(b))
         return a[mask], b[mask]
 
     def __repr__(self) -> str:

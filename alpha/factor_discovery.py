@@ -76,13 +76,13 @@ class FactorDiscovery:
     因子发现 orchestrator
 
     用法:
-        discovery = FactorDiscovery(df, db_path="data/market_data.db")
+        discovery = FactorDiscovery(df, db_path="data/ctrader_data.duckdb")
         run = discovery.run(config=DiscoveryConfig(n_candidates=500))
         # run.after_dedup 是去重后保留的 top candidates
         # run.promoted 是已经 register 到 RegistryAdapter 的名字
     """
 
-    def __init__(self, df: pd.DataFrame, db_path: str = "data/market_data.db",
+    def __init__(self, df: pd.DataFrame, db_path: str = "data/ctrader_data.duckdb",
                  log_dir: str = "data/charts/factor_discovery",
                  lifecycle_log: str = "data/charts/factor_lifecycle_log.jsonl"):
         self.df = df

@@ -23,7 +23,7 @@ def main():
     print("=" * 78)
     print()
 
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     results = []
     for name in strategy_registry.list():
         strat_cls = strategy_registry._strategies[name]

@@ -9,7 +9,7 @@ drop_candles.py — 删 candles 僵尸表 (2026-06-02 23:40)
 import sqlite3
 import os
 
-DB = "data/market_data.db"
+DB = "data/ctrader_data.duckdb"
 
 # 备份 (保险, 删错可恢复)
 backup = DB + ".pre_drop_candles.bak"

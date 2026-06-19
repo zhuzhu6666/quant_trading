@@ -80,9 +80,24 @@ Thumbs.db
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/*.duckdb
+data/*.duckdb.wal
 data/*.csv   # raw market data 从 MT5 broker 重拉, 不入库
 data/ticks/  # tick generator 运行时生成, 不入库
+data/dukascopy_raw/
+data/feature_models/
+data/ml_models/
+data/browser/
 !data/charts/**  # 报告/图/npy/json 入库
+
+# ── Node / 前端 ─────────────────────────
+node_modules/
+frontend-v2/node_modules/
+frontend-v2/dist/
+frontend-v2/.vite/
+
+# ── Hermes Agent ─────────────────────────
+.hermes/
 
 # ── 日志 (运行时生成) ───────────────────
 logs/

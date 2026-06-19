@@ -20,7 +20,7 @@ from backend.core.logging import setup_logging
 from backend.core.paths import BACKEND_DIR
 from backend.jobs import get_job_manager
 from backend.ws.endpoints import router as ws_router
-from monitor.metrics import Metrics
+from monitor.metrics import Metrics, install_into_runtime_state
 from monitor.structured_log import setup_structured_logging
 
 
@@ -36,7 +36,7 @@ def _init_observability() -> None:
     except Exception as e:
         _lg.warning(f"[lifespan] setup_structured_logging failed (non-fatal): {e}")
     try:
-        Metrics.install_into_runtime_state()
+        install_into_runtime_state()
         _lg.info("[lifespan] Metrics installed into RuntimeState")
     except Exception as e:
         _lg.warning(f"[lifespan] Metrics.install_into_runtime_state failed (non-fatal): {e}")
@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
     # 导致并发 API 请求排队 5-12s. 在 lifespan 完成, 所有 _init_db DDL 都在这里跑完.
     try:
         from data.store import DataStore
-        DataStore("data/market_data.db")
+        DataStore()
         _lg.info("[lifespan] DataStore warmed up")
     except Exception as e:
         _lg.warning(f"[lifespan] DataStore warmup failed (non-fatal): {e}")

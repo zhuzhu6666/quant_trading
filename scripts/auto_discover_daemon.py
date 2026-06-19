@@ -41,7 +41,7 @@ logger = logging.getLogger('auto_discover')
 def load_m15_bars(n_bars: int, symbol: str = "XAUUSD+") -> "pd.DataFrame":
     import sqlite3
     import pandas as pd
-    db = PROJECT_ROOT / "data" / "market_data.db"
+    db = PROJECT_ROOT / "data" / "ctrader_data.duckdb"
     con = sqlite3.connect(str(db))
     try:
         df = pd.read_sql_query(

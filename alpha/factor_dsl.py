@@ -467,7 +467,8 @@ class DSLEvaluator:
             x = self.evaluate(args[0]) if isinstance(args[0], FactorNode) else np.full(len(self.df), float(args[0]))
             q = args[1] if not isinstance(args[1], FactorNode) else self.evaluate(args[1])
             q = float(q[0]) if hasattr(q, "__len__") else float(q)
-            return pd.Series(x).quantile(q)
+            qv = float(pd.Series(x).quantile(q))
+            return np.full(len(x), qv)
 
         # 7. 时序算子 (参数: x, n)
         if op in ("ts_mean", "ts_std", "ts_sum", "ts_min", "ts_max",

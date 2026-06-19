@@ -5,16 +5,31 @@ v1: passwords aren't actually validated (any password works); the token just
 proves the user has been through the login flow. Multi-user + real auth is
 Phase 6+.
 """
+import os as _os
+import secrets
 import time
+from functools import lru_cache
 from typing import Annotated
 
 import jwt
 from fastapi import Header, HTTPException, status
 
-# Hardcoded v1 constants. In production, JWT_SECRET comes from env / secret manager.
-JWT_SECRET = "quant-v1-dev-secret-do-not-use-in-prod"
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_SECONDS = 24 * 3600
+
+_JWT_SECRET: str | None = None
+
+
+def _get_jwt_secret() -> str:
+    """惰性加载 JWT_SECRET, 避免模块导入时 KeyError 炸整个 app。
+
+    若环境变量未设置, 生成一个 dev 级临时密钥
+    (每次启动变化, 前端需要重新登录)。
+    """
+    global _JWT_SECRET
+    if _JWT_SECRET is None:
+        _JWT_SECRET = _os.environ.get("QUANT_JWT_SECRET") or secrets.token_hex(32)
+    return _JWT_SECRET
 
 
 def create_token(user: str) -> str:
@@ -25,32 +40,14 @@ def create_token(user: str) -> str:
         "iat": now,
         "exp": now + JWT_EXPIRY_SECONDS,
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
 def get_current_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> str:
-    """FastAPI dependency. Returns the user from the JWT, or raises 401.
-
-    Backwards compat: if no Authorization header, return "zhu" (Phase 3.14 stub).
-    The stricter version `require_user` (below) always raises.
-    """
-    if not authorization:
-        # v1: backwards compat with the Phase 3.14 stub. Allows existing routes
-        # (which don't yet use this dep) to keep working. Will be removed once
-        # all routes are wrapped.
-        return "zhu"
-    if not authorization.lower().startswith("bearer "):
-        return "zhu"
-    token = authorization.split(" ", 1)[1].strip()
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except jwt.ExpiredSignatureError:
-        return "zhu"  # v1: soft-fail; v2: raise HTTPException(401)
-    except jwt.InvalidTokenError:
-        return "zhu"
-    return payload.get("sub", "zhu")
+    """FastAPI dependency. Returns the user from the JWT, or raises 401."""
+    return require_user(authorization)
 
 
 def require_user(
@@ -60,7 +57,7 @@ def require_user(
     if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "missing_authorization", "msg": "Authorization: Bearer <token> required"},
+            detail={"error": "missing_authorization", "msg": "Authorization: Bearer *** required"},
             headers={"WWW-Authenticate": "Bearer"},
         )
     if not authorization.lower().startswith("bearer "):
@@ -71,7 +68,7 @@ def require_user(
         )
     token = authorization.split(" ", 1)[1].strip()
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -93,3 +90,10 @@ def require_user(
 from typing import Annotated as _Annotated  # noqa: E402
 from fastapi import Depends as _Depends  # noqa: E402
 RequireUser = _Annotated[str, _Depends(require_user)]
+
+
+def __getattr__(name):
+    """向后兼容: from backend.core.auth import JWT_SECRET 可惰性加载。"""
+    if name == "JWT_SECRET":
+        return _get_jwt_secret()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -21,7 +21,7 @@
 import logging
 import sys
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -56,7 +56,7 @@ def main():
     print()
 
     # 1. 加载数据
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars("XAUUSD+", "M15")
     assert not df.empty, "No M15 data"
     bars = []
@@ -74,8 +74,8 @@ def main():
     highs = np.array([b["high"] for b in bars])
     lows = np.array([b["low"] for b in bars])
     n = len(bars)
-    print(f"Loaded {n} bars, {datetime.utcfromtimestamp(bars[0]['time'])} → "
-          f"{datetime.utcfromtimestamp(bars[-1]['time'])}")
+    print(f"Loaded {n} bars, {datetime.fromtimestamp(bars[0]['time'], tz=timezone.utc)} → "
+          f"{datetime.fromtimestamp(bars[-1]['time'], tz=timezone.utc)}")
 
     # ── 1.5 batch 算 regime 标签 (避免主循环 O(n²)) ──
     # EMA 来自 trend_following (公开 staticmethod), ATR/ADX 来自 scripts.equity_by_regime
@@ -227,8 +227,8 @@ def main():
     print("=" * 78)
     print(f"  MAB-driven Paper Report ({elapsed:.1f}s)")
     print("=" * 78)
-    print(f"  Period       : {datetime.utcfromtimestamp(bars[0]['time'])} → "
-          f"{datetime.utcfromtimestamp(bars[-1]['time'])}  ({n} bars)")
+    print(f"  Period       : {datetime.fromtimestamp(bars[0]['time'], tz=timezone.utc)} → "
+          f"{datetime.fromtimestamp(bars[-1]['time'], tz=timezone.utc)}  ({n} bars)")
     print(f"  Initial      : ${initial:.2f}")
     print(f"  Final        : ${final_bal:.2f}")
     print(f"  Net PnL      : ${net_pnl:+.2f}  ({ret:+.2f}%)")

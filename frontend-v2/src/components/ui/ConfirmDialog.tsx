@@ -44,7 +44,7 @@ export function ConfirmDialog({
         </>
       }
     >
-      <p className="text-sm" style={{ color: "#4a4f59" }}>{message}</p>
+      <p className="text-sm text-text-secondary">{message}</p>
     </Modal>
   );
 }

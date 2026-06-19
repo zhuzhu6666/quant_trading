@@ -46,7 +46,7 @@ def run_discovery(
 
     cb("loading", 15, "loading bars from db")
     from data.store import DataStore
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars("XAUUSD+", "M15")
     if len(df) > n_bars:
         df = df.tail(n_bars)

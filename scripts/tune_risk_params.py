@@ -34,7 +34,7 @@ def _run_single_paper_pass(
     from execution.paper_engine import PaperEngine
     from data.store import DataStore
 
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars("XAUUSD+", "M15")
     if n_bars and len(df) > n_bars:
         df = df.tail(n_bars)

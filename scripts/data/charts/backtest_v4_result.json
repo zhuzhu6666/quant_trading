@@ -1,0 +1,11 @@
+{
+  "n_bars": 202837,
+  "n_trades": 2528,
+  "win_rate": 0.4138,
+  "total_pnl": 454.34,
+  "total_return_pct": 4.54,
+  "sharpe": 0.3433,
+  "max_drawdown_pct": -2.82,
+  "sl_count": 1481,
+  "tp_count": 1046
+}

@@ -24,7 +24,7 @@ def run_factor_health(
     progress_cb("loading", 10, f"loading {bar_count} bars from db")
     from data.store import DataStore
     import pandas as pd
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars("XAUUSD+", "M15")
     if bar_count and len(df) > bar_count:
         df = df.tail(bar_count)

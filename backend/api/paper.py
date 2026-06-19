@@ -53,6 +53,7 @@ def stop(_user: RequireUser, req: PaperStopRequest)-> dict:
 
 @router.post("/emergency-stop")
 def emergency_stop(
+    _user: RequireUser,
     body: PaperStopRequest = PaperStopRequest(close_positions=True),
     x_confirm: Annotated[str | None, Header()] = None,
 ) -> dict:

@@ -28,7 +28,7 @@ import logging
 import math
 import time as _time
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, timezone, date
 
 import numpy as np
 
@@ -225,7 +225,7 @@ class PaperTrader:
 
         for i, bar in enumerate(self._bars):
             # 模拟盘每日重置 daily stats
-            bar_date = datetime.utcfromtimestamp(bar["time"]).date()
+            bar_date = datetime.fromtimestamp(bar["time"], tz=timezone.utc).date()
             if self._last_reset_date is None:
                 self._last_reset_date = bar_date
             elif bar_date != self._last_reset_date:
@@ -344,8 +344,8 @@ class PaperTrader:
             symbol=self.strategy.symbol,
             timeframe=self.strategy.timeframe,
             strategy=self.strategy.name,
-            start_date=datetime.utcfromtimestamp(self._bars[0]["time"]).strftime("%Y-%m-%d"),
-            end_date=datetime.utcfromtimestamp(self._bars[-1]["time"]).strftime("%Y-%m-%d"),
+            start_date=datetime.fromtimestamp(self._bars[0]["time"], tz=timezone.utc).strftime("%Y-%m-%d"),
+            end_date=datetime.fromtimestamp(self._bars[-1]["time"], tz=timezone.utc).strftime("%Y-%m-%d"),
             n_bars=len(self._bars),
             initial_balance=self.engine.initial_balance,
             final_balance=self.engine.balance,
@@ -370,7 +370,7 @@ class PaperTrader:
         """按 close 时间聚合成日 PnL"""
         by_day: dict[date, float] = {}
         for t in closes:
-            d = datetime.utcfromtimestamp(t.time).date()
+            d = datetime.fromtimestamp(t.time, tz=timezone.utc).date()
             by_day[d] = by_day.get(d, 0.0) + t.pnl
         return [v for _, v in sorted(by_day.items())]
 

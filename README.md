@@ -1,9 +1,9 @@
 # Quant Trading — Factor Takeover v4 Alpha Factory
 
 XAUUSD 黄金 M5 量化交易系统，**Factor Takeover v4** 架构：因子计算 → 连续信号 → 组合优化 → 执行 → 归因 → 自适应全闭环。
-以因子系统彻底取代旧 `multi_factor_m15` 投票策略。cTrader demo 为唯一执行通道。
+以因子系统彻底取代旧 `multi_factor_m15` 投票策略。cTrader demo 为唯一执行通道，MT5 已完全移除。
 
-**最后更新**: 2026-06-15 | **架构**: Factor Takeover v4 | **Phase 0-7**: ✅ 全部完成
+**最后更新**: 2026-06-18 | **架构**: Factor Takeover v4 | **Phase 0-7**: ✅ 全部完成
 
 ---
 
@@ -15,21 +15,34 @@ XAUUSD 黄金 M5 量化交易系统，**Factor Takeover v4** 架构：因子计�
 | **因子库** | 39 builtin + 26 GP DSL shadow/discovered，实时 39 因子参与组合信号 |
 | **决策管道** | ✅ StreamingFactorEngine → SignalNormalizer → PortfolioCompositor → ExecutionGate |
 | **归因** | ✅ AttributionEngine（线性 MC + Gram-Schmidt 正交 + MTM，NW-HAC Sharpe 三层窗口） |
-| **权重自适应** | ✅ AdaptiveWeightEngine（exp(k×score)，DSR+健康分退役，CausalCheck 启用，多样性约束）
-| **GP 分类器** | ✅ GPClassifier（AST 表达式 → 类型标签，接入 SignalNormalizer + PortfolioCompositor）
-| **cTrader** | ✅ demo 真发单 (Pepperstone, Open API)
-| **Web UI** | ✅ Vite + React 19, 5 面板, 权重/归因卡片
-| **Scheduler** | ✅ 9 任务 (evolution/canary/retire/sync/data_pull/awe_adapt/ml_retrain/feature_eng/ml_drift)
-| **MT5 数据** | ✅ 定时拉 K 线填充 DataStore
-| **回测引擎** | ✅ 向量化 (alpha/backtest/vectorized.py, 202K bar 实测)
-| **ML 预测** | ✅ XGBoost 方向预测器注册为因子 + 概念漂移检测
-| **特征工程** | ✅ FeatureDeriver (200+ 特征) + PCA/KPCA 压缩 + FeatureSelector
-| **执行层** | ✅ BaseBrokerBridge 统一接口 (PaperBridge + CTraderBridge), VWAP/TWAP, 执行质量分析
-| **风控** | ✅ VaR/CVaR 引擎 + Kelly 仓位 + 压力测试 + 因子暴露集中度监控
-| **DuckDB** | ✅ data/duckdb_store.py (列式存储, 向量化查询)
-| **Tick 管道** | ✅ data/tick_pipeline/ (MT5→DuckDB→TickBarBuilder)
-| **多品种** | ✅ 并行管道 (XAUUSD+ + EURUSD)
-| **平台/运维** | ✅ ExperimentTracker + FactorLibrary + WeeklyReport + Docker + AutoRecovery + AlertRules
+| **权重自适应** | ✅ AdaptiveWeightEngine（exp(k×score)，DSR+健康分退役，CausalCheck 启用，多样性约束）|
+| **cTrader** | ✅ demo 真发单 (Pepperstone, Open API) |
+| **Web UI** | ✅ Vite + React 19, 面板: 交易/因子/数据/系统/风控/回测 |
+| **Scheduler** | ✅ 10 任务 (evolution/canary/retire/sync/data_sync/awe_adapt/ml_retrain/feature_eng/ml_drift/dukascopy-tick) |
+| **回测引擎** | ✅ 向量化 (alpha/backtest/vectorized.py, 985K bar 实测) |
+| **ML 预测** | ✅ XGBoost 方向预测器注册为因子 + 概念漂移检测 |
+| **特征工程** | ✅ FeatureDeriver (200+ 特征) + PCA/KPCA 压缩 + FeatureSelector |
+| **执行层** | ✅ CTraderBridge (唯一通道), VWAP/TWAP, 执行质量分析 |
+| **风控** | ✅ VaR/CVaR 引擎 + Kelly 仓位 + 压力测试 + 因子暴露集中度监控 |
+| **数据库** | 见下方数据架构 |
+| **Tick 数据** | ✅ Dukascopy (65M tick, bid/ask/volume) cron 每小时增量 |
+| **L2 订单簿** | ✅ cTrader depth event 实时入库 |
+| **开平仓记录** | ✅ trades.duckdb 自动记录 |
+| **事件日历** | ✅ events.duckdb (NFP/FOMC/CPI) |
+| **多品种** | ✅ 并行管道 (XAUUSD+) |
+
+## 数据架构
+
+```
+data/
+├── ctrader_data.duckdb   1.5 GB  K线 (985K M5 + 329K M15)  scheduler 每5分钟
+├── ticks.duckdb          6.7 GB  Dukascopy tick (65M bid/ask/volume) cron 每小时
+├── l2.duckdb             268 KB  L2 订单簿 (实时 depth event)
+├── trades.duckdb         268 KB  开平仓记录 (归因引擎自动写入)
+├── events.duckdb         524 KB  事件日历 (NFP/FOMC/CPI)
+├── analytics.db           13 MB  策略表现
+└── decision_log.db         3 MB  决策日志
+```
 
 ---
 
@@ -128,7 +141,7 @@ RuntimeConfig 热更新 → 下一 tick 生效
 | `data/charts/factor_trades.jsonl` | 逐笔归因明细 |
 | `data/charts/factor_weight_history.jsonl` | 权重变更记录 |
 | `data/charts/factor_attribution.json` | 归因快照（原子更新，重启恢复） |
-| `data/market_data.duckdb` | DuckDB 列式存储（13 表，结构化市场数据） |
+| `data/ctrader_data.duckdb` | DuckDB 列式存储（13 表，结构化市场数据） |
 
 ---
 

@@ -115,7 +115,7 @@ def main():
     print("=" * 72)
 
     # 1. 加载数据
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars("XAUUSD+", "M15")
     assert not df.empty, "No M15 data"
     print(f"Loaded {len(df)} bars, {df.index[0]} → {df.index[-1]}")

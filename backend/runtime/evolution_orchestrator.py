@@ -139,27 +139,27 @@ def scheduled_evolution_cycle(
             })
             cb("register_done", 50, f"registered {registered} factors")
 
-            # ── Step 4: Canary 评估 (对已注册的 shadow 因子) ──
-            cb("canary", 55, "running canary evaluation")
-            promotions, rollbacks, stay = _run_canary_evaluation(
-                symbol, timeframe, n_bars
-            )
-            report.canary_promotions = promotions
-            report.canary_rollbacks = rollbacks
-            report.canary_stay = stay
-            if promotions:
-                logger.info("[Evolve] canary promoted: %s", promotions)
-                _emit_evolution_story("canary_promotions", {
-                    "promoted": promotions, "rollbacked": rollbacks,
-                })
-                # 晋升 ACTIVE → 启用策略中的影子因子
-                try:
-                    from config.runtime_config import patch as rc_patch
-                    rc_patch({"include_shadow_factors": True})
-                    logger.info("[Evolve] enabled include_shadow_factors in RuntimeConfig")
-                except Exception as e:
-                    logger.debug("[Evolve] enable shadow factors failed: %s", e)
-            cb("canary_done", 70, f"promoted {len(promotions)}, rolled {len(rollbacks)}")
+        # ── Step 4: Canary 评估 (无论 GP 有无产出, 已有的 shadow/UNKNOWN 因子都需要评估) ──
+        cb("canary", 55, "running canary evaluation")
+        promotions, rollbacks, stay = _run_canary_evaluation(
+            symbol, timeframe, n_bars
+        )
+        report.canary_promotions = promotions
+        report.canary_rollbacks = rollbacks
+        report.canary_stay = stay
+        if promotions:
+            logger.info("[Evolve] canary promoted: %s", promotions)
+            _emit_evolution_story("canary_promotions", {
+                "promoted": promotions, "rollbacked": rollbacks,
+            })
+            # 晋升 ACTIVE → 启用策略中的影子因子
+            try:
+                from config.runtime_config import patch as rc_patch
+                rc_patch({"include_shadow_factors": True})
+                logger.info("[Evolve] enabled include_shadow_factors in RuntimeConfig")
+            except Exception as e:
+                logger.debug("[Evolve] enable shadow factors failed: %s", e)
+        cb("canary_done", 70, f"promoted {len(promotions)}, rolled {len(rollbacks)}")
 
         # ── Step 5: 因子健康检查 + 退役 ──
         cb("retirement", 75, "checking factor retirement")
@@ -172,7 +172,7 @@ def scheduled_evolution_cycle(
                 _try_retire(name, retire_info["reason"])
         cb("retirement_done", 85, f"retired {len(retire_info['candidates'])} factors")
 
-        # ── Step 5.5: IC Tracker 自动刷新 ──
+        # ── Step 5.5: IC Tracker 自动刷新 + 因子健康报告落盘 ──
         cb("ic_refresh", 86, "refreshing factor IC tracking")
         try:
             from alpha.ic_tracker import refresh_all_factors
@@ -185,6 +185,25 @@ def scheduled_evolution_cycle(
             )
         except Exception as e:
             logger.debug("[Evolve] IC refresh skipped: %s", e)
+
+        # 写因子健康报告 (供前端 /api/factor-health/latest 消费)
+        try:
+            from alpha.factor_health import evaluate_factors, write_report
+            from backend.core.paths import CHARTS_DIR
+            report_result = evaluate_factors(df, threshold=0.04)
+            out_txt = CHARTS_DIR / "factor_health_report.txt"
+            out_json = CHARTS_DIR / "factor_health_report.json"
+            write_report(report_result, out_txt, out_json)
+            logger.info(
+                "[Evolve] factor health report written: %s healthy=%d watch=%d decaying=%d unknown=%d",
+                out_json,
+                report_result.get("healthy", 0),
+                report_result.get("watch", 0),
+                report_result.get("decaying", 0),
+                report_result.get("unknown", 0),
+            )
+        except Exception as e:
+            logger.debug("[Evolve] factor health report write skipped: %s", e)
 
         # ── Step 6: 权重更新 ──
         cb("weights", 88, "recomputing factor weights")
@@ -224,10 +243,18 @@ def _run_gp(
     """运行 GP 搜索, 返回 ExpressionScore 列表."""
     try:
         from alpha.factor_search_gp import run_gp_search
+        t0 = _time.time()
         results = run_gp_search(
             df, pop=pop, gen=gen, top_k=top_k,
             progress_cb=lambda step, pct, msg: None,
         )
+        elapsed = _time.time() - t0
+        n = len(results) if results else 0
+        if n > 0:
+            top_score = getattr(results[0], "score", 0) if results else 0
+            logger.info("[Evolve] GP done: %d candidates in %.1fs (top_score=%.3f)", n, elapsed, top_score)
+        else:
+            logger.info("[Evolve] GP done: 0 candidates in %.1fs", elapsed)
         return results if results else []
     except Exception as e:
         logger.exception("[Evolve] GP search failed: %s", e)
@@ -242,14 +269,21 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
         count = 0
         for expr_score in expressions:
             name = getattr(expr_score, "name", None) or f"dsl_auto_{hash(expr_score.expression or '') & 0xFFFFFFFF:08x}"
+            expression_str = getattr(expr_score, "expression", "") or ""
+            # 把表达式编译为可调用因子函数
+            func = None
+            if expression_str:
+                try:
+                    from alpha.factor_dsl import compile_expression
+                    func = compile_expression(expression_str)
+                except Exception:
+                    pass
             try:
-                adapter.register(
+                adapter.register_runtime(
                     name=name,
-                    func=None,
-                    category="auto_gp",
-                    description=getattr(expr_score, "expression", ""),
+                    func=func,
                     source=SOURCE_SHADOW,
-                    metadata={"score": getattr(expr_score, "score", 0)},
+                    description=expression_str,
                 )
                 count += 1
             except Exception as e:
@@ -280,12 +314,10 @@ def _run_canary_evaluation(
 
         shadows: list[tuple[str, float]] = []
         try:
-            all_factors = adapter.list_all() if hasattr(adapter, "list_all") else []
-            for name in all_factors:
-                meta = adapter.get_metadata(name) if hasattr(adapter, "get_metadata") else {}
-                score = 0.0
-                if isinstance(meta, dict):
-                    score = float(meta.get("score", 0.0))
+            # RegistryAdapter 没有 list_all/get_metadata, 用 get_meta 遍历
+            for name in list(adapter._meta.keys()):
+                meta = adapter.get_meta(name) or {}
+                score = float(meta.get("score", 0.0))
                 shadows.append((name, score))
         except Exception:
             pass

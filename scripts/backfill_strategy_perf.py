@@ -33,7 +33,7 @@ import logging
 import sqlite3
 import sys
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── make project importable when run as a script ───────────────
@@ -63,7 +63,7 @@ def _build_inmemory_regime_db(src_path: str) -> sqlite3.Connection:
     """Copy the three tables regime.detect() needs into :memory:.
 
     The detector opens a connection per ``detect()`` call.  If we let
-    it open ``data/market_data.db`` 50,000 times we waste tens of
+    it open ``data/ctrader_data.duckdb`` 50,000 times we waste tens of
     seconds on cold disk reads.  Pre-loading into a single in-memory
     connection (then monkey-patching ``_open``) means every detect()
     call is a pure in-process query.
@@ -150,7 +150,7 @@ def _snapshot(engine, strategy_name: str, run_id: int,
     return {
         "run_id": run_id,
         "bar_ts": float(bar["time"]),
-        "bar_date": datetime.utcfromtimestamp(bar["time"]).strftime("%Y-%m-%d"),
+        "bar_date": datetime.fromtimestamp(bar["time"], tz=timezone.utc).strftime("%Y-%m-%d"),
         "strategy": strategy_name,
         "regime": regime_str,
         "direction": direction,
@@ -235,7 +235,7 @@ def run_backfill(symbol: str, timeframe: str, strategy_name: str,
 
     for i, bar in enumerate(trader._bars):
         # 每日重置（仅在没持仓时清 daily.peak_equity，保留 balance/position）
-        bar_date = datetime.utcfromtimestamp(bar["time"]).date()
+        bar_date = datetime.fromtimestamp(bar["time"], tz=timezone.utc).date()
         if last_reset_date is None:
             last_reset_date = bar_date
         elif bar_date != last_reset_date:
@@ -339,7 +339,7 @@ def main() -> int:
     p.add_argument("--timeframe", default="M15")
     p.add_argument("--strategy", default="multi_factor_m15")
     p.add_argument("--balance", type=float, default=500.0)
-    p.add_argument("--db", default="data/market_data.db",
+    p.add_argument("--db", default="data/ctrader_data.duckdb",
                    help="Source market DB (read-only).")
     p.add_argument("--analytics-db", default="data/analytics.db",
                    help="Destination analytics DB (strategy_perf).")

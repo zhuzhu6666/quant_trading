@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Input } from "@/components/ui";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
+import { Input } from "@/components/ui/Input";
 import { useAppStore } from "@/lib/store";
 
 export default function LoginPage() {
@@ -23,7 +25,7 @@ export default function LoginPage() {
         const msg =
           err?.detail?.msg ||
           err?.detail ||
-          `login failed (${r.status} ${r.statusText})`;
+          `登录失败 (${r.status} ${r.statusText})`;
         setError(msg);
         return;
       }
@@ -38,26 +40,25 @@ export default function LoginPage() {
   }
 
   return (
-    <div
-      className="min-h-screen flex items-center justify-center"
-      style={{ backgroundColor: "#f5f7fa" }}
-    >
-      <Card className="w-80 space-y-4">
-        <div
-          className="text-lg font-semibold text-center"
-          style={{ color: "#1a1e24" }}
-        >
-          Quant Console
+    <div className="min-h-screen flex items-center justify-center bg-apple-bg">
+      <Card className="w-80 space-y-5" padding="lg">
+        <div className="text-center">
+          <div className="text-2xl font-semibold text-text-primary tracking-tight mb-1">
+            ◆ Quant
+          </div>
+          <div className="text-xs text-text-secondary">
+            XAUUSD+ 量化交易控制台
+          </div>
         </div>
         <Input
           type="password"
-          placeholder="password"
+          placeholder="请输入密码"
           value={pass}
           onChange={(e) => setPass(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && login()}
         />
         {error && (
-          <div className="text-xs" style={{ color: "#f85149" }}>
+          <div className="text-xs text-danger bg-danger-light rounded-lg px-3 py-2">
             {error}
           </div>
         )}

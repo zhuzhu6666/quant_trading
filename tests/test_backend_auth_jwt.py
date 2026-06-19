@@ -25,13 +25,10 @@ def test_login_returns_jwt():
     assert "exp" in payload
 
 
-def test_me_no_auth_returns_zhu_backcompat():
-    """No header → lenient dep returns "zhu" (Phase 3.14 stub compat)."""
+def test_me_no_auth_returns_401():
+    """No Authorization header → 401 (strict auth)."""
     r = client.get("/api/auth/me")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["user"] == "zhu"
-    assert body["authenticated"] is False
+    assert r.status_code == 401
 
 
 def test_me_with_valid_jwt():
@@ -66,12 +63,16 @@ def test_me_strict_expired_token_401():
     assert "token_expired" in str(body)
 
 
-def test_get_current_user_lenient_no_header():
+def test_get_current_user_no_header_raises_401():
     from backend.core.auth import get_current_user
-    assert get_current_user(authorization=None) == "zhu"
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_user(authorization=None)
+    assert exc_info.value.status_code == 401
 
 
-def test_get_current_user_lenient_with_valid():
+def test_get_current_user_with_valid():
     from backend.core.auth import get_current_user
     token = create_token("bob")
     assert get_current_user(authorization=f"Bearer {token}") == "bob"

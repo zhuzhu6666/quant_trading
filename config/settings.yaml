@@ -8,13 +8,7 @@ system:
   log_level: INFO
   log_dir: logs/
 
-mt5:
-  account: 9823690
-  server: Bybit-Live-2
-  symbol: XAUUSD+
-  password_env: MT5_PASSWORD
-
-# cTrader Open API (并行 MT5 接入, 2026-06-04 起)
+# cTrader Open API (唯一执行通道, MT5 已移除)
 # Pepperstone demo 走 demo.ctraderapi.com:5035 (ssl)
 # Access token (推荐) 走 env: CTRADER_ACCESS_TOKEN, 不需 password
 ctrader:
@@ -52,7 +46,7 @@ position:
 
 event_sizing:
   enabled: true                 # 事件感知动态仓位
-  db_path: data/market_data.db
+  db_path: data/ctrader_data.duckdb
   event_times:                  # 假设发布时间 (UTC)
     FOMC: "19:00"
     NFP: "13:30"
@@ -76,8 +70,8 @@ execution:
   timeout_seconds: 10
 
 data:
-  store_backend: sqlite        # sqlite | influxdb
-  db_path: data/market_data.db
+  store_backend: duckdb           # duckdb | sqlite
+  db_path: data/ctrader_data.duckdb
   tick_buffer_size: 10000
   bar_timeframes: [M5, M15, M30, H1, H4, D1]
   warmup_bars: 500
@@ -133,4 +127,23 @@ runtime:
   # --- 数据自给 ---
   sync_interval_sec: 300
   sync_recovery_max_attempts: 3
+  strategy_sl_atr: 2.0
+  strategy_tp_atr: 3.0
+  strategy_cooldown_bars: 3
+  # 以下字段对应 RuntimeConfig dataclass 无定义, 保留仅作参考
+  # strategy_bb_percentile: 80
+  # strategy_nfp_skip_days: 1
+  # strategy_enable_dual_event_skip: false
+  # strategy_enable_fomc_boost: false
+  # strategy_fomc_boost_mult: 1.5
+  # strategy_enable_gvz_gate: false
+  # strategy_gvz_drop_pct: -2.0
+
+  # --- Phase 5: 风控升级 (默认启用) ---
+  var_enabled: true
+  var_cvar_threshold: 0.02
+  kelly_enabled: true
+  kelly_fraction: 0.5
+  kelly_max_pct: 0.25
+  kelly_risk_per_trade_pct: 0.01
 

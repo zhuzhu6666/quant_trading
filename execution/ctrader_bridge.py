@@ -21,11 +21,17 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+# Phase 4: 统一接口
+from execution.base import BaseBrokerBridge, OrderResult, PositionInfo, AccountInfo
+
 try:
     from ctrader_open_api import Client, Protobuf, TcpProtocol
     from ctrader_open_api.messages import (
         OpenApiCommonMessages_pb2 as CommonMsg,
         OpenApiMessages_pb2 as TradeMsg,
+    )
+    from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import (
+        ProtoHeartbeatEvent,
     )
     from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
         ProtoOASymbol, ProtoOATrendbar, ProtoOAPosition, ProtoOATrader,
@@ -47,6 +53,14 @@ class CTraderOrderResult:
     comment: str = ""
     price: float = 0.0
     volume: float = 0.0
+
+
+# Phase 4: CTraderOrderResult -> OrderResult 转换
+def _to_order_result(r: CTraderOrderResult) -> "OrderResult":
+    return OrderResult(
+        success=r.success, order_id=r.order_id, position_id=r.position_id,
+        error_code=r.error_code, comment=r.comment, price=r.price, volume=r.volume,
+    )
 
 
 # ── 常量映射 (跟 MT5 FILLING_MODES 风格统一) ────────────
@@ -92,7 +106,7 @@ _ASSET_ID_TO_CODE = {
 
 # ── 主类 ────────────────────────────────────────────────
 
-class CTraderBridge:
+class CTraderBridge(BaseBrokerBridge):
     """
     cTrader Open API 桥接 (并行 MT5 接入).
 
@@ -128,6 +142,7 @@ class CTraderBridge:
         self._client: "Client | None" = None
         self._reactor = None
         self._connected = False
+        self._connected_lock = threading.Lock()
         self._app_authed = False
         self._account_authed = False
         self._symbol_id: int | None = None
@@ -136,6 +151,20 @@ class CTraderBridge:
         # audit 2026-06-08: 实时报价 (ProtoOASpotEvent 回调更新)
         self._spot_price: float | None = None
         self._spot_lock = threading.Lock()
+        # ── 熔断 / 退避 ──
+        self._fail_count: int = 0
+        self._last_fail_time: float = 0.0
+        self._backoff_lock = threading.Lock()
+        self._last_error_time: float = 0.0
+        self._last_error_msg: str = ""
+
+        # ── 心跳 (每 10 秒 ProtoHeartbeatEvent, 防服务端空闲断开) ──
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+
+        # ── 持久 L2 DuckDB 连接 (避免每次 depth event 开/关导致锁冲突) ──
+        self._l2_db = None
+        self._l2_db_lock = threading.Lock()
 
     def has_token(self) -> bool:
         """检查必要凭证是否已设置 (client_id + client_secret + access_token).
@@ -146,13 +175,13 @@ class CTraderBridge:
 
     def connect(self) -> bool:
         """连 broker + App auth + Account auth; 同步阻塞到全部完成或失败"""
-        if self._connected:
-            logger.info("Already connected")
-            return True
+        with self._connected_lock:
+            if self._connected:
+                logger.info("Already connected")
+                return True
         try:
-            from twisted.internet import reactor
+            from twisted.internet import reactor as default_reactor
             from twisted.internet import defer
-            self._reactor = reactor
         except Exception as e:
             logger.error(f"Twisted reactor import failed: {e}")
             return False
@@ -160,7 +189,6 @@ class CTraderBridge:
         # Twisted 关键: reactor 必须在 daemon 线程上跑 .run() 阻塞事件循环
         # 一次只能一个 reactor run, 重入会 ReactorAlreadyRunning
         # installSignalHandlers=False: 防 signal.signal() 跨线程错
-        from twisted.internet import reactor as default_reactor
         from threading import Thread
         self._reactor = default_reactor
         if not self._reactor.running:
@@ -181,6 +209,12 @@ class CTraderBridge:
         # 官方 sample 写法: client = Client(host, port, TcpProtocol) — 3 参
         # 之前加 numberOfMessagesToSendPerSecond=5 可能是引发 'wrong random id' 的元凶
         # 退回 3 参构造
+        # 先停旧 client 再建新 client, 避免 reactor 线程泄漏
+        if self._client:
+            try:
+                self._client.stopService()
+            except Exception:
+                pass
         self._client = Client(
             self.host, self.port,
             TcpProtocol,
@@ -206,7 +240,8 @@ class CTraderBridge:
             logger.error(f"Connect timeout: {self.host}:{self.port}")
             self.disconnect()
             return False
-        self._connected = True
+        with self._connected_lock:
+            self._connected = True
         logger.info(f"cTrader TCP connected: {self.host}:{self.port}")
 
         # 官方 sample 顺序: connected callback 第一件事就是 App auth
@@ -221,7 +256,14 @@ class CTraderBridge:
             self.disconnect()
             return False
         # 3) 查 symbol_id 缓存
-        self._resolve_symbol_id()
+        result = self._resolve_symbol_id()
+        if not result:
+            logger.error('Failed to resolve symbol ID for %s', self.symbol)
+            self.disconnect()
+            return False
+        self._record_success()
+        # 启动心跳 (每 10 秒 ProtoHeartbeatEvent, 防服务端空闲断开)
+        self._start_heartbeat()
         return True
 
     def _version_handshake(self) -> bool:
@@ -233,21 +275,226 @@ class CTraderBridge:
 
     def _on_disconnected(self, reason):
         logger.warning(f"cTrader Twisted: disconnected ({reason})")
-        self._connected = False
+        self._stop_heartbeat()
+        self._mark_disconnected()
+
+    # ── 熔断 / 退避 ─────────────────────────────────────
+
+    def _mark_disconnected(self):
+        """Reset all connection flags. Thread-safe.
+        Call when connection is confirmed dead — from _on_disconnected,
+        _send timeouts, or API call failures."""
+        with self._connected_lock:
+            self._connected = False
+        self._app_authed = False
+        self._account_authed = False
+
+    def _should_backoff(self) -> bool:
+        """指数退避检查: 连续失败越久, 跳过时间越长.
+        退避期内直接返回空值, 不调 _send(), 给 Twisted reactor
+        和被 cTrader 限流的账号喘息时间.
+        Backoff = min(300, 2^fail_count) 秒, max 5 分钟."""
+        with self._backoff_lock:
+            if self._fail_count == 0:
+                return False
+            elapsed = time.time() - self._last_fail_time
+            # 2^fail_count 指数退避, cap 300s
+            backoff = min(300, 1 << min(self._fail_count, 8))
+            return elapsed < backoff
+
+    def _record_failure(self):
+        """记录一次失败, 增加退避计数."""
+        with self._backoff_lock:
+            self._fail_count += 1
+            self._last_fail_time = time.time()
+
+    def _record_success(self):
+        """成功一次 → 清零退避计数."""
+        with self._backoff_lock:
+            self._fail_count = 0
+
+    def _should_log_error(self, msg: str) -> bool:
+        """相同错误聚合: 同一消息 60 秒内只打一次,
+        避免超时风暴灌满磁盘."""
+        now = time.time()
+        if msg == self._last_error_msg and now - self._last_error_time < 60:
+            return False
+        self._last_error_msg = msg
+        self._last_error_time = now
+        return True
+
+    # ── 心跳 (每 10s, 防服务端空闲断开) ──────────────────────
+
+    def _start_heartbeat(self):
+        """启动后台心跳线程, 每 10 秒发 ProtoHeartbeatEvent."""
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            return  # 已在跑
+        self._heartbeat_stop.clear()
+
+        def _worker():
+            while not self._heartbeat_stop.is_set():
+                try:
+                    if self._client and self._client.isConnected:
+                        hb = ProtoHeartbeatEvent()
+                        # payloadType 默认为 51 (HEARTBEAT 枚举), 不需要改
+                        self._reactor.callFromThread(
+                            lambda: self._client.send(hb)
+                        )
+                except Exception:
+                    logger.debug("heartbeat send failed (non-fatal)")
+                self._heartbeat_stop.wait(10.0)
+
+        self._heartbeat_thread = threading.Thread(
+            target=_worker, daemon=True, name="ctrader-heartbeat",
+        )
+        self._heartbeat_thread.start()
+        logger.debug("[heartbeat] started (every 10s)")
+
+    def _stop_heartbeat(self):
+        """停止心跳线程."""
+        self._heartbeat_stop.set()
+        self._heartbeat_thread = None
 
     def _on_message(self, client, message):
-        """ProtoOASpotEvent 回调: 更新 _spot_price (线程安全)."""
+        """消息回调: 提取 payload 分发到各处理器."""
         try:
-            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
             from ctrader_open_api import Protobuf
             payload = Protobuf.extract(message)
-            if isinstance(payload, ProtoOASpotEvent):
-                bid = (payload.bid or 0) / (10 ** 2)  # moneyDigits=2 for XAUUSD
-                ask = (payload.ask or 0) / (10 ** 2)
-                with self._spot_lock:
+            self._handle_spot_event(payload)
+            self._handle_depth_event(payload)
+        except Exception as e:
+            logger.warning(f"_on_message parse failed: {e}")
+
+    def _handle_spot_event(self, payload):
+        """处理实时报价更新."""
+        try:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
+            if not isinstance(payload, ProtoOASpotEvent):
+                return
+            raw_bid = payload.bid or 0
+            raw_ask = payload.ask or 0
+            meta = getattr(self, '_symbol_meta', None) or {}
+            digits = meta.get('digits', 2)
+            pip_pos = meta.get('pip_position', digits)
+            price_digits = max(digits, pip_pos)
+            divisor = 10 ** price_digits
+            bid = raw_bid / divisor if raw_bid else 0
+            ask = raw_ask / divisor if raw_ask else 0
+            # 自动修正: cTrader demo 的 symbol meta 经常少报精度
+            max_val = max(bid, ask)
+            for _ in range(5):
+                if max_val < 10000:
+                    break
+                price_digits += 1
+                divisor = 10 ** price_digits
+                bid = raw_bid / divisor if raw_bid else 0
+                ask = raw_ask / divisor if raw_ask else 0
+                max_val = max(bid, ask)
+            logger.debug(f"spot raw: bid={raw_bid} ask={raw_ask} digits={price_digits} → bid={bid:.2f} ask={ask:.2f}")
+            with self._spot_lock:
+                if bid > 0 and ask > 0:
                     self._spot_price = (bid + ask) / 2.0
-        except Exception:
-            pass
+                elif bid > 0:
+                    self._spot_price = bid
+                elif ask > 0:
+                    self._spot_price = ask
+        except Exception as e:
+            logger.warning(f"spot event parse failed: {e}")
+
+    def _load_depth_counter(self) -> int:
+        """从当前时间戳生成 INT32 安全 id, 避免 DB 锁冲突.""" 
+        import time
+        return (time.time_ns() // 1000) & 0x7FFFFFFF
+
+    def _handle_depth_event(self, payload):
+        """处理深度报价 (Level II) 事件."""
+        if not hasattr(self, '_depth_quotes'):
+            self._depth_quotes = []
+            self._depth_lock = threading.Lock()
+            # 从 DB 取最大 id 作为起始, 避免重启后计数器重置产生重复
+            self._depth_counter = self._load_depth_counter()
+        try:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOADepthEvent
+            if not isinstance(payload, ProtoOADepthEvent):
+                return
+            # 收集新报价
+            new_quotes = []
+            for q in payload.newQuotes:
+                bid = q.bid / 100000.0
+                ask = q.ask / 100000.0
+                size = q.size / 100.0  # 官方: depth 量 ÷ 100
+                new_quotes.append({
+                    'id': q.id,
+                    'bid': round(bid, 2),
+                    'ask': round(ask, 2),
+                    'size': size,
+                })
+            deleted_ids = list(payload.deletedQuotes)
+            # 存入 bridge 状态
+            if not hasattr(self, '_depth_quotes'):
+                self._depth_quotes = []
+                self._depth_lock = threading.Lock()
+            # 更新本地 order book
+            with self._depth_lock:
+                # 删除旧报价
+                if deleted_ids:
+                    del_set = set(deleted_ids)
+                    self._depth_quotes = [q for q in self._depth_quotes if q['id'] not in del_set]
+                # 添加/更新新报价
+                for q in new_quotes:
+                    found = False
+                    for existing in self._depth_quotes:
+                        if existing['id'] == q['id']:
+                            existing.update(q)
+                            found = True
+                            break
+                    if not found:
+                        self._depth_quotes.append(q)
+            logger.info(f"depth event: {len(new_quotes)} new, {len(deleted_ids)} deleted, "
+                         f"total={len(self._depth_quotes)}")
+
+            # ── 持久化到 l2.duckdb ──
+            try:
+                import duckdb as _duckdb
+                import pandas as _pd
+                with self._l2_db_lock:
+                    if self._l2_db is None:
+                        import os
+                        _db_path = os.path.join(
+                            os.path.dirname(os.path.abspath(__file__)),
+                            "..", "data", "l2.duckdb"
+                        )
+                        self._l2_db = _duckdb.connect(str(_db_path))
+                    _tdb = self._l2_db
+                now = time.time()
+                # 记录每个变动
+                for q in new_quotes:
+                    self._depth_counter += 1
+                    side = 'bid' if q.get('bid', 0) > 0 else 'ask'
+                    price = q.get('bid', 0) or q.get('ask', 0)
+                    _tdb.execute("""
+                        INSERT INTO orderbook_changes
+                        (id, symbol, ts, quote_id, side, price, size, change_type, created_at)
+                        VALUES (?, 'XAUUSD+', ?, ?, ?, ?, ?, 'new', ?)
+                    """, [self._depth_counter, now, q['id'], side, price, q['size'], now])
+                for did in deleted_ids:
+                    self._depth_counter += 1
+                    _tdb.execute("""
+                        INSERT INTO orderbook_changes
+                        (id, symbol, ts, quote_id, side, price, size, change_type, created_at)
+                        VALUES (?, 'XAUUSD+', ?, ?, '', 0, 0, 'delete', ?)
+                    """, [self._depth_counter, now, did, now])
+            except Exception as _l2e:
+                logger.warning(f"l2 db write failed: {_l2e}")
+        except Exception as e:
+            logger.warning(f"depth event parse failed: {e}")
+
+    def get_depth_quotes(self) -> list[dict]:
+        """获取当前深度报价快照."""
+        if not hasattr(self, '_depth_quotes'):
+            return []
+        with self._depth_lock:
+            return list(self._depth_quotes)
 
     def subscribe_spots(self, symbol_id: int | None = None) -> bool:
         """订阅实时报价 (ProtoOASubscribeSpotsReq). 成功后 _on_message 会持续收到 spot event."""
@@ -267,6 +514,24 @@ class CTraderBridge:
             logger.warning(f"subscribe_spots failed: {e}")
             return False
 
+    def subscribe_depth(self, symbol_id: int | None = None) -> bool:
+        """订阅 L2 深度报价 (ProtoOASubscribeDepthQuotesReq)."""
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASubscribeDepthQuotesReq
+        sid = symbol_id or self._symbol_id
+        if not sid:
+            logger.error("subscribe_depth: no symbol_id")
+            return False
+        try:
+            req = ProtoOASubscribeDepthQuotesReq()
+            req.ctidTraderAccountId = self.account_id
+            req.symbolId.append(sid)
+            self._send(req, timeout=5.0)
+            logger.info(f"subscribe_depth OK for symbol_id={sid}")
+            return True
+        except Exception as e:
+            logger.warning(f"subscribe_depth failed: {e}")
+            return False
+
     def get_spot_price(self) -> float | None:
         """线程安全读最新 spot 价."""
         with self._spot_lock:
@@ -274,20 +539,32 @@ class CTraderBridge:
 
     def disconnect(self):
         """停 client service + 关连接; reactor 留着(全局 reactor 不能跨进程 stop)"""
+        self._stop_heartbeat()
+        # 关闭持久 L2 DuckDB 连接
+        with self._l2_db_lock:
+            if self._l2_db is not None:
+                try:
+                    self._l2_db.close()
+                except Exception:
+                    pass
+                self._l2_db = None
         if self._client:
             try:
                 self._client.stopService()
             except Exception:
                 pass
         # 不调 reactor.stop() — 那是全局 reactor, 关了影响别的
-        self._connected = False
+        with self._connected_lock:
+            self._connected = False
         self._app_authed = False
         self._account_authed = False
         logger.info("cTrader disconnected (reactor 留着, 给下次 connect 复用)")
 
     @property
     def is_connected(self) -> bool:
-        return self._connected and self._app_authed and self._account_authed
+        with self._connected_lock:
+            return (self._connected and self._app_authed
+                    and self._account_authed and self._symbol_id is not None)
 
     # ── 内部: App auth / Account auth ──
 
@@ -496,13 +773,19 @@ class CTraderBridge:
 
     # ── 订单 ──
 
-    def market_buy(self, volume: float, sl: float = 0.0, tp: float = 0.0,
-                   comment: str = "") -> CTraderOrderResult:
-        return self._send_market_order(TRADE_SIDE["BUY"], volume, sl, tp, comment)
+    def market_buy(self, symbol: str = "", volume: float = 0.0,
+                   sl: float = 0.0, tp: float = 0.0,
+                   comment: str = "") -> OrderResult:
+        _sym = symbol or self.symbol
+        r = self._send_market_order(TRADE_SIDE["BUY"], volume, sl, tp, comment)
+        return _to_order_result(r)
 
-    def market_sell(self, volume: float, sl: float = 0.0, tp: float = 0.0,
-                    comment: str = "") -> CTraderOrderResult:
-        return self._send_market_order(TRADE_SIDE["SELL"], volume, sl, tp, comment)
+    def market_sell(self, symbol: str = "", volume: float = 0.0,
+                    sl: float = 0.0, tp: float = 0.0,
+                    comment: str = "") -> OrderResult:
+        _sym = symbol or self.symbol
+        r = self._send_market_order(TRADE_SIDE["SELL"], volume, sl, tp, comment)
+        return _to_order_result(r)
 
     def amend_position_sltp(self, position_id: int,
                             sl: float = 0.0, tp: float = 0.0,
@@ -522,10 +805,6 @@ class CTraderBridge:
             trailing: 是否启用 trailing stop loss (默认 False)
             guaranteed: 是否启用 guaranteed stop loss (默认 False, French Risk 账户才支持)
 
-        跟 ProtoOA 协议字段对照:
-            stopLoss, takeProfit, trailingStopLoss, guaranteedStopLoss
-            都是 Optional 字段. 0 / False 表示不修改, server 保留旧值.
-
         Returns:
             CTraderOrderResult(success, position_id, comment, error_code)
 
@@ -536,6 +815,13 @@ class CTraderBridge:
                stopLoss 是 moneyDigits-scaled. amend 时 caller 传真实价格 (e.g. 2034.5),
                server 自己 scale. 不像 ClosePositionReq 的 volume * 100.
         """
+        # 按照 symbol digits 舍入, 避免 cTrader 拒绝 (如 4329.751677557901)
+        digits = getattr(self, '_symbol_meta', {}).get('digits', 2)
+        if sl > 0:
+            sl = round(float(sl), digits)
+        if tp > 0:
+            tp = round(float(tp), digits)
+
         if not self._connected or not self._account_authed:
             return CTraderOrderResult(
                 success=False, position_id=position_id,
@@ -602,6 +888,11 @@ class CTraderBridge:
                 error_code=err_code, comment=err_msg,
             )
 
+    # Phase 4: 统一抽象接口方法
+    def amend_sl_tp(self, position_id: int, sl: float, tp: float) -> bool:
+        r = self.amend_position_sltp(position_id, sl=sl, tp=tp)
+        return r.success
+
     def _send_market_order(self, side: int, volume: float, sl: float, tp: float,
                            comment: str) -> CTraderOrderResult:
         if not self._connected or not self._account_authed:
@@ -623,7 +914,7 @@ class CTraderBridge:
         req.tradeSide = side
         # cTrader volume 字段单位: 1 lot = 100 (centi-lot) per OpenApiPy docs
         # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
-        req.volume = int(volume * 100)
+        req.volume = int(round(volume * 100))
         req.comment = comment or "quant-live"
         # ⚠️ 阶段 2 MVP: SL/TP 不上 server (cTrader MARKET 单不支持 SL/TP 字段,
         # 需用 MARKET_RANGE 或 AmendOrder 后置). runner 在本地 Python 层做 SL/TP 检查
@@ -669,10 +960,41 @@ class CTraderBridge:
                 comment=f"orderId={order_id}, awaiting get_positions() for entry_price",
             )
         except Exception as e:
+            # P0-5: timeout/crash may mask a filled order.
+            # Reconcile by fetching current positions before declaring failure.
+            logger.warning(
+                "market_order send error: %s. Reconciling positions...", e,
+            )
+            try:
+                positions = self.get_positions(self.symbol)
+                expected_side = 1 if side == TRADE_SIDE["BUY"] else -1
+                matching = [
+                    p for p in positions
+                    if p.direction == expected_side
+                ]
+                if matching:
+                    # Use the most recent match (last in list by position_id)
+                    best = max(matching, key=lambda p: p.position_id)
+                    logger.info(
+                        "Reconciliation found position %s — order actually filled",
+                        best.position_id,
+                    )
+                    return CTraderOrderResult(
+                        success=True,
+                        position_id=int(best.position_id),
+                        comment=f"reconciled after send error: posId={best.position_id}",
+                    )
+                logger.info(
+                    "Reconciliation: no matching %s position on %s",
+                    "BUY" if side == TRADE_SIDE["BUY"] else "SELL",
+                    self.symbol,
+                )
+            except Exception as reconcile_err:
+                logger.error("Reconciliation failed: %s", reconcile_err)
             return CTraderOrderResult(success=False, error_code="SEND_ERR", comment=str(e))
 
-    def close_position(self, position_id: int | None = None,
-                       volume: float | None = None) -> CTraderOrderResult:
+    def close_position(self, position_id: int,
+                       volume: float = 0.0) -> OrderResult:
         """平仓 (走 ProtoOAClosePositionReq, DRY-RUN 时仅打印).
 
         Args:
@@ -683,29 +1005,29 @@ class CTraderBridge:
         (payloadType/ctidTraderAccountId/positionId/volume). volume 不能省略.
         """
         if not self.is_connected:
-            return CTraderOrderResult(success=False, comment="Not connected")
+            return OrderResult(success=False, comment="Not connected")
         if not self._account_authed:
-            return CTraderOrderResult(success=False, comment="Account not authed")
-        if position_id is None:
-            return CTraderOrderResult(success=False, comment="position_id required")
+            return OrderResult(success=False, comment="Account not authed")
+        if position_id <= 0:
+            return OrderResult(success=False, comment="position_id required")
         # DRY-RUN 安全闸
         if not self.send_orders:
             logger.warning(f"[DRY-RUN] close_position pos={position_id} vol={volume} (send_orders=False)")
-            return CTraderOrderResult(
+            return OrderResult(
                 success=True, position_id=position_id,
                 comment="DRY-RUN close (send_orders=False)",
             )
         try:
             # 如果未传 volume, 自动查仓位 volume
-            if volume is None:
+            if volume <= 0.0:
                 positions = self.get_positions()
-                match = [p for p in positions if p["position_id"] == position_id]
+                match = [p for p in positions if p.position_id == position_id]
                 if not match:
-                    return CTraderOrderResult(
+                    return OrderResult(
                         success=False, position_id=position_id,
                         comment=f"Position {position_id} not found in open positions",
                     )
-                volume = match[0]["volume"]
+                volume = match[0].volume
                 logger.info(f"  auto-resolved volume={volume} for full close")
 
             req = TradeMsg.ProtoOAClosePositionReq()
@@ -713,10 +1035,10 @@ class CTraderBridge:
             req.positionId = int(position_id)
             # cTrader volume 字段: 1 lot = 100 (centi-lot) per doc
             # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
-            req.volume = int(volume * 100)
+            req.volume = int(round(volume * 100))
             resp = self._send(req, timeout=10.0)
             logger.info(f"close_position OK pos={position_id} vol={volume} resp={type(resp).__name__}")
-            return CTraderOrderResult(
+            return OrderResult(
                 success=True,
                 position_id=position_id,
                 volume=volume,
@@ -724,7 +1046,7 @@ class CTraderBridge:
             )
         except Exception as e:
             logger.error(f"close_position failed pos={position_id}: {e}")
-            return CTraderOrderResult(
+            return OrderResult(
                 success=False, position_id=position_id,
                 error_code="close_failed", comment=str(e),
             )
@@ -742,10 +1064,10 @@ class CTraderBridge:
             self._send(req, timeout=5.0)
             return True
         except Exception:
-            self._connected = False
+            self._mark_disconnected()
             return False
 
-    def account_info(self) -> dict:
+    def account_info(self) -> AccountInfo:
         """
         查账户余额/净值.
 
@@ -758,7 +1080,9 @@ class CTraderBridge:
         Margin 同理: cTrader ProtoOAMarginReq 可查, v3 暂略, 返 0.0。
         """
         if not self.is_connected:
-            return {}
+            return AccountInfo()
+        if self._should_backoff():
+            return AccountInfo()
         try:
             req = TradeMsg.ProtoOATraderReq()
             req.ctidTraderAccountId = self.account_id
@@ -773,19 +1097,23 @@ class CTraderBridge:
             equity = balance + unrealized
             login = t.traderLogin
             currency = _ASSET_ID_TO_CODE.get(t.depositAssetId, f"ASSET_{t.depositAssetId}")
-            return {
-                "balance": balance,
-                "equity": equity,
-                "margin": 0.0,                # TODO: ProtoOAMarginReq
-                "margin_free": 0.0,           # TODO: ProtoOAMarginReq
-                "login": login,
-                "leverage": t.maxLeverage,
-                "currency": currency,
-                "swap_free": bool(t.swapFree),
-            }
+            self._record_success()
+            return AccountInfo(
+                balance=balance,
+                equity=equity,
+                margin=0.0,
+                margin_free=0.0,
+                leverage=float(getattr(t, 'maxLeverage', 0) or 0),
+                currency=currency,
+                account_id=login,
+                name=f"cTrader-{login}",
+            )
         except Exception as e:
-            logger.error(f"account_info failed: {e}")
-            return {}
+            self._mark_disconnected()
+            self._record_failure()
+            if self._should_log_error(f"account_info failed: {e}"):
+                logger.error(f"account_info failed: {e}")
+            return AccountInfo()
 
     def _unrealized_pnl(self) -> float:
         """查所有持仓的浮动盈亏总和 (美元, 非 centi-unit).
@@ -810,7 +1138,7 @@ class CTraderBridge:
                 total += pnl / divisor
         return total
 
-    def get_positions(self, symbol: str | None = None) -> list[dict]:
+    def get_positions(self, symbol: str = "") -> list[PositionInfo]:
         """
         查当前持仓. 用 ProtoOAReconcileReq (增量大).
 
@@ -818,6 +1146,8 @@ class CTraderBridge:
         position.tradeData (ProtoOATradeData) 里.
         """
         if not self.is_connected:
+            return []
+        if self._should_backoff():
             return []
         try:
             req = TradeMsg.ProtoOAReconcileReq()
@@ -833,21 +1163,26 @@ class CTraderBridge:
                 # ⚠️ audit 2026-06-11: ProtoOAPosition.price 是 float (type=1=double),
                 #    already real price, 不能除 moneyDigits. spot event 才需要除.
                 #    SL/TP 同理是 float.
-                result.append({
-                    "position_id": p.positionId,
-                    "symbol_id": td.symbolId,
-                    "type": "buy" if td.tradeSide == TRADE_SIDE["BUY"] else "sell",
-                    "volume": td.volume / 100.0,         # centi-lot → lot
-                    "price_open": p.price,
-                    "sl": p.stopLoss or 0,
-                    "tp": p.takeProfit or 0,
-                    "profit": None,  # 需 ProtoOAGetPositionUnrealizedPnLReq
-                    "swap": p.swap / 100.0,
-                    "commission": p.commission / 100.0,
-                })
+                direction = 1 if td.tradeSide == TRADE_SIDE["BUY"] else -1
+                result.append(PositionInfo(
+                    position_id=p.positionId,
+                    symbol=self.symbol,
+                    direction=direction,
+                    volume=td.volume / 100.0,
+                    entry_price=p.price,
+                    current_price=p.price,
+                    sl=p.stopLoss or 0,
+                    tp=p.takeProfit or 0,
+                    commission=p.commission / 100.0,
+                    swap=p.swap / 100.0,
+                ))
+            self._record_success()
             return result
         except Exception as e:
-            logger.error(f"get_positions failed: {e}")
+            self._mark_disconnected()
+            self._record_failure()
+            if self._should_log_error(f"get_positions failed: {e}"):
+                logger.error(f"get_positions failed: {e}")
             return []
 
     # ── 历史 (trendbar) ──
@@ -902,12 +1237,19 @@ class CTraderBridge:
         req.ctidTraderAccountId = self.account_id
         req.symbolId = self._symbol_id
         req.period = period
-        now_min = int(time.time() // 60)
+        # ⚠️ 2026-06-18: 官方文档要求毫秒时间戳 (Unix ms), 之前用了分钟导致 bar 始终为空
         mins = period_minutes.get(timeframe, 15)
-        # 多取 10% 冗余, 防 server 内部边缘 case
+        now_ms = int(time.time() * 1000)
+        mins_ms = mins * 60 * 1000
         lookback_bars = min(n_bars, 5000)
-        req.fromTimestamp = now_min - lookback_bars * mins
-        req.toTimestamp = now_min
+        req.fromTimestamp = now_ms - lookback_bars * mins_ms
+        req.toTimestamp = now_ms
+        # count 可同时传, 官方文档示例同时使用 count + 时间范围
+        # 按官方示例设 count = lookback_bars (服务端最多返这个数)
+        try:
+            req.count = lookback_bars
+        except Exception:
+            pass
         try:
             resp = self._send(req, timeout=20.0)
         except Exception as e:
@@ -915,19 +1257,15 @@ class CTraderBridge:
             return None
         if not resp.trendbar:
             return None
-        # ⚠️ moneyDigits 需 SymbolByIdReq 拿, 先固定 2 (XAUUSD = 4512.34 2 digits)
-        digits = 2
+        # 按官方文档: GetPriceFromRelative = round(value / 100000, symbol.digits)
+        # digits 从 _symbol_meta 获取, 保底 2 (XAUUSD 常见值)
+        digits = getattr(self, '_symbol_meta', {}).get('digits', 2)
         rows = []
         for bar in resp.trendbar:
-            # 低点有绝对值; 高/开/收是 delta 相对前 close — 没前 close 时算不出
-            # 先用 low 估计 (lossy 凑合看, 真 OHLC 走阶段 2 spot 订阅)
-            low = bar.low / (10 ** digits)
-            # delta 是 pips (10^digits 倍数 = 1 USD)
-            # close = low + deltaClose / 10^digits; 但没有 prev close
-            # PoC 阶段: 用 low 兜底全部 4 个, 标注 lossy
-            close = low + bar.deltaClose / (10 ** digits)
-            open_ = close - bar.deltaOpen / (10 ** digits)  # 估算
-            high = max(open_, close, low) + bar.deltaHigh / (10 ** digits)
+            low = round(bar.low / 100000, digits)
+            open_ = round((bar.low + bar.deltaOpen) / 100000, digits)
+            high = round((bar.low + bar.deltaHigh) / 100000, digits)
+            close = round((bar.low + bar.deltaClose) / 100000, digits)
             rows.append({
                 "time": bar.utcTimestampInMinutes * 60,  # unix minute → unix second
                 "open": open_,
@@ -941,7 +1279,6 @@ class CTraderBridge:
         df = pd.DataFrame(rows)
         df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
         df = df.set_index("time").sort_index()
-        logger.warning("fetch_bars LOSSY: only low is absolute; O/H/C estimated from delta")
         return df[["open", "high", "low", "close", "volume"]]
 
 

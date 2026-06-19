@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "browser": {
+      "command": "C:/Users/zhu/AppData/Local/Programs/Python/Python312/python.exe",
+      "args": ["tools/mcp_browser_server.py"],
+      "env": {
+        "BROWSER_HEADED": "false"
+      }
+    }
+  }
+}

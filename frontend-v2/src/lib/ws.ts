@@ -1,11 +1,18 @@
 import { useAppStore } from "@/lib/store";
 
+// Debug: confirm this module version is loaded
+if (import.meta.env.DEV) {
+  console.log("[ws] module loaded, WS_BASE=",
+    import.meta.env.VITE_WS_URL || (import.meta.env.DEV ? "ws://localhost:8000" : `ws://${location.host}`));
+}
+
 // WebSocket base URL.
-// In dev mode Vite proxies /ws to the backend, so relative works.
-// In prod (single-port), same-origin is correct.
+// Dev mode: connect directly to backend :8000 (Vite WS proxy may drop subprotocols).
+// Prod (single-port): same-origin is correct.
 // VITE_WS_URL allows LAN/QA override: VITE_WS_URL=ws://192.168.1.5:8000
 const WS_BASE: string =
-  import.meta.env.VITE_WS_URL || `ws://${location.host}`;
+  import.meta.env.VITE_WS_URL ||
+  (import.meta.env.DEV ? "ws://localhost:8000" : `ws://${location.host}`);
 const MIN_INTERVAL_MS = 200;
 
 class WSClient {
@@ -16,9 +23,11 @@ class WSClient {
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private lastFlush = 0;
   private pendingSnapshot: any = null;
+  private path: string = "/ws/state";
 
   start(path = "/ws/state") {
     this.stopped = false;
+    this.path = path;
     this.connect(path);
   }
 
@@ -31,7 +40,17 @@ class WSClient {
 
   private connect(path: string) {
     if (this.stopped) return;
-    try { this.ws = new WebSocket(`${WS_BASE}${path}`); } catch { this.scheduleReconnect(); return; }
+    // ★ close old connection first (prevent connection leak)
+    if (this.ws) {
+        try { this.ws.onclose = null; this.ws.close(); } catch {}
+    }
+    // 从 localStorage 取 JWT token 传给后端 WS 鉴权
+    const token = localStorage.getItem("quant_token") || "";
+    // 同时用 subprotocol + query string 双通道传 token (subprotocol 在 Vite proxy 可能丢失)
+    const sep = path.includes("?") ? "&" : "?";
+    const url = `${WS_BASE}${path}${token ? `${sep}token=${encodeURIComponent(token)}` : ""}`;
+    if (import.meta.env.DEV) console.log("[ws] connecting: token=" + !!token + " url=" + url.slice(0, 80) + "...");
+    try { this.ws = token ? new WebSocket(url, [token]) : new WebSocket(url); } catch { this.scheduleReconnect(); return; }
     this.ws.onopen = () => {
       this.attempt = 0;
       useAppStore.getState().setWsConnected(true);
@@ -43,7 +62,11 @@ class WSClient {
       useAppStore.getState().setWsConnected(false);
       this.scheduleReconnect();
     };
-    this.ws.onerror = () => this.ws?.close();
+    // Don't force-close on transient errors — let onclose handle cleanup naturally.
+    // force-close creates a WinError 10054 reset loop on Windows.
+    this.ws.onerror = () => {
+      // no-op: the browser will fire onclose after onerror
+    };
   }
 
   private scheduleFlush() {
@@ -73,7 +96,7 @@ class WSClient {
     const delays = [1000, 2000, 4000, 8000, 15000, 30000];
     const delay = delays[Math.min(this.attempt, delays.length - 1)];
     this.attempt++;
-    this.reconnectTimer = setTimeout(() => this.connect("/ws/state"), delay);
+    this.reconnectTimer = setTimeout(() => this.connect(this.path), delay);
   }
 }
 

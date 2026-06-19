@@ -22,7 +22,7 @@ def _load_bars(symbol: str, timeframe: str) -> pd.DataFrame:
     """Load bars from SQLite. Returns DataFrame with DatetimeIndex + OHLCV columns."""
     from data.store import DataStore
 
-    store = DataStore(str(DATA_DIR / "market_data.db"))
+    store = DataStore(str(DATA_DIR / "ctrader_data.duckdb"))
     df = store.load_bars(symbol, timeframe)
     if df.empty:
         return df

@@ -144,11 +144,13 @@ ws.onmessage = (e)=>{
             },
         }
 
-        dead = set()
+        import asyncio
+        tasks = []
         for ws in _ws_clients:
-            try:
-                import asyncio
-                asyncio.create_task(ws.send_text(json.dumps(payload)))
-            except Exception:
+            tasks.append(asyncio.create_task(ws.send_text(json.dumps(payload))))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        dead = set()
+        for ws, result in zip(_ws_clients, results):
+            if isinstance(result, Exception):
                 dead.add(ws)
         _ws_clients -= dead

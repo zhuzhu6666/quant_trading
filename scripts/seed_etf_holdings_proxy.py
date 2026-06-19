@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import sqlite3
 import pandas as pd
 
-DB = "data/market_data.db"
+DB = "data/ctrader_data.duckdb"
 
 
 def main():

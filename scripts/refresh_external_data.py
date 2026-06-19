@@ -44,7 +44,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("refresh_external")
 
-DB_PATH = "data/market_data.db"
+DB_PATH = "data/ctrader_data.duckdb"
 
 # ── 数据源频率定义 (秒) ──────────────────────────────────
 FREQ = {

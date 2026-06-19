@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { authFetch } from "@/lib/auth";
 
 interface JobProgress {
@@ -79,6 +79,14 @@ export function useJobPolling<T = any>(
   const cancel = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
     aliveRef.current = false;
+  }, []);
+
+  // Cleanup on unmount: stop polling and mark as dead
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      aliveRef.current = false;
+    };
   }, []);
 
   return { progress, result, done, error, start, cancel };

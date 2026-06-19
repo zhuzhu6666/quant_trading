@@ -24,7 +24,6 @@ SCRIPT_SPECS = [
     ("live_sync.py", "scripts.live_sync", "run_sync_once", ["timeframes", "sync_type"]),
     ("live_sync.py", "scripts.live_sync", "get_status", []),
     ("tune_risk_params.py", "scripts.tune_risk_params", "run_tuning", ["risk_pct_grid", "cb_pct_grid", "n_bars"]),
-    ("p1_e_ab_test.py", "scripts.p1_e_ab_test", "run_ab", ["path_a", "path_b", "n_bars"]),
 ]
 
 

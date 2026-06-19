@@ -65,7 +65,8 @@ class OrderManager:
                           OrderStatus.REJECTED],
         OrderStatus.PENDING: [OrderStatus.SUBMITTED, OrderStatus.CANCELLED, OrderStatus.REJECTED],
         OrderStatus.SUBMITTED: [OrderStatus.PARTIAL_FILLED, OrderStatus.FILLED,
-                                 OrderStatus.CANCELLED, OrderStatus.REJECTED],
+                                 OrderStatus.CANCELLED, OrderStatus.REJECTED,
+                                 OrderStatus.PENDING],  # v11-fix (P1-10): 重试需要 SUBMITTED→PENDING
         # P16: PARTIAL→PARTIAL 允许 (累加 partial_fill), 仍可去 FILLED / CANCELLED
         OrderStatus.PARTIAL_FILLED: [OrderStatus.PARTIAL_FILLED, OrderStatus.FILLED,
                                      OrderStatus.CANCELLED],
@@ -110,11 +111,9 @@ class OrderManager:
         if not order:
             return
         order.fill_price = fill_price
-        if volume:
-            order.volume = volume
-        order.filled_volume = volume if volume else order.volume  # BUG-3
-        self._transition(order, OrderStatus.FILLED)
-        self._archive(order)
+        order.filled_volume = volume if volume is not None else order.volume
+        if self._transition(order, OrderStatus.FILLED):
+            self._archive(order)
 
     def partial_fill(self, ticket: int, fill_price: float, filled_vol: float):
         """BUG-3 (audit 2026-06-04) 修复:
@@ -129,9 +128,9 @@ class OrderManager:
         if order.filled_volume >= order.volume - 1e-9:
             # 全成, transition FILLED + 归档
             order.filled_volume = order.volume
-            self._transition(order, OrderStatus.FILLED)
-            self._archive(order)
-            logger.info(f"Order {ticket} partial fills aggregate to full, archived")
+            if self._transition(order, OrderStatus.FILLED):
+                self._archive(order)
+                logger.info(f"Order {ticket} partial fills aggregate to full, archived")
         else:
             # 部分成, 仍保持活跃
             self._transition(order, OrderStatus.PARTIAL_FILLED)
@@ -160,9 +159,14 @@ class OrderManager:
         # 重试
         if order.retry_count < order.max_retries:
             order.retry_count += 1
-            order.status = OrderStatus.PENDING
-            order.update_time = time.time()
-            logger.warning(f"Order {ticket} rejected, retry {order.retry_count}/{order.max_retries}: {reason}")
+            # v11-fix (P1-10): 用 _transition 确保状态机一致性
+            if self._transition(order, OrderStatus.PENDING):
+                order.update_time = time.time()
+                logger.warning(f"Order {ticket} rejected, retry {order.retry_count}/{order.max_retries}: {reason}")
+            else:
+                logger.error(f"Order {ticket} transition to PENDING failed, reject permanently: {reason}")
+                self._transition(order, OrderStatus.REJECTED)
+                self._archive(order)
         else:
             self._transition(order, OrderStatus.REJECTED)
             self._archive(order)

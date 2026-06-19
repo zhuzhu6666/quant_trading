@@ -10,14 +10,11 @@ import { MiniAreaChart } from "@/components/dashboard/MiniAreaChart";
 
 /* ─── Live types ─── */
 interface BrokerStatus {
-  mt5: { status: string; error?: string };
   ctrader: { status: string; error?: string };
   loop?: { running: boolean; pid?: number | null; broker?: string | null; started_at?: number | null };
 }
 interface AccountInfo { ok: boolean; broker: string; balance?: number; equity?: number; margin?: number; margin_free?: number; margin_level?: number; leverage?: number; currency?: string; error?: string; }
 interface Position { ticket: number; type: "buy" | "sell"; volume: number; price_open: number; price_current: number; sl: number; tp: number; profit: number; magic?: number; }
-
-const BROKER_OPTIONS = [{ value: "mt5", label: "mt5" }, { value: "ctrader", label: "ctrader" }];
 
 function statusBadgeVariant(s: string | undefined): "success" | "warning" | "danger" {
   if (s === "connected") return "success";
@@ -30,13 +27,12 @@ export default function TradingPanel() {
 }
 
 /* ==================================================================
-   Live — 实盘交易 (已移除模拟盘, 有回测框架替代)
+   Live — 实盘交易 (仅 cTrader)
    ================================================================== */
 function LiveContent() {
   const [status, setStatus] = useState<BrokerStatus | null>(null);
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [positions, setPositions] = useState<{ ok: boolean; positions: Position[]; error?: string } | null>(null);
-  const [broker, setBroker] = useState<"mt5" | "ctrader">("ctrader");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const { confirm, dialogProps } = useConfirm();
@@ -46,25 +42,25 @@ function LiveContent() {
     try {
       const [sr, ar, pr] = await Promise.all([
         authFetch("/api/live/status"),
-        authFetch(`/api/live/account?broker=${broker}`),
-        authFetch(`/api/live/positions?broker=${broker}`),
+        authFetch("/api/live/account?broker=ctrader"),
+        authFetch("/api/live/positions?broker=ctrader"),
       ]);
       if (sr.ok) setStatus(await sr.json());
       if (ar.ok) setAccount(await ar.json());
       if (pr.ok) setPositions(await pr.json());
     } catch { /* best-effort */ }
   }
-  useEffect(() => { load(); }, [broker]);
-  usePolling(load, 5000, [broker]);
+  useEffect(() => { load(); }, []);
+  usePolling(load, 5000, []);
 
   async function emergencyClose() {
-    const ok = await confirm("紧急平仓", `确认紧急平仓 (${broker})? 后端 X-Confirm: emergency 二次校验。`);
+    const ok = await confirm("紧急平仓", "确认紧急平仓 (cTrader)? 后端 X-Confirm: emergency 二次校验。");
     if (!ok) return;
     setBusy(true); setResult(null);
     try {
       const r = await authFetch("/api/live/emergency-close", {
         method: "POST", headers: { "Content-Type": "application/json", "X-Confirm": "emergency" },
-        body: JSON.stringify({ broker, symbol: null }),
+        body: JSON.stringify({ broker: "ctrader", symbol: null }),
       });
       const d = await r.json();
       setResult(d.ok ? `✓ ${d.broker} 已平` : `✗ ${d.error || "failed"}`);
@@ -99,9 +95,6 @@ function LiveContent() {
         </p>
       </Card>
       <div className="flex items-end gap-4">
-        <div className="w-28">
-          <Select label="查看 broker" options={BROKER_OPTIONS} value={broker} onChange={(e) => setBroker(e.target.value as "mt5" | "ctrader")} />
-        </div>
         <Button variant="ghost" size="sm" onClick={load}>刷新</Button>
         <Button variant="danger" size="sm" onClick={emergencyClose} disabled={busy}>⏮ 紧急平仓</Button>
         {loopRunning && status?.loop?.broker && status.loop.started_at != null && (
@@ -110,14 +103,14 @@ function LiveContent() {
       </div>
 
       {/* Broker status */}
-      <div className="grid grid-cols-2 gap-4">
-        {(["mt5", "ctrader"] as const).map((b) => (
+      <div className="grid grid-cols-1 gap-4">
+        {(["ctrader"] as const).map((b) => (
           <Card key={b} title={b.toUpperCase()}>
             <div className="flex items-center gap-2 mb-2">
               <Badge variant={statusBadgeVariant((status as any)?.[b]?.status)}>{(status as any)?.[b]?.status ?? "?"}</Badge>
               {(status as any)?.[b]?.error && <span className="text-xs text-down">{(status as any)?.[b]?.error}</span>}
             </div>
-            {b === broker && account && (
+            {account && (
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <div><span className="text-fg-muted">balance</span> <span className="num float-right">{fmtNum(account.balance ?? 0)}</span></div>
                 <div><span className="text-fg-muted">equity</span> <span className="num float-right">{fmtNum(account.equity ?? 0)}</span></div>

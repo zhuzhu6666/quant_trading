@@ -76,10 +76,13 @@ class PaperService:
         )
         log_path = log_dir / f"paper_{datetime.now().strftime('%Y%m%d_%H%M%S')}_pid{self._proc.pid}.log"
 
+        # 用局部引用避免 stop() 设 self._proc = None 时 drain 线程读 None.stdout
+        proc = self._proc
+
         def _drain():
             try:
                 with open(log_path, "wb") as f:
-                    for line in self._proc.stdout:
+                    for line in proc.stdout:
                         f.write(line)
                         f.flush()
             except Exception:
@@ -88,7 +91,7 @@ class PaperService:
         threading.Thread(target=_drain, daemon=True).start()
         self._started_at = datetime.now(timezone.utc).isoformat()
         self._config = config
-        self._strategy_id = config.get("strategy_id", "multi_factor_m15")
+        self._strategy_id = config.get("strategy_id", "factor_pipeline_v4")
         progress_cb("started", 100, f"paper pid={self._proc.pid}")
         return PaperStatus(
             status="running", started_at=self._started_at, pid=self._proc.pid,

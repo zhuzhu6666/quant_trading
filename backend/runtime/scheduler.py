@@ -72,17 +72,21 @@ class _TimerJob:
         self._error_count = 0
         self._last_error = ""
         self._last_run_time = 0.0
+        self._finished_at: float = 0.0
 
     def _parse_interval_seconds(self) -> float:
         """从 cron 表达式推算调度间隔(秒).
-        支持: '0 * * * *' → 3600, '*/5 * * * *' → 300, '*/30 * * * *' → 1800.
+
+        支持:
+          '*/5 * * * *' → 300, '0 * * * *' → 3600,
+          '0 */6 * * *' → 21600, '0 5 * * 0' → 604800.
         """
         parts = self.cron_expr.strip().split()
         if len(parts) != 5:
             return 3600.0
-        minute_str, hour_str = parts[0], parts[1]
+        minute_str, hour_str, dom_str, month_str, dow_str = parts
 
-        # */N → 每 N 分钟
+        # */N minute → 每 N 分钟
         if minute_str.startswith("*/"):
             try:
                 n = int(minute_str[2:])
@@ -91,19 +95,31 @@ class _TimerJob:
             except ValueError:
                 pass
 
-        # * (每分钟)
+        # * * * * * → 每分钟
         if minute_str == "*" and hour_str == "*":
             return 60.0
 
         # N * * * * → 每 N 分钟 (N > 0)
-        if minute_str.isdigit() and hour_str == "*":
-            n = int(minute_str)
-            if n > 0:
-                return float(n * 60)
+        if minute_str.isdigit() and int(minute_str) > 0 and hour_str == "*":
+            return float(int(minute_str) * 60)
+
+        # 0 */N * * * → 每 N 小时
+        if minute_str == "0" and hour_str.startswith("*/"):
+            try:
+                n = int(hour_str[2:])
+                if n > 0:
+                    return float(n * 3600)
+            except ValueError:
+                pass
 
         # 0 N * * * → 每 N 小时
         if minute_str == "0" and hour_str.isdigit():
             return float(int(hour_str) * 3600)
+
+        # Weekly: 0 H * * D → every 7 days (604800s)
+        if (minute_str.isdigit() and hour_str.isdigit() and
+                dom_str == "*" and month_str == "*" and dow_str.isdigit()):
+            return 604800.0  # 7 days
 
         return 3600.0  # 默认 1 小时
 
@@ -137,6 +153,7 @@ class _TimerJob:
         if not self._stop_event.is_set():
             interval = self._parse_interval_seconds()
             self._schedule_next(interval)
+        self._finished_at = _time.time()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -145,11 +162,24 @@ class _TimerJob:
                 self._timer.cancel()
                 self._timer = None
 
+    def run_now(self) -> None:
+        """立即执行一次 (不改变定时器), 并计入 run_count。"""
+        try:
+            self.fn()
+            self._run_count += 1
+            self._last_run_time = _time.time()
+        except Exception as e:
+            self._error_count += 1
+            self._last_error = str(e)
+            logger.error(f"[scheduler][{self.name}] run_now error: {e}")
+            if self.on_error:
+                self.on_error(self.name, e)
+
     @property
     def info(self) -> JobInfo:
         next_run = (
-            self._timer.finished_at + self._parse_interval_seconds()
-            if self._timer and hasattr(self._timer, "finished_at")
+            self._finished_at + self._parse_interval_seconds()
+            if self._finished_at > 0
             else _time.time() + self._parse_interval_seconds()
         )
         return JobInfo(
@@ -216,7 +246,12 @@ class InProcessScheduler:
                 return
             if HAS_APSCHEDULER and self._apscheduler:
                 self._apscheduler.start()
-            # Timer-mode: 单个 job 在 add_job 时自行 start
+            else:
+                # audit v9: 修复 Timer job 完全不启动的 bug
+                # add_job 时 _started 还是 False, 所以 job.start() 没被调
+                # 必须在 start() 里补启动所有已注册的 Timer job
+                for job in self._jobs_timer.values():
+                    job.start()
             self._started = True
             logger.info("[InProcessScheduler] started")
 
@@ -279,6 +314,30 @@ class InProcessScheduler:
                 self._jobs_timer[name] = job
             logger.info(f"[InProcessScheduler] add_job {name} ({cron_expr})")
             return True
+
+    def run_job_now(self, name: str) -> bool:
+        """立即执行指定任务一次, 计入 run_count。"""
+        with self._lock:
+            if HAS_APSCHEDULER and self._apscheduler:
+                job_id = self._jobs_aps.get(name)
+                if job_id is None:
+                    logger.warning(f"[InProcessScheduler] job {name} not found")
+                    return False
+                try:
+                    job = self._apscheduler.get_job(job_id)
+                    if job:
+                        job.func()
+                except Exception as e:
+                    logger.error(f"[InProcessScheduler] run_job_now({name}) failed: {e}")
+                    return False
+                return True
+            else:
+                job = self._jobs_timer.get(name)
+                if job is None:
+                    logger.warning(f"[InProcessScheduler] job {name} not found")
+                    return False
+                job.run_now()
+                return True
 
     def remove_job(self, name: str) -> bool:
         """移除一个定时任务."""

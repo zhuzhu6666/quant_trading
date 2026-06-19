@@ -91,6 +91,7 @@ class RegistryAdapter:
         func: Callable,
         source: str = SOURCE_DISCOVERED,
         description: str = "",
+        log_event: bool = True,
     ) -> bool:
         """
         运行时注册一个因子函数. 返回 True 成功, False 失败 (已存在).
@@ -100,6 +101,7 @@ class RegistryAdapter:
             func: 因子函数, 签名 (df: pd.DataFrame) -> np.ndarray
             source: builtin / discovered / shadow
             description: 表达式或描述
+            log_event: 是否写入 lifecycle log. restore_from_log 传 False 避免重复.
         """
         if name in factor_registry:
             logger.warning(f"[RegistryAdapter] {name} 已存在, 跳过 register")
@@ -112,11 +114,12 @@ class RegistryAdapter:
             "register_time": _time.time(),
             "description": description,
         }
-        self._log_event(FactorLifecycleEvent(
-            timestamp=_time.time(), event="register", factor=name,
-            source=source, description=description,
-        ))
-        logger.info(f"[RegistryAdapter] register {name} ({source})")
+        if log_event:
+            self._log_event(FactorLifecycleEvent(
+                timestamp=_time.time(), event="register", factor=name,
+                source=source, description=description,
+            ))
+            logger.info(f"[RegistryAdapter] register {name} ({source})")
         return True
 
     def unregister(self, name: str, reason: str = "") -> bool:

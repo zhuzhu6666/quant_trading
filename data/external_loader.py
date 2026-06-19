@@ -4,7 +4,7 @@ data/external_loader.py
 
 把日度宏观/事件数据 forward-fill 到 M15 bar 级别, 供 alpha/registry 因子调用。
 
-数据源 (data/market_data.db):
+数据源 (data/ctrader_data.duckdb):
   - macro_daily: DFII10 / DTWEXBGS (DXY 代理) / GVZCLS / VIXCLS
   - etf_daily:   GLD / SLV / TLT  (收盘价)
   - etf_holdings: GLD / SLV 持仓量 (吨) + shares outstanding  (P0-ETF 2026-06-03)
@@ -20,13 +20,13 @@ data/external_loader.py
   + 央行列:     cb_total_chg_3m  (全球央行 3 月累计净买入, 吨)
 
 用法:
-    loader = ExternalDataLoader("data/market_data.db")
+    loader = ExternalDataLoader("data/ctrader_data.duckdb")
     df_ext = loader.load_aligned(bar_df)  # bar_df 必须是 M15 DatetimeIndex
     # 之后 df = bar_df.join(df_ext) 即可让因子访问到
 """
 from __future__ import annotations
 
-import sqlite3
+import duckdb
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -37,12 +37,12 @@ import pandas as pd
 class ExternalDataLoader:
     """外部数据 (宏观 + 事件 + ETF + 央行) 对齐到 bar 级别"""
 
-    def __init__(self, db_path: str = "data/market_data.db"):
+    def __init__(self, db_path: str = "data/ctrader_data.duckdb"):
         self.db_path = db_path
 
     def _load_macro(self) -> pd.DataFrame:
         """加载 macro_daily, 列: date / dfii10 / dxy / gvz / vix"""
-        con = sqlite3.connect(self.db_path)
+        con = duckdb.connect(self.db_path)
         rows = con.execute(
             "SELECT date, series, value FROM macro_daily ORDER BY date"
         ).fetchall()
@@ -57,7 +57,7 @@ class ExternalDataLoader:
 
     def _load_etf(self) -> pd.DataFrame:
         """加载 etf_daily, 列: gld / slv / tlt"""
-        con = sqlite3.connect(self.db_path)
+        con = duckdb.connect(self.db_path)
         rows = con.execute(
             "SELECT date, symbol, close FROM etf_daily ORDER BY date"
         ).fetchall()
@@ -75,13 +75,13 @@ class ExternalDataLoader:
 
         返回列: gld_tonnes / slv_tonnes / gld_shares / slv_shares / gld_aum
         """
-        con = sqlite3.connect(self.db_path)
+        con = duckdb.connect(self.db_path)
         try:
             rows = con.execute(
                 "SELECT symbol, date, total_tonnes, total_shares, aum_usd "
                 "FROM etf_holdings ORDER BY date"
             ).fetchall()
-        except sqlite3.OperationalError:
+        except Exception:
             # 表不存在 (旧库) → 返空
             con.close()
             return pd.DataFrame()
@@ -108,13 +108,13 @@ class ExternalDataLoader:
                 cb_china_total / cb_china_chg_monthly
                 ...
         """
-        con = sqlite3.connect(self.db_path)
+        con = duckdb.connect(self.db_path)
         try:
             rows = con.execute(
                 "SELECT country, date, total_tonnes, monthly_chg_tonnes "
                 "FROM cb_gold ORDER BY date"
             ).fetchall()
-        except sqlite3.OperationalError:
+        except Exception:
             con.close()
             return pd.DataFrame()
         con.close()
@@ -144,14 +144,14 @@ class ExternalDataLoader:
             cot_mm_net_pct_oi = mm_net / open_interest
             cot_mm_net_chg_4w = mm_net_pct_oi 4w diff
         """
-        con = sqlite3.connect(self.db_path)
+        con = duckdb.connect(self.db_path)
         try:
             rows = con.execute(
                 "SELECT report_date, open_interest, mm_long, mm_short, mm_spread, "
                 "pm_long, pm_short, swap_long, swap_short, other_long, other_short "
                 "FROM cot_gold ORDER BY report_date"
             ).fetchall()
-        except sqlite3.OperationalError:
+        except Exception:
             con.close()
             return pd.DataFrame()
         con.close()
@@ -186,7 +186,7 @@ class ExternalDataLoader:
 
     def _load_events(self) -> pd.DataFrame:
         """加载 events, 列: date / fomc / nfp / cpi / pce (1=是事件日)"""
-        con = sqlite3.connect(self.db_path)
+        con = duckdb.connect(self.db_path)
         rows = con.execute(
             "SELECT date, type FROM events ORDER BY date"
         ).fetchall()
@@ -292,6 +292,11 @@ class ExternalDataLoader:
         ext = ext.sort_index()
 
         # Reindex 到 bar 级别 (含周末/假日的 bar index), forward-fill
+        # 先对日度数据 ffill (消除尾部 NaN), 再 reindex 到 bar 频率
+        ext = ext.ffill()
+        # 统一 index 精度 (bar 可能是 datetime64[s], 外部数据是 datetime64[us])
+        if ext.index.dtype != bar_df.index.dtype:
+            ext.index = ext.index.astype(bar_df.index.dtype)
         ext = ext.reindex(bar_df.index, method="ffill")
 
         # 边界处理: 头部 bfill (取最早已知值), 尾部若全 NaN 则保留
@@ -311,11 +316,11 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
     from data.store import DataStore
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     bars = store.load_bars("XAUUSD+", "M15")
     print(f"Loaded {len(bars)} bars, range: {bars.index[0]} → {bars.index[-1]}")
 
-    loader = ExternalDataLoader("data/market_data.db")
+    loader = ExternalDataLoader("data/ctrader_data.duckdb")
     ext = loader.align_to_bars(bars)
     print(f"\nExternal df shape: {ext.shape}")
     print(f"Columns ({len(ext.columns)}): {list(ext.columns)}")

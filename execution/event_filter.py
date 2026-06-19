@@ -21,7 +21,7 @@ v1 实现 (T13):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +37,7 @@ class SharedEventFilter:
             enable_nfp_skip=True, nfp_skip_days=1,
             enable_dual_event_skip=True,
             enable_gvz_gate=True, gvz_drop_pct=-2.0,
-            db_path="data/market_data.db",
+            db_path="data/events.duckdb",
         )
         # paper 主循环里每根 bar:
         if ef.should_skip(bar_time):
@@ -51,7 +51,7 @@ class SharedEventFilter:
         enable_dual_event_skip: bool = True,
         enable_gvz_gate: bool = True,
         gvz_drop_pct: float = -2.0,
-        db_path: str = "data/market_data.db",
+        db_path: str = "data/events.duckdb",
     ):
         self.enable_nfp_skip = enable_nfp_skip
         self.nfp_skip_days = nfp_skip_days
@@ -155,7 +155,7 @@ class SharedEventFilter:
                   只做 in-set 查询, 单次 ~50ns, 总 ~50K × 50ns = 2.5ms
         """
         try:
-            bar_date_str = datetime.utcfromtimestamp(bar_time).strftime("%Y-%m-%d")
+            bar_date_str = datetime.fromtimestamp(bar_time, tz=timezone.utc).strftime("%Y-%m-%d")
         except (OSError, ValueError, OverflowError):
             return False, ""
 

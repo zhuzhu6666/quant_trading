@@ -17,7 +17,7 @@ import logging
 import math
 import sys
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib
@@ -32,8 +32,17 @@ from data.store import DataStore
 from strategy.registry import strategy_registry
 from execution.paper_trader import PaperTrader
 
-# 复用 trend 工具
-import strategies.trend_following as tf
+# 复用 trend 工具 — inline from strategies.trend_following
+def _vector_ema(values, period):
+    n = len(values)
+    out = np.full(n, np.nan, dtype=np.float64)
+    if n < period:
+        return out
+    k = 2.0 / (period + 1.0)
+    out[period - 1] = float(np.mean(values[:period]))
+    for i in range(period, n):
+        out[i] = (values[i] - out[i - 1]) * k + out[i - 1]
+    return out
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("equity_regime")
@@ -130,8 +139,8 @@ def compute_regimes(closes: np.ndarray, highs: np.ndarray, lows: np.ndarray,
     n = len(closes)
     out = np.full(n, "RANGING", dtype=object)
 
-    ema_fast = tf.TrendFollowingStrategy._vector_ema(closes, period_ema_fast)
-    ema_slow = tf.TrendFollowingStrategy._vector_ema(closes, period_ema_slow)
+    ema_fast = _vector_ema(closes, period_ema_fast)
+    ema_slow = _vector_ema(closes, period_ema_slow)
     atr = _vector_atr(highs, lows, closes, atr_period)
     adx_arr = _vector_adx(highs, lows, closes, period_adx)
 
@@ -184,7 +193,7 @@ def main():
         enable_dual_event_skip=True,
         enable_gvz_gate=True, gvz_drop_pct=-2.0,
     )
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     trader = PaperTrader(
         strategy=strategy, initial_balance=500.0, default_lots=0.01,
         max_lots=2.0, warmup_bars=500, enable_circuit=False,
@@ -248,7 +257,7 @@ def main():
     starts = np.concatenate(([0], boundaries + 1))
     ends = np.concatenate((boundaries, [len(regimes) - 1]))
 
-    t_dt = np.array([datetime.utcfromtimestamp(t) for t in times])
+    t_dt = np.array([datetime.fromtimestamp(t, tz=timezone.utc) for t in times])
 
     # 主 equity 曲线 (暗色)
     ax.plot(t_dt, equity, color="#ffffff", linewidth=0.6, alpha=0.35, zorder=1)

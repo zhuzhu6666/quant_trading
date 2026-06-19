@@ -1,7 +1,7 @@
 """Job state dataclass — lives in memory, not persisted (v1)."""
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 
@@ -12,7 +12,7 @@ class JobState:
     status: Literal["queued", "running", "done", "error", "cancelled"] = "queued"
     progress_pct: float = 0.0
     current_step: str = ""
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
     params: dict[str, Any] = field(default_factory=dict)
     result: dict[str, Any] | None = None
@@ -26,8 +26,8 @@ class JobState:
             "status": self.status,
             "progress_pct": self.progress_pct,
             "current_step": self.current_step,
-            "started_at": self.started_at.isoformat() + "Z",
-            "finished_at": self.finished_at.isoformat() + "Z" if self.finished_at else None,
+            "started_at": self.started_at.isoformat().replace("+00:00", "") + "Z",
+            "finished_at": self.finished_at.isoformat().replace("+00:00", "") + "Z" if self.finished_at else None,
             "params": self.params,
             "result": self.result,
             "error": self.error,

@@ -4,7 +4,7 @@
 
 A production-grade algorithmic trading system focused on gold (XAUUSD) futures, with a **Factor Takeover v4** closed-loop architecture — **Phase 0-7 ✅ all complete**:
 因子计算 (StreamingFactorEngine) → 三域归一 (SignalNormalizer) → 两层组合 (PortfolioCompositor) → 执行闸门 (ExecutionGate) → 归因 (AttributionEngine) → 权重自适应 (AdaptiveWeightEngine)
-取代了旧的 multi_factor_m15 投票策略。cTrader demo 为唯一执行通道，MT5 仅作数据源。
+取代了旧的 multi_factor_m15 投票策略。cTrader demo 为唯一执行通道，MT5 已完全移除。
 
 ## Codebase Map (Factor Takeover v4)
 
@@ -22,11 +22,11 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 | **Backtest** | `alpha/backtest/vectorized.py` | 向量化回测引擎 (202K bar 实测) |
 | **ML** | `alpha/ml/` | XGBoost 方向预测器, 概念漂移检测 |
 | **Features** | `alpha/features/` | FeatureDeriver(200+), PCA/KPCA, FeatureSelector |
-| **Data** | `data/` | DuckDB + SQLite 双存储, MT5 拉取, tick 管道 |
+| **Data** | `data/` | DuckDB 5 库: ctrader K线, Dukascopy tick, L2订单簿, 开平仓, 事件日历 |
 | **Execution** | `execution/` | cTrader bridge, OMS, BaseBrokerBridge, VWAP/TWAP, 执行质量分析 |
 | **Risk** | `risk/` | VaR/CVaR, Kelly, 压力测试, 集中度监控, 跨品种协方差 |
 | **Platform** | `research/` | ExperimentTracker, FactorLibrary, WeeklyReport |
-| **Ops** | `monitor/` | AlertRules(6条), AutoRecovery(心跳+重启) |
+| **Ops** | `monitor/` | 业务告警(连亏/回撤/熔断, 每tick检查), AutoRecovery(心跳+重启), system_health |
 | **Config** | `config/runtime_config.py` | 热更新配置：factor_signal_config, factor_portfolio_weights, awe_* |
 | **Frontend** | `frontend-v2/` | React 19/TypeScript UI (Vite + Tailwind), 5 面板 |
 
@@ -50,10 +50,10 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 
 - **No legacy strategy**: `multi_factor_m15` 已删除，全部由因子管道驱动
 - **cTrader 唯一执行通道**: `ctrader_send_orders=True` 默认发单到 demo
-- **Data source**: MT5 定时拉 K 线填充 DataStore，cTrader 不做数据请求
+- **Data source**: cTrader 为唯一数据源 + 执行通道, Dukascopy 补充 tick 历史
 - **Factor lifecycle**: DISCOVERED → SHADOW → ACTIVE（通过 evolution_orchestrator）
 - **Factor health**: 5-dimension (mean_abs_ic 40%, ic_stability 20%, regime_consistency 20%, decay_rate 10%, independence 10%)
-- **Scheduler**: 9 jobs (evolution_hourly, canary_fast, retire_hourly, sync_health, data_pull, awe_adapt, ml_retrain, feature_eng, ml_drift_check)
+- **Scheduler**: 8 jobs (evolution_hourly, data_sync, dukascopy_tick, awe_adapt, ml_retrain, feature_eng, ml_drift_check, system_health)
 - **Default symbol**: XAUUSD+, timeframe M5
 - **Default weights**: 设计文档手拍值, 由 AWE 实盘自适应调优
 
@@ -68,16 +68,16 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 
 ## Testing
 
-- `pytest tests/ -v` — 497 tests (alpha/execution/backend/risk/research 全模块)
-- `pytest tests/alpha/ -v` for Factor Takeover v4 module tests (315+ alpha tests)
+- `pytest tests/ -v` — 454 tests (alpha/backend/risk/research 全模块)
+- `pytest tests/alpha/ -v` for Factor Takeover v4 module tests (305 alpha tests)
 - `pytest tests/alpha/ -v -k <pattern>` for targeted tests
 - Test files mirror source structure: `tests/alpha/`, `tests/execution/`, etc.
 - Key test files: `test_streaming_factor_engine.py`, `test_signal_normalizer.py`, `test_portfolio_compositor.py`, `test_execution_gate.py`, `test_attribution_engine.py`, `test_adaptive_weight_engine.py`, `test_gp_classifier.py`
 
 ## Audit
 
-- `PROJECT_AUDIT_v10.md` — 2026-06-14 全代码库审计 (296 files, 55,578 lines)
-- 全部 P0 及主要 P1 已修复
+- `PROJECT_AUDIT_v14.md` — 2026-06-19 全代码库审计 (196 files, 闭环验证 + bug hunt + 孤儿文件检测)
+- 全部 P0 已修复
 - `docs/UPGRADE_BLUEPRINT.md` — Phase 0-7 全部完成
 - 剩余技术债务: `TODO.md` / 蓝图 Appendix C.1
 
@@ -100,5 +100,5 @@ python start-all.py --refresh-data     # 启动前刷新外部数据 (COT/Events
 8. **Memory-first**: Save non-obvious project insights to `memory/` directory
 9. **Before touching cTrader bridge**, check if connected (can block threadpool)
 10. **Backend runs on FastAPI** — blocking calls go in `run_in_executor` or background tasks
-11. **Database is SQLite** — avoid writes in hot paths, use LIMIT on market data queries
-12. **cTrader = execution only, MT5 = data source only** — never conflate the two
+11. **Database is DuckDB** — avoid writes in hot paths, use LIMIT on market data queries
+12. **cTrader = 唯一数据源+执行通道**

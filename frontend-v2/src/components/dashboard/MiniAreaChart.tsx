@@ -3,9 +3,10 @@ interface MiniAreaChartProps {
   height?: number;
   color?: string;
   className?: string;
+  showArea?: boolean;
 }
 
-export function MiniAreaChart({ data, height = 36, color = "#3b82f6", className = "" }: MiniAreaChartProps) {
+export function MiniAreaChart({ data, height = 40, color = "#0071E3", className = "", showArea = true }: MiniAreaChartProps) {
   if (data.length === 0) return null;
   const max = Math.max(...data, 1);
   const min = Math.min(...data, 0);
@@ -21,17 +22,18 @@ export function MiniAreaChart({ data, height = 36, color = "#3b82f6", className 
   }).join(" ");
 
   const areaPath = `${linePath} L${w},${h} L0,${h} Z`;
+  const gradientId = `area-${color.replace("#", "")}`;
 
   return (
     <svg width="100%" height="100%" viewBox={`0 0 ${w} ${h}`} className={className} preserveAspectRatio="xMidYMid meet">
       <defs>
-        <linearGradient id={`area-${color.replace("#", "")}`} x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.2" />
+        <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.25" />
           <stop offset="100%" stopColor={color} stopOpacity="0" />
         </linearGradient>
       </defs>
-      <path d={areaPath} fill={`url(#area-${color.replace("#", "")})`} />
-      <path d={linePath} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      {showArea && <path d={areaPath} fill={`url(#${gradientId})`} />}
+      <path d={linePath} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

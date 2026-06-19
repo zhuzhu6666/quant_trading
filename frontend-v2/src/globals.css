@@ -5,72 +5,215 @@
 @layer base {
   * {
     box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
   }
+
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
+
   body {
-    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     font-size: 13px;
     line-height: 1.5;
-    background: linear-gradient(135deg, #f5f7fa 0%, #e4e9f0 100%);
-    color: #1a1e24;
+    background: #F5F5F7;
+    color: #1D1D1F;
     min-height: 100vh;
+    overflow-x: hidden;
   }
+
+  /* Apple-style scrollbar */
   ::-webkit-scrollbar {
-    width: 5px;
-    height: 5px;
+    width: 6px;
+    height: 6px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: #dce0e6;
-    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.12);
+    border-radius: 10px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #c0c5cc;
+    background: rgba(0, 0, 0, 0.2);
   }
+
+  /* Tabular numbers for metrics */
   .num {
-    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-family: 'SF Mono', SFMono-Regular, ui-monospace, Menlo, Consolas, monospace;
     font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
   }
+
+  /* Focus ring */
   *:focus-visible {
-    outline: 2px solid #3b82f6;
+    outline: 2px solid #0071E3;
     outline-offset: 2px;
+    border-radius: 4px;
   }
+
+  /* Select options */
   select option {
-    background: #ffffff;
-    color: #1a1e24;
+    background: #FFFFFF;
+    color: #1D1D1F;
+  }
+
+  /* Smooth transitions for interactive elements */
+  button, a {
+    transition: all 200ms cubic-bezier(0.25, 0.1, 0.25, 1.0);
   }
 }
 
 @layer components {
-  .glass {
-    background: rgba(255, 255, 255, 0.6);
-    border: 1px solid rgba(255, 255, 255, 0.8);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    border-radius: 12px;
+  /* Apple Card */
+  .card {
+    background: #FFFFFF;
+    border-radius: 20px;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.04), 0 2px 12px rgba(0,0,0,0.06);
+    transition: all 300ms cubic-bezier(0.25, 0.1, 0.25, 1.0);
   }
-  .glass-hover {
-    transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  .card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.10);
   }
-  .glass-hover:hover {
-    transform: translateY(-4px) scale(1.02);
-    box-shadow: 0 12px 40px rgba(59, 130, 246, 0.15);
-    background: rgba(255, 255, 255, 0.92);
-    border-color: rgba(59, 130, 246, 0.4);
+  .card:active {
+    transform: translateY(0);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.06), 0 1px 4px rgba(0,0,0,0.04);
   }
-  .panel-slide {
-    animation: panelSlideIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+
+  /* Apple Glass Card */
+  .glass-card {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border-radius: 20px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    transition: all 300ms cubic-bezier(0.25, 0.1, 0.25, 1.0);
+  }
+  .glass-card:hover {
+    background: rgba(255, 255, 255, 0.88);
+    transform: translateY(-2px);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.12);
+  }
+
+  /* Apple Button */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5 font-medium rounded-xl text-sm;
+    background: #0071E3;
+    color: white;
+    padding: 8px 16px;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.08);
+    transition: all 200ms cubic-bezier(0.25, 0.1, 0.25, 1.0);
+  }
+  .btn-primary:hover {
+    background: #0077ED;
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.04), 0 4px 12px rgba(0,113,227,0.25);
+  }
+  .btn-primary:active {
+    background: #0068D1;
+    transform: scale(0.97);
+  }
+  .btn-primary:disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-1.5 font-medium rounded-xl text-sm;
+    background: #F5F5F7;
+    color: #1D1D1F;
+    padding: 8px 16px;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06);
+    transition: all 200ms cubic-bezier(0.25, 0.1, 0.25, 1.0);
+  }
+  .btn-secondary:hover {
+    background: #EBEBF0;
+    transform: translateY(-1px);
+  }
+  .btn-secondary:active {
+    background: #E5E5EA;
+    transform: scale(0.97);
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 font-medium rounded-xl text-sm;
+    background: transparent;
+    color: #86868B;
+    padding: 8px 16px;
+    transition: all 200ms cubic-bezier(0.25, 0.1, 0.25, 1.0);
+  }
+  .btn-ghost:hover {
+    background: rgba(0,0,0,0.04);
+    color: #1D1D1F;
+  }
+
+  /* Apple Badge */
+  .badge {
+    @apply inline-flex items-center font-medium;
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 100px;
+    letter-spacing: 0.01em;
+  }
+
+  /* Panel slide animation */
+  .panel-slide-in {
+    animation: panelSlideIn 0.35s cubic-bezier(0.32, 0.72, 0, 1) forwards;
   }
   .panel-slide-out {
-    animation: panelSlideOut 0.25s ease-in forwards;
+    animation: panelSlideOut 0.25s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+  }
+
+  /* Metric value style */
+  .metric-value {
+    @apply font-semibold num;
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+  }
+
+  /* Section label */
+  .section-label {
+    @apply font-semibold uppercase tracking-wide;
+    font-size: 11px;
+    color: #86868B;
+    letter-spacing: 0.05em;
+  }
+
+  /* Status dot */
+  .status-dot {
+    @apply rounded-full;
+    width: 8px;
+    height: 8px;
+  }
+  .status-dot-sm {
+    @apply rounded-full;
+    width: 6px;
+    height: 6px;
+  }
+
+  /* Navigation bar */
+  .nav-bar {
+    @apply fixed top-0 left-0 right-0 z-50;
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+    height: 52px;
   }
 }
 
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Keyframes */
 @keyframes panelSlideIn {
   0% {
     transform: translateY(-100%);
@@ -104,24 +247,13 @@
   }
 }
 
-@keyframes pulse-fast {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-
-@keyframes countUp {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
-}
-
-.animate-float {
-  animation: float 3s ease-in-out infinite;
-}
-.animate-count-up {
-  animation: countUp 0.3s ease both;
+@keyframes pulseRing {
+  0% {
+    transform: scale(0.8);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(2);
+    opacity: 0;
+  }
 }

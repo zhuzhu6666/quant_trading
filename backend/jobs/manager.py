@@ -68,25 +68,29 @@ class JobManager:
                 data = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            started_at = datetime.fromisoformat(data["started_at"].rstrip("Z")).replace(tzinfo=None)
-            finished_at = (
-                datetime.fromisoformat(data["finished_at"].rstrip("Z")).replace(tzinfo=None)
-                if data.get("finished_at") else None
-            )
-            js = JobState(
-                id=data["id"],
-                kind=data["kind"],
-                status=data["status"],
-                progress_pct=data.get("progress_pct", 0.0),
-                current_step=data.get("current_step", ""),
-                started_at=started_at,
-                finished_at=finished_at,
-                params=data.get("params", {}),
-                result=data.get("result"),
-                error=data.get("error"),
-                log_tail=data.get("log_tail", []),
-            )
-            self._jobs[js.id] = js
+            try:
+                started_at = datetime.fromisoformat(data["started_at"].rstrip("Z")).replace(tzinfo=timezone.utc)
+                finished_at = (
+                    datetime.fromisoformat(data["finished_at"].rstrip("Z")).replace(tzinfo=timezone.utc)
+                    if data.get("finished_at") else None
+                )
+                js = JobState(
+                    id=data["id"],
+                    kind=data["kind"],
+                    status=data["status"],
+                    progress_pct=data.get("progress_pct", 0.0),
+                    current_step=data.get("current_step", ""),
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    params=data.get("params", {}),
+                    result=data.get("result"),
+                    error=data.get("error"),
+                    log_tail=data.get("log_tail", []),
+                )
+                self._jobs[js.id] = js
+            except (KeyError, ValueError, TypeError, AttributeError):
+                logger.warning("skipping malformed persisted job line: %s", line[:120])
+                continue
 
     def _append_persisted(self, js: JobState) -> None:
         """Append job to JSONL persist file, then trim to MAX_PERSISTED lines."""
@@ -173,7 +177,7 @@ class JobManager:
             logger.error(f"job {js.id} ({js.kind}) failed: {e}")
         finally:
             from datetime import datetime
-            js.finished_at = datetime.utcnow()
+            js.finished_at = datetime.now(timezone.utc)
             self._tasks.pop(js.id, None)
             self._append_persisted(js)
 

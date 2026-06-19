@@ -11,7 +11,7 @@ DATA_DIR: Path = PROJECT_ROOT / "data"
 LOGS_DIR: Path = PROJECT_ROOT / "logs"
 CONFIG_DIR: Path = PROJECT_ROOT / "config"
 CHARTS_DIR: Path = DATA_DIR / "charts"
-DB_PATH: Path = DATA_DIR / "market_data.db"
+DB_PATH: Path = DATA_DIR / "ctrader_data.duckdb"
 
 
 def ensure_logs_dir() -> Path:

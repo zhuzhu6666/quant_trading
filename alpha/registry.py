@@ -57,7 +57,7 @@ def factor_rsi_14(df):
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(span=14, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(span=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 100.0), where=avg_loss != 0)
     return 100 - 100 / (1 + rs)
 
 

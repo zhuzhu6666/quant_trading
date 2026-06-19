@@ -128,7 +128,7 @@ def main():
     print(f"Years covered: {(df_all['report_date'].iloc[-1] - df_all['report_date'].iloc[0]).days / 365.25:.1f} years")
 
     # 写库
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     n = 0
     for _, row in df_all.iterrows():
         store.insert_cot_gold(
@@ -149,7 +149,7 @@ def main():
 
     # 验证
     import sqlite3
-    con = sqlite3.connect("data/market_data.db")
+    con = sqlite3.connect("data/ctrader_data.duckdb")
     print(f"cot_gold count: {con.execute('SELECT COUNT(*) FROM cot_gold').fetchone()[0]}")
     print(f"latest 3:")
     for r in con.execute("SELECT report_date, open_interest, mm_long, mm_short, mm_long-mm_short AS mm_net FROM cot_gold ORDER BY report_date DESC LIMIT 3"):

@@ -35,19 +35,11 @@ def once(_user: RequireUser, req: OnceRequest) -> dict:
 
 @router.post("/daemon/start")
 def daemon_start(_user: RequireUser, req: DaemonStartRequest) -> dict:
-    """启动定时同步守护进程 (后台线程, 每 interval_seconds 秒跑一次)."""
-    from data.live_sync.daemon import start as _daemon_start, is_running as _daemon_is_running
-    if _daemon_is_running():
-        return {"ok": False, "msg": "daemon already running"}
-    result = _daemon_start(interval_seconds=req.interval_seconds, timeframes=req.timeframes)
-    return {"ok": True, **result}
+    """已弃用 — 活盘用 scheduler 代替 daemon"""
+    return {"ok": False, "msg": "daemon 已弃用, 改用 scheduler 自动同步"}
 
 
 @router.post("/daemon/stop")
 def daemon_stop(_user: RequireUser) -> dict:
-    """停止定时同步守护进程."""
-    from data.live_sync.daemon import stop as _daemon_stop, is_running as _daemon_is_running
-    if not _daemon_is_running():
-        return {"ok": False, "msg": "daemon not running"}
-    result = _daemon_stop()
-    return {"ok": True, "stopped": result.get("stopped", False)}
+    """已弃用"""
+    return {"ok": False, "msg": "daemon 已弃用"}

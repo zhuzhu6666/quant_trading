@@ -46,9 +46,21 @@ def run_sync_once(
     cb = progress_cb or (lambda *_: None)
     cb("loading", 5, f"sync {sync_type} {timeframes}")
 
-    from data.live_sync import orchestrator
+    # CTraderPuller 替代原 MT5 orchestrator
     try:
-        result = orchestrator.run_once(timeframes=timeframes, sync_type=sync_type)
+        from data.live_sync.ctrader_puller import CTraderPuller
+        from config.runtime_config import shared as rcc
+        cfg = rcc()
+        symbol = list(cfg.enabled_symbols)[0] if hasattr(cfg, 'enabled_symbols') and cfg.enabled_symbols else "XAUUSD+"
+        results = {}
+        total = 0
+        for tf in timeframes:
+            puller = CTraderPuller(symbol=symbol)
+            r = puller.pull_history(symbol=symbol, timeframe=tf, n=100)
+            n = r.n_bars if hasattr(r, 'n_bars') else 0
+            results[tf] = n
+            total += n
+        result = {"total_inserted": total, "per_tf": results}
     except Exception as e:
         cb("error", 100, f"sync failed: {e}")
         raise
@@ -62,26 +74,17 @@ def start_daemon(
     timeframes: list[str] | None = None,
     progress_cb: Optional[Callable[[str, float, str], None]] = None,
 ) -> dict:
-    """Start the live-sync daemon in background. Returns {daemon_pid, started_at}."""
-    if timeframes is None:
-        timeframes = ["M15", "H1", "D1"]
+    """已弃用 — 改用 scheduler"""
     cb = progress_cb or (lambda *_: None)
-    cb("loading", 5, f"starting daemon interval={interval_seconds}s timeframes={timeframes}")
-
-    from data.live_sync import daemon
-    result = daemon.start(interval_seconds=interval_seconds, timeframes=timeframes)
-    cb("started", 100, f"daemon started pid={result.get('daemon_pid', '?')}")
-    return result
+    cb("error", 100, "daemon 已弃用, 改用 scheduler")
+    return {"ok": False, "msg": "daemon 已弃用"}
 
 
 def stop_daemon(progress_cb: Optional[Callable[[str, float, str], None]] = None) -> dict:
-    """Stop the live-sync daemon. Returns {stopped: bool, last_run: dict}."""
+    """已弃用"""
     cb = progress_cb or (lambda *_: None)
-    cb("loading", 5, "stopping daemon")
-    from data.live_sync import daemon
-    result = daemon.stop()
-    cb("stopped", 100, "daemon stopped")
-    return result
+    cb("error", 100, "daemon 已弃用")
+    return {"ok": False, "msg": "daemon 已弃用"}
 
 
 # Aliases (Phase 3 backend used these names; preserve compatibility)

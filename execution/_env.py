@@ -60,5 +60,5 @@ def load_env(env_file: Path | str = None, prefix: str = "CTRADER_",
     return count
 
 
-# 便利: 主动调一次, 这样 import _env 就生效
-load_env()
+# (audit v10) 移除自动调用 — 所有调用方已显式调 load_env()
+# load_env()

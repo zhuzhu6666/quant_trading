@@ -9,7 +9,7 @@ of recent M15 history. Returns a multi-label dict of 8 booleans:
 
 Inputs come from two sources:
   * in-memory M15 history (used to compute EMA / ADX / ATR / Bollinger)
-  * SQLite at data/market_data.db (used to look up GVZ, VIX, DXY proxy,
+  * SQLite at data/ctrader_data.duckdb (used to look up GVZ, VIX, DXY proxy,
     event calendar)
 
 Missing data (e.g. VIX not pulled) is handled silently by returning False
@@ -30,12 +30,13 @@ Conventions
 from __future__ import annotations
 
 import logging
-import sqlite3
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
+import duckdb
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 logger = logging.getLogger(__name__)
 
@@ -195,24 +196,17 @@ def _bb_width(close: np.ndarray, period: int = BB_PERIOD,
     width = (upper - lower) / np.where(mid == 0, np.nan, mid)
     return width
 
-
 # ---------------------------------------------------------------------------
-# SQLite accessors
+# DuckDB accessors (v11-fix P1-14: 从 sqlite3 迁移到 duckdb)
 # ---------------------------------------------------------------------------
 
-def _open(db_path: str) -> sqlite3.Connection:
-    """Open a SQLite connection (read-only URI when possible)."""
-    # ``mode=ro`` URIs are only honoured for real files; if the path is
-    # relative, sqlite resolves it against CWD. Fall back to a plain
-    # connect() on any error.
-    try:
-        uri = f"file:{db_path}?mode=ro"
-        return sqlite3.connect(uri, uri=True)
-    except sqlite3.OperationalError:
-        return sqlite3.connect(db_path)
+
+def _open(db_path: str) -> duckdb.DuckDBPyConnection:
+    """Read-only connection to DuckDB market data."""
+    return duckdb.connect(db_path, read_only=True)
 
 
-def _safe_scalar(conn: sqlite3.Connection, sql: str, params: Iterable = ()) -> float | None:
+def _safe_scalar(conn: duckdb.DuckDBPyConnection, sql: str, params: Iterable = ()) -> float | None:
     """Run ``sql`` and return a single float column value, or None."""
     try:
         cur = conn.execute(sql, tuple(params))
@@ -225,7 +219,7 @@ def _safe_scalar(conn: sqlite3.Connection, sql: str, params: Iterable = ()) -> f
         return None
 
 
-def _safe_dataframe(conn: sqlite3.Connection, sql: str,
+def _safe_dataframe(conn: duckdb.DuckDBPyConnection, sql: str,
                     params: Iterable = ()) -> pd.DataFrame:
     """Run ``sql`` and return a DataFrame, or empty on failure."""
     try:
@@ -264,7 +258,7 @@ class RegimeDetector:
         bar: dict | None,
         history_bars: Sequence[dict],
         date_str: str | None = None,
-        db_path: str = "data/market_data.db",
+        db_path: str = "data/ctrader_data.duckdb"
     ) -> dict[str, bool]:
         """Return the 8-key regime dictionary for the given bar.
 
@@ -281,7 +275,7 @@ class RegimeDetector:
             "YYYY-MM-DD" used to look up news / macro. If ``None`` we
             try to infer it from the bar's ``time`` field.
         db_path:
-            Path to the SQLite database (default: ``data/market_data.db``).
+            Path to the SQLite database (default: ``data/ctrader_data.duckdb``).
         """
         flags: dict[str, bool] = {
             "TRENDING_UP": False,
@@ -425,7 +419,7 @@ class RegimeDetector:
             rows.append((t, float(o), float(h), float(l), float(c)))
         if not rows:
             empty = np.array([], dtype="float64")
-            return None, empty, empty, empty, empty
+            return None, empty, empty, empty
         df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close"])
         return (
             df["close"].to_numpy(dtype="float64"),

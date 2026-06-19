@@ -1,12 +1,13 @@
 """config/__init__.py — flat-constant shim for legacy scripts
 
 新代码应直接读 config/settings.yaml (嵌套结构)。
-本 shim 仅为老 scripts (fetch_mt5_data.py) 提供向后兼容常量:
-    MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, SYMBOL, TIMEFRAME, DATA_DIR
+本 shim 仅为老 scripts 提供向后兼容常量:
+    SYMBOL, TIMEFRAME, DATA_DIR
     INITIAL_CASH, COMMISSION, SLIPPAGE
 
 P1 (audit 2026-06-04): 新增 load_config() + cfg_get() 供新代码用。
 """
+
 from __future__ import annotations
 
 import os
@@ -26,13 +27,8 @@ if yaml is not None and _YAML.exists():
 else:
     _cfg = {}
 
-# ── MT5 ────────────────────────────────────────────────────────────────────
-MT5_LOGIN: int = int(_cfg.get("mt5", {}).get("account", 9823690))
-MT5_PASSWORD: str = os.environ.get(
-    _cfg.get("mt5", {}).get("password_env", "MT5_PASSWORD"), ""
-)
-MT5_SERVER: str = _cfg.get("mt5", {}).get("server", "Bybit-Live-2")
-SYMBOL: str = _cfg.get("mt5", {}).get("symbol", "XAUUSD+")
+# ── SYMBOL ──────────────────────────────────────────────────────────────
+SYMBOL: str = _cfg.get("ctrader", {}).get("symbol", "XAUUSD+")
 
 # ── 数据 ──────────────────────────────────────────────────────────────────
 DATA_DIR: str = _cfg.get("data", {}).get("db_path", "data/")

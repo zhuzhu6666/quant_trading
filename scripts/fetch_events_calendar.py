@@ -29,7 +29,7 @@ import requests
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-DB = str(PROJECT_ROOT / "data" / "market_data.db")
+DB = str(PROJECT_ROOT / "data" / "events.duckdb")
 
 # ── API 端点 ──
 BASE_URL = "https://nfs.faireconomy.media"

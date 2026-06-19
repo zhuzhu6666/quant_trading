@@ -6,9 +6,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import app
+from backend.core.auth import create_token
 from backend.services.paper_service import get_paper_service
 
-client = TestClient(app)
+_token = create_token("test_user")
+client = TestClient(app, headers={"Authorization": f"Bearer {_token}"})
 
 
 @pytest.fixture(autouse=True)

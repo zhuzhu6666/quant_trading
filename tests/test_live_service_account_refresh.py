@@ -151,24 +151,28 @@ def test_kickoff_runs_even_when_fetch_bars_returns_none():
     )
     ctrader_start = None
     for i in range(main_loop_idx, len(lines)):
-        if lines[i].strip() == 'elif broker == "ctrader":':
+        stripped = lines[i].strip()
+        # The main loop now has an unconditional cTrader try block starting with _get_ctrader()
+        if stripped.startswith('bridge, err, warming = _get_ctrader()'):
             ctrader_start = i
             break
-    assert ctrader_start is not None, "could not find cTrader branch in _run_loop main loop"
-    # Find the end of this branch (next line at indent < 16 spaces)
+    assert ctrader_start is not None, "could not find cTrader try block in _run_loop main loop"
+    # Find the end of this block (next line that's not indented under the try)
+    # The try: is at 8 spaces, content at 12 spaces
     end = ctrader_start + 1
     while end < len(lines):
-        if lines[end].strip() and not lines[end].startswith("                "):
+        if lines[end].strip() and not lines[end].startswith("            "):
             break
         end += 1
-    branch_text = "\n".join(lines[ctrader_start + 1:end])
+    branch_text = "\n".join(lines[ctrader_start:end])
     kickoff_pos = branch_text.find("kickoff_account_refresh")
-    fetch_pos = branch_text.find("_fetch_bars_with_retry")
-    assert kickoff_pos > 0, "kickoff_account_refresh not found in cTrader main-loop branch"
-    assert fetch_pos > 0, "_fetch_bars_with_retry not found in cTrader main-loop branch"
-    assert kickoff_pos < fetch_pos, (
-        "REGRESSION: kickoff_account_refresh is AFTER _fetch_bars_with_retry in "
-        "_run_loop's cTrader branch. It must be BEFORE so the cache writer still "
-        "runs when fetch_bars returns None (which is the norm for cTrader demo)."
+    # cTrader reads from local DataStore now
+    warmup_pos = branch_text.find("_warmup_from_local_db")
+    assert kickoff_pos > 0, "kickoff_account_refresh not found in cTrader main-loop block"
+    assert warmup_pos > 0, "_warmup_from_local_db not found in cTrader main-loop block"
+    assert kickoff_pos < warmup_pos, (
+        "REGRESSION: kickoff_account_refresh is AFTER _warmup_from_local_db in "
+        "_run_loop's cTrader main loop. It must be BEFORE so the cache writer still "
+        "runs when warmup returns None."
     )
 

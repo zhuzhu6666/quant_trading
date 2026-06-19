@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     web_port: int = 3000
-    db_path: str = "data/market_data.db"
+    db_path: str = "data/ctrader_data.duckdb"
 
 
 _settings: Settings | None = None

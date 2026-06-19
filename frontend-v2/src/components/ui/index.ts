@@ -10,3 +10,4 @@ export { Modal } from "./Modal";
 export { Skeleton } from "./Skeleton";
 export { MetricCard } from "./MetricCard";
 export { ConfirmDialog } from "./ConfirmDialog";
+export { TabBar } from "./TabBar";

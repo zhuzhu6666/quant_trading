@@ -1,0 +1,137 @@
+# Endpoint scan: (HTTP方法, 完整路径, 鉴权)
+# 鉴权判断: 函数签名含 `_user: RequireUser` 参数 → auth, 否则 no_auth
+
+# ── health.py ──
+GET /api/health no_auth
+
+# ── auth.py ──
+POST /api/auth/login no_auth
+GET /api/auth/me no_auth
+GET /api/auth/me-strict no_auth
+
+# ── live.py ──
+GET /api/live/status auth
+GET /api/live/loop-status auth
+GET /api/live/account auth
+GET /api/live/positions auth
+POST /api/live/start auth
+POST /api/live/stop auth
+POST /api/live/emergency-close auth
+GET /api/live/strategy-status auth
+
+# ── paper.py ──
+POST /api/paper/start auth
+POST /api/paper/stop auth
+POST /api/paper/emergency-stop no_auth
+GET /api/paper/status auth
+
+# ── market.py ──
+GET /api/market/bars auth
+
+# ── external_data.py ──
+GET /api/data/external-status auth
+POST /api/data/external-refresh auth
+GET /api/data/external-refresh/{job_id} no_auth
+
+# ── config.py ──
+GET /api/config auth
+PUT /api/config auth
+
+# ── factor_health.py ──
+POST /api/factor-health/run auth
+GET /api/factor-health/latest auth
+
+# ── factor_v4.py ──
+GET /api/v4/weights auth
+GET /api/v4/stats auth
+
+# ── sync.py ──
+GET /api/sync/status auth
+POST /api/sync/once auth
+POST /api/sync/daemon/start auth
+POST /api/sync/daemon/stop auth
+
+# ── discover.py ──
+POST /api/discover auth
+GET /api/discover/{job_id} auth
+
+# ── tuning.py ──
+POST /api/tuning/run auth
+GET /api/tuning/{job_id} auth
+
+# ── calibrator.py ──
+GET /api/calibrator auth
+POST /api/calibrator/save auth
+POST /api/calibrator/load auth
+
+# ── shadow.py ──
+GET /api/shadow auth
+POST /api/shadow/promote auth
+POST /api/shadow/demote auth
+
+# ── ab_test.py ──
+POST /api/ab/run auth
+GET /api/ab auth
+GET /api/ab/{job_id} auth
+
+# ── reports.py ──
+GET /api/reports auth
+GET /api/reports/{name} auth
+
+# ── logs.py ──
+GET /api/logs/tail auth
+
+# ── metrics.py ──
+GET /api/metrics no_auth
+GET /api/metrics/ no_auth
+GET /api/metrics/health auth
+
+# ── strategies.py ──
+GET /api/strategies auth
+
+# ── jobs.py ──
+GET /api/jobs auth
+GET /api/jobs/{job_id} auth
+POST /api/jobs/{job_id}/cancel auth
+
+# ── control.py ──
+GET /api/control/scheduler auth
+GET /api/control/evolution/latest auth
+
+# ── risk.py ──
+GET /api/risk/summary auth
+POST /api/risk/var auth
+GET /api/risk/var auth
+POST /api/risk/kelly auth
+GET /api/risk/kelly auth
+POST /api/risk/stress/run auth
+GET /api/risk/stress auth
+POST /api/risk/concentration auth
+GET /api/risk/concentration auth
+
+# ── ops.py ──
+GET /api/ops/alerts auth
+GET /api/ops/recovery auth
+GET /api/ops/recovery/history auth
+GET /api/ops/reports/weekly auth
+POST /api/ops/reports/weekly/generate auth
+
+# ── experiments.py ──
+GET /api/experiments/ auth
+GET /api/experiments/stats auth
+GET /api/experiments/{run_id} auth
+POST /api/experiments/ auth
+PATCH /api/experiments/{run_id} auth
+
+# ── backtest.py ──
+POST /api/backtest/run auth
+GET /api/backtest/{job_id} auth
+GET /api/backtest/ auth
+GET /api/backtest auth
+GET /api/backtest/{job_id}/report auth
+GET /api/backtest/report/latest auth
+
+# ── 汇总 ──
+# 总计端点: 80 (含 /api/metrics 和 /api/metrics/ 两个路由指向同一函数)
+# auth: 72 个
+# no_auth: 8 个

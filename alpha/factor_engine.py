@@ -1,4 +1,5 @@
-"""
+"""DEPRECATED — 请使用 alpha/streaming_factor_engine.py 替代。
+
 Factor Engine — 流式因子计算
 
 特性：
@@ -6,6 +7,9 @@ Factor Engine — 流式因子计算
 - 流式更新：每个新bar增量计算（不重算历史）
 - 向量化批量：回测模式全量计算
 - 输出标准化：统一 DataFrame 格式
+
+注意: 此文件已被 StreamingFactorEngine 取代, 仅保留供旧脚本引用。
+新开发请勿导入此模块。
 """
 
 import logging
@@ -123,7 +127,7 @@ class FactorEngine:
                 n = min(len(values), len(fwd))
                 vals = values[:n]
                 rets = fwd[:n]
-                mask = ~(np.isnan(vals) | np.isnan(rets))
+                mask = ~(np.isnan(vals) | np.isnan(rets) | np.isinf(vals) | np.isinf(rets))
                 if mask.sum() < 30:
                     continue
                 ic = float(np.corrcoef(vals[mask], rets[mask])[0, 1])

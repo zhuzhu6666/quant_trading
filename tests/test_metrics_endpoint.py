@@ -10,8 +10,9 @@ from monitor.metrics import Metrics
 @pytest.fixture
 def client() -> TestClient:
     from backend.app import app
-
-    return TestClient(app)
+    from backend.core.auth import create_token
+    token = create_token("test_user")
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 @pytest.fixture(autouse=True)

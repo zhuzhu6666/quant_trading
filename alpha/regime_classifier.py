@@ -20,8 +20,13 @@ logger = logging.getLogger(__name__)
 
 # 5 个 regime (与 mab_router.REGIMES 一致)
 REGIMES = ["TRENDING_UP", "TRENDING_DOWN", "RANGING", "HIGH_VOL", "LOW_VOL"]
-# 4 因子 (与 factors/__init__.py 一致)
-FACTORS = ["aroon", "cci", "mfi", "williams_r"]
+# 4 因子: 优先从 factor_registry 获取, 静态名单为 fallback
+try:
+    from alpha.registry import factor_registry
+    _REG_FACTORS = list(factor_registry.list())[:10]
+except Exception:
+    _REG_FACTORS = []
+FACTORS = _REG_FACTORS or ["aroon", "cci", "mfi", "williams_r"]
 N_FEATURES = len(REGIMES) + len(FACTORS)  # 9 维
 
 

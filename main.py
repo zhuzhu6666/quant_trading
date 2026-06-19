@@ -113,7 +113,7 @@ def main():
     parser.add_argument("--factor-health-report", action="store_true",
                         help="T14.1 跑 paper 前先评估 22 因子健康分, 落盘 data/charts/factor_health_report.txt")
     parser.add_argument("--factor-health-data", type=str, default=None,
-                        help="T14.1 评估时用的 bar CSV 路径 (默认 data/market_data.db M15)")
+                        help="T14.1 评估时用的 bar CSV 路径 (默认 ctrader_data.duckdb M15)")
     parser.add_argument("--router-seed", type=int, default=42,
                         help="MABRouter 随机种子 (P1-D 默认 42)")
     parser.add_argument("--router-arms", nargs="+",
@@ -209,7 +209,7 @@ def run_backtest(args):
     logger.info("=" * 60)
 
     # ── 1. 加载数据 ──
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars(args.symbol, args.timeframe)
 
     if df.empty:
@@ -495,7 +495,7 @@ def run_paper(args):
         from pathlib import Path
         import json as _json
 
-        store = DataStore("data/market_data.db")
+        store = DataStore("data/ctrader_data.duckdb")
         df = store.load_bars(args.symbol, args.timeframe)
         if df.empty:
             logger.warning(f"[T14.1] 无 {args.timeframe} 数据, 跳过健康评估")
@@ -503,7 +503,7 @@ def run_paper(args):
             # 注入跨资产/事件列 (DXY/SLV/real_yield/hours_to_fomc/nfp)
             # 没这些列, 5 个跨资产/事件因子会算 nan (n_obs=0)
             from data.external_loader import ExternalDataLoader
-            ext = ExternalDataLoader("data/market_data.db")
+            ext = ExternalDataLoader("data/ctrader_data.duckdb")
             ext_df = ext.align_to_bars(df)
             # align_to_bars 只返回外部列, 需手动 join 回原 bar
             df = df.join(ext_df, how="left")
@@ -563,15 +563,14 @@ def run_paper(args):
     logger.info("=" * 60)
 
     # ── 加载数据 ──
-    store = DataStore("data/market_data.db")
+    store = DataStore("data/ctrader_data.duckdb")
 
     # ── 事件感知仓位 (默认开启) ──
     event_sizing = None
     if args.use_event_sizing and not args.no_event_sizing:
         from execution.event_sizing import EventSizing
         event_sizing = EventSizing(
-            db_path=cfg_get(CFG, "event_sizing", "db_path",
-                            default="data/market_data.db"),
+            db_path=cfg_get(CFG, "event_sizing", "db_path", default="data/events.duckdb"),
             enabled=True,
         )
         logger.info(f"  [EventSizing] 启用: {event_sizing.stats()}")
@@ -680,7 +679,7 @@ def run_paper(args):
                 enable_nfp_skip=True, nfp_skip_days=1,
                 enable_dual_event_skip=True,
                 enable_gvz_gate=True, gvz_drop_pct=-2.0,
-                db_path="data/market_data.db",
+                db_path="data/events.duckdb",
             )
 
         runner = MABPaperRunner(

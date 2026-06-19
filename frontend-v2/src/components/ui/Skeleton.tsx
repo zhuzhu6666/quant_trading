@@ -7,10 +7,10 @@ interface SkeletonProps {
 }
 
 const variantStyles: Record<string, string> = {
-  text: "h-4 bg-[#e4e9f0] rounded w-full",
-  card: "h-[100px] bg-white border border-[#dce0e6] rounded-lg",
-  "table-row": "h-10 bg-[#e4e9f0]/50 rounded w-full",
-  metric: "h-16 bg-white border border-[#dce0e6] rounded-lg",
+  text: "h-4 bg-apple-bg rounded-xl w-full",
+  card: "h-[100px] bg-white shadow-card rounded-3xl",
+  "table-row": "h-10 bg-apple-bg/60 rounded-xl w-full",
+  metric: "h-16 bg-white shadow-card rounded-3xl",
 };
 
 export function Skeleton({ variant = "text", count = 1, className }: SkeletonProps) {

@@ -8,7 +8,7 @@ Events 表结构: (date TEXT, type TEXT, description TEXT, importance INTEGER)
   importance=2 → MEDIUM: PCE
 
 用法:
-    es = EventSizing(db_path="data/market_data.db")
+    es = EventSizing(db_path="data/events.duckdb")
     mult = es.get_multiplier(bar_time_epoch)  # 0.2 .. 1.0
     lots *= mult
 """
@@ -74,7 +74,7 @@ class EventSizing:
 
     def __init__(
         self,
-        db_path: str = "data/market_data.db",
+        db_path: str = "data/events.duckdb",
         enabled: bool = True,
         event_times: dict[str, str] | None = None,
         tiers: dict[int, list[EventTier]] | None = None,
@@ -95,21 +95,23 @@ class EventSizing:
                 )
 
     def _load_events(self, db_path: str) -> None:
-        """从 SQLite 加载 importance≥2 的事件"""
+        """从 DuckDB 加载 importance≥2 的事件 (v11-fix P1-14: sqlite3→duckdb)"""
         if not Path(db_path).exists():
             logger.warning(f"[EventSizing] {db_path} 不存在, event sizing 禁用")
             self.enabled = False
             return
 
         try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT date, type, description, importance "
-                "FROM events WHERE importance >= 2"
-            )
-            rows = cur.fetchall()
-            conn.close()
+            import duckdb
+            conn = duckdb.connect(db_path)
+            try:
+                cur = conn.execute(
+                    "SELECT date, type, description, importance "
+                    "FROM events WHERE importance >= 2"
+                )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
 
             for date_str, evt_type, desc, importance in rows:
                 time_str = self.event_times.get(evt_type, "13:30")

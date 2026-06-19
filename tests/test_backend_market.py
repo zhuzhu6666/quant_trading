@@ -2,8 +2,10 @@
 from fastapi.testclient import TestClient
 
 from backend.app import app
+from backend.core.auth import create_token
 
-client = TestClient(app)
+_token = create_token("test_user")
+client = TestClient(app, headers={"Authorization": f"Bearer {_token}"})
 
 
 def test_get_bars_default():

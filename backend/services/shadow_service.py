@@ -36,11 +36,16 @@ def list_shadows() -> list[dict]:
     out: list[dict] = []
     for name in names:
         meta = adapter.get_meta(name)
+        ts = meta.get("register_time", 0)
+        from datetime import datetime, timezone
+        ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else ""
         out.append({
             "name": name,
+            "status": meta.get("source", SOURCE_SHADOW),
             "source": meta.get("source", SOURCE_SHADOW),
+            "ts": ts_iso,
+            "expr": meta.get("description", ""),
             "description": meta.get("description", ""),
-            "register_time": meta.get("register_time"),
         })
     return out
 
@@ -48,9 +53,10 @@ def list_shadows() -> list[dict]:
 def promote(name: str) -> dict:
     """把 shadow 因子晋升到 discovered (改 source + 落 lifecycle log)."""
     adapter = _get_adapter()
-    if name not in adapter._meta:
+    meta = adapter.get_meta(name)
+    if not meta:
         return {"name": name, "ok": False, "error": f"factor {name!r} not in registry"}
-    if adapter._meta[name].get("source") == SOURCE_DISCOVERED:
+    if meta.get("source") == SOURCE_DISCOVERED:
         return {"name": name, "ok": True, "new_status": SOURCE_DISCOVERED, "msg": "already discovered"}
     ok = adapter.promote(name, new_source=SOURCE_DISCOVERED, reason="manual promote via /api/shadow/promote")
     if not ok:
@@ -62,9 +68,10 @@ def demote(name: str) -> dict:
     """从 registry 移除一个非 builtin 因子.
     builtin 会受 RegistryAdapter.unregister 保护, 自动跳过."""
     adapter = _get_adapter()
-    if name not in adapter._meta:
+    meta = adapter.get_meta(name)
+    if not meta:
         return {"name": name, "ok": False, "error": f"factor {name!r} not in registry"}
-    source = adapter._meta[name].get("source", "builtin")
+    source = meta.get("source", "builtin")
     if source == "builtin":
         return {"name": name, "ok": False, "error": "cannot demote builtin factor (protected)"}
     ok = adapter.unregister(name, reason="manual demote via /api/shadow/demote")

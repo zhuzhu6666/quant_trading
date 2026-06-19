@@ -78,7 +78,8 @@ class AlmgrenChrissModel:
         return [slice_size] * n_slices
 
     def expected_cost(
-        self, total_qty: float, n_slices: int = 10, side: int = 1
+        self, total_qty: float, n_slices: int = 10, side: int = 1,
+        price: float | None = None,
     ) -> dict:
         """估算 Almgren-Chriss 市场冲击成本.
 
@@ -86,6 +87,7 @@ class AlmgrenChrissModel:
             total_qty: 总数量 (oz)
             n_slices:  切片数
             side:      交易方向 (1=买入, -1=卖出, 不影响成本幅度)
+            price:     当前金价 (USD/oz). 提供时计算实际 USD 成本.
 
         Returns:
             dict:
@@ -93,7 +95,7 @@ class AlmgrenChrissModel:
                 permanent_impact_bps  永久冲击 (bps)
                 total_slippage_bps    总滑点 (bps)
                 optimal_slices        切片数
-                total_cost_usd_per_oz 每盎司成本 (USD)
+                total_cost_usd_per_oz 每盎司成本 (USD, price 为 None 时返回 bps 分数)
         """
         p = self.params
         V_avg = p["daily_volume_oz"]
@@ -112,8 +114,17 @@ class AlmgrenChrissModel:
         total_bps = temp_bps + perm_bps
 
         # 成本 USD/oz = total_bps / 10000 × price
-        # price = 1.0 作为标量 (不在黄金即时价格上计价)
-        cost_usd_per_oz = total_bps / 10_000 * 1.0
+        # 默认价格从 get_spot_price 获取（如果有），否则用 config 默认
+        if price is None:
+            try:
+                from execution.ctrader_bridge import CTraderBridge
+                bridge = CTraderBridge._instance
+                if bridge is not None:
+                    price = bridge.get_spot_price()
+            except Exception:
+                pass
+        _price = price if price is not None else 3000.0  # XAUUSD 默认 ~$3000/oz
+        cost_usd_per_oz = total_bps / 10_000 * _price
 
         return {
             "temporary_impact_bps": temp_bps,

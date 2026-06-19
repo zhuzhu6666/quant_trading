@@ -54,3 +54,43 @@ def list_jobs(_user: RequireUser, status: str | None = None) -> dict:
 @router.get("")
 def list_jobs_noslash(_user: RequireUser, status: str | None = None) -> dict:
     return list_jobs(_user=_user, status=status)
+
+
+@router.get("/{job_id}/report")
+def get_job_report(_user: RequireUser, job_id: str) -> dict:
+    """Fetch backtest report for a completed job."""
+    mgr = get_job_manager()
+    js = mgr.get(job_id)
+    if js is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if js.status != "done":
+        return {"job_id": job_id, "status": js.status, "report": None}
+    # Try to read latest report from data/charts
+    try:
+        from backend.services.report_service import list_reports
+        reports = list_reports(kind="json")
+        # Match by job_id prefix or return most recent
+        matched = [r for r in reports if job_id[:8] in r["name"]]
+        target = matched[0] if matched else (reports[0] if reports else None)
+        if target:
+            from backend.services.report_service import read_report
+            content = read_report(target["name"])
+            return {"job_id": job_id, "status": js.status, "report": content}
+    except Exception:
+        pass
+    return {"job_id": job_id, "status": js.status, "report": None}
+
+
+@router.get("/report/latest")
+def get_latest_report(_user: RequireUser) -> dict:
+    """Fetch the most recent backtest report."""
+    try:
+        from backend.services.report_service import list_reports, read_report
+        reports = list_reports(kind="json")
+        if not reports:
+            return {"report": None}
+        target = reports[0]
+        content = read_report(target["name"])
+        return {"report": content}
+    except Exception:
+        return {"report": None}

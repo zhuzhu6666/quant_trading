@@ -3,8 +3,8 @@ from fastapi import APIRouter
 
 from backend.api import (
     ab_test, auth, backtest, calibrator, config, control, discover,
-    external_data, factor_health, health, jobs, live, market, metrics,
-    paper, reports, shadow, strategies, sync, tuning,
+    external_data, factor_health, factor_v4, health, jobs, live, logs,
+    market, metrics, paper, reports, risk, ops, experiments, shadow, strategies, sync, tuning,
 )
 
 ALL_ROUTERS: list[APIRouter] = [
@@ -14,6 +14,7 @@ ALL_ROUTERS: list[APIRouter] = [
     paper.router,
     market.router,
     factor_health.router,
+    factor_v4.router,
     external_data.router,
     sync.router,
     discover.router,
@@ -24,8 +25,12 @@ ALL_ROUTERS: list[APIRouter] = [
     reports.router,
     config.router,
     live.router,
+    logs.router,
     strategies.router,
     jobs.router,
     metrics.router,
     control.router,
+    risk.router,
+    ops.router,
+    experiments.router,
 ]

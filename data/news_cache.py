@@ -1,14 +1,14 @@
 """
-从 SQLite 加载 events + GVZ 进 strategy 用的内存 cache
+从 DuckDB 加载 events + GVZ 进 strategy 用的内存 cache
 """
-import sqlite3
+import duckdb
 from datetime import datetime, timedelta
 from typing import Optional
 
 
-def load_nfp_dates(db_path: str = "data/market_data.db") -> set[str]:
+def load_nfp_dates(db_path: str = "data/events.duckdb") -> set[str]:
     """NFP 日期集合（±2 天窗口已在调用方处理，这里只返回原始日期）"""
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path)
     cur = conn.cursor()
     cur.execute("SELECT date FROM events WHERE type='NFP'")
     dates = {r[0] for r in cur.fetchall()}
@@ -17,7 +17,7 @@ def load_nfp_dates(db_path: str = "data/market_data.db") -> set[str]:
 
 
 def load_event_dates(db_path: str, event_type: str) -> set[str]:
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path)
     cur = conn.cursor()
     cur.execute("SELECT date FROM events WHERE type=?", (event_type,))
     dates = {r[0] for r in cur.fetchall()}
@@ -25,9 +25,9 @@ def load_event_dates(db_path: str, event_type: str) -> set[str]:
     return dates
 
 
-def load_gvz_series(db_path: str = "data/market_data.db") -> dict[str, float]:
+def load_gvz_series(db_path: str = "data/ctrader_data.duckdb") -> dict[str, float]:
     """GVZ 日度值"""
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path)
     cur = conn.cursor()
     cur.execute("SELECT date, value FROM macro_daily WHERE series='GVZCLS' ORDER BY date")
     rows = dict(cur.fetchall())
@@ -41,12 +41,13 @@ def daily_change_pct(series: dict[str, float], target_date: str) -> Optional[flo
     if target_date not in series:
         return None
     cur = series[target_date]
+    prev = None
     for d in sorted_dates:
         if d < target_date:
             prev = series[d]
         else:
             break
-    if prev and prev > 0:
+    if prev is not None and prev > 0:
         return (cur - prev) / prev * 100
     return None
 
@@ -65,7 +66,7 @@ def expand_to_window(dates: set[str], days: int = 1) -> set[str]:
 
 
 def load_events_with_importance(
-    db_path: str = "data/market_data.db",
+    db_path: str = "data/ctrader_data.duckdb",
     min_importance: int = 2,
 ) -> list[dict]:
     """加载 importance >= min_importance 的事件。
@@ -73,7 +74,7 @@ def load_events_with_importance(
     Returns:
         list of dicts: [{date, type, description, importance}, ...]
     """
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path)
     cur = conn.cursor()
     cur.execute(
         "SELECT date, type, description, importance "

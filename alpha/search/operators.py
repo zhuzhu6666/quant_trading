@@ -268,7 +268,7 @@ def register_standard_ops() -> None:
     reg.register(
         "zscore",
         _op_zscore,
-        1,
+        2,
         "ts",
         "Rolling z-score: (x - mean(x,n)) / std(x,n)",
     )

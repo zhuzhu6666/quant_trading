@@ -1,7 +1,7 @@
 """Live trading service.
 
 Responsibilities:
-- Probe broker connection status (MT5 + cTrader)
+- Probe broker connection status (cTrader)
 - Read real account info (balance / equity / margin / leverage)
 - Read real positions (open trades)
 - Start/stop the live trading loop as a background **thread** in the backend
@@ -24,7 +24,13 @@ from loguru import logger
 
 import os
 import pandas as pd
+import numpy as _np
 from pathlib import Path
+
+# ── DecisionLog (v4 决策审计) ─────────────────────────────────
+from db.store import DecisionLogStore
+_DECISION_LOG: DecisionLogStore | None = None
+_DECISION_LOG_RUN_ID: int = 0
 
 # ── Local SL/TP tracking (live loop only) ──────────────────────────
 # audit 2026-06-10: 之前 SL/TP 完全靠本地 Python 监控 1 bar 延迟的
@@ -50,6 +56,121 @@ class _LocalSLTP:
 
 _local_positions: dict[int, _LocalSLTP] = {}
 _local_positions_lock = threading.Lock()
+
+# P1-d: module-level state for _scheduled_param_tune
+_PARAM_TUNE_STATE: dict[str, Any] = {}
+
+# ── AttributionEngine 开仓/平仓跟踪 ──
+# 记录上一 tick 的 position_id 集合, 用于检测平仓事件.
+# 在 _process_tick_factor_pipeline 中每 tick 更新.
+_prev_position_ids: set[int] = set()
+# 用于 close detection: position_id → open_price
+_pos_open_prices: dict[int, float] = {}
+# ── 追踪止损状态 ──
+# position_id → {best_price, activated, entry_price, direction}
+_trailing_state: dict[int, dict] = {}
+# ── 金字塔规则: position_id → 开仓时的 composite.score
+# 用于判断新信号是否比已有持仓更强, 避免递减加仓
+_pos_entry_scores: dict[int, float] = {}
+
+
+# ═══════════════════════════════════════════════════════════
+# 风控集成: VaR 闸门 + Kelly 仓位
+# ═══════════════════════════════════════════════════════════
+
+def _risk_var_gate(cfg) -> tuple[bool, str]:
+    """VaR 闸门: 检查当前 VaR 是否超过阈值。
+
+    Returns:
+        (passed, reason)
+        当 cfg.var_enabled=False 或数据不足时, passed=True (不阻挡)。
+    """
+    if not getattr(cfg, 'var_enabled', False):
+        return True, ""
+    var_data = _live_state.get("risk", {}).get("var", {})
+    var_pct = var_data.get("var_pct", 0) or 0
+    threshold_pct = getattr(cfg, 'var_cvar_threshold', 0.02) * 100  # 0.02 → 2%
+    if var_pct > threshold_pct:
+        return (
+            False,
+            f"var_gate: VaR={var_pct:.1f}% > {threshold_pct:.1f}%",
+        )
+    return True, ""
+
+
+def _risk_kelly_volume(
+    cfg, direction: int, current_price: float, sl_price: float,
+    bridge_meta: dict, acct: dict,
+) -> float:
+    """根据 Kelly 分数计算开仓手数。
+
+    策略:
+        volume = min(
+            default_vol × 5,              # 上限
+            max(                           # 下限
+                min_vol,
+                f* × risk_capital / SL点数
+            )
+        )
+
+    当 kelly_enabled=False 或无可用数据时返回默认 1.0 lot。
+    """
+    _min_vol = bridge_meta.get('min_volume', 1.0)
+    _step_vol = bridge_meta.get('step_volume', 1.0)
+    _to_step = lambda v: max(
+        _min_vol,
+        round(v / _step_vol) * _step_vol if _step_vol > 0 else v,
+    )
+
+    # 默认: 1 lot
+    default_vol = _to_step(1.0)
+    if not getattr(cfg, 'kelly_enabled', False):
+        return default_vol
+
+    kelly_data = _live_state.get("risk", {}).get("kelly", {})
+    kelly_f = kelly_data.get("kelly_fraction", 0) or 0
+    if kelly_f <= 0:
+        return default_vol
+
+    equity = float(acct.get("equity", 0) or 0)
+    if equity <= 0:
+        return default_vol
+
+    # Kelly 乘数 (半凯利/四分之一凯利)
+    kelly_mult = getattr(cfg, 'kelly_fraction', 0.5)
+    f_star = kelly_f * kelly_mult
+
+    # 每笔风险敞口 = equity × risk_pct
+    risk_pct = getattr(cfg, 'kelly_risk_per_trade_pct', 0.01)
+    risk_capital = equity * risk_pct
+
+    # SL 距离 (价格单位)
+    sl_dist = abs(current_price - sl_price)
+    sl_dist = max(sl_dist, current_price * 0.001)  # 至少 0.1% 价格波动
+
+    # XAUUSD 合约乘数: 1 lot = 100 oz, 价差 1 点 = $100
+    contract_mult = 100.0
+    raw_vol = f_star * risk_capital / (sl_dist * contract_mult) if sl_dist > 0 else 0
+
+    # 资金占比上限
+    max_pct = getattr(cfg, 'kelly_max_pct', 0.25)
+    max_vol = equity * max_pct / (sl_dist * contract_mult) if sl_dist > 0 else default_vol * 10
+
+    vol = max(_min_vol, min(max_vol, raw_vol, default_vol * 5))
+    return _to_step(vol)
+
+
+def _save_param_tune_state() -> None:
+    """Persist param tune state to a JSON file for recovery."""
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent.parent / "data" / "param_tune_state.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_PARAM_TUNE_STATE, indent=2, default=str))
+    except Exception as e:
+        logger.warning("Failed to save param tune state: %s", e)
 
 
 def _track_local_sl_tp(position_id: int, sl: float, tp: float) -> None:
@@ -80,7 +201,7 @@ def _track_local_sl_tp(position_id: int, sl: float, tp: float) -> None:
 # HTTP handlers in get_account / get_positions / start_loop); in-place
 # mutation can race with iteration and yield torn reads.
 _live_state: dict = {
-    "broker": None,         # "mt5" | "ctrader" | None
+    "broker": "ctrader",    # 唯一执行/数据通道
     "loop_running": False,
     "loop_strategy": None,
     "loop_started_at": None,
@@ -123,12 +244,11 @@ _POSITIONS_CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 15.0  # 15s 避免 WS 1s 推 + HTTP 5s 轮询同时击中 reactor
 _CACHE_LOCK = threading.Lock()  # 防多个线程同时刷新 (WS + live tick 同时过期)
 
-# audit 2026-06-10: MT5 路径之前完全没缓存, 每次 HTTP 请求都新建 MT5Bridge +
-# connect(阻塞 5s+) + account_info + disconnect, 5s 轮询时其他 API 全排队.
-# 加同样 15s TTL 缓存, 跟 cTrader 对齐. 独立 key ("mt5") 防止 cTrader 缓存污染.
-_MT5_ACCOUNT_CACHE: dict[str, tuple[float, dict]] = {}
-_MT5_POSITIONS_CACHE: dict[str, tuple[float, dict]] = {}
-_MT5_CACHE_TTL = 15.0
+
+# ── Status / account / positions ──────────────────────────────────────────
+
+_probe_ctrader_cache: tuple[float, str, str | None] | None = None
+_CTRADER_PROBE_TTL = 15.0  # cTrader ping 也有 5s 超时, 按 _ACCOUNT_CACHE 节奏缓存
 
 
 def _cache_get_or_refresh(cache: dict, ttl: float, fetcher):
@@ -159,8 +279,8 @@ def _make_ctrader_bridge(**overrides):
     try:
         from execution._env import load_env
         load_env()
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("load_env failed (non-critical): %s", _e)
     try:
         from execution.ctrader_bridge import CTraderBridge
     except ImportError as e:
@@ -229,8 +349,8 @@ def _get_ctrader():
     try:
         from execution._env import load_env
         load_env()
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("load_env failed (non-critical): %s", _e)
     try:
         from execution.ctrader_bridge import CTraderBridge
     except ImportError as e:
@@ -304,42 +424,17 @@ def _wait_ctrader_ready(bridge, timeout_sec: float = 30.0) -> str | None:
 
 # ── Status / account / positions ──────────────────────────────────────────
 
-_probe_mt5_cache: tuple[float, str, str | None] | None = None
 _probe_ctrader_cache: tuple[float, str, str | None] | None = None
-_MT5_PROBE_TTL = 30.0  # 30s 缓存, 免每次状态轮询都调 mt5.initialize() (阻塞5s)
 _CTRADER_PROBE_TTL = 15.0  # cTrader ping 也有 5s 超时, 按 _ACCOUNT_CACHE 节奏缓存
 
 
 def get_status() -> dict:
     """Report current broker connection status (best-effort, no broker call)."""
-    global _probe_mt5_cache, _probe_ctrader_cache
-    mt5_status, mt5_error = _probe_mt5()
     ctrader_status, ctrader_error = _probe_ctrader()
     return {
-        "mt5": {"status": mt5_status, "error": mt5_error},
         "ctrader": {"status": ctrader_status, "error": ctrader_error},
         "loop": loop_status(),
     }
-
-
-def _probe_mt5() -> tuple[str, str | None]:
-    global _probe_mt5_cache
-    now = time.time()
-    if _probe_mt5_cache and (now - _probe_mt5_cache[0]) < _MT5_PROBE_TTL:
-        return _probe_mt5_cache[1], _probe_mt5_cache[2]
-    try:
-        from execution.mt5_bridge import MT5Bridge
-        bridge = MT5Bridge()
-        if bridge.connect():
-            bridge.disconnect()
-            _probe_mt5_cache = (now, "connected", None)
-            return "connected", None
-        _probe_mt5_cache = (now, "disconnected", "connect returned False (no MT5 terminal running or wrong creds)")
-        return "disconnected", "connect returned False (no MT5 terminal running or wrong creds)"
-    except Exception as e:
-        msg = f"{type(e).__name__}: {e}"[:300]
-        _probe_mt5_cache = (now, "error", msg)
-        return "error", msg
 
 
 def _probe_ctrader() -> tuple[str, str | None]:
@@ -382,25 +477,7 @@ def get_account(broker: str) -> dict:
             "warming_up": True,
             "error": "live loop warming up, first tick pending (within 60s)",
         }
-    if broker == "mt5":
-        # audit 2026-06-10: 加 15s TTL 缓存, 避免 mt5.initialize() 每次阻塞 5s+
-        def _fetch_mt5_acct():
-            from execution.mt5_bridge import MT5Bridge
-            bridge = MT5Bridge()
-            if not bridge.connect():
-                return {"ok": False, "broker": "mt5", "error": "mt5_connect_failed"}
-            try:
-                info = bridge.account_info()
-                if not info:
-                    return {"ok": False, "broker": "mt5", "error": "account_info returned empty (likely no account logged in)"}
-                return {"ok": True, "broker": "mt5", **info}
-            finally:
-                bridge.disconnect()
-        try:
-            return _cache_get_or_refresh(_MT5_ACCOUNT_CACHE, _MT5_CACHE_TTL, _fetch_mt5_acct)
-        except Exception as e:
-            return {"ok": False, "broker": "mt5", "error": f"{type(e).__name__}: {e}"[:300]}
-    elif broker == "ctrader":
+    if broker == "ctrader":
         def _fetch():
             # audit 2026-06-10: _get_ctrader 返 3-tuple, warming_up 短路
             bridge, err, warming = _get_ctrader()
@@ -446,23 +523,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             "positions": [],
             "warming_up": True,
         }
-    if broker == "mt5":
-        # audit 2026-06-10: 加 15s TTL 缓存, 跟 account 路径对齐
-        def _fetch_mt5_pos():
-            from execution.mt5_bridge import MT5Bridge
-            bridge = MT5Bridge()
-            if not bridge.connect():
-                return {"ok": False, "broker": "mt5", "error": "mt5_connect_failed", "positions": []}
-            try:
-                pos = bridge.get_positions(symbol)
-                return {"ok": True, "broker": "mt5", "positions": pos}
-            finally:
-                bridge.disconnect()
-        try:
-            return _cache_get_or_refresh(_MT5_POSITIONS_CACHE, _MT5_CACHE_TTL, _fetch_mt5_pos)
-        except Exception as e:
-            return {"ok": False, "broker": "mt5", "error": f"{type(e).__name__}: {e}"[:300], "positions": []}
-    elif broker == "ctrader":
+    if broker == "ctrader":
         # 缓存短路: live loop 在跑 → 只读 _live_state (跟上面 if 分支等价,
         # 保留是为了 cache_fallback 的 robustness — 上层分支没匹配时这里兜底)
         cached_positions = _live_state.get("positions")
@@ -576,13 +637,13 @@ def _scheduled_param_tune():
 
     try:
         from monitor.evolution_story import EvolutionStory
-        EvolutionStory.shared().add_event(
+        EvolutionStory.shared().append(
             event_type="param_tune_complete",
-            data={"best_params": best.params, "pnl": round(best.net_pnl, 2),
+            payload={"best_params": best.params, "pnl": round(best.net_pnl, 2),
                   "sharpe": round(best.sharpe, 2), "n_combos": len(combos)}
         )
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("[param_tune] EvolutionStory.append failed: %s", _e)
 
 
 def _scheduled_awe_adapt():
@@ -625,11 +686,20 @@ def _scheduled_awe_adapt():
         engine = fp.get("engine")
         if engine is not None and hasattr(engine, "export_factor_history"):
             try:
-                import numpy as _np
                 fv_dict, fwd_arr = engine.export_factor_history()
                 fwd_ret = fwd_arr if len(fwd_arr) > 0 else None
-            except Exception:
-                pass
+                # Feed ICTracker for AWE IC gate
+                ictracker = fp.get("ic_tracker")
+                if ictracker is not None and fv_dict and fwd_ret is not None:
+                    for fname, fvals in fv_dict.items():
+                        try:
+                            min_len = min(len(fvals), len(fwd_ret))
+                            if min_len >= 2:
+                                ictracker.update(fname, fvals[:min_len], fwd_ret[:min_len])
+                        except Exception as _e:
+                            logger.debug("[awe_adapt] ictracker.update failed for %s: %s", fname, _e)
+            except Exception as _e2:
+                logger.debug("[awe_adapt] export_factor_history failed: %s", _e2)
 
         # 如果因子数据充足且 blend baseline 未计算, 触发计算
         use_blend = bool(awe._blend_baselines)
@@ -642,8 +712,8 @@ def _scheduled_awe_adapt():
                     ])
                     awe.compute_blend_baseline(factor_mat, fwd_ret[:len(fwd_ret)], f_names)
                     use_blend = True
-            except Exception:
-                pass
+            except Exception as _e2:
+                logger.debug("[awe_adapt] blend_baseline compute failed: %s", _e2)
 
         patches = awe.adapt(attr, cfg.factor_portfolio_weights,
                            use_blend_baseline=use_blend,
@@ -661,8 +731,8 @@ def _scheduled_awe_adapt():
                     if p.get("weight", 0) > 0
                 }})
                 logger.info("[awe_adapt] weights pushed to RuntimeConfig")
-            except Exception:
-                pass
+            except Exception as _e2:
+                logger.warning("[awe_adapt] cfg.patch weight push failed: %s", _e2)
         else:
             logger.debug("[awe_adapt] no weight changes needed")
     except Exception as e:
@@ -696,7 +766,7 @@ def _scheduled_feature_engineering():
         from alpha.registry import factor_registry
         from monitor.evolution_story.report import EvolutionStory
 
-        store = DataStore("data/market_data.db")
+        store = DataStore("data/ctrader_data.duckdb")
         df = store.load_bars("XAUUSD+", "M5", limit=20000)
         if df.empty or len(df) < 1000:
             logger.info("[fe] insufficient bars: %d", len(df))
@@ -710,7 +780,6 @@ def _scheduled_feature_engineering():
                 if fn is None:
                     continue
                 vals = fn(df)
-                import numpy as _np
                 arr = _np.asarray(vals, dtype=float)
                 arr[_np.isinf(arr)] = _np.nan
                 factor_vals[name] = arr
@@ -737,14 +806,14 @@ def _scheduled_feature_engineering():
         try:
             story = EvolutionStory.shared() if hasattr(EvolutionStory, "shared") else None
             if story:
-                story.add_event(event_type="feature_engineering", data={
+                story.append(event_type="feature_engineering", payload={
                     "n_selected": result.get("n_selected"),
                     "n_candidates": result.get("n_candidates"),
                     "pca_n": result.get("pca_n_components"),
                     "pca_var": result.get("pca_variance"),
                 })
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("[fe] EvolutionStory.append failed: %s", _e)
     except Exception as e:
         logger.warning(f"[fe] failed: {e}", exc_info=True)
 
@@ -818,67 +887,141 @@ def _start_live_scheduler():
         return
     # 每小时: 完整自进化循环 (GP + OOS + Canary + 退役 + 权重)
     sched.add_job("evolution_hourly", "0 * * * *", scheduled_evolution_cycle)
-    # 每 30 分钟: 快速 Canary 检查 (仅晋升/回滚, 不跑 GP)
-    sched.add_job("canary_fast", "*/30 * * * *",
-                   lambda: scheduled_evolution_cycle(gp_pop=0, gp_gen=0))
-    # 每小时: 因子健康退役检查 (紧接 evolution, 延迟 10 分钟)
-    from alpha.factor_health import retirement_check
-    from alpha.registry_adapter import RegistryAdapter
-    def _hourly_retire():
-        try:
-            adapter = RegistryAdapter()
-            statuses = adapter.all_statuses() if hasattr(adapter, "all_statuses") else []
-            if statuses:
-                rc = retirement_check(statuses)
-                for name in rc.candidates:
-                    adapter.retire(name, rc.reason)
-                    logger.info("[retire] {} → DEAD: {}", name, rc.reason)
-                if not rc.candidates:
-                    logger.debug("[retire] no candidates found (checked {} factors)", len(statuses))
-            else:
-                logger.debug("[retire] no factor statuses to check")
-        except Exception as e:
-            logger.warning("[retire] failed: {}", e)
-    sched.add_job("retire_hourly", "10 * * * *", _hourly_retire)
-    # 每 5 分钟: 数据同步健康检查
+    # ── 数据同步 (每 5 分钟): 检查缺口 → 有缺才补 ──────────
     from data.live_sync.health import SyncHealth
-    def _sync_health_check():
-        try:
-            health = SyncHealth.shared()
-            before = health.summary() if hasattr(health, "summary") else {}
-            health.check_and_log()
-            logger.debug("[sync_health] check complete: {}", before)
-        except Exception as e:
-            logger.warning("[sync_health] failed: {}", e)
-    sched.add_job("sync_health", "*/5 * * * *", _sync_health_check)
-    # 每 10 分钟: 从 MT5 拉新 bar
-    def _pull_new_bars():
+    def _data_sync():
+        """先检查 bars + ticks 新鲜度, 有缺口才回补, 不缺就跳过。"""
         t0 = time.time()
+        health = SyncHealth.shared()
         try:
             from config.runtime_config import shared as _rcc
-            from data.live_sync.orchestrator import SyncOrchestrator
             cfg = _rcc()
             symbols = list(cfg.enabled_symbols) if hasattr(cfg, 'enabled_symbols') else ["XAUUSD+"]
-            orch = SyncOrchestrator()
-            total_inserted = 0
-            for sym in symbols:
-                for tf in ["M1", "M5", "M15", "M30", "H1", "D1"]:
-                    try:
-                        result = orch.incremental_sync(sym, [tf])
-                        if result and hasattr(result, "inserted"):
-                            inserted = result.inserted
-                            total_inserted += inserted
-                            if inserted > 0:
-                                logger.debug("[data_pull] {} {} +{} bars", sym, tf, inserted)
-                    except Exception as e:
-                        logger.warning("[data_pull] {} {} failed: {}", sym, tf, e)
+            now = time.time()
+            import duckdb as _duckdb
+            _db_path = str(Path(__file__).resolve().parent.parent.parent / "data" / "ctrader_data.duckdb")
+            _dc = _duckdb.connect(_db_path)
+
+            # 1. 检查 bar 新鲜度: 各周期最新 bar 时间 vs 预期阈值
+            bar_thresholds = {"M1": 600, "M5": 900, "M15": 1800, "M30": 3600, "H1": 7200, "D1": 172800}
+            stale_tfs = []
+            fresh_tfs = []
+            for tf, max_age in bar_thresholds.items():
+                try:
+                    row = _dc.execute(
+                        "SELECT MAX(time) FROM bars WHERE symbol=? AND timeframe=?",
+                        [symbols[0], tf],
+                    ).fetchone()
+                    if row and row[0] and (now - float(row[0])) < max_age:
+                        fresh_tfs.append(tf)
+                    else:
+                        stale_tfs.append(tf)
+                except Exception:
+                    stale_tfs.append(tf)
+
+            # 2. 检查 tick 新鲜度
+            tick_gap = 600.0  # 10 分钟阈值
+            try:
+                tick_row = _dc.execute(
+                    "SELECT MAX(time) FROM ticks WHERE symbol=?", [symbols[0]],
+                ).fetchone()
+                tick_latest = float(tick_row[0]) if tick_row and tick_row[0] else 0
+                tick_stale = tick_latest == 0 or (now - tick_latest) > tick_gap
+                tick_age = (now - tick_latest) if tick_latest > 0 else float("inf")
+            except Exception:
+                tick_stale = True
+                tick_age = float("inf")
+            _dc.close()
+
+            # 3. 日志: 数据健康摘要
+            bar_status = f"{len(fresh_tfs)}/{len(bar_thresholds)} fresh"
+            tick_status = f"{'' if tick_stale else '✓'}tick age={tick_age/60:.0f}m"
+            if stale_tfs:
+                logger.info("[data_sync] stale: bars={} tick_age={:.0f}m → pulling", stale_tfs, tick_age/60)
+            else:
+                # 一切新鲜: 跳过数据拉取, 只记录健康状态
+                if not tick_stale:
+                    logger.debug("[data_sync] all fresh ({}), skip pull", bar_status)
+                    health.record_success()
+                    return
+                logger.info("[data_sync] bars ok, ticks stale (age={:.0f}m) → pulling", tick_age/60)
+
+            # 4. 回补 bars (用主 bridge 直接拉, 不再开第二连接)
+            total_bars = 0
+            sync_tfs = stale_tfs if stale_tfs else list(bar_thresholds.keys())
+            if sync_tfs:
+                bridge, err, warming = _get_ctrader()
+                if err:
+                    logger.warning("[data_sync] cTrader bridge unavailable: {}, skip bar pull", err)
+                elif warming:
+                    logger.info("[data_sync] cTrader bridge still warming up, skip bar pull")
+                elif not bridge.is_connected:
+                    logger.info("[data_sync] cTrader bridge not connected, skip bar pull")
+                else:
+                    for sym in symbols:
+                        for tf in sync_tfs:
+                            try:
+                                df = bridge.fetch_bars(tf, n_bars=200)
+                                if df is None or df.empty:
+                                    continue
+                                bars = []
+                                for idx, row in df.iterrows():
+                                    ts = int(idx.timestamp())
+                                    bars.append({
+                                        "time": ts,
+                                        "open": float(row["open"]),
+                                        "high": float(row["high"]),
+                                        "low": float(row["low"]),
+                                        "close": float(row["close"]),
+                                        "volume": int(row["volume"]),
+                                        "spread": 0,
+                                    })
+                                from data.store import DataStore
+                                DataStore().insert_bars(bars, sym, tf)
+                                total_bars += len(bars)
+                                logger.info("[data_sync] pulled {} {} bars: {} bars", sym, tf, len(bars))
+                            except Exception as e:
+                                logger.warning("[data_sync] {} {} pull failed: {}", sym, tf, e)
+
+            # 5. 记录健康状态
             elapsed = time.time() - t0
-            if total_inserted > 0:
-                logger.info("[data_pull] done: +{} bars total ({:.1f}s) across {} symbols",
-                           total_inserted, elapsed, len(symbols))
+            health.record_success()
+            if total_bars > 0 or tick_stale:
+                logger.info("[data_sync] done ({:.1f}s): +{} bars, tick_gap={:.0f}m", elapsed, total_bars, tick_age/60)
         except Exception as e:
-            logger.warning("[data_pull] orchestrator init failed: {}", e)
-    sched.add_job("data_pull", "*/10 * * * *", _pull_new_bars)
+            logger.warning("[data_sync] failed: {}", e)
+            try:
+                health.record_failure(str(e)[:200])
+            except Exception as _e2:
+                logger.debug("[data_sync] health.record_failure failed: %s", _e2)
+    sched.add_job("data_sync", "*/5 * * * *", _data_sync)
+    # 每小时: Dukascopy tick 增量 (替换 Hermes cron, 项目全自主)
+    def _scheduled_dukascopy_tick():
+        """运行 Dukascopy tick 增量拉取脚本."""
+        try:
+            import subprocess, sys
+            script = Path(__file__).resolve().parent.parent.parent / "scripts" / "debug" / "_pull_dukascopy_incremental.py"
+            if not script.exists():
+                logger.warning("[dukascopy_tick] script not found: {}")
+                return
+            result = subprocess.run(
+                [sys.executable or "python", str(script)],
+                capture_output=True, text=True, timeout=180,
+            )
+            out = (result.stdout or "").strip()
+            if result.returncode == 0:
+                logger.info("[dukascopy_tick] {}", out.split(chr(10))[-1] if out else "done")
+            else:
+                logger.warning("[dukascopy_tick] failed (rc={}): {}", result.returncode, (result.stderr or "")[:200])
+        except Exception as e:
+            logger.warning("[dukascopy_tick] error: {}", e)
+    sched.add_job("dukascopy_tick", "0 * * * *", _scheduled_dukascopy_tick)
+    # 启动后立即补跑一次 tick 增量 (后台线程, 不阻塞启动)
+    threading.Thread(
+        target=_scheduled_dukascopy_tick,
+        daemon=True,
+        name="dukascopy-tick-catchup",
+    ).start()
     # 每 30 分钟: AWE 权重自适应 (如果 attribution engine 有数据)
     sched.add_job("awe_adapt", "*/30 * * * *", _scheduled_awe_adapt)
     # Phase 2: ML 因子自动重训 (每周日凌晨 5:00)
@@ -887,18 +1030,74 @@ def _start_live_scheduler():
     sched.add_job("feature_eng", "0 3 * * *", _scheduled_feature_engineering)
     # Phase 2: ML 因子漂移检测 (每 6 小时)
     sched.add_job("ml_drift_check", "0 */6 * * *", _scheduled_ml_drift_check)
+    # 每分钟: 系统总健康检查 (桥/数据/调度器/磁盘/内存)
+    from monitor.system_health import shared as _sh_shared
+    from monitor.alerter import Alerter
+    _sys_health = _sh_shared()
+    _sys_health.set_alerter(Alerter({"log_file": "logs/alerts.log", "min_level": "WARNING"}).send)
+    def _scheduled_system_health():
+        _sys_health.run()
+    sched.add_job("system_health", "* * * * *", _scheduled_system_health)
     sched.start()
-    logger.info("[live] InProcessScheduler started with 9 jobs")
+    logger.info("[live] InProcessScheduler started with 8 jobs")
+
+    # ── 后台: 首次启动数据补充 (用主 bridge, 不开第二连接) ──
+    def _initial_ctrader_data_pull():
+        """启动后立即从 cTrader 拉最近数据写入 DB.
+        不清除现有 MT5 历史数据 (保留 203K 宝贵 bars).
+        DuckDB UNIQUE constraint 自动处理同时间戳的 bar."""
+        try:
+            bridge, err, warming = _get_ctrader()
+            if err:
+                logger.warning("[init] cTrader bridge unavailable: {}, skip initial pull", err)
+                return
+            if warming:
+                # bridge 还在后台连接中, 等最多 30s
+                t0 = time.time()
+                while time.time() - t0 < 30:
+                    if bridge.is_connected:
+                        break
+                    time.sleep(1)
+                if not bridge.is_connected:
+                    logger.warning("[init] cTrader bridge not connected after 30s, skip initial pull")
+                    return
+            # 拉最近 5000 根 M5 bars (cTrader 有 ~90天数据)
+            from data.store import DataStore
+            store = DataStore()
+            for tf in ["M5", "M15", "H1"]:
+                try:
+                    df = bridge.fetch_bars(tf, n_bars=5000)
+                    if df is None or df.empty:
+                        logger.warning("[init] {} pull returned empty", tf)
+                        continue
+                    bars = []
+                    for idx, row in df.iterrows():
+                        ts = int(idx.timestamp())
+                        bars.append({
+                            "time": ts, "open": float(row["open"]),
+                            "high": float(row["high"]), "low": float(row["low"]),
+                            "close": float(row["close"]), "volume": int(row["volume"]),
+                            "spread": 0,
+                        })
+                    store.insert_bars(bars, "XAUUSD+", tf)
+                    logger.info("[init] {}: +{} bars ({} → {})", tf, len(bars),
+                               time.strftime('%m-%d %H:%M', time.gmtime(bars[0]["time"])),
+                               time.strftime('%m-%d %H:%M', time.gmtime(bars[-1]["time"])))
+                except Exception as e:
+                    logger.warning("[init] {} pull failed: {}", tf, e)
+            logger.info("[init] ✅ cTrader 初始数据补充完成")
+        except Exception as _e:
+            logger.warning("[init] initial pull failed: {}", _e)
+
+    import threading as _th
+    _th.Thread(target=_initial_ctrader_data_pull, daemon=True).start()
     # 开机补跑: 先拉数据, 再跑其他检查 (后台线程, 不阻塞 start_loop HTTP 响应)
     def _catch_up_all_jobs():
         import traceback as _tb
         # 使用 sched.run_job_now() 确保执行计入 run_count
         job_names = [
-            "data_pull",
-            "sync_health",
-            "canary_fast",
+            "data_sync",
             "evolution_hourly",
-            "retire_hourly",
             "awe_adapt",
             "ml_retrain",
             "feature_eng",
@@ -969,23 +1168,21 @@ def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
                 "started_at": _loop_started_at,
                 "strategy_name": _loop_strategy_name,
             }
-        if broker not in ("mt5", "ctrader"):
+        if broker not in ("ctrader",):
             return {"ok": False, "error": f"unknown broker: {broker}"}
 
         # ★ v9-fix: 重启退避 — 上次停止后至少等 _MIN_RESTART_INTERVAL 秒
         since_end = time.time() - _last_loop_end
-        if since_end < _MIN_RESTART_INTERVAL:
-            wait = _MIN_RESTART_INTERVAL - since_end
-            logger.warning(f"[live] restart backoff: waiting {wait:.0f}s before next loop start")
-            # 在锁外等, 不阻塞其他 API 请求
-            _loop_state_lock.release()
-            try:
-                time.sleep(wait)
-            finally:
-                _loop_state_lock.acquire()
-            # 再次检查是否有人在等的时候启动了
-            if _loop_thread is not None and _loop_thread.is_alive():
-                return {"ok": False, "error": "another loop started during backoff wait"}
+
+    if since_end < _MIN_RESTART_INTERVAL:
+        wait = _MIN_RESTART_INTERVAL - since_end
+        logger.warning(f"[live] restart backoff: waiting {wait:.0f}s before next loop start")
+        time.sleep(wait)
+
+    with _loop_state_lock:
+        # 再次检查是否有人在等的时候启动了
+        if _loop_thread is not None and _loop_thread.is_alive():
+            return {"ok": False, "error": "another loop started during backoff wait"}
 
         # Pre-flight: broker connection must be live
         acct = {"ok": True, "broker": broker, "balance": 0, "equity": 0,
@@ -1069,7 +1266,7 @@ def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bar
     实时 tick 走 broker spot event, 这里只保证 strategy 暖机有数据。
     """
     import time as _time
-    db_path = "data/market_data.duckdb"
+    db_path = "data/ctrader_data.duckdb"
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -1170,7 +1367,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
     # ── Phase 1: warmup ──
     # audit 2026-06-08: Pepperstone demo broker ProtoOAGetTrendbarsReq 不返 history
-    # (任何 period 都 0 bar). 改优先读本地 DataStore("data/market_data.db") 拉 XAUUSD+
+    # (任何 period 都 0 bar). 改优先读本地 DataStore("data/ctrader_data.duckdb") 拉 XAUUSD+
     # M15 200 根, 再 fallback 到 broker fetch_bars.
     df = None
     df_source = None
@@ -1188,17 +1385,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     if df is None or len(df) < 30:
         # fallback: broker fetch_bars
         try:
-            if broker == "mt5":
-                from execution.mt5_bridge import MT5Bridge
-                bridge = MT5Bridge()
-                if not bridge.connect():
-                    log("FATAL: MT5 connect failed at loop start")
-                    return
-                try:
-                    df = _fetch_bars_with_retry(bridge, timeframe=15, n_bars=200)
-                finally:
-                    bridge.disconnect()
-            elif broker == "ctrader":
+            if broker == "ctrader":
                 # audit 2026-06-10: 3-tuple + 阻塞等连好 (loop 线程里可等)
                 bridge, err, warming = _get_ctrader()
                 if err:
@@ -1236,6 +1423,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
     # ── Factor Takeover v4 管道初始化 ──
     global _factor_pipeline
+    global _DECISION_LOG, _DECISION_LOG_RUN_ID
     _factor_pipeline = None
     try:
         from config.runtime_config import shared as _rcc
@@ -1261,7 +1449,9 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         })
         from alpha.attribution_engine import AttributionEngine
         from alpha.adaptive_weight_engine import AdaptiveWeightEngine
+        from alpha.ic_tracker import ICTracker
         attr = AttributionEngine()
+        ictracker = ICTracker(window=5000)
         awe = AdaptiveWeightEngine({
             "awe_sensitivity": _rcfg.awe_sensitivity,
             "awe_anchor_pull": _rcfg.awe_anchor_pull,
@@ -1273,15 +1463,19 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             "awe_health_floor": _rcfg.awe_health_floor,
             "awe_disable_min_trades": _rcfg.awe_disable_min_trades,
             "awe_max_type_weight_pct": _rcfg.awe_max_type_weight_pct,
-        })
-        awe.initialize(_rcfg.factor_portfolio_weights)
+        }, ictracker=ictracker)
+        awe.initialize(_rcfg.factor_portfolio_weights, ictracker=ictracker)
         _factor_pipeline = {
             "engine": engine, "normalizer": normalizer,
             "compositor": compositor, "gate": gate,
-            "attribution": attr, "awe": awe,
+            "attribution": attr, "awe": awe, "ic_tracker": ictracker,
         }
         log(f"Factor Takeover v4 pipeline initialized "
             f"(ctrader_demo={_rcfg.ctrader_send_orders})")
+        # ── 初始化决策审计日志 ──
+        if _DECISION_LOG is None:
+            _DECISION_LOG = DecisionLogStore()
+            _DECISION_LOG_RUN_ID = int(time.time())
         # Phase 6: 初始化跨品种协方差
         global _cross_asset_covar
         try:
@@ -1344,9 +1538,11 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     log(f"subscribe_spots skipped: {wait_err}")
                 else:
                     spot_bridge.subscribe_spots()
+                    spot_bridge.subscribe_depth()
                     log("subscribed to spot events for real-time price")
             else:
                 spot_bridge.subscribe_spots()
+                spot_bridge.subscribe_depth()
                 log("subscribed to spot events for real-time price")
         except Exception as e:
             log(f"subscribe_spots failed (non-fatal): {e}")
@@ -1372,61 +1568,27 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 _live_state["session_winning"] = 0
                 _live_state["session_losing"] = 0
                 _live_state["session_max_drawdown_pct"] = 0.0
-        except Exception:
-            pass
+        except Exception as _e2:
+            log(f"tick {tick}: session reset failed (non-fatal): {_e2}")
+            bridge, err, warming = _get_ctrader()
+            if err:
+                log(f"tick {tick}: {err}; reconnect next tick")
+                stop_flag.wait(60)
+                continue
+            if warming or not bridge.is_connected:
+                log(f"tick {tick}: cTrader still warming up, skip tick")
+                stop_flag.wait(60)
+                continue
 
-        try:
-            # MT5 单例缓存 (同 cTrader _get_ctrader 模式, 省每次新建 bridge + connect 开销)
-            if broker == "mt5":
-                from execution.mt5_bridge import MT5Bridge as _MT5B
-                _mt5_bridge = getattr(_run_loop, "_mt5_bridge", None)
-                if _mt5_bridge is not None and _mt5_bridge.is_connected:
-                    bridge = _mt5_bridge
-                else:
-                    bridge = _MT5B()
-                    if not bridge.connect():
-                        log(f"tick {tick}: MT5 connect failed, will retry")
-                        _run_loop._mt5_bridge = None
-                        stop_flag.wait(60)
-                        continue
-                    _run_loop._mt5_bridge = bridge
-                try:
-                    df_new = _fetch_bars_with_retry(bridge, timeframe=15, n_bars=5)
-                    if df_new is None or len(df_new) == 0:
-                        log(f"tick {tick}: no bars after retry")
-                    else:
-                        # MT5: same flow as cTrader; strategy drives
-                        last_bar = df_new.iloc[-1]
-                        _process_tick(bridge, None, df_new, last_bar, broker, tick, log)
-                finally:
-                    # audit 2026-06-10: 后台线程写 _live_state 缓存, WS 1s 推送
-                    # 下次 tick 就能拿到真 broker equity. tick 主体不被阻塞, 失败时静默.
-                    # MT5 路径: 单例桥不断开, 下次 tick 复用 (省每次新建 + connect 的阻塞开销).
-                    # 连接断开时 tick 自愈 (新建 bridge + connect).
-                    kickoff_account_refresh(bridge, broker, interval_sec=30.0)
-                    if broker != "mt5":
-                        bridge.disconnect()
-            elif broker == "ctrader":
-                # audit v9: cTrader 只做执行, 数据从本地 DataStore (MT5 data_pull 填) 读
-                bridge, err, warming = _get_ctrader()
-                if err:
-                    log(f"tick {tick}: {err}; reconnect next tick")
-                    stop_flag.wait(60)
-                    continue
-                if warming or not bridge.is_connected:
-                    log(f"tick {tick}: cTrader still warming up, skip tick")
-                    stop_flag.wait(60)
-                    continue
+            # 刷新账户缓存
+            kickoff_account_refresh(bridge, broker, interval_sec=30.0)
 
-                # 刷新账户缓存 (cTrader)
-                kickoff_account_refresh(bridge, broker, interval_sec=30.0)
-
-                # 从本地 DataStore 读最新 bars (MT5 data_pull 每 10 分钟同步)
-                df_new = _warmup_from_local_db("XAUUSD+", TF, 5)
-                if df_new is None or len(df_new) == 0:
-                    log(f"tick {tick}: local DB has no bars (waiting for MT5 data_pull)")
-                    _write_live_trade_log(tick, 0, _live_state.get("account") or {}, [], None, strategy)
-                else:
+            # 从本地 DataStore 读最新 bars (cTraderPuller 定时写入)
+            df_new = _warmup_from_local_db("XAUUSD+", TF, 5)
+            if df_new is None or len(df_new) == 0:
+                log(f"tick {tick}: local DB has no bars (waiting for CTraderPuller)")
+                _write_live_trade_log(tick, 0, _live_state.get("account") or {}, [], None, None)
+            else:
                     # v9: 用 cTrader spot 覆盖最新 close, 但验证合理性 (spot 在 bar close ±20% 内)
                     spot = bridge.get_spot_price() if hasattr(bridge, "get_spot_price") else 0
                     last_close = float(df_new.iloc[-1]["close"])
@@ -1441,7 +1603,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     cb_tripped = _live_state.get("circuit_breaker", False)
                     if cb_tripped:
                         log(f"tick {tick}: circuit breaker tripped, skip trading")
-                        _write_live_trade_log(tick, spot or 0, _live_state.get("account") or {}, [], None, strategy)
+                        _write_live_trade_log(tick, spot or 0, _live_state.get("account") or {}, [], None, None)
                     else:
                         session_pnl = float(_live_state.get("session_pnl", 0.0))
                         start_balance = float(_live_state.get("session_start_balance", 0.0)) or 1000.0
@@ -1451,7 +1613,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                             _live_state["circuit_breaker"] = True
                             _live_state["circuit_reason"] = f"daily drawdown {dd_pct:.1f}%"
                             log(f"tick {tick}: CIRCUIT BREAKER: daily drawdown {dd_pct:.1f}%")
-                            _write_live_trade_log(tick, spot or 0, _live_state.get("account") or {}, [], None, strategy)
+                            _write_live_trade_log(tick, spot or 0, _live_state.get("account") or {}, [], None, None)
                         else:
                             last_bar = df_new.iloc[-1]
                             _process_tick(bridge, None, df_new, last_bar, broker, tick, log)
@@ -1570,7 +1732,7 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
         return
     if not raw:
         return
-    # 统一转 dict: MT5Bridge 返 dict, CTraderBridge 返 AccountInfo dataclass
+    # 统一转 dict: CTraderBridge 返 AccountInfo dataclass
     if not isinstance(raw, dict):
         from dataclasses import asdict
         acct = asdict(raw)
@@ -1601,7 +1763,12 @@ def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 30.0) -> 
     global _loop_stop_flag is set OR the process exits (daemon=True).
 
     ★ v9-fix: 连接断开时不做 API 调用 + 指数退避, 防 timeout 风暴.
+    ★ v11-fix: 单例检查, 避免每 tick 创建新线程 (P0-4 线程泄漏).
     """
+    global _refresh_thread
+    if _refresh_thread is not None and _refresh_thread.is_alive():
+        return _refresh_thread
+
     stop_flag_ref = _loop_stop_flag  # captured at call time
     _fail_count = 0
     _MAX_BACKOFF = 300  # 最大退避 5min
@@ -1647,6 +1814,7 @@ def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 30.0) -> 
         name=f"acct-refresh-{broker}",
     )
     t.start()
+    _refresh_thread = t
     return t
 
 
@@ -1672,13 +1840,18 @@ def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, lo
 
 # ═══════════════════════════════════════════════════════════
 # Factor Takeover v4 管道状态
-# ═══════════════════════════════════════════════════════════
+# ── Factor Takeover v4 管道 ──
 # 由 _run_loop 初始化, _process_tick 读取
 _factor_pipeline: dict | None = None  # {engine, normalizer, compositor, gate}
 _factor_pipeline_lock = threading.Lock()
 
+# Phase 4: 执行质量分析器
+from execution.analytics import ExecutionQuality, TradeExecution as _ExecTrade
+_exec_quality = ExecutionQuality(max_records=500)
+
 # Phase 6: 多品种并行管道
 _factor_pipelines: dict[str, dict] = {}  # {symbol: {engine, normalizer, ...}}
+_refresh_thread: threading.Thread | None = None  # v11-fix (P0-4): account refresh 单例
 _cross_asset_covar: "CrossAssetCovariance | None" = None  # 跨品种协方差
 
 
@@ -1716,19 +1889,16 @@ def _write_live_trade_log(tick: int, price: float, acct: dict,
         _LIVE_TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(_LIVE_TRADE_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(_json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-    except Exception:
+    except Exception as _e2:
         pass  # 审计日志失败不阻塞主循环
+        logger.debug("[live] _write_live_trade_log failed: %s", _e2)
 
 
 def _should_send_orders(broker: str) -> bool:
     """True = 真发单; False = dry-run (记 log, 不下单)."""
-    import os
     if broker == "ctrader":
-        # cTrader 是唯一执行通道, 读 RuntimeConfig 允许热切换
         from config.runtime_config import shared as cfg
         return cfg().ctrader_send_orders
-    elif broker == "mt5":
-        return os.getenv("MT5_SEND_ORDERS", "0") == "1"
     return False
 
 
@@ -1750,8 +1920,8 @@ def get_latest_price() -> float | None:
         spot = bridge.get_spot_price()
         if spot is not None and spot > 0:
             return spot
-    except Exception:
-        pass
+    except Exception as _e2:
+        logger.debug("[live] get_latest_price spot query failed: %s", _e2)
     return _latest_price
 
 
@@ -1759,24 +1929,7 @@ def get_latest_price() -> float | None:
 
 def emergency_close(broker: str, symbol: str | None = None) -> dict:
     """Close all positions (or one symbol) on the given broker."""
-    if broker == "mt5":
-        try:
-            from execution.mt5_bridge import MT5Bridge
-            bridge = MT5Bridge()
-            if not bridge.connect():
-                return {"ok": False, "error": "mt5_connect_failed"}
-            try:
-                if symbol:
-                    # close_all_positions(symbol) closes only the given symbol
-                    bridge.close_all_positions(symbol)
-                else:
-                    bridge.close_all_positions()
-                return {"ok": True, "broker": "mt5", "symbol": symbol or "ALL"}
-            finally:
-                bridge.disconnect()
-        except Exception as e:
-            return {"ok": False, "error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc()[-300:]}
-    elif broker == "ctrader":
+    if broker == "ctrader":
         # audit 2026-06-10: 3-tuple + 短等 (emergency close 用户主动点, 可接受 5s 等)
         bridge, err, warming = _get_ctrader()
         if err:
@@ -1824,9 +1977,14 @@ def _process_tick_factor_pipeline(
         engine.append_bar → normalizer.normalize → compositor.compose
         → gate.filter → _execute_factor_signal
     """
+    global _prev_position_ids
     from config.runtime_config import shared as _rc
-    cfg = _rc()
-    _tf = getattr(cfg, 'timeframe', 'M5')
+    _tf = "M5"  # safe default before config access
+    try:
+        cfg = _rc()
+        _tf = getattr(cfg, 'timeframe', 'M5')
+    except Exception:
+        cfg = None
 
     engine = pipeline["engine"]
     normalizer = pipeline["normalizer"]
@@ -1857,12 +2015,36 @@ def _process_tick_factor_pipeline(
     composite = compositor.compose(signals, factor_values)
     gate_result = gate.filter(composite, factor_values, bar)
     gate.tick()
+    # ── 决策审计: signal ──
+    if _DECISION_LOG:
+        bar_ts = bar.get("time", 0)
+        if bar_ts:
+            bar_date = time.strftime("%Y-%m-%d", time.gmtime(bar_ts))
+            _DECISION_LOG.log(
+                run_id=_DECISION_LOG_RUN_ID,
+                ts=bar_ts,
+                bar_date=bar_date,
+                decision_type="signal",
+                strategy="factor_v4",
+                direction=composite.direction,
+                confidence=composite.score,
+                decision=("execute" if gate_result.passed
+                          and composite.direction != 0 else "hold"),
+                meta=_json.dumps({
+                    "gate_reason": gate_result.reason,
+                    "tick": tick,
+                    "tactical_score": composite.tactical_score,
+                    "macro_score": composite.macro_score,
+                    "n_active": composite.n_active_factors,
+                    "n_abstain": composite.n_abstain_factors,
+                }, ensure_ascii=False),
+            )
 
     # 3. 构造 Signal (兼容旧 _send_order 逻辑)
     from alpha.portfolio_compositor import CompositeSignal
 
     # 4. 发单 (仅非 dry_run 且门通过)
-    send = cfg.ctrader_send_orders and not cfg.factor_dry_run
+    send = cfg is not None and cfg.ctrader_send_orders and not cfg.factor_dry_run
 
     signal_str = ""
     if composite.direction != 0:
@@ -1880,7 +2062,127 @@ def _process_tick_factor_pipeline(
     pos = _live_state.get("positions") or []
     if isinstance(pos, dict):
         pos = pos.get("positions", []) or []
+    # ★ P0 fix: 统一转 dict — 支持 dataclass / protobuf / 任意非 dict
+    if pos and not isinstance(pos[0], dict):
+        from backend.ws.endpoints import _position_to_dict
+        pos = [_position_to_dict(p) for p in pos]
     current_price = float(last_bar["close"])
+
+    # ── 平仓检测: 对比 _prev_position_ids 找出被 broker 关闭的仓位 ──
+    current_pids: set[int] = set()
+    for p in pos:
+        pid = p.get("position_id") or p.get("ticket")
+        if pid is not None:
+            current_pids.add(int(pid))
+    closed_pids: set[int] = set()
+    attr_engine = pipeline.get("attribution")
+    if not _prev_position_ids:
+        # 冷启动: loop 重启后 _prev_position_ids 为空,
+        # 用当前持仓初始化, 后续平仓可正常检测.
+        _prev_position_ids = current_pids.copy()
+        # ★ 修复跨重启归因丢失: 为当前持仓创建占位的 TradeAttribution,
+        #   确保重启前开的仓平仓时不会无声丢失数据。
+        if pos and attr_engine:
+            try:
+                from alpha.attribution_engine import TradeAttribution
+                for p in pos:
+                    pid = p.get("position_id") or p.get("ticket")
+                    if pid is None:
+                        continue
+                    pid = int(pid)
+                    if pid in attr_engine._open_trades:
+                        continue
+                    open_price = float(
+                        p.get("open_price") or p.get("entry_price") or current_price
+                    )
+                    direction = int(p.get("direction", 0))
+                    if direction == 0:
+                        continue
+                    recovery_attr = TradeAttribution(
+                        position_id=pid,
+                        open_ts=time.time(),
+                        open_price=open_price,
+                        direction=direction,
+                        factor_signals={},
+                        factor_values={},
+                        active_weights={},
+                        composite_score=0.0,
+                        tactical_score=0.0,
+                        macro_score=0.0,
+                        tags_breakdown={},
+                        total_signal_abs=0.0,
+                    )
+                    attr_engine.record_open(pid, recovery_attr)
+                    log(
+                        f"tick {tick}: recovered attribution for existing "
+                        f"pos={pid} dir={direction} price={open_price}"
+                    )
+            except Exception as rec_err:
+                log(f"tick {tick}: attribution recovery error: {rec_err}")
+    else:
+        closed_pids = _prev_position_ids - current_pids
+    for cpid in closed_pids:
+        try:
+            mc = attr_engine.record_close(cpid,
+                                          close_price=current_price,
+                                          close_ts=time.time())
+            # 平仓事件真实发生, 无论是否有因子归因都要计数
+            if mc:
+                total_pnl = sum(mc.values())
+            else:
+                # 恢复仓位无因子信号 → 从持仓方向估算 PnL
+                total_pnl = 0.0
+                try:
+                    open_price = _pos_open_prices.get(cpid, current_price)
+                    dir_sign = 1  # default long
+                    for p in pos:
+                        ptype = (p.get("type")
+                                 if isinstance(p, dict)
+                                 else getattr(p, "type", None))
+                        if ptype == "sell":
+                            dir_sign = -1
+                    total_pnl = (current_price - open_price) * dir_sign
+                except Exception as _e2:
+                    log(f"tick {tick}: attribution close pos={cpid} PnL fallback error: {_e2}")
+            _live_state["session_trades"] = _live_state.get("session_trades", 0) + 1
+            if total_pnl > 0:
+                _live_state["session_winning"] = _live_state.get("session_winning", 0) + 1
+            elif total_pnl < 0:
+                _live_state["session_losing"] = _live_state.get("session_losing", 0) + 1
+            _live_state["session_pnl"] = _live_state.get("session_pnl", 0) + total_pnl
+            log(f"tick {tick}: attribution close pos={cpid} pnl={total_pnl:.2f} "
+                f"factors={len(mc)}")
+            # ── 决策审计: close ──
+            if _DECISION_LOG:
+                bar_ts = bar.get("time", 0)
+                bar_date = time.strftime("%Y-%m-%d", time.gmtime(bar_ts)) if bar_ts else ""
+                _DECISION_LOG.log(
+                    run_id=_DECISION_LOG_RUN_ID,
+                    ts=bar_ts or time.time(),
+                    bar_date=bar_date,
+                    decision_type="close",
+                    strategy="factor_v4",
+                    direction=0,
+                    confidence=round(total_pnl, 2),
+                    decision="closed",
+                    meta=_json.dumps({
+                        "position_id": cpid,
+                        "pnl": round(total_pnl, 2),
+                        "price": round(current_price, 2),
+                        "tick": tick,
+                    }, ensure_ascii=False),
+                )
+            # 清理追踪止损状态
+            _trailing_state.pop(cpid, None)
+            # 清理金字塔规则状态
+            _pos_entry_scores.pop(cpid, None)
+        except Exception as exc:
+            log(f"tick {tick}: attribution close pos={cpid} error: {exc}")
+    # 记录当前仓位 open price (供下次 close 使用)
+    for p in pos:
+        pid = p.get("position_id") or p.get("ticket")
+        if pid is not None and int(pid) not in _pos_open_prices:
+            _pos_open_prices[int(pid)] = float(p.get("open_price", current_price))
 
     # ★ v9-fix: 价格僵死检测 — same price for >30 ticks → DataStore 可能断更
     _price_key = f"{broker}:{getattr(cfg, 'timeframe', '?')}"
@@ -1895,7 +2197,7 @@ def _process_tick_factor_pipeline(
                            if k.startswith(f"{broker}:") and abs(v - current_price) < 0.01)
         if _stuck_count >= 30 and _stuck_count % 30 == 0:
             log(f"WARN: price stuck at {current_price:.2f} for {_stuck_count} ticks — "
-                f"DataStore may be stale, check MT5 data_pull")
+                f"DataStore may be stale, check CTraderPuller")
 
     # 价格守卫
     if bridge is not None and hasattr(bridge, "get_spot_price"):
@@ -1904,58 +2206,164 @@ def _process_tick_factor_pipeline(
             if (spot and spot > 0 and current_price > 0
                     and abs(spot - current_price) / current_price < 0.20):
                 current_price = spot
-        except Exception:
-            pass
+        except Exception as _e2:
+            logger.debug("[live] spot price guard failed for tick %s: %s", tick, _e2)
 
     # ── 执行 ──
+    atr_val = factor_values.get("atr_ratio", 0)
+    atr_price = atr_val * current_price if atr_val and atr_val > 0 else 0
+    sl_price = 0.0
+    tp_price = 0.0
     if composite.direction != 0 and gate_result.passed and send:
         direction_name = {1: "LONG", -1: "SHORT"}.get(composite.direction, "?")
-        atr_val = factor_values.get("atr_ratio", 0)
-        atr_price = atr_val * current_price if atr_val and atr_val > 0 else 0
         sl_dist = atr_price * cfg.strategy_sl_atr if atr_price > 0 else current_price * 0.02
         tp_dist = atr_price * cfg.strategy_tp_atr if atr_price > 0 else current_price * 0.03
         sl_price = current_price - sl_dist if composite.direction == 1 else current_price + sl_dist
         tp_price = current_price + tp_dist if composite.direction == 1 else current_price - tp_dist
-        # 从 bridge metadata 取最小手数, 安全处理 _symbol_meta=None
+        # 从 bridge metadata 取小数位 → 舍入 SL/TP 防 cTrader 拒绝
         _meta = getattr(bridge, '_symbol_meta', None) or {}
-        _min_vol = _meta.get('min_volume', 1.0)
-        _step_vol = _meta.get('step_volume', 1.0)
-        volume = max(_min_vol, round(1.0 / _step_vol) * _step_vol if _step_vol > 0 else 1.0)
+        _digits = _meta.get('digits', 2)
+        sl_price = round(float(sl_price), _digits)
+        tp_price = round(float(tp_price), _digits)
 
-        try:
-            if composite.direction == 1:
-                result = bridge.market_buy(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
-            elif composite.direction == -1:
-                result = bridge.market_sell(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
-            else:
-                result = None
+        # ── 风控: VaR 闸门 ──
+        risk_passed, risk_reason = _risk_var_gate(cfg)
+        if not risk_passed:
+            log(f"tick {tick}: v4 {direction_name} BLOCKED by risk gate: {risk_reason}")
+            _write_live_trade_log_factor(
+                tick, current_price, acct, pos, composite, gate_result,
+                _live_state,
+            )
+            return
 
-            if result is not None and getattr(result, "success", False):
-                pid = getattr(result, "position_id", 0) or 0
-                if pid <= 0 and pos:
-                    pid = int(pos[0].get("position_id") or pos[0].get("ticket") or 0)
-                if pid > 0:
-                    try:
-                        amend_res = bridge.amend_position_sltp(
-                            position_id=pid, sl=sl_price, tp=tp_price,
-                        )
-                        if getattr(amend_res, "success", False):
-                            _track_local_sl_tp(pid, sl=sl_price, tp=tp_price)
-                            log(f"tick {tick}: v4 {direction_name} ORDER+AMEND OK "
-                                f"vol={volume} pos={pid} score={composite.score:.4f}")
-                        else:
-                            log(f"tick {tick}: v4 {direction_name} AMEND FAILED "
-                                f"pos={pid}: {getattr(amend_res, 'comment', '?')}")
-                    except Exception as e:
-                        log(f"tick {tick}: v4 {direction_name} amend exception: {e}")
+        # ── 风控: Kelly 仓位 ──
+        acct_clean = _live_state.get("account") or {}
+        volume = _risk_kelly_volume(cfg, composite.direction, current_price,
+                                    sl_price, _meta, acct_clean)
+        log(f"tick {tick}: v4 {direction_name} volume={volume:.2f} "
+            f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)})")
+
+        # ── 金字塔规则: 新信号必须比已有同向持仓的信号更强才加仓 ──
+        _max_entry = 0.0
+        for _p in pos:
+            _pid = _p.get("position_id") or _p.get("ticket")
+            if _pid is not None:
+                _es = _pos_entry_scores.get(int(_pid))
+                if _es is not None and abs(_es) > abs(_max_entry):
+                    _max_entry = _es
+        if abs(_max_entry) >= abs(composite.score):
+            log(f"tick {tick}: v4 {direction_name} SKIP (pyramid: "
+                f"existing={abs(_max_entry):.4f} >= signal={abs(composite.score):.4f})")
+            # 让结构化日志记录 pyramid 拦截原因
+            gate_result = type('GateResult', (), {
+                'passed': False, 'reason': f'加仓被拦: 需超 {abs(_max_entry):.4f}',
+            })()
+        else:
+            try:
+                if composite.direction == 1:
+                    result = bridge.market_buy(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
+                elif composite.direction == -1:
+                    result = bridge.market_sell(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
                 else:
-                    log(f"tick {tick}: v4 {direction_name} ORDER OK (no position_id) "
-                        f"vol={volume}")
-            elif result is not None and not getattr(result, "success", False):
-                log(f"tick {tick}: v4 {direction_name} ORDER FAILED: "
-                    f"{getattr(result, 'error_code', '?')} {getattr(result, 'comment', '')}")
-        except Exception as e:
-            log(f"tick {tick}: v4 {direction_name} order exception: {e}")
+                    result = None
+
+                if result is not None and getattr(result, "success", False):
+                    pid = getattr(result, "position_id", 0) or 0
+                    if pid <= 0 and pos:
+                        p0 = pos[0]
+                        if hasattr(p0, 'get'):
+                            pid = int(p0.get("position_id") or p0.get("ticket") or 0)
+                        else:
+                            pid = int(getattr(p0, 'position_id', 0) or getattr(p0, 'ticket', 0) or 0)
+                    if pid > 0:
+                        try:
+                            amend_res = bridge.amend_position_sltp(
+                                position_id=pid, sl=sl_price, tp=tp_price,
+                            )
+                            if getattr(amend_res, "success", False):
+                                _track_local_sl_tp(pid, sl=sl_price, tp=tp_price)
+                                _pos_entry_scores[pid] = composite.score
+                                log(f"tick {tick}: v4 {direction_name} ORDER+AMEND OK "
+                                    f"vol={volume} pos={pid} score={composite.score:.4f}")
+                                # ── 执行质量记录 ──
+                                try:
+                                    fill_price = float(getattr(result, 'price', current_price) or current_price)
+                                    _exec_quality.record(_ExecTrade(
+                                        signal_time=bar.get("time", time.time()),
+                                        submit_time=time.time(),
+                                        fill_time=time.time(),
+                                        signal_price=current_price,
+                                        fill_price=fill_price,
+                                        symbol="XAUUSD+",
+                                        direction=composite.direction,
+                                        volume=volume,
+                                        order_id=pid,
+                                    ))
+                                except Exception:
+                                    pass
+                                # ── 记录开仓归因 ──
+                                try:
+                                    from alpha.attribution_engine import TradeAttribution
+                                    total_signal_abs = sum(
+                                        abs(s) for s in composite.factor_signals.values()
+                                        if s is not None
+                                    )
+                                    trade_attr = TradeAttribution(
+                                        position_id=pid,
+                                        open_ts=time.time(),
+                                        open_price=current_price,
+                                        direction=composite.direction,
+                                        factor_signals=dict(composite.factor_signals),
+                                        factor_values=dict(composite.factor_values),
+                                        active_weights=dict(composite.active_weights),
+                                        composite_score=composite.score,
+                                        tactical_score=composite.tactical_score,
+                                        macro_score=composite.macro_score,
+                                        tags_breakdown=dict(composite.tags_breakdown),
+                                        total_signal_abs=total_signal_abs,
+                                    )
+                                    attr_engine.record_open(pid, trade_attr)
+                                    _pos_open_prices[pid] = current_price
+                                    log(f"tick {tick}: attribution recorded open pos={pid}")
+                                    # ── 决策审计: open ──
+                                    if _DECISION_LOG:
+                                        bar_ts = bar.get("time", 0)
+                                        bar_date = time.strftime(
+                                            "%Y-%m-%d", time.gmtime(bar_ts)
+                                        ) if bar_ts else ""
+                                        _DECISION_LOG.log(
+                                            run_id=_DECISION_LOG_RUN_ID,
+                                            ts=bar_ts or time.time(),
+                                            bar_date=bar_date,
+                                            decision_type="open",
+                                            strategy="factor_v4",
+                                            direction=composite.direction,
+                                            confidence=composite.score,
+                                            decision="executed",
+                                            meta=_json.dumps({
+                                                "position_id": pid,
+                                                "volume": volume,
+                                                "price": round(current_price, 2),
+                                                "sl": round(sl_price, 2),
+                                                "tp": round(tp_price, 2),
+                                                "tick": tick,
+                                            }, ensure_ascii=False),
+                                        )
+                                except Exception as attr_err:
+                                    log(f"tick {tick}: attribution record_open error: {attr_err}")
+                            else:
+                                log(f"tick {tick}: v4 {direction_name} AMEND FAILED "
+                                    f"pos={pid}: {getattr(amend_res, 'comment', '?')}")
+                        except Exception as e:
+                            log(f"tick {tick}: v4 {direction_name} amend exception: {e}")
+                    else:
+                        log(f"tick {tick}: v4 {direction_name} ORDER OK (no position_id) "
+                            f"vol={volume}")
+                elif result is not None and not getattr(result, "success", False):
+                    log(f"tick {tick}: v4 {direction_name} ORDER FAILED: "
+                        f"{getattr(result, 'error_code', '?')} {getattr(result, 'comment', '')}")
+            except Exception as e:
+                log(f"tick {tick}: v4 {direction_name} order exception: {e}")
 
     # ── 日志 ──
     log(f"tick {tick}: price={current_price:.2f} "
@@ -1965,14 +2373,127 @@ def _process_tick_factor_pipeline(
         f"pnl_session={_live_state.get('session_pnl', 0):.2f}"
         f"{signal_str}")
 
+    # ── 业务告警检查 ──
+    _check_business_alerts(tick, acct, pos, log)
+
     # ── 结构化日志 ──
     _write_live_trade_log_factor(
         tick, current_price, acct, pos, composite, gate_result,
         _live_state,
     )
 
+    # ── AWE 自适应追踪止损 ──
+    if pos and bridge is not None and atr_price > 0:
+        _update_trailing_stops(
+            bridge, pos, current_price, pipeline, atr_price,
+            tick, log,
+        )
+
+    # ── 更新上一 tick 持仓 ID, 供下次平仓检测 ──
+    _prev_position_ids = current_pids
+
     global _latest_price
     _latest_price = current_price
+
+
+# ── AWE 自适应追踪止损 ──────────────────────────────────────
+
+def _update_trailing_stops(
+    bridge, pos: list, current_price: float, pipeline: dict,
+    atr_price: float, tick: int, log,
+) -> None:
+    """每 tick 检查追踪止损, 需要时 amend SL.
+
+    追踪松紧度由 AWE composite_conviction() 动态决定:
+        ≥0.7 → 紧追踪 (1.5×ATR), 快速锁利
+        0.4~0.7 → 中等 (2.0×ATR)
+        <0.4 → 松追踪 (3.0×ATR), 只保本
+    """
+    global _trailing_state
+    awe = pipeline.get("awe")
+    if awe is None:
+        return
+
+    try:
+        conviction = awe.composite_conviction()
+    except Exception:
+        return
+
+    if conviction >= 0.7:
+        trail_atr = 1.5
+        activate_atr = 1.0
+    elif conviction >= 0.4:
+        trail_atr = 2.0
+        activate_atr = 1.5
+    else:
+        trail_atr = 3.0
+        activate_atr = 2.0
+
+    for p in pos:
+        pid = p.get("position_id") or p.get("ticket")
+        if pid is None:
+            continue
+        pid = int(pid)
+        direction = p.get("direction", 0)
+        entry = float(p.get("entry_price", 0) or p.get("open_price", 0))
+        if entry <= 0 or direction == 0:
+            continue
+
+        state = _trailing_state.setdefault(pid, {
+            "best_price": entry,
+            "activated": False,
+            "entry_price": entry,
+            "direction": direction,
+        })
+
+        # 更新最优价
+        if direction == 1:  # LONG
+            if current_price > state["best_price"]:
+                state["best_price"] = current_price
+            price_move = current_price - entry
+        else:  # SHORT
+            if current_price < state["best_price"]:
+                state["best_price"] = current_price
+            price_move = entry - current_price
+
+        # 激活检查
+        if not state["activated"] and price_move >= atr_price * activate_atr:
+            state["activated"] = True
+            log(f"tick {tick}: trail activated pos={pid} "
+                f"move={price_move:.2f} conviction={conviction:.2f}")
+
+        if not state["activated"]:
+            continue
+
+        # 计算目标 SL
+        if direction == 1:
+            target_sl = state["best_price"] - atr_price * trail_atr
+            current_sl = float(p.get("sl", 0))
+            current_tp = float(p.get("tp", 0) or p.get("takeProfit", 0))
+            if target_sl > current_sl + 0.01:
+                try:
+                    bridge.amend_position_sltp(
+                        position_id=pid, sl=round(target_sl, 2),
+                        tp=round(current_tp, 2) if current_tp > 0 else 0.0,
+                    )
+                    log(f"tick {tick}: trail LONG pos={pid} sl={target_sl:.2f} "
+                        f"best={state['best_price']:.2f} conv={conviction:.2f}")
+                except Exception as _e2:
+                    logger.debug("[live] trail LONG amend failed for pos %s: %s", pid, _e2)
+        else:
+            target_sl = state["best_price"] + atr_price * trail_atr
+            current_sl = float(p.get("sl", 0))
+            current_tp = float(p.get("tp", 0) or p.get("takeProfit", 0))
+            if current_sl == 0 or target_sl < current_sl - 0.01:
+                try:
+                    bridge.amend_position_sltp(
+                        position_id=pid, sl=round(target_sl, 2),
+                        tp=round(current_tp, 2) if current_tp > 0 else 0.0,
+                    )
+                    log(f"tick {tick}: trail SHORT pos={pid} sl={target_sl:.2f} "
+                        f"best={state['best_price']:.2f} conv={conviction:.2f}")
+                except Exception as _e2:
+                    logger.debug("[live] trail SHORT amend failed for pos %s: %s", pid, _e2)
 
 
 def _write_live_trade_log_factor(
@@ -2013,5 +2534,56 @@ def _write_live_trade_log_factor(
         _LIVE_TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with _LIVE_TRADE_LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except Exception as _e2:
+        logger.debug("[live] _write_live_trade_log_factor failed: %s", _e2)
+
+
+# ── 业务告警 ─────────────────────────────────────────────
+
+def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
+    """每 tick 检查业务告警规则, 通过 Alerter 发送。
+
+    规则:
+      1. 连亏 ≥ 3 笔 → WARNING
+      2. 当日回撤 ≥ 3% → WARNING, ≥ 5% → ERROR
+      3. 熔断触发 → CRITICAL (已在 circuit 逻辑中触发, 此处仅补发)
+    """
+    try:
+        from monitor.alerter import Alerter
+        _alerter = Alerter({"log_file": "logs/alerts.log", "min_level": "WARNING"})
+
+        # 规则 1: 连亏
+        consec = int(_live_state.get("consecutive_loss", 0))
+        if consec >= 3 and tick % 10 == 0:  # 每 10 tick 发一次, 避免刷屏
+            _alerter.send("WARNING", f"⚠️ 连续亏损 {consec} 笔",
+                          f"Tick: {tick}\nConsecutive Loss: {consec}\n"
+                          f"Session PnL: ${_live_state.get('session_pnl', 0):.2f}")
+
+        # 规则 2: 当日回撤
+        dd_pct = float(_live_state.get("session_max_drawdown_pct", 0))
+        balance = float(acct.get("balance", 0))
+        if dd_pct >= 5.0 and tick % 10 == 0:
+            _alerter.send("ERROR", f"🔴 当日回撤 {dd_pct:.1f}%",
+                          f"Tick: {tick}\nDrawdown: {dd_pct:.1f}%\n"
+                          f"Balance: ${balance:.2f}\n"
+                          f"Session PnL: ${_live_state.get('session_pnl', 0):.2f}")
+        elif dd_pct >= 3.0 and tick % 10 == 0:
+            _alerter.send("WARNING", f"⚠️ 当日回撤 {dd_pct:.1f}%",
+                          f"Tick: {tick}\nDrawdown: {dd_pct:.1f}%\n"
+                          f"Balance: ${balance:.2f}")
+
+        # 规则 3: 熔断确认
+        if _live_state.get("circuit_breaker") and tick % 10 == 0:
+            reason = _live_state.get("circuit_reason", "unknown")
+            _alerter.send("CRITICAL", "🔴 熔断触发",
+                          f"Tick: {tick}\nReason: {reason}\n"
+                          f"Session PnL: ${_live_state.get('session_pnl', 0):.2f}")
+
+        # 每 50 tick 输出执行质量摘要
+        if tick > 0 and tick % 50 == 0:
+            summary = _exec_quality.summary()
+            if _exec_quality.report().get("n_filled", 0) > 0:
+                log(f"tick {tick}: {summary}")
+
+    except Exception as _e:
+        logger.debug("[live] _check_business_alerts failed: %s", _e)

@@ -1,23 +1,8 @@
 import { useEffect, useState } from "react";
-import { Button, Card, ProgressBar, Input, Select, Table } from "@/components/ui";
+import { Button, Card, ProgressBar, Input, Select, Table, TabBar } from "@/components/ui";
 import type { Column } from "@/components/ui";
 import { useJobPolling, useApi } from "@/lib/hooks";
 import { authFetch } from "@/lib/auth";
-
-function TabBar({ tabs, active, onChange }: { tabs: {key:string,label:string}[], active: string, onChange: (k:string)=>void }) {
-  return (
-    <div className="flex gap-1 mb-4 p-1 rounded-lg" style={{ background: "rgba(255,255,255,0.5)" }}>
-      {tabs.map(t => (
-        <button key={t.key} onClick={() => onChange(t.key)}
-          className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all duration-200 ${
-            active === t.key ? "bg-[#d4edda] text-[#1a1e24]" : "bg-[#dce0e6] text-[#4a4f59] hover:bg-[#d0d5dd] hover:text-[#1a1e24]"
-          }`}>
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 export default function ExperimentsPanel() {
   const [activeTab, setActiveTab] = useState("tuning");
@@ -65,7 +50,7 @@ function TuningSection() {
     }
 
     let cancelled = false;
-    const name = reportPath.split(/[\\/]/).pop()!;
+    const name = reportPath.split(/[\\\\/]/).pop()!;
 
     authFetch(`/api/reports/${encodeURIComponent(name)}`)
       .then(async (rr) => {
@@ -200,6 +185,8 @@ function CalibratorSection() {
   const [editing, setEditing] = useState<string>("");
   const [saved, setSaved] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [loadMsg, setLoadMsg] = useState<string | null>(null);
+  const [loadingCal, setLoadingCal] = useState(false);
 
   useEffect(() => {
     if (data?.buckets) {
@@ -208,6 +195,26 @@ function CalibratorSection() {
       setEditing("[]");
     }
   }, [data?.buckets]);
+
+  async function loadCalibrator() {
+    setLoadingCal(true);
+    setLoadMsg(null);
+    try {
+      const r = await authFetch("/api/calibrator/load", { method: "POST" });
+      if (r.ok) {
+        const d = await r.json();
+        setLoadMsg(`✓ 已加载: ${d.path ?? "ok"}`);
+        await refresh();
+      } else {
+        const err = await r.json().catch(() => ({}));
+        setLoadMsg(`✗ 加载失败 (${r.status}): ${err.detail?.msg ?? r.statusText}`);
+      }
+    } catch (e: any) {
+      setLoadMsg(`✗ 请求失败: ${e.message}`);
+    } finally {
+      setLoadingCal(false);
+    }
+  }
 
   async function saveBuckets() {
     setSaving(true);
@@ -388,12 +395,27 @@ function CalibratorSection() {
             >
               重载
             </Button>
+            <Button
+              variant="secondary"
+              onClick={loadCalibrator}
+              disabled={loadingCal}
+              loading={loadingCal}
+            >
+              加载校准
+            </Button>
             {saved && (
               <span
                 className="text-xs"
                 style={{ color: "#8b949e" }}
               >
                 {saved}
+              </span>
+            )}
+            {loadMsg && (
+              <span
+                className={`text-xs ${loadMsg.startsWith("✓") ? "text-up" : "text-down"}`}
+              >
+                {loadMsg}
               </span>
             )}
           </div>
@@ -416,11 +438,21 @@ function ABSection() {
   const [nBars, setNBars] = useState(5000);
   const [jobId, setJobId] = useState<string | null>(null);
   const [report, setReport] = useState<string | null>(null);
+  const [abHistory, setAbHistory] = useState<any[] | null>(null);
 
   const poller = useJobPolling((id: string) => `/api/ab/${id}`);
   const isRunning =
     poller.progress?.status === "running" ||
     poller.progress?.status === "queued";
+
+  useEffect(() => {
+    authFetch("/api/ab").then(async (r) => {
+      if (r.ok) {
+        const d = await r.json();
+        setAbHistory(Array.isArray(d) ? d : d.results ?? d.history ?? d.runs ?? []);
+      }
+    }).catch(() => {});
+  }, []);
 
   // When the poll signals done, fetch the full report file from the backend.
   useEffect(() => {
@@ -433,7 +465,7 @@ function ABSection() {
     }
 
     let cancelled = false;
-    const name = reportPath.split(/[\\/]/).pop()!;
+    const name = reportPath.split(/[\\\\/]/).pop()!;
 
     authFetch(`/api/reports/${encodeURIComponent(name)}`)
       .then(async (rr) => {
@@ -535,6 +567,24 @@ function ABSection() {
           <pre className="text-xs whitespace-pre-wrap num text-fg">
             {report}
           </pre>
+        </Card>
+      )}
+
+      {abHistory && abHistory.length > 0 && (
+        <Card title="历史 A/B 测试">
+          <Table
+            columns={[
+              { key: "id", header: "ID", render: (r: any) => <span className="text-xs font-mono">{r.id ?? r.job_id ?? "--"}</span> },
+              { key: "path_a", header: "path A", render: (r: any) => r.path_a ?? r.a ?? "--" },
+              { key: "path_b", header: "path B", render: (r: any) => r.path_b ?? r.b ?? "--" },
+              { key: "delta_pnl", header: "ΔPnL", align: "right", render: (r: any) => <span className="num">{(r.delta_pnl ?? 0).toFixed(2)}</span> },
+              { key: "delta_sharpe", header: "ΔSharpe", align: "right", render: (r: any) => <span className="num">{(r.delta_sharpe ?? 0).toFixed(4)}</span> },
+              { key: "ts", header: "时间", render: (r: any) => <span className="text-xs text-fg-muted">{r.ts ?? r.timestamp ?? r.created_at ?? "--"}</span> },
+            ]}
+            data={abHistory}
+            keyExtractor={(r: any, i: number) => r.id ?? r.job_id ?? String(i)}
+            emptyMessage="暂无历史"
+          />
         </Card>
       )}
     </div>

@@ -21,6 +21,7 @@ export function Candlestick({ bars, height = 480 }: Props) {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const lastTimeRef = useRef<number>(0);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -46,20 +47,36 @@ export function Candlestick({ bars, height = 480 }: Props) {
     chartRef.current = chart;
     candleSeriesRef.current = candle;
     volSeriesRef.current = vol;
+    lastTimeRef.current = 0;
     return () => { chart.remove(); chartRef.current = null; };
   }, [height]);
 
   useEffect(() => {
-    if (!candleSeriesRef.current || !volSeriesRef.current) return;
-    const candleData = bars.map((b) => ({ time: b.t as Time, open: b.o, high: b.h, low: b.l, close: b.c }));
-    const volData = bars.map((b) => ({
-      time: b.t as Time,
-      value: b.v,
-      color: b.c >= b.o ? CHART_THEME.volumeUp : CHART_THEME.volumeDown,
-    }));
-    candleSeriesRef.current.setData(candleData);
-    volSeriesRef.current.setData(volData);
-    if (bars.length > 0) chartRef.current?.timeScale().fitContent();
+    const candle = candleSeriesRef.current;
+    const vol = volSeriesRef.current;
+    if (!candle || !vol || bars.length === 0) return;
+
+    const prevLast = lastTimeRef.current;
+    const newLast = bars[bars.length - 1]?.t ?? 0;
+
+    // 增量更新: 最后 bar 时间变了 → 只 update 最后一根 (保留其他不动)
+    if (prevLast > 0 && prevLast === newLast) {
+      const b = bars[bars.length - 1];
+      candle.update({ time: b.t as Time, open: b.o, high: b.h, low: b.l, close: b.c });
+      vol.update({ time: b.t as Time, value: b.v, color: b.c >= b.o ? CHART_THEME.volumeUp : CHART_THEME.volumeDown });
+    } else {
+      // 全量: 初次加载、时间范围变更、bar 数量变化
+      const candleData = bars.map((b) => ({ time: b.t as Time, open: b.o, high: b.h, low: b.l, close: b.c }));
+      const volData = bars.map((b) => ({
+        time: b.t as Time,
+        value: b.v,
+        color: b.c >= b.o ? CHART_THEME.volumeUp : CHART_THEME.volumeDown,
+      }));
+      candle.setData(candleData);
+      vol.setData(volData);
+      if (bars.length > 0) chartRef.current?.timeScale().fitContent();
+    }
+    lastTimeRef.current = newLast;
   }, [bars]);
 
   return <div ref={containerRef} />;

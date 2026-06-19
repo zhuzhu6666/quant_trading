@@ -201,35 +201,39 @@ class FactorHealth:
         else:
             comp_decay = 50.0  # 数据不够, 中性分
 
-        # 5. independence (10) — v2: 跟 ACTIVE 因子真相关矩阵
+        # 5. independence (10) — v3: 跟 ACTIVE 因子真实相关矩阵
         # ──────────────────────────────────────────────────
-        # v1 简化 (audit 2026-06-06): 用 |ic - mean(other_ics)| 当"相关", 不是真相关
-        #   缺陷: BETA=0.5 跟 BETA=0.5 +offset 都算 0 分, 错把"不漂移"当"独立"
-        # v2: 算真 corrcoef between this factor's vals 和 other factor's vals
-        #   |corr| = 0 → 100 (完美独立), |corr| = 1 → 0 (完全共线)
+        # v3 (2026-06-15): 用 ic_tracker.export_vals() 取因子值序列,
+        #   计算 np.corrcoef 真实相关性。|corr|=0→100分（完美独立）,
+        #   |corr|=1→0分（完全共线）。
+        #   与 v1/v2 的 |ic-mean| 伪相关相比: 真相关直接度量因子值冗余,
+        #   不受 IC 水平漂移影响。
         if self.active_factor_names:
-            other_ics: list[float] = []
-            for other in self.active_factor_names:
-                if other == name:
-                    continue
-                # 用 rolling_ic (跟 v1 一致接口), 跟 v1 行为兼容
-                # 完整 corr 矩阵是 v3 工作
-                other_ics.append(self.ic_tracker.rolling_ic(other))
-            if other_ics and abs(ic) > 1e-6:
-                # 伪相关系数: |my_ic - mean(other_ics)| 越大越独立
-                # 跟 v1 同算法, 但用 0.05 阈值 (v1 用的 0.04 跟 mean_abs 重)
-                diff = abs(ic - float(np.mean(other_ics)))
-                comp_indep = min(100.0, diff / 0.05 * 100.0)
+            my_vals = self.ic_tracker.export_vals(name)
+            if len(my_vals) > 1:
+                other_corrs: list[float] = []
+                for other in self.active_factor_names:
+                    if other == name:
+                        continue
+                    other_vals = self.ic_tracker.export_vals(other)
+                    if len(other_vals) < 2:
+                        continue
+                    # 对齐长度, 算 Pearson 相关
+                    min_len = min(len(my_vals), len(other_vals))
+                    corr_mat = np.corrcoef(my_vals[:min_len], other_vals[:min_len])
+                    corr = abs(corr_mat[0, 1])
+                    if not np.isnan(corr):
+                        other_corrs.append(corr)
+                if other_corrs:
+                    avg_corr = float(np.mean(other_corrs))
+                    # |corr| = 0 → 100, |corr| = 1 → 0
+                    comp_indep = min(100.0, max(0.0, (1.0 - avg_corr) * 100.0))
+                else:
+                    comp_indep = 50.0
             else:
-                comp_indep = 50.0
+                comp_indep = 50.0  # 数据不够算 corr
         else:
             comp_indep = 50.0  # 无 ACTIVE 列表时中性分
-
-        # REFACTOR-5 v2 NOTE: 真正 corr 矩阵版独立性
-        # 完整实现需要 ic_tracker 暴露 vals 序列 (现在只存 (val, ret) 对)
-        # 暂用 rolling_ic 差值作伪相关 (跟 v1 兼容), 阈值改 0.05 (v1 的 0.04 跟 mean_abs 重)
-        # 完整 v3: 加 ic_tracker.export_vals(name) → list, 然后算 np.corrcoef
-        # 优先级: P2, 等 verify-1 跑出实际 HEALTHY 数再决定是否做
 
         return {
             "mean_abs_ic": round(comp_mean_abs, 2),
@@ -262,6 +266,10 @@ class FactorHealth:
         for i in range(30, n, step):
             sub_v = vals[max(0, i - window):i]
             sub_r = rets[max(0, i - window):i]
+            sub_mask = ~(np.isnan(sub_v) | np.isnan(sub_r)
+                         | np.isinf(sub_v) | np.isinf(sub_r))
+            sub_v = sub_v[sub_mask]
+            sub_r = sub_r[sub_mask]
             if len(sub_v) < 10:
                 continue
             try:

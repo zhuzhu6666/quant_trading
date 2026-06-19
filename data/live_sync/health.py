@@ -118,6 +118,44 @@ class SyncHealth:
         rec["degraded"] = self.is_degraded()
         return rec
 
+    def summary(self) -> Dict[str, Any]:
+        """返回轻量摘要，与 snapshot 相同但去掉了内部字段。"""
+        return self.snapshot()
+
+    def check_and_log(self) -> None:
+        """检查健康状态 + 数据库每个周期数据新鲜度。供 sync_health cron job 调用。
+        使用 DataStore (DuckDB) 查询 bars 表。"""
+        if self.is_degraded():
+            logger.warning(
+                "[SyncHealth] DEGRADED: %d consecutive failures, last error: %s",
+                self._record.consecutive_failures, self._record.last_error,
+            )
+        elif self.is_stale():
+            last_ok = self._record.last_success_ts
+            age = (time.time() - last_ok) if last_ok else float("inf")
+            logger.warning("[SyncHealth] STALE: last success %.0fs ago", age)
+        else:
+            logger.debug("[SyncHealth] healthy: fresh=%s", self.is_fresh())
+        try:
+            from data.store import DataStore
+            store = DataStore("data/ctrader_data.duckdb")
+            now = time.time()
+            thresholds = {"M5": 900, "M15": 1800, "M30": 3600, "H1": 7200, "D1": 172800}
+            stale_tfs = []
+            for tf in ["M5", "M15", "M30", "H1", "D1"]:
+                df = store.load_bars("XAUUSD+", tf, limit=1)
+                if df is not None and len(df) > 0:
+                    ts = df.index[-1]
+                    ts_epoch = ts.timestamp() if hasattr(ts, 'timestamp') else float(ts)
+                    age = now - ts_epoch
+                    threshold = thresholds.get(tf, 3600)
+                    if age > threshold:
+                        stale_tfs.append(f"{tf}({age/3600:.1f}h)")
+            if stale_tfs:
+                logger.warning("[SyncHealth] data gap: %s", ", ".join(stale_tfs))
+        except Exception:
+            pass  # 数据库不可用时静默跳过
+
     # ----- 持久化 -----
     def _load(self) -> None:
         p = Path(self._path)

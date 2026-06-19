@@ -51,7 +51,8 @@ class ICTracker:
 
         n = len(factor_values)
         for i in range(n):
-            if not (np.isnan(factor_values[i]) or np.isnan(forward_returns[i])):
+            if not (np.isnan(factor_values[i]) or np.isinf(factor_values[i])
+                    or np.isnan(forward_returns[i]) or np.isinf(forward_returns[i])):
                 self._history[name].append((factor_values[i], forward_returns[i]))
         # Emit factor_ic metric
         try:
@@ -69,9 +70,9 @@ class ICTracker:
         h = self._history.get(name)
         if not h or len(h) < 30:
             return 0.0
-        vals = np.array([v[0] for v in h])
-        rets = np.array([v[1] for v in h])
-        mask = ~(np.isnan(vals) | np.isnan(rets))
+        vals = np.array([v[0] for v in h], dtype=np.float64)
+        rets = np.array([v[1] for v in h], dtype=np.float64)
+        mask = ~(np.isnan(vals) | np.isnan(rets) | np.isinf(vals) | np.isinf(rets))
         if mask.sum() < 10:
             return 0.0
         return float(np.corrcoef(vals[mask], rets[mask])[0, 1])
@@ -86,6 +87,15 @@ class ICTracker:
             "active": abs(ic) >= 0.02,
             "decay": "stable" if abs(ic) >= 0.1 else "fading" if abs(ic) >= 0.02 else "dead",
         }
+
+    def export_vals(self, name: str) -> np.ndarray:
+        """导出因子值的序列 (不含 NaN, 用于 FactorHealth 计算因子间相关性)."""
+        h = self._history.get(name)
+        if not h:
+            return np.array([])
+        vals = np.array([v[0] for v in h])
+        mask = ~np.isnan(vals)
+        return vals[mask]
 
     def all_status(self) -> list[dict]:
         return [self.status(name) for name in self._history]
