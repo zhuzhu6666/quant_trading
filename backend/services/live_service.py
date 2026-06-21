@@ -1641,6 +1641,9 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 _live_state["session_max_drawdown_pct"] = 0.0
         except Exception as _e2:
             log(f"tick {tick}: session reset failed (non-fatal): {_e2}")
+
+        # ── 主循环体: 账户刷新 + 数据读取 + 交易 ──
+        try:
             bridge, err, warming = _get_ctrader()
             if err:
                 log(f"tick {tick}: {err}; reconnect next tick")
@@ -1660,34 +1663,34 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 log(f"tick {tick}: local DB has no bars (waiting for CTraderPuller)")
                 _write_live_trade_log(tick, 0, _live_state.get("account") or {}, [], None, None)
             else:
-                    # v9: 用 cTrader spot 覆盖最新 close, 但验证合理性 (spot 在 bar close ±20% 内)
-                    spot = bridge.get_spot_price() if hasattr(bridge, "get_spot_price") else 0
-                    last_close = float(df_new.iloc[-1]["close"])
-                    if spot and spot > 0 and last_close > 0 and abs(spot - last_close) / last_close < 0.20:
-                        df_new.loc[df_new.index[-1], "close"] = spot
-                        df_new.loc[df_new.index[-1], "high"] = max(df_new.iloc[-1]["high"], spot)
-                        df_new.loc[df_new.index[-1], "low"] = min(df_new.iloc[-1]["low"], spot)
-                    elif spot and spot > 0:
-                        log(f"tick {tick}: spot={spot:.2f} too far from bar close={last_close:.2f}, using DataStore price")
+                # v9: 用 cTrader spot 覆盖最新 close, 但验证合理性 (spot 在 bar close ±20% 内)
+                spot = bridge.get_spot_price() if hasattr(bridge, "get_spot_price") else 0
+                last_close = float(df_new.iloc[-1]["close"])
+                if spot and spot > 0 and last_close > 0 and abs(spot - last_close) / last_close < 0.20:
+                    df_new.loc[df_new.index[-1], "close"] = spot
+                    df_new.loc[df_new.index[-1], "high"] = max(df_new.iloc[-1]["high"], spot)
+                    df_new.loc[df_new.index[-1], "low"] = min(df_new.iloc[-1]["low"], spot)
+                elif spot and spot > 0:
+                    log(f"tick {tick}: spot={spot:.2f} too far from bar close={last_close:.2f}, using DataStore price")
 
-                    # 熔断检查 + 策略运算
-                    cb_tripped = _live_state.get("circuit_breaker", False)
-                    if cb_tripped:
-                        log(f"tick {tick}: circuit breaker tripped, skip trading")
+                # 熔断检查 + 策略运算
+                cb_tripped = _live_state.get("circuit_breaker", False)
+                if cb_tripped:
+                    log(f"tick {tick}: circuit breaker tripped, skip trading")
+                    _write_live_trade_log(tick, spot or 0, _live_state.get("account") or {}, [], None, None)
+                else:
+                    session_pnl = float(_live_state.get("session_pnl", 0.0))
+                    start_balance = float(_live_state.get("session_start_balance", 0.0)) or 1000.0
+                    dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0
+                    _live_state["session_max_drawdown_pct"] = max(float(_live_state.get("session_max_drawdown_pct", 0.0)), dd_pct)
+                    if session_pnl < 0 and dd_pct >= 5.0:
+                        _live_state["circuit_breaker"] = True
+                        _live_state["circuit_reason"] = f"daily drawdown {dd_pct:.1f}%"
+                        log(f"tick {tick}: CIRCUIT BREAKER: daily drawdown {dd_pct:.1f}%")
                         _write_live_trade_log(tick, spot or 0, _live_state.get("account") or {}, [], None, None)
                     else:
-                        session_pnl = float(_live_state.get("session_pnl", 0.0))
-                        start_balance = float(_live_state.get("session_start_balance", 0.0)) or 1000.0
-                        dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0
-                        _live_state["session_max_drawdown_pct"] = max(float(_live_state.get("session_max_drawdown_pct", 0.0)), dd_pct)
-                        if session_pnl < 0 and dd_pct >= 5.0:
-                            _live_state["circuit_breaker"] = True
-                            _live_state["circuit_reason"] = f"daily drawdown {dd_pct:.1f}%"
-                            log(f"tick {tick}: CIRCUIT BREAKER: daily drawdown {dd_pct:.1f}%")
-                            _write_live_trade_log(tick, spot or 0, _live_state.get("account") or {}, [], None, None)
-                        else:
-                            last_bar = df_new.iloc[-1]
-                            _process_tick(bridge, None, df_new, last_bar, broker, tick, log)
+                        last_bar = df_new.iloc[-1]
+                        _process_tick(bridge, None, df_new, last_bar, broker, tick, log)
         except Exception as e:
             log(f"tick {tick} error: {type(e).__name__}: {e}\n{traceback.format_exc()[-300:]}")
 

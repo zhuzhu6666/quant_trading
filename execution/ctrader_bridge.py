@@ -167,33 +167,56 @@ class CTraderBridge(BaseBrokerBridge):
         self._l2_db = None
         self._l2_db_lock = threading.Lock()
 
+        # ── 持久 reactor 线程 (auth 后不停, 保持连接活跃) ──
+        self._reactor_started = False
+        self._reactor_thread: threading.Thread | None = None
+
     def has_token(self) -> bool:
         """检查必要凭证是否已设置 (client_id + client_secret + access_token).
         用于 live_service 的 pre-flight 检查, 不做网络调用."""
         return bool(self.client_id and self.client_secret and self.access_token)
 
+    def _ensure_reactor(self):
+        """确保 Twisted reactor 在后台 daemon 线程运行。幂等。
+        Reactor 进程级单例, 启动后不再停止, 保持 cTrader 长连接活跃。"""
+        if self._reactor_started:
+            return
+        self._reactor_started = True
+        try:
+            from twisted.internet import reactor as default_reactor
+        except Exception as e:
+            self._reactor_started = False
+            raise RuntimeError(f"Twisted reactor import failed: {e}")
+        self._reactor = default_reactor
+        if self._reactor.running:
+            return
+        # 用 callWhenRunning 等 reactor 就绪
+        _ready = threading.Event()
+        self._reactor.callWhenRunning(lambda: _ready.set())
+
+        def _run():
+            self._reactor.run(installSignalHandlers=False)
+
+        t = threading.Thread(target=_run, daemon=True, name="ctrader-reactor")
+        t.start()
+        self._reactor_thread = t
+        if not _ready.wait(timeout=5.0):
+            raise RuntimeError("Reactor failed to start within 5s")
+
     # ── 连接管理 ──
 
     def connect(self) -> bool:
-        """连 broker + App auth + Account auth; 在当前线程跑 reactor."""
+        """连 broker + App auth + Account auth + Symbol resolve。
+        首次调用启动持久 reactor 线程 (auth 后不停, 保持 TCP 长连接);
+        后续调用复用已运行的 reactor, 只做 auth 链。"""
         with self._connected_lock:
             if self._connected:
                 logger.info("Already connected")
                 return True
-        try:
-            from twisted.internet import reactor as default_reactor
-            from twisted.internet import defer
-        except Exception as e:
-            logger.error(f"Twisted reactor import failed: {e}")
-            return False
 
-        self._reactor = default_reactor
-        if self._reactor.running:
-            self._reactor.callFromThread(self._reactor.stop)
-            time.sleep(0.5)
-
-        # TLS SNI patch
+        # TLS SNI patch (reactor 启动前)
         _patch_ctrader_ssl_endpoint()
+        self._ensure_reactor()
 
         # 结果通过 Event 传递
         self._conn_ready = threading.Event()
@@ -201,7 +224,7 @@ class CTraderBridge(BaseBrokerBridge):
         self._conn_ok = False
 
         def _do_connect():
-            """在 reactor 回调里: 创建 Client → 等连接 → auth"""
+            """在 reactor 线程内: 创建 Client → 等连接 → auth"""
             nonlocal self
             try:
                 if self._client:
@@ -216,14 +239,11 @@ class CTraderBridge(BaseBrokerBridge):
             def _on_conn(c):
                 logger.info("cTrader TCP+TLS connected, starting auth")
                 self._conn_ok = True
-                # Deferred chain: app auth → account auth → symbol → complete
-                # Twisted reactor 线程内不能阻塞 (busy-wait sleep), 必须全异步.
                 from twisted.internet import defer
                 import uuid
                 from ctrader_open_api import Protobuf
 
                 def _unwrap(resp):
-                    """client.send() 回调返回 ProtoMessage wrapper, 需要 extract 出真实消息."""
                     return Protobuf.extract(resp)
 
                 def _step_app(_dummy=None):
@@ -256,7 +276,6 @@ class CTraderBridge(BaseBrokerBridge):
                             raise RuntimeError("accessToken 没绑任何 ctid 账户")
                         if self.account_id not in accts:
                             raise RuntimeError(f"account_id={self.account_id} 不在列表 {accts}")
-                        # step 9: AccountAuth
                         r2 = TradeMsg.ProtoOAAccountAuthReq()
                         r2.ctidTraderAccountId = self.account_id
                         r2.accessToken = self.access_token
@@ -274,7 +293,6 @@ class CTraderBridge(BaseBrokerBridge):
                     return d
 
                 def _step_symbol(_dummy):
-                    # 查 symbolId
                     req = TradeMsg.ProtoOASymbolsListReq()
                     req.ctidTraderAccountId = self.account_id
                     d = self._client.send(req, clientMsgId=str(uuid.uuid4()),
@@ -297,14 +315,16 @@ class CTraderBridge(BaseBrokerBridge):
                     self._record_success()
                     self._start_heartbeat()
                     logger.info("cTrader fully authenticated")
+                    # ★ 在 reactor 线程内设置 _connected, 避免竞态
+                    with self._connected_lock:
+                        self._connected = True
                     self._conn_ready.set()
-                    # 认证完成后停止 reactor (允许 connect() 返回给调用方)
-                    self._reactor.callLater(0.5, self._reactor.stop)
+                    # ★ 不再 stop reactor — 保持 TCP 长连接活跃
 
                 def _on_error(f):
                     logger.error(f"cTrader auth failed: {f.getErrorMessage()}")
                     self._conn_ready.set()
-                    self._reactor.callLater(0.5, self._reactor.stop)
+                    # ★ 不再 stop reactor — reactor 线程保持, 下次 connect() 重试
 
                 chain = defer.succeed(None)
                 chain.addCallback(_step_app)
@@ -323,21 +343,24 @@ class CTraderBridge(BaseBrokerBridge):
                 self._conn_ready.set()
 
         # 超时兜底
-        self._reactor.callLater(self.request_timeout_sec + 5, 
+        timeout = self.request_timeout_sec + 10
+        self._reactor.callLater(timeout,
             lambda: (self._conn_ready.set() if not self._conn_ready.is_set() else None))
 
-        # 在当前线程跑 reactor (connect 从后台线程调用, 不阻塞主线程)
-        self._reactor.callWhenRunning(_do_connect)
-        self._reactor.run(installSignalHandlers=False)
+        # 在已运行的 reactor 线程内执行 _do_connect
+        self._reactor.callFromThread(_do_connect)
 
-        # reactor 退出后检查结果
-        if not self._conn_ok or not self._auth_ok:
-            logger.error(f"Connect/auth failed: conn={self._conn_ok} auth={self._auth_ok}")
-            self.disconnect()
+        # 等 auth 完成 (reactor 线程会 set _conn_ready)
+        if not self._conn_ready.wait(timeout=timeout + 5):
+            logger.error(f"Connect/auth timeout after {timeout}s")
+            self._mark_disconnected()
             return False
 
-        with self._connected_lock:
-            self._connected = True
+        if not self._conn_ok or not self._auth_ok:
+            logger.error(f"Connect/auth failed: conn={self._conn_ok} auth={self._auth_ok}")
+            self._mark_disconnected()
+            return False
+
         return True
 
     def _version_handshake(self) -> bool:
@@ -675,9 +698,13 @@ class CTraderBridge(BaseBrokerBridge):
             return d
 
         # 如果在 reactor 线程内 (如 _on_conn 回调), callFromThread + busy-wait 会死锁
-        # → 直接调用 _do_send, 然后用 doIteration 给 reactor 时间处理响应
-        in_reactor = bool(getattr(self._reactor, 'running', False))
-        if not in_reactor:
+        # → 直接调用 _do_send, 然后用 doIteration 给 reactor 时间处理响应。
+        # ★ 持久 reactor 修复: 用线程 ID 判断 (不是 reactor.running, 因为 reactor 在后台线程跑)
+        in_reactor_thread = (
+            self._reactor_thread is not None
+            and threading.current_thread() == self._reactor_thread
+        )
+        if not in_reactor_thread:
             self._reactor.callFromThread(_do_send)
             deadline = time.time() + timeout + 1.0
             while not result_holder and time.time() < deadline:
