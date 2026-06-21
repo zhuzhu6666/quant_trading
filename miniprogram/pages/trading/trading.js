@@ -7,94 +7,51 @@ Page({
     connected: false,
     connLabel: '等待数据',
     source: '',
-    // 账户 — 直接来自 /api/live/account
+    // 账户 — WS 实时推送, HTTP 兜底
     equity: '—', balance: '—', pnl: '—', pnlCls: 'text-gray',
     margin: '—', marginFree: '—', leverage: '—',
     currency: '',
-    // 持仓 — 直接来自 /api/live/positions (支持多笔)
+    // 持仓 — WS 实时推送 / HTTP 兜底
     positions: [],
-    // 统计 — 来自 global state (每日会话)
+    // 统计
     trades: 0, wins: 0, losses: 0,
     winRate: '—', winRateCls: 'text-gray', winRateBar: 0, winRateBarCls: 'progress-green',
     drawdown: '—',
     price: '—',
-    // 风控 — 来自 global state
+    // 风控
     circuitBreaker: false, consecLoss: 0,
   },
 
-  _actTimer: null,
+  _fallbackTimer: null,
 
   onLoad() {
-    this._fetchAccount();
     this._update();
-    this._actTimer = setInterval(() => this._fetchAccount(), 15000);
+    this._fallbackTimer = setInterval(() => this._fallbackFetch(), 60000);
   },
 
   onShow() {
-    this._fetchAccount();
     this._update();
   },
 
   onHide() {
-    if (this._actTimer) { clearInterval(this._actTimer); this._actTimer = null; }
+    this._clearFallback();
   },
 
   onUnload() {
-    if (this._actTimer) { clearInterval(this._actTimer); this._actTimer = null; }
+    this._clearFallback();
+  },
+
+  _clearFallback() {
+    if (this._fallbackTimer) { clearInterval(this._fallbackTimer); this._fallbackTimer = null; }
   },
 
   onGlobalStateUpdate() { this._update(); },
 
-  async _fetchAccount() {
-    const [acct, pos] = await Promise.all([
-      api.get('/api/live/account'),
-      api.get('/api/live/positions'),
-    ]);
-
-    const hasAcct = acct && acct.ok;
-    const hasPos = pos && (pos.positions || pos.ok);
-
-    this.setData({
-      equity: hasAcct && acct.equity ? Number(acct.equity).toFixed(2) : this.data.equity,
-      balance: hasAcct && acct.balance ? Number(acct.balance).toFixed(2) : this.data.balance,
-      margin: hasAcct && acct.margin ? Number(acct.margin).toFixed(2) : '—',
-      marginFree: hasAcct && acct.margin_free ? Number(acct.margin_free).toFixed(2) : '—',
-      leverage: hasAcct && acct.leverage ? acct.leverage : '—',
-      currency: hasAcct && acct.currency ? acct.currency : '',
-    });
-
-    // 持仓解析 — 支持多笔
-    if (hasPos) {
-      var plist = pos.positions || [];
-      if (plist.length > 0) {
-        var list = [];
-        for (var i = 0; i < plist.length; i++) {
-          var p = plist[i];
-          var dir = (p.type === 'buy' || p.direction === 'LONG' || p.tradeSide === 'BUY') ? 'LONG' : 'SHORT';
-          var entry = p.price_open || p.openPrice || 0;
-          var size = p.volume || p.size || 0;
-          var upl = p.profit || p.unrealizedPnl || 0;
-          var sym = p.symbol || p.symbolName || '';
-          list.push({
-            dir: dir === 'LONG' ? '多头' : '空头',
-            dirCls: dir === 'LONG' ? 'text-green' : 'text-red',
-            entry: entry ? Number(entry).toFixed(2) : '—',
-            size: size ? Number(size).toFixed(2) : '—',
-            pnl: (upl >= 0 ? '+' : '') + Number(upl).toFixed(2),
-            pnlCls: upl > 0 ? 'text-green' : upl < 0 ? 'text-red' : 'text-gray',
-            symbol: sym,
-          });
-        }
-        this.setData({ positions: list });
-      } else {
-        this.setData({ positions: [] });
-      }
-    }
-  },
-
+  // ── 主数据源: WS 推送 → global state → 实时更新 ──
   _update() {
     const g = app.globalData;
     const t = g.trading || {};
+    const pos = t.position || {};
     const daily = t.daily || {};
     const risk = t.risk || {};
 
@@ -111,12 +68,18 @@ Page({
     else if (t.source === 'frozen') connLabel = '数据冻结 · 已停止';
     else if (t.source === 'none') connLabel = '等待连接';
 
-    // source 和 pipeline 状态不变（来自 global state 的 closed_loop / source）
-    // 账户和持仓数据由 _fetchAccount() 独立管理，这里只更新统计和风控
+    // 账户 — 来自 WS (global state)
+    const eq = t.equity || 0;
+    const bal = t.balance || 0;
+
+    // 持仓 — 来自 WS (单笔) 或 HTTP 兜底 (多笔)
+    const hasPos = t.n_positions > 0;
+
     this.setData({
-      connected,
-      connLabel,
-      source: t.source || 'none',
+      connected, connLabel, source: t.source || 'none',
+      // 账户 (WS 实时)
+      equity: eq > 0 ? Number(eq).toFixed(2) : '—',
+      balance: bal > 0 ? Number(bal).toFixed(2) : '—',
       pnl: (pnl >= 0 ? '+' : '') + pnl.toFixed(2),
       pnlCls: pnl > 0 ? 'text-green' : pnl < 0 ? 'text-red' : 'text-gray',
       // 统计
@@ -131,5 +94,63 @@ Page({
       circuitBreaker: !!risk.circuit_breaker,
       consecLoss: risk.consecutive_loss || 0,
     });
+
+    // 如果 WS 没数据, 触发 HTTP 兜底
+    if (!eq && !bal) {
+      this._fallbackFetch();
+    }
+  },
+
+  // ── HTTP 兜底: WS 断开时从 /api/live/account + positions 补数据 ──
+  async _fallbackFetch() {
+    try {
+      const [acct, pos] = await Promise.all([
+        api.get('/api/live/account'),
+        api.get('/api/live/positions'),
+      ]);
+
+      const hasAcct = acct && acct.ok;
+
+      // 只在 WS 没推送时才覆盖账户数据
+      this.setData({
+        equity: (hasAcct && acct.equity && !this.data.equity || this.data.equity === '—')
+          ? Number(acct.equity).toFixed(2) : this.data.equity,
+        balance: (hasAcct && acct.balance && !this.data.balance || this.data.balance === '—')
+          ? Number(acct.balance).toFixed(2) : this.data.balance,
+        margin: hasAcct && acct.margin ? Number(acct.margin).toFixed(2) : '—',
+        marginFree: hasAcct && acct.margin_free ? Number(acct.margin_free).toFixed(2) : '—',
+        leverage: hasAcct && acct.leverage ? acct.leverage : '—',
+        currency: hasAcct && acct.currency ? acct.currency : '',
+      });
+
+      // 补持仓 (WS 只传单笔, HTTP 有多笔)
+      const hasPos = pos && (pos.positions || pos.ok);
+      if (hasPos) {
+        var plist = pos.positions || [];
+        if (plist.length > 0) {
+          var list = [];
+          for (var i = 0; i < plist.length; i++) {
+            var p = plist[i];
+            var dir = (p.type === 'buy' || p.direction === 'LONG' || p.tradeSide === 'BUY') ? 'LONG' : 'SHORT';
+            var entry = p.price_open || p.openPrice || 0;
+            var size = p.volume || p.size || 0;
+            var upl = p.profit || p.unrealizedPnl || 0;
+            var sym = p.symbol || p.symbolName || '';
+            list.push({
+              dir: dir === 'LONG' ? '多头' : '空头',
+              dirCls: dir === 'LONG' ? 'text-green' : 'text-red',
+              entry: entry ? Number(entry).toFixed(2) : '—',
+              size: size ? Number(size).toFixed(2) : '—',
+              pnl: (upl >= 0 ? '+' : '') + Number(upl).toFixed(2),
+              pnlCls: upl > 0 ? 'text-green' : upl < 0 ? 'text-red' : 'text-gray',
+              symbol: sym,
+            });
+          }
+          this.setData({ positions: list });
+        }
+      }
+    } catch (e) {
+      // 静默失败, WS 主通道下次会更新
+    }
   },
 });
