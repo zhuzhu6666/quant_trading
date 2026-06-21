@@ -11,9 +11,8 @@ Page({
     equity: '—', balance: '—', pnl: '—', pnlCls: 'text-gray',
     margin: '—', marginFree: '—', leverage: '—',
     currency: '',
-    // 持仓 — 直接来自 /api/live/positions
-    hasPos: false, posDir: '—', posDirCls: 'text-gray',
-    posEntry: '—', posSize: '—', posPnl: '—', posPnlCls: 'text-gray',
+    // 持仓 — 直接来自 /api/live/positions (支持多笔)
+    positions: [],
     // 统计 — 来自 global state (每日会话)
     trades: 0, wins: 0, losses: 0,
     winRate: '—', winRateCls: 'text-gray', winRateBar: 0, winRateBarCls: 'progress-green',
@@ -64,26 +63,31 @@ Page({
       currency: hasAcct && acct.currency ? acct.currency : '',
     });
 
-    // 持仓解析
+    // 持仓解析 — 支持多笔
     if (hasPos) {
       var plist = pos.positions || [];
       if (plist.length > 0) {
-        var p = plist[0];
-        var dir = (p.type === 'buy' || p.direction === 'LONG' || p.tradeSide === 'BUY') ? 'LONG' : 'SHORT';
-        var entry = p.price_open || p.openPrice || 0;
-        var size = p.volume || p.size || 0;
-        var upl = p.profit || p.unrealizedPnl || 0;
-        this.setData({
-          hasPos: true,
-          posDir: dir === 'LONG' ? '多头' : '空头',
-          posDirCls: dir === 'LONG' ? 'text-green' : 'text-red',
-          posEntry: entry ? Number(entry).toFixed(2) : '—',
-          posSize: size ? Number(size).toFixed(2) : '—',
-          posPnl: (upl >= 0 ? '+' : '') + Number(upl).toFixed(2),
-          posPnlCls: upl > 0 ? 'text-green' : upl < 0 ? 'text-red' : 'text-gray',
-        });
+        var list = [];
+        for (var i = 0; i < plist.length; i++) {
+          var p = plist[i];
+          var dir = (p.type === 'buy' || p.direction === 'LONG' || p.tradeSide === 'BUY') ? 'LONG' : 'SHORT';
+          var entry = p.price_open || p.openPrice || 0;
+          var size = p.volume || p.size || 0;
+          var upl = p.profit || p.unrealizedPnl || 0;
+          var sym = p.symbol || p.symbolName || '';
+          list.push({
+            dir: dir === 'LONG' ? '多头' : '空头',
+            dirCls: dir === 'LONG' ? 'text-green' : 'text-red',
+            entry: entry ? Number(entry).toFixed(2) : '—',
+            size: size ? Number(size).toFixed(2) : '—',
+            pnl: (upl >= 0 ? '+' : '') + Number(upl).toFixed(2),
+            pnlCls: upl > 0 ? 'text-green' : upl < 0 ? 'text-red' : 'text-gray',
+            symbol: sym,
+          });
+        }
+        this.setData({ positions: list });
       } else {
-        this.setData({ hasPos: false, posDir: '空仓', posDirCls: 'text-gray' });
+        this.setData({ positions: [] });
       }
     }
   },

@@ -35,26 +35,31 @@
   <!-- 持仓 -->
   <view class="card">
     <text class="card-title">持仓</text>
-    <view wx:if="{{hasPos}}">
-      <view class="stats-grid" style="margin-bottom:16rpx">
-        <view class="stat-cell">
-          <text class="stat-cell-value {{posDirCls}}" style="font-size:32rpx">{{posDir}}</text>
-          <text class="stat-cell-label">方向</text>
+    <block wx:if="{{positions.length > 0}}">
+      <view wx:for="{{positions}}" wx:key="symbol" wx:for-item="p" style="margin-bottom:{{index < positions.length - 1 ? '16rpx' : '0'}}">
+        <view wx:if="{{p.symbol}}" style="margin-bottom:8rpx">
+          <text style="font-size:22rpx;color:#8E8E93">{{p.symbol}}</text>
         </view>
-        <view class="stat-cell">
-          <text class="stat-cell-value text-dark">{{posEntry}}</text>
-          <text class="stat-cell-label">入场价</text>
+        <view class="stats-grid" style="margin-bottom:12rpx">
+          <view class="stat-cell">
+            <text class="stat-cell-value {{p.dirCls}}" style="font-size:32rpx">{{p.dir}}</text>
+            <text class="stat-cell-label">方向</text>
+          </view>
+          <view class="stat-cell">
+            <text class="stat-cell-value text-dark">{{p.entry}}</text>
+            <text class="stat-cell-label">入场价</text>
+          </view>
+          <view class="stat-cell">
+            <text class="stat-cell-value text-dark">{{p.size}}</text>
+            <text class="stat-cell-label">手数</text>
+          </view>
         </view>
-        <view class="stat-cell">
-          <text class="stat-cell-value text-dark">{{posSize}}</text>
-          <text class="stat-cell-label">手数</text>
+        <view style="text-align:center;padding:12rpx;background:#F2F2F7;border-radius:14rpx">
+          <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:2rpx">浮动盈亏</text>
+          <text style="font-size:36rpx;font-weight:700;font-variant-numeric:tabular-nums" class="{{p.pnlCls}}">{{p.pnl}}</text>
         </view>
       </view>
-      <view style="text-align:center;padding:16rpx;background:#F2F2F7;border-radius:16rpx">
-        <text style="font-size:24rpx;color:#8E8E93;display:block;margin-bottom:4rpx">浮动盈亏</text>
-        <text class="big-number {{posPnlCls}}">{{posPnl}}</text>
-      </view>
-    </view>
+    </block>
     <view wx:else class="empty-state">
       <text>📭 当前无持仓</text>
     </view>
