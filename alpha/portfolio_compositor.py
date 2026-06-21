@@ -184,14 +184,14 @@ class PortfolioCompositor:
         }
 
     def _try_classify_gp(self, name: str) -> list[str] | None:
-        """尝试用 GPClassifier 分类因子名称/表达式。"""
+        """尝试用 GPClassifier 分类因子名称/表达式."""
         try:
             from alpha.gp_classifier import classify_expr
             tags = classify_expr(name)
             if tags and tags != ["GP发现"]:
                 return tags
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("GP classifier unavailable for '%s': %s", name, e)
         return None
 
     def refresh_configs(self, factor_names: list[str] | None = None):

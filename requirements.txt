@@ -1,24 +1,17 @@
-"""
-Quant Trading System — requirements
-
-Python 3.12 required (not hermes venv 3.11)
-"""
+# Quant Trading System — requirements
+# Python 3.11+ required
 
 # Core
 numpy>=1.26
 pandas>=2.1
 pyyaml>=6.0
+duckdb>=1.0
 
-# MT5 (optional — for live/paper trading)
-MetaTrader5>=5.0
-
-# cTrader (optional — for live/paper trading via Open API)
-# Used by execution/ctrader_bridge.py. Pulls in Twisted + protobuf.
+# cTrader Open API (执行通道)
 ctrader-open-api>=0.9
-service_identity>=18.0  # TLS hostname verification, silence Twisted warning
+service_identity>=18.0  # TLS hostname verification
 
-# Web Console backend (Phase 1+, 2026-06-07)
-# Replaces pre-existing dashboard's loose fastapi/uvicorn/websockets pins above
+# API backend (FastAPI)
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
 pydantic>=2.6,<3.0
@@ -27,7 +20,7 @@ websockets>=12.0,<13.0
 httpx>=0.27,<1.0
 python-multipart>=0.0.9,<1.0
 
-# Backtest (optional — for backtrader engine)
+# Backtest
 backtrader>=1.9.78
 
 # Data analysis
@@ -37,5 +30,5 @@ scikit-learn>=1.3
 # Logging
 loguru>=0.7
 
-# Web Console auth (Phase 5.3+)
+# Auth
 pyjwt>=2.8,<3.0

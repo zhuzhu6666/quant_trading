@@ -45,12 +45,8 @@ def list_jobs(_user: RequireUser, status: str | None = None) -> dict:
 
 
 # (audit v7-fix-5: FastAPI routes GET "/" on a prefix="/api/backtest" router
-# to the path "/api/backtest/" only. The frontend calls "/api/backtest"
-# (no trailing slash) and "/api/backtest/<id>", which are different
-# routes. Add a no-path alias that maps to the same handler so the
-# canonical /api/backtest?status=done query string reaches the backend.
-# Otherwise next.config rewrites pass it through, FastAPI 404s, and the
-# frontend's fetch().json() chokes on the HTML 404 body.)
+# to the path "/api/backtest/" only. Add a no-path alias that maps to the
+# same handler so the canonical /api/backtest?status=done query string works.)
 @router.get("")
 def list_jobs_noslash(_user: RequireUser, status: str | None = None) -> dict:
     return list_jobs(_user=_user, status=status)

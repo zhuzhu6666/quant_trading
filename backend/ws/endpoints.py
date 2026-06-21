@@ -7,6 +7,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
+from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from backend.core.logging import setup_logging
@@ -46,6 +47,73 @@ def _position_to_dict(p: object) -> dict:
     }
 
 
+def _read_closed_loop_status() -> dict:
+    """Return compact closed-loop health summary for all pipeline nodes.
+
+    Reads from _live_state + attribution snapshot. No blocking I/O on hot path
+    except a small cached file read (1s interval is fine for JSON < 100KB).
+    """
+    from backend.services.live_service import _live_state
+
+    # ── Attribution ──
+    attr_status = "no_data"
+    attr_trades = 0
+    try:
+        p = Path(__file__).resolve().parent.parent / "data" / "charts" / "factor_attribution.json"
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if raw:
+                attr_trades = sum(s.get("n_trades", 0) for s in raw.values())
+                attr_status = "active" if attr_trades > 10 else "cold_start"
+    except Exception:
+        attr_status = "error"
+
+    # ── Pipeline ──
+    strategy = _live_state.get("loop_strategy")
+    loop_running = _live_state.get("loop_running")
+    pipeline_status = "inactive"
+    if strategy and loop_running is not False:
+        pipeline_status = "running"
+    if _live_state.get("circuit_breaker"):
+        pipeline_status = "circuit_breaker"
+
+    # ── Sync ──
+    sync_age = _live_state.get("sync_age_seconds")
+    sync_status = "ok"
+    if sync_age is not None:
+        if sync_age > 300:
+            sync_status = "stale"
+        if sync_age > 3600:
+            sync_status = "stale_critical"
+
+    # 管道停了 → data_sync / risk 也显示待机
+    ds_status = sync_status if pipeline_status == "running" else "inactive"
+    risk_status = ("active" if _live_state.get("circuit_breaker") is not None else "ok") if pipeline_status == "running" else "inactive"
+
+    return {
+        "nodes": {
+            "data_sync": {"status": ds_status, "age_seconds": sync_age},
+            "factor_engine": {"status": "running" if pipeline_status == "running" else "inactive"},
+            "signal_normalizer": {"status": "running" if pipeline_status == "running" else "inactive"},
+            "portfolio_compositor": {"status": "running" if pipeline_status == "running" else "inactive"},
+            "execution_gate": {"status": pipeline_status},
+            "execution": {
+                "status": "running" if (_live_state.get("loop_started_at") and loop_running is not False) else "inactive",
+                "n_positions": _live_state.get("n_positions", 0),
+            },
+            "attribution": {"status": attr_status, "n_trades_attributed": attr_trades},
+            "adaptive_weight": {"status": "initialized" if _live_state.get("awe_adapted_at") else "waiting"},
+            "risk": {
+                "status": risk_status,
+                "circuit_breaker": bool(_live_state.get("circuit_breaker", False)),
+            },
+        },
+        "pipeline_active": pipeline_status == "running",
+        "all_green": pipeline_status == "running",
+    }
+
+
 def _read_state_snapshot() -> dict:
     """返回 cTrader 实时快照。live 在跑→实时; 停止→冻结最后数据。
 
@@ -73,6 +141,7 @@ def _read_state_snapshot() -> dict:
             "leverage": None, "currency": None, "n_positions": 0,
             "current_price": None,
             "active_strategy": {"id": None, "mode": "single", "source": "none"},
+            "closed_loop": _read_closed_loop_status(),
             "server_time": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -144,6 +213,7 @@ def _read_state_snapshot() -> dict:
             "mode": "single",
             "source": "live" if live_running else "stopped",
         },
+        "closed_loop": _read_closed_loop_status(),
         "server_time": datetime.now(timezone.utc).isoformat(),
     }
 

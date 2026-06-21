@@ -81,12 +81,6 @@ alpha:
   min_ic_threshold: 0.02       # 最低IC阈值
   rolling_window_days: 20      # IC滚动窗口
 
-monitor:
-  dashboard_port: 8050
-  websocket_port: 8051
-  alert_channels: [log]         # log | dingtalk | wechat
-  metrics_interval_seconds: 1
-
 # =============================================================================
 # RuntimeConfig (Phase 1.2) — 可热更新字段
 # 运行中任何修改通过 POST /api/control/runtime/reload 推送给所有 loop
@@ -130,14 +124,6 @@ runtime:
   strategy_sl_atr: 2.0
   strategy_tp_atr: 3.0
   strategy_cooldown_bars: 3
-  # 以下字段对应 RuntimeConfig dataclass 无定义, 保留仅作参考
-  # strategy_bb_percentile: 80
-  # strategy_nfp_skip_days: 1
-  # strategy_enable_dual_event_skip: false
-  # strategy_enable_fomc_boost: false
-  # strategy_fomc_boost_mult: 1.5
-  # strategy_enable_gvz_gate: false
-  # strategy_gvz_drop_pct: -2.0
 
   # --- Phase 5: 风控升级 (默认启用) ---
   var_enabled: true
@@ -146,4 +132,3 @@ runtime:
   kelly_fraction: 0.5
   kelly_max_pct: 0.25
   kelly_risk_per_trade_pct: 0.01
-

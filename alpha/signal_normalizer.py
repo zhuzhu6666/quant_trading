@@ -239,15 +239,15 @@ class SignalNormalizer:
                 self._histories[name].append(value)
 
     def _default_gp_config(self, name: str) -> dict:
-        """GP 发现因子的默认配置, 尝试从 GPClassifier 获取标签。"""
+        """GP 发现因子的默认配置, 尝试从 GPClassifier 获取标签."""
         tags = None
         try:
             from alpha.gp_classifier import classify_expr
             t = classify_expr(name)
             if t and t != ["GP发现"]:
                 tags = t
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("GP classifier unavailable for '%s': %s", name, e)
         return {
             "enabled": True,
             "weight": 0.3,

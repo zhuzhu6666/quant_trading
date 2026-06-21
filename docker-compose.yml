@@ -1,49 +1,31 @@
-# =============================================================================
-# Quant Trading Backend — Docker Compose
-#
-# Architecture:
-#   MT5 data source runs on the Windows HOST (MT5Puller writes data/volume).
-#   This container runs the FastAPI backend + cTrader execution + factor pipeline.
-#
-# Usage:
-#   Production (Linux server):  docker compose up -d
-#   Dev (Windows):              python start-all.py  (MT5 + backend run locally)
-#
-# Required .env entries:
-#   CTRADER_CLIENT_ID
-#   CTRADER_CLIENT_SECRET
-#   QUANT_JWT_SECRET            (falls back to "changeme" if omitted)
-#   QUANT_CORS_ALLOWED_ORIGINS  (optional, comma-separated origins)
-# =============================================================================
-
-version: '3.8'
+version: "3.9"
 
 services:
   backend:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: quant-backend
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
-      # Shared data directory — MT5 on host writes to this; container reads
+      # DuckDB 数据和 charts 持久化
       - ./data:/app/data
-      # Config (runtime config files, if any)
-      - ./config:/app/config
-      # Logs persist outside the container
+      # 日志持久化
       - ./logs:/app/logs
-      # Environment file (must contain broker credentials)
-      - ./.env:/app/.env:ro
+      # 配置热更新（不改容器）
+      - ./config:/app/config
+      # cTrader 凭证（不上传到镜像，只运行时挂载）
+      - ./.env:/app/.env
     environment:
-      # JWT secret for web console auth
-      - QUANT_JWT_SECRET=${QUANT_JWT_SECRET:-changeme}
-      # CORS origins for dev-mode Vite (default: localhost:5173)
-      - QUANT_CORS_ALLOWED_ORIGINS=${QUANT_CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
-      # Container timezone
-      - TZ=UTC
-    restart: unless-stopped
-    # Optional: resource limits
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 2G
+      - TZ=Asia/Shanghai
+      - PYTHONIOENCODING=utf-8:replace
+    # 如果 cTrader 凭证不在 .env 里，也可以用环境变量传
+    # env_file: .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

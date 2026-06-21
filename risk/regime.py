@@ -29,7 +29,6 @@ Conventions
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
 
@@ -37,8 +36,6 @@ import duckdb
 import numpy as np
 import pandas as pd
 from loguru import logger
-
-logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants (kept here so the detector is self-contained and easy to tune)
@@ -445,7 +442,7 @@ class RegimeDetector:
             return _coerce_date(times[-1])
         return None
 
-    def _dxy_driven(self, conn: sqlite3.Connection, today: str,
+    def _dxy_driven(self, conn: duckdb.DuckDBPyConnection, today: str,
                     db_path: str, closes: np.ndarray, times: list) -> bool:
         """Return True if the 20-day |corr(DXY, XAUUSD)| exceeds 0.7.
 

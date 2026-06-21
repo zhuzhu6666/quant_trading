@@ -387,4 +387,32 @@ class StateContainer:
 
 
 # 全局单例 (OPT-4: 现在是容器, 旧代码 state.balance 仍 work)
-state = StateContainer()
+# ARCH-2 (audit 2026-06-21): 通过 _LazyStateProxy 委托给 AppContext,
+# 测试可通过 AppContext.reset() 获得全新实例.
+class _LazyStateProxy:
+    """延迟代理: 优先从 AppContext 获取, 否则回退本地实例."""
+    _local: StateContainer | None = None
+
+    def _target(self) -> StateContainer:
+        try:
+            from core.app import AppContext
+            if AppContext._shared is not None:
+                return AppContext._shared.state
+        except ImportError:
+            pass
+        local = object.__getattribute__(self, "_local")
+        if local is None:
+            local = StateContainer()
+            object.__setattr__(self, "_local", local)
+        return local
+
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name, value):
+        if name == "_local":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._target(), name, value)
+
+state: _LazyStateProxy = _LazyStateProxy()

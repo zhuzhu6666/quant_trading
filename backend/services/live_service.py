@@ -1022,6 +1022,64 @@ def _start_live_scheduler():
         daemon=True,
         name="dukascopy-tick-catchup",
     ).start()
+    # 每天 8:00: 经济日历拉取
+    def _scheduled_events_sync():
+        try:
+            import subprocess
+            script = Path(__file__).resolve().parent.parent.parent / "scripts" / "fetch_events_calendar.py"
+            if not script.exists():
+                logger.warning("[events_sync] script not found")
+                return
+            result = subprocess.run(
+                [sys.executable or "python", str(script), "--weeks", "2"],
+                capture_output=True, text=True, timeout=60,
+            )
+            out = (result.stdout or "").strip()
+            if result.returncode == 0:
+                logger.info("[events_sync] ok")
+            else:
+                logger.warning("[events_sync] failed (rc={}): {}", result.returncode, (result.stderr or "")[:200])
+        except Exception as e:
+            logger.warning("[events_sync] error: {}", e)
+    sched.add_job("events_sync", "0 8 * * *", _scheduled_events_sync)
+    # 启动后立即补跑一次 (后台线程)
+    threading.Thread(
+        target=_scheduled_events_sync,
+        daemon=True,
+        name="events-sync-catchup",
+    ).start()
+    # 每周六 6:00: COT 持仓刷新 (CFTC 周五发布)
+    def _scheduled_cot_sync():
+        try:
+            import subprocess
+            script = Path(__file__).resolve().parent.parent.parent / "scripts" / "refresh_external_data.py"
+            result = subprocess.run(
+                [sys.executable or "python", str(script), "--source", "cot", "--force"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                logger.info("[cot_sync] ok")
+            else:
+                logger.warning("[cot_sync] failed (rc={}): {}", result.returncode, (result.stderr or "")[:200])
+        except Exception as e:
+            logger.warning("[cot_sync] error: {}", e)
+    sched.add_job("cot_sync", "0 6 * * 6", _scheduled_cot_sync)
+    # 每季度首日 4:00: ETF 持仓刷新 (SEC 10-Q filing)
+    def _scheduled_etf_sync():
+        try:
+            import subprocess
+            script = Path(__file__).resolve().parent.parent.parent / "scripts" / "refresh_external_data.py"
+            result = subprocess.run(
+                [sys.executable or "python", str(script), "--source", "etf", "--force"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0:
+                logger.info("[etf_sync] ok")
+            else:
+                logger.warning("[etf_sync] failed (rc={}): {}", result.returncode, (result.stderr or "")[:200])
+        except Exception as e:
+            logger.warning("[etf_sync] error: {}", e)
+    sched.add_job("etf_sync", "0 4 1 */3 *", _scheduled_etf_sync)
     # 每 30 分钟: AWE 权重自适应 (如果 attribution engine 有数据)
     sched.add_job("awe_adapt", "*/30 * * * *", _scheduled_awe_adapt)
     # Phase 2: ML 因子自动重训 (每周日凌晨 5:00)
@@ -1117,11 +1175,11 @@ def _start_live_scheduler():
 
 
 def _stop_live_scheduler():
-    """停止 Scheduler. 幂等."""
+    """停止 Scheduler. 幂等. wait=False 避免阻塞."""
     from backend.runtime.scheduler import InProcessScheduler
     sched = InProcessScheduler()
     try:
-        sched.stop()
+        sched.stop(wait=False)
         logger.info("[live] InProcessScheduler stopped")
     except Exception as e:
         logger.debug("[live] scheduler stop: {}", e)
@@ -1129,6 +1187,13 @@ def _stop_live_scheduler():
 
 def loop_status() -> dict:
     """Whether the live trading loop thread is running. 优先 _live_state 缓存."""
+    # 显式停止 → 立即返回 stopped, 不等后台清理线程
+    if _live_state.get("loop_running") is False:
+        return {
+            "running": False, "pid": None, "broker": _live_state.get("broker") or _loop_broker,
+            "started_at": _live_state.get("loop_started_at"),
+            "strategy_name": _live_state.get("loop_strategy") or _loop_strategy_name,
+        }
     # 优先共享缓存 (audit 2026-06-08)
     if _live_state.get("loop_running") and _live_state.get("broker"):
         return {
@@ -1228,7 +1293,8 @@ def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
 
 
 def stop_loop() -> dict:
-    """Signal the loop thread to stop. Waits up to 5s for it to exit.
+    """Signal the loop thread to stop. Returns immediately;
+    blocking cleanup (thread join + scheduler shutdown) runs in background.
     audit v9: 停止后保留最后数据不变 (account/positions/session 冻结), 前端持续显示.
     """
     global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
@@ -1241,21 +1307,26 @@ def stop_loop() -> dict:
         if _loop_stop_flag is not None:
             _loop_stop_flag.set()
         thread = _loop_thread
-    # wait outside the lock
-    thread.join(timeout=5)
-    if thread.is_alive():
-        logger.warning(f"live loop thread for {broker} did not stop within 5s; will continue in background")
-    with _loop_state_lock:
-        _loop_thread = None
-        _loop_stop_flag = None
-        _loop_broker = None
-        _loop_started_at = None
-    # ★ v9-fix: 记录停止时间供重启退避使用
-    _last_loop_end = time.time()
-    # audit v9: 只停调度器 + 标记停止, 保留 account/positions/session 数据冻结显示
+
+    # ★ 立即标记停止, 前端立刻看到状态变化
     _live_state["loop_running"] = False
-    _stop_live_scheduler()
-    logger.info("[live] loop stopped, data frozen for display")
+    _last_loop_end = time.time()
+
+    # 阻塞清理移到后台线程, stop 端点秒返
+    def _cleanup() -> None:
+        thread.join(timeout=5)
+        if thread.is_alive():
+            logger.warning(f"live loop thread for {broker} did not stop within 5s; will continue in background")
+        with _loop_state_lock:
+            _loop_thread = None
+            _loop_stop_flag = None
+            _loop_broker = None
+            _loop_started_at = None
+        _stop_live_scheduler()
+        logger.info("[live] loop stopped, data frozen for display")
+
+    threading.Thread(target=_cleanup, name="stop_loop_cleanup", daemon=True).start()
+    logger.info("[live] stop signaled, cleanup in background")
     return {"ok": True, "was_running": True, "broker": broker}
 
 
@@ -2077,48 +2148,9 @@ def _process_tick_factor_pipeline(
     closed_pids: set[int] = set()
     attr_engine = pipeline.get("attribution")
     if not _prev_position_ids:
-        # 冷启动: loop 重启后 _prev_position_ids 为空,
-        # 用当前持仓初始化, 后续平仓可正常检测.
+        # 冷启动: 用当前持仓初始化 pid 集, 仅用于平仓检测.
+        # 不创建 recovery 归因 — 重启前开的仓没有因子信号, 归因数据无效.
         _prev_position_ids = current_pids.copy()
-        # ★ 修复跨重启归因丢失: 为当前持仓创建占位的 TradeAttribution,
-        #   确保重启前开的仓平仓时不会无声丢失数据。
-        if pos and attr_engine:
-            try:
-                from alpha.attribution_engine import TradeAttribution
-                for p in pos:
-                    pid = p.get("position_id") or p.get("ticket")
-                    if pid is None:
-                        continue
-                    pid = int(pid)
-                    if pid in attr_engine._open_trades:
-                        continue
-                    open_price = float(
-                        p.get("open_price") or p.get("entry_price") or current_price
-                    )
-                    direction = int(p.get("direction", 0))
-                    if direction == 0:
-                        continue
-                    recovery_attr = TradeAttribution(
-                        position_id=pid,
-                        open_ts=time.time(),
-                        open_price=open_price,
-                        direction=direction,
-                        factor_signals={},
-                        factor_values={},
-                        active_weights={},
-                        composite_score=0.0,
-                        tactical_score=0.0,
-                        macro_score=0.0,
-                        tags_breakdown={},
-                        total_signal_abs=0.0,
-                    )
-                    attr_engine.record_open(pid, recovery_attr)
-                    log(
-                        f"tick {tick}: recovered attribution for existing "
-                        f"pos={pid} dir={direction} price={open_price}"
-                    )
-            except Exception as rec_err:
-                log(f"tick {tick}: attribution recovery error: {rec_err}")
     else:
         closed_pids = _prev_position_ids - current_pids
     for cpid in closed_pids:

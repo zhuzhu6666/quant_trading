@@ -2,7 +2,7 @@
 
 Endpoints:
   GET /api/v4/weights      — last 50 entries from factor_weight_history.jsonl
-  GET /api/v4/stats        — attribution summary (stub, returns {} for now)
+  GET /api/v4/stats        — attribution summary per-factor + pipeline health
   POST /api/v4/ml/retrain  — manually trigger ML direction predictor retrain
 """
 
@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import math
+from collections import Counter
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -17,10 +20,12 @@ from fastapi import APIRouter
 from backend.core.auth import RequireUser
 from backend.services.live_service import _scheduled_ml_retrain
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v4", tags=["factor-v4"])
 
 DATA_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "charts" / "factor_weight_history.jsonl"
 _TRADE_LOG = Path(__file__).resolve().parent.parent.parent / "logs" / "live_trades.jsonl"
+_ATTR_SNAPSHOT = Path(__file__).resolve().parent.parent.parent / "data" / "charts" / "factor_attribution.json"
 
 
 @router.get("/weights")
@@ -74,9 +79,76 @@ def get_weight_history(_user: RequireUser) -> list[dict]:
 
 @router.get("/stats")
 def get_attribution_stats(_user: RequireUser) -> dict:
-    """Stub: returns empty dict for now. Will be filled when attribution is
-    wired into live state."""
-    return {}
+    """Return attribution stats per-factor from snapshot file + summary.
+
+    Data written by AttributionEngine._save_stats_snapshot() after every close.
+    Returns empty dict when no trades have been attributed yet.
+    """
+    if not _ATTR_SNAPSHOT.exists():
+        return {"status": "no_data", "per_factor": {}, "summary": {}}
+
+    try:
+        with open(_ATTR_SNAPSHOT, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to read attribution snapshot: %s", e)
+        return {"status": "error", "detail": str(e)}
+
+    if not raw:
+        return {"status": "no_data", "per_factor": {}, "summary": {}}
+
+    # ── Build per-factor summary (trim recent_mcs to avoid bloat) ──
+    per_factor = {}
+    for name, s in raw.items():
+        per_factor[name] = {
+            "n_trades": s.get("n_trades", 0),
+            "n_voted": s.get("n_voted", 0),
+            "wins": s.get("wins", 0),
+            "win_rate": round(
+                s["wins"] / s["n_voted"], 4
+            ) if s.get("n_voted", 0) > 0 else 0.0,
+            "total_mc": s.get("total_mc", 0.0),
+            "avg_mc": s.get("avg_mc", 0.0),
+            "composite_sharpe_score": s.get("composite_sharpe_score"),
+            "ir_short": s.get("ir_short"),
+            "ir_mid": s.get("ir_mid"),
+            "ir_long": s.get("ir_long"),
+            "recent_mcs_sample": s.get("recent_mcs", [])[-10:],  # last 10 only
+        }
+
+    # ── Summary stats ──
+    n_factors = len(per_factor)
+    total_trades = sum(s["n_trades"] for s in per_factor.values())
+    total_wins = sum(s["wins"] for s in per_factor.values())
+    total_voted = sum(s["n_voted"] for s in per_factor.values())
+    avg_sharpe_values = [
+        s["composite_sharpe_score"] for s in per_factor.values()
+        if s.get("composite_sharpe_score") is not None
+        and not (isinstance(s["composite_sharpe_score"], float) and math.isnan(s["composite_sharpe_score"]))
+    ]
+    avg_sharpe = round(sum(avg_sharpe_values) / len(avg_sharpe_values), 4) if avg_sharpe_values else None
+
+    # Top/bottom factors by avg_mc
+    sorted_by_mc = sorted(
+        per_factor.items(), key=lambda x: abs(x[1].get("avg_mc", 0)), reverse=True
+    )
+    top_factors = [
+        {"name": n, "avg_mc": v["avg_mc"], "win_rate": v["win_rate"]}
+        for n, v in sorted_by_mc[:10]
+    ]
+
+    summary = {
+        "n_factors_attributed": n_factors,
+        "total_trades": total_trades,
+        "total_voted": total_voted,
+        "total_wins": total_wins,
+        "overall_win_rate": round(total_wins / total_voted, 4) if total_voted > 0 else 0.0,
+        "avg_sharpe_across_factors": avg_sharpe,
+        "top_contributors": top_factors,
+        "last_updated": _ATTR_SNAPSHOT.stat().st_mtime,
+    }
+
+    return {"status": "ok", "per_factor": per_factor, "summary": summary}
 
 
 @router.post("/ml/retrain")

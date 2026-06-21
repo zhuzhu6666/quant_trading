@@ -45,4 +45,30 @@ class Clock:
 
 
 # 全局单例
-clock = Clock()
+# ARCH-2 (audit 2026-06-21): 通过 _LazyClockProxy 委托给 AppContext.
+class _LazyClockProxy:
+    _local: Clock | None = None
+
+    def _target(self) -> Clock:
+        try:
+            from core.app import AppContext
+            if AppContext._shared is not None:
+                return AppContext._shared.clock
+        except ImportError:
+            pass
+        local = object.__getattribute__(self, "_local")
+        if local is None:
+            local = Clock()
+            object.__setattr__(self, "_local", local)
+        return local
+
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name, value):
+        if name == "_local":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._target(), name, value)
+
+clock: _LazyClockProxy = _LazyClockProxy()

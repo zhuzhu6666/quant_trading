@@ -158,8 +158,11 @@ class EventSizing:
             delta = event.dt - bar_dt
             hours_until = delta.total_seconds() / 3600.0
 
-            # 跳过超过 72h 的未来事件和 1h 前的过去事件
-            if hours_until < -1.0:
+            # BUG-4 fix (audit 2026-06-21): 只对未来的事件降低仓位.
+            # 旧实现: hours_until < -1.0 才跳过, 导致事件后 60 分钟内仍被误判
+            # (e.g. hours_until=-0.5 → -0.5 <= 4 → 乘 0.2, 事件已过不应减仓).
+            # 新实现: hours_until <= 0 跳过 (事件已过) + hours_until > 72 跳过 (太远).
+            if hours_until <= 0:
                 continue
             if hours_until > 72.0:
                 continue

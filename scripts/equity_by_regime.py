@@ -185,7 +185,6 @@ def main():
     print("=" * 72)
 
     # 1. 跑 paper 流程 (复用 main.py run_paper 的配置)
-    import strategies  # noqa: F401
     strategy = strategy_registry.create(
         "multi_factor_m15", symbol="XAUUSD+", timeframe="M15",
         sl_atr=3.0, tp_atr=4.0, cooldown_bars=3,

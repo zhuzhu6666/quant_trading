@@ -42,8 +42,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.store import DataStore  # noqa: E402
 from strategy.registry import strategy_registry  # noqa: E402
-import strategies  # noqa: E402,F401  — triggers @register decorators
-from execution.paper_trader import PaperTrader  # noqa: E402
+
+
 from risk.regime import RegimeDetector  # noqa: E402
 import risk.regime as _regime_mod  # noqa: E402
 from db.store import AnalyticsStore  # noqa: E402

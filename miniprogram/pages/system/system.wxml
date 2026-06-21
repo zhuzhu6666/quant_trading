@@ -1,0 +1,75 @@
+<scroll-view class="scroll-page" scroll-y>
+
+  <!-- 数据库健康 -->
+  <view class="card">
+    <text class="card-title">数据库健康</text>
+    <view style="display:flex;align-items:center;gap:12rpx;margin-bottom:16rpx">
+      <text class="dot {{dbOverall === '健康' ? 'dot-green' : dbOverall === '降级' ? 'dot-orange' : 'dot-red'}}"></text>
+      <text style="font-size:28rpx;font-weight:700;color:#1C1C1E">{{dbOverall}}</text>
+      <text style="font-size:22rpx;color:#8E8E93;margin-left:auto">{{dbSummary}}</text>
+    </view>
+
+    <block wx:if="{{dbList.length}}">
+      <view wx:for="{{dbList}}" wx:key="file" class="stat-row" style="padding:14rpx 0">
+        <view style="flex:1;min-width:0">
+          <view style="display:flex;align-items:center;gap:10rpx">
+            <text class="dot {{item.freshnessDot}}"></text>
+            <text style="font-size:26rpx;font-weight:600;color:#1C1C1E">{{item.name}}</text>
+          </view>
+          <view style="display:flex;gap:20rpx;margin-top:6rpx;margin-left:24rpx">
+            <text style="font-size:22rpx;color:#8E8E93">{{item.size}}</text>
+            <text style="font-size:22rpx;color:#8E8E93">{{item.rows}} 行</text>
+            <text style="font-size:22rpx;color:#C7C7CC">{{item.ageText}}</text>
+          </view>
+          <text wx:if="{{item.hasError}}" style="font-size:20rpx;color:#FF3B30;margin-top:4rpx;margin-left:24rpx">⚠ 查询异常</text>
+        </view>
+        <text class="badge {{item.freshness === '实时' ? 'badge-green' : item.freshness === '正常' ? 'badge-green' : item.freshness === '延迟' ? 'badge-orange' : 'badge-gray'}}" style="font-size:20rpx;flex-shrink:0">{{item.freshness}}</text>
+      </view>
+    </block>
+    <view wx:else class="empty-state"><text>暂无数据库信息</text></view>
+
+    <view wx:if="{{dbCheckedAt}}" style="text-align:right;margin-top:12rpx">
+      <text style="font-size:20rpx;color:#C7C7CC">检查时间 {{dbCheckedAt}}</text>
+    </view>
+  </view>
+
+  <!-- 进化 -->
+  <view class="card">
+    <text class="card-title">自进化</text>
+    <block wx:if="{{evolution.hasData}}">
+      <view style="background:#F2F2F7;border-radius:16rpx;padding:20rpx;margin-bottom:16rpx">
+        <text style="font-size:26rpx;color:#1C1C1E;line-height:1.7">{{evolution.summary}}</text>
+      </view>
+      <block wx:if="{{evolution.detail.length}}">
+        <view wx:for="{{evolution.detail}}" wx:key="label" class="stat-row" style="padding:10rpx 0">
+          <text class="stat-label">{{item.label}}</text>
+          <text class="stat-value {{item.cls}}" style="font-size:24rpx">{{item.value}}</text>
+        </view>
+      </block>
+      <text style="font-size:22rpx;color:#C7C7CC">{{evolution.time}}</text>
+    </block>
+    <view wx:else class="empty-state"><text>暂无进化事件</text></view>
+  </view>
+
+  <!-- 服务器 -->
+  <view class="card">
+    <text class="card-title">服务器</text>
+    <view class="stat-row">
+      <text class="stat-label">地址</text>
+      <text class="stat-value" style="font-size:24rpx;color:#8E8E93">{{server}}</text>
+    </view>
+    <view class="stat-row">
+      <text class="stat-label">数据源</text>
+      <text class="stat-value text-green" style="font-size:24rpx">cTrader</text>
+    </view>
+    <view class="stat-row" style="border:none">
+      <text class="stat-label">版本</text>
+      <text class="stat-value" style="font-size:24rpx;color:#8E8E93">Factor Takeover v4</text>
+    </view>
+  </view>
+
+  <view style="text-align:center;padding:32rpx 0;color:#C7C7CC;font-size:22rpx">
+    XAUUSD Quant Monitor
+  </view>
+
+</scroll-view>

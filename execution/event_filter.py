@@ -183,8 +183,8 @@ class SharedEventFilter:
                 if gvz_chg is not None and gvz_chg < self.gvz_drop_pct:
                     self._skipped_count += 1
                     return True, f"GVZ_DROP({gvz_chg:.1f}%)"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("GVZ gate check failed for %s: %s", bar_date_str, e)
 
         return False, ""
 

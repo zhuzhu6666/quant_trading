@@ -8,7 +8,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import strategies  # noqa: F401 触发注册
 from strategy.registry import strategy_registry
 from data.store import DataStore
 from execution.paper_trader import PaperTrader

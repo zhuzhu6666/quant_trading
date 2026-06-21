@@ -29,7 +29,6 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import strategies  # noqa: F401
 from strategy.registry import strategy_registry
 from strategy.mab_router import MABRouter, classify_regime, REGIMES
 from data.store import DataStore

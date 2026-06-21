@@ -1,16 +1,15 @@
-"""DEPRECATED — 请使用 alpha/streaming_factor_engine.py 替代。
+"""BATCH-ONLY Factor Engine - 离线批量因子计算 (已弃用于生产路径).
 
-Factor Engine — 流式因子计算
+本模块仅用于批量离线分析脚本 (factor PCA, IC rolling, walkforward 等).
+生产路径 (live/paper 实时流) 请使用 alpha/streaming_factor_engine.py.
 
-特性：
-- 注册制：因子函数注册到 registry
-- 流式更新：每个新bar增量计算（不重算历史）
-- 向量化批量：回测模式全量计算
-- 输出标准化：统一 DataFrame 格式
+特性:
+- 注册制: 因子函数注册到 registry
+- 向量化批量: 全量 DataFrame 一次性计算所有因子
+- 输出标准化: 统一 DataFrame 格式
 
-注意: 此文件已被 StreamingFactorEngine 取代, 仅保留供旧脚本引用。
-新开发请勿导入此模块。
-"""
+注意: 此模块不适用于实时 bar 流, 无增量计算能力.
+新开发请使用 StreamingFactorEngine, 除非你需要 compute_all() 一次性批量计算."""
 
 import logging
 from collections import defaultdict
@@ -86,7 +85,7 @@ class FactorEngine:
             return None
 
     def compute_all(self) -> dict[str, np.ndarray]:
-        """计算所有注册因子"""
+        """计算所有已注册因子"""
         for name in factor_registry.list():
             self.compute(name)
         return self._factor_cache
@@ -94,54 +93,51 @@ class FactorEngine:
     def ic_analysis(self, forward_periods: list[int] | None = None
                     ) -> pd.DataFrame:
         """
-        IC分析：每个因子与未来收益的相关性
+        IC分析: 每个因子与未来收益的相关性
 
-        支持多周期 IC（default [1, 5, 10, 20]）:
+        支持多周期 IC (default [1, 5, 10, 20]):
           - 旧版 (BUG-3): 只算 1-bar forward return, 跟 forward_periods 形参脱钩
           - 新版: 对每个 fp 算 close[i+fp]/close[i] - 1, 输出多列 ic_1/ic_5/ic_10/ic_20 + ic_mean
         """
-        if self.df is None or "close" not in self.df.columns:
+        if self.df is None or self.df.empty:
             return pd.DataFrame()
 
         forward_periods = forward_periods or [1, 5, 10, 20]
-        close = self.df["close"].values
+        close = self.df["close"].to_numpy(dtype=np.float64)
         n_close = len(close)
-        records = []
+        if n_close < 50:
+            return pd.DataFrame()
 
         # 预计算每个 fp 的 forward return (NaN 末端补齐以便后续 slice)
         fwd_rets_by_fp: dict[int, np.ndarray] = {}
         for fp in forward_periods:
-            if fp >= n_close:
-                continue
             fwd = np.full(n_close, np.nan, dtype=np.float64)
-            fwd[:n_close - fp] = close[fp:] / close[:n_close - fp] - 1.0
+            fwd[:-fp] = close[fp:] / close[:-fp] - 1.0
             fwd_rets_by_fp[fp] = fwd
 
+        records = []
         for name, values in self._factor_cache.items():
             if values is None or len(values) < 50:
                 continue
+            vals = np.asarray(values, dtype=np.float64)
 
-            # 多周期 IC
             per_fp_ic: dict[int, float] = {}
             for fp, fwd in fwd_rets_by_fp.items():
                 n = min(len(values), len(fwd))
-                vals = values[:n]
-                rets = fwd[:n]
-                mask = ~(np.isnan(vals) | np.isnan(rets) | np.isinf(vals) | np.isinf(rets))
+                mask = ~(np.isnan(vals[:n]) | np.isnan(fwd[:n]) | np.isinf(vals[:n]) |
+                         np.isinf(fwd[:n]))
                 if mask.sum() < 30:
                     continue
-                ic = float(np.corrcoef(vals[mask], rets[mask])[0, 1])
+                ic = float(np.corrcoef(vals[:n][mask], fwd[:n][mask])[0, 1])
                 per_fp_ic[fp] = round(ic, 4)
 
             if not per_fp_ic:
                 continue
 
-            # 跟旧版兼容: 默认用 1-bar IC 作为主 ic, 顺带报全周期
             primary_ic = per_fp_ic.get(1, 0.0)
             ic_values = list(per_fp_ic.values())
             record = {
                 "factor": name,
-                "ic": primary_ic,
                 "abs_ic": round(abs(primary_ic), 4),
                 "ic_mean": round(float(np.mean(ic_values)), 4) if ic_values else 0.0,
                 "n_valid": int(min(len(values), n_close)),
@@ -153,7 +149,7 @@ class FactorEngine:
         return pd.DataFrame(records).sort_values("abs_ic", ascending=False)
 
     def get_active_factors(self, min_abs_ic: float = 0.02) -> list[str]:
-        """获取IC显著的活跃因子"""
+        """返回 |IC| >= min_abs_ic 的因子名"""
         ic_df = self.ic_analysis()
         if ic_df.empty:
             return []

@@ -1,10 +1,13 @@
-"""Auth dependency. v1: HS256 JWT in Authorization header.
+"""Auth dependency. v2: HS256 JWT in Authorization header, SHA256 password validation.
 
 Wire-in: any route can add `Depends(get_current_user)` to require a valid JWT.
-v1: passwords aren't actually validated (any password works); the token just
-proves the user has been through the login flow. Multi-user + real auth is
-Phase 6+.
-"""
+v2: password validated via SHA256 in backend/api/auth.py._verify_password().
+The token just proves the user has been through the login flow.
+
+SEC-1 fix (audit 2026-06-21): document current state accurately.
+JWT secret must be set via QUANT_JWT_SECRET env var (otherwise auto-generated per-startup).
+Password hash should be set via QUANT_PASSWORD_HASH env var (otherwise uses hardcoded default)."""
+
 import os as _os
 import secrets
 import time

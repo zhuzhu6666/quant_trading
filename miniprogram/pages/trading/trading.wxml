@@ -1,0 +1,116 @@
+<scroll-view class="scroll-page" scroll-y>
+
+  <!-- 连接状态 -->
+  <view class="conn-bar {{connected ? 'conn-ok' : 'conn-off'}}">
+    <text class="dot {{connected ? 'dot-green' : 'dot-gray'}}"></text>
+    <text>{{connLabel}}</text>
+  </view>
+
+  <!-- 账户 -->
+  <view class="card">
+    <text class="card-title">账户</text>
+    <view class="stats-grid" style="margin-bottom:16rpx">
+      <view class="stat-cell">
+        <text class="stat-cell-value text-dark">{{equity}}</text>
+        <text class="stat-cell-label">净值</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-dark">{{balance}}</text>
+        <text class="stat-cell-label">余额</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value {{pnlCls}}">{{pnl}}</text>
+        <text class="stat-cell-label">今日盈亏</text>
+      </view>
+    </view>
+    <view class="stat-row" style="border:none">
+      <text class="stat-label">XAUUSD</text>
+      <text class="stat-value" style="font-size:38rpx;font-weight:700">{{price}}</text>
+    </view>
+  </view>
+
+  <!-- 持仓 -->
+  <view class="card">
+    <text class="card-title">持仓</text>
+    <view wx:if="{{hasPos}}">
+      <view class="stats-grid" style="margin-bottom:16rpx">
+        <view class="stat-cell">
+          <text class="stat-cell-value {{posDirCls}}" style="font-size:32rpx">{{posDir}}</text>
+          <text class="stat-cell-label">方向</text>
+        </view>
+        <view class="stat-cell">
+          <text class="stat-cell-value text-dark">{{posEntry}}</text>
+          <text class="stat-cell-label">入场价</text>
+        </view>
+        <view class="stat-cell">
+          <text class="stat-cell-value text-dark">{{posSize}}</text>
+          <text class="stat-cell-label">手数</text>
+        </view>
+      </view>
+      <view style="text-align:center;padding:16rpx;background:#F2F2F7;border-radius:16rpx">
+        <text style="font-size:24rpx;color:#8E8E93;display:block;margin-bottom:4rpx">浮动盈亏</text>
+        <text class="big-number {{posPnlCls}}">{{posPnl}}</text>
+      </view>
+    </view>
+    <view wx:else class="empty-state">
+      <text>📭 当前无持仓</text>
+    </view>
+  </view>
+
+  <!-- 今日统计 -->
+  <view class="card">
+    <text class="card-title">今日统计</text>
+    <view class="stats-grid" style="margin-bottom:16rpx">
+      <view class="stat-cell">
+        <text class="stat-cell-value text-dark">{{trades}}</text>
+        <text class="stat-cell-label">交易</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-green">{{wins}}</text>
+        <text class="stat-cell-label">胜</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-red">{{losses}}</text>
+        <text class="stat-cell-label">负</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value {{winRateCls}}">{{winRate}}</text>
+        <text class="stat-cell-label">胜率</text>
+      </view>
+    </view>
+    <view style="margin-top:8rpx">
+      <view style="display:flex;justify-content:space-between;margin-bottom:6rpx">
+        <text style="font-size:22rpx;color:#8E8E93">胜率</text>
+        <text style="font-size:22rpx;color:#8E8E93">{{winRate}}</text>
+      </view>
+      <view class="progress-bar">
+        <view class="progress-fill {{winRateBarCls}}" style="width:{{winRateBar}}%"></view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 风控 -->
+  <view class="card">
+    <text class="card-title">风控</text>
+    <!-- 上排：熔断器独立居中 -->
+    <view style="display:flex;align-items:center;justify-content:center;padding:20rpx 0;margin-bottom:20rpx;background:#F2F2F7;border-radius:16rpx">
+      <text style="font-size:48rpx;margin-right:16rpx">{{circuitBreaker ? '⚠️' : '✓'}}</text>
+      <view>
+        <text style="font-size:26rpx;font-weight:600;color:#1C1C1E;display:block">熔断器</text>
+        <text style="font-size:22rpx;color:{{circuitBreaker ? '#FF3B30' : '#34C759'}}">{{circuitBreaker ? '已触发' : '正常'}}</text>
+      </view>
+    </view>
+    <!-- 下排：连续亏损 + 最大回撤 -->
+    <view class="stats-grid">
+      <view class="stat-cell">
+        <text class="stat-cell-value {{consecLoss >= 3 ? 'text-red' : 'text-dark'}}">{{consecLoss}}</text>
+        <text class="stat-cell-label">连续亏损</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-red">{{drawdown}}</text>
+        <text class="stat-cell-label">最大回撤</text>
+      </view>
+    </view>
+  </view>
+
+</scroll-view>

@@ -7,7 +7,7 @@ execution/_sharpe.py - Sharpe ratio 计算 (OPT-2 audit 2026-06-06)
 为什么不用 iid 假设的 std:
 - Lo (2002) "The Statistics of Sharpe Ratios": iid 假设下 Sharpe 虚高 20-50%
 - M15 黄金跨夜 drift, 连续 win/loss, 仓位不调 → equity 序列强自相关
-- Newey-West (1994) HAC 用 Bartlett kernel + 自动 lag, 调自相关
+- Newey-West (1994) HAC 用 Bartlett kernel + auto lag, 调自相关
 
 Why log returns:
 - simple returns 不可加: 1 笔 +50% 然后 -33% 复合 = 0, 算 simple sum = +17%
@@ -17,9 +17,12 @@ Why log returns:
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
+
+_logger = logging.getLogger(__name__)
 
 
 # ── Timeframe → bars per year ──────────────────────────
@@ -51,23 +54,44 @@ def sharpe_ratio_log_nw(equity: np.ndarray, timeframe: str) -> float:
     equity : np.ndarray
         Equity curve (length T, all values > 0).
     timeframe : str
-        Bar timeframe: M5/M15/M30/H1/H4/D1. 决定 bars_per_year.
+        Bar timeframe: M5/M15/M30/H1/H4/D1.
 
     Returns
     -------
     float
-        Annualized Sharpe. 0.0 if data insufficient or zero variance.
+        Annualized Sharpe. 0.0 if data insufficient, zero variance, or RUIN.
 
     Notes
     -----
     - log returns: r_t = log(eq_t / eq_{t-1})
-    - Newey-West HAC variance: γ_0 + 2 * Σ_{k=1}^L (1 - k/(L+1)) * γ_k
+    - Newey-West HAC variance: gamma_0 + 2 * Sum_{k=1}^L (1 - k/(L+1)) * gamma_k
     - 跟 iid 估计相比, NW 调整会把 std 调高 (强正自相关时), Sharpe 调低
-    - 这是真实风险调整后收益, 不是"我连续赢了 5 笔 = Sharpe 5"的错觉
+
+    STAT-1 fix (audit 2026-06-21):
+    旧实现用 np.isfinite() 过滤 -inf, 静默丢弃归零后的 bar → Sharpe 虚高.
+    现在检测 equity <= 0 时打印 RUIN 警告并截断序列.
     """
     eq = np.asarray(equity, dtype=float)
     if len(eq) < 2:
         return 0.0
+
+    # ── STAT-1: 检测 RUIN (equity <= 0) ──────────────────────
+    ruin_mask = eq <= 0
+    if np.any(ruin_mask):
+        ruin_idx = int(np.argmax(ruin_mask))
+        _logger.warning(
+            "[STAT-1] Equity curve contains values <= 0 — possible RUIN. "
+            "Sharpe computed on surviving portion only (biased upward). "
+            "min_equity=%.4f, bar_of_ruin=%d/%d",
+            float(np.min(eq)),
+            ruin_idx,
+            len(eq),
+        )
+        # 截断到归零点 (不含), 至少保留 1 个点
+        eq = eq[:ruin_idx] if ruin_idx > 0 else eq[:1]
+        if len(eq) < 2:
+            return 0.0
+
     # ① log returns
     rets = np.log(eq[1:] / eq[:-1])
     rets = rets[np.isfinite(rets)]

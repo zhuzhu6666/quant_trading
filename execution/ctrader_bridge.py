@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Phase 4: 统一接口
 from execution.base import BaseBrokerBridge, OrderResult, PositionInfo, AccountInfo
+from execution.ctrader_ssl_patch import _patch_ctrader_ssl_endpoint
 
 try:
     from ctrader_open_api import Client, Protobuf, TcpProtocol
@@ -174,7 +175,7 @@ class CTraderBridge(BaseBrokerBridge):
     # ── 连接管理 ──
 
     def connect(self) -> bool:
-        """连 broker + App auth + Account auth; 同步阻塞到全部完成或失败"""
+        """连 broker + App auth + Account auth; 在当前线程跑 reactor."""
         with self._connected_lock:
             if self._connected:
                 logger.info("Already connected")
@@ -186,84 +187,73 @@ class CTraderBridge(BaseBrokerBridge):
             logger.error(f"Twisted reactor import failed: {e}")
             return False
 
-        # Twisted 关键: reactor 必须在 daemon 线程上跑 .run() 阻塞事件循环
-        # 一次只能一个 reactor run, 重入会 ReactorAlreadyRunning
-        # installSignalHandlers=False: 防 signal.signal() 跨线程错
-        from threading import Thread
         self._reactor = default_reactor
-        if not self._reactor.running:
-            self._reactor_thread = Thread(
-                target=lambda: self._reactor.run(installSignalHandlers=False),
-                daemon=True,
-            )
-            self._reactor_thread.start()
-            # 等 reactor 真正跑起来
-            for _ in range(50):  # 5s max
-                if self._reactor.running:
-                    break
-                time.sleep(0.1)
-            if not self._reactor.running:
-                logger.error("Reactor failed to start in 5s")
-                return False
+        if self._reactor.running:
+            self._reactor.callFromThread(self._reactor.stop)
+            time.sleep(0.5)
 
-        # 官方 sample 写法: client = Client(host, port, TcpProtocol) — 3 参
-        # 之前加 numberOfMessagesToSendPerSecond=5 可能是引发 'wrong random id' 的元凶
-        # 退回 3 参构造
-        # 先停旧 client 再建新 client, 避免 reactor 线程泄漏
-        if self._client:
+        # TLS SNI patch
+        _patch_ctrader_ssl_endpoint()
+
+        # 结果通过 Event 传递
+        self._conn_ready = threading.Event()
+        self._auth_ok = False
+        self._conn_ok = False
+
+        def _do_connect():
+            """在 reactor 回调里: 创建 Client → 等连接 → auth"""
+            nonlocal self
             try:
-                self._client.stopService()
-            except Exception:
-                pass
-        self._client = Client(
-            self.host, self.port,
-            TcpProtocol,
-        )
+                if self._client:
+                    try: self._client.stopService()
+                    except: pass
+                self._client = Client(self.host, self.port, TcpProtocol)
+            except Exception as e:
+                logger.error(f"Client create failed: {e}")
+                self._conn_ready.set()
+                return
 
-        # 用 callback 推事件 (Twisted reactor 推 model)
-        self._conn_deferred: defer.Deferred = defer.Deferred()
-        self._client.setConnectedCallback(lambda c: self._on_connected())
-        self._client.setDisconnectedCallback(lambda c, r: self._on_disconnected(r))
-        # audit 2026-06-08: 注册消息回调, 用于接收 ProtoOASpotEvent 实时报价
-        self._client.setMessageReceivedCallback(lambda c, m: self._on_message(c, m))
-        # Client service 也需 startService 触发连接尝试
-        try:
-            self._client.startService()
-        except Exception as e:
-            logger.warning(f"startService: {e}")
+            def _on_conn(c):
+                logger.info("cTrader TCP+TLS connected, starting auth")
+                try:
+                    self._conn_ok = True
+                    if self._app_auth() and self._account_auth() and self._resolve_symbol_id():
+                        self._auth_ok = True
+                        self._record_success()
+                        self._start_heartbeat()
+                        logger.info("cTrader fully authenticated")
+                    else:
+                        logger.error("cTrader auth failed")
+                except Exception as e:
+                    logger.error(f"cTrader auth error: {e}")
+                finally:
+                    self._conn_ready.set()
 
-        # 主线程等连接完成
-        deadline = time.time() + self.request_timeout_sec
-        while not self._client.isConnected and time.time() < deadline:
-            time.sleep(0.1)
-        if not self._client.isConnected:
-            logger.error(f"Connect timeout: {self.host}:{self.port}")
+            self._client.setConnectedCallback(_on_conn)
+            self._client.setDisconnectedCallback(lambda c, r: self._on_disconnected(r))
+            self._client.setMessageReceivedCallback(lambda c, m: self._on_message(c, m))
+            try:
+                self._client.startService()
+            except Exception as e:
+                logger.warning(f"startService: {e}")
+                self._conn_ready.set()
+
+        # 超时兜底
+        self._reactor.callLater(self.request_timeout_sec + 5, 
+            lambda: (self._conn_ready.set() if not self._conn_ready.is_set() else None))
+
+        # 在当前线程跑 reactor (connect 从后台线程调用, 不阻塞主线程)
+        self._reactor.callWhenRunning(_do_connect)
+        self._reactor.run(installSignalHandlers=False)
+
+        # reactor 退出后检查结果
+        if not self._conn_ok or not self._auth_ok:
+            logger.error(f"Connect/auth failed: conn={self._conn_ok} auth={self._auth_ok}")
             self.disconnect()
             return False
+
         with self._connected_lock:
             self._connected = True
-        logger.info(f"cTrader TCP connected: {self.host}:{self.port}")
-
-        # 官方 sample 顺序: connected callback 第一件事就是 App auth
-        # 不要发 ProtoOAVersionReq 在前 — 实测会引发 "wrong random id" (协议时序错)
-        # 1) App auth
-        if not self._app_auth():
-            self.disconnect()
-            return False
-        # 2) Account auth: 先 GetAccountListByAccessTokenReq 拿绑定账户列表
-        #    再 ProtoOAAccountAuthReq 真认证 (cTrader 文档 step 8-9)
-        if not self._account_auth():
-            self.disconnect()
-            return False
-        # 3) 查 symbol_id 缓存
-        result = self._resolve_symbol_id()
-        if not result:
-            logger.error('Failed to resolve symbol ID for %s', self.symbol)
-            self.disconnect()
-            return False
-        self._record_success()
-        # 启动心跳 (每 10 秒 ProtoHeartbeatEvent, 防服务端空闲断开)
-        self._start_heartbeat()
         return True
 
     def _version_handshake(self) -> bool:
@@ -600,11 +590,19 @@ class CTraderBridge(BaseBrokerBridge):
             d.addErrback(lambda f: result_holder.update({"ok": False, "err": f}))
             return d
 
-        self._reactor.callFromThread(_do_send)
-
-        deadline = time.time() + timeout + 1.0
-        while not result_holder and time.time() < deadline:
-            time.sleep(0.05)
+        # 如果在 reactor 线程内 (如 _on_conn 回调), callFromThread + busy-wait 会死锁
+        # → 直接调用 _do_send, 然后用 doIteration 给 reactor 时间处理响应
+        if not hasattr(self._reactor, 'threadpool') or self._reactor.threadpool is None:
+            _do_send()
+            deadline = time.time() + timeout + 1.0
+            while not result_holder and time.time() < deadline:
+                try: self._reactor.doIteration(0.05)
+                except: time.sleep(0.05)
+        else:
+            self._reactor.callFromThread(_do_send)
+            deadline = time.time() + timeout + 1.0
+            while not result_holder and time.time() < deadline:
+                time.sleep(0.05)
         if not result_holder:
             raise TimeoutError(f"cTrader send timeout: {type(msg).__name__}")
         if not result_holder.get("ok"):

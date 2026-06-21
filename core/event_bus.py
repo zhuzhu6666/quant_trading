@@ -176,4 +176,30 @@ class EventBus:
 
 
 # 全局单例
-bus = EventBus()
+# ARCH-2 (audit 2026-06-21): 通过 _LazyBusProxy 委托给 AppContext.
+class _LazyBusProxy:
+    _local: EventBus | None = None
+
+    def _target(self) -> EventBus:
+        try:
+            from core.app import AppContext
+            if AppContext._shared is not None:
+                return AppContext._shared.event_bus
+        except ImportError:
+            pass
+        local = object.__getattribute__(self, "_local")
+        if local is None:
+            local = EventBus()
+            object.__setattr__(self, "_local", local)
+        return local
+
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name, value):
+        if name == "_local":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._target(), name, value)
+
+bus: _LazyBusProxy = _LazyBusProxy()

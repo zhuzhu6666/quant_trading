@@ -82,15 +82,21 @@ class FactorHealth:
             )
 
         components = self._compute_components(name, ic, n_obs)
-        score = sum(
-            w * components[k] for k, w in {
-                "mean_abs_ic": 40,
-                "ic_stability": 20,
-                "regime_consistency": 20,
-                "decay_rate": 10,
-                "independence": 10,
-            }.items() if k in components
-        ) / 100.0  # normalize 0-100
+        # BUG-5 fix (audit 2026-06-21): 显式按实际可用权重归一化,
+        # 不再依赖"权重和恒=100"隐式假设.
+        weights_dict = {
+            "mean_abs_ic": 40,
+            "ic_stability": 20,
+            "regime_consistency": 20,
+            "decay_rate": 10,
+            "independence": 10,
+        }
+        total_weight = sum(weights_dict[k] for k in components if k in weights_dict)
+        if total_weight > 0:
+            score = sum(weights_dict[k] * components[k] for k in components
+                        if k in weights_dict) / total_weight
+        else:
+            score = 0.0
 
         if score >= HEALTHY_SCORE_THRESHOLD:
             status_str = "HEALTHY"
@@ -501,13 +507,11 @@ def retirement_check(
             for name in result.candidates:
                 adapter.retire(name)
     """
-    from config.runtime_config import RuntimeConfig
-
-    cfg = RuntimeConfig()  # 使用默认值; 若需热更可用 shared()
-    try:
-        cfg = RuntimeConfig.shared()
-    except Exception:
-        pass
+    # BUG-1 fix (audit 2026-06-21): RuntimeConfig() 用默认构造器永远拿默认值,
+    # RuntimeConfig 类没有 shared() 类方法 (那是模块级函数 shared()).
+    # 改用模块级 shared() 函数获取热更后的单例.
+    from config.runtime_config import shared as _rc_shared
+    cfg = _rc_shared()
 
     severe_threshold = cfg.retire_severe_threshold  # 30.0
     decaying_days_threshold = float(cfg.retire_decaying_days)  # 7

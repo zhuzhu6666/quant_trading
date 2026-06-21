@@ -1,0 +1,251 @@
+"""GET /api/system/db-health — 数据库健康状态（大小/行数/最新数据时间）"""
+import os
+import time
+from pathlib import Path
+
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/system", tags=["system"])
+
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+
+# 需要报告的数据库列表
+_DB_LIST = [
+    # (文件名, 显示名, 类型)
+    ("ctrader_data.duckdb", "cTrader K线", "duckdb"),
+    ("ticks.duckdb", "Dukascopy Tick", "duckdb"),
+    ("l2.duckdb", "L2 深度", "duckdb"),
+    ("trades.duckdb", "交易记录", "duckdb"),
+    ("events.duckdb", "事件日历", "duckdb"),
+    ("analytics.db", "分析数据", "sqlite"),
+    ("decision_log.db", "决策日志", "sqlite"),
+    ("experiments.db", "实验记录", "sqlite"),
+]
+
+_TS_CANDIDATES = [
+    "time", "ts", "timestamp", "bar_ts", "open_ts", "close_ts",
+    "created_at", "updated_at", "tick_ts", "exec_ts",
+    "date", "datetime", "event_ts", "bar_date",
+]
+
+
+def _fmt_size(size_bytes: int) -> str:
+    """字节转可读大小"""
+    if size_bytes >= 1_073_741_824:
+        return f"{size_bytes / 1_073_741_824:.1f}G"
+    if size_bytes >= 1_048_576:
+        return f"{size_bytes / 1_048_576:.0f}M"
+    if size_bytes >= 1_024:
+        return f"{size_bytes / 1_024:.0f}K"
+    return f"{size_bytes}B"
+
+
+def _try_parse_ts(val) -> float | None:
+    """尝试把值转成 Unix timestamp。支持数字戳和 ISO 日期字符串"""
+    if val is None:
+        return None
+    # 数字
+    if isinstance(val, (int, float)):
+        if val > 1_000_000_000:
+            return float(val)
+        if val > 40_000:
+            return float(val)
+        return None
+    # 字符串日期：2026-06-17 或 2026-06-17T12:00:00
+    s = str(val).strip()[:19]
+    if not s or s[0] not in '0123456789':
+        return None
+    try:
+        from datetime import datetime, timezone
+        if 'T' in s or ' ' in s:
+            dt = datetime.fromisoformat(s.replace(' ', 'T'))
+        else:
+            dt = datetime.strptime(s[:10], '%Y-%m-%d')
+        return dt.replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return None
+
+
+def _duckdb_stats(path: Path) -> dict:
+    """查询 DuckDB 数据库的表统计"""
+    import duckdb
+    tables = []
+    total_rows = 0
+    latest_ts = None
+    errors = []
+
+    try:
+        con = duckdb.connect(str(path), read_only=True)
+        try:
+            for t in con.execute("SHOW TABLES").fetchall():
+                tname = t[0]
+                try:
+                    cnt = con.execute(f'SELECT COUNT(*) FROM "{tname}"').fetchone()[0]
+                    total_rows += cnt
+                    cols = [c[0] for c in con.execute(f'DESCRIBE "{tname}"').fetchall()]
+                    tbl_latest = None
+
+                    # 找时间列并取最新值
+                    for tc in _TS_CANDIDATES:
+                        if tc in cols:
+                            try:
+                                res = con.execute(
+                                    f'SELECT MAX("{tc}") FROM "{tname}" WHERE "{tc}" IS NOT NULL'
+                                ).fetchone()
+                                if res and res[0]:
+                                    tbl_latest = _try_parse_ts(res[0])
+                                    if tbl_latest:
+                                        break
+                            except Exception:
+                                continue
+
+                    tables.append({
+                        "name": tname,
+                        "rows": cnt,
+                        "latest_ts": tbl_latest,
+                    })
+                    if tbl_latest and isinstance(tbl_latest, (int, float)) and tbl_latest > (latest_ts or 0):
+                        latest_ts = tbl_latest
+                except Exception as e:
+                    errors.append(f"{tname}: {e}")
+        finally:
+            con.close()
+    except Exception as e:
+        errors.append(f"connect: {e}")
+
+    return {"tables": tables, "total_rows": total_rows, "latest_ts": latest_ts, "errors": errors}
+
+
+def _sqlite_stats(path: Path) -> dict:
+    """查询 SQLite 数据库的表统计"""
+    import sqlite3
+    tables = []
+    total_rows = 0
+    latest_ts = None
+    errors = []
+
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        try:
+            cur = con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            for row in cur.fetchall():
+                tname = row["name"]
+                try:
+                    cnt = con.execute(f'SELECT COUNT(*) FROM "{tname}"').fetchone()[0]
+                    total_rows += cnt
+                    # 获取列名
+                    col_cur = con.execute(f'PRAGMA table_info("{tname}")')
+                    cols = [r["name"] for r in col_cur.fetchall()]
+                    tbl_latest = None
+
+                    for tc in _TS_CANDIDATES:
+                        if tc in cols:
+                            try:
+                                res = con.execute(
+                                    f'SELECT MAX("{tc}") FROM "{tname}" WHERE "{tc}" IS NOT NULL'
+                                ).fetchone()
+                                if res and res[0]:
+                                    tbl_latest = _try_parse_ts(res[0])
+                                    if tbl_latest:
+                                        break
+                            except Exception:
+                                continue
+
+                    tables.append({
+                        "name": tname,
+                        "rows": cnt,
+                        "latest_ts": tbl_latest,
+                    })
+                    if tbl_latest and tbl_latest > (latest_ts or 0):
+                        latest_ts = tbl_latest
+                except Exception as e:
+                    errors.append(f"{tname}: {e}")
+        finally:
+            con.close()
+    except Exception as e:
+        errors.append(f"connect: {e}")
+
+    return {"tables": tables, "total_rows": total_rows, "latest_ts": latest_ts, "errors": errors}
+
+
+@router.get("/db-health")
+def db_health() -> dict:
+    """返回所有数据库的健康状态"""
+    databases = []
+    now = time.time()
+
+    for filename, label, db_type in _DB_LIST:
+        path = _DATA_DIR / filename
+        if not path.exists():
+            databases.append({
+                "name": label,
+                "file": filename,
+                "type": db_type,
+                "exists": False,
+                "size": "—",
+                "size_bytes": 0,
+                "tables": [],
+                "total_rows": 0,
+                "latest_ts": None,
+                "freshness": "missing",
+                "errors": ["file not found"],
+            })
+            continue
+
+        size_bytes = path.stat().st_size
+        stats = _duckdb_stats(path) if db_type == "duckdb" else _sqlite_stats(path)
+
+        latest = stats["latest_ts"]
+        freshness = "unknown"
+        if latest and isinstance(latest, (int, float)):
+            age_sec = now - latest
+            if age_sec < 3600:
+                freshness = "fresh"      # < 1 小时
+            elif age_sec < 86400:
+                freshness = "recent"     # < 1 天
+            elif age_sec < 259200:
+                freshness = "stale"      # < 3 天
+            else:
+                freshness = "old"        # > 3 天
+
+        databases.append({
+            "name": label,
+            "file": filename,
+            "type": db_type,
+            "exists": True,
+            "size": _fmt_size(size_bytes),
+            "size_bytes": size_bytes,
+            "tables": stats["tables"],
+            "total_rows": stats["total_rows"],
+            "latest_ts": latest,
+            "freshness": freshness,
+            "errors": stats["errors"],
+        })
+
+    # 整体健康分
+    fresh_count = sum(1 for d in databases if d.get("freshness") == "fresh")
+    missing_count = sum(1 for d in databases if not d.get("exists"))
+    stale_count = sum(1 for d in databases if d.get("freshness") in ("stale", "old"))
+
+    if missing_count == 0 and stale_count == 0:
+        overall = "healthy"
+    elif missing_count > 0:
+        overall = "degraded"
+    else:
+        overall = "stale"
+
+    return {
+        "ok": True,
+        "overall": overall,
+        "checked_at": now,
+        "summary": {
+            "total": len(databases),
+            "fresh": fresh_count,
+            "stale": stale_count,
+            "missing": missing_count,
+        },
+        "databases": databases,
+    }
