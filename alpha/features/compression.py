@@ -174,35 +174,42 @@ _PCA_FACTOR_PREFIX = "pca"
 
 
 def register_pca_factors(compressor: FeatureCompressor):
-    """将 PCA 压缩器的各分量注册为 factor_registry 因子。
+    """将 PCA 压缩器的各分量注册为因子 (通过 RegistryAdapter 标准路径)。
 
     因子名: pca_0, pca_1, ..., pca_N-1
+    先移除旧的 pca_* 因子，再注册新的。
     """
     from alpha.registry import factor_registry
+    from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
     from alpha.features.derivatives import FeatureDeriver
 
     if not compressor.is_fitted:
         logger.warning("PCA not fitted, skip factor registration")
         return
 
+    adapter = RegistryAdapter.shared()
     n = compressor.n_components
     deriver = FeatureDeriver()
 
+    # 先清理旧的 pca_* 因子
+    for name in list(factor_registry._factors.keys()):
+        if name.startswith(f"{_PCA_FACTOR_PREFIX}_"):
+            try:
+                adapter.force_unregister(name, "replaced by new PCA run")
+            except Exception:
+                del factor_registry._factors[name]
+
     for i in range(n):
-        idx = i  # capture in closure
+        idx = i
 
         def make_pca_fn(component_idx: int = idx):
             def pca_fn(df: pd.DataFrame) -> np.ndarray:
                 try:
-                    # 重新加载模型 (避免 pickle 引用问题)
                     comp = FeatureCompressor.load()
                     if comp is None:
                         return np.full(len(df), np.nan)
-
-                    # 生成衍生特征
                     X = deriver.derive(df)
                     transformed = comp.transform(X)
-
                     if component_idx < transformed.shape[1]:
                         return transformed[:, component_idx]
                     return np.full(len(df), np.nan)
@@ -211,5 +218,10 @@ def register_pca_factors(compressor: FeatureCompressor):
             return pca_fn
 
         factor_name = f"{_PCA_FACTOR_PREFIX}_{i}"
-        factor_registry._factors[factor_name] = make_pca_fn(i)
-        logger.info("registered PCA factor: %s", factor_name)
+        adapter.register_runtime(
+            name=factor_name,
+            func=make_pca_fn(i),
+            source=SOURCE_SHADOW,
+            description=f"PCA component {i} (variance ratio: {compressor.explained_variance_ratio[i]:.4f})",
+        )
+        logger.info("registered PCA factor via adapter: %s", factor_name)

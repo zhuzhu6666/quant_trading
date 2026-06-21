@@ -42,6 +42,15 @@ async def lifespan(app: FastAPI):
     from loguru import logger as _lg
     setup_logging()
     _init_observability()
+
+    # 初始化统一数据库
+    try:
+        from backend.core.db import init_all
+        init_all()
+        _lg.info("[lifespan] databases initialized")
+    except Exception as e:
+        _lg.warning(f"[lifespan] db init failed (non-fatal): {e}")
+
     get_job_manager().bind_loop(asyncio.get_running_loop())
 
     # Restore shadow/discovered factors from lifecycle log

@@ -22,11 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def _get_adapter() -> RegistryAdapter:
-    """每次调用都新建一个 RegistryAdapter — 简单可靠.
-    内部 _meta dict 是 in-process state, 跟其它 service 共享 (singleton 不会).
-    注意: persistent_registry 启动时也会构造一个, 不会冲突 (RegistryAdapter
-    只读 factor_registry 共享 dict, _meta 各管各的)."""
-    return RegistryAdapter()
+    """返回 RegistryAdapter 单例 (线程安全)。"""
+    return RegistryAdapter.shared()
 
 
 def list_shadows() -> list[dict]:

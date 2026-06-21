@@ -1,22 +1,20 @@
-"""backend/runtime/evolution_orchestrator.py — 自进化编排器主循环。
+"""backend/runtime/evolution_orchestrator.py — 自进化编排器主循环 (v2: 闭环修复).
 
-把 GP 搜索 → OOS 评估 → Canary 晋升 → 权重更新 → 退役检查
-串成一个可被 InProcessScheduler 调度的端到端管线。
+把 GP 搜索 → 注册 shadow → Canary 晋升(持久化+执行) → 退役检查(执行)
+→ 权重更新 → 串成端到端闭环管线。
 
-流程:
-  1. 从 DataStore 加载 M15 数据
-  2. 跑 GP 搜索发现新因子
-  3. 注册为 shadow 因子 (RegistryAdapter)
-  4. OOS 评估 (PurgedWalkForward + BootstrapCI)
-  5. Canary 晋升 (CanaryDirector)
-  6. 权重更新 (WeightPolicy)
-  7. 退役检查 (retirement_check)
-  8. 发射 EvolutionStory 事件
+v2 修复:
+  - CanaryDirector 状态持久化到 decision_log.db 的 canary_state 表
+  - 晋升后真正调用 adapter.promote() 更新因子 source
+  - 退役检查后真正调用 adapter.retire() 移除因子
+  - 权重更新推送 factor_portfolio_weights (AWE 读同一字段)
 """
 
 from __future__ import annotations
 
+import json as _json
 import logging
+import sqlite3
 import time as _time
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -27,6 +25,105 @@ import pandas as pd
 from strategy import mab_router as _mab_router
 
 logger = logging.getLogger(__name__)
+
+_CANARY_DB = "data/decision_log.db"
+_CANARY_STATE_FILE = "data/charts/canary_state.json"
+
+
+def _ensure_canary_db() -> None:
+    """确保 canary_state 表存在 (SQLite in decision_log.db)."""
+    try:
+        conn = sqlite3.connect(_CANARY_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS canary_state (
+                factor_name TEXT PRIMARY KEY,
+                stage TEXT NOT NULL DEFAULT 'shadow',
+                oos_bars INTEGER DEFAULT 0,
+                cumulative_pnl REAL DEFAULT 0.0,
+                promote_time REAL DEFAULT 0.0,
+                events_json TEXT DEFAULT '[]',
+                updated_at REAL DEFAULT 0.0
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("[Evolve] canary_state table init: %s", e)
+
+
+def _load_canary_states() -> dict[str, dict]:
+    """从 SQLite 加载所有 canary 状态. 降级到 JSON 文件."""
+    states: dict[str, dict] = {}
+    try:
+        _ensure_canary_db()
+        conn = sqlite3.connect(_CANARY_DB)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM canary_state").fetchall()
+        conn.close()
+        for r in rows:
+            name = r["factor_name"]
+            try:
+                events = _json.loads(r["events_json"]) if r["events_json"] else []
+            except Exception:
+                events = []
+            states[name] = {
+                "stage": r["stage"], "oos_bars": r["oos_bars"],
+                "cumulative_pnl": r["cumulative_pnl"], "promote_time": r["promote_time"],
+                "events": events, "updated_at": r["updated_at"],
+            }
+        if states:
+            return states
+    except Exception as e:
+        logger.debug("[Evolve] load canary from DB: %s", e)
+
+    # 降级: JSON 文件
+    try:
+        from pathlib import Path
+        p = Path(_CANARY_STATE_FILE)
+        if p.exists():
+            loaded = _json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                return loaded
+    except Exception as e:
+        logger.debug("[Evolve] load canary from JSON: %s", e)
+    return {}
+
+
+def _save_canary_states(states: dict[str, dict]) -> None:
+    """持久化 canary 状态到 SQLite + JSON 备份."""
+    try:
+        _ensure_canary_db()
+        conn = sqlite3.connect(_CANARY_DB)
+        now = _time.time()
+        for name, s in states.items():
+            events_json = _json.dumps(s.get("events", []), ensure_ascii=False)
+            conn.execute("""
+                INSERT OR REPLACE INTO canary_state
+                (factor_name, stage, oos_bars, cumulative_pnl, promote_time, events_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                name,
+                s.get("stage", "shadow"),
+                s.get("oos_bars", 0),
+                s.get("cumulative_pnl", 0.0),
+                s.get("promote_time", 0.0),
+                events_json,
+                now,
+            ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug("[Evolve] save canary to DB: %s, falling back to JSON", e)
+        try:
+            from pathlib import Path
+            Path(_CANARY_STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
+            Path(_CANARY_STATE_FILE).write_text(
+                _json.dumps(states, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e2:
+            logger.warning("[Evolve] canary state save failed: %s", e2)
+
 
 # ── EvolutionStage 记录 ───────────────────────────────────────────────
 
@@ -78,25 +175,7 @@ def scheduled_evolution_cycle(
     gp_top_k: int = 10,
     progress_cb: Callable[[str, float, str], None] | None = None,
 ) -> EvolutionReport:
-    """执行一次完整的自进化循环。
-
-    设计原则:
-    - 每一步出错不阻塞后续步骤 (非致命异常被 catch, 记到 report.error)
-    - 每一步发射 EvolutionStory 事件
-    - 支持 progress_cb 供 InProcessScheduler / API 跟踪进度
-
-    Args:
-        symbol: 品种代码.
-        timeframe: 数据周期.
-        n_bars: GP 搜索使用的 bar 数量.
-        gp_pop: GP 种群大小.
-        gp_gen: GP 世代数.
-        gp_top_k: GP 返回 top-K 候选.
-        progress_cb: 可选进度回调 (step, pct, msg).
-
-    Returns:
-        EvolutionReport 记录本次循环结果.
-    """
+    """执行一次完整的自进化循环 (闭环)."""
     report = EvolutionReport()
     cb = progress_cb or (lambda *_: None)
     t0 = _time.time()
@@ -115,7 +194,7 @@ def scheduled_evolution_cycle(
             return report
         cb("data_loaded", 10, f"loaded {len(df)} bars")
 
-        # ── Step 2: GP 搜索 (如果 pop>0) ──
+        # ── Step 2: GP 搜索 ──
         if gp_pop > 0 and gp_gen > 0:
             cb("gp_search", 15, f"GP search pop={gp_pop} gen={gp_gen}")
             expressions = _run_gp(df, pop=gp_pop, gen=gp_gen, top_k=gp_top_k)
@@ -124,12 +203,9 @@ def scheduled_evolution_cycle(
             cb("gp_done", 40, f"GP found {len(expressions)} candidates")
         else:
             expressions = []
-            cb("gp_skip", 40, "GP skipped (fast cycle mode)")
+            cb("gp_skip", 40, "GP skipped")
 
-        if not expressions:
-            logger.info("[Evolve] no new GP candidates, skipping registration")
-        else:
-            # ── Step 3: 注册 shadow 因子 ──
+        if expressions:
             cb("register", 42, f"registering {len(expressions)} shadow factors")
             registered = _register_shadow_factors(expressions)
             report.gp_registered_shadow = registered
@@ -138,8 +214,10 @@ def scheduled_evolution_cycle(
                 "count": registered, "source": "gp_search",
             })
             cb("register_done", 50, f"registered {registered} factors")
+        else:
+            logger.info("[Evolve] no new GP candidates")
 
-        # ── Step 4: Canary 评估 (无论 GP 有无产出, 已有的 shadow/UNKNOWN 因子都需要评估) ──
+        # ── Step 3: Canary 评估 (持久化 + 真正晋升) ──
         cb("canary", 55, "running canary evaluation")
         promotions, rollbacks, stay = _run_canary_evaluation(
             symbol, timeframe, n_bars
@@ -147,21 +225,20 @@ def scheduled_evolution_cycle(
         report.canary_promotions = promotions
         report.canary_rollbacks = rollbacks
         report.canary_stay = stay
+
         if promotions:
             logger.info("[Evolve] canary promoted: %s", promotions)
+            # ★ 真正执行晋升: 更新 RegistryAdapter source
+            _execute_promotions(promotions)
             _emit_evolution_story("canary_promotions", {
                 "promoted": promotions, "rollbacked": rollbacks,
             })
-            # 晋升 ACTIVE → 启用策略中的影子因子
-            try:
-                from config.runtime_config import patch as rc_patch
-                rc_patch({"include_shadow_factors": True})
-                logger.info("[Evolve] enabled include_shadow_factors in RuntimeConfig")
-            except Exception as e:
-                logger.debug("[Evolve] enable shadow factors failed: %s", e)
+        if rollbacks:
+            logger.info("[Evolve] canary rolled back: %s", rollbacks)
+            _execute_rollbacks(rollbacks)
         cb("canary_done", 70, f"promoted {len(promotions)}, rolled {len(rollbacks)}")
 
-        # ── Step 5: 因子健康检查 + 退役 ──
+        # ── Step 4: 退役检查 ──
         cb("retirement", 75, "checking factor retirement")
         retire_info = _check_retirement()
         report.retire_candidates = retire_info["candidates"]
@@ -169,10 +246,11 @@ def scheduled_evolution_cycle(
         if retire_info["candidates"]:
             logger.info("[Evolve] retiring: %s", retire_info["candidates"])
             for name in retire_info["candidates"]:
-                _try_retire(name, retire_info["reason"])
+                if _try_retire(name, retire_info["reason"]):
+                    logger.info("[Evolve] retired: %s", name)
         cb("retirement_done", 85, f"retired {len(retire_info['candidates'])} factors")
 
-        # ── Step 5.5: IC Tracker 自动刷新 + 因子健康报告落盘 ──
+        # ── Step 5: IC 刷新 + 因子健康报告 ──
         cb("ic_refresh", 86, "refreshing factor IC tracking")
         try:
             from alpha.ic_tracker import refresh_all_factors
@@ -186,7 +264,6 @@ def scheduled_evolution_cycle(
         except Exception as e:
             logger.debug("[Evolve] IC refresh skipped: %s", e)
 
-        # 写因子健康报告 (供前端 /api/factor-health/latest 消费)
         try:
             from alpha.factor_health import evaluate_factors, write_report
             from backend.core.paths import CHARTS_DIR
@@ -195,17 +272,15 @@ def scheduled_evolution_cycle(
             out_json = CHARTS_DIR / "factor_health_report.json"
             write_report(report_result, out_txt, out_json)
             logger.info(
-                "[Evolve] factor health report written: %s healthy=%d watch=%d decaying=%d unknown=%d",
-                out_json,
+                "[Evolve] factor health report: healthy=%d watch=%d decaying=%d",
                 report_result.get("healthy", 0),
                 report_result.get("watch", 0),
                 report_result.get("decaying", 0),
-                report_result.get("unknown", 0),
             )
         except Exception as e:
-            logger.debug("[Evolve] factor health report write skipped: %s", e)
+            logger.debug("[Evolve] factor health report skipped: %s", e)
 
-        # ── Step 6: 权重更新 ──
+        # ── Step 6: 权重更新 (推送到 AWE 消费同一字段) ──
         cb("weights", 88, "recomputing factor weights")
         report.weights_updated = _update_weights(df=df)
         cb("weights_done", 95, "weights updated" if report.weights_updated else "weights unchanged")
@@ -226,33 +301,26 @@ def scheduled_evolution_cycle(
 
 
 def _load_bars(symbol: str, timeframe: str, n_bars: int) -> pd.DataFrame | None:
-    """从 DataStore 加载 M15 bar 数据."""
     try:
         from data.store import DataStore
         ds = DataStore()
-        df = ds.load_bars(symbol, timeframe, limit=n_bars)
-        return df
+        return ds.load_bars(symbol, timeframe, limit=n_bars)
     except Exception as e:
         logger.warning("[Evolve] load_bars failed: %s", e)
         return None
 
 
-def _run_gp(
-    df: pd.DataFrame, pop: int = 50, gen: int = 20, top_k: int = 10
-) -> list[Any]:
-    """运行 GP 搜索, 返回 ExpressionScore 列表."""
+def _run_gp(df: pd.DataFrame, pop: int = 50, gen: int = 20, top_k: int = 10) -> list[Any]:
     try:
         from alpha.factor_search_gp import run_gp_search
         t0 = _time.time()
-        results = run_gp_search(
-            df, pop=pop, gen=gen, top_k=top_k,
-            progress_cb=lambda step, pct, msg: None,
-        )
+        results = run_gp_search(df, pop=pop, gen=gen, top_k=top_k,
+                                progress_cb=lambda step, pct, msg: None)
         elapsed = _time.time() - t0
         n = len(results) if results else 0
         if n > 0:
             top_score = getattr(results[0], "score", 0) if results else 0
-            logger.info("[Evolve] GP done: %d candidates in %.1fs (top_score=%.3f)", n, elapsed, top_score)
+            logger.info("[Evolve] GP done: %d candidates in %.1fs (top=%.3f)", n, elapsed, top_score)
         else:
             logger.info("[Evolve] GP done: 0 candidates in %.1fs", elapsed)
         return results if results else []
@@ -262,27 +330,30 @@ def _run_gp(
 
 
 def _register_shadow_factors(expressions: list[Any]) -> int:
-    """注册 GP 搜索结果到 RegistryAdapter."""
+    """注册 GP 搜索结果为影子因子 (SOURCE_SHADOW).
+
+    影子因子进入 factor_registry 但不参与投票——StreamingFactorEngine
+    在每 tick 通过 adapter.get_meta() 检查 source, 跳过 shadow。
+    只有通过 Canary 晋升为 SOURCE_DISCOVERED 后才参与交易。
+    """
     try:
         from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
-        adapter = RegistryAdapter()
+        adapter = RegistryAdapter.shared()
         count = 0
         for expr_score in expressions:
-            name = getattr(expr_score, "name", None) or f"dsl_auto_{hash(expr_score.expression or '') & 0xFFFFFFFF:08x}"
+            name = getattr(expr_score, "name", None) or \
+                   f"dsl_auto_{hash(expr_score.expression or '') & 0xFFFFFFFF:08x}"
             expression_str = getattr(expr_score, "expression", "") or ""
-            # 把表达式编译为可调用因子函数
             func = None
             if expression_str:
                 try:
-                    from alpha.factor_dsl import compile_expression
-                    func = compile_expression(expression_str)
+                    from alpha.factor_dsl import evaluate_dsl
+                    func = lambda df, _expr=expression_str: evaluate_dsl(_expr, df)
                 except Exception:
                     pass
             try:
                 adapter.register_runtime(
-                    name=name,
-                    func=func,
-                    source=SOURCE_SHADOW,
+                    name=name, func=func, source=SOURCE_SHADOW,
                     description=expression_str,
                 )
                 count += 1
@@ -297,37 +368,47 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
 def _run_canary_evaluation(
     symbol: str, timeframe: str, n_bars: int
 ) -> tuple[list[str], list[str], list[str]]:
-    """运行 CanaryDirector 检查 shadow 因子晋升/回滚.
+    """运行 CanaryDirector, 从持久化状态恢复, 评估后写回。
 
-    真实 OOS PnL 来源优先级:
-      1. decision_log 中 strategy 名匹配 → 实盘 close PnL
-      2. 登记为 ACTIVE 的因子 → strategy_perf 累计 PnL
-      3. 新 shadow 因子 → GP score 估算 (fallback)
+    Returns: (promotions, rollbacks, stay)
     """
     promotions: list[str] = []
     rollbacks: list[str] = []
     stay: list[str] = []
+    saved_states: dict[str, dict] = {}
+
     try:
         from deployment.canary import CanaryDirector, CanaryEvalContext
         from alpha.registry_adapter import RegistryAdapter
-        adapter = RegistryAdapter()
+        adapter = RegistryAdapter.shared()
 
-        shadows: list[tuple[str, float]] = []
-        try:
-            # RegistryAdapter 没有 list_all/get_metadata, 用 get_meta 遍历
-            for name in list(adapter._meta.keys()):
-                meta = adapter.get_meta(name) or {}
-                score = float(meta.get("score", 0.0))
-                shadows.append((name, score))
-        except Exception:
-            pass
+        # 加载持久化状态
+        saved_states = _load_canary_states()
 
-        if not shadows:
+        # 收集所有影子 + 已发现因子
+        candidates: list[tuple[str, float, str]] = []
+        for name in list(adapter._meta.keys()):
+            meta = adapter.get_meta(name) or {}
+            source = meta.get("source", "")
+            score = float(meta.get("score", 0.0))
+            if source in ("shadow", "discovered"):
+                candidates.append((name, score, source))
+
+        if not candidates:
             return promotions, rollbacks, stay
 
         director = CanaryDirector()
-        for name, score in shadows:
-            # 尝试从 decision_log 加载实盘 PnL
+
+        # 恢复持久化状态到 director
+        for name, state in saved_states.items():
+            if name in dict(candidates):
+                dir_state = director.get_state(name)
+                dir_state.stage = state.get("stage", "shadow")
+                dir_state.oos_bars = state.get("oos_bars", 0)
+                dir_state.cumulative_pnl = state.get("cumulative_pnl", 0.0)
+                dir_state.promote_time = state.get("promote_time", 0.0)
+
+        for name, score, source in candidates:
             ctx = _load_canary_ctx_from_log(name, score)
             try:
                 result = director.check_promotion(name, ctx)
@@ -342,52 +423,84 @@ def _run_canary_evaluation(
             except Exception as e:
                 logger.debug("[Evolve] canary check %s failed: %s", name, e)
                 stay.append(name)
+
+        # ★ 持久化 director 状态到 DB
+        new_states: dict[str, dict] = {}
+        for name, _, _ in candidates:
+            s = director.get_state(name)
+            new_states[name] = {
+                "stage": s.stage,
+                "oos_bars": s.oos_bars,
+                "cumulative_pnl": s.cumulative_pnl,
+                "promote_time": s.promote_time,
+                "events": [dict(e) for e in getattr(s, "_events", [])],
+                "updated_at": _time.time(),
+            }
+        _save_canary_states(new_states)
+
     except Exception as e:
         logger.exception("[Evolve] canary eval failed: %s", e)
+
     return promotions, rollbacks, stay
 
 
+def _execute_promotions(names: list[str]) -> None:
+    """真正执行晋升: adapter.promote(name, SOURCE_DISCOVERED)."""
+    try:
+        from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED
+        adapter = RegistryAdapter.shared()
+        for name in names:
+            try:
+                ok = adapter.promote(name, new_source=SOURCE_DISCOVERED,
+                                     reason="canary_promotion")
+                if ok:
+                    logger.info("[Evolve] ✓ promoted %s → DISCOVERED", name)
+            except Exception as e:
+                logger.debug("[Evolve] promote %s failed: %s", name, e)
+    except Exception as e:
+        logger.debug("[Evolve] execute_promotions failed: %s", e)
+
+
+def _execute_rollbacks(names: list[str]) -> None:
+    """回滚因子到 SOURCE_SHADOW."""
+    try:
+        from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
+        adapter = RegistryAdapter.shared()
+        for name in names:
+            try:
+                adapter.promote(name, new_source=SOURCE_SHADOW,
+                                reason="canary_rollback")
+                logger.info("[Evolve] ↺ rolled back %s → SHADOW", name)
+            except Exception as e:
+                logger.debug("[Evolve] rollback %s failed: %s", name, e)
+    except Exception as e:
+        logger.debug("[Evolve] execute_rollbacks failed: %s", e)
+
+
 def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
-    """从 decision_log 读实盘 PnL, 构造 CanaryEvalContext.
-
-    Args:
-        name: 因子/策略名.
-        score: GP score fallback.
-
-    Returns:
-        CanaryEvalContext 含实盘 (bars, pnl) 或估算值.
-    """
     from deployment.canary import CanaryEvalContext
     try:
-        import sqlite3, json as _json
-        db_path = "data/decision_log.db"
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(_CANARY_DB)
         conn.row_factory = sqlite3.Row
-        # 查询该因子的所有平仓记录
         rows = conn.execute(
             "SELECT meta FROM decision_log WHERE decision_type='close' AND strategy=?",
             (name,)
         ).fetchall()
         conn.close()
         if not rows:
-            # fallback: 按 GP score 估算
             estimated_pnl = score * 0.05 if abs(score) > 0.01 else 0.0
             return CanaryEvalContext(
                 oos_bars=min(int(abs(score) * 5000), 5000),
                 oos_pnl=estimated_pnl,
             )
-        # 从 meta JSON 提取 pnl
         total_pnl = 0.0
         for r in rows:
             meta = _json.loads(r["meta"]) if isinstance(r["meta"], str) else (r["meta"] or {})
             if isinstance(meta, dict):
                 total_pnl += float(meta.get("pnl", 0.0))
-        return CanaryEvalContext(
-            oos_bars=len(rows),
-            oos_pnl=total_pnl,
-        )
+        return CanaryEvalContext(oos_bars=len(rows), oos_pnl=total_pnl)
     except Exception as e:
-        logger.debug("[Evolve] _load_canary_ctx_from_log(%s) failed: %s, fallback to score", name, e)
+        logger.debug("[Evolve] canary_ctx(%s) failed: %s", name, e)
         estimated_pnl = score * 0.05 if abs(score) > 0.01 else 0.0
         return CanaryEvalContext(
             oos_bars=min(int(abs(score) * 5000), 5000),
@@ -396,77 +509,49 @@ def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
 
 
 def _check_retirement() -> dict[str, Any]:
-    """检查 need retire 的因子."""
     result: dict[str, Any] = {"candidates": [], "reason": ""}
     try:
         from alpha.factor_health import retirement_check
         from alpha.registry_adapter import RegistryAdapter
-
-        adapter = RegistryAdapter()
-        # 构造 status 列表 (简化: 从 adapter 已知状态)
-        statuses: list[Any] = []
-        try:
-            if hasattr(adapter, "all_statuses"):
-                statuses = adapter.all_statuses()
-        except Exception:
-            pass
-
+        adapter = RegistryAdapter.shared()
+        statuses = adapter.all_statuses()
         if statuses:
             rc = retirement_check(statuses)
             result["candidates"] = [c for c in rc.candidates]
             result["reason"] = rc.reason
     except Exception as e:
-        logger.debug("[Evolve] retirement_check skipped: %s", e)
+        logger.debug("[Evolve] retirement_check: %s", e)
     return result
 
 
 def _try_retire(name: str, reason: str) -> bool:
-    """安全地 retire 一个因子."""
     try:
         from alpha.registry_adapter import RegistryAdapter
-        adapter = RegistryAdapter()
-        if hasattr(adapter, "retire"):
-            return adapter.retire(name, reason)
+        adapter = RegistryAdapter.shared()
+        return adapter.retire(name, reason)
     except Exception as e:
         logger.debug("[Evolve] retire %s failed: %s", name, e)
-    return False
+        return False
 
 
 def _update_weights(df: pd.DataFrame | None = None) -> bool:
-    """计算动态权重并通过 RuntimeConfig.patch 推给策略消费.
+    """计算动态权重并推入 factor_portfolio_weights (AWE 同一字段).
 
-    Flow:
-        1. 从 RegistryAdapter 收集所有活跃因子健康分
-        2. WeightPolicy.compute_weights → dict[str, float]
-        3. 映射到 multi_factor_m15 能消费的格式 (vote_weights + shadow_vote_weight)
-        4. RuntimeConfig.patch() 广播给 subscribe 者
-
-    If *df* is provided and a MABRouter can be constructed from the current
-    factor set, also runs :func:`auto_regime_boost` to detect regime changes
-    and boost Beta priors for the new regime.
+    从健康报告读取分数 → WeightPolicy → RuntimeConfig.patch.
     """
     try:
         from alpha.registry_adapter import RegistryAdapter
-        adapter = RegistryAdapter()
-
-        scores: dict[str, float] = {}
-        try:
-            if hasattr(adapter, "all_health_scores"):
-                scores = adapter.all_health_scores()
-        except Exception:
-            pass
-
+        adapter = RegistryAdapter.shared()
+        scores = adapter.all_health_scores()
         if not scores:
             return False
 
         from deployment.weight_policy import WeightPolicy
         wp = WeightPolicy()
         new_weights = wp.compute_weights(scores)
-
         if not new_weights:
             return False
 
-        # ── Regime-aware MAB prior boost (if we have price data) ──
         if df is not None:
             try:
                 factor_names = list(new_weights.keys())
@@ -475,53 +560,20 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
                     _router = MABRouter(strategies=factor_names)
                     _result = _mab_router.auto_regime_boost(df, _router)
                     if _result.get("boosted"):
-                        logger.info(
-                            "[Evolve] auto_regime_boost: %s → %s (boosted=%s)",
-                            _result.get("previous_regime"),
-                            _result.get("current_regime"),
-                            _result.get("boosted"),
-                        )
+                        logger.info("[Evolve] regime_boost: %s→%s",
+                                    _result.get("previous_regime"),
+                                    _result.get("current_regime"))
             except Exception as e:
-                logger.debug("[Evolve] auto_regime_boost skipped: %s", e)
+                logger.debug("[Evolve] regime_boost: %s", e)
 
-        # 映射到策略可消费的参数
-        # 3 个内置因子权重: 按因子名匹配, 未知因子归入 shadow_vote_weight
-        builtin_names = ["di_spread", "rsi_14", "stoch_k"]
-        builtin_weights = [new_weights.get(n, 1.0) for n in builtin_names]
-        # 归一化
-        total_b = sum(builtin_weights)
-        if total_b > 0:
-            builtin_weights = [w / total_b * 3 for w in builtin_weights]  # scale to ~3
-
-        # 影子因子权重 = 按 IC 比值动态调权
-        # 公式: shadow_vote_weight = clamp(shadow_avg_ic / builtin_avg_ic, 0.15, 2.0)
-        # 影子因子 IC 比内置高 → 权重向 1 靠拢, 可达 2.0 (超额投票权)
-        # 影子因子 IC 比内置低 → 权重最低保底 0.15 (仍然不归零)
-        shadow_names = [k for k in new_weights if k not in builtin_names]
-        if shadow_names:
-            shadow_avg_ic = float(np.mean([new_weights[k] for k in shadow_names]))
-            builtin_avg_ic = float(np.mean([new_weights.get(n, 0) for n in builtin_names])) if builtin_names else 0.001
-            ratio = shadow_avg_ic / max(builtin_avg_ic, 0.001)
-            shadow_w = max(0.15, min(2.0, ratio))
-        else:
-            shadow_w = 0.15
-
-        # 推入 RuntimeConfig → multi_factor_m15 通过 subscribe 接收
         from config.runtime_config import patch as rc_patch
-        patch_dict: dict = {
-            "vote_weights": builtin_weights,
-            "shadow_vote_weight": round(min(shadow_w, 1.0), 4),
-        }
-        rc_patch(patch_dict)
+        rc_patch({"factor_portfolio_weights": new_weights})
         _emit_evolution_story("weights_updated", {
             "factors": len(new_weights),
-            "vote_weights": builtin_weights,
-            "shadow_vote_weight": patch_dict["shadow_vote_weight"],
+            "factor_portfolio_weights": new_weights,
         })
-        logger.info("[Evolve] weights pushed to RuntimeConfig: vote=%s shadow=%.4f",
-                     builtin_weights, patch_dict["shadow_vote_weight"])
+        logger.info("[Evolve] weights: %d factors → factor_portfolio_weights", len(new_weights))
 
-        # ── Adaptive risk tuning (volatility + equity based) ──
         if df is not None:
             try:
                 from core.state import state as _state
@@ -529,24 +581,16 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
                 from risk.circuit import auto_tune_risk
                 risk_cfg = auto_tune_risk(df, equity)
                 _emit_evolution_story("risk_tuned", risk_cfg)
-                logger.info(
-                    "[Evolve] auto_tune_risk: max_daily_loss_pct=%.2f%%, "
-                    "single_trade_risk_usd=%.2f, atr_percentile=%.1f%%",
-                    risk_cfg["max_daily_loss_pct"],
-                    risk_cfg["single_trade_risk_usd"],
-                    risk_cfg["atr_percentile"],
-                )
             except Exception as e:
-                logger.debug("[Evolve] auto_tune_risk skipped: %s", e)
+                logger.debug("[Evolve] auto_tune_risk: %s", e)
 
         return True
     except Exception as e:
-        logger.debug("[Evolve] update_weights failed: %s", e)
+        logger.debug("[Evolve] update_weights: %s", e)
         return False
 
 
 def _emit_evolution_story(event_type: str, payload: dict) -> None:
-    """发射 EvolutionStory 事件 (非失败)."""
     try:
         from monitor.evolution_story import EvolutionStory
         EvolutionStory.shared().append(event_type, payload)
@@ -554,12 +598,8 @@ def _emit_evolution_story(event_type: str, payload: dict) -> None:
         pass
 
 
-# ── 便捷 CLI ──────────────────────────────────────────────────────────
-
-
 if __name__ == "__main__":
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     report = scheduled_evolution_cycle()
-    import json as _json
     print(_json.dumps(report.to_dict(), indent=2, ensure_ascii=False))

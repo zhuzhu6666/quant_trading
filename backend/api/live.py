@@ -74,7 +74,7 @@ def start(_user: RequireUser, req: StartRequest) -> dict:
 
 
 @router.post("/stop")
-def stop() -> dict:
+def stop(_user: RequireUser) -> dict:
     """Terminate the loop subprocess."""
     return stop_loop()
 
@@ -213,5 +213,5 @@ def session_stats_endpoint(_user: RequireUser) -> dict:
         "wins": int(_live_state.get("session_winning", 0)),
         "losses": int(_live_state.get("session_losing", 0)),
         "drawdown_pct": float(_live_state.get("session_max_drawdown_pct", 0)),
-        "consecutive_loss": int(_live_state.get("session_losing", 0)),
+        "consecutive_loss": int(_live_state.get("session_consecutive_loss", 0)),
     }

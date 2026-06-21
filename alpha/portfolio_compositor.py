@@ -209,3 +209,15 @@ class PortfolioCompositor:
         for name in factor_names:
             if name not in self._factor_configs:
                 self._factor_configs[name] = self._default_gp_config(name)
+
+    def update_weights(self, weights: dict[str, float]) -> None:
+        """热更新因子权重 (供 RuntimeConfig 订阅回调)。
+
+        Args:
+            weights: {factor_name: new_weight}
+        """
+        for name, w in weights.items():
+            if name not in self._factor_configs:
+                self._factor_configs[name] = self._default_gp_config(name)
+            self._factor_configs[name]["weight"] = float(w)
+        logger.debug("PortfolioCompositor: updated weights for %d factors", len(weights))

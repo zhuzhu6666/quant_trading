@@ -62,7 +62,7 @@ def restore_from_log(lifecycle_log_path: str = "data/charts/factor_lifecycle_log
         return 0
 
     if adapter is None:
-        adapter = RegistryAdapter()
+        adapter = RegistryAdapter.shared()
     restored = 0
     for name, ev in latest_event.items():
         event_type = ev.get("event")

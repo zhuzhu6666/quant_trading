@@ -26,11 +26,16 @@ Thumbs.db
 data/*.db
 data/*.duckdb
 data/*.duckdb.wal
+data/*.db-shm
+data/*.db-wal
+data/*.bak
+data/charts/*.bak
 data/ticks/
 data/dukascopy_raw/
 data/feature_models/
 data/ml_models/
 data/browser/
+tick_vault_data/
 
 # Logs
 logs/
@@ -52,14 +57,8 @@ desktop.ini
 $RECYCLE.BIN/
 *.lnk
 
-# Docker
-Dockerfile
-docker-compose.yml
-.dockerignore
-
-# Node / frontend (v5 removed React frontend)
+# Node / frontend (removed — now WeChat mini-program)
 node_modules/
-frontend-v2/node_modules/
 package-lock.json
 
 # Build artifacts

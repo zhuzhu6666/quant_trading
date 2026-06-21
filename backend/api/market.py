@@ -16,7 +16,7 @@ _store: DataStore | None = None
 def _get_store() -> DataStore:
     global _store
     if _store is None:
-        _store = DataStore("data/ctrader_data.duckdb")
+        _store = DataStore()
     return _store
 
 

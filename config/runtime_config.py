@@ -94,7 +94,6 @@ class RuntimeConfig:
     sync_recovery_max_attempts: int = 3
 
     # --- 策略控制 ---
-    include_shadow_factors: bool = False
     ctrader_send_orders: bool = True  # cTrader 是唯一执行通道, 默认真发单
 
     # --- 风控/执行参数 (原 strategy_* 前缀, 现被 Factor Takeover v4 管道使用) ---
