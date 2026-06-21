@@ -1,3 +1,5 @@
+import api from '../../utils/api';
+
 const app = getApp();
 
 Page({
@@ -5,29 +7,90 @@ Page({
     connected: false,
     connLabel: '等待数据',
     source: '',
-    // 账户
+    // 账户 — 直接来自 /api/live/account
     equity: '—', balance: '—', pnl: '—', pnlCls: 'text-gray',
     margin: '—', marginFree: '—', leverage: '—',
-    // 持仓
+    currency: '',
+    // 持仓 — 直接来自 /api/live/positions
     hasPos: false, posDir: '—', posDirCls: 'text-gray',
     posEntry: '—', posSize: '—', posPnl: '—', posPnlCls: 'text-gray',
-    // 统计
+    // 统计 — 来自 global state (每日会话)
     trades: 0, wins: 0, losses: 0,
     winRate: '—', winRateCls: 'text-gray', winRateBar: 0, winRateBarCls: 'progress-green',
     drawdown: '—',
     price: '—',
-    // 风控
+    // 风控 — 来自 global state
     circuitBreaker: false, consecLoss: 0,
   },
 
-  onLoad() { this._update(); },
-  onShow() { this._update(); },
+  _actTimer: null,
+
+  onLoad() {
+    this._fetchAccount();
+    this._update();
+    this._actTimer = setInterval(() => this._fetchAccount(), 15000);
+  },
+
+  onShow() {
+    this._fetchAccount();
+    this._update();
+  },
+
+  onHide() {
+    if (this._actTimer) { clearInterval(this._actTimer); this._actTimer = null; }
+  },
+
+  onUnload() {
+    if (this._actTimer) { clearInterval(this._actTimer); this._actTimer = null; }
+  },
+
   onGlobalStateUpdate() { this._update(); },
+
+  async _fetchAccount() {
+    const [acct, pos] = await Promise.all([
+      api.get('/api/live/account'),
+      api.get('/api/live/positions'),
+    ]);
+
+    const hasAcct = acct && acct.ok;
+    const hasPos = pos && (pos.positions || pos.ok);
+
+    this.setData({
+      equity: hasAcct && acct.equity ? Number(acct.equity).toFixed(2) : this.data.equity,
+      balance: hasAcct && acct.balance ? Number(acct.balance).toFixed(2) : this.data.balance,
+      margin: hasAcct && acct.margin ? Number(acct.margin).toFixed(2) : '—',
+      marginFree: hasAcct && acct.margin_free ? Number(acct.margin_free).toFixed(2) : '—',
+      leverage: hasAcct && acct.leverage ? acct.leverage : '—',
+      currency: hasAcct && acct.currency ? acct.currency : '',
+    });
+
+    // 持仓解析
+    if (hasPos) {
+      var plist = pos.positions || [];
+      if (plist.length > 0) {
+        var p = plist[0];
+        var dir = (p.type === 'buy' || p.direction === 'LONG' || p.tradeSide === 'BUY') ? 'LONG' : 'SHORT';
+        var entry = p.price_open || p.openPrice || 0;
+        var size = p.volume || p.size || 0;
+        var upl = p.profit || p.unrealizedPnl || 0;
+        this.setData({
+          hasPos: true,
+          posDir: dir === 'LONG' ? '多头' : '空头',
+          posDirCls: dir === 'LONG' ? 'text-green' : 'text-red',
+          posEntry: entry ? Number(entry).toFixed(2) : '—',
+          posSize: size ? Number(size).toFixed(2) : '—',
+          posPnl: (upl >= 0 ? '+' : '') + Number(upl).toFixed(2),
+          posPnlCls: upl > 0 ? 'text-green' : upl < 0 ? 'text-red' : 'text-gray',
+        });
+      } else {
+        this.setData({ hasPos: false, posDir: '空仓', posDirCls: 'text-gray' });
+      }
+    }
+  },
 
   _update() {
     const g = app.globalData;
     const t = g.trading || {};
-    const pos = t.position || {};
     const daily = t.daily || {};
     const risk = t.risk || {};
 
@@ -37,7 +100,6 @@ Page({
     const losses = daily.loss || 0;
     const wr = trades > 0 ? (wins / trades * 100) : 0;
     const dd = daily.drawdown_pct || 0;
-    const hasPos = t.n_positions > 0;
     const connected = !!(t.source && t.source !== 'none');
 
     let connLabel = '等待数据';
@@ -45,26 +107,14 @@ Page({
     else if (t.source === 'frozen') connLabel = '数据冻结 · 已停止';
     else if (t.source === 'none') connLabel = '等待连接';
 
+    // source 和 pipeline 状态不变（来自 global state 的 closed_loop / source）
+    // 账户和持仓数据由 _fetchAccount() 独立管理，这里只更新统计和风控
     this.setData({
       connected,
       connLabel,
       source: t.source || 'none',
-      // 账户
-      equity: (t.equity || 0) > 0 ? Number(t.equity).toFixed(2) : '—',
-      balance: (t.balance || 0) > 0 ? Number(t.balance).toFixed(2) : '—',
       pnl: (pnl >= 0 ? '+' : '') + pnl.toFixed(2),
       pnlCls: pnl > 0 ? 'text-green' : pnl < 0 ? 'text-red' : 'text-gray',
-      margin: (risk.margin != null ? Number(risk.margin).toFixed(2) : '—'),
-      marginFree: (risk.margin_free != null ? Number(risk.margin_free).toFixed(2) : '—'),
-      leverage: t.leverage || '—',
-      // 持仓
-      hasPos,
-      posDir: hasPos ? (pos.dir === 'LONG' ? '多头' : '空头') : '空仓',
-      posDirCls: hasPos ? (pos.dir === 'LONG' ? 'text-green' : 'text-red') : 'text-gray',
-      posEntry: hasPos && pos.entry ? Number(pos.entry).toFixed(2) : '—',
-      posSize: hasPos && pos.size ? Number(pos.size).toFixed(2) : '—',
-      posPnl: hasPos ? ((pos.unrealized >= 0 ? '+' : '') + Number(pos.unrealized).toFixed(2)) : '—',
-      posPnlCls: hasPos ? (pos.unrealized > 0 ? 'text-green' : pos.unrealized < 0 ? 'text-red' : 'text-gray') : 'text-gray',
       // 统计
       trades, wins, losses,
       winRate: trades > 0 ? wr.toFixed(1) + '%' : '—',

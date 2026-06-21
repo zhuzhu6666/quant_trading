@@ -27,6 +27,9 @@
       <text class="stat-label">XAUUSD</text>
       <text class="stat-value" style="font-size:38rpx;font-weight:700">{{price}}</text>
     </view>
+    <view wx:if="{{currency}}" style="margin-top:12rpx;text-align:right">
+      <text style="font-size:22rpx;color:#8E8E93">币种: {{currency}}</text>
+    </view>
   </view>
 
   <!-- 持仓 -->
