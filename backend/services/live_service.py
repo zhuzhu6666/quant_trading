@@ -498,6 +498,11 @@ def get_account(broker: str) -> dict:
                 info_dict = asdict(info)
             else:
                 info_dict = info
+            info_dict.setdefault("ok", True)
+            info_dict.setdefault("broker", "ctrader")
+            # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
+            _live_state["account"] = info_dict
+            _live_state["account_updated_at"] = time.time()
             return {"ok": True, "broker": "ctrader", **info_dict}
         try:
             return _cache_get_or_refresh(_ACCOUNT_CACHE, _CACHE_TTL, _fetch)
@@ -559,6 +564,9 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                     "commission": p.get("commission", 0.0),
                     "magic": p.get("magic"),
                 })
+            # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
+            _live_state["positions"] = positions
+            _live_state["positions_updated_at"] = time.time()
             return {"ok": True, "broker": "ctrader", "positions": positions}
         try:
             return _cache_get_or_refresh(_POSITIONS_CACHE, _CACHE_TTL, _fetch)
