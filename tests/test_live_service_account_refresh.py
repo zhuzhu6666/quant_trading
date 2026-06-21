@@ -138,7 +138,8 @@ def test_kickoff_runs_even_when_fetch_bars_returns_none():
     must be called BEFORE _fetch_bars_with_retry. Otherwise the cTrader
     demo (which returns 0 history bars) will skip the kickoff forever.
     """
-    src_path = "C:/Users/zhu/quant_trading/backend/services/live_service.py"
+    from pathlib import Path as _Path
+    src_path = str(_Path(__file__).resolve().parent.parent / "backend" / "services" / "live_service.py")
     src = open(src_path, encoding="utf-8").read()
     lines = src.splitlines()
     # Locate _run_loop function start
