@@ -1551,3 +1551,13 @@
 {"ts": 1781938669.2949953, "factor": "di_spread", "old": 0.325, "new": 0.325, "reason": "diversity_技术_80%>max"}
 {"ts": 1781938669.2949953, "factor": "adx", "old": 0.111, "new": 0.111, "reason": "diversity_技术_80%>max"}
 {"ts": 1781938669.2949953, "factor": "dxy_corr_20", "old": 0.95, "new": 0.95, "reason": "score=18.246"}
+{"ts": 1782035224.8980098, "factor": "rsi_14", "old": 1.15, "new": 1.15, "reason": "score=51.954"}
+{"ts": 1782035224.9029038, "factor": "rsi_14", "old": 0.0, "new": 0.0, "reason": "dsr_p=1.000>threshold"}
+{"ts": 1782035224.9072828, "factor": "test", "old": 1.15, "new": 1.15, "reason": "score=105.108"}
+{"ts": 1782035224.9215899, "factor": "rsi_14", "old": 0.197, "new": 0.197, "reason": "diversity_技术_80%>max"}
+{"ts": 1782035224.9215899, "factor": "di_spread", "old": 0.325, "new": 0.325, "reason": "diversity_技术_80%>max"}
+{"ts": 1782035224.9215899, "factor": "adx", "old": 0.111, "new": 0.111, "reason": "diversity_技术_80%>max"}
+{"ts": 1782035224.9215899, "factor": "dxy_corr_20", "old": 0.95, "new": 0.95, "reason": "score=61.826"}
+{"ts": 1782035225.6887765, "factor": "f1", "old": 1.15, "new": 1.15, "reason": "score=0.500"}
+{"ts": 1782035225.697122, "factor": "factor_0", "old": 2.05, "new": 2.05, "reason": "score=0.300"}
+{"ts": 1782035225.697122, "factor": "factor_1", "old": 0.569, "new": 0.569, "reason": "score=0.300"}

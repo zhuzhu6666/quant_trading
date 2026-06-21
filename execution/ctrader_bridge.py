@@ -215,19 +215,103 @@ class CTraderBridge(BaseBrokerBridge):
 
             def _on_conn(c):
                 logger.info("cTrader TCP+TLS connected, starting auth")
-                try:
-                    self._conn_ok = True
-                    if self._app_auth() and self._account_auth() and self._resolve_symbol_id():
-                        self._auth_ok = True
-                        self._record_success()
-                        self._start_heartbeat()
-                        logger.info("cTrader fully authenticated")
-                    else:
-                        logger.error("cTrader auth failed")
-                except Exception as e:
-                    logger.error(f"cTrader auth error: {e}")
-                finally:
+                self._conn_ok = True
+                # Deferred chain: app auth → account auth → symbol → complete
+                # Twisted reactor 线程内不能阻塞 (busy-wait sleep), 必须全异步.
+                from twisted.internet import defer
+                import uuid
+                from ctrader_open_api import Protobuf
+
+                def _unwrap(resp):
+                    """client.send() 回调返回 ProtoMessage wrapper, 需要 extract 出真实消息."""
+                    return Protobuf.extract(resp)
+
+                def _step_app(_dummy=None):
+                    req = TradeMsg.ProtoOAApplicationAuthReq()
+                    req.clientId = self.client_id
+                    req.clientSecret = self.client_secret
+                    d = self._client.send(req, clientMsgId=str(uuid.uuid4()),
+                                          responseTimeoutInSeconds=self.request_timeout_sec)
+                    d.addCallback(_unwrap)
+                    def _check(resp):
+                        if type(resp).__name__ == "ProtoOAErrorRes":
+                            raise RuntimeError(f"App auth rejected: code={resp.errorCode} {resp.description!r}")
+                        self._app_authed = True
+                        logger.info(f"App auth OK (clientId={self.client_id})")
+                    d.addCallback(_check)
+                    return d
+
+                def _step_account(_dummy):
+                    rl = TradeMsg.ProtoOAGetAccountListByAccessTokenReq()
+                    rl.accessToken = self.access_token
+                    d = self._client.send(rl, clientMsgId=str(uuid.uuid4()),
+                                          responseTimeoutInSeconds=self.request_timeout_sec)
+                    d.addCallback(_unwrap)
+                    def _check(resp):
+                        if type(resp).__name__ == "ProtoOAErrorRes":
+                            raise RuntimeError(f"Account list rejected: code={resp.errorCode}")
+                        accts = [a.ctidTraderAccountId for a in resp.ctidTraderAccount]
+                        logger.info(f"accessToken 绑定账户: {accts}")
+                        if not accts:
+                            raise RuntimeError("accessToken 没绑任何 ctid 账户")
+                        if self.account_id not in accts:
+                            raise RuntimeError(f"account_id={self.account_id} 不在列表 {accts}")
+                        # step 9: AccountAuth
+                        r2 = TradeMsg.ProtoOAAccountAuthReq()
+                        r2.ctidTraderAccountId = self.account_id
+                        r2.accessToken = self.access_token
+                        d2 = self._client.send(r2, clientMsgId=str(uuid.uuid4()),
+                                               responseTimeoutInSeconds=self.request_timeout_sec)
+                        d2.addCallback(_unwrap)
+                        def _check2(resp2):
+                            if type(resp2).__name__ == "ProtoOAErrorRes":
+                                raise RuntimeError(f"Account auth rejected: code={resp2.errorCode}")
+                            self._account_authed = True
+                            logger.info(f"Account auth OK (account={self.account_id})")
+                        d2.addCallback(_check2)
+                        return d2
+                    d.addCallback(_check)
+                    return d
+
+                def _step_symbol(_dummy):
+                    # 查 symbolId
+                    req = TradeMsg.ProtoOASymbolsListReq()
+                    req.ctidTraderAccountId = self.account_id
+                    d = self._client.send(req, clientMsgId=str(uuid.uuid4()),
+                                          responseTimeoutInSeconds=self.request_timeout_sec)
+                    d.addCallback(_unwrap)
+                    def _check(resp):
+                        if type(resp).__name__ == "ProtoOAErrorRes":
+                            raise RuntimeError(f"Symbol list rejected: code={resp.errorCode}")
+                        for s in resp.symbol:
+                            if s.symbolName == self.symbol:
+                                self._symbol_id = s.symbolId
+                                logger.info(f"Symbol {self.symbol} id={self._symbol_id}")
+                                return
+                        raise RuntimeError(f"Symbol {self.symbol} not found in list")
+                    d.addCallback(_check)
+                    return d
+
+                def _on_done(_):
+                    self._auth_ok = True
+                    self._record_success()
+                    self._start_heartbeat()
+                    logger.info("cTrader fully authenticated")
                     self._conn_ready.set()
+                    # 认证完成后停止 reactor (允许 connect() 返回给调用方)
+                    self._reactor.callLater(0.5, self._reactor.stop)
+
+                def _on_error(f):
+                    logger.error(f"cTrader auth failed: {f.getErrorMessage()}")
+                    self._conn_ready.set()
+                    self._reactor.callLater(0.5, self._reactor.stop)
+
+                chain = defer.succeed(None)
+                chain.addCallback(_step_app)
+                chain.addCallback(_step_account)
+                chain.addCallback(_step_symbol)
+                chain.addCallback(_on_done)
+                chain.addErrback(_on_error)
 
             self._client.setConnectedCallback(_on_conn)
             self._client.setDisconnectedCallback(lambda c, r: self._on_disconnected(r))
@@ -592,17 +676,18 @@ class CTraderBridge(BaseBrokerBridge):
 
         # 如果在 reactor 线程内 (如 _on_conn 回调), callFromThread + busy-wait 会死锁
         # → 直接调用 _do_send, 然后用 doIteration 给 reactor 时间处理响应
-        if not hasattr(self._reactor, 'threadpool') or self._reactor.threadpool is None:
+        in_reactor = bool(getattr(self._reactor, 'running', False))
+        if not in_reactor:
+            self._reactor.callFromThread(_do_send)
+            deadline = time.time() + timeout + 1.0
+            while not result_holder and time.time() < deadline:
+                time.sleep(0.05)
+        else:
             _do_send()
             deadline = time.time() + timeout + 1.0
             while not result_holder and time.time() < deadline:
                 try: self._reactor.doIteration(0.05)
                 except: time.sleep(0.05)
-        else:
-            self._reactor.callFromThread(_do_send)
-            deadline = time.time() + timeout + 1.0
-            while not result_holder and time.time() < deadline:
-                time.sleep(0.05)
         if not result_holder:
             raise TimeoutError(f"cTrader send timeout: {type(msg).__name__}")
         if not result_holder.get("ok"):
