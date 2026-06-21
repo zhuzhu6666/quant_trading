@@ -166,17 +166,17 @@ class TestMultipleEvents:
         assert es.get_multiplier(bar_time) == pytest.approx(0.5)
 
     def test_past_event_lookback(self):
-        """事件后 30 分钟仍在 lookback 窗口内"""
+        """事件后 3 分钟在 post-event 窗口内 (5 min) → 还有 multiplier"""
         evt = _event_dt("2024-06-15", 19, 0)
         es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
-        bar_time = (evt + timedelta(minutes=30)).timestamp()
+        bar_time = (evt + timedelta(minutes=3)).timestamp()
         assert es.get_multiplier(bar_time) == pytest.approx(0.2)
 
     def test_past_event_outside_lookback(self):
-        """事件后 2 小时超出 lookback 窗口"""
+        """事件后 10 分钟超出 post-event 窗口 (5 min) → 恢复 1.0"""
         evt = _event_dt("2024-06-15", 19, 0)
         es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
-        bar_time = (evt + timedelta(hours=2)).timestamp()
+        bar_time = (evt + timedelta(minutes=10)).timestamp()
         assert es.get_multiplier(bar_time) == 1.0
 
 
