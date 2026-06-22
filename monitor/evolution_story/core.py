@@ -70,13 +70,28 @@ class EvolutionStory:
         }
         if payload:
             record.update(payload)
+        # 文件备份
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         with self._fp_lock:
             try:
                 with open(self._path, "a", encoding="utf-8") as f:
                     f.write(line + "\n")
             except OSError:
-                logger.exception("EvolutionStory.append failed for path=%s", self._path)
+                pass
+        # ★ 主存储: state.db
+        try:
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO evolution_events (timestamp, event_type, payload_json) VALUES (?, ?, ?)",
+                    (record["ts"], event_type, json.dumps(payload or {}, ensure_ascii=False))
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass
         # 联动 metric
         try:
             from backend.runtime.runtime_state import RuntimeState

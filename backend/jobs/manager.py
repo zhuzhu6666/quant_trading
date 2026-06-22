@@ -51,14 +51,42 @@ class JobManager:
             self._loop = loop
 
     def _load_persisted(self) -> None:
-        """Load previously persisted jobs from JSONL into self._jobs."""
+        """从 state.db 加载持久化 jobs。降级到 JSONL。"""
+        try:
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM jobs WHERE status IN ('running','pending') ORDER BY updated_at DESC LIMIT ?",
+                    (self.MAX_PERSISTED,)
+                ).fetchall()
+                for r in rows:
+                    try:
+                        params = json.loads(r["params_json"]) if r["params_json"] else {}
+                        result = json.loads(r["result_json"]) if r["result_json"] else None
+                        js = JobState(
+                            id=r["id"], kind=r["kind"], status=r["status"],
+                            progress_pct=r["progress"] or 0.0,
+                            started_at=datetime.fromtimestamp(r["created_at"], tz=timezone.utc) if r["created_at"] else datetime.now(timezone.utc),
+                            params=params, result=result, error=r["error"] or "",
+                        )
+                        self._jobs[js.id] = js
+                    except Exception:
+                        continue
+                if self._jobs:
+                    return
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+        # 降级: JSONL
         path = self.PERSIST_PATH
         if not path.exists():
             return
         try:
             lines = path.read_text(encoding="utf-8").strip().splitlines()
         except Exception:
-            logger.warning("failed to read persisted jobs")
             return
         for line in lines[-self.MAX_PERSISTED:]:
             line = line.strip()
@@ -93,7 +121,28 @@ class JobManager:
                 continue
 
     def _append_persisted(self, js: JobState) -> None:
-        """Append job to JSONL persist file, then trim to MAX_PERSISTED lines."""
+        """持久化 job 到 state.db + JSONL 备份."""
+        # 主存储: state.db
+        try:
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                now = js.finished_at.timestamp() if js.finished_at else None
+                created = js.started_at.timestamp() if js.started_at else None
+                conn.execute(
+                    "INSERT OR REPLACE INTO jobs (id, kind, status, params_json, result_json, progress, error, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (js.id, js.kind, js.status,
+                     json.dumps(js.params, ensure_ascii=False),
+                     json.dumps(js.result, ensure_ascii=False) if js.result else "{}",
+                     js.progress_pct, js.error or "", created, now)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        # 降级: JSONL
         path = self.PERSIST_PATH
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

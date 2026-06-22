@@ -385,7 +385,7 @@ def evaluate_factors(
     if exclude_dead:
         try:
             from alpha.registry_adapter import RegistryAdapter
-            dead_names_set = set(RegistryAdapter().dead_names())
+            dead_names_set = set(RegistryAdapter.shared().dead_names())
         except Exception:
             pass  # 静默降级 — 仍评估所有因子
 
@@ -430,7 +430,7 @@ def evaluate_factors(
 
 
 def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
-    """把 evaluate_factors 返的 dict 落盘成 json (详细) + txt (可读)."""
+    """把 evaluate_factors 结果落盘: state.db (主) + json/txt (缓存)。"""
     import json
     from pathlib import Path as _P
 
@@ -439,13 +439,13 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
     out_txt.parent.mkdir(parents=True, exist_ok=True)
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
-    # json
+    # json 缓存 (API 兼容)
     out_json.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    # txt — 人读报告
+    # txt 人读报告
     lines = ["=" * 72, "  FACTOR HEALTH REPORT", "=" * 72, ""]
     s = {k: v for k, v in result.items() if k in ("total", "healthy", "watch", "decaying", "unknown", "dead")}
     lines.append(f"  Summary: {s}")
@@ -463,6 +463,36 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
         lines.append("")
     lines.append("=" * 72)
     out_txt.write_text("\n".join(lines), encoding="utf-8")
+
+    # ★ 写入 state.db (主存储)
+    try:
+        from backend.core.db import get_state_conn
+        conn = get_state_conn()
+        try:
+            import time as _time
+            now = _time.time()
+            factors = result.get("factors", [])
+            for f in factors:
+                name = f.get("factor", "")
+                if not name:
+                    continue
+                score = float(f.get("score", 50.0))
+                status = str(f.get("status", "UNKNOWN"))
+                section = str(f.get("section", "unknown"))
+                n_obs = int(f.get("n_obs", 0))
+                rolling_ic = float(f.get("rolling_ic", 0.0))
+                comp_json = json.dumps(f.get("components", {}), ensure_ascii=False)
+                conn.execute(
+                    "INSERT OR REPLACE INTO factor_health "
+                    "(factor, score, status, section, n_obs, rolling_ic, components_json, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (name, score, status, section, n_obs, rolling_ic, comp_json, now)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("write_report DB: %s", e)
 
 
 # ── 退役检查 (Phase 2.4) ──────────────────────────────────────────────

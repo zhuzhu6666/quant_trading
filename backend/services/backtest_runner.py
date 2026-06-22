@@ -57,7 +57,7 @@ def _run_single_backtrader_pass(
     cb = progress_cb or (lambda *_: None)
     cb("running", 50, f"sl={sl_atr} tp={tp_atr} cd={cooldown_bars}")
 
-    from strategies.backtest_strategy import run_one, INITIAL_BALANCE
+    from strategy.backtest import run_one, INITIAL_BALANCE
 
     # 分割 train/test (跟 main.py:run_backtest 一致, 70/30)
     n = len(df)

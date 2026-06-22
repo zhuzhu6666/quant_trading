@@ -92,13 +92,24 @@ class StreamingFactorEngine:
     # ── 动态因子支持 ─────────────────────────────────────
 
     def refresh_factor_list(self):
-        """重新扫描 factor_registry，发现新增因子（GP 动态注册）。"""
-        new_factors = set(factor_registry.list()) - set(self._available_factors)
-        if new_factors:
-            logger.info(
-                "StreamingFactorEngine: discovered new factors: %s", new_factors
-            )
-        self._available_factors = list(factor_registry.list())
+        """重新扫描 factor_registry，跳过 shadow 因子（不参与投票）。"""
+        all_factors = factor_registry.list()
+        # 过滤掉 shadow 因子——只让 BUILTIN 和 DISCOVERED 参与交易
+        try:
+            from alpha.registry_adapter import RegistryAdapter
+            adapter = RegistryAdapter.shared()
+            voting = []
+            for name in all_factors:
+                meta = adapter.get_meta(name)
+                source = meta.get("source", "builtin") if meta else "builtin"
+                if source != "shadow":
+                    voting.append(name)
+            skipped = set(all_factors) - set(voting)
+            if skipped:
+                logger.debug("StreamingFactorEngine: skipping shadow factors: %s", skipped)
+            self._available_factors = voting
+        except Exception:
+            self._available_factors = list(all_factors)
 
     # ── 重置 ─────────────────────────────────────────────
 

@@ -24,33 +24,46 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v4", tags=["factor-v4"])
 
 DATA_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "charts" / "factor_weight_history.jsonl"
-_TRADE_LOG = Path(__file__).resolve().parent.parent.parent / "logs" / "live_trades.jsonl"
 _ATTR_SNAPSHOT = Path(__file__).resolve().parent.parent.parent / "data" / "charts" / "factor_attribution.json"
 
 
 @router.get("/weights")
 def get_weight_history(_user: RequireUser) -> list[dict]:
-    """Return latest effective weights: config baseline + AWE adaptations merged."""
+    """Return latest effective weights: config baseline + state.db weight_history merged."""
     weights: dict[str, float] = {}
 
-    # 1. Load AWE weight history (latest adaptation per factor)
-    if DATA_FILE.exists():
+    # 1. Load latest AWE weight per factor from state.db
+    try:
+        from backend.core.db import get_state_conn
+        conn = get_state_conn()
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        name = entry.get("factor") or entry.get("name")
-                        new_w = entry.get("new")
-                        if name and new_w is not None:
-                            weights[name] = float(new_w)
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            pass
+            rows = conn.execute(
+                "SELECT factor, new_weight FROM weight_history "
+                "WHERE id IN (SELECT MAX(id) FROM weight_history GROUP BY factor)"
+            ).fetchall()
+            for r in rows:
+                weights[r["factor"]] = float(r["new_weight"])
+        finally:
+            conn.close()
+    except Exception:
+        # 降级: JSONL 文件
+        if DATA_FILE.exists():
+            try:
+                with open(DATA_FILE, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            name = entry.get("factor") or entry.get("name")
+                            new_w = entry.get("new")
+                            if name and new_w is not None:
+                                weights[name] = float(new_w)
+                        except json.JSONDecodeError:
+                            continue
+            except OSError:
+                pass  # JSONL fallback file read failed — harmless, will use config baseline
 
     # 2. Fill in config baseline for factors AWE hasn't adapted yet
     try:
@@ -161,20 +174,26 @@ async def trigger_ml_retrain(_user: RequireUser) -> dict:
 
 @router.get("/recent-ticks")
 def get_recent_ticks(_user: RequireUser, n: int = 30) -> list[dict]:
-    """返回最近 N 个 tick 的因子管道数据（从 live_trades.jsonl 读取）。"""
-    if not _TRADE_LOG.exists():
-        return []
+    """返回最近 N 个 v4 信号记录 (从 state.db decision_log 读取)。"""
+    entries: list[dict] = []
     try:
-        with open(_TRADE_LOG, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        entries = []
-        for line in lines[-n:]:
-            line = line.strip()
-            if line:
+        from backend.core.db import get_state_conn
+        conn = get_state_conn()
+        try:
+            rows = conn.execute(
+                "SELECT meta, ts FROM decision_log WHERE strategy='factor_v4' "
+                "AND decision_type='signal' ORDER BY id DESC LIMIT ?",
+                (n,)
+            ).fetchall()
+            for r in reversed(rows):
                 try:
-                    entries.append(json.loads(line))
+                    entry = json.loads(r["meta"])
+                    entry["ts"] = r["ts"]
+                    entries.append(entry)
                 except json.JSONDecodeError:
                     continue
-        return entries[::-1]  # 最新在前
-    except OSError:
-        return []
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return entries

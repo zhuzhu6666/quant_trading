@@ -555,6 +555,23 @@ class AttributionEngine:
                 encoding="utf-8",
             )
             tmp.replace(path)
+            # ★ 同步写入 state.db
+            try:
+                from backend.core.db import get_state_conn
+                conn = get_state_conn()
+                try:
+                    import time as _t
+                    now = _t.time()
+                    for name, s in snapshot.items():
+                        conn.execute(
+                            "INSERT OR REPLACE INTO attribution_snapshot (factor, data_json, updated_at) VALUES (?, ?, ?)",
+                            (name, json.dumps(s, ensure_ascii=False, default=str), now)
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:
+                pass
         except Exception as e:
             logger.warning("Failed to save stats snapshot: %s", e)
 

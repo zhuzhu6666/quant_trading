@@ -123,8 +123,9 @@ def main():
         from cli.paper import run_paper
         run_paper(args)
     elif args.mode == "live":
-        from cli.live import run_live
-        run_live(args)
+        print("Live trading is managed by the backend API (POST /api/live/start).")
+        print("Start the backend server: python -m backend")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

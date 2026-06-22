@@ -1,5 +1,6 @@
 """Calibrator service — read/write data/charts/calibrator_bucket.json."""
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,20 @@ def save(buckets: list[dict]) -> dict:
     existing["buckets"] = buckets
     existing["saved_at"] = datetime.now(timezone.utc).isoformat()
     CALIBRATOR_PATH.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+    # ★ 写入 state.db
+    try:
+        from backend.core.db import get_state_conn
+        conn = get_state_conn()
+        try:
+            conn.execute(
+                "INSERT INTO calibrator (data_json, updated_at) VALUES (?, ?)",
+                (json.dumps(existing, ensure_ascii=False), time.time())
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
     return {"path": str(CALIBRATOR_PATH), "saved_n": len(buckets)}
 
 

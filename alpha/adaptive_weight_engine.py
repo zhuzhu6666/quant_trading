@@ -479,20 +479,21 @@ class AdaptiveWeightEngine:
     # ── 权重历史 ────────────────────────────────────────
 
     def _write_weight_history(self, patches: dict[str, dict]):
-        """写入权重变更记录到 JSONL。"""
+        """写入权重变更记录到 state.db weight_history 表。"""
         try:
+            from backend.core.db import get_state_conn
             ts = time.time()
-            path = Path(self._weight_history_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
+            conn = get_state_conn()
+            try:
                 for name, p in patches.items():
-                    entry = {
-                        "ts": ts,
-                        "factor": name,
-                        "old": self._current_weights.get(name, 0),
-                        "new": p["weight"],
-                        "reason": p.get("reason", ""),
-                    }
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    conn.execute(
+                        "INSERT INTO weight_history (timestamp, factor, old_weight, new_weight, reason) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (ts, name, self._current_weights.get(name, 0),
+                         p["weight"], p.get("reason", ""))
+                    )
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             logger.warning("Failed to write weight history: %s", e)

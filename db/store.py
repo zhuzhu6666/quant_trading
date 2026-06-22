@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 class AnalyticsStore:
     """Run/strategy analytics — one SQLite file, multiple tables."""
 
-    def __init__(self, db_path: str = "data/analytics.db"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            from backend.core.db import STATE_DB
+            db_path = str(STATE_DB)
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
@@ -155,7 +158,10 @@ class AnalyticsStore:
 class DecisionLogStore:
     """决策审计轨迹 — 独立 DB，记录 signal / risk_check / open / close / circuit_trip / router_select 等关键决策。"""
 
-    def __init__(self, db_path: str = "data/decision_log.db"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            from backend.core.db import STATE_DB
+            db_path = str(STATE_DB)
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()

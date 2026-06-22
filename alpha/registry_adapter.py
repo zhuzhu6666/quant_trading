@@ -290,19 +290,129 @@ class RegistryAdapter:
     def get_meta(self, name: str) -> dict:
         return dict(self._meta.get(name, {}))
 
+    # ── 批量健康分 / 状态查询 (供 evolution_orchestrator 用) ──────
+
+    def all_health_scores(self) -> dict[str, float]:
+        """返回所有已注册因子的当前健康分映射 {name: score_0_100}.
+
+        读取 state.db factor_health 表；缺失因子回退到 50.0。
+        """
+        scores: dict[str, float] = {}
+        try:
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT factor, score FROM factor_health"
+                ).fetchall()
+                for r in rows:
+                    scores[r["factor"]] = float(r["score"])
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("[RegistryAdapter] all_health_scores from DB: %s", e)
+            # 降级: JSON 文件
+            try:
+                from backend.core.paths import CHARTS_DIR
+                import json as _json
+                rp = CHARTS_DIR / "factor_health_report.json"
+                if rp.exists():
+                    report = _json.loads(rp.read_text(encoding="utf-8"))
+                    if isinstance(report, dict):
+                        for section in ("healthy", "watch", "decaying", "unknown"):
+                            items = report.get(section, [])
+                            if isinstance(items, list):
+                                for item in items:
+                                    if isinstance(item, dict) and "name" in item:
+                                        scores[item["name"]] = float(item.get("score", 50.0))
+            except Exception:
+                pass
+
+        for name in set(factor_registry.list()) | set(self._meta.keys()):
+            scores.setdefault(name, 50.0)
+        return scores
+
+    def all_statuses(self) -> list:
+        """返回所有已知因子的 FactorHealthStatus 列表。从 state.db factor_health 表构造。"""
+        from alpha.factor_health import FactorHealthStatus
+        statuses: list = []
+        try:
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT factor, score, status, n_obs, rolling_ic, components_json FROM factor_health"
+                ).fetchall()
+                import json as _json
+                for r in rows:
+                    if self._lifecycle_statuses.get(r["factor"]) == "DEAD":
+                        continue
+                    try:
+                        comp = _json.loads(r["components_json"]) if r["components_json"] else {}
+                    except Exception:
+                        comp = {}
+                    statuses.append(FactorHealthStatus(
+                        factor=r["factor"],
+                        score=float(r["score"]),
+                        status=r["status"] or "UNKNOWN",
+                        n_obs=int(r["n_obs"] or 0),
+                        rolling_ic=float(r["rolling_ic"] or 0.0),
+                        components=comp,
+                    ))
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("[RegistryAdapter] all_statuses from DB: %s", e)
+            # 降级: JSON 文件
+            try:
+                from backend.core.paths import CHARTS_DIR
+                import json as _json
+                rp = CHARTS_DIR / "factor_health_report.json"
+                if rp.exists():
+                    report = _json.loads(rp.read_text(encoding="utf-8"))
+                    if isinstance(report, dict):
+                        status_map = {"healthy": "HEALTHY", "watch": "WATCH", "decaying": "DECAYING", "unknown": "UNKNOWN"}
+                        for section, status_label in status_map.items():
+                            items = report.get(section, [])
+                            if isinstance(items, list):
+                                for item in items:
+                                    if isinstance(item, dict) and "name" in item:
+                                        name = item["name"]
+                                        if self._lifecycle_statuses.get(name) == "DEAD":
+                                            continue
+                                        statuses.append(FactorHealthStatus(
+                                            factor=name,
+                                            score=float(item.get("score", 50.0)),
+                                            status=status_label,
+                                            n_obs=int(item.get("n_obs", 0)),
+                                            rolling_ic=float(item.get("rolling_ic", 0.0)),
+                                        ))
+            except Exception:
+                pass
+        return statuses
+
     # ── 事件日志 ───────────────────────────────────────────────
 
     def _log_event(self, event: FactorLifecycleEvent):
-        """落盘 jsonl 事件流 (append-only) + 联动 EvolutionStory / Metrics"""
+        """写入 state.db lifecycle_events 表 + 联动 EvolutionStory / Metrics."""
         try:
-            with open(self._log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                conn.execute(
+                    "INSERT INTO lifecycle_events (timestamp, event, factor, source, description, score, status, reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (event.timestamp, event.event, event.factor, event.source,
+                     event.description, event.score, event.status, event.reason)
+                )
+                conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
-            logger.warning(f"[RegistryAdapter] 写事件日志失败: {e}")
+            logger.warning(f"[RegistryAdapter] lifecycle event DB write failed: {e}")
         # Phase 2.0 接入层:同步广播到 EvolutionStory + RuntimeState(可观测,失败不抛)
         try:
             from monitor.evolution_story import EvolutionStory
-
             EvolutionStory.shared().append(
                 event.event,
                 {
@@ -314,29 +424,31 @@ class RegistryAdapter:
                     "reason": event.reason,
                 },
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("EvolutionStory.append skipped", exc_info=True)
         try:
             from backend.runtime.runtime_state import RuntimeState
-
             RuntimeState.shared().emit_metric(
                 "factor_lifecycle_events_total",
                 {"event": event.event, "source": event.source or "unknown"},
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("RuntimeState.emit_metric skipped", exc_info=True)
 
     def read_events(self, n: int = 100) -> list[dict]:
-        """读最近 n 条事件 (从 jsonl)"""
-        if not self._log_path.exists():
-            return []
+        """读最近 n 条事件 (从 state.db)."""
         try:
-            with open(self._log_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            events = [json.loads(l) for l in lines[-n:] if l.strip()]
-            return events
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM lifecycle_events ORDER BY id DESC LIMIT ?", (n,)
+                ).fetchall()
+                return [dict(r) for r in reversed(rows)]
+            finally:
+                conn.close()
         except Exception as e:
-            logger.warning(f"[RegistryAdapter] 读事件日志失败: {e}")
+            logger.warning(f"[RegistryAdapter] read events failed: {e}")
             return []
 
     def dead_count(self) -> int:
@@ -359,3 +471,33 @@ class RegistryAdapter:
             "by_source": by_source,
             "log_path": str(self._log_path),
         }
+
+
+# ═══════════════════════════════════════════
+# 模块级单例 (线程安全)
+# ═══════════════════════════════════════════
+import threading as _threading
+
+_adapter_instance: RegistryAdapter | None = None
+_adapter_lock = _threading.Lock()
+
+
+@classmethod
+def _get_shared(cls) -> RegistryAdapter:
+    """返回 RegistryAdapter 单例。首次调用时初始化，后续复用。"""
+    global _adapter_instance
+    if _adapter_instance is None:
+        with _adapter_lock:
+            if _adapter_instance is None:
+                _adapter_instance = cls()
+    return _adapter_instance
+
+
+RegistryAdapter.shared = _get_shared
+
+
+def reset_shared() -> None:
+    """重置单例 (仅供测试使用)。"""
+    global _adapter_instance
+    with _adapter_lock:
+        _adapter_instance = None

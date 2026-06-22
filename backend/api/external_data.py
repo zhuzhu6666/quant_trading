@@ -135,7 +135,7 @@ def trigger_refresh(_user: RequireUser, req: RefreshRequest = RefreshRequest()):
     }
     args = ["--once"]
     if req.source and req.source != "all":
-        args = ["--source", req.source]
+        args += ["--source", req.source]
     if req.force:
         args.append("--force")
 
