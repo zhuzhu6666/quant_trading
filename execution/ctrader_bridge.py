@@ -87,14 +87,17 @@ TIME_IN_FORCE = {
     "MARKET_ON_CLOSE": 4,
 }
 
-# cTrader depositAssetId → ISO currency code (audit 2026-06-08)
-# 完整列表见 cTrader Open API 文档 "ProtoOACurrencyId" enum.
-# 仅列 Pepperstone demo 常见 5 个; 其它 ID 走 fallback "ASSET_{id}" 字符串.
+# cTrader depositAssetId → ISO currency code
+# ⚠️ Pepperstone demo 的资产ID映射与标准cTrader不同:
+#   depositAssetId=4 → EUR (非JPY), 已由账户5817896实测确认
+# 标准cTrader: 1=USD, 2=EUR, 3=GBP, 4=JPY (适用于其他broker)
+# Pepperstone demo实测: 4=EUR
+# 未知ID走 fallback "ASSET_{id}" 字符串
 _ASSET_ID_TO_CODE = {
     1:  "USD",
     2:  "EUR",
     3:  "GBP",
-    4:  "JPY",
+    4:  "EUR",   # Pepperstone实测=EUR, 标准cTrader=JPY
     5:  "CHF",
     6:  "AUD",
     7:  "CAD",
