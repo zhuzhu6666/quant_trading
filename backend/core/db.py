@@ -75,8 +75,10 @@ CREATE TABLE IF NOT EXISTS decision_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER, ts REAL, bar_date TEXT,
     decision_type TEXT NOT NULL,
-    strategy TEXT, direction INTEGER,
-    confidence REAL, decision TEXT,
+    strategy TEXT, regime TEXT,
+    direction INTEGER,
+    confidence REAL, factor_scores TEXT,
+    decision TEXT,
     meta TEXT DEFAULT '{}',
     created_at REAL
 );

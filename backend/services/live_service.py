@@ -1650,10 +1650,12 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     votes = {}
                     for name, sig in signals.items():
                         raw_val = last_fv.get(name)
+                        s_val = sig if isinstance(sig, (int, float)) else 0.0
+                        r_val = raw_val if isinstance(raw_val, (int, float)) else None
                         votes[name] = {
-                            "signal": round(sig, 4),
-                            "raw": round(raw_val, 4) if isinstance(raw_val, (int, float)) else None,
-                            "direction": 1 if sig > 0 else -1 if sig < 0 else 0,
+                            "signal": round(s_val, 4),
+                            "raw": round(r_val, 4) if r_val is not None else None,
+                            "direction": 1 if s_val > 0 else -1 if s_val < 0 else 0,
                         }
                     with _LIVE_STATE_LOCK:
                         _live_state["last_factor_votes"] = votes
@@ -2162,10 +2164,12 @@ def _process_tick_factor_pipeline(
         votes = {}
         for name, sig in signals.items():
             raw_val = factor_values.get(name)
+            s_val = sig if isinstance(sig, (int, float)) else 0.0
+            r_val = raw_val if isinstance(raw_val, (int, float)) else None
             votes[name] = {
-                "signal": round(sig, 4),
-                "raw": round(raw_val, 4) if isinstance(raw_val, (int, float)) else None,
-                "direction": 1 if sig > 0 else -1 if sig < 0 else 0,
+                "signal": round(s_val, 4),
+                "raw": round(r_val, 4) if r_val is not None else None,
+                "direction": 1 if s_val > 0 else -1 if s_val < 0 else 0,
             }
         with _LIVE_STATE_LOCK:
             _live_state["last_factor_votes"] = votes
