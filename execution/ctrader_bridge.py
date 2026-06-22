@@ -1207,6 +1207,11 @@ class CTraderBridge(BaseBrokerBridge):
             equity = balance + unrealized
             login = t.traderLogin
             currency = _ASSET_ID_TO_CODE.get(t.depositAssetId, f"ASSET_{t.depositAssetId}")
+            logger.info(
+                f"Trader info: login={login} balance={balance:.2f} "
+                f"depositAssetId={t.depositAssetId} currency={currency} "
+                f"leverage={getattr(t, 'maxLeverage', 0)}"
+            )
             self._record_success()
             return AccountInfo(
                 balance=balance,
