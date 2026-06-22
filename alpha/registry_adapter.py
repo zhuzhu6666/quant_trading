@@ -122,6 +122,21 @@ class RegistryAdapter:
             logger.info(f"[RegistryAdapter] register {name} ({source})")
         return True
 
+    def _clean_health_record(self, name: str) -> None:
+        """删除 factor_health / canary_state / weight_history 中的孤儿记录."""
+        try:
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                conn.execute("DELETE FROM factor_health WHERE factor = ?", (name,))
+                conn.execute("DELETE FROM canary_state WHERE factor = ?", (name,))
+                conn.execute("DELETE FROM weight_history WHERE factor = ?", (name,))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("[RegistryAdapter] _clean_health_record failed for %s: %s", name, e)
+
     def unregister(self, name: str, reason: str = "") -> bool:
         """
         动态移除一个因子. 不删 metadata (历史保留).
@@ -140,6 +155,7 @@ class RegistryAdapter:
         del factor_registry._factors[name]
         self._meta[name]["source"] = SOURCE_REMOVED
         self._meta[name]["removed_time"] = _time.time()
+        self._clean_health_record(name)
         self._log_event(FactorLifecycleEvent(
             timestamp=_time.time(), event="unregister", factor=name,
             source=SOURCE_REMOVED, reason=reason,
@@ -221,6 +237,7 @@ class RegistryAdapter:
             old_source = self._meta.get(name, {}).get("source", SOURCE_BUILTIN)
             if old_source != SOURCE_BUILTIN:
                 del factor_registry._factors[name]
+                self._clean_health_record(name)
             self._meta.setdefault(name, {})["source"] = SOURCE_REMOVED
 
         self._log_event(FactorLifecycleEvent(

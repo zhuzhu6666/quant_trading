@@ -489,6 +489,15 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
                     (name, score, status, section, n_obs, rolling_ic, comp_json, now)
                 )
             conn.commit()
+            # 清理孤儿: 删除不在本次评估结果中的 factor_health 记录
+            evaluated_names = {f.get("factor", "") for f in factors if f.get("factor")}
+            if evaluated_names:
+                placeholders = ",".join("?" * len(evaluated_names))
+                conn.execute(
+                    f"DELETE FROM factor_health WHERE factor NOT IN ({placeholders})",
+                    tuple(evaluated_names),
+                )
+                conn.commit()
         finally:
             conn.close()
     except Exception as e:
