@@ -86,7 +86,11 @@ def _duckdb_stats(path: Path) -> dict:
     errors = []
 
     try:
-        con = duckdb.connect(str(path), read_only=True)
+        # 优先用默认模式（与实盘写入连接兼容），失败再试 read_only
+        try:
+            con = duckdb.connect(str(path))
+        except duckdb.IOException:
+            con = duckdb.connect(str(path), read_only=True)
         try:
             for t in con.execute("SHOW TABLES").fetchall():
                 tname = t[0]
