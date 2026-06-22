@@ -94,7 +94,7 @@ class RuntimeConfig:
     sync_recovery_max_attempts: int = 3
 
     # --- 策略控制 ---
-    ctrader_send_orders: bool = True  # cTrader 是唯一执行通道, 默认真发单
+    ctrader_send_orders: bool = False  # cTrader 是唯一执行通道, 默认保持 dry-run
 
     # --- 风控/执行参数 (原 strategy_* 前缀, 现被 Factor Takeover v4 管道使用) ---
     risk_sl_atr: float = 1.5
@@ -334,13 +334,24 @@ class RuntimeConfig:
 
     @classmethod
     def from_yaml(cls, yaml_cfg: Dict[str, Any]) -> "RuntimeConfig":
-        """从 settings.yaml 的 'runtime' 段读取字段,缺失则用默认值。"""
+        """从 settings.yaml 读取字段。
+
+        优先读 `runtime` 段；像 `ctrader.send_orders` 这种历史安全闸，
+        若 runtime 未显式覆盖，则沿用顶层配置避免默认值反转。
+        """
         if not isinstance(yaml_cfg, dict):
             return cls()
         runtime_section = yaml_cfg.get("runtime", {})
         if not isinstance(runtime_section, dict):
-            return cls()
-        return cls.from_dict(runtime_section)
+            runtime_section = {}
+
+        merged = dict(runtime_section)
+        ctrader_section = yaml_cfg.get("ctrader", {})
+        if "ctrader_send_orders" not in merged and isinstance(ctrader_section, dict):
+            if "send_orders" in ctrader_section:
+                merged["ctrader_send_orders"] = bool(ctrader_section["send_orders"])
+
+        return cls.from_dict(merged)
 
     def to_yaml(self) -> Dict[str, Any]:
         """导出为可写回 settings.yaml 的 runtime 段。"""

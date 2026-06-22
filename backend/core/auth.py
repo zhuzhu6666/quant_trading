@@ -8,10 +8,10 @@ SEC-1 fix (audit 2026-06-21): document current state accurately.
 JWT secret must be set via QUANT_JWT_SECRET env var (otherwise auto-generated per-startup).
 Password hash should be set via QUANT_PASSWORD_HASH env var (otherwise uses hardcoded default)."""
 
+import logging
 import os as _os
 import secrets
 import time
-from functools import lru_cache
 from typing import Annotated
 
 import jwt
@@ -21,6 +21,8 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_SECONDS = 24 * 3600
 
 _JWT_SECRET: str | None = None
+_JWT_SECRET_WARNED = False
+_logger = logging.getLogger(__name__)
 
 
 def _get_jwt_secret() -> str:
@@ -29,9 +31,16 @@ def _get_jwt_secret() -> str:
     若环境变量未设置, 生成一个 dev 级临时密钥
     (每次启动变化, 前端需要重新登录)。
     """
-    global _JWT_SECRET
+    global _JWT_SECRET, _JWT_SECRET_WARNED
     if _JWT_SECRET is None:
-        _JWT_SECRET = _os.environ.get("QUANT_JWT_SECRET") or secrets.token_hex(32)
+        _JWT_SECRET = _os.environ.get("QUANT_JWT_SECRET")
+        if not _JWT_SECRET:
+            _JWT_SECRET = secrets.token_hex(32)
+            if not _JWT_SECRET_WARNED:
+                _logger.warning(
+                    "QUANT_JWT_SECRET not set; using ephemeral dev JWT secret for this process"
+                )
+                _JWT_SECRET_WARNED = True
     return _JWT_SECRET
 
 

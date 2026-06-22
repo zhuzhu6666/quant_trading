@@ -64,10 +64,17 @@ def test_from_yaml_reads_runtime_section() -> None:
     assert cfg.canary_min_oos_bars == 100
 
 
+def test_from_yaml_inherits_ctrader_send_orders_from_top_level() -> None:
+    yaml_cfg = {"ctrader": {"send_orders": False}, "runtime": {}}
+    cfg = rc.RuntimeConfig.from_yaml(yaml_cfg)
+    assert cfg.ctrader_send_orders is False
+
+
 def test_from_yaml_uses_defaults_for_missing_keys() -> None:
     cfg = rc.RuntimeConfig.from_yaml({})
     assert cfg.shadow_vote_weight == 0.15  # 默认值
     assert cfg.canary_min_oos_bars == 80
+    assert cfg.ctrader_send_orders is False
 
 
 def test_unknown_keys_go_to_extra() -> None:

@@ -17,8 +17,8 @@ _HASH = hashlib.sha256(_PW.encode()).hexdigest()
 @pytest.fixture(autouse=True)
 def _set_test_password(monkeypatch):
     """Override the password hash so the login test can use a known password."""
-    import backend.api.auth as _auth_mod
-    monkeypatch.setattr(_auth_mod, "_PASSWORD_HASH", _HASH)
+    monkeypatch.setenv("QUANT_PASSWORD_HASH", _HASH)
+    monkeypatch.setenv("QUANT_AUTH_USER", "zhu")
     yield
 
 
@@ -37,6 +37,15 @@ def test_login_returns_jwt():
     assert payload["sub"] == "zhu"
     assert "iat" in payload
     assert "exp" in payload
+
+
+def test_login_uses_env_overrides(monkeypatch):
+    pw = "override_pw"
+    monkeypatch.setenv("QUANT_AUTH_USER", "alice")
+    monkeypatch.setenv("QUANT_PASSWORD_HASH", hashlib.sha256(pw.encode()).hexdigest())
+    r = client.post("/api/auth/login", json={"username": "alice", "password": pw})
+    assert r.status_code == 200
+    assert r.json()["user"] == "alice"
 
 
 def test_me_no_auth_returns_401():

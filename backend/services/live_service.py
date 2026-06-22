@@ -15,6 +15,7 @@ in v1", forcing the user to SSH in and run `python main.py --mode live` by
 hand. v8 added real thread management so the Web 总览 can drive the
 trading loop from the browser.)
 """
+import copy
 import threading
 import time
 import traceback
@@ -87,7 +88,7 @@ def _risk_var_gate(cfg) -> tuple[bool, str]:
     """
     if not getattr(cfg, 'var_enabled', False):
         return True, ""
-    var_data = _live_state.get("risk", {}).get("var", {})
+    var_data = _live_state_get("risk", {}, clone=True).get("var", {})
     var_pct = var_data.get("var_pct", 0) or 0
     threshold_pct = getattr(cfg, 'var_cvar_threshold', 0.02) * 100  # 0.02 → 2%
     if var_pct > threshold_pct:
@@ -124,7 +125,7 @@ def _risk_kelly_volume(
     if not getattr(cfg, 'kelly_enabled', False):
         return default_vol
 
-    kelly_data = _live_state.get("risk", {}).get("kelly", {})
+    kelly_data = _live_state_get("risk", {}, clone=True).get("kelly", {})
     kelly_f = kelly_data.get("kelly_fraction", 0) or 0
     if kelly_f <= 0:
         return default_vol
@@ -243,6 +244,151 @@ _live_state: dict = {
 
 # ★ 保护 _live_state 的读-改-写操作 (多线程: HTTP handler + live loop + scheduler)
 _LIVE_STATE_LOCK = threading.Lock()
+
+
+def _live_state_get(key: str, default=None, *, clone: bool = False):
+    with _LIVE_STATE_LOCK:
+        value = _live_state.get(key, default)
+    if clone and isinstance(value, (dict, list, set)):
+        return copy.deepcopy(value)
+    return value
+
+
+def _live_state_set(key: str, value) -> None:
+    with _LIVE_STATE_LOCK:
+        _live_state[key] = value
+
+
+def _live_state_update(**kwargs) -> None:
+    with _LIVE_STATE_LOCK:
+        _live_state.update(kwargs)
+
+
+def _reset_session_state_for_new_day() -> None:
+    _live_state_update(
+        circuit_breaker=False,
+        circuit_reason="",
+        session_pnl=0.0,
+        session_trades=0,
+        session_winning=0,
+        session_losing=0,
+        session_consecutive_loss=0,
+        session_max_drawdown_pct=0.0,
+    )
+
+
+def _evaluate_daily_drawdown() -> dict:
+    session_pnl = float(_live_state_get("session_pnl", 0.0) or 0.0)
+    start_balance = float(_live_state_get("session_start_balance", 0.0) or 1000.0)
+    dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0.0
+    prev_dd = float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0)
+    updates = {"session_max_drawdown_pct": max(prev_dd, dd_pct)}
+    tripped = session_pnl < 0 and dd_pct >= 5.0
+    reason = f"daily drawdown {dd_pct:.1f}%" if tripped else ""
+    if tripped:
+        updates["circuit_breaker"] = True
+        updates["circuit_reason"] = reason
+    _live_state_update(**updates)
+    return {
+        "tripped": tripped,
+        "dd_pct": dd_pct,
+        "reason": reason,
+        "session_pnl": session_pnl,
+        "start_balance": start_balance,
+    }
+
+
+def _record_session_trade(total_pnl: float) -> dict:
+    with _LIVE_STATE_LOCK:
+        trades = int(_live_state.get("session_trades", 0)) + 1
+        winning = int(_live_state.get("session_winning", 0))
+        losing = int(_live_state.get("session_losing", 0))
+        consecutive_loss = int(_live_state.get("session_consecutive_loss", 0))
+        session_pnl = float(_live_state.get("session_pnl", 0.0)) + float(total_pnl)
+        if total_pnl > 0:
+            winning += 1
+            consecutive_loss = 0
+        elif total_pnl < 0:
+            losing += 1
+            consecutive_loss += 1
+        _live_state.update(
+            session_trades=trades,
+            session_winning=winning,
+            session_losing=losing,
+            session_consecutive_loss=consecutive_loss,
+            session_pnl=session_pnl,
+        )
+    return {
+        "session_trades": trades,
+        "session_winning": winning,
+        "session_losing": losing,
+        "session_consecutive_loss": consecutive_loss,
+        "session_pnl": session_pnl,
+    }
+
+
+def _append_trade_equity(equity: float) -> list[float]:
+    with _LIVE_STATE_LOCK:
+        history = list(_live_state.get("trade_equity_history", []))
+        history.append(float(equity))
+        if len(history) > 1000:
+            history = history[-500:]
+        _live_state["trade_equity_history"] = history
+        return list(history)
+
+
+def _set_risk_metric(name: str, value: dict) -> None:
+    with _LIVE_STATE_LOCK:
+        risk_state = dict(_live_state.get("risk", {}))
+        risk_state[name] = value
+        _live_state["risk"] = risk_state
+
+
+def _get_risk_state() -> dict:
+    return _live_state_get("risk", {}, clone=True) or {}
+
+
+def _set_factor_snapshot(votes: dict, composite: dict) -> None:
+    _live_state_update(last_factor_votes=votes, last_composite=composite)
+
+
+def _set_loop_diagnostic(tick: int, bridge_status: str, *, bridge_ready: bool | None = None) -> None:
+    previous = _live_state_get("_diag", {}, clone=True) or {}
+    snapshot = {
+        "tick": tick,
+        "ts": time.time(),
+        "bridge": bridge_status,
+        "last_error": previous.get("last_error", ""),
+    }
+    if bridge_ready is not None:
+        snapshot["bridge_ready"] = bridge_ready
+    _live_state_set("_diag", snapshot)
+
+
+def _prime_live_loop_state(
+    *,
+    broker: str,
+    strategy_name: str,
+    started_at: float,
+    account: dict,
+) -> None:
+    _live_state_update(
+        broker=broker,
+        loop_running=True,
+        loop_strategy=strategy_name,
+        loop_started_at=started_at,
+        account=account,
+        account_updated_at=time.time(),
+    )
+    _reset_session_state_for_new_day()
+
+
+
+def _mark_loop_stopped_for_display() -> None:
+    _live_state_update(
+        loop_running=False,
+        loop_strategy=None,
+    )
 
 # ── cTrader 缓存 (防 WS 1s 推送反复击中 Twisted reactor)
 # audit 2026-06-08: WS _read_state_snapshot 每 1s 调 get_account/get_positions,
@@ -477,8 +623,8 @@ def get_account(broker: str) -> dict:
     避免重复打 broker (Twisted reactor callFromThread 会阻塞主线程 50-200ms,
     直接卡前端 HTTP 请求). Loop 自己的 tick 已经每 60s 刷新 _live_state."""
     # ── 缓存短路: loop 在跑 → 只读 _live_state ──
-    if _live_state.get("loop_running") and _live_state.get("broker") == broker:
-        acct = _live_state.get("account")
+    if _live_state_get("loop_running") and _live_state_get("broker") == broker:
+        acct = _live_state_get("account", clone=True)
         if acct and acct.get("ok"):
             return acct
         # 缓存没准备好 (loop 刚启动或第一次 tick 未完成)
@@ -512,8 +658,7 @@ def get_account(broker: str) -> dict:
             info_dict.setdefault("ok", True)
             info_dict.setdefault("broker", "ctrader")
             # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
-            _live_state["account"] = info_dict
-            _live_state["account_updated_at"] = time.time()
+            _live_state_update(account=info_dict, account_updated_at=time.time())
             return {"ok": True, "broker": "ctrader", **info_dict}
         try:
             return _cache_get_or_refresh(_ACCOUNT_CACHE, _CACHE_TTL, _fetch)
@@ -528,8 +673,8 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
 
     audit 2026-06-09: 同 get_account, live loop 在跑时短路读缓存."""
     # ── 缓存短路: loop 在跑 → 只读 _live_state ──
-    if _live_state.get("loop_running") and _live_state.get("broker") == broker:
-        cached = _live_state.get("positions")
+    if _live_state_get("loop_running") and _live_state_get("broker") == broker:
+        cached = _live_state_get("positions", clone=True)
         if isinstance(cached, dict) and cached.get("ok"):
             return cached
         # 缓存未就绪 — 同步 broker 路径在 live 模式下不应该走
@@ -542,8 +687,8 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
     if broker == "ctrader":
         # 缓存短路: live loop 在跑 → 只读 _live_state (跟上面 if 分支等价,
         # 保留是为了 cache_fallback 的 robustness — 上层分支没匹配时这里兜底)
-        cached_positions = _live_state.get("positions")
-        if cached_positions is not None and _live_state.get("loop_running"):
+        cached_positions = _live_state_get("positions", clone=True)
+        if cached_positions is not None and _live_state_get("loop_running"):
             return {"ok": True, "broker": "ctrader", "positions": cached_positions}
         # 缓存空 fallback
         def _fetch():
@@ -576,8 +721,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                     "magic": p.get("magic"),
                 })
             # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
-            _live_state["positions"] = positions
-            _live_state["positions_updated_at"] = time.time()
+            _live_state_update(positions=positions, positions_updated_at=time.time())
             return {"ok": True, "broker": "ctrader", "positions": positions}
         try:
             return _cache_get_or_refresh(_POSITIONS_CACHE, _CACHE_TTL, _fetch)
@@ -1218,20 +1362,20 @@ def _stop_live_scheduler():
 def loop_status() -> dict:
     """Whether the live trading loop thread is running. 优先 _live_state 缓存."""
     # 显式停止 → 立即返回 stopped, 不等后台清理线程
-    if _live_state.get("loop_running") is False:
+    if _live_state_get("loop_running") is False:
         return {
-            "running": False, "pid": None, "broker": _live_state.get("broker") or _loop_broker,
-            "started_at": _live_state.get("loop_started_at"),
-            "strategy_name": _live_state.get("loop_strategy") or _loop_strategy_name,
+            "running": False, "pid": None, "broker": _live_state_get("broker") or _loop_broker,
+            "started_at": _live_state_get("loop_started_at"),
+            "strategy_name": _live_state_get("loop_strategy") or _loop_strategy_name,
         }
     # 优先共享缓存 (audit 2026-06-08)
-    if _live_state.get("loop_running") and _live_state.get("broker"):
+    if _live_state_get("loop_running") and _live_state_get("broker"):
         return {
             "running": True,
             "pid": None,
-            "broker": _live_state["broker"],
-            "started_at": _live_state.get("loop_started_at"),
-            "strategy_name": _live_state.get("loop_strategy"),
+            "broker": _live_state_get("broker"),
+            "started_at": _live_state_get("loop_started_at"),
+            "strategy_name": _live_state_get("loop_strategy"),
         }
     with _loop_state_lock:
         if _loop_thread is not None and _loop_thread.is_alive():
@@ -1293,20 +1437,14 @@ def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
         _loop_strategy_name = strategy_name  # audit 2026-06-08
         # ⚠️ audit 2026-06-09: 启动前立即填充共享缓存, 否则 WS 1s 推送读到
         # _live_state["account"]=None → equity=0, 要等 60s 第一个 tick 才恢复.
-        _live_state["broker"] = broker
-        _live_state["loop_running"] = True
-        _live_state["loop_strategy"] = strategy_name
-        _live_state["loop_started_at"] = _loop_started_at
-        _live_state["account"] = acct
-        _live_state["account_updated_at"] = time.time()
+        _prime_live_loop_state(
+            broker=broker,
+            strategy_name=strategy_name,
+            started_at=_loop_started_at,
+            account=acct,
+        )
         # 启动自进化 Scheduler (5 job)
         _start_live_scheduler()
-        _live_state["session_pnl"] = 0.0
-        _live_state["session_trades"] = 0
-        _live_state["session_winning"] = 0
-        _live_state["session_losing"] = 0
-        _live_state["session_consecutive_loss"] = 0
-        _live_state["session_max_drawdown_pct"] = 0.0
         _loop_thread = threading.Thread(
             target=_run_loop,
             args=(broker, _loop_stop_flag),
@@ -1351,8 +1489,7 @@ def stop_loop() -> dict:
         _loop_started_at = None
 
     # ★ 立即标记停止, 前端立刻看到状态变化
-    _live_state["loop_running"] = False
-    _live_state["loop_strategy"] = None  # 清策略名，防止 WS pipeline 误判运行中
+    _mark_loop_stopped_for_display()  # 清策略名，防止 WS pipeline 误判运行中
     _last_loop_end = time.time()
 
     # 阻塞清理移到后台线程, stop 端点秒返
@@ -1670,9 +1807,9 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                             "raw": round(r_val, 4) if r_val is not None else None,
                             "direction": 1 if s_val > 0 else -1 if s_val < 0 else 0,
                         }
-                    with _LIVE_STATE_LOCK:
-                        _live_state["last_factor_votes"] = votes
-                        _live_state["last_composite"] = {
+                    _set_factor_snapshot(
+                        votes,
+                        {
                             "direction": composite.direction,
                             "score": round(composite.score, 4),
                             "tactical_score": round(composite.tactical_score, 4),
@@ -1682,7 +1819,8 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                             "gate_passed": gate_result.passed,
                             "gate_reason": gate_result.reason,
                             "ts": time.time(),
-                        }
+                        },
+                    )
                     dir_name = {1: "LONG", -1: "SHORT"}.get(composite.direction, "FLAT")
                     log(f"warmup signal: {dir_name} score={composite.score:.4f} "
                         f"n={composite.n_active_factors} gate={gate_result.reason}")
@@ -1724,10 +1862,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     while not stop_flag.is_set():
         tick += 1
         # 诊断: 记录 tick 计数和桥状态
-        _live_state["_diag"] = {
-            "tick": tick, "ts": time.time(),
-            "bridge": "checking", "last_error": _live_state.get("_diag", {}).get("last_error", ""),
-        }
+        _set_loop_diagnostic(tick, "checking")
 
         # ── 跨日重置熔断 + 会话统计 ──
         try:
@@ -1737,14 +1872,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 if _current_trade_date:
                     log(f"new trading day {today_str}, resetting session stats")
                 _current_trade_date = today_str
-                _live_state["circuit_breaker"] = False
-                _live_state["circuit_reason"] = ""
-                _live_state["session_pnl"] = 0.0
-                _live_state["session_trades"] = 0
-                _live_state["session_winning"] = 0
-                _live_state["session_losing"] = 0
-                _live_state["session_consecutive_loss"] = 0
-                _live_state["session_max_drawdown_pct"] = 0.0
+                _reset_session_state_for_new_day()
         except Exception as _e2:
             log(f"tick {tick}: session reset failed (non-fatal): {_e2}")
 
@@ -1757,12 +1885,11 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 continue
             # bridge 不可用时仍跑因子管道（用本地 DB），只跳过发单
             bridge_ready = bridge is not None and not warming and bridge.is_connected
-            _live_state["_diag"] = {
-                "tick": tick, "ts": time.time(),
-                "bridge": "ready" if bridge_ready else ("warming" if warming else "disconnected"),
-                "bridge_ready": bridge_ready,
-                "last_error": _live_state.get("_diag", {}).get("last_error", ""),
-            }
+            _set_loop_diagnostic(
+                tick,
+                "ready" if bridge_ready else ("warming" if warming else "disconnected"),
+                bridge_ready=bridge_ready,
+            )
             if not bridge_ready:
                 log(f"tick {tick}: cTrader warming/disconnected, running pipeline dry")
 
@@ -1786,20 +1913,13 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     log(f"tick {tick}: spot={spot:.2f} too far from bar close={last_close:.2f}, using DataStore price")
 
                 # 熔断检查 + 策略运算
-                cb_tripped = _live_state.get("circuit_breaker", False)
+                cb_tripped = _live_state_get("circuit_breaker", False)
                 if cb_tripped:
                     log(f"tick {tick}: circuit breaker tripped, skip trading")
                 else:
-                    session_pnl = float(_live_state.get("session_pnl", 0.0))
-                    start_balance = float(_live_state.get("session_start_balance", 0.0)) or 1000.0
-                    dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0
-                    with _LIVE_STATE_LOCK:
-                        _live_state["session_max_drawdown_pct"] = max(float(_live_state.get("session_max_drawdown_pct", 0.0)), dd_pct)
-                        if session_pnl < 0 and dd_pct >= 5.0:
-                            _live_state["circuit_breaker"] = True
-                            _live_state["circuit_reason"] = f"daily drawdown {dd_pct:.1f}%"
-                    if session_pnl < 0 and dd_pct >= 5.0:
-                        log(f"tick {tick}: CIRCUIT BREAKER: daily drawdown {dd_pct:.1f}%")
+                    dd_state = _evaluate_daily_drawdown()
+                    if dd_state["tripped"]:
+                        log(f"tick {tick}: CIRCUIT BREAKER: daily drawdown {dd_state['dd_pct']:.1f}%")
                     else:
                         last_bar = df_new.iloc[-1]
                         _process_tick(bridge, None, df_new, last_bar, broker, tick, log)
@@ -1813,35 +1933,30 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         # ── 风险模块自动计算 (每 tick, 不阻塞主循环) ──
         try:
             # 1. 追加当前 equity 到历史序列
-            acct = _live_state.get("account") or {}
+            acct = _live_state_get("account", {}, clone=True) or {}
             equity = float(acct.get("equity") or 0.0)
+            eq_hist = _live_state_get("trade_equity_history", [], clone=True) or []
             if equity > 0:
-                with _LIVE_STATE_LOCK:
-                    _live_state["trade_equity_history"].append(equity)
-                    if len(_live_state["trade_equity_history"]) > 1000:
-                        _live_state["trade_equity_history"] = _live_state["trade_equity_history"][-500:]
-
-            with _LIVE_STATE_LOCK:
-                eq_hist = list(_live_state["trade_equity_history"])
+                eq_hist = _append_trade_equity(equity)
 
             # 2. VaR — 用 VaRCalculator(confidence=0.95)
             from backend.risk.var import VaRCalculator as _VaRCalc
             _var_calc = _VaRCalc(confidence=0.95)
             if len(eq_hist) >= 10:
-                _live_state["risk"]["var"] = _var_calc.calculate(eq_hist)
+                _set_risk_metric("var", _var_calc.calculate(eq_hist))
             else:
-                _live_state["risk"]["var"] = _var_calc.get_status(eq_hist)
+                _set_risk_metric("var", _var_calc.get_status(eq_hist))
 
             # 3. Kelly — 从 session_winning/session_losing 计算
             from backend.risk.kelly import KellyCriterion as _KellyCalc
             _kelly_calc = _KellyCalc()
-            sw = int(_live_state.get("session_winning", 0))
-            sl = int(_live_state.get("session_losing", 0))
+            sw = int(_live_state_get("session_winning", 0))
+            sl = int(_live_state_get("session_losing", 0))
             total = sw + sl
             if total > 0:
                 win_rate = sw / total
                 # 没有单笔盈亏明细, 用 session_pnl 估算平均盈亏
-                session_pnl = float(_live_state.get("session_pnl", 0.0))
+                session_pnl = float(_live_state_get("session_pnl", 0.0))
                 if sw > 0 and sl > 0 and session_pnl != 0:
                     # 简单估算: 假设盈亏各半, avg_win = avg_loss 的粗略分割
                     avg_win = (session_pnl / total) * (1 + win_rate)
@@ -1850,22 +1965,22 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 else:
                     avg_win = 0.0
                     avg_loss = 0.01
-                _live_state["risk"]["kelly"] = _kelly_calc.calculate(win_rate, avg_win, avg_loss)
+                _set_risk_metric("kelly", _kelly_calc.calculate(win_rate, avg_win, avg_loss))
             else:
-                _live_state["risk"]["kelly"] = _kelly_calc.get_status()
+                _set_risk_metric("kelly", _kelly_calc.get_status())
 
             # 4. Stress — 用 trade_equity_history 跑
             from backend.risk.stress_test import StressTest as _StressTest
             _stress = _StressTest()
             if len(eq_hist) >= 10:
-                _live_state["risk"]["stress"] = _stress.run(eq_hist)
+                _set_risk_metric("stress", _stress.run(eq_hist))
             else:
-                _live_state["risk"]["stress"] = _stress.get_status()
+                _set_risk_metric("stress", _stress.get_status())
 
             # 5. Concentration — 空参数 (no factor weights yet)
             from backend.risk.concentration import ConcentrationChecker as _ConcCheck
             _conc = _ConcCheck()
-            _live_state["risk"]["concentration"] = _conc.check()
+            _set_risk_metric("concentration", _conc.check())
 
         except Exception as risk_e:
             log(f"tick {tick}: risk calculation error (non-fatal): {risk_e}")
@@ -1933,16 +2048,14 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
     # WS snapshot doesn't mistake it for an error envelope.
     acct.setdefault("ok", True)
     acct.setdefault("broker", broker)
-    _live_state["account"] = acct
-    _live_state["account_updated_at"] = time.time()
+    _live_state_update(account=acct, account_updated_at=time.time())
     try:
         pos_raw = bridge.get_positions() or []
     except Exception as e:
         logger.warning(f"[{broker}] background get_positions failed: {e}")
         pos_raw = None
     if pos_raw is not None:
-        _live_state["positions"] = pos_raw
-        _live_state["positions_updated_at"] = time.time()
+        _live_state_update(positions=pos_raw, positions_updated_at=time.time())
 
 
 def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 30.0) -> threading.Thread:
@@ -2065,7 +2178,7 @@ _latest_price: float | None = None
 
 def get_latest_price() -> float | None:
     """返回最新价. 优先共享缓存 (live loop 写), 其次 bridge spot, 最后 bar close."""
-    spot = _live_state.get("spot_price")
+    spot = _live_state_get("spot_price")
     if spot and spot > 0:
         return spot
     global _latest_price
@@ -2184,9 +2297,9 @@ def _process_tick_factor_pipeline(
                 "raw": round(r_val, 4) if r_val is not None else None,
                 "direction": 1 if s_val > 0 else -1 if s_val < 0 else 0,
             }
-        with _LIVE_STATE_LOCK:
-            _live_state["last_factor_votes"] = votes
-            _live_state["last_composite"] = {
+        _set_factor_snapshot(
+            votes,
+            {
                 "direction": composite.direction,
                 "score": round(composite.score, 4),
                 "tactical_score": round(composite.tactical_score, 4),
@@ -2196,7 +2309,8 @@ def _process_tick_factor_pipeline(
                 "gate_passed": gate_result.passed,
                 "gate_reason": gate_result.reason,
                 "ts": time.time(),
-            }
+            },
+        )
     except Exception as _e:
         log(f"tick {tick}: factor votes save failed (non-fatal): {_e}")
     # ── 决策审计: signal ──
@@ -2242,8 +2356,8 @@ def _process_tick_factor_pipeline(
         )
 
     # ── 读 account/positions 缓存 ──
-    acct = _live_state.get("account") or {}
-    pos = _live_state.get("positions") or []
+    acct = _live_state_get("account", {}, clone=True) or {}
+    pos = _live_state_get("positions", [], clone=True) or []
     if isinstance(pos, dict):
         pos = pos.get("positions", []) or []
     # ★ P0 fix: 统一转 dict — 支持 dataclass / protobuf / 任意非 dict
@@ -2289,15 +2403,7 @@ def _process_tick_factor_pipeline(
                     total_pnl = (current_price - open_price) * dir_sign
                 except Exception as _e2:
                     log(f"tick {tick}: attribution close pos={cpid} PnL fallback error: {_e2}")
-            with _LIVE_STATE_LOCK:
-                _live_state["session_trades"] = _live_state.get("session_trades", 0) + 1
-                if total_pnl > 0:
-                    _live_state["session_winning"] = _live_state.get("session_winning", 0) + 1
-                    _live_state["session_consecutive_loss"] = 0
-                elif total_pnl < 0:
-                    _live_state["session_losing"] = _live_state.get("session_losing", 0) + 1
-                    _live_state["session_consecutive_loss"] = _live_state.get("session_consecutive_loss", 0) + 1
-                _live_state["session_pnl"] = _live_state.get("session_pnl", 0) + total_pnl
+            _record_session_trade(total_pnl)
             log(f"tick {tick}: attribution close pos={cpid} pnl={total_pnl:.2f} "
                 f"factors={len(mc)}")
             # ── 决策审计: close ──
@@ -2385,7 +2491,7 @@ def _process_tick_factor_pipeline(
             return
 
         # ── 风控: Kelly 仓位 ──
-        acct_clean = _live_state.get("account") or {}
+        acct_clean = _live_state_get("account", {}, clone=True) or {}
         volume = _risk_kelly_volume(cfg, composite.direction, current_price,
                                     sl_price, _meta, acct_clean)
         log(f"tick {tick}: v4 {direction_name} volume={volume:.2f} "
@@ -2535,7 +2641,7 @@ def _process_tick_factor_pipeline(
         f"balance={acct.get('balance', 0):.2f} "
         f"equity={acct.get('equity', 0):.2f} "
         f"pos={len(pos)} "
-        f"pnl_session={_live_state.get('session_pnl', 0):.2f}"
+        f"pnl_session={_live_state_get('session_pnl', 0):.2f}"
         f"{signal_str}")
 
     # ── 业务告警检查 ──
@@ -2728,31 +2834,31 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
         _alerter = Alerter({"log_file": "logs/alerts.log", "min_level": "WARNING"})
 
         # 规则 1: 连亏
-        consec = int(_live_state.get("consecutive_loss", 0))
+        consec = int(_live_state_get("session_consecutive_loss", 0))
         if consec >= 3 and tick % 10 == 0:  # 每 10 tick 发一次, 避免刷屏
             _alerter.send("WARNING", f"⚠️ 连续亏损 {consec} 笔",
                           f"Tick: {tick}\nConsecutive Loss: {consec}\n"
-                          f"Session PnL: ${_live_state.get('session_pnl', 0):.2f}")
+                          f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
 
         # 规则 2: 当日回撤
-        dd_pct = float(_live_state.get("session_max_drawdown_pct", 0))
+        dd_pct = float(_live_state_get("session_max_drawdown_pct", 0))
         balance = float(acct.get("balance", 0))
         if dd_pct >= 5.0 and tick % 10 == 0:
             _alerter.send("ERROR", f"🔴 当日回撤 {dd_pct:.1f}%",
                           f"Tick: {tick}\nDrawdown: {dd_pct:.1f}%\n"
                           f"Balance: ${balance:.2f}\n"
-                          f"Session PnL: ${_live_state.get('session_pnl', 0):.2f}")
+                          f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
         elif dd_pct >= 3.0 and tick % 10 == 0:
             _alerter.send("WARNING", f"⚠️ 当日回撤 {dd_pct:.1f}%",
                           f"Tick: {tick}\nDrawdown: {dd_pct:.1f}%\n"
                           f"Balance: ${balance:.2f}")
 
         # 规则 3: 熔断确认
-        if _live_state.get("circuit_breaker") and tick % 10 == 0:
-            reason = _live_state.get("circuit_reason", "unknown")
+        if _live_state_get("circuit_breaker") and tick % 10 == 0:
+            reason = _live_state_get("circuit_reason", "unknown")
             _alerter.send("CRITICAL", "🔴 熔断触发",
                           f"Tick: {tick}\nReason: {reason}\n"
-                          f"Session PnL: ${_live_state.get('session_pnl', 0):.2f}")
+                          f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
 
         # 每 50 tick 输出执行质量摘要
         if tick > 0 and tick % 50 == 0:

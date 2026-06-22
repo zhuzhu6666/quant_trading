@@ -1,12 +1,19 @@
 """Config service — read/edit config/settings.yaml."""
-import yaml
+from __future__ import annotations
+
+import shutil
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from backend.core.paths import CONFIG_DIR
+from config.runtime_config import RuntimeConfig
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
+BACKUP_SUFFIX = ".bak"
+TEMP_SUFFIX = ".tmp"
 
 
 def get_config() -> dict:
@@ -22,7 +29,7 @@ def get_config() -> dict:
 
 
 def put_config(yaml_text: str) -> dict:
-    """Validate + write settings.yaml. Returns changes summary."""
+    """Validate + atomically write settings.yaml. Returns changes summary."""
     try:
         parsed = yaml.safe_load(yaml_text)
     except yaml.YAMLError as e:
@@ -34,8 +41,55 @@ def put_config(yaml_text: str) -> dict:
     old = yaml.safe_load(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
     changes = _diff(old or {}, parsed or {})
 
-    SETTINGS_PATH.write_text(yaml_text, encoding="utf-8")
-    return {"ok": True, "changes": changes, "path": str(SETTINGS_PATH)}
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = SETTINGS_PATH.with_name(f"{SETTINGS_PATH.name}{BACKUP_SUFFIX}")
+    tmp_path = SETTINGS_PATH.with_name(f"{SETTINGS_PATH.name}{TEMP_SUFFIX}")
+
+    if SETTINGS_PATH.exists():
+        shutil.copy2(SETTINGS_PATH, backup_path)
+
+    tmp_path.write_text(yaml_text, encoding="utf-8")
+    tmp_path.replace(SETTINGS_PATH)
+
+    return {
+        "ok": True,
+        "changes": changes,
+        "path": str(SETTINGS_PATH),
+        "backup_path": str(backup_path) if backup_path.exists() else None,
+    }
+
+
+def patch_runtime_config(runtime_patch: dict[str, Any]) -> dict:
+    """Patch only the runtime config section with schema validation."""
+    if not isinstance(runtime_patch, dict) or not runtime_patch:
+        raise ValueError("runtime_patch_must_be_non_empty_object")
+
+    allowed = {k for k in RuntimeConfig.__dataclass_fields__ if k != "extra"}
+    unknown = sorted(k for k in runtime_patch if k not in allowed)
+    if unknown:
+        raise ValueError(f"unknown_runtime_keys: {', '.join(unknown)}")
+
+    current = yaml.safe_load(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
+    if not isinstance(current, dict):
+        current = {}
+
+    merged_runtime = RuntimeConfig.from_yaml(current).to_dict()
+    merged_runtime.update(runtime_patch)
+    validated_runtime = RuntimeConfig.from_dict(merged_runtime)
+
+    current["runtime"] = validated_runtime.to_dict()
+    ctrader_cfg = current.get("ctrader")
+    if not isinstance(ctrader_cfg, dict):
+        ctrader_cfg = {}
+        current["ctrader"] = ctrader_cfg
+    if "ctrader_send_orders" in runtime_patch:
+        ctrader_cfg["send_orders"] = bool(validated_runtime.ctrader_send_orders)
+
+    yaml_text = yaml.safe_dump(current, sort_keys=False, allow_unicode=True)
+    result = put_config(yaml_text)
+    result["runtime"] = validated_runtime.to_dict()
+    result["updated_keys"] = sorted(runtime_patch.keys())
+    return result
 
 
 def _diff(a: Any, b: Any, prefix: str = "") -> list[str]:
