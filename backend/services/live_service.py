@@ -1176,12 +1176,18 @@ def _start_live_scheduler():
     def _catch_up_all_jobs():
         import traceback as _tb
         # 使用 sched.run_job_now() 确保执行计入 run_count
+        # 冷启动补跑: 确保重启后数据立即刷新, 不错过低频任务的调度窗口
         job_names = [
-            "data_sync",
-            "evolution_hourly",
-            "awe_adapt",
-            "ml_retrain",
-            "feature_eng",
+            "data_sync",           # 每 5 分钟 — bars/ticks 补缺
+            "dukascopy_tick",      # 每小时 — Dukascopy tick 历史
+            "events_sync",         # 每日 08:00 — 经济事件日历
+            "cot_sync",            # 每周六 — COT 持仓报告
+            "etf_sync",            # 每季度 — ETF 持仓
+            "evolution_hourly",    # 每小时 — 进化闭环
+            "awe_adapt",           # 每 30 分钟 — 权重自适应
+            "ml_retrain",           # 每周日 — ML 重训
+            "feature_eng",         # 每日 03:00 — 特征工程
+            "ml_drift_check",      # 每 6 小时 — 概念漂移检测
         ]
         for name in job_names:
             try:
