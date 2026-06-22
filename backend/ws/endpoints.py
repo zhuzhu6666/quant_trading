@@ -239,19 +239,20 @@ async def ws_state(ws: WebSocket) -> None:
     except Exception:
         pass
     if not token:
-        _ws_log.warning("WS /ws/state rejected: missing token (query_params=%s, subprotocols=%s)",
-                        dict(getattr(ws, 'query_params', {})) if hasattr(ws, 'query_params') else "N/A",
-                        getattr(ws, 'subprotocols', []))
+        _ws_log.warning("WS /ws/state rejected: missing token")
+        await ws.accept()
         await ws.close(code=4001, reason="missing token")
         return
     try:
         _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except _jwt.ExpiredSignatureError:
         _ws_log.warning("WS /ws/state rejected: token expired")
+        await ws.accept()
         await ws.close(code=4001, reason="token expired")
         return
     except Exception as e:
         _ws_log.warning("WS /ws/state rejected: invalid token (%s)", e)
+        await ws.accept()
         await ws.close(code=4001, reason="invalid token")
         return
     _ws_log.info("WS /ws/state connected OK")

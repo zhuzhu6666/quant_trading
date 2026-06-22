@@ -53,9 +53,15 @@ function connect() {
   });
 
   socketTask.onError((err) => {
-    console.error('[WS] error:', err);
+    console.warn('[WS] error (falling back to HTTP polling):', err.errMsg || err);
     socketTask = null;
     isConnected = false;
+    // WS 失败不阻塞，HTTP 轮询兜底
+    // 如果是认证失败 (token 过期)，标记需要重新登录
+    const errMsg = (err && err.errMsg) || '';
+    if (errMsg.includes('401') || errMsg.includes('status') || errMsg.includes('Invalid')) {
+      console.warn('[WS] token may be expired, will retry on next login');
+    }
   });
 }
 
