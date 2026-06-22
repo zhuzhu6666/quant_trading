@@ -85,8 +85,9 @@
   </view>
 
   <!-- 交易决策 -->
-  <view class="card" wx:if="{{hasVotes}}">
+  <view class="card">
     <text class="card-title">交易决策</text>
+    <block wx:if="{{hasVotes}}">
     <!-- 决策流程 -->
     <view style="display:flex;flex-direction:column;gap:0">
       <!-- 第1步: 信号 -->
@@ -127,11 +128,14 @@
         <text style="font-size:36rpx">{{compPassed ? '📤' : '🛑'}}</text>
       </view>
     </view>
+    </block>
+    <view wx:else class="empty-state"><text>等待因子信号数据...</text></view>
   </view>
 
   <!-- 因子投票 -->
-  <view class="card" wx:if="{{hasVotes}}">
+  <view class="card">
     <text class="card-title">因子投票</text>
+    <block wx:if="{{hasVotes}}">
     <!-- 合成信号摘要 -->
     <view style="display:flex;align-items:center;justify-content:space-between;padding:16rpx;background:#F2F2F7;border-radius:14rpx;margin-bottom:16rpx">
       <view style="display:flex;align-items:center;gap:12rpx">
@@ -153,6 +157,8 @@
         <text style="font-size:20rpx;width:80rpx;flex-shrink:0" class="{{item.signalCls}}">{{item.signal}}</text>
       </view>
     </block>
+    </block>
+    <view wx:else class="empty-state"><text>等待因子信号数据...</text></view>
   </view>
 
   <!-- 今日统计 -->
