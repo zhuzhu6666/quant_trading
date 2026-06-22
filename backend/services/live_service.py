@@ -1047,6 +1047,7 @@ def _start_live_scheduler():
     ).start()
     # 每天 8:00: 经济日历拉取
     def _scheduled_events_sync():
+        import sys
         try:
             import subprocess
             script = Path(__file__).resolve().parent.parent.parent / "scripts" / "fetch_events_calendar.py"
@@ -1073,6 +1074,7 @@ def _start_live_scheduler():
     ).start()
     # 每周六 6:00: COT 持仓刷新 (CFTC 周五发布)
     def _scheduled_cot_sync():
+        import sys
         try:
             import subprocess
             script = Path(__file__).resolve().parent.parent.parent / "scripts" / "refresh_external_data.py"
@@ -1089,6 +1091,7 @@ def _start_live_scheduler():
     sched.add_job("cot_sync", "0 6 * * 6", _scheduled_cot_sync)
     # 每季度首日 4:00: ETF 持仓刷新 (SEC 10-Q filing)
     def _scheduled_etf_sync():
+        import sys
         try:
             import subprocess
             script = Path(__file__).resolve().parent.parent.parent / "scripts" / "refresh_external_data.py"
