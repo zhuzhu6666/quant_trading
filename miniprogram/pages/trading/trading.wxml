@@ -84,6 +84,51 @@
     </view>
   </view>
 
+  <!-- 交易决策 -->
+  <view class="card" wx:if="{{hasVotes}}">
+    <text class="card-title">交易决策</text>
+    <!-- 决策流程 -->
+    <view style="display:flex;flex-direction:column;gap:0">
+      <!-- 第1步: 信号 -->
+      <view style="display:flex;align-items:center;padding:12rpx 0">
+        <view style="width:48rpx;height:48rpx;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-right:16rpx;background:{{compDirCls === 'text-green' ? '#34C759' : compDirCls === 'text-red' ? '#FF3B30' : '#C7C7CC'}}20">
+          <text style="font-size:28rpx">1</text>
+        </view>
+        <view style="flex:1">
+          <text style="font-size:26rpx;font-weight:600;color:#1C1C1E;display:block">{{compDir}} {{compScore}}</text>
+          <text style="font-size:22rpx;color:#8E8E93">合成信号 · 战术 {{compTactical}} · 宏观 {{compMacro}}</text>
+        </view>
+        <text class="badge {{compPassed ? 'badge-green' : 'badge-red'}}" style="font-size:20rpx">{{compPassed ? '✓ 通过' : '✗ 拦截'}}</text>
+      </view>
+      <!-- 分隔线 -->
+      <view style="width:2rpx;height:16rpx;background:#E5E5EA;margin-left:23rpx"></view>
+      <!-- 第2步: 闸门 -->
+      <view style="display:flex;align-items:center;padding:12rpx 0">
+        <view style="width:48rpx;height:48rpx;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-right:16rpx;background:#F2F2F7">
+          <text style="font-size:28rpx;color:#8E8E93">2</text>
+        </view>
+        <view style="flex:1">
+          <text style="font-size:26rpx;font-weight:600;color:#1C1C1E;display:block">闸门判定</text>
+          <text style="font-size:22rpx;color:{{compGateCls}}">{{compGateDetail}}</text>
+        </view>
+        <text class="badge {{compGateBadge}}" style="font-size:20rpx">{{compGate}}</text>
+      </view>
+      <!-- 分隔线 -->
+      <view style="width:2rpx;height:16rpx;background:#E5E5EA;margin-left:23rpx"></view>
+      <!-- 第3步: 结果 -->
+      <view style="display:flex;align-items:center;padding:12rpx 0">
+        <view style="width:48rpx;height:48rpx;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-right:16rpx;background:{{compPassed ? '#34C75920' : '#FF3B3020'}}">
+          <text style="font-size:28rpx;color:{{compPassed ? '#34C759' : '#FF3B30'}}">3</text>
+        </view>
+        <view style="flex:1">
+          <text style="font-size:26rpx;font-weight:600;color:#1C1C1E;display:block">{{compPassed ? '开仓 ' + compDir : '不开仓'}}</text>
+          <text style="font-size:22rpx;color:#8E8E93">{{compDecisionReason}}</text>
+        </view>
+        <text style="font-size:36rpx">{{compPassed ? '📤' : '🛑'}}</text>
+      </view>
+    </view>
+  </view>
+
   <!-- 因子投票 -->
   <view class="card" wx:if="{{hasVotes}}">
     <text class="card-title">因子投票</text>
@@ -94,7 +139,7 @@
         <text style="font-size:20rpx;color:#8E8E93">合成 {{compScore}}</text>
       </view>
       <view style="display:flex;align-items:center;gap:8rpx">
-        <text class="badge {{compGateCls === 'text-green' ? 'badge-green' : 'badge-orange'}}" style="font-size:18rpx">{{compGate}}</text>
+        <text class="badge {{compPassed ? 'badge-green' : 'badge-orange'}}" style="font-size:18rpx">{{compGate}}</text>
         <text style="font-size:18rpx;color:#8E8E93">L{{voteLong}}/S{{voteShort}}/F{{voteFlat}}</text>
       </view>
     </view>

@@ -41,7 +41,9 @@ Page({
     // 因子投票
     voteList: [], voteLong: 0, voteShort: 0, voteFlat: 0,
     compDir: '—', compDirCls: 'text-gray', compScore: '—',
-    compGate: '—', compGateCls: 'text-gray', hasVotes: false,
+    compPassed: false, compGate: '—', compGateCls: 'text-gray',
+    compGateDetail: '', compGateBadge: 'badge-gray', compDecisionReason: '',
+    compTactical: '—', compMacro: '—', hasVotes: false,
   },
 
   _fallbackTimer: null,
@@ -145,6 +147,35 @@ Page({
     }
     var compDir = comp.direction === 1 ? 'LONG' : comp.direction === -1 ? 'SHORT' : 'FLAT';
     var compDirCls = comp.direction === 1 ? 'text-green' : comp.direction === -1 ? 'text-red' : 'text-gray';
+    var compPassed = !!comp.gate_passed;
+    var gateReason = comp.gate_reason || '—';
+
+    // 闸门详细说明
+    var GATE_DETAIL = {
+      'passed': '所有检查通过，信号强度足够',
+      'signal_below_threshold': '信号得分低于开仓阈值',
+      'nfp_skip': '非农数据事件，跳过本周期',
+      'gvz_gate': 'GVZ 波动率闸门触发',
+      'macd_reverse': 'MACD 方向与信号相反',
+    };
+    var gateDetail = '';
+    if (gateReason === 'passed') gateDetail = '所有检查通过，信号强度足够';
+    else if (gateReason.startsWith('cooldown')) gateDetail = '冷却期未结束，还需等待';
+    else gateDetail = GATE_DETAIL[gateReason] || ('拦截原因: ' + gateReason);
+    var gateLabel = gateReason === 'passed' ? '放行' : '拦截';
+    var gateBadge = gateReason === 'passed' ? 'badge-green' : gateReason.startsWith('cooldown') ? 'badge-orange' : 'badge-red';
+
+    // 决策原因
+    var decisionReason = '';
+    if (compPassed) {
+      decisionReason = '闸门放行，发送 ' + compDir + ' 订单';
+    } else if (gateReason === 'signal_below_threshold') {
+      decisionReason = '信号强度不足，等待更强信号';
+    } else if (gateReason.startsWith('cooldown')) {
+      decisionReason = '冷却期限制，避免频繁交易';
+    } else {
+      decisionReason = '被闸门拦截: ' + gateReason;
+    }
 
     this.setData({
       connected, connLabel, source: t.source || 'none',
@@ -175,8 +206,14 @@ Page({
       compDir: compDir,
       compDirCls: compDirCls,
       compScore: comp.score != null ? comp.score.toFixed(4) : '—',
-      compGate: comp.gate_passed ? '通过' : (comp.gate_reason || '—'),
-      compGateCls: comp.gate_passed ? 'text-green' : 'text-orange',
+      compPassed: compPassed,
+      compGate: gateLabel,
+      compGateCls: compPassed ? 'text-green' : gateReason.startsWith('cooldown') ? 'text-orange' : 'text-red',
+      compGateDetail: gateDetail,
+      compGateBadge: gateBadge,
+      compDecisionReason: decisionReason,
+      compTactical: comp.tactical_score != null ? comp.tactical_score.toFixed(3) : '—',
+      compMacro: comp.macro_score != null ? comp.macro_score.toFixed(3) : '—',
       hasVotes: fvNames.length > 0,
     });
 
