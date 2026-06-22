@@ -1270,11 +1270,15 @@ def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
             return {"ok": False, "error": f"unknown broker: {broker}"}
 
         # ★ v9-fix: 重启退避 — 上次停止后至少等 _MIN_RESTART_INTERVAL 秒
-        since_end = time.time() - _last_loop_end
+        # audit v3: _MIN_RESTART_INTERVAL=60s 太长, 小程序重启只等2秒就调start
+        # 用户主动重启时不应阻塞, 只对自动重启(如auto_recovery)保留退避
+        since_end = time.time() - _last_loop_end if _last_loop_end else 999
 
-    if since_end < _MIN_RESTART_INTERVAL:
-        wait = _MIN_RESTART_INTERVAL - since_end
-        logger.warning(f"[live] restart backoff: waiting {wait:.0f}s before next loop start")
+    # 退避只在上次停止后很短时间内生效 (防止 auto_recovery 立即重启崩溃的 loop)
+    # 用户主动 stop→start 间隔一般 >2s, 不会触发
+    if _last_loop_end and since_end < 3:
+        wait = 3 - since_end
+        logger.warning(f"[live] restart backoff: waiting {wait:.1f}s")
         time.sleep(wait)
 
     with _loop_state_lock:
@@ -1330,6 +1334,7 @@ def stop_loop() -> dict:
     """Signal the loop thread to stop. Returns immediately;
     blocking cleanup (thread join + scheduler shutdown) runs in background.
     audit v9: 停止后保留最后数据不变 (account/positions/session 冻结), 前端持续显示.
+    audit v3: 立即清 _loop_thread, 让 start_loop 不再误判"already running"
     """
     global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
     global _last_loop_end
@@ -1341,6 +1346,12 @@ def stop_loop() -> dict:
         if _loop_stop_flag is not None:
             _loop_stop_flag.set()
         thread = _loop_thread
+        # ★ 立即清 _loop_thread, 让 start_loop 能检测到"已停止"
+        # 后台清理线程只负责 join + scheduler shutdown
+        _loop_thread = None
+        _loop_stop_flag = None
+        _loop_broker = None
+        _loop_started_at = None
 
     # ★ 立即标记停止, 前端立刻看到状态变化
     _live_state["loop_running"] = False
@@ -1352,11 +1363,6 @@ def stop_loop() -> dict:
         thread.join(timeout=5)
         if thread.is_alive():
             logger.warning(f"live loop thread for {broker} did not stop within 5s; will continue in background")
-        with _loop_state_lock:
-            _loop_thread = None
-            _loop_stop_flag = None
-            _loop_broker = None
-            _loop_started_at = None
         _stop_live_scheduler()
         logger.info("[live] loop stopped, data frozen for display")
 
