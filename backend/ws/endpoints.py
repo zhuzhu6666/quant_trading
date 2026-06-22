@@ -73,7 +73,7 @@ def _read_closed_loop_status() -> dict:
     strategy = _live_state.get("loop_strategy")
     loop_running = _live_state.get("loop_running")
     pipeline_status = "inactive"
-    if strategy and loop_running is not False:
+    if strategy and loop_running is True:
         pipeline_status = "running"
     if _live_state.get("circuit_breaker"):
         pipeline_status = "circuit_breaker"
@@ -99,7 +99,7 @@ def _read_closed_loop_status() -> dict:
             "portfolio_compositor": {"status": "running" if pipeline_status == "running" else "inactive"},
             "execution_gate": {"status": pipeline_status},
             "execution": {
-                "status": "running" if (_live_state.get("loop_started_at") and loop_running is not False) else "inactive",
+                "status": "running" if (_live_state.get("loop_started_at") and loop_running is True) else "inactive",
                 "n_positions": _live_state.get("n_positions", 0),
             },
             "attribution": {"status": attr_status, "n_trades_attributed": attr_trades},

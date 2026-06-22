@@ -1334,6 +1334,7 @@ def stop_loop() -> dict:
 
     # ★ 立即标记停止, 前端立刻看到状态变化
     _live_state["loop_running"] = False
+    _live_state["loop_strategy"] = None  # 清策略名，防止 WS pipeline 误判运行中
     _last_loop_end = time.time()
 
     # 阻塞清理移到后台线程, stop 端点秒返
@@ -1731,6 +1732,10 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     else:
                         last_bar = df_new.iloc[-1]
                         _process_tick(bridge, None, df_new, last_bar, broker, tick, log)
+                        # ★ 交易执行后立即检查停止信号，避免下个 tick 才响应
+                        if stop_flag.is_set():
+                            log(f"tick {tick}: stop requested during processing, exiting")
+                            break
         except Exception as e:
             log(f"tick {tick} error: {type(e).__name__}: {e}\n{traceback.format_exc()[-300:]}")
 
