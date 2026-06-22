@@ -11,12 +11,13 @@ from fastapi import APIRouter
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
-# 缓存: 避免重复慢查询 (tick 库 6.7G 每次 MAX() 约 20s)
+# 缓存: 后台线程每 55s 自动刷新, 避免请求阻塞线程池
 _cache: dict | None = None
 _cache_ts: float = 0
 _cache_lock = threading.Lock()
-_CACHE_TTL = 60  # 秒
-_warmed = False  # 启动预热是否完成
+_CACHE_REFRESH_INTERVAL = 55  # 秒 (早于旧 TTL 5s, 确保永不过期)
+_refresh_thread: threading.Thread | None = None
+_stop_refresh = threading.Event()
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
@@ -260,57 +261,69 @@ def _compute_db_health() -> dict:
     }
 
 
-def _warm_cache():
-    """在后台线程中预热缓存（不阻塞启动）"""
-    global _cache, _cache_ts, _warmed
-    try:
-        result = _compute_db_health()
-        with _cache_lock:
-            _cache = result
-            _cache_ts = time.time()
-            _warmed = True
-    except Exception:
-        # 预热失败不影响服务启动，首次请求会触发实时计算
-        pass
+def _refresh_cache():
+    """后台线程: 每 55s 自动刷新缓存, 确保请求永远走缓存秒返。"""
+    global _cache, _cache_ts
+    while not _stop_refresh.is_set():
+        try:
+            result = _compute_db_health()
+            with _cache_lock:
+                _cache = result
+                _cache_ts = time.time()
+        except Exception:
+            pass  # 刷新失败保留旧缓存, 下次重试
+        _stop_refresh.wait(_CACHE_REFRESH_INTERVAL)
+
+
+def _start_background_refresh():
+    """启动后台缓存刷新线程 (daemon, 随进程退出)。"""
+    global _refresh_thread, _stop_refresh
+    if _refresh_thread is not None and _refresh_thread.is_alive():
+        return
+    _stop_refresh.clear()
+    _refresh_thread = threading.Thread(
+        target=_refresh_cache, daemon=True, name="db-health-refresh"
+    )
+    _refresh_thread.start()
 
 
 @router.get("/db-health")
 def db_health() -> dict:
-    """返回所有数据库的健康状态 (启动预热 + 60s 缓存)。
+    """返回所有数据库的健康状态 (后台自动刷新, 永远 <1ms)。
 
-    首次启动后 3s 自动后台预热，后续请求全部走缓存（<1ms）。
+    后台 daemon 线程每 55s 更新缓存, 请求端永远直接读缓存。
     """
     global _cache, _cache_ts
     now = time.time()
 
     with _cache_lock:
-        if _cache is not None and (now - _cache_ts) < _CACHE_TTL:
+        if _cache is not None:
             result = dict(_cache)
             result["checked_at"] = now
             return result
 
-    # 缓存未命中（极少发生：刚启动且预热尚未完成）
-    # 此时实时计算（阻塞），但只会在启动后几秒内遇到
+    # 极端情况: 缓存尚未初始化 (刚启动, 预热还没跑完)
+    # 此时同步计算一次 (阻塞 ~20s), 但仅发生一次
     result = _compute_db_health()
     with _cache_lock:
         _cache = result
-        _cache_ts = time.time()
+        _cache_ts = now
     return result
 
 
-# ── 启动事件：后台预热缓存 ──
+# ── 启动事件：后台预热 + 持续刷新缓存 ──
 
 def _on_startup():
-    """延迟 3s 后在后台线程预热 db-health 缓存。
+    """延迟 3s 后启动后台缓存刷新线程。
 
-    延迟确保 ctrader reactor 等重资源先初始化完毕，
-    避免抢占启动关键路径的线程池资源。
+    延迟确保 ctrader reactor 等重资源先初始化完毕。
+    之后每 55s 自动刷新，请求端永远走缓存（<1ms）。
     """
-    def _delayed_warm():
+    def _delayed_start():
         time.sleep(3)
-        _warm_cache()
+        _start_background_refresh()
 
-    t = threading.Thread(target=_delayed_warm, daemon=True, name="db-health-warm")
+    t = threading.Thread(target=_delayed_start, daemon=True, name="db-health-init")
     t.start()
 
 
