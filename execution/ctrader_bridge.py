@@ -959,8 +959,7 @@ class CTraderBridge(BaseBrokerBridge):
 
         try:
             req = TradeMsg.ProtoOAAmendPositionSLTPReq()
-            order_acct = self._trader_login if self._trader_login > 0 else self.account_id
-            req.ctidTraderAccountId = order_acct
+            req.ctidTraderAccountId = self.account_id
             req.positionId = int(position_id)
             # Proto3 semantics: 0 = 不设, 非 0 = 设
             if sl > 0:
@@ -1023,9 +1022,7 @@ class CTraderBridge(BaseBrokerBridge):
             )
 
         req = TradeMsg.ProtoOANewOrderReq()
-        # ★ 优先用 traderLogin (用户可见的账户ID), auth 用的 account_id 可能不同
-        order_acct = self._trader_login if self._trader_login > 0 else self.account_id
-        req.ctidTraderAccountId = order_acct
+        req.ctidTraderAccountId = self.account_id
         req.symbolId = self._symbol_id
         req.orderType = ORDER_TYPE["MARKET"]
         req.tradeSide = side
@@ -1034,7 +1031,7 @@ class CTraderBridge(BaseBrokerBridge):
         req.volume = int(round(volume * 100))
         req.comment = comment or "quant-live"
         logger.info(
-            f"market_order: account={order_acct} (auth={self.account_id}) symbolId={self._symbol_id} "
+            f"market_order: account={self.account_id} symbolId={self._symbol_id} "
             f"side={side} volume={req.volume} centilot (= {volume} lot) "
             f"sl={sl} tp={tp}"
         )
@@ -1153,8 +1150,7 @@ class CTraderBridge(BaseBrokerBridge):
                 logger.info(f"  auto-resolved volume={volume} for full close")
 
             req = TradeMsg.ProtoOAClosePositionReq()
-            order_acct = self._trader_login if self._trader_login > 0 else self.account_id
-            req.ctidTraderAccountId = order_acct
+            req.ctidTraderAccountId = self.account_id
             req.positionId = int(position_id)
             # cTrader volume 字段: 1 lot = 100 (centi-lot) per doc
             # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
