@@ -111,6 +111,7 @@ def _risk_kelly_volume(
     """
     # audit v3: min_volume/step_volume 从 bridge meta 取, fallback 用 0.01 而非 1.0
     # XAUUSD 标准最小手数 0.01 lot, 1 lot = 100 oz ≈ $420K 名义价值
+    # 但某些 cTrader 账户 minVolume=100 centi-lot = 1.0 lot
     _min_vol = bridge_meta.get('min_volume', 0.01)
     _step_vol = bridge_meta.get('step_volume', 0.01)
     _to_step = lambda v: max(
@@ -118,8 +119,8 @@ def _risk_kelly_volume(
         round(v / _step_vol) * _step_vol if _step_vol > 0 else v,
     )
 
-    # audit v3: 默认微型手 0.01, 不再是 1.0
-    default_vol = _to_step(0.01)
+    # audit v3: 默认微型手, 不再是 1.0
+    default_vol = _to_step(max(_min_vol, 0.01))
     if not getattr(cfg, 'kelly_enabled', False):
         return default_vol
 
