@@ -1629,6 +1629,51 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     snapshots.append(fv)
             if snapshots:
                 fp["normalizer"].warmup(snapshots)
+            # ★ 预热完成后立即跑一次 compose+gate, 生成初始因子投票数据
+            if fp["engine"].is_warm and snapshots:
+                try:
+                    last_fv = snapshots[-1]
+                    last_bar = {
+                        "open": float(df["open"].iloc[-1]),
+                        "high": float(df["high"].iloc[-1]),
+                        "low": float(df["low"].iloc[-1]),
+                        "close": float(df["close"].iloc[-1]),
+                        "volume": float(df["volume"].iloc[-1]) if "volume" in df.columns else 0.0,
+                        "time": float(df.index[-1].timestamp()) if hasattr(df.index[-1], "timestamp") else 0.0,
+                        "timeframe": TF,
+                        "complete": True,
+                    }
+                    signals = fp["normalizer"].normalize(last_fv)
+                    composite = fp["compositor"].compose(signals, last_fv)
+                    gate_result = fp["gate"].filter(composite, last_fv, last_bar)
+                    fp["gate"].tick()
+                    # 保存到 _live_state
+                    votes = {}
+                    for name, sig in signals.items():
+                        raw_val = last_fv.get(name)
+                        votes[name] = {
+                            "signal": round(sig, 4),
+                            "raw": round(raw_val, 4) if isinstance(raw_val, (int, float)) else None,
+                            "direction": 1 if sig > 0 else -1 if sig < 0 else 0,
+                        }
+                    with _LIVE_STATE_LOCK:
+                        _live_state["last_factor_votes"] = votes
+                        _live_state["last_composite"] = {
+                            "direction": composite.direction,
+                            "score": round(composite.score, 4),
+                            "tactical_score": round(composite.tactical_score, 4),
+                            "macro_score": round(composite.macro_score, 4),
+                            "n_active": composite.n_active_factors,
+                            "n_abstain": composite.n_abstain_factors,
+                            "gate_passed": gate_result.passed,
+                            "gate_reason": gate_result.reason,
+                            "ts": time.time(),
+                        }
+                    dir_name = {1: "LONG", -1: "SHORT"}.get(composite.direction, "FLAT")
+                    log(f"warmup signal: {dir_name} score={composite.score:.4f} "
+                        f"n={composite.n_active_factors} gate={gate_result.reason}")
+                except Exception as e:
+                    log(f"warmup signal generation failed (non-fatal): {e}")
             log(f"Factor pipeline warmed up: {len(df)} bars, "
                 f"buffer={fp['engine'].buffer_size}, "
                 f"warm={fp['engine'].is_warm}")
@@ -2124,8 +2169,8 @@ def _process_tick_factor_pipeline(
                 "gate_reason": gate_result.reason,
                 "ts": time.time(),
             }
-    except Exception:
-        pass
+    except Exception as _e:
+        log(f"tick {tick}: factor votes save failed (non-fatal): {_e}")
     # ── 决策审计: signal ──
     if _DECISION_LOG:
         bar_ts = bar.get("time", 0)
