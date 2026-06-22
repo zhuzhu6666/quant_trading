@@ -234,7 +234,7 @@ class RuntimeConfig:
     awe_max_single_change: float = 0.15
     awe_weight_min: float = 0.1
     awe_weight_max: float = 3.0
-    awe_min_trades: int = 999                # 最少交易笔数才调权重
+    awe_min_trades: int = 50                # 最少交易笔数才调权重
     awe_adapt_interval: int = 50
     awe_ic_floor: float = 0.02
     awe_health_floor: float = 40.0

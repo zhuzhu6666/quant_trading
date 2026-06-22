@@ -746,12 +746,13 @@ def _scheduled_awe_adapt():
             logger.info("[awe_adapt] adapted {} factors: {}",
                         len(patches),
                         {k: v["weight"] for k, v in patches.items()})
-            # Phase 1: 推送权重变更到 RuntimeConfig
+            # 推送权重变更到 RuntimeConfig (包括 weight=0 的禁用因子)
+            # audit v3: 之前 if p.get("weight",0) > 0 过滤了禁用因子,
+            # 导致被禁因子永远推不到 compositor, 继续用旧权重交易
             try:
                 cfg.patch({"factor_portfolio_weights": {
                     name: p["weight"]
                     for name, p in patches.items()
-                    if p.get("weight", 0) > 0
                 }})
                 logger.info("[awe_adapt] weights pushed to RuntimeConfig")
             except Exception as _e2:
@@ -1123,7 +1124,7 @@ def _start_live_scheduler():
         _sys_health.run()
     sched.add_job("system_health", "* * * * *", _scheduled_system_health)
     sched.start()
-    logger.info("[live] InProcessScheduler started with 8 jobs")
+    logger.info("[live] InProcessScheduler started with 11 jobs")
 
     # ── 后台: 首次启动数据补充 (用主 bridge, 不开第二连接) ──
     def _initial_ctrader_data_pull():

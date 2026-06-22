@@ -1,4 +1,5 @@
 """Verify JWT auth roundtrip."""
+import hashlib
 import time
 
 import jwt
@@ -8,11 +9,24 @@ from fastapi.testclient import TestClient
 from backend.app import app
 from backend.core.auth import JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET, create_token, get_current_user, require_user
 
+# Set a known password hash for testing
+_PW = "test_pass_123"
+_HASH = hashlib.sha256(_PW.encode()).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def _set_test_password(monkeypatch):
+    """Override the password hash so the login test can use a known password."""
+    import backend.api.auth as _auth_mod
+    monkeypatch.setattr(_auth_mod, "_PASSWORD_HASH", _HASH)
+    yield
+
+
 client = TestClient(app)
 
 
 def test_login_returns_jwt():
-    r = client.post("/api/auth/login", json={"username": "zhu", "password": "anything"})
+    r = client.post("/api/auth/login", json={"username": "zhu", "password": _PW})
     assert r.status_code == 200
     body = r.json()
     assert body["user"] == "zhu"
@@ -26,7 +40,7 @@ def test_login_returns_jwt():
 
 
 def test_me_no_auth_returns_401():
-    """No Authorization header → 401 (strict auth)."""
+    """No Authorization header -> 401 (strict auth)."""
     r = client.get("/api/auth/me")
     assert r.status_code == 401
 

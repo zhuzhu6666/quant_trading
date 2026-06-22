@@ -567,9 +567,9 @@ def retirement_check(
                 parts.append(f"{s.factor}:decayed({days:.1f}d)")
             continue
 
-        # 无 days_in_decay 数据时, 所有 DECAYING 都入选
-        candidates.append(s.factor)
-        parts.append(f"{s.factor}:DECAYING(score={s.score:.1f})")
+        # audit v3 fix: 无 days_in_decay 数据时, 不再无脑退役所有 DECAYING 因子
+        # 只有 severe(<30) 才立即退役, 中度衰退(30-40)需要 days_in_decay 确认持续天数
+        # 之前的行为会导致 score 30-40 的轻微衰退因子被错误退役
 
     reason = "; ".join(parts) if parts else "no candidates"
     return RetireCandidates(candidates=candidates, reason=reason)

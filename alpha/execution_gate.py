@@ -1,6 +1,6 @@
 """ExecutionGate — 开仓闸门。
 
-组合了信号强度/冷却期/MACD反向/波动率/事件过滤器。
+组合了信号强度/冷却期/事件过滤器。
 
 设计文档: docs/FACTOR_TAKEOVER_V4.md §7.3
 """
@@ -83,16 +83,12 @@ class GateResult:
 class ExecutionGate:
     """开仓闸门。
 
-    检查链: 信号强度 → 冷却期 → MACD反向 → 波动率 → 事件
+    检查链: 信号强度 → 冷却期 → 事件
 
     Args:
         config: 字典，包含以下键:
             - signal_threshold: float (default 0.4)
-            - filter_macd_enabled: bool (default True)
-            - filter_bb_enabled: bool (default True)
             - cooldown_bars: int (default 3)
-            - macd_hist_allow_long_when_positive: bool (default False)
-            - macd_hist_allow_short_when_negative: bool (default False)
     """
 
     def __init__(self, config: dict[str, Any]):
@@ -113,7 +109,7 @@ class ExecutionGate:
 
         Args:
             composite: CompositeSignal（必须有 direction 和 score 属性）
-            factor_values: 因子原始值（含 macd_hist, bb_width 等）
+            factor_values: 因子原始值
             bar: 当前 bar dict（含 time 等字段）
 
         Returns:

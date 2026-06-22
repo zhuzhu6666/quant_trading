@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
 @router.get("")
 @router.get("/")
-def get_metrics() -> Response:
+def get_metrics(_user: RequireUser) -> Response:
     """Prometheus text format."""
     body, content_type = Metrics.shared().render()
     return Response(content=body, media_type=content_type)

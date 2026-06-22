@@ -21,7 +21,9 @@ REFRESH_SCRIPT = Path(__file__).resolve().parent.parent.parent / "scripts" / "re
 PYTHON = sys.executable or "python"
 
 # ── 后台刷新任务存储 ──
+import threading as _threading
 _refresh_jobs: dict[str, dict] = {}  # job_id → {status, output, started_at, finished_at}
+_refresh_jobs_lock = _threading.Lock()
 
 
 def _run_script(*args: str) -> str:
@@ -40,11 +42,13 @@ def _run_script(*args: str) -> str:
 
 def _run_script_bg(job_id: str, *args: str):
     """后台线程：执行刷新脚本，更新 job 状态"""
-    job = _refresh_jobs.get(job_id)
+    with _refresh_jobs_lock:
+        job = _refresh_jobs.get(job_id)
     if not job:
         return
     try:
-        job["status"] = "running"
+        with _refresh_jobs_lock:
+            job["status"] = "running"
         result = subprocess.run(
             [PYTHON, str(REFRESH_SCRIPT), *args],
             capture_output=True, text=True, timeout=300,
@@ -66,18 +70,19 @@ def _run_script_bg(job_id: str, *args: str):
 def _cleanup_stale_jobs(max_age: float = 3600, max_size: int = 500):
     """清理超过 1 小时的旧 job, 且上限 500 条防止内存泄漏。"""
     now = time.time()
-    stale = [k for k, v in _refresh_jobs.items()
-             if (now - v.get("started_at", 0)) > max_age]
-    for k in stale:
-        _refresh_jobs.pop(k, None)
-    if len(_refresh_jobs) > max_size:
-        sorted_keys = sorted(
-            _refresh_jobs,
-            key=lambda k: _refresh_jobs[k].get("started_at", 0),
-            reverse=True,
-        )
-        for k in sorted_keys[max_size:]:
+    with _refresh_jobs_lock:
+        stale = [k for k, v in _refresh_jobs.items()
+                 if (now - v.get("started_at", 0)) > max_age]
+        for k in stale:
             _refresh_jobs.pop(k, None)
+        if len(_refresh_jobs) > max_size:
+            sorted_keys = sorted(
+                _refresh_jobs,
+                key=lambda k: _refresh_jobs[k].get("started_at", 0),
+                reverse=True,
+            )
+            for k in sorted_keys[max_size:]:
+                _refresh_jobs.pop(k, None)
 
 
 def _parse_status(stdout: str) -> list[dict]:
@@ -127,12 +132,13 @@ def trigger_refresh(_user: RequireUser, req: RefreshRequest = RefreshRequest()):
     """触发外部数据刷新（后台异步），立即返回 job_id"""
     _cleanup_stale_jobs()
     job_id = uuid.uuid4().hex[:12]
-    _refresh_jobs[job_id] = {
-        "status": "pending",
-        "output": [],
-        "started_at": time.time(),
-        "finished_at": None,
-    }
+    with _refresh_jobs_lock:
+        _refresh_jobs[job_id] = {
+            "status": "pending",
+            "output": [],
+            "started_at": time.time(),
+            "finished_at": None,
+        }
     args = ["--once"]
     if req.source and req.source != "all":
         args += ["--source", req.source]
@@ -152,7 +158,8 @@ def trigger_refresh(_user: RequireUser, req: RefreshRequest = RefreshRequest()):
 @router.get("/external-refresh/{job_id}")
 def get_refresh_status(_user: RequireUser, job_id: str):
     """查询刷新任务进度"""
-    job = _refresh_jobs.get(job_id)
+    with _refresh_jobs_lock:
+        job = _refresh_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"job_id={job_id} not found")
-    return job
+    return dict(job)  # 返回 copy, 防 torn read

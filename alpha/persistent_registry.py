@@ -1,23 +1,19 @@
-"""alpha/persistent_registry.py — 跨进程持久化 shadow 因子 (T15.5 v2, 2026-06-02)
+"""alpha/persistent_registry.py — 跨进程持久化 shadow/discovered 因子 (v2).
 
 问题: RegistryAdapter.register_runtime 修改的 factor_registry._factors
 只在当前进程有效, 进程退出就丢.
 
-解决: 启动时从 lifecycle.jsonl 读 register 事件, 重新 evaluate_dsl 出函数,
-重新 register_runtime.
+v2 (audit 2026-06-22): 从 state.db lifecycle_events 表恢复,
+不再依赖 JSONL 文件. JSONL 作为降级备份.
 
 用法:
     import alpha.persistent_registry
-    # 在 main.py / scripts 入口 import 后立即调
-    alpha.persistent_registry.restore_from_log("data/charts/factor_lifecycle_log.jsonl")
-
-注: 这只是 v1 临时方案, v2 应该把 DSL 表达式 + 编译结果存 json, 不每次 parse.
+    alpha.persistent_registry.restore_from_log()
 """
 from __future__ import annotations
 
 import logging
 import json
-from pathlib import Path
 from typing import Optional
 
 from alpha.registry_adapter import RegistryAdapter
@@ -26,39 +22,65 @@ from alpha.factor_dsl import evaluate_dsl
 logger = logging.getLogger(__name__)
 
 
-def restore_from_log(lifecycle_log_path: str = "data/charts/factor_lifecycle_log.jsonl",
-                      verbose: bool = True,
-                      adapter: "RegistryAdapter | None" = None) -> int:
-    """
-    从 lifecycle log 恢复所有 shadow / discovered 因子.
+def restore_from_log(lifecycle_log_path: str = "",
+                     verbose: bool = True,
+                     adapter: "RegistryAdapter | None" = None) -> int:
+    """从 state.db lifecycle_events 表恢复所有 shadow / discovered 因子.
+
+    降级到 JSONL 文件 (如果传了路径且文件存在).
 
     Returns: 恢复的因子数
     """
-    log_path = Path(lifecycle_log_path)
-    if not log_path.exists():
-        if verbose:
-            logger.info(f"[PersistentRegistry] {log_path} 不存在, 无需恢复")
-        return 0
-
-    # 读所有事件, 按 factor 名取最后一个事件 (register 或 unregister)
     latest_event: dict[str, dict] = {}
-    with open(log_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            factor = ev.get("factor")
-            if not factor:
-                continue
-            # 最后一个事件决定状态
-            if ev.get("event") in ("register", "unregister"):
-                latest_event[factor] = ev
+
+    # 主路径: 从 state.db lifecycle_events 表读取
+    try:
+        import sqlite3
+        from backend.core.db import STATE_DB
+        conn = sqlite3.connect(str(STATE_DB))
+        conn.row_factory = sqlite3.Row
+        # 按 factor 分组取最后一个 register/unregister 事件
+        rows = conn.execute(
+            "SELECT factor, event, source, description, timestamp "
+            "FROM lifecycle_events "
+            "WHERE event IN ('register', 'unregister') "
+            "ORDER BY timestamp ASC"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            factor = r["factor"]
+            if factor:
+                latest_event[factor] = dict(r)
+        if verbose and latest_event:
+            logger.info(f"[PersistentRegistry] 从 state.db 读取 {len(latest_event)} 个因子事件")
+    except Exception as e:
+        logger.debug(f"[PersistentRegistry] state.db 读取失败: {e}")
+
+    # 降级: JSONL 文件 (如果传了路径且 DB 没读到)
+    if not latest_event and lifecycle_log_path:
+        from pathlib import Path
+        log_path = Path(lifecycle_log_path)
+        if log_path.exists():
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    factor = ev.get("factor")
+                    if not factor:
+                        continue
+                    if ev.get("event") in ("register", "unregister"):
+                        latest_event[factor] = ev
+            if verbose and latest_event:
+                logger.info(f"[PersistentRegistry] 从 JSONL 降级读取 {len(latest_event)} 个因子事件")
 
     if not latest_event:
+        if verbose:
+            logger.info("[PersistentRegistry] 无生命周期事件, 无需恢复")
         return 0
 
     if adapter is None:

@@ -1,10 +1,11 @@
-"""backend/runtime/evolution_orchestrator.py — 自进化编排器主循环 (v2: 闭环修复).
+"""backend/runtime/evolution_orchestrator.py — 自进化编排器主循环 (v3: DB统一).
 
 把 GP 搜索 → 注册 shadow → Canary 晋升(持久化+执行) → 退役检查(执行)
 → 权重更新 → 串成端到端闭环管线。
 
-v2 修复:
-  - CanaryDirector 状态持久化到 decision_log.db 的 canary_state 表
+v3 修复 (audit 2026-06-22):
+  - 全部读写改用 STATE_DB (统一状态库), 不再用 decision_log.db
+  - canary_state / decision_log 都从 state.db 读写
   - 晋升后真正调用 adapter.promote() 更新因子 source
   - 退役检查后真正调用 adapter.retire() 移除因子
   - 权重更新推送 factor_portfolio_weights (AWE 读同一字段)
@@ -26,14 +27,15 @@ from strategy import mab_router as _mab_router
 
 logger = logging.getLogger(__name__)
 
-_CANARY_DB = "data/decision_log.db"
-_CANARY_STATE_FILE = "data/charts/canary_state.json"
+# audit v3: 统一使用 STATE_DB, 不再用 decision_log.db
+from backend.core.db import STATE_DB as _CANARY_DB
 
 
 def _ensure_canary_db() -> None:
-    """确保 canary_state 表存在 (SQLite in decision_log.db)."""
+    """确保 canary_state 表存在 (state.db, DDL已在backend/core/db.py定义)."""
+    # state.db 的 DDL 已包含 canary_state 表, 此处幂等创建以防万一
     try:
-        conn = sqlite3.connect(_CANARY_DB)
+        conn = sqlite3.connect(str(_CANARY_DB))
         conn.execute("""
             CREATE TABLE IF NOT EXISTS canary_state (
                 factor_name TEXT PRIMARY KEY,
@@ -52,11 +54,11 @@ def _ensure_canary_db() -> None:
 
 
 def _load_canary_states() -> dict[str, dict]:
-    """从 SQLite 加载所有 canary 状态. 降级到 JSON 文件."""
+    """从 state.db 加载所有 canary 状态."""
     states: dict[str, dict] = {}
     try:
         _ensure_canary_db()
-        conn = sqlite3.connect(_CANARY_DB)
+        conn = sqlite3.connect(str(_CANARY_DB))
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT * FROM canary_state").fetchall()
         conn.close()
@@ -75,25 +77,14 @@ def _load_canary_states() -> dict[str, dict]:
             return states
     except Exception as e:
         logger.debug("[Evolve] load canary from DB: %s", e)
-
-    # 降级: JSON 文件
-    try:
-        from pathlib import Path
-        p = Path(_CANARY_STATE_FILE)
-        if p.exists():
-            loaded = _json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                return loaded
-    except Exception as e:
-        logger.debug("[Evolve] load canary from JSON: %s", e)
     return {}
 
 
 def _save_canary_states(states: dict[str, dict]) -> None:
-    """持久化 canary 状态到 SQLite + JSON 备份."""
+    """持久化 canary 状态到 state.db."""
     try:
         _ensure_canary_db()
-        conn = sqlite3.connect(_CANARY_DB)
+        conn = sqlite3.connect(str(_CANARY_DB))
         now = _time.time()
         for name, s in states.items():
             events_json = _json.dumps(s.get("events", []), ensure_ascii=False)
@@ -113,16 +104,7 @@ def _save_canary_states(states: dict[str, dict]) -> None:
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.debug("[Evolve] save canary to DB: %s, falling back to JSON", e)
-        try:
-            from pathlib import Path
-            Path(_CANARY_STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
-            Path(_CANARY_STATE_FILE).write_text(
-                _json.dumps(states, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as e2:
-            logger.warning("[Evolve] canary state save failed: %s", e2)
+        logger.warning("[Evolve] save canary to state.db failed: %s", e)
 
 
 # ── EvolutionStage 记录 ───────────────────────────────────────────────
@@ -168,7 +150,7 @@ class EvolutionReport:
 
 def scheduled_evolution_cycle(
     symbol: str = "XAUUSD+",
-    timeframe: str = "M15",
+    timeframe: str = "M5",
     n_bars: int = 8000,
     gp_pop: int = 50,
     gp_gen: int = 20,
@@ -480,7 +462,7 @@ def _execute_rollbacks(names: list[str]) -> None:
 def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
     from deployment.canary import CanaryEvalContext
     try:
-        conn = sqlite3.connect(_CANARY_DB)
+        conn = sqlite3.connect(str(_CANARY_DB))
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT meta FROM decision_log WHERE decision_type='close' AND strategy=?",

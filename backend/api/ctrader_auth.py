@@ -15,6 +15,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from backend.core.auth import RequireUser
+
 router = APIRouter(prefix="/api/ctrader", tags=["ctrader-auth"])
 
 _ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
@@ -59,7 +61,7 @@ class AuthUrlResponse(BaseModel):
 
 
 @router.get("/auth-url", response_model=AuthUrlResponse)
-def get_auth_url() -> AuthUrlResponse:
+def get_auth_url(_user: RequireUser) -> AuthUrlResponse:
     """返回 cTrader OAuth 授权 URL."""
     env = _read_env()
     client_id = env.get("CTRADER_CLIENT_ID", "")
@@ -77,7 +79,7 @@ def get_auth_url() -> AuthUrlResponse:
 
 
 @router.get("/callback")
-def oauth_callback(code: str = Query(...)) -> dict:
+def oauth_callback(_user: RequireUser, code: str = Query(...)) -> dict:
     """cTrader OAuth 回调 — 用 code 换 token 并存到 .env."""
     env = _read_env()
 
@@ -133,7 +135,7 @@ def oauth_callback(code: str = Query(...)) -> dict:
 
 
 @router.get("/token-status")
-def token_status() -> dict:
+def token_status(_user: RequireUser) -> dict:
     """检查当前 token 状态."""
     env = _read_env()
     token = env.get("CTRADER_ACCESS_TOKEN", "")
