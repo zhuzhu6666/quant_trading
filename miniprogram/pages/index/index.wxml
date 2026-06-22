@@ -26,6 +26,10 @@
         bindtap="startPipeline">
         {{pipelineRunning ? '运行中' : '▶ 启动'}}
       </view>
+      <view class="btn btn-warning" style="flex:1;opacity:{{restarting ? 0.4 : 1}}"
+        bindtap="restartPipeline">
+        {{restarting ? '重启中...' : '↻ 重启'}}
+      </view>
       <view class="btn btn-danger" style="flex:1;opacity:{{pipelineRunning ? 1 : 0.4}}"
         bindtap="stopPipeline">
         {{pipelineRunning ? '⏹ 停止' : '已停止'}}

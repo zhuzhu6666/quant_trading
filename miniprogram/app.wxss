@@ -213,6 +213,7 @@ view, text, scroll-view {
   letter-spacing: 1rpx;
 }
 .btn-primary { background: #007AFF; color: #FFFFFF; }
+.btn-warning { background: rgba(255,149,0,0.10); color: #FF9500; }
 .btn-danger  { background: rgba(255,59,48,0.10); color: #FF3B30; }
 .btn:active  { opacity: 0.6; transform: scale(0.97); }
 

@@ -28,6 +28,7 @@ Page({
     controlMsg: '',
     controlOk: false,
     controlErr: false,
+    restarting: false,
   },
 
   onLoad() { this._update(); },
@@ -57,6 +58,31 @@ Page({
       this._broadcastRefresh();
     } else {
       this.setData({ controlMsg: (result && result.detail) || '停止失败', controlOk: false, controlErr: true });
+    }
+  },
+
+  async restartPipeline() {
+    if (this.data.restarting) return;
+    this.setData({ restarting: true, controlMsg: '重启中...', controlOk: false, controlErr: false });
+
+    // 如果在运行，先停止
+    if (this.data.pipelineRunning) {
+      const stopRes = await api.post('/api/live/stop');
+      if (!stopRes || !stopRes.ok) {
+        this.setData({ controlMsg: '停止失败，重启中断', controlOk: false, controlErr: true, restarting: false });
+        return;
+      }
+      // 等 2 秒让线程完全退出
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    // 重新启动
+    const startRes = await api.post('/api/live/start');
+    if (startRes && startRes.ok) {
+      this.setData({ pipelineRunning: true, controlMsg: '已重启', controlOk: true, controlErr: false, restarting: false });
+      this._broadcastRefresh();
+    } else {
+      this.setData({ controlMsg: '启动失败', controlOk: false, controlErr: true, restarting: false });
     }
   },
 
