@@ -12,6 +12,8 @@ App({
       n_positions: 0, current_price: null,
     },
     lastUpdate: null,
+    // 策略状态缓存（跨页面共享）
+    strategyStatus: null,
   },
 
   _pollTimer: null,
@@ -22,16 +24,13 @@ App({
 
   async _tryAutoLogin() {
     const token = wx.getStorageSync('jwt_token');
-    if (!token) return; // 无 token，等用户手动登录
-
+    if (!token) return;
     api.loadToken();
-    // 用 /api/state 验证 token 有效性
-    const data = await api.get('/api/state');
-    if (data) {
-      // token 有效，跳过登录页
+    // v5: /api/state 目前 500，改用 /api/auth/me 验证 token
+    const data = await api.get('/api/auth/me');
+    if (data && data.username) {
       this.startChannels();
     }
-    // token 无效 → 静默失败，登录页会显示
   },
 
   startChannels() {
@@ -71,7 +70,64 @@ App({
   },
 
   async _poll() {
-    const data = await api.get('/api/state');
-    if (data) this._applyState(data);
+    // ═════════════════════════════════════════════════
+    // v5 HTTP 兜底: /api/state → 500, 用以下端点拼合
+    // ═════════════════════════════════════════════════
+    try {
+      const [acct, strat, stats] = await Promise.all([
+        api.get('/api/live/account'),
+        api.get('/api/live/strategy-status'),
+        api.get('/api/live/session-stats'),
+      ]);
+
+      const hasAcct = acct && acct.ok;
+      const hasStrat = strat && typeof strat.running === 'boolean';
+      const hasStats = stats && typeof stats.trades === 'number';
+
+      if (!hasAcct && !hasStrat) return;
+
+      const pos = (hasStrat && strat.position) || {};
+      const src = hasStrat && strat.running ? 'live' : 'frozen';
+
+      // 只更新 trading 数据，不覆盖 closed_loop (仅 WS 有)
+      const prevTrading = this.globalData.trading || {};
+      const newTrading = {
+        source: src,
+        equity: hasAcct ? (acct.equity || prevTrading.equity || 0) : (prevTrading.equity || 0),
+        balance: hasAcct ? (acct.balance || prevTrading.balance || 0) : (prevTrading.balance || 0),
+        pnl_today: hasStats ? (stats.pnl_today || 0) : (prevTrading.pnl_today || 0),
+        position: {
+          dir: pos.dir || 'FLAT',
+          entry: pos.entry || 0,
+          size: pos.count || 0,
+          unrealized: 0,
+        },
+        daily: hasStats ? {
+          trades: stats.trades || 0,
+          win: stats.wins || 0,
+          loss: stats.losses || 0,
+          pnl: stats.pnl_today || 0,
+          drawdown_pct: stats.drawdown_pct || 0,
+        } : (prevTrading.daily || { trades: 0, win: 0, loss: 0, pnl: 0, drawdown_pct: 0 }),
+        risk: {
+          circuit_breaker: hasStrat ? !!strat.circuit_breaker : (prevTrading.risk && prevTrading.risk.circuit_breaker) || false,
+          consecutive_loss: hasStats ? (stats.consecutive_loss || 0) : 0,
+        },
+        n_positions: pos.count || 0,
+        current_price: prevTrading.current_price || null,
+      };
+
+      this.globalData.trading = newTrading;
+      this.globalData.lastUpdate = Date.now();
+      // 缓存策略状态供页面使用
+      this.globalData.strategyStatus = hasStrat ? strat : null;
+
+      const pages = getCurrentPages();
+      pages.forEach(p => {
+        if (p.onGlobalStateUpdate) p.onGlobalStateUpdate();
+      });
+    } catch (e) {
+      // 静默失败，WS 主通道下次会更新
+    }
   },
 });

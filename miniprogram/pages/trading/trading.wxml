@@ -65,6 +65,25 @@
     </view>
   </view>
 
+  <!-- 最近信号 -->
+  <view class="card" wx:if="{{signals.length}}">
+    <text class="card-title">最近信号</text>
+    <view style="background:#F2F2F7;border-radius:16rpx;padding:16rpx;margin-bottom:12rpx" wx:if="{{signalReason}}">
+      <text style="font-size:22rpx;color:#8E8E93">{{signalReason}}</text>
+    </view>
+    <view wx:for="{{signals}}" wx:key="index" class="stat-row" style="padding:12rpx 0">
+      <view style="display:flex;align-items:center;gap:12rpx;flex:1;min-width:0">
+        <text style="font-size:24rpx;font-weight:600;width:72rpx" class="{{item.dirCls}}">{{item.dir}}</text>
+        <text style="font-size:24rpx;color:#1C1C1E">score {{item.score}}</text>
+        <text style="font-size:20rpx;color:#8E8E93">{{item.nFactors}}因子</text>
+      </view>
+      <view style="display:flex;align-items:center;gap:12rpx;flex-shrink:0">
+        <text style="font-size:20rpx;color:#8E8E93">战术 {{item.tactical}}</text>
+        <text class="badge {{item.gateBadge}}" style="font-size:18rpx">{{item.gate}}</text>
+      </view>
+    </view>
+  </view>
+
   <!-- 今日统计 -->
   <view class="card">
     <text class="card-title">今日统计</text>
