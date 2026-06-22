@@ -17,8 +17,7 @@ _DB_LIST = [
     ("l2.duckdb", "L2 深度", "duckdb"),
     ("trades.duckdb", "交易记录", "duckdb"),
     ("events.duckdb", "事件日历", "duckdb"),
-    ("analytics.db", "分析数据", "sqlite"),
-    ("decision_log.db", "决策日志", "sqlite"),
+    ("state.db", "统一状态库", "sqlite"),
     ("experiments.db", "实验记录", "sqlite"),
 ]
 

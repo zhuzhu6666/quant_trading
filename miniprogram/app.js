@@ -28,7 +28,7 @@ App({
     api.loadToken();
     // v5: /api/state 目前 500，改用 /api/auth/me 验证 token
     const data = await api.get('/api/auth/me');
-    if (data && data.username) {
+    if (data && (data.user || data.username)) {
       this.startChannels();
     }
   },

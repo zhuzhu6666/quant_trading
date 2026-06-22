@@ -63,9 +63,11 @@ async function login(username, password) {
 async function get(endpoint) {
   await _ensureToken();
   try {
+    const headers = {};
+    if (token) headers.Authorization = '*** ' + token;
     const res = await request({
       url: CONFIG.SERVER + endpoint,
-      header: { Authorization: 'Bearer ' + token },
+      header: headers,
       timeout: 15000,
     });
     return res && res.data;
@@ -78,10 +80,12 @@ async function get(endpoint) {
 async function post(endpoint, data = {}) {
   await _ensureToken();
   try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = '*** ' + token;
     const res = await request({
       url: CONFIG.SERVER + endpoint,
       method: 'POST',
-      header: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      header: headers,
       data,
       timeout: 20000,
     });
@@ -97,6 +101,11 @@ async function _ensureToken() {
   const saved = loadToken();
   if (saved) { token = saved; return; }
   await login();
+  // login() 内部调用 setToken 已设置 token, 二次确认
+  if (!token) {
+    const reloaded = loadToken();
+    if (reloaded) token = reloaded;
+  }
 }
 
 export default { login, get, post, setToken, loadToken };
