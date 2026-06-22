@@ -1028,7 +1028,11 @@ class CTraderBridge(BaseBrokerBridge):
         req.tradeSide = side
         # cTrader volume 字段单位: 1 lot = 100 (centi-lot) per OpenApiPy docs
         # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
-        req.volume = int(round(volume * 100))
+        # audit v3: 某些 cTrader demo 账户 minVolume=1.0 lot (100 centi-lot)
+        # 如果 bridge meta 有 min_volume, 用它; 否则默认 1.0 lot
+        _meta = getattr(self, '_symbol_meta', None) or {}
+        _min_vol_lot = _meta.get('min_volume', 1.0)
+        req.volume = int(round(max(volume, _min_vol_lot) * 100))
         req.comment = comment or "quant-live"
         logger.info(
             f"market_order: account={self.account_id} symbolId={self._symbol_id} "
