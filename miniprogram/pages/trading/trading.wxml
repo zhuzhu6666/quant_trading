@@ -84,6 +84,32 @@
     </view>
   </view>
 
+  <!-- 因子投票 -->
+  <view class="card" wx:if="{{hasVotes}}">
+    <text class="card-title">因子投票</text>
+    <!-- 合成信号摘要 -->
+    <view style="display:flex;align-items:center;justify-content:space-between;padding:16rpx;background:#F2F2F7;border-radius:14rpx;margin-bottom:16rpx">
+      <view style="display:flex;align-items:center;gap:12rpx">
+        <text style="font-size:24rpx;font-weight:600" class="{{compDirCls}}">{{compDir}}</text>
+        <text style="font-size:20rpx;color:#8E8E93">合成 {{compScore}}</text>
+      </view>
+      <view style="display:flex;align-items:center;gap:8rpx">
+        <text class="badge {{compGateCls === 'text-green' ? 'badge-green' : 'badge-orange'}}" style="font-size:18rpx">{{compGate}}</text>
+        <text style="font-size:18rpx;color:#8E8E93">L{{voteLong}}/S{{voteShort}}/F{{voteFlat}}</text>
+      </view>
+    </view>
+    <!-- 各因子投票条 -->
+    <block wx:for="{{voteList}}" wx:key="name">
+      <view style="display:flex;align-items:center;gap:12rpx;padding:8rpx 0">
+        <text style="font-size:22rpx;color:#8E8E93;width:80rpx;text-align:right;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{item.name}}</text>
+        <view class="progress-bar" style="flex:1;height:8rpx">
+          <view class="progress-fill {{item.barCls}}" style="width:{{item.barPct}}%;min-width:4rpx"></view>
+        </view>
+        <text style="font-size:20rpx;width:80rpx;flex-shrink:0" class="{{item.signalCls}}">{{item.signal}}</text>
+      </view>
+    </block>
+  </view>
+
   <!-- 今日统计 -->
   <view class="card">
     <text class="card-title">今日统计</text>

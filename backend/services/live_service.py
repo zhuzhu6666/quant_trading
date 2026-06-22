@@ -2101,6 +2101,31 @@ def _process_tick_factor_pipeline(
     composite = compositor.compose(signals, factor_values)
     gate_result = gate.filter(composite, factor_values, bar)
     gate.tick()
+    # ★ 保存因子投票快照到 _live_state, 前端「因子投票」面板读取
+    try:
+        votes = {}
+        for name, sig in signals.items():
+            raw_val = factor_values.get(name)
+            votes[name] = {
+                "signal": round(sig, 4),
+                "raw": round(raw_val, 4) if isinstance(raw_val, (int, float)) else None,
+                "direction": 1 if sig > 0 else -1 if sig < 0 else 0,
+            }
+        with _LIVE_STATE_LOCK:
+            _live_state["last_factor_votes"] = votes
+            _live_state["last_composite"] = {
+                "direction": composite.direction,
+                "score": round(composite.score, 4),
+                "tactical_score": round(composite.tactical_score, 4),
+                "macro_score": round(composite.macro_score, 4),
+                "n_active": composite.n_active_factors,
+                "n_abstain": composite.n_abstain_factors,
+                "gate_passed": gate_result.passed,
+                "gate_reason": gate_result.reason,
+                "ts": time.time(),
+            }
+    except Exception:
+        pass
     # ── 决策审计: signal ──
     if _DECISION_LOG:
         bar_ts = bar.get("time", 0)

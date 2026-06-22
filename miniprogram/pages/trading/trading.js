@@ -38,6 +38,10 @@ Page({
     price: '—',
     // 风控
     circuitBreaker: false, consecLoss: 0,
+    // 因子投票
+    voteList: [], voteLong: 0, voteShort: 0, voteFlat: 0,
+    compDir: '—', compDirCls: 'text-gray', compScore: '—',
+    compGate: '—', compGateCls: 'text-gray', hasVotes: false,
   },
 
   _fallbackTimer: null,
@@ -115,6 +119,33 @@ Page({
       });
     }
 
+    // ── 因子投票面板 ──
+    var fv = (ss && ss.factor_votes) || {};
+    var comp = (ss && ss.last_composite) || {};
+    var voteList = [];
+    var fvNames = Object.keys(fv);
+    // 按 |signal| 降序排列
+    fvNames.sort(function(a, b) {
+      return Math.abs((fv[b].signal || 0)) - Math.abs((fv[a].signal || 0));
+    });
+    var longCount = 0, shortCount = 0, flatCount = 0;
+    for (var vi = 0; vi < fvNames.length; vi++) {
+      var v = fv[fvNames[vi]];
+      var dir = v.direction;
+      if (dir > 0) longCount++;
+      else if (dir < 0) shortCount++;
+      else flatCount++;
+      voteList.push({
+        name: fvNames[vi].replace(/_/g, ' '),
+        signal: v.signal != null ? (v.signal >= 0 ? '+' : '') + v.signal.toFixed(3) : '—',
+        signalCls: dir > 0 ? 'text-green' : dir < 0 ? 'text-red' : 'text-gray',
+        barPct: Math.min(Math.abs(v.signal || 0) * 100, 100),
+        barCls: dir > 0 ? 'progress-green' : dir < 0 ? 'progress-red' : 'progress-gray',
+      });
+    }
+    var compDir = comp.direction === 1 ? 'LONG' : comp.direction === -1 ? 'SHORT' : 'FLAT';
+    var compDirCls = comp.direction === 1 ? 'text-green' : comp.direction === -1 ? 'text-red' : 'text-gray';
+
     this.setData({
       connected, connLabel, source: t.source || 'none',
       // 账户 (WS 实时)
@@ -136,6 +167,17 @@ Page({
       // 信号
       signals: signals,
       signalReason: (ss && ss.reason) || '',
+      // 因子投票
+      voteList: voteList,
+      voteLong: longCount,
+      voteShort: shortCount,
+      voteFlat: flatCount,
+      compDir: compDir,
+      compDirCls: compDirCls,
+      compScore: comp.score != null ? comp.score.toFixed(4) : '—',
+      compGate: comp.gate_passed ? '通过' : (comp.gate_reason || '—'),
+      compGateCls: comp.gate_passed ? 'text-green' : 'text-orange',
+      hasVotes: fvNames.length > 0,
     });
 
     // 如果 WS 没数据, 触发 HTTP 兜底
