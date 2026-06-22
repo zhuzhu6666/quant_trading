@@ -1708,6 +1708,11 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     _current_trade_date: str = ""
     while not stop_flag.is_set():
         tick += 1
+        # 诊断: 记录 tick 计数和桥状态
+        _live_state["_diag"] = {
+            "tick": tick, "ts": time.time(),
+            "bridge": "checking", "last_error": _live_state.get("_diag", {}).get("last_error", ""),
+        }
 
         # ── 跨日重置熔断 + 会话统计 ──
         try:
@@ -1735,11 +1740,19 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 log(f"tick {tick}: {err}; reconnect next tick")
                 stop_flag.wait(60)
                 continue
-            if warming or not bridge.is_connected:
-                # bridge 不可用时仍跑因子管道（用本地 DB），只跳过发单
+            # bridge 不可用时仍跑因子管道（用本地 DB），只跳过发单
+            bridge_ready = bridge is not None and not warming and bridge.is_connected
+            _live_state["_diag"] = {
+                "tick": tick, "ts": time.time(),
+                "bridge": "ready" if bridge_ready else ("warming" if warming else "disconnected"),
+                "bridge_ready": bridge_ready,
+                "last_error": _live_state.get("_diag", {}).get("last_error", ""),
+            }
+            if not bridge_ready:
                 log(f"tick {tick}: cTrader warming/disconnected, running pipeline dry")
-            else:
-                # 刷新账户缓存
+
+            # 刷新账户缓存 (bridge 可用时才做)
+            if bridge_ready:
                 kickoff_account_refresh(bridge, broker, interval_sec=30.0)
 
             # 从本地 DataStore 读最新 bars (cTraderPuller 定时写入)

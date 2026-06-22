@@ -192,6 +192,8 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
     # ── 因子投票快照 (每 tick 更新, 前端「因子投票」面板) ──
     factor_votes = _live_state.get("last_factor_votes") or {}
     last_composite = _live_state.get("last_composite") or {}
+    # 诊断信息
+    diag = _live_state.get("_diag") or {}
 
     return {
         "running": loop.get("running", False),
@@ -206,6 +208,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         "v4_status": v4_status,
         "factor_votes": factor_votes,
         "last_composite": last_composite,
+        "_diag": diag,
     }
 
 
