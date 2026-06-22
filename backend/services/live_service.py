@@ -1647,7 +1647,6 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     composite = fp["compositor"].compose(signals, last_fv)
                     gate_result = fp["gate"].filter(composite, last_fv, last_bar)
                     fp["gate"].tick()
-                    # 保存到 _live_state
                     votes = {}
                     for name, sig in signals.items():
                         raw_val = last_fv.get(name)
@@ -1737,12 +1736,11 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 stop_flag.wait(60)
                 continue
             if warming or not bridge.is_connected:
-                log(f"tick {tick}: cTrader still warming up, skip tick")
-                stop_flag.wait(60)
-                continue
-
-            # 刷新账户缓存
-            kickoff_account_refresh(bridge, broker, interval_sec=30.0)
+                # bridge 不可用时仍跑因子管道（用本地 DB），只跳过发单
+                log(f"tick {tick}: cTrader warming/disconnected, running pipeline dry")
+            else:
+                # 刷新账户缓存
+                kickoff_account_refresh(bridge, broker, interval_sec=30.0)
 
             # 从本地 DataStore 读最新 bars (cTraderPuller 定时写入)
             df_new = _warmup_from_local_db("XAUUSD+", TF, 5)
