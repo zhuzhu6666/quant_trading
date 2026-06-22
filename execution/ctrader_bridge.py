@@ -152,6 +152,7 @@ class CTraderBridge(BaseBrokerBridge):
         self._symbol_id: int | None = None
         self._forced_symbol_id = forced_symbol_id  # ProtoOASymbol 无 name, 需外部指定 ID
         self._server_version: str = "v0"  # ★ VersionReq 拿, 给后续 Req clientMsgId 用
+        self._trader_login: int = 0  # account_info 返回的 traderLogin, 下单 fallback
         # audit 2026-06-08: 实时报价 (ProtoOASpotEvent 回调更新)
         self._spot_price: float | None = None
         self._spot_lock = threading.Lock()
@@ -958,7 +959,8 @@ class CTraderBridge(BaseBrokerBridge):
 
         try:
             req = TradeMsg.ProtoOAAmendPositionSLTPReq()
-            req.ctidTraderAccountId = self.account_id
+            order_acct = self._trader_login if self._trader_login > 0 else self.account_id
+            req.ctidTraderAccountId = order_acct
             req.positionId = int(position_id)
             # Proto3 semantics: 0 = 不设, 非 0 = 设
             if sl > 0:
@@ -1021,7 +1023,9 @@ class CTraderBridge(BaseBrokerBridge):
             )
 
         req = TradeMsg.ProtoOANewOrderReq()
-        req.ctidTraderAccountId = self.account_id
+        # ★ 优先用 traderLogin (用户可见的账户ID), auth 用的 account_id 可能不同
+        order_acct = self._trader_login if self._trader_login > 0 else self.account_id
+        req.ctidTraderAccountId = order_acct
         req.symbolId = self._symbol_id
         req.orderType = ORDER_TYPE["MARKET"]
         req.tradeSide = side
@@ -1029,6 +1033,11 @@ class CTraderBridge(BaseBrokerBridge):
         # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
         req.volume = int(round(volume * 100))
         req.comment = comment or "quant-live"
+        logger.info(
+            f"market_order: account={order_acct} (auth={self.account_id}) symbolId={self._symbol_id} "
+            f"side={side} volume={req.volume} centilot (= {volume} lot) "
+            f"sl={sl} tp={tp}"
+        )
         # ⚠️ 阶段 2 MVP: SL/TP 不上 server (cTrader MARKET 单不支持 SL/TP 字段,
         # 需用 MARKET_RANGE 或 AmendOrder 后置). runner 在本地 Python 层做 SL/TP 检查
         # + close_position(). 阶段 3 补 ProtoOAAmendPositionSLTPReq 把 SL/TP 推 server
@@ -1144,7 +1153,8 @@ class CTraderBridge(BaseBrokerBridge):
                 logger.info(f"  auto-resolved volume={volume} for full close")
 
             req = TradeMsg.ProtoOAClosePositionReq()
-            req.ctidTraderAccountId = self.account_id
+            order_acct = self._trader_login if self._trader_login > 0 else self.account_id
+            req.ctidTraderAccountId = order_acct
             req.positionId = int(position_id)
             # cTrader volume 字段: 1 lot = 100 (centi-lot) per doc
             # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
@@ -1209,6 +1219,7 @@ class CTraderBridge(BaseBrokerBridge):
                 unrealized = 0.0
             equity = balance + unrealized
             login = t.traderLogin
+            self._trader_login = login  # 保存 traderLogin, 下单时用作 fallback
             currency = _ASSET_ID_TO_CODE.get(t.depositAssetId, f"ASSET_{t.depositAssetId}")
             logger.info(
                 f"Trader info: login={login} balance={balance:.2f} "
