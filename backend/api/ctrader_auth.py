@@ -79,8 +79,11 @@ def get_auth_url(_user: RequireUser) -> AuthUrlResponse:
 
 
 @router.get("/callback")
-def oauth_callback(_user: RequireUser, code: str = Query(...)) -> dict:
-    """cTrader OAuth 回调 — 用 code 换 token 并存到 .env."""
+def oauth_callback(code: str = Query(...)) -> dict:
+    """cTrader OAuth 回调 — 用 code 换 token 并存到 .env.
+
+    免鉴权: cTrader 重定向是浏览器直接跳转, 不带 JWT header。
+    """
     env = _read_env()
 
     client_id = env.get("CTRADER_CLIENT_ID", "")
