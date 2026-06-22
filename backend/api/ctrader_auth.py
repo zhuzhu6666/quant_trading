@@ -73,7 +73,7 @@ def get_auth_url(_user: RequireUser) -> AuthUrlResponse:
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": "accounts",
+        "scope": "trading",  # accounts=只读, trading=可交易
     })
     return AuthUrlResponse(url=f"{_CTRADER_AUTH_URL}?{params}")
 
