@@ -88,7 +88,7 @@ Page({
 
   // ── 数据库健康 ──
   async _fetchDbHealth() {
-    var d = await api.get('/api/system/db-health');
+    var d = await api.get('/api/system/db-health', 45000);
     if (!d || !d.ok) return;
 
     var overallCls = { healthy: 'text-green', degraded: 'text-orange', stale: 'text-red' }[d.overall] || 'text-gray';

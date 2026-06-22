@@ -60,7 +60,7 @@ async function login(username, password) {
   }
 }
 
-async function get(endpoint) {
+async function get(endpoint, timeoutMs) {
   await _ensureToken();
   try {
     const headers = {};
@@ -68,7 +68,7 @@ async function get(endpoint) {
     const res = await request({
       url: CONFIG.SERVER + endpoint,
       header: headers,
-      timeout: 15000,
+      timeout: timeoutMs || 15000,
     });
     return res && res.data;
   } catch (e) {

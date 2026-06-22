@@ -7,6 +7,11 @@ from fastapi import APIRouter
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
+# 缓存: 避免重复慢查询 (tick 库 6.7G 每次 MAX() 约 20s)
+_cache: dict | None = None
+_cache_ts: float = 0
+_CACHE_TTL = 60  # 秒
+
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 # 需要报告的数据库列表
@@ -172,9 +177,16 @@ def _sqlite_stats(path: Path) -> dict:
 
 @router.get("/db-health")
 def db_health() -> dict:
-    """返回所有数据库的健康状态"""
-    databases = []
+    """返回所有数据库的健康状态 (60s 缓存)"""
+    global _cache, _cache_ts
     now = time.time()
+    if _cache is not None and (now - _cache_ts) < _CACHE_TTL:
+        # 更新 checked_at 时间戳
+        result = dict(_cache)
+        result["checked_at"] = now
+        return result
+
+    databases = []
 
     for filename, label, db_type in _DB_LIST:
         path = _DATA_DIR / filename
@@ -236,7 +248,7 @@ def db_health() -> dict:
     else:
         overall = "stale"
 
-    return {
+    result = {
         "ok": True,
         "overall": overall,
         "checked_at": now,
@@ -248,3 +260,6 @@ def db_health() -> dict:
         },
         "databases": databases,
     }
+    _cache = result
+    _cache_ts = now
+    return result
