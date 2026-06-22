@@ -105,25 +105,21 @@ def _risk_kelly_volume(
     """根据 Kelly 分数计算开仓手数。
 
     策略:
-        volume = min(
-            default_vol × 5,              # 上限
-            max(                           # 下限
-                min_vol,
-                f* × risk_capital / SL点数
-            )
-        )
+        volume = min(max_vol, max(min_vol, f* × risk_capital / SL点数))
 
-    当 kelly_enabled=False 或无可用数据时返回默认 1.0 lot。
+    当 kelly_enabled=False 或无可用数据时返回默认微型手 (0.01 lot)。
     """
-    _min_vol = bridge_meta.get('min_volume', 1.0)
-    _step_vol = bridge_meta.get('step_volume', 1.0)
+    # audit v3: min_volume/step_volume 从 bridge meta 取, fallback 用 0.01 而非 1.0
+    # XAUUSD 标准最小手数 0.01 lot, 1 lot = 100 oz ≈ $420K 名义价值
+    _min_vol = bridge_meta.get('min_volume', 0.01)
+    _step_vol = bridge_meta.get('step_volume', 0.01)
     _to_step = lambda v: max(
         _min_vol,
         round(v / _step_vol) * _step_vol if _step_vol > 0 else v,
     )
 
-    # 默认: 1 lot
-    default_vol = _to_step(1.0)
+    # audit v3: 默认微型手 0.01, 不再是 1.0
+    default_vol = _to_step(0.01)
     if not getattr(cfg, 'kelly_enabled', False):
         return default_vol
 
@@ -2394,20 +2390,37 @@ def _process_tick_factor_pipeline(
         log(f"tick {tick}: v4 {direction_name} volume={volume:.2f} "
             f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)})")
 
-        # ── 金字塔规则: 新信号必须比已有同向持仓的信号更强才加仓 ──
-        _max_entry = 0.0
-        for _p in pos:
-            _pid = _p.get("position_id") or _p.get("ticket")
-            if _pid is not None:
-                _es = _pos_entry_scores.get(int(_pid))
-                if _es is not None and abs(_es) > abs(_max_entry):
-                    _max_entry = _es
-        if abs(_max_entry) >= abs(composite.score):
-            log(f"tick {tick}: v4 {direction_name} SKIP (pyramid: "
-                f"existing={abs(_max_entry):.4f} >= signal={abs(composite.score):.4f})")
-            # 让结构化日志记录 pyramid 拦截原因
+        # ── 仓位控制检查 (用 flat 结构避免 elif 回退 bug) ──
+        order_blocked = False
+        block_reason = ""
+        max_pos_count = getattr(cfg, 'max_position_count', 3)
+        max_lots = getattr(cfg, 'max_position_lots', 0.5)
+
+        if max_pos_count > 0 and len(pos) >= max_pos_count:
+            order_blocked = True
+            block_reason = f'仓位上限: {len(pos)}/{max_pos_count}'
+        elif max_pos_count > 0:
+            total_lots = sum(float(_p.get('volume', 0) or _p.get('lots', 0) or 0) for _p in pos)
+            if total_lots + volume > max_lots:
+                order_blocked = True
+                block_reason = f'手数上限: {total_lots:.2f}+{volume:.2f}>{max_lots}'
+
+        if not order_blocked and getattr(cfg, 'pyramid_enabled', True) and len(pos) > 0:
+            _max_entry = 0.0
+            for _p in pos:
+                _pid = _p.get("position_id") or _p.get("ticket")
+                if _pid is not None:
+                    _es = _pos_entry_scores.get(int(_pid))
+                    if _es is not None and abs(_es) > abs(_max_entry):
+                        _max_entry = _es
+            if _max_entry > 0 and abs(_max_entry) >= abs(composite.score):
+                order_blocked = True
+                block_reason = f'金字塔: 需超 {abs(_max_entry):.4f}'
+
+        if order_blocked:
+            log(f"tick {tick}: v4 {direction_name} SKIP ({block_reason})")
             gate_result = type('GateResult', (), {
-                'passed': False, 'reason': f'加仓被拦: 需超 {abs(_max_entry):.4f}',
+                'passed': False, 'reason': block_reason,
             })()
         else:
             try:

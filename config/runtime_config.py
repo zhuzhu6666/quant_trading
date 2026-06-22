@@ -228,6 +228,11 @@ class RuntimeConfig:
     factor_signal_threshold: float = 0.3    # 开仓信号阈值
     filter_bb_enabled: bool = True
 
+    # --- 金字塔/仓位控制 ---
+    pyramid_enabled: bool = True             # 金字塔加仓规则: 新信号需强于已有持仓才加仓
+    max_position_lots: float = 0.5           # 单品种最大持仓手数
+    max_position_count: int = 3              # 单品种最大同时持仓数
+
     # --- Adaptive Weight Engine (Phase 5 占位) ---
     awe_sensitivity: float = 0.5
     awe_anchor_pull: float = 0.15
