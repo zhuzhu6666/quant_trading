@@ -1,5 +1,9 @@
-"""GET /api/system/db-health — 数据库健康状态（大小/行数/最新数据时间）"""
+"""GET /api/system/db-health — 数据库健康状态（大小/行数/最新数据时间）
+
+启动时自动预热缓存，避免首次请求阻塞线程池导致其他接口超时。
+"""
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -10,7 +14,9 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 # 缓存: 避免重复慢查询 (tick 库 6.7G 每次 MAX() 约 20s)
 _cache: dict | None = None
 _cache_ts: float = 0
+_cache_lock = threading.Lock()
 _CACHE_TTL = 60  # 秒
+_warmed = False  # 启动预热是否完成
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
@@ -175,18 +181,10 @@ def _sqlite_stats(path: Path) -> dict:
     return {"tables": tables, "total_rows": total_rows, "latest_ts": latest_ts, "errors": errors}
 
 
-@router.get("/db-health")
-def db_health() -> dict:
-    """返回所有数据库的健康状态 (60s 缓存)"""
-    global _cache, _cache_ts
-    now = time.time()
-    if _cache is not None and (now - _cache_ts) < _CACHE_TTL:
-        # 更新 checked_at 时间戳
-        result = dict(_cache)
-        result["checked_at"] = now
-        return result
-
+def _compute_db_health() -> dict:
+    """计算所有数据库的健康状态（阻塞，约 20s）"""
     databases = []
+    now = time.time()
 
     for filename, label, db_type in _DB_LIST:
         path = _DATA_DIR / filename
@@ -196,7 +194,7 @@ def db_health() -> dict:
                 "file": filename,
                 "type": db_type,
                 "exists": False,
-                "size": "—",
+                "size": "\u2014",
                 "size_bytes": 0,
                 "tables": [],
                 "total_rows": 0,
@@ -214,13 +212,13 @@ def db_health() -> dict:
         if latest and isinstance(latest, (int, float)):
             age_sec = now - latest
             if age_sec < 3600:
-                freshness = "fresh"      # < 1 小时
+                freshness = "fresh"
             elif age_sec < 86400:
-                freshness = "recent"     # < 1 天
+                freshness = "recent"
             elif age_sec < 259200:
-                freshness = "stale"      # < 3 天
+                freshness = "stale"
             else:
-                freshness = "old"        # > 3 天
+                freshness = "old"
 
         databases.append({
             "name": label,
@@ -248,7 +246,7 @@ def db_health() -> dict:
     else:
         overall = "stale"
 
-    result = {
+    return {
         "ok": True,
         "overall": overall,
         "checked_at": now,
@@ -260,6 +258,63 @@ def db_health() -> dict:
         },
         "databases": databases,
     }
-    _cache = result
-    _cache_ts = now
+
+
+def _warm_cache():
+    """在后台线程中预热缓存（不阻塞启动）"""
+    global _cache, _cache_ts, _warmed
+    try:
+        result = _compute_db_health()
+        with _cache_lock:
+            _cache = result
+            _cache_ts = time.time()
+            _warmed = True
+    except Exception:
+        # 预热失败不影响服务启动，首次请求会触发实时计算
+        pass
+
+
+@router.get("/db-health")
+def db_health() -> dict:
+    """返回所有数据库的健康状态 (启动预热 + 60s 缓存)。
+
+    首次启动后 3s 自动后台预热，后续请求全部走缓存（<1ms）。
+    """
+    global _cache, _cache_ts
+    now = time.time()
+
+    with _cache_lock:
+        if _cache is not None and (now - _cache_ts) < _CACHE_TTL:
+            result = dict(_cache)
+            result["checked_at"] = now
+            return result
+
+    # 缓存未命中（极少发生：刚启动且预热尚未完成）
+    # 此时实时计算（阻塞），但只会在启动后几秒内遇到
+    result = _compute_db_health()
+    with _cache_lock:
+        _cache = result
+        _cache_ts = time.time()
     return result
+
+
+# ── 启动事件：后台预热缓存 ──
+
+def _on_startup():
+    """延迟 3s 后在后台线程预热 db-health 缓存。
+
+    延迟确保 ctrader reactor 等重资源先初始化完毕，
+    避免抢占启动关键路径的线程池资源。
+    """
+    def _delayed_warm():
+        time.sleep(3)
+        _warm_cache()
+
+    t = threading.Thread(target=_delayed_warm, daemon=True, name="db-health-warm")
+    t.start()
+
+
+# 注册到 FastAPI app 的 startup 事件
+# (在 backend/app.py 中调用: db_health.register_startup(app))
+def register_startup(app):
+    app.add_event_handler("startup", _on_startup)

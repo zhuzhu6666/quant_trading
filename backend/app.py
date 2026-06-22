@@ -77,6 +77,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _lg.warning(f"[lifespan] cTrader warmup failed (non-fatal): {e}")
 
+    # Background warm-up db-health cache (避免首次请求阻塞线程池 20s)
+    try:
+        from backend.api.db_health import _on_startup as _warm_db_health
+        _warm_db_health()
+        _lg.info("[lifespan] db-health cache warmup scheduled")
+    except Exception as e:
+        _lg.warning(f"[lifespan] db-health warmup failed (non-fatal): {e}")
+
     yield
 
     # Stop scheduler on shutdown
