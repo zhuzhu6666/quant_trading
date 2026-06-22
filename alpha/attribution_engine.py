@@ -570,8 +570,8 @@ class AttributionEngine:
                     conn.commit()
                 finally:
                     conn.close()
-            except Exception:
-                pass
+            except Exception as _sdb_err:
+                logger.warning("Failed to write attribution_snapshot to state.db: %s", _sdb_err)
         except Exception as e:
             logger.warning("Failed to save stats snapshot: %s", e)
 
@@ -643,29 +643,53 @@ class AttributionEngine:
     # ── 加载快照 ──────────────────────────────────────────
 
     def _load_stats_snapshot(self):
-        """从快照恢复因子统计 (启动时调用)。"""
-        path = Path(self._stats_snapshot_path)
-        if not path.exists():
-            return
+        """从 state.db (首选) 或 JSON 文件恢复因子统计 (启动时调用)。"""
+        data: dict[str, Any] = {}
+
+        # 尝试从 state.db 恢复 (更可靠, 事务保护)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            for name, d in data.items():
-                stats = FactorAttributionStats(name=name)
-                stats.n_trades = d.get("n_trades", 0)
-                stats.n_voted = d.get("n_voted", 0)
-                stats.wins = d.get("wins", 0)
-                stats.total_mc = d.get("total_mc", 0.0)
-                # 恢复 deque
-                mcs = d.get("recent_mcs", [])
-                if mcs:
-                    stats.recent_mcs.extend(mcs)
-                dirs = d.get("recent_pnl_directions", [])
-                if dirs:
-                    stats.recent_pnl_directions.extend(dirs)
-                self._per_factor[name] = stats
-            logger.info(
-                "Restored %d factor stats from %s",
-                len(data), self._stats_snapshot_path,
-            )
+            from backend.core.db import get_state_conn
+            conn = get_state_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT factor, data_json FROM attribution_snapshot"
+                ).fetchall()
+                for r in rows:
+                    try:
+                        data[r["factor"]] = json.loads(r["data_json"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+            finally:
+                conn.close()
         except Exception as e:
-            logger.warning("Failed to load stats snapshot: %s", e)
+            logger.warning("Failed to load stats from state.db: %s", e)
+
+        # Fallback: JSON 文件
+        if not data:
+            path = Path(self._stats_snapshot_path)
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except Exception as e:
+                    logger.warning("Failed to load stats from JSON: %s", e)
+
+        if not data:
+            return
+
+        for name, d in data.items():
+            stats = FactorAttributionStats(name=name)
+            stats.n_trades = d.get("n_trades", 0)
+            stats.n_voted = d.get("n_voted", 0)
+            stats.wins = d.get("wins", 0)
+            stats.total_mc = d.get("total_mc", 0.0)
+            # 恢复 deque
+            mcs = d.get("recent_mcs", [])
+            if mcs:
+                stats.recent_mcs.extend(mcs)
+            dirs = d.get("recent_pnl_directions", [])
+            if dirs:
+                stats.recent_pnl_directions.extend(dirs)
+            self._per_factor[name] = stats
+        logger.info(
+            "Restored %d factor stats from state.db", len(data),
+        )

@@ -12,8 +12,10 @@ import asyncio
 import json
 import logging
 import math
+import time
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter
 
@@ -92,20 +94,38 @@ def get_weight_history(_user: RequireUser) -> list[dict]:
 
 @router.get("/stats")
 def get_attribution_stats(_user: RequireUser) -> dict:
-    """Return attribution stats per-factor from snapshot file + summary.
+    """Return attribution stats per-factor from state.db (primary) or JSON file (fallback).
 
     Data written by AttributionEngine._save_stats_snapshot() after every close.
     Returns empty dict when no trades have been attributed yet.
     """
-    if not _ATTR_SNAPSHOT.exists():
-        return {"status": "no_data", "per_factor": {}, "summary": {}}
-
+    # ── Primary: state.db attribution_snapshot ──
+    raw: dict[str, Any] = {}
     try:
-        with open(_ATTR_SNAPSHOT, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Failed to read attribution snapshot: %s", e)
-        return {"status": "error", "detail": str(e)}
+        from backend.core.db import get_state_conn
+        conn = get_state_conn()
+        try:
+            rows = conn.execute(
+                "SELECT factor, data_json FROM attribution_snapshot"
+            ).fetchall()
+            for r in rows:
+                try:
+                    raw[r["factor"]] = json.loads(r["data_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("Failed to read attribution_snapshot from state.db: %s", e)
+
+    # ── Fallback: JSON file ──
+    if not raw and _ATTR_SNAPSHOT.exists():
+        try:
+            with open(_ATTR_SNAPSHOT, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to read attribution snapshot: %s", e)
+            return {"status": "error", "detail": str(e)}
 
     if not raw:
         return {"status": "no_data", "per_factor": {}, "summary": {}}
@@ -158,7 +178,7 @@ def get_attribution_stats(_user: RequireUser) -> dict:
         "overall_win_rate": round(total_wins / total_voted, 4) if total_voted > 0 else 0.0,
         "avg_sharpe_across_factors": avg_sharpe,
         "top_contributors": top_factors,
-        "last_updated": _ATTR_SNAPSHOT.stat().st_mtime,
+        "last_updated": time.time(),
     }
 
     return {"status": "ok", "per_factor": per_factor, "summary": summary}
