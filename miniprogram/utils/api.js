@@ -64,7 +64,7 @@ async function get(endpoint) {
   await _ensureToken();
   try {
     const headers = {};
-    if (token) headers.Authorization = '*** ' + token;
+    if (token) headers.Authorization = 'Bearer ' + token;
     const res = await request({
       url: CONFIG.SERVER + endpoint,
       header: headers,
@@ -81,7 +81,7 @@ async function post(endpoint, data = {}) {
   await _ensureToken();
   try {
     const headers = { 'Content-Type': 'application/json' };
-    if (token) headers.Authorization = '*** ' + token;
+    if (token) headers.Authorization = 'Bearer ' + token;
     const res = await request({
       url: CONFIG.SERVER + endpoint,
       method: 'POST',
