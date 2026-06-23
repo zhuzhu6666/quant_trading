@@ -231,7 +231,7 @@ class RuntimeConfig:
     # --- 金字塔/仓位控制 ---
     pyramid_enabled: bool = True             # 金字塔加仓规则: 新信号需强于已有持仓才加仓
     max_position_volume: float = 0.5           # 单品种最大持仓量
-    max_position_api_volume: float = 50.0    # 单品种最大持仓量(API volume, live 口径)
+    max_position_api_volume: float = 1000.0    # 单品种最大持仓量(API volume, live 口径)
     max_position_count: int = 3              # 单品种最大同时持仓数
 
     # --- Adaptive Weight Engine (Phase 5 占位) ---
@@ -268,14 +268,14 @@ class RuntimeConfig:
             "tactical_alpha": 0.7,
             "signal_threshold": 0.35,
             "max_position_volume": 0.5,
-            "max_position_api_volume": 50.0,
+            "max_position_api_volume": 1000.0,
             "contract_size": 100,
         },
         "EURUSD": {
             "tactical_alpha": 0.6,
             "signal_threshold": 0.35,
             "max_position_volume": 0.5,
-            "max_position_api_volume": 50.0,
+            "max_position_api_volume": 1000.0,
             "contract_size": 100000,
         },
     })

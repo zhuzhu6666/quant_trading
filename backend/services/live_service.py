@@ -2613,7 +2613,7 @@ def _process_tick_factor_pipeline(
         order_blocked = False
         block_reason = ""
         max_pos_count = getattr(cfg, 'max_position_count', 3)
-        max_api_volume = float(getattr(cfg, 'max_position_api_volume', 50.0) or 50.0)
+        max_api_volume = float(getattr(cfg, 'max_position_api_volume', 1000.0) or 1000.0)
 
         if max_pos_count > 0 and len(pos) >= max_pos_count:
             order_blocked = True
