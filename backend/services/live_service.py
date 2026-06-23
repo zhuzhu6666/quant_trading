@@ -1784,6 +1784,43 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         if _DECISION_LOG is None:
             _DECISION_LOG = DecisionLogStore()
             _DECISION_LOG_RUN_ID = int(time.time())
+        # ── 多品种管道初始化 (Phase 6: _factor_pipelines) ──
+        global _factor_pipelines
+        _factor_pipelines = {}
+        try:
+            from config.runtime_config import shared as _rcfg2
+            cfg2 = _rcfg2()
+            symbols = list(cfg2.enabled_symbols) if hasattr(cfg2, 'enabled_symbols') else ["XAUUSD+"]
+            for sym in symbols:
+                if sym == "XAUUSD+":
+                    # 已有主管道
+                    _factor_pipelines[sym] = _factor_pipeline
+                    continue
+                # 为额外品种创建独立管道 (共用归因/AWE/IC tracker)
+                _sym_engine = StreamingFactorEngine(max_buffer=200)
+                _sym_normalizer = SignalNormalizer(cfg2.factor_signal_config)
+                _sym_compositor = PortfolioCompositor(
+                    _merge_portfolio_configs(
+                        cfg2.factor_signal_config,
+                        cfg2.factor_portfolio_weights,
+                        cfg2.factor_tactical_alpha,
+                        cfg2.factor_signal_threshold,
+                    )
+                )
+                _sym_gate = ExecutionGate({
+                    "signal_threshold": cfg2.factor_signal_threshold,
+                    "cooldown_bars": cfg2.strategy_cooldown_bars,
+                })
+                _factor_pipelines[sym] = {
+                    "engine": _sym_engine, "normalizer": _sym_normalizer,
+                    "compositor": _sym_compositor, "gate": _sym_gate,
+                    "attribution": attr, "awe": awe, "ic_tracker": ictracker,
+                }
+            if len(symbols) > 1:
+                log(f"Multi-symbol pipelines initialized: {symbols}")
+        except Exception as e:
+            log(f"Multi-symbol pipeline init skipped: {e}")
+            _factor_pipelines = {"XAUUSD+": _factor_pipeline} if _factor_pipeline else {}
         # Phase 6: 初始化跨品种协方差
         global _cross_asset_covar
         try:
