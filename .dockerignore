@@ -1,0 +1,17 @@
+# 排除不需要进 Docker 镜像的文件
+.git/
+.gitignore
+*.md
+docs/
+tests/
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+frontend-v2/
+miniprogram/
+.venv/
+venv/
+.pytest_cache/
+*.duckdb.wal
+*.duckdb.tmp

@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS decision_log (
 -- 金丝雀状态
 CREATE TABLE IF NOT EXISTS canary_state (
     factor_name TEXT PRIMARY KEY,
-    stage TEXT NOT NULL DEFAULT 'shadow',
+    stage TEXT NOT NULL DEFAULT 'SHADOW',
     oos_bars INTEGER DEFAULT 0,
     cumulative_pnl REAL DEFAULT 0.0,
     promote_time REAL DEFAULT 0.0,

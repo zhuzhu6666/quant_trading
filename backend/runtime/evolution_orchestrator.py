@@ -39,7 +39,7 @@ def _ensure_canary_db() -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS canary_state (
                 factor_name TEXT PRIMARY KEY,
-                stage TEXT NOT NULL DEFAULT 'shadow',
+                stage TEXT NOT NULL DEFAULT 'SHADOW',
                 oos_bars INTEGER DEFAULT 0,
                 cumulative_pnl REAL DEFAULT 0.0,
                 promote_time REAL DEFAULT 0.0,
@@ -360,7 +360,7 @@ def _run_canary_evaluation(
     saved_states: dict[str, dict] = {}
 
     try:
-        from deployment.canary import CanaryDirector, CanaryEvalContext
+        from deployment.canary import ACTIVE, CANARY_STAGES, SHADOW, CanaryDirector, CanaryEvalContext
         from alpha.registry_adapter import RegistryAdapter
         adapter = RegistryAdapter.shared()
 
@@ -380,23 +380,31 @@ def _run_canary_evaluation(
             return promotions, rollbacks, stay
 
         director = CanaryDirector()
+        candidate_names = {name for name, _, _ in candidates}
 
         # 恢复持久化状态到 director
         for name, state in saved_states.items():
-            if name in dict(candidates):
+            if name in candidate_names:
                 dir_state = director.get_state(name)
-                dir_state.stage = state.get("stage", "shadow")
+                stage = str(state.get("stage", SHADOW)).upper()
+                dir_state.stage = stage if stage in CANARY_STAGES else SHADOW
                 dir_state.oos_bars = state.get("oos_bars", 0)
                 dir_state.cumulative_pnl = state.get("cumulative_pnl", 0.0)
                 dir_state.promote_time = state.get("promote_time", 0.0)
 
         for name, score, source in candidates:
+            if name not in saved_states and source == "discovered":
+                director.get_state(name).stage = ACTIVE
+
             ctx = _load_canary_ctx_from_log(name, score)
             try:
                 result = director.check_promotion(name, ctx)
                 if result == "promote":
                     director.promote(name)
-                    promotions.append(name)
+                    if director.get_stage(name) == ACTIVE:
+                        promotions.append(name)
+                    else:
+                        stay.append(name)
                 elif result == "rollback":
                     director.rollback(name)
                     rollbacks.append(name)

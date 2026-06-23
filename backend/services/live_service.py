@@ -878,6 +878,7 @@ def _scheduled_awe_adapt():
             logger.debug("[awe_adapt] skip: AWE not initialized")
             return
 
+        from config.runtime_config import patch as _rc_patch
         from config.runtime_config import shared as _rc
         cfg = _rc()
 
@@ -936,7 +937,7 @@ def _scheduled_awe_adapt():
             # audit v3: 之前 if p.get("weight",0) > 0 过滤了禁用因子,
             # 导致被禁因子永远推不到 compositor, 继续用旧权重交易
             try:
-                cfg.patch({"factor_portfolio_weights": {
+                _rc_patch({"factor_portfolio_weights": {
                     name: p["weight"]
                     for name, p in patches.items()
                 }})
