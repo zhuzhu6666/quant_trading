@@ -132,6 +132,21 @@ Page({
         });
       }
     }
+    // 防御性 fallback: WS 只有摘要 position 时使用
+    if (positions.length === 0 && hasPos && t.position && t.position.dir !== 'FLAT') {
+      var posSummary = t.position;
+      var pDir2 = posSummary.dir === 'LONG' ? '多头' : '空头';
+      positions.push({
+        dir: pDir2,
+        dirCls: pDir2 === '多头' ? 'text-green' : 'text-red',
+        entry: posSummary.entry ? Number(posSummary.entry).toFixed(2) : '—',
+        size: posSummary.size ? Number(posSummary.size).toFixed(2) : '—',
+        apiSize: posSummary.size ? String(Number(posSummary.size).toFixed(2)) : '—',
+        pnl: (posSummary.unrealized >= 0 ? '+' : '') + Number(posSummary.unrealized).toFixed(2),
+        pnlCls: posSummary.unrealized > 0 ? 'text-green' : posSummary.unrealized < 0 ? 'text-red' : 'text-gray',
+        symbol: 'XAUUSD',
+      });
+    }
 
     // 信号数据来自 strategyStatus 缓存
     var ss = g.strategyStatus;

@@ -75,10 +75,11 @@ App({
     // v5 HTTP 兜底: /api/state → 500, 用以下端点拼合
     // ═════════════════════════════════════════════════
     try {
-      const [acct, strat, stats] = await Promise.all([
+      const [acct, strat, stats, posRes] = await Promise.all([
         api.get('/api/live/account'),
         api.get('/api/live/strategy-status'),
         api.get('/api/live/session-stats'),
+        api.get('/api/live/positions'),
       ]);
 
       const hasAcct = acct && acct.ok;
@@ -89,6 +90,25 @@ App({
 
       const pos = (hasStrat && strat.position) || {};
       const src = hasStrat && strat.running ? 'live' : 'frozen';
+
+      // 从 /api/live/positions 构建持仓列表
+      var positionsList = [];
+      if (posRes && posRes.ok && Array.isArray(posRes.positions) && posRes.positions.length > 0) {
+        positionsList = posRes.positions.map(function(p) {
+          return {
+            symbol: p.symbol || '',
+            type: p.type || 'buy',
+            volume: p.api_volume || p.volume || 0,
+            price_open: p.price_open || 0,
+            current_price: p.price_current || p.price_open || 0,
+            pnl: p.profit || p.pnl || 0,
+            sl: p.sl || 0,
+            tp: p.tp || 0,
+            position_id: p.ticket || p.position_id || 0,
+            direction: p.type === 'buy' ? 1 : -1,
+          };
+        });
+      }
 
       // 只更新 trading 数据，不覆盖 closed_loop (仅 WS 有)
       const prevTrading = this.globalData.trading || {};
@@ -103,6 +123,7 @@ App({
           size: pos.size || pos.volume || pos.api_volume || 0,
           unrealized: 0,
         },
+        positions_list: positionsList,
         daily: hasStats ? {
           trades: stats.trades || 0,
           win: stats.wins || 0,
@@ -114,7 +135,7 @@ App({
           circuit_breaker: hasStrat ? !!strat.circuit_breaker : (prevTrading.risk && prevTrading.risk.circuit_breaker) || false,
           consecutive_loss: hasStats ? (stats.consecutive_loss || 0) : 0,
         },
-        n_positions: (pos.size || pos.volume || pos.api_volume) ? 1 : 0,
+        n_positions: positionsList.length,
         current_price: prevTrading.current_price || null,
       };
 
