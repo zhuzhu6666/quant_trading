@@ -933,17 +933,21 @@ def _scheduled_awe_adapt():
             logger.info("[awe_adapt] adapted {} factors: {}",
                         len(patches),
                         {k: v["weight"] for k, v in patches.items()})
-            # 推送权重变更到 RuntimeConfig (包括 weight=0 的禁用因子)
-            # audit v3: 之前 if p.get("weight",0) > 0 过滤了禁用因子,
-            # 导致被禁因子永远推不到 compositor, 继续用旧权重交易
+            # ★ 通过 DecisionPolicy 融合后再写 (保持一致性)
             try:
-                _rc_patch({"factor_portfolio_weights": {
-                    name: p["weight"]
-                    for name, p in patches.items()
-                }})
-                logger.info("[awe_adapt] weights pushed to RuntimeConfig")
+                from alpha.decision_policy import DecisionPolicy
+                dp = DecisionPolicy()
+                decisions = dp.fast_decide(
+                    awe_patches=patches,
+                    weight_policy_weights=None,
+                    factor_configs=cfg.factor_signal_config,
+                    current_weights=cfg.factor_portfolio_weights,
+                )
+                merged = DecisionPolicy.to_weights(decisions)
+                _rc_patch({"factor_portfolio_weights": merged})
+                logger.info("[awe_adapt] weights pushed via DecisionPolicy ({} factors)", len(merged))
             except Exception as _e2:
-                logger.warning("[awe_adapt] cfg.patch weight push failed: %s", _e2)
+                logger.warning("[awe_adapt] DecisionPolicy weight push failed: %s", _e2)
         else:
             logger.debug("[awe_adapt] no weight changes needed")
     except Exception as e:
@@ -1090,15 +1094,19 @@ def _scheduled_ml_drift_check():
 
 
 def _start_live_scheduler():
-    """注册并启动自进化 Scheduler (5 个 job). 幂等: 已运行时跳过."""
+    """注册并启动自进化 Scheduler (11 job). 幂等: 已运行时跳过."""
     from backend.runtime.scheduler import InProcessScheduler
-    from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
+    from backend.runtime.evolution_kernel import EvolutionKernel
     sched = InProcessScheduler()
     if getattr(sched, "_started", False):
         return
-    # 每小时: 完整自进化循环 (GP + OOS + Canary + 退役 + 权重)
-    sched.add_job("evolution_hourly", "0 * * * *", scheduled_evolution_cycle)
-    # ── 数据同步 (每 5 分钟): 检查缺口 → 有缺才补 ──────────
+
+    # ★ 初始化 EvolutionKernel (注册中枢 + quality gate + governor)
+    kernel = EvolutionKernel.shared()
+    kernel.set_pipeline(_factor_pipeline)
+    kernel.start()  # registers evolution_hourly + awe_adapt + system_health
+
+    # ── 数据同步 (每 5 分钟) ──
     from data.live_sync.health import SyncHealth
     def _data_sync():
         """先检查 bars + ticks 新鲜度, 有缺口才回补, 不缺就跳过。"""
@@ -1294,24 +1302,16 @@ def _start_live_scheduler():
         except Exception as e:
             logger.warning("[etf_sync] error: {}", e)
     sched.add_job("etf_sync", "0 4 1 */3 *", _scheduled_etf_sync)
-    # 每 30 分钟: AWE 权重自适应 (如果 attribution engine 有数据)
-    sched.add_job("awe_adapt", "*/30 * * * *", _scheduled_awe_adapt)
+    # ★ awe_adapt / evolution_hourly / system_health 已由 EvolutionKernel 注册
     # Phase 2: ML 因子自动重训 (每周日凌晨 5:00)
     sched.add_job("ml_retrain", "0 5 * * 0", _scheduled_ml_retrain)
     # Phase 3: 特征工程 (每天凌晨 3:00)
     sched.add_job("feature_eng", "0 3 * * *", _scheduled_feature_engineering)
     # Phase 2: ML 因子漂移检测 (每 6 小时)
     sched.add_job("ml_drift_check", "0 */6 * * *", _scheduled_ml_drift_check)
-    # 每分钟: 系统总健康检查 (桥/数据/调度器/磁盘/内存)
-    from monitor.system_health import shared as _sh_shared
-    from monitor.alerter import Alerter
-    _sys_health = _sh_shared()
-    _sys_health.set_alerter(Alerter({"log_file": "logs/alerts.log", "min_level": "WARNING"}).send)
-    def _scheduled_system_health():
-        _sys_health.run()
-    sched.add_job("system_health", "* * * * *", _scheduled_system_health)
+    # ★ system_health 已由 EvolutionKernel 注册
     sched.start()
-    logger.info("[live] InProcessScheduler started with 11 jobs")
+    logger.info("[live] InProcessScheduler started with 10 jobs")
 
     # ── 后台: 首次启动数据补充 (用主 bridge, 不开第二连接) ──
     def _initial_ctrader_data_pull():

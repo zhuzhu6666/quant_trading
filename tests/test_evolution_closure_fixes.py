@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+import pandas as pd
+
 
 from alpha.registry_adapter import RegistryAdapter
 from backend.runtime import evolution_orchestrator as evo
@@ -108,3 +111,71 @@ def test_canary_restores_legacy_lowercase_shadow(monkeypatch):
     assert promotions == []
     assert stay == ["foo"]
     assert saved["foo"]["stage"] == CANARY_5
+
+
+def test_shadow_trader_evaluate_factor_builds_virtual_perf():
+    from alpha.shadow_trader import evaluate_factor
+
+    df = pd.DataFrame({
+        "open": np.linspace(100.0, 120.0, 80),
+        "high": np.linspace(101.0, 121.0, 80),
+        "low": np.linspace(99.0, 119.0, 80),
+        "close": np.linspace(100.0, 120.0, 80),
+        "volume": np.ones(80) * 100,
+    })
+
+    def momentum_factor(frame):
+        return pd.Series(frame["close"]).diff(3).to_numpy()
+
+    perf = evaluate_factor(df, "mom", momentum_factor, symbol="XAUUSD+", timeframe="M5")
+
+    assert perf is not None
+    assert perf.factor == "mom"
+    assert perf.oos_bars > 0
+    assert 0.0 <= perf.hit_rate <= 1.0
+
+
+def test_canary_context_prefers_shadow_factor_perf(monkeypatch):
+    from alpha.shadow_trader import ShadowPerf
+    import alpha.shadow_trader as shadow_trader
+
+    perf = ShadowPerf(
+        factor="foo",
+        source="shadow",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        oos_bars=88,
+        cumulative_pnl=0.0123,
+        hit_rate=0.61,
+        max_drawdown=0.002,
+        last_signal=0.7,
+        n_valid=100,
+        n_active=88,
+    )
+    monkeypatch.setattr(shadow_trader, "load_shadow_perf", lambda name: perf)
+
+    ctx = evo._load_canary_ctx_from_log("foo", score=0.0)
+
+    assert ctx.oos_bars == 88
+    assert ctx.oos_pnl == 0.0123
+    assert ctx.additional_metrics["source"] == "shadow_factor_perf"
+
+
+def test_update_shadow_performance_uses_shadow_trader(monkeypatch):
+    import alpha.shadow_trader as shadow_trader
+
+    calls = []
+
+    def fake_eval(df, **kwargs):
+        calls.append(kwargs)
+        return {"foo": object()}
+
+    monkeypatch.setattr(shadow_trader, "evaluate_shadow_factors", fake_eval)
+    monkeypatch.setattr(evo, "_emit_evolution_story", lambda *args, **kwargs: None)
+
+    count = evo._update_shadow_performance(pd.DataFrame({"close": [1, 2, 3]}), "XAUUSD+", "M5")
+
+    assert count == 1
+    assert calls[0]["symbol"] == "XAUUSD+"
+    assert calls[0]["timeframe"] == "M5"
+    assert calls[0]["persist"] is True

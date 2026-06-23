@@ -1,0 +1,233 @@
+"""risk/governor.py — 最高层风控裁决器 (RiskGovernor).
+
+Governor 不是指标计算器, 而是决策仲裁者.
+它回答: "系统现在能不能做某个动作?"
+
+裁决类型:
+  - allow_trade:           允许开仓?
+  - allow_weight_update:   允许权重更新?
+  - allow_promotion:       允许因子晋升?
+  - allow_new_factor:      允许注册新因子?
+  - force_dry_run:         强制只算信号不下单?
+  - force_deleverage:       强制降低仓位?
+
+Governor 单例, 可在任何地方用 RiskGovernor.shared() 访问.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GovernorVerdict:
+    """裁决结果."""
+    allowed: bool
+    reason: str = ""
+    suggestion: str = ""
+
+
+@dataclass
+class GovernorState:
+    """Governor 决策时读取的外部状态快照."""
+    # 账户状态
+    balance: float = 0.0
+    equity: float = 0.0
+    peak_equity: float = 0.0
+    drawdown_pct: float = 0.0
+    # 交易状态
+    open_positions: int = 0
+    total_position_value: float = 0.0
+    consecutive_losses: int = 0
+    daily_trades: int = 0
+    daily_loss_pct: float = 0.0
+    # 风控指标 (来自现有模块)
+    var_95: float = 0.0
+    kelly_fraction: float = 1.0
+    circuit_broken: bool = False
+    # 系统状态
+    loop_running: bool = False
+    bridge_connected: bool = False
+    data_lag_seconds: float = 0.0
+    # 额外
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+class RiskGovernor:
+    """最高层风控裁决器.
+
+    用法:
+        governor = RiskGovernor.shared()
+        # 交易前
+        verdict = governor.allow_trade(state_snapshot)
+        if not verdict.allowed:
+            logger.warning("trade blocked: %s", verdict.reason)
+            return
+
+    阈值可通过 RuntimeConfig 热更新.
+    """
+
+    _instance: RiskGovernor | None = None
+    _lock = threading.Lock()
+
+    def __init__(
+        self,
+        max_drawdown_pct: float = 15.0,        # 最大回撤 %
+        max_consecutive_losses: int = 8,        # 连续亏损上限
+        max_daily_loss_pct: float = 5.0,        # 日亏损上限
+        max_daily_trades: int = 20,             # 日交易上限
+        min_bridge_uptake: bool = True,         # 桥接断开时的应对
+        data_lag_max_seconds: float = 3600.0,   # 数据最大延迟 (秒)
+        circuit_breaker_bypass: bool = False,   # 是否绕过熔断
+    ):
+        self._cfg = {
+            "max_drawdown_pct": max_drawdown_pct,
+            "max_consecutive_losses": max_consecutive_losses,
+            "max_daily_loss_pct": max_daily_loss_pct,
+            "max_daily_trades": max_daily_trades,
+            "min_bridge_uptake": min_bridge_uptake,
+            "data_lag_max_seconds": data_lag_max_seconds,
+            "circuit_breaker_bypass": circuit_breaker_bypass,
+        }
+        self._dry_run_mode: bool = False          # governor 强制 dry-run
+        self._deleverage_pct: float = 0.0         # governor 强制降杠杆 %
+        self._overrides: dict[str, bool] = {}     # 手动 override
+
+    @classmethod
+    def shared(cls) -> RiskGovernor:
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """重置单例 (测试用)."""
+        with cls._lock:
+            cls._instance = None
+
+    # ── 配置 ────────────────────────────────────────────────────────
+
+    def update_config(self, **kwargs) -> None:
+        self._cfg.update(kwargs)
+
+    def set_override(self, key: str, value: bool) -> None:
+        """手动覆盖裁决 (如 force_allow_trade=True)."""
+        self._overrides[key] = value
+
+    def clear_override(self, key: str) -> None:
+        self._overrides.pop(key, None)
+
+    # ── 裁决方法 ────────────────────────────────────────────────────
+
+    def allow_trade(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许开新仓吗?"""
+        if self._dry_run_mode or self._overrides.get("force_dry_run"):
+            return GovernorVerdict(False, "force_dry_run", "governor forced dry-run")
+
+        if state is None:
+            return GovernorVerdict(True, "no_state")
+
+        cfg = self._cfg
+
+        # 熔断
+        if state.circuit_broken and not cfg["circuit_breaker_bypass"]:
+            return GovernorVerdict(False, "circuit_broken", "circuit breaker triggered")
+
+        # 回撤超限
+        if state.drawdown_pct >= cfg["max_drawdown_pct"]:
+            return GovernorVerdict(False, "drawdown_too_high",
+                                   f"drawdown {state.drawdown_pct:.1f}% >= {cfg['max_drawdown_pct']:.0f}%")
+
+        # 连续亏损超限
+        if state.consecutive_losses >= cfg["max_consecutive_losses"]:
+            return GovernorVerdict(False, "consecutive_losses",
+                                   f"{state.consecutive_losses} >= {cfg['max_consecutive_losses']}")
+
+        # 日亏损超限
+        if state.daily_loss_pct >= cfg["max_daily_loss_pct"]:
+            return GovernorVerdict(False, "daily_loss_limit",
+                                   f"daily loss {state.daily_loss_pct:.1f}% >= {cfg['max_daily_loss_pct']:.0f}%")
+
+        # 日交易笔数超限
+        if cfg["max_daily_trades"] > 0 and state.daily_trades >= cfg["max_daily_trades"]:
+            return GovernorVerdict(False, "daily_trade_limit",
+                                   f"{state.daily_trades} >= {cfg['max_daily_trades']}")
+
+        # 数据延迟
+        if state.data_lag_seconds > cfg["data_lag_max_seconds"]:
+            return GovernorVerdict(False, "data_lag",
+                                   f"data lag {state.data_lag_seconds:.0f}s > {cfg['data_lag_max_seconds']:.0f}s")
+
+        return GovernorVerdict(True, "ok")
+
+    def allow_weight_update(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许权重更新吗?"""
+        if self._overrides.get("force_weight_freeze"):
+            return GovernorVerdict(False, "force_weight_freeze", "governor froze weights")
+
+        if state is None:
+            return GovernorVerdict(True, "no_state")
+
+        cfg = self._cfg
+
+        # 回撤超限时冻结权重
+        if state.drawdown_pct >= cfg["max_drawdown_pct"] * 0.8:  # 80% of max → freeze
+            return GovernorVerdict(False, "drawdown_approaching_limit",
+                                   f"drawdown {state.drawdown_pct:.1f}% >= {cfg['max_drawdown_pct']*0.8:.0f}%")
+
+        return GovernorVerdict(True, "ok")
+
+    def allow_promotion(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许因子晋升吗?"""
+        if self._overrides.get("force_promotion_freeze"):
+            return GovernorVerdict(False, "force_promotion_freeze")
+
+        if state is None:
+            return GovernorVerdict(True, "no_state")
+
+        cfg = self._cfg
+        # 大幅回撤时暂停因子晋升 (进化暂停, 专注回本)
+        if state.drawdown_pct >= cfg["max_drawdown_pct"] * 0.7:
+            return GovernorVerdict(False, "drawdown_too_high_for_promotion")
+
+        return GovernorVerdict(True, "ok")
+
+    def allow_new_factor(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许注册新因子吗?"""
+        if self._overrides.get("force_new_factor_freeze"):
+            return GovernorVerdict(False, "force_factor_freeze")
+
+        if state is None:
+            return GovernorVerdict(True, "no_state")
+
+        cfg = self._cfg
+        if state.drawdown_pct >= cfg["max_drawdown_pct"] * 0.6:
+            return GovernorVerdict(False, "drawdown_too_high_for_new_factor")
+
+        return GovernorVerdict(True, "ok")
+
+    def force_dry_run(self) -> bool:
+        """Governor 强制 dry-run?"""
+        return self._dry_run_mode or self._overrides.get("force_dry_run", False)
+
+    def force_deleverage(self) -> float:
+        """Governor 强制降杠杆比例 (0=不降, 0.5=降到50%)"""
+        return self._deleverage_pct
+
+    # ── 主动设置 ────────────────────────────────────────────────────
+
+    def set_dry_run(self, enabled: bool) -> None:
+        self._dry_run_mode = enabled
+        logger.warning("[Governor] dry_run=%s (manual)", enabled)
+
+    def set_deleverage(self, pct: float) -> None:
+        self._deleverage_pct = max(0.0, min(1.0, pct))
+        logger.warning("[Governor] deleverage=%.0f%% (manual)", pct * 100)

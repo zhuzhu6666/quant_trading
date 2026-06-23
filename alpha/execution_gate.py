@@ -104,17 +104,29 @@ class ExecutionGate:
         composite: Any,
         factor_values: dict[str, float | None],
         bar: dict[str, Any],
+        governor_state: Any = None,
     ) -> GateResult:
-        """检查所有闸门。
+        """检查所有闸门.
 
         Args:
             composite: CompositeSignal（必须有 direction 和 score 属性）
             factor_values: 因子原始值
             bar: 当前 bar dict（含 time 等字段）
+            governor_state: 可选, RiskGovernor 状态快照 (P3.2).
 
         Returns:
             GateResult(passed=True) 表示可以通过，否则为 False。
         """
+        # P3.2: RiskGovernor 最高层裁决
+        if governor_state is not None:
+            try:
+                from risk.governor import RiskGovernor
+                gov = RiskGovernor.shared()
+                verdict = gov.allow_trade(governor_state)
+                if not verdict.allowed:
+                    return GateResult(False, f"governor:{verdict.reason}")
+            except Exception:
+                pass
         # 1. 信号强度门槛
         if composite.direction == 0:
             return GateResult(False, "signal_below_threshold")

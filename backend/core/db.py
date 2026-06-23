@@ -94,6 +94,34 @@ CREATE TABLE IF NOT EXISTS canary_state (
     updated_at REAL DEFAULT 0.0
 );
 
+-- 影子因子虚拟交易绩效
+CREATE TABLE IF NOT EXISTS shadow_factor_perf (
+    factor TEXT PRIMARY KEY,
+    source TEXT DEFAULT 'shadow',
+    symbol TEXT DEFAULT '',
+    timeframe TEXT DEFAULT '',
+    oos_bars INTEGER DEFAULT 0,
+    cumulative_pnl REAL DEFAULT 0.0,
+    hit_rate REAL DEFAULT 0.0,
+    max_drawdown REAL DEFAULT 0.0,
+    last_signal REAL DEFAULT 0.0,
+    metrics_json TEXT DEFAULT '{}',
+    updated_at REAL DEFAULT 0.0
+);
+
+-- 影子因子逐 bar 虚拟交易明细 (按需抽样写入)
+CREATE TABLE IF NOT EXISTS shadow_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    factor TEXT NOT NULL,
+    symbol TEXT DEFAULT '',
+    timeframe TEXT DEFAULT '',
+    ts REAL,
+    signal REAL DEFAULT 0.0,
+    position INTEGER DEFAULT 0,
+    pnl REAL DEFAULT 0.0,
+    created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_trades_factor_ts ON shadow_trades(factor, ts);
 -- 因子生命周期事件 (原 factor_lifecycle_log.jsonl)
 CREATE TABLE IF NOT EXISTS lifecycle_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,6 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_lifecycle_events_event ON lifecycle_events(event)
 CREATE INDEX IF NOT EXISTS idx_evolution_events_type ON evolution_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_weight_history_factor ON weight_history(factor);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_shadow_factor_perf_updated ON shadow_factor_perf(updated_at);
 """
 
 

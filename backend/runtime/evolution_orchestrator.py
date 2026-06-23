@@ -94,7 +94,7 @@ def _save_canary_states(states: dict[str, dict]) -> None:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 name,
-                s.get("stage", "shadow"),
+                s.get("stage", "SHADOW"),
                 s.get("oos_bars", 0),
                 s.get("cumulative_pnl", 0.0),
                 s.get("promote_time", 0.0),
@@ -166,6 +166,21 @@ def scheduled_evolution_cycle(
         _emit_evolution_story("cycle_start", {})
         cb("start", 0, "evolution cycle starting")
 
+        # ── Step 0: DataQualityGate (P3.3) ──
+        try:
+            from data.quality_gate import run_quality_gate, evolution_guard
+            dq_report = run_quality_gate(
+                symbol=symbol,
+                max_lag_seconds=3600,
+            )
+            if not evolution_guard(dq_report):
+                report.error = f"quality_gate: {dq_report.detail}"
+                _emit_evolution_story("cycle_error", {"error": report.error})
+                report.duration_sec = _time.time() - t0
+                return report
+        except Exception as dq_err:
+            logger.debug("[Evolve] quality gate skipped: %s", dq_err)
+
         # ── Step 1: 加载数据 ──
         df = _load_bars(symbol, timeframe, n_bars)
         if df is None or len(df) < 500:
@@ -199,7 +214,13 @@ def scheduled_evolution_cycle(
         else:
             logger.info("[Evolve] no new GP candidates")
 
-        # ── Step 3: Canary 评估 (持久化 + 真正晋升) ──
+        # ── Step 3: Shadow 绩效刷新 + Canary 评估 (持久化 + 真正晋升) ──
+        cb("shadow_perf", 52, "refreshing shadow factor performance")
+        shadow_count = _update_shadow_performance(df, symbol, timeframe)
+        if shadow_count:
+            logger.info("[Evolve] shadow perf refreshed: %d factors", shadow_count)
+
+        # ── Step 3b: Canary 评估 (持久化 + 真正晋升) ──
         cb("canary", 55, "running canary evaluation")
         promotions, rollbacks, stay = _run_canary_evaluation(
             symbol, timeframe, n_bars
@@ -360,7 +381,7 @@ def _run_canary_evaluation(
     saved_states: dict[str, dict] = {}
 
     try:
-        from deployment.canary import ACTIVE, CANARY_STAGES, SHADOW, CanaryDirector, CanaryEvalContext
+        from deployment.canary import ACTIVE, CANARY_STAGES, SHADOW, QUARANTINED, RETIRED, TERMINAL_STAGES, CanaryDirector, CanaryEvalContext
         from alpha.registry_adapter import RegistryAdapter
         adapter = RegistryAdapter.shared()
 
@@ -387,15 +408,17 @@ def _run_canary_evaluation(
             if name in candidate_names:
                 dir_state = director.get_state(name)
                 stage = str(state.get("stage", SHADOW)).upper()
-                dir_state.stage = stage if stage in CANARY_STAGES else SHADOW
+                # P1.2: 保留 QUARANTINED / RETIRED 状态 (不重置到 SHADOW)
+                valid_stages = set(CANARY_STAGES) | TERMINAL_STAGES
+                dir_state.stage = stage if stage in valid_stages else SHADOW
                 dir_state.oos_bars = state.get("oos_bars", 0)
                 dir_state.cumulative_pnl = state.get("cumulative_pnl", 0.0)
                 dir_state.promote_time = state.get("promote_time", 0.0)
 
         for name, score, source in candidates:
-            if name not in saved_states and source == "discovered":
-                director.get_state(name).stage = ACTIVE
-
+            # ★ P0.1: 不再 bypass canary validation. 所有因子 (无论 source
+            # 是什么) 都从 canary_state 恢复 stage, 走标准 canary 管道。
+            # 移除了 "discovered源且无saved_states→直接ACTIVE" 的捷径。
             ctx = _load_canary_ctx_from_log(name, score)
             try:
                 result = director.check_promotion(name, ctx)
@@ -467,8 +490,58 @@ def _execute_rollbacks(names: list[str]) -> None:
         logger.debug("[Evolve] execute_rollbacks failed: %s", e)
 
 
+def _update_shadow_performance(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
+    """Refresh shadow/discovered virtual performance for Canary."""
+    try:
+        from alpha.shadow_trader import evaluate_shadow_factors
+        results = evaluate_shadow_factors(
+            df,
+            symbol=symbol,
+            timeframe=timeframe,
+            sources=("shadow", "discovered"),
+            persist=True,
+        )
+        if results:
+            _emit_evolution_story("shadow_perf_updated", {
+                "count": len(results),
+                "factors": list(results.keys())[:20],
+            })
+        return len(results)
+    except Exception as e:
+        logger.debug("[Evolve] shadow perf refresh skipped: %s", e)
+        return 0
+
+
 def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
+    """加载因子在 shadow 阶段的真实 OOS 绩效.
+
+    P1.3: 优先使用 shadow_factor_perf 表 (影子虚拟交易真实 PnL),
+          然后 decision_log 中的 close 记录,
+          最后才回退到基于 score 的估算 (并打警告).
+    """
     from deployment.canary import CanaryEvalContext
+
+    # ── 首选: shadow_factor_perf 真实影子交易数据 ──
+    try:
+        from alpha.shadow_trader import load_shadow_perf
+        perf = load_shadow_perf(name)
+        if perf is not None and perf.oos_bars > 0:
+            logger.info("[Evolve] canary_ctx(%s): shadow_factor_perf oos_bars=%d pnl=%.4f",
+                        name, perf.oos_bars, perf.cumulative_pnl)
+            return CanaryEvalContext(
+                oos_bars=perf.oos_bars,
+                oos_pnl=perf.cumulative_pnl,
+                additional_metrics={
+                    "source": "shadow_factor_perf",
+                    "hit_rate": perf.hit_rate,
+                    "max_drawdown": perf.max_drawdown,
+                    "last_signal": perf.last_signal,
+                },
+            )
+    except Exception as e:
+        logger.debug("[Evolve] shadow canary_ctx(%s) skipped: %s", name, e)
+
+    # ── 次选: decision_log close 记录 ──
     try:
         conn = sqlite3.connect(str(_CANARY_DB))
         conn.row_factory = sqlite3.Row
@@ -477,25 +550,27 @@ def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
             (name,)
         ).fetchall()
         conn.close()
-        if not rows:
-            estimated_pnl = score * 0.05 if abs(score) > 0.01 else 0.0
-            return CanaryEvalContext(
-                oos_bars=min(int(abs(score) * 5000), 5000),
-                oos_pnl=estimated_pnl,
-            )
-        total_pnl = 0.0
-        for r in rows:
-            meta = _json.loads(r["meta"]) if isinstance(r["meta"], str) else (r["meta"] or {})
-            if isinstance(meta, dict):
-                total_pnl += float(meta.get("pnl", 0.0))
-        return CanaryEvalContext(oos_bars=len(rows), oos_pnl=total_pnl)
+        if rows:
+            total_pnl = 0.0
+            for r in rows:
+                meta = _json.loads(r["meta"]) if isinstance(r["meta"], str) else (r["meta"] or {})
+                if isinstance(meta, dict):
+                    total_pnl += float(meta.get("pnl", 0.0))
+            logger.info("[Evolve] canary_ctx(%s): decision_log rows=%d pnl=%.4f",
+                        name, len(rows), total_pnl)
+            return CanaryEvalContext(oos_bars=len(rows), oos_pnl=total_pnl)
     except Exception as e:
-        logger.debug("[Evolve] canary_ctx(%s) failed: %s", name, e)
-        estimated_pnl = score * 0.05 if abs(score) > 0.01 else 0.0
-        return CanaryEvalContext(
-            oos_bars=min(int(abs(score) * 5000), 5000),
-            oos_pnl=estimated_pnl,
-        )
+        logger.debug("[Evolve] canary_ctx(%s) decision_log failed: %s", name, e)
+
+    # ── 最后: 基于 score 的估算 (无真实数据) ──
+    estimated_pnl = score * 0.05 if abs(score) > 0.01 else 0.0
+    estimated_bars = min(int(abs(score) * 5000), 5000)
+    logger.warning("[Evolve] canary_ctx(%s): no real perf data, estimated pnl=%.4f bars=%d",
+                   name, estimated_pnl, estimated_bars)
+    return CanaryEvalContext(
+        oos_bars=estimated_bars,
+        oos_pnl=estimated_pnl,
+    )
 
 
 def _check_retirement() -> dict[str, Any]:
@@ -527,7 +602,8 @@ def _try_retire(name: str, reason: str) -> bool:
 def _update_weights(df: pd.DataFrame | None = None) -> bool:
     """计算动态权重并推入 factor_portfolio_weights (AWE 同一字段).
 
-    从健康报告读取分数 → WeightPolicy → RuntimeConfig.patch.
+    从健康报告读取分数 → WeightPolicy + Shadow OOS → DecisionPolicy → RuntimeConfig.patch.
+    DecisionPolicy 是唯一写路径, 解决 AWE 和 WeightPolicy 互相覆盖的问题.
     """
     try:
         from alpha.registry_adapter import RegistryAdapter
@@ -536,25 +612,58 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
         if not scores:
             return False
 
+        from config.runtime_config import shared as _rc
+        cfg = _rc()
+
+        # 来源 A: WeightPolicy 健康分权重
         from deployment.weight_policy import WeightPolicy
         wp = WeightPolicy()
-        new_weights = wp.compute_weights(scores)
-        if not new_weights:
+        wp_weights = wp.compute_weights(scores)
+        if not wp_weights:
             return False
 
+        # 来源 B: Shadow OOS 绩效 (从 state.db 读取)
+        shadow_perfs = {}
+        try:
+            from alpha.shadow_trader import load_shadow_perf
+            for name in wp_weights:
+                perf = load_shadow_perf(name)
+                if perf is not None:
+                    shadow_perfs[name] = perf
+        except Exception as e:
+            logger.debug("[Evolve] load shadow perfs: %s", e)
+
+        # 来源 C: 当前权重 (已有 AWE 调整过的)
+        current_weights = dict(cfg.factor_portfolio_weights)
+
+        # 来源 D: Regime — 沿用现有 MAB router 逻辑
+        regime = None
         if df is not None:
             try:
-                factor_names = list(new_weights.keys())
-                if factor_names:
-                    from strategy.mab_router import MABRouter
-                    _router = MABRouter(strategies=factor_names)
-                    _result = _mab_router.auto_regime_boost(df, _router)
-                    if _result.get("boosted"):
-                        logger.info("[Evolve] regime_boost: %s→%s",
-                                    _result.get("previous_regime"),
-                                    _result.get("current_regime"))
+                from strategy.mab_router import MABRouter
+                _router = MABRouter(strategies=list(wp_weights.keys()))
+                _result = _mab_router.auto_regime_boost(df, _router)
+                if _result.get("boosted"):
+                    regime = _result.get("current_regime")
+                    logger.info("[Evolve] regime_boost: %s→%s",
+                                _result.get("previous_regime"), regime)
             except Exception as e:
                 logger.debug("[Evolve] regime_boost: %s", e)
+
+        # ★ 统一决策入口: DecisionPolicy 融合所有来源
+        from alpha.decision_policy import DecisionPolicy
+        dp = DecisionPolicy()
+        decisions = dp.decide(
+            awe_patches=None,  # evolution 不运行 awe.adapt (有 awe_adapt job)
+            weight_policy_weights=wp_weights,
+            shadow_perfs=shadow_perfs,
+            factor_configs=cfg.factor_signal_config,
+            current_weights=current_weights,
+            regime=regime,
+        )
+        new_weights = DecisionPolicy.to_weights(decisions)
+        if not new_weights:
+            return False
 
         from config.runtime_config import patch as rc_patch
         rc_patch({"factor_portfolio_weights": new_weights})
@@ -562,7 +671,8 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
             "factors": len(new_weights),
             "factor_portfolio_weights": new_weights,
         })
-        logger.info("[Evolve] weights: %d factors → factor_portfolio_weights", len(new_weights))
+        logger.info("[Evolve] weights: %d factors → factor_portfolio_weights (via DecisionPolicy)",
+                    len(new_weights))
 
         if df is not None:
             try:
