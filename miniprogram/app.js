@@ -99,7 +99,7 @@ App({
         position: {
           dir: pos.dir || 'FLAT',
           entry: pos.entry || 0,
-          size: pos.count || 0,
+          size: pos.size || pos.volume || pos.api_volume || 0,
           unrealized: 0,
         },
         daily: hasStats ? {
@@ -113,7 +113,7 @@ App({
           circuit_breaker: hasStrat ? !!strat.circuit_breaker : (prevTrading.risk && prevTrading.risk.circuit_breaker) || false,
           consecutive_loss: hasStats ? (stats.consecutive_loss || 0) : 0,
         },
-        n_positions: pos.count || 0,
+        n_positions: (pos.size || pos.volume || pos.api_volume) ? 1 : 0,
         current_price: prevTrading.current_price || null,
       };
 

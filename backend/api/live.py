@@ -178,6 +178,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         "last_reason": "",
         "last_tick": None,
     }
+    seen_exec_keys: set[tuple] = set()
     try:
         logs_dir = _Path(__file__).resolve().parent.parent.parent / "logs"
         log_names = ["backend.log", "live_loop.log"]
@@ -192,13 +193,17 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                 raw = f.read().decode("utf-8", errors="replace")
             lines = raw.splitlines()[-1000:]
             for line in lines:
-                m = re.search(r"market_order: account=(\d+) \(auth=(\d+)\) symbolId=(\d+) side=(\d+) volume=(\d+) centilot \(= ([\d.]+) lot\)", line)
+                m = re.search(r"market_order: account=(\d+) symbolId=(\d+) side=(\d+) volume=(\d+) api_units \(= ([\d.]+) api\)", line)
                 if m:
+                    key = ("wire_send", m.group(1), m.group(2), m.group(3), m.group(4))
+                    if key in seen_exec_keys:
+                        continue
+                    seen_exec_keys.add(key)
                     execution_events.append({
                         "tick": None,
-                        "direction": "BUY" if m.group(4) == "1" else "SELL",
+                        "direction": "BUY" if m.group(3) == "1" else "SELL",
                         "stage": "wire_send",
-                        "reason": f"实际发送 {m.group(6)} lot / {m.group(5)} centilot (account={m.group(1)})",
+                        "reason": f"实际发送 {m.group(5)} API量 (account={m.group(1)})",
                     })
                     execution_summary["wire_sends"] += 1
                     execution_summary["last_stage"] = "wire_send"
@@ -206,6 +211,10 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     continue
                 m = re.search(r"market_order send error: (.+?)\. Reconciling positions", line)
                 if m:
+                    key = ("ctrader_send_err", m.group(1))
+                    if key in seen_exec_keys:
+                        continue
+                    seen_exec_keys.add(key)
                     reason_text = m.group(1)
                     execution_events.append({
                         "tick": None,
@@ -217,8 +226,12 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     execution_summary["last_stage"] = "ctrader_send_err"
                     execution_summary["last_reason"] = reason_text
                     continue
-                m = re.search(r"tick (\d+): v4 (LONG|SHORT) volume=([\d.]+) \(Kelly enabled=(True|False)\)", line)
+                m = re.search(r"tick (\d+): v4 (LONG|SHORT) req_api_volume=([\d.]+) \(Kelly enabled=(True|False)\)", line)
                 if m:
+                    key = ("attempt", m.group(1), m.group(2), m.group(3), m.group(4))
+                    if key in seen_exec_keys:
+                        continue
+                    seen_exec_keys.add(key)
                     execution_events.append({
                         "tick": int(m.group(1)),
                         "direction": m.group(2),
@@ -232,6 +245,10 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     continue
                 m = re.search(r"tick (\d+): v4 (LONG|SHORT) SKIP \((.+)\)", line)
                 if m:
+                    key = ("local_skip", m.group(1), m.group(2), m.group(3))
+                    if key in seen_exec_keys:
+                        continue
+                    seen_exec_keys.add(key)
                     reason_text = m.group(3)
                     execution_events.append({
                         "tick": int(m.group(1)),
@@ -246,6 +263,10 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     continue
                 m = re.search(r"tick (\d+): v4 (LONG|SHORT) ORDER\+AMEND OK vol=([\d.]+) pos=(\d+) score=([-\d.]+)", line)
                 if m:
+                    key = ("success", m.group(1), m.group(2), m.group(3), m.group(4), m.group(5))
+                    if key in seen_exec_keys:
+                        continue
+                    seen_exec_keys.add(key)
                     execution_events.append({
                         "tick": int(m.group(1)),
                         "direction": m.group(2),
@@ -259,6 +280,10 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     continue
                 m = re.search(r"tick (\d+): v4 (LONG|SHORT) ORDER FAILED: ([A-Z_]+) (.+)", line)
                 if m:
+                    key = ("ctrader_reject", m.group(1), m.group(2), m.group(3), m.group(4))
+                    if key in seen_exec_keys:
+                        continue
+                    seen_exec_keys.add(key)
                     reason_text = f"{m.group(3)} {m.group(4)}".strip()
                     execution_events.append({
                         "tick": int(m.group(1)),

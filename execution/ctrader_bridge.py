@@ -910,10 +910,11 @@ class CTraderBridge(BaseBrokerBridge):
                 "symbol_id": full.symbolId,
                 "symbol_name": target_name,
                 "digits": full.digits,        # 价格小数位 (XAUUSD=2)
-                "lot_size": full.lotSize,     # 1 lot = X oz (XAUUSD=100)
-                "min_volume": full.minVolume / 100.0,  # centi-lot → lot
-                "step_volume": full.stepVolume / 100.0,
-                "max_volume": full.maxVolume / 100.0,
+                "lot_size": full.lotSize,     # 合约尺寸 (XAUUSD=100 oz)
+                "api_min_volume": full.minVolume,
+                "api_step_volume": full.stepVolume,
+                "api_max_volume": full.maxVolume,
+                "volume_unit": "api",
                 "pip_position": full.pipPosition,
             }
             self._symbol_id = full.symbolId
@@ -936,9 +937,10 @@ class CTraderBridge(BaseBrokerBridge):
                 "symbol_id": s.symbolId,
                 "digits": s.digits,
                 "lot_size": s.lotSize,
-                "min_volume": s.minVolume / 100.0,
-                "step_volume": s.stepVolume / 100.0,
-                "max_volume": s.maxVolume / 100.0,
+                "api_min_volume": s.minVolume,
+                "api_step_volume": s.stepVolume,
+                "api_max_volume": s.maxVolume,
+                "volume_unit": "api",
             } for s in resp.symbol[:10]]
         except Exception as e:
             logger.error(f"get_symbols_list failed: {e}")
@@ -1085,17 +1087,16 @@ class CTraderBridge(BaseBrokerBridge):
         req.symbolId = self._symbol_id
         req.orderType = ORDER_TYPE["MARKET"]
         req.tradeSide = side
-        # cTrader volume 字段单位: 1 lot = 100 (centi-lot) per OpenApiPy docs
-        # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
-        # audit v3: 某些 cTrader demo 账户 minVolume=1.0 lot (100 centi-lot)
-        # 如果 bridge meta 有 min_volume, 用它; 否则默认 1.0 lot
+        # cTrader volume 字段单位: API 原生 volume unit
         _meta = getattr(self, '_symbol_meta', None) or {}
-        _min_vol_lot = _meta.get('min_volume', 1.0)
-        req.volume = int(round(max(volume, _min_vol_lot) * 100))
+        _min_vol_api = int(round(float(_meta.get('api_min_volume') or 0)))
+        if _min_vol_api <= 0:
+            _min_vol_api = max(1, int(round(volume)))
+        req.volume = int(round(max(volume, _min_vol_api)))
         req.comment = comment or "quant-live"
         logger.info(
             f"market_order: account={self.account_id} symbolId={self._symbol_id} "
-            f"side={side} volume={req.volume} centilot (= {volume} lot) "
+            f"side={side} volume={req.volume} api_units (= {volume} api) "
             f"sl={sl} tp={tp}"
         )
         # ⚠️ 阶段 2 MVP: SL/TP 不上 server (cTrader MARKET 单不支持 SL/TP 字段,
@@ -1181,7 +1182,7 @@ class CTraderBridge(BaseBrokerBridge):
 
         Args:
             position_id: 要平的仓位 ID; None 时 broker 默认平当前账户所有仓位
-            volume: 部分平仓量 (lots); None 时自动查当前仓位 volume 全平
+            volume: 部分平仓量 (API volume); None 时自动查当前仓位 volume 全平
 
         ⚠️ audit 2026-06-11: ProtoOAClosePositionReq 4 个字段全部 required
         (payloadType/ctidTraderAccountId/positionId/volume). volume 不能省略.
@@ -1215,9 +1216,8 @@ class CTraderBridge(BaseBrokerBridge):
             req = TradeMsg.ProtoOAClosePositionReq()
             req.ctidTraderAccountId = self.account_id
             req.positionId = int(position_id)
-            # cTrader volume 字段: 1 lot = 100 (centi-lot) per doc
-            # "volume int64 Required Volume, represented in 0.01 of a unit (e.g. 1000 in protocol means 10.00 units)"
-            req.volume = int(round(volume * 100))
+            # cTrader volume 字段: API 原生 volume unit
+            req.volume = int(round(volume))
             resp = self._send(req, timeout=10.0)
             logger.info(f"close_position OK pos={position_id} vol={volume} resp={type(resp).__name__}")
             return OrderResult(
@@ -1356,9 +1356,10 @@ class CTraderBridge(BaseBrokerBridge):
                 direction = 1 if td.tradeSide == TRADE_SIDE["BUY"] else -1
                 result.append(PositionInfo(
                     position_id=p.positionId,
+                    symbol_id=td.symbolId,
                     symbol=self.symbol,
                     direction=direction,
-                    volume=td.volume / 100.0,
+                    volume=td.volume,
                     entry_price=p.price,
                     current_price=p.price,
                     sl=p.stopLoss or 0,

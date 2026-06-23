@@ -67,6 +67,8 @@ _PARAM_TUNE_STATE: dict[str, Any] = {}
 _prev_position_ids: set[int] = set()
 # 用于 close detection: position_id → open_price
 _pos_open_prices: dict[int, float] = {}
+# 用于仓位上限/展示的策略口径 API volume (开仓后回查到的实际 API 量)
+_pos_open_api_volume: dict[int, float] = {}
 # ── 追踪止损状态 ──
 # position_id → {best_price, activated, entry_price, direction}
 _trailing_state: dict[int, dict] = {}
@@ -103,25 +105,19 @@ def _risk_kelly_volume(
     cfg, direction: int, current_price: float, sl_price: float,
     bridge_meta: dict, acct: dict,
 ) -> float:
-    """根据 Kelly 分数计算开仓手数。
+    """根据 Kelly 分数计算 API 原生开仓量。
 
-    策略:
-        volume = min(max_vol, max(min_vol, f* × risk_capital / SL点数))
-
-    当 kelly_enabled=False 或无可用数据时返回默认微型手 (0.01 lot)。
+    返回值使用 cTrader API volume unit；XAUUSD 常见最小开仓量约为 100 API units。
     """
-    # audit v3: min_volume/step_volume 从 bridge meta 取, fallback 用 0.01 而非 1.0
-    # XAUUSD 标准最小手数 0.01 lot, 1 lot = 100 oz ≈ $420K 名义价值
-    # 但某些 cTrader 账户 minVolume=100 centi-lot = 1.0 lot
-    _min_vol = bridge_meta.get('min_volume', 0.01)
-    _step_vol = bridge_meta.get('step_volume', 0.01)
-    _to_step = lambda v: max(
-        _min_vol,
-        round(v / _step_vol) * _step_vol if _step_vol > 0 else v,
-    )
+    _min_vol = float(bridge_meta.get('api_min_volume') or 100.0)
+    _step_vol = float(bridge_meta.get('api_step_volume') or 1.0)
 
-    # audit v3: 默认微型手, 不再是 1.0
-    default_vol = _to_step(max(_min_vol, 0.01))
+    def _to_step(v: float) -> float:
+        if _step_vol <= 0:
+            return max(_min_vol, v)
+        return max(_min_vol, round(v / _step_vol) * _step_vol)
+
+    default_vol = _to_step(max(_min_vol, 100.0))
     if not getattr(cfg, 'kelly_enabled', False):
         return default_vol
 
@@ -146,16 +142,63 @@ def _risk_kelly_volume(
     sl_dist = abs(current_price - sl_price)
     sl_dist = max(sl_dist, current_price * 0.001)  # 至少 0.1% 价格波动
 
-    # XAUUSD 合约乘数: 1 lot = 100 oz, 价差 1 点 = $100
+    # XAUUSD 合约乘数: 100 oz
     contract_mult = 100.0
-    raw_vol = f_star * risk_capital / (sl_dist * contract_mult) if sl_dist > 0 else 0
+    raw_api_volume = f_star * risk_capital / (sl_dist * contract_mult) if sl_dist > 0 else 0
 
-    # 资金占比上限
+    # 资金占比上限 (API volume)
     max_pct = getattr(cfg, 'kelly_max_pct', 0.25)
-    max_vol = equity * max_pct / (sl_dist * contract_mult) if sl_dist > 0 else default_vol * 10
+    max_api_volume_calc = equity * max_pct / (sl_dist * contract_mult) if sl_dist > 0 else default_vol * 10 / 100.0
 
-    vol = max(_min_vol, min(max_vol, raw_vol, default_vol * 5))
-    return _to_step(vol)
+    vol_api = max(_min_vol, min(max_api_volume_calc * 100.0, raw_api_volume * 100.0, default_vol * 5))
+    return _to_step(vol_api)
+
+
+def _position_api_volume(pos: Any) -> float:
+    """Extract the canonical API volume from a position payload.
+
+    The live stack should use the broker-returned volume field directly and
+    avoid falling back to legacy unit aliases when doing risk and sizing
+    math.
+    """
+    if pos is None:
+        return 0.0
+    if hasattr(pos, 'get'):
+        for key in ('volume', 'api_volume'):
+            try:
+                value = pos.get(key)
+            except Exception:
+                value = None
+            if value is not None:
+                return float(value)
+        return 0.0
+    for key in ('volume', 'api_volume'):
+        value = getattr(pos, key, None)
+        if value is not None:
+            return float(value)
+    return 0.0
+
+
+def _resolve_position_api_volume(
+    position_id: int,
+    positions: list[Any] | None,
+    fallback_volume: float,
+) -> float:
+    """Resolve the actual API volume for a filled position_id.
+
+    We prefer the broker-refreshed position list, because the executed size can
+    differ from the submitted request volume after min-volume / step rounding.
+    """
+    actual_api_volume = float(fallback_volume)
+    for pos in positions or []:
+        current_pid = None
+        if hasattr(pos, 'get'):
+            current_pid = pos.get('position_id') or pos.get('ticket')
+        else:
+            current_pid = getattr(pos, 'position_id', None) or getattr(pos, 'ticket', None)
+        if current_pid is not None and int(current_pid) == int(position_id):
+            return _position_api_volume(pos) or actual_api_volume
+    return actual_api_volume
 
 
 def _save_param_tune_state() -> None:
@@ -706,11 +749,13 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             raw = bridge.get_positions(symbol)
             positions = []
             for p in raw:
+                api_volume = _position_api_volume(p)
                 positions.append({
                     "ticket": p.get("position_id"),
                     "symbol": p.get("symbol_id"),
                     "type": p.get("type"),
-                    "volume": p.get("volume", 0.0),
+                    "volume": api_volume,
+                    "api_volume": api_volume,
                     "price_open": p.get("price_open", 0.0),
                     "price_current": p.get("price_current", p.get("price_open", 0.0)),
                     "sl": p.get("sl", 0.0),
@@ -2406,6 +2451,7 @@ def _process_tick_factor_pipeline(
             _record_session_trade(total_pnl)
             log(f"tick {tick}: attribution close pos={cpid} pnl={total_pnl:.2f} "
                 f"factors={len(mc)}")
+            _pos_open_api_volume.pop(int(cpid), None)
             # ── 决策审计: close ──
             if _DECISION_LOG:
                 bar_ts = bar.get("time", 0)
@@ -2494,23 +2540,33 @@ def _process_tick_factor_pipeline(
         acct_clean = _live_state_get("account", {}, clone=True) or {}
         volume = _risk_kelly_volume(cfg, composite.direction, current_price,
                                     sl_price, _meta, acct_clean)
-        log(f"tick {tick}: v4 {direction_name} volume={volume:.2f} "
+        log(f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
             f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)})")
 
         # ── 仓位控制检查 (用 flat 结构避免 elif 回退 bug) ──
         order_blocked = False
         block_reason = ""
         max_pos_count = getattr(cfg, 'max_position_count', 3)
-        max_lots = getattr(cfg, 'max_position_lots', 0.5)
+        max_api_volume = float(getattr(cfg, 'max_position_api_volume', 50.0) or 50.0)
 
         if max_pos_count > 0 and len(pos) >= max_pos_count:
             order_blocked = True
             block_reason = f'仓位上限: {len(pos)}/{max_pos_count}'
         elif max_pos_count > 0:
-            total_lots = sum(float(_p.get('volume', 0) or _p.get('lots', 0) or 0) for _p in pos)
-            if total_lots + volume > max_lots:
+            total_api_volume = 0.0
+            for _p in pos:
+                _pid = None
+                if hasattr(_p, 'get'):
+                    _pid = _p.get('position_id') or _p.get('ticket')
+                else:
+                    _pid = getattr(_p, 'position_id', None) or getattr(_p, 'ticket', None)
+                if _pid is not None and int(_pid) in _pos_open_api_volume:
+                    total_api_volume += float(_pos_open_api_volume[int(_pid)])
+                    continue
+                total_api_volume += _position_api_volume(_p)
+            if total_api_volume + volume > max_api_volume:
                 order_blocked = True
-                block_reason = f'手数上限: {total_lots:.2f}+{volume:.2f}>{max_lots}'
+                block_reason = f'API量上限: {total_api_volume:.0f}+{volume:.0f}>{max_api_volume:.0f}'
 
         if not order_blocked and getattr(cfg, 'pyramid_enabled', True) and len(pos) > 0:
             _max_entry = 0.0
@@ -2547,6 +2603,11 @@ def _process_tick_factor_pipeline(
                         else:
                             pid = int(getattr(p0, 'position_id', 0) or getattr(p0, 'ticket', 0) or 0)
                     if pid > 0:
+                        actual_api_volume = _resolve_position_api_volume(
+                            pid,
+                            bridge.get_positions(getattr(bridge, 'symbol', '') or ''),
+                            volume,
+                        )
                         try:
                             amend_res = bridge.amend_position_sltp(
                                 position_id=pid, sl=sl_price, tp=tp_price,
@@ -2555,7 +2616,7 @@ def _process_tick_factor_pipeline(
                                 _track_local_sl_tp(pid, sl=sl_price, tp=tp_price)
                                 _pos_entry_scores[pid] = composite.score
                                 log(f"tick {tick}: v4 {direction_name} ORDER+AMEND OK "
-                                    f"vol={volume} pos={pid} score={composite.score:.4f}")
+                                    f"api_volume={actual_api_volume:.0f} pos={pid} score={composite.score:.4f}")
                                 # ── 执行质量记录 ──
                                 try:
                                     fill_price = float(getattr(result, 'price', current_price) or current_price)
@@ -2567,7 +2628,7 @@ def _process_tick_factor_pipeline(
                                         fill_price=fill_price,
                                         symbol="XAUUSD+",
                                         direction=composite.direction,
-                                        volume=volume,
+                                        volume=actual_api_volume,
                                         order_id=pid,
                                     ))
                                 except Exception:
@@ -2592,9 +2653,11 @@ def _process_tick_factor_pipeline(
                                         macro_score=composite.macro_score,
                                         tags_breakdown=dict(composite.tags_breakdown),
                                         total_signal_abs=total_signal_abs,
+                                        api_volume=float(actual_api_volume),
                                     )
                                     attr_engine.record_open(pid, trade_attr)
                                     _pos_open_prices[pid] = current_price
+                                    _pos_open_api_volume[pid] = float(actual_api_volume)
                                     log(f"tick {tick}: attribution recorded open pos={pid}")
                                     # ── 决策审计: open ──
                                     if _DECISION_LOG:
@@ -2613,7 +2676,8 @@ def _process_tick_factor_pipeline(
                                             decision="executed",
                                             meta=_json.dumps({
                                                 "position_id": pid,
-                                                "volume": volume,
+                                                "volume": actual_api_volume,
+                                                "requested_volume": volume,
                                                 "price": round(current_price, 2),
                                                 "sl": round(sl_price, 2),
                                                 "tp": round(tp_price, 2),

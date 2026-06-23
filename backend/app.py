@@ -41,6 +41,18 @@ def _init_observability() -> None:
 async def lifespan(app: FastAPI):
     from loguru import logger as _lg
     setup_logging()
+
+    # Load RuntimeConfig from settings.yaml so live execution honors ctrader.send_orders.
+    try:
+        from config.runtime_config import RuntimeConfig, replace as rc_replace
+        from backend.services.config_service import get_config
+        yaml_cfg = get_config()["parsed"]
+        rc = RuntimeConfig.from_yaml(yaml_cfg)
+        rc_replace(rc)
+        _lg.info("[lifespan] RuntimeConfig loaded from config/settings.yaml")
+    except Exception as e:
+        _lg.warning(f"[lifespan] RuntimeConfig load failed (non-fatal): {e}")
+
     _init_observability()
 
     # 初始化统一数据库

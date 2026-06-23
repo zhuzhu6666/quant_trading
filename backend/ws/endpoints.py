@@ -26,14 +26,17 @@ def _position_to_dict(p: object) -> dict:
     if isinstance(p, dict):
         return p
     # PositionInfo dataclass — 同时暴露 dataclass 字段 + 前端兼容名
+    _volume = getattr(p, "volume", 0.0)
     return {
         "type": "buy" if p.direction == 1 else "sell",
         "price_open": p.entry_price,
-        "volume": p.volume,
+        "volume": _volume,
+        "api_volume": _volume,
         "profit": p.pnl,
         # 原始字段 (兼容代码中 p.get("position_id") / p.get("open_price") 等)
         "position_id": p.position_id,
         "ticket": p.position_id,
+        "symbol_id": getattr(p, "symbol_id", 0),
         "direction": p.direction,
         "entry_price": p.entry_price,
         "open_price": p.entry_price,
@@ -159,7 +162,7 @@ def _read_state_snapshot() -> dict:
                 pos_data = {
                     "dir": "LONG" if p.get("type") == "buy" else "SHORT",
                     "entry": p.get("price_open", 0.0),
-                    "size": p.get("volume", 0.0),
+                    "size": p.get("api_volume", p.get("volume", 0.0)),
                     "unrealized": p.get("profit") or 0.0,
                 }
         elif isinstance(positions, list) and positions:
@@ -167,7 +170,7 @@ def _read_state_snapshot() -> dict:
             pos_data = {
                 "dir": "LONG" if p.get("type") == "buy" else "SHORT",
                 "entry": p.get("price_open", 0.0),
-                "size": p.get("volume", 0.0),
+                "size": p.get("api_volume", p.get("volume", 0.0)),
                 "unrealized": p.get("profit") or 0.0,
             }
     except Exception as exc:

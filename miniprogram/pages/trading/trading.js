@@ -30,8 +30,8 @@ Page({
     equity: '—', balance: '—', pnl: '—', pnlCls: 'text-gray',
     margin: '—', marginFree: '—', leverage: '—',
     currency: '',
-    lotOz: '100', pointSize: '0.01', pointValuePerLot: '1.00 USD/点',
-    notionalPerLot: '—', slTpExample: '',
+    contractOz: '100', pointSize: '0.01', pointValuePerContract: '1.00 USD/点',
+    contractNotional: '—', slTpExample: '',
     // 持仓 — WS 实时推送 / HTTP 兜底
     positions: [],
     // 最近信号 — 来自 /api/live/strategy-status
@@ -167,7 +167,7 @@ Page({
     var execEvents = [];
     for (var ei = Math.max(0, execEventsRaw.length - 5); ei < execEventsRaw.length; ei++) {
       var ev = execEventsRaw[ei];
-      var stageLabel = ev.stage === 'success' ? '已成交' : ev.stage === 'ctrader_reject' ? 'cTrader 拒单' : ev.stage === 'local_skip' ? '本地拦截' : ev.stage === 'attempt' ? '尝试下单' : ev.stage || '—';
+      var stageLabel = ev.stage === 'success' ? '已成交' : ev.stage === 'ctrader_reject' ? 'cTrader 拒单' : ev.stage === 'local_skip' ? '本地拦截' : ev.stage === 'attempt' ? '准备下单' : ev.stage || '—';
       execEvents.push({
         tick: ev.tick,
         direction: (ev.direction || '').toUpperCase(),
@@ -212,13 +212,13 @@ Page({
     var gateLabel = gateReason === 'passed' ? '放行' : '拦截';
     var gateBadge = gateReason === 'passed' ? 'badge-green' : gateReason.startsWith('cooldown') ? 'badge-orange' : 'badge-red';
 
-    var lotOz = 100;
+    var contractOz = 100;
     var pointSize = 0.01;
-    var pointValuePerLot = 1.0;
-    var notionalPerLot = currentPrice > 0 ? (currentPrice * lotOz) : 0;
+    var pointValuePerContract = 1.0;
+    var contractNotional = currentPrice > 0 ? (currentPrice * contractOz) : 0;
     var slTpExample = '';
     if (currentPrice > 0) {
-      slTpExample = '1手=100oz，1点=' + pointSize.toFixed(2) + '，1点/手≈' + pointValuePerLot.toFixed(2) + ' USD';
+      slTpExample = '100oz 标准合约，1点=' + pointSize.toFixed(2) + '，1点/标准合约≈' + pointValuePerContract.toFixed(2) + ' USD';
     }
     // 决策原因
     var decisionReason = '';
@@ -239,10 +239,10 @@ Page({
       balance: bal > 0 ? Number(bal).toFixed(2) : '—',
       pnl: (pnl >= 0 ? '+' : '') + pnl.toFixed(2),
       pnlCls: pnl > 0 ? 'text-green' : pnl < 0 ? 'text-red' : 'text-gray',
-      lotOz: lotOz,
+      contractOz: contractOz,
       pointSize: pointSize.toFixed(2),
-      pointValuePerLot: pointValuePerLot.toFixed(2) + ' USD',
-      notionalPerLot: notionalPerLot > 0 ? notionalPerLot.toFixed(2) + ' USD' : '—',
+      pointValuePerContract: pointValuePerContract.toFixed(2) + ' USD',
+      contractNotional: contractNotional > 0 ? contractNotional.toFixed(2) + ' USD' : '—',
       slTpExample: slTpExample,
       // 统计
       trades, wins, losses,

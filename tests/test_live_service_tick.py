@@ -23,10 +23,12 @@ def _reset_state():
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
+    live_service._pos_open_api_volume.clear()
     yield
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
+    live_service._pos_open_api_volume.clear()
 
 
 def _make_df():
@@ -56,6 +58,13 @@ def _fake_bridge(position_id=12345, order_id=99):
         success=True, position_id=position_id,
     )
     return bridge
+
+
+def test_resolve_position_api_volume_prefers_refreshed_position():
+    """Actual filled size should come from refreshed broker positions, not the request."""
+    refreshed = [{"position_id": 12345, "volume": 130.0}]
+    vol = live_service._resolve_position_api_volume(12345, refreshed, 100.0)
+    assert vol == 130.0
 
 
 # ── _local_positions ─────────────────────────────────────

@@ -30,8 +30,13 @@ class OrderResult:
 
 @dataclass
 class PositionInfo:
-    """统一持仓信息"""
+    """统一持仓信息
+
+    volume 使用 API 原生口径（cTrader volume unit），上层不要再自行
+    解释成 lot/手；如需展示，交给 UI 层格式化。
+    """
     position_id: int = 0
+    symbol_id: int = 0
     symbol: str = ""
     direction: int = 0       # 1=long, -1=short, 0=flat
     volume: float = 0.0
@@ -42,6 +47,28 @@ class PositionInfo:
     pnl: float = 0.0
     commission: float = 0.0
     swap: float = 0.0
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Dict-like accessor for canonical fields.
+
+        Only the broker/API volume field is supported for size. Legacy lot
+        aliases are intentionally not mapped here.
+        """
+        if key == "type":
+            return "buy" if self.direction == 1 else "sell" if self.direction == -1 else default
+        if key == "tradeSide":
+            return "BUY" if self.direction == 1 else "SELL" if self.direction == -1 else default
+        alias = {
+            "ticket": "position_id",
+            "positionId": "position_id",
+            "symbolName": "symbol",
+            "open_price": "entry_price",
+            "price_open": "entry_price",
+            "price_current": "current_price",
+            "current_price": "current_price",
+            "profit": "pnl",
+        }.get(key, key)
+        return getattr(self, alias, default)
 
 
 @dataclass

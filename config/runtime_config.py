@@ -230,7 +230,8 @@ class RuntimeConfig:
 
     # --- 金字塔/仓位控制 ---
     pyramid_enabled: bool = True             # 金字塔加仓规则: 新信号需强于已有持仓才加仓
-    max_position_lots: float = 0.5           # 单品种最大持仓手数
+    max_position_lots: float = 0.5           # 单品种最大持仓量(旧名保留)
+    max_position_api_volume: float = 50.0    # 单品种最大持仓量(API volume, live 口径)
     max_position_count: int = 3              # 单品种最大同时持仓数
 
     # --- Adaptive Weight Engine (Phase 5 占位) ---
@@ -252,8 +253,8 @@ class RuntimeConfig:
     awe_max_type_weight_pct: float = 0.40
 
     # --- Phase 4: 执行算法配置 ---
-    algo_enabled: bool = False               # 是否启用算法执行 (>0.05 lot 自动拆单)
-    algo_threshold_lots: float = 0.05        # 超过此手数启用 algo (0=永不用)
+    algo_enabled: bool = False               # 是否启用算法执行 (>0.05 API volume 自动拆单)
+    algo_threshold_lots: float = 0.05        # 超过此 API volume 阈值启用 algo (0=永不用)
     algo_default: str = "TWAP"               # 默认算法: TWAP | VWAP | POV | IS
     algo_duration_minutes: int = 30          # 默认执行窗口 (分钟)
     algo_pov_participation: float = 0.10     # POV 算法的市场参与率
@@ -267,12 +268,14 @@ class RuntimeConfig:
             "tactical_alpha": 0.7,
             "signal_threshold": 0.35,
             "max_position_lots": 0.5,
+            "max_position_api_volume": 50.0,
             "contract_size": 100,
         },
         "EURUSD": {
             "tactical_alpha": 0.6,
             "signal_threshold": 0.35,
             "max_position_lots": 0.5,
+            "max_position_api_volume": 50.0,
             "contract_size": 100000,
         },
     })
