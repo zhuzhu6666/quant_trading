@@ -1410,6 +1410,20 @@ class CTraderBridge(BaseBrokerBridge):
             for d in resp.deal:
                 money_digits = getattr(d, 'moneyDigits', 2) or 2
                 divisor = 10 ** money_digits
+                # ── Close detail (平仓盈亏) ──
+                cpd = d.closePositionDetail
+                close_detail = {}
+                # cpd.Descriptor 存在且至少有一个非默认字段 → 有真实平仓数据
+                if cpd and (cpd.balance != 0 or cpd.grossProfit != 0):
+                    cd_divisor = 10 ** (getattr(cpd, 'moneyDigits', 2) or 2)
+                    close_detail = {
+                        "entry_price": cpd.entryPrice,
+                        "gross_profit": cpd.grossProfit / cd_divisor,
+                        "swap": cpd.swap / cd_divisor,
+                        "commission": cpd.commission / cd_divisor,
+                        "balance": cpd.balance / cd_divisor,
+                        "closed_volume": cpd.closedVolume,
+                    }
                 results.append({
                     "deal_id": d.dealId,
                     "order_id": d.orderId,
@@ -1422,7 +1436,7 @@ class CTraderBridge(BaseBrokerBridge):
                     "deal_status": d.dealStatus,
                     "execution_timestamp": d.executionTimestamp / 1000.0,
                     "commission": d.commission / divisor,
-                    "close_position_detail": str(d.closePositionDetail) if d.closePositionDetail else "",
+                    "close_detail": close_detail,
                 })
             logger.info("[cTrader] get_deals: %d deals returned (from=%s to=%s max=%d)",
                         len(results),

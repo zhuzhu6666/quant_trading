@@ -70,9 +70,23 @@ class FactorAttributionStats:
     recent_mcs: deque = field(default_factory=lambda: deque(maxlen=250))
     recent_pnls: deque = field(default_factory=lambda: deque(maxlen=250))
     recent_pnl_directions: deque = field(default_factory=lambda: deque(maxlen=50))
+    # ── 真实 PnL (来自 cTrader get_deals) ──
+    total_gross: float = 0.0
+    total_swap: float = 0.0
+    total_commission: float = 0.0
+    total_net_pnl: float = 0.0
 
-    def record(self, mc: float, is_win: bool, tags: dict[str, float]):
-        """记录一笔交易的归因结果。"""
+    def record(self, mc: float, is_win: bool, tags: dict[str, float],
+               real_pnl: dict | None = None):
+        """记录一笔交易的归因结果。
+
+        Args:
+            mc: 边际贡献 (MC decomposition).
+            is_win: 该笔是否盈利.
+            tags: 因子标签.
+            real_pnl: 可选，cTrader 真实盈亏:
+                      {"gross": ..., "swap": ..., "commission": ..., "net": ...}
+        """
         self.n_trades += 1
         self.total_mc += mc
         self.recent_mcs.append(mc)
@@ -80,6 +94,12 @@ class FactorAttributionStats:
         if is_win:
             self.wins += 1
         self.recent_pnl_directions.append(1 if is_win else -1)
+        # ── 真实 PnL ──
+        if real_pnl:
+            self.total_gross += real_pnl.get("gross", 0.0) or 0.0
+            self.total_swap += real_pnl.get("swap", 0.0) or 0.0
+            self.total_commission += real_pnl.get("commission", 0.0) or 0.0
+            self.total_net_pnl += real_pnl.get("net", 0.0) or 0.0
 
     @property
     def win_rate(self) -> float:
@@ -328,10 +348,19 @@ class AttributionEngine:
 
     def record_close(
         self, position_id: int, close_price: float, close_ts: float,
+        real_pnl: dict | None = None,
     ) -> dict[str, float]:
         """平仓时计算归因。
 
-        返回: {factor_name: marginal_contribution}
+        Args:
+            position_id: 仓位 ID.
+            close_price: 平仓价格 (用于估算, 同时用作降级回退).
+            close_ts: 平仓时间戳.
+            real_pnl: 可选，cTrader 真实盈亏:
+                      {"gross": ..., "swap": ..., "commission": ..., "net": ...}
+
+        Returns:
+            {factor_name: marginal_contribution}
         """
         attrib = self._open_trades.pop(position_id, None)
         if attrib is None:
@@ -340,6 +369,11 @@ class AttributionEngine:
 
         trade_pnl = (close_price - attrib.open_price) * attrib.direction * attrib.api_volume
 
+        # ── 优先使用真实 PnL ──
+        actual_pnl = trade_pnl
+        if real_pnl and real_pnl.get("net") is not None:
+            actual_pnl = real_pnl["net"]
+
         # ── 尝试 Gram-Schmidt 正交归因 ──
         marginal_contributions = self._orthogonal_close(attrib, trade_pnl)
 
@@ -347,12 +381,13 @@ class AttributionEngine:
         if marginal_contributions is None:
             marginal_contributions = self._linear_mc_close(attrib, trade_pnl)
 
-        # ── 更新滚动统计 ──
+        # ── 更新滚动统计 (使用真实 PnL 判断盈亏) ──
         for name, mc in marginal_contributions.items():
             if name not in self._per_factor:
                 self._per_factor[name] = FactorAttributionStats(name)
             self._per_factor[name].record(
-                mc, trade_pnl > 0, attrib.tags_breakdown,
+                mc, actual_pnl > 0, attrib.tags_breakdown,
+                real_pnl=real_pnl,
             )
 
         # ── 记录 trade PnL (用于后续 Gram-Schmidt Y 向量) ──
@@ -364,7 +399,7 @@ class AttributionEngine:
         # ── 写入逐笔明细 ──
         self._write_trade_log(
             position_id, attrib, close_price, close_ts,
-            marginal_contributions, trade_pnl,
+            marginal_contributions, trade_pnl, actual_pnl, real_pnl,
         )
 
         return marginal_contributions
@@ -463,8 +498,16 @@ class AttributionEngine:
         close_price: float, close_ts: float,
         marginal_contributions: dict[str, float],
         trade_pnl: float,
+        actual_pnl: float | None = None,
+        real_pnl: dict | None = None,
     ):
-        """追加一行逐笔归因明细到 JSONL 和 trades.duckdb。"""
+        """追加一行逐笔归因明细到 JSONL 和 trades.duckdb。
+
+        Args:
+            ...
+            actual_pnl: 实际使用的 PnL (优先 real_pnl, 降级估算).
+            real_pnl: cTrader 原始盈亏 {"gross", "swap", "commission", "net"}.
+        """
         try:
             entry = {
                 "position_id": position_id,
@@ -474,6 +517,7 @@ class AttributionEngine:
                 "close_price": close_price,
                 "direction": attrib.direction,
                 "trade_pnl": round(trade_pnl, 6),
+                "actual_pnl": round(actual_pnl, 6) if actual_pnl is not None else round(trade_pnl, 6),
                 "api_volume": attrib.api_volume,
                 "composite_score": attrib.composite_score,
                 "tactical_score": attrib.tactical_score,
@@ -482,6 +526,12 @@ class AttributionEngine:
                 "factor_signals": attrib.factor_signals,
                 "active_weights": attrib.active_weights,
                 "tags_breakdown": attrib.tags_breakdown,
+                "real_gross": round(real_pnl.get("gross", 0), 6) if real_pnl else None,
+                "real_swap": round(real_pnl.get("swap", 0), 6) if real_pnl else None,
+                "real_commission": round(real_pnl.get("commission", 0), 6) if real_pnl else None,
+                "real_net": round(real_pnl.get("net", 0), 6) if real_pnl else None,
+                "real_balance": round(real_pnl.get("balance", 0), 2) if real_pnl else None,
+                "deal_id": real_pnl.get("deal_id") if real_pnl else None,
             }
             # JSONL 日志 (保留)
             path = Path(self._trade_log_path)
@@ -558,6 +608,13 @@ class AttributionEngine:
                     "ir_short": round(s.ir_short, 4) if not math.isnan(s.ir_short) else None,
                     "ir_mid": round(s.ir_mid, 4) if not math.isnan(s.ir_mid) else None,
                     "ir_long": round(s.ir_long, 4) if not math.isnan(s.ir_long) else None,
+                    # ── 真实 PnL ──
+                    "total_gross": round(s.total_gross, 6),
+                    "total_swap": round(s.total_swap, 6),
+                    "total_commission": round(s.total_commission, 6),
+                    "total_net_pnl": round(s.total_net_pnl, 6),
+                    "avg_gross": round(s.total_gross / s.n_voted, 6) if s.n_voted > 0 else 0,
+                    "avg_net": round(s.total_net_pnl / s.n_voted, 6) if s.n_voted > 0 else 0,
                 }
             # 原子写入: 先写临时文件再 rename
             path = Path(self._stats_snapshot_path)
@@ -697,6 +754,11 @@ class AttributionEngine:
             stats.n_voted = d.get("n_voted", 0)
             stats.wins = d.get("wins", 0)
             stats.total_mc = d.get("total_mc", 0.0)
+            # ── 恢复真实 PnL ──
+            stats.total_gross = d.get("total_gross", 0.0)
+            stats.total_swap = d.get("total_swap", 0.0)
+            stats.total_commission = d.get("total_commission", 0.0)
+            stats.total_net_pnl = d.get("total_net_pnl", 0.0)
             # 恢复 deque
             mcs = d.get("recent_mcs", [])
             if mcs:

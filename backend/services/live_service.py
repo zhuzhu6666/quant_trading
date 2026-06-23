@@ -2463,11 +2463,28 @@ def _process_tick_factor_pipeline(
         _prev_position_ids = current_pids.copy()
     else:
         closed_pids = _prev_position_ids - current_pids
+
+    # ── 获取真实 PnL (从 cTrader deals) ──
+    _real_pnls: dict[int, dict] = {}
+    if closed_pids and bridge is not None:
+        try:
+            from execution.deal_sync import sync_close_deals_batch
+            from backend.core.db import get_state_conn
+            _sconn = get_state_conn()
+            try:
+                _real_pnls = sync_close_deals_batch(bridge, _sconn, closed_pids)
+            finally:
+                _sconn.close()
+        except Exception as _ds_err:
+            log(f"tick {tick}: deal_sync error: {_ds_err}")
+
     for cpid in closed_pids:
         try:
+            real_pnl = _real_pnls.get(cpid)
             mc = attr_engine.record_close(cpid,
                                           close_price=current_price,
-                                          close_ts=time.time())
+                                          close_ts=time.time(),
+                                          real_pnl=real_pnl)
             # 平仓事件真实发生, 无论是否有因子归因都要计数
             if mc:
                 total_pnl = sum(mc.values())

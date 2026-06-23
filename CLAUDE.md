@@ -14,7 +14,7 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 | **Signal Normalizer** | `alpha/signal_normalizer.py` | 三域归一：zscore_tanh / rank_mapping / discrete → [-1, +1] |
 | **Portfolio Compositor** | `alpha/portfolio_compositor.py` | Tactical/Macro 两层加权组合，tags_breakdown；支持 RuntimeConfig 热更新权重 |
 | **Execution Gate** | `alpha/execution_gate.py` | 开仓闸门：信号强度/MACD反向/冷却/NFP事件过滤 |
-| **Attribution Engine** | `alpha/attribution_engine.py` | 实盘归因：线性 MC + Gram-Schmidt 正交，NW-HAC Sharpe；快照双写 state.db |
+| **Attribution Engine** | `alpha/attribution_engine.py` | 实盘归因：线性 MC + Gram-Schmidt 正交，NW-HAC Sharpe；快照双写 state.db；接受 cTrader 真实 PnL (gross/swap/commission) |
 | **Adaptive Weight** | `alpha/adaptive_weight_engine.py` | 权重自适应：exp(k×score)，锚点回归，DSR/健康分退役，复活；权重历史写入 state.db |
 | **GP Classifier** | `alpha/gp_classifier.py` | AST 表达式 → 类型标签（量价/动量/均值回归/波动率/非线性） |
 | Alpha mining | `alpha/search/` | GP/Random search, MAP-Elites, BlendSearch SLSQP |
@@ -25,8 +25,8 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 | **ML** | `alpha/ml/` | XGBoost 方向预测器, 概念漂移检测 |
 | **Features** | `alpha/features/` | FeatureDeriver(200+), PCA/KPCA, FeatureSelector；PCA 因子注册为 SOURCE_SHADOW |
 | **Data** | `data/` | DuckDB 5 库: ctrader K线, Dukascopy tick, L2订单簿, 开平仓, 事件日历 |
-| **State DB** | `data/state.db` | SQLite 统一状态库 (14表): decision_log, lifecycle_events, weight_history, canary_state, factor_health, evolution_events, jobs, attribution_snapshot, param_tune, calibrator, sync_health, strategy_perf, live_trades(已废弃) |
-| **Execution** | `execution/` | cTrader bridge, OMS, BaseBrokerBridge, VWAP/TWAP, 执行质量分析 |
+| **State DB** | `data/state.db` | SQLite 统一状态库 (15表): decision_log, lifecycle_events, weight_history, canary_state, factor_health, evolution_events, jobs, attribution_snapshot, param_tune, calibrator, sync_health, strategy_perf, ctrader_deals, live_trades(已废弃) |
+| **Execution** | `execution/` | cTrader bridge, OMS, BaseBrokerBridge, VWAP/TWAP, 执行质量分析, deal_sync (成交同步模块) |
 | **Risk** | `risk/` | VaR/CVaR, Kelly, 压力测试, 集中度监控, 跨品种协方差 |
 | **Platform** | `research/` | ExperimentTracker, WeeklyReport |
 | **Ops** | `monitor/` | 业务告警(连亏/回撤/熔断, 每tick检查), AutoRecovery(心跳+重启), system_health |
@@ -44,7 +44,8 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
     → ExecutionGate.filter(composite, ...)          # 信号/MACD/冷却/事件
     → market_buy/sell (到 cTrader demo)
     ↓ (平仓时)
-    AttributionEngine.record_close(...)             # 线性 MC / Gram-Schmidt
+    live_service 检测 closed_pids → deal_sync 拉 cTrader 真实 PnL (gross/swap/commission)
+    → AttributionEngine.record_close(..., real_pnl=...) # 真实 PnL 参与 MC 分解
     ↓ (每 30 分钟 / 50 笔交易)
     AdaptiveWeightEngine.adapt(...)                 # NW-HAC Sharpe → exp(k×score)
     → cfg.patch({"factor_portfolio_weights": ...})  # RuntimeConfig 广播
@@ -93,7 +94,7 @@ DuckDB (时序市场数据):
   data/events.duckdb       — 经济事件日历
 
 SQLite (运行时状态):
-  data/state.db            — 统一状态库 (14 表)
+  data/state.db            — 统一状态库 (15 表, 含 ctrader_deals)
   data/experiments.db      — 实验记录
 
 路径常量: backend/core/db.py (DUCKDB_BARS, STATE_DB, etc.)
@@ -111,6 +112,7 @@ SQLite (运行时状态):
 ## Audit
 
 - 2026-06-22: 全面修复 (进化闭环打通 / 数据库统一 / 权重热更新 / 影子隔离 / 并发锁 / 交易日志统一 / 死代码清理)
+- 2026-06-23: 归因真实 PnL 改造 — `record_close` 新增 `real_pnl` 参数, `FactorAttributionStats` 新增 total_gross/swap/commission/net 累加器, `state.db` 新增 `ctrader_deals` 表存原始成交, `execution/deal_sync.py` 同步模块, `live_service` 平仓检测自动调 deal_sync 获取真实 PnL
 - `docs/UPGRADE_BLUEPRINT.md` — Phase 0-7 全部完成
 - 剩余技术债务: `TODO.md` / 蓝图 Appendix C.1
 
@@ -120,6 +122,7 @@ SQLite (运行时状态):
 python -m backend                     # FastAPI :8000
 uvicorn backend.app:app --host 0.0.0.0 --port 8000  # 或直接 uvicorn
 python scripts/refresh_external_data.py --once        # 刷新外部数据 (COT/Events/ETF)
+.venv/bin/python scripts/backfill_ctrader_deals.py --days 30  # 回填历史成交到 ctrader_deals
 ```
 
 ## AI Behavior Rules
@@ -135,4 +138,6 @@ python scripts/refresh_external_data.py --once        # 刷新外部数据 (COT/
 9. **Before touching cTrader bridge**, check if connected (can block threadpool)
 10. **Backend runs on FastAPI** — blocking calls go in `run_in_executor` or background tasks
 11. **cTrader = 唯一数据源+执行通道**
-12. **_live_state RMW operations MUST use _LIVE_STATE_LOCK**
+12. **归因使用真实 PnL**: `record_close()` 的 `real_pnl` 参数由 `live_service` 通过 `deal_sync` 自动提供, 包含 gross/swap/commission; `FactorAttributionStats` 累加 `total_gross/swap/commission/net_pnl`; 手工测试需传 `real_pnl={\"gross\":...,\"swap\":...,\"commission\":...,\"net\":...}`
+13. **ctrader_deals 表是原始数据锚点**: `execution/deal_sync.py` 负责从 cTrader 拉成交写入 state.db; `find_close_deal` 按 `gross_profit != 0` 判断平仓腿; 回填用 `scripts/backfill_ctrader_deals.py`
+14. **_live_state RMW operations MUST use _LIVE_STATE_LOCK**

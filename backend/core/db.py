@@ -213,6 +213,31 @@ CREATE INDEX IF NOT EXISTS idx_evolution_events_type ON evolution_events(event_t
 CREATE INDEX IF NOT EXISTS idx_weight_history_factor ON weight_history(factor);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_shadow_factor_perf_updated ON shadow_factor_perf(updated_at);
+
+-- cTrader 原始成交记录 (归因锚点)
+CREATE TABLE IF NOT EXISTS ctrader_deals (
+    deal_id     INTEGER PRIMARY KEY,
+    position_id INTEGER NOT NULL,
+    order_id    INTEGER DEFAULT 0,
+    symbol_id   INTEGER DEFAULT 0,
+    volume      INTEGER DEFAULT 0,
+    filled_volume INTEGER DEFAULT 0,
+    exec_price  REAL DEFAULT 0.0,
+    trade_side  TEXT DEFAULT '',
+    deal_status INTEGER DEFAULT 0,
+    exec_timestamp REAL DEFAULT 0.0,
+    commission   REAL DEFAULT 0.0,
+    entry_price  REAL DEFAULT 0.0,
+    gross_profit REAL DEFAULT 0.0,
+    swap         REAL DEFAULT 0.0,
+    close_commission REAL DEFAULT 0.0,
+    balance      REAL DEFAULT 0.0,
+    closed_volume INTEGER DEFAULT 0,
+    is_close     INTEGER DEFAULT 0,
+    fetched_at   REAL NOT NULL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_ctrader_deals_pos ON ctrader_deals(position_id);
+CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp);
 """
 
 
