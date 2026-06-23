@@ -195,6 +195,15 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                 raw = f.read().decode("utf-8", errors="replace")
             lines = raw.splitlines()[-5000:]
             for line in lines:
+                # 提取时间戳: HH:MM:SS (live_loop) 或 YYYY-MM-DD HH:MM:SS (backend)
+                _ts = None
+                _m_time = re.match(r"(\d{2}:\d{2}:\d{2}) ", line)
+                if _m_time:
+                    _ts = _m_time.group(1)
+                else:
+                    _m_time = re.match(r"\d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2})", line)
+                    if _m_time:
+                        _ts = _m_time.group(1)
                 m = re.search(r"market_order: account=(\d+) symbolId=(\d+) side=(\d+) volume=(\d+) api_units \(= ([\d.]+) api\)", line)
                 if m:
                     key = ("wire_send", m.group(1), m.group(2), m.group(3), m.group(4))
@@ -202,7 +211,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                         continue
                     seen_exec_keys.add(key)
                     execution_events.append({
-                        "tick": None,
+                        "tick": None, "time": _ts,
                         "direction": "BUY" if m.group(3) == "1" else "SELL",
                         "stage": "wire_send",
                         "reason": f"实际发送 {m.group(5)} API量 (account={m.group(1)})",
@@ -219,7 +228,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     seen_exec_keys.add(key)
                     reason_text = m.group(1)
                     execution_events.append({
-                        "tick": None,
+                        "tick": None, "time": _ts,
                         "direction": "—",
                         "stage": "ctrader_send_err",
                         "reason": reason_text,
@@ -235,7 +244,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                         continue
                     seen_exec_keys.add(key)
                     execution_events.append({
-                        "tick": int(m.group(1)),
+                        "tick": int(m.group(1)), "time": _ts,
                         "direction": m.group(2),
                         "stage": "attempt",
                         "reason": f"策略准备下单，Kelly enabled={m.group(4)}",
@@ -253,7 +262,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     seen_exec_keys.add(key)
                     reason_text = m.group(3)
                     execution_events.append({
-                        "tick": int(m.group(1)),
+                        "tick": int(m.group(1)), "time": _ts,
                         "direction": m.group(2),
                         "stage": "local_skip",
                         "reason": reason_text,
@@ -270,7 +279,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                         continue
                     seen_exec_keys.add(key)
                     execution_events.append({
-                        "tick": int(m.group(1)),
+                        "tick": int(m.group(1)), "time": _ts,
                         "direction": m.group(2),
                         "stage": "success",
                         "reason": f"cTrader 已成交并完成止盈止损，pos={m.group(4)}",
@@ -288,7 +297,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     seen_exec_keys.add(key)
                     reason_text = f"{m.group(3)} {m.group(4)}".strip()
                     execution_events.append({
-                        "tick": int(m.group(1)),
+                        "tick": int(m.group(1)), "time": _ts,
                         "direction": m.group(2),
                         "stage": "ctrader_reject",
                         "reason": reason_text,

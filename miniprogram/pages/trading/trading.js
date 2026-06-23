@@ -170,6 +170,7 @@ Page({
       var stageLabel = ev.stage === 'success' ? '已成交' : ev.stage === 'ctrader_reject' ? 'cTrader 拒单' : ev.stage === 'local_skip' ? '本地拦截' : ev.stage === 'attempt' ? '准备下单' : ev.stage || '—';
       execEvents.push({
         tick: ev.tick,
+        time: ev.time || '',
         direction: (ev.direction || '').toUpperCase(),
         stage: stageLabel,
         stageCls: ev.stage === 'success' ? 'text-green' : ev.stage === 'ctrader_reject' ? 'text-red' : ev.stage === 'local_skip' ? 'text-orange' : 'text-gray',

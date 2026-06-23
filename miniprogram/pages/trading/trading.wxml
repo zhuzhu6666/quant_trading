@@ -194,9 +194,10 @@
       <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:8rpx">最近执行事件</text>
       <block wx:if="{{execEvents.length}}">
         <view wx:for="{{execEvents}}" wx:key="index" class="exec-row">
-          <text style="font-size:22rpx;font-weight:600;width:72rpx" class="{{item.stageCls}}">{{item.stage}}</text>
-          <text class="exec-stage-label">tick {{item.tick}}</text>
-          <text style="font-size:20rpx;color:#8E8E93;flex:1">{{item.direction}}</text>
+          <text style="font-size:22rpx;font-weight:600;width:80rpx" class="{{item.stageCls}}">{{item.stage}}</text>
+          <text style="font-size:18rpx;color:#C7C7CC;width:100rpx">{{item.time}}</text>
+          <text class="exec-stage-label">#{{item.tick}}</text>
+          <text style="font-size:20rpx;color:#8E8E93;flex:1;text-align:right">{{item.direction}}</text>
           <text class="exec-reason">{{item.reason}}</text>
         </view>
       </block>
