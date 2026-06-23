@@ -338,7 +338,7 @@ class AttributionEngine:
             logger.warning("No attribution for position %d", position_id)
             return {}
 
-        trade_pnl = (close_price - attrib.open_price) * attrib.direction
+        trade_pnl = (close_price - attrib.open_price) * attrib.direction * attrib.api_volume
 
         # ── 尝试 Gram-Schmidt 正交归因 ──
         marginal_contributions = self._orthogonal_close(attrib, trade_pnl)

@@ -109,7 +109,7 @@ def _risk_kelly_volume(
 
     返回值使用 cTrader API volume unit；XAUUSD 常见最小开仓量约为 100 API units。
     """
-    _min_vol = float(bridge_meta.get('api_min_volume') or 100.0)
+    _min_vol = float(bridge_meta.get('api_min_volume') or 1.0)
     _step_vol = float(bridge_meta.get('api_step_volume') or 1.0)
 
     def _to_step(v: float) -> float:
@@ -117,7 +117,7 @@ def _risk_kelly_volume(
             return max(_min_vol, v)
         return max(_min_vol, round(v / _step_vol) * _step_vol)
 
-    default_vol = _to_step(max(_min_vol, 100.0))
+    default_vol = _to_step(_min_vol)
     if not getattr(cfg, 'kelly_enabled', False):
         return default_vol
 
@@ -2483,7 +2483,12 @@ def _process_tick_factor_pipeline(
                                  else getattr(p, "type", None))
                         if ptype == "sell":
                             dir_sign = -1
-                    total_pnl = (current_price - open_price) * dir_sign
+                    cpid_vol = _pos_open_api_volume.get(int(cpid), 0.0)
+                    if cpid_vol <= 0:
+                        cpid_vol = 0.01 * 100.0  # fallback: 0.01 lot = 1 API unit
+                    # PnL = 价差 × 方向 × API volume × (oz/API unit)
+                    # 1 API unit = 0.01 lot = 1 oz, 所以 PnL = 价差 × 方向 × API volume
+                    total_pnl = (current_price - open_price) * dir_sign * cpid_vol
                 except Exception as _e2:
                     log(f"tick {tick}: attribution close pos={cpid} PnL fallback error: {_e2}")
             _record_session_trade(total_pnl)
