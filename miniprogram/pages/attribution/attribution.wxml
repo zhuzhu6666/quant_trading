@@ -1,6 +1,6 @@
 <scroll-view class="scroll-page" scroll-y>
 
-  <!-- 总览 -->
+  <!-- 归因总览 -->
   <view class="card">
     <text class="card-title">归因总览</text>
     <view class="stats-grid">
@@ -23,17 +23,46 @@
     </view>
   </view>
 
-  <!-- 因子贡献排名 -->
+  <!-- 真实盈亏总览 -->
   <view class="card">
-    <text class="card-title">因子贡献 (avg_mc)</text>
+    <text class="card-title">真实盈亏 (cTrader)</text>
+    <view class="stats-grid">
+      <view class="stat-cell">
+        <text class="stat-cell-value text-dark">{{totalGross}}</text>
+        <text class="stat-cell-label">毛利润</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-orange">{{totalSwap}}</text>
+        <text class="stat-cell-label">Swap</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-orange">{{totalComm}}</text>
+        <text class="stat-cell-label">佣金</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value {{totalNetCls}}">{{totalNet}}</text>
+        <text class="stat-cell-label">净利润</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 因子贡献排名 (真实盈亏) -->
+  <view class="card">
+    <text class="card-title">因子贡献 (avg_net / avg_mc)</text>
     <block wx:if="{{factors.length}}">
-      <view wx:for="{{factors}}" wx:key="name" class="stat-row">
-        <view style="display:flex;align-items:center;gap:12rpx;flex:1;min-width:0">
+      <view wx:for="{{factors}}" wx:key="name" class="stat-row" style="flex-direction:column;align-items:stretch;padding:14rpx 0">
+        <view style="display:flex;align-items:center;gap:12rpx;flex:1;min-width:0;margin-bottom:6rpx">
           <text style="font-size:22rpx;color:#C7C7CC;font-weight:600;width:36rpx">#{{index+1}}</text>
-          <text style="font-size:26rpx;color:#1C1C1E;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{item.label}}</text>
+          <text style="font-size:26rpx;color:#1C1C1E;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">{{item.label}}</text>
           <text class="badge {{item.wrBadge}}" style="font-size:18rpx">{{item.wrText}}</text>
         </view>
-        <text class="stat-value {{item.mcCls}}" style="font-size:24rpx">{{item.mcText}}</text>
+        <view style="display:flex;align-items:center;gap:16rpx;padding-left:48rpx">
+          <text class="stat-value {{item.mcCls}}" style="font-size:22rpx;min-width:100rpx">{{item.mcText}}</text>
+          <text style="font-size:18rpx;color:#8E8E93">毛/净:</text>
+          <text class="{{item.avgGrossCls}}" style="font-size:20rpx;min-width:72rpx">{{item.avgGross}}</text>
+          <text class="{{item.avgNetCls}}" style="font-size:20rpx;font-weight:600;min-width:72rpx">{{item.avgNet}}</text>
+          <text style="font-size:18rpx;color:#8E8E93">| {{item.nTrades}}笔</text>
+        </view>
       </view>
     </block>
     <view wx:else class="empty-state"><text>暂无归因数据</text></view>

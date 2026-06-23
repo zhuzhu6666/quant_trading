@@ -147,6 +147,13 @@ def get_attribution_stats(_user: RequireUser) -> dict:
             "ir_mid": s.get("ir_mid"),
             "ir_long": s.get("ir_long"),
             "recent_mcs_sample": s.get("recent_mcs", [])[-10:],  # last 10 only
+            # ── 真实 PnL (来自 cTrader deals) ──
+            "total_gross": s.get("total_gross", 0.0),
+            "total_swap": s.get("total_swap", 0.0),
+            "total_commission": s.get("total_commission", 0.0),
+            "total_net_pnl": s.get("total_net_pnl", 0.0),
+            "avg_gross": s.get("avg_gross", 0.0),
+            "avg_net": s.get("avg_net", 0.0),
         }
 
     # ── Summary stats ──
@@ -154,6 +161,11 @@ def get_attribution_stats(_user: RequireUser) -> dict:
     total_trades = sum(s["n_trades"] for s in per_factor.values())
     total_wins = sum(s["wins"] for s in per_factor.values())
     total_voted = sum(s["n_voted"] for s in per_factor.values())
+    # ── 真实 PnL 汇总 ──
+    total_gross = sum(s.get("total_gross", 0.0) or 0.0 for s in per_factor.values())
+    total_swap = sum(s.get("total_swap", 0.0) or 0.0 for s in per_factor.values())
+    total_comm = sum(s.get("total_commission", 0.0) or 0.0 for s in per_factor.values())
+    total_net = sum(s.get("total_net_pnl", 0.0) or 0.0 for s in per_factor.values())
     avg_sharpe_values = [
         s["composite_sharpe_score"] for s in per_factor.values()
         if s.get("composite_sharpe_score") is not None
@@ -179,6 +191,11 @@ def get_attribution_stats(_user: RequireUser) -> dict:
         "avg_sharpe_across_factors": avg_sharpe,
         "top_contributors": top_factors,
         "last_updated": time.time(),
+        # ── 真实 PnL 汇总 ──
+        "total_gross": round(total_gross, 2),
+        "total_swap": round(total_swap, 2),
+        "total_commission": round(total_comm, 2),
+        "total_net_pnl": round(total_net, 2),
     }
 
     return {"status": "ok", "per_factor": per_factor, "summary": summary}
