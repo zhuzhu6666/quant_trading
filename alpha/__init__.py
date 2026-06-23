@@ -26,6 +26,9 @@ from .attribution_engine import AttributionEngine, TradeAttribution, FactorAttri
 from .execution_gate import ExecutionGate, GateResult
 from .gp_classifier import GPClassifier, classify_expr
 from .registry import factor_registry
+from .decision_policy import DecisionPolicy, WeightDecision
+from .shadow_trader import ShadowPerf, evaluate_shadow_factors, load_shadow_perf
+from .adaptive_weight_engine import AdaptiveWeightEngine
 
 __all__ = [
     "ICTracker",
@@ -41,6 +44,11 @@ __all__ = [
     "GPClassifier",
     "classify_expr",
     "factor_registry",
-    # FactorEngine intentionally excluded — batch-only, 离线分析脚本直接
-    # from alpha.factor_engine import FactorEngine 显式导入
+    "DecisionPolicy",
+    "WeightDecision",
+    "ShadowPerf",
+    "evaluate_shadow_factors",
+    "load_shadow_perf",
+    "AdaptiveWeightEngine",
+    # FactorEngine intentionally excluded — batch-only
 ]

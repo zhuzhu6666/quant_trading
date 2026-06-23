@@ -8,6 +8,7 @@ from risk.concentration import ExposureReport, FactorExposureMonitor
 from risk.kelly import KellyPositionSizer
 from risk.stress_test import StressScenarioResult, StressTester
 from risk.var import VaREngine
+from risk.governor import RiskGovernor, GovernorState, GovernorVerdict
 
 __all__ = [
     "ExposureReport",
@@ -16,4 +17,7 @@ __all__ = [
     "StressScenarioResult",
     "StressTester",
     "VaREngine",
+    "RiskGovernor",
+    "GovernorState",
+    "GovernorVerdict",
 ]
