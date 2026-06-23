@@ -119,8 +119,8 @@ def run_paper(args):
     trader = PaperTrader(
         strategy=strategy,
         initial_balance=500.0,
-        default_lots=0.01,
-        max_lots=0.1,
+        default_volume=0.01,
+        max_position_volume=0.1,
         warmup_bars=500,
         risk_per_trade_pct=1.0,
         max_daily_loss_pct=15.0,
@@ -236,7 +236,7 @@ def _run_paper_with_router(args, store, event_sizing):
     router = MABRouter(list(strats.keys()), seed=args.router_seed, warmup_trades=50)
     runner = MABPaperRunner(
         strategies=strats, router=router,
-        initial_balance=500.0, default_lots=0.01, max_lots=0.1,
+        initial_balance=500.0, default_volume=0.01, max_position_volume=0.1,
         risk_per_trade_pct=1.0,
         max_daily_loss_pct=15.0,
         enable_circuit=args.enable_circuit,

@@ -118,9 +118,9 @@ class MABPaperRunner:
         strategies: dict[str, BaseStrategy],
         router: MABRouter,
         initial_balance: float = 500.0,
-        default_lots: float = 0.01,
-        max_lots: float = 0.5,
-        min_lots: float = 0.01,
+        default_volume: float = 0.01,
+        max_position_volume: float = 0.5,
+        min_volume: float = 0.01,
         warmup_bars: int = 500,
         # 风控 (从 PaperTrader 同款参数)
         max_daily_loss_pct: float = 10.0,
@@ -129,7 +129,7 @@ class MABPaperRunner:
         single_risk_usd: float = 35.0,
         volatility_mult: float = 3.0,
         # FOOTGUN-2 fix (audit 2026-06-06): 改 None=禁用 vs 0.0=真 0% 风险
-        risk_per_trade_pct: float | None = None,  # 0=固定 default_lots，>0 启用 Kelly 动态仓位
+        risk_per_trade_pct: float | None = None,  # 0=固定 default_volume，>0 启用 Kelly 动态仓位
         enable_circuit: bool = True,
         scheduler=None,             # SelfLearningScheduler
         scorer=None,                # WeightedScorer
@@ -160,12 +160,12 @@ class MABPaperRunner:
 
         # 复用 PaperTrader 的风控/撮合
         # enable_circuit=False → pre_trade + circuit_breaker 都关 (baseline 语义)
-        # risk_per_trade_pct > 0 启用 Kelly-style 动态仓位 (按 equity × risk% / sl_distance 自动算手数)
+        # risk_per_trade_pct > 0 启用 Kelly-style 动态仓位 (按 equity × risk% / sl_distance 自动算 volume)
         self.paper = PaperTrader(
             strategy=primary_strategy,
             initial_balance=initial_balance,
-            default_lots=default_lots,
-            max_lots=max_lots,
+            default_volume=default_volume,
+            max_position_volume=max_position_volume,
             warmup_bars=warmup_bars,
             max_daily_loss_pct=max_daily_loss_pct,
             max_consecutive_loss=max_consecutive_loss,
@@ -176,8 +176,8 @@ class MABPaperRunner:
             enable_circuit=enable_circuit,
             event_sizing=event_sizing,
         )
-        # 直接改 engine min_lots (PaperTrader 没暴露, 但 engine 有这个属性)
-        self.paper.engine.min_lots = min_lots
+        # 直接改 engine min_volume (PaperTrader 没暴露, 但 engine 有这个属性)
+        self.paper.engine.min_volume = min_volume
 
         # 统计
         self._strategy_picks: dict[str, int] = {s: 0 for s in strategies}
@@ -389,7 +389,7 @@ class MABPaperRunner:
             # REFACTOR-6 (audit 2026-06-06): 让 ProbabilityCalibrator 真被消费
             # ─────────────────────────────────────────────────────────────
             # 旧实现: 校准只改 signal.confidence, 但 confidence 没进仓位决策
-            #         (PaperEngine 算 lots 用 signal.strength, 跟 confidence 解耦)
+            #         (PaperEngine 算 volume 用 signal.strength, 跟 confidence 解耦)
             #         → 校准结果被算出来就被丢了
             # 新实现: 把校准因子 (cal/raw) 应用到 signal.strength, 让 PaperEngine
             #         按校准后 strength 算手数, 校准真影响仓位

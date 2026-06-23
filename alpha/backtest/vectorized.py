@@ -20,7 +20,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════
-# 交易成本 (XAUUSD+, 0.01 lot)
+# 交易成本 (XAUUSD+, 0.01 volume unit)
 # ═══════════════════════════════════════════════════════════
 SPREAD_COST = 0.12       # 双边点差 $0.12
 COMMISSION_PER_LOT = 6.0  # 双边佣金 $6/标准手
@@ -101,10 +101,10 @@ class FactorBacktester:
     Args:
         df: 历史 K 线 DataFrame (columns: time, open, high, low, close, volume)
         config: RuntimeConfig 实例或 None (使用默认)
-        lot_size: 固定手数 (默认 0.01)
+        lot_size: 固定 volume unit (默认 0.01)
         initial_capital: 初始资金 (默认 $10,000)
         slippage_bps: 滑点 bps (默认 2 = 0.02%)
-        commission_per_lot: 双边佣金 $/标准手 (默认 $6)
+        commission_per_volume: 双边佣金 $/标准 volume unit (默认 $6)
         timeframe: K 线周期 (默认 "M5")
     """
 
@@ -121,7 +121,7 @@ class FactorBacktester:
         lot_size: float = 0.01,
         initial_capital: float = 10000.0,
         slippage_bps: float = 2.0,
-        commission_per_lot: float = 6.0,
+        commission_per_volume: float = 6.0,
         timeframe: str = "M5",
     ):
         self.df = df
@@ -129,7 +129,7 @@ class FactorBacktester:
         self.lot_size = lot_size
         self.initial_capital = initial_capital
         self.slippage_bps = slippage_bps
-        self.commission_per_lot = commission_per_lot
+        self.commission_per_volume = commission_per_volume
         self.timeframe = timeframe
 
         # 延迟导入避免循环依赖
@@ -147,7 +147,7 @@ class FactorBacktester:
 
     def _calc_trade_cost(self) -> float:
         """单笔双边成本 (点差 + 佣金)。"""
-        return SPREAD_COST + self.commission_per_lot * self.lot_size
+        return SPREAD_COST + self.commission_per_volume * self.lot_size
 
     @staticmethod
     def _calc_swap(entry_ts: float, exit_ts: float) -> float:

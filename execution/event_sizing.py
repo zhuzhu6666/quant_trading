@@ -10,7 +10,7 @@ Events 表结构: (date TEXT, type TEXT, description TEXT, importance INTEGER)
 用法:
     es = EventSizing(db_path="data/events.duckdb")
     mult = es.get_multiplier(bar_time_epoch)  # 0.2 .. 1.0
-    lots *= mult
+    volume *= mult
 """
 from __future__ import annotations
 

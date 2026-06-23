@@ -26,7 +26,7 @@ class CrossAssetCovariance:
         cac = CrossAssetCovariance(["XAUUSD+", "EURUSD"], window=60)
         cac.update(multi_close_df)  # columns: (XAUUSD+, close), (EURUSD, close)
         weights = cac.risk_parity_weights()  # {"XAUUSD+": 0.6, "EURUSD": 0.4}
-        limits = cac.position_limits(total_lots=0.5)  # {"XAUUSD+": 0.3, "EURUSD": 0.2}
+        limits = cac.position_limits(total_volume=0.5)  # {"XAUUSD+": 0.3, "EURUSD": 0.2}
     """
 
     def __init__(self, symbols: list[str], window: int = 60):
@@ -184,19 +184,19 @@ class CrossAssetCovariance:
 
         return {sym: float(w) for sym, w in zip(self.symbols, w)}
 
-    def position_limits(self, total_lots: float = 0.5,
+    def position_limits(self, total_volume: float = 0.5,
                         max_single_pct: float = 0.60) -> dict[str, float]:
         """返回各品种的仓位上限
 
         Args:
-            total_lots: 所有品种总手数上限
+            total_volume: 所有品种总 volume 上限
             max_single_pct: 单一品种最大占比 (默认 60%)
         """
         weights = self.risk_parity_weights()
         limits = {}
         for sym in self.symbols:
             w = weights.get(sym, 1.0 / len(self.symbols))
-            limits[sym] = min(w * total_lots, max_single_pct * total_lots)
+            limits[sym] = min(w * total_volume, max_single_pct * total_volume)
         return limits
 
     def correlation_warning(self, threshold: float = 0.7) -> list[str]:

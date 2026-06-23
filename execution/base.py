@@ -33,7 +33,7 @@ class PositionInfo:
     """统一持仓信息
 
     volume 使用 API 原生口径（cTrader volume unit），上层不要再自行
-    解释成 lot/手；如需展示，交给 UI 层格式化。
+    解释成 volume/手；如需展示，交给 UI 层格式化。
     """
     position_id: int = 0
     symbol_id: int = 0
@@ -51,8 +51,7 @@ class PositionInfo:
     def get(self, key: str, default: Any = None) -> Any:
         """Dict-like accessor for canonical fields.
 
-        Only the broker/API volume field is supported for size. Legacy lot
-        aliases are intentionally not mapped here.
+        Only the broker/API volume field is supported for size. Legacy volume aliases are intentionally not mapped here.
         """
         if key == "type":
             return "buy" if self.direction == 1 else "sell" if self.direction == -1 else default

@@ -300,7 +300,7 @@ class AttributionEngine:
             _tdb = _duckdb.connect("data/trades.duckdb")
             _tdb.execute("""
                 INSERT OR REPLACE INTO trades
-                (position_id, symbol, direction, lots,
+                (position_id, symbol, direction, volume,
                  open_ts, open_price, open_reason,
                  composite_score, tactical_score, macro_score,
                  status)
@@ -317,7 +317,7 @@ class AttributionEngine:
             open_exec_id = _next_db_id()
             _tdb.execute("""
                 INSERT INTO trade_executions
-                (id, trade_id, exec_ts, exec_type, price, lots, reason)
+                (id, trade_id, exec_ts, exec_type, price, volume, reason)
                 VALUES (?, ?, ?, 'open', ?, ?, 'signal_open')
             """, [open_exec_id, position_id, attribution.open_ts, attribution.open_price, attribution.api_volume])
             _tdb.close()
@@ -499,7 +499,7 @@ class AttributionEngine:
             pnl_pct = round(trade_pnl / attrib.open_price * 100, 4) if attrib.open_price else 0.0
             _tdb.execute("""
                 INSERT OR REPLACE INTO trades
-                (position_id, symbol, direction, lots,
+                (position_id, symbol, direction, volume,
                  open_ts, open_price, open_reason,
                  close_ts, close_price, trade_pnl, pnl_pct,
                  composite_score, tactical_score, macro_score,
@@ -527,7 +527,7 @@ class AttributionEngine:
             close_exec_id = trade_write_base + 999
             _tdb.execute("""
                 INSERT INTO trade_executions
-                (id, trade_id, exec_ts, exec_type, price, lots, reason)
+                (id, trade_id, exec_ts, exec_type, price, volume, reason)
                 VALUES (?, ?, ?, 'close', ?, ?, 'signal_close')
             """, [close_exec_id, position_id, close_ts, close_price, attrib.api_volume])
             _tdb.close()

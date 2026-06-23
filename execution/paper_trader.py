@@ -91,33 +91,39 @@ class PaperTrader:
       5. 收集 equity 序列，结束时输出报告
     """
 
-    def __init__(self, strategy: BaseStrategy, initial_balance: float = 500.0,
-                 default_lots: float = 0.01, max_lots: float = 0.5,
-                 warmup_bars: int = 500,
-                 # 风控参数（按 $500 账户调过, P3 调优 2026-06-02）
-                 # 5% 在 50K bar 触发 13+ 次, PnL -33%
-                 # 10% 触发 ~3 次, PnL -9% (从 -33% 提升 3.5x)
-                 # 注: 0.01 手 XAUUSD 3ATR 单笔风险 ≈ $20-30
-                 #     对 $500 账户等于 4-6%，已突破传统 1-2% 准则
-                 #     阈值放宽到 10% 以让策略能开仓，依赖熔断器兜底
-                 max_daily_loss_pct: float = 10.0,
-                 max_consecutive_loss: int = 5,
-                 max_trades_per_day: int = 20,
-                 single_risk_usd: float = 35.0,
-                 volatility_mult: float = 3.0,
-                 # FOOTGUN-2 fix (audit 2026-06-06): 区分 None=禁用 vs 0.0=真 0% 风险
-                 # None → 固定 default_lots, 0.0 → 拒单 (lots=0), >0 → Kelly
-                 risk_per_trade_pct: float | None = None,
-                 enable_circuit: bool = True,
-                 # P2: 资金费/隔夜利息 (XAUUSD+ 典型 -1.0/lot/day long, 0 short)
-                 enable_swap: bool = True,
-                 swap_long_per_lot_per_day: float = -1.0,
-                 swap_short_per_lot_per_day: float = 0.0,
-                 event_sizing=None):
+    def __init__(
+        self,
+        strategy: BaseStrategy,
+        initial_balance: float = 500.0,
+        default_volume: float = 0.01,
+        max_position_volume: float = 0.5,
+        warmup_bars: int = 500,
+        # 风控参数（按 $500 账户调过, P3 调优 2026-06-02）
+        # 5% 在 50K bar 触发 13+ 次, PnL -33%
+        # 10% 触发 ~3 次, PnL -9% (从 -33% 提升 3.5x)
+        # 注: 0.01 手 XAUUSD 3ATR 单笔风险 ≈ $20-30
+        #     对 $500 账户等于 4-6%，已突破传统 1-2% 准则
+        #     阈值放宽到 10% 以让策略能开仓，依赖熔断器兜底
+        max_daily_loss_pct: float = 10.0,
+        max_consecutive_loss: int = 5,
+        max_trades_per_day: int = 20,
+        single_risk_usd: float = 35.0,
+        volatility_mult: float = 3.0,
+        # FOOTGUN-2 fix (audit 2026-06-06): 区分 None=禁用 vs 0.0=真 0% 风险
+        # None → 固定 default_volume, 0.0 → 拒单 (volume=0), >0 → Kelly
+        risk_per_trade_pct: float | None = None,
+        enable_circuit: bool = True,
+        # P2: 资金费/隔夜利息 (XAUUSD+ 典型 -1.0/volume/day long, 0 short)
+        enable_swap: bool = True,
+        swap_long_per_volume_per_day: float = -1.0,
+        swap_short_per_volume_per_day: float = 0.0,
+        event_sizing=None,
+    ):
+
         # FOOTGUN-2 fix (audit 2026-06-06): 改 None=禁用 vs 0.0=真 0% 风险
         # 旧的"0.0 静默禁用"已修, paper_engine._open 走 3 分支:
-        #   None  → 固定 default_lots × size_mult
-        #   0.0   → lots=0 触发拒单
+        #   None  → 固定 default_volume × size_mult
+        #   0.0   → volume=0 触发拒单
         #   > 0   → Kelly 动态仓位
         # 旧 warning 块已删除 (paper_engine.__init__ 现在发新 warning)
         self.strategy = strategy
@@ -149,15 +155,15 @@ class PaperTrader:
 
         self.engine = PaperExecutionEngine(
             initial_balance=initial_balance,
-            default_lots=default_lots,
-            max_position_lots=max_lots,
+            default_volume=default_volume,
+            max_position_volume=max_position_volume,
             risk_per_trade_pct=risk_per_trade_pct,
             pre_trade=self.pre_trade,
             circuit_breaker=self.circuit_breaker,
             atr_source=_atr_source,
             enable_swap=enable_swap,
-            swap_long_per_lot_per_day=swap_long_per_lot_per_day,
-            swap_short_per_lot_per_day=swap_short_per_lot_per_day,
+            swap_long_per_volume_per_day=swap_long_per_volume_per_day,
+            swap_short_per_volume_per_day=swap_short_per_volume_per_day,
             event_sizing=event_sizing,
         )
         self.warmup_bars = warmup_bars

@@ -13,7 +13,7 @@ Paper Execution Engine — 模拟撮合引擎
     4. 都不在 → 以 close 价成交（视为 hold）
   对空头对称。
 
-手续费：$6/lot 单边（与实盘一致）
+手续费：$6/volume 单边（与实盘一致）
 滑点：2bps，固定
 
 状态：复用 core.state 单例，与回测/实盘一致。
@@ -63,42 +63,42 @@ class PaperExecutionEngine:
     """
 
     # 合约/费用参数（XAUUSD+ Bybit 实盘一致）
-    CONTRACT_SIZE = 100        # 100 oz/lot (XAUUSD+ Bybit 实盘 1 lot = 100 oz)
-    COMMISSION_PER_LOT = 6.0   # $6/lot 单边
+    CONTRACT_SIZE = 100        # 100 oz/volume unit (XAUUSD+ Bybit 实盘 1 volume unit = 100 oz)
+    COMMISSION_PER_VOLUME = 6.0   # $6/volume 单边
     SLIPPAGE_BPS = 2.0         # 2bps
     DIGITS = 2
 
     def __init__(self, initial_balance: float = 500.0,
-                 default_lots: float = 0.01,
-                 max_position_lots: float = 0.5,
+                 default_volume: float = 0.01,
+                 max_position_volume: float = 0.5,
                  # FOOTGUN-2 fix (audit 2026-06-06): 改 None=禁用 vs 0.0=真 0% 风险
-                 # 默认 None (跟 paper_trader 对齐) — 保持 default_lots 不变,
+                 # 默认 None (跟 paper_trader 对齐) — 保持 default_volume 不变,
                  # 想启用 Kelly 仓位 caller 显式传 >0 (main.py 传 2.0)
                  risk_per_trade_pct: float | None = None,
-                 min_lots: float = 0.01,
+                 min_volume: float = 0.01,
                  pre_trade: Optional[PreTradeChecker] = None,
                  circuit_breaker: Optional[CircuitBreaker] = None,
                  atr_source: Optional[callable] = None,
                  slippage_model: Optional[DynamicSlippageModel] = None,
                  event_sizing: Optional[EventSizing] = None,
-                 # P2: 资金费/隔夜利息 (XAUUSD+ 典型: long=-1.0/lot/day, short=0)
-                 # swap 单位: USD per lot per day, 负值=成本, 正值=返佣
-                 # 对 0.01 lot 持仓 1 天, -1.0 -> -0.01 USD
-                 swap_long_per_lot_per_day: float = -1.0,
-                 swap_short_per_lot_per_day: float = 0.0,
+                 # P2: 资金费/隔夜利息 (XAUUSD+ 典型: long=-1.0/volume/day, short=0)
+                 # swap 单位: USD per volume unit per day, 负值=成本, 正值=返佣
+# 对 0.01 volume 持仓 1 天, -1.0 -> -0.01 USD
+                 swap_long_per_volume_per_day: float = -1.0,
+                 swap_short_per_volume_per_day: float = 0.0,
                  enable_swap: bool = True):
         self.initial_balance = initial_balance
-        self.default_lots = default_lots
-        self.max_position_lots = max_position_lots
-        self.min_lots = min_lots
+        self.default_volume = default_volume
+        self.max_position_volume = max_position_volume
+        self.min_volume = min_volume
         self.risk_per_trade_pct = risk_per_trade_pct  # None=禁用动态仓位, 0.0=真 0% (拒单), >0=Kelly
         # FOOTGUN-2 fix: 显式区分 None vs 0
         if risk_per_trade_pct is None:
-            logger.debug("[FOOTGUN-2] risk_per_trade_pct=None, 禁用 Kelly 动态仓位, 走 fixed default_lots")
+            logger.debug("[FOOTGUN-2] risk_per_trade_pct=None, 禁用 Kelly 动态仓位, 走 fixed default_volume")
         elif risk_per_trade_pct == 0.0:
             logger.warning(
-                "[FOOTGUN-2] risk_per_trade_pct=0.0, 真 0%% 风险 → lots * 0 = 0 触发拒单。"
-                "如果想禁用动态仓位, 改传 None; 想固定 default_lots 不变, 传 None 后用 default_lots 字段控制"
+                "[FOOTGUN-2] risk_per_trade_pct=0.0, 真 0%% 风险 → volume * 0 = 0 触发拒单。"
+                "如果想禁用动态仓位, 改传 None; 想固定 default_volume 不变, 传 None 后用 default_volume 字段控制"
             )
         self.pre_trade = pre_trade
         self.circuit_breaker = circuit_breaker
@@ -110,8 +110,8 @@ class PaperExecutionEngine:
         self.event_sizing = event_sizing
         # P2: swap/funding 资金费 (隔夜利息)
         self.enable_swap = enable_swap
-        self.swap_long_per_lot_per_day = swap_long_per_lot_per_day
-        self.swap_short_per_lot_per_day = swap_short_per_lot_per_day
+        self.swap_long_per_volume_per_day = swap_long_per_volume_per_day
+        self.swap_short_per_volume_per_day = swap_short_per_volume_per_day
         # 当前 bar 上下文（供 _apply_slippage 使用）
         self._current_bar: dict | None = None
         self._current_atr: float | None = None
@@ -154,8 +154,8 @@ class PaperExecutionEngine:
         slip = price * self.SLIPPAGE_BPS / 10000.0
         return price + slip if direction == 1 else price - slip
 
-    def _commission(self, lots: float) -> float:
-        return lots * self.COMMISSION_PER_LOT
+    def _commission(self, volume: float) -> float:
+        return volume * self.COMMISSION_PER_VOLUME
 
     def _open(self, signal: Signal, fill_price: float, bar_time: float | None = None):
         """开仓
@@ -172,43 +172,43 @@ class PaperExecutionEngine:
 
         # ── 动态仓位（Kelly + Event Sizing） ──────────────────
         # risk_per_trade_pct:
-        #   - None  → 禁用动态仓位, 走 fixed default_lots × size_mult
-        #   - 0.0   → 真 0% 风险, lots = 0 → pre_trade 拒单
-        #   - > 0   → Kelly: lots = risk_dollars / (sl_distance × contract_size)
+        #   - None  → 禁用动态仓位, 走 fixed default_volume × size_mult
+        #   - 0.0   → 真 0% 风险, volume = 0 → pre_trade 拒单
+        #   - > 0   → Kelly: volume = risk_dollars / (sl_distance × contract_size)
         # signal.strength (默认 1.0) 作为额外乘数（FOMC boost 用）
         size_mult = max(0.01, float(getattr(signal, 'strength', 1.0) or 1.0))
         if self.risk_per_trade_pct is not None and self.risk_per_trade_pct > 0:
             pip_risk = abs(fill_price - sl_price)
             risk_dollars = self.equity * (self.risk_per_trade_pct / 100.0) * size_mult
             if pip_risk > 0:
-                # lots = risk_usd / (sl_distance × contract_size)
-                lots = risk_dollars / (pip_risk * self.CONTRACT_SIZE)
+                # volume = risk_usd / (sl_distance × contract_size)
+                volume = risk_dollars / (pip_risk * self.CONTRACT_SIZE)
             else:
-                lots = self.default_lots
+                volume = self.default_volume
         elif self.risk_per_trade_pct == 0.0:
-            # FOOTGUN-2 fix: 真 0% 风险 = lots=0 (拒单)
-            lots = 0.0
+            # FOOTGUN-2 fix: 真 0% 风险 = volume=0 (拒单)
+            volume = 0.0
         else:
             # None 或其他: 固定手数 × size_mult
-            lots = self.default_lots * size_mult
+            volume = self.default_volume * size_mult
 
         # ── Event multiplier ────────────────────────────────
         # 事件临近时缩小仓位: mult ∈ [0.2, 1.0]
         if self.event_sizing is not None and signal.timestamp > 0:
             event_mult = self.event_sizing.get_multiplier(signal.timestamp)
-            lots *= event_mult
+            volume *= event_mult
             if event_mult < 1.0:
                 logger.debug(
                     f"EVENT SIZING: mult={event_mult:.2f} "
-                    f"lots_after={lots:.4f} (before clamp)"
+                    f"volume_after={volume:.4f} (before clamp)"
                 )
 
-        # 统一钳制 [min_lots, max_position_lots]，按 0.01 取整（MT5 步进）
-        lots = max(self.min_lots, min(round(lots, 2), self.max_position_lots))
+        # 统一钳制 [min_volume, max_position_volume]，按 0.01 取整（MT5 步进）
+        volume = max(self.min_volume, min(round(volume, 2), self.max_position_volume))
 
         # ── 前置风控检查 ──────────────────────────────
         if self.pre_trade is not None:
-            passed, reason = self.pre_trade.check(fill_price, sl_price, lots)
+            passed, reason = self.pre_trade.check(fill_price, sl_price, volume)
             if not passed:
                 self._blocked_count += 1
                 logger.info(
@@ -226,7 +226,7 @@ class PaperExecutionEngine:
 
         # 模拟滑点
         actual_price = self._apply_slippage(fill_price, signal.direction)
-        comm = self._commission(lots)
+        comm = self._commission(volume)
         # 计算实际滑点（百分点）
         slip_pct = abs(actual_price - fill_price) / fill_price * 100
         if self.circuit_breaker is not None:
@@ -243,7 +243,7 @@ class PaperExecutionEngine:
         self.position = Position(
             symbol=signal.symbol,
             direction=signal.direction,
-            volume=lots,
+            volume=volume,
             entry_price=actual_price,
             current_price=actual_price,
             sl_price=sl_price,
@@ -258,7 +258,7 @@ class PaperExecutionEngine:
             ticket=self._new_ticket(),
             symbol=signal.symbol,
             direction=signal.direction,
-            volume=lots,
+            volume=volume,
             price=actual_price,
             time=signal.timestamp,
             pnl=-comm,
@@ -270,8 +270,8 @@ class PaperExecutionEngine:
         logger.info(
             f"OPEN {'LONG' if signal.direction==1 else 'SHORT'} "
             f"ticket={trade.ticket} price={actual_price:.2f} "
-            f"sl={sl_price:.2f} tp={tp_price:.2f} lots={lots} comm=${comm:.2f}"
-        )
+            f"sl={sl_price:.2f} tp={tp_price:.2f} volume={volume} comm=${comm:.2f}"
+)
 
     def _close(self, fill_price: float, reason: str, bar_time: float | None = None) -> Optional[PaperTrade]:
         """平仓"""
@@ -291,7 +291,7 @@ class PaperExecutionEngine:
             pnl = (pos.entry_price - actual_price) * pos.volume * self.CONTRACT_SIZE
 
         # P2: 资金费/隔夜利息 (swap/funding)
-        # 持仓秒数 → 天数 → swap_rate (USD/lot/day) × 手数
+        # 持仓秒数 → 天数 → swap_rate (USD/volume/day) × volume
         swap_cost = 0.0
         if self.enable_swap and pos.entry_time is not None and bar_time is not None:
             try:
@@ -302,9 +302,9 @@ class PaperExecutionEngine:
                     entry_ts = float(pos.entry_time)
                 hold_sec = max(0.0, float(bar_time) - entry_ts)
                 hold_days = hold_sec / 86400.0
-                swap_rate = self.swap_long_per_lot_per_day if pos.direction == 1 else self.swap_short_per_lot_per_day
-                # swap_rate 是 USD per lot per day, pos.volume 是 lots
-                # 成本: rate × lots × days (rate 已是 signed, 负值=成本, 正值=返佣)
+                swap_rate = self.swap_long_per_volume_per_day if pos.direction == 1 else self.swap_short_per_volume_per_day
+                # swap_rate 是 USD per volume unit per day, pos.volume 是 volume
+                # 成本: rate × volume × days (rate 已是 signed, 负值=成本, 正值=返佣)
                 swap_cost = swap_rate * pos.volume * hold_days
             except Exception as e:
                 logger.debug(f"swap calc skipped: {e}")

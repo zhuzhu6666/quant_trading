@@ -10,7 +10,7 @@ import numpy as np
 
 
 # ── 公共常量 (跟 paper 配置对齐) ──
-CONTRACT_SIZE = 100       # XAUUSD+ 100 oz/lot
+CONTRACT_SIZE = 100       # XAUUSD+ 100 oz/volume unit
 INITIAL_BALANCE = 500.0
 COMMISSION = 0.00003      # $6/100oz, round-turn $12
 WARMUP_BARS = 500

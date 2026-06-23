@@ -22,14 +22,14 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 
 XAUUSD_PIP = 0.01  # 1 pip in price terms (typical 5-digit broker)
-XAUUSD_CONTRACT_SIZE = 100  # oz per standard lot
-XAUUSD_PIP_VALUE_PER_LOT = XAUUSD_PIP * XAUUSD_CONTRACT_SIZE  # $1.00 / lot
+XAUUSD_CONTRACT_SIZE = 100  # oz per standard volume unit
+XAUUSD_PIP_VALUE_PER_VOLUME = XAUUSD_PIP * XAUUSD_CONTRACT_SIZE  # $1.00 / volume unit
 XAUUSD_TYPICAL_PRICE = 2000.0  # ~USD/oz
 
 NORMAL_SPREAD_PIPS = 0.25  # mid-point of 0.2–0.3 pips
 DROUGHT_SPREAD_PIPS = 5.0
 
-ATR_M5_PER_LOT = 10.0  # $ per lot per 5-min bar (mid-point of $8–12)
+ATR_M5_PER_VOLUME = 10.0  # $ per volume unit per 5-min bar (mid-point of $8–12)
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +232,7 @@ class StressTester:
             total_pnl += pnl
             lbl = "gain" if pnl >= 0 else "loss"
             lines.append(
-                f"{_pos_val(pos, 'direction', 'buy')} {vol} lot(s): "
+                f"{_pos_val(pos, 'direction', 'buy')} {vol} volume unit(s): "
                 f"${abs(pnl):,.2f} ({lbl})"
             )
 
@@ -290,7 +290,7 @@ class StressTester:
             cost = vol * XAUUSD_CONTRACT_SIZE * price * SLIPPAGE_RATIO
             total_cost += cost
             lines.append(
-                f"{_pos_val(pos, 'direction', 'buy')} {vol} lot(s): "
+                f"{_pos_val(pos, 'direction', 'buy')} {vol} volume unit(s): "
                 f"slippage ${cost:,.2f}"
             )
 
@@ -342,11 +342,11 @@ class StressTester:
         for pos in positions:
             vol = _pos_val(pos, "volume", 0.01)
 
-            # Cost = extra pips × pip-value-per-lot × lots
-            cost = extra_spread_pips * XAUUSD_PIP_VALUE_PER_LOT * vol
+            # Cost = extra pips × pip-value-per-volume × volume
+            cost = extra_spread_pips * XAUUSD_PIP_VALUE_PER_VOLUME * vol
             total_cost += cost
             lines.append(
-                f"{_pos_val(pos, 'direction', 'buy')} {vol} lot(s): "
+                f"{_pos_val(pos, 'direction', 'buy')} {vol} volume unit(s): "
                 f"extra spread ${cost:,.2f}"
             )
 
@@ -379,7 +379,7 @@ class StressTester:
     ) -> StressScenarioResult:
         """2 h cTrader outage → gap open → max adverse movement.
 
-        2h ATR approximated as ``1.5 × ATR_M5 × 24`` per lot, giving a
+        2h ATR approximated as ``1.5 × ATR_M5 × 24`` per volume unit, giving a
         worst-case adverse price move in the *wrong* direction for each open
         position (longs lose on gap-down, shorts lose on gap-up).
         """
@@ -393,8 +393,8 @@ class StressTester:
                 details="No positions open — no impact.",
             )
 
-        # 2h ATR ≈ 1.5 × M5_ATR × 24  (dollars per lot)
-        atr_2h_per_lot = 1.5 * ATR_M5_PER_LOT * 24  # e.g. 360.0
+        # 2h ATR ≈ 1.5 × M5_ATR × 24  (dollars per volume unit)
+        atr_2h_per_volume = 1.5 * ATR_M5_PER_VOLUME * 24  # e.g. 360.0
 
         total_loss = 0.0
         lines: list[str] = []
@@ -402,10 +402,10 @@ class StressTester:
         for pos in positions:
             vol = _pos_val(pos, "volume", 0.01)
             # Worst-case adverse move = ATR magnitude regardless of direction
-            loss = atr_2h_per_lot * vol
+            loss = atr_2h_per_volume * vol
             total_loss += loss
             lines.append(
-                f"{_pos_val(pos, 'direction', 'buy')} {vol} lot(s): "
+                f"{_pos_val(pos, 'direction', 'buy')} {vol} volume unit(s): "
                 f"adverse move ${loss:,.2f}"
             )
 
@@ -469,10 +469,10 @@ class StressTester:
 
         for pos in positions:
             vol = _pos_val(pos, "volume", 0.01)
-            cost = NORMAL_SPREAD_PIPS * XAUUSD_PIP_VALUE_PER_LOT * vol
+            cost = NORMAL_SPREAD_PIPS * XAUUSD_PIP_VALUE_PER_VOLUME * vol
             total_cost += cost
             lines.append(
-                f"{_pos_val(pos, 'direction', 'buy')} {vol} lot(s): "
+                f"{_pos_val(pos, 'direction', 'buy')} {vol} volume unit(s): "
                 f"exit cost ${cost:,.2f}"
             )
 

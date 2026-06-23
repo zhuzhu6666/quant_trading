@@ -52,7 +52,7 @@ def _short_signal(atr=5.0, price=2000.0, ts=1_000_000):
 
 def _engine():
     return PaperExecutionEngine(
-        initial_balance=500.0, default_lots=0.01,
+        initial_balance=500.0, default_volume=0.01,
         pre_trade=None, circuit_breaker=None, risk_per_trade_pct=None,
     )
 

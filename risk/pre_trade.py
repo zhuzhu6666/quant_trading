@@ -26,8 +26,8 @@ class PreTradeChecker:
                  max_trades: int = 20,
                  max_consecutive_loss: int = 5,
                  # FOOTGUN-3 fix (audit 2026-06-06): 默认 2.0 → 35.0
-                 # 0.01 lot × 3ATR SL × 100 oz = $25-30 实际单笔风险, 2.0 默认会拒几乎所有开仓
-                 # PaperTrader 默认已用 35.0, 这里跟 PaperTrader 对齐
+                 # 0.01 volume × 3ATR SL × 100 oz = $25-30 实际单笔风险, 2.0 默认会拒几乎所有开仓
+# PaperTrader 默认已用 35.0, 这里跟 PaperTrader 对齐
                  single_risk_usd: float = 35.0):
         self.max_daily_loss_pct = max_daily_loss_pct
         self.max_trades = max_trades
@@ -66,7 +66,7 @@ class PreTradeChecker:
 
         # 6. 单笔风险检查
         pip_risk = abs(entry_price - sl_price)
-        dollar_risk = pip_risk * size * 100  # 100 oz/lot
+        dollar_risk = pip_risk * size * 100  # 100 oz/volume unit
         if dollar_risk > self.single_risk_usd:
             return False, f"单笔风险${dollar_risk:.2f}超过上限${self.single_risk_usd}"
 
