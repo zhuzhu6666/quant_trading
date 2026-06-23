@@ -148,7 +148,7 @@ class FactorAttributionStats:
             return float("nan")
 
         data = list(self.recent_mcs)[-window:]
-        if len(data) < 10:
+        if len(data) < 30:
             return float("nan")
         # MC 序列 → equity curve
         equity = np.cumsum(data)
@@ -176,7 +176,7 @@ class FactorAttributionStats:
 
     def _compute_ir(self, window: int) -> float:
         data = list(self.recent_mcs)[-window:]
-        if len(data) < 10:
+        if len(data) < 20:
             return float("nan")
         arr = np.array(data)
         mean, std = arr.mean(), arr.std()
@@ -596,6 +596,8 @@ class AttributionEngine:
         try:
             snapshot = {}
             for name, s in self._per_factor.items():
+                if s.n_trades < 3:
+                    continue  # 跳过样本太少因子，避免极端 Sharpe
                 snapshot[name] = {
                     "n_trades": s.n_trades,
                     "n_voted": s.n_voted,
