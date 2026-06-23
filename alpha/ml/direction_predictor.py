@@ -41,18 +41,30 @@ FACTOR_NAME = "xgb_dir"
 # ═══════════════════════════════════════════════════════════
 
 def _load_attribution_stats() -> dict[str, dict]:
-    """加载因子归因快照 (factor_attribution.json)。
+    """从 state.db 加载因子归因快照。
 
     Returns:
         {因子名: {composite_sharpe_score, win_rate, avg_mc, ...}}
-        文件不存在或不可用时返回空 dict。
+        无数据时返回空 dict。
     """
-    if not _ATTRIBUTION_PATH.exists():
-        return {}
     try:
-        return json.loads(_ATTRIBUTION_PATH.read_text(encoding="utf-8"))
+        from backend.core.db import get_state_conn
+        conn = get_state_conn()
+        try:
+            rows = conn.execute(
+                "SELECT factor, data_json FROM attribution_snapshot"
+            ).fetchall()
+            data = {}
+            for r in rows:
+                try:
+                    data[r["factor"]] = json.loads(r["data_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            return data
+        finally:
+            conn.close()
     except Exception:
-        logger.debug("[xgb_dir] failed to load attribution stats")
+        logger.debug("[xgb_dir] failed to load attribution stats from state.db")
         return {}
 
 

@@ -62,13 +62,19 @@ def _read_closed_loop_status() -> dict:
     attr_status = "no_data"
     attr_trades = 0
     try:
-        p = Path(__file__).resolve().parent.parent / "data" / "charts" / "factor_attribution.json"
-        if p.exists():
-            with open(p, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            if raw:
-                attr_trades = sum(s.get("n_trades", 0) for s in raw.values())
+        from backend.core.db import get_state_conn
+        conn = get_state_conn()
+        try:
+            rows = conn.execute(
+                "SELECT data_json FROM attribution_snapshot"
+            ).fetchall()
+            for r in rows:
+                d = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
+                attr_trades += d.get("n_trades", 0)
+            if rows:
                 attr_status = "active" if attr_trades > 10 else "cold_start"
+        finally:
+            conn.close()
     except Exception:
         attr_status = "error"
 

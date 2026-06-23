@@ -618,16 +618,7 @@ class AttributionEngine:
                     "avg_gross": round(s.total_gross / s.n_voted, 6) if s.n_voted > 0 else 0,
                     "avg_net": round(s.total_net_pnl / s.n_voted, 6) if s.n_voted > 0 else 0,
                 }
-            # 原子写入: 先写临时文件再 rename
-            path = Path(self._stats_snapshot_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(snapshot, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            tmp.replace(path)
-            # ★ 同步写入 state.db
+            # ★ 写入 state.db (唯一持久化路径)
             if not _os.environ.get("PYTEST_CURRENT_TEST"):
                 try:
                     from backend.core.db import get_state_conn
@@ -737,15 +728,6 @@ class AttributionEngine:
                     conn.close()
             except Exception as e:
                 logger.warning("Failed to load stats from state.db: %s", e)
-
-        # Fallback: JSON 文件
-        if not data:
-            path = Path(self._stats_snapshot_path)
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except Exception as e:
-                    logger.warning("Failed to load stats from JSON: %s", e)
 
         if not data:
             return

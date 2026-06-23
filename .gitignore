@@ -30,6 +30,7 @@ data/*.db-shm
 data/*.db-wal
 data/*.bak
 data/charts/*.bak
+data/charts/factor_attribution.json
 data/ticks/
 data/dukascopy_raw/
 data/feature_models/

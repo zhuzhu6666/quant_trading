@@ -17,7 +17,7 @@ from alpha.attribution_engine import (
 )
 
 
-def _make_stats(name: str, n_trades=20, win_rate=0.6, mc_std=0.02, seed=42):
+def _make_stats(name: str, n_trades=30, win_rate=0.6, mc_std=0.02, seed=42):
     """构造有 N 笔交易记录的 FactorAttributionStats。"""
     stats = FactorAttributionStats(name=name)
     np.random.seed(seed)
@@ -41,7 +41,7 @@ SAMPLE_AWE_CONFIG = {
     "awe_adapt_interval": 50,
     "awe_ic_floor": 0.02,
     "awe_health_floor": 40.0,
-    "awe_disable_min_trades": 20,
+    "awe_disable_min_trades": 30,
     "awe_causal_threshold": -0.3,
     "awe_dsr_p_threshold": 0.95,
     "awe_resurrect_health_threshold": 60.0,
@@ -93,7 +93,7 @@ class TestAdapt:
         a.initialize(SAMPLE_FACTOR_CONFIGS)
         attr = AttributionEngine()
         # 构造正 Sharpe 因子
-        stats = _make_stats("rsi_14", n_trades=20, win_rate=0.7, seed=1)
+        stats = _make_stats("rsi_14", n_trades=30, win_rate=0.7, seed=1)
         attr._per_factor["rsi_14"] = stats
         with patch.object(a, "_check_ic_and_health", return_value=True):
             with patch.object(a, "_enforce_diversity", side_effect=lambda p, *a: p):
@@ -107,7 +107,7 @@ class TestAdapt:
         a.initialize(SAMPLE_FACTOR_CONFIGS)
         attr = AttributionEngine()
         # 构造负 Sharpe 因子
-        stats = _make_stats("rsi_14", n_trades=20, win_rate=0.3, seed=2)
+        stats = _make_stats("rsi_14", n_trades=30, win_rate=0.3, seed=2)
         attr._per_factor["rsi_14"] = stats
         with patch.object(a, "_check_ic_and_health", return_value=True):
             with patch.object(a, "_enforce_diversity", side_effect=lambda p, *a: p):
@@ -124,7 +124,7 @@ class TestAdapt:
         })
         a.initialize({"test": {"weight": 1.0, "tags": ["技术"], "enabled": True}})
         attr = AttributionEngine()
-        stats = _make_stats("test", n_trades=20, win_rate=0.9, mc_std=0.05, seed=3)
+        stats = _make_stats("test", n_trades=30, win_rate=0.9, mc_std=0.05, seed=3)
         attr._per_factor["test"] = stats
         with patch.object(a, "_check_ic_and_health", return_value=True):
             with patch.object(a, "_enforce_diversity", side_effect=lambda p, *a: p):
@@ -137,7 +137,7 @@ class TestAdapt:
         a = AdaptiveWeightEngine({**SAMPLE_AWE_CONFIG, "awe_sensitivity": 0.001})
         a.initialize({"test": {"weight": 1.0, "tags": ["技术"], "enabled": True}})
         attr = AttributionEngine()
-        stats = _make_stats("test", n_trades=20, win_rate=0.5, mc_std=0.01, seed=4)
+        stats = _make_stats("test", n_trades=30, win_rate=0.5, mc_std=0.001, seed=42)
         attr._per_factor["test"] = stats
         with patch.object(a, "_check_ic_and_health", return_value=True):
             with patch.object(a, "_enforce_diversity", side_effect=lambda p, *a: p):
@@ -164,7 +164,7 @@ class TestDiversityConstraint:
         # 全部正 Sharpe → 都想增权
         attr = AttributionEngine()
         for name in configs:
-            s = _make_stats(name, n_trades=20, win_rate=0.7, seed=hash(name) % 100)
+            s = _make_stats(name, n_trades=30, win_rate=0.7, seed=hash(name) % 100)
             attr._per_factor[name] = s
 
         with patch.object(a, "_check_ic_and_health", return_value=True):
@@ -197,7 +197,7 @@ class TestICAndHealthCheck:
         a = AdaptiveWeightEngine(SAMPLE_AWE_CONFIG, ictracker=mock_tracker)
         a.initialize({"test": {"weight": 1.0, "tags": ["技术"], "enabled": True}})
         attr = AttributionEngine()
-        stats = _make_stats("test", n_trades=20, win_rate=0.7)
+        stats = _make_stats("test", n_trades=30, win_rate=0.7)
         attr._per_factor["test"] = stats
         with patch.object(a, "_enforce_diversity", side_effect=lambda p, *a: p):
             patches = a.adapt(attr, {"test": {"weight": 1.0, "tags": ["技术"], "enabled": True}})

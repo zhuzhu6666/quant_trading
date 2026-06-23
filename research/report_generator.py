@@ -173,14 +173,27 @@ class WeeklyReport:
 
     def _section_attribution(self) -> str:
         """
-        Read attribution data from ``data/charts/factor_attribution.json`` and
-        produce a summary table.
+        Read attribution data from state.db and produce a summary table.
         """
-        path = Path("data/charts/factor_attribution.json")
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            from backend.core.db import get_state_conn
+            import sqlite3
+            conn = get_state_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT factor, data_json FROM attribution_snapshot"
+                ).fetchall()
+                data = {}
+                for r in rows:
+                    try:
+                        data[r["factor"]] = json.loads(r["data_json"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+            finally:
+                conn.close()
+            if not data:
+                return self._na("暂无归因数据")
+        except Exception as exc:
             logger.warning(f"Attribution data not available: {exc}")
             return self._na("数据未就绪")
 
