@@ -204,10 +204,10 @@ def _read_state_snapshot() -> dict:
                     "volume": p_dict.get("api_volume", p_dict.get("volume", 0.0)),
                     "price_open": p_dict.get("price_open", 0.0),
                     "current_price": p_dict.get("current_price", 0.0),
-                    "pnl": p_dict.get("pnl") or 0.0,
+                    "pnl": p_dict.get("pnl") or p_dict.get("profit") or 0.0,
                     "sl": p_dict.get("sl") or 0.0,
                     "tp": p_dict.get("tp") or 0.0,
-                    "position_id": p_dict.get("position_id") or 0,
+                    "position_id": p_dict.get("position_id") or p_dict.get("ticket") or 0,
                     "open_time": p_dict.get("open_time") or 0,
                 })
     except Exception:
