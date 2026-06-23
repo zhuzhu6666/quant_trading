@@ -23,9 +23,9 @@ view, text, scroll-view {
 .card {
   background: #FFFFFF;
   border-radius: 24rpx;
-  padding: 28rpx;
+  padding: 28rpx 24rpx;
   margin-bottom: 20rpx;
-  box-shadow: 0 2rpx 12rpx rgba(0,0,0,0.04);
+  box-shadow: 0 1rpx 10rpx rgba(0,0,0,0.05), 0 2rpx 20rpx rgba(0,0,0,0.03);
 }
 
 .card-title {

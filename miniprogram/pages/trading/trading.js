@@ -341,6 +341,7 @@ Page({
             dirCls: dir === 'LONG' ? 'text-green' : 'text-red',
             entry: entry ? Number(entry).toFixed(2) : '—',
             size: size ? Number(size).toFixed(2) : '—',
+            apiSize: size ? String(Number(size).toFixed(2)) : '—',
             pnl: (upl >= 0 ? '+' : '') + Number(upl).toFixed(2),
             pnlCls: upl > 0 ? 'text-green' : upl < 0 ? 'text-red' : 'text-gray',
             symbol: sym,

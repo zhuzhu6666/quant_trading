@@ -44,7 +44,8 @@ Page({
       this._fetchDbHealth(),
       this._fetchServerHealth(),
       this._fetchFactorHealth(),
-      this._fetchScheduler(),
+      // 延迟 2.5s 拉调度器, 避免 WS upgrade 后 HTTP 请求在微信开发者工具上间歇超时
+      new Promise(function(r) { setTimeout(r, 2500); }).then(this._fetchScheduler.bind(this)),
     ]);
   },
 
