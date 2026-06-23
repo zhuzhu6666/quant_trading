@@ -181,7 +181,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
     seen_exec_keys: set[tuple] = set()
     try:
         logs_dir = _Path(__file__).resolve().parent.parent.parent / "logs"
-        log_names = ["backend.log", "live_loop.log"]
+        log_names = ["live_loop.log", "backend.log"]
         for log_name in log_names:
             log_path = logs_dir / log_name
             if not log_path.exists():
@@ -189,9 +189,11 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
             with open(log_path, "rb") as f:
                 f.seek(0, 2)
                 size = f.tell()
-                f.seek(max(size - 80000, 0))
+                # backend.log 增长快, 多读一些确保 wire_send 事件不丢失
+                read_size = 800000 if "backend" in log_name else 80000
+                f.seek(max(size - read_size, 0))
                 raw = f.read().decode("utf-8", errors="replace")
-            lines = raw.splitlines()[-1000:]
+            lines = raw.splitlines()[-5000:]
             for line in lines:
                 m = re.search(r"market_order: account=(\d+) symbolId=(\d+) side=(\d+) volume=(\d+) api_units \(= ([\d.]+) api\)", line)
                 if m:
@@ -261,7 +263,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     execution_summary["last_reason"] = reason_text
                     execution_summary["last_tick"] = int(m.group(1))
                     continue
-                m = re.search(r"tick (\d+): v4 (LONG|SHORT) ORDER\+AMEND OK vol=([\d.]+) pos=(\d+) score=([-\d.]+)", line)
+                m = re.search(r"tick (\d+): v4 (LONG|SHORT) ORDER\+AMEND OK (?:vol|api_volume)=([\d.]+) pos=(\d+) score=([-\d.]+)", line)
                 if m:
                     key = ("success", m.group(1), m.group(2), m.group(3), m.group(4), m.group(5))
                     if key in seen_exec_keys:
@@ -297,6 +299,19 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
                     execution_summary["last_tick"] = int(m.group(1))
                     continue
         execution_events = execution_events[-8:]
+        # 按 tick 号选最新带 tick 的事件作为 last_stage (wire_send 没有 tick 不覆盖)
+        _best_tick = execution_summary["last_tick"]
+        if _best_tick is not None and _best_tick >= 0:
+            # 从 events 里找到最后一条有 tick 的事件
+            for ev in reversed(execution_events):
+                if ev.get("tick") is not None:
+                    execution_summary["last_stage"] = ev["stage"]
+                    execution_summary["last_reason"] = ev["reason"]
+                    break
+        elif execution_events:
+            # 完全没有 tick 事件才用 wire_send
+            execution_summary["last_stage"] = execution_events[-1]["stage"]
+            execution_summary["last_reason"] = execution_events[-1]["reason"]
     except Exception:
         pass
 
