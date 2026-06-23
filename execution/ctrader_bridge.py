@@ -1376,6 +1376,64 @@ class CTraderBridge(BaseBrokerBridge):
                 logger.error(f"get_positions failed: {e}")
             return []
 
+    # ── 历史成交 (ProtoOADealListReq) ─────────────────────────
+
+    def get_deals(self, *, from_ts: int = 0, to_ts: int = 0,
+                  max_rows: int = 100) -> list[dict]:
+        """查历史成交记录 (已平仓交易).
+
+        cTrader ProtoOADealListReq → ProtoOADealListRes.
+
+        Args:
+            from_ts: 起始时间戳 (秒, 0=不限).
+            to_ts:   结束时间戳 (秒, 0=不限).
+            max_rows: 最大返回条数 (默认 100).
+
+        Returns:
+            [{dealId, positionId, symbolId, volume, filledVolume,
+              executionPrice, tradeSide, dealStatus,
+              executionTimestamp, commission, ...}]
+        """
+        if not self.is_connected:
+            return []
+        try:
+            req = TradeMsg.ProtoOADealListReq()
+            req.ctidTraderAccountId = self.account_id
+            if from_ts > 0:
+                req.fromTimestamp = int(from_ts * 1000)  # ms
+            if to_ts > 0:
+                req.toTimestamp = int(to_ts * 1000)
+            if max_rows > 0:
+                req.maxRows = max_rows
+            resp = self._send(req, timeout=15.0)
+            results = []
+            for d in resp.deal:
+                money_digits = getattr(d, 'moneyDigits', 2) or 2
+                divisor = 10 ** money_digits
+                results.append({
+                    "deal_id": d.dealId,
+                    "order_id": d.orderId,
+                    "position_id": d.positionId,
+                    "symbol_id": d.symbolId,
+                    "volume": d.volume,
+                    "filled_volume": d.filledVolume,
+                    "execution_price": d.executionPrice / divisor,
+                    "trade_side": "buy" if d.tradeSide == TRADE_SIDE["BUY"] else "sell",
+                    "deal_status": d.dealStatus,
+                    "execution_timestamp": d.executionTimestamp / 1000.0,
+                    "commission": d.commission / divisor,
+                    "close_position_detail": str(d.closePositionDetail) if d.closePositionDetail else "",
+                })
+            logger.info("[cTrader] get_deals: %d deals returned (from=%s to=%s max=%d)",
+                        len(results),
+                        time.strftime("%Y-%m-%d", time.gmtime(from_ts)) if from_ts else "∞",
+                        time.strftime("%Y-%m-%d", time.gmtime(to_ts)) if to_ts else "∞",
+                        max_rows)
+            return results
+        except Exception as e:
+            logger.error(f"get_deals failed: {e}")
+            return []
+
     # ── 历史 (trendbar) ──
 
     def fetch_bars(self, timeframe: str = "M15", n_bars: int = 5000) -> "pd.DataFrame | None":
