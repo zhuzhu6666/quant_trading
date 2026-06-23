@@ -442,6 +442,7 @@ import time as _time
 _ACCOUNT_CACHE: dict[str, tuple[float, dict]] = {}
 _POSITIONS_CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 15.0  # 15s 避免 WS 1s 推 + HTTP 5s 轮询同时击中 reactor
+_POSITIONS_CACHE_TTL = 3.0  # 持仓/盈亏刷新频率 (含官方 PnL API)
 _CACHE_LOCK = threading.Lock()  # 防多个线程同时刷新 (WS + live tick 同时过期)
 
 
@@ -770,7 +771,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             _live_state_update(positions=positions, positions_updated_at=time.time())
             return {"ok": True, "broker": "ctrader", "positions": positions}
         try:
-            return _cache_get_or_refresh(_POSITIONS_CACHE, _CACHE_TTL, _fetch)
+            return _cache_get_or_refresh(_POSITIONS_CACHE, _POSITIONS_CACHE_TTL, _fetch)
         except Exception as e:
             return {"ok": False, "broker": "ctrader", "error": f"{type(e).__name__}: {e}"[:300], "positions": []}
     else:
@@ -1979,7 +1980,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
             # 刷新账户缓存 (bridge 可用时才做)
             if bridge_ready:
-                kickoff_account_refresh(bridge, broker, interval_sec=30.0)
+                kickoff_account_refresh(bridge, broker, interval_sec=3.0)
 
             # 从本地 DataStore 读最新 bars (cTraderPuller 定时写入)
             df_new = _warmup_from_local_db("XAUUSD+", TF, 5)
