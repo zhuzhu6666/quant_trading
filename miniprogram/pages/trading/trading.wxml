@@ -173,25 +173,25 @@
       <text class="exec-count">准备下单 {{execAttemptCount}} · 实际发送 {{execWireSendCount}} · 本地拦截 {{execSkipCount}} · 成功 {{execSuccessCount}} · 拒单 {{execFailCount}}</text>
     </view>
 
-    <view style="padding:12rpx 0 18rpx 0;border-bottom:1rpx solid rgba(60,60,67,0.06)" wx:if="{{compPassed}}">
-      <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:4rpx">信号层</text>
-      <text style="font-size:24rpx;font-weight:600;color:#1C1C1E">闸门放行，准备执行 {{compDir}}</text>
+    <view class="exec-section" wx:if="{{compPassed}}">
+      <text class="exec-section-label">信号层</text>
+      <text class="exec-section-content">闸门放行，准备执行 {{compDir}}</text>
       <text style="font-size:20rpx;color:#8E8E93">{{compDecisionReason}}</text>
     </view>
-    <view style="padding:12rpx 0 18rpx 0;border-bottom:1rpx solid rgba(60,60,67,0.06)" wx:if="{{!compPassed}}">
-      <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:4rpx">信号层</text>
-      <text style="font-size:24rpx;font-weight:600;color:#1C1C1E">没有放行到执行层</text>
+    <view class="exec-section" wx:if="{{!compPassed}}">
+      <text class="exec-section-label">信号层</text>
+      <text class="exec-section-content">没有放行到执行层</text>
       <text style="font-size:20rpx;color:#8E8E93">{{compDecisionReason}}</text>
     </view>
 
-    <view style="padding:12rpx 0 18rpx 0;border-bottom:1rpx solid rgba(60,60,67,0.06)">
-      <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:4rpx">本地执行层</text>
-      <text style="font-size:24rpx;font-weight:600;color:#1C1C1E">{{execStage}}</text>
+    <view class="exec-section">
+      <text class="exec-section-label">本地执行层</text>
+      <text class="exec-section-content">{{execStage}}</text>
       <text style="font-size:20rpx;color:#8E8E93">{{execReason}}</text>
     </view>
 
-    <view style="padding-top:12rpx">
-      <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:8rpx">最近执行事件</text>
+    <view style="padding-top:8rpx">
+      <text class="exec-section-label">最近执行事件</text>
       <block wx:if="{{execEvents.length}}">
         <view wx:for="{{execEvents}}" wx:key="index" class="exec-row">
           <text style="font-size:22rpx;font-weight:600;width:80rpx" class="{{item.stageCls}}">{{item.stage}}</text>

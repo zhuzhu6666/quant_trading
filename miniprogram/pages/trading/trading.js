@@ -107,8 +107,31 @@ Page({
     const bal = t.balance || 0;
     const currentPrice = Number(t.current_price || 0);
 
-    // 持仓 — 来自 WS (单笔) 或 HTTP 兜底 (多笔)
+    // 持仓 — 来自 WS (多笔) 或 HTTP 兜底 (多笔)
     const hasPos = t.n_positions > 0;
+    // 从 WS data 的 positions_list 构建持仓数组
+    var positions = [];
+    if (t.positions_list && t.positions_list.length > 0) {
+      var plist = t.positions_list;
+      for (var pi = 0; pi < plist.length; pi++) {
+        var pp = plist[pi];
+        var pDir = (pp.type === 'buy' || pp.type === 'BUY') ? '多头' : '空头';
+        var pEntry = pp.price_open || 0;
+        var pSize = pp.volume || 0;
+        var pPnl = pp.pnl || 0;
+        var pSym = pp.symbol || 'XAUUSD';
+        positions.push({
+          dir: pDir,
+          dirCls: pDir === '多头' ? 'text-green' : 'text-red',
+          entry: pEntry ? Number(pEntry).toFixed(2) : '—',
+          size: pSize ? Number(pSize).toFixed(2) : '—',
+          apiSize: pSize ? String(Number(pSize).toFixed(2)) : '—',
+          pnl: (pPnl >= 0 ? '+' : '') + Number(pPnl).toFixed(2),
+          pnlCls: pPnl > 0 ? 'text-green' : pPnl < 0 ? 'text-red' : 'text-gray',
+          symbol: pSym,
+        });
+      }
+    }
 
     // 信号数据来自 strategyStatus 缓存
     var ss = g.strategyStatus;
@@ -259,6 +282,8 @@ Page({
       // 信号
       signals: signals,
       signalReason: (ss && ss.reason) || '',
+      // 持仓
+      positions: positions,
       // 因子投票
       voteList: voteList,
       voteLong: longCount,
@@ -326,6 +351,7 @@ Page({
         currency: hasAcct && acct.currency ? acct.currency : '',
       });
 
+      // 始终尝试更新持仓 (独立于账户数据状态)
       var plist = (pos && Array.isArray(pos.positions)) ? pos.positions : [];
       if (plist.length > 0) {
         var list = [];

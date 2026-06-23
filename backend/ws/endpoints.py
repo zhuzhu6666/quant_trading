@@ -189,6 +189,28 @@ def _read_state_snapshot() -> dict:
 
     n_positions = len(positions.get("positions") or []) if isinstance(positions, dict) else len(positions) if isinstance(positions, list) else 0
 
+    # ── 所有持仓列表 (供前端持仓卡片) ──
+    positions_list: list[dict] = []
+    try:
+        raw_list = positions.get("positions") if isinstance(positions, dict) else positions if isinstance(positions, list) else []
+        if raw_list:
+            for p_raw in raw_list:
+                p_dict = _position_to_dict(p_raw)
+                positions_list.append({
+                    "symbol": p_dict.get("symbol") or "",
+                    "type": p_dict.get("type") or "buy",
+                    "direction": p_dict.get("direction") or 0,
+                    "volume": p_dict.get("api_volume", p_dict.get("volume", 0.0)),
+                    "price_open": p_dict.get("price_open", 0.0),
+                    "current_price": p_dict.get("current_price", 0.0),
+                    "pnl": p_dict.get("pnl") or 0.0,
+                    "sl": p_dict.get("sl") or 0.0,
+                    "tp": p_dict.get("tp") or 0.0,
+                    "position_id": p_dict.get("position_id") or 0,
+                })
+    except Exception:
+        pass
+
     source = "live" if live_running else "frozen"
 
     return {
@@ -216,6 +238,7 @@ def _read_state_snapshot() -> dict:
         "leverage": acct.get("leverage"),
         "currency": acct.get("currency"),
         "n_positions": n_positions,
+        "positions_list": positions_list,
         "current_price": _live_get_latest_price(),
         "active_strategy": {
             "id": _live_state.get("loop_strategy") or loop.get("strategy_name"),

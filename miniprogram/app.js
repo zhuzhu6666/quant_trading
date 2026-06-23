@@ -56,6 +56,7 @@ App({
       balance: data.balance || 0,
       pnl_today: data.pnl_today || 0,
       position: data.position || { dir: 'FLAT', entry: 0, size: 0, unrealized: 0 },
+      positions_list: data.positions_list || [],
       daily: data.daily || { trades: 0, win: 0, loss: 0, pnl: 0, drawdown_pct: 0 },
       risk: data.risk || { circuit_breaker: false, consecutive_loss: 0 },
       n_positions: data.n_positions || 0,
