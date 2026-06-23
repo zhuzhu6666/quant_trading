@@ -1377,6 +1377,13 @@ class CTraderBridge(BaseBrokerBridge):
                     swap=p.swap / 100.0,
                     open_timestamp=(td.openTimestamp / 1000.0) if td.openTimestamp else 0,
                 ))
+            # 批量查询所有持仓的未实现盈亏 (官方 API)
+            try:
+                pnl_map = self.get_unrealized_pnl()
+                for pos in result:
+                    pos.pnl = pnl_map.get(pos.position_id, 0.0)
+            except Exception:
+                pass
             self._record_success()
             return result
         except Exception as e:
@@ -1385,6 +1392,32 @@ class CTraderBridge(BaseBrokerBridge):
             if self._should_log_error(f"get_positions failed: {e}"):
                 logger.error(f"get_positions failed: {e}")
             return []
+
+    def get_unrealized_pnl(self) -> dict[int, float]:
+        """Query unrealized PnL for all open positions via ProtoOAGetPositionUnrealizedPnLReq.
+
+        Returns dict mapping position_id → netUnrealizedPnL (in real USD, after dividing by moneyDigits).
+        Empty dict on error or no positions.
+        """
+        if not self.is_connected:
+            return {}
+        try:
+            req = TradeMsg.ProtoOAGetPositionUnrealizedPnLReq()
+            req.ctidTraderAccountId = self.account_id
+            resp = self._send(req, timeout=10.0)
+            result: dict[int, float] = {}
+            md = resp.moneyDigits or 2
+            divisor = 10.0 ** md
+            for upnl in resp.positionUnrealizedPnL:
+                net_pnl = upnl.netUnrealizedPnL / divisor if divisor else 0.0
+                result[upnl.positionId] = net_pnl
+            self._record_success()
+            return result
+        except Exception as e:
+            self._record_failure()
+            if self._should_log_error(f"get_unrealized_pnl failed: {e}"):
+                logger.error(f"get_unrealized_pnl failed: {e}")
+            return {}
 
     # ── 历史成交 (ProtoOADealListReq) ─────────────────────────
 
