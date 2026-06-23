@@ -1091,6 +1091,15 @@ class CTraderBridge(BaseBrokerBridge):
         _meta = getattr(self, '_symbol_meta', None) or {}
         _min_vol_api = int(round(float(_meta.get('api_min_volume') or 0)))
         if _min_vol_api <= 0:
+            # 未获取到 symbol meta → 尝试懒加载
+            if self._symbol_id is not None:
+                try:
+                    self._resolve_symbol_id()
+                    _meta = getattr(self, '_symbol_meta', None) or {}
+                    _min_vol_api = int(round(float(_meta.get('api_min_volume') or 0)))
+                except Exception:
+                    pass
+        if _min_vol_api <= 0:
             _min_vol_api = max(1, int(round(volume)))
         req.volume = int(round(max(volume, _min_vol_api)))
         req.comment = comment or "quant-live"
