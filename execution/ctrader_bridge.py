@@ -436,13 +436,19 @@ class CTraderBridge(BaseBrokerBridge):
             while not self._heartbeat_stop.is_set():
                 try:
                     if self._client and self._client.isConnected:
-                        hb = ProtoHeartbeatEvent()
-                        # payloadType 默认为 51 (HEARTBEAT 枚举), 不需要改
-                        self._reactor.callFromThread(
-                            lambda: self._client.send(hb)
-                        )
+                        # cTrader heartbeat is fire-and-forget; consume the Deferred
+                        # so Twisted timeout cancellations do not become unhandled.
+                        def _send_hb():
+                            try:
+                                hb = ProtoHeartbeatEvent()
+                                d = self._client.send(hb)
+                                if hasattr(d, "addBoth"):
+                                    d.addBoth(lambda result: None)
+                            except Exception:
+                                logger.debug("heartbeat send failed (non-fatal)")
+                        self._reactor.callFromThread(_send_hb)
                 except Exception:
-                    logger.debug("heartbeat send failed (non-fatal)")
+                    logger.debug("heartbeat scheduling failed (non-fatal)")
                 self._heartbeat_stop.wait(10.0)
 
         self._heartbeat_thread = threading.Thread(
@@ -503,9 +509,61 @@ class CTraderBridge(BaseBrokerBridge):
             logger.warning(f"spot event parse failed: {e}")
 
     def _load_depth_counter(self) -> int:
-        """从当前时间戳生成 INT32 安全 id, 避免 DB 锁冲突.""" 
+        """从现有 orderbook_changes 的最大 id 继续递增, 避免主键重复.""" 
+        import os
         import time
+        try:
+            import duckdb as _duckdb
+            _db_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..", "data", "l2.duckdb"
+            )
+            if os.path.exists(_db_path):
+                con = _duckdb.connect(str(_db_path), read_only=True)
+                try:
+                    row = con.execute(
+                        "SELECT COALESCE(MAX(id), 0) FROM orderbook_changes"
+                    ).fetchone()
+                    if row and row[0] is not None:
+                        return int(row[0])
+                finally:
+                    con.close()
+        except Exception:
+            pass
         return (time.time_ns() // 1000) & 0x7FFFFFFF
+
+    def _ensure_l2_schema(self, tdb) -> None:
+        """Ensure the L2 DuckDB schema matches the live depth payloads.
+
+        quote_id values from cTrader can exceed INT32, so we migrate that column
+        to BIGINT on startup if needed. Keep id as INT32 for now because it is a
+        primary key in the existing table and still fits comfortably with the
+        current counter strategy.
+        """
+        try:
+            cols = {
+                row[1].lower(): str(row[2]).upper()
+                for row in tdb.execute("PRAGMA table_info('orderbook_changes')").fetchall()
+            }
+        except Exception:
+            cols = {}
+        if not cols:
+            tdb.execute("""
+                CREATE TABLE IF NOT EXISTS orderbook_changes (
+                    id INTEGER PRIMARY KEY,
+                    symbol VARCHAR NOT NULL DEFAULT 'XAUUSD+',
+                    ts DOUBLE NOT NULL,
+                    quote_id BIGINT NOT NULL,
+                    side VARCHAR NOT NULL,
+                    price DOUBLE NOT NULL,
+                    size DOUBLE,
+                    change_type VARCHAR NOT NULL,
+                    created_at DOUBLE DEFAULT (date_part('EPOCH', CURRENT_TIMESTAMP))
+                )
+            """)
+            return
+        if cols.get('quote_id') and cols['quote_id'] != 'BIGINT':
+            tdb.execute("ALTER TABLE orderbook_changes ALTER COLUMN quote_id SET DATA TYPE BIGINT")
 
     def _handle_depth_event(self, payload):
         """处理深度报价 (Level II) 事件."""
@@ -566,6 +624,7 @@ class CTraderBridge(BaseBrokerBridge):
                             "..", "data", "l2.duckdb"
                         )
                         self._l2_db = _duckdb.connect(str(_db_path))
+                        self._ensure_l2_schema(self._l2_db)
                     _tdb = self._l2_db
                 now = time.time()
                 # 记录每个变动
@@ -1221,10 +1280,12 @@ class CTraderBridge(BaseBrokerBridge):
             login = t.traderLogin
             self._trader_login = login  # 保存 traderLogin, 下单时用作 fallback
             currency = _ASSET_ID_TO_CODE.get(t.depositAssetId, f"ASSET_{t.depositAssetId}")
+            leverage_in_cents = float(getattr(t, 'leverageInCents', 0) or 0)
+            leverage = leverage_in_cents / 100.0 if leverage_in_cents > 0 else 0.0
             logger.info(
                 f"Trader info: login={login} balance={balance:.2f} "
                 f"depositAssetId={t.depositAssetId} currency={currency} "
-                f"leverage={getattr(t, 'maxLeverage', 0)}"
+                f"leverage={leverage:.2f} (leverageInCents={leverage_in_cents:.0f}, maxLeverage={getattr(t, 'maxLeverage', 0)})"
             )
             self._record_success()
             return AccountInfo(
@@ -1232,7 +1293,7 @@ class CTraderBridge(BaseBrokerBridge):
                 equity=equity,
                 margin=0.0,
                 margin_free=0.0,
-                leverage=float(getattr(t, 'maxLeverage', 0) or 0),
+                leverage=leverage,
                 currency=currency,
                 account_id=login,
                 name=f"cTrader-{login}",

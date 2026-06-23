@@ -32,7 +32,33 @@
     </view>
   </view>
 
-  <!-- 持仓 -->
+  <!-- 合约口径 -->
+  <view class="card">
+    <text class="card-title">合约口径</text>
+    <view class="stats-grid" style="margin-bottom:16rpx">
+      <view class="stat-cell">
+        <text class="stat-cell-value text-dark">{{lotOz}} oz</text>
+        <text class="stat-cell-label">1手</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-dark">{{pointSize}}</text>
+        <text class="stat-cell-label">1点</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-dark">{{pointValuePerLot}}</text>
+        <text class="stat-cell-label">1手每点</text>
+      </view>
+      <view class="stat-cell">
+        <text class="stat-cell-value text-dark">{{notionalPerLot}}</text>
+        <text class="stat-cell-label">1手名义</text>
+      </view>
+    </view>
+    <view style="background:#F2F2F7;border-radius:14rpx;padding:14rpx">
+      <text style="font-size:22rpx;color:#1C1C1E;display:block;margin-bottom:4rpx">{{slTpExample}}</text>
+      <text style="font-size:20rpx;color:#8E8E93">按你当前账户口径：1手=100oz，报价2位小数，所以 1点=0.01；SL/TP 的点数要先换成价格差，再换算盈亏。</text>
+    </view>
+  </view>
+
   <view class="card">
     <text class="card-title">持仓</text>
     <block wx:if="{{positions.length > 0}}">
@@ -122,7 +148,7 @@
           <text style="font-size:28rpx;color:{{compPassed ? '#34C759' : '#FF3B30'}}">3</text>
         </view>
         <view style="flex:1">
-          <text style="font-size:26rpx;font-weight:600;color:#1C1C1E;display:block">{{compPassed ? '开仓 ' + compDir : '不开仓'}}</text>
+          <text style="font-size:26rpx;font-weight:600;color:#1C1C1E;display:block">{{compPassed ? '信号放行 ' + compDir : '不开仓'}}</text>
           <text style="font-size:22rpx;color:#8E8E93">{{compDecisionReason}}</text>
         </view>
         <text style="font-size:36rpx">{{compPassed ? '📤' : '🛑'}}</text>
@@ -130,6 +156,50 @@
     </view>
     </block>
     <view wx:else class="empty-state"><text>等待因子信号数据...</text></view>
+  </view>
+
+  <!-- 执行链路 -->
+  <view class="card">
+    <text class="card-title">执行链路</text>
+    <view style="display:flex;align-items:center;justify-content:space-between;padding:16rpx;background:#F2F2F7;border-radius:14rpx;margin-bottom:16rpx">
+      <view style="display:flex;align-items:center;gap:12rpx;flex:1;min-width:0">
+        <text class="badge {{compPassed ? 'badge-green' : 'badge-red'}}" style="font-size:18rpx">信号 {{compPassed ? '放行' : '拦截'}}</text>
+        <text class="badge {{execStageCls === 'text-green' ? 'badge-green' : execStageCls === 'text-red' ? 'badge-red' : execStageCls === 'text-orange' ? 'badge-orange' : 'badge-gray'}}" style="font-size:18rpx">执行 {{execStage}}</text>
+      </view>
+      <text style="font-size:18rpx;color:#8E8E93">尝试 {{execAttemptCount}} · 发送 {{execWireSendCount}} · 本地拦截 {{execSkipCount}} · 成功 {{execSuccessCount}} · 拒单 {{execFailCount}}</text>
+    </view>
+
+    <view style="padding:12rpx 0 18rpx 0;border-bottom:1rpx solid #ECECF0" wx:if="{{compPassed}}">
+      <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:4rpx">信号层</text>
+      <text style="font-size:24rpx;font-weight:600;color:#1C1C1E">闸门放行，准备执行 {{compDir}}</text>
+      <text style="font-size:20rpx;color:#8E8E93">{{compDecisionReason}}</text>
+    </view>
+    <view style="padding:12rpx 0 18rpx 0;border-bottom:1rpx solid #ECECF0" wx:if="{{!compPassed}}">
+      <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:4rpx">信号层</text>
+      <text style="font-size:24rpx;font-weight:600;color:#1C1C1E">没有放行到执行层</text>
+      <text style="font-size:20rpx;color:#8E8E93">{{compDecisionReason}}</text>
+    </view>
+
+    <view style="padding:12rpx 0 18rpx 0;border-bottom:1rpx solid #ECECF0">
+      <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:4rpx">本地执行层</text>
+      <text style="font-size:24rpx;font-weight:600;color:#1C1C1E">{{execStage}}</text>
+      <text style="font-size:20rpx;color:#8E8E93">{{execReason}}</text>
+    </view>
+
+    <view style="padding-top:12rpx">
+      <text style="font-size:22rpx;color:#8E8E93;display:block;margin-bottom:8rpx">最近执行事件</text>
+      <block wx:if="{{execEvents.length}}">
+        <view wx:for="{{execEvents}}" wx:key="index" class="stat-row" style="padding:10rpx 0">
+          <view style="display:flex;align-items:center;gap:12rpx;flex:1;min-width:0">
+            <text style="font-size:22rpx;font-weight:600;width:72rpx" class="{{item.stageCls}}">{{item.stage}}</text>
+            <text style="font-size:22rpx;color:#1C1C1E">tick {{item.tick}}</text>
+            <text style="font-size:20rpx;color:#8E8E93">{{item.direction}}</text>
+          </view>
+          <text style="font-size:20rpx;color:#8E8E93;max-width:52%;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{item.reason}}</text>
+        </view>
+      </block>
+      <view wx:else class="empty-state"><text>等待执行日志...</text></view>
+    </view>
   </view>
 
   <!-- 因子投票 -->

@@ -13,6 +13,10 @@ from backend.services.factor_health_service import run_factor_health
 router = APIRouter(prefix="/api/factor-health", tags=["factor-health"])
 
 
+def _is_internal_factor_name(name: str) -> bool:
+    return name.startswith("dsl_") or name.startswith("pca_")
+
+
 class RunRequest(BaseModel):
     threshold: float = 0.04
     bar_count: int = 50000
@@ -34,4 +38,20 @@ def latest(_user: RequireUser)-> dict:
     p = CHARTS_DIR / "factor_health_report.json"
     if not p.exists():
         return {"error": "no_report_yet", "report": None}
-    return {"report": json.loads(p.read_text(encoding="utf-8")), "report_path": str(p)}
+
+    report = json.loads(p.read_text(encoding="utf-8"))
+    factors = report.get("factors", []) if isinstance(report, dict) else []
+    visible = [f for f in factors if not _is_internal_factor_name(str(f.get("factor", "")))]
+    visible.sort(key=lambda f: float(f.get("score", 0.0) or 0.0), reverse=True)
+
+    if isinstance(report, dict):
+        report = dict(report)
+        report["factors"] = visible
+        report["total"] = len(visible)
+        report["healthy"] = sum(1 for f in visible if f.get("status") == "HEALTHY")
+        report["watch"] = sum(1 for f in visible if f.get("status") == "WATCH")
+        report["decaying"] = sum(1 for f in visible if f.get("status") == "DECAYING")
+        report["dead"] = sum(1 for f in visible if f.get("status") == "DEAD")
+        report["unknown"] = sum(1 for f in visible if f.get("status") == "UNKNOWN")
+
+    return {"report": report, "report_path": str(p)}

@@ -166,6 +166,115 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         except Exception:
             pass
 
+    # ── 执行链路: 从日志里提取最近的「尝试 / 本地拦截 / cTrader 拒单 / 成功」 ──
+    execution_events: list[dict] = []
+    execution_summary = {
+        "attempts": 0,
+        "wire_sends": 0,
+        "local_skips": 0,
+        "successes": 0,
+        "failures": 0,
+        "last_stage": "unknown",
+        "last_reason": "",
+        "last_tick": None,
+    }
+    try:
+        logs_dir = _Path(__file__).resolve().parent.parent.parent / "logs"
+        log_names = ["backend.log", "live_loop.log"]
+        for log_name in log_names:
+            log_path = logs_dir / log_name
+            if not log_path.exists():
+                continue
+            with open(log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(size - 80000, 0))
+                raw = f.read().decode("utf-8", errors="replace")
+            lines = raw.splitlines()[-1000:]
+            for line in lines:
+                m = re.search(r"market_order: account=(\d+) \(auth=(\d+)\) symbolId=(\d+) side=(\d+) volume=(\d+) centilot \(= ([\d.]+) lot\)", line)
+                if m:
+                    execution_events.append({
+                        "tick": None,
+                        "direction": "BUY" if m.group(4) == "1" else "SELL",
+                        "stage": "wire_send",
+                        "reason": f"实际发送 {m.group(6)} lot / {m.group(5)} centilot (account={m.group(1)})",
+                    })
+                    execution_summary["wire_sends"] += 1
+                    execution_summary["last_stage"] = "wire_send"
+                    execution_summary["last_reason"] = execution_events[-1]["reason"]
+                    continue
+                m = re.search(r"market_order send error: (.+?)\. Reconciling positions", line)
+                if m:
+                    reason_text = m.group(1)
+                    execution_events.append({
+                        "tick": None,
+                        "direction": "—",
+                        "stage": "ctrader_send_err",
+                        "reason": reason_text,
+                    })
+                    execution_summary["failures"] += 1
+                    execution_summary["last_stage"] = "ctrader_send_err"
+                    execution_summary["last_reason"] = reason_text
+                    continue
+                m = re.search(r"tick (\d+): v4 (LONG|SHORT) volume=([\d.]+) \(Kelly enabled=(True|False)\)", line)
+                if m:
+                    execution_events.append({
+                        "tick": int(m.group(1)),
+                        "direction": m.group(2),
+                        "stage": "attempt",
+                        "reason": f"策略准备下单，Kelly enabled={m.group(4)}",
+                    })
+                    execution_summary["attempts"] += 1
+                    execution_summary["last_stage"] = "attempt"
+                    execution_summary["last_reason"] = execution_events[-1]["reason"]
+                    execution_summary["last_tick"] = int(m.group(1))
+                    continue
+                m = re.search(r"tick (\d+): v4 (LONG|SHORT) SKIP \((.+)\)", line)
+                if m:
+                    reason_text = m.group(3)
+                    execution_events.append({
+                        "tick": int(m.group(1)),
+                        "direction": m.group(2),
+                        "stage": "local_skip",
+                        "reason": reason_text,
+                    })
+                    execution_summary["local_skips"] += 1
+                    execution_summary["last_stage"] = "local_skip"
+                    execution_summary["last_reason"] = reason_text
+                    execution_summary["last_tick"] = int(m.group(1))
+                    continue
+                m = re.search(r"tick (\d+): v4 (LONG|SHORT) ORDER\+AMEND OK vol=([\d.]+) pos=(\d+) score=([-\d.]+)", line)
+                if m:
+                    execution_events.append({
+                        "tick": int(m.group(1)),
+                        "direction": m.group(2),
+                        "stage": "success",
+                        "reason": f"cTrader 已成交并完成止盈止损，pos={m.group(4)}",
+                    })
+                    execution_summary["successes"] += 1
+                    execution_summary["last_stage"] = "success"
+                    execution_summary["last_reason"] = execution_events[-1]["reason"]
+                    execution_summary["last_tick"] = int(m.group(1))
+                    continue
+                m = re.search(r"tick (\d+): v4 (LONG|SHORT) ORDER FAILED: ([A-Z_]+) (.+)", line)
+                if m:
+                    reason_text = f"{m.group(3)} {m.group(4)}".strip()
+                    execution_events.append({
+                        "tick": int(m.group(1)),
+                        "direction": m.group(2),
+                        "stage": "ctrader_reject",
+                        "reason": reason_text,
+                    })
+                    execution_summary["failures"] += 1
+                    execution_summary["last_stage"] = "ctrader_reject"
+                    execution_summary["last_reason"] = reason_text
+                    execution_summary["last_tick"] = int(m.group(1))
+                    continue
+        execution_events = execution_events[-8:]
+    except Exception:
+        pass
+
     # 原因
     reason = ""
     if cb:
@@ -195,6 +304,18 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
     # 诊断信息
     diag = _live_state.get("_diag") or {}
 
+    # 只暴露真正参与交易的因子: 过滤掉 DSL / PCA 这类内部自动生成项。
+    # 以 config.runtime_config 为准, 保持和交易策略的实际权重表一致。
+    try:
+        from config.runtime_config import shared as _rc_shared
+        cfg = _rc_shared()
+        valid_names = set((cfg.factor_portfolio_weights or {}).keys()) | set((cfg.factor_signal_config or {}).keys())
+        if valid_names:
+            factor_votes = {k: v for k, v in factor_votes.items() if k in valid_names}
+    except Exception:
+        # 配置读取失败时不阻塞页面, 但仍保留原始投票快照。
+        pass
+
     return {
         "running": loop.get("running", False),
         "broker": loop.get("broker") or "ctrader",
@@ -209,6 +330,8 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         "factor_votes": factor_votes,
         "last_composite": last_composite,
         "_diag": diag,
+        "execution_events": execution_events,
+        "execution_summary": execution_summary,
     }
 
 

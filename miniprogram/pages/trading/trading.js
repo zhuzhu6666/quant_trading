@@ -17,6 +17,10 @@ var GATE_LABELS = {
   'gvz': 'GVZ 闸门',
 };
 
+function _isInternalFactorName(name) {
+  return /^dsl_/i.test(name) || /^pca_/i.test(name);
+}
+
 Page({
   data: {
     connected: false,
@@ -26,6 +30,8 @@ Page({
     equity: '—', balance: '—', pnl: '—', pnlCls: 'text-gray',
     margin: '—', marginFree: '—', leverage: '—',
     currency: '',
+    lotOz: '100', pointSize: '0.01', pointValuePerLot: '1.00 USD/点',
+    notionalPerLot: '—', slTpExample: '',
     // 持仓 — WS 实时推送 / HTTP 兜底
     positions: [],
     // 最近信号 — 来自 /api/live/strategy-status
@@ -44,6 +50,9 @@ Page({
     compPassed: false, compGate: '—', compGateCls: 'text-gray',
     compGateDetail: '', compGateBadge: 'badge-gray', compDecisionReason: '',
     compTactical: '—', compMacro: '—', hasVotes: false,
+    // 执行链路
+    execEvents: [], execStage: '—', execStageCls: 'text-gray', execReason: '',
+    execAttemptCount: 0, execWireSendCount: 0, execSkipCount: 0, execSuccessCount: 0, execFailCount: 0,
   },
 
   _fallbackTimer: null,
@@ -96,6 +105,7 @@ Page({
     // 账户 — 来自 WS (global state)
     const eq = t.equity || 0;
     const bal = t.balance || 0;
+    const currentPrice = Number(t.current_price || 0);
 
     // 持仓 — 来自 WS (单笔) 或 HTTP 兜底 (多笔)
     const hasPos = t.n_positions > 0;
@@ -125,7 +135,9 @@ Page({
     var fv = (ss && ss.factor_votes) || {};
     var comp = (ss && ss.last_composite) || {};
     var voteList = [];
-    var fvNames = Object.keys(fv);
+    var fvNames = Object.keys(fv).filter(function(name) {
+      return !_isInternalFactorName(name);
+    });
     // 按 |signal| 降序排列
     fvNames.sort(function(a, b) {
       return Math.abs((fv[b].signal || 0)) - Math.abs((fv[a].signal || 0));
@@ -150,6 +162,41 @@ Page({
     var compPassed = !!comp.gate_passed;
     var gateReason = comp.gate_reason || '—';
 
+    var execSummary = (ss && ss.execution_summary) || {};
+    var execEventsRaw = (ss && ss.execution_events) || [];
+    var execEvents = [];
+    for (var ei = Math.max(0, execEventsRaw.length - 5); ei < execEventsRaw.length; ei++) {
+      var ev = execEventsRaw[ei];
+      var stageLabel = ev.stage === 'success' ? '已成交' : ev.stage === 'ctrader_reject' ? 'cTrader 拒单' : ev.stage === 'local_skip' ? '本地拦截' : ev.stage === 'attempt' ? '尝试下单' : ev.stage || '—';
+      execEvents.push({
+        tick: ev.tick,
+        direction: (ev.direction || '').toUpperCase(),
+        stage: stageLabel,
+        stageCls: ev.stage === 'success' ? 'text-green' : ev.stage === 'ctrader_reject' ? 'text-red' : ev.stage === 'local_skip' ? 'text-orange' : 'text-gray',
+        reason: ev.reason || '—',
+      });
+    }
+    var execStage = '等待执行';
+    var execStageCls = 'text-gray';
+    var execReason = '暂无执行记录';
+    if (execSummary.last_stage === 'success') {
+      execStage = '已成交';
+      execStageCls = 'text-green';
+      execReason = execSummary.last_reason || 'cTrader 已成交';
+    } else if (execSummary.last_stage === 'ctrader_reject') {
+      execStage = 'cTrader 拒单';
+      execStageCls = 'text-red';
+      execReason = execSummary.last_reason || 'cTrader 拒绝下单';
+    } else if (execSummary.last_stage === 'local_skip') {
+      execStage = '本地拦截';
+      execStageCls = 'text-orange';
+      execReason = execSummary.last_reason || '本地风控拦截';
+    } else if (execSummary.last_stage === 'attempt') {
+      execStage = '尝试下单';
+      execStageCls = 'text-blue';
+      execReason = execSummary.last_reason || '已准备下单';
+    }
+
     // 闸门详细说明
     var GATE_DETAIL = {
       'passed': '所有检查通过，信号强度足够',
@@ -165,10 +212,18 @@ Page({
     var gateLabel = gateReason === 'passed' ? '放行' : '拦截';
     var gateBadge = gateReason === 'passed' ? 'badge-green' : gateReason.startsWith('cooldown') ? 'badge-orange' : 'badge-red';
 
+    var lotOz = 100;
+    var pointSize = 0.01;
+    var pointValuePerLot = 1.0;
+    var notionalPerLot = currentPrice > 0 ? (currentPrice * lotOz) : 0;
+    var slTpExample = '';
+    if (currentPrice > 0) {
+      slTpExample = '1手=100oz，1点=' + pointSize.toFixed(2) + '，1点/手≈' + pointValuePerLot.toFixed(2) + ' USD';
+    }
     // 决策原因
     var decisionReason = '';
     if (compPassed) {
-      decisionReason = '闸门放行，发送 ' + compDir + ' 订单';
+      decisionReason = '闸门放行，已尝试发送 ' + compDir + ' 订单';
     } else if (gateReason === 'signal_below_threshold') {
       decisionReason = '信号强度不足，等待更强信号';
     } else if (gateReason.startsWith('cooldown')) {
@@ -184,6 +239,11 @@ Page({
       balance: bal > 0 ? Number(bal).toFixed(2) : '—',
       pnl: (pnl >= 0 ? '+' : '') + pnl.toFixed(2),
       pnlCls: pnl > 0 ? 'text-green' : pnl < 0 ? 'text-red' : 'text-gray',
+      lotOz: lotOz,
+      pointSize: pointSize.toFixed(2),
+      pointValuePerLot: pointValuePerLot.toFixed(2) + ' USD',
+      notionalPerLot: notionalPerLot > 0 ? notionalPerLot.toFixed(2) + ' USD' : '—',
+      slTpExample: slTpExample,
       // 统计
       trades, wins, losses,
       winRate: trades > 0 ? wr.toFixed(1) + '%' : '—',
@@ -214,6 +274,16 @@ Page({
       compDecisionReason: decisionReason,
       compTactical: comp.tactical_score != null ? comp.tactical_score.toFixed(3) : '—',
       compMacro: comp.macro_score != null ? comp.macro_score.toFixed(3) : '—',
+      // 执行链路
+      execEvents: execEvents,
+      execStage: execStage,
+      execStageCls: execStageCls,
+      execReason: execReason,
+      execAttemptCount: execSummary.attempts || 0,
+      execWireSendCount: execSummary.wire_sends || 0,
+      execSkipCount: execSummary.local_skips || 0,
+      execSuccessCount: execSummary.successes || 0,
+      execFailCount: execSummary.failures || 0,
       hasVotes: fvNames.length > 0,
     });
 

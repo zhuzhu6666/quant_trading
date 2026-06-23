@@ -141,8 +141,16 @@ Page({
     if (!d || !d.report) return;
     var r = d.report;
     var factors = r.factors || [];
-    // 取前 6 个有问题的
-    var top = factors.filter(function(f) { return f.status !== 'HEALTHY'; }).slice(0, 6);
+    // 按分数排序后，取前 6 个有问题的；同时隐藏 DSL / PCA 内部因子
+    var top = factors
+      .filter(function(f) {
+        return !/^dsl_/i.test(f.factor || '') && !/^pca_/i.test(f.factor || '');
+      })
+      .filter(function(f) { return f.status !== 'HEALTHY'; })
+      .sort(function(a, b) {
+        return (Number(b.score) || 0) - (Number(a.score) || 0);
+      })
+      .slice(0, 6);
     var topList = top.map(function(f) {
       return {
         name: f.factor.replace(/_/g, ' '),
