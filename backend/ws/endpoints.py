@@ -192,19 +192,28 @@ def _read_state_snapshot() -> dict:
 
     # ── 所有持仓列表 (供前端持仓卡片) ──
     positions_list: list[dict] = []
+    # 用实时 spot 价计算浮动盈亏 (桥接层只有 entry price, 没有 current)
+    spot_price = _live_get_latest_price()
     try:
         raw_list = positions.get("positions") if isinstance(positions, dict) else positions if isinstance(positions, list) else []
         if raw_list:
             for p_raw in raw_list:
                 p_dict = _position_to_dict(p_raw)
+                entry = p_dict.get("price_open", 0.0) or 0.0
+                vol = p_dict.get("api_volume", p_dict.get("volume", 0.0)) or 0.0
+                direction = p_dict.get("direction") or 0
+                if direction == 0:
+                    direction = 1 if p_dict.get("type") == "buy" else -1
+                # 浮动盈亏: (spot - entry) * 方向 * 手数 * 合约乘数(100)
+                computed_pnl = (spot_price - entry) * direction * vol * 100.0 if (spot_price and entry) else 0.0
                 positions_list.append({
                     "symbol": p_dict.get("symbol") or "",
                     "type": p_dict.get("type") or "buy",
-                    "direction": p_dict.get("direction") or 0,
-                    "volume": p_dict.get("api_volume", p_dict.get("volume", 0.0)),
-                    "price_open": p_dict.get("price_open", 0.0),
-                    "current_price": p_dict.get("current_price", 0.0),
-                    "pnl": p_dict.get("pnl") or p_dict.get("profit") or 0.0,
+                    "direction": direction,
+                    "volume": vol,
+                    "price_open": entry,
+                    "current_price": spot_price or 0.0,
+                    "pnl": round(computed_pnl, 2),
                     "sl": p_dict.get("sl") or 0.0,
                     "tp": p_dict.get("tp") or 0.0,
                     "position_id": p_dict.get("position_id") or p_dict.get("ticket") or 0,
