@@ -2582,6 +2582,12 @@ def _process_tick_factor_pipeline(
         tp_price = current_price + tp_dist if composite.direction == 1 else current_price - tp_dist
         # 从 bridge metadata 取小数位 → 舍入 SL/TP 防 cTrader 拒绝
         _meta = getattr(bridge, '_symbol_meta', None) or {}
+        if not _meta.get('api_min_volume') and bridge is not None and hasattr(bridge, '_resolve_symbol_id'):
+            try:
+                bridge._resolve_symbol_id()
+                _meta = getattr(bridge, '_symbol_meta', None) or {}
+            except Exception:
+                pass
         _digits = _meta.get('digits', 2)
         sl_price = round(float(sl_price), _digits)
         tp_price = round(float(tp_price), _digits)
