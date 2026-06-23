@@ -752,7 +752,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                 api_volume = _position_api_volume(p)
                 positions.append({
                     "ticket": p.get("position_id"),
-                    "symbol": p.get("symbol_id"),
+                    "symbol": p.get("symbol"),
                     "type": p.get("type"),
                     "volume": api_volume,
                     "api_volume": api_volume,
@@ -764,6 +764,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                     "swap": p.get("swap", 0.0),
                     "commission": p.get("commission", 0.0),
                     "magic": p.get("magic"),
+                    "open_time": p.get("open_timestamp", 0),
                 })
             # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
             _live_state_update(positions=positions, positions_updated_at=time.time())

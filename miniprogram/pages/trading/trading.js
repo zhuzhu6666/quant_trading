@@ -120,15 +120,25 @@ Page({
         var pSize = pp.volume || 0;
         var pPnl = pp.pnl || 0;
         var pSym = pp.symbol || 'XAUUSD';
+        // 入场时间
+        var ot = pp.open_time || 0;
+        var timeStr = '';
+        if (ot > 0) {
+          var d = new Date(ot * 1000);
+          var hh = ('0' + d.getHours()).slice(-2);
+          var mm = ('0' + d.getMinutes()).slice(-2);
+          var ss = ('0' + d.getSeconds()).slice(-2);
+          timeStr = hh + ':' + mm + ':' + ss;
+        }
         positions.push({
           dir: pDir,
           dirCls: pDir === '多头' ? 'text-green' : 'text-red',
           entry: pEntry ? Number(pEntry).toFixed(2) : '—',
           size: pSize ? Number(pSize).toFixed(2) : '—',
-          apiSize: pSize ? String(Number(pSize).toFixed(2)) : '—',
           pnl: (pPnl >= 0 ? '+' : '') + Number(pPnl).toFixed(2),
           pnlCls: pPnl > 0 ? 'text-green' : pPnl < 0 ? 'text-red' : 'text-gray',
           symbol: pSym,
+          openTime: timeStr,
         });
       }
     }
@@ -141,10 +151,10 @@ Page({
         dirCls: pDir2 === '多头' ? 'text-green' : 'text-red',
         entry: posSummary.entry ? Number(posSummary.entry).toFixed(2) : '—',
         size: posSummary.size ? Number(posSummary.size).toFixed(2) : '—',
-        apiSize: posSummary.size ? String(Number(posSummary.size).toFixed(2)) : '—',
         pnl: (posSummary.unrealized >= 0 ? '+' : '') + Number(posSummary.unrealized).toFixed(2),
         pnlCls: posSummary.unrealized > 0 ? 'text-green' : posSummary.unrealized < 0 ? 'text-red' : 'text-gray',
         symbol: 'XAUUSD',
+        openTime: '',
       });
     }
 
@@ -383,10 +393,10 @@ Page({
             dirCls: dir === 'LONG' ? 'text-green' : 'text-red',
             entry: entry ? Number(entry).toFixed(2) : '—',
             size: size ? Number(size).toFixed(2) : '—',
-            apiSize: size ? String(Number(size).toFixed(2)) : '—',
             pnl: (upl >= 0 ? '+' : '') + Number(upl).toFixed(2),
             pnlCls: upl > 0 ? 'text-green' : upl < 0 ? 'text-red' : 'text-gray',
             symbol: sym,
+            openTime: '',
           });
         }
         this.setData({ positions: list });

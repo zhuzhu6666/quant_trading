@@ -43,10 +43,11 @@ def _position_to_dict(p: object) -> dict:
         "current_price": p.current_price,
         "sl": p.sl,
         "tp": p.tp,
-        "pnl": p.pnl,
-        "commission": p.commission,
-        "swap": p.swap,
-        "symbol": p.symbol,
+        'pnl': p.pnl,
+        'commission': p.commission,
+        'swap': p.swap,
+        'symbol': p.symbol,
+        'open_time': p.open_timestamp,
     }
 
 
@@ -207,6 +208,7 @@ def _read_state_snapshot() -> dict:
                     "sl": p_dict.get("sl") or 0.0,
                     "tp": p_dict.get("tp") or 0.0,
                     "position_id": p_dict.get("position_id") or 0,
+                    "open_time": p_dict.get("open_time") or 0,
                 })
     except Exception:
         pass

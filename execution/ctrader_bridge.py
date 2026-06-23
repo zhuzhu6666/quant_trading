@@ -1375,6 +1375,7 @@ class CTraderBridge(BaseBrokerBridge):
                     tp=p.takeProfit or 0,
                     commission=p.commission / 100.0,
                     swap=p.swap / 100.0,
+                    open_timestamp=(td.openTimestamp / 1000.0) if td.openTimestamp else 0,
                 ))
             self._record_success()
             return result

@@ -47,6 +47,7 @@ class PositionInfo:
     pnl: float = 0.0
     commission: float = 0.0
     swap: float = 0.0
+    open_timestamp: float = 0.0  # epoch seconds
 
     def get(self, key: str, default: Any = None) -> Any:
         """Dict-like accessor for canonical fields.

@@ -59,38 +59,23 @@
     </view>
   </view>
 
-  <!-- ═══ 持仓 ═══ -->
+  <!-- ═══ 持仓 (紧凑) ═══ -->
   <view class="card">
     <text class="card-title">持仓</text>
     <block wx:if="{{positions.length > 0}}">
-      <view wx:for="{{positions}}" wx:key="symbol" wx:for-item="p">
-        <view class="pos-card">
-          <view class="pos-header">
-            <text class="pos-symbol">{{p.symbol}}</text>
-          </view>
-          <view class="pos-grid">
-            <view class="pos-cell">
-              <text class="pos-cell-val {{p.dirCls}}">{{p.dir}}</text>
-              <text class="pos-cell-lbl">方向</text>
-            </view>
-            <view class="pos-cell">
-              <text class="pos-cell-val text-dark">{{p.entry}}</text>
-              <text class="pos-cell-lbl">入场价</text>
-            </view>
-            <view class="pos-cell">
-              <text class="pos-cell-val text-dark">{{p.size}}</text>
-              <text class="pos-cell-lbl">手数</text>
-            </view>
-            <view class="pos-cell">
-              <text class="pos-cell-val text-dark">{{p.apiSize}}</text>
-              <text class="pos-cell-lbl">API量</text>
-            </view>
-          </view>
-          <view class="pos-pnl-box">
-            <text class="pos-pnl-lbl">浮动盈亏</text>
-            <text class="pos-pnl-val {{p.pnlCls}}">{{p.pnl}}</text>
-          </view>
-        </view>
+      <view class="pos-header-row">
+        <text class="pos-hdr-dir">方向</text>
+        <text class="pos-hdr-entry">入场</text>
+        <text class="pos-hdr-time">时间</text>
+        <text class="pos-hdr-size">手数</text>
+        <text class="pos-hdr-pnl">浮动盈亏</text>
+      </view>
+      <view class="pos-compact" wx:for="{{positions}}" wx:key="index" wx:for-item="p">
+        <text class="pos-dir {{p.dirCls}}">{{p.dir}}</text>
+        <text class="pos-entry">{{p.entry}}</text>
+        <text class="pos-time">{{p.openTime}}</text>
+        <text class="pos-size">{{p.size}}</text>
+        <text class="pos-pnl-c {{p.pnlCls}}">{{p.pnl}}</text>
       </view>
     </block>
     <view wx:else class="empty-state">
