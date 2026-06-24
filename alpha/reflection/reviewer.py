@@ -45,6 +45,23 @@ class TradeReviewer:
     def _new_id(prefix: str) -> str:
         return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
+    @staticmethod
+    def is_review_verifiable(
+        *,
+        real_pnl: dict | None = None,
+        close_reason: str = "",
+        context_integrity: str = "full",
+    ) -> tuple[bool, str]:
+        payload = real_pnl or {}
+        has_net = isinstance(payload, dict) and payload.get("net") is not None
+        if has_net:
+            return True, ""
+        if close_reason in {"broker_close", "restart_replay", "emergency_close"}:
+            return False, "missing_real_pnl"
+        if context_integrity != "full":
+            return False, "partial_context"
+        return False, "missing_real_pnl"
+
     def review_closed_trade(
         self,
         *,
@@ -55,8 +72,32 @@ class TradeReviewer:
         contributions: dict[str, float] | None = None,
         exit_decision_id: str = "",
         real_pnl: dict | None = None,
+        close_reason: str = "",
+        context_integrity: str = "full",
     ) -> dict:
         contributions = contributions or {}
+        is_verifiable, skip_reason = self.is_review_verifiable(
+            real_pnl=real_pnl,
+            close_reason=close_reason,
+            context_integrity=context_integrity,
+        )
+        if not is_verifiable:
+            return {
+                "accepted": False,
+                "skip_reason": skip_reason,
+                "position_id": position_id,
+                "trade_id": str(position_id),
+                "outcome_label": "",
+                "pnl": float(pnl),
+                "failure_tags": ["unverified_close"],
+                "summary_text": f"trade {position_id} skipped review: {skip_reason}",
+                "review_json": {
+                    "position_id": position_id,
+                    "real_pnl": real_pnl or {},
+                    "close_reason": close_reason,
+                    "context_integrity": context_integrity,
+                },
+            }
         with self._conn() as conn:
             entry = conn.execute(
                 """
@@ -155,6 +196,8 @@ class TradeReviewer:
             "positive_share": round(positive_share, 4),
             "close_price": close_price,
             "real_pnl": real_pnl or {},
+            "close_reason": close_reason,
+            "context_integrity": context_integrity,
             "failure_tags": failure_tags,
             "factor_contributions": contributions,
         }
@@ -218,6 +261,7 @@ class TradeReviewer:
                 )
 
         return {
+            "accepted": True,
             "review_id": review_id,
             "trade_id": trade_id,
             "position_id": position_id,

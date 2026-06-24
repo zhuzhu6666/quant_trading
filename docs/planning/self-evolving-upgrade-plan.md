@@ -6,6 +6,31 @@
 
 ---
 
+## Current Implementation Status (2026-06-25)
+
+The plan below is no longer purely aspirational. The current codebase already implements the rule-driven learning loop baseline:
+
+1. decision ledger writes for open/close lifecycle,
+2. post-trade rule review with machine-readable outcome artifacts,
+3. experience memory and conservative factor suggestion generation,
+4. governor approval / rejection / rollback,
+5. learning application logging,
+6. application-effect tracking against subsequent trades,
+7. auto weight sync after governance,
+8. startup auto-resume and delayed learning backfill for restart-gap repair.
+
+What is still in verification rather than fully "finished":
+
+1. real-trade validation that application-effect status transitions remain stable over time,
+2. cleanup of historical duplicate application rows from early iterations,
+3. more explicit frontend mapping for `observing`, `effective`, `ineffective`, `reinforced`, and `superseded`,
+4. eventual extraction of the current `_update_weights()` coupling into a clearer service contract,
+5. future model adapters once enough verified live data has accumulated.
+
+This means the system is already in the "rule-driven learning stage", not in the "model-driven self-evolution stage" yet.
+
+---
+
 ## 1. Goal
 
 This document defines the upgrade path from the current factor-driven trading system to a true self-evolving system.

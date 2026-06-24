@@ -84,10 +84,20 @@ async def lifespan(app: FastAPI):
 
     # Background warm-up cTrader bridge
     try:
-        from backend.services.live_service import warmup_ctrader
+        from backend.services.live_service import schedule_auto_resume_loop, warmup_ctrader
         warmup_ctrader(timeout_sec=0.0)
+        if schedule_auto_resume_loop():
+            _lg.info("[lifespan] auto-resume loop scheduled from persisted desired state")
     except Exception as e:
         _lg.warning(f"[lifespan] cTrader warmup failed (non-fatal): {e}")
+
+    # Delayed learning backfill: repair restart gaps using ctrader_deals + decision_ledger.
+    try:
+        from backend.services.learning_backfill import schedule_learning_backfill
+        if schedule_learning_backfill(delay_sec=180.0, limit=100, allow_partial=False, rebuild_learning=True):
+            _lg.info("[lifespan] learning backfill scheduled")
+    except Exception as e:
+        _lg.warning(f"[lifespan] learning backfill schedule failed (non-fatal): {e}")
 
     # Background warm-up db-health cache (避免首次请求阻塞线程池 20s)
     try:

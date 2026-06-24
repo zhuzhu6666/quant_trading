@@ -20,6 +20,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+INVALID_FACTOR_ERROR_THRESHOLD = 3
+
 
 @dataclass
 class ShadowPerf:
@@ -118,6 +120,98 @@ def _max_drawdown(equity: np.ndarray) -> float:
     return float(np.max(dd)) if len(dd) else 0.0
 
 
+def _record_shadow_error(
+    factor: str,
+    *,
+    source: str = "shadow",
+    symbol: str = "",
+    timeframe: str = "",
+    error: str = "",
+) -> None:
+    _ensure_shadow_tables()
+    from backend.core.db import get_state_conn
+
+    conn = get_state_conn()
+    try:
+        row = conn.execute(
+            "SELECT metrics_json FROM shadow_factor_perf WHERE factor = ?",
+            (factor,),
+        ).fetchone()
+        metrics = {}
+        if row is not None:
+            try:
+                metrics = json.loads(row["metrics_json"] or "{}")
+            except Exception:
+                metrics = {}
+        error_count = int(metrics.get("error_count", 0) or 0) + 1
+        metrics.update({
+            "factor": factor,
+            "source": source,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "status": "invalid",
+            "error_count": error_count,
+            "last_error": str(error or "")[:500],
+            "last_error_at": time.time(),
+        })
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO shadow_factor_perf
+            (factor, source, symbol, timeframe, oos_bars, cumulative_pnl,
+             hit_rate, max_drawdown, last_signal, metrics_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                factor,
+                source,
+                symbol,
+                timeframe,
+                0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                json.dumps(metrics, ensure_ascii=False),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_invalid_shadow_factors(max_errors: int = INVALID_FACTOR_ERROR_THRESHOLD) -> list[dict]:
+    _ensure_shadow_tables()
+    from backend.core.db import get_state_conn
+
+    conn = get_state_conn()
+    try:
+        rows = conn.execute(
+            "SELECT factor, source, symbol, timeframe, metrics_json, updated_at FROM shadow_factor_perf"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    invalid = []
+    for row in rows:
+        try:
+            metrics = json.loads(row["metrics_json"] or "{}")
+        except Exception:
+            metrics = {}
+        error_count = int(metrics.get("error_count", 0) or 0)
+        if metrics.get("status") == "invalid" and error_count >= max_errors:
+            invalid.append({
+                "factor": row["factor"],
+                "source": row["source"] or metrics.get("source", "shadow"),
+                "symbol": row["symbol"] or metrics.get("symbol", ""),
+                "timeframe": row["timeframe"] or metrics.get("timeframe", ""),
+                "error_count": error_count,
+                "last_error": str(metrics.get("last_error", "") or ""),
+                "updated_at": float(row["updated_at"] or 0.0),
+            })
+    return invalid
+
+
 def evaluate_factor(
     df: pd.DataFrame,
     factor: str,
@@ -135,7 +229,14 @@ def evaluate_factor(
     try:
         raw = fn(df)
     except Exception as exc:
-        logger.debug("[shadow] factor %s failed: %s", factor, exc)
+        logger.warning("[shadow] factor %s failed: %s", factor, exc)
+        _record_shadow_error(
+            factor,
+            source=source,
+            symbol=symbol,
+            timeframe=timeframe,
+            error=str(exc),
+        )
         return None
 
     n = len(df)

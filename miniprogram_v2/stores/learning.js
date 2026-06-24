@@ -5,6 +5,7 @@ const store = createStore({
   suggestions: [],
   applications: [],
   reviews: [],
+  lifecycle: [],
   updatedAt: 0,
 });
 

@@ -40,6 +40,50 @@ class RuleEvolutionGovernor:
     def _new_id(prefix: str) -> str:
         return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
+    @staticmethod
+    def _reward_from_review(item: dict) -> float:
+        review = item.get("review") or {}
+        pnl = float(item.get("pnl", 0.0) or 0.0)
+        close_reason = str(review.get("close_reason", "") or "")
+        context_integrity = str(review.get("context_integrity", "full") or "full")
+        reward = 0.0
+        if pnl > 0:
+            reward = min(1.0, pnl / max(abs(pnl), 50.0))
+        elif pnl < 0:
+            reward = -min(1.0, abs(pnl) / max(abs(pnl), 50.0))
+        reward_scale = 1.0
+        if context_integrity != "full":
+            reward_scale *= 0.5
+        if close_reason in {"emergency_close", "restart_replay"}:
+            reward_scale *= 0.6
+        return reward * reward_scale
+
+    @staticmethod
+    def _parse_application_row(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        try:
+            item["suggestion_ids"] = json.loads(item.pop("suggestion_ids_json") or "[]")
+        except Exception:
+            item["suggestion_ids"] = []
+        try:
+            item["details"] = json.loads(item.pop("details_json") or "{}")
+        except Exception:
+            item["details"] = {}
+        return item
+
+    @staticmethod
+    def _parse_review_row(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        try:
+            item["failure_tags"] = json.loads(item.pop("failure_tags_json") or "[]")
+        except Exception:
+            item["failure_tags"] = []
+        try:
+            item["review"] = json.loads(item.pop("review_json") or "{}")
+        except Exception:
+            item["review"] = {}
+        return item
+
     def list_suggestions(self, *, status: str | None = None, limit: int = 100) -> list[dict]:
         sql = """
             SELECT suggestion_id, scope_type, scope_key, action, confidence, reason,
@@ -116,12 +160,8 @@ class RuleEvolutionGovernor:
                         status = "rejected"
                         note = f"rejected by governor: positive evidence too weak avg_reward={avg_reward:.3f}"
                 elif action == "watch":
-                    if sample_count < 6:
-                        status = "approved"
-                        note = f"approved by governor: watch-only observation, samples={sample_count}"
-                    elif sample_count >= 6:
-                        status = "rejected"
-                        note = "watch suggestion expired after sufficient observation window"
+                    status = "rejected"
+                    note = f"observation-only factor kept in stats, not promoted to executable suggestion (samples={sample_count})"
 
                 if status == "proposed" and now - float(row["created_at"] or 0.0) > 14 * 86400:
                     status = "rejected"
@@ -222,9 +262,111 @@ class RuleEvolutionGovernor:
         cycle_ts: float,
         status: str = "applied",
         details: dict | None = None,
-    ) -> str:
-        application_id = self._new_id("lapp")
+        ) -> str:
+        suggestion_ids = [str(item) for item in (suggestion_ids or []) if str(item)]
+        suggestion_ids_json = json.dumps(sorted(set(suggestion_ids)), ensure_ascii=False)
+        details_json = json.dumps(details or {}, ensure_ascii=False, default=str)
         with self._conn() as conn:
+            existing = conn.execute(
+                """
+                SELECT application_id, suggestion_ids_json, status
+                FROM learning_application_log
+                WHERE scope_type=? AND scope_key=? AND action=?
+                  AND status IN ('applied', 'observing', 'effective')
+                ORDER BY cycle_ts DESC, created_at DESC
+                LIMIT 1
+                """,
+                (scope_type, scope_key, action),
+            ).fetchone()
+            if existing:
+                try:
+                    existing_ids = json.dumps(
+                        sorted(set(str(item) for item in json.loads(existing["suggestion_ids_json"] or "[]"))),
+                        ensure_ascii=False,
+                    )
+                except Exception:
+                    existing_ids = "[]"
+                existing_status = str(existing["status"] or "")
+                if existing_ids == suggestion_ids_json and existing_status in {"applied", "observing", "effective"}:
+                    conn.execute(
+                        """
+                        UPDATE learning_application_log
+                        SET status='superseded'
+                        WHERE scope_type=? AND scope_key=? AND action=?
+                          AND application_id<>?
+                          AND status IN ('applied', 'observing', 'effective')
+                          AND suggestion_ids_json=?
+                        """,
+                        (
+                            scope_type,
+                            scope_key,
+                            action,
+                            str(existing["application_id"]),
+                            suggestion_ids_json,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE learning_application_effect
+                        SET status='superseded', updated_at=?
+                        WHERE application_id IN (
+                            SELECT application_id
+                            FROM learning_application_log
+                            WHERE scope_type=? AND scope_key=? AND action=?
+                              AND application_id<>?
+                              AND status='superseded'
+                              AND suggestion_ids_json=?
+                        )
+                        """,
+                        (
+                            time.time(),
+                            scope_type,
+                            scope_key,
+                            action,
+                            str(existing["application_id"]),
+                            suggestion_ids_json,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE learning_application_log
+                        SET cycle_ts=?, bias_multiplier=?, old_weight=?, new_weight=?, details_json=?
+                        WHERE application_id=?
+                        """,
+                        (
+                            float(cycle_ts),
+                            float(bias_multiplier),
+                            float(old_weight),
+                            float(new_weight),
+                            details_json,
+                            str(existing["application_id"]),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE learning_application_effect
+                        SET decision_json=?, updated_at=?
+                        WHERE application_id=?
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "suggestion_ids": suggestion_ids,
+                                    "bias_multiplier": bias_multiplier,
+                                    "old_weight": old_weight,
+                                    "new_weight": new_weight,
+                                    "details": details or {},
+                                },
+                                ensure_ascii=False,
+                                default=str,
+                            ),
+                            time.time(),
+                            str(existing["application_id"]),
+                        ),
+                    )
+                    return str(existing["application_id"])
+
+            application_id = self._new_id("lapp")
             conn.execute(
                 """
                 INSERT INTO learning_application_log
@@ -241,10 +383,258 @@ class RuleEvolutionGovernor:
                     float(bias_multiplier),
                     float(old_weight),
                     float(new_weight),
-                    json.dumps(suggestion_ids, ensure_ascii=False),
+                    suggestion_ids_json,
                     status,
-                    json.dumps(details or {}, ensure_ascii=False, default=str),
+                    details_json,
+                    time.time(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO learning_application_effect
+                (application_id, scope_type, scope_key, action, status, decision_json,
+                 updated_at, created_at)
+                VALUES (?, ?, ?, ?, 'observing', ?, ?, ?)
+                """,
+                (
+                    application_id,
+                    scope_type,
+                    scope_key,
+                    action,
+                    json.dumps(
+                        {
+                            "suggestion_ids": suggestion_ids,
+                            "bias_multiplier": bias_multiplier,
+                            "old_weight": old_weight,
+                            "new_weight": new_weight,
+                            "details": details or {},
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    time.time(),
                     time.time(),
                 ),
             )
         return application_id
+
+    def reconcile_application_effects(
+        self,
+        *,
+        min_trades: int = 3,
+        observe_trades: int = 5,
+        baseline_min_trades: int = 2,
+        reward_delta_for_effective: float = 0.08,
+        reward_delta_for_bad: float = -0.08,
+    ) -> dict[str, int]:
+        observed = 0
+        rolled_back = 0
+        reinforced = 0
+        waiting = 0
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM learning_application_log
+                WHERE status IN ('applied', 'observing', 'effective')
+                ORDER BY cycle_ts ASC
+                """
+            ).fetchall()
+            now = time.time()
+
+            for row in rows:
+                app = self._parse_application_row(row)
+                if str(app.get("scope_type") or "") != "factor":
+                    continue
+                factor = str(app.get("scope_key") or "")
+                if not factor:
+                    continue
+
+                post_rows = conn.execute(
+                    """
+                    SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
+                           r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                    FROM trade_outcome_review r
+                    WHERE r.created_at > ?
+                      AND EXISTS (
+                          SELECT 1
+                          FROM decision_factor_snapshot dfs
+                          WHERE dfs.decision_id = r.entry_decision_id
+                            AND dfs.factor = ?
+                      )
+                    ORDER BY r.created_at ASC
+                    LIMIT ?
+                    """,
+                    (float(app.get("cycle_ts") or 0.0), factor, int(observe_trades)),
+                ).fetchall()
+                post_reviews = [self._parse_review_row(r) for r in post_rows]
+
+                pre_rows = conn.execute(
+                    """
+                    SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
+                           r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                    FROM trade_outcome_review r
+                    WHERE r.created_at <= ?
+                      AND EXISTS (
+                          SELECT 1
+                          FROM decision_factor_snapshot dfs
+                          WHERE dfs.decision_id = r.entry_decision_id
+                            AND dfs.factor = ?
+                      )
+                    ORDER BY r.created_at DESC
+                    LIMIT ?
+                    """,
+                    (float(app.get("cycle_ts") or 0.0), factor, int(observe_trades)),
+                ).fetchall()
+                pre_reviews = [self._parse_review_row(r) for r in pre_rows]
+
+                post_rewards = [self._reward_from_review(r) for r in post_reviews]
+                pre_rewards = [self._reward_from_review(r) for r in pre_reviews]
+                post_avg = sum(post_rewards) / len(post_rewards) if post_rewards else 0.0
+                pre_avg = sum(pre_rewards) / len(pre_rewards) if pre_rewards else 0.0
+                delta = post_avg - pre_avg
+                post_win_rate = sum(1 for r in post_reviews if float(r.get("pnl", 0.0) or 0.0) > 0) / max(len(post_reviews), 1)
+                pre_win_rate = sum(1 for r in pre_reviews if float(r.get("pnl", 0.0) or 0.0) > 0) / max(len(pre_reviews), 1)
+
+                decision = {
+                    "application_id": app["application_id"],
+                    "scope_key": factor,
+                    "action": app["action"],
+                    "post_review_ids": [r["review_id"] for r in post_reviews],
+                    "baseline_review_ids": [r["review_id"] for r in pre_reviews],
+                    "post_avg_reward": round(post_avg, 6),
+                    "baseline_avg_reward": round(pre_avg, 6),
+                    "delta_avg_reward": round(delta, 6),
+                    "post_win_rate": round(post_win_rate, 4),
+                    "baseline_win_rate": round(pre_win_rate, 4),
+                    "baseline_ready": len(pre_reviews) >= baseline_min_trades,
+                    "observe_ready": len(post_reviews) >= min_trades,
+                }
+
+                next_status = "observing"
+                if len(post_reviews) < min_trades or len(pre_reviews) < baseline_min_trades:
+                    next_status = "observing"
+                elif delta >= reward_delta_for_effective:
+                    next_status = "effective"
+                elif delta <= reward_delta_for_bad:
+                    next_status = "ineffective"
+                else:
+                    next_status = "mixed"
+
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO learning_application_effect
+                    (application_id, scope_type, scope_key, action, status,
+                     observed_trade_count, baseline_trade_count,
+                     post_avg_reward, baseline_avg_reward, delta_avg_reward,
+                     post_win_rate, baseline_win_rate, decision_json,
+                     last_review_at, updated_at, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM learning_application_effect WHERE application_id=?), ?))
+                    """,
+                    (
+                        app["application_id"],
+                        "factor",
+                        factor,
+                        app["action"],
+                        next_status,
+                        len(post_reviews),
+                        len(pre_reviews),
+                        round(post_avg, 6),
+                        round(pre_avg, 6),
+                        round(delta, 6),
+                        round(post_win_rate, 4),
+                        round(pre_win_rate, 4),
+                        json.dumps(decision, ensure_ascii=False, default=str),
+                        max((float(r.get("created_at", 0.0) or 0.0) for r in post_reviews), default=0.0),
+                        now,
+                        app["application_id"],
+                        now,
+                    ),
+                )
+
+                conn.execute(
+                    """
+                    UPDATE learning_application_log
+                    SET status=?, details_json=?
+                    WHERE application_id=?
+                    """,
+                    (
+                        next_status,
+                        json.dumps({**(app.get("details") or {}), "effect": decision}, ensure_ascii=False, default=str),
+                        app["application_id"],
+                    ),
+                )
+                observed += 1
+
+                if next_status == "observing":
+                    waiting += 1
+                    continue
+
+                suggestion_ids = list(app.get("suggestion_ids") or [])
+                if next_status == "ineffective" and suggestion_ids:
+                    conn.executemany(
+                        """
+                        UPDATE policy_suggestion
+                        SET status='rolled_back', reviewed_at=?, review_note=?
+                        WHERE suggestion_id=?
+                        """,
+                        [
+                            (now, f"auto rollback by application effect delta={delta:.3f}", sid)
+                            for sid in suggestion_ids
+                        ],
+                    )
+                    rolled_back += 1
+                elif next_status == "effective" and len(post_reviews) >= observe_trades:
+                    suggestion_id = self._new_id("psg")
+                    evidence = {
+                        "source_application_id": app["application_id"],
+                        "sample_count": len(post_reviews),
+                        "baseline_sample_count": len(pre_reviews),
+                        "post_avg_reward": round(post_avg, 6),
+                        "baseline_avg_reward": round(pre_avg, 6),
+                        "delta_avg_reward": round(delta, 6),
+                    }
+                    conn.execute(
+                        """
+                        INSERT INTO policy_suggestion
+                        (suggestion_id, scope_type, scope_key, action, confidence, reason,
+                         evidence_json, status, reviewed_at, review_note, created_at)
+                        VALUES (?, 'factor', ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
+                        """,
+                        (
+                            suggestion_id,
+                            factor,
+                            app["action"],
+                            min(0.75, 0.35 + max(0.0, delta)),
+                            f"auto reinforced by application effect delta={delta:.3f}",
+                            json.dumps(evidence, ensure_ascii=False, default=str),
+                            now,
+                            f"auto reinforce from application {app['application_id']}",
+                            now,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE learning_application_effect
+                        SET status='reinforced', updated_at=?
+                        WHERE application_id=?
+                        """,
+                        (now, app["application_id"]),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE learning_application_log
+                        SET status='reinforced'
+                        WHERE application_id=?
+                        """,
+                        (app["application_id"],),
+                    )
+                    reinforced += 1
+
+        return {
+            "observed": observed,
+            "rolled_back": rolled_back,
+            "reinforced": reinforced,
+            "waiting": waiting,
+        }

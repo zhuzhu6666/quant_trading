@@ -84,17 +84,59 @@ function describeReview(item = {}) {
 
 function describeApplication(item = {}) {
   const action = String(item.action || '').toLowerCase();
+  const status = String(item.status || 'observing').toLowerCase();
   let actionLabel = '观察生效';
   if (action.includes('downweight')) actionLabel = '降低权重已生效';
   else if (action.includes('boost')) actionLabel = '提高权重已生效';
   else if (action.includes('watch')) actionLabel = '观察策略已记录';
   else if (action.includes('quarantine')) actionLabel = '隔离策略已生效';
 
+  let effectLabel = '观察中';
+  let effectText = '系统正在等待更多样本来判断这次调整是否真的有帮助。';
+  if (status === 'effective') {
+    effectLabel = '已见效果';
+    effectText = '应用后表现优于历史基线，这次调整正在起正向作用。';
+  } else if (status === 'reinforced') {
+    effectLabel = '已增强';
+    effectText = '应用后持续有效，系统已经自动追加了一次增强。';
+  } else if (status === 'ineffective') {
+    effectLabel = '已回退';
+    effectText = '应用后效果变差，系统已经自动回滚相关建议。';
+  } else if (status === 'mixed') {
+    effectLabel = '效果混合';
+    effectText = '应用后有变化，但还不足以下明确结论。';
+  }
+
+  const observed = Number(item.observed_trade_count || 0);
+  const baseline = Number(item.baseline_trade_count || 0);
+  const delta = Number(item.delta_avg_reward || 0);
+  const postWinRate = Number(item.post_win_rate || 0);
+  const baselineWinRate = Number(item.baseline_win_rate || 0);
+  const deltaText = `${delta >= 0 ? '+' : ''}${delta.toFixed(3)}`;
+  const postWinText = `${Math.round(postWinRate * 100)}%`;
+  const baselineWinText = `${Math.round(baselineWinRate * 100)}%`;
+
   return {
     actionLabel,
     scopeLabel: humanizeScopeKey(item.scope_key),
     impactText: `${item.old_weight} -> ${item.new_weight}，bias ${item.bias_multiplier}`,
+    effectLabel,
+    effectText,
+    effectTone: toneFromStatus(status),
+    effectSummary: `后验 ${observed} 笔 / 基线 ${baseline} 笔，reward Δ ${deltaText}`,
+    effectStatsText: `胜率 ${postWinText}，基线 ${baselineWinText}`,
+    isObservationOnly: action === 'watch',
   };
+}
+
+function isMeaningfulApplication(item = {}) {
+  const action = String(item.action || '').toLowerCase();
+  const bias = Number(item.bias_multiplier || 1);
+  const oldWeight = Number(item.old_weight || 0);
+  const newWeight = Number(item.new_weight || 0);
+  if (action === 'watch') return false;
+  if (Math.abs(bias - 1) < 0.000001 && Math.abs(newWeight - oldWeight) < 0.000001) return false;
+  return true;
 }
 
 Page({
@@ -109,8 +151,12 @@ Page({
     selectedSuggestion: null,
     reviews: [],
     selectedReview: null,
+    allApplications: [],
     applications: [],
+    applicationCountDisplay: 0,
+    observationApplicationCount: 0,
     selectedApplication: null,
+    latestApplicationExpanded: false,
     closureSteps: [],
     latestApplication: null,
     governBusy: false,
@@ -147,11 +193,14 @@ Page({
       createdText: formatDateTime(item.created_at),
       ...describeReview(item),
     }));
-    const applications = (state.applications || []).map((item) => ({
+    const allApplications = (state.applications || []).map((item) => ({
       ...item,
       createdText: formatDateTime(item.created_at),
+      reviewAtText: formatDateTime(item.last_review_at),
       ...describeApplication(item),
     }));
+    const applications = allApplications.filter((item) => isMeaningfulApplication(item));
+    const observationApplicationCount = Math.max(0, allApplications.length - applications.length);
     const suggestionTab = this.data.suggestionTab || 'proposed';
     const proposedSuggestions = suggestions.filter((item) => item.status === 'proposed');
     const approvedSuggestions = suggestions.filter((item) => item.status === 'approved');
@@ -170,7 +219,10 @@ Page({
       rolledBackSuggestions,
       visibleSuggestions,
       reviews,
+      allApplications,
       applications,
+      applicationCountDisplay: applications.length,
+      observationApplicationCount,
       closureSteps: [
         {
           id: 'review',
@@ -200,8 +252,19 @@ Page({
           note: applications.length ? `${applications.length} 次权重应用` : '还未影响运行权重',
           tone: applications.length ? 'positive' : 'neutral',
         },
+        {
+          id: 'effect',
+          index: '5',
+          title: '效果追踪',
+          note: applications.length
+            ? applications[0].effectLabel
+            : allApplications.length
+              ? '当前以观察记录为主'
+              : '等待应用后样本',
+          tone: applications.length ? applications[0].effectTone : 'neutral',
+        },
       ],
-      latestApplication: applications[0] || null,
+      latestApplication: applications[0] || allApplications[0] || null,
       updatedAt: formatDateTime(state.updatedAt),
     });
   },
@@ -250,8 +313,12 @@ Page({
 
   openApplicationDetail(e) {
     const id = e.currentTarget.dataset.id;
-    const item = (this.data.applications || []).find((x) => x.application_id === id) || null;
+    const item = (this.data.allApplications || []).find((x) => x.application_id === id) || null;
     this.setData({ selectedApplication: item });
+  },
+
+  toggleLatestApplicationDetail() {
+    this.setData({ latestApplicationExpanded: !this.data.latestApplicationExpanded });
   },
 
   closeSuggestionDetail() {

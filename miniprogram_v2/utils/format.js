@@ -49,8 +49,8 @@ export function toneFromPnl(value) {
 
 export function toneFromStatus(status) {
   const s = String(status || '').toLowerCase();
-  if (['approved', 'ok', 'healthy', 'running', 'connected', 'good_win', 'active'].includes(s)) return 'positive';
-  if (['rejected', 'rolled_back', 'error', 'critical', 'bad_loss', 'offline'].includes(s)) return 'negative';
-  if (['proposed', 'warning', 'watch', 'stale'].includes(s)) return 'warning';
+  if (['approved', 'ok', 'healthy', 'running', 'connected', 'good_win', 'active', 'effective', 'reinforced'].includes(s)) return 'positive';
+  if (['rejected', 'rolled_back', 'error', 'critical', 'bad_loss', 'offline', 'ineffective'].includes(s)) return 'negative';
+  if (['proposed', 'warning', 'watch', 'stale', 'observing', 'mixed'].includes(s)) return 'warning';
   return 'neutral';
 }

@@ -10,6 +10,7 @@ Page({
     wsTone: 'warning',
     equity: '--',
     pnlToday: '--',
+    pnlTodayTone: 'neutral',
     drawdown: '--',
     positions: '0',
     loopLabel: '未知',

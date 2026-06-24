@@ -44,12 +44,43 @@ class ExperienceBuilder:
     def build_from_review(self, review: dict) -> dict:
         review_json = review.get("review_json", {}) or {}
         failure_tags = list(review.get("failure_tags", []) or [])
-        primary_factor = (
-            review_json.get("worst_factor")
-            or review_json.get("top_factor")
-            or review_json.get("top_weight_factor")
-            or ""
-        )
+        outcome_label = str(review.get("outcome_label", "") or "")
+        close_reason = str(review_json.get("close_reason", "") or "")
+        context_integrity = str(review_json.get("context_integrity", "full") or "full")
+        if context_integrity != "full" and "partial_context" not in failure_tags:
+            failure_tags.append("partial_context")
+        if close_reason == "emergency_close" and "manual_intervention" not in failure_tags:
+            failure_tags.append("manual_intervention")
+        if close_reason == "restart_replay" and "restart_replay" not in failure_tags:
+            failure_tags.append("restart_replay")
+
+        def _factor_source(name: object) -> str:
+            factor = str(name or "")
+            if not factor:
+                return ""
+            try:
+                from alpha.registry_adapter import RegistryAdapter
+                meta = RegistryAdapter.shared().get_meta(factor)
+                return str(meta.get("source", "") or "")
+            except Exception:
+                return ""
+
+        def _is_actionable_factor(name: object) -> bool:
+            factor = str(name or "")
+            if not factor or factor.startswith("dsl_auto_"):
+                return False
+            return _factor_source(factor) in {"builtin", "discovered"}
+
+        top_weight_factor = str(review_json.get("top_weight_factor", "") or "")
+        top_factor = str(review_json.get("top_factor", "") or "")
+        worst_factor = str(review_json.get("worst_factor", "") or "")
+
+        if outcome_label in {"bad_loss", "good_loss"}:
+            primary_factor = worst_factor if _is_actionable_factor(worst_factor) else (top_weight_factor or top_factor or worst_factor)
+        else:
+            primary_factor = top_weight_factor or top_factor or worst_factor
+            if not _is_actionable_factor(primary_factor):
+                primary_factor = top_weight_factor or top_factor or worst_factor
         scope_parts = [
             str(review.get("regime_id", "") or ""),
             str(primary_factor or ""),
@@ -64,6 +95,16 @@ class ExperienceBuilder:
         elif pnl < 0:
             reward_score = -min(1.0, abs(pnl) / max(abs(pnl), 50.0))
 
+        reward_scale = 1.0
+        evidence_scale = 1.0
+        if context_integrity != "full":
+            reward_scale *= 0.5
+            evidence_scale *= 0.35
+        if close_reason in {"emergency_close", "restart_replay"}:
+            reward_scale *= 0.6
+            evidence_scale *= 0.5
+        reward_score *= reward_scale
+
         if review.get("outcome_label") == "bad_loss":
             recommended_action = "downweight"
         elif review.get("outcome_label") == "good_win":
@@ -72,13 +113,18 @@ class ExperienceBuilder:
             recommended_action = "watch"
         else:
             recommended_action = "watch"
+        if context_integrity != "full" or close_reason in {"emergency_close", "restart_replay"}:
+            recommended_action = "watch"
 
         evidence_strength = min(1.0, max(0.15, abs(reward_score) + 0.20 * len(failure_tags)))
+        evidence_strength = max(0.05, evidence_strength * evidence_scale)
         context = {
             "position_id": review.get("position_id", ""),
             "trade_id": review.get("trade_id", ""),
             "primary_factor": primary_factor,
             "failure_tags": failure_tags,
+            "close_reason": close_reason,
+            "context_integrity": context_integrity,
             "summary_text": review.get("summary_text", ""),
             "review_json": review_json,
         }

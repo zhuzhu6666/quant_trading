@@ -72,13 +72,13 @@ class PolicySuggester:
                 action = "downweight"
                 confidence = min(0.95, 0.45 + 0.08 * sample_count + 0.10 * bad_loss_count)
                 reason = f"factor {primary_factor} shows repeated negative outcomes ({sample_count} samples)"
-            elif sample_count >= 5 and avg_reward >= 0.25:
+            elif sample_count >= 4 and win_count >= 3 and avg_reward >= 0.22:
                 action = "boost_small"
                 confidence = min(0.85, 0.40 + 0.05 * sample_count)
                 reason = f"factor {primary_factor} shows stable positive outcomes ({sample_count} samples)"
             else:
                 action = "watch"
-                confidence = min(0.70, 0.25 + 0.05 * sample_count)
+                confidence = 0.0
                 reason = f"factor {primary_factor} still accumulating evidence"
 
             conn.execute(
@@ -99,6 +99,9 @@ class PolicySuggester:
                     now,
                 ),
             )
+
+            if action == "watch":
+                return None
 
             payload = {
                 "sample_count": sample_count,

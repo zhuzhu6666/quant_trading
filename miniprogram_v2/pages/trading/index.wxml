@@ -19,7 +19,7 @@
           <view class="hero-metric-value">{{strategy.positionDir || 'FLAT'}}</view>
         </view>
         <view class="hero-metric">
-          <view class="hero-metric-label">回撤</view>
+          <view class="hero-metric-label">实时回撤</view>
           <view class="hero-metric-value">{{daily.drawdown}}</view>
         </view>
       </view>
@@ -45,11 +45,11 @@
           <view class="value-md">{{strategy.positionDir || 'FLAT'}}</view>
         </view>
         <view class="split-card stack-12">
-          <view class="small muted">当日 PnL</view>
+          <view class="small muted">实时 PnL</view>
           <view class="value-md">{{daily.pnl}}</view>
         </view>
         <view class="split-card stack-12">
-          <view class="small muted">当日回撤</view>
+          <view class="small muted">实时回撤</view>
           <view class="value-md">{{daily.drawdown}}</view>
         </view>
       </view>
@@ -88,12 +88,12 @@
         <view wx:for="{{positions}}" wx:key="position_id" class="list-item">
           <view class="row-between">
             <view class="list-title">{{item.symbol || 'XAUUSD+'}}</view>
-            <view class="{{item.netUnrealizedPnL >= 0 ? 'accent-pos' : 'accent-neg'}} value-md">{{item.netUnrealizedPnL || item.pnl || 0}}</view>
+            <view class="{{item.pnlToneClass}} value-md">{{item.pnlText}}</view>
           </view>
           <view class="row-wrap" style="margin-top: 10rpx;">
-            <view class="tag">{{item.type || '--'}}</view>
-            <view class="tag">开仓 {{item.open_price || item.price_open || '--'}}</view>
-            <view class="tag">量 {{item.volume || item.size || '--'}}</view>
+            <view class="tag">{{item.directionText}}</view>
+            <view class="tag">开仓 {{item.openPriceText}}</view>
+            <view class="tag">量 {{item.volumeText}}</view>
           </view>
           <view class="caption-grid" style="margin-top: 12rpx;">
             <view class="caption-card">
@@ -103,6 +103,10 @@
             <view class="caption-card">
               <view class="caption-label">止盈</view>
               <view class="caption-value">{{item.tp || item.take_profit || '--'}}</view>
+            </view>
+            <view class="caption-card">
+              <view class="caption-label">现价</view>
+              <view class="caption-value">{{item.currentPriceText}}</view>
             </view>
           </view>
         </view>

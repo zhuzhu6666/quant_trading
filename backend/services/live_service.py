@@ -16,6 +16,7 @@ hand. v8 added real thread management so the Web 总览 can drive the
 trading loop from the browser.)
 """
 import copy
+import json
 import threading
 import time
 import traceback
@@ -84,6 +85,14 @@ _trailing_state: dict[int, dict] = {}
 # 用于判断新信号是否比已有持仓更强, 避免递减加仓
 _pos_entry_scores: dict[int, float] = {}
 _pos_entry_decisions: dict[int, str] = {}
+_pending_close_reasons: dict[int, str] = {}
+
+_RUNTIME_KV_LOOP_DESIRED = "live.loop.desired_state"
+_RUNTIME_KV_LAST_SHUTDOWN = "live.loop.last_shutdown"
+_RECOVERY_CONTEXT_PARTIAL = "partial"
+_RECOVERY_CONTEXT_FULL = "full"
+_RECOVERY_REPLAY_LOOKBACK_SEC = 7 * 24 * 3600
+_AUTO_RESUME_DELAY_SEC = 4.0
 
 
 # ═══════════════════════════════════════════════════════════
@@ -316,6 +325,455 @@ def _live_state_update(**kwargs) -> None:
         _live_state.update(kwargs)
 
 
+def _get_state_conn():
+    from backend.core.db import get_state_conn
+
+    return get_state_conn()
+
+
+def _runtime_kv_get(key: str, default=None):
+    conn = _get_state_conn()
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM runtime_kv WHERE key=?",
+            (key,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return default
+    try:
+        return json.loads(row["value_json"])
+    except Exception:
+        return default
+
+
+def _runtime_kv_set(key: str, value) -> None:
+    conn = _get_state_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO runtime_kv(key, value_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json=excluded.value_json,
+                updated_at=excluded.updated_at
+            """,
+            (key, json.dumps(value, ensure_ascii=False, default=str), time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _lookup_entry_decision_id(position_id: int) -> str:
+    conn = _get_state_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT decision_id FROM decision_ledger
+            WHERE position_id=? AND event_type='open'
+            ORDER BY decision_ts DESC LIMIT 1
+            """,
+            (str(position_id),),
+        ).fetchone()
+        return str(row["decision_id"]) if row and row["decision_id"] else ""
+    finally:
+        conn.close()
+
+
+def _persist_loop_desired_state(
+    enabled: bool,
+    *,
+    broker: str = "ctrader",
+    strategy_name: str = "factor_v4",
+    reason: str = "manual",
+) -> None:
+    _runtime_kv_set(
+        _RUNTIME_KV_LOOP_DESIRED,
+        {
+            "enabled": bool(enabled),
+            "broker": broker,
+            "strategy_name": strategy_name,
+            "reason": reason,
+            "updated_at": time.time(),
+        },
+    )
+
+
+def _read_loop_desired_state() -> dict:
+    state = _runtime_kv_get(_RUNTIME_KV_LOOP_DESIRED, {}) or {}
+    return state if isinstance(state, dict) else {}
+
+
+def _remember_close_reason(position_id: int, reason: str) -> None:
+    if position_id <= 0 or not reason:
+        return
+    _pending_close_reasons[int(position_id)] = reason
+
+
+def _consume_close_reason(position_id: int, default: str = "broker_close") -> str:
+    return _pending_close_reasons.pop(int(position_id), default)
+
+
+def _normalize_position_snapshot(raw: Any) -> dict:
+    if isinstance(raw, dict):
+        data = dict(raw)
+    else:
+        data = {
+            "position_id": getattr(raw, "position_id", 0) or getattr(raw, "ticket", 0),
+            "ticket": getattr(raw, "ticket", 0) or getattr(raw, "position_id", 0),
+            "symbol": getattr(raw, "symbol", ""),
+            "type": "buy" if int(getattr(raw, "direction", 0) or 0) >= 0 else "sell",
+            "direction": int(getattr(raw, "direction", 0) or 0),
+            "open_price": float(getattr(raw, "open_price", 0.0) or getattr(raw, "entry_price", 0.0) or 0.0),
+            "entry_price": float(getattr(raw, "entry_price", 0.0) or getattr(raw, "open_price", 0.0) or 0.0),
+            "volume": float(getattr(raw, "volume", 0.0) or getattr(raw, "api_volume", 0.0) or 0.0),
+        }
+    direction = int(data.get("direction") or 0)
+    if direction == 0:
+        ptype = str(data.get("type") or "").lower()
+        direction = 1 if ptype == "buy" else -1 if ptype == "sell" else 0
+    position_id = int(data.get("position_id") or data.get("ticket") or 0)
+    return {
+        "position_id": position_id,
+        "symbol": str(data.get("symbol") or ""),
+        "direction": direction,
+        "open_price": float(data.get("open_price") or data.get("entry_price") or 0.0),
+        "volume": float(data.get("api_volume") or data.get("volume") or 0.0),
+        "type": str(data.get("type") or ("buy" if direction >= 0 else "sell")),
+        "raw": data,
+    }
+
+
+def _upsert_recovery_position_state(
+    raw_position: Any,
+    *,
+    broker: str,
+    strategy_name: str,
+    status: str = "open",
+    context_integrity: str | None = None,
+    meta: dict | None = None,
+) -> None:
+    snapshot = _normalize_position_snapshot(raw_position)
+    position_id = snapshot["position_id"]
+    if position_id <= 0:
+        return
+    now = time.time()
+    entry_decision_id = _lookup_entry_decision_id(position_id)
+    desired_integrity = context_integrity or (_RECOVERY_CONTEXT_FULL if entry_decision_id else _RECOVERY_CONTEXT_PARTIAL)
+    conn = _get_state_conn()
+    try:
+        prev = conn.execute(
+            "SELECT * FROM recovery_position_state WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        first_seen_at = float(prev["first_seen_at"]) if prev else now
+        stored_meta = {}
+        if prev and prev["recovery_meta_json"]:
+            try:
+                stored_meta = json.loads(prev["recovery_meta_json"])
+            except Exception:
+                stored_meta = {}
+        next_meta = dict(stored_meta)
+        if meta:
+            next_meta.update(meta)
+        prev_integrity = str(prev["context_integrity"]) if prev and prev["context_integrity"] else ""
+        if prev_integrity == _RECOVERY_CONTEXT_FULL:
+            desired_integrity = _RECOVERY_CONTEXT_FULL
+        conn.execute(
+            """
+            INSERT INTO recovery_position_state
+            (position_id, broker, symbol, direction, open_price, volume,
+             first_seen_at, last_seen_at, status, strategy_name,
+             entry_decision_id, context_integrity, recovery_meta_json,
+             closed_at, close_reason, close_pnl)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, '', 0.0)
+            ON CONFLICT(position_id) DO UPDATE SET
+                broker=excluded.broker,
+                symbol=excluded.symbol,
+                direction=excluded.direction,
+                open_price=excluded.open_price,
+                volume=excluded.volume,
+                last_seen_at=excluded.last_seen_at,
+                status=excluded.status,
+                strategy_name=excluded.strategy_name,
+                entry_decision_id=CASE
+                    WHEN recovery_position_state.entry_decision_id='' THEN excluded.entry_decision_id
+                    ELSE recovery_position_state.entry_decision_id
+                END,
+                context_integrity=CASE
+                    WHEN recovery_position_state.context_integrity='full' THEN 'full'
+                    ELSE excluded.context_integrity
+                END,
+                recovery_meta_json=excluded.recovery_meta_json,
+                closed_at=CASE
+                    WHEN excluded.status IN ('open', 'recovered') THEN 0.0
+                    ELSE recovery_position_state.closed_at
+                END,
+                close_reason=CASE
+                    WHEN excluded.status IN ('open', 'recovered') THEN ''
+                    ELSE recovery_position_state.close_reason
+                END,
+                close_pnl=CASE
+                    WHEN excluded.status IN ('open', 'recovered') THEN 0.0
+                    ELSE recovery_position_state.close_pnl
+                END
+            """,
+            (
+                position_id,
+                broker,
+                snapshot["symbol"],
+                snapshot["direction"],
+                snapshot["open_price"],
+                snapshot["volume"],
+                first_seen_at,
+                now,
+                status,
+                strategy_name,
+                entry_decision_id,
+                desired_integrity,
+                json.dumps(next_meta, ensure_ascii=False, default=str),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _list_active_recovery_positions(broker: str) -> list[dict]:
+    conn = _get_state_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM recovery_position_state
+            WHERE broker=? AND status IN ('open', 'recovered')
+            ORDER BY last_seen_at ASC
+            """,
+            (broker,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _mark_recovery_position_closed(
+    position_id: int,
+    *,
+    close_reason: str,
+    close_pnl: float,
+    closed_at: float,
+    meta: dict | None = None,
+) -> None:
+    conn = _get_state_conn()
+    try:
+        row = conn.execute(
+            "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        merged_meta = {}
+        if row and row["recovery_meta_json"]:
+            try:
+                merged_meta = json.loads(row["recovery_meta_json"])
+            except Exception:
+                merged_meta = {}
+        if meta:
+            merged_meta.update(meta)
+        conn.execute(
+            """
+            UPDATE recovery_position_state
+            SET status='closed_replayed',
+                closed_at=?,
+                close_reason=?,
+                close_pnl=?,
+                recovery_meta_json=?
+            WHERE position_id=?
+            """,
+            (
+                float(closed_at),
+                close_reason,
+                float(close_pnl),
+                json.dumps(merged_meta, ensure_ascii=False, default=str),
+                int(position_id),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _replay_recovered_close(
+    *,
+    broker: str,
+    position_id: int,
+    position_state: dict,
+    real_pnl: dict | None,
+    strategy_name: str,
+) -> None:
+    total_pnl = float((real_pnl or {}).get("net", position_state.get("close_pnl", 0.0)) or 0.0)
+    close_price = float((real_pnl or {}).get("exec_price", position_state.get("open_price", 0.0)) or 0.0)
+    close_ts = float((real_pnl or {}).get("exec_timestamp", time.time()) or time.time())
+    context_integrity = str(position_state.get("context_integrity") or _RECOVERY_CONTEXT_PARTIAL)
+
+    _record_session_trade(total_pnl)
+    _mark_recovery_position_closed(
+        position_id,
+        close_reason="restart_replay",
+        close_pnl=total_pnl,
+        closed_at=close_ts,
+        meta={"replayed_at": time.time(), "strategy_name": strategy_name},
+    )
+
+    exit_decision_id = ""
+    if _LEDGER:
+        try:
+            exit_decision_id = _LEDGER.log_decision(
+                event_type="close",
+                symbol=str(position_state.get("symbol") or "XAUUSD+"),
+                timeframe="",
+                trade_id=str(position_id),
+                position_id=str(position_id),
+                decision_ts=close_ts,
+                portfolio_state={},
+                risk_state=_live_state_get("risk", {}, clone=True) or {},
+                action_score=float(total_pnl),
+                action_reason="restart_replay_close",
+                action_json={
+                    "position_id": int(position_id),
+                    "replayed": True,
+                    "close_reason": "restart_replay",
+                    "real_pnl": real_pnl or {},
+                },
+            )
+            _LEDGER.log_position_event(
+                position_id=str(position_id),
+                trade_id=str(position_id),
+                symbol=str(position_state.get("symbol") or "XAUUSD+"),
+                event_type="closed",
+                avg_price=close_price,
+                realized_pnl=float(total_pnl),
+                details={
+                    "replayed": True,
+                    "close_reason": "restart_replay",
+                    "real_pnl": real_pnl or {},
+                },
+                event_ts=close_ts,
+            )
+        except Exception as exc:
+            logger.debug("[live] replay close ledger failed for pos %s: %s", position_id, exc)
+
+    if _TRADE_REVIEWER and _EXPERIENCE_BUILDER and _POLICY_SUGGESTER:
+        try:
+            review = _TRADE_REVIEWER.review_closed_trade(
+                position_id=str(position_id),
+                pnl=float(total_pnl),
+                close_price=close_price,
+                close_ts=close_ts,
+                contributions={},
+                exit_decision_id=exit_decision_id,
+                real_pnl=real_pnl,
+                close_reason="restart_replay",
+                context_integrity=context_integrity,
+            )
+            if review.get("accepted", True):
+                experience = _EXPERIENCE_BUILDER.build_from_review(review)
+                _POLICY_SUGGESTER.suggest_from_experience(experience)
+        except Exception as exc:
+            logger.debug("[live] replay close learning failed for pos %s: %s", position_id, exc)
+
+
+def _read_positions_for_recovery(bridge) -> list[Any]:
+    cached_positions = _live_state_get("positions", clone=True) or []
+    if isinstance(cached_positions, dict):
+        cached_positions = cached_positions.get("positions", []) or []
+    if cached_positions:
+        return list(cached_positions)
+    return bridge.get_positions() or []
+
+
+def _bootstrap_position_recovery(
+    bridge,
+    *,
+    broker: str,
+    strategy_name: str,
+    log,
+) -> bool:
+    global _prev_position_ids
+
+    try:
+        current_positions = _read_positions_for_recovery(bridge)
+    except Exception as exc:
+        log(f"recovery bootstrap skipped: get_positions failed: {exc}")
+        return False
+
+    normalized = [_normalize_position_snapshot(pos) for pos in current_positions]
+    coerced_positions = _coerce_live_positions(current_positions)
+    current_ids = {item["position_id"] for item in normalized if item["position_id"] > 0}
+    active_rows = _list_active_recovery_positions(broker)
+    if not current_ids:
+        suffix = f" while {len(active_rows)} persisted positions remain" if active_rows else ""
+        log(f"recovery bootstrap deferred: broker returned 0 positions{suffix}")
+        return False
+    missing_ids = {int(row["position_id"]) for row in active_rows if int(row["position_id"]) not in current_ids}
+
+    if missing_ids:
+        from execution.deal_sync import sync_close_deals_batch
+
+        lookback_from = int(
+            max(
+                0,
+                min(float(row.get("last_seen_at") or time.time()) for row in active_rows if int(row["position_id"]) in missing_ids)
+                - _RECOVERY_REPLAY_LOOKBACK_SEC,
+            )
+        )
+        conn = _get_state_conn()
+        try:
+            replayed = sync_close_deals_batch(
+                bridge,
+                conn,
+                missing_ids,
+                from_ts=lookback_from,
+                max_rows=500,
+            )
+        finally:
+            conn.close()
+        for row in active_rows:
+            position_id = int(row["position_id"])
+            if position_id in missing_ids:
+                _replay_recovered_close(
+                    broker=broker,
+                    position_id=position_id,
+                    position_state=row,
+                    real_pnl=replayed.get(position_id),
+                    strategy_name=strategy_name,
+                )
+        log(f"recovery bootstrap replayed {len(missing_ids)} missing closes")
+
+    for item in normalized:
+        position_id = item["position_id"]
+        if position_id <= 0:
+            continue
+        _pos_open_prices[position_id] = item["open_price"]
+        _pos_open_api_volume[position_id] = item["volume"]
+        _upsert_recovery_position_state(
+            item["raw"],
+            broker=broker,
+            strategy_name=strategy_name,
+            status="recovered",
+            meta={"recovered_at": time.time()},
+        )
+
+    if coerced_positions:
+        _live_state_update(
+            positions=coerced_positions,
+            positions_updated_at=time.time(),
+        )
+    _prev_position_ids = current_ids.copy()
+    if current_ids:
+        log(f"recovery bootstrap attached {len(current_ids)} live positions after restart")
+    return True
+
+
 def _reset_session_state_for_new_day() -> None:
     # 从当前 account 中读取实际余额作为熔断器基准
     acct = _live_state_get("account", {}) or {}
@@ -449,6 +907,33 @@ def _mark_loop_stopped_for_display() -> None:
         loop_running=False,
         loop_strategy=None,
     )
+
+
+def schedule_auto_resume_loop(delay_sec: float = _AUTO_RESUME_DELAY_SEC) -> bool:
+    desired = _read_loop_desired_state()
+    if not desired or not desired.get("enabled"):
+        return False
+    if loop_status().get("running"):
+        return False
+
+    broker = str(desired.get("broker") or "ctrader")
+    strategy_name = str(desired.get("strategy_name") or "factor_v4")
+
+    def _resume():
+        time.sleep(max(0.0, delay_sec))
+        try:
+            result = start_loop(
+                broker,
+                strategy_name=strategy_name,
+                persist_desired=False,
+                trigger_reason="auto_resume",
+            )
+            logger.info("[live] auto-resume attempted: %s", result)
+        except Exception as exc:
+            logger.warning("[live] auto-resume failed: %s", exc)
+
+    threading.Thread(target=_resume, name="live_loop_auto_resume", daemon=True).start()
+    return True
 
 # ── cTrader 缓存 (防 WS 1s 推送反复击中 Twisted reactor)
 # audit 2026-06-08: WS _read_state_snapshot 每 1s 调 get_account/get_positions,
@@ -652,6 +1137,7 @@ def get_status() -> dict:
     return {
         "ctrader": {"status": ctrader_status, "error": ctrader_error},
         "loop": loop_status(),
+        "readiness": get_live_readiness("ctrader"),
     }
 
 
@@ -676,6 +1162,77 @@ def _probe_ctrader() -> tuple[str, str | None]:
     return "connected", None
 
 
+def _coerce_live_positions(raw_positions) -> list[dict]:
+    pos_list = raw_positions or []
+    if isinstance(pos_list, dict):
+        pos_list = pos_list.get("positions", []) or []
+    if pos_list and not isinstance(pos_list[0], dict):
+        from backend.ws.endpoints import _position_to_dict
+        pos_list = [_position_to_dict(p) for p in pos_list]
+    return list(pos_list or [])
+
+
+def get_live_readiness(broker: str = "ctrader") -> dict:
+    loop = loop_status()
+    diag = _live_state_get("_diag", {}, clone=True) or {}
+    account = _live_state_get("account", {}, clone=True) or {}
+    account_updated_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
+    positions_updated_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
+    positions = _coerce_live_positions(_live_state_get("positions", clone=True))
+
+    broker_status = "unknown"
+    broker_error = None
+    if broker == "ctrader":
+        broker_status, broker_error = _probe_ctrader()
+
+    loop_running = bool(loop.get("running"))
+    account_ready = bool(account and account.get("ok") and account_updated_at > 0)
+    positions_ready = positions_updated_at > 0 and len(positions) > 0
+    bridge_ready = bool(diag.get("bridge_ready"))
+
+    state = "idle"
+    if loop_running:
+        if bridge_ready and account_ready and positions_ready:
+            state = "ready"
+        elif broker_status in {"connected", "warming_up"}:
+            state = "warming_up"
+        else:
+            state = "degraded"
+    elif broker_status == "connected":
+        state = "idle_connected"
+    elif broker_status == "warming_up":
+        state = "warming_up"
+    elif broker_status in {"disconnected", "error", "no_token"}:
+        state = "degraded"
+
+    reasons: list[str] = []
+    if not bridge_ready and loop_running:
+        reasons.append("bridge_not_ready")
+    if not account_ready:
+        reasons.append("account_not_ready")
+    if positions_updated_at <= 0:
+        reasons.append("positions_never_synced")
+    elif not positions_ready:
+        reasons.append("positions_empty")
+    if broker_error:
+        reasons.append("broker_error")
+
+    return {
+        "state": state,
+        "broker_status": broker_status,
+        "broker_error": broker_error,
+        "loop_running": loop_running,
+        "bridge_ready": bridge_ready,
+        "account_ready": account_ready,
+        "positions_ready": positions_ready,
+        "account_updated_at": account_updated_at or None,
+        "positions_updated_at": positions_updated_at or None,
+        "positions_count": len(positions),
+        "positions": positions,
+        "reasons": reasons,
+    }
+
+
 def get_account(broker: str) -> dict:
     """Read real broker account info. Returns dict with at minimum
     {ok, broker, balance, equity, margin, leverage, currency, error}.
@@ -683,17 +1240,21 @@ def get_account(broker: str) -> dict:
     audit 2026-06-09: 如果 live loop 在跑这个 broker, 短路返回 _live_state 缓存,
     避免重复打 broker (Twisted reactor callFromThread 会阻塞主线程 50-200ms,
     直接卡前端 HTTP 请求). Loop 自己的 tick 已经每 60s 刷新 _live_state."""
+    readiness = get_live_readiness(broker)
     # ── 缓存短路: loop 在跑 → 只读 _live_state ──
     if _live_state_get("loop_running") and _live_state_get("broker") == broker:
         acct = _live_state_get("account", clone=True)
         if acct and acct.get("ok"):
-            return acct
+            result = dict(acct)
+            result["readiness"] = readiness
+            return result
         # 缓存没准备好 (loop 刚启动或第一次 tick 未完成)
         return {
             "ok": False,
             "broker": broker,
             "warming_up": True,
             "error": "live loop warming up, first tick pending (within 60s)",
+            "readiness": readiness,
         }
     if broker == "ctrader":
         def _fetch():
@@ -707,6 +1268,7 @@ def get_account(broker: str) -> dict:
                     "broker": "ctrader",
                     "warming_up": True,
                     "error": "cTrader connecting in background, first account query pending (within 30s)",
+                    "readiness": readiness,
                 }
             info = bridge.account_info()
             if not info:
@@ -720,13 +1282,13 @@ def get_account(broker: str) -> dict:
             info_dict.setdefault("broker", "ctrader")
             # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
             _live_state_update(account=info_dict, account_updated_at=time.time())
-            return {"ok": True, "broker": "ctrader", **info_dict}
+            return {"ok": True, "broker": "ctrader", **info_dict, "readiness": get_live_readiness("ctrader")}
         try:
             return _cache_get_or_refresh(_ACCOUNT_CACHE, _CACHE_TTL, _fetch)
         except Exception as e:
-            return {"ok": False, "broker": "ctrader", "error": f"{type(e).__name__}: {e}"[:300]}
+            return {"ok": False, "broker": "ctrader", "error": f"{type(e).__name__}: {e}"[:300], "readiness": readiness}
     else:
-        return {"ok": False, "broker": broker, "error": f"unknown broker: {broker}"}
+        return {"ok": False, "broker": broker, "error": f"unknown broker: {broker}", "readiness": readiness}
 
 
 def get_positions(broker: str, symbol: str | None = None) -> dict:
@@ -734,23 +1296,29 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
 
     audit 2026-06-09: 同 get_account, live loop 在跑时短路读缓存."""
     # ── 缓存短路: loop 在跑 → 只读 _live_state ──
+    readiness = get_live_readiness(broker)
     if _live_state_get("loop_running") and _live_state_get("broker") == broker:
-        cached = _live_state_get("positions", clone=True)
-        if isinstance(cached, dict) and cached.get("ok"):
-            return cached
-        # 缓存未就绪 — 同步 broker 路径在 live 模式下不应该走
+        if readiness["positions_ready"]:
+            return {
+                "ok": True,
+                "broker": broker,
+                "positions": readiness["positions"],
+                "warming_up": False,
+                "readiness": readiness,
+            }
         return {
-            "ok": True,  # 标识 HTTP 200 正常, 但数据为空
+            "ok": True,
             "broker": broker,
             "positions": [],
             "warming_up": True,
+            "readiness": readiness,
         }
     if broker == "ctrader":
         # 缓存短路: live loop 在跑 → 只读 _live_state (跟上面 if 分支等价,
         # 保留是为了 cache_fallback 的 robustness — 上层分支没匹配时这里兜底)
         cached_positions = _live_state_get("positions", clone=True)
         if cached_positions is not None and _live_state_get("loop_running"):
-            return {"ok": True, "broker": "ctrader", "positions": cached_positions}
+            return {"ok": True, "broker": "ctrader", "positions": _coerce_live_positions(cached_positions), "readiness": readiness}
         # 缓存空 fallback
         def _fetch():
             # audit 2026-06-10: _get_ctrader 返 3-tuple, warming_up 短路
@@ -763,6 +1331,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                     "broker": "ctrader",
                     "positions": [],
                     "warming_up": True,
+                    "readiness": readiness,
                 }
             raw = bridge.get_positions(symbol)
             positions = []
@@ -786,13 +1355,13 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                 })
             # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
             _live_state_update(positions=positions, positions_updated_at=time.time())
-            return {"ok": True, "broker": "ctrader", "positions": positions}
+            return {"ok": True, "broker": "ctrader", "positions": positions, "readiness": get_live_readiness("ctrader")}
         try:
             return _cache_get_or_refresh(_POSITIONS_CACHE, _POSITIONS_CACHE_TTL, _fetch)
         except Exception as e:
-            return {"ok": False, "broker": "ctrader", "error": f"{type(e).__name__}: {e}"[:300], "positions": []}
+            return {"ok": False, "broker": "ctrader", "error": f"{type(e).__name__}: {e}"[:300], "positions": [], "readiness": readiness}
     else:
-        return {"ok": False, "broker": broker, "error": f"unknown broker: {broker}", "positions": []}
+        return {"ok": False, "broker": broker, "error": f"unknown broker: {broker}", "positions": [], "readiness": readiness}
 
 
 # ── Trading loop management (background thread) ─────────────────────────
@@ -1457,7 +2026,13 @@ def loop_status() -> dict:
         }
 
 
-def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
+def start_loop(
+    broker: str,
+    strategy_name: str = "v1_minimal_ma_cross",
+    *,
+    persist_desired: bool = True,
+    trigger_reason: str = "manual",
+) -> dict:
     """Spawn the live loop as a background thread in this backend process.
     Refuses if a loop is already running. Requires the broker to be reachable."""
     global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at, _loop_strategy_name
@@ -1500,6 +2075,13 @@ def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
         _loop_broker = broker
         _loop_started_at = time.time()
         _loop_strategy_name = strategy_name  # audit 2026-06-08
+        if persist_desired:
+            _persist_loop_desired_state(
+                True,
+                broker=broker,
+                strategy_name=strategy_name,
+                reason=trigger_reason,
+            )
         # ⚠️ audit 2026-06-09: 启动前立即填充共享缓存, 否则 WS 1s 推送读到
         # _live_state["account"]=None → equity=0, 要等 60s 第一个 tick 才恢复.
         _prime_live_loop_state(
@@ -1526,11 +2108,16 @@ def start_loop(broker: str, strategy_name: str = "v1_minimal_ma_cross") -> dict:
         "thread_id": _loop_thread.ident,
         "pid": _loop_thread.ident,  # audit 2026-06-09: alias for FE uniformity (paper/start returns pid; thread.ident is the closest equivalent for a background thread)
         "strategy_name": strategy_name,
+        "trigger_reason": trigger_reason,
         "msg": f"live loop thread started. Read /api/live/loop-status to monitor.",
     }
 
 
-def stop_loop() -> dict:
+def stop_loop(
+    *,
+    persist_desired: bool = True,
+    trigger_reason: str = "manual",
+) -> dict:
     """Signal the loop thread to stop. Returns immediately;
     blocking cleanup (thread join + scheduler shutdown) runs in background.
     audit v9: 停止后保留最后数据不变 (account/positions/session 冻结), 前端持续显示.
@@ -1555,6 +2142,12 @@ def stop_loop() -> dict:
 
     # ★ 立即标记停止, 前端立刻看到状态变化
     _mark_loop_stopped_for_display()  # 清策略名，防止 WS pipeline 误判运行中
+    if persist_desired:
+        _persist_loop_desired_state(False, broker=broker or "ctrader", strategy_name=_loop_strategy_name or "factor_v4", reason=trigger_reason)
+    _runtime_kv_set(
+        _RUNTIME_KV_LAST_SHUTDOWN,
+        {"broker": broker, "ts": time.time(), "trigger_reason": trigger_reason},
+    )
     _last_loop_end = time.time()
 
     # 阻塞清理移到后台线程, stop 端点秒返
@@ -1567,7 +2160,7 @@ def stop_loop() -> dict:
 
     threading.Thread(target=_cleanup, name="stop_loop_cleanup", daemon=True).start()
     logger.info("[live] stop signaled, cleanup in background")
-    return {"ok": True, "was_running": True, "broker": broker}
+    return {"ok": True, "was_running": True, "broker": broker, "trigger_reason": trigger_reason}
 
 
 def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bars: int = 200) -> "pd.DataFrame | None":
@@ -1969,6 +2562,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
     # ── Phase 3: 主循环 (60s tick) ──
     tick = 0
+    recovery_bootstrapped = False
     _current_trade_date: str = ""
     while not stop_flag.is_set():
         tick += 1
@@ -2007,6 +2601,16 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             # 刷新账户缓存 (bridge 可用时才做)
             if bridge_ready:
                 kickoff_account_refresh(bridge, broker, interval_sec=3.0)
+                if not recovery_bootstrapped:
+                    try:
+                        recovery_bootstrapped = _bootstrap_position_recovery(
+                            bridge,
+                            broker=broker,
+                            strategy_name=str(_loop_strategy_name or "factor_v4"),
+                            log=log,
+                        )
+                    except Exception as _recovery_err:
+                        log(f"tick {tick}: recovery bootstrap failed (non-fatal): {_recovery_err}")
 
             # 从本地 DataStore 读最新 bars (cTraderPuller 定时写入)
             df_new = _warmup_from_local_db("XAUUSD+", TF, 5)
@@ -2335,6 +2939,7 @@ def emergency_close(broker: str, symbol: str | None = None) -> dict:
                 pid = p.get("position_id") or p.get("ticket")
                 if pid is None:
                     continue
+                _remember_close_reason(int(pid), "emergency_close")
                 result = bridge.close_position(pid)
                 if getattr(result, "success", False):
                     closed += 1
@@ -2505,10 +3110,13 @@ def _process_tick_factor_pipeline(
             current_pids.add(int(pid))
     closed_pids: set[int] = set()
     attr_engine = pipeline.get("attribution")
+    positions_snapshot_ready = bool(_live_state_get("positions_updated_at", 0.0))
     if not _prev_position_ids:
-        # 冷启动: 用当前持仓初始化 pid 集, 仅用于平仓检测.
-        # 不创建 recovery 归因 — 重启前开的仓没有因子信号, 归因数据无效.
         _prev_position_ids = current_pids.copy()
+    elif not current_pids and not positions_snapshot_ready:
+        closed_pids = set()
+        current_pids = _prev_position_ids.copy()
+        log(f"tick {tick}: positions cache not ready, defer close detection")
     else:
         closed_pids = _prev_position_ids - current_pids
 
@@ -2529,6 +3137,7 @@ def _process_tick_factor_pipeline(
     for cpid in closed_pids:
         try:
             real_pnl = _real_pnls.get(cpid)
+            close_reason = _consume_close_reason(int(cpid), "broker_close")
             mc = attr_engine.record_close(cpid,
                                           close_price=current_price,
                                           close_ts=time.time(),
@@ -2631,11 +3240,30 @@ def _process_tick_factor_pipeline(
                         contributions=mc,
                         exit_decision_id=exit_decision_id,
                         real_pnl=real_pnl,
+                        close_reason=close_reason,
+                        context_integrity=_RECOVERY_CONTEXT_FULL,
                     )
-                    experience = _EXPERIENCE_BUILDER.build_from_review(review)
-                    _POLICY_SUGGESTER.suggest_from_experience(experience)
+                    if review.get("accepted", True):
+                        experience = _EXPERIENCE_BUILDER.build_from_review(review)
+                        _POLICY_SUGGESTER.suggest_from_experience(experience)
+                    else:
+                        logger.info(
+                            "[live] skipped unverified trade review for pos %s: %s",
+                            cpid,
+                            review.get("skip_reason", "unknown"),
+                        )
                 except Exception as _learn_err:
                     logger.debug("[live] post-trade learning failed for pos %s: %s", cpid, _learn_err)
+            try:
+                _mark_recovery_position_closed(
+                    int(cpid),
+                    close_reason=close_reason,
+                    close_pnl=float(total_pnl),
+                    closed_at=time.time(),
+                    meta={"real_pnl": real_pnl or {}, "factor_contributions": mc or {}},
+                )
+            except Exception as _recovery_close_err:
+                logger.debug("[live] recovery close persist failed for pos %s: %s", cpid, _recovery_close_err)
             # 清理追踪止损状态
             _trailing_state.pop(cpid, None)
             # 清理金字塔规则状态
@@ -2870,6 +3498,7 @@ def _process_tick_factor_pipeline(
                                     _pos_open_prices[pid] = current_price
                                     _pos_open_api_volume[pid] = float(actual_api_volume)
                                     log(f"tick {tick}: attribution recorded open pos={pid}")
+                                    entry_decision_id = ""
                                     if _LEDGER:
                                         try:
                                             entry_decision_id = _LEDGER.log_composite_decision(
@@ -2939,6 +3568,28 @@ def _process_tick_factor_pipeline(
                                             )
                                         except Exception as _ledger_err:
                                             logger.debug("[live] ledger open failed for pos %s: %s", pid, _ledger_err)
+                                    try:
+                                        _upsert_recovery_position_state(
+                                            {
+                                                "position_id": pid,
+                                                "symbol": "XAUUSD+",
+                                                "direction": composite.direction,
+                                                "open_price": float(fill_price or current_price),
+                                                "volume": float(actual_api_volume),
+                                                "entry_decision_id": entry_decision_id or _lookup_entry_decision_id(int(pid)),
+                                            },
+                                            broker=broker,
+                                            strategy_name=str(_loop_strategy_name or "factor_v4"),
+                                            status="open",
+                                            context_integrity=_RECOVERY_CONTEXT_FULL,
+                                            meta={
+                                                "tick": tick,
+                                                "sl": round(sl_price, 2),
+                                                "tp": round(tp_price, 2),
+                                            },
+                                        )
+                                    except Exception as _recovery_open_err:
+                                        logger.debug("[live] recovery open persist failed for pos %s: %s", pid, _recovery_open_err)
                                     # ── 决策审计: open ──
                                     if _DECISION_LOG:
                                         bar_ts = bar.get("time", 0)

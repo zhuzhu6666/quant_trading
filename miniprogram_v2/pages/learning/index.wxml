@@ -22,8 +22,8 @@
           <view class="hero-metric-value">{{summary.suggestions.approved || 0}}</view>
         </view>
         <view class="hero-metric">
-          <view class="hero-metric-label">已应用</view>
-          <view class="hero-metric-value">{{summary.applications || 0}}</view>
+          <view class="hero-metric-label">权重应用</view>
+          <view class="hero-metric-value">{{applicationCountDisplay || 0}}</view>
         </view>
       </view>
     </view>
@@ -46,17 +46,64 @@
           <view class="value-md">{{suggestions.length || 0}}</view>
         </view>
         <view class="split-card stack-12">
-          <view class="small muted">已应用</view>
-          <view class="value-md">{{summary.applications || 0}}</view>
+          <view class="small muted">权重应用</view>
+          <view class="value-md">{{applicationCountDisplay || 0}}</view>
         </view>
       </view>
-      <view wx:if="{{latestApplication}}" class="status-banner status-banner-positive" style="margin-top: 18rpx;">
-        <view class="small muted">最近一次生效</view>
+      <view wx:if="{{observationApplicationCount > 0}}" class="section-note" style="margin-top: 14rpx;">
+        另有 {{observationApplicationCount}} 条观察记录，暂未真正改动运行权重。
+      </view>
+      <view wx:if="{{latestApplication}}" class="status-banner status-banner-{{latestApplication.effectTone || 'neutral'}}" style="margin-top: 18rpx;">
+        <view class="small muted">最近一次应用效果</view>
         <view class="row-between">
           <view class="value-md">{{latestApplication.scope_key}}</view>
-          <view class="tag">{{latestApplication.action}}</view>
+          <status-pill label="{{latestApplication.effectLabel}}" tone="{{latestApplication.effectTone}}" />
         </view>
-        <view class="section-note">{{latestApplication.old_weight}} -> {{latestApplication.new_weight}}，bias {{latestApplication.bias_multiplier}}</view>
+        <view class="section-note">{{latestApplication.effectSummary}}</view>
+        <view class="section-note">{{latestApplication.effectText}}</view>
+        <view class="row-between">
+          <view class="small muted">{{latestApplication.isObservationOnly ? '观察记录详情' : '权重应用详情'}}</view>
+          <button class="btn-secondary" size="mini" bindtap="toggleLatestApplicationDetail">
+            {{latestApplicationExpanded ? '收起详情' : '查看详情'}}
+          </button>
+        </view>
+        <view wx:if="{{latestApplicationExpanded}}" class="detail-card stack-16" style="margin-top: 14rpx;">
+          <view class="row-between">
+            <view class="list-title">{{latestApplication.scopeLabel}}</view>
+            <status-pill label="{{latestApplication.effectLabel}}" tone="{{latestApplication.effectTone}}" />
+          </view>
+          <view class="kv-grid">
+            <view class="kv-item">
+              <view class="kv-label">bias</view>
+              <view class="kv-value">{{latestApplication.bias_multiplier}}</view>
+            </view>
+            <view class="kv-item">
+              <view class="kv-label">应用时间</view>
+              <view class="kv-value">{{latestApplication.createdText}}</view>
+            </view>
+            <view class="kv-item">
+              <view class="kv-label">后验样本</view>
+              <view class="kv-value">{{latestApplication.observed_trade_count || 0}}</view>
+            </view>
+            <view class="kv-item">
+              <view class="kv-label">基线样本</view>
+              <view class="kv-value">{{latestApplication.baseline_trade_count || 0}}</view>
+            </view>
+            <view class="kv-item">
+              <view class="kv-label">reward Δ</view>
+              <view class="kv-value">{{latestApplication.delta_avg_reward}}</view>
+            </view>
+            <view class="kv-item">
+              <view class="kv-label">最近复核</view>
+              <view class="kv-value">{{latestApplication.reviewAtText}}</view>
+            </view>
+          </view>
+          <view class="soft-panel section-note">{{latestApplication.impactText}}</view>
+          <view class="soft-panel section-note">{{latestApplication.effectStatsText}}</view>
+          <view wx:if="{{latestApplication.isObservationOnly}}" class="soft-panel section-note">
+            这条记录目前只进入观察层，还没有真正改动运行权重，所以会出现在效果追踪里，但不会计入权重应用列表。
+          </view>
+        </view>
       </view>
     </section-card>
 
@@ -202,20 +249,22 @@
         <view wx:for="{{applications}}" wx:key="application_id" class="timeline-item tap-card" data-id="{{item.application_id}}" bindtap="openApplicationDetail">
           <view class="row-between">
             <view class="list-title">{{item.scopeLabel}}</view>
-            <view class="tag">{{item.actionLabel}}</view>
+            <status-pill label="{{item.effectLabel}}" tone="{{item.effectTone}}" />
           </view>
-          <view class="small muted">{{item.impactText}}</view>
+          <view class="small muted">{{item.actionLabel}} · {{item.createdText}}</view>
+          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.effectSummary}}</view>
+          <view class="section-note" style="margin-top: 10rpx;">{{item.effectText}}</view>
         </view>
         </view>
       </view>
-      <view wx:else class="empty">还没有学习应用记录</view>
+      <view wx:else class="empty">还没有权重应用记录</view>
     </section-card>
 
-    <section-card wx:if="{{selectedApplication}}" title="应用详情" subtitle="建议是怎么真正影响权重的">
+    <section-card wx:if="{{selectedApplication}}" title="{{selectedApplication.isObservationOnly ? '观察详情' : '应用详情'}}" subtitle="{{selectedApplication.isObservationOnly ? '这条记录为什么还在观察中' : '建议是怎么真正影响权重的'}}">
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedApplication.scopeLabel}}</view>
-          <view class="tag">{{selectedApplication.actionLabel}}</view>
+          <status-pill label="{{selectedApplication.effectLabel}}" tone="{{selectedApplication.effectTone}}" />
         </view>
         <view class="kv-grid">
           <view class="kv-item">
@@ -234,13 +283,36 @@
             <view class="kv-label">新权重</view>
             <view class="kv-value">{{selectedApplication.new_weight}}</view>
           </view>
+          <view class="kv-item">
+            <view class="kv-label">后验样本</view>
+            <view class="kv-value">{{selectedApplication.observed_trade_count || 0}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">基线样本</view>
+            <view class="kv-value">{{selectedApplication.baseline_trade_count || 0}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">reward Δ</view>
+            <view class="kv-value">{{selectedApplication.delta_avg_reward}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">最近复核</view>
+            <view class="kv-value">{{selectedApplication.reviewAtText}}</view>
+          </view>
         </view>
         <view class="soft-panel section-note">{{selectedApplication.impactText}}</view>
+        <view class="soft-panel section-note">{{selectedApplication.effectSummary}}</view>
+        <view class="soft-panel section-note">{{selectedApplication.effectStatsText}}</view>
+        <view class="soft-panel section-note">{{selectedApplication.effectText}}</view>
+        <view wx:if="{{selectedApplication.isObservationOnly}}" class="soft-panel section-note">
+          这条记录目前只进入观察层，还没有真正改动运行权重，所以会出现在效果追踪里，但不会计入权重应用列表。
+        </view>
         <view wx:if="{{selectedApplication.suggestion_ids && selectedApplication.suggestion_ids.length}}" class="row-wrap">
           <view wx:for="{{selectedApplication.suggestion_ids}}" wx:key="*this" class="tag">{{item}}</view>
         </view>
         <button class="btn-secondary" bindtap="closeApplicationDetail">收起详情</button>
       </view>
     </section-card>
+
   </view>
 </view>

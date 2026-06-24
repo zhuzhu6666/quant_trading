@@ -362,6 +362,50 @@ CREATE TABLE IF NOT EXISTS learning_application_log (
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS learning_application_effect (
+    application_id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT DEFAULT 'observing',
+    observed_trade_count INTEGER DEFAULT 0,
+    baseline_trade_count INTEGER DEFAULT 0,
+    post_avg_reward REAL DEFAULT 0.0,
+    baseline_avg_reward REAL DEFAULT 0.0,
+    delta_avg_reward REAL DEFAULT 0.0,
+    post_win_rate REAL DEFAULT 0.0,
+    baseline_win_rate REAL DEFAULT 0.0,
+    decision_json TEXT DEFAULT '{}',
+    last_review_at REAL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0,
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS runtime_kv (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS recovery_position_state (
+    position_id INTEGER PRIMARY KEY,
+    broker TEXT DEFAULT 'ctrader',
+    symbol TEXT DEFAULT '',
+    direction INTEGER DEFAULT 0,
+    open_price REAL DEFAULT 0.0,
+    volume REAL DEFAULT 0.0,
+    first_seen_at REAL DEFAULT 0.0,
+    last_seen_at REAL DEFAULT 0.0,
+    status TEXT DEFAULT 'open',
+    strategy_name TEXT DEFAULT '',
+    entry_decision_id TEXT DEFAULT '',
+    context_integrity TEXT DEFAULT 'full',
+    recovery_meta_json TEXT DEFAULT '{}',
+    closed_at REAL DEFAULT 0.0,
+    close_reason TEXT DEFAULT '',
+    close_pnl REAL DEFAULT 0.0
+);
+
 CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(ts);
 CREATE INDEX IF NOT EXISTS idx_decision_log_type ON decision_log(decision_type);
 CREATE INDEX IF NOT EXISTS idx_lifecycle_events_factor ON lifecycle_events(factor);
@@ -381,6 +425,9 @@ CREATE INDEX IF NOT EXISTS idx_experience_memory_trade ON experience_memory(trad
 CREATE INDEX IF NOT EXISTS idx_experience_memory_regime ON experience_memory(regime_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_policy_suggestion_scope ON policy_suggestion(scope_type, scope_key, status);
 CREATE INDEX IF NOT EXISTS idx_learning_application_scope ON learning_application_log(scope_type, scope_key, cycle_ts);
+CREATE INDEX IF NOT EXISTS idx_learning_application_effect_scope ON learning_application_effect(scope_type, scope_key, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_kv_updated ON runtime_kv(updated_at);
+CREATE INDEX IF NOT EXISTS idx_recovery_position_status ON recovery_position_state(status, broker, last_seen_at);
 
 -- cTrader 原始成交记录 (归因锚点)
 CREATE TABLE IF NOT EXISTS ctrader_deals (

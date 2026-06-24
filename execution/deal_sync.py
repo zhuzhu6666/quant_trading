@@ -173,6 +173,10 @@ def sync_close_deal(
     bridge: Any,
     conn: sqlite3.Connection,
     position_id: int,
+    *,
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+    max_rows: int = _MAX_ROWS,
 ) -> dict | None:
     """一站式: 为单个平仓 position_id 获取真实 PnL.
 
@@ -198,7 +202,7 @@ def sync_close_deal(
         return _cd_to_real_pnl(cd)
 
     # 本地没有 → 拉最近成交
-    deals = fetch_deals_since(bridge)
+    deals = fetch_deals_since(bridge, from_ts=from_ts, to_ts=to_ts, max_rows=max_rows)
     if deals:
         store_deals(conn, deals)
         cd = find_close_deal(conn, position_id)
@@ -213,6 +217,10 @@ def sync_close_deals_batch(
     bridge: Any,
     conn: sqlite3.Connection,
     position_ids: set[int],
+    *,
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+    max_rows: int = _MAX_ROWS,
 ) -> dict[int, dict]:
     """批量版 sync_close_deal.
 
@@ -240,7 +248,7 @@ def sync_close_deals_batch(
 
     # 2. 缺失的拉取
     if need_fetch:
-        deals = fetch_deals_since(bridge)
+        deals = fetch_deals_since(bridge, from_ts=from_ts, to_ts=to_ts, max_rows=max_rows)
         if deals:
             store_deals(conn, deals)
         for pid in list(need_fetch):

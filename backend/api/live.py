@@ -97,18 +97,21 @@ def emergency(
 def strategy_status_endpoint(_user: RequireUser) -> dict:
     """当前因子管道状态、持仓、最近信号及闸门判定。"""
     from pathlib import Path as _Path
-    from backend.services.live_service import _live_state, loop_status as _ls, _factor_pipeline
+    from backend.services.live_service import (
+        _factor_pipeline,
+        _live_state,
+        get_live_readiness,
+        loop_status as _ls,
+    )
 
     loop = _ls()
     acct = _live_state.get("account") or {}
-    positions = _live_state.get("positions") or []
+    readiness = get_live_readiness("ctrader")
+    positions = readiness.get("positions") or []
     cb = _live_state.get("circuit_breaker", False)
     cb_reason = _live_state.get("circuit_reason", "")
 
-    pos_list = positions.get("positions", []) if isinstance(positions, dict) else positions
-    if pos_list and hasattr(pos_list[0], '__dataclass_fields__'):
-        from backend.ws.endpoints import _position_to_dict
-        pos_list = [_position_to_dict(p) for p in pos_list]
+    pos_list = positions
     n_pos = len(pos_list)
     pos_dir = "FLAT"
     pos_entry = 0.0
@@ -370,6 +373,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         "broker": loop.get("broker") or "ctrader",
         "strategy": "factor_pipeline_v4",
         "mode": "DRY-RUN" if not _should_send_orders("ctrader") else "LIVE",
+        "readiness": readiness,
         "position": {"dir": pos_dir, "entry": round(pos_entry, 2), "count": n_pos},
         "circuit_breaker": cb,
         "circuit_reason": cb_reason,

@@ -2,6 +2,22 @@ import liveStore from '../../stores/live';
 import { emergencyCloseAll, refreshLiveSnapshot, startTradingLoop, stopTradingLoop } from '../../services/live';
 import { formatMoney, formatPct, formatPrice, toneFromStatus } from '../../utils/format';
 
+function normalizePosition(item = {}) {
+  const pnl = Number(item.pnl ?? item.netUnrealizedPnL ?? item.unrealized ?? item.profit ?? 0);
+  const currentPrice = item.current_price ?? item.price_current ?? 0;
+  const openPrice = item.open_price ?? item.price_open ?? 0;
+  return {
+    ...item,
+    pnlValue: pnl,
+    pnlText: formatMoney(pnl),
+    currentPriceText: formatPrice(currentPrice, 3),
+    openPriceText: formatPrice(openPrice, 3),
+    volumeText: String(item.volume ?? item.size ?? '--'),
+    directionText: item.type === 'buy' ? 'LONG' : item.type === 'sell' ? 'SHORT' : (item.direction || '--'),
+    pnlToneClass: pnl >= 0 ? 'accent-pos' : 'accent-neg',
+  };
+}
+
 Page({
   data: {
     signalLabel: '无信号',
@@ -36,6 +52,7 @@ Page({
   syncView() {
     const state = liveStore.getState();
     const trading = state.trading || {};
+    const positions = (trading.positions_list || []).map(normalizePosition);
     const strategy = state.strategyStatus || {};
     const loopStatus = state.loopStatus || {};
     const v4Status = strategy.v4_status || {};
@@ -65,6 +82,14 @@ Page({
       gateLabel = '信号可执行';
       gateTone = 'positive';
     }
+    const realizedDailyPnl = Number((trading.daily && trading.daily.pnl) || 0);
+    const unrealizedPnl = positions.reduce((sum, item) => sum + Number(item.pnlValue || 0), 0);
+    const livePnl = realizedDailyPnl + unrealizedPnl;
+    const balance = Number(trading.balance || 0);
+    const equity = Number(trading.equity || 0);
+    const equityDrawdownPct = balance > 0 ? Math.max(0, ((balance - equity) / balance) * 100) : 0;
+    const sessionDrawdownPct = Number((trading.daily && trading.daily.drawdown_pct) || 0);
+    const liveDrawdownPct = Math.max(sessionDrawdownPct, equityDrawdownPct);
     this.setData({
       signalLabel: direction === 1 || direction === 'LONG' ? '偏多' : direction === -1 || direction === 'SHORT' ? '偏空' : '观望',
       signalTone: direction === 1 || direction === 'LONG' ? 'positive' : direction === -1 || direction === 'SHORT' ? 'negative' : 'neutral',
@@ -78,11 +103,11 @@ Page({
         gateReason,
         circuitBreaker,
       },
-      positions: trading.positions_list || [],
+      positions,
       loopRunning: !!loopStatus.running,
       daily: {
-        pnl: formatMoney(trading.daily && trading.daily.pnl),
-        drawdown: formatPct(trading.daily && trading.daily.drawdown_pct),
+        pnl: formatMoney(livePnl),
+        drawdown: formatPct(liveDrawdownPct),
         trades: trading.daily && trading.daily.trades,
       },
       risk: trading.risk || {},

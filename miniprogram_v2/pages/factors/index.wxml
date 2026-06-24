@@ -64,6 +64,48 @@
       <view wx:else class="empty">还没有权重与因子映射数据</view>
     </section-card>
 
+    <section-card title="因子生命周期" subtitle="谁在晋升，谁在观察，谁被回滚或隔离">
+      <view wx:if="{{lifecycle.length}}">
+        <view class="grid-3" style="margin-bottom: 18rpx;">
+          <view class="split-card stack-12">
+            <view class="small muted">晋升</view>
+            <view class="value-md" style="color: #16a34a;">{{lifecycleSummary.promote}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">观察</view>
+            <view class="value-md" style="color: #2563eb;">{{lifecycleSummary.watch}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">风险</view>
+            <view class="value-md" style="color: #ef4444;">{{lifecycleSummary.risk}}</view>
+          </view>
+        </view>
+
+        <view class="segmented">
+          <view class="segmented-item {{lifecycleTab === 'all' ? 'segmented-item-active' : ''}}" data-tab="all" bindtap="switchLifecycleTab">全部</view>
+          <view class="segmented-item {{lifecycleTab === 'promote' ? 'segmented-item-active' : ''}}" data-tab="promote" bindtap="switchLifecycleTab">晋升</view>
+          <view class="segmented-item {{lifecycleTab === 'watch' ? 'segmented-item-active' : ''}}" data-tab="watch" bindtap="switchLifecycleTab">观察</view>
+          <view class="segmented-item {{lifecycleTab === 'risk' ? 'segmented-item-active' : ''}}" data-tab="risk" bindtap="switchLifecycleTab">风险</view>
+        </view>
+
+        <view class="timeline" style="margin-top: 18rpx;">
+          <view wx:for="{{visibleLifecycle}}" wx:key="id" class="timeline-item tap-card" data-id="{{item.id}}" bindtap="openLifecycleDetail">
+            <view class="row-between">
+              <view class="list-title">{{item.factorCompactText}}</view>
+              <status-pill label="{{item.title}}" tone="{{item.tone}}" />
+            </view>
+            <view class="small muted">{{item.createdText}} · {{item.stageText}}</view>
+            <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.noteCompact}}</view>
+            <view wx:if="{{item.metricText}}" class="small muted" style="margin-top: 10rpx;">{{item.metricText}}</view>
+          </view>
+        </view>
+        <button wx:if="{{lifecycleFilteredCount > 4}}" class="btn-secondary" style="margin-top: 18rpx;" bindtap="toggleLifecycleExpanded">
+          {{lifecycleExpanded ? '收起生命周期' : '查看更多生命周期'}}
+        </button>
+      </view>
+      <view wx:else class="empty">还没有因子生命周期事件</view>
+    </section-card>
+
     <section-card wx:if="{{selectedRow}}" title="单因子详情" subtitle="当前排序焦点因子的治理视图">
       <view class="detail-card stack-16">
         <view class="row-between">
@@ -116,6 +158,36 @@
     <section-card title="健康报告" subtitle="因子健康引擎的最近输出">
       <view wx:if="{{health}}" class="soft-panel section-note">{{health.summary || health.status || '已获取健康报告'}}</view>
       <view wx:else class="empty">还没有健康报告</view>
+    </section-card>
+
+    <section-card wx:if="{{selectedLifecycle}}" title="生命周期详情" subtitle="这次状态变化为什么发生">
+      <view class="detail-card stack-16">
+        <view class="row-between">
+          <view class="list-title">{{selectedLifecycle.factorText}}</view>
+          <status-pill label="{{selectedLifecycle.title}}" tone="{{selectedLifecycle.tone}}" />
+        </view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">当前阶段</view>
+            <view class="kv-value">{{selectedLifecycle.stageText}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">发生时间</view>
+            <view class="kv-value">{{selectedLifecycle.createdText}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">事件类型</view>
+            <view class="kv-value">{{selectedLifecycle.event || '--'}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">来源</view>
+            <view class="kv-value">{{selectedLifecycle.kind || '--'}}</view>
+          </view>
+        </view>
+        <view class="soft-panel section-note">{{selectedLifecycle.note}}</view>
+        <view wx:if="{{selectedLifecycle.metricText}}" class="soft-panel section-note">{{selectedLifecycle.metricText}}</view>
+        <button class="btn-secondary" bindtap="closeLifecycleDetail">收起详情</button>
+      </view>
     </section-card>
   </view>
 </view>

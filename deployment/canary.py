@@ -12,6 +12,7 @@
     CANARY_5     (5 根 OOS bar 验证)
     CANARY_20    (20 根 OOS bar 验证)
     CANARY_50    (50 根 OOS bar 验证, 仅低权重试运行)
+    PROBATION    (晋升观察期, 低风险继续验证)
     ACTIVE       (全部署)
     QUARANTINED  (异常隔离, 需手动解除)
     RETIRED      (永久退役)
@@ -33,11 +34,12 @@ SHADOW = "SHADOW"
 CANARY_5 = "CANARY_5"
 CANARY_20 = "CANARY_20"
 CANARY_50 = "CANARY_50"
+PROBATION = "PROBATION"
 ACTIVE = "ACTIVE"
 QUARANTINED = "QUARANTINED"
 RETIRED = "RETIRED"
 
-CANARY_STAGES = [SHADOW, CANARY_5, CANARY_20, CANARY_50, ACTIVE]
+CANARY_STAGES = [SHADOW, CANARY_5, CANARY_20, CANARY_50, PROBATION, ACTIVE]
 TERMINAL_STAGES = {QUARANTINED, RETIRED}  # 不再自动晋升/回滚
 
 # 各阶段最低要求: (min_oos_bars, min_oos_pnl)
@@ -47,8 +49,19 @@ STAGE_REQUIREMENTS: dict[str, tuple[int, float]] = {
     CANARY_5: (5, 0.001),            # 5 bars, +0.1% 净收益
     CANARY_20: (20, 0.003),          # 20 bars, +0.3%
     CANARY_50: (50, 0.005),          # 50 bars, +0.5%
+    PROBATION: (80, 0.007),          # 80 bars, +0.7% 且进入观察期
     ACTIVE: (0, 0.0),                # 最终阶段, 无晋升要求
 }
+
+# 多维晋升过滤
+MIN_HIT_RATE_EARLY = 0.48
+MIN_HIT_RATE_LATE = 0.52
+MIN_HEALTH_SCORE = 35.0
+MIN_INDEPENDENCE_SCORE = 25.0
+MAX_DRAWDOWN_TO_PNL_RATIO = 2.5
+MIN_ACTIVE_BARS_FOR_PROBATION = 20
+MAX_DISCOVERED_FACTORS = 24
+MAX_NEW_DISCOVERED_PER_CYCLE = 3
 
 # PnL 低于此比例 × 阈值时触发 rollback (默认 -50% 阈值即回滚)
 ROLLBACK_PNL_RATIO = -0.5
@@ -74,7 +87,7 @@ class CanaryEvalContext:
     oos_bars: int = 0
     oos_pnl: float = 0.0
     # 可选扩展字段
-    additional_metrics: dict = field(default_factory=dict)
+    additional_metrics: dict = field(default_factory=dict)  # hit_rate/max_drawdown/health_score/independence 等
 
     @classmethod
     def from_pnl_series(cls, pnl_series: list[float]) -> CanaryEvalContext:
@@ -163,9 +176,18 @@ class CanaryDirector:
         # 更新统计
         state.oos_bars = eval_ctx.oos_bars
         state.cumulative_pnl = eval_ctx.oos_pnl
+        metrics = dict(eval_ctx.additional_metrics or {})
         self._record_event(state, "eval", {
             "oos_bars": eval_ctx.oos_bars,
             "oos_pnl": round(eval_ctx.oos_pnl, 6),
+            "metrics": {
+                "source": metrics.get("source", "unknown"),
+                "hit_rate": round(float(metrics.get("hit_rate", 0.0) or 0.0), 6),
+                "max_drawdown": round(float(metrics.get("max_drawdown", 0.0) or 0.0), 6),
+                "health_score": round(float(metrics.get("health_score", 0.0) or 0.0), 4),
+                "independence_score": round(float(metrics.get("independence_score", 0.0) or 0.0), 4),
+                "n_active": int(metrics.get("n_active", eval_ctx.oos_bars) or eval_ctx.oos_bars),
+            },
         })
 
         # ── 步骤 1: 检查当前阶段是否需要回滚 ──
@@ -196,15 +218,69 @@ class CanaryDirector:
 
         # 条件检查
         if eval_ctx.oos_bars < min_bars:
-            cb("check_promotion", 100, f"{factor_name}: insufficient bars "
-                                       f"({eval_ctx.oos_bars} < {min_bars})")
+            reason = f"insufficient bars ({eval_ctx.oos_bars} < {min_bars})"
+            self._record_event(state, "stay", {"reason": reason, "next_stage": next_stage})
+            cb("check_promotion", 100, f"{factor_name}: {reason}")
             return "stay"
 
         if eval_ctx.oos_pnl < min_pnl:
-            cb("check_promotion", 100, f"{factor_name}: insufficient PnL "
-                                       f"({eval_ctx.oos_pnl:.4f} < {min_pnl})")
+            reason = f"insufficient PnL ({eval_ctx.oos_pnl:.4f} < {min_pnl})"
+            self._record_event(state, "stay", {"reason": reason, "next_stage": next_stage})
+            cb("check_promotion", 100, f"{factor_name}: {reason}")
             return "stay"
 
+        metrics = eval_ctx.additional_metrics or {}
+        hit_rate = float(metrics.get("hit_rate", 0.0) or 0.0)
+        max_drawdown = float(metrics.get("max_drawdown", 0.0) or 0.0)
+        health_score = float(metrics.get("health_score", 50.0) or 50.0)
+        independence_score = float(metrics.get("independence_score", 50.0) or 50.0)
+        n_active = int(metrics.get("n_active", eval_ctx.oos_bars) or eval_ctx.oos_bars)
+
+        min_hit_rate = MIN_HIT_RATE_LATE if next_stage in (PROBATION, ACTIVE) else MIN_HIT_RATE_EARLY
+        if hit_rate > 0 and hit_rate < min_hit_rate:
+            reason = f"hit_rate too low ({hit_rate:.3f} < {min_hit_rate:.3f})"
+            self._record_event(state, "stay", {"reason": reason, "next_stage": next_stage})
+            cb("check_promotion", 100, f"{factor_name}: {reason}")
+            return "stay"
+
+        if next_stage in (PROBATION, ACTIVE) and n_active < MIN_ACTIVE_BARS_FOR_PROBATION:
+            reason = f"insufficient active bars ({n_active} < {MIN_ACTIVE_BARS_FOR_PROBATION})"
+            self._record_event(state, "stay", {"reason": reason, "next_stage": next_stage})
+            cb("check_promotion", 100, f"{factor_name}: {reason}")
+            return "stay"
+
+        if next_stage in (PROBATION, ACTIVE) and health_score < MIN_HEALTH_SCORE:
+            reason = f"health score too low ({health_score:.1f} < {MIN_HEALTH_SCORE:.1f})"
+            self._record_event(state, "stay", {"reason": reason, "next_stage": next_stage})
+            cb("check_promotion", 100, f"{factor_name}: {reason}")
+            return "stay"
+
+        if next_stage in (PROBATION, ACTIVE) and independence_score < MIN_INDEPENDENCE_SCORE:
+            reason = f"independence too low ({independence_score:.1f} < {MIN_INDEPENDENCE_SCORE:.1f})"
+            self._record_event(state, "stay", {"reason": reason, "next_stage": next_stage})
+            cb("check_promotion", 100, f"{factor_name}: {reason}")
+            return "stay"
+
+        if next_stage in (PROBATION, ACTIVE) and eval_ctx.oos_pnl > 0:
+            dd_ratio = max_drawdown / max(abs(eval_ctx.oos_pnl), 1e-6)
+            if max_drawdown > 0 and dd_ratio > MAX_DRAWDOWN_TO_PNL_RATIO:
+                reason = f"drawdown too large (ratio={dd_ratio:.2f})"
+                self._record_event(state, "stay", {"reason": reason, "next_stage": next_stage})
+                cb("check_promotion", 100, f"{factor_name}: {reason}")
+                return "stay"
+
+        self._record_event(state, "qualify", {
+            "next_stage": next_stage,
+            "oos_bars": eval_ctx.oos_bars,
+            "oos_pnl": round(eval_ctx.oos_pnl, 6),
+            "metrics": {
+                "hit_rate": round(hit_rate, 6),
+                "max_drawdown": round(max_drawdown, 6),
+                "health_score": round(health_score, 4),
+                "independence_score": round(independence_score, 4),
+                "n_active": n_active,
+            },
+        })
         cb("check_promotion", 100, f"{factor_name}: qualifies for {next_stage}")
         return "promote"
 
@@ -436,6 +512,8 @@ class CanaryDirector:
             "event": event,
             **detail,
         })
+        if len(state.history) > 200:
+            state.history = state.history[-200:]
 
 
 def _now() -> float:

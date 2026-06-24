@@ -660,6 +660,8 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
 
             if status != "approved":
                 continue
+            if action not in {"downweight", "boost_small"}:
+                continue
 
             bias_info = approved_biases.get(
                 factor,
@@ -733,6 +735,7 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
             _gov = RuleEvolutionGovernor()
             governance_result["review_pending"] = _gov.review_pending()
             governance_result["reconcile_active"] = _gov.reconcile_active()
+            governance_result["reconcile_application_effects"] = _gov.reconcile_application_effects()
             _emit_evolution_story("learning_governance", governance_result)
         except Exception as e:
             logger.debug("[Evolve] learning governance: %s", e)

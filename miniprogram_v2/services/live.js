@@ -30,6 +30,22 @@ function patchFromStatePayload(data) {
   });
 }
 
+function normalizePositionsPayload(rawPositions = []) {
+  return (rawPositions || []).map((item) => {
+    const pnl = Number(
+      item.netUnrealizedPnL ?? item.unrealized ?? item.pnl ?? item.profit ?? 0
+    );
+    return {
+      ...item,
+      pnl,
+      unrealized: pnl,
+      current_price: item.current_price ?? item.price_current ?? 0,
+      open_price: item.open_price ?? item.price_open ?? 0,
+      volume: item.volume ?? item.size ?? 0,
+    };
+  });
+}
+
 function connectSocket() {
   if (socketTask) return;
   const token = wx.getStorageSync('jwt_token') || '';
@@ -99,13 +115,26 @@ async function pollLoop(options = {}) {
     ]);
 
     const currentTrading = liveStore.getState().trading || {};
-    const posList = (positions && positions.positions) || [];
+    const posList = normalizePositionsPayload((positions && positions.positions) || []);
+    const primaryPosition = posList[0] || null;
     const nextTrading = {
       ...currentTrading,
       equity: (account && account.equity) || currentTrading.equity || 0,
       balance: (account && account.balance) || currentTrading.balance || 0,
       positions_list: posList,
       n_positions: posList.length,
+      position: primaryPosition
+        ? {
+            dir: primaryPosition.type === 'buy' ? 'LONG' : primaryPosition.type === 'sell' ? 'SHORT' : 'FLAT',
+            entry: primaryPosition.open_price || 0,
+            size: primaryPosition.volume || 0,
+            unrealized: primaryPosition.pnl || 0,
+          }
+        : { dir: 'FLAT', entry: 0, size: 0, unrealized: 0 },
+      current_price:
+        (primaryPosition && primaryPosition.current_price) ||
+        currentTrading.current_price ||
+        0,
       daily: sessionStats
         ? {
             trades: sessionStats.trades || 0,
