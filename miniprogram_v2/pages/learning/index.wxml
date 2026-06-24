@@ -9,7 +9,7 @@
         </view>
         <view class="hero-actions learning-actions">
           <status-pill label="{{updatedAt}}" tone="neutral" />
-          <button class="btn-secondary btn-block" bindtap="onRunGovernance">运行治理</button>
+          <button class="btn-secondary btn-block {{governBusy ? 'btn-disabled' : ''}}" bindtap="onRunGovernance" loading="{{governBusy}}" disabled="{{governBusy}}">自动治理</button>
         </view>
       </view>
       <view class="hero-metrics">
@@ -75,11 +75,12 @@
         </view>
         <view wx:for="{{visibleSuggestions}}" wx:key="suggestion_id" class="list-item tap-card" data-id="{{item.suggestion_id}}" bindtap="openSuggestionDetail">
           <view class="row-between">
-            <view class="list-title">{{item.scope_key}}</view>
+            <view class="list-title">{{item.scopeLabel}}</view>
             <status-pill label="{{item.status}}" tone="{{item.tone}}" />
           </view>
-          <view class="small muted">{{item.action}} · conf {{item.confidence}} · {{item.createdText}}</view>
-          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.reason}}</view>
+          <view class="small muted">{{item.actionLabel}} · 置信度 {{item.confidenceText}} · {{item.createdText}}</view>
+          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.reasonText}}</view>
+          <view class="section-note" style="margin-top: 10rpx;">{{item.impactText}}</view>
           <view wx:if="{{item.status === 'proposed'}}" class="btn-row" style="margin-top: 12rpx;">
             <button class="btn-primary" size="mini" data-id="{{item.suggestion_id}}" bindtap="approveSuggestion">批准</button>
             <button class="btn-secondary" size="mini" data-id="{{item.suggestion_id}}" bindtap="rejectSuggestion">拒绝</button>
@@ -93,20 +94,21 @@
     <section-card wx:if="{{selectedSuggestion}}" title="建议详情" subtitle="证据、说明与治理状态">
       <view class="detail-card stack-16">
         <view class="row-between">
-          <view class="list-title">{{selectedSuggestion.scope_key}}</view>
+          <view class="list-title">{{selectedSuggestion.scopeLabel}}</view>
           <status-pill label="{{selectedSuggestion.status}}" tone="{{selectedSuggestion.tone}}" />
         </view>
         <view class="kv-grid">
           <view class="kv-item">
-            <view class="kv-label">动作</view>
-            <view class="kv-value">{{selectedSuggestion.action}}</view>
+            <view class="kv-label">建议类型</view>
+            <view class="kv-value">{{selectedSuggestion.actionLabel}}</view>
           </view>
           <view class="kv-item">
             <view class="kv-label">置信度</view>
-            <view class="kv-value">{{selectedSuggestion.confidence}}</view>
+            <view class="kv-value">{{selectedSuggestion.confidenceText}}</view>
           </view>
         </view>
-        <view class="soft-panel section-note">{{selectedSuggestion.reason}}</view>
+        <view class="soft-panel section-note">{{selectedSuggestion.reasonText}}</view>
+        <view class="soft-panel section-note">{{selectedSuggestion.impactText}}</view>
         <view wx:if="{{selectedSuggestion.evidence}}" class="kv-grid">
           <view class="kv-item">
             <view class="kv-label">样本数</view>
@@ -125,6 +127,7 @@
             <view class="kv-value">{{selectedSuggestion.evidence.experience_id || '--'}}</view>
           </view>
         </view>
+        <view class="soft-panel section-note">{{selectedSuggestion.evidenceText}}</view>
         <view wx:if="{{selectedSuggestion.evidence && selectedSuggestion.evidence.factor_breakdown}}" class="soft-panel section-note">
           因子拆解已生成，可作为后续模型接口的结构化输入。
         </view>
@@ -138,10 +141,10 @@
         <view wx:for="{{reviews}}" wx:key="review_id" class="timeline-item tap-card" data-id="{{item.review_id}}" bindtap="openReviewDetail">
           <view class="row-between">
             <view class="list-title">{{item.position_id}}</view>
-            <status-pill label="{{item.outcome_label}}" tone="{{item.tone}}" />
+            <status-pill label="{{item.outcomeLabel}}" tone="{{item.tone}}" />
           </view>
           <view class="small muted">{{item.createdText}} · pnl {{item.pnl}}</view>
-          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.summary_text}}</view>
+          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.meaningText}}</view>
         </view>
         </view>
       </view>
@@ -152,7 +155,7 @@
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedReview.position_id}}</view>
-          <status-pill label="{{selectedReview.outcome_label}}" tone="{{selectedReview.tone}}" />
+          <status-pill label="{{selectedReview.outcomeLabel}}" tone="{{selectedReview.tone}}" />
         </view>
         <view class="kv-grid">
           <view class="kv-item">
@@ -172,18 +175,18 @@
             <view class="kv-value">{{selectedReview.mfe}}</view>
           </view>
         </view>
-        <view class="soft-panel section-note">{{selectedReview.summary_text}}</view>
+        <view class="soft-panel section-note">{{selectedReview.meaningText}}</view>
         <view wx:if="{{selectedReview.failure_tags && selectedReview.failure_tags.length}}" class="row-wrap">
           <view wx:for="{{selectedReview.failure_tags}}" wx:key="*this" class="tag">{{item}}</view>
         </view>
         <view wx:if="{{selectedReview.review}}" class="kv-grid">
           <view class="kv-item">
             <view class="kv-label">主因子</view>
-            <view class="kv-value">{{selectedReview.review.top_factor || selectedReview.review.top_weight_factor || '--'}}</view>
+            <view class="kv-value">{{selectedReview.primaryFactorText || '--'}}</view>
           </view>
           <view class="kv-item">
             <view class="kv-label">最差因子</view>
-            <view class="kv-value">{{selectedReview.review.worst_factor || '--'}}</view>
+            <view class="kv-value">{{selectedReview.worstFactorText || '--'}}</view>
           </view>
         </view>
         <view wx:if="{{selectedReview.review && selectedReview.review.decision_trace}}" class="soft-panel section-note">
@@ -198,10 +201,10 @@
         <view class="timeline">
         <view wx:for="{{applications}}" wx:key="application_id" class="timeline-item tap-card" data-id="{{item.application_id}}" bindtap="openApplicationDetail">
           <view class="row-between">
-            <view class="list-title">{{item.scope_key}}</view>
-            <view class="tag">{{item.bias_multiplier}}</view>
+            <view class="list-title">{{item.scopeLabel}}</view>
+            <view class="tag">{{item.actionLabel}}</view>
           </view>
-          <view class="small muted">{{item.action}} · {{item.old_weight}} -> {{item.new_weight}}</view>
+          <view class="small muted">{{item.impactText}}</view>
         </view>
         </view>
       </view>
@@ -211,8 +214,8 @@
     <section-card wx:if="{{selectedApplication}}" title="应用详情" subtitle="建议是怎么真正影响权重的">
       <view class="detail-card stack-16">
         <view class="row-between">
-          <view class="list-title">{{selectedApplication.scope_key}}</view>
-          <view class="tag">{{selectedApplication.action}}</view>
+          <view class="list-title">{{selectedApplication.scopeLabel}}</view>
+          <view class="tag">{{selectedApplication.actionLabel}}</view>
         </view>
         <view class="kv-grid">
           <view class="kv-item">
@@ -232,6 +235,7 @@
             <view class="kv-value">{{selectedApplication.new_weight}}</view>
           </view>
         </view>
+        <view class="soft-panel section-note">{{selectedApplication.impactText}}</view>
         <view wx:if="{{selectedApplication.suggestion_ids && selectedApplication.suggestion_ids.length}}" class="row-wrap">
           <view wx:for="{{selectedApplication.suggestion_ids}}" wx:key="*this" class="tag">{{item}}</view>
         </view>

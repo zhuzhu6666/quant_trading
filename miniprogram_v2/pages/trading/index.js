@@ -38,11 +38,18 @@ Page({
     const trading = state.trading || {};
     const strategy = state.strategyStatus || {};
     const loopStatus = state.loopStatus || {};
+    const v4Status = strategy.v4_status || {};
     const recentSignal = strategy.recent_signal || strategy.signal || {};
     const direction = recentSignal.direction || strategy.direction || trading.position.dir || 'FLAT';
     const positionDir = trading.position && trading.position.dir;
     const gateReason = strategy.gate_reason || '';
     const circuitBreaker = !!strategy.circuit_breaker;
+    const pipelineRunning = !!(
+      strategy.pipeline_running ||
+      strategy.running ||
+      v4Status.pipeline_active ||
+      loopStatus.running
+    );
     let gateLabel = '等待信号';
     let gateTone = 'neutral';
     if (circuitBreaker) {
@@ -64,7 +71,7 @@ Page({
       gateLabel,
       gateTone,
       strategy: {
-        pipelineRunning: !!strategy.pipeline_running,
+        pipelineRunning,
         positionDir,
         entry: trading.position && trading.position.entry,
         size: trading.position && trading.position.size,

@@ -42,9 +42,36 @@ def review_suggestion(_user: RequireUser, req: ReviewRequest) -> dict:
 @router.post("/govern/run")
 def run_governance(_user: RequireUser) -> dict:
     gov = RuleEvolutionGovernor()
+    before = gov.list_suggestions(limit=500)
+    before_summary = {
+        "proposed": sum(1 for item in before if item.get("status") == "proposed"),
+        "approved": sum(1 for item in before if item.get("status") == "approved"),
+        "rejected": sum(1 for item in before if item.get("status") == "rejected"),
+        "rolled_back": sum(1 for item in before if item.get("status") == "rolled_back"),
+    }
+    review_result = gov.review_pending()
+    reconcile_result = gov.reconcile_active()
+    after = gov.list_suggestions(limit=500)
+    after_summary = {
+        "proposed": sum(1 for item in after if item.get("status") == "proposed"),
+        "approved": sum(1 for item in after if item.get("status") == "approved"),
+        "rejected": sum(1 for item in after if item.get("status") == "rejected"),
+        "rolled_back": sum(1 for item in after if item.get("status") == "rolled_back"),
+    }
+    auto_actions = int(review_result.get("approved", 0)) + int(review_result.get("rejected", 0)) + int(reconcile_result.get("rolled_back", 0))
+    message = (
+        f"本轮治理自动处理 {auto_actions} 条建议："
+        f"批准 {review_result.get('approved', 0)}，"
+        f"拒绝 {review_result.get('rejected', 0)}，"
+        f"回滚 {reconcile_result.get('rolled_back', 0)}。"
+    )
     return {
-        "review_pending": gov.review_pending(),
-        "reconcile_active": gov.reconcile_active(),
+        "review_pending": review_result,
+        "reconcile_active": reconcile_result,
+        "before": before_summary,
+        "after": after_summary,
+        "message": message,
+        "auto_actions": auto_actions,
     }
 
 

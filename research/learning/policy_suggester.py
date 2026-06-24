@@ -100,7 +100,6 @@ class PolicySuggester:
                 ),
             )
 
-            suggestion_id = self._new_id("psg")
             payload = {
                 "sample_count": sample_count,
                 "win_count": win_count,
@@ -109,23 +108,51 @@ class PolicySuggester:
                 "experience_id": experience.get("experience_id", ""),
                 "failure_tags": experience.get("failure_tags", []),
             }
-            conn.execute(
+            existing = conn.execute(
                 """
-                INSERT INTO policy_suggestion
-                (suggestion_id, scope_type, scope_key, action, confidence, reason,
-                 evidence_json, status, created_at)
-                VALUES (?, 'factor', ?, ?, ?, ?, ?, 'proposed', ?)
+                SELECT suggestion_id
+                FROM policy_suggestion
+                WHERE scope_type='factor' AND scope_key=? AND action=? AND status='proposed'
+                ORDER BY created_at DESC
+                LIMIT 1
                 """,
-                (
-                    suggestion_id,
-                    primary_factor,
-                    action,
-                    round(confidence, 6),
-                    reason,
-                    json.dumps(payload, ensure_ascii=False, default=str),
-                    now,
-                ),
-            )
+                (primary_factor, action),
+            ).fetchone()
+            if existing:
+                suggestion_id = str(existing["suggestion_id"])
+                conn.execute(
+                    """
+                    UPDATE policy_suggestion
+                    SET confidence=?, reason=?, evidence_json=?, created_at=?
+                    WHERE suggestion_id=?
+                    """,
+                    (
+                        round(confidence, 6),
+                        reason,
+                        json.dumps(payload, ensure_ascii=False, default=str),
+                        now,
+                        suggestion_id,
+                    ),
+                )
+            else:
+                suggestion_id = self._new_id("psg")
+                conn.execute(
+                    """
+                    INSERT INTO policy_suggestion
+                    (suggestion_id, scope_type, scope_key, action, confidence, reason,
+                     evidence_json, status, created_at)
+                    VALUES (?, 'factor', ?, ?, ?, ?, ?, 'proposed', ?)
+                    """,
+                    (
+                        suggestion_id,
+                        primary_factor,
+                        action,
+                        round(confidence, 6),
+                        reason,
+                        json.dumps(payload, ensure_ascii=False, default=str),
+                        now,
+                    ),
+                )
 
         return {
             "suggestion_id": suggestion_id,

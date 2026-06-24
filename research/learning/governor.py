@@ -116,7 +116,10 @@ class RuleEvolutionGovernor:
                         status = "rejected"
                         note = f"rejected by governor: positive evidence too weak avg_reward={avg_reward:.3f}"
                 elif action == "watch":
-                    if sample_count >= 6:
+                    if sample_count < 6:
+                        status = "approved"
+                        note = f"approved by governor: watch-only observation, samples={sample_count}"
+                    elif sample_count >= 6:
                         status = "rejected"
                         note = "watch suggestion expired after sufficient observation window"
 
