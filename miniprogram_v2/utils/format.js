@@ -10,6 +10,13 @@ export function formatPct(value) {
   return sign + n.toFixed(2) + '%';
 }
 
+export function formatPrice(value, digits = 3) {
+  if (value === null || value === undefined || value === '') return '--';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '--';
+  return n.toFixed(digits).replace(/\.?0+$/, '');
+}
+
 export function formatCount(value) {
   return String(Number(value || 0));
 }

@@ -1,6 +1,6 @@
 import liveStore from '../../stores/live';
 import { emergencyCloseAll, refreshLiveSnapshot, startTradingLoop, stopTradingLoop } from '../../services/live';
-import { formatMoney, formatPct, toneFromStatus } from '../../utils/format';
+import { formatMoney, formatPct, formatPrice, toneFromStatus } from '../../utils/format';
 
 Page({
   data: {
@@ -79,7 +79,7 @@ Page({
         trades: trading.daily && trading.daily.trades,
       },
       risk: trading.risk || {},
-      currentPrice: trading.current_price || '--',
+      currentPrice: formatPrice(trading.current_price, 3),
     });
   },
 
