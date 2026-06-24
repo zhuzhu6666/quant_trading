@@ -115,7 +115,7 @@ Page({
     this.setData({ startBusy: true });
     try {
       await startTradingLoop();
-      await refreshLiveSnapshot();
+      await refreshLiveSnapshot({ force: true });
     } finally {
       this.setData({ startBusy: false });
     }
@@ -126,7 +126,7 @@ Page({
     this.setData({ stopBusy: true });
     try {
       await stopTradingLoop();
-      await refreshLiveSnapshot();
+      await refreshLiveSnapshot({ force: true });
     } finally {
       this.setData({ stopBusy: false });
     }

@@ -6,6 +6,8 @@ let socketTask = null;
 let reconnectTimer = null;
 let pollTimer = null;
 let started = false;
+let pollInFlight = null;
+let lastPollAt = 0;
 
 function patchFromStatePayload(data) {
   if (!data) return;
@@ -69,7 +71,24 @@ function connectSocket() {
   });
 }
 
-async function pollLoop() {
+async function pollLoop(options = {}) {
+  const now = Date.now();
+  const state = liveStore.getState();
+  const force = !!options.force;
+  const wsFresh = state.wsConnected && now - (state.lastUpdate || 0) < 3000;
+
+  if (!force && wsFresh) {
+    return state;
+  }
+  if (!force && pollInFlight) {
+    return pollInFlight;
+  }
+  if (!force && now - lastPollAt < 1200) {
+    return state;
+  }
+
+  lastPollAt = now;
+  pollInFlight = (async () => {
     try {
     const [account, positions, strategyStatus, sessionStats, loopStatus] = await Promise.all([
       get('/api/live/account').catch(() => null),
@@ -79,48 +98,54 @@ async function pollLoop() {
       get('/api/live/loop-status').catch(() => null),
     ]);
 
+    const currentTrading = liveStore.getState().trading || {};
+    const posList = (positions && positions.positions) || [];
+    const nextTrading = {
+      ...currentTrading,
+      equity: (account && account.equity) || currentTrading.equity || 0,
+      balance: (account && account.balance) || currentTrading.balance || 0,
+      positions_list: posList,
+      n_positions: posList.length,
+      daily: sessionStats
+        ? {
+            trades: sessionStats.trades || 0,
+            win: sessionStats.wins || 0,
+            loss: sessionStats.losses || 0,
+            pnl: sessionStats.pnl_today || 0,
+            drawdown_pct: sessionStats.drawdown_pct || 0,
+          }
+        : currentTrading.daily,
+      risk: {
+        circuit_breaker: !!(strategyStatus && strategyStatus.circuit_breaker),
+        consecutive_loss: (sessionStats && sessionStats.consecutive_loss) || 0,
+      },
+    };
+
     liveStore.setState({
       account,
       strategyStatus,
       sessionStats,
       loopStatus,
+      trading: nextTrading,
       lastUpdate: Date.now(),
     });
-
-    const posList = (positions && positions.positions) || [];
-    const currentTrading = liveStore.getState().trading || {};
-    liveStore.setState({
-      trading: {
-        ...currentTrading,
-        equity: (account && account.equity) || currentTrading.equity || 0,
-        balance: (account && account.balance) || currentTrading.balance || 0,
-        positions_list: posList,
-        n_positions: posList.length,
-        daily: sessionStats
-          ? {
-              trades: sessionStats.trades || 0,
-              win: sessionStats.wins || 0,
-              loss: sessionStats.losses || 0,
-              pnl: sessionStats.pnl_today || 0,
-              drawdown_pct: sessionStats.drawdown_pct || 0,
-            }
-          : currentTrading.daily,
-        risk: {
-          circuit_breaker: !!(strategyStatus && strategyStatus.circuit_breaker),
-          consecutive_loss: (sessionStats && sessionStats.consecutive_loss) || 0,
-        },
-      },
-    });
+    return liveStore.getState();
   } catch (err) {
     console.warn('[v2-live] poll failed', err && err.statusCode);
+    return liveStore.getState();
+  } finally {
+    pollInFlight = null;
   }
+  })();
+
+  return pollInFlight;
 }
 
 export function startLiveRuntime() {
   if (started) return;
   started = true;
   connectSocket();
-  pollLoop();
+  pollLoop({ force: true });
   pollTimer = setInterval(pollLoop, CONFIG.POLL_INTERVAL);
 }
 
@@ -141,8 +166,8 @@ export function stopLiveRuntime() {
   liveStore.setState({ wsConnected: false });
 }
 
-export async function refreshLiveSnapshot() {
-  await pollLoop();
+export async function refreshLiveSnapshot(options = {}) {
+  await pollLoop(options);
   return liveStore.getState();
 }
 
