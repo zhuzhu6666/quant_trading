@@ -1,0 +1,7 @@
+{
+  "navigationBarTitleText": "学习",
+  "usingComponents": {
+    "status-pill": "/components/status-pill/index",
+    "section-card": "/components/section-card/index"
+  }
+}

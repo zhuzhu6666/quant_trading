@@ -1,0 +1,62 @@
+{
+  "pages": [
+    "pages/login/index",
+    "pages/overview/index",
+    "pages/trading/index",
+    "pages/learning/index",
+    "pages/factors/index",
+    "pages/ops/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "Quant Agent",
+    "navigationBarBackgroundColor": "#F5F7FB",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#F2F4F8",
+    "backgroundTextStyle": "dark"
+  },
+  "tabBar": {
+    "color": "#8E8E93",
+    "selectedColor": "#007AFF",
+    "backgroundColor": "#FFFFFF",
+    "borderStyle": "white",
+    "list": [
+      {
+        "pagePath": "pages/overview/index",
+        "text": "总览",
+        "iconPath": "assets/images/tab_loop_gray.png",
+        "selectedIconPath": "assets/images/tab_loop_blue.png"
+      },
+      {
+        "pagePath": "pages/trading/index",
+        "text": "交易",
+        "iconPath": "assets/images/tab_trade_gray.png",
+        "selectedIconPath": "assets/images/tab_trade_blue.png"
+      },
+      {
+        "pagePath": "pages/learning/index",
+        "text": "学习",
+        "iconPath": "assets/images/tab_attr_gray.png",
+        "selectedIconPath": "assets/images/tab_attr_blue.png"
+      },
+      {
+        "pagePath": "pages/factors/index",
+        "text": "因子",
+        "iconPath": "assets/images/tab_attr_gray.png",
+        "selectedIconPath": "assets/images/tab_attr_blue.png"
+      },
+      {
+        "pagePath": "pages/ops/index",
+        "text": "运维",
+        "iconPath": "assets/images/tab_sys_gray.png",
+        "selectedIconPath": "assets/images/tab_sys_blue.png"
+      }
+    ]
+  },
+  "networkTimeout": {
+    "request": 15000,
+    "connectSocket": 6000
+  },
+  "lazyCodeLoading": "requiredComponents",
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

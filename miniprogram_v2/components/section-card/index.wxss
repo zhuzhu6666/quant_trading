@@ -1,0 +1,28 @@
+.card {
+  background: #ffffff;
+  border-radius: 24rpx;
+  padding: 22rpx;
+  box-shadow: 0 10rpx 28rpx rgba(15, 23, 42, 0.05);
+}
+
+.row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.card-head {
+  margin-bottom: 16rpx;
+}
+
+.card-title {
+  font-size: 28rpx;
+  font-weight: 700;
+  color: #111827;
+}
+
+.card-subtitle {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: #6b7280;
+}

@@ -1,0 +1,10 @@
+.input {
+  height: 82rpx;
+  background: #f5f7fb;
+  border-radius: 18rpx;
+  padding: 0 22rpx;
+  box-sizing: border-box;
+  font-size: 26rpx;
+  color: #111827;
+  border: 1rpx solid #e8edf3;
+}

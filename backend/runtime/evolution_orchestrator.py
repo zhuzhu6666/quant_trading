@@ -599,6 +599,120 @@ def _try_retire(name: str, reason: str) -> bool:
         return False
 
 
+def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Collect rule-learning suggestions from state.db.
+
+    Returns:
+        summary_by_factor:
+            {
+                factor: {
+                    "proposed": int,
+                    "approved": int,
+                    "latest_action": str,
+                    "latest_confidence": float,
+                }
+            }
+        approved_biases:
+            {
+                factor: {
+                    "multiplier": float,
+                    "action": str,
+                    "suggestion_ids": list[str],
+                }
+            }
+    """
+    summary: dict[str, dict] = {}
+    approved_biases: dict[str, dict] = {}
+    try:
+        cutoff = _time.time() - max_age_days * 86400
+        conn = sqlite3.connect(str(_CANARY_DB))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT suggestion_id, scope_key, action, confidence, status, created_at
+            FROM policy_suggestion
+            WHERE scope_type='factor' AND created_at>=?
+              AND status IN ('proposed', 'approved')
+            ORDER BY created_at DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+        conn.close()
+
+        for row in rows:
+            factor = str(row["scope_key"] or "")
+            if not factor:
+                continue
+            action = str(row["action"] or "watch")
+            confidence = float(row["confidence"] or 0.0)
+            status = str(row["status"] or "proposed")
+            item = summary.setdefault(
+                factor,
+                {"proposed": 0, "approved": 0, "latest_action": action, "latest_confidence": confidence},
+            )
+            if status == "approved":
+                item["approved"] += 1
+            else:
+                item["proposed"] += 1
+            # first row is latest because rows ordered desc
+            if item["latest_action"] == action and item["latest_confidence"] == confidence:
+                pass
+
+            if status != "approved":
+                continue
+
+            bias_info = approved_biases.get(
+                factor,
+                {"multiplier": 1.0, "action": action, "suggestion_ids": []},
+            )
+            current = float(bias_info.get("multiplier", 1.0))
+            if action == "downweight":
+                current *= max(0.80, 1.0 - 0.20 * min(confidence, 1.0))
+            elif action == "boost_small":
+                current *= min(1.08, 1.0 + 0.08 * min(confidence, 1.0))
+            bias_info["multiplier"] = min(1.10, max(0.70, current))
+            bias_info["action"] = action
+            bias_info["suggestion_ids"].append(str(row["suggestion_id"]))
+            approved_biases[factor] = bias_info
+    except Exception as e:
+        logger.debug("[Evolve] collect learning suggestions: %s", e)
+    return summary, approved_biases
+
+
+def _apply_learning_biases(
+    weights: dict[str, float],
+    approved_biases: dict[str, dict],
+) -> tuple[dict[str, float], dict[str, dict]]:
+    """Apply small approved learning biases on top of WeightPolicy output."""
+    if not weights or not approved_biases:
+        return dict(weights or {}), {}
+
+    adjusted = dict(weights)
+    applied: dict[str, dict] = {}
+    for factor, bias_info in approved_biases.items():
+        if factor not in adjusted:
+            continue
+        mult = float((bias_info or {}).get("multiplier", 1.0))
+        old_w = float(adjusted[factor] or 0.0)
+        new_w = max(0.0, old_w * float(mult))
+        adjusted[factor] = new_w
+        applied[factor] = {
+            "multiplier": round(float(mult), 6),
+            "action": str((bias_info or {}).get("action", "watch")),
+            "suggestion_ids": list((bias_info or {}).get("suggestion_ids", []) or []),
+            "old_weight": round(old_w, 6),
+            "biased_weight": round(new_w, 6),
+        }
+
+    total = sum(float(v) for v in adjusted.values())
+    if total > 0:
+        adjusted = {k: round(float(v) / total, 6) for k, v in adjusted.items()}
+        for factor, info in applied.items():
+            if factor in adjusted:
+                info["new_weight"] = adjusted[factor]
+    return adjusted, applied
+
+
 def _update_weights(df: pd.DataFrame | None = None) -> bool:
     """计算动态权重并推入 factor_portfolio_weights (AWE 同一字段).
 
@@ -612,6 +726,18 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
         if not scores:
             return False
 
+        # 规则学习治理: proposed -> approved/rejected, approved -> rolled_back
+        governance_result = {}
+        try:
+            from research.learning.governor import RuleEvolutionGovernor
+            _gov = RuleEvolutionGovernor()
+            governance_result["review_pending"] = _gov.review_pending()
+            governance_result["reconcile_active"] = _gov.reconcile_active()
+            _emit_evolution_story("learning_governance", governance_result)
+        except Exception as e:
+            logger.debug("[Evolve] learning governance: %s", e)
+            _gov = None
+
         from config.runtime_config import shared as _rc
         cfg = _rc()
 
@@ -621,6 +747,20 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
         wp_weights = wp.compute_weights(scores)
         if not wp_weights:
             return False
+
+        # 来源 A2: 规则学习建议 (proposed 只做观测, approved 才做小偏置)
+        learning_summary, approved_biases = _collect_learning_suggestions()
+        if learning_summary:
+            _emit_evolution_story("learning_suggestions_seen", {
+                "factors": len(learning_summary),
+                "summary": learning_summary,
+                "approved_biases": approved_biases,
+            })
+        if approved_biases:
+            wp_weights, applied_biases = _apply_learning_biases(wp_weights, approved_biases)
+            logger.info("[Evolve] applied learning biases to %d factors", len(applied_biases))
+        else:
+            applied_biases = {}
 
         # 来源 B: Shadow OOS 绩效 (从 state.db 读取)
         shadow_perfs = {}
@@ -670,7 +810,28 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
         _emit_evolution_story("weights_updated", {
             "factors": len(new_weights),
             "factor_portfolio_weights": new_weights,
+            "learning_biases": applied_biases,
         })
+        if applied_biases and _gov is not None:
+            cycle_ts = _time.time()
+            for factor, info in applied_biases.items():
+                try:
+                    _gov.log_application(
+                        scope_type="factor",
+                        scope_key=factor,
+                        action=str(info.get("action", "watch")),
+                        bias_multiplier=float(info.get("multiplier", 1.0)),
+                        old_weight=float(info.get("old_weight", 0.0)),
+                        new_weight=float(info.get("new_weight", info.get("biased_weight", 0.0))),
+                        suggestion_ids=list(info.get("suggestion_ids", []) or []),
+                        cycle_ts=cycle_ts,
+                        details={
+                            "governance": governance_result,
+                            "biased_weight": info.get("biased_weight", 0.0),
+                        },
+                    )
+                except Exception as e:
+                    logger.debug("[Evolve] learning application log %s: %s", factor, e)
         logger.info("[Evolve] weights: %d factors → factor_portfolio_weights (via DecisionPolicy)",
                     len(new_weights))
 

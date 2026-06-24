@@ -30,8 +30,16 @@ from pathlib import Path
 
 # ── DecisionLog (v4 决策审计) ─────────────────────────────────
 from db.store import DecisionLogStore
+from backend.ledger.service import DecisionLedger
+from alpha.reflection.reviewer import TradeReviewer
+from research.learning.experience_builder import ExperienceBuilder
+from research.learning.policy_suggester import PolicySuggester
 _DECISION_LOG: DecisionLogStore | None = None
 _DECISION_LOG_RUN_ID: int = 0
+_LEDGER: DecisionLedger | None = None
+_TRADE_REVIEWER: TradeReviewer | None = None
+_EXPERIENCE_BUILDER: ExperienceBuilder | None = None
+_POLICY_SUGGESTER: PolicySuggester | None = None
 
 # ── Local SL/TP tracking (live loop only) ──────────────────────────
 # audit 2026-06-10: 之前 SL/TP 完全靠本地 Python 监控 1 bar 延迟的
@@ -75,6 +83,7 @@ _trailing_state: dict[int, dict] = {}
 # ── 金字塔规则: position_id → 开仓时的 composite.score
 # 用于判断新信号是否比已有持仓更强, 避免递减加仓
 _pos_entry_scores: dict[int, float] = {}
+_pos_entry_decisions: dict[int, str] = {}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1727,6 +1736,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     # ── Factor Takeover v4 管道初始化 ──
     global _factor_pipeline
     global _DECISION_LOG, _DECISION_LOG_RUN_ID
+    global _LEDGER, _TRADE_REVIEWER, _EXPERIENCE_BUILDER, _POLICY_SUGGESTER
     _factor_pipeline = None
     try:
         from config.runtime_config import shared as _rcc
@@ -1794,6 +1804,14 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         if _DECISION_LOG is None:
             _DECISION_LOG = DecisionLogStore()
             _DECISION_LOG_RUN_ID = int(time.time())
+        if _LEDGER is None:
+            _LEDGER = DecisionLedger()
+        if _TRADE_REVIEWER is None:
+            _TRADE_REVIEWER = TradeReviewer()
+        if _EXPERIENCE_BUILDER is None:
+            _EXPERIENCE_BUILDER = ExperienceBuilder()
+        if _POLICY_SUGGESTER is None:
+            _POLICY_SUGGESTER = PolicySuggester()
         # ── 多品种管道初始化 (Phase 6: _factor_pipelines) ──
         global _factor_pipelines
         _factor_pipelines = {}
@@ -2430,7 +2448,6 @@ def _process_tick_factor_pipeline(
                     "n_abstain": composite.n_abstain_factors,
                 }, ensure_ascii=False),
             )
-
     # 3. 构造 Signal (兼容旧 _send_order 逻辑)
     from alpha.portfolio_compositor import CompositeSignal
 
@@ -2458,6 +2475,27 @@ def _process_tick_factor_pipeline(
         from backend.ws.endpoints import _position_to_dict
         pos = [_position_to_dict(p) for p in pos]
     current_price = float(last_bar["close"])
+    if _LEDGER and composite.direction != 0:
+        try:
+            _LEDGER.log_composite_decision(
+                event_type="signal",
+                composite=composite,
+                gate_result=gate_result,
+                symbol="XAUUSD+",
+                timeframe=str(getattr(cfg, "timeframe", "") or ""),
+                decision_ts=bar.get("time", time.time()),
+                portfolio_state={
+                    "balance": acct.get("balance", 0),
+                    "equity": acct.get("equity", 0),
+                    "n_positions": len(pos),
+                    "session_pnl": _live_state_get("session_pnl", 0),
+                },
+                risk_state=_live_state_get("risk", {}, clone=True) or {},
+                action_reason="signal_detected",
+                action_json={"tick": tick},
+            )
+        except Exception as _ledger_err:
+            logger.debug("[live] ledger signal failed: %s", _ledger_err)
 
     # ── 平仓检测: 对比 _prev_position_ids 找出被 broker 关闭的仓位 ──
     current_pids: set[int] = set()
@@ -2544,10 +2582,65 @@ def _process_tick_factor_pipeline(
                         "tick": tick,
                     }, ensure_ascii=False),
                 )
+            exit_decision_id = ""
+            if _LEDGER:
+                try:
+                    exit_decision_id = _LEDGER.log_decision(
+                        event_type="close",
+                        symbol="XAUUSD+",
+                        timeframe=str(getattr(cfg, "timeframe", "") or ""),
+                        decision_ts=bar.get("time", time.time()),
+                        trade_id=str(cpid),
+                        position_id=str(cpid),
+                        portfolio_state={
+                            "balance": acct.get("balance", 0),
+                            "equity": acct.get("equity", 0),
+                            "session_pnl": _live_state_get("session_pnl", 0),
+                        },
+                        risk_state=_live_state_get("risk", {}, clone=True) or {},
+                        action_score=float(total_pnl),
+                        action_reason="position_closed",
+                        action_json={
+                            "position_id": cpid,
+                            "pnl": round(total_pnl, 2),
+                            "price": round(current_price, 2),
+                            "tick": tick,
+                            "factor_contributions": mc,
+                            "real_pnl": real_pnl or {},
+                        },
+                    )
+                    _LEDGER.log_position_event(
+                        position_id=str(cpid),
+                        trade_id=str(cpid),
+                        symbol="XAUUSD+",
+                        event_type="closed",
+                        avg_price=current_price,
+                        realized_pnl=float(total_pnl),
+                        details={"tick": tick, "real_pnl": real_pnl or {}, "factor_contributions": mc},
+                        event_ts=time.time(),
+                    )
+                except Exception as _ledger_err:
+                    logger.debug("[live] ledger close failed: %s", _ledger_err)
+            if _TRADE_REVIEWER and _EXPERIENCE_BUILDER and _POLICY_SUGGESTER:
+                try:
+                    review = _TRADE_REVIEWER.review_closed_trade(
+                        position_id=str(cpid),
+                        pnl=float(total_pnl),
+                        close_price=float(current_price),
+                        close_ts=time.time(),
+                        contributions=mc,
+                        exit_decision_id=exit_decision_id,
+                        real_pnl=real_pnl,
+                    )
+                    experience = _EXPERIENCE_BUILDER.build_from_review(review)
+                    _POLICY_SUGGESTER.suggest_from_experience(experience)
+                except Exception as _learn_err:
+                    logger.debug("[live] post-trade learning failed for pos %s: %s", cpid, _learn_err)
             # 清理追踪止损状态
             _trailing_state.pop(cpid, None)
             # 清理金字塔规则状态
             _pos_entry_scores.pop(cpid, None)
+            _pos_entry_decisions.pop(int(cpid), None)
         except Exception as exc:
             log(f"tick {tick}: attribution close pos={cpid} error: {exc}")
     # 记录当前仓位 open price (供下次 close 使用)
@@ -2608,6 +2701,26 @@ def _process_tick_factor_pipeline(
         risk_passed, risk_reason = _risk_var_gate(cfg)
         if not risk_passed:
             log(f"tick {tick}: v4 {direction_name} BLOCKED by risk gate: {risk_reason}")
+            if _LEDGER:
+                try:
+                    _LEDGER.log_composite_decision(
+                        event_type="skip",
+                        composite=composite,
+                        gate_result=gate_result,
+                        symbol="XAUUSD+",
+                        timeframe=str(getattr(cfg, "timeframe", "") or ""),
+                        decision_ts=bar.get("time", time.time()),
+                        portfolio_state={
+                            "balance": acct.get("balance", 0),
+                            "equity": acct.get("equity", 0),
+                            "n_positions": len(pos),
+                        },
+                        risk_state=_live_state_get("risk", {}, clone=True) or {},
+                        action_reason=risk_reason,
+                        action_json={"tick": tick, "skip_stage": "risk_var_gate"},
+                    )
+                except Exception as _ledger_err:
+                    logger.debug("[live] ledger risk skip failed: %s", _ledger_err)
             _write_live_trade_log_factor(
                 tick, current_price, acct, pos, composite, gate_result,
                 _live_state,
@@ -2663,6 +2776,26 @@ def _process_tick_factor_pipeline(
             gate_result = type('GateResult', (), {
                 'passed': False, 'reason': block_reason,
             })()
+            if _LEDGER:
+                try:
+                    _LEDGER.log_composite_decision(
+                        event_type="skip",
+                        composite=composite,
+                        gate_result=gate_result,
+                        symbol="XAUUSD+",
+                        timeframe=str(getattr(cfg, "timeframe", "") or ""),
+                        decision_ts=bar.get("time", time.time()),
+                        portfolio_state={
+                            "balance": acct.get("balance", 0),
+                            "equity": acct.get("equity", 0),
+                            "n_positions": len(pos),
+                        },
+                        risk_state=_live_state_get("risk", {}, clone=True) or {},
+                        action_reason=block_reason,
+                        action_json={"tick": tick, "skip_stage": "position_control"},
+                    )
+                except Exception as _ledger_err:
+                    logger.debug("[live] ledger position skip failed: %s", _ledger_err)
         else:
             try:
                 if composite.direction == 1:
@@ -2673,6 +2806,7 @@ def _process_tick_factor_pipeline(
                     result = None
 
                 if result is not None and getattr(result, "success", False):
+                    fill_price = float(getattr(result, 'price', current_price) or current_price)
                     pid = getattr(result, "position_id", 0) or 0
                     if pid <= 0 and pos:
                         p0 = pos[0]
@@ -2697,7 +2831,6 @@ def _process_tick_factor_pipeline(
                                     f"api_volume={actual_api_volume:.0f} pos={pid} score={composite.score:.4f}")
                                 # ── 执行质量记录 ──
                                 try:
-                                    fill_price = float(getattr(result, 'price', current_price) or current_price)
                                     _exec_quality.record(_ExecTrade(
                                         signal_time=bar.get("time", time.time()),
                                         submit_time=time.time(),
@@ -2737,6 +2870,75 @@ def _process_tick_factor_pipeline(
                                     _pos_open_prices[pid] = current_price
                                     _pos_open_api_volume[pid] = float(actual_api_volume)
                                     log(f"tick {tick}: attribution recorded open pos={pid}")
+                                    if _LEDGER:
+                                        try:
+                                            entry_decision_id = _LEDGER.log_composite_decision(
+                                                event_type="open",
+                                                composite=composite,
+                                                gate_result=gate_result,
+                                                symbol="XAUUSD+",
+                                                timeframe=str(getattr(cfg, "timeframe", "") or ""),
+                                                decision_ts=bar.get("time", time.time()),
+                                                trade_id=str(pid),
+                                                position_id=str(pid),
+                                                portfolio_state={
+                                                    "balance": acct.get("balance", 0),
+                                                    "equity": acct.get("equity", 0),
+                                                    "n_positions": len(pos),
+                                                    "session_pnl": _live_state_get("session_pnl", 0),
+                                                },
+                                                risk_state=_live_state_get("risk", {}, clone=True) or {},
+                                                action_reason="executed",
+                                                action_json={
+                                                    "position_id": pid,
+                                                    "volume": actual_api_volume,
+                                                    "requested_volume": volume,
+                                                    "price": round(current_price, 2),
+                                                    "sl": round(sl_price, 2),
+                                                    "tp": round(tp_price, 2),
+                                                    "tick": tick,
+                                                },
+                                            )
+                                            _pos_entry_decisions[int(pid)] = entry_decision_id
+                                            _LEDGER.log_order_event(
+                                                event_type="submitted",
+                                                decision_id=entry_decision_id,
+                                                trade_id=str(pid),
+                                                order_id=str(pid),
+                                                broker_order_id=str(pid),
+                                                price=float(current_price),
+                                                volume=float(actual_api_volume),
+                                                status="submitted",
+                                                details={"tick": tick, "direction": composite.direction},
+                                            )
+                                            _LEDGER.log_order_event(
+                                                event_type="filled",
+                                                decision_id=entry_decision_id,
+                                                trade_id=str(pid),
+                                                order_id=str(pid),
+                                                broker_order_id=str(pid),
+                                                price=float(fill_price),
+                                                volume=float(actual_api_volume),
+                                                status="filled",
+                                                details={"tick": tick, "direction": composite.direction},
+                                            )
+                                            _LEDGER.log_position_event(
+                                                position_id=str(pid),
+                                                trade_id=str(pid),
+                                                symbol="XAUUSD+",
+                                                event_type="opened",
+                                                net_volume=float(actual_api_volume),
+                                                avg_price=float(fill_price),
+                                                details={
+                                                    "tick": tick,
+                                                    "direction": composite.direction,
+                                                    "sl": round(sl_price, 2),
+                                                    "tp": round(tp_price, 2),
+                                                },
+                                                event_ts=time.time(),
+                                            )
+                                        except Exception as _ledger_err:
+                                            logger.debug("[live] ledger open failed for pos %s: %s", pid, _ledger_err)
                                     # ── 决策审计: open ──
                                     if _DECISION_LOG:
                                         bar_ts = bar.get("time", 0)

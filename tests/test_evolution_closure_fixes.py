@@ -179,3 +179,67 @@ def test_update_shadow_performance_uses_shadow_trader(monkeypatch):
     assert calls[0]["symbol"] == "XAUUSD+"
     assert calls[0]["timeframe"] == "M5"
     assert calls[0]["persist"] is True
+
+
+def test_collect_learning_suggestions_separates_proposed_and_approved(tmp_path, monkeypatch):
+    import sqlite3
+
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(evo, "_CANARY_DB", db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS policy_suggestion (
+            suggestion_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            confidence REAL DEFAULT 0.0,
+            reason TEXT DEFAULT '',
+            evidence_json TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'proposed',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO policy_suggestion
+        (suggestion_id, scope_type, scope_key, action, confidence, status, created_at)
+        VALUES (?, 'factor', ?, ?, ?, ?, ?)
+        """,
+        [
+            ("a1", "foo", "downweight", 0.9, "proposed", 9_999_999_000),
+            ("a2", "foo", "downweight", 0.8, "approved", 9_999_999_100),
+            ("a3", "bar", "boost_small", 0.5, "approved", 9_999_999_200),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(evo._time, "time", lambda: 10_000_000_000)
+    summary, biases = evo._collect_learning_suggestions(max_age_days=30)
+
+    assert summary["foo"]["proposed"] == 1
+    assert summary["foo"]["approved"] == 1
+    assert summary["bar"]["approved"] == 1
+    assert biases["foo"]["multiplier"] < 1.0
+    assert biases["bar"]["multiplier"] > 1.0
+    assert biases["foo"]["suggestion_ids"] == ["a2"]
+
+
+def test_apply_learning_biases_is_small_and_normalized():
+    adjusted, applied = evo._apply_learning_biases(
+        {"foo": 0.6, "bar": 0.4},
+        {
+            "foo": {"multiplier": 0.8, "action": "downweight", "suggestion_ids": ["s1"]},
+            "bar": {"multiplier": 1.04, "action": "boost_small", "suggestion_ids": ["s2"]},
+        },
+    )
+
+    assert set(adjusted) == {"foo", "bar"}
+    assert abs(sum(adjusted.values()) - 1.0) < 1e-6
+    assert adjusted["foo"] < 0.6
+    assert adjusted["bar"] > 0.4
+    assert applied["foo"]["multiplier"] == 0.8
+    assert applied["bar"]["multiplier"] == 1.04

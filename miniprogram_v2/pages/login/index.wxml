@@ -1,0 +1,17 @@
+<view class="app-shell">
+  <view class="page-stack">
+    <view class="hero">
+      <view class="hero-kicker">Welcome</view>
+      <view class="hero-title">Quant Agent V2</view>
+      <view class="hero-subtitle">全新小程序控制台，围绕交易、学习、因子与治理闭环重构。</view>
+    </view>
+
+    <view class="band stack-16">
+      <view class="band-title">登录</view>
+      <input class="input" placeholder="用户名" value="{{username}}" bindinput="onUsernameInput" />
+      <input class="input" password placeholder="密码" value="{{password}}" bindinput="onPasswordInput" />
+      <button class="btn-primary" loading="{{loading}}" bindtap="onSubmit">进入控制台</button>
+      <view wx:if="{{error}}" class="accent-neg small">{{error}}</view>
+    </view>
+  </view>
+</view>

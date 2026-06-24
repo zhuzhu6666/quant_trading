@@ -1,0 +1,106 @@
+<view class="app-shell">
+  <view class="page-stack">
+    <view class="hero">
+      <view class="row-between">
+        <view>
+          <view class="hero-kicker">Overview</view>
+          <view class="hero-title">系统驾驶舱</view>
+          <view class="hero-subtitle">看清系统是否在运行、是否在交易、是否在学习。</view>
+        </view>
+        <status-pill label="{{wsLabel}}" tone="{{wsTone}}" />
+      </view>
+      <view class="hero-metrics">
+        <view class="hero-metric">
+          <view class="hero-metric-label">权益</view>
+          <view class="hero-metric-value">{{equity}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">当日 PnL</view>
+          <view class="hero-metric-value {{pnlTodayTone === 'positive' ? 'accent-pos' : pnlTodayTone === 'negative' ? 'accent-neg' : ''}}">{{pnlToday}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">持仓</view>
+          <view class="hero-metric-value">{{positions}}</view>
+        </view>
+      </view>
+    </view>
+
+    <view class="grid-2">
+      <metric-tile label="当日 PnL" value="{{pnlToday}}" tone="{{pnlTodayTone}}" hint="今日累计" />
+      <metric-tile label="回撤" value="{{drawdown}}" hint="当日最大回撤" />
+      <metric-tile label="持仓数" value="{{positions}}" hint="当前仓位数量" />
+      <metric-tile label="最近同步" value="{{updatedAt}}" hint="最后刷新时间" />
+    </view>
+
+    <view class="grid-1-2">
+      <section-card title="系统状态" subtitle="运行与治理入口">
+        <view class="stack-16">
+          <view class="status-banner status-banner-{{loopTone}}">
+            <view class="small muted">交易循环</view>
+            <view class="row-between">
+              <view class="value-md">{{loopLabel}}</view>
+              <status-pill label="{{loopTone === 'positive' ? '在线' : '待机'}}" tone="{{loopTone}}" />
+            </view>
+            <view class="section-note">实时链路 {{wsLabel}}，最近同步 {{updatedAt}}</view>
+          </view>
+          <view class="btn-row">
+            <button class="btn-primary" bindtap="onStart">启动</button>
+            <button class="btn-secondary" bindtap="onStop">停止</button>
+          </view>
+          <button class="btn-secondary" bindtap="onGovern">运行治理</button>
+        </view>
+      </section-card>
+
+      <section-card title="学习概览" subtitle="规则进化是否在形成新经验">
+        <view class="status-banner status-banner-{{governanceTone}}">
+          <view class="small muted">治理状态</view>
+          <view class="row-between">
+            <view class="value-md">{{governanceLabel}}</view>
+            <status-pill label="{{governanceLabel}}" tone="{{governanceTone}}" />
+          </view>
+          <view class="section-note">已应用 {{learningApplications}} 次，最新复盘会在治理后进入下一轮权重。</view>
+        </view>
+        <view class="grid-3">
+          <metric-tile label="待审" value="{{learningSummary.proposed || 0}}" hint="proposed" />
+          <metric-tile label="已批" value="{{learningSummary.approved || 0}}" hint="approved" />
+          <metric-tile label="已回滚" value="{{learningSummary.rolled_back || 0}}" hint="rolled back" />
+        </view>
+        <view class="btn-row-compact" style="margin-top: 16rpx;">
+          <button class="btn-secondary" bindtap="goLearning">学习页</button>
+          <button class="btn-secondary" bindtap="goTrading">交易页</button>
+        </view>
+      </section-card>
+    </view>
+
+    <section-card title="闭环进度" subtitle="因子到开仓，再到复盘与经验回流">
+      <view class="progress-strip">
+        <view wx:for="{{closureSteps}}" wx:key="id" class="progress-step progress-step-{{item.tone}}">
+          <view class="progress-index">{{item.index}}</view>
+          <view class="progress-title">{{item.title}}</view>
+          <view class="progress-note">{{item.note}}</view>
+        </view>
+      </view>
+    </section-card>
+
+    <section-card title="最新复盘" subtitle="最近一笔平仓后系统的判断">
+      <view wx:if="{{latestReview}}" class="stack-12">
+        <view class="row-between">
+          <view class="value-md">{{latestReview.outcome_label}}</view>
+          <view class="{{latestReview.pnl >= 0 ? 'accent-pos' : 'accent-neg'}} value-md">{{latestReview.pnl}}</view>
+        </view>
+        <view class="soft-panel section-note">{{latestReview.summary_text}}</view>
+        <view class="caption-grid">
+          <view class="caption-card">
+            <view class="caption-label">仓位编号</view>
+            <view class="caption-value">{{latestReview.position_id || '--'}}</view>
+          </view>
+          <view class="caption-card">
+            <view class="caption-label">结果标签</view>
+            <view class="caption-value">{{latestReview.outcome_label || '--'}}</view>
+          </view>
+        </view>
+      </view>
+      <view wx:else class="empty">还没有平仓复盘数据</view>
+    </section-card>
+  </view>
+</view>

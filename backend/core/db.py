@@ -205,6 +205,163 @@ CREATE TABLE IF NOT EXISTS sync_health (
     updated_at REAL
 );
 
+-- 结构化决策账本
+CREATE TABLE IF NOT EXISTS decision_ledger (
+    decision_id TEXT PRIMARY KEY,
+    trade_id TEXT DEFAULT '',
+    position_id TEXT DEFAULT '',
+    event_type TEXT NOT NULL,
+    symbol TEXT DEFAULT '',
+    timeframe TEXT DEFAULT '',
+    decision_ts REAL NOT NULL DEFAULT 0.0,
+    regime_id TEXT DEFAULT '',
+    regime_confidence REAL DEFAULT 0.0,
+    portfolio_state_json TEXT DEFAULT '{}',
+    risk_state_json TEXT DEFAULT '{}',
+    policy_version TEXT DEFAULT '',
+    factor_set_version TEXT DEFAULT '',
+    action_score REAL DEFAULT 0.0,
+    action_reason TEXT DEFAULT '',
+    action_json TEXT DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS decision_factor_snapshot (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id TEXT NOT NULL,
+    factor TEXT NOT NULL,
+    source TEXT DEFAULT 'registry',
+    raw_value REAL DEFAULT 0.0,
+    normalized_value REAL DEFAULT 0.0,
+    direction REAL DEFAULT 0.0,
+    base_weight REAL DEFAULT 0.0,
+    policy_weight REAL DEFAULT 0.0,
+    shadow_score REAL DEFAULT 0.0,
+    health_score REAL DEFAULT 0.0,
+    gated INTEGER DEFAULT 0,
+    gated_reason TEXT DEFAULT '',
+    contribution_score REAL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS order_lifecycle_event (
+    event_id TEXT PRIMARY KEY,
+    decision_id TEXT DEFAULT '',
+    trade_id TEXT DEFAULT '',
+    order_id TEXT DEFAULT '',
+    broker_order_id TEXT DEFAULT '',
+    event_type TEXT NOT NULL,
+    event_ts REAL NOT NULL DEFAULT 0.0,
+    price REAL DEFAULT 0.0,
+    volume REAL DEFAULT 0.0,
+    status TEXT DEFAULT '',
+    details_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS position_lifecycle_event (
+    event_id TEXT PRIMARY KEY,
+    position_id TEXT NOT NULL,
+    trade_id TEXT DEFAULT '',
+    symbol TEXT DEFAULT '',
+    event_type TEXT NOT NULL,
+    event_ts REAL NOT NULL DEFAULT 0.0,
+    net_volume REAL DEFAULT 0.0,
+    avg_price REAL DEFAULT 0.0,
+    unrealized_pnl REAL DEFAULT 0.0,
+    realized_pnl REAL DEFAULT 0.0,
+    details_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS trade_outcome_review (
+    review_id TEXT PRIMARY KEY,
+    trade_id TEXT DEFAULT '',
+    position_id TEXT DEFAULT '',
+    entry_decision_id TEXT DEFAULT '',
+    exit_decision_id TEXT DEFAULT '',
+    entry_quality REAL DEFAULT 0.0,
+    hold_quality REAL DEFAULT 0.0,
+    exit_quality REAL DEFAULT 0.0,
+    regime_fit_score REAL DEFAULT 0.0,
+    execution_quality REAL DEFAULT 0.0,
+    pnl REAL DEFAULT 0.0,
+    mae REAL DEFAULT 0.0,
+    mfe REAL DEFAULT 0.0,
+    outcome_label TEXT DEFAULT '',
+    failure_tags_json TEXT DEFAULT '[]',
+    summary_text TEXT DEFAULT '',
+    review_json TEXT DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS factor_contribution_review (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id TEXT NOT NULL,
+    trade_id TEXT DEFAULT '',
+    factor TEXT NOT NULL,
+    entry_contribution REAL DEFAULT 0.0,
+    hold_contribution REAL DEFAULT 0.0,
+    exit_contribution REAL DEFAULT 0.0,
+    net_contribution REAL DEFAULT 0.0,
+    confidence REAL DEFAULT 0.0,
+    notes TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS experience_memory (
+    experience_id TEXT PRIMARY KEY,
+    trade_id TEXT DEFAULT '',
+    regime_id TEXT DEFAULT '',
+    setup_hash TEXT DEFAULT '',
+    decision_context_json TEXT DEFAULT '{}',
+    outcome_label TEXT DEFAULT '',
+    reward_score REAL DEFAULT 0.0,
+    failure_tags_json TEXT DEFAULT '[]',
+    recommended_action TEXT DEFAULT '',
+    evidence_strength REAL DEFAULT 0.0,
+    artifact_version TEXT DEFAULT 'v1',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS experience_pattern_stats (
+    scope_type TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    sample_count INTEGER DEFAULT 0,
+    win_count INTEGER DEFAULT 0,
+    bad_loss_count INTEGER DEFAULT 0,
+    avg_reward REAL DEFAULT 0.0,
+    last_outcome_label TEXT DEFAULT '',
+    recommended_action TEXT DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (scope_type, scope_key)
+);
+
+CREATE TABLE IF NOT EXISTS policy_suggestion (
+    suggestion_id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    reason TEXT DEFAULT '',
+    evidence_json TEXT DEFAULT '{}',
+    status TEXT DEFAULT 'proposed',
+    reviewed_at REAL DEFAULT 0.0,
+    review_note TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS learning_application_log (
+    application_id TEXT PRIMARY KEY,
+    cycle_ts REAL NOT NULL DEFAULT 0.0,
+    scope_type TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    bias_multiplier REAL DEFAULT 1.0,
+    old_weight REAL DEFAULT 0.0,
+    new_weight REAL DEFAULT 0.0,
+    suggestion_ids_json TEXT DEFAULT '[]',
+    status TEXT DEFAULT 'applied',
+    details_json TEXT DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(ts);
 CREATE INDEX IF NOT EXISTS idx_decision_log_type ON decision_log(decision_type);
 CREATE INDEX IF NOT EXISTS idx_lifecycle_events_factor ON lifecycle_events(factor);
@@ -213,6 +370,17 @@ CREATE INDEX IF NOT EXISTS idx_evolution_events_type ON evolution_events(event_t
 CREATE INDEX IF NOT EXISTS idx_weight_history_factor ON weight_history(factor);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_shadow_factor_perf_updated ON shadow_factor_perf(updated_at);
+CREATE INDEX IF NOT EXISTS idx_decision_ledger_ts ON decision_ledger(decision_ts);
+CREATE INDEX IF NOT EXISTS idx_decision_ledger_pos_event ON decision_ledger(position_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_decision ON decision_factor_snapshot(decision_id);
+CREATE INDEX IF NOT EXISTS idx_order_lifecycle_trade ON order_lifecycle_event(trade_id, event_ts);
+CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_event(position_id, event_ts);
+CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
+CREATE INDEX IF NOT EXISTS idx_factor_contribution_review_trade ON factor_contribution_review(trade_id);
+CREATE INDEX IF NOT EXISTS idx_experience_memory_trade ON experience_memory(trade_id);
+CREATE INDEX IF NOT EXISTS idx_experience_memory_regime ON experience_memory(regime_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_policy_suggestion_scope ON policy_suggestion(scope_type, scope_key, status);
+CREATE INDEX IF NOT EXISTS idx_learning_application_scope ON learning_application_log(scope_type, scope_key, cycle_ts);
 
 -- cTrader 原始成交记录 (归因锚点)
 CREATE TABLE IF NOT EXISTS ctrader_deals (

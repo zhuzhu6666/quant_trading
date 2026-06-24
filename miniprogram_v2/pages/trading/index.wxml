@@ -1,0 +1,113 @@
+<view class="app-shell">
+  <view class="page-stack">
+    <view class="hero">
+      <view class="row-between">
+        <view>
+          <view class="hero-kicker">Trading</view>
+          <view class="hero-title">实时交易</view>
+          <view class="hero-subtitle">此刻系统在怎么想、怎么做、有没有被风险闸门拦住。</view>
+        </view>
+        <status-pill label="{{signalLabel}}" tone="{{signalTone}}" />
+      </view>
+      <view class="hero-metrics">
+        <view class="hero-metric">
+          <view class="hero-metric-label">价格</view>
+          <view class="hero-metric-value">{{currentPrice}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">方向</view>
+          <view class="hero-metric-value">{{strategy.positionDir || 'FLAT'}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">回撤</view>
+          <view class="hero-metric-value">{{daily.drawdown}}</view>
+        </view>
+      </view>
+    </view>
+
+    <view class="grid-2-1">
+    <section-card title="即时摘要" subtitle="持仓与风险">
+      <view class="status-banner status-banner-{{gateTone}}">
+        <view class="small muted">执行姿态</view>
+        <view class="row-between">
+          <view class="value-md">{{gateLabel}}</view>
+          <status-pill label="{{strategy.pipelineRunning ? 'pipeline on' : 'pipeline off'}}" tone="{{strategy.pipelineRunning ? 'positive' : 'warning'}}" />
+        </view>
+        <view class="section-note">{{strategy.gateReason || '当前没有额外拦截原因，策略将按规则继续推进。'}}</view>
+      </view>
+      <view class="grid-2">
+        <view class="split-card stack-12">
+          <view class="small muted">当前价格</view>
+          <view class="value-md">{{currentPrice}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">当前方向</view>
+          <view class="value-md">{{strategy.positionDir || 'FLAT'}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">当日 PnL</view>
+          <view class="value-md">{{daily.pnl}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">当日回撤</view>
+          <view class="value-md">{{daily.drawdown}}</view>
+        </view>
+      </view>
+      <view class="btn-row" style="margin-top: 18rpx;">
+        <button class="btn-primary" bindtap="onStart">启动</button>
+        <button class="btn-secondary" bindtap="onStop">停止</button>
+        <button class="btn-danger" bindtap="onEmergencyClose">紧急平仓</button>
+      </view>
+    </section-card>
+
+    <section-card title="风控状态" subtitle="看系统有没有在踩刹车">
+      <view class="soft-panel stack-12">
+        <view class="row-between">
+          <view class="small">熔断</view>
+          <status-pill label="{{strategy.circuitBreaker ? '已触发' : '正常'}}" tone="{{strategy.circuitBreaker ? 'negative' : 'positive'}}" />
+        </view>
+        <view class="row-between">
+          <view class="small">执行流水线</view>
+          <status-pill label="{{strategy.pipelineRunning ? '运行中' : '已停止'}}" tone="{{strategy.pipelineRunning ? 'positive' : 'warning'}}" />
+        </view>
+        <view class="row-between">
+          <view class="small">连续亏损</view>
+          <view class="small">{{risk.consecutive_loss || 0}}</view>
+        </view>
+        <view class="row-between">
+          <view class="small">日内交易数</view>
+          <view class="small">{{daily.trades || 0}}</view>
+        </view>
+        <view class="small muted">最近闸门原因：{{strategy.gateReason || '无'}}</view>
+      </view>
+    </section-card>
+    </view>
+
+    <section-card title="当前持仓" subtitle="仓位级别视图">
+      <view wx:if="{{positions.length}}">
+        <view wx:for="{{positions}}" wx:key="position_id" class="list-item">
+          <view class="row-between">
+            <view class="list-title">{{item.symbol || 'XAUUSD+'}}</view>
+            <view class="{{item.netUnrealizedPnL >= 0 ? 'accent-pos' : 'accent-neg'}} value-md">{{item.netUnrealizedPnL || item.pnl || 0}}</view>
+          </view>
+          <view class="row-wrap" style="margin-top: 10rpx;">
+            <view class="tag">{{item.type || '--'}}</view>
+            <view class="tag">开仓 {{item.open_price || item.price_open || '--'}}</view>
+            <view class="tag">量 {{item.volume || item.size || '--'}}</view>
+          </view>
+          <view class="caption-grid" style="margin-top: 12rpx;">
+            <view class="caption-card">
+              <view class="caption-label">止损</view>
+              <view class="caption-value">{{item.sl || item.stop_loss || '--'}}</view>
+            </view>
+            <view class="caption-card">
+              <view class="caption-label">止盈</view>
+              <view class="caption-value">{{item.tp || item.take_profit || '--'}}</view>
+            </view>
+          </view>
+        </view>
+      </view>
+      <view wx:else class="empty">当前没有持仓</view>
+    </section-card>
+  </view>
+</view>

@@ -1,0 +1,121 @@
+<view class="app-shell">
+  <view class="page-stack">
+    <view class="hero">
+      <view class="hero-kicker">Factors</view>
+      <view class="hero-title">因子治理台</view>
+      <view class="hero-subtitle">看权重、贡献、胜率和因子是否正在被学习层推动。</view>
+      <view class="hero-metrics" wx:if="{{summary}}">
+        <view class="hero-metric">
+          <view class="hero-metric-label">已归因</view>
+          <view class="hero-metric-value">{{summary.n_factors_attributed || 0}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">总交易</view>
+          <view class="hero-metric-value">{{summary.total_trades || 0}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">净收益</view>
+          <view class="hero-metric-value">{{summary.total_net_pnl || 0}}</view>
+        </view>
+      </view>
+    </view>
+
+    <section-card title="因子摘要" subtitle="当前归因体系的整体情况">
+      <view wx:if="{{summary}}" class="grid-3">
+        <view class="split-card stack-12">
+          <view class="small muted">已归因因子</view>
+          <view class="value-md">{{summary.n_factors_attributed || 0}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">总交易</view>
+          <view class="value-md">{{summary.total_trades || 0}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">真实净收益</view>
+          <view class="value-md">{{summary.total_net_pnl || 0}}</view>
+        </view>
+      </view>
+      <view wx:else class="empty">还没有因子统计数据</view>
+    </section-card>
+
+    <section-card title="核心因子" subtitle="权重、贡献、胜率与交易样本">
+      <view class="segmented">
+        <view class="segmented-item {{sortMode === 'weight' ? 'segmented-item-active' : ''}}" data-mode="weight" bindtap="changeSortMode">权重</view>
+        <view class="segmented-item {{sortMode === 'avg_mc' ? 'segmented-item-active' : ''}}" data-mode="avg_mc" bindtap="changeSortMode">贡献</view>
+        <view class="segmented-item {{sortMode === 'win_rate' ? 'segmented-item-active' : ''}}" data-mode="win_rate" bindtap="changeSortMode">胜率</view>
+        <view class="segmented-item {{sortMode === 'trades' ? 'segmented-item-active' : ''}}" data-mode="trades" bindtap="changeSortMode">样本</view>
+      </view>
+      <view wx:if="{{rows.length}}">
+        <view wx:for="{{rows}}" wx:key="factor" class="list-item tap-card" data-factor="{{item.factor}}" bindtap="openFactorDetail">
+          <view class="row-between">
+            <view class="row">
+              <view class="rank-badge">#{{item.rank}}</view>
+              <view class="list-title" style="margin-left: 12rpx;">{{item.factor}}</view>
+            </view>
+            <view class="tag">w {{item.weight}}</view>
+          </view>
+          <view class="row-wrap" style="margin-top: 10rpx;">
+            <view class="tag">avg_mc {{item.avg_mc}}</view>
+            <view class="tag">win {{item.win_rate}}</view>
+            <view class="tag">trades {{item.trades}}</view>
+          </view>
+        </view>
+      </view>
+      <view wx:else class="empty">还没有权重与因子映射数据</view>
+    </section-card>
+
+    <section-card wx:if="{{selectedRow}}" title="单因子详情" subtitle="当前排序焦点因子的治理视图">
+      <view class="detail-card stack-16">
+        <view class="row-between">
+          <view class="row">
+            <view class="rank-badge">#{{selectedRow.rank}}</view>
+            <view class="list-title" style="margin-left: 12rpx;">{{selectedRow.factor}}</view>
+          </view>
+          <view class="tag">w {{selectedRow.weight}}</view>
+        </view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">avg_mc</view>
+            <view class="kv-value">{{selectedRow.avg_mc}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">win_rate</view>
+            <view class="kv-value">{{selectedRow.win_rate}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">trades</view>
+            <view class="kv-value">{{selectedRow.trades}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">total_mc</view>
+            <view class="kv-value">{{selectedRow.total_mc}}</view>
+          </view>
+        </view>
+        <view class="soft-panel section-note">Sharpe {{selectedRow.sharpe || 0}}，这能帮助我们区分“偶然赚到”与“质量更高的贡献”。</view>
+      </view>
+    </section-card>
+
+    <section-card title="Top Contributors" subtitle="当前归因里最有影响力的因子">
+      <view wx:if="{{topContributors.length}}">
+        <view wx:for="{{topContributors}}" wx:key="name" class="list-item">
+          <view class="row-between">
+            <view class="row">
+              <view class="rank-badge">#{{index + 1}}</view>
+              <view class="list-title" style="margin-left: 12rpx;">{{item.name}}</view>
+            </view>
+            <view class="tag">{{item.avg_mc}}</view>
+          </view>
+          <view class="row-wrap" style="margin-top: 10rpx;">
+            <view class="tag">win {{item.win_rate}}</view>
+          </view>
+        </view>
+      </view>
+      <view wx:else class="empty">还没有 top contributor 数据</view>
+    </section-card>
+
+    <section-card title="健康报告" subtitle="因子健康引擎的最近输出">
+      <view wx:if="{{health}}" class="soft-panel section-note">{{health.summary || health.status || '已获取健康报告'}}</view>
+      <view wx:else class="empty">还没有健康报告</view>
+    </section-card>
+  </view>
+</view>

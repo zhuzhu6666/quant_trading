@@ -1,0 +1,242 @@
+<view class="app-shell">
+  <view class="page-stack">
+    <view class="hero">
+      <view class="row-between">
+        <view>
+          <view class="hero-kicker">Learning</view>
+          <view class="hero-title">规则学习闭环</view>
+      <view class="hero-subtitle">这里看系统从平仓里学到了什么，又准备如何影响下一轮权重。</view>
+        </view>
+        <view class="hero-actions">
+          <status-pill label="{{updatedAt}}" tone="neutral" />
+          <button class="btn-secondary" size="mini" bindtap="onRunGovernance">运行治理</button>
+        </view>
+      </view>
+      <view class="hero-metrics">
+        <view class="hero-metric">
+          <view class="hero-metric-label">待审</view>
+          <view class="hero-metric-value">{{summary.suggestions.proposed || 0}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">已批</view>
+          <view class="hero-metric-value">{{summary.suggestions.approved || 0}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">已应用</view>
+          <view class="hero-metric-value">{{summary.applications || 0}}</view>
+        </view>
+      </view>
+    </view>
+
+    <section-card title="学习摘要" subtitle="建议、应用、复盘的总体情况">
+      <view class="progress-strip" style="margin-bottom: 18rpx;">
+        <view wx:for="{{closureSteps}}" wx:key="id" class="progress-step progress-step-{{item.tone}}">
+          <view class="progress-index">{{item.index}}</view>
+          <view class="progress-title">{{item.title}}</view>
+          <view class="progress-note">{{item.note}}</view>
+        </view>
+      </view>
+      <view class="grid-3">
+        <view class="split-card stack-12">
+          <view class="small muted">待审</view>
+          <view class="value-md">{{summary.suggestions.proposed || 0}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">已批</view>
+          <view class="value-md">{{summary.suggestions.approved || 0}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">已应用</view>
+          <view class="value-md">{{summary.applications || 0}}</view>
+        </view>
+      </view>
+      <view wx:if="{{latestApplication}}" class="status-banner status-banner-positive" style="margin-top: 18rpx;">
+        <view class="small muted">最近一次生效</view>
+        <view class="row-between">
+          <view class="value-md">{{latestApplication.scope_key}}</view>
+          <view class="tag">{{latestApplication.action}}</view>
+        </view>
+        <view class="section-note">{{latestApplication.old_weight}} -> {{latestApplication.new_weight}}，bias {{latestApplication.bias_multiplier}}</view>
+      </view>
+    </section-card>
+
+    <section-card title="策略建议" subtitle="按治理状态分段查看">
+      <view class="segmented">
+        <view class="segmented-item {{suggestionTab === 'proposed' ? 'segmented-item-active' : ''}}" data-tab="proposed" bindtap="switchSuggestionTab">待审 {{proposedSuggestions.length}}</view>
+        <view class="segmented-item {{suggestionTab === 'approved' ? 'segmented-item-active' : ''}}" data-tab="approved" bindtap="switchSuggestionTab">已批 {{approvedSuggestions.length}}</view>
+        <view class="segmented-item {{suggestionTab === 'rolled_back' ? 'segmented-item-active' : ''}}" data-tab="rolled_back" bindtap="switchSuggestionTab">回滚 {{rolledBackSuggestions.length}}</view>
+      </view>
+
+      <view wx:if="{{visibleSuggestions.length}}" style="margin-top: 18rpx;">
+        <view class="divider-title">
+          <view class="band-title" style="margin-bottom: 0;">
+            {{suggestionTab === 'approved' ? '已批准建议' : suggestionTab === 'rolled_back' ? '已回滚建议' : '待审核建议'}}
+          </view>
+        </view>
+        <view wx:for="{{visibleSuggestions}}" wx:key="suggestion_id" class="list-item tap-card" data-id="{{item.suggestion_id}}" bindtap="openSuggestionDetail">
+          <view class="row-between">
+            <view class="list-title">{{item.scope_key}}</view>
+            <status-pill label="{{item.status}}" tone="{{item.tone}}" />
+          </view>
+          <view class="small muted">{{item.action}} · conf {{item.confidence}} · {{item.createdText}}</view>
+          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.reason}}</view>
+          <view wx:if="{{item.status === 'proposed'}}" class="btn-row" style="margin-top: 12rpx;">
+            <button class="btn-primary" size="mini" data-id="{{item.suggestion_id}}" bindtap="approveSuggestion">批准</button>
+            <button class="btn-secondary" size="mini" data-id="{{item.suggestion_id}}" bindtap="rejectSuggestion">拒绝</button>
+          </view>
+        </view>
+      </view>
+
+      <view wx:if="{{!suggestions.length}}" class="empty">还没有策略建议</view>
+    </section-card>
+
+    <section-card wx:if="{{selectedSuggestion}}" title="建议详情" subtitle="证据、说明与治理状态">
+      <view class="detail-card stack-16">
+        <view class="row-between">
+          <view class="list-title">{{selectedSuggestion.scope_key}}</view>
+          <status-pill label="{{selectedSuggestion.status}}" tone="{{selectedSuggestion.tone}}" />
+        </view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">动作</view>
+            <view class="kv-value">{{selectedSuggestion.action}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">置信度</view>
+            <view class="kv-value">{{selectedSuggestion.confidence}}</view>
+          </view>
+        </view>
+        <view class="soft-panel section-note">{{selectedSuggestion.reason}}</view>
+        <view wx:if="{{selectedSuggestion.evidence}}" class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">样本数</view>
+            <view class="kv-value">{{selectedSuggestion.evidence.sample_count || '--'}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">平均 reward</view>
+            <view class="kv-value">{{selectedSuggestion.evidence.avg_reward || '--'}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">坏损次数</view>
+            <view class="kv-value">{{selectedSuggestion.evidence.bad_loss_count || '--'}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">经验来源</view>
+            <view class="kv-value">{{selectedSuggestion.evidence.experience_id || '--'}}</view>
+          </view>
+        </view>
+        <view wx:if="{{selectedSuggestion.evidence && selectedSuggestion.evidence.factor_breakdown}}" class="soft-panel section-note">
+          因子拆解已生成，可作为后续模型接口的结构化输入。
+        </view>
+        <button class="btn-secondary" bindtap="closeSuggestionDetail">收起详情</button>
+      </view>
+    </section-card>
+
+    <section-card title="最近复盘" subtitle="平仓后系统对结果的解释">
+      <view wx:if="{{reviews.length}}">
+        <view class="timeline">
+        <view wx:for="{{reviews}}" wx:key="review_id" class="timeline-item tap-card" data-id="{{item.review_id}}" bindtap="openReviewDetail">
+          <view class="row-between">
+            <view class="list-title">{{item.position_id}}</view>
+            <status-pill label="{{item.outcome_label}}" tone="{{item.tone}}" />
+          </view>
+          <view class="small muted">{{item.createdText}} · pnl {{item.pnl}}</view>
+          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.summary_text}}</view>
+        </view>
+        </view>
+      </view>
+      <view wx:else class="empty">还没有复盘记录</view>
+    </section-card>
+
+    <section-card wx:if="{{selectedReview}}" title="复盘详情" subtitle="这笔交易为什么赚，或者为什么亏">
+      <view class="detail-card stack-16">
+        <view class="row-between">
+          <view class="list-title">{{selectedReview.position_id}}</view>
+          <status-pill label="{{selectedReview.outcome_label}}" tone="{{selectedReview.tone}}" />
+        </view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">PnL</view>
+            <view class="kv-value">{{selectedReview.pnl}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">创建时间</view>
+            <view class="kv-value">{{selectedReview.createdText}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">MAE</view>
+            <view class="kv-value">{{selectedReview.mae}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">MFE</view>
+            <view class="kv-value">{{selectedReview.mfe}}</view>
+          </view>
+        </view>
+        <view class="soft-panel section-note">{{selectedReview.summary_text}}</view>
+        <view wx:if="{{selectedReview.failure_tags && selectedReview.failure_tags.length}}" class="row-wrap">
+          <view wx:for="{{selectedReview.failure_tags}}" wx:key="*this" class="tag">{{item}}</view>
+        </view>
+        <view wx:if="{{selectedReview.review}}" class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">主因子</view>
+            <view class="kv-value">{{selectedReview.review.top_factor || selectedReview.review.top_weight_factor || '--'}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">最差因子</view>
+            <view class="kv-value">{{selectedReview.review.worst_factor || '--'}}</view>
+          </view>
+        </view>
+        <view wx:if="{{selectedReview.review && selectedReview.review.decision_trace}}" class="soft-panel section-note">
+          已保留决策链路，可继续扩展成逐步 trace 面板。
+        </view>
+        <button class="btn-secondary" bindtap="closeReviewDetail">收起详情</button>
+      </view>
+    </section-card>
+
+    <section-card title="应用记录" subtitle="哪些建议真的影响了权重">
+      <view wx:if="{{applications.length}}">
+        <view class="timeline">
+        <view wx:for="{{applications}}" wx:key="application_id" class="timeline-item tap-card" data-id="{{item.application_id}}" bindtap="openApplicationDetail">
+          <view class="row-between">
+            <view class="list-title">{{item.scope_key}}</view>
+            <view class="tag">{{item.bias_multiplier}}</view>
+          </view>
+          <view class="small muted">{{item.action}} · {{item.old_weight}} -> {{item.new_weight}}</view>
+        </view>
+        </view>
+      </view>
+      <view wx:else class="empty">还没有学习应用记录</view>
+    </section-card>
+
+    <section-card wx:if="{{selectedApplication}}" title="应用详情" subtitle="建议是怎么真正影响权重的">
+      <view class="detail-card stack-16">
+        <view class="row-between">
+          <view class="list-title">{{selectedApplication.scope_key}}</view>
+          <view class="tag">{{selectedApplication.action}}</view>
+        </view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">bias</view>
+            <view class="kv-value">{{selectedApplication.bias_multiplier}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">应用时间</view>
+            <view class="kv-value">{{selectedApplication.createdText}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">旧权重</view>
+            <view class="kv-value">{{selectedApplication.old_weight}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">新权重</view>
+            <view class="kv-value">{{selectedApplication.new_weight}}</view>
+          </view>
+        </view>
+        <view wx:if="{{selectedApplication.suggestion_ids && selectedApplication.suggestion_ids.length}}" class="row-wrap">
+          <view wx:for="{{selectedApplication.suggestion_ids}}" wx:key="*this" class="tag">{{item}}</view>
+        </view>
+        <button class="btn-secondary" bindtap="closeApplicationDetail">收起详情</button>
+      </view>
+    </section-card>
+  </view>
+</view>

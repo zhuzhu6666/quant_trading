@@ -1,0 +1,91 @@
+<view class="app-shell">
+  <view class="page-stack">
+    <view class="hero">
+      <view class="row-between">
+        <view>
+          <view class="hero-kicker">Operations</view>
+          <view class="hero-title">系统运维</view>
+          <view class="hero-subtitle">调度器、演化事件、接口健康和数据库状态都在这里看。</view>
+        </view>
+        <button class="btn-secondary" size="mini" bindtap="onRefresh">刷新</button>
+      </view>
+      <view class="hero-metrics">
+        <view class="hero-metric">
+          <view class="hero-metric-label">API</view>
+          <view class="hero-metric-value">{{apiHealth.status || 'unknown'}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">演化</view>
+          <view class="hero-metric-value">{{evolution ? 'active' : 'none'}}</view>
+        </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">Jobs</view>
+          <view class="hero-metric-value">{{scheduler && scheduler.jobs ? scheduler.jobs.length : 0}}</view>
+        </view>
+      </view>
+    </view>
+
+    <section-card title="接口健康" subtitle="后端是否还在稳定响应">
+      <view class="status-banner status-banner-{{apiHealth.tone || 'neutral'}}">
+        <view class="row-between">
+          <view class="small">API</view>
+          <status-pill label="{{apiHealth.status || 'unknown'}}" tone="{{apiHealth.tone || 'neutral'}}" />
+        </view>
+        <view class="section-note">{{apiHealth.message || apiHealth.detail || '无额外信息'}}</view>
+      </view>
+    </section-card>
+
+    <section-card title="最新演化周期" subtitle="最近一次进化编排输出">
+      <view wx:if="{{evolution}}" class="stack-12">
+        <view class="row-between">
+          <view class="value-md">{{evolution.event_type || 'cycle_complete'}}</view>
+          <status-pill label="{{evolution.tone === 'negative' ? '异常' : '正常'}}" tone="{{evolution.tone}}" />
+        </view>
+        <view class="small muted">{{evolution.tsText}}</view>
+        <view class="soft-panel section-note">这里后续可以继续挂出本轮建议数量、审批数量、应用数量，直接形成运维级闭环快照。</view>
+      </view>
+      <view wx:else class="empty">还没有演化事件</view>
+    </section-card>
+
+    <section-card title="调度器" subtitle="查看关键 job 是否在运行">
+      <view wx:if="{{schedulerSummary}}" class="grid-3" style="margin-bottom: 18rpx;">
+        <view class="split-card stack-12">
+          <view class="small muted">总任务</view>
+          <view class="value-md">{{schedulerSummary.total}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">运行中</view>
+          <view class="value-md">{{schedulerSummary.running}}</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">累计错误</view>
+          <view class="value-md">{{schedulerSummary.errors}}</view>
+        </view>
+      </view>
+      <view wx:if="{{scheduler && scheduler.jobs && scheduler.jobs.length}}">
+        <view wx:for="{{scheduler.jobs}}" wx:key="name" class="list-item">
+          <view class="row-between">
+            <view class="list-title">{{item.name}}</view>
+            <status-pill label="{{item.running ? 'running' : 'idle'}}" tone="{{item.running ? 'positive' : 'warning'}}" />
+          </view>
+          <view class="row-wrap" style="margin-top: 10rpx;">
+            <view class="tag">{{item.cron_expr}}</view>
+            <view class="tag">run {{item.run_count}}</view>
+            <view class="tag">err {{item.error_count}}</view>
+          </view>
+        </view>
+      </view>
+      <view wx:else class="empty">调度器暂时没有 job 数据</view>
+    </section-card>
+
+    <section-card title="数据库健康" subtitle="state / experiments / duckdb 总览">
+      <view wx:if="{{dbCards.length}}" class="caption-grid">
+        <view wx:for="{{dbCards}}" wx:key="key" class="caption-card">
+          <view class="caption-label">{{item.key}}</view>
+          <view class="caption-value">{{item.value}}</view>
+        </view>
+      </view>
+      <view wx:else class="soft-panel section-note">暂无数据</view>
+    </section-card>
+  </view>
+</view>

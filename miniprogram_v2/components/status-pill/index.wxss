@@ -1,0 +1,30 @@
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44rpx;
+  padding: 0 16rpx;
+  border-radius: 999rpx;
+  font-size: 22rpx;
+  font-weight: 600;
+}
+
+.pill-neutral {
+  background: #eef2f7;
+  color: #4b5563;
+}
+
+.pill-positive {
+  background: #e9f8ef;
+  color: #18a957;
+}
+
+.pill-negative {
+  background: #ffe9e7;
+  color: #ff3b30;
+}
+
+.pill-warning {
+  background: #fff4de;
+  color: #ff9f0a;
+}
