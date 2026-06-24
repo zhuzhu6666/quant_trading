@@ -308,6 +308,11 @@ def _live_state_update(**kwargs) -> None:
 
 
 def _reset_session_state_for_new_day() -> None:
+    # 从当前 account 中读取实际余额作为熔断器基准
+    acct = _live_state_get("account", {}) or {}
+    start_balance = float(acct.get("balance", 0) or 0)
+    if start_balance <= 0:
+        start_balance = 0.0  # 没有 account 信息时置 0, 熔断器 fallback 不再硬编码 1000
     _live_state_update(
         circuit_breaker=False,
         circuit_reason="",
@@ -317,12 +322,15 @@ def _reset_session_state_for_new_day() -> None:
         session_losing=0,
         session_consecutive_loss=0,
         session_max_drawdown_pct=0.0,
+        session_start_balance=start_balance,
     )
 
 
 def _evaluate_daily_drawdown() -> dict:
     session_pnl = float(_live_state_get("session_pnl", 0.0) or 0.0)
-    start_balance = float(_live_state_get("session_start_balance", 0.0) or 1000.0)
+    start_balance = float(_live_state_get("session_start_balance", 0.0) or 0.0)
+    if start_balance <= 0:
+        return {"tripped": False, "dd_pct": 0.0, "reason": "", "session_pnl": session_pnl, "start_balance": 0.0}
     dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0.0
     prev_dd = float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0)
     updates = {"session_max_drawdown_pct": max(prev_dd, dd_pct)}
@@ -2488,10 +2496,12 @@ def _process_tick_factor_pipeline(
                                           close_ts=time.time(),
                                           real_pnl=real_pnl)
             # 平仓事件真实发生, 无论是否有因子归因都要计数
-            if mc:
+            # ★ 优先使用 cTrader 真实 PnL (修复 Bug D: 边际贡献和不可用于熔断器)
+            if real_pnl and real_pnl.get("net") is not None:
+                total_pnl = real_pnl["net"]
+            elif mc:
                 total_pnl = sum(mc.values())
             else:
-                # 恢复仓位无因子信号 → 从持仓方向估算 PnL
                 total_pnl = 0.0
                 try:
                     open_price = _pos_open_prices.get(cpid, current_price)

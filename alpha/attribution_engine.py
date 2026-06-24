@@ -70,11 +70,6 @@ class FactorAttributionStats:
     recent_mcs: deque = field(default_factory=lambda: deque(maxlen=250))
     recent_pnls: deque = field(default_factory=lambda: deque(maxlen=250))
     recent_pnl_directions: deque = field(default_factory=lambda: deque(maxlen=50))
-    # ── 真实 PnL (来自 cTrader get_deals) ──
-    total_gross: float = 0.0
-    total_swap: float = 0.0
-    total_commission: float = 0.0
-    total_net_pnl: float = 0.0
 
     def record(self, mc: float, is_win: bool, tags: dict[str, float],
                real_pnl: dict | None = None):
@@ -94,12 +89,6 @@ class FactorAttributionStats:
         if is_win:
             self.wins += 1
         self.recent_pnl_directions.append(1 if is_win else -1)
-        # ── 真实 PnL ──
-        if real_pnl:
-            self.total_gross += real_pnl.get("gross", 0.0) or 0.0
-            self.total_swap += real_pnl.get("swap", 0.0) or 0.0
-            self.total_commission += real_pnl.get("commission", 0.0) or 0.0
-            self.total_net_pnl += real_pnl.get("net", 0.0) or 0.0
 
     @property
     def win_rate(self) -> float:
@@ -306,6 +295,10 @@ class AttributionEngine:
         self._orthogonal_attribution = None
         # 逐笔 trade PnL 历史 (用于 Gram-Schmidt Y 向量)
         self._recent_trade_pnls: deque = deque(maxlen=250)
+        # 系统级真实 PnL 累计 (非因子级, 避免重复累加)
+        self._system_pnl: dict[str, float] = {
+            "gross": 0.0, "swap": 0.0, "commission": 0.0, "net": 0.0, "trades": 0,
+        }
         # 从快照恢复状态
         self._load_stats_snapshot()
 
@@ -392,6 +385,14 @@ class AttributionEngine:
 
         # ── 记录 trade PnL (用于后续 Gram-Schmidt Y 向量) ──
         self._recent_trade_pnls.append(trade_pnl)
+
+        # ── 系统级真实 PnL 累计 (仅统计一次, 非因子级) ──
+        if real_pnl:
+            self._system_pnl["gross"] += real_pnl.get("gross", 0.0) or 0.0
+            self._system_pnl["swap"] += real_pnl.get("swap", 0.0) or 0.0
+            self._system_pnl["commission"] += real_pnl.get("commission", 0.0) or 0.0
+            self._system_pnl["net"] += real_pnl.get("net", 0.0) or 0.0
+            self._system_pnl["trades"] += 1
 
         # ── 持久化快照 ──
         self._save_stats_snapshot()
@@ -605,18 +606,11 @@ class AttributionEngine:
                     "total_mc": round(s.total_mc, 6),
                     "avg_mc": round(s.avg_mc, 6),
                     "recent_mcs": [round(x, 6) for x in list(s.recent_mcs)],
-                    "recent_pnl_directions": list(s.recent_pnl_directions),
-                    "composite_sharpe_score": round(s.composite_sharpe_score, 4),
-                    "ir_short": round(s.ir_short, 4) if not math.isnan(s.ir_short) else None,
-                    "ir_mid": round(s.ir_mid, 4) if not math.isnan(s.ir_mid) else None,
-                    "ir_long": round(s.ir_long, 4) if not math.isnan(s.ir_long) else None,
-                    # ── 真实 PnL ──
-                    "total_gross": round(s.total_gross, 6),
-                    "total_swap": round(s.total_swap, 6),
-                    "total_commission": round(s.total_commission, 6),
-                    "total_net_pnl": round(s.total_net_pnl, 6),
-                    "avg_gross": round(s.total_gross / s.n_voted, 6) if s.n_voted > 0 else 0,
-                    "avg_net": round(s.total_net_pnl / s.n_voted, 6) if s.n_voted > 0 else 0,
+                    'recent_pnl_directions': list(s.recent_pnl_directions),
+                    'composite_sharpe_score': round(s.composite_sharpe_score, 4),
+                    'ir_short': round(s.ir_short, 4) if not math.isnan(s.ir_short) else None,
+                    'ir_mid': round(s.ir_mid, 4) if not math.isnan(s.ir_mid) else None,
+                    'ir_long': round(s.ir_long, 4) if not math.isnan(s.ir_long) else None,
                 }
             # ★ 写入 state.db (唯一持久化路径)
             if not _os.environ.get("PYTEST_CURRENT_TEST"):
@@ -631,6 +625,18 @@ class AttributionEngine:
                                 "INSERT OR REPLACE INTO attribution_snapshot (factor, data_json, updated_at) VALUES (?, ?, ?)",
                                 (name, json.dumps(s, ensure_ascii=False, default=str), now)
                             )
+                        # ── 系统级真实 PnL 汇总 (非因子级, 避免重复求和) ──
+                        system_data = {
+                            "n_trades": self._system_pnl["trades"],
+                            "total_gross": round(self._system_pnl["gross"], 6),
+                            "total_swap": round(self._system_pnl["swap"], 6),
+                            "total_commission": round(self._system_pnl["commission"], 6),
+                            "total_net_pnl": round(self._system_pnl["net"], 6),
+                        }
+                        conn.execute(
+                            "INSERT OR REPLACE INTO attribution_snapshot (factor, data_json, updated_at) VALUES (?, ?, ?)",
+                            ("__SYSTEM__", json.dumps(system_data, ensure_ascii=False, default=str), now)
+                        )
                         conn.commit()
                     finally:
                         conn.close()
@@ -738,11 +744,6 @@ class AttributionEngine:
             stats.n_voted = d.get("n_voted", 0)
             stats.wins = d.get("wins", 0)
             stats.total_mc = d.get("total_mc", 0.0)
-            # ── 恢复真实 PnL ──
-            stats.total_gross = d.get("total_gross", 0.0)
-            stats.total_swap = d.get("total_swap", 0.0)
-            stats.total_commission = d.get("total_commission", 0.0)
-            stats.total_net_pnl = d.get("total_net_pnl", 0.0)
             # 恢复 deque
             mcs = d.get("recent_mcs", [])
             if mcs:

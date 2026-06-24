@@ -132,7 +132,11 @@ def get_attribution_stats(_user: RequireUser) -> dict:
 
     # ── Build per-factor summary (trim recent_mcs to avoid bloat) ──
     per_factor = {}
+    system_stats: dict[str, Any] = {}
     for name, s in raw.items():
+        if name == "__SYSTEM__":
+            system_stats = s
+            continue
         per_factor[name] = {
             "n_trades": s.get("n_trades", 0),
             "n_voted": s.get("n_voted", 0),
@@ -147,25 +151,18 @@ def get_attribution_stats(_user: RequireUser) -> dict:
             "ir_mid": s.get("ir_mid"),
             "ir_long": s.get("ir_long"),
             "recent_mcs_sample": s.get("recent_mcs", [])[-10:],  # last 10 only
-            # ── 真实 PnL (来自 cTrader deals) ──
-            "total_gross": s.get("total_gross", 0.0),
-            "total_swap": s.get("total_swap", 0.0),
-            "total_commission": s.get("total_commission", 0.0),
-            "total_net_pnl": s.get("total_net_pnl", 0.0),
-            "avg_gross": s.get("avg_gross", 0.0),
-            "avg_net": s.get("avg_net", 0.0),
         }
 
     # ── Summary stats ──
     n_factors = len(per_factor)
-    total_trades = sum(s["n_trades"] for s in per_factor.values())
+    total_trades = system_stats.get("n_trades", 0)
     total_wins = sum(s["wins"] for s in per_factor.values())
     total_voted = sum(s["n_voted"] for s in per_factor.values())
-    # ── 真实 PnL 汇总 ──
-    total_gross = sum(s.get("total_gross", 0.0) or 0.0 for s in per_factor.values())
-    total_swap = sum(s.get("total_swap", 0.0) or 0.0 for s in per_factor.values())
-    total_comm = sum(s.get("total_commission", 0.0) or 0.0 for s in per_factor.values())
-    total_net = sum(s.get("total_net_pnl", 0.0) or 0.0 for s in per_factor.values())
+    # ── 真实 PnL 汇总 (从 __SYSTEM__ 行读取, 非跨因子求和) ──
+    total_gross = system_stats.get("total_gross", 0.0) or 0.0
+    total_swap = system_stats.get("total_swap", 0.0) or 0.0
+    total_comm = system_stats.get("total_commission", 0.0) or 0.0
+    total_net = system_stats.get("total_net_pnl", 0.0) or 0.0
     avg_sharpe_values = [
         s["composite_sharpe_score"] for s in per_factor.values()
         if s.get("composite_sharpe_score") is not None
