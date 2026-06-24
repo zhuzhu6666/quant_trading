@@ -13,6 +13,10 @@ Page({
     daily: {},
     risk: {},
     currentPrice: '--',
+    loopRunning: false,
+    startBusy: false,
+    stopBusy: false,
+    emergencyBusy: false,
   },
 
   onLoad() {
@@ -33,6 +37,7 @@ Page({
     const state = liveStore.getState();
     const trading = state.trading || {};
     const strategy = state.strategyStatus || {};
+    const loopStatus = state.loopStatus || {};
     const recentSignal = strategy.recent_signal || strategy.signal || {};
     const direction = recentSignal.direction || strategy.direction || trading.position.dir || 'FLAT';
     const positionDir = trading.position && trading.position.dir;
@@ -67,6 +72,7 @@ Page({
         circuitBreaker,
       },
       positions: trading.positions_list || [],
+      loopRunning: !!loopStatus.running,
       daily: {
         pnl: formatMoney(trading.daily && trading.daily.pnl),
         drawdown: formatPct(trading.daily && trading.daily.drawdown_pct),
@@ -78,17 +84,35 @@ Page({
   },
 
   async onStart() {
-    await startTradingLoop();
-    await refreshLiveSnapshot();
+    if (this.data.loopRunning || this.data.startBusy || this.data.stopBusy) return;
+    this.setData({ startBusy: true });
+    try {
+      await startTradingLoop();
+      await refreshLiveSnapshot();
+    } finally {
+      this.setData({ startBusy: false });
+    }
   },
 
   async onStop() {
-    await stopTradingLoop();
-    await refreshLiveSnapshot();
+    if (!this.data.loopRunning || this.data.stopBusy || this.data.startBusy) return;
+    this.setData({ stopBusy: true });
+    try {
+      await stopTradingLoop();
+      await refreshLiveSnapshot();
+    } finally {
+      this.setData({ stopBusy: false });
+    }
   },
 
   async onEmergencyClose() {
-    await emergencyCloseAll(null);
-    await refreshLiveSnapshot();
+    if (!this.data.positions.length || this.data.emergencyBusy) return;
+    this.setData({ emergencyBusy: true });
+    try {
+      await emergencyCloseAll(null);
+      await refreshLiveSnapshot();
+    } finally {
+      this.setData({ emergencyBusy: false });
+    }
   },
 });

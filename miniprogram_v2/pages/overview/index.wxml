@@ -44,10 +44,10 @@
             <view class="section-note">实时链路 {{wsLabel}}，最近同步 {{updatedAt}}</view>
           </view>
           <view class="btn-row">
-            <button class="btn-primary" bindtap="onStart">启动</button>
-            <button class="btn-secondary" bindtap="onStop">停止</button>
+            <button class="btn-primary {{loopRunning || startBusy || stopBusy ? 'btn-disabled' : ''}}" bindtap="onStart" loading="{{startBusy}}" disabled="{{loopRunning || startBusy || stopBusy}}">启动</button>
+            <button class="btn-stop {{!loopRunning || stopBusy || startBusy ? 'btn-disabled' : ''}}" bindtap="onStop" loading="{{stopBusy}}" disabled="{{!loopRunning || stopBusy || startBusy}}">停止</button>
           </view>
-          <button class="btn-secondary" bindtap="onGovern">运行治理</button>
+          <button class="btn-secondary btn-block {{governBusy ? 'btn-disabled' : ''}}" bindtap="onGovern" loading="{{governBusy}}" disabled="{{governBusy}}">运行治理</button>
         </view>
       </section-card>
 

@@ -107,13 +107,13 @@ page {
 
 .grid-1-2 {
   display: grid;
-  grid-template-columns: 1.15fr 0.85fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16rpx;
 }
 
 .grid-2-1 {
   display: grid;
-  grid-template-columns: 0.95fr 1.05fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16rpx;
 }
 
@@ -181,6 +181,11 @@ page {
   flex-wrap: wrap;
 }
 
+.btn-row button,
+.btn-row-compact button {
+  flex: 1 1 220rpx;
+}
+
 .segmented {
   display: flex;
   align-items: center;
@@ -188,16 +193,18 @@ page {
   padding: 8rpx;
   border-radius: 999rpx;
   background: #eef2f7;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .segmented-item {
-  min-width: 108rpx;
+  flex: 1 1 0;
+  min-width: 0;
   text-align: center;
-  padding: 10rpx 16rpx;
+  padding: 10rpx 8rpx;
   border-radius: 999rpx;
   font-size: 22rpx;
   color: #6b7280;
+  white-space: nowrap;
 }
 
 .segmented-item-active {
@@ -212,6 +219,7 @@ page {
 }
 
 .btn-primary,
+.btn-stop,
 .btn-secondary,
 .btn-danger {
   min-height: 80rpx;
@@ -222,7 +230,13 @@ page {
   justify-content: center;
   font-size: 26rpx;
   font-weight: 600;
+  line-height: 1;
   border: none;
+  transition: transform 120ms ease, opacity 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+}
+
+.btn-block {
+  width: 100%;
 }
 
 .btn-primary {
@@ -231,15 +245,76 @@ page {
   box-shadow: 0 8rpx 18rpx rgba(0, 122, 255, 0.22);
 }
 
+.btn-stop {
+  background: linear-gradient(180deg, #fff3e5 0%, #ffe8cc 100%);
+  color: #c46b00;
+  box-shadow: 0 8rpx 18rpx rgba(255, 159, 10, 0.14);
+}
+
 .btn-secondary {
-  background: #eef2f7;
-  color: #111827;
+  background: linear-gradient(180deg, #edf5ff 0%, #e4f0ff 100%);
+  color: #0f5fd7;
+  box-shadow: 0 8rpx 18rpx rgba(74, 144, 226, 0.12);
 }
 
 .btn-danger {
   background: #ff3b30;
   color: #ffffff;
   box-shadow: 0 8rpx 18rpx rgba(255, 59, 48, 0.18);
+}
+
+.btn-primary.button-hover,
+.btn-stop.button-hover,
+.btn-secondary.button-hover,
+.btn-danger.button-hover {
+  transform: scale(0.98) translateY(1rpx);
+  opacity: 0.92;
+}
+
+.btn-primary.button-hover {
+  background: #0069df;
+  box-shadow: 0 4rpx 12rpx rgba(0, 122, 255, 0.18);
+}
+
+.btn-secondary.button-hover {
+  background: linear-gradient(180deg, #dfeeff 0%, #d5e7ff 100%);
+  box-shadow: 0 4rpx 12rpx rgba(74, 144, 226, 0.1);
+}
+
+.btn-stop.button-hover {
+  background: linear-gradient(180deg, #ffeacc 0%, #ffddb0 100%);
+  box-shadow: 0 4rpx 12rpx rgba(255, 159, 10, 0.12);
+}
+
+.btn-danger.button-hover {
+  background: #f2352b;
+  box-shadow: 0 4rpx 12rpx rgba(255, 59, 48, 0.14);
+}
+
+.btn-disabled {
+  opacity: 1;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.btn-primary.btn-disabled {
+  background: #8fc2ff;
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.btn-stop.btn-disabled {
+  background: linear-gradient(180deg, #fff5e8 0%, #ffeedb 100%);
+  color: #d39a53;
+}
+
+.btn-secondary.btn-disabled {
+  background: linear-gradient(180deg, #eef3fa 0%, #e8eef7 100%);
+  color: #9aa7bb;
+}
+
+.btn-danger.btn-disabled {
+  background: #ffb3ae;
+  color: rgba(255, 255, 255, 0.96);
 }
 
 .tag {

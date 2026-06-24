@@ -20,6 +20,10 @@ Page({
     governanceTone: 'neutral',
     learningApplications: 0,
     closureSteps: [],
+    loopRunning: false,
+    startBusy: false,
+    stopBusy: false,
+    governBusy: false,
     updatedAt: '--',
   },
 
@@ -62,6 +66,7 @@ Page({
       positions: String(trading.n_positions || 0),
       loopLabel: loopStatus.running ? '交易循环运行中' : '交易循环已停止',
       loopTone: loopStatus.running ? 'positive' : 'warning',
+      loopRunning: !!loopStatus.running,
       latestReview: summary.latest_review,
       learningSummary: suggestions,
       governanceLabel,
@@ -106,17 +111,35 @@ Page({
   },
 
   async onStart() {
-    await startTradingLoop();
-    await refreshLiveSnapshot();
+    if (this.data.loopRunning || this.data.startBusy || this.data.stopBusy) return;
+    this.setData({ startBusy: true });
+    try {
+      await startTradingLoop();
+      await refreshLiveSnapshot();
+    } finally {
+      this.setData({ startBusy: false });
+    }
   },
 
   async onStop() {
-    await stopTradingLoop();
-    await refreshLiveSnapshot();
+    if (!this.data.loopRunning || this.data.stopBusy || this.data.startBusy) return;
+    this.setData({ stopBusy: true });
+    try {
+      await stopTradingLoop();
+      await refreshLiveSnapshot();
+    } finally {
+      this.setData({ stopBusy: false });
+    }
   },
 
   async onGovern() {
-    await runLearningGovernance();
+    if (this.data.governBusy) return;
+    this.setData({ governBusy: true });
+    try {
+      await runLearningGovernance();
+    } finally {
+      this.setData({ governBusy: false });
+    }
   },
 
   goLearning() {

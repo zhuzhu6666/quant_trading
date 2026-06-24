@@ -1,26 +1,28 @@
 <view class="app-shell">
   <view class="page-stack">
     <view class="hero">
-      <view class="row-between">
-        <view>
+      <view class="row-between hero-top">
+        <view class="hero-copy">
           <view class="hero-kicker">Operations</view>
           <view class="hero-title">系统运维</view>
           <view class="hero-subtitle">调度器、演化事件、接口健康和数据库状态都在这里看。</view>
         </view>
-        <button class="btn-secondary" size="mini" bindtap="onRefresh">刷新</button>
+        <view class="hero-actions ops-actions">
+          <button class="btn-secondary btn-toolbar" bindtap="onRefresh">刷新</button>
+        </view>
       </view>
       <view class="hero-metrics">
         <view class="hero-metric">
           <view class="hero-metric-label">API</view>
-          <view class="hero-metric-value">{{apiHealth.status || 'unknown'}}</view>
+          <view class="hero-metric-value {{apiMetricClass}}">{{apiHealth.status || 'unknown'}}</view>
         </view>
         <view class="hero-metric">
           <view class="hero-metric-label">演化</view>
-          <view class="hero-metric-value">{{evolution ? 'active' : 'none'}}</view>
+          <view class="hero-metric-value {{evolutionMetricClass}}">{{evolution ? 'active' : 'none'}}</view>
         </view>
         <view class="hero-metric">
           <view class="hero-metric-label">Jobs</view>
-          <view class="hero-metric-value">{{scheduler && scheduler.jobs ? scheduler.jobs.length : 0}}</view>
+          <view class="hero-metric-value {{jobsMetricClass}}">{{scheduler && scheduler.jobs ? scheduler.jobs.length : 0}}</view>
         </view>
       </view>
     </view>
@@ -82,7 +84,7 @@
       <view wx:if="{{dbCards.length}}" class="caption-grid">
         <view wx:for="{{dbCards}}" wx:key="key" class="caption-card">
           <view class="caption-label">{{item.key}}</view>
-          <view class="caption-value">{{item.value}}</view>
+          <view class="caption-value {{item.valueClass}}">{{item.value}}</view>
         </view>
       </view>
       <view wx:else class="soft-panel section-note">暂无数据</view>

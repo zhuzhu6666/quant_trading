@@ -1,15 +1,15 @@
 <view class="app-shell">
   <view class="page-stack">
     <view class="hero">
-      <view class="row-between">
-        <view>
+      <view class="row-between hero-top">
+        <view class="hero-copy">
           <view class="hero-kicker">Learning</view>
           <view class="hero-title">规则学习闭环</view>
-      <view class="hero-subtitle">这里看系统从平仓里学到了什么，又准备如何影响下一轮权重。</view>
+          <view class="hero-subtitle">这里看系统从平仓里学到了什么，又准备如何影响下一轮权重。</view>
         </view>
-        <view class="hero-actions">
+        <view class="hero-actions learning-actions">
           <status-pill label="{{updatedAt}}" tone="neutral" />
-          <button class="btn-secondary" size="mini" bindtap="onRunGovernance">运行治理</button>
+          <button class="btn-secondary btn-block" bindtap="onRunGovernance">运行治理</button>
         </view>
       </view>
       <view class="hero-metrics">
@@ -38,12 +38,12 @@
       </view>
       <view class="grid-3">
         <view class="split-card stack-12">
-          <view class="small muted">待审</view>
-          <view class="value-md">{{summary.suggestions.proposed || 0}}</view>
+          <view class="small muted">复盘数</view>
+          <view class="value-md">{{reviews.length || 0}}</view>
         </view>
         <view class="split-card stack-12">
-          <view class="small muted">已批</view>
-          <view class="value-md">{{summary.suggestions.approved || 0}}</view>
+          <view class="small muted">建议数</view>
+          <view class="value-md">{{suggestions.length || 0}}</view>
         </view>
         <view class="split-card stack-12">
           <view class="small muted">已应用</view>

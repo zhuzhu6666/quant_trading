@@ -1,8 +1,8 @@
 <view class="app-shell">
   <view class="page-stack">
     <view class="hero">
-      <view class="row-between">
-        <view>
+      <view class="row-between hero-top">
+        <view class="hero-copy">
           <view class="hero-kicker">Trading</view>
           <view class="hero-title">实时交易</view>
           <view class="hero-subtitle">此刻系统在怎么想、怎么做、有没有被风险闸门拦住。</view>
@@ -54,9 +54,9 @@
         </view>
       </view>
       <view class="btn-row" style="margin-top: 18rpx;">
-        <button class="btn-primary" bindtap="onStart">启动</button>
-        <button class="btn-secondary" bindtap="onStop">停止</button>
-        <button class="btn-danger" bindtap="onEmergencyClose">紧急平仓</button>
+        <button class="btn-primary {{loopRunning || startBusy || stopBusy ? 'btn-disabled' : ''}}" bindtap="onStart" loading="{{startBusy}}" disabled="{{loopRunning || startBusy || stopBusy}}">启动</button>
+        <button class="btn-stop {{!loopRunning || stopBusy || startBusy ? 'btn-disabled' : ''}}" bindtap="onStop" loading="{{stopBusy}}" disabled="{{!loopRunning || stopBusy || startBusy}}">停止</button>
+        <button class="btn-danger {{!positions.length || emergencyBusy ? 'btn-disabled' : ''}}" bindtap="onEmergencyClose" loading="{{emergencyBusy}}" disabled="{{!positions.length || emergencyBusy}}">紧急平仓</button>
       </view>
     </section-card>
 

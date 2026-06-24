@@ -1,1 +1,19 @@
-/* inherit global */
+.hero-top {
+  align-items: flex-start;
+  gap: 16rpx;
+}
+
+.hero-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.learning-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 12rpx;
+  min-width: 168rpx;
+  padding-top: 6rpx;
+}
