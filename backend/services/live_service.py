@@ -2654,7 +2654,7 @@ def _process_tick_factor_pipeline(
                     _es = _pos_entry_scores.get(int(_pid))
                     if _es is not None and abs(_es) > abs(_max_entry):
                         _max_entry = _es
-            if _max_entry > 0 and abs(_max_entry) >= abs(composite.score):
+            if abs(_max_entry) > 0 and abs(_max_entry) >= abs(composite.score):
                 order_blocked = True
                 block_reason = f'金字塔: 需超 {abs(_max_entry):.4f}'
 
