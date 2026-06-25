@@ -365,6 +365,12 @@
   - `python scripts/phase_c_supervisor_check.py --direct-broker` 已可直接连本地 cTrader，读取真实 open positions，并复用 Phase C 的持仓路径指标 + supervisor 判定
   - 当前真实样本中，2 笔 open position 都已被识别为 `long_hold`
   - 其中 `268085757` 当前已被 supervisor 给出 `close / thesis_broken` 结论，说明 C6 已具备“真实活跃仓 -> supervisor 判断”本地验收能力
+- 线上服务器已完成 Phase C 发布与重启验收：
+  - GitHub `main`、服务器 `/home/ubuntu/quant_trading`、本地代码已同步到 `4a12eaf`
+  - 服务器 `.venv` 已通过 Phase C 相关测试：`57 passed`
+  - `quant-backend.service` 重启后，`/api/live/status` 已进入 `bridge_ready/account_ready`，并完成真实持仓恢复
+  - 服务器日志已出现真实主动保护执行证据：`position_id=268085757` 被 live loop 发出 `supervisor close`，原因为 `thesis_broken`
+  - 该仓位随后已生成真实 close review：`review_b4e1413da0cb489e`，`close_reason=thesis_broken`，说明“真实持仓 -> supervisor 判定 -> risk verdict -> 执行 -> review”链路已在线上跑通
 - 本地历史平仓样本已增强到 Phase C 路径口径：
   - `backend/services/learning_backfill.py` 现在会优先用 broker 开/平成交恢复 `holding_seconds`
   - 若本地 DuckDB 有对应 bars，则会进一步推导 `mfe / mae / giveback_ratio / profit_capture_ratio / holding_efficiency / thesis_status`
@@ -374,22 +380,23 @@
   - `timeout_close_case` 与 `active_protection_case` 已拆成 `evidence / inferred_evidence`
   - `learning_backfill` 写入的 `close_reason_source=phase_c_inferred` 不再被当成“真实已执行 supervisor/timeout close”
 - 真实案例覆盖现状：
-  - 已直接覆盖：长持仓案例、盈利后回吐案例、broker/manual close 案例、活跃仓 supervisor `close / thesis_broken` 案例
+  - 已直接覆盖：长持仓案例、broker/manual close 案例、线上已执行 active protection `close / thesis_broken` 案例
+  - 本地已直接覆盖：盈利后回吐案例、活跃仓 supervisor `close / thesis_broken` 判定案例
   - 当前仅推断覆盖：历史 `profit_giveback_after_mfe` 一类退出问题样本
-  - 远程现网历史 review 当前主要仍是 `historical_backfill / broker_close / restart_replay`，还没有现成的 `holding_timeout / supervisor_reduce / supervisor_tighten / thesis_broken` 已执行平仓样本可直接验收
+  - 远程现网当前仍缺少可直接验收的 `holding_timeout` 样本，以及 `supervisor_reduce / supervisor_tighten` 已执行样本
 
 当前阻塞点：
 
 - 当前本地新增 review 虽已能补出 `holding_seconds / giveback_ratio / profit_capture_ratio / thesis_status`，但仍有部分旧样本缺 entry decision / regime 上下文，因此“责任拆分”还不够完整
-- 远程线上接口当前仍未部署 Phase C 新 supervisor 字段，因此线上活跃长持仓仍只能看到旧口径 payload
-- 当前仍缺少真实 `holding_timeout` 样本，以及“已执行并落账成 review 的 active protection close（reduce/tighten/close）”样本，C6 还不能正式收口
+- 远程 `/api/live/positions` 在仓位刚被主动平仓后会短暂回到 `positions_empty`，当前更多依赖 `trade-trace` / `policy verdicts` / review 来确认主动保护已落账
+- 当前仍缺少真实 `holding_timeout` 样本，以及 `supervisor_reduce / supervisor_tighten` 已执行样本，C6 还不能正式收口
 
 下一步：
 
-- 把本地 Phase C 代码发布到服务器后，复跑 `/api/live/positions`、`/api/risk/trade-trace`、`python scripts/phase_c_supervisor_check.py --api-base ...`
-- 至少覆盖长持仓回吐、手动关闭、超时关闭、主动保护关闭四类案例
-- 优先补到能从真实 close review 中稳定看到 `holding_seconds / giveback_ratio / supervisor close_reason` 的完整证据
-- 一旦线上出现 timeout 或 supervisor 执行平仓样本，立即回灌本地并复跑 C6 验收脚本，确认责任标签是否能落到 `时长问题 / 退出问题 / thesis_broken`
+- 继续观察线上，优先等待并验收真实 `holding_timeout` 与 `supervisor_reduce / supervisor_tighten` 样本
+- 继续补远程真实 `profit_giveback` close review，确认 `giveback_ratio / profit_capture_ratio / close_reason` 能在线上稳定落到 review
+- 对刚执行的线上 `thesis_broken` 样本，继续用 `trade-trace`、`policy verdicts`、`phase_c_supervisor_check.py --api-base ...` 做回放，确认链路长期稳定
+- 一旦线上出现 timeout 或更多 supervisor 执行平仓样本，立即回灌本地并复跑 C6 验收脚本，确认责任标签是否能落到 `时长问题 / 退出问题 / thesis_broken`
 
 ---
 

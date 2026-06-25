@@ -162,6 +162,18 @@ def _fetch_remote_open_positions(api_base: str, token: str, timeout: float) -> l
     return list(data.get("positions") or [])
 
 
+def _fetch_remote_policy_verdicts(api_base: str, token: str, limit: int, timeout: float) -> list[dict]:
+    status, data = _http_json(
+        "GET",
+        f"{api_base.rstrip('/')}/api/risk/policy/verdicts?limit={int(limit)}",
+        token=token,
+        timeout=timeout,
+    )
+    if status != 200:
+        raise RuntimeError(f"fetch remote policy verdicts failed: status={status}, body={json.dumps(data, ensure_ascii=False)}")
+    return list(data.get("items") or [])
+
+
 def _fetch_direct_broker_open_positions() -> list[dict]:
     from execution._env import load_env
 
@@ -233,7 +245,34 @@ def _open_position_bucket(position: dict) -> list[str]:
     return tags
 
 
-def _build_coverage(summary: dict[str, int], cases: list[dict], open_positions: list[dict]) -> dict[str, dict[str, Any]]:
+def _event_bucket(event: dict) -> list[str]:
+    tags: list[str] = []
+    event_type = str(event.get("event_type") or "")
+    action = str(event.get("action") or "")
+    audit_payload = event.get("risk_verdict", {}).get("audit_payload") or {}
+    close_reason = str(audit_payload.get("close_reason") or "")
+
+    if close_reason == "holding_timeout":
+        tags.append("timeout_close")
+    if event_type in {"supervisor_close", "supervisor_reduce", "supervisor_tighten"}:
+        tags.append("active_protection")
+    elif action in {"reduce_position", "tighten_position"}:
+        tags.append("active_protection")
+    elif close_reason in {"thesis_broken", "profit_giveback_after_mfe"}:
+        tags.append("active_protection")
+    return tags
+
+
+def _build_coverage(
+    summary: dict[str, int],
+    cases: list[dict],
+    open_positions: list[dict],
+    pending_events: list[dict],
+) -> dict[str, dict[str, Any]]:
+    def _append_unique(target: list[str], value: str, limit: int = 3) -> None:
+        if value and value not in target and len(target) < limit:
+            target.append(value)
+
     coverage = {
         "long_hold_case": {
             "covered": bool(summary.get("long_hold") or summary.get("open_long_hold_positions")),
@@ -271,30 +310,39 @@ def _build_coverage(summary: dict[str, int], cases: list[dict], open_positions: 
     for case in cases:
         tags = set(case.get("tags") or [])
         position_id = str(case.get("position_id") or "")
-        if "long_hold" in tags and len(coverage["long_hold_case"]["evidence"]) < 3:
-            coverage["long_hold_case"]["evidence"].append(position_id)
-        if "profit_giveback" in tags and len(coverage["profit_giveback_case"]["evidence"]) < 3:
-            coverage["profit_giveback_case"]["evidence"].append(position_id)
-        if "manual_close" in tags and len(coverage["manual_close_case"]["evidence"]) < 3:
-            coverage["manual_close_case"]["evidence"].append(position_id)
-        if "timeout_close" in tags and len(coverage["timeout_close_case"]["evidence"]) < 3:
-            coverage["timeout_close_case"]["evidence"].append(position_id)
-        if "inferred_timeout_close" in tags and len(coverage["timeout_close_case"]["inferred_evidence"]) < 3:
-            coverage["timeout_close_case"]["inferred_evidence"].append(position_id)
-        if "active_protection" in tags and len(coverage["active_protection_case"]["evidence"]) < 3:
-            coverage["active_protection_case"]["evidence"].append(position_id)
-        if "inferred_active_protection" in tags and len(coverage["active_protection_case"]["inferred_evidence"]) < 3:
-            coverage["active_protection_case"]["inferred_evidence"].append(position_id)
+        if "long_hold" in tags:
+            _append_unique(coverage["long_hold_case"]["evidence"], position_id)
+        if "profit_giveback" in tags:
+            _append_unique(coverage["profit_giveback_case"]["evidence"], position_id)
+        if "manual_close" in tags:
+            _append_unique(coverage["manual_close_case"]["evidence"], position_id)
+        if "timeout_close" in tags:
+            _append_unique(coverage["timeout_close_case"]["evidence"], position_id)
+        if "inferred_timeout_close" in tags:
+            _append_unique(coverage["timeout_close_case"]["inferred_evidence"], position_id)
+        if "active_protection" in tags:
+            _append_unique(coverage["active_protection_case"]["evidence"], position_id)
+        if "inferred_active_protection" in tags:
+            _append_unique(coverage["active_protection_case"]["inferred_evidence"], position_id)
     for pos in open_positions:
         tags = set(pos.get("tags") or [])
         position_id = str(pos.get("position_id") or "")
         action = str(pos.get("supervisor_action") or "")
-        if "long_hold" in tags and len(coverage["long_hold_case"]["evidence"]) < 3:
-            coverage["long_hold_case"]["evidence"].append(f"open:{position_id}")
-        if "timeout_watch" in tags and len(coverage["timeout_close_case"]["evidence"]) < 3:
-            coverage["timeout_close_case"]["evidence"].append(f"open:{position_id}")
-        if action in {"close", "reduce", "tighten"} and len(coverage["active_protection_case"]["evidence"]) < 3:
-            coverage["active_protection_case"]["evidence"].append(f"open:{position_id}:{action}")
+        if "long_hold" in tags:
+            _append_unique(coverage["long_hold_case"]["evidence"], f"open:{position_id}")
+        if "timeout_watch" in tags:
+            _append_unique(coverage["timeout_close_case"]["evidence"], f"open:{position_id}")
+        if action in {"close", "reduce", "tighten"}:
+            _append_unique(coverage["active_protection_case"]["evidence"], f"open:{position_id}:{action}")
+    for event in pending_events:
+        tags = set(event.get("tags") or [])
+        position_id = str(event.get("position_id") or "")
+        event_type = str(event.get("event_type") or "")
+        close_reason = str(event.get("close_reason") or "")
+        if "timeout_close" in tags:
+            _append_unique(coverage["timeout_close_case"]["evidence"], f"event:{position_id}:{close_reason or event_type}")
+        if "active_protection" in tags:
+            _append_unique(coverage["active_protection_case"]["evidence"], f"event:{position_id}:{close_reason or event_type}")
     return coverage
 
 
@@ -311,12 +359,14 @@ def main() -> int:
     args = parser.parse_args()
     source = "local_db"
     open_positions: list[dict] = []
+    pending_events: list[dict] = []
 
     if args.api_base:
         source = "remote_api"
         token = args.token.strip() or _remote_login(args.api_base, args.username, args.password, args.timeout)
         cases = _fetch_remote_reviews(args.api_base, token, args.limit, args.timeout)
         open_positions = _fetch_remote_open_positions(args.api_base, token, args.timeout)
+        pending_events = _fetch_remote_policy_verdicts(args.api_base, token, args.limit, args.timeout)
     elif args.direct_broker:
         source = "direct_broker"
         cases = []
@@ -332,7 +382,7 @@ def main() -> int:
         finally:
             conn.close()
 
-    if not cases and not open_positions:
+    if not cases and not open_positions and not pending_events:
         print("no_review_cases: 当前数据源里还没有可用于 Phase C 验收的样本。")
         return 2
 
@@ -394,13 +444,35 @@ def main() -> int:
             }
         )
 
+    pending_event_items = []
+    for event in pending_events:
+        audit_payload = event.get("risk_verdict", {}).get("audit_payload") or {}
+        tags = _event_bucket(event)
+        if "timeout_close" in tags:
+            summary_counts["timeout_close"] += 1
+        if "active_protection" in tags:
+            summary_counts["active_protection"] += 1
+        pending_event_items.append(
+            {
+                "decision_id": str(event.get("decision_id") or ""),
+                "event_type": str(event.get("event_type") or ""),
+                "action": str(event.get("action") or ""),
+                "position_id": str(audit_payload.get("position_id") or ""),
+                "close_reason": str(audit_payload.get("close_reason") or ""),
+                "holding_seconds": float(audit_payload.get("holding_seconds") or 0.0),
+                "allowed": bool(event.get("allowed")),
+                "tags": tags,
+            }
+        )
+
     print(
         json.dumps(
             {
                 "source": source,
                 "summary": summary_counts,
-                "coverage": _build_coverage(summary_counts, bucketed, open_position_items),
+                "coverage": _build_coverage(summary_counts, bucketed, open_position_items, pending_event_items),
                 "open_positions": open_position_items,
+                "pending_events": pending_event_items,
                 "cases": bucketed,
             },
             ensure_ascii=False,
