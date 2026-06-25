@@ -64,7 +64,8 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
             "applications_total": _scalar(conn, "SELECT COUNT(*) FROM learning_application_log"),
             "effects_total": _scalar(conn, "SELECT COUNT(*) FROM learning_application_effect"),
             "open_recovery_positions": _scalar(conn, "SELECT COUNT(*) FROM recovery_position_state WHERE status='open'"),
-            "closed_recovery_positions_recent": _scalar(conn, "SELECT COUNT(*) FROM recovery_position_state WHERE status='closed' AND closed_at >= ?", (since,)),
+            "active_recovery_positions": _scalar(conn, "SELECT COUNT(*) FROM recovery_position_state WHERE status IN ('open', 'recovered')"),
+            "closed_recovery_positions_recent": _scalar(conn, "SELECT COUNT(*) FROM recovery_position_state WHERE status IN ('closed', 'closed_replayed') AND closed_at >= ?", (since,)),
         }
 
         missing_review = _rows(
@@ -132,6 +133,18 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
         )
         for row in recent_failures:
             row["action"] = _json_loads(row.pop("action_json", "{}"), {})
+        active_recovery_without_entry = _rows(
+            conn,
+            """
+            SELECT position_id, status, symbol, direction, open_price, volume, context_integrity, last_seen_at
+            FROM recovery_position_state
+            WHERE status IN ('open', 'recovered')
+              AND COALESCE(entry_decision_id, '') = ''
+            ORDER BY last_seen_at DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
 
         issues = []
         if counts["amend_failed_recent"] > 0:
@@ -158,6 +171,12 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
                 "code": "broker_close_without_review",
                 "message": f"{len(broker_closes_without_review)} recent broker close deals have no review",
             })
+        if active_recovery_without_entry:
+            issues.append({
+                "severity": "error",
+                "code": "active_recovery_without_entry",
+                "message": f"{len(active_recovery_without_entry)} active recovery positions have no entry decision",
+            })
 
         status = "healthy"
         if any(item["severity"] == "error" for item in issues):
@@ -177,6 +196,7 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
                 "closed_without_open": closed_without_open,
                 "broker_closes_without_review": broker_closes_without_review,
                 "recent_failures": recent_failures,
+                "active_recovery_without_entry": active_recovery_without_entry,
             },
         }
     finally:

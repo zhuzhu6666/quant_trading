@@ -303,6 +303,13 @@ Market / Broker / External Data
 
 输出不是交易信号，而是 `market_context` 和 `tradeability_state`。
 
+这一层还需要补齐两类完全体上下文：
+
+- `temporal_context`：交易时段、星期/日期、重大事件前后、bar 生命周期、开仓时间、持仓时长、持仓是否超时、不同持仓阶段的收益/回撤效率。
+- `market_space_context`：价格在近期区间、趋势通道、支撑阻力、波动分位、成交/深度状态、多周期结构、跨品种相关性中的位置。
+
+当前系统已经开始在 review / experience 中记录 `entry_ts`、`close_ts`、`holding_seconds`、`holding_minutes`，但时间/空间上下文仍未形成统一抽象层。后续应把它们作为可复盘、可训练、可风控的上下文输入，而不是散落在单个因子或日志字段里。
+
 #### Layer 2: 因子与组合信号
 
 负责生成可解释的交易意图：
@@ -317,6 +324,15 @@ Market / Broker / External Data
 - confidence。
 
 这一层只能表达“想不想交易”，不能决定“可不可以交易”。
+
+时间/空间上下文进入本层时，应采用“上下文调制”，而不是简单替代信号。例如：
+
+- 同一个趋势因子，在高波动突破空间和低波动震荡空间中权重不同。
+- 同一个入场信号，在亚洲盘、伦敦盘、美盘和重大事件前后的可信度不同。
+- 同一笔持仓，开仓后 5 分钟、30 分钟、2 小时的出场逻辑应不同。
+- 因子贡献复盘应区分 entry contribution、hold contribution、exit contribution 与 holding-time efficiency。
+
+这部分是当前完全体路线中的未完成项，应在 Phase B/C 之间逐步补齐。
 
 #### Layer 3: 元决策层
 
@@ -536,6 +552,8 @@ offline validated
 - live_service 所有下单前风险判断统一走 facade。
 - API 风控面板读取同一套状态。
 - ledger 记录完整 risk verdict。
+- 将 `temporal_context` 纳入风控裁决：持仓时长、超时、事件窗口、交易时段、日内连续亏损节奏。
+- 将 `market_space_context` 纳入风控裁决：价格空间位置、波动分位、结构冲突、相关性敞口。
 
 ### Phase C: 模型建议进入实时旁路
 
@@ -547,6 +565,7 @@ offline validated
 - advisory score 写入 ledger。
 - 小程序显示模型建议与置信度。
 - 模型建议只作为 review context，不改变订单。
+- 模型样本显式携带时间/空间上下文，先用于解释和离线训练，不直接驱动 live 风控。
 
 ### Phase D: 元模型旁路
 

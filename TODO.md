@@ -3,6 +3,11 @@
 Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入联调与验证阶段。
 当前重点不再是“有没有框架”，而是“闭环是否稳定、自愈是否可靠、前后端展示是否一致”。
 
+> **协作约定**
+> - 每次对话中发现新的架构缺口、技术债、未来能力或验证结论，都要顺手写入 `TODO.md` 或 `docs/architecture.md`。
+> - 短期可执行事项写入 `TODO.md`；长期架构和完全体能力写入 `docs/architecture.md`。
+> - 不确定是否马上开发的发现，也要以“观察/待设计/延期项”形式落文档，避免只留在聊天记录里。
+
 > **2026-06-25 状态更新**
 > - ✅ 决策账本、平仓复盘、经验沉淀、规则建议、治理审批已打通
 > - ✅ 学习应用日志 `learning_application_log` 已落库
@@ -29,7 +34,8 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 > - ✅ 模型样本已接入订单/仓位生命周期：`execution_trace` 汇总 order / position 事件、失败订单和 broker lifecycle
 > - ✅ 大模型上下文卡片已落地：`llm_context` 提供 prompt_card、evidence_bullets、label_summary
 > - ✅ 小程序 V2 已替换旧版，当前为唯一维护前端
-> - 🟡 当前仍处于 demo 实盘联调期，需要继续验证“应用后效果追踪 -> 自动回滚/增强”在真实交易流中的稳定性
+> - ✅ Phase A 稳定闭环已收口：6 小时窗口健康检查 healthy，open/close/review/experience 无断链，手动 broker close 已验证
+> - 🟡 进入 Phase B 前观察项：`learning_application_effect` 仍有 2 条 observing；系统健康里 `l2_depth`、`disk_space` 仍可能 degraded/critical，应作为运行环境专项处理
 
 ---
 
@@ -37,11 +43,13 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 
 | # | 项 | 状态 | 说明 |
 |---|----|------|------|
-| L1 | 学习应用效果追踪实盘验证 | 进行中 | 验证 `observing -> effective / ineffective / reinforced` 是否随真实平仓正确推进 |
+| L1 | 学习应用效果追踪实盘验证 | 观察中 | 当前 effect 记录为 observing/superseded，闭环不阻塞；继续随真实平仓观察是否推进 |
 | L2 | 历史重复应用记录清理脚本 | 待做 | 旧逻辑遗留了少量重复 `application`，现在已不会继续增长，但建议补一次正式清理 |
 | L3 | 小程序学习页状态文案对齐 | 待做 | 将 `observing / effective / ineffective / superseded / reinforced` 做更明确展示 |
 | L4 | 重启恢复场景回归测试 | 待做 | 覆盖“开仓后重启 / 重启期间平仓 / loop 未立即恢复”三类场景 |
 | L5 | 服务器开发同步规范固化 | 完成 | 已固化到 `docs/development-workflow.md`：本地为主开发端，GitHub main 为最终合并源，服务器为后端运行/验证端，热修需短事务回推并保持三端一致 |
+| L6 | 时间/空间上下文抽象因子 | 待设计 | 已开始记录 `holding_seconds`，但还需把交易时段、持仓生命周期、价格空间位置、多周期结构和相关性统一成可学习上下文 |
+| L7 | 运行环境健康专项 | 待做 | `l2_depth` 与 `disk_space` 偶发 degraded/critical；不阻塞 Phase A 闭环，但进入 Phase B 前建议独立处理 |
 
 ## 🟡 延期项
 
@@ -97,3 +105,6 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 - 2026-06-25: 修复 cTrader 市价单成交后 SL/TP amend 失败时 open/recovery 上下文缺失的问题；以后即使 amend 失败，也会记录 open、submitted/filled、position opened，再记录 amend failure。
 - 2026-06-25: 修复 SL/TP 保护价用 bar/current price 计算导致 SELL 在成交后被 cTrader `TRADING_BAD_STOPS` 拒绝的问题；现在成交后会基于真实 `fill_price` 重算保护价再 amend。
 - 2026-06-25: 新增 `scripts/repair_open_ledger_from_deals.py`，用于把历史 close-without-open 缺口按 partial context 修成最小 open ledger，不伪造因子快照；极端缺 open deal 时必须显式加 `--allow-close-only`。
+- 2026-06-25: trade review / experience 已开始沉淀 `entry_ts`、`close_ts`、`holding_seconds`、`holding_minutes`；旧恢复仓在 close 前若缺 open ledger，会自动补最小 open 证据并保持 partial context。
+- 2026-06-25: Phase A 收口检查通过：服务器 `quant-backend.service` active，6 小时窗口 `phase_a_health_check` healthy；decision ledger 当前 open=22、close=22、signal=1101、skip=340，reviews=40、experience=40、applications/effects=4。
+- 2026-06-25: `scripts/phase_a_health_check.py` 已补充 active recovery 口径，`open/recovered` 都算 active，并检查 active recovery 是否缺 entry decision；closed recovery 同时兼容 `closed` 与 `closed_replayed`。
