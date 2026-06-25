@@ -436,6 +436,117 @@ def _lookup_entry_decision_id(position_id: int) -> str:
         conn.close()
 
 
+def _ensure_open_ledger_for_recovered_close(
+    position_id: int,
+    *,
+    broker: str,
+    close_ts: float,
+    close_price: float,
+    real_pnl: dict | None = None,
+    close_reason: str = "broker_close",
+) -> str:
+    """Create minimal open evidence for recovered legacy positions before close review."""
+    if position_id <= 0:
+        return ""
+    existing = _lookup_entry_decision_id(position_id)
+    if existing:
+        return existing
+    if not _LEDGER:
+        return ""
+
+    conn = _get_state_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM recovery_position_state WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return ""
+
+    real_pnl = real_pnl or {}
+    open_price = float(row["open_price"] or real_pnl.get("entry_price") or close_price or 0.0)
+    volume = float(row["volume"] or 0.0)
+    direction = int(row["direction"] or 0)
+    symbol = str(row["symbol"] or "XAUUSD+")
+    strategy_name = str(row["strategy_name"] or _loop_strategy_name or "factor_v4")
+    first_seen_at = float(row["first_seen_at"] or 0.0)
+    open_ts = first_seen_at if first_seen_at > 0 else max(0.0, float(close_ts or time.time()) - 1.0)
+
+    try:
+        decision_id = _LEDGER.log_decision(
+            event_type="open",
+            symbol=symbol,
+            timeframe="",
+            trade_id=str(position_id),
+            position_id=str(position_id),
+            decision_ts=open_ts,
+            portfolio_state={},
+            risk_state=_live_state_get("risk", {}, clone=True) or {},
+            action_score=0.0,
+            action_reason="live_close_open_repair",
+            action_json={
+                "position_id": int(position_id),
+                "broker": broker,
+                "strategy_name": strategy_name,
+                "price": open_price,
+                "volume": volume,
+                "direction": direction,
+                "close_reason": close_reason,
+                "repair_source": "recovery_position_state",
+                "context_integrity": str(row["context_integrity"] or _RECOVERY_CONTEXT_PARTIAL),
+                "real_pnl": real_pnl,
+            },
+        )
+        _LEDGER.log_position_event(
+            position_id=str(position_id),
+            trade_id=str(position_id),
+            symbol=symbol,
+            event_type="opened",
+            net_volume=volume,
+            avg_price=open_price,
+            details={
+                "repair_source": "recovery_position_state",
+                "close_reason": close_reason,
+                "direction": direction,
+            },
+            event_ts=open_ts,
+        )
+        _upsert_recovery_position_state(
+            {
+                "position_id": position_id,
+                "symbol": symbol,
+                "direction": direction,
+                "open_price": open_price,
+                "volume": volume,
+                "entry_decision_id": decision_id,
+            },
+            broker=broker,
+            strategy_name=strategy_name,
+            status=str(row["status"] or "open"),
+            context_integrity=str(row["context_integrity"] or _RECOVERY_CONTEXT_PARTIAL),
+            meta={"open_repaired_before_close": True, "open_repair_decision_id": decision_id},
+        )
+        logger.info("[live] repaired missing open ledger before close pos=%s decision=%s", position_id, decision_id)
+        return decision_id
+    except Exception as exc:
+        logger.debug("[live] open ledger repair before close failed for pos %s: %s", position_id, exc)
+        return ""
+
+
+def _lookup_recovery_context_integrity(position_id: int, default: str = _RECOVERY_CONTEXT_FULL) -> str:
+    conn = _get_state_conn()
+    try:
+        row = conn.execute(
+            "SELECT context_integrity FROM recovery_position_state WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        return str(row["context_integrity"] or default) if row else default
+    finally:
+        conn.close()
+
+
 def _persist_loop_desired_state(
     enabled: bool,
     *,
@@ -3339,9 +3450,10 @@ def _process_tick_factor_pipeline(
         try:
             real_pnl = _real_pnls.get(cpid)
             close_reason = _consume_close_reason(int(cpid), "broker_close")
+            close_ts = float((real_pnl or {}).get("exec_timestamp") or time.time())
             mc = attr_engine.record_close(cpid,
                                           close_price=current_price,
-                                          close_ts=time.time(),
+                                          close_ts=close_ts,
                                           real_pnl=real_pnl)
             # 平仓事件真实发生, 无论是否有因子归因都要计数
             # ★ 优先使用 cTrader 真实 PnL (修复 Bug D: 边际贡献和不可用于熔断器)
@@ -3393,13 +3505,24 @@ def _process_tick_factor_pipeline(
                     }, ensure_ascii=False),
                 )
             exit_decision_id = ""
+            context_integrity = _lookup_recovery_context_integrity(int(cpid), _RECOVERY_CONTEXT_FULL)
             if _LEDGER:
                 try:
+                    repaired_entry_decision_id = _ensure_open_ledger_for_recovered_close(
+                        int(cpid),
+                        broker=broker,
+                        close_ts=close_ts,
+                        close_price=float(current_price),
+                        real_pnl=real_pnl,
+                        close_reason=close_reason,
+                    )
+                    if repaired_entry_decision_id:
+                        context_integrity = _lookup_recovery_context_integrity(int(cpid), context_integrity)
                     exit_decision_id = _LEDGER.log_decision(
                         event_type="close",
                         symbol="XAUUSD+",
                         timeframe=str(getattr(cfg, "timeframe", "") or ""),
-                        decision_ts=bar.get("time", time.time()),
+                        decision_ts=bar.get("time", close_ts),
                         trade_id=str(cpid),
                         position_id=str(cpid),
                         portfolio_state={
@@ -3427,7 +3550,7 @@ def _process_tick_factor_pipeline(
                         avg_price=current_price,
                         realized_pnl=float(total_pnl),
                         details={"tick": tick, "real_pnl": real_pnl or {}, "factor_contributions": mc},
-                        event_ts=time.time(),
+                        event_ts=close_ts,
                     )
                 except Exception as _ledger_err:
                     logger.debug("[live] ledger close failed: %s", _ledger_err)
@@ -3437,12 +3560,12 @@ def _process_tick_factor_pipeline(
                         position_id=str(cpid),
                         pnl=float(total_pnl),
                         close_price=float(current_price),
-                        close_ts=time.time(),
+                        close_ts=close_ts,
                         contributions=mc,
                         exit_decision_id=exit_decision_id,
                         real_pnl=real_pnl,
                         close_reason=close_reason,
-                        context_integrity=_RECOVERY_CONTEXT_FULL,
+                        context_integrity=context_integrity,
                     )
                     if review.get("accepted", True):
                         experience = _EXPERIENCE_BUILDER.build_from_review(review)
@@ -3460,7 +3583,7 @@ def _process_tick_factor_pipeline(
                     int(cpid),
                     close_reason=close_reason,
                     close_pnl=float(total_pnl),
-                    closed_at=time.time(),
+                    closed_at=close_ts,
                     meta={"real_pnl": real_pnl or {}, "factor_contributions": mc or {}},
                 )
             except Exception as _recovery_close_err:

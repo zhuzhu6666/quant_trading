@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pytest
+
 from alpha.reflection.reviewer import TradeReviewer
 from backend.api.learning import (
     DatasetModelCardRequest,
@@ -75,6 +77,7 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
         timeframe="M5",
         trade_id="101",
         position_id="101",
+        decision_ts=900_000.0,
         action_score=0.82,
         action_reason="executed",
         action_json={"price": 3300.0},
@@ -170,6 +173,8 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     suggestion = suggester.suggest_from_experience(experience)
 
     assert review["outcome_label"] == "bad_loss"
+    assert review["review_json"]["holding_seconds"] == pytest.approx(100_000.0)
+    assert experience["decision_context_json"]["holding_minutes"] == pytest.approx(100_000.0 / 60.0)
     assert "overweight_noise_factor" in review["failure_tags"]
     assert experience["recommended_action"] == "downweight"
     assert suggestion is None

@@ -111,6 +111,8 @@ class TradeReviewer:
             trade_id = str(entry["trade_id"]) if entry and entry["trade_id"] else str(position_id)
             entry_score = float(entry["action_score"] or 0.0) if entry else 0.0
             regime_id = str(entry["regime_id"] or "") if entry else ""
+            entry_ts = float(entry["decision_ts"] or 0.0) if entry else 0.0
+            timeframe = str(entry["timeframe"] or "") if entry else ""
             entry_factors = list(
                 conn.execute(
                     """
@@ -169,6 +171,8 @@ class TradeReviewer:
         execution_quality = _clamp(0.60 if real_pnl else 0.45)
         mae = abs(min(float(pnl), 0.0))
         mfe = max(float(pnl), 0.0)
+        close_ts = float(close_ts or time.time())
+        holding_seconds = max(0.0, close_ts - entry_ts) if entry_ts > 0 else 0.0
 
         top_factor = ""
         top_factor_mc = 0.0
@@ -186,6 +190,11 @@ class TradeReviewer:
             "trade_id": trade_id,
             "entry_decision_id": entry_decision_id,
             "exit_decision_id": exit_decision_id,
+            "entry_ts": entry_ts,
+            "close_ts": close_ts,
+            "holding_seconds": round(holding_seconds, 3),
+            "holding_minutes": round(holding_seconds / 60.0, 3),
+            "timeframe": timeframe,
             "entry_score": entry_score,
             "top_weight_factor": top_weight_factor,
             "top_weight": top_weight,

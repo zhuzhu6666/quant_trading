@@ -74,6 +74,7 @@ def fetch_missing_positions(
         d.trade_id,
         d.regime_id,
         d.action_score AS entry_score,
+        d.decision_ts AS entry_ts,
         d.symbol,
         d.timeframe
     FROM missing m
@@ -99,6 +100,9 @@ def build_review_record(row: sqlite3.Row) -> dict:
     trade_id = str(row["trade_id"] or position_id)
     pnl = float(row["net_pnl"] or 0.0)
     entry_score = float(row["entry_score"] or 0.0)
+    entry_ts = float(row["entry_ts"] or 0.0)
+    close_ts = float(row["close_ts"] or 0.0)
+    holding_seconds = max(0.0, close_ts - entry_ts) if entry_ts > 0 and close_ts > 0 else 0.0
     outcome_label = classify_outcome(entry_score, pnl)
     summary = (
         f"trade {position_id} closed pnl={pnl:.2f}; "
@@ -121,6 +125,11 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "trade_id": trade_id,
         "entry_decision_id": str(row["entry_decision_id"] or ""),
         "exit_decision_id": "",
+        "entry_ts": entry_ts,
+        "close_ts": close_ts,
+        "holding_seconds": round(holding_seconds, 3),
+        "holding_minutes": round(holding_seconds / 60.0, 3),
+        "timeframe": str(row["timeframe"] or ""),
         "entry_score": entry_score,
         "top_weight_factor": "",
         "top_weight": 0.0,

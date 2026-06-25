@@ -1,8 +1,10 @@
 import threading
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
+from backend.ledger.service import DecisionLedger
 from backend.services import live_service
 
 
@@ -205,3 +207,75 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
     assert calls["positions"][0]["event_type"] == "opened"
     assert calls["upserts"][0][0]["entry_decision_id"] == "dec_open"
     assert calls["attr"][0] == 268
+
+
+def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    monkeypatch.setattr(live_service, "_LEDGER", ledger)
+
+    conn = _conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO recovery_position_state
+            (position_id, broker, symbol, direction, open_price, volume,
+             first_seen_at, last_seen_at, status, strategy_name,
+             entry_decision_id, context_integrity, recovery_meta_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                268046003,
+                "ctrader",
+                "XAUUSD+",
+                1,
+                4015.92,
+                100.0,
+                1_782_373_400.0,
+                1_782_373_500.0,
+                "open",
+                "smoke",
+                "",
+                "partial",
+                "{}",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    decision_id = live_service._ensure_open_ledger_for_recovered_close(
+        268046003,
+        broker="ctrader",
+        close_ts=1_782_373_646.154,
+        close_price=3980.89,
+        real_pnl={"net": 36.52, "entry_price": 4015.92},
+        close_reason="broker_close",
+    )
+
+    rows = []
+    conn = _conn()
+    try:
+        rows = list(
+            conn.execute(
+                "SELECT * FROM decision_ledger WHERE position_id='268046003' AND event_type='open'"
+            )
+        )
+        recovery = conn.execute(
+            "SELECT entry_decision_id, context_integrity FROM recovery_position_state WHERE position_id=268046003"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert decision_id
+    assert len(rows) == 1
+    assert rows[0]["action_reason"] == "live_close_open_repair"
+    assert recovery["entry_decision_id"] == decision_id
+    assert recovery["context_integrity"] == "partial"
