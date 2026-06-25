@@ -1,5 +1,6 @@
 import threading
 import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -265,6 +266,53 @@ def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     verdict = live_service._consume_close_verdict(268, "emergency_close")
     assert verdict["allowed"] is True
     assert verdict["audit_payload"]["action"] == "close_position"
+
+
+def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
+    class _SyncHealth:
+        def snapshot(self):
+            return {"fresh": False, "stale": True, "degraded": True}
+
+        def last_bar_age_seconds(self, timeframe):
+            assert timeframe == "M5"
+            return 321.0
+
+    class _Bridge:
+        is_connected = False
+
+    now = time.time()
+    live_service._live_state_update(
+        loop_running=True,
+        account_updated_at=now - 12,
+        positions_updated_at=now - 34,
+    )
+
+    import data.live_sync.health as sync_health_module
+
+    monkeypatch.setattr(sync_health_module.SyncHealth, "shared", staticmethod(lambda: _SyncHealth()))
+
+    ctx = live_service._build_open_trade_risk_context(
+        cfg=SimpleNamespace(
+            timeframe="M5",
+            var_enabled=True,
+            var_cvar_threshold=0.02,
+            max_position_count=3,
+            max_position_api_volume=1000.0,
+            pyramid_enabled=True,
+        ),
+        bridge=_Bridge(),
+        acct={"balance": 10000, "equity": 10000},
+        positions=[],
+        requested_api_volume=100.0,
+        signal_score=0.6,
+    )
+
+    assert ctx["bridge_connected"] is False
+    assert ctx["loop_running"] is True
+    assert ctx["data_lag_seconds"] == 321.0
+    assert ctx["runtime_health"]["sync_health"]["degraded"] is True
+    assert ctx["runtime_health"]["account_cache_age_seconds"] >= 10.0
+    assert ctx["runtime_health"]["positions_cache_age_seconds"] >= 30.0
 
 
 def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):

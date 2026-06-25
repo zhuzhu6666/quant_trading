@@ -50,6 +50,18 @@ class TestRiskGovernor:
         assert not v.allowed
         assert "data_lag" in v.reason
 
+    def test_loop_not_running_blocks_trade(self, gov):
+        """live loop 未运行 → 禁止交易."""
+        v = gov.allow_trade(GovernorState(loop_running=False))
+        assert not v.allowed
+        assert v.reason == "loop_not_running"
+
+    def test_bridge_disconnected_blocks_trade(self, gov):
+        """bridge 断开 → 禁止交易."""
+        v = gov.allow_trade(GovernorState(bridge_connected=False))
+        assert not v.allowed
+        assert v.reason == "bridge_disconnected"
+
     def test_force_dry_run_blocks_trade(self, gov):
         """force_dry_run override → 禁止交易."""
         gov.set_dry_run(True)

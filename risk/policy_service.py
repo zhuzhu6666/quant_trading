@@ -184,6 +184,9 @@ class RiskPolicyService:
             "requested_api_volume": float(context.get("requested_api_volume", 0.0) or 0.0),
             "total_api_volume": float(context.get("total_api_volume", 0.0) or 0.0),
         }
+        runtime_health = context.get("runtime_health") or {}
+        if runtime_health:
+            extra["runtime_health"] = runtime_health
         return GovernorState(
             balance=float(account.get("balance", 0.0) or 0.0),
             equity=float(account.get("equity", 0.0) or 0.0),

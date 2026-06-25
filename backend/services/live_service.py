@@ -252,12 +252,33 @@ def _max_abs_entry_score_for_positions(positions: list[Any]) -> float:
 def _build_open_trade_risk_context(
     *,
     cfg,
+    bridge,
     acct: dict,
     positions: list[Any],
     requested_api_volume: float,
     signal_score: float,
 ) -> dict:
     risk_snapshot = _live_state_get("risk", {}, clone=True) or {}
+    loop_running = bool(_live_state_get("loop_running", True))
+    bridge_connected = bool(getattr(bridge, "is_connected", False))
+    account_updated_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
+    positions_updated_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
+    now = time.time()
+    account_cache_age_seconds = max(0.0, now - account_updated_at) if account_updated_at > 0 else 0.0
+    positions_cache_age_seconds = max(0.0, now - positions_updated_at) if positions_updated_at > 0 else 0.0
+    sync_snapshot = {}
+    data_lag_seconds = 0.0
+    try:
+        from data.live_sync.health import SyncHealth
+
+        sync_health = SyncHealth.shared()
+        sync_snapshot = sync_health.snapshot()
+        data_lag_seconds = float(
+            sync_health.last_bar_age_seconds(str(getattr(cfg, "timeframe", "M5") or "M5")) or 0.0
+        )
+    except Exception:
+        sync_snapshot = {}
+
     return {
         "account": acct or {},
         "session": {
@@ -281,8 +302,14 @@ def _build_open_trade_risk_context(
         "pyramid_enabled": bool(getattr(cfg, "pyramid_enabled", True)),
         "max_abs_entry_score": _max_abs_entry_score_for_positions(positions or []),
         "signal_score": float(signal_score or 0.0),
-        "loop_running": bool(_live_state_get("loop_running", True)),
-        "bridge_connected": True,
+        "loop_running": loop_running,
+        "bridge_connected": bridge_connected,
+        "data_lag_seconds": data_lag_seconds,
+        "runtime_health": {
+            "account_cache_age_seconds": account_cache_age_seconds,
+            "positions_cache_age_seconds": positions_cache_age_seconds,
+            "sync_health": sync_snapshot,
+        },
     }
 
 
@@ -3805,6 +3832,7 @@ def _process_tick_factor_pipeline(
         # ── Phase B: 统一风控裁决 ──
         risk_context = _build_open_trade_risk_context(
             cfg=cfg,
+            bridge=bridge,
             acct=acct_clean,
             positions=pos,
             requested_api_volume=volume,

@@ -555,6 +555,7 @@ offline validated
 - 因子发现和晋升实际调用点已接入：`scripts/discover_factors.py --auto-register`、EvolutionOrchestrator GP shadow 注册、EvolutionOrchestrator canary -> discovered promote、`/api/shadow/promote` 手动晋升都会先走 `RiskPolicyService`。
 - live open 成功路径与风险阻断路径都会写入 policy verdict；`/api/risk/summary` 和 `/api/risk/policy/verdicts` 已可聚合最近 allowed/blocked verdict。
 - live close 路径已接入 `close_position` verdict：系统发起 emergency close 前审计，broker close 落账时写入 close ledger 和 position lifecycle。
+- Governor state 第一版 runtime health 已接入 live 开仓：`loop_running`、`bridge_connected`、`data_lag_seconds` 进入真实裁决，sync health 与 account/positions cache age 已进入审计上下文。
 - 后续还需要把前端风控面板接到该数据源，并补齐运行环境、跨品种、时间/空间上下文等更完整的 governor state。
 
 要完成：
@@ -564,6 +565,7 @@ offline validated
 - live_service 所有下单前风险判断统一走 facade。
 - API 风控面板读取同一套状态。后端数据源已具备，前端展示待接入。
 - ledger 记录完整 risk verdict。open allowed / skip blocked / close risk-reducing 已覆盖，后续继续扩展到更多非交易高影响动作的统一审计表。
+- 运行环境健康第一版已接入开仓裁决；后续继续把磁盘空间、L2 深度、更多数据质量项纳入统一 governor state。
 - 将 `temporal_context` 纳入风控裁决：持仓时长、超时、事件窗口、交易时段、日内连续亏损节奏。
 - 将 `market_space_context` 纳入风控裁决：价格空间位置、波动分位、结构冲突、相关性敞口。
 

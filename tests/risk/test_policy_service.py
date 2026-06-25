@@ -58,6 +58,30 @@ def test_open_trade_blocks_var_threshold():
     assert verdict.audit_payload["source"] == "var_gate"
 
 
+def test_open_trade_blocks_when_loop_not_running():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {"loop_running": False},
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "loop_not_running"
+
+
+def test_open_trade_blocks_when_bridge_disconnected():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {"bridge_connected": False},
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "bridge_disconnected"
+
+
 def test_open_trade_blocks_position_count():
     service = _service()
 

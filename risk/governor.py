@@ -52,8 +52,8 @@ class GovernorState:
     kelly_fraction: float = 1.0
     circuit_broken: bool = False
     # 系统状态
-    loop_running: bool = False
-    bridge_connected: bool = False
+    loop_running: bool = True
+    bridge_connected: bool = True
     data_lag_seconds: float = 0.0
     # 额外
     extra: dict[str, Any] = field(default_factory=dict)
@@ -140,6 +140,14 @@ class RiskGovernor:
         # 熔断
         if state.circuit_broken and not cfg["circuit_breaker_bypass"]:
             return GovernorVerdict(False, "circuit_broken", "circuit breaker triggered")
+
+        # live loop 未运行
+        if not state.loop_running:
+            return GovernorVerdict(False, "loop_not_running", "live loop is not running")
+
+        # 桥接不可用
+        if cfg["min_bridge_uptake"] and not state.bridge_connected:
+            return GovernorVerdict(False, "bridge_disconnected", "broker bridge is disconnected")
 
         # 回撤超限
         if state.drawdown_pct >= cfg["max_drawdown_pct"]:
