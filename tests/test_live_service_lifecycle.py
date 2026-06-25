@@ -1,4 +1,5 @@
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -126,3 +127,81 @@ def test_mark_loop_stopped_for_display_preserves_cached_data():
     assert live_service._live_state_get("loop_strategy") is None
     assert live_service._live_state_get("broker") == "ctrader"
     assert live_service._live_state_get("account", clone=True)["balance"] == 999.0
+
+
+def test_protection_prices_from_reference_use_direction_and_digits():
+    assert live_service._protection_prices_from_reference(1, 4000.123, 10.0, 15.0, 2) == (3990.12, 4015.12)
+    assert live_service._protection_prices_from_reference(-1, 4000.123, 10.0, 15.0, 2) == (4010.12, 3985.12)
+
+
+def test_position_open_price_accepts_dict_and_object_payloads():
+    assert live_service._position_open_price({"entry_price": 4008.5}) == 4008.5
+    assert live_service._position_open_price(SimpleNamespace(open_price=4010.25)) == 4010.25
+    assert live_service._position_open_price({"entry_price": None, "price": 3999.0}) == 3999.0
+
+
+def test_record_filled_open_context_persists_even_before_amend_success(monkeypatch):
+    calls = {"orders": [], "positions": [], "upserts": []}
+
+    class _Ledger:
+        def log_composite_decision(self, **kwargs):
+            calls["decision"] = kwargs
+            return "dec_open"
+
+        def log_order_event(self, **kwargs):
+            calls["orders"].append(kwargs)
+
+        def log_position_event(self, **kwargs):
+            calls["positions"].append(kwargs)
+
+    class _Attr:
+        def record_open(self, pid, trade_attr):
+            calls["attr"] = (pid, trade_attr)
+
+    composite = SimpleNamespace(
+        direction=-1,
+        score=-0.7,
+        tactical_score=-0.8,
+        macro_score=0.0,
+        factor_signals={"rsi": -0.5},
+        factor_values={"rsi": 70.0},
+        active_weights={"rsi": 0.5},
+        tags_breakdown={},
+        n_active_factors=1,
+        n_abstain_factors=0,
+    )
+    gate = SimpleNamespace(passed=True, reason="passed")
+    cfg = SimpleNamespace(timeframe="M5")
+
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(
+        live_service,
+        "_upsert_recovery_position_state",
+        lambda raw, **kwargs: calls["upserts"].append((raw, kwargs)),
+    )
+
+    decision_id = live_service._record_filled_position_open_context(
+        attr_engine=_Attr(),
+        broker="ctrader",
+        cfg=cfg,
+        bar={"time": 123.0},
+        tick=7,
+        pid=268,
+        actual_api_volume=100.0,
+        requested_volume=100.0,
+        fill_price=4008.5,
+        current_price=4008.4,
+        sl_price=4012.5,
+        tp_price=3994.5,
+        acct={"balance": 10000, "equity": 10001},
+        pos=[],
+        composite=composite,
+        gate_result=gate,
+    )
+
+    assert decision_id == "dec_open"
+    assert calls["decision"]["event_type"] == "open"
+    assert [item["event_type"] for item in calls["orders"]] == ["submitted", "filled"]
+    assert calls["positions"][0]["event_type"] == "opened"
+    assert calls["upserts"][0][0]["entry_decision_id"] == "dec_open"
+    assert calls["attr"][0] == 268

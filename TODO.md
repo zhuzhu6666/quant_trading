@@ -90,3 +90,9 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 | 5 | `data/store.py` -> `duckdb_store.py` 双层包装 | 过度封装，所有引用通过旧 `store.py` 再委派到 `duckdb_store.py` |
 
 > 以上不阻塞运行。当需要扩展 ML、多品种或模型接入时，再按优先级继续处理。
+
+## Phase A 稳定闭环记录
+
+- 2026-06-25: 新增 `scripts/phase_a_health_check.py`，用于检查 decision ledger、broker close、trade review、experience、policy suggestion、learning application/effect 是否断链。
+- 2026-06-25: 修复 cTrader 市价单成交后 SL/TP amend 失败时 open/recovery 上下文缺失的问题；以后即使 amend 失败，也会记录 open、submitted/filled、position opened，再记录 amend failure。
+- 2026-06-25: 修复 SL/TP 保护价用 bar/current price 计算导致 SELL 在成交后被 cTrader `TRADING_BAD_STOPS` 拒绝的问题；现在成交后会基于真实 `fill_price` 重算保护价再 amend。
