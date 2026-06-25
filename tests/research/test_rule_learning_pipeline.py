@@ -664,6 +664,8 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
     )
     assert api_queue["ok"] is True
     assert api_queue["candidate"]["candidate_id"] == candidate["candidate_id"]
+    assert api_queue["risk_verdict"]["allowed"] is True
+    assert api_queue["risk_verdict"]["required_mode"] == "shadow"
 
     listed = list_learning_model_shadow_candidates(
         None,
@@ -755,6 +757,8 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
     )
     assert api_canary["ok"] is True
     assert api_canary["decision"] == "canary_ready"
+    assert api_canary["risk_verdict"]["allowed"] is True
+    assert api_canary["risk_verdict"]["required_mode"] == "canary"
     listed_canary = list_learning_model_canary_reviews(
         None,
         candidate_id=queued_again["candidate"]["candidate_id"],
@@ -842,6 +846,8 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
     )
     assert api_trial["ok"] is True
     assert api_trial["trial"]["status"] == "canary_passed"
+    assert api_trial["risk_verdict"]["allowed"] is True
+    assert api_trial["risk_verdict"]["required_mode"] == "canary"
     listed_trials = list_learning_model_canary_trials(
         None,
         candidate_id=queued_again["candidate"]["candidate_id"],

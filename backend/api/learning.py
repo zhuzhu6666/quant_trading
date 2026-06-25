@@ -22,6 +22,7 @@ from research.model_canary import ModelCanaryReviewer
 from research.model_canary_executor import ModelCanaryExecutor
 from research.model_inference_contract import ModelInferenceContract
 from research.model_pipeline import LearningModelPipeline
+from risk.policy_service import RiskPolicyService
 
 router = APIRouter(prefix="/api/learning", tags=["learning"])
 
@@ -48,6 +49,19 @@ def _is_visible_review(item: dict) -> bool:
     if close_reason in {"broker_close", "restart_replay", "emergency_close"}:
         return False
     return True
+
+
+def _risk_verdict(action: str, context: dict | None = None) -> dict:
+    return RiskPolicyService.shared().evaluate(action, context or {}).to_dict()
+
+
+def _blocked_by_risk(verdict: dict) -> dict:
+    return {
+        "ok": False,
+        "blocked": True,
+        "error": verdict.get("reason", "risk_policy_block"),
+        "risk_verdict": verdict,
+    }
 
 
 class ReviewRequest(BaseModel):
@@ -574,7 +588,18 @@ def evaluate_learning_model_promotion(_user: RequireUser, req: ModelPromotionGat
 
 @router.post("/model/shadow-queue")
 def queue_learning_model_shadow_candidate(_user: RequireUser, req: ModelShadowQueueRequest) -> dict:
-    return ModelShadowQueue(req.registry_db_path).queue(
+    verdict = _risk_verdict(
+        "start_shadow_model",
+        {
+            "model_type": req.model_type,
+            "symbol": req.symbol,
+            "timeframe": req.timeframe,
+            "capabilities": {"live_trading": False},
+        },
+    )
+    if not verdict.get("allowed", False):
+        return _blocked_by_risk(verdict)
+    result = ModelShadowQueue(req.registry_db_path).queue(
         model_type=req.model_type,
         artifact_path=req.artifact_path,
         version=req.version,
@@ -588,6 +613,8 @@ def queue_learning_model_shadow_candidate(_user: RequireUser, req: ModelShadowQu
         require_snapshot_ready=bool(req.require_snapshot_ready),
         note=req.note,
     )
+    result["risk_verdict"] = verdict
+    return result
 
 
 @router.get("/model/shadow-queue")
@@ -636,7 +663,19 @@ def run_learning_model_shadow_validation(_user: RequireUser, req: ModelShadowRun
 def review_learning_model_canary(_user: RequireUser, req: ModelCanaryReviewRequest) -> dict:
     if not req.candidate_id:
         raise HTTPException(status_code=400, detail="candidate_id is required")
-    return ModelCanaryReviewer(req.registry_db_path).review_candidate(
+    candidate = ModelShadowQueue(req.registry_db_path).get_candidate(req.candidate_id)
+    verdict = _risk_verdict(
+        "start_canary_model",
+        {
+            "candidate_id": req.candidate_id,
+            "candidate_status": str((candidate or {}).get("status") or ""),
+            "allowed_statuses": ["passed"],
+            "capabilities": {"live_trading": False},
+        },
+    )
+    if not verdict.get("allowed", False):
+        return _blocked_by_risk(verdict)
+    result = ModelCanaryReviewer(req.registry_db_path).review_candidate(
         req.candidate_id,
         report_path=req.report_path,
         min_shadow_samples=max(1, int(req.min_shadow_samples)),
@@ -645,6 +684,8 @@ def review_learning_model_canary(_user: RequireUser, req: ModelCanaryReviewReque
         max_positive_rate=float(req.max_positive_rate),
         note=req.note,
     )
+    result["risk_verdict"] = verdict
+    return result
 
 
 @router.get("/model/canary-review")
@@ -693,7 +734,19 @@ def list_learning_model_inference_audits(
 def run_learning_model_canary_trial(_user: RequireUser, req: ModelCanaryTrialRequest) -> dict:
     if not req.candidate_id:
         raise HTTPException(status_code=400, detail="candidate_id is required")
-    return ModelCanaryExecutor(req.registry_db_path).run_trial(
+    candidate = ModelShadowQueue(req.registry_db_path).get_candidate(req.candidate_id)
+    verdict = _risk_verdict(
+        "start_canary_model",
+        {
+            "candidate_id": req.candidate_id,
+            "candidate_status": str((candidate or {}).get("status") or ""),
+            "allowed_statuses": ["canary_ready"],
+            "capabilities": {"live_trading": False},
+        },
+    )
+    if not verdict.get("allowed", False):
+        return _blocked_by_risk(verdict)
+    result = ModelCanaryExecutor(req.registry_db_path).run_trial(
         candidate_id=req.candidate_id,
         samples=req.samples,
         contexts=req.contexts,
@@ -702,6 +755,8 @@ def run_learning_model_canary_trial(_user: RequireUser, req: ModelCanaryTrialReq
         min_decision_coverage=float(req.min_decision_coverage),
         note=req.note,
     )
+    result["risk_verdict"] = verdict
+    return result
 
 
 @router.get("/model/canary-trial")

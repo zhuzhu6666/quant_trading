@@ -29,9 +29,8 @@ class RiskVerdict:
 class RiskPolicyService:
     """Single facade for risk decisions.
 
-    The first supported action is ``open_trade``.  Later Phase B steps should
-    route weight updates, model promotion, canary, and factor registration
-    through the same interface.
+    Supported actions start with ``open_trade`` and now include conservative
+    non-execution gates for policy/model governance.
     """
 
     _instance: "RiskPolicyService | None" = None
@@ -53,6 +52,18 @@ class RiskPolicyService:
         context = context or {}
         if action == "open_trade":
             return self._evaluate_open_trade(context)
+        if action == "close_position":
+            return self._evaluate_close_position(context)
+        if action == "update_weight":
+            return self._evaluate_governor_action(action, context, "allow_weight_update")
+        if action == "promote_factor":
+            return self._evaluate_governor_action(action, context, "allow_promotion")
+        if action == "register_factor":
+            return self._evaluate_governor_action(action, context, "allow_new_factor")
+        if action == "start_shadow_model":
+            return self._evaluate_model_stage(action, context, required_mode="shadow")
+        if action == "start_canary_model":
+            return self._evaluate_model_stage(action, context, required_mode="canary")
         return RiskVerdict(
             allowed=False,
             reason="unsupported_action",
@@ -186,4 +197,101 @@ class RiskPolicyService:
             loop_running=bool(context.get("loop_running", True)),
             bridge_connected=bool(context.get("bridge_connected", True)),
             extra=extra,
+        )
+
+    def _evaluate_close_position(self, context: dict[str, Any]) -> RiskVerdict:
+        return RiskVerdict(
+            allowed=True,
+            reason="risk_reducing_action",
+            required_mode=str(context.get("mode") or "live"),
+            audit_payload={
+                "action": "close_position",
+                "source": "risk_policy",
+                "position_id": context.get("position_id", ""),
+                "close_reason": context.get("close_reason", ""),
+            },
+        )
+
+    def _evaluate_governor_action(
+        self,
+        action: str,
+        context: dict[str, Any],
+        method_name: str,
+    ) -> RiskVerdict:
+        state = self._build_governor_state(context)
+        method = getattr(self.governor, method_name)
+        gov_verdict = method(state)
+        if not gov_verdict.allowed:
+            return RiskVerdict(
+                allowed=False,
+                reason=gov_verdict.reason or "governor_block",
+                severity="error",
+                required_mode=str(context.get("required_mode") or "governed"),
+                audit_payload={
+                    "action": action,
+                    "source": "RiskGovernor",
+                    "suggestion": gov_verdict.suggestion,
+                    "state": state.extra,
+                },
+            )
+        return RiskVerdict(
+            allowed=True,
+            reason="ok",
+            required_mode=str(context.get("required_mode") or "governed"),
+            audit_payload={
+                "action": action,
+                "source": "risk_policy",
+                "state": state.extra,
+            },
+        )
+
+    def _evaluate_model_stage(
+        self,
+        action: str,
+        context: dict[str, Any],
+        *,
+        required_mode: str,
+    ) -> RiskVerdict:
+        capabilities = context.get("capabilities") or {}
+        live_trading = bool(context.get("live_trading", False) or capabilities.get("live_trading", False))
+        if live_trading:
+            return RiskVerdict(
+                allowed=False,
+                reason="live_trading_capability_not_allowed",
+                severity="error",
+                required_mode=required_mode,
+                audit_payload={
+                    "action": action,
+                    "source": "model_guardrail",
+                    "candidate_id": context.get("candidate_id", ""),
+                    "capabilities": capabilities,
+                },
+            )
+        allowed_statuses = set(context.get("allowed_statuses") or [])
+        candidate_status = str(context.get("candidate_status") or "")
+        if allowed_statuses and candidate_status and candidate_status not in allowed_statuses:
+            return RiskVerdict(
+                allowed=False,
+                reason="candidate_status_not_allowed",
+                severity="error",
+                required_mode=required_mode,
+                audit_payload={
+                    "action": action,
+                    "source": "model_stage",
+                    "candidate_id": context.get("candidate_id", ""),
+                    "candidate_status": candidate_status,
+                    "allowed_statuses": sorted(allowed_statuses),
+                },
+            )
+        return RiskVerdict(
+            allowed=True,
+            reason="ok",
+            required_mode=required_mode,
+            audit_payload={
+                "action": action,
+                "source": "risk_policy",
+                "candidate_id": context.get("candidate_id", ""),
+                "candidate_status": candidate_status,
+                "capabilities": capabilities,
+            },
         )

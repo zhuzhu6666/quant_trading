@@ -104,3 +104,88 @@ def test_open_trade_blocks_pyramid_weaker_signal():
     assert verdict.allowed is False
     assert verdict.reason == "金字塔: 需超 0.7000"
     assert verdict.audit_payload["source"] == "pyramid"
+
+
+def test_close_position_is_allowed_as_risk_reducing_action():
+    service = _service()
+
+    verdict = service.evaluate(
+        "close_position",
+        {"position_id": "268", "close_reason": "manual"},
+    )
+
+    assert verdict.allowed is True
+    assert verdict.reason == "risk_reducing_action"
+    assert verdict.audit_payload["position_id"] == "268"
+
+
+def test_update_weight_blocks_when_drawdown_near_limit():
+    service = _service()
+
+    verdict = service.evaluate(
+        "update_weight",
+        {"session": {"drawdown_pct": 12.0}},
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "drawdown_approaching_limit"
+    assert verdict.audit_payload["source"] == "RiskGovernor"
+
+
+def test_promote_and_register_factor_use_governor_thresholds():
+    service = _service()
+
+    promote = service.evaluate("promote_factor", {"session": {"drawdown_pct": 11.0}})
+    register = service.evaluate("register_factor", {"session": {"drawdown_pct": 10.0}})
+
+    assert promote.allowed is False
+    assert promote.reason == "drawdown_too_high_for_promotion"
+    assert register.allowed is False
+    assert register.reason == "drawdown_too_high_for_new_factor"
+
+
+def test_start_shadow_model_blocks_live_trading_capability():
+    service = _service()
+
+    verdict = service.evaluate(
+        "start_shadow_model",
+        {"candidate_id": "cand_1", "capabilities": {"live_trading": True}},
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "live_trading_capability_not_allowed"
+    assert verdict.required_mode == "shadow"
+
+
+def test_start_canary_model_blocks_unexpected_candidate_status():
+    service = _service()
+
+    verdict = service.evaluate(
+        "start_canary_model",
+        {
+            "candidate_id": "cand_2",
+            "candidate_status": "queued",
+            "allowed_statuses": ["shadow_passed", "canary_ready"],
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "candidate_status_not_allowed"
+    assert verdict.audit_payload["candidate_status"] == "queued"
+
+
+def test_start_canary_model_allows_advisory_candidate():
+    service = _service()
+
+    verdict = service.evaluate(
+        "start_canary_model",
+        {
+            "candidate_id": "cand_3",
+            "candidate_status": "shadow_passed",
+            "allowed_statuses": ["shadow_passed", "canary_ready"],
+            "capabilities": {"live_trading": False},
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.required_mode == "canary"

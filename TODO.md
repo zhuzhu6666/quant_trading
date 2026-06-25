@@ -50,7 +50,7 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 | L5 | 服务器开发同步规范固化 | 完成 | 已固化到 `docs/development-workflow.md`：本地为主开发端，GitHub main 为最终合并源，服务器为后端运行/验证端，热修需短事务回推并保持三端一致 |
 | L6 | 时间/空间上下文抽象因子 | 待设计 | 已开始记录 `holding_seconds`，但还需把交易时段、持仓生命周期、价格空间位置、多周期结构和相关性统一成可学习上下文 |
 | L7 | 运行环境健康专项 | 待做 | `l2_depth` 与 `disk_space` 偶发 degraded/critical；不阻塞 Phase A 闭环，但进入 Phase B 前建议独立处理 |
-| B1 | RiskPolicyService 统一开仓裁决 | 进行中 | 已建立 `risk/policy_service.py`，live 开仓前 VaR/仓位数量/API volume/金字塔统一输出 `RiskVerdict` |
+| B1 | RiskPolicyService 统一高影响动作裁决 | 进行中 | 已覆盖 `open_trade / close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model`；live 开仓与模型 shadow/canary API 已接入 verdict |
 
 ## 🟡 延期项
 
@@ -114,3 +114,4 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 
 - 2026-06-25: 新增 `risk/policy_service.py`，提供 `RiskPolicyService.evaluate(action, context) -> RiskVerdict` 统一风控裁决入口。
 - 2026-06-25: live 开仓路径已接入 `open_trade` verdict；VaR、仓位数量、API volume、金字塔检查统一通过 `RiskVerdict` 返回，并写入 skip ledger 的 `risk_state.policy_verdict`。
+- 2026-06-25: `RiskPolicyService` 已扩展 `close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model`；模型 shadow queue、canary review、canary trial API 已附带 `risk_verdict`，并阻断带 live trading 能力或状态不匹配的候选。

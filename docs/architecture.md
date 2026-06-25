@@ -549,7 +549,9 @@ offline validated
 
 - 已新增 `RiskPolicyService.evaluate(action, context) -> RiskVerdict` 作为统一 facade。
 - live 开仓路径已先接入 `open_trade`，把 VaR、仓位数量、API volume、金字塔检查统一成一个可审计 verdict。
-- 后续还需要把 close、weight update、factor promotion、model shadow/canary 等高影响动作也逐步接入。
+- `close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model` 已进入统一 action 口径。
+- 模型 shadow queue、canary review、canary trial API 已附带 `risk_verdict`，并阻断带 live trading 能力或候选状态不匹配的模型流程。
+- 后续还需要把权重更新、因子晋升、新因子注册的实际调用点从各自业务模块接入该 verdict，而不只是 service 层具备动作定义。
 
 要完成：
 
