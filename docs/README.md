@@ -8,6 +8,7 @@
 - [../TODO.md](../TODO.md) - 当前状态、收尾事项和技术债
 - [../CLAUDE.md](../CLAUDE.md) - Codex/Claude 协作上下文和工程约定
 - [startup.md](startup.md) - 后端、小程序和常用脚本启动方式
+- [development-workflow.md](development-workflow.md) - 本地/GitHub/服务器三端开发、发布和同步流程
 - [architecture.md](architecture.md) - 当前系统架构、风控/学习/模型边界和未来完全体
 - [CTRADER_INTEGRATION.md](CTRADER_INTEGRATION.md) - cTrader 执行通道说明
 - [planning/self-evolving-upgrade-plan.md](planning/self-evolving-upgrade-plan.md) - 规则学习与模型数据闭环设计
@@ -22,7 +23,6 @@
 
 ## 三端协作规则
 
-- 后端代码以服务器修改和验证为准。
-- 前端代码以本地 `miniprogram_v2` 修改和验证为准。
-- GitHub `main` 是最终合并源。
-- 每轮发布后统一执行：本地提交 -> 推送 GitHub -> 同步服务器 -> 必要时从 GitHub 下发到本地和服务器，保持本地、GitHub、服务器三端一致。
+- 完整流程见 [development-workflow.md](development-workflow.md)。
+- 简要原则：本地是主开发端，GitHub `main` 是最终合并源，服务器是后端真实运行和验证端。
+- 服务器允许短事务热修，但必须立即 commit / push GitHub，再从 GitHub 下发到本地和服务器，保持三端一致。

@@ -41,7 +41,7 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 | L2 | 历史重复应用记录清理脚本 | 待做 | 旧逻辑遗留了少量重复 `application`，现在已不会继续增长，但建议补一次正式清理 |
 | L3 | 小程序学习页状态文案对齐 | 待做 | 将 `observing / effective / ineffective / superseded / reinforced` 做更明确展示 |
 | L4 | 重启恢复场景回归测试 | 待做 | 覆盖“开仓后重启 / 重启期间平仓 / loop 未立即恢复”三类场景 |
-| L5 | 服务器开发同步规范固化 | 完成 | 已写入 `docs/README.md`：后端以服务器为准、本地前端为准、GitHub main 为最终合并源，发布后保持本地/GitHub/服务器三端一致 |
+| L5 | 服务器开发同步规范固化 | 完成 | 已固化到 `docs/development-workflow.md`：本地为主开发端，GitHub main 为最终合并源，服务器为后端运行/验证端，热修需短事务回推并保持三端一致 |
 
 ## 🟡 延期项
 
