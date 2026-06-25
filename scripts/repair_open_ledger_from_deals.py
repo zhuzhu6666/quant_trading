@@ -128,7 +128,13 @@ def _direction_from_context(ctx: dict) -> int:
     return 0
 
 
-def repair(*, db_path: str | Path = STATE_DB, limit: int = 50, apply: bool = False) -> dict:
+def repair(
+    *,
+    db_path: str | Path = STATE_DB,
+    limit: int = 50,
+    apply: bool = False,
+    allow_close_only: bool = False,
+) -> dict:
     conn = _connect(db_path)
     repaired = []
     skipped = []
@@ -156,7 +162,7 @@ def repair(*, db_path: str | Path = STATE_DB, limit: int = 50, apply: bool = Fal
                 or 0.0
             )
             direction = _direction_from_context(ctx)
-            if not open_deal and not recovery:
+            if not open_deal and not recovery and not (allow_close_only and close_deal):
                 skipped.append({"position_id": position_id, "reason": "no_open_deal_or_recovery"})
                 continue
 
@@ -171,6 +177,7 @@ def repair(*, db_path: str | Path = STATE_DB, limit: int = 50, apply: bool = Fal
                 "volume": volume,
                 "open_deal_id": open_deal.get("deal_id"),
                 "close_deal_id": close_deal.get("deal_id"),
+                "allow_close_only": bool(allow_close_only),
                 "repair_created_at": now,
                 "note": "minimal historical open ledger repair; no factor snapshots fabricated",
             }
@@ -270,8 +277,18 @@ def main() -> int:
     parser.add_argument("--db", default=str(STATE_DB), help="Path to state.db")
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--apply", action="store_true", help="Write repairs. Omit for dry-run.")
+    parser.add_argument(
+        "--allow-close-only",
+        action="store_true",
+        help="Allow partial repair from close deal entry_price when open deal/recovery is missing.",
+    )
     args = parser.parse_args()
-    result = repair(db_path=args.db, limit=args.limit, apply=args.apply)
+    result = repair(
+        db_path=args.db,
+        limit=args.limit,
+        apply=args.apply,
+        allow_close_only=args.allow_close_only,
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0
 

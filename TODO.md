@@ -96,4 +96,4 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 - 2026-06-25: 新增 `scripts/phase_a_health_check.py`，用于检查 decision ledger、broker close、trade review、experience、policy suggestion、learning application/effect 是否断链。
 - 2026-06-25: 修复 cTrader 市价单成交后 SL/TP amend 失败时 open/recovery 上下文缺失的问题；以后即使 amend 失败，也会记录 open、submitted/filled、position opened，再记录 amend failure。
 - 2026-06-25: 修复 SL/TP 保护价用 bar/current price 计算导致 SELL 在成交后被 cTrader `TRADING_BAD_STOPS` 拒绝的问题；现在成交后会基于真实 `fill_price` 重算保护价再 amend。
-- 2026-06-25: 新增 `scripts/repair_open_ledger_from_deals.py`，用于把历史 close-without-open 缺口按 partial context 修成最小 open ledger，不伪造因子快照。
+- 2026-06-25: 新增 `scripts/repair_open_ledger_from_deals.py`，用于把历史 close-without-open 缺口按 partial context 修成最小 open ledger，不伪造因子快照；极端缺 open deal 时必须显式加 `--allow-close-only`。
