@@ -8,6 +8,7 @@ const store = createStore({
   factorWeights: [],
   dbHealth: null,
   apiHealth: null,
+  riskSummary: null,
   updatedAt: 0,
 });
 

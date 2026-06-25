@@ -89,5 +89,41 @@
       </view>
       <view wx:else class="soft-panel section-note">暂无数据</view>
     </section-card>
+
+    <section-card title="统一风控裁决" subtitle="最近系统放行了什么，又拦住了什么">
+      <view wx:if="{{policySummary}}" class="stack-12">
+        <view class="grid-3" style="margin-bottom: 18rpx;">
+          <view class="split-card stack-12">
+            <view class="small muted">允许</view>
+            <view class="value-md accent-pos">{{policySummary.allowed}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">阻断</view>
+            <view class="value-md accent-neg">{{policySummary.blocked}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">总数</view>
+            <view class="value-md">{{policySummary.total}}</view>
+          </view>
+        </view>
+        <view class="status-banner status-banner-{{policySummary.latestTone}}">
+          <view class="row-between">
+            <view class="small">最新裁决</view>
+            <status-pill label="{{policySummary.latestAction}}" tone="{{policySummary.latestTone}}" />
+          </view>
+          <view class="section-note">{{policySummary.latestReason}}</view>
+        </view>
+        <view class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">高频原因</view>
+            <view class="small">{{policySummary.topReason}}</view>
+          </view>
+          <view wx:if="{{policySummary.actionRows.length}}" class="row-wrap">
+            <view wx:for="{{policySummary.actionRows}}" wx:key="key" class="tag">{{item.label}} {{item.value}}</view>
+          </view>
+        </view>
+      </view>
+      <view wx:else class="soft-panel section-note">风控汇总暂时不可用</view>
+    </section-card>
   </view>
 </view>

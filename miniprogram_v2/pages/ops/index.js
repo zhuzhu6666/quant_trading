@@ -1,6 +1,6 @@
 import systemStore from '../../stores/system';
 import { refreshOpsDomain } from '../../services/ops';
-import { formatDateTime, toneFromStatus } from '../../utils/format';
+import { formatDateTime, humanizeRiskAction, humanizeRiskReason, toneFromStatus } from '../../utils/format';
 
 function resolveEventTone(eventType) {
   const normalized = String(eventType || '').toLowerCase();
@@ -57,6 +57,33 @@ function buildDbCards(dbHealth) {
   ];
 }
 
+function summarizePolicy(policy = null) {
+  if (!policy) return null;
+  const counts = policy.counts || {};
+  const blocked = Number(counts.blocked || 0);
+  const allowed = Number(counts.allowed || 0);
+  const items = Array.isArray(policy.items) ? policy.items : [];
+  const latest = items[0] || null;
+  const byReason = policy.by_reason || {};
+  const byAction = policy.by_action || {};
+  const topReason = Object.keys(byReason)
+    .sort((a, b) => Number(byReason[b] || 0) - Number(byReason[a] || 0))[0] || '';
+  const actionRows = Object.keys(byAction)
+    .sort((a, b) => Number(byAction[b] || 0) - Number(byAction[a] || 0))
+    .slice(0, 4)
+    .map((key) => ({ key, label: humanizeRiskAction(key), value: byAction[key] }));
+  return {
+    blocked,
+    allowed,
+    total: Number(policy.total || items.length || 0),
+    latestAction: latest ? humanizeRiskAction(latest.action || latest.event_type || '--') : '--',
+    latestReason: latest ? humanizeRiskReason(latest.reason || '--') : '--',
+    latestTone: latest ? (latest.allowed ? 'positive' : 'negative') : 'neutral',
+    topReason: humanizeRiskReason(topReason || '暂无'),
+    actionRows,
+  };
+}
+
 Page({
   data: {
     scheduler: null,
@@ -68,6 +95,7 @@ Page({
     apiMetricClass: '',
     evolutionMetricClass: '',
     jobsMetricClass: '',
+    policySummary: null,
   },
 
   onLoad() {
@@ -90,8 +118,10 @@ Page({
     const scheduler = state.scheduler || null;
     const jobs = (scheduler && scheduler.jobs) || [];
     const dbHealth = state.dbHealth;
+    const riskSummary = state.riskSummary || null;
     const runningJobs = jobs.filter((item) => item.running).length;
     const dbCards = buildDbCards(dbHealth);
+    const policySummary = summarizePolicy(riskSummary && riskSummary.policy);
     this.setData({
       scheduler,
       evolution: state.evolution
@@ -102,6 +132,7 @@ Page({
           }
         : null,
       dbHealth,
+      policySummary,
       apiHealth: {
         ...apiHealth,
         tone: toneFromStatus(apiHealth.status || 'ok'),

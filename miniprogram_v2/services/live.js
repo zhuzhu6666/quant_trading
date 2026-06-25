@@ -106,12 +106,13 @@ async function pollLoop(options = {}) {
   lastPollAt = now;
   pollInFlight = (async () => {
     try {
-    const [account, positions, strategyStatus, sessionStats, loopStatus] = await Promise.all([
+    const [account, positions, strategyStatus, sessionStats, loopStatus, riskSummary] = await Promise.all([
       get('/api/live/account').catch(() => null),
       get('/api/live/positions').catch(() => null),
       get('/api/live/strategy-status').catch(() => null),
       get('/api/live/session-stats').catch(() => null),
       get('/api/live/loop-status').catch(() => null),
+      get('/api/risk/summary').catch(() => null),
     ]);
 
     const currentTrading = liveStore.getState().trading || {};
@@ -155,6 +156,7 @@ async function pollLoop(options = {}) {
       strategyStatus,
       sessionStats,
       loopStatus,
+      riskSummary,
       trading: nextTrading,
       lastUpdate: Date.now(),
     });

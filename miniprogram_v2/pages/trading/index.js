@@ -1,6 +1,6 @@
 import liveStore from '../../stores/live';
 import { emergencyCloseAll, refreshLiveSnapshot, startTradingLoop, stopTradingLoop } from '../../services/live';
-import { formatMoney, formatPct, formatPrice, toneFromStatus } from '../../utils/format';
+import { formatMoney, formatPct, formatPrice, humanizeRiskAction, humanizeRiskReason } from '../../utils/format';
 
 function normalizePosition(item = {}) {
   const pnl = Number(item.pnl ?? item.netUnrealizedPnL ?? item.unrealized ?? item.profit ?? 0);
@@ -33,6 +33,7 @@ Page({
     startBusy: false,
     stopBusy: false,
     emergencyBusy: false,
+    policyView: null,
   },
 
   onLoad() {
@@ -55,6 +56,7 @@ Page({
     const positions = (trading.positions_list || []).map(normalizePosition);
     const strategy = state.strategyStatus || {};
     const loopStatus = state.loopStatus || {};
+    const riskSummary = state.riskSummary || {};
     const v4Status = strategy.v4_status || {};
     const recentSignal = strategy.recent_signal || strategy.signal || {};
     const direction = recentSignal.direction || strategy.direction || trading.position.dir || 'FLAT';
@@ -90,6 +92,8 @@ Page({
     const equityDrawdownPct = balance > 0 ? Math.max(0, ((balance - equity) / balance) * 100) : 0;
     const sessionDrawdownPct = Number((trading.daily && trading.daily.drawdown_pct) || 0);
     const liveDrawdownPct = Math.max(sessionDrawdownPct, equityDrawdownPct);
+    const policy = riskSummary.policy || {};
+    const latestVerdict = Array.isArray(policy.items) ? policy.items[0] : null;
     this.setData({
       signalLabel: direction === 1 || direction === 'LONG' ? '偏多' : direction === -1 || direction === 'SHORT' ? '偏空' : '观望',
       signalTone: direction === 1 || direction === 'LONG' ? 'positive' : direction === -1 || direction === 'SHORT' ? 'negative' : 'neutral',
@@ -112,6 +116,15 @@ Page({
       },
       risk: trading.risk || {},
       currentPrice: formatPrice(trading.current_price, 3),
+      policyView: latestVerdict
+        ? {
+            action: humanizeRiskAction(latestVerdict.action || latestVerdict.event_type || '--'),
+            reason: humanizeRiskReason(latestVerdict.reason || '--'),
+            tone: latestVerdict.allowed ? 'positive' : 'negative',
+            blocked: Number((policy.counts && policy.counts.blocked) || 0),
+            allowed: Number((policy.counts && policy.counts.allowed) || 0),
+          }
+        : null,
     });
   },
 

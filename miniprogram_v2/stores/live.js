@@ -19,6 +19,7 @@ const store = createStore({
   account: null,
   sessionStats: null,
   loopStatus: null,
+  riskSummary: null,
 });
 
 export default store;
