@@ -77,6 +77,8 @@ git push origin main
 cd /home/ubuntu/quant_trading
 git pull --ff-only origin main
 .venv/bin/python -m pytest tests/research/test_rule_learning_pipeline.py tests/research/test_model_registry.py -q
+.venv/bin/python scripts/phase_b_risk_check.py --api-base https://YOUR_HOST --username YOUR_USER --password YOUR_PASSWORD
+.venv/bin/python scripts/phase_b_risk_check.py --api-base https://YOUR_HOST --username YOUR_USER --password YOUR_PASSWORD --position-id 123456789
 git status --short
 git rev-parse HEAD
 ```
@@ -174,6 +176,7 @@ ssh ubuntu@SERVER "cd /home/ubuntu/quant_trading && git rev-parse HEAD && git st
 [ ] GitHub push 成功
 [ ] 服务器 pull --ff-only 成功
 [ ] 服务器核心测试通过
+[ ] Phase B 风控摘要接口验证通过（`/api/risk/summary`、`/api/risk/policy/verdicts`）
 [ ] 必要服务已重启
 [ ] 本地 / GitHub / 服务器 HEAD 一致
 [ ] 服务器工作区干净

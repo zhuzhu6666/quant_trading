@@ -560,6 +560,8 @@ offline validated
 - 时间规则第一批已进入真实链路：`open_trade` 会执行“连续亏损后的冷静期”拦截；`close_position` verdict 会记录持仓时长、超时阈值和是否超时，live loop 已具备按 `risk_max_holding_bars` 自动发起超时平仓的能力（默认关闭，待校准）。
 - 已基于服务器在线仓位样本把 `risk_max_holding_bars` 的首发默认值校准到 `288`（M5 约 24 小时），目的是先让超时收口真正生效，同时避免刚上线就误伤当前 7 小时到 13 小时级别的持仓。
 - 运行环境健康已继续收口到统一裁决：`system_health` 快照现已进入 `runtime_health`；其中 `disk_space=critical` 被视为硬阻断，`l2_depth=critical` 只在策略显式要求深度数据时阻断，否则先作为软风险保留在审计与展示层。
+- 线上验收已证明这条链路真实生效：`/api/risk/summary` 会返回 `system_health`，`/api/live/positions` 会返回 `holding_seconds / holding_timeout_*`，`/api/live/status` 与 `/api/live/strategy-status` 也能看到 ready/connected/live positions 等运行态证据。
+- 这也暴露出展示层最后一层缺口：`system_health.overall=critical` 不能直接等价成“会阻断交易”，因为有些 critical 项只是高优先级观察项（例如未要求 L2 时的 `l2_depth`）。因此展示层需要补“是否真的挡住开仓”的解释，而不是把机器状态原样抛给用户。
 - 后续还需要把前端风控面板接到该数据源，并补齐运行环境、跨品种、时间/空间上下文等更完整的 governor state。
 
 要完成：

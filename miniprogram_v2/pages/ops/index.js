@@ -2,6 +2,22 @@ import systemStore from '../../stores/system';
 import { refreshOpsDomain } from '../../services/ops';
 import { formatDateTime, humanizeRiskAction, humanizeRiskReason, toneFromStatus } from '../../utils/format';
 
+function humanizeHealthComponent(key) {
+  const mapping = {
+    ctrader_bridge: '交易桥',
+    live_loop: '实盘循环',
+    bar_m1: '1分钟K线',
+    bar_m5: '5分钟K线',
+    tick_data: 'Tick 数据',
+    l2_depth: '盘口深度',
+    db_ctrader_data: '主行情库',
+    db_ticks: 'Tick 库',
+    db_l2: '深度库',
+    disk_space: '磁盘空间',
+  };
+  return mapping[key] || key || '--';
+}
+
 function resolveEventTone(eventType) {
   const normalized = String(eventType || '').toLowerCase();
   if (['cycle_complete', 'cycle_succeeded', 'completed', 'success'].includes(normalized)) {
@@ -88,20 +104,40 @@ function summarizeSystemHealth(systemHealth = null) {
   if (!systemHealth) return null;
   const critical = Array.isArray(systemHealth.critical_components) ? systemHealth.critical_components : [];
   const degraded = Array.isArray(systemHealth.degraded_components) ? systemHealth.degraded_components : [];
+  const blocking = Array.isArray(systemHealth.blocking_components) ? systemHealth.blocking_components : [];
+  const advisoryCritical = Array.isArray(systemHealth.advisory_critical_components) ? systemHealth.advisory_critical_components : [];
   const components = systemHealth.components && typeof systemHealth.components === 'object' ? systemHealth.components : {};
   const componentRows = Object.keys(components)
     .slice(0, 6)
     .map((key) => ({
-      key,
+      key: humanizeHealthComponent(key),
       status: components[key] && components[key].status ? components[key].status : 'unknown',
     }));
+  const impactStatus = systemHealth.impact_status || (blocking.length ? 'blocked' : critical.length || degraded.length ? 'observe' : 'ok');
+  const impactTone =
+    impactStatus === 'blocked'
+      ? 'negative'
+      : impactStatus === 'observe'
+        ? 'warning'
+        : toneFromStatus(systemHealth.overall || 'unknown');
   return {
     overall: systemHealth.overall || 'unknown',
-    tone: toneFromStatus(systemHealth.overall || 'unknown'),
+    tone: impactTone,
+    impactStatus,
+    impactLabel:
+      impactStatus === 'blocked'
+        ? '会阻断交易'
+        : impactStatus === 'observe'
+          ? '需要盯住'
+          : '暂不影响交易',
+    impactSummary: systemHealth.impact_summary || '暂无运行风险摘要',
     criticalCount: critical.length,
     degradedCount: degraded.length,
-    criticalText: critical.length ? critical.join(' / ') : '无',
-    degradedText: degraded.length ? degraded.join(' / ') : '无',
+    blockingCount: blocking.length,
+    criticalText: critical.length ? critical.map(humanizeHealthComponent).join(' / ') : '无',
+    degradedText: degraded.length ? degraded.map(humanizeHealthComponent).join(' / ') : '无',
+    blockingText: blocking.length ? blocking.map(humanizeHealthComponent).join(' / ') : '无',
+    advisoryText: advisoryCritical.length ? advisoryCritical.map(humanizeHealthComponent).join(' / ') : '无',
     scoreText: Number(systemHealth.overall_score || 0).toFixed(2),
     componentRows,
   };

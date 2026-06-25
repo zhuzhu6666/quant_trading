@@ -50,6 +50,7 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 | L5 | 服务器开发同步规范固化 | 完成 | 已固化到 `docs/development-workflow.md`：本地为主开发端，GitHub main 为最终合并源，服务器为后端运行/验证端，热修需短事务回推并保持三端一致 |
 | L6 | 时间/空间上下文抽象因子 | 待设计 | 已开始记录 `holding_seconds`，但还需把交易时段、持仓生命周期、价格空间位置、多周期结构和相关性统一成可学习上下文 |
 | L7 | 运行环境健康专项 | 待做 | `l2_depth` 与 `disk_space` 偶发 degraded/critical；不阻塞 Phase A 闭环，但进入 Phase B 前建议独立处理 |
+| L8 | 风控/复盘运维检索入口 | 进行中 | 已新增 `/api/risk/trade-trace` 和 `scripts/phase_b_risk_check.py --position-id/--decision-id`；现在可按 `position_id / decision_id` 追 decision ledger、position/order lifecycle、trade review、factor contribution、recovery state。后续仍可补更适合前端直接展示的运维页与搜索入口 |
 | B1 | RiskPolicyService 统一高影响动作裁决 | 进行中 | 已覆盖 `open_trade / close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model`；live 开仓、模型 shadow/canary API、学习权重同步、因子 shadow 注册、因子 promote 已接入 verdict |
 
 ## 🟡 延期项
@@ -76,6 +77,7 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 | LE3 | `research/learning/policy_suggester.py` | 当前仍是保守规则阈值 | 后续真实样本足够后，应迁移到可配置阈值或模型 adapter |
 | LE4 | `backend/services/learning_backfill.py` | 断点修复与实时闭环仍需压测 | 需要用真实重启/补单场景确认无重复复盘 |
 | LE5 | `miniprogram_v2/pages/learning/*` | 学习生命周期状态与后端枚举已增多 | 前端展示层还可再做一次精简和映射统一 |
+| LE6 | `backend/core/db.py` vs `research/experiment_tracker.py` | `experiments.db` schema 漂移 | `init_experiments_db()` 期待 `experiment_type/params_json/...` 列式表，但 `ExperimentTracker` 仍使用 `data TEXT` blob 旧表；本地 Phase B 验证时已触发 `no such column: experiment_type` 启动 warning，需统一实验记录 schema 与迁移策略 |
 
 ## 🔵 P2（审计 v13 确认）
 
@@ -124,3 +126,6 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 - 2026-06-25: 时间规则第一批已落地：`open_trade` 会阻断“连续亏损后的冷静期”内新开仓；`close_position` verdict 会统一记录持仓时长与是否超时，live loop 也已预留 `risk_max_holding_bars` 驱动的自动超时平仓能力（默认关闭，待参数校准）。
 - 2026-06-25: 基于服务器当前在线仓位样本（约 13.3h / 7.4h）把 `risk_max_holding_bars` 首发默认值校准为 `288`（M5 约 24 小时）；这样不会立刻误伤现有仓位，但能让超时收口链真正开始生效。
 - 2026-06-25: 系统健康第一批已进入统一开仓裁决：`runtime_health.system_health` 会进入 `open_trade` context；当前 `disk_space=critical` 会直接阻断新开仓，`l2_depth=critical` 仅在策略声明 `risk_require_l2_depth=True` 时阻断，否则先作为软风险记录和展示。
+- 2026-06-25: 新增 `scripts/phase_b_risk_check.py`，用于统一验收 `/api/risk/summary` 与 `/api/risk/policy/verdicts`；支持远程 HTTP 登录验收，也支持 `--local-testclient` 本地直连 app 做结构自检。当前服务器 SSH 临时超时，后续网络恢复后优先用该脚本补齐线上 payload 级证据。
+- 2026-06-25: 已通过 `https://www.zhuzhu666.icu` 完成线上 payload 级验证：`/api/risk/summary` 真实返回已包含 `system_health`，`/api/live/positions` 真实返回已包含 `holding_seconds / holding_timeout_*`，`/api/live/status` 与 `/api/live/strategy-status` 显示 live loop ready、bridge connected、2 个持仓均已带 SL/TP。当前也暴露出最后一层体验问题：`system_health.overall=critical` 可能只是 `l2_depth` 这类非阻断观察项，因此已开始补“是否真的阻断交易”的人话语义。
+- 2026-06-25: 已新增 `/api/risk/trade-trace`，给 `position_id / decision_id` 可返回 decision ledger、position lifecycle、order lifecycle、trade review、factor contribution、recovery state 的整条证据链；`scripts/phase_b_risk_check.py` 也已支持 `--position-id / --decision-id` 做远程核验。
