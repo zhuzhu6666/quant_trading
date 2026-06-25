@@ -340,6 +340,23 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
     只有通过 Canary 晋升为 SOURCE_DISCOVERED 后才参与交易。
     """
     try:
+        from risk.policy_service import RiskPolicyService
+        verdict = RiskPolicyService.shared().evaluate(
+            "register_factor",
+            {
+                "required_mode": "shadow",
+                "candidate_count": len(expressions),
+                "source": "evolution_orchestrator",
+            },
+        )
+        if not verdict.allowed:
+            logger.warning("[Evolve] shadow register blocked by risk policy: %s", verdict.reason)
+            _emit_evolution_story("shadow_register_blocked", {
+                "candidate_count": len(expressions),
+                "risk_verdict": verdict.to_dict(),
+            })
+            return 0
+
         from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
         adapter = RegistryAdapter.shared()
         count = 0
@@ -355,11 +372,12 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
                 except Exception:
                     pass
             try:
-                adapter.register_runtime(
+                ok = adapter.register_runtime(
                     name=name, func=func, source=SOURCE_SHADOW,
                     description=expression_str,
                 )
-                count += 1
+                if ok:
+                    count += 1
             except Exception as e:
                 logger.debug("[Evolve] register %s failed: %s", name, e)
         return count
@@ -460,6 +478,23 @@ def _run_canary_evaluation(
 def _execute_promotions(names: list[str]) -> None:
     """真正执行晋升: adapter.promote(name, SOURCE_DISCOVERED)."""
     try:
+        from risk.policy_service import RiskPolicyService
+        verdict = RiskPolicyService.shared().evaluate(
+            "promote_factor",
+            {
+                "required_mode": "discovered",
+                "factor_count": len(names),
+                "source": "evolution_orchestrator",
+            },
+        )
+        if not verdict.allowed:
+            logger.warning("[Evolve] promotion blocked by risk policy: %s", verdict.reason)
+            _emit_evolution_story("canary_promotion_blocked", {
+                "promoted": names,
+                "risk_verdict": verdict.to_dict(),
+            })
+            return
+
         from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED
         adapter = RegistryAdapter.shared()
         for name in names:

@@ -9,6 +9,7 @@ import pandas as pd
 from alpha.registry_adapter import RegistryAdapter
 from backend.runtime import evolution_orchestrator as evo
 from backend.services import live_service
+from backend.services import shadow_service
 from config import runtime_config as rc
 from deployment.canary import ACTIVE, CANARY_5, CANARY_50, PROBATION, CanaryEvalContext
 
@@ -33,9 +34,41 @@ class _AWE:
 class _Adapter:
     def __init__(self, source="shadow"):
         self._meta = {"foo": {"source": source, "score": 1.0}}
+        self.promoted = []
+        self.registered = []
 
     def get_meta(self, name):
         return dict(self._meta[name])
+
+    def promote(self, name, new_source, reason=""):
+        self.promoted.append((name, new_source, reason))
+        self._meta[name]["source"] = new_source
+        return True
+
+    def register_runtime(self, name, func, source, description=""):
+        self.registered.append((name, source, description))
+        self._meta[name] = {"source": source, "score": 0.0, "description": description}
+        return True
+
+
+class _RiskVerdict:
+    def __init__(self, allowed=True, reason="ok"):
+        self.allowed = allowed
+        self.reason = reason
+
+    def to_dict(self):
+        return {"allowed": self.allowed, "reason": self.reason}
+
+
+class _RiskPolicy:
+    def __init__(self, allowed=True, reason="ok"):
+        self.allowed = allowed
+        self.reason = reason
+        self.calls = []
+
+    def evaluate(self, action, context):
+        self.calls.append((action, context))
+        return _RiskVerdict(self.allowed, self.reason)
 
 
 def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
@@ -266,3 +299,32 @@ def test_apply_learning_biases_is_small_and_normalized():
     assert adjusted["bar"] > 0.4
     assert applied["foo"]["multiplier"] == 0.8
     assert applied["bar"]["multiplier"] == 1.04
+
+
+def test_evolution_shadow_register_blocked_by_risk_policy(monkeypatch):
+    import risk.policy_service as policy_service
+
+    policy = _RiskPolicy(allowed=False, reason="drawdown_too_high_for_new_factor")
+    monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: policy))
+    monkeypatch.setattr(evo, "_emit_evolution_story", lambda *args, **kwargs: None)
+
+    class _Expr:
+        expression = "rank(close)"
+
+    assert evo._register_shadow_factors([_Expr()]) == 0
+    assert policy.calls[0][0] == "register_factor"
+
+
+def test_shadow_promote_blocked_by_risk_policy(monkeypatch):
+    import risk.policy_service as policy_service
+
+    adapter = _Adapter("shadow")
+    policy = _RiskPolicy(allowed=False, reason="drawdown_too_high_for_promotion")
+    monkeypatch.setattr(shadow_service, "_get_adapter", lambda: adapter)
+    monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: policy))
+
+    result = shadow_service.promote("foo")
+
+    assert result["ok"] is False
+    assert "risk_policy_block" in result["error"]
+    assert adapter.promoted == []

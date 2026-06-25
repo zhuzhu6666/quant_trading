@@ -88,7 +88,7 @@ risk/
   -> cross asset covariance
 ```
 
-`RiskGovernor` 目前是最高层风控裁决器的接口形态，已支持：
+`RiskGovernor` 目前是最高层风控裁决器的核心规则，`RiskPolicyService` 是面向业务调用点的统一 facade。当前已支持：
 
 - `allow_trade`
 - `allow_weight_update`
@@ -97,7 +97,7 @@ risk/
 - `force_dry_run`
 - `force_deleverage`
 
-但它还没有完全成为实时链路唯一入口。当前 live path 仍是显式执行 `ExecutionGate + VaR + Kelly + 仓位控制`。未来需要把这些分散检查收敛到统一的 `RiskGovernor` / `RiskPolicyService` facade。
+它已经开始进入真实业务链路：live 开仓、学习权重同步、模型 shadow/canary API、因子 shadow 注册、手动 shadow promote、自动 canary promote 都会产出 `risk_verdict`。剩余工作是继续把历史分散检查收敛到同一 facade，并让前端风控面板直接展示这些 verdict。
 
 当前需要注意的结构债：
 
@@ -552,7 +552,8 @@ offline validated
 - `close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model` 已进入统一 action 口径。
 - 模型 shadow queue、canary review、canary trial API 已附带 `risk_verdict`，并阻断带 live trading 能力或候选状态不匹配的模型流程。
 - 学习治理 run 的 `_update_weights()` 同步已接入 `update_weight` verdict。
-- 后续还需要把因子晋升、新因子注册等实际调用点从各自业务模块接入该 verdict，而不只是 service 层具备动作定义。
+- 因子发现和晋升实际调用点已接入：`scripts/discover_factors.py --auto-register`、EvolutionOrchestrator GP shadow 注册、EvolutionOrchestrator canary -> discovered promote、`/api/shadow/promote` 手动晋升都会先走 `RiskPolicyService`。
+- 后续还需要把 verdict 聚合到风控面板，并补齐运行环境、跨品种、时间/空间上下文等更完整的 governor state。
 
 要完成：
 

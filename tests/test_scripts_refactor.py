@@ -9,6 +9,7 @@ import inspect
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -79,3 +80,39 @@ def test_cli_help_is_fast():
         assert proc.returncode == 0
         # Loose bound: a slow machine might be 2-3s; fail if > 5s
         assert elapsed < 5.0, f"{script_name} --help took {elapsed:.2f}s (expected <5s)"
+
+
+@dataclass
+class _Candidate:
+    expression: str
+    score: float = 1.0
+
+
+def test_discovery_auto_register_blocked_by_risk_policy(monkeypatch):
+    from scripts import discover_factors
+    import risk.policy_service as policy_service
+
+    class _Verdict:
+        allowed = False
+        reason = "force_factor_freeze"
+
+        def to_dict(self):
+            return {"allowed": self.allowed, "reason": self.reason}
+
+    class _Policy:
+        def evaluate(self, action, context):
+            assert action == "register_factor"
+            assert context["required_mode"] == "shadow"
+            return _Verdict()
+
+    monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: _Policy()))
+
+    registered, verdict = discover_factors._register_top_factors(
+        [_Candidate("rank(close)")],
+        engine="gp",
+        auto_register=True,
+    )
+
+    assert registered == []
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "force_factor_freeze"

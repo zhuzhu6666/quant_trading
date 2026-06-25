@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from risk.policy_service import RiskPolicyService
 from alpha.registry_adapter import (
     RegistryAdapter,
     SOURCE_SHADOW,
@@ -55,10 +56,30 @@ def promote(name: str) -> dict:
         return {"name": name, "ok": False, "error": f"factor {name!r} not in registry"}
     if meta.get("source") == SOURCE_DISCOVERED:
         return {"name": name, "ok": True, "new_status": SOURCE_DISCOVERED, "msg": "already discovered"}
+    verdict = RiskPolicyService.shared().evaluate(
+        "promote_factor",
+        {
+            "required_mode": "discovered",
+            "factor": name,
+            "source": meta.get("source", SOURCE_SHADOW),
+        },
+    ).to_dict()
+    if not verdict.get("allowed", False):
+        return {
+            "name": name,
+            "ok": False,
+            "error": f"risk_policy_block: {verdict.get('reason', 'unknown')}",
+            "risk_verdict": verdict,
+        }
     ok = adapter.promote(name, new_source=SOURCE_DISCOVERED, reason="manual promote via /api/shadow/promote")
     if not ok:
-        return {"name": name, "ok": False, "error": "promote() returned False (builtin or already in target state)"}
-    return {"name": name, "ok": True, "new_status": SOURCE_DISCOVERED}
+        return {
+            "name": name,
+            "ok": False,
+            "error": "promote() returned False (builtin or already in target state)",
+            "risk_verdict": verdict,
+        }
+    return {"name": name, "ok": True, "new_status": SOURCE_DISCOVERED, "risk_verdict": verdict}
 
 
 def demote(name: str) -> dict:

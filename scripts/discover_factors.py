@@ -7,6 +7,7 @@ Two-mode form (per spec §1.3):
 The service function is the source of truth; the CLI is a thin wrapper.
 """
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -19,6 +20,88 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from backend.core.paths import CHARTS_DIR  # noqa: E402
 from backend.jobs.progress import ProgressCB  # noqa: E402
+
+
+def _candidate_expression(candidate: Any) -> str:
+    return str(
+        getattr(candidate, "expression", "")
+        or getattr(candidate, "expr", "")
+        or getattr(candidate, "dsl", "")
+        or ""
+    )
+
+
+def _candidate_name(candidate: Any, index: int) -> str:
+    explicit = str(getattr(candidate, "name", "") or "").strip()
+    if explicit:
+        return explicit
+    expr = _candidate_expression(candidate)
+    digest = hashlib.sha1(expr.encode("utf-8")).hexdigest()[:10] if expr else f"{index:04d}"
+    return f"dsl_shadow_{digest}"
+
+
+def _candidate_ic(candidate: Any) -> float:
+    for attr in ("ic", "abs_ic_mean", "score"):
+        value = getattr(candidate, attr, None)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def _risk_verdict_dict(action: str, context: dict[str, Any]) -> dict[str, Any]:
+    from risk.policy_service import RiskPolicyService
+
+    return RiskPolicyService.shared().evaluate(action, context).to_dict()
+
+
+def _register_top_factors(top: list[Any], *, engine: str, auto_register: bool) -> tuple[list[str], dict[str, Any]]:
+    if not auto_register:
+        return [], {
+            "allowed": True,
+            "reason": "auto_register_disabled",
+            "required_mode": "shadow",
+            "audit_payload": {
+                "action": "register_factor",
+                "source": "discover_factors",
+                "candidate_count": len(top),
+                "engine": engine,
+            },
+        }
+
+    verdict = _risk_verdict_dict(
+        "register_factor",
+        {
+            "required_mode": "shadow",
+            "candidate_count": len(top),
+            "engine": engine,
+        },
+    )
+    if not verdict.get("allowed", False):
+        return [], verdict
+
+    from alpha.factor_dsl import evaluate_dsl
+    from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
+
+    adapter = RegistryAdapter.shared()
+    registered: list[str] = []
+    for i, candidate in enumerate(top):
+        expression = _candidate_expression(candidate)
+        if not expression:
+            continue
+        name = _candidate_name(candidate, i)
+        func = lambda df, _expr=expression: evaluate_dsl(_expr, df)
+        ok = adapter.register_runtime(
+            name=name,
+            func=func,
+            source=SOURCE_SHADOW,
+            description=expression,
+        )
+        if ok:
+            registered.append(name)
+    return registered, verdict
 
 
 def run_discovery(
@@ -63,8 +146,17 @@ def run_discovery(
 
     cb("evaluating", 70, f"evaluating {len(candidates) if isinstance(candidates, list) else '?'} candidates")
     top = candidates[:top_k] if isinstance(candidates, list) else []
+    registered_shadow, risk_verdict = _register_top_factors(top, engine=engine, auto_register=auto_register)
 
     cb("writing", 95, f"writing report to {report_path}")
+    top_factors = [
+        {
+            "name": _candidate_name(c, i),
+            "expr": _candidate_expression(c),
+            "ic": _candidate_ic(c),
+        }
+        for i, c in enumerate(top)
+    ]
     report_path.write_text(
         json.dumps(
             {
@@ -72,26 +164,25 @@ def run_discovery(
                 "n_candidates": n_candidates,
                 "top_k": top_k,
                 "found": len(candidates) if isinstance(candidates, list) else 0,
-                "top": [
-                    {"name": getattr(c, "name", str(i)), "expr": getattr(c, "expr", ""), "ic": getattr(c, "ic", 0.0)}
-                    for i, c in enumerate(top)
-                ],
+                "top": top_factors,
+                "auto_register": auto_register,
+                "registered_shadow": registered_shadow,
+                "risk_verdict": risk_verdict,
             },
             indent=2,
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
-    cb("done", 100, f"done. {len(top)} top factors written")
+    cb("done", 100, f"done. {len(top)} top factors written, {len(registered_shadow)} registered")
 
     return {
         "engine": engine,
         "candidates_total": n_candidates,
         "found": len(candidates) if isinstance(candidates, list) else 0,
-        "top_factors": [
-            {"name": getattr(c, "name", str(i)), "expr": getattr(c, "expr", ""), "ic": getattr(c, "ic", 0.0)}
-            for i, c in enumerate(top)
-        ],
+        "top_factors": top_factors,
+        "registered_shadow": registered_shadow,
+        "risk_verdict": risk_verdict,
         "report_path": str(report_path),
     }
 
