@@ -174,6 +174,13 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
     )
     gate = SimpleNamespace(passed=True, reason="passed")
     cfg = SimpleNamespace(timeframe="M5")
+    risk_verdict = SimpleNamespace(
+        to_dict=lambda: {
+            "allowed": True,
+            "reason": "ok",
+            "audit_payload": {"action": "open_trade"},
+        }
+    )
 
     monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
     monkeypatch.setattr(
@@ -199,10 +206,13 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
         pos=[],
         composite=composite,
         gate_result=gate,
+        risk_verdict=risk_verdict,
     )
 
     assert decision_id == "dec_open"
     assert calls["decision"]["event_type"] == "open"
+    assert calls["decision"]["risk_state"]["policy_verdict"]["allowed"] is True
+    assert calls["decision"]["action_json"]["risk_verdict"]["audit_payload"]["action"] == "open_trade"
     assert [item["event_type"] for item in calls["orders"]] == ["submitted", "filled"]
     assert calls["positions"][0]["event_type"] == "opened"
     assert calls["upserts"][0][0]["entry_decision_id"] == "dec_open"

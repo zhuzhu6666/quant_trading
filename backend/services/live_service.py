@@ -3213,6 +3213,7 @@ def _record_filled_position_open_context(
     pos: list,
     composite,
     gate_result,
+    risk_verdict=None,
 ) -> str:
     """Persist open context after a market fill, even if SL/TP amend fails."""
     entry_decision_id = ""
@@ -3262,7 +3263,11 @@ def _record_filled_position_open_context(
                     "n_positions": len(pos),
                     "session_pnl": _live_state_get("session_pnl", 0),
                 },
-                risk_state=_live_state_get("risk", {}, clone=True) or {},
+                risk_state=(
+                    _risk_state_with_verdict(risk_verdict)
+                    if risk_verdict is not None
+                    else (_live_state_get("risk", {}, clone=True) or {})
+                ),
                 action_reason="executed",
                 action_json={
                     "position_id": pid,
@@ -3273,6 +3278,11 @@ def _record_filled_position_open_context(
                     "sl": round(sl_price, 2),
                     "tp": round(tp_price, 2),
                     "tick": tick,
+                    **(
+                        {"risk_verdict": risk_verdict.to_dict()}
+                        if risk_verdict is not None
+                        else {}
+                    ),
                 },
             )
             _pos_entry_decisions[int(pid)] = entry_decision_id
@@ -3883,7 +3893,7 @@ def _process_tick_factor_pipeline(
                                                     "n_positions": len(pos),
                                                     "session_pnl": _live_state_get("session_pnl", 0),
                                                 },
-                                                risk_state=_live_state_get("risk", {}, clone=True) or {},
+                                                risk_state=_risk_state_with_verdict(risk_verdict),
                                                 action_reason="executed",
                                                 action_json={
                                                     "position_id": pid,
@@ -3893,6 +3903,7 @@ def _process_tick_factor_pipeline(
                                                     "sl": round(sl_price, 2),
                                                     "tp": round(tp_price, 2),
                                                     "tick": tick,
+                                                    "risk_verdict": risk_verdict.to_dict(),
                                                 },
                                             )
                                             _pos_entry_decisions[int(pid)] = entry_decision_id
@@ -4004,6 +4015,7 @@ def _process_tick_factor_pipeline(
                                     pos=pos,
                                     composite=composite,
                                     gate_result=gate_result,
+                                    risk_verdict=risk_verdict,
                                 )
                                 if _LEDGER:
                                     try:
@@ -4069,6 +4081,7 @@ def _process_tick_factor_pipeline(
                                 pos=pos,
                                 composite=composite,
                                 gate_result=gate_result,
+                                risk_verdict=risk_verdict,
                             )
                             if _LEDGER:
                                 try:

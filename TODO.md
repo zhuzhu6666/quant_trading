@@ -117,3 +117,4 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 - 2026-06-25: `RiskPolicyService` 已扩展 `close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model`；模型 shadow queue、canary review、canary trial API 已附带 `risk_verdict`，并阻断带 live trading 能力或状态不匹配的候选。
 - 2026-06-25: 学习治理 `/api/learning/govern/run` 的权重同步已接入 `update_weight` verdict；治理 review/reconcile 可继续执行，但 `_update_weights()` 只有在风控允许时才会触发。
 - 2026-06-25: 因子发现与晋升实际入口已接入风控：`scripts/discover_factors.py --auto-register` 会先检查 `register_factor` verdict，再真正注册 `SOURCE_SHADOW`；EvolutionOrchestrator 的 GP shadow 注册与 canary -> discovered promote、`/api/shadow/promote` 手动晋升都会先经过 `RiskPolicyService`。
+- 2026-06-25: live open 成功路径也会把 allowed `open_trade` verdict 写入 open ledger；`/api/risk/summary` 和 `/api/risk/policy/verdicts` 已能从 decision ledger 汇总最近 allowed/blocked verdict，给风控面板做统一数据源。

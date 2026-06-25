@@ -553,15 +553,16 @@ offline validated
 - 模型 shadow queue、canary review、canary trial API 已附带 `risk_verdict`，并阻断带 live trading 能力或候选状态不匹配的模型流程。
 - 学习治理 run 的 `_update_weights()` 同步已接入 `update_weight` verdict。
 - 因子发现和晋升实际调用点已接入：`scripts/discover_factors.py --auto-register`、EvolutionOrchestrator GP shadow 注册、EvolutionOrchestrator canary -> discovered promote、`/api/shadow/promote` 手动晋升都会先走 `RiskPolicyService`。
-- 后续还需要把 verdict 聚合到风控面板，并补齐运行环境、跨品种、时间/空间上下文等更完整的 governor state。
+- live open 成功路径与风险阻断路径都会写入 policy verdict；`/api/risk/summary` 和 `/api/risk/policy/verdicts` 已可聚合最近 allowed/blocked verdict。
+- 后续还需要把前端风控面板接到该数据源，并补齐运行环境、跨品种、时间/空间上下文等更完整的 governor state。
 
 要完成：
 
 - 合并 `risk/` 与 `backend/risk/` 的职责边界。
 - 增加 `RiskPolicyService` facade。
 - live_service 所有下单前风险判断统一走 facade。
-- API 风控面板读取同一套状态。
-- ledger 记录完整 risk verdict。
+- API 风控面板读取同一套状态。后端数据源已具备，前端展示待接入。
+- ledger 记录完整 risk verdict。open allowed / skip blocked 已覆盖，后续继续扩展到更多非交易高影响动作的统一审计表。
 - 将 `temporal_context` 纳入风控裁决：持仓时长、超时、事件窗口、交易时段、日内连续亏损节奏。
 - 将 `market_space_context` 纳入风控裁决：价格空间位置、波动分位、结构冲突、相关性敞口。
 
