@@ -7,8 +7,10 @@ import sqlite3
 import threading
 import time
 import uuid
+from typing import Any
 
 from backend.core.db import get_state_conn
+from backend.services.position_metrics import update_position_path_metrics
 
 
 logger = logging.getLogger(__name__)
@@ -22,11 +24,192 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value or 0.0)
+    except Exception:
+        return float(default)
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    tf = str(timeframe or "").upper()
+    mapping = {
+        "M1": 60,
+        "M5": 300,
+        "M10": 600,
+        "M15": 900,
+        "M30": 1800,
+        "H1": 3600,
+        "H4": 14400,
+        "D1": 86400,
+    }
+    return int(mapping.get(tf, 300))
+
+
+def _infer_path_metrics_from_bars(
+    *,
+    symbol: str,
+    timeframe: str,
+    entry_ts: float,
+    close_ts: float,
+    entry_price: float,
+    close_price: float,
+    pnl: float,
+) -> dict[str, Any]:
+    result = {
+        "mfe": max(0.0, pnl),
+        "mae": max(0.0, -pnl),
+        "giveback_ratio": 0.0,
+        "profit_capture_ratio": 0.0,
+        "time_in_profit_seconds": 0.0,
+        "time_in_profit_ratio": 0.0,
+        "holding_efficiency": 0.0,
+        "time_decay_score": 0.0,
+        "thesis_status": "",
+        "regime_shift": "",
+        "position_path_state": {},
+        "path_source": "",
+    }
+    if entry_ts <= 0 or close_ts <= entry_ts or entry_price <= 0 or close_price <= 0:
+        return result
+    try:
+        from data.store import DataStore
+
+        bars = DataStore().load_bars(
+            symbol or "XAUUSD+",
+            timeframe or "M5",
+            start=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(max(0.0, entry_ts - _timeframe_seconds(timeframe)))),
+            end=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(close_ts + _timeframe_seconds(timeframe))),
+        )
+    except Exception:
+        return result
+    if bars is None or getattr(bars, "empty", True):
+        return result
+
+    last_bar_close = _safe_float(bars.iloc[-1]["close"] if len(bars.index) else 0.0)
+    normalized_close_price = close_price
+    if normalized_close_price <= 0:
+        normalized_close_price = last_bar_close
+    elif entry_price > 0:
+        ratio = normalized_close_price / entry_price
+        if ratio < 0.2 or ratio > 5.0:
+            normalized_close_price = last_bar_close
+
+    price_move = normalized_close_price - entry_price
+    if abs(price_move) < 1e-9 or abs(pnl) < 1e-9:
+        return result
+    pnl_per_price = pnl / price_move
+    is_long = pnl_per_price > 0
+    tf_seconds = _timeframe_seconds(timeframe)
+    favorable_price_move = 0.0
+    adverse_price_move = 0.0
+    time_in_profit_seconds = 0.0
+
+    for _, bar in bars.iterrows():
+        high = _safe_float(bar.get("high"))
+        low = _safe_float(bar.get("low"))
+        close_bar = _safe_float(bar.get("close"))
+        if high <= 0 or low <= 0:
+            continue
+        if is_long:
+            favorable_price_move = max(favorable_price_move, high - entry_price)
+            adverse_price_move = max(adverse_price_move, entry_price - low)
+            if close_bar > entry_price:
+                time_in_profit_seconds += tf_seconds
+        else:
+            favorable_price_move = max(favorable_price_move, entry_price - low)
+            adverse_price_move = max(adverse_price_move, high - entry_price)
+            if close_bar < entry_price:
+                time_in_profit_seconds += tf_seconds
+
+    estimated_mfe = max(0.0, favorable_price_move * abs(pnl_per_price))
+    estimated_mae = max(0.0, adverse_price_move * abs(pnl_per_price))
+    holding_seconds = max(0.0, close_ts - entry_ts)
+    seed_state = {
+        "mfe": estimated_mfe,
+        "mae": estimated_mae,
+        "time_in_profit_seconds": min(time_in_profit_seconds, holding_seconds),
+        "last_observed_ts": close_ts,
+        "last_unrealized_pnl": pnl,
+        "entry_regime": "",
+        "current_regime": "",
+        "thesis_status": "intact",
+        "regime_shift": "none",
+    }
+    next_state, metrics = update_position_path_metrics(
+        previous_state=seed_state,
+        current_pnl=pnl,
+        now_ts=close_ts,
+        holding_seconds=holding_seconds,
+        max_holding_seconds=0.0,
+        entry_regime="",
+        current_regime="",
+    )
+    return {
+        **metrics,
+        "mfe": round(max(estimated_mfe, metrics["mfe"]), 6),
+        "mae": round(max(estimated_mae, metrics["mae"]), 6),
+        "position_path_state": next_state,
+        "path_source": "duckdb_bars",
+    }
+
+
 def classify_outcome(entry_score: float, pnl: float) -> str:
     if pnl > 0:
         return "lucky_win"
     conviction = abs(float(entry_score or 0.0))
     return "bad_loss" if conviction >= 0.55 else "good_loss"
+
+
+def _infer_close_reason(row: sqlite3.Row, path_metrics: dict[str, Any]) -> str:
+    entry_ts = _safe_float(row["entry_ts"] or row["broker_entry_ts"])
+    close_ts = _safe_float(row["close_ts"])
+    holding_seconds = max(0.0, close_ts - entry_ts) if entry_ts > 0 and close_ts > 0 else 0.0
+    if holding_seconds >= 24 * 3600 and _safe_float(path_metrics.get("time_decay_score")) <= 0.35:
+        return "holding_timeout"
+    if str(path_metrics.get("thesis_status") or "") == "broken" and _safe_float(path_metrics.get("giveback_ratio")) >= 0.5:
+        return "profit_giveback_after_mfe"
+    return "broker_close"
+
+
+def _close_reason_source(close_reason: str) -> str:
+    if close_reason in {"holding_timeout", "profit_giveback_after_mfe"}:
+        return "phase_c_inferred"
+    if close_reason == "broker_close":
+        return "broker_deal_backfill"
+    return "unknown"
+
+
+def _phase_c_diagnosis(review_json: dict[str, Any]) -> dict[str, Any]:
+    holding_seconds = _safe_float(review_json.get("holding_seconds"))
+    giveback_ratio = _safe_float(review_json.get("giveback_ratio"))
+    profit_capture_ratio = _safe_float(review_json.get("profit_capture_ratio"))
+    mfe = _safe_float(review_json.get("mfe"))
+    pnl = _safe_float((review_json.get("real_pnl") or {}).get("net"))
+    holding_efficiency = _safe_float(review_json.get("holding_efficiency"))
+    thesis_status = str(review_json.get("thesis_status") or "")
+    close_reason = str(review_json.get("close_reason") or "")
+    drivers: list[str] = []
+    primary_issue = "unclear"
+    if close_reason == "holding_timeout" or holding_seconds >= 24 * 3600 > 0:
+        drivers.append("holding_too_long")
+        primary_issue = "timing_exit"
+    if giveback_ratio >= 0.5 or (mfe > 0 and pnl > 0 and profit_capture_ratio < 0.9):
+        drivers.append("profit_giveback")
+        primary_issue = "exit_capture"
+    if thesis_status == "broken":
+        drivers.append("thesis_broken")
+        if primary_issue == "unclear":
+            primary_issue = "thesis_failure"
+    if holding_efficiency < 0.35 and holding_seconds > 0:
+        drivers.append("holding_inefficient")
+        if primary_issue == "unclear":
+            primary_issue = "holding_quality"
+    return {
+        "primary_issue": primary_issue,
+        "drivers": drivers,
+        "confidence": round(min(1.0, 0.35 + 0.2 * len(drivers)), 3),
+    }
 
 
 def fetch_missing_positions(
@@ -47,10 +230,12 @@ def fetch_missing_positions(
             MAX(deal_id) AS deal_id,
             MAX(ABS(commission)) AS close_commission,
             MAX(gross_profit) AS gross_profit,
-            MAX(swap) AS swap
+            MAX(swap) AS swap,
+            MIN(CASE WHEN is_close = 0 THEN exec_timestamp END) AS broker_entry_ts,
+            MAX(CASE WHEN is_close = 0 THEN exec_price END) AS broker_entry_price
         FROM ctrader_deals
-        WHERE is_close = 1
         GROUP BY position_id
+        HAVING MAX(CASE WHEN is_close = 1 THEN 1 ELSE 0 END) = 1
     ),
     missing AS (
         SELECT c.*
@@ -76,7 +261,9 @@ def fetch_missing_positions(
         d.action_score AS entry_score,
         d.decision_ts AS entry_ts,
         d.symbol,
-        d.timeframe
+        d.timeframe,
+        m.broker_entry_ts,
+        m.broker_entry_price
     FROM missing m
     LEFT JOIN decision_ledger d
         ON d.position_id = CAST(m.position_id AS TEXT) AND d.event_type = 'open'
@@ -100,9 +287,26 @@ def build_review_record(row: sqlite3.Row) -> dict:
     trade_id = str(row["trade_id"] or position_id)
     pnl = float(row["net_pnl"] or 0.0)
     entry_score = float(row["entry_score"] or 0.0)
-    entry_ts = float(row["entry_ts"] or 0.0)
+    decision_entry_ts = float(row["entry_ts"] or 0.0)
+    broker_entry_ts = float(row["broker_entry_ts"] or 0.0)
+    entry_ts = decision_entry_ts if decision_entry_ts > 0 else broker_entry_ts
     close_ts = float(row["close_ts"] or 0.0)
     holding_seconds = max(0.0, close_ts - entry_ts) if entry_ts > 0 and close_ts > 0 else 0.0
+    entry_ts_source = "decision_ledger" if decision_entry_ts > 0 else ("ctrader_deals" if broker_entry_ts > 0 else "")
+    entry_price = _safe_float(row["entry_price"] or row["broker_entry_price"])
+    close_price = _safe_float(row["exec_price"])
+    timeframe = str(row["timeframe"] or "M5")
+    symbol = str(row["symbol"] or "XAUUSD+")
+    path_metrics = _infer_path_metrics_from_bars(
+        symbol=symbol,
+        timeframe=timeframe,
+        entry_ts=entry_ts,
+        close_ts=close_ts,
+        entry_price=entry_price,
+        close_price=close_price,
+        pnl=pnl,
+    )
+    inferred_close_reason = _infer_close_reason(row, path_metrics)
     outcome_label = classify_outcome(entry_score, pnl)
     summary = (
         f"trade {position_id} closed pnl={pnl:.2f}; "
@@ -126,10 +330,24 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "entry_decision_id": str(row["entry_decision_id"] or ""),
         "exit_decision_id": "",
         "entry_ts": entry_ts,
+        "entry_ts_source": entry_ts_source,
         "close_ts": close_ts,
         "holding_seconds": round(holding_seconds, 3),
         "holding_minutes": round(holding_seconds / 60.0, 3),
-        "timeframe": str(row["timeframe"] or ""),
+        "timeframe": timeframe,
+        "mfe": round(_safe_float(path_metrics.get("mfe"), max(0.0, pnl)), 6),
+        "mae": round(_safe_float(path_metrics.get("mae"), max(0.0, -pnl)), 6),
+        "giveback_ratio": round(_safe_float(path_metrics.get("giveback_ratio")), 6),
+        "profit_capture_ratio": round(_safe_float(path_metrics.get("profit_capture_ratio")), 6),
+        "time_in_profit": round(_safe_float(path_metrics.get("time_in_profit_seconds")), 6),
+        "time_in_profit_seconds": round(_safe_float(path_metrics.get("time_in_profit_seconds")), 6),
+        "time_in_profit_ratio": round(_safe_float(path_metrics.get("time_in_profit_ratio")), 6),
+        "holding_efficiency": round(_safe_float(path_metrics.get("holding_efficiency")), 6),
+        "time_decay_score": round(_safe_float(path_metrics.get("time_decay_score")), 6),
+        "thesis_status": str(path_metrics.get("thesis_status") or ""),
+        "regime_shift": str(path_metrics.get("regime_shift") or ""),
+        "position_path_state": path_metrics.get("position_path_state") or {},
+        "path_source": str(path_metrics.get("path_source") or ""),
         "entry_score": entry_score,
         "top_weight_factor": "",
         "top_weight": 0.0,
@@ -140,11 +358,15 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "positive_share": 0.0,
         "close_price": float(row["exec_price"] or 0.0),
         "real_pnl": real_pnl,
-        "close_reason": "historical_backfill",
+        "close_reason": inferred_close_reason,
+        "close_reason_source": _close_reason_source(inferred_close_reason),
         "context_integrity": "full",
         "failure_tags": [outcome_label],
         "factor_contributions": {},
     }
+    context_integrity = "full" if row["entry_decision_id"] else ("partial" if broker_entry_ts > 0 else "minimal")
+    review_json["context_integrity"] = context_integrity
+    review_json["phase_c_diagnosis"] = _phase_c_diagnosis(review_json)
     return {
         "review_id": new_id("review"),
         "trade_id": trade_id,
@@ -157,8 +379,8 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "regime_fit_score": 0.70 if pnl > 0 else (0.35 + (0.10 if outcome_label == "good_loss" else 0.0)),
         "execution_quality": 0.60,
         "pnl": round(pnl, 6),
-        "mae": round(abs(min(pnl, 0.0)), 6),
-        "mfe": round(max(pnl, 0.0), 6),
+        "mae": round(_safe_float(path_metrics.get("mae"), abs(min(pnl, 0.0))), 6),
+        "mfe": round(_safe_float(path_metrics.get("mfe"), max(pnl, 0.0)), 6),
         "outcome_label": outcome_label,
         "failure_tags_json": json.dumps([outcome_label], ensure_ascii=False),
         "summary_text": summary,

@@ -37,6 +37,13 @@ function normalizePosition(item = {}) {
         ? '已经超过系统设定的持仓时长上限。'
         : `距离上限还剩 ${formatDurationMinutes(Number(item.holding_timeout_remaining_seconds || 0) / 60)}。`)
       : '当前没有启用自动超时平仓。',
+    supervisorLabel: item.supervisor_label || '继续持有',
+    supervisorSummary: item.supervisor_summary || '当前没有看到足够强的主动收口信号。',
+    supervisorTone: item.supervisor_action === 'close'
+      ? 'negative'
+      : item.supervisor_action === 'reduce' || item.supervisor_action === 'tighten'
+        ? 'warning'
+        : 'positive',
   };
 }
 

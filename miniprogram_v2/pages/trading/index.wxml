@@ -114,6 +114,13 @@
             </view>
             <view class="section-note">{{item.timeoutHint}}</view>
           </view>
+          <view class="status-banner status-banner-{{item.supervisorTone}}" style="margin-top: 12rpx;">
+            <view class="row-between">
+              <view class="small muted">持仓监督结论</view>
+              <status-pill label="{{item.supervisorLabel}}" tone="{{item.supervisorTone}}" />
+            </view>
+            <view class="section-note">{{item.supervisorSummary}}</view>
+          </view>
           <view class="caption-grid" style="margin-top: 12rpx;">
             <view class="caption-card">
               <view class="caption-label">止损</view>

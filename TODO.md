@@ -1,131 +1,683 @@
-# TODO — 当前收尾与待办
+# TODO — 完整开发路线与当前进度
 
-Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入联调与验证阶段。
-当前重点不再是“有没有框架”，而是“闭环是否稳定、自愈是否可靠、前后端展示是否一致”。
+本文档现在是项目的**执行总面板**。  
+以后每完成一项、暂停一项、发现一项新缺口，都必须先更新这里，再继续开发。
 
-> **协作约定**
-> - 每次对话中发现新的架构缺口、技术债、未来能力或验证结论，都要顺手写入 `TODO.md` 或 `docs/architecture.md`。
-> - 短期可执行事项写入 `TODO.md`；长期架构和完全体能力写入 `docs/architecture.md`。
-> - 不确定是否马上开发的发现，也要以“观察/待设计/延期项”形式落文档，避免只留在聊天记录里。
+目标：
 
-> **2026-06-25 状态更新**
-> - ✅ 决策账本、平仓复盘、经验沉淀、规则建议、治理审批已打通
-> - ✅ 学习应用日志 `learning_application_log` 已落库
-> - ✅ 应用效果追踪 `learning_application_effect` 已落库
-> - ✅ 治理接口支持“治理后自动同步权重”
-> - ✅ 学习应用记录已支持幂等复用，重复活跃记录会标记为 `superseded`
-> - ✅ 后端启动后可自动恢复 loop，并延迟执行 learning backfill 修复重启断点
-> - ✅ 模型就绪样本导出已落地：`LearningFeatureProvider` + `/api/learning/dataset` + `/api/learning/decision-dataset`
-> - ✅ 离线训练数据集快照已落地：`LearningDatasetBuilder` + `/api/learning/dataset/export`
-> - ✅ 样本已包含因子贡献对账：`factor_outcomes` + `attribution_alignment` 可解释入场贡献、真实净贡献、helpful/harmful 角色与质量门
-> - ✅ 训练前数据体检已落地：`LearningDatasetReadiness` + `/api/learning/dataset/readiness`
-> - ✅ 离线快照 manifest 已内嵌 readiness：导出物自带训练门槛、schema issue、ready/warming_up 判断
-> - ✅ 离线快照独立校验已落地：`LearningDatasetValidator` + `/api/learning/dataset/validate` 可复验 hash、行数、schema、manifest
-> - ✅ 模型适配器安全基线已落地：`DatasetSummaryAdapter` + `/api/learning/dataset/model-card` 可生成并注册离线 model_card，但明确禁止接入实盘执行
-> - ✅ 离线统计训练基线已落地：`LearningStatisticalTrainer` + `/api/learning/dataset/train` 可从已校验 snapshot 训练可解释权重 artifact，并可注册为离线模型版本
-> - ✅ 离线模型准入门已落地：`ModelPromotionGate` + `/api/learning/model/promotion-gate` 可评估 registered artifact 是否进入 shadow validation，且不会绕过 live/canary
-> - ✅ 模型影子验证候选队列已落地：`ModelShadowQueue` + `/api/learning/model/shadow-queue` 可幂等登记、查询和推进 trained model 的 shadow validation 状态
-> - ✅ 模型影子验证 runner 已落地：`ModelShadowRunner` + `/api/learning/model/shadow-run` 可消费 queued candidate、生成可解释 shadow report 并回写 passed/failed
-> - ✅ 模型金丝雀预审已落地：`ModelCanaryReviewer` + `/api/learning/model/canary-review` 可将 shadow-passed 模型推进到 canary_ready / canary_rejected，仍不接实盘执行
-> - ✅ 模型推理合同已落地：`ModelInferenceContract` + `/api/learning/model/inference` 只接受 canary_ready 模型，输出 advisory-only 可解释评分并落审计日志，不下单、不改权重
-> - ✅ 受控模型金丝雀试运行已落地：`ModelCanaryExecutor` + `/api/learning/model/canary-trial` 可批量消费 advisory inference、记录 canary_passed / canary_failed，仍不下单、不改权重
-> - ✅ 端到端模型学习工作流已落地：`LearningModelPipeline` + `/api/learning/model/pipeline/run` 可串联 train -> gate -> queue -> shadow -> canary review -> controlled trial
-> - ✅ 实时因子链路已补齐执行失败账本：`signal/open/close/skip/order_failed/amend_failed` 均可进入模型样本
-> - ✅ 模型样本已接入订单/仓位生命周期：`execution_trace` 汇总 order / position 事件、失败订单和 broker lifecycle
-> - ✅ 大模型上下文卡片已落地：`llm_context` 提供 prompt_card、evidence_bullets、label_summary
-> - ✅ 小程序 V2 已替换旧版，当前为唯一维护前端
-> - ✅ Phase A 稳定闭环已收口：6 小时窗口健康检查 healthy，open/close/review/experience 无断链，手动 broker close 已验证
-> - 🟡 进入 Phase B 前观察项：`learning_application_effect` 仍有 2 条 observing；系统健康里 `l2_depth`、`disk_space` 仍可能 degraded/critical，应作为运行环境专项处理
+- 让任何一次新对话都能先读 `TODO.md`，快速知道系统做到哪了
+- 让后续开发严格按顺序推进，而不是想到哪做到哪
+- 让“当前状态、下一步、为什么还没做”都能落在文档里，而不是只留在聊天记录
+
+长期架构蓝图见 [docs/architecture.md](docs/architecture.md)。
 
 ---
 
-## 🟢 当前最高优先级
+## 0. 使用规则
 
-| # | 项 | 状态 | 说明 |
-|---|----|------|------|
-| L1 | 学习应用效果追踪实盘验证 | 观察中 | 当前 effect 记录为 observing/superseded，闭环不阻塞；继续随真实平仓观察是否推进 |
-| L2 | 历史重复应用记录清理脚本 | 待做 | 旧逻辑遗留了少量重复 `application`，现在已不会继续增长，但建议补一次正式清理 |
-| L3 | 小程序学习页状态文案对齐 | 待做 | 将 `observing / effective / ineffective / superseded / reinforced` 做更明确展示 |
-| L4 | 重启恢复场景回归测试 | 待做 | 覆盖“开仓后重启 / 重启期间平仓 / loop 未立即恢复”三类场景 |
-| L5 | 服务器开发同步规范固化 | 完成 | 已固化到 `docs/development-workflow.md`：本地为主开发端，GitHub main 为最终合并源，服务器为后端运行/验证端，热修需短事务回推并保持三端一致 |
-| L6 | 时间/空间上下文抽象因子 | 待设计 | 已开始记录 `holding_seconds`，但还需把交易时段、持仓生命周期、价格空间位置、多周期结构和相关性统一成可学习上下文 |
-| L7 | 运行环境健康专项 | 待做 | `l2_depth` 与 `disk_space` 偶发 degraded/critical；不阻塞 Phase A 闭环，但进入 Phase B 前建议独立处理 |
-| L8 | 风控/复盘运维检索入口 | 进行中 | 已新增 `/api/risk/trade-trace` 和 `scripts/phase_b_risk_check.py --position-id/--decision-id`；现在可按 `position_id / decision_id` 追 decision ledger、position/order lifecycle、trade review、factor contribution、recovery state。后续仍可补更适合前端直接展示的运维页与搜索入口 |
-| B1 | RiskPolicyService 统一高影响动作裁决 | 进行中 | 已覆盖 `open_trade / close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model`；live 开仓、模型 shadow/canary API、学习权重同步、因子 shadow 注册、因子 promote 已接入 verdict |
+### 每次开发前
 
-## 🟡 延期项
+先看：
 
-| # | 项 | 原因 | 触发条件 |
-|---|----|------|---------|
-| D1 | Autoencoder 非线性特征压缩 | 过拟合风险高，20K bar 极易学噪声 | bar > 100K |
-| D2 | 数据版本控制系统 | DuckDB snapshot 已够用，无需额外系统 | 需要时重构 |
+1. 本文档的“当前阶段”
+2. 本文档的“当前唯一进行中项”
+3. 本文档的“下一步入口”
 
-## ⚠️ P1（审计 v13 确认）
+### 每次开发后
 
-| # | 文件 | 问题 | 说明 |
-|---|------|------|------|
-| TD1 | `execution/ctrader_bridge.py` | spot price 除数 `10**5` 硬编码 XAUUSD | 换品种会价格错误 |
-| TD3 | `execution/market_impact.py:117` | 成本计算默认金价 3000.0 硬编码 | 非 XAUUSD 品种会成本偏差 |
-| P1-3 | `config/__init__.py` | MT5 相关常量和 config 残留 | MT5 已彻底移除 |
+必须更新本文档中的以下内容：
 
-## 🟠 学习闭环专项技术债
+- 对应任务状态：`未开始 / 进行中 / 已完成 / 阻塞 / 观察中 / 延后`
+- 完成日期
+- 产出物
+- 验证结果
+- 新发现的缺口或后续子任务
 
-| # | 文件 / 模块 | 问题 | 说明 |
-|---|------|------|------|
-| LE1 | `research/learning/governor.py` | 历史重复应用记录仍可能残留 | 新逻辑已避免继续膨胀，但旧数据建议补清理脚本 |
-| LE2 | `backend/api/learning.py` | 治理接口依赖 `_update_weights()` 内部函数 | 现阶段可用，后续建议抽成正式 service 接口 |
-| LE3 | `research/learning/policy_suggester.py` | 当前仍是保守规则阈值 | 后续真实样本足够后，应迁移到可配置阈值或模型 adapter |
-| LE4 | `backend/services/learning_backfill.py` | 断点修复与实时闭环仍需压测 | 需要用真实重启/补单场景确认无重复复盘 |
-| LE5 | `miniprogram_v2/pages/learning/*` | 学习生命周期状态与后端枚举已增多 | 前端展示层还可再做一次精简和映射统一 |
-| LE6 | `backend/core/db.py` vs `research/experiment_tracker.py` | `experiments.db` schema 漂移 | `init_experiments_db()` 期待 `experiment_type/params_json/...` 列式表，但 `ExperimentTracker` 仍使用 `data TEXT` blob 旧表；本地 Phase B 验证时已触发 `no such column: experiment_type` 启动 warning，需统一实验记录 schema 与迁移策略 |
+### 状态约束
 
-## 🔵 P2（审计 v13 确认）
+- 同一时间只允许一个“主开发阶段”处于 `进行中`
+- 同一阶段内可以有多个子任务，但要标清主次
+- 发现新想法时，先写进“新增发现 / 待设计项”，不要直接打乱当前顺序
 
-| # | 文件 | 问题 | 说明 |
-|---|------|------|------|
-| 1 | `monitor/evolution_story.py` vs `evolution_story/` | 文件与目录冲突 -> Python import 未定义 | 清掉一边 |
-| 2 | `./nul` | Windows 设备名意外创建的文件 | 直接删除 |
-| 3 | `alpha/factor_attribution.py` | 旧版归因，已被 `attribution_engine.py` 取代 | 无人 import |
-| 4 | `execution/paper_bridge.py` | 旧版模拟盘桥接 | 无人 import |
-| 5 | `live/` 目录 | factor_monitor, meta_learner_monitor 仅被旧 main.py 引用 | 迁移或删除 |
-| 6 | 根目录 `_` 前缀调试脚本 | 6 个一次性脚本散落根目录 | 移入 `scripts/debug/` |
-| 7 | `scripts/ctrader_live_runner.py` | docstring 仍引用 MT5 | 更新或删除 |
+---
 
-## 📋 已知技术债务
+## 1. 当前阶段总览
 
-| # | 问题 | 说明 |
-|---|------|------|
-| 1 | `regime_classifier.py` 因子脱节 | 使用 `[aroon, cci, mfi, williams_r]` 不在 39 因子池 |
-| 2 | `scripts/train_xgb_walkforward.py` 仅 4 因子 | 与当前模型数据管道脱节 |
-| 4 | `scripts/factor_pca.py` docstring 过时 | 声称 15 因子，实际 39 |
-| 5 | `data/store.py` -> `duckdb_store.py` 双层包装 | 过度封装，所有引用通过旧 `store.py` 再委派到 `duckdb_store.py` |
+### 已完成阶段
 
-> 以上不阻塞运行。当需要扩展 ML、多品种或模型接入时，再按优先级继续处理。
+- ✅ Phase A：稳定闭环
+- ✅ Phase B：风控统一（达到可用闭环）
 
-## Phase A 稳定闭环记录
+### 当前主阶段
 
-- 2026-06-25: 新增 `scripts/phase_a_health_check.py`，用于检查 decision ledger、broker close、trade review、experience、policy suggestion、learning application/effect 是否断链。
-- 2026-06-25: 修复 cTrader 市价单成交后 SL/TP amend 失败时 open/recovery 上下文缺失的问题；以后即使 amend 失败，也会记录 open、submitted/filled、position opened，再记录 amend failure。
-- 2026-06-25: 修复 SL/TP 保护价用 bar/current price 计算导致 SELL 在成交后被 cTrader `TRADING_BAD_STOPS` 拒绝的问题；现在成交后会基于真实 `fill_price` 重算保护价再 amend。
-- 2026-06-25: 新增 `scripts/repair_open_ledger_from_deals.py`，用于把历史 close-without-open 缺口按 partial context 修成最小 open ledger，不伪造因子快照；极端缺 open deal 时必须显式加 `--allow-close-only`。
-- 2026-06-25: trade review / experience 已开始沉淀 `entry_ts`、`close_ts`、`holding_seconds`、`holding_minutes`；旧恢复仓在 close 前若缺 open ledger，会自动补最小 open 证据并保持 partial context。
-- 2026-06-25: Phase A 收口检查通过：服务器 `quant-backend.service` active，6 小时窗口 `phase_a_health_check` healthy；decision ledger 当前 open=22、close=22、signal=1101、skip=340，reviews=40、experience=40、applications/effects=4。
-- 2026-06-25: `scripts/phase_a_health_check.py` 已补充 active recovery 口径，`open/recovered` 都算 active，并检查 active recovery 是否缺 entry decision；closed recovery 同时兼容 `closed` 与 `closed_replayed`。
+- 🟡 Phase C：持仓监督闭环（进行中，C1 已完成）
 
-## Phase B 风控统一记录
+### 当前系统一句话状态
 
-- 2026-06-25: 新增 `risk/policy_service.py`，提供 `RiskPolicyService.evaluate(action, context) -> RiskVerdict` 统一风控裁决入口。
-- 2026-06-25: live 开仓路径已接入 `open_trade` verdict；VaR、仓位数量、API volume、金字塔检查统一通过 `RiskVerdict` 返回，并写入 skip ledger 的 `risk_state.policy_verdict`。
-- 2026-06-25: `RiskPolicyService` 已扩展 `close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model`；模型 shadow queue、canary review、canary trial API 已附带 `risk_verdict`，并阻断带 live trading 能力或状态不匹配的候选。
-- 2026-06-25: 学习治理 `/api/learning/govern/run` 的权重同步已接入 `update_weight` verdict；治理 review/reconcile 可继续执行，但 `_update_weights()` 只有在风控允许时才会触发。
-- 2026-06-25: 因子发现与晋升实际入口已接入风控：`scripts/discover_factors.py --auto-register` 会先检查 `register_factor` verdict，再真正注册 `SOURCE_SHADOW`；EvolutionOrchestrator 的 GP shadow 注册与 canary -> discovered promote、`/api/shadow/promote` 手动晋升都会先经过 `RiskPolicyService`。
-- 2026-06-25: live open 成功路径也会把 allowed `open_trade` verdict 写入 open ledger；`/api/risk/summary` 和 `/api/risk/policy/verdicts` 已能从 decision ledger 汇总最近 allowed/blocked verdict，给风控面板做统一数据源。
-- 2026-06-25: `close_position` 已接入真实平仓入口：`emergency_close` 发起前先取 verdict 并缓存，后续 broker close 落账时消费；外部/手动 broker close 也会生成 risk-reducing verdict 写入 close ledger 与 position lifecycle。
-- 2026-06-25: Governor state 第一版 runtime health 已接入 live 开仓裁决：`loop_running`、`bridge_connected`、`data_lag_seconds`、sync health snapshot、account/positions cache age 会进入 `open_trade` context；当前已开始阻断 `loop_not_running / bridge_disconnected / data_lag`。
-- 2026-06-25: `temporal_context` 第一版已进入 live 开仓风控上下文、policy verdict 审计载荷和 decision sample 导出；当前先覆盖交易时段、weekday、bar 周期、距离上次成交时间、loop uptime，后续再逐步进入硬规则与训练特征。
-- 2026-06-25: 时间规则第一批已落地：`open_trade` 会阻断“连续亏损后的冷静期”内新开仓；`close_position` verdict 会统一记录持仓时长与是否超时，live loop 也已预留 `risk_max_holding_bars` 驱动的自动超时平仓能力（默认关闭，待参数校准）。
-- 2026-06-25: 基于服务器当前在线仓位样本（约 13.3h / 7.4h）把 `risk_max_holding_bars` 首发默认值校准为 `288`（M5 约 24 小时）；这样不会立刻误伤现有仓位，但能让超时收口链真正开始生效。
-- 2026-06-25: 系统健康第一批已进入统一开仓裁决：`runtime_health.system_health` 会进入 `open_trade` context；当前 `disk_space=critical` 会直接阻断新开仓，`l2_depth=critical` 仅在策略声明 `risk_require_l2_depth=True` 时阻断，否则先作为软风险记录和展示。
-- 2026-06-25: 新增 `scripts/phase_b_risk_check.py`，用于统一验收 `/api/risk/summary` 与 `/api/risk/policy/verdicts`；支持远程 HTTP 登录验收，也支持 `--local-testclient` 本地直连 app 做结构自检。当前服务器 SSH 临时超时，后续网络恢复后优先用该脚本补齐线上 payload 级证据。
-- 2026-06-25: 已通过 `https://www.zhuzhu666.icu` 完成线上 payload 级验证：`/api/risk/summary` 真实返回已包含 `system_health`，`/api/live/positions` 真实返回已包含 `holding_seconds / holding_timeout_*`，`/api/live/status` 与 `/api/live/strategy-status` 显示 live loop ready、bridge connected、2 个持仓均已带 SL/TP。当前也暴露出最后一层体验问题：`system_health.overall=critical` 可能只是 `l2_depth` 这类非阻断观察项，因此已开始补“是否真的阻断交易”的人话语义。
-- 2026-06-25: 已新增 `/api/risk/trade-trace`，给 `position_id / decision_id` 可返回 decision ledger、position lifecycle、order lifecycle、trade review、factor contribution、recovery state 的整条证据链；`scripts/phase_b_risk_check.py` 也已支持 `--position-id / --decision-id` 做远程核验。
+系统现在已经具备：
+
+- 实时因子链路
+- 统一风控裁决第一阶段
+- 决策账本与生命周期追踪
+- 平仓复盘与经验沉淀
+- 离线模型训练 / shadow / canary / advisory 流程
+
+系统现在仍然缺：
+
+- 持仓中的主动裁决能力
+- “因子错 / 参数错 / 退出错 / 时长错 / regime 错”的正式责任拆分
+- 因子参数治理与版本治理
+- 元模型层的全局调度能力
+
+### 当前唯一进行中主线
+
+`Phase C / C6：真实案例验收与上线前核查`
+
+### 下一步入口
+
+继续 **Phase C / C6：真实案例验收与上线前核查**。
+
+---
+
+## 2. 总开发顺序
+
+后续默认严格按下面顺序推进，除非有线上事故或用户显式改优先级。
+
+1. Phase C：持仓监督闭环
+2. Phase D：归因升级与责任分离
+3. Phase E：因子治理与参数模板
+4. Phase F：数学模型与大语言模型分层接入
+5. Phase G：元模型旁路
+6. Phase H：受限自动治理
+7. Phase I：多品种完全体
+
+说明：
+
+- **Phase C** 不做，系统持仓中仍然是“睡着的”
+- **Phase D** 不做，系统就分不清问题到底出在 entry、exit、timing、param 还是 regime
+- **Phase E** 不做，因子优化就只能靠零散人工干预
+- **Phase F/G** 是把模型系统化接入，但前提是前面几层已经清楚
+
+---
+
+## 3. Phase A / Phase B 已完成记录
+
+### Phase A：稳定闭环
+
+状态：`已完成`  
+完成日期：`2026-06-25`
+
+已完成：
+
+- 决策账本、平仓复盘、经验沉淀、规则建议、治理审批主链路打通
+- 手动 broker close 已验证能进入复盘与经验链
+- learning backfill 与重启恢复主链路打通
+- `holding_seconds / holding_minutes` 已开始沉淀
+
+主要验证：
+
+- `scripts/phase_a_health_check.py`
+- 6 小时窗口健康检查通过
+- open / close / review / experience 无断链
+
+### Phase B：风控统一
+
+状态：`已完成（可用闭环）`  
+完成日期：`2026-06-25`
+
+已完成：
+
+- `RiskPolicyService.evaluate(action, context) -> RiskVerdict`
+- `open_trade / close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model`
+- runtime health 第一版进入 live 开仓裁决
+- `temporal_context` 第一版进入风控审计上下文
+- 持仓 timeout 审计字段落地
+- `/api/risk/summary`
+- `/api/risk/policy/verdicts`
+- `/api/risk/trade-trace`
+- 运维前端开始做人话化展示
+
+主要验证：
+
+- GitHub / 服务器已同步到 `264a2944`
+- 线上验证 `/api/risk/summary`、`/api/live/status`、`/api/live/positions`、`/api/risk/trade-trace`
+- 服务重启后可恢复到 `ready`
+
+---
+
+## 4. Phase C：持仓监督闭环
+
+状态：`进行中`  
+优先级：`P0`  
+目标：让系统从“会开仓”走向“会管理已开仓位”。
+
+### 为什么先做这个
+
+当前最明显的缺口是：
+
+- 仓位曾经盈利过
+- 后来又回吐
+- 持仓时间已经很长
+- 系统仍然只会等待原始止盈止损
+
+这说明当前系统没有真正的“持仓裁决层”。
+
+### C1：定义 `position_supervisor` contract
+
+状态：`已完成`
+
+完成日期：`2026-06-25`
+
+要产出：
+
+- 模块职责定义
+- 输入上下文字段
+- 输出动作字段
+- 与 `RiskPolicyService` 的接口关系
+- ledger / trace 写入要求
+
+至少要回答：
+
+- supervisor 什么时候跑
+- 它读哪些仓位状态和市场状态
+- 它输出哪些建议
+- 哪些建议必须再交给风控拍板
+
+完成标准：
+
+- 有明确 schema / contract 文档
+- 能指导后续代码落地，不再口头讨论
+
+产出物：
+
+- `docs/position-supervisor-contract.md`
+- `docs/architecture.md` 中 Layer 5 增加 contract 入口
+
+验证结果：
+
+- contract 已对齐现有 `RiskPolicyService.evaluate(action, context)`、`decision_ledger`、`position_lifecycle_event`、`/api/risk/trade-trace` 的现有接口形态
+- 已明确 C4 之前 `tighten / reduce` 仅能先作为 advisory verdict 存证，`close` 可优先复用现有 `close_position`
+
+新发现的缺口 / 后续子任务：
+
+- C4 需要为 `tighten_position` / `reduce_position` 增加正式 risk action
+- C5 需要让 `trade-trace` 显式展示 supervisor verdict，而不是只依赖 review 或 action_json 旁带
+
+### C2：补齐持仓路径核心字段
+
+状态：`已完成`
+
+完成日期：`2026-06-25`
+
+要补齐或统一：
+
+- `mfe`
+- `mae`
+- `giveback_ratio`
+- `profit_capture_ratio`
+- `time_in_profit`
+- `holding_efficiency`
+- `time_decay_score`
+- `thesis_status`
+- `regime_shift`
+
+完成标准：
+
+- 活跃仓位与已平仓仓位都能稳定计算核心字段
+- 字段能进入 API / trace / review 基础结构
+
+产出物：
+
+- `backend/services/position_metrics.py`
+- `backend/services/live_service.py` 持仓路径指标接入
+- `alpha/reflection/reviewer.py` 平仓复盘指标接入
+
+验证结果：
+
+- 活跃仓位路径已能稳定输出 `mfe / mae / giveback_ratio / profit_capture_ratio / time_in_profit / holding_efficiency / time_decay_score / thesis_status / regime_shift`
+- `/api/live/positions` 基础结构已通过 `live_service.get_positions()` 挂载这些字段
+- 平仓 review 与 `/api/risk/trade-trace` 的 review 基础结构已可带出这些字段
+- 测试通过：
+  - `python -m pytest tests/test_live_service_account_refresh.py tests/test_live_service_lifecycle.py tests/research/test_rule_learning_pipeline.py -q`
+  - `python -m pytest tests/risk/test_risk_api_policy.py -q`
+
+新发现的缺口 / 后续子任务：
+
+- 当前 `regime_shift` 仍是保守版，只有显式 regime 证据时才会给出 `confirmed`
+- C3 需要基于这些字段把 `hold / tighten / reduce / close` 的动作门槛正式结构化
+- C5 之后前端需要把这些字段翻译成人话，而不只是裸数值
+
+### C3：定义持仓动作分级
+
+状态：`已完成`
+
+完成日期：`2026-06-25`
+
+要形成统一动作集：
+
+- `hold`
+- `tighten`
+- `reduce`
+- `close`
+
+并明确每种动作的触发条件、证据字段、执行限制。
+
+完成标准：
+
+- supervisor 输出不再是模糊文字，而是结构化动作建议
+
+产出物：
+
+- `backend/services/position_supervisor.py`
+
+验证结果：
+
+- `position_supervisor` 已稳定输出 `hold / tighten / reduce / close`
+- 已包含结构化 `summary_reason / evidence / recommended_controls / human_summary`
+- 测试通过：
+  - `python -m pytest tests/test_position_supervisor.py -q`
+
+### C4：接入 `RiskPolicyService`
+
+状态：`已完成`
+
+完成日期：`2026-06-25`
+
+要完成：
+
+- 持仓监督建议进入风控裁决
+- 风控能基于 supervisor 建议做最终放行、收紧或拒绝
+- 原因写入 `risk_verdict`
+
+完成标准：
+
+- 持仓中的减仓、收紧、平仓都可追到 supervisor 与 risk verdict 链路
+
+产出物：
+
+- `risk/policy_service.py`
+- `backend/services/live_service.py`
+
+验证结果：
+
+- `tighten_position / reduce_position / close_position` 已进入统一 risk verdict
+- live tick 已接入 supervisor -> risk -> execute 链路
+- 测试通过：
+  - `python -m pytest tests/risk/test_policy_service.py tests/test_live_service_lifecycle.py -q`
+
+### C5：接入 trade trace / 前端展示
+
+状态：`已完成`
+
+完成日期：`2026-06-25`
+
+要完成：
+
+- `/api/risk/trade-trace` 可展示 supervisor 结论
+- 前端能用人话说明“为什么继续拿 / 为什么收紧 / 为什么平仓”
+
+完成标准：
+
+- 不再只显示机器字段
+- 用户能直观看懂系统对持仓的判断
+
+产出物：
+
+- `backend/api/risk.py`
+- `miniprogram_v2/pages/trading/index.js`
+- `miniprogram_v2/pages/trading/index.wxml`
+
+验证结果：
+
+- `/api/risk/trade-trace` 已显式暴露 `position_supervisor.latest/events`
+- 活跃持仓 API 已输出 `supervisor_label / supervisor_summary`
+- 当前持仓页已增加“持仓监督结论”人话卡片
+- 测试通过：
+  - `python -m pytest tests/test_position_supervisor.py tests/risk/test_risk_api_policy.py -q`
+
+### C6：用真实案例验收
+
+状态：`进行中`
+
+目标案例：
+
+- 近期那两个长持仓
+- “曾经盈利但未止盈，后续回吐甚至止损”的案例
+- 手动关闭、超时关闭、主动保护关闭等案例
+
+完成标准：
+
+- 能明确给出：是退出问题、时长问题、regime 切换问题，还是因子/参数问题
+
+当前进展：
+
+- 已补典型场景自动化验收：
+  - 大浮盈回吐 -> `reduce`
+  - 持仓超时 -> `close`
+  - trace 中可追 supervisor verdict
+- 已新增真实数据核查脚本：
+  - `scripts/phase_c_supervisor_check.py`
+- 本地真实样本链路已打通：
+  - 修复 Windows 本地 cTrader TLS 证书链问题后，`scripts/backfill_ctrader_deals.py --days 1 --max-rows 20` 已可成功回填真实成交
+  - `scripts/backfill_learning_reviews.py --limit 50 --allow-partial` 已可基于这些成交生成本地 `trade_outcome_review`
+  - `python scripts/phase_c_supervisor_check.py --limit 30` 已可在本地直接读取真实 review 样本完成结构核查
+- 本地当前活跃仓验收入口已打通：
+  - `python scripts/phase_c_supervisor_check.py --direct-broker` 已可直接连本地 cTrader，读取真实 open positions，并复用 Phase C 的持仓路径指标 + supervisor 判定
+  - 当前真实样本中，2 笔 open position 都已被识别为 `long_hold`
+  - 其中 `268085757` 当前已被 supervisor 给出 `close / thesis_broken` 结论，说明 C6 已具备“真实活跃仓 -> supervisor 判断”本地验收能力
+- 本地历史平仓样本已增强到 Phase C 路径口径：
+  - `backend/services/learning_backfill.py` 现在会优先用 broker 开/平成交恢复 `holding_seconds`
+  - 若本地 DuckDB 有对应 bars，则会进一步推导 `mfe / mae / giveback_ratio / profit_capture_ratio / holding_efficiency / thesis_status`
+  - 已通过远程 `/api/market/bars` 回灌 2026-06-24 ~ 2026-06-25 的 `XAUUSD+ / M5` bars 到本地 DuckDB，当前本地真实 review 已识别出 `4` 个 `profit_giveback` 案例
+- C6 验收口径已显式区分“直接证据”和“推断证据”：
+  - `scripts/phase_c_supervisor_check.py` 现在会输出 `coverage`
+  - `timeout_close_case` 与 `active_protection_case` 已拆成 `evidence / inferred_evidence`
+  - `learning_backfill` 写入的 `close_reason_source=phase_c_inferred` 不再被当成“真实已执行 supervisor/timeout close”
+- 真实案例覆盖现状：
+  - 已直接覆盖：长持仓案例、盈利后回吐案例、broker/manual close 案例、活跃仓 supervisor `close / thesis_broken` 案例
+  - 当前仅推断覆盖：历史 `profit_giveback_after_mfe` 一类退出问题样本
+  - 远程现网历史 review 当前主要仍是 `historical_backfill / broker_close / restart_replay`，还没有现成的 `holding_timeout / supervisor_reduce / supervisor_tighten / thesis_broken` 已执行平仓样本可直接验收
+
+当前阻塞点：
+
+- 当前本地新增 review 虽已能补出 `holding_seconds / giveback_ratio / profit_capture_ratio / thesis_status`，但仍有部分旧样本缺 entry decision / regime 上下文，因此“责任拆分”还不够完整
+- 远程线上接口当前仍未部署 Phase C 新 supervisor 字段，因此线上活跃长持仓仍只能看到旧口径 payload
+- 当前仍缺少真实 `holding_timeout` 样本，以及“已执行并落账成 review 的 active protection close（reduce/tighten/close）”样本，C6 还不能正式收口
+
+下一步：
+
+- 把本地 Phase C 代码发布到服务器后，复跑 `/api/live/positions`、`/api/risk/trade-trace`、`python scripts/phase_c_supervisor_check.py --api-base ...`
+- 至少覆盖长持仓回吐、手动关闭、超时关闭、主动保护关闭四类案例
+- 优先补到能从真实 close review 中稳定看到 `holding_seconds / giveback_ratio / supervisor close_reason` 的完整证据
+- 一旦线上出现 timeout 或 supervisor 执行平仓样本，立即回灌本地并复跑 C6 验收脚本，确认责任标签是否能落到 `时长问题 / 退出问题 / thesis_broken`
+
+---
+
+## 5. Phase D：归因升级与责任分离
+
+状态：`未开始`  
+优先级：`P0`  
+前置条件：`Phase C 基本落地`
+
+目标：让系统正式分清“问题到底出在哪”。
+
+### D1：扩展 trade review contract
+
+状态：`未开始`
+
+新增核心字段：
+
+- `entry_quality`
+- `exit_quality`
+- `holding_efficiency`
+- `regime_fit`
+- `thesis_status_at_exit`
+- `profit_capture_ratio`
+- `giveback_ratio`
+- `time_in_profit`
+
+### D2：失败分类体系 v2
+
+状态：`未开始`
+
+目标标签至少包括：
+
+- `entry_good_exit_bad`
+- `alpha_correct_but_capture_failed`
+- `tp_too_far`
+- `sl_too_tight`
+- `holding_too_long`
+- `regime_changed_during_hold`
+- `factor_logic_ok_but_param_suspect`
+
+### D3：责任回写链路
+
+状态：`未开始`
+
+要写回：
+
+- `trade_outcome_review`
+- `factor_contribution_review`
+- learning sample
+- trade trace
+- 前端复盘页
+
+完成标准：
+
+- 任何一笔亏损都不能只被粗暴归成“因子失效”
+
+---
+
+## 6. Phase E：因子治理与参数模板
+
+状态：`未开始`  
+优先级：`P1`  
+前置条件：`Phase D 基本落地`
+
+目标：建立正式的“因子教练层”。
+
+### E1：因子解释卡片 schema
+
+状态：`未开始`
+
+每个因子至少要有：
+
+- `factor_id`
+- `factor_family`
+- `formula_version`
+- `parameter_version`
+- `parameters`
+- `expected_regimes`
+- `weak_regimes`
+- `expected_holding_profile`
+- `failure_modes`
+
+### E2：参数模板系统
+
+状态：`未开始`
+
+目标：
+
+- 把“参数”从散点配置变成版本化模板
+- 支持 regime-aware 参数切换
+
+### E3：在线轻调 / 离线深调边界
+
+状态：`未开始`
+
+要明确：
+
+- 哪些可以在线轻调
+- 哪些必须离线验证后发布
+
+### E4：因子治理工作流
+
+状态：`未开始`
+
+链路目标：
+
+参数可疑证据 -> 治理建议 -> 回测/验证 -> 审批 -> 灰度 -> 发布/回滚
+
+---
+
+## 7. Phase F：数学模型与大语言模型分层接入
+
+状态：`未开始`  
+优先级：`P1`  
+前置条件：`Phase C/D/E 的基础 contract 已明确`
+
+目标：把模型接入位置写进系统，不让其悬空或越权。
+
+### F1：数学模型接入持仓监督层
+
+状态：`未开始`
+
+候选能力：
+
+- 持仓质量评分
+- 退出风险评分
+- 时间衰减评分
+- 持仓继续持有概率评估
+
+### F2：数学模型接入因子治理层
+
+状态：`未开始`
+
+候选能力：
+
+- regime-aware 因子排序
+- 参数失配检测
+- 阈值与模板效果比较
+
+### F3：大语言模型接入归因与治理层
+
+状态：`未开始`
+
+候选能力：
+
+- 复盘解释
+- 治理建议归纳
+- 审查说明
+- 人话运维与风控摘要
+
+### F4：模型权限边界固化
+
+状态：`未开始`
+
+必须明确禁止：
+
+- 直接下单
+- 直接平仓
+- 直接提高硬风控上限
+- 直接绕过 `RiskPolicyService`
+
+---
+
+## 8. Phase G：元模型旁路
+
+状态：`未开始`  
+优先级：`P2`
+
+目标：让系统拥有全局调度脑，但仍然只有建议权。
+
+### G1：定义 `meta_context.v1`
+
+状态：`未开始`
+
+### G2：元模型输出 contract
+
+状态：`未开始`
+
+至少包括：
+
+- 当前系统状态
+- 风险预算建议
+- 交易频率建议
+- 可信因子族
+- 冻结/观察建议
+
+### G3：接入 Governor 审批链
+
+状态：`未开始`
+
+完成标准：
+
+- 元模型建议进入 ledger
+- 元模型建议不能直接执行
+
+---
+
+## 9. Phase H：受限自动治理
+
+状态：`未开始`  
+优先级：`P2`
+
+目标：让系统自动应用低风险调整，但绝不越过硬风控。
+
+允许自动化：
+
+- 降低风险预算
+- 降低交易频率
+- 切换到保守参数模板
+- 暂停某些弱势因子
+
+禁止自动化：
+
+- 提高最大亏损阈值
+- 关闭熔断
+- 提高最大仓位
+- 直接启用 live-trading 模型
+
+---
+
+## 10. Phase I：多品种完全体
+
+状态：`未开始`  
+优先级：`P3`
+
+目标：从 XAUUSD+ 扩展到多品种、多风险池、全组合调度。
+
+---
+
+## 11. 观察项 / 并行但不打断主线
+
+| ID | 项 | 状态 | 说明 |
+|---|---|---|---|
+| O1 | `learning_application_effect` 真实流观察 | 观察中 | 跟踪 observing / reinforced / ineffective 是否稳定推进 |
+| O2 | 重启恢复回归测试 | 待做 | 覆盖开仓后重启、重启期间平仓、延迟恢复 |
+| O3 | 运行环境健康专项 | 待做 | `l2_depth`、`disk_space` 继续治理 |
+| O4 | 风控运维页搜索入口 | 待做 | 继续强化按 `position_id / decision_id` 的查询体验 |
+| O5 | 历史重复 application 清理脚本 | 待做 | 清理旧数据噪声 |
+
+---
+
+## 12. 已知结构缺口
+
+| ID | 缺口 | 当前情况 | 归属阶段 |
+|---|---|---|---|
+| G-1 | 持仓中没有主动裁决层 | 当前更多是硬闸门 + TP/SL | Phase C |
+| G-2 | 时间/空间上下文仍未统一抽象 | 已有 `holding_seconds`，但远未成体系 | Phase C / D |
+| G-3 | 因子参数治理缺失 | 当前主要是权重治理 | Phase E |
+| G-4 | 归因结果未完整喂回 live 风控 | 复盘和风控仍偏分离 | Phase C / D |
+| G-5 | 数学模型和 LLM 接入层已写文档，但未正式落地 | 目前仍偏离线和辅助 | Phase F |
+| G-6 | 元模型尚未正式入位 | 仍无统一全局调度层 | Phase G |
+
+---
+
+## 13. 已知技术债
+
+### P1
+
+| ID | 文件/模块 | 问题 |
+|---|---|---|
+| TD1 | `execution/ctrader_bridge.py` | 价格除数 `10**5` 仍偏 XAUUSD 定制 |
+| TD2 | `execution/market_impact.py` | 成本计算默认金价硬编码 |
+| TD3 | `config/__init__.py` | MT5 相关残留仍需清理 |
+| TD4 | `backend/core/db.py` vs `research/experiment_tracker.py` | `experiments.db` schema 漂移 |
+
+### P2
+
+| ID | 文件/模块 | 问题 |
+|---|---|---|
+| TD5 | `monitor/evolution_story.py` vs `evolution_story/` | 文件与目录冲突 |
+| TD6 | `./nul` | Windows 设备名误文件 |
+| TD7 | `alpha/factor_attribution.py` | 旧版归因残留 |
+| TD8 | `execution/paper_bridge.py` | 旧版模拟盘桥接残留 |
+| TD9 | `live/` 目录 | 部分旧监控仅被旧 `main.py` 引用 |
+| TD10 | 根目录调试脚本 | 一次性脚本应移入 `scripts/debug/` |
+
+---
+
+## 14. 下次开工时怎么开始
+
+以后不管在哪个对话继续，默认启动顺序如下：
+
+1. 先读 [TODO.md](TODO.md)
+2. 确认“当前唯一进行中主线”
+3. 如果为空，就从“下一步入口”开始
+4. 开发前先更新对应任务为 `进行中`
+5. 完成后更新为 `已完成`，并补验证结果与新发现
+
+当前默认下一步：
+
+**Phase C / C6：真实案例验收与上线前核查**

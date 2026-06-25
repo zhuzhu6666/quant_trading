@@ -52,6 +52,10 @@ class RiskPolicyService:
         context = context or {}
         if action == "open_trade":
             return self._evaluate_open_trade(context)
+        if action == "tighten_position":
+            return self._evaluate_position_adjustment(action, context)
+        if action == "reduce_position":
+            return self._evaluate_position_adjustment(action, context)
         if action == "close_position":
             return self._evaluate_close_position(context)
         if action == "update_weight":
@@ -247,6 +251,27 @@ class RiskPolicyService:
                 "max_holding_bars": max_holding_bars,
                 "max_holding_seconds": max_holding_seconds,
                 "holding_timeout_exceeded": holding_timeout_exceeded,
+                "temporal_context": temporal_context,
+            },
+        )
+
+    def _evaluate_position_adjustment(self, action: str, context: dict[str, Any]) -> RiskVerdict:
+        temporal_context = context.get("temporal_context") or {}
+        supervisor_action = str(context.get("supervisor_action") or action)
+        recommended_controls = context.get("recommended_controls") or {}
+        return RiskVerdict(
+            allowed=True,
+            reason="risk_reducing_action",
+            required_mode=str(context.get("mode") or "live"),
+            audit_payload={
+                "action": action,
+                "source": "risk_policy",
+                "position_id": context.get("position_id", ""),
+                "supervisor_action": supervisor_action,
+                "supervisor_reason": context.get("supervisor_reason", ""),
+                "supervisor_confidence": float(context.get("supervisor_confidence", 0.0) or 0.0),
+                "supervisor_evidence": context.get("supervisor_evidence") or {},
+                "recommended_controls": recommended_controls,
                 "temporal_context": temporal_context,
             },
         )

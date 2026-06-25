@@ -1,683 +1,935 @@
 # Quant Trading Architecture
 
 > Last updated: 2026-06-25
-> Scope: current maintained architecture and target full architecture.
+> Scope: current system, target full architecture, and the delivery roadmap we will follow.
 
-本文是当前项目的主架构文档。历史蓝图、旧 Web Console 设计、MT5 时代说明和重复 proposal 不再作为运行依据。
+本文现在是项目的主蓝图。后续讨论中形成的新架构结论，优先更新这里；`TODO.md` 只负责承接近期执行项和验证项。
 
-## 1. 当前系统定位
+---
 
-当前系统是 XAUUSD+ 为主的 Factor Takeover v4 量化交易栈。
+## 1. 这套系统现在到底是什么
 
-它已经不是单纯的因子回测系统，而是一条可审计闭环：
+当前系统已经不是“因子出信号然后下单”的简单交易脚本，而是一条可审计、可复盘、可学习的闭环：
 
 ```text
-行情数据
-  -> 因子实时计算
-  -> 信号归一化
-  -> 多因子组合
-  -> 执行闸门 / 风控闸门
+市场数据
+  -> 实时因子计算
+  -> 信号归一化与多因子组合
+  -> 执行闸门 / 风控裁决
   -> cTrader demo 执行
   -> 决策账本 / 订单与仓位生命周期
-  -> 平仓复盘 / 经验记忆
-  -> 规则治理 / 模型数据集 / 离线模型流水线
+  -> 平仓复盘 / 经验沉淀
+  -> 规则治理 / 离线模型流水线
 ```
 
-维护中的前端是 `miniprogram_v2`。后端是 FastAPI API 服务。旧浏览器 Web Console、MT5 文档和早期设计稿不再是维护目标。
+当前维护中的前端是 `miniprogram_v2`，后端是 FastAPI 服务，执行通道是 cTrader demo。
 
-## 2. 当前主链路
+一句话概括当前状态：
 
-### 2.1 实时交易链路
+**Phase B 已达到“可用闭环”，但系统还没有进入“主动持仓管理 + 因子治理 + 元模型调度”的完全体。**
+
+---
+
+## 2. 当前系统已经做到哪一步
+
+### 2.1 已经落地的能力
+
+- 实时因子链路：`StreamingFactorEngine -> SignalNormalizer -> PortfolioCompositor`
+- live 执行链路：`ExecutionGate -> live_service -> ctrader_bridge`
+- 决策账本与生命周期：`signal / skip / open / close / order_failed / amend_failed`
+- 平仓复盘与经验沉淀：`trade_outcome_review / experience_memory`
+- 规则驱动学习闭环：`PolicySuggester -> Governor -> learning_application_log / effect`
+- 离线模型流水线：dataset、readiness、validator、train、promotion gate、shadow、canary、advisory inference
+- 风控统一裁决第一阶段：`RiskPolicyService.evaluate(action, context) -> RiskVerdict`
+- 持仓时长记录第一阶段：`holding_seconds / holding_minutes / timeout_*`
+- 运维证据链查询：`/api/risk/trade-trace`
+- 三端协作流程：本地开发、GitHub 合并、服务器验证与同步
+
+### 2.2 当前系统的真实定位
+
+它已经是：
+
+- 一个**规则驱动、证据可回放**的交易系统；
+- 一个**会记录自己为什么做出决定**的系统；
+- 一个**会在平仓后形成结构化经验**的系统；
+- 一个**允许模型离线学习，但禁止模型直接接管实盘**的系统。
+
+它还不是：
+
+- 一个能主动管理持仓路径的系统；
+- 一个能系统性调参和治理因子的系统；
+- 一个有成熟元模型统一调度全局状态的系统；
+- 一个多品种、全组合、全上下文的完全体。
+
+---
+
+## 3. 当前系统的核心短板
+
+这几轮对话之后，短板已经很清楚了。真正缺的不是“再加几个指标”，而是缺下面四个层：
+
+### 3.1 持仓监督层缺失
+
+现在系统擅长开仓前判断，但对持仓中的过程理解还太弱。
+
+典型表现：
+
+- 有些仓位曾经明显盈利；
+- 后来利润回吐；
+- 持仓时间已经很长；
+- 但系统没有主动收紧、减仓或平仓；
+- 只是继续等待原始止盈止损。
+
+这说明当前风控更多是“硬闸门”，还不是“持仓裁决官”。
+
+### 3.2 归因层还没正式成为系统中枢
+
+系统已经能做平仓复盘，但还没把这些知识正式转成“实时持仓解释”和“后续因子治理输入”。
+
+也就是说，现在已经会记录：
+
+- 最终赚没赚
+- 为什么平仓
+- 某些因子贡献如何
+
+但还没完全做到：
+
+- 这笔单曾经是否证明过自己是对的
+- 最后亏损是因子错、退出错、时长错，还是市场切换
+- 这种结论怎样反馈给风控和因子治理
+
+### 3.3 因子治理层仍然偏弱
+
+当前系统会：
+
+- 记录因子贡献
+- 调整权重
+- 通过规则建议做保守治理
+
+但还没形成真正的“因子教练层”：
+
+- 哪个因子适合哪类市场
+- 哪个因子是公式问题，哪个是参数问题
+- 参数该在线轻调，还是离线深调
+- 何时拆版本、切模板、灰度上线、替换旧参数
+
+### 3.4 元模型还没有正式入位
+
+当前模型链路是 advisory-only，这很好，也符合现阶段安全边界。  
+但未来完全体还需要一个更高层的“全局调度脑”，负责：
+
+- 看整体状态，而不是只看单笔交易
+- 协调因子、风控、执行、学习、模型
+- 建议系统偏进攻还是偏防守
+- 识别什么时候该降频、降权、冻结某类策略
+
+---
+
+## 4. 这套系统的正确权力结构
+
+这是现在最需要固定下来的原则。
+
+### 4.1 风控不是唯一的大脑，但它是最高裁决权
+
+系统里可以有多个“会思考”的层：
+
+- 因子层发现机会
+- 归因层解释交易过程
+- 因子治理层优化因子和参数
+- 元模型层统筹全局状态
+
+但这些层都不能绕过风控。
+
+**风控不是负责产生 alpha，风控负责决定哪些 alpha 有资格活着进入执行。**
+
+### 4.2 模型可以参与判断，但不能直接越权执行
+
+未来模型可以：
+
+- 估计风险
+- 估计当前市场适配度
+- 估计因子可信度
+- 建议收紧风险预算
+- 建议调整因子权重或参数模板
+
+但模型不能直接：
+
+- 提高硬风控上限
+- 关闭熔断
+- 绕过 Governor
+- 直接替换 live 交易决策
+
+### 4.3 硬风控不是“全是固定数字”
+
+硬风控应该拆成两层：
+
+#### 绝对硬边界
+
+必须写死，谁都不能突破：
+
+- 单笔最大风险
+- 单日最大亏损
+- 最大总回撤
+- 最大仓位 / 最大杠杆 / 最大敞口
+- 网络异常 / 数据异常 / broker 异常禁止开新仓
+- kill switch / dry-run / emergency close
+
+#### 动态硬边界
+
+不是写死一个常数，而是写死一套裁决规则：
+
+- 当前允许仓位 = 风险预算 x 波动率调节 x 市场状态调节
+- 当前允许持仓时长 = 策略类型 x regime x 风险状态
+- 当前止损结构 = 波动率 x 空间位置 x 流动性状态
+
+关键点是：
+
+**可以动态算，但动态算出来的结果也必须被硬执行。**
+
+---
+
+## 5. 完全体应该长什么样
+
+未来正确的形态不是“一个超级模型控制所有”，而是“多层解释、多层治理、统一裁决、证据闭环”。
+
+建议目标架构如下：
 
 ```text
-DataStore / cTrader bars
-  -> backend/services/live_service.py
-  -> alpha/streaming_factor_engine.py
-  -> alpha/signal_normalizer.py
-  -> alpha/portfolio_compositor.py
-  -> alpha/execution_gate.py
-  -> backend/services/live_service.py risk checks
-  -> execution/ctrader_bridge.py
-  -> backend/ledger/service.py
+市场 / Broker / 外部上下文
+  -> 数据质量与市场状态层
+  -> 时间/空间上下文层
+  -> 因子执行层
+  -> 多因子组合层
+  -> 持仓监督与交易归因层
+  -> 因子治理层
+  -> 元模型/元策略层
+  -> RiskGovernor / RiskPolicyService
+  -> 执行路由
+  -> Ledger 证据脊柱
+  -> 复盘、学习、模型实验室
+  -> 治理、灰度、回滚
 ```
 
-核心职责：
+---
 
-- `StreamingFactorEngine`：每根 bar 增量计算因子。
-- `SignalNormalizer`：把原始因子值变成统一方向和强度的信号。
-- `PortfolioCompositor`：合成 tactical / macro / composite score。
-- `ExecutionGate`：处理信号阈值、冷却期、NFP/GVZ 事件过滤，并预留 `RiskGovernor` 裁决入口。
-- `live_service`：读取账户与仓位缓存，执行 VaR gate、Kelly sizing、仓位数量/总量控制、SL/TP 修正、cTrader 下单。
-- `DecisionLedger`：记录 signal、skip、open、close、order_failed、amend_failed 等事件。
+## 6. 完全体的分层定义
 
-当前执行安全边界：
-
-- cTrader demo 是唯一维护中的执行通道。
-- `ctrader_send_orders` 和 `factor_dry_run` 决定是否真正发单。
-- 下单前必须经过 `ExecutionGate`。
-- 下单前会经过 VaR gate。
-- Kelly 只影响仓位大小，不负责绕过风控。
-- 仓位数量和总 API volume 会再次拦截。
-- 订单失败、SL/TP amend 失败、风控 skip 都会写入 ledger，供后续学习。
-
-### 2.2 风控体系现状
-
-当前风控是“分层硬规则 + 总裁决器雏形”。
-
-```text
-ExecutionGate
-  -> signal threshold / cooldown / event filters
-  -> optional RiskGovernor allow_trade
-
-live_service pre-order risk
-  -> VaR gate
-  -> Kelly position sizing
-  -> max position count
-  -> max total API volume
-  -> broker metadata / min volume / step volume
-
-risk/
-  -> RiskGovernor
-  -> circuit breaker
-  -> position monitor
-  -> concentration monitor
-  -> stress tester
-  -> VaR engine
-  -> Kelly position sizer
-  -> regime detector
-  -> cross asset covariance
-```
-
-`RiskGovernor` 目前是最高层风控裁决器的核心规则，`RiskPolicyService` 是面向业务调用点的统一 facade。当前已支持：
-
-- `allow_trade`
-- `allow_weight_update`
-- `allow_promotion`
-- `allow_new_factor`
-- `force_dry_run`
-- `force_deleverage`
-
-它已经开始进入真实业务链路：live 开仓、学习权重同步、模型 shadow/canary API、因子 shadow 注册、手动 shadow promote、自动 canary promote 都会产出 `risk_verdict`。剩余工作是继续把历史分散检查收敛到同一 facade，并让前端风控面板直接展示这些 verdict。
-此外，`temporal_context` 第一版已经进入 live 开仓上下文与 `risk_verdict.audit_payload`，并会随 decision sample 一起导出，当前包含交易时段、weekday、bar 周期、距上次成交间隔、loop uptime 等可解释时间字段；这一步先解决“统一记录”，下一步才是把其中一部分提升为真正的 governor 规则。
-
-当前需要注意的结构债：
-
-- `risk/` 和 `backend/risk/` 同时存在。
-- API 使用 `backend/risk` 的轻量版本。
-- 更完整的 Governor、压力测试、集中度、跨品种风控在根目录 `risk/`。
-- 后续应统一为一个稳定 facade，避免 live、API、learning 各自读不同实现。
-
-### 2.3 决策账本与学习样本
-
-当前系统已经把“交易”扩展成“可学习事件”。
-
-```text
-decision_ledger
-  + factor snapshots
-  + order lifecycle
-  + position lifecycle
-  + trade_outcome_review
-  + experience_memory
-  + learning_application_log
-  + learning_application_effect
-  -> LearningFeatureProvider
-  -> learning_sample.v1 / decision_sample.v1
-```
-
-两类样本：
-
-- `learning_sample.v1`：平仓后的交易级样本，包含 PnL、归因、复盘、经验、治理上下文。
-- `decision_sample.v1`：决策级样本，覆盖 signal、skip、hold、open、order_failed、amend_failed。
-
-样本关键字段：
-
-- `factor_outcomes`
-- `attribution_alignment`
-- `execution_trace`
-- `application_context`
-- `risk_state`
-- `portfolio_state`
-- `llm_context`
-- `explainability`
-
-这意味着未来模型不只是学习“什么信号赚钱”，也能学习：
-
-- 为什么没有交易。
-- 哪一层 gate 拦截。
-- 是否是风控拦截。
-- 是否是 broker 执行失败。
-- 哪些因子在入场时看似正确、平仓后实际有害。
-- 某次规则应用之后效果是否变好。
-
-### 2.4 规则驱动学习闭环
-
-当前学习闭环已经落地，但处于 demo 实盘联调和稳定性验证阶段。
-
-```text
-closed position
-  -> TradeReviewer
-  -> ExperienceBuilder
-  -> PolicySuggester
-  -> RuleEvolutionGovernor
-  -> approved / rejected / rolled_back
-  -> learning application log
-  -> learning application effect tracking
-  -> adaptive weights / later review
-```
-
-当前规则治理原则：
-
-- 单笔交易不会直接改变系统。
-- 经验先沉淀成 pattern。
-- pattern 达到样本数量和收益阈值后才形成 suggestion。
-- suggestion 需要 Governor 审核。
-- 已应用建议需要持续观察。
-- 后续证据反转时可以 rollback / ineffective / reinforced。
-
-这套系统当前是“规则驱动学习”，不是“模型驱动自我进化”。
-
-### 2.5 离线模型流水线
-
-当前模型链路已经建立，但所有模型能力都是离线和 advisory-only。
-
-```text
-LearningDatasetBuilder
-  -> LearningDatasetReadiness
-  -> LearningDatasetValidator
-  -> DatasetSummaryAdapter
-  -> LearningStatisticalTrainer
-  -> ModelPromotionGate
-  -> ModelShadowQueue
-  -> ModelShadowRunner
-  -> ModelCanaryReviewer
-  -> ModelInferenceContract
-  -> ModelCanaryExecutor
-  -> LearningModelPipeline
-```
-
-安全边界：
-
-- 模型 artifact 不允许声明 `live_trading=true`。
-- `ModelPromotionGate` 只允许进入 `shadow_candidate`。
-- `ModelShadowRunner` 只做离线影子验证。
-- `ModelCanaryReviewer` 只把候选推进为 `canary_ready` 或 `canary_rejected`。
-- `ModelInferenceContract` 只接受 `canary_ready` 模型，输出 `review_only` advice。
-- `ModelCanaryExecutor` 只做受控 advisory trial，不下单、不改权重。
-
-当前模型的定位：
-
-```text
-模型 = 解释、评分、排序、审查建议
-模型 != 下单者
-模型 != 风控绕过者
-模型 != 权重直接修改者
-```
-
-## 3. 当前系统成熟度
-
-### 已经落地
-
-- 因子实时链路。
-- composite signal 和 execution gate。
-- cTrader demo 执行通道。
-- 决策账本和订单/仓位 lifecycle。
-- 平仓复盘。
-- 经验记忆。
-- 规则建议。
-- Governor 审批 / 拒绝 / 回滚。
-- 学习应用日志和效果跟踪。
-- 重启后 learning backfill。
-- 模型就绪样本导出。
-- 离线快照、readiness、validator。
-- 离线训练、model card、promotion gate。
-- shadow queue / shadow run / canary review。
-- advisory-only inference。
-- controlled canary trial。
-- 小程序 V2 作为唯一维护前端。
-
-### 仍需验证
-
-- demo 实盘连续运行下，平仓复盘是否稳定无漏记。
-- 重启中开仓/平仓场景是否能可靠恢复。
-- learning application effect 是否能在真实流中正确推进。
-- 自动 rollback / reinforced 是否和真实收益一致。
-- 小程序学习页是否准确展示所有状态。
-
-### 当前主要技术债
-
-- `risk/` 与 `backend/risk/` 风控实现需要统一 facade。
-- `RiskGovernor` 尚未成为所有风控动作的唯一裁决入口。
-- 多品种风险预算尚未完全接入 live path。
-- 历史重复 learning application 需要一次清理脚本。
-- 部分旧模块、旧桥接、旧脚本仍在 TODO 中待清理。
-
-## 4. 未来完全体架构
-
-未来完全体不是“让一个模型控制一切”，而是“硬风控不可绕过，规则治理可审计，模型和元模型提供建议与协调”。
-
-推荐目标形态：
-
-```text
-Market / Broker / External Data
-  -> Data Quality Gate
-  -> Feature and Factor Layer
-  -> Signal and Portfolio Layer
-  -> Meta Decision Layer
-  -> Risk Governor
-  -> Execution Router
-  -> Ledger and Lifecycle Spine
-  -> Review / Learning / Model Lab
-  -> Governance and Rollback
-```
-
-### 4.1 完全体分层
-
-#### Layer 0: 不可绕过硬风控
-
-这一层是系统宪法，任何模型、元模型、规则建议都不能绕过。
-
-包括：
-
-- 最大日亏损。
-- 最大总回撤。
-- 单笔最大风险。
-- 最大仓位数量。
-- 最大净/毛敞口。
-- 最大品种相关性敞口。
-- broker 断连处理。
-- 数据延迟处理。
-- 价格异常处理。
-- emergency close / kill switch。
-- 强制 dry-run。
-
-#### Layer 1: 数据质量和市场状态
-
-负责判断当前数据是否可交易：
-
-- bar/tick 是否新鲜。
-- 价格是否卡死。
-- spread/slippage 是否异常。
-- 交易时段是否允许。
-- 重大事件风险。
-- regime 是否发生明显切换。
-- 多数据源是否互相矛盾。
-
-输出不是交易信号，而是 `market_context` 和 `tradeability_state`。
-
-这一层还需要补齐两类完全体上下文：
-
-- `temporal_context`：交易时段、星期/日期、重大事件前后、bar 生命周期、开仓时间、持仓时长、持仓是否超时、不同持仓阶段的收益/回撤效率。
-- `market_space_context`：价格在近期区间、趋势通道、支撑阻力、波动分位、成交/深度状态、多周期结构、跨品种相关性中的位置。
-
-当前系统已经开始在 review / experience 中记录 `entry_ts`、`close_ts`、`holding_seconds`、`holding_minutes`，但时间/空间上下文仍未形成统一抽象层。后续应把它们作为可复盘、可训练、可风控的上下文输入，而不是散落在单个因子或日志字段里。
-
-#### Layer 2: 因子与组合信号
-
-负责生成可解释的交易意图：
-
-- 因子计算。
-- 因子归一化。
-- 因子分组。
-- tactical / macro 组合。
-- 因子贡献快照。
-- composite score。
-- direction。
-- confidence。
-
-这一层只能表达“想不想交易”，不能决定“可不可以交易”。
-
-时间/空间上下文进入本层时，应采用“上下文调制”，而不是简单替代信号。例如：
-
-- 同一个趋势因子，在高波动突破空间和低波动震荡空间中权重不同。
-- 同一个入场信号，在亚洲盘、伦敦盘、美盘和重大事件前后的可信度不同。
-- 同一笔持仓，开仓后 5 分钟、30 分钟、2 小时的出场逻辑应不同。
-- 因子贡献复盘应区分 entry contribution、hold contribution、exit contribution 与 holding-time efficiency。
-
-这部分是当前完全体路线中的未完成项，应在 Phase B/C 之间逐步补齐。
-
-#### Layer 3: 元决策层
-
-这是未来元模型/元策略所在层。
+### Layer 0: 执行宪法层（不可绕过硬风控）
 
 职责：
 
-- 判断当前应该偏防守还是进攻。
-- 判断当前哪些因子族更可信。
-- 调整建议风险预算。
-- 给出是否应该降低频率、降低仓位、暂停学习的建议。
-- 给不同模型/规则输出做 routing。
-- 给出人类可读解释。
+- 最大亏损、最大回撤、最大敞口、最大杠杆
+- 数据断流 / broker 断连 / 价格异常 / 磁盘异常 / loop 异常处理
+- 熔断、强制 dry-run、emergency close
 
-但它不能：
+原则：
 
-- 直接下单。
-- 直接提高硬风控上限。
-- 直接绕过 Governor。
-- 直接把模型接入 live execution。
+- 这一层不是为了赚钱，是为了**不死**
+- 这一层不接受模型绕过
 
-#### Layer 4: RiskGovernor / RiskPolicyService
-
-未来应成为所有高影响动作的唯一裁决入口。
-
-统一裁决：
-
-- 是否允许开仓。
-- 是否允许加仓。
-- 是否允许平仓。
-- 是否允许权重更新。
-- 是否允许因子晋升。
-- 是否允许新因子注册。
-- 是否允许模型进入 shadow。
-- 是否允许模型进入 canary。
-- 是否允许某个建议应用到 live policy。
-
-推荐接口：
-
-```text
-RiskPolicyService.evaluate(action, context) -> Verdict
-
-action:
-  - open_trade
-  - add_position
-  - close_position
-  - update_weight
-  - promote_factor
-  - register_factor
-  - start_shadow_model
-  - start_canary_model
-  - apply_model_suggestion
-
-verdict:
-  - allowed
-  - reason
-  - severity
-  - max_size
-  - required_mode
-  - audit_payload
-```
-
-这一层应该收敛现在分散的 VaR、Kelly、仓位、熔断、集中度、回撤、数据延迟、多品种敞口判断。
-
-#### Layer 5: 执行路由
+### Layer 1: 数据质量与市场状态层
 
 职责：
 
-- 根据 Governor verdict 执行。
-- 统一处理 broker metadata。
-- 统一处理 volume 转换。
-- 统一处理 SL/TP amend。
-- 统一记录 order lifecycle。
-- 支持未来 paper/demo/live 分层。
+- 行情是否新鲜
+- spread / slippage / depth / bar lag 是否异常
+- 当前市场更像趋势、震荡、假突破、波动扩散还是波动收缩
+- 当前交易环境是否可交易
 
-执行层只执行已经批准的动作，不自行解释策略。
+输出：
 
-#### Layer 6: Ledger Spine
+- `tradeability_state`
+- `regime_state`
+- `data_quality_state`
 
-未来所有重要动作都应写入一条统一证据脊柱。
+### Layer 2: 时间/空间上下文层
 
-包括：
+这是后续必须补强的抽象层。
 
-- 市场上下文。
-- 因子快照。
-- composite signal。
-- gate 结果。
-- risk verdict。
-- model advice。
-- meta-model advice。
-- final action。
-- broker lifecycle。
-- position lifecycle。
-- post-trade review。
-- learning application。
-- rollback / reinforce。
+职责：
 
-目标是任何一笔交易都能回放：
+- 时间上下文：交易时段、weekday、事件窗口、持仓时长、盈利持续时间、回撤持续时间
+- 空间上下文：价格在区间/通道/支撑阻力/波动分位中的位置
+- 多周期上下文：M1/M5/M15/H1 结构是否一致
+- 相关性上下文：当前仓位与其他风险暴露是否冲突
+
+输出：
+
+- `temporal_context`
+- `market_space_context`
+- `multi_timeframe_context`
+
+### Layer 3: 因子执行层
+
+职责：
+
+- 按当前公式版本和参数版本生成信号
+- 输出方向、强度、适用 regime、预期持仓类型
+
+这里要特别强调：
+
+因子不是死的，但**单笔交易生命周期内最好保持版本稳定**，避免边交易边重写自己。
+
+每个因子最终都应该是一个可解释对象，至少知道：
+
+- 因子家族
+- 公式版本
+- 参数版本
+- 当前参数值
+- 适用市场
+- 弱适用市场
+- 预期持仓时长
+- 典型失效模式
+
+### Layer 4: 多因子组合层
+
+职责：
+
+- 因子归一化
+- 因子分组
+- tactical / macro / structural 组合
+- 生成 composite score、direction、confidence
+
+这一层只表达：
+
+**“我想不想交易”**
+
+它不能最终决定：
+
+**“我可不可以交易”**
+
+### Layer 5: 持仓监督与交易归因层
+
+这是未来最关键的新层，建议正式命名为：
+
+**`position_supervisor`**
+
+Phase C / C1 的正式 contract 见 [position-supervisor-contract.md](position-supervisor-contract.md)。
+
+职责：
+
+- 持续观察仓位生命周期
+- 判断 thesis 是否仍成立
+- 识别市场是否切换
+- 识别是否出现高浮盈回吐
+- 识别持仓时间是否已经失去效率
+- 给出继续持有 / 收紧 / 减仓 / 平仓的建议
+
+这一层要显式判断：
+
+- 入场质量 `entry_quality`
+- 持仓效率 `holding_efficiency`
+- 浮盈回吐比例 `giveback_ratio`
+- 时间衰减评分 `time_decay_score`
+- market regime 是否切换
+- 继续持有是否值得占用风险预算
+
+这层的核心不是“生成信号”，而是：
+
+**理解一笔已经开的交易现在还值不值得继续活着。**
+
+### Layer 6: 因子治理层
+
+这是“谁来调参数、谁来优化因子”的正式答案。
+
+职责：
+
+- 判断某因子是逻辑问题、参数问题、市场不匹配，还是退出不匹配
+- 统计因子在不同 regime 下的表现
+- 决定是降权、换模板、调阈值、调 lookback，还是拆成新版本
+- 负责在线轻调与离线深调的边界
+
+建议拆成两类动作：
+
+#### 在线轻调
+
+- 权重调整
+- 风险预算缩放
+- 开仓阈值轻微调节
+- 不同 regime 间切换预设参数模板
+
+#### 离线深调
+
+- 改核心公式
+- 改核心 lookback
+- 改主要阈值
+- 加过滤条件
+- 重新回测、walk-forward、灰度上线
+
+原则：
+
+**归因层负责发现“参数可疑”，治理层负责决定“参数怎么改”。**
+
+### Layer 7: 元模型 / 元策略层
+
+未来可以有元模型，但角色不是皇帝，而是全局调度员。
+
+职责：
+
+- 汇总因子、仓位、风险、执行、学习、模型状态
+- 判断当前应该偏进攻还是偏防守
+- 建议风险预算倍数、交易频率、可信因子族
+- 决定哪些候选建议应该进入人审或 Governor
+
+它不能：
+
+- 直接下单
+- 直接改硬风控上限
+- 绕过 shadow / canary / Governor
+
+### Layer 8: RiskGovernor / RiskPolicyService
+
+这一层是整个系统的**最高执行裁决层**。
+
+未来所有高影响动作都应该走它：
+
+- `open_trade`
+- `add_position`
+- `reduce_position`
+- `close_position`
+- `update_weight`
+- `switch_parameter_template`
+- `promote_factor`
+- `register_factor`
+- `start_shadow_model`
+- `start_canary_model`
+- `apply_model_suggestion`
+
+它接收来自：
+
+- 硬规则
+- 市场状态
+- 时间/空间上下文
+- 持仓监督建议
+- 因子治理建议
+- 元模型建议
+
+然后输出唯一裁决：
 
 ```text
-当时看到了什么
-系统想做什么
-模型建议了什么
-风控允许了什么
-最后执行了什么
-结果如何
-后来学到了什么
-有没有回滚
+RiskPolicyService.evaluate(action, context) -> RiskVerdict
 ```
 
-#### Layer 7: 学习与模型实验室
+### Layer 9: 执行路由层
 
-这一层可以越来越强，但必须隔离 live 权限。
+职责：
 
-包括：
+- 统一 broker metadata、volume、SL/TP、改单、撤单
+- 严格执行经过批准的动作
+- 不负责理解策略语义
 
-- dataset export。
-- readiness audit。
-- dataset validation。
-- offline training。
-- model registry。
-- promotion gate。
-- shadow validation。
-- canary review。
-- advisory inference。
-- controlled canary trial。
-- human review。
+### Layer 10: Ledger 证据脊柱
 
-任何模型要影响 live policy，必须经过：
+未来所有动作都应写入统一证据链：
+
+- 当时看到了什么
+- 因子想做什么
+- 持仓监督怎么判断
+- 元模型建议了什么
+- 风控允许了什么
+- 最终执行了什么
+- 结果如何
+- 后来学到了什么
+
+### Layer 11: 学习与模型实验室
+
+职责：
+
+- dataset export / readiness / validation
+- offline train / registry / promotion gate
+- shadow / canary / advisory inference
+- 回测、复盘、离线调参、相似案例检索
+
+原则：
+
+**先做解释和建议，再做受限影响，最后才可能有限介入 live policy。**
+
+---
+
+## 7. 三个最容易混淆的角色
+
+这是后续开发时必须始终保持清楚的分工。
+
+### 因子
+
+负责：
+
+- 发现机会
+- 生成信号
+
+不负责：
+
+- 最终裁决
+- 直接修改自己
+
+### 交易大脑
+
+这里不是单一模块，而是三层合起来：
+
+- 持仓监督与归因层
+- 因子治理层
+- 元模型层
+
+它们负责：
+
+- 理解过程
+- 解释问题
+- 形成优化建议
+
+### 风控
+
+负责：
+
+- 统一裁决
+- 强制执行
+- 记录原因
+
+所以更准确的说法不是“风控是唯一大脑”，而是：
+
+**风控是最高裁决权；交易大脑是解释和治理中枢。**
+
+---
+
+## 8. 我们要如何判断“因子错了”还是“退出错了”
+
+这是未来归因体系的关键标准。
+
+不能只看最终盈亏。  
+必须看整条持仓路径。
+
+建议每笔交易至少记录并用于归因：
+
+- `entry_quality`
+- `exit_quality`
+- `mfe`
+- `mae`
+- `profit_capture_ratio`
+- `giveback_ratio`
+- `time_in_profit`
+- `holding_efficiency`
+- `regime_fit`
+- `exit_reason`
+- `thesis_status_at_exit`
+
+然后给出责任标签，例如：
+
+- `entry_good_exit_bad`
+- `alpha_correct_but_capture_failed`
+- `tp_too_far`
+- `sl_too_tight`
+- `holding_too_long`
+- `regime_changed_during_hold`
+- `factor_logic_ok_but_param_suspect`
+
+这样系统后续才能真正区分：
+
+- 是因子逻辑不适应
+- 是因子参数不适应
+- 是止盈止损不适应
+- 是持仓时长不适应
+- 是市场中途切换了
+
+---
+
+## 9. 当前系统与完全体之间，最关键的开发路线
+
+下面这条路线是后续开发主线，默认按此推进。
+
+## 9A. 数学模型和大语言模型应该接在哪里
+
+这两类模型都应该进入系统，但角色完全不同，不能混用。
+
+### 数学模型的定位
+
+数学模型更适合做：
+
+- 概率估计
+- 风险评分
+- regime 识别
+- 因子排序
+- 持仓质量评分
+- 参数模板选择
+- 异常检测
+
+它更像系统里的**定量判断器**。
+
+### 大语言模型的定位
+
+大语言模型更适合做：
+
+- 复盘解释
+- 证据归纳
+- 失败模式总结
+- 治理建议草案
+- 人审辅助
+- 运维/风控/因子状态的人话说明
+
+它更像系统里的**语义理解器和治理助理**。
+
+### 数学模型应该接的层
+
+#### 1. 接在持仓监督与归因层
+
+用途：
+
+- 评估继续持有是否仍有正期望
+- 评估退出风险是否升高
+- 评估时间衰减是否明显
+- 评估浮盈回吐是否异常
+- 评估当前持仓效率是否已经恶化
+
+适合的模型：
+
+- path scoring model
+- survival / duration model
+- exit quality model
+- trade outcome probability model
+
+输出进入：
+
+- `position_supervisor`
+- `RiskPolicyService` 的审计上下文和建议输入
+
+#### 2. 接在因子治理层
+
+用途：
+
+- 判断因子在不同 regime 下的有效性
+- 判断问题更像公式问题还是参数问题
+- 评估 lookback、threshold、止盈止损模板是否失配
+- 给出参数模板切换或降权建议
+
+适合的模型：
+
+- logistic regression
+- xgboost / lightgbm
+- ranking model
+- regime classifier
+- anomaly detector
+
+输出进入：
+
+- 因子治理工作流
+- 参数模板候选
+- 治理审批前的量化证据
+
+#### 3. 接在元模型层
+
+用途：
+
+- 汇总全局市场、持仓、风险、学习、执行状态
+- 建议当前系统偏进攻还是偏防守
+- 建议风险预算倍数、交易频率、可信因子族
+- 识别系统是否进入恢复期、防守期或异常期
+
+它是未来“元模型”中的定量核心，但仍然只有建议权，没有执行特权。
+
+### 大语言模型应该接的层
+
+#### 1. 接在归因与复盘层
+
+用途：
+
+- 读取结构化 `trade_trace`
+- 总结这笔交易为什么赢、为什么亏
+- 把“因子问题 / 参数问题 / 退出问题 / 时长问题 / regime 问题”讲清楚
+- 生成给人看的复盘摘要
+
+它在这里更像：
+
+**交易复盘分析师**
+
+#### 2. 接在因子治理层
+
+用途：
+
+- 汇总某因子在一段时间内的表现证据
+- 归纳该因子适用市场、弱适用市场、典型失败模式
+- 生成治理建议草案
+- 生成参数调整提案的解释文本
+
+它在这里更像：
+
+**治理报告生成器**
+
+#### 3. 接在元治理层
+
+用途：
+
+- 汇总风控、归因、因子治理、数学模型建议
+- 生成系统状态说明
+- 生成 rollout / rollback 理由
+- 支持人工审批和运维排障
+
+它在这里更像：
+
+**治理秘书长 / 审计助理**
+
+### 两类模型都不能直接接到执行层
+
+不管是数学模型还是大语言模型，都不应该直接拥有下面这些权力：
+
+- 直接开仓
+- 直接平仓
+- 直接提高硬风控上限
+- 直接关闭熔断
+- 直接绕过 `RiskPolicyService`
+- 直接启用 live-trading 模型
+
+它们都只能通过：
+
+- `position_supervisor`
+- 因子治理层
+- 元模型层
+- `RiskPolicyService`
+- shadow / canary / advisory 流程
+
+间接影响系统。
+
+### 最终关系
+
+可以把两类模型和主链路的关系理解成这样：
 
 ```text
-offline validated
-  -> shadow passed
-  -> canary ready
-  -> advisory trial passed
-  -> Governor approved
-  -> limited rollout
-  -> monitored application effect
-  -> rollback capable
+市场数据
+  -> 因子层
+  -> 组合层
+  -> 持仓监督层
+       <- 数学模型: 持仓评分 / 退出风险 / 时间衰减
+       <- LLM: 复盘解释 / 失败归因总结
+  -> 因子治理层
+       <- 数学模型: 参数评估 / regime适配 / 因子排序
+       <- LLM: 治理建议归纳 / 审查说明
+  -> 元模型层
+       <- 数学模型: 全局状态评分 / 风险预算建议
+       <- LLM: 全局解释 / 治理摘要 / 人审辅助
+  -> RiskPolicyService
+  -> 执行层
 ```
 
-## 5. 元模型的最终位置
+一句话总结：
 
-未来可以有元模型，但它不是皇帝，而是调度员、审计员和风险参谋。
+- 数学模型负责“算”
+- 大语言模型负责“讲明白”
+- 风控负责“拍板并执行”
 
-### 元模型应该做什么
+### Phase A: 稳定闭环
 
-- 汇总因子、风控、执行、学习、模型输出。
-- 识别当前系统状态：正常、过热、失真、防守、恢复期。
-- 决定是否建议降低交易频率。
-- 决定是否建议降低风险预算。
-- 决定哪些模型/因子当前更可信。
-- 给出可解释的建议。
-- 帮助发现风控规则过严或过松。
-- 帮助生成待审核的 policy suggestion。
+状态：已完成
 
-### 元模型不应该做什么
+目标：
 
-- 不直接下单。
-- 不直接修改风控上限。
-- 不直接关闭熔断。
-- 不直接提升仓位。
-- 不绕过 `RiskGovernor`。
-- 不绕过 shadow/canary。
-- 不在证据不足时自动晋升模型。
+- 决策账本、复盘、经验、规则建议、效果跟踪稳定
+- 手动平仓、重启恢复、补账无断链
 
-### 推荐元模型输出格式
+成果：
 
-```json
-{
-  "regime": "defensive",
-  "confidence": 0.78,
-  "risk_budget_multiplier_suggestion": 0.5,
-  "trade_frequency_suggestion": "reduce",
-  "trusted_factor_groups": ["macro", "volatility"],
-  "untrusted_factor_groups": ["short_momentum"],
-  "recommended_actions": [
-    {
-      "action": "freeze_weight_update",
-      "reason": "drawdown approaching limit and recent model advice unstable",
-      "requires_governor_approval": true
-    }
-  ],
-  "must_not_override": [
-    "max_daily_loss",
-    "circuit_breaker",
-    "broker_disconnect",
-    "data_lag"
-  ]
-}
-```
-
-元模型输出应进入 ledger，并由 `RiskGovernor` 或 `RuleEvolutionGovernor` 审批后才能影响系统。
-
-## 6. 当前到完全体的路线
-
-### Phase A: 稳定当前闭环
-
-目标：证明现有规则驱动闭环在 demo 实盘里可靠。
-
-要完成：
-
-- 连续运行验证 signal/open/close/skip/order_failed/amend_failed 都能落账。
-- 验证平仓复盘和真实 PnL 对齐。
-- 验证 learning application effect 能推进。
-- 验证 rollback / reinforced 不误触发。
-- 验证重启恢复和 delayed backfill。
+- 已验证 open/close/review/experience 主闭环
+- 已完成手动 broker close 验证
 
 ### Phase B: 风控统一
 
-目标：让风控从“分散检查”变成“统一裁决”。
+状态：已完成可用闭环
 
-当前进展：
+目标：
 
-- 已新增 `RiskPolicyService.evaluate(action, context) -> RiskVerdict` 作为统一 facade。
-- live 开仓路径已先接入 `open_trade`，把 VaR、仓位数量、API volume、金字塔检查统一成一个可审计 verdict。
-- `close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model` 已进入统一 action 口径。
-- 模型 shadow queue、canary review、canary trial API 已附带 `risk_verdict`，并阻断带 live trading 能力或候选状态不匹配的模型流程。
-- 学习治理 run 的 `_update_weights()` 同步已接入 `update_weight` verdict。
-- 因子发现和晋升实际调用点已接入：`scripts/discover_factors.py --auto-register`、EvolutionOrchestrator GP shadow 注册、EvolutionOrchestrator canary -> discovered promote、`/api/shadow/promote` 手动晋升都会先走 `RiskPolicyService`。
-- live open 成功路径与风险阻断路径都会写入 policy verdict；`/api/risk/summary` 和 `/api/risk/policy/verdicts` 已可聚合最近 allowed/blocked verdict。
-- live close 路径已接入 `close_position` verdict：系统发起 emergency close 前审计，broker close 落账时写入 close ledger 和 position lifecycle。
-- Governor state 第一版 runtime health 已接入 live 开仓：`loop_running`、`bridge_connected`、`data_lag_seconds` 进入真实裁决，sync health 与 account/positions cache age 已进入审计上下文。
-- 时间规则第一批已进入真实链路：`open_trade` 会执行“连续亏损后的冷静期”拦截；`close_position` verdict 会记录持仓时长、超时阈值和是否超时，live loop 已具备按 `risk_max_holding_bars` 自动发起超时平仓的能力（默认关闭，待校准）。
-- 已基于服务器在线仓位样本把 `risk_max_holding_bars` 的首发默认值校准到 `288`（M5 约 24 小时），目的是先让超时收口真正生效，同时避免刚上线就误伤当前 7 小时到 13 小时级别的持仓。
-- 运行环境健康已继续收口到统一裁决：`system_health` 快照现已进入 `runtime_health`；其中 `disk_space=critical` 被视为硬阻断，`l2_depth=critical` 只在策略显式要求深度数据时阻断，否则先作为软风险保留在审计与展示层。
-- 线上验收已证明这条链路真实生效：`/api/risk/summary` 会返回 `system_health`，`/api/live/positions` 会返回 `holding_seconds / holding_timeout_*`，`/api/live/status` 与 `/api/live/strategy-status` 也能看到 ready/connected/live positions 等运行态证据。
-- 这也暴露出展示层最后一层缺口：`system_health.overall=critical` 不能直接等价成“会阻断交易”，因为有些 critical 项只是高优先级观察项（例如未要求 L2 时的 `l2_depth`）。因此展示层需要补“是否真的挡住开仓”的解释，而不是把机器状态原样抛给用户。
-- 后续还需要把前端风控面板接到该数据源，并补齐运行环境、跨品种、时间/空间上下文等更完整的 governor state。
+- 把分散风控收敛到 `RiskPolicyService`
+- 让风险 verdict 成为统一可审计裁决
 
-要完成：
+成果：
 
-- 合并 `risk/` 与 `backend/risk/` 的职责边界。
-- 增加 `RiskPolicyService` facade。
-- live_service 所有下单前风险判断统一走 facade。
-- API 风控面板读取同一套状态。后端数据源已具备，前端展示待接入。
-- ledger 记录完整 risk verdict。open allowed / skip blocked / close risk-reducing 已覆盖，后续继续扩展到更多非交易高影响动作的统一审计表。
-- 运行环境健康第一版已接入开仓裁决；后续继续把磁盘空间、L2 深度、更多数据质量项纳入统一 governor state。
-- `temporal_context` 已先完成统一记录与样本导出，并已落第一批实规则：连续亏损后冷静期、持仓超时审计/自动收口钩子；下一步继续把事件窗口、交易时段、日内连续亏损节奏细化为更完整裁决。
-- 将 `market_space_context` 纳入风控裁决：价格空间位置、波动分位、结构冲突、相关性敞口。
+- 风控 summary / verdict / trade-trace 已可线上验证
+- 持仓时长与 timeout 审计已落地
+- 运维前端已开始做人话展示
 
-### Phase C: 模型建议进入实时旁路
+### Phase C: 持仓监督闭环
 
-目标：让模型能看 live context，但仍不能执行。
+状态：下一阶段最高优先级
+
+这是从“会开仓”走向“会管理仓位”的关键一步。
 
 要完成：
 
-- live path 可调用 `ModelInferenceContract` advisory score。
-- advisory score 写入 ledger。
-- 小程序显示模型建议与置信度。
-- 模型建议只作为 review context，不改变订单。
-- 模型样本显式携带时间/空间上下文，先用于解释和离线训练，不直接驱动 live 风控。
+1. 建立 `position_supervisor`
+2. 为每个活跃仓位持续计算：
+   - `holding_seconds`
+   - `mfe / mae`
+   - `giveback_ratio`
+   - `time_decay_score`
+   - `holding_efficiency`
+   - `thesis_status`
+   - `regime_shift`
+3. 输出结构化建议：
+   - `hold`
+   - `tighten`
+   - `reduce`
+   - `close`
+4. 把建议送入 `RiskPolicyService`
+5. 所有动作写入 ledger 和 trade trace
 
-### Phase D: 元模型旁路
+验收标准：
 
-目标：增加元模型对系统状态的统一判断。
+- 不再只会死等止盈止损
+- 对“曾经盈利但后来回吐”的仓位能给出可解释动作
+- 每次平仓都知道是 stop、timeout、giveback、regime shift，还是 thesis failure
 
-要完成：
+### Phase D: 归因升级与责任分离
 
-- 定义 `meta_context.v1`。
-- 汇总 market、factor、risk、execution、learning、model 状态。
-- 元模型输出 advisory meta decision。
-- 输出进入 ledger。
-- 输出可生成 policy suggestion，但不能直接应用。
+目标：
 
-### Phase E: 受限自动调参
-
-目标：在严格权限下，让系统自动应用低风险建议。
-
-允许自动化的范围：
-
-- 小幅降低风险预算。
-- 暂停权重更新。
-- 暂停新因子注册。
-- 降低交易频率。
-- 标记某类模式为 watch。
-
-不允许自动化的范围：
-
-- 提高最大亏损阈值。
-- 关闭熔断。
-- 提高最大仓位。
-- 未经审批启用 live_trading 模型。
-- 跳过 canary。
-
-### Phase F: 多品种完全体
-
-目标：从 XAUUSD+ 单品种扩展到多品种组合风控。
+- 把“入场错 / 退出错 / 时长错 / 参数错 / regime 错”正式分离
 
 要完成：
 
-- 每品种独立 factor pipeline。
-- 全局 `RiskGovernor` 聚合风险预算。
-- 跨品种相关性和风险平价。
-- 品种级、策略级、账户级三层限制。
-- 多品种 ledger 和 dataset contract。
+1. 扩展 trade review contract
+2. 引入统一 failure taxonomy v2
+3. 建立责任归因标签
+4. 把责任归因同时写入：
+   - trade review
+   - factor contribution review
+   - position supervisor close reason
+   - learning sample
 
-## 7. 最终原则
+验收标准：
 
-1. 硬风控永远高于模型。
-2. Governor 是执行权限边界。
-3. 模型先离线，再 shadow，再 canary，再 advisory，最后才可能受限影响 live policy。
-4. 元模型只协调，不独裁。
-5. 所有高影响动作必须可审计、可解释、可回滚。
-6. 单笔交易不能直接改变系统。
-7. 经验必须经过样本数、收益、失败标签和治理审查。
-8. 未来越智能，权限越要清晰。
+- 单笔亏损不再粗暴归类为“因子失效”
+- 系统能识别“因子方向对，但退出不好”
 
-## 8. 主要 API
+### Phase E: 因子治理与参数模板
 
-Learning endpoints:
+目标：
 
+- 正式建立“因子教练层”
+
+要完成：
+
+1. 因子解释卡片标准化
+2. 参数版本与模板系统
+3. regime-aware 参数模板切换
+4. 在线轻调与离线深调边界
+5. 参数怀疑证据 -> 候选治理动作 -> 回测/灰度 -> 发布
+
+验收标准：
+
+- 系统知道某因子是“逻辑好但参数可疑”
+- 因子不再只有权重变化，还能有版本和模板治理
+
+### Phase F: 元模型旁路
+
+目标：
+
+- 让更高层的大脑开始看到全局，但仍不拥有执行特权
+
+要完成：
+
+1. 定义 `meta_context.v1`
+2. 汇总市场、因子、持仓、风控、学习、模型状态
+3. 输出 advisory meta decision
+4. 把元模型建议写入 ledger
+5. 只允许生成建议，不允许直接执行
+
+验收标准：
+
+- 系统能判断现在该进攻、观望、收缩还是恢复
+- 元模型能建议降频、降权、冻结某些因子族
+
+### Phase G: 受限自动治理
+
+目标：
+
+- 在不突破安全边界的前提下，让系统自动做低风险调整
+
+允许自动化：
+
+- 降低风险预算
+- 暂停某类新开仓
+- 降低某类因子权重
+- 切换到保守参数模板
+
+不允许自动化：
+
+- 提高硬风控上限
+- 关闭熔断
+- 启用 live-trading 模型
+- 绕过 Governor
+
+### Phase H: 多品种完全体
+
+目标：
+
+- 从 XAUUSD+ 走向多品种、多风险池、全组合调度
+
+---
+
+## 10. 后续开发的默认顺序
+
+如果没有新的外部强约束，后续默认按下面顺序推进：
+
+1. 先做 `position_supervisor`
+2. 再做归因 contract 升级
+3. 再做因子解释卡片和参数模板
+4. 再做因子治理工作流
+5. 再做元模型旁路
+6. 最后做受限自动治理和多品种扩展
+
+原因很简单：
+
+- 没有持仓监督，系统持仓中还是“睡着的”
+- 没有归因升级，就分不清问题到底出在哪
+- 没有因子治理，参数优化就只能靠人工零散干预
+- 没有元模型，全局调度就永远碎片化
+
+---
+
+## 11. 当前系统最重要的工程原则
+
+1. 硬风控高于一切模型和策略
+2. 风控是最高裁决层，不是唯一 alpha 来源
+3. 单笔交易不能直接重写系统
+4. 模型先 advisory，再 shadow/canary，再考虑受限影响
+5. 持仓过程必须持续重评估，不能只等 TP/SL
+6. 归因必须分清入场、退出、时长、参数、regime 的责任
+7. 因子可以进化，但不能在实盘里无边界自我改写
+8. 所有高影响动作都要可解释、可审计、可回滚
+9. 前端展示以人话为主，机器状态只是底层证据，不是最终文案
+
+---
+
+## 12. 当前主要入口
+
+### API
+
+- `/api/live/status`
+- `/api/live/positions`
+- `/api/risk/summary`
+- `/api/risk/policy/verdicts`
+- `/api/risk/trade-trace`
 - `/api/learning/dataset`
 - `/api/learning/decision-dataset`
-- `/api/learning/dataset/export`
-- `/api/learning/dataset/readiness`
-- `/api/learning/dataset/validate`
-- `/api/learning/dataset/model-card`
-- `/api/learning/dataset/train`
-- `/api/learning/model/promotion-gate`
-- `/api/learning/model/shadow-queue`
-- `/api/learning/model/shadow-run`
-- `/api/learning/model/canary-review`
-- `/api/learning/model/inference`
-- `/api/learning/model/canary-trial`
 - `/api/learning/model/pipeline/run`
 
-Risk endpoints:
+### 数据
 
-- `/api/risk/summary`
-- `/api/risk/var`
-- `/api/risk/kelly`
-- `/api/risk/stress`
-- `/api/risk/concentration`
+- `data/state.db`
+- `data/experiments.db`
+- `data/*.duckdb`
 
-## 9. 数据库
+### 核心文档
 
-- `data/state.db`：运行状态、决策账本、复盘、经验、学习应用、cTrader deals。
-- `data/experiments.db`：实验、模型注册、shadow/canary 模型工作流。
-- `data/*.duckdb`：bars、ticks、L2、trades、events 等行情数据。
+- [README.md](../README.md)
+- [TODO.md](../TODO.md)
+- [development-workflow.md](development-workflow.md)
+- [startup.md](startup.md)
 
-## 10. 高信号测试
+---
 
-```bash
-python -m pytest tests\research\test_rule_learning_pipeline.py tests\research\test_model_registry.py -q
-python -m pytest tests\research tests\alpha\test_portfolio_compositor.py tests\test_live_service_lifecycle.py tests\test_evolution_closure_fixes.py tests\deployment\test_deployment.py tests\test_backend_jobs_manager.py tests\test_backend_jobs_state.py -q
-```
+## 13. 当前结论
+
+这套系统现在已经有了“骨架”和“血管”，但还没长出完整的“中枢神经”。
+
+下一阶段真正的突破点，不是再加一个模型，也不是急着让模型接管实盘，而是先把下面三件事做完整：
+
+1. 持仓监督
+2. 责任归因
+3. 因子治理
+
+这三层一旦立住，后面的元模型、自动治理、多品种扩展才有稳定地基。

@@ -175,6 +175,9 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
 
     assert review["outcome_label"] == "bad_loss"
     assert review["review_json"]["holding_seconds"] == pytest.approx(100_000.0)
+    assert review["review_json"]["mfe"] == pytest.approx(0.0)
+    assert review["review_json"]["mae"] == pytest.approx(120.0)
+    assert review["review_json"]["holding_efficiency"] >= 0.0
     assert experience["decision_context_json"]["holding_minutes"] == pytest.approx(100_000.0 / 60.0)
     assert "overweight_noise_factor" in review["failure_tags"]
     assert experience["recommended_action"] == "downweight"

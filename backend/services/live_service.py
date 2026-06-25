@@ -37,6 +37,8 @@ from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
 from risk.policy_service import RiskPolicyService
+from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
+from backend.services.position_supervisor import evaluate_position_supervisor
 _DECISION_LOG: DecisionLogStore | None = None
 _DECISION_LOG_RUN_ID: int = 0
 _LEDGER: DecisionLedger | None = None
@@ -557,6 +559,529 @@ def _holding_summary_for_position(position: Any, *, cfg=None, now_ts: float | No
         "holding_timeout_status": timeout_status,
         "holding_timeout_remaining_seconds": round(remaining_seconds, 3) if timeout_enabled else 0.0,
     }
+
+
+def _position_unrealized_pnl(position: Any) -> float:
+    if isinstance(position, dict):
+        candidates = (
+            position.get("profit"),
+            position.get("pnl"),
+            position.get("unrealized_pnl"),
+        )
+    else:
+        candidates = (
+            getattr(position, "profit", None),
+            getattr(position, "pnl", None),
+            getattr(position, "unrealized_pnl", None),
+        )
+    for value in candidates:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            continue
+    return 0.0
+
+
+def _load_recovery_position_row(position_id: int) -> dict[str, Any]:
+    if position_id <= 0:
+        return {}
+    conn = _get_state_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM recovery_position_state
+            WHERE position_id=?
+            LIMIT 1
+            """,
+            (int(position_id),),
+        ).fetchone()
+        if row is None:
+            return {}
+        item = dict(row)
+        try:
+            item["recovery_meta"] = json.loads(item.get("recovery_meta_json") or "{}")
+        except Exception:
+            item["recovery_meta"] = {}
+        return item
+    finally:
+        conn.close()
+
+
+def _current_regime_hint() -> str:
+    composite = _live_state_get("last_composite", clone=True) or {}
+    if isinstance(composite, dict):
+        for key in ("regime_id", "regime", "regime_state"):
+            value = composite.get(key)
+            if value:
+                return str(value)
+    return ""
+
+
+def _position_path_metrics_for_position(
+    position: Any,
+    *,
+    cfg=None,
+    now_ts: float | None = None,
+    persist: bool = False,
+    broker: str = "",
+    strategy_name: str = "",
+) -> dict[str, Any]:
+    try:
+        pid = int(
+            (position.get("position_id") if isinstance(position, dict) else getattr(position, "position_id", None))
+            or (position.get("ticket") if isinstance(position, dict) else getattr(position, "ticket", None))
+            or 0
+        )
+    except Exception:
+        pid = 0
+    if pid <= 0:
+        return {}
+
+    holding = _holding_summary_for_position(position, cfg=cfg, now_ts=now_ts)
+    recovery_row = _load_recovery_position_row(pid)
+    recovery_meta = recovery_row.get("recovery_meta") if recovery_row else {}
+    path_state = normalize_path_state((recovery_meta or {}).get("position_path"))
+    entry_ctx = _lookup_open_decision_context(pid)
+    entry_regime = str((recovery_meta or {}).get("entry_regime") or "")
+    current_regime = _current_regime_hint()
+    current_pnl = _position_unrealized_pnl(position)
+    next_state, metrics = update_position_path_metrics(
+        previous_state=path_state,
+        current_pnl=current_pnl,
+        now_ts=float(now_ts or time.time()),
+        holding_seconds=float(holding.get("holding_seconds", 0.0) or 0.0),
+        max_holding_seconds=float(holding.get("max_holding_seconds", 0.0) or 0.0),
+        entry_regime=entry_regime,
+        current_regime=current_regime,
+    )
+
+    result = {
+        **metrics,
+        "time_in_profit": round(metrics["time_in_profit_seconds"], 6),
+        "entry_regime": entry_regime,
+        "current_regime": current_regime,
+        "entry_ts_source": str(entry_ctx.get("source") or ""),
+    }
+
+    if persist:
+        next_meta = dict(recovery_meta or {})
+        next_meta["position_path"] = next_state
+        if entry_regime:
+            next_meta["entry_regime"] = entry_regime
+        if current_regime:
+            next_meta["current_regime"] = current_regime
+        _upsert_recovery_position_state(
+            position,
+            broker=broker or str(recovery_row.get("broker") or "ctrader"),
+            strategy_name=strategy_name or str(recovery_row.get("strategy_name") or _loop_strategy_name or "factor_v4"),
+            status=str(recovery_row.get("status") or "open"),
+            context_integrity=str(recovery_row.get("context_integrity") or _RECOVERY_CONTEXT_FULL),
+            meta=next_meta,
+        )
+    return result
+
+
+def _build_position_supervisor_context(
+    position: dict[str, Any],
+    *,
+    cfg=None,
+    acct: dict | None = None,
+    now_ts: float | None = None,
+    positions: list[Any] | None = None,
+) -> dict[str, Any]:
+    now_ts = float(now_ts or time.time())
+    temporal_context = _build_close_position_risk_context(
+        position_id=int(position.get("position_id") or position.get("ticket") or 0),
+        close_reason="position_supervisor",
+        mode="supervisor",
+        symbol=str(position.get("symbol") or "XAUUSD+"),
+        position=position,
+        cfg=cfg,
+        decision_ts=now_ts,
+    )
+    position_metrics = _position_path_metrics_for_position(position, cfg=cfg, now_ts=now_ts, persist=False)
+    holding_timeout_ratio = float(position.get("holding_timeout_ratio", 0.0) or 0.0)
+    market_space_context = {
+        "distance_to_sl": round(
+            abs(float(position.get("current_price", position.get("price_current", 0.0)) or 0.0) - float(position.get("sl", 0.0) or 0.0)),
+            6,
+        ) if float(position.get("sl", 0.0) or 0.0) > 0 else 0.0,
+        "distance_to_tp": round(
+            abs(float(position.get("tp", 0.0) or 0.0) - float(position.get("current_price", position.get("price_current", 0.0)) or 0.0)),
+            6,
+        ) if float(position.get("tp", 0.0) or 0.0) > 0 else 0.0,
+        "atr_multiple_from_entry": 0.0,
+        "range_location": 0.0,
+        "structure_bias": "",
+    }
+    entry_ctx = {
+        "entry_decision_id": _lookup_entry_decision_id(int(position.get("position_id") or position.get("ticket") or 0)),
+        "entry_score": 0.0,
+        "entry_reason": "",
+        "factor_set_version": "",
+        "policy_version": "",
+        "expected_holding_profile": "",
+        "entry_regime": position_metrics.get("entry_regime", ""),
+        "entry_regime_confidence": 0.0,
+    }
+    risk_context = {
+        "risk_snapshot": _live_state_get("risk", {}, clone=True) or {},
+        "policy_state": {},
+        "max_holding_bars": int(getattr(cfg, "risk_max_holding_bars", 0) or 0) if cfg else 0,
+        "max_holding_seconds": float(position.get("max_holding_seconds", 0.0) or 0.0),
+        "open_position_count": len(positions or []),
+        "total_api_volume": _tracked_total_api_volume(positions or []),
+        "holding_timeout_ratio": holding_timeout_ratio,
+        **position_metrics,
+    }
+    return {
+        "position": {
+            "position_id": position.get("position_id") or position.get("ticket"),
+            "trade_id": str(position.get("position_id") or position.get("ticket") or ""),
+            "symbol": str(position.get("symbol") or "XAUUSD+"),
+            "direction": int(position.get("direction", 0) or 0),
+            "entry_price": float(position.get("entry_price", position.get("open_price", position.get("price_open", 0.0))) or 0.0),
+            "current_price": float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+            "volume": float(position.get("volume", position.get("api_volume", 0.0)) or 0.0),
+            "opened_at": float(position.get("open_time", 0.0) or 0.0),
+            "unrealized_pnl": float(position.get("profit", position.get("pnl", 0.0)) or 0.0),
+            "realized_pnl": 0.0,
+            "stop_loss": float(position.get("sl", 0.0) or 0.0),
+            "take_profit": float(position.get("tp", 0.0) or 0.0),
+            "type": str(position.get("type") or ""),
+            "sl": float(position.get("sl", 0.0) or 0.0),
+            "tp": float(position.get("tp", 0.0) or 0.0),
+        },
+        "market": {
+            "bid": float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+            "ask": float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+            "mid": float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+            "spread": 0.0,
+            "timeframe": str(temporal_context.get("temporal_context", {}).get("timeframe", "") or temporal_context.get("timeframe", "")),
+            "timeframe_seconds": int(temporal_context.get("timeframe_seconds", 0) or 0),
+            "regime_state": position_metrics.get("current_regime", ""),
+            "volatility_state": "",
+        },
+        "risk": risk_context,
+        "temporal_context": {
+            **(temporal_context.get("temporal_context") or {}),
+            "holding_seconds": temporal_context.get("holding_seconds", 0.0),
+            "holding_minutes": round(float(temporal_context.get("holding_seconds", 0.0) or 0.0) / 60.0, 3),
+            "holding_bars": round(
+                float(temporal_context.get("holding_seconds", 0.0) or 0.0) / max(int(temporal_context.get("timeframe_seconds", 0) or 1), 1),
+                3,
+            ) if int(temporal_context.get("timeframe_seconds", 0) or 0) > 0 else 0.0,
+        },
+        "market_space_context": market_space_context,
+        "entry_context": entry_ctx,
+        "runtime": {
+            "loop_running": bool(_live_state_get("loop_running", True)),
+            "bridge_connected": True,
+            "data_quality_state": "",
+            "runtime_health": {},
+            "account": acct or {},
+        },
+    }
+
+
+def _evaluate_position_supervisor_for_position(
+    position: dict[str, Any],
+    *,
+    cfg=None,
+    acct: dict | None = None,
+    now_ts: float | None = None,
+    positions: list[Any] | None = None,
+    persist: bool = False,
+    broker: str = "",
+    strategy_name: str = "",
+) -> dict[str, Any]:
+    context = _build_position_supervisor_context(position, cfg=cfg, acct=acct, now_ts=now_ts, positions=positions)
+    verdict = evaluate_position_supervisor(context)
+    if persist:
+        pid = int(position.get("position_id") or position.get("ticket") or 0)
+        row = _load_recovery_position_row(pid)
+        meta = dict((row or {}).get("recovery_meta") or {})
+        meta["latest_supervisor"] = verdict
+        _upsert_recovery_position_state(
+            position,
+            broker=broker or str((row or {}).get("broker") or "ctrader"),
+            strategy_name=strategy_name or str((row or {}).get("strategy_name") or _loop_strategy_name or "factor_v4"),
+            status=str((row or {}).get("status") or "open"),
+            context_integrity=str((row or {}).get("context_integrity") or _RECOVERY_CONTEXT_FULL),
+            meta=meta,
+        )
+    return verdict
+
+
+def _enrich_positions_with_path_metrics(
+    pos_list: list[Any],
+    *,
+    cfg=None,
+    now_ts: float | None = None,
+    persist: bool = False,
+    broker: str = "",
+    strategy_name: str = "",
+) -> list[dict]:
+    now_ts = float(now_ts or time.time())
+    enriched: list[dict] = []
+    for raw in _coerce_live_positions(pos_list):
+        item = dict(raw)
+        item.update(_holding_summary_for_position(item, cfg=cfg, now_ts=now_ts))
+        item.update(
+            _position_path_metrics_for_position(
+                item,
+                cfg=cfg,
+                now_ts=now_ts,
+                persist=persist,
+                broker=broker,
+                strategy_name=strategy_name,
+            )
+        )
+        item["supervisor"] = _evaluate_position_supervisor_for_position(
+            item,
+            cfg=cfg,
+            now_ts=now_ts,
+            positions=pos_list,
+            persist=persist,
+            broker=broker,
+            strategy_name=strategy_name,
+        )
+        item["supervisor_action"] = item["supervisor"].get("action")
+        item["supervisor_label"] = item["supervisor"].get("action_label")
+        item["supervisor_reason"] = item["supervisor"].get("summary_reason")
+        item["supervisor_summary"] = item["supervisor"].get("human_summary")
+        enriched.append(item)
+    return enriched
+
+
+def _supervisor_risk_context(
+    position: dict[str, Any],
+    verdict: dict[str, Any],
+    *,
+    cfg=None,
+    mode: str = "live",
+) -> dict[str, Any]:
+    close_context = _build_close_position_risk_context(
+        position_id=int(position.get("position_id") or position.get("ticket") or 0),
+        close_reason=str((verdict.get("recommended_controls") or {}).get("close_reason") or verdict.get("summary_reason") or ""),
+        mode=mode,
+        broker="ctrader",
+        symbol=str(position.get("symbol") or "XAUUSD+"),
+        position=position,
+        cfg=cfg,
+    )
+    close_context.update(
+        {
+            "supervisor_action": verdict.get("action"),
+            "supervisor_confidence": verdict.get("confidence"),
+            "supervisor_reason": verdict.get("summary_reason"),
+            "supervisor_evidence": verdict.get("evidence") or {},
+            "supervisor_decision_ts": verdict.get("decision_ts"),
+            "recommended_controls": verdict.get("recommended_controls") or {},
+            "position_id": str(position.get("position_id") or position.get("ticket") or ""),
+        }
+    )
+    return close_context
+
+
+def _remember_supervisor_state(
+    position: dict[str, Any],
+    verdict: dict[str, Any],
+    *,
+    action_applied: str = "",
+    broker: str = "ctrader",
+    strategy_name: str = "",
+) -> None:
+    pid = int(position.get("position_id") or position.get("ticket") or 0)
+    row = _load_recovery_position_row(pid)
+    meta = dict((row or {}).get("recovery_meta") or {})
+    meta["latest_supervisor"] = verdict
+    if action_applied:
+        meta["last_supervisor_applied_action"] = action_applied
+        meta["last_supervisor_applied_ts"] = time.time()
+        meta["last_supervisor_reason"] = verdict.get("summary_reason")
+    _upsert_recovery_position_state(
+        position,
+        broker=broker,
+        strategy_name=strategy_name or str((row or {}).get("strategy_name") or _loop_strategy_name or "factor_v4"),
+        status=str((row or {}).get("status") or "open"),
+        context_integrity=str((row or {}).get("context_integrity") or _RECOVERY_CONTEXT_FULL),
+        meta=meta,
+    )
+
+
+def _supervisor_recently_applied(position_id: int, action: str, cooldown_seconds: float = 300.0) -> bool:
+    row = _load_recovery_position_row(position_id)
+    meta = dict((row or {}).get("recovery_meta") or {})
+    if str(meta.get("last_supervisor_applied_action") or "") != str(action or ""):
+        return False
+    last_ts = float(meta.get("last_supervisor_applied_ts", 0.0) or 0.0)
+    return last_ts > 0 and (time.time() - last_ts) < cooldown_seconds
+
+
+def _log_supervisor_decision(
+    *,
+    position: dict[str, Any],
+    verdict: dict[str, Any],
+    risk_verdict: dict[str, Any] | None,
+    acct: dict | None,
+    cfg,
+    event_type: str,
+    tick: int,
+) -> str:
+    if not _LEDGER:
+        return ""
+    try:
+        return _LEDGER.log_decision(
+            event_type=event_type,
+            symbol=str(position.get("symbol") or "XAUUSD+"),
+            timeframe=str(getattr(cfg, "timeframe", "") or ""),
+            trade_id=str(position.get("position_id") or position.get("ticket") or ""),
+            position_id=str(position.get("position_id") or position.get("ticket") or ""),
+            decision_ts=float(verdict.get("decision_ts") or time.time()),
+            portfolio_state={
+                "balance": (acct or {}).get("balance", 0.0),
+                "equity": (acct or {}).get("equity", 0.0),
+                "session_pnl": _live_state_get("session_pnl", 0.0),
+            },
+            risk_state=_risk_state_with_verdict_dict(risk_verdict or {}),
+            action_score=float(verdict.get("confidence", 0.0) or 0.0),
+            action_reason=str(verdict.get("summary_reason") or event_type),
+            action_json={
+                "tick": tick,
+                "supervisor_verdict": verdict,
+                "risk_verdict": risk_verdict or {},
+            },
+        )
+    except Exception as exc:
+        logger.debug("[live] supervisor ledger failed for pos %s: %s", position.get("position_id"), exc)
+        return ""
+
+
+def _run_position_supervision(
+    bridge,
+    pos: list,
+    *,
+    cfg,
+    acct: dict,
+    tick: int,
+    log,
+) -> None:
+    if not pos or bridge is None:
+        return
+    for raw in pos or []:
+        position = dict(raw)
+        pid = int(position.get("position_id") or position.get("ticket") or 0)
+        if pid <= 0:
+            continue
+        verdict = _evaluate_position_supervisor_for_position(
+            position,
+            cfg=cfg,
+            acct=acct,
+            now_ts=time.time(),
+            positions=pos,
+            persist=True,
+            broker="ctrader",
+            strategy_name=str(_loop_strategy_name or "factor_v4"),
+        )
+        action = str(verdict.get("action") or "hold")
+        if action == "hold":
+            continue
+        if _supervisor_recently_applied(pid, action):
+            continue
+
+        risk_action = {
+            "tighten": "tighten_position",
+            "reduce": "reduce_position",
+            "close": "close_position",
+        }.get(action)
+        if not risk_action:
+            continue
+        risk_context = _supervisor_risk_context(position, verdict, cfg=cfg)
+        risk_verdict = _RISK_POLICY.evaluate(risk_action, risk_context).to_dict()
+        _log_supervisor_decision(
+            position=position,
+            verdict=verdict,
+            risk_verdict=risk_verdict,
+            acct=acct,
+            cfg=cfg,
+            event_type=f"supervisor_{action}",
+            tick=tick,
+        )
+        if not risk_verdict.get("allowed", False):
+            _remember_supervisor_state(position, verdict, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+            continue
+
+        controls = verdict.get("recommended_controls") or {}
+        try:
+            if action == "tighten":
+                target_sl = float(controls.get("target_stop_loss", 0.0) or 0.0)
+                current_sl = float(position.get("sl", 0.0) or 0.0)
+                current_tp = float(position.get("tp", 0.0) or 0.0)
+                if target_sl > 0 and abs(target_sl - current_sl) >= 0.01:
+                    amend_res = bridge.amend_position_sltp(pid, sl=target_sl, tp=current_tp)
+                    if getattr(amend_res, "success", False):
+                        _track_local_sl_tp(pid, sl=target_sl, tp=current_tp)
+                        if _LEDGER:
+                            _LEDGER.log_position_event(
+                                position_id=str(pid),
+                                trade_id=str(pid),
+                                symbol=str(position.get("symbol") or "XAUUSD+"),
+                                event_type="tightened",
+                                net_volume=float(position.get("volume", 0.0) or 0.0),
+                                avg_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                                details={
+                                    "supervisor_action": action,
+                                    "supervisor_reason": verdict.get("summary_reason"),
+                                    "risk_verdict_reason": risk_verdict.get("reason"),
+                                    "applied_controls": controls,
+                                },
+                            )
+                        _remember_supervisor_state(position, verdict, action_applied=action, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                        log(f"tick {tick}: supervisor tighten pos={pid} sl->{target_sl:.2f}")
+            elif action == "reduce":
+                current_volume = float(position.get("volume", position.get("api_volume", 0.0)) or 0.0)
+                reduce_fraction = float(controls.get("reduce_fraction", 0.0) or 0.0)
+                reduce_volume = max(0.0, round(current_volume * reduce_fraction))
+                if reduce_volume > 0 and current_volume - reduce_volume >= 1.0:
+                    result = bridge.close_position(pid, volume=reduce_volume)
+                    if getattr(result, "success", False):
+                        if _LEDGER:
+                            _LEDGER.log_position_event(
+                                position_id=str(pid),
+                                trade_id=str(pid),
+                                symbol=str(position.get("symbol") or "XAUUSD+"),
+                                event_type="reduced",
+                                net_volume=max(0.0, current_volume - reduce_volume),
+                                avg_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                                details={
+                                    "supervisor_action": action,
+                                    "supervisor_reason": verdict.get("summary_reason"),
+                                    "risk_verdict_reason": risk_verdict.get("reason"),
+                                    "applied_controls": {**controls, "reduce_volume": reduce_volume},
+                                },
+                            )
+                        _remember_supervisor_state(position, verdict, action_applied=action, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                        log(f"tick {tick}: supervisor reduce pos={pid} vol={reduce_volume:.0f}")
+            elif action == "close":
+                _remember_close_reason(pid, str(controls.get("close_reason") or verdict.get("summary_reason") or "supervisor_close"))
+                _remember_close_verdict(
+                    pid,
+                    type(
+                        "SupervisorVerdictProxy",
+                        (),
+                        {
+                            "to_dict": lambda _self: risk_verdict,
+                        },
+                    )(),
+                )
+                result = bridge.close_position(pid)
+                if getattr(result, "success", False):
+                    _remember_supervisor_state(position, verdict, action_applied=action, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                    log(f"tick {tick}: supervisor close sent pos={pid} reason={verdict.get('summary_reason')}")
+        except Exception as exc:
+            logger.debug("[live] supervisor action %s failed for pos %s: %s", action, pid, exc)
 
 
 def _resolve_position_api_volume(
@@ -1859,13 +2384,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
         cfg = None
 
     def _enrich_positions(pos_list: list[Any]) -> list[dict]:
-        now_ts = time.time()
-        enriched: list[dict] = []
-        for raw in _coerce_live_positions(pos_list):
-            item = dict(raw)
-            item.update(_holding_summary_for_position(item, cfg=cfg, now_ts=now_ts))
-            enriched.append(item)
-        return enriched
+        return _enrich_positions_with_path_metrics(pos_list, cfg=cfg, now_ts=time.time(), persist=False, broker=broker)
 
     if _live_state_get("loop_running") and _live_state_get("broker") == broker:
         if readiness["positions_ready"]:
@@ -3342,7 +3861,21 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
         logger.warning(f"[{broker}] background get_positions failed: {e}")
         pos_raw = None
     if pos_raw is not None:
-        _live_state_update(positions=pos_raw, positions_updated_at=time.time())
+        try:
+            from config.runtime_config import shared as _rc
+
+            cfg = _rc()
+        except Exception:
+            cfg = None
+        enriched = _enrich_positions_with_path_metrics(
+            pos_raw,
+            cfg=cfg,
+            now_ts=time.time(),
+            persist=True,
+            broker=broker,
+            strategy_name=str(_loop_strategy_name or "factor_v4"),
+        )
+        _live_state_update(positions=enriched, positions_updated_at=time.time())
 
 
 def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 30.0) -> threading.Thread:
@@ -4566,6 +5099,15 @@ def _process_tick_factor_pipeline(
         _update_trailing_stops(
             bridge, pos, current_price, pipeline, atr_price,
             tick, log,
+        )
+    if pos and bridge is not None and cfg is not None:
+        _run_position_supervision(
+            bridge,
+            pos,
+            cfg=cfg,
+            acct=acct,
+            tick=tick,
+            log=log,
         )
     if pos and bridge is not None and cfg is not None:
         _enforce_holding_timeout(

@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -123,6 +124,15 @@ class TradeReviewer:
                     (entry_decision_id,),
                 )
             ) if entry_decision_id else []
+            recovery = conn.execute(
+                """
+                SELECT recovery_meta_json
+                FROM recovery_position_state
+                WHERE position_id=?
+                LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
 
         top_weight_factor = ""
         top_weight = 0.0
@@ -169,10 +179,28 @@ class TradeReviewer:
         exit_quality = _clamp(0.55 if real_pnl else 0.45)
         regime_fit_score = _clamp(0.70 if pnl > 0 else 0.35 + (0.10 if "good_loss" in failure_tags else 0.0))
         execution_quality = _clamp(0.60 if real_pnl else 0.45)
-        mae = abs(min(float(pnl), 0.0))
-        mfe = max(float(pnl), 0.0)
         close_ts = float(close_ts or time.time())
         holding_seconds = max(0.0, close_ts - entry_ts) if entry_ts > 0 else 0.0
+        recovery_meta = {}
+        if recovery and recovery["recovery_meta_json"]:
+            try:
+                recovery_meta = json.loads(recovery["recovery_meta_json"])
+            except Exception:
+                recovery_meta = {}
+        path_state = normalize_path_state((recovery_meta or {}).get("position_path"))
+        current_regime = str((recovery_meta or {}).get("current_regime") or "")
+        next_state, path_metrics = update_position_path_metrics(
+            previous_state=path_state,
+            current_pnl=float(pnl),
+            now_ts=close_ts,
+            holding_seconds=holding_seconds,
+            max_holding_seconds=0.0,
+            entry_regime=str((recovery_meta or {}).get("entry_regime") or ""),
+            current_regime=current_regime,
+        )
+        mae = float(path_metrics["mae"])
+        mfe = float(path_metrics["mfe"])
+        hold_quality = _clamp(0.30 + path_metrics["holding_efficiency"] * 0.7)
 
         top_factor = ""
         top_factor_mc = 0.0
@@ -195,6 +223,17 @@ class TradeReviewer:
             "holding_seconds": round(holding_seconds, 3),
             "holding_minutes": round(holding_seconds / 60.0, 3),
             "timeframe": timeframe,
+            "mfe": round(mfe, 6),
+            "mae": round(mae, 6),
+            "giveback_ratio": path_metrics["giveback_ratio"],
+            "profit_capture_ratio": path_metrics["profit_capture_ratio"],
+            "time_in_profit": path_metrics["time_in_profit_seconds"],
+            "time_in_profit_seconds": path_metrics["time_in_profit_seconds"],
+            "time_in_profit_ratio": path_metrics["time_in_profit_ratio"],
+            "holding_efficiency": path_metrics["holding_efficiency"],
+            "time_decay_score": path_metrics["time_decay_score"],
+            "thesis_status": path_metrics["thesis_status"],
+            "regime_shift": path_metrics["regime_shift"],
             "entry_score": entry_score,
             "top_weight_factor": top_weight_factor,
             "top_weight": top_weight,
@@ -209,6 +248,7 @@ class TradeReviewer:
             "context_integrity": context_integrity,
             "failure_tags": failure_tags,
             "factor_contributions": contributions,
+            "position_path_state": next_state,
         }
 
         review_id = self._new_id("review")

@@ -278,6 +278,14 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
 
         review = _parse_review_row(review_row) if review_row is not None else None
         factor_contributions = [dict(row) for row in factor_rows]
+        supervisor_events = []
+        latest_supervisor = None
+        for row in ledger_rows:
+            event_type = str(row["event_type"] or "")
+            if event_type.startswith("supervisor_"):
+                parsed = _parse_ledger(row)
+                supervisor_events.append(parsed)
+                latest_supervisor = parsed
         if not ledger_rows and not position_events and not order_events and review is None and recovery_state is None:
             locator = resolved_position_id or resolved_decision_id
             raise LookupError(f"trade trace not found: {locator}")
@@ -294,11 +302,17 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
             "factor_count": len(factor_contributions),
             "latest_outcome": str(review["outcome_label"] or "") if review else "",
             "latest_close_reason": str((review.get("review") or {}).get("close_reason") or "") if review else "",
+            "supervisor_events": len(supervisor_events),
+            "latest_supervisor_action": str((latest_supervisor or {}).get("action", {}).get("supervisor_verdict", {}).get("action") or ""),
         }
         return {
             "summary": summary,
             "anchor": dict(anchor) if anchor is not None else None,
             "decision_ledger": [_parse_ledger(row) for row in ledger_rows],
+            "position_supervisor": {
+                "latest": latest_supervisor,
+                "events": supervisor_events,
+            },
             "position_lifecycle": [_parse_event(row) for row in position_events],
             "order_lifecycle": [_parse_event(row) for row in order_events],
             "review": review,

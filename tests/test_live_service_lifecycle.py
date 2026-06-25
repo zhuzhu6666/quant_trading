@@ -489,3 +489,54 @@ def test_holding_summary_for_position_reports_watch_status(monkeypatch, tmp_path
     assert summary["holding_timeout_status"] == "watch"
     assert summary["holding_timeout_exceeded"] is False
     assert summary["holding_timeout_remaining_seconds"] == pytest.approx(600.0)
+
+
+def test_position_path_metrics_tracks_mfe_giveback_and_time_in_profit(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+
+    open_ts = time.time() - 1200.0
+    ledger.log_decision(
+        event_type="open",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        trade_id="9002",
+        position_id="9002",
+        decision_ts=open_ts,
+        portfolio_state={},
+        risk_state={},
+        action_score=0.0,
+        action_reason="test_open",
+        action_json={},
+    )
+
+    first = live_service._position_path_metrics_for_position(
+        {"position_id": 9002, "symbol": "XAUUSD+", "open_time": open_ts, "profit": 80.0},
+        cfg=SimpleNamespace(timeframe="M5", risk_max_holding_bars=12),
+        now_ts=open_ts + 600.0,
+        persist=True,
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+    second = live_service._position_path_metrics_for_position(
+        {"position_id": 9002, "symbol": "XAUUSD+", "open_time": open_ts, "profit": 20.0},
+        cfg=SimpleNamespace(timeframe="M5", risk_max_holding_bars=12),
+        now_ts=open_ts + 1200.0,
+        persist=True,
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+
+    assert first["mfe"] == pytest.approx(80.0)
+    assert second["mfe"] == pytest.approx(80.0)
+    assert second["giveback_ratio"] == pytest.approx(0.75)
+    assert second["profit_capture_ratio"] == pytest.approx(0.25)
+    assert second["time_in_profit"] == pytest.approx(600.0)
+    assert second["thesis_status"] == "weakening"

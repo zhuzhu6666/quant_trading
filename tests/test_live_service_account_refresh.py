@@ -58,7 +58,10 @@ def test_refresh_account_positions_writes_cache():
     # positions stored as the wrapped endpoint format OR unwrapped list — accept either
     if isinstance(pos, dict):
         pos = pos.get("positions", [])
-    assert any(p.get("position_id") == 42 for p in pos)
+    cached = next(p for p in pos if p.get("position_id") == 42)
+    assert cached["mfe"] == pytest.approx(50.0)
+    assert cached["profit_capture_ratio"] == pytest.approx(1.0)
+    assert cached["thesis_status"] == "intact"
 
 
 def test_refresh_account_positions_swallows_bridge_errors():
