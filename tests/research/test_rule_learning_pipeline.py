@@ -24,6 +24,7 @@ from backend.api.learning import (
     list_learning_model_inference_audits,
     list_learning_model_shadow_candidates,
     queue_learning_model_shadow_candidate,
+    run_governance,
     run_learning_model_shadow_validation,
     review_learning_model_canary,
     run_learning_model_canary_trial,
@@ -1110,6 +1111,31 @@ def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):
     assert experience["recommended_action"] == "watch"
     assert float(experience["reward_score"]) < 0.3
     assert float(experience["evidence_strength"]) < 0.2
+
+
+def test_governance_run_returns_risk_verdict(monkeypatch):
+    class _FakeGovernor:
+        def list_suggestions(self, limit=500, status=None):
+            return []
+
+        def review_pending(self):
+            return {"approved": 0, "rejected": 0, "unchanged": 0}
+
+        def reconcile_active(self):
+            return {"rolled_back": 0, "kept": 0}
+
+        def reconcile_application_effects(self):
+            return {"rolled_back": 0, "reinforced": 0}
+
+    import backend.api.learning as learning_api
+
+    monkeypatch.setattr(learning_api, "RuleEvolutionGovernor", _FakeGovernor)
+
+    result = run_governance(None)
+
+    assert result["weights_synced"] is False
+    assert result["risk_verdict"]["allowed"] is True
+    assert result["risk_verdict"]["audit_payload"]["action"] == "update_weight"
 
 
 def test_feature_provider_marks_incomplete_samples_not_model_ready(tmp_path):

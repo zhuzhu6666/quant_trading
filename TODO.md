@@ -115,3 +115,4 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 - 2026-06-25: 新增 `risk/policy_service.py`，提供 `RiskPolicyService.evaluate(action, context) -> RiskVerdict` 统一风控裁决入口。
 - 2026-06-25: live 开仓路径已接入 `open_trade` verdict；VaR、仓位数量、API volume、金字塔检查统一通过 `RiskVerdict` 返回，并写入 skip ledger 的 `risk_state.policy_verdict`。
 - 2026-06-25: `RiskPolicyService` 已扩展 `close_position / update_weight / promote_factor / register_factor / start_shadow_model / start_canary_model`；模型 shadow queue、canary review、canary trial API 已附带 `risk_verdict`，并阻断带 live trading 能力或状态不匹配的候选。
+- 2026-06-25: 学习治理 `/api/learning/govern/run` 的权重同步已接入 `update_weight` verdict；治理 review/reconcile 可继续执行，但 `_update_weights()` 只有在风控允许时才会触发。

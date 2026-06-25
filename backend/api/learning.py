@@ -243,12 +243,23 @@ def run_governance(_user: RequireUser) -> dict:
         + int(effect_result.get("reinforced", 0))
     )
     weights_synced = False
+    weight_risk_verdict = _risk_verdict(
+        "update_weight",
+        {
+            "required_mode": "governed",
+            "governance": {
+                "auto_actions": auto_actions,
+                "approved_after": after_summary["approved"],
+            },
+        },
+    )
     if after_summary["approved"] > 0 or auto_actions > 0:
-        try:
-            from backend.runtime.evolution_orchestrator import _update_weights
-            weights_synced = bool(_update_weights())
-        except Exception:
-            weights_synced = False
+        if weight_risk_verdict.get("allowed", False):
+            try:
+                from backend.runtime.evolution_orchestrator import _update_weights
+                weights_synced = bool(_update_weights())
+            except Exception:
+                weights_synced = False
     message = (
         f"本轮治理自动处理 {auto_actions} 条建议："
         f"批准 {review_result.get('approved', 0)}，"
@@ -258,6 +269,8 @@ def run_governance(_user: RequireUser) -> dict:
     )
     if weights_synced:
         message += " 已同步最新权重。"
+    elif (after_summary["approved"] > 0 or auto_actions > 0) and not weight_risk_verdict.get("allowed", False):
+        message += f" 权重同步被风控阻断：{weight_risk_verdict.get('reason', 'unknown')}。"
     return {
         "review_pending": review_result,
         "reconcile_active": reconcile_result,
@@ -267,6 +280,7 @@ def run_governance(_user: RequireUser) -> dict:
         "message": message,
         "auto_actions": auto_actions,
         "weights_synced": weights_synced,
+        "risk_verdict": weight_risk_verdict,
     }
 
 
