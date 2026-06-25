@@ -103,8 +103,8 @@ SQLite (运行时状态):
 
 ## Testing
 
-- `pytest tests/ -v` — 454 tests (alpha/backend/risk/research 全模块)
-- `pytest tests/alpha/ -v` for Factor Takeover v4 module tests (305 alpha tests)
+- `pytest tests/ -v` — 全量测试 (alpha/backend/risk/research 等模块)
+- `pytest tests/alpha/ -v` for Factor Takeover v4 module tests
 - `pytest tests/alpha/ -v -k <pattern>` for targeted tests
 - Test files mirror source structure: `tests/alpha/`, `tests/execution/`, etc.
 - Key test files: `test_streaming_factor_engine.py`, `test_signal_normalizer.py`, `test_portfolio_compositor.py`, `test_execution_gate.py`, `test_attribution_engine.py`, `test_adaptive_weight_engine.py`, `test_gp_classifier.py`

@@ -1,5 +1,7 @@
 # Factor Takeover · 机构级自适应 Alpha Factory v4
 
+> 当前状态（2026-06-25）: v4 主体已经落地，当前权威运行说明见 `CLAUDE.md` 和 `TODO.md`。本文中的 `multi_factor_m15`、旧策略并跑和 JSON/JSONL 持久化描述属于迁移期设计背景；实际代码以 `StreamingFactorEngine`、`PortfolioCompositor`、`AttributionEngine`、`RuntimeConfig` 和 `data/state.db` 为准。
+
 > 版本：v4.0  
 > 目标：以因子系统彻底取代策略系统，建立「因子计算 → 连续信号 → 组合优化 → 执行 → 归因 → 自适应」全闭环。  
 > 核心原则：**不预测市场状态，只跟踪因子真实表现。所有模型参数均可被自适应引擎覆盖。**  

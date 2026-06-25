@@ -1,5 +1,7 @@
 ﻿# Realtime Paper + cTrader + Learning Loop Design
 
+> Archived note (2026-06-25): this was an early proposal. The current repo has moved to the Factor Takeover v4 live loop, cTrader demo as the execution channel, `data/state.db` for runtime state, and `miniprogram_v2` as the maintained frontend. MT5 references below are historical migration context only.
+
 > 2026-06-03  design draft
 > Owner: zhu
 > Status: **proposal**, awaiting W0 go-ahead

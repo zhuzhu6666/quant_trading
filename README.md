@@ -19,7 +19,7 @@ main.py (CLI 入口)
 ├── backend/          — FastAPI REST API + WebSocket
 ├── monitor/          — metrics / alerter / structured logging
 ├── config/           — YAML + RuntimeConfig 热更新
-├── tests/            — 38 smoke tests
+├── tests/            — pytest 测试集
 └── scripts/          — 离线分析脚本
 ```
 
