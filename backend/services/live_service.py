@@ -35,12 +35,14 @@ from backend.ledger.service import DecisionLedger
 from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
+from risk.policy_service import RiskPolicyService
 _DECISION_LOG: DecisionLogStore | None = None
 _DECISION_LOG_RUN_ID: int = 0
 _LEDGER: DecisionLedger | None = None
 _TRADE_REVIEWER: TradeReviewer | None = None
 _EXPERIENCE_BUILDER: ExperienceBuilder | None = None
 _POLICY_SUGGESTER: PolicySuggester | None = None
+_RISK_POLICY = RiskPolicyService.shared()
 
 # ── Local SL/TP tracking (live loop only) ──────────────────────────
 # audit 2026-06-10: 之前 SL/TP 完全靠本地 Python 监控 1 bar 延迟的
@@ -215,6 +217,81 @@ def _position_api_volume(pos: Any) -> float:
         if value is not None:
             return float(value)
     return 0.0
+
+
+def _tracked_total_api_volume(positions: list[Any]) -> float:
+    total_api_volume = 0.0
+    for item in positions or []:
+        if hasattr(item, 'get'):
+            pid = item.get('position_id') or item.get('ticket')
+        else:
+            pid = getattr(item, 'position_id', None) or getattr(item, 'ticket', None)
+        if pid is not None and int(pid) in _pos_open_api_volume:
+            total_api_volume += float(_pos_open_api_volume[int(pid)])
+            continue
+        total_api_volume += _position_api_volume(item)
+    return float(total_api_volume)
+
+
+def _max_abs_entry_score_for_positions(positions: list[Any]) -> float:
+    max_entry = 0.0
+    for item in positions or []:
+        if hasattr(item, 'get'):
+            pid = item.get("position_id") or item.get("ticket")
+        else:
+            pid = getattr(item, "position_id", None) or getattr(item, "ticket", None)
+        if pid is None:
+            continue
+        entry_score = _pos_entry_scores.get(int(pid))
+        if entry_score is not None and abs(entry_score) > abs(max_entry):
+            max_entry = float(entry_score)
+    return abs(float(max_entry))
+
+
+def _build_open_trade_risk_context(
+    *,
+    cfg,
+    acct: dict,
+    positions: list[Any],
+    requested_api_volume: float,
+    signal_score: float,
+) -> dict:
+    risk_snapshot = _live_state_get("risk", {}, clone=True) or {}
+    return {
+        "account": acct or {},
+        "session": {
+            "pnl": float(_live_state_get("session_pnl", 0.0) or 0.0),
+            "start_balance": float(_live_state_get("session_start_balance", 0.0) or 0.0),
+            "trades": int(_live_state_get("session_trades", 0) or 0),
+            "consecutive_losses": int(_live_state_get("session_consecutive_loss", 0) or 0),
+            "drawdown_pct": float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0),
+            "circuit_breaker": bool(_live_state_get("circuit_breaker", False)),
+        },
+        "risk_snapshot": risk_snapshot,
+        "var": {
+            "enabled": bool(getattr(cfg, "var_enabled", False)),
+            "threshold_pct": float(getattr(cfg, "var_cvar_threshold", 0.02) or 0.02) * 100.0,
+        },
+        "open_position_count": len(positions or []),
+        "max_position_count": int(getattr(cfg, "max_position_count", 3) or 0),
+        "total_api_volume": _tracked_total_api_volume(positions or []),
+        "requested_api_volume": float(requested_api_volume or 0.0),
+        "max_position_api_volume": float(getattr(cfg, "max_position_api_volume", 1000.0) or 0.0),
+        "pyramid_enabled": bool(getattr(cfg, "pyramid_enabled", True)),
+        "max_abs_entry_score": _max_abs_entry_score_for_positions(positions or []),
+        "signal_score": float(signal_score or 0.0),
+        "loop_running": bool(_live_state_get("loop_running", True)),
+        "bridge_connected": True,
+    }
+
+
+def _risk_state_with_verdict(verdict) -> dict:
+    state = _live_state_get("risk", {}, clone=True) or {}
+    try:
+        state["policy_verdict"] = verdict.to_dict()
+    except Exception:
+        state["policy_verdict"] = {"allowed": False, "reason": "verdict_serialization_failed"}
+    return state
 
 
 def _position_open_price(pos: Any) -> float:
@@ -3648,36 +3725,6 @@ def _process_tick_factor_pipeline(
             composite.direction, current_price, sl_dist, tp_dist, _digits,
         )
 
-        # ── 风控: VaR 闸门 ──
-        risk_passed, risk_reason = _risk_var_gate(cfg)
-        if not risk_passed:
-            log(f"tick {tick}: v4 {direction_name} BLOCKED by risk gate: {risk_reason}")
-            if _LEDGER:
-                try:
-                    _LEDGER.log_composite_decision(
-                        event_type="skip",
-                        composite=composite,
-                        gate_result=gate_result,
-                        symbol="XAUUSD+",
-                        timeframe=str(getattr(cfg, "timeframe", "") or ""),
-                        decision_ts=bar.get("time", time.time()),
-                        portfolio_state={
-                            "balance": acct.get("balance", 0),
-                            "equity": acct.get("equity", 0),
-                            "n_positions": len(pos),
-                        },
-                        risk_state=_live_state_get("risk", {}, clone=True) or {},
-                        action_reason=risk_reason,
-                        action_json={"tick": tick, "skip_stage": "risk_var_gate"},
-                    )
-                except Exception as _ledger_err:
-                    logger.debug("[live] ledger risk skip failed: %s", _ledger_err)
-            _write_live_trade_log_factor(
-                tick, current_price, acct, pos, composite, gate_result,
-                _live_state,
-            )
-            return
-
         # ── 风控: Kelly 仓位 ──
         acct_clean = _live_state_get("account", {}, clone=True) or {}
         volume = _risk_kelly_volume(cfg, composite.direction, current_price,
@@ -3685,42 +3732,17 @@ def _process_tick_factor_pipeline(
         log(f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
             f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)})")
 
-        # ── 仓位控制检查 (用 flat 结构避免 elif 回退 bug) ──
-        order_blocked = False
-        block_reason = ""
-        max_pos_count = getattr(cfg, 'max_position_count', 3)
-        max_api_volume = float(getattr(cfg, 'max_position_api_volume', 1000.0) or 1000.0)
-
-        if max_pos_count > 0 and len(pos) >= max_pos_count:
-            order_blocked = True
-            block_reason = f'仓位上限: {len(pos)}/{max_pos_count}'
-        elif max_pos_count > 0:
-            total_api_volume = 0.0
-            for _p in pos:
-                _pid = None
-                if hasattr(_p, 'get'):
-                    _pid = _p.get('position_id') or _p.get('ticket')
-                else:
-                    _pid = getattr(_p, 'position_id', None) or getattr(_p, 'ticket', None)
-                if _pid is not None and int(_pid) in _pos_open_api_volume:
-                    total_api_volume += float(_pos_open_api_volume[int(_pid)])
-                    continue
-                total_api_volume += _position_api_volume(_p)
-            if total_api_volume + volume > max_api_volume:
-                order_blocked = True
-                block_reason = f'API量上限: {total_api_volume:.0f}+{volume:.0f}>{max_api_volume:.0f}'
-
-        if not order_blocked and getattr(cfg, 'pyramid_enabled', True) and len(pos) > 0:
-            _max_entry = 0.0
-            for _p in pos:
-                _pid = _p.get("position_id") or _p.get("ticket")
-                if _pid is not None:
-                    _es = _pos_entry_scores.get(int(_pid))
-                    if _es is not None and abs(_es) > abs(_max_entry):
-                        _max_entry = _es
-            if abs(_max_entry) > 0 and abs(_max_entry) >= abs(composite.score):
-                order_blocked = True
-                block_reason = f'金字塔: 需超 {abs(_max_entry):.4f}'
+        # ── Phase B: 统一风控裁决 ──
+        risk_context = _build_open_trade_risk_context(
+            cfg=cfg,
+            acct=acct_clean,
+            positions=pos,
+            requested_api_volume=volume,
+            signal_score=float(composite.score or 0.0),
+        )
+        risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
+        order_blocked = not risk_verdict.allowed
+        block_reason = risk_verdict.reason
 
         if order_blocked:
             log(f"tick {tick}: v4 {direction_name} SKIP ({block_reason})")
@@ -3741,12 +3763,16 @@ def _process_tick_factor_pipeline(
                             "equity": acct.get("equity", 0),
                             "n_positions": len(pos),
                         },
-                        risk_state=_live_state_get("risk", {}, clone=True) or {},
+                        risk_state=_risk_state_with_verdict(risk_verdict),
                         action_reason=block_reason,
-                        action_json={"tick": tick, "skip_stage": "position_control"},
+                        action_json={
+                            "tick": tick,
+                            "skip_stage": "risk_policy",
+                            "risk_verdict": risk_verdict.to_dict(),
+                        },
                     )
                 except Exception as _ledger_err:
-                    logger.debug("[live] ledger position skip failed: %s", _ledger_err)
+                    logger.debug("[live] ledger risk policy skip failed: %s", _ledger_err)
         else:
             try:
                 if composite.direction == 1:

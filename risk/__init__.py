@@ -9,6 +9,7 @@ from risk.kelly import KellyPositionSizer
 from risk.stress_test import StressScenarioResult, StressTester
 from risk.var import VaREngine
 from risk.governor import RiskGovernor, GovernorState, GovernorVerdict
+from risk.policy_service import RiskPolicyService, RiskVerdict
 
 __all__ = [
     "ExposureReport",
@@ -20,4 +21,6 @@ __all__ = [
     "RiskGovernor",
     "GovernorState",
     "GovernorVerdict",
+    "RiskPolicyService",
+    "RiskVerdict",
 ]

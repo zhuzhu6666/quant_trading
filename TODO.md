@@ -50,6 +50,7 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 | L5 | 服务器开发同步规范固化 | 完成 | 已固化到 `docs/development-workflow.md`：本地为主开发端，GitHub main 为最终合并源，服务器为后端运行/验证端，热修需短事务回推并保持三端一致 |
 | L6 | 时间/空间上下文抽象因子 | 待设计 | 已开始记录 `holding_seconds`，但还需把交易时段、持仓生命周期、价格空间位置、多周期结构和相关性统一成可学习上下文 |
 | L7 | 运行环境健康专项 | 待做 | `l2_depth` 与 `disk_space` 偶发 degraded/critical；不阻塞 Phase A 闭环，但进入 Phase B 前建议独立处理 |
+| B1 | RiskPolicyService 统一开仓裁决 | 进行中 | 已建立 `risk/policy_service.py`，live 开仓前 VaR/仓位数量/API volume/金字塔统一输出 `RiskVerdict` |
 
 ## 🟡 延期项
 
@@ -108,3 +109,8 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 - 2026-06-25: trade review / experience 已开始沉淀 `entry_ts`、`close_ts`、`holding_seconds`、`holding_minutes`；旧恢复仓在 close 前若缺 open ledger，会自动补最小 open 证据并保持 partial context。
 - 2026-06-25: Phase A 收口检查通过：服务器 `quant-backend.service` active，6 小时窗口 `phase_a_health_check` healthy；decision ledger 当前 open=22、close=22、signal=1101、skip=340，reviews=40、experience=40、applications/effects=4。
 - 2026-06-25: `scripts/phase_a_health_check.py` 已补充 active recovery 口径，`open/recovered` 都算 active，并检查 active recovery 是否缺 entry decision；closed recovery 同时兼容 `closed` 与 `closed_replayed`。
+
+## Phase B 风控统一记录
+
+- 2026-06-25: 新增 `risk/policy_service.py`，提供 `RiskPolicyService.evaluate(action, context) -> RiskVerdict` 统一风控裁决入口。
+- 2026-06-25: live 开仓路径已接入 `open_trade` verdict；VaR、仓位数量、API volume、金字塔检查统一通过 `RiskVerdict` 返回，并写入 skip ledger 的 `risk_state.policy_verdict`。

@@ -545,6 +545,12 @@ offline validated
 
 目标：让风控从“分散检查”变成“统一裁决”。
 
+当前进展：
+
+- 已新增 `RiskPolicyService.evaluate(action, context) -> RiskVerdict` 作为统一 facade。
+- live 开仓路径已先接入 `open_trade`，把 VaR、仓位数量、API volume、金字塔检查统一成一个可审计 verdict。
+- 后续还需要把 close、weight update、factor promotion、model shadow/canary 等高影响动作也逐步接入。
+
 要完成：
 
 - 合并 `risk/` 与 `backend/risk/` 的职责边界。
