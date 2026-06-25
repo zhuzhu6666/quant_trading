@@ -50,7 +50,7 @@
 
 ### 当前主阶段
 
-- 🟢 Phase E：因子治理与参数模板（主链已完成，待远程验收 / 真实样本观察）
+- ✅ Phase E：因子治理与参数模板（主链已完成，远程验收通过 / 真实样本观察）
 
 ### 当前系统一句话状态
 
@@ -71,11 +71,11 @@
 
 ### 当前唯一进行中主线
 
-`Phase E 收口：远程验收 / 真实样本观察`
+`Phase E 完成：真实样本观察 / Phase F 准备`
 
 ### 下一步入口
 
-继续 **Phase E 收口验收**：推送、服务器拉取、运行关键测试，并把真实样本不足的部分作为观察项跟踪。
+Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F：数学模型与大语言模型分层接入**；Phase E 只保留真实样本观察与后续模板覆盖增强。
 
 ---
 
@@ -570,7 +570,7 @@
 
 ## 6. Phase E：因子治理与参数模板
 
-状态：`主链已完成，待远程验收 / 真实样本观察`  
+状态：`已完成（远程验收通过，真实样本观察中）`  
 优先级：`P1`  
 前置条件：`Phase D 基本落地`
 
@@ -1215,6 +1215,11 @@
 - 已通过 Phase E 收口回归：
   - `pytest tests/test_factor_cards_api.py tests/alpha/test_streaming_factor_engine.py tests/test_runtime_config.py tests/risk/test_policy_service.py tests/risk/test_risk_api_policy.py tests/research/test_rule_evolution_governor.py tests/research/test_rule_learning_pipeline.py tests/test_learning_backfill.py tests/test_review_contract_api.py tests/test_failure_taxonomy.py -q`
   - 结果：`114 passed`
+- 已完成远程服务器验收：
+  - GitHub `main` 已推送至 `49a6b150`
+  - 服务器 `/home/ubuntu/quant_trading` 已 fast-forward 到 `49a6b15`
+  - 远程 `.venv/bin/python -m pytest ... -q` 结果：`114 passed, 1 warning`
+  - warning 为 pytest 配置项 `asyncio_mode` 未识别，不影响本轮 Phase E 测试通过
 - 已通过前端语法检查：
   - `node --check miniprogram_v2/pages/learning/index.js`
   - `node --check miniprogram_v2/pages/overview/index.js`
@@ -1243,7 +1248,7 @@
 - 扩大更多手工参数模板与 regime-specific 模板覆盖面
 - 评估更复杂离散/事件类因子是否值得参数模板化
 - 等真实线上样本继续观察候选审批、灰度发布、回滚效果
-- 远程服务器拉取后运行关键测试 / 接口验收，作为 Phase E 最终发布确认
+- 真实线上样本继续观察，不阻塞 Phase E 完成态
 
 ---
 
@@ -1427,4 +1432,4 @@
 
 当前默认下一步：
 
-**Phase E 收口验收：推送 GitHub、服务器拉取、运行关键测试 / 接口验收**
+**Phase F：数学模型与大语言模型分层接入**
