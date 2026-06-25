@@ -179,6 +179,7 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     assert review["review_json"]["mae"] == pytest.approx(120.0)
     assert review["review_json"]["holding_efficiency"] >= 0.0
     assert experience["decision_context_json"]["holding_minutes"] == pytest.approx(100_000.0 / 60.0)
+    assert "primary_responsibility" in experience["decision_context_json"]
     assert "overweight_noise_factor" in review["failure_tags"]
     assert experience["recommended_action"] == "downweight"
     assert suggestion is None
@@ -196,17 +197,21 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     assert sample["quality"]["model_ready"] is True
     assert sample["target"]["outcome_label"] == "bad_loss"
     assert sample["target"]["recommended_action"] == "downweight"
+    assert "primary_responsibility" in sample["target"]
+    assert "responsibility_labels" in sample["target"]
     assert sample["decision"]["decision_id"] == entry_decision_id
     assert sample["decision"]["factor_count"] == 2
     assert sample["explainability"]["top_factors"][0]["factor"] == "noise_factor"
     assert sample["factor_outcomes"][0]["factor"] == "noise_factor"
     assert sample["factor_outcomes"][0]["outcome_contribution"]["net_contribution"] == -90.0
+    assert "primary_responsibility" in sample["factor_outcomes"][0]["outcome_contribution"]
     assert sample["factor_outcomes"][0]["outcome_contribution"]["attribution_label"] == "confirmed"
     assert sample["factor_outcomes"][0]["outcome_contribution"]["outcome_role"] == "harmful"
     assert sample["factor_outcomes"][1]["outcome_contribution"]["outcome_role"] == "helpful"
     assert sample["attribution_alignment"]["labels"]["confirmed"] == 2
     assert sample["attribution_alignment"]["most_harmful_factors"][0]["factor"] == "noise_factor"
     assert sample["experience"]["trade_id"] == "101"
+    assert "primary_responsibility" in sample["experience"]
     assert sample["execution_trace"]["summary"]["order_event_count"] == 2
     assert sample["execution_trace"]["summary"]["position_event_count"] == 2
     assert sample["execution_trace"]["summary"]["order_statuses"]["filled"] == 1

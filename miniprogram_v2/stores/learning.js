@@ -6,6 +6,9 @@ const store = createStore({
   applications: [],
   reviews: [],
   lifecycle: [],
+  offlineCandidates: [],
+  templateRecommendations: [],
+  pendingGovernanceFocus: null,
   updatedAt: 0,
 });
 

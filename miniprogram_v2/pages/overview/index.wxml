@@ -58,14 +58,50 @@
             <view class="value-md">{{governanceLabel}}</view>
             <status-pill label="{{governanceLabel}}" tone="{{governanceTone}}" />
           </view>
+          <view class="section-note">{{governanceHeadlineSummary}}</view>
           <view class="section-note">已应用 {{learningApplications}} 次，最新复盘会在治理后进入下一轮权重。</view>
+          <view class="section-note">{{templateOpsSummary}}</view>
         </view>
         <view class="grid-3">
           <metric-tile label="待审" value="{{learningSummary.proposed || 0}}" hint="proposed" />
           <metric-tile label="已批" value="{{learningSummary.approved || 0}}" hint="approved" />
           <metric-tile label="已回滚" value="{{learningSummary.rolled_back || 0}}" hint="rolled back" />
         </view>
+        <view wx:if="{{pendingTemplateCandidateCount || pendingTemplateRecommendationCount}}" class="soft-panel stack-12" style="margin-top: 16rpx;">
+          <view class="row-between">
+            <view class="small">参数治理待办</view>
+            <view class="small muted">候选 {{pendingTemplateCandidateCount}} · 推荐 {{pendingTemplateRecommendationCount}}</view>
+          </view>
+          <view wx:if="{{governanceTodoCard}}" class="soft-panel stack-12">
+            <view class="row-between">
+              <view class="small">当前主待办</view>
+              <button class="btn-primary" size="mini" bindtap="openGovernanceTodo">{{governanceTodoCard.actionLabel}}</button>
+            </view>
+            <view class="section-note">{{governanceTodoCard.title}}</view>
+            <view class="row-wrap">
+              <view wx:if="{{governanceTodoCard.priorityLabel}}" class="tag">{{governanceTodoCard.priorityLabel}}</view>
+              <view wx:if="{{governanceTodoCard.stageTag}}" class="tag">{{governanceTodoCard.stageTag}}</view>
+              <view wx:if="{{governanceTodoCard.targetTypeText}}" class="tag">{{governanceTodoCard.targetTypeText}}</view>
+            </view>
+            <view wx:if="{{governanceTodoCard.summary}}" class="section-note">{{governanceTodoCard.summary}}</view>
+            <view wx:if="{{governanceTodoCard.queueHint}}" class="small muted">{{governanceTodoCard.queueHint}}</view>
+          </view>
+          <view class="row-wrap">
+            <view class="tag">待审候选 {{pendingTemplateCandidateCount}}</view>
+            <view class="tag">在线轻调 {{onlineLightRecommendationCount}}</view>
+            <view class="tag">离线深调 {{offlineDeepRecommendationCount}}</view>
+          </view>
+          <view wx:if="{{pendingCandidateHint}}" class="section-note">待审候选：{{pendingCandidateHint}}</view>
+          <view wx:if="{{pendingOnlineRecommendationHint}}" class="section-note">可直接推进：{{pendingOnlineRecommendationHint}}</view>
+          <view wx:if="{{pendingOfflineRecommendationHint}}" class="section-note">需先离线验证：{{pendingOfflineRecommendationHint}}</view>
+          <view class="btn-row-compact">
+            <button wx:if="{{pendingTemplateCandidateCount}}" class="btn-primary" size="mini" bindtap="openPendingCandidate">打开待审候选</button>
+            <button wx:if="{{onlineLightRecommendationCount}}" class="btn-secondary" size="mini" bindtap="openPendingRecommendation">打开在线推荐</button>
+            <button wx:if="{{offlineDeepRecommendationCount}}" class="btn-secondary" size="mini" bindtap="openOfflineRecommendation">打开离线推荐</button>
+          </view>
+        </view>
         <view class="btn-row-compact" style="margin-top: 16rpx;">
+          <button wx:if="{{learningSummaryRaw.latest_parameter_template_candidate || learningSummaryRaw.latest_parameter_template_recommendation}}" class="btn-primary" bindtap="openLatestGovernance">打开参数治理</button>
           <button class="btn-secondary" bindtap="goLearning">学习页</button>
           <button class="btn-secondary" bindtap="goTrading">交易页</button>
         </view>

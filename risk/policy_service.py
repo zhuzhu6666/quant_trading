@@ -60,6 +60,8 @@ class RiskPolicyService:
             return self._evaluate_close_position(context)
         if action == "update_weight":
             return self._evaluate_governor_action(action, context, "allow_weight_update")
+        if action == "switch_parameter_template":
+            return self._evaluate_governor_action(action, context, "allow_weight_update")
         if action == "promote_factor":
             return self._evaluate_governor_action(action, context, "allow_promotion")
         if action == "register_factor":

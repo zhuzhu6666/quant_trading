@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from backend.services.parameter_templates import ParameterTemplateService
 from research.learning.governor import RuleEvolutionGovernor
 
 
@@ -560,3 +561,171 @@ def test_reconcile_application_effects_waits_when_no_post_reviews(tmp_path):
     assert int(effect_row["observed_trade_count"]) == 0
     assert int(effect_row["baseline_trade_count"]) == 3
     assert float(effect_row["last_review_at"]) == 0.0
+
+
+def test_reconcile_parameter_template_effects_rolls_back_active_template(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    svc = ParameterTemplateService(db_path)
+
+    old_template = svc.upsert_template(
+        {
+            "factor_id": "rsi_14",
+            "regime_key": "range",
+            "factor_family": "momentum_oscillator",
+            "template_version": "range_safe.v1",
+            "template_role": "default",
+            "formula_version": "registry_builtin.v1",
+            "base_parameter_version": "default.v1",
+            "parameters": {"length": 18, "upper_band": 72, "lower_band": 28},
+            "applicable_regimes": ["range"],
+            "avoid_regimes": ["strong_trend"],
+            "holding_profile_hint": {"style": "short_swing", "min_bars": 2, "max_bars": 10},
+            "evidence": {"note": "old"},
+        },
+        source="manual",
+    )
+    new_template = svc.upsert_template(
+        {
+            "factor_id": "rsi_14",
+            "regime_key": "range",
+            "factor_family": "momentum_oscillator",
+            "template_version": "range_fast.v1",
+            "template_role": "aggressive",
+            "formula_version": "registry_builtin.v1",
+            "base_parameter_version": "default.v1",
+            "parameters": {"length": 14, "upper_band": 70, "lower_band": 30},
+            "applicable_regimes": ["range"],
+            "avoid_regimes": ["low_vol"],
+            "holding_profile_hint": {"style": "fast_reversion", "min_bars": 1, "max_bars": 6},
+            "evidence": {"note": "new"},
+        },
+        source="manual",
+    )
+    svc.activate_template(
+        factor_id="rsi_14",
+        regime_key="range",
+        template_id=old_template["template_id"],
+        note="baseline active",
+    )
+    switch = svc.create_switch_suggestion(
+        factor_id="rsi_14",
+        regime_key="range",
+        template_id=new_template["template_id"],
+        note="proposed switch",
+    )
+    gov.set_status(switch["suggestion_id"], "approved", "approved for test")
+    applied = svc.activate_template(
+        factor_id="rsi_14",
+        regime_key="range",
+        template_id=new_template["template_id"],
+        suggestion_id=switch["suggestion_id"],
+        note="apply new template",
+    )
+    assert applied["ok"] is True
+
+    conn = _connect(db_path)
+    try:
+        apps = conn.execute(
+            """
+            SELECT application_id
+            FROM learning_application_log
+            WHERE scope_type='parameter_template'
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+        assert len(apps) >= 2
+        conn.execute(
+            "UPDATE learning_application_log SET status='superseded', cycle_ts=80.0 WHERE application_id=?",
+            (str(apps[-1]["application_id"]),),
+        )
+        conn.execute(
+            "UPDATE learning_application_log SET cycle_ts=200.0 WHERE application_id=?",
+            (str(apps[0]["application_id"]),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = _connect(db_path)
+    try:
+        baseline_samples = (
+            (120.0, 55.0),
+            (140.0, 45.0),
+        )
+        for idx, (ts, pnl) in enumerate(baseline_samples, start=1):
+            decision_id = f"base_dec_{idx}"
+            review_payload = {"real_pnl": {"net": pnl}, "close_reason": "broker_close", "context_integrity": "full"}
+            conn.execute(
+                """
+                INSERT INTO decision_factor_snapshot
+                (decision_id, factor, contribution_score)
+                VALUES (?, 'rsi_14', ?)
+                """,
+                (decision_id, pnl / 100.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
+                 failure_tags_json, summary_text, review_json, created_at)
+                VALUES (?, ?, ?, ?, ?, 'good_win', '[]', '', ?, ?)
+                """,
+                (
+                    f"base_r_{idx}",
+                    f"base_t_{idx}",
+                    f"base_p_{idx}",
+                    decision_id,
+                    pnl,
+                    json.dumps(review_payload),
+                    ts,
+                ),
+            )
+
+        post_samples = (
+            (300.0, -60.0),
+            (320.0, -45.0),
+            (340.0, -50.0),
+        )
+        for idx, (ts, pnl) in enumerate(post_samples, start=1):
+            decision_id = f"post_dec_{idx}"
+            review_payload = {"real_pnl": {"net": pnl}, "close_reason": "broker_close", "context_integrity": "full"}
+            conn.execute(
+                """
+                INSERT INTO decision_factor_snapshot
+                (decision_id, factor, contribution_score)
+                VALUES (?, 'rsi_14', ?)
+                """,
+                (decision_id, pnl / 100.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
+                 failure_tags_json, summary_text, review_json, created_at)
+                VALUES (?, ?, ?, ?, ?, 'bad_loss', '[]', '', ?, ?)
+                """,
+                (
+                    f"post_r_{idx}",
+                    f"post_t_{idx}",
+                    f"post_p_{idx}",
+                    decision_id,
+                    pnl,
+                    json.dumps(review_payload),
+                    ts,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = gov.reconcile_application_effects(min_trades=3, observe_trades=3, baseline_min_trades=2)
+
+    assert result["rolled_back"] == 1
+
+    active = svc.get_active_template(factor_id="rsi_14", regime_key="range")
+    logs = svc.list_switch_logs(factor_id="rsi_14", limit=10)
+
+    assert active["template_id"] == old_template["template_id"]
+    assert logs[0]["status"] == "rolled_back"
+    assert logs[0]["new_template_id"] == old_template["template_id"]

@@ -255,6 +255,20 @@ def test_update_weight_blocks_when_drawdown_near_limit():
     assert verdict.audit_payload["source"] == "RiskGovernor"
 
 
+def test_switch_parameter_template_uses_weight_governor_thresholds():
+    service = _service()
+
+    verdict = service.evaluate(
+        "switch_parameter_template",
+        {"session": {"drawdown_pct": 12.0}, "required_mode": "governed"},
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "drawdown_approaching_limit"
+    assert verdict.required_mode == "governed"
+    assert verdict.audit_payload["action"] == "switch_parameter_template"
+
+
 def test_promote_and_register_factor_use_governor_thresholds():
     service = _service()
 

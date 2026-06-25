@@ -63,6 +63,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _lg.warning(f"[lifespan] db init failed (non-fatal): {e}")
 
+    try:
+        from backend.services.parameter_templates import ParameterTemplateService
+        ParameterTemplateService().sync_runtime_config()
+        _lg.info("[lifespan] active parameter templates synced into RuntimeConfig")
+    except Exception as e:
+        _lg.warning(f"[lifespan] parameter template runtime sync failed (non-fatal): {e}")
+
     get_job_manager().bind_loop(asyncio.get_running_loop())
 
     # Restore shadow/discovered factors from lifecycle log

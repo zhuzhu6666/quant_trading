@@ -10,7 +10,9 @@ import uuid
 from typing import Any
 
 from backend.core.db import get_state_conn
+from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import update_position_path_metrics
+from backend.services.review_contract import normalize_trade_review_contract
 
 
 logger = logging.getLogger(__name__)
@@ -325,6 +327,7 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "exec_timestamp": float(row["close_ts"] or 0.0),
     }
     review_json = {
+        "contract_version": "phase_d.v1",
         "position_id": position_id,
         "trade_id": trade_id,
         "entry_decision_id": str(row["entry_decision_id"] or ""),
@@ -345,7 +348,9 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "holding_efficiency": round(_safe_float(path_metrics.get("holding_efficiency")), 6),
         "time_decay_score": round(_safe_float(path_metrics.get("time_decay_score")), 6),
         "thesis_status": str(path_metrics.get("thesis_status") or ""),
+        "thesis_status_at_exit": str(path_metrics.get("thesis_status") or ""),
         "regime_shift": str(path_metrics.get("regime_shift") or ""),
+        "regime_shift_at_exit": str(path_metrics.get("regime_shift") or ""),
         "position_path_state": path_metrics.get("position_path_state") or {},
         "path_source": str(path_metrics.get("path_source") or ""),
         "entry_score": entry_score,
@@ -363,10 +368,32 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "context_integrity": "full",
         "failure_tags": [outcome_label],
         "factor_contributions": {},
+        "entry_quality": round(0.55 + (0.25 if pnl > 0 else -0.30) * min(abs(entry_score), 1.0), 4),
+        "hold_quality": round(0.55 if pnl > 0 else 0.40, 4),
+        "exit_quality": 0.55,
+        "regime_fit_score": round(0.70 if pnl > 0 else (0.35 + (0.10 if outcome_label == "good_loss" else 0.0)), 4),
+        "regime_fit": round(0.70 if pnl > 0 else (0.35 + (0.10 if outcome_label == "good_loss" else 0.0)), 4),
+        "execution_quality": 0.60,
     }
     context_integrity = "full" if row["entry_decision_id"] else ("partial" if broker_entry_ts > 0 else "minimal")
     review_json["context_integrity"] = context_integrity
+    review_json = normalize_trade_review_contract(
+        review_json,
+        entry_quality=review_json["entry_quality"],
+        hold_quality=review_json["hold_quality"],
+        exit_quality=review_json["exit_quality"],
+        regime_fit_score=review_json["regime_fit_score"],
+        execution_quality=review_json["execution_quality"],
+    )
     review_json["phase_c_diagnosis"] = _phase_c_diagnosis(review_json)
+    taxonomy = build_failure_taxonomy({**review_json, "pnl": pnl})
+    review_json["failure_taxonomy"] = taxonomy
+    review_json["primary_responsibility"] = taxonomy["primary_responsibility"]
+    review_json["responsibility_labels"] = taxonomy["responsibility_labels"]
+    failure_tags = [outcome_label]
+    for label in taxonomy["responsibility_labels"]:
+        if label not in failure_tags:
+            failure_tags.append(label)
     return {
         "review_id": new_id("review"),
         "trade_id": trade_id,
@@ -382,7 +409,7 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "mae": round(_safe_float(path_metrics.get("mae"), abs(min(pnl, 0.0))), 6),
         "mfe": round(_safe_float(path_metrics.get("mfe"), max(pnl, 0.0)), 6),
         "outcome_label": outcome_label,
-        "failure_tags_json": json.dumps([outcome_label], ensure_ascii=False),
+        "failure_tags_json": json.dumps(failure_tags, ensure_ascii=False),
         "summary_text": summary,
         "review_json": json.dumps(review_json, ensure_ascii=False, default=str),
         "created_at": float(row["close_ts"] or time.time()),

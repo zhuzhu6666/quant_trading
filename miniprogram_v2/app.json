@@ -4,6 +4,7 @@
     "pages/overview/index",
     "pages/trading/index",
     "pages/learning/index",
+    "pages/trade-trace/index",
     "pages/factors/index",
     "pages/ops/index"
   ],

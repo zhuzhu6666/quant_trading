@@ -167,6 +167,7 @@ class LearningFeatureProvider:
                 "net_contribution": _safe_float(row["net_contribution"]),
                 "confidence": _safe_float(row["confidence"]),
                 "notes": str(row["notes"] or ""),
+                "note_payload": _loads(row["notes"], {}) if str(row["notes"] or "").startswith("{") else {},
             }
             for row in rows
         ]
@@ -450,6 +451,9 @@ class LearningFeatureProvider:
                         "contribution_delta": round(delta, 6),
                         "confidence": _safe_float(review.get("confidence")),
                         "notes": str(review.get("notes") or ""),
+                        "primary_responsibility": str((review.get("note_payload") or {}).get("primary_responsibility") or ""),
+                        "responsibility_labels": list((review.get("note_payload") or {}).get("responsibility_labels") or []),
+                        "factor_role_hint": str((review.get("note_payload") or {}).get("factor_role") or ""),
                         "same_direction": same_direction,
                         "attribution_label": attribution_label,
                         "outcome_role": outcome_role,
@@ -482,6 +486,9 @@ class LearningFeatureProvider:
                             "contribution_delta": round(net, 6),
                             "confidence": _safe_float(review.get("confidence")),
                             "notes": str(review.get("notes") or ""),
+                            "primary_responsibility": str((review.get("note_payload") or {}).get("primary_responsibility") or ""),
+                            "responsibility_labels": list((review.get("note_payload") or {}).get("responsibility_labels") or []),
+                            "factor_role_hint": str((review.get("note_payload") or {}).get("factor_role") or ""),
                             "same_direction": False,
                             "attribution_label": "review_only",
                             "outcome_role": "helpful" if net > 0 else "harmful" if net < 0 else "neutral",
@@ -713,6 +720,8 @@ class LearningFeatureProvider:
             "regime_id": str(row["regime_id"] or ""),
             "setup_hash": str(row["setup_hash"] or ""),
             "decision_context": context,
+            "primary_responsibility": str(context.get("primary_responsibility") or ""),
+            "responsibility_labels": list(context.get("responsibility_labels") or []),
             "outcome_label": str(row["outcome_label"] or ""),
             "reward_score": _safe_float(row["reward_score"]),
             "failure_tags": failure_tags if isinstance(failure_tags, list) else [],
@@ -824,6 +833,8 @@ class LearningFeatureProvider:
             "review": review_json if isinstance(review_json, dict) else {},
             "created_at": _safe_float(row["created_at"]),
         }
+        review["primary_responsibility"] = str((review["review"] or {}).get("primary_responsibility") or "")
+        review["responsibility_labels"] = list((review["review"] or {}).get("responsibility_labels") or [])
         decision = None
         factors: list[dict] = []
         if review["entry_decision_id"]:
@@ -856,6 +867,8 @@ class LearningFeatureProvider:
             "pnl": review["pnl"],
             "failure_tags": review["failure_tags"],
             "recommended_action": experience["recommended_action"] if experience else "",
+            "primary_responsibility": review["primary_responsibility"],
+            "responsibility_labels": review["responsibility_labels"],
         }
         llm_context = self._trade_llm_context(
             review=review,
@@ -886,6 +899,8 @@ class LearningFeatureProvider:
                 "execution_summary": execution_trace["summary"],
                 "evidence_bullets": llm_context["evidence_bullets"],
                 "failure_tags": review["failure_tags"],
+                "primary_responsibility": review["primary_responsibility"],
+                "responsibility_labels": review["responsibility_labels"],
                 "ledger_links": {
                     "entry_decision_id": review["entry_decision_id"],
                     "exit_decision_id": review["exit_decision_id"],

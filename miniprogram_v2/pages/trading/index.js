@@ -1,5 +1,6 @@
 import liveStore from '../../stores/live';
 import { emergencyCloseAll, refreshLiveSnapshot, startTradingLoop, stopTradingLoop } from '../../services/live';
+import { openTradeTracePage } from '../../services/ops';
 import { formatMoney, formatPct, formatPrice, formatDurationMinutes, humanizeRiskAction, humanizeRiskReason } from '../../utils/format';
 
 function normalizePosition(item = {}) {
@@ -188,5 +189,11 @@ Page({
     } finally {
       this.setData({ emergencyBusy: false });
     }
+  },
+
+  openTradeTrace(e) {
+    const positionId = String((e.currentTarget.dataset && e.currentTarget.dataset.positionId) || '').trim();
+    if (!positionId) return;
+    openTradeTracePage({ positionId });
   },
 });

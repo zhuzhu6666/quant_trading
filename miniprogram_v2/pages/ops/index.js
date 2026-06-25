@@ -1,6 +1,13 @@
 import systemStore from '../../stores/system';
-import { refreshOpsDomain } from '../../services/ops';
+import learningStore from '../../stores/learning';
+import { openTradeTracePage, refreshOpsDomain } from '../../services/ops';
+import { openLearningGovernancePage, refreshLearning } from '../../services/learning';
 import { formatDateTime, humanizeRiskAction, humanizeRiskReason, toneFromStatus } from '../../utils/format';
+import {
+  buildGovernanceTodoCard,
+  normalizeGovernanceStageKey,
+  sortGovernanceItemsByPriority,
+} from '../../utils/governance';
 
 function humanizeHealthComponent(key) {
   const mapping = {
@@ -143,6 +150,79 @@ function summarizeSystemHealth(systemHealth = null) {
   };
 }
 
+function humanizeResponsibility(value = '') {
+  const key = String(value || '').toLowerCase();
+  if (key === 'exit') return '退出问题';
+  if (key === 'timing') return '时长问题';
+  if (key === 'regime') return '市场切换问题';
+  if (key === 'parameter') return '参数问题';
+  if (key === 'thesis') return 'thesis 失效';
+  if (key === 'holding') return '持仓效率问题';
+  return '暂未定责';
+}
+
+function humanizeOutcome(value = '') {
+  const key = String(value || '').toLowerCase();
+  if (key === 'good_win') return '高质量盈利';
+  if (key === 'lucky_win') return '幸运盈利';
+  if (key === 'good_loss') return '可接受亏损';
+  if (key === 'bad_loss') return '无效亏损';
+  if (key === 'win') return '盈利';
+  if (key === 'loss') return '亏损';
+  return value || '进行中';
+}
+
+function humanizeTraceResponsibility(value = '') {
+  return humanizeResponsibility(value || '');
+}
+
+function matchesRecentTraceFilter(item = {}, filter = 'all') {
+  const key = String(filter || 'all').toLowerCase();
+  const governanceStageKey = normalizeGovernanceStageKey(item.parameter_governance_stage || '');
+  if (key === 'all') return true;
+  if (key === 'parameter_only') return !!item.parameter_governance_factor;
+  if (key === 'exit_only') return String(item.primary_responsibility || '') === 'exit';
+  if (key === 'timing_only') return String(item.primary_responsibility || '') === 'timing';
+  if (key === 'governance_hint') return !!item.parameter_governance_factor || !!item.parameter_candidate_status;
+  if (key === 'candidate_review') return String(item.parameter_governance_entry_type || '') === 'candidate';
+  if (key === 'recommendation_only') return String(item.parameter_governance_entry_type || '') === 'recommendation';
+  if (key === 'online_light_only') return governanceStageKey === 'online_light';
+  if (key === 'offline_deep_only') return governanceStageKey === 'offline_deep';
+  if (key === 'deployed_watch') return governanceStageKey === 'deployed';
+  return true;
+}
+
+function matchesRecentTraceSearch(item = {}, keyword = '') {
+  const text = String(keyword || '').trim().toLowerCase();
+  if (!text) return true;
+  const haystack = [
+    item.position_id,
+    item.trade_id,
+    item.entry_decision_id,
+    item.exit_decision_id,
+    item.summary_text,
+    item.parameter_governance_factor,
+    item.symbol,
+    item.primary_responsibility,
+  ]
+    .map((value) => String(value || '').toLowerCase())
+    .join(' ');
+  return haystack.includes(text);
+}
+
+function mapOverviewHintCard(item = null) {
+  if (!item) return null;
+  return {
+    factorId: String(item.factor_id || ''),
+    candidateId: String(item.candidate_id || ''),
+    recommendationId: String(item.recommendation_id || ''),
+    title: String(item.title || ''),
+    stageText: String(item.stage_tag || ''),
+    note: String(item.summary || ''),
+    actionLabel: String(item.action_label || ''),
+  };
+}
+
 Page({
   data: {
     scheduler: null,
@@ -156,20 +236,40 @@ Page({
     jobsMetricClass: '',
     policySummary: null,
     systemHealthSummary: null,
+    recentTradeTraceItems: [],
+    totalRecentTradeTraceCount: 0,
+    recentTraceFilter: 'all',
+    recentTraceSearch: '',
+    tracePositionId: '',
+    traceDecisionId: '',
+    recentTraceQueries: [],
+    pendingTemplateCandidateCount: 0,
+    pendingTemplateRecommendationCount: 0,
+    onlineLightRecommendationCount: 0,
+    offlineDeepRecommendationCount: 0,
+    pendingCandidateCard: null,
+    pendingOnlineRecommendationCard: null,
+    pendingOfflineRecommendationCard: null,
+    pendingGovernanceTodoCard: null,
+    recentTraceTodoCard: null,
   },
 
   onLoad() {
-    this._unsub = systemStore.subscribe(() => this.syncView());
+    this._unsubSystem = systemStore.subscribe(() => this.syncView());
+    this._unsubLearning = learningStore.subscribe(() => this.syncView());
     this.syncView();
     refreshOpsDomain();
+    refreshLearning();
   },
 
   onShow() {
     refreshOpsDomain();
+    refreshLearning();
   },
 
   onUnload() {
-    this._unsub && this._unsub();
+    this._unsubSystem && this._unsubSystem();
+    this._unsubLearning && this._unsubLearning();
   },
 
   syncView() {
@@ -183,6 +283,85 @@ Page({
     const runningJobs = jobs.filter((item) => item.running).length;
     const dbCards = buildDbCards(dbHealth);
     const policySummary = summarizePolicy(riskSummary && riskSummary.policy);
+    const recentTradeTraceItems = (state.recentTradeTraces || []).map((item) => {
+      const governanceStageTag = String(item.parameter_governance_stage || '');
+      const governanceStageSummary = String(item.parameter_governance_stage_summary || '');
+      const governanceNextStepText = String(item.parameter_governance_next_step || '');
+      const governanceTargetTypeText = String(item.parameter_governance_target_type || '');
+      const governanceEntryHintText = String(item.parameter_governance_entry_hint_text || '');
+      const governanceActionLabel = String(item.parameter_governance_action_label || '');
+      const governancePriority = {
+        score: Number(item.parameter_governance_priority_score || 0),
+        label: String(item.parameter_governance_priority_label || ''),
+        summary: String(item.parameter_governance_priority_summary || ''),
+      };
+      return {
+        ...item,
+      id: item.review_id || `${item.position_id || '--'}_${item.created_at || 0}`,
+      title: item.position_id ? `position ${item.position_id}` : `trade ${item.trade_id || '--'}`,
+      outcomeText: humanizeOutcome(item.outcome_label || ''),
+      responsibilityText: humanizeTraceResponsibility(item.primary_responsibility || ''),
+      governanceText: item.parameter_governance_factor
+        ? `${item.parameter_governance_factor} · ${item.parameter_candidate_status || '待评估'}`
+        : '',
+      governanceStageText: governanceStageTag,
+      governanceStageTag,
+      governanceStageSummary,
+      governanceNextStepText,
+      governanceActionLabel,
+      governanceTargetTypeText,
+      governanceEntryTypeText: governanceEntryHintText,
+      governanceCandidateId: String(item.parameter_candidate_id || ''),
+      governanceRecommendationId: String(item.parameter_recommendation_id || ''),
+      governancePriorityScore: governancePriority.score,
+      governancePriorityLabel: governancePriority.label,
+      governancePrioritySummary: governancePriority.summary,
+      timeText: formatDateTime(item.created_at || 0),
+      };
+    });
+    const recentTraceFilter = this.data.recentTraceFilter || 'all';
+    const recentTraceSearch = this.data.recentTraceSearch || '';
+    const learning = learningStore.getState();
+    const learningSummary = learning.summary || {};
+    const candidateCounts = learningSummary.parameter_template_candidates || {};
+    const recommendationCounts = learningSummary.parameter_template_recommendations || {};
+    const summaryOverview = learningSummary.parameter_template_overview || {};
+    const pendingCandidateCard = mapOverviewHintCard(summaryOverview.pending_candidate_hint);
+    const pendingOnlineRecommendationCard = mapOverviewHintCard(summaryOverview.online_light_hint);
+    const pendingOfflineRecommendationCard = mapOverviewHintCard(summaryOverview.offline_deep_hint);
+    const filteredRecentTradeTraceItems = recentTradeTraceItems.filter(
+      (item) => matchesRecentTraceFilter(item, recentTraceFilter) && matchesRecentTraceSearch(item, recentTraceSearch)
+    );
+    const sortedRecentTradeTraceItems = sortGovernanceItemsByPriority(filteredRecentTradeTraceItems);
+    const recentTraceTodoCard = buildGovernanceTodoCard(sortedRecentTradeTraceItems);
+    const summaryGovernanceTodo = learningSummary.parameter_template_todo || null;
+    const pendingGovernanceTodoCard = summaryGovernanceTodo
+      ? {
+          factorId: String(summaryGovernanceTodo.factor_id || ''),
+          candidateId: String(summaryGovernanceTodo.candidate_id || ''),
+          recommendationId: String(summaryGovernanceTodo.recommendation_id || ''),
+          title: String(summaryGovernanceTodo.title || ''),
+          stageText: String(summaryGovernanceTodo.stage_tag || ''),
+          note: String(summaryGovernanceTodo.priority_summary || summaryGovernanceTodo.summary || ''),
+          actionLabel: String(summaryGovernanceTodo.action_label || ''),
+          targetTypeText: String(summaryGovernanceTodo.target_type || ''),
+          priorityLabel: String(summaryGovernanceTodo.priority_label || ''),
+          queueHint: String(summaryGovernanceTodo.queue_hint || ''),
+        }
+      : null;
+    const recentTraceQueries = (state.recentTradeTraceQueries || []).map((item) => ({
+      ...item,
+      id: `${item.positionId || '--'}_${item.decisionId || '--'}_${item.ts || 0}`,
+      label: item.positionId
+        ? `position ${item.positionId}`
+        : `decision ${item.decisionId || '--'}`,
+      sublabel: item.positionId && item.decisionId
+        ? `decision ${item.decisionId}`
+        : item.positionId
+          ? 'position 查询'
+          : 'decision 查询',
+      timeText: formatDateTime(item.ts || 0),
+    }));
     this.setData({
       scheduler,
       evolution: state.evolution
@@ -195,6 +374,18 @@ Page({
       dbHealth,
       policySummary,
       systemHealthSummary,
+      recentTradeTraceItems: sortedRecentTradeTraceItems,
+      totalRecentTradeTraceCount: recentTradeTraceItems.length,
+      recentTraceQueries,
+      pendingTemplateCandidateCount: Number(candidateCounts.pending_review || 0),
+      pendingTemplateRecommendationCount: Number(recommendationCounts.total || 0),
+      onlineLightRecommendationCount: Number(recommendationCounts.online_light || 0),
+      offlineDeepRecommendationCount: Number(recommendationCounts.offline_deep || 0),
+      pendingCandidateCard,
+      pendingOnlineRecommendationCard,
+      pendingOfflineRecommendationCard,
+      pendingGovernanceTodoCard,
+      recentTraceTodoCard,
       apiHealth: {
         ...apiHealth,
         tone: toneFromStatus(apiHealth.status || 'ok'),
@@ -232,5 +423,99 @@ Page({
 
   async onRefresh() {
     await refreshOpsDomain();
+  },
+
+  onTracePositionInput(e) {
+    this.setData({ tracePositionId: e.detail.value || '' });
+  },
+
+  onTraceDecisionInput(e) {
+    this.setData({ traceDecisionId: e.detail.value || '' });
+  },
+
+  async onQueryTradeTrace() {
+    const positionId = String(this.data.tracePositionId || '').trim();
+    const decisionId = String(this.data.traceDecisionId || '').trim();
+    if (!positionId && !decisionId) {
+      wx.showToast({
+        title: '请输入 position_id 或 decision_id',
+        icon: 'none',
+        duration: 1800,
+      });
+      return;
+    }
+    openTradeTracePage({ positionId, decisionId });
+  },
+
+  replayRecentTrace(e) {
+    const positionId = String((e.currentTarget.dataset && e.currentTarget.dataset.positionId) || '').trim();
+    const decisionId = String((e.currentTarget.dataset && e.currentTarget.dataset.decisionId) || '').trim();
+    openTradeTracePage({ positionId, decisionId });
+  },
+
+  openRecentTradeTrace(e) {
+    const positionId = String((e.currentTarget.dataset && e.currentTarget.dataset.positionId) || '').trim();
+    const decisionId = String((e.currentTarget.dataset && e.currentTarget.dataset.decisionId) || '').trim();
+    openTradeTracePage({ positionId, decisionId });
+  },
+
+  openRecentGovernance(e) {
+    const candidateId = String((e.currentTarget.dataset && e.currentTarget.dataset.candidateId) || '').trim();
+    const recommendationId = String((e.currentTarget.dataset && e.currentTarget.dataset.recommendationId) || '').trim();
+    const factorId = String((e.currentTarget.dataset && e.currentTarget.dataset.factorId) || '').trim();
+    if (candidateId) {
+      openLearningGovernancePage({
+        type: 'offline_candidate',
+        candidateId,
+        factorId,
+      });
+      return;
+    }
+    if (recommendationId) {
+      openLearningGovernancePage({
+        type: 'template_recommendation',
+        recommendationId,
+        factorId,
+      });
+    }
+  },
+
+  openPendingCandidate() {
+    const item = this.data.pendingCandidateCard || null;
+    if (!item || !item.candidateId) return;
+    openLearningGovernancePage({
+      type: 'offline_candidate',
+      candidateId: item.candidateId,
+      factorId: item.factorId,
+    });
+  },
+
+  openPendingRecommendation() {
+    const item = this.data.pendingOnlineRecommendationCard || null;
+    if (!item || !item.recommendationId) return;
+    openLearningGovernancePage({
+      type: 'template_recommendation',
+      recommendationId: item.recommendationId,
+      factorId: item.factorId,
+    });
+  },
+
+  openOfflineRecommendation() {
+    const item = this.data.pendingOfflineRecommendationCard || null;
+    if (!item || !item.recommendationId) return;
+    openLearningGovernancePage({
+      type: 'template_recommendation',
+      recommendationId: item.recommendationId,
+      factorId: item.factorId,
+    });
+  },
+
+  switchRecentTraceFilter(e) {
+    const filter = String((e.currentTarget.dataset && e.currentTarget.dataset.filter) || 'all');
+    this.setData({ recentTraceFilter: filter }, () => this.syncView());
+  },
+
+  onRecentTraceSearchInput(e) {
+    this.setData({ recentTraceSearch: e.detail.value || '' }, () => this.syncView());
   },
 });

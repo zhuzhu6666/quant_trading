@@ -95,7 +95,12 @@
               <status-pill label="{{item.title}}" tone="{{item.tone}}" />
             </view>
             <view class="small muted">{{item.createdText}} · {{item.stageText}}</view>
+            <view wx:if="{{item.governanceStageTag || item.governanceTargetTypeText}}" class="row-wrap" style="margin-top: 10rpx;">
+              <view wx:if="{{item.governanceStageTag}}" class="tag">{{item.governanceStageTag}}</view>
+              <view wx:if="{{item.governanceTargetTypeText}}" class="tag">{{item.governanceTargetTypeText}}</view>
+            </view>
             <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.noteCompact}}</view>
+            <view wx:if="{{item.governanceStageSummary}}" class="section-note" style="margin-top: 10rpx;">{{item.governanceStageSummary}}</view>
             <view wx:if="{{item.metricText}}" class="small muted" style="margin-top: 10rpx;">{{item.metricText}}</view>
           </view>
         </view>
@@ -185,7 +190,14 @@
           </view>
         </view>
         <view class="soft-panel section-note">{{selectedLifecycle.note}}</view>
+        <view wx:if="{{selectedLifecycle.governanceStageTag || selectedLifecycle.governanceTargetTypeText}}" class="row-wrap">
+          <view wx:if="{{selectedLifecycle.governanceStageTag}}" class="tag">{{selectedLifecycle.governanceStageTag}}</view>
+          <view wx:if="{{selectedLifecycle.governanceTargetTypeText}}" class="tag">{{selectedLifecycle.governanceTargetTypeText}}</view>
+        </view>
+        <view wx:if="{{selectedLifecycle.governanceStageSummary}}" class="soft-panel section-note">{{selectedLifecycle.governanceStageSummary}}</view>
         <view wx:if="{{selectedLifecycle.metricText}}" class="soft-panel section-note">{{selectedLifecycle.metricText}}</view>
+        <button wx:if="{{selectedLifecycle.linkedCandidateId || selectedLifecycle.linkedRecommendationId}}" class="btn-secondary" bindtap="openLifecycleGovernance">{{selectedLifecycle.governanceActionLabel || '打开治理对象'}}</button>
+        <button wx:if="{{selectedLifecycle.metrics.candidate_trace.trace_locator && (selectedLifecycle.metrics.candidate_trace.trace_locator.position_id || selectedLifecycle.metrics.candidate_trace.trace_locator.entry_decision_id || selectedLifecycle.metrics.candidate_trace.trace_locator.exit_decision_id)}}" class="btn-primary" bindtap="openLifecycleTrace">查看来源证据链</button>
         <button class="btn-secondary" bindtap="closeLifecycleDetail">收起详情</button>
       </view>
     </section-card>

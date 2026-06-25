@@ -126,6 +126,175 @@
       <view wx:else class="soft-panel section-note">风控汇总暂时不可用</view>
     </section-card>
 
+    <section-card title="参数治理待办" subtitle="把待审候选和新推荐直接抬到运维入口">
+      <view wx:if="{{pendingTemplateCandidateCount || pendingTemplateRecommendationCount}}" class="stack-12">
+        <view class="grid-3">
+          <view class="split-card stack-12">
+            <view class="small muted">待审候选</view>
+            <view class="value-md">{{pendingTemplateCandidateCount}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">在线轻调</view>
+            <view class="value-md">{{onlineLightRecommendationCount}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">离线深调</view>
+            <view class="value-md">{{offlineDeepRecommendationCount}}</view>
+          </view>
+        </view>
+        <view wx:if="{{pendingGovernanceTodoCard}}" class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">当前主待办</view>
+            <button
+              class="btn-primary"
+              size="mini"
+              bindtap="openRecentGovernance"
+              data-candidate-id="{{pendingGovernanceTodoCard.candidateId}}"
+              data-recommendation-id="{{pendingGovernanceTodoCard.recommendationId}}"
+              data-factor-id="{{pendingGovernanceTodoCard.factorId}}"
+            >
+              {{pendingGovernanceTodoCard.actionLabel}}
+            </button>
+          </view>
+          <view class="section-note">{{pendingGovernanceTodoCard.title}}</view>
+          <view class="row-wrap">
+            <view wx:if="{{pendingGovernanceTodoCard.priorityLabel}}" class="tag">{{pendingGovernanceTodoCard.priorityLabel}}</view>
+            <view wx:if="{{pendingGovernanceTodoCard.stageText}}" class="tag">{{pendingGovernanceTodoCard.stageText}}</view>
+            <view wx:if="{{pendingGovernanceTodoCard.targetTypeText}}" class="tag">{{pendingGovernanceTodoCard.targetTypeText}}</view>
+          </view>
+          <view wx:if="{{pendingGovernanceTodoCard.note}}" class="section-note">{{pendingGovernanceTodoCard.note}}</view>
+          <view wx:if="{{pendingGovernanceTodoCard.queueHint}}" class="small muted">{{pendingGovernanceTodoCard.queueHint}}</view>
+        </view>
+        <view wx:if="{{pendingCandidateCard}}" class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">待审候选</view>
+            <button class="btn-primary" size="mini" bindtap="openPendingCandidate">{{pendingCandidateCard.actionLabel}}</button>
+          </view>
+          <view class="section-note">{{pendingCandidateCard.title}}</view>
+          <view class="small muted">{{pendingCandidateCard.stageText}}</view>
+          <view class="small muted">{{pendingCandidateCard.note}}</view>
+        </view>
+        <view wx:if="{{pendingOnlineRecommendationCard}}" class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">在线轻调推荐</view>
+            <button class="btn-secondary" size="mini" bindtap="openPendingRecommendation">{{pendingOnlineRecommendationCard.actionLabel}}</button>
+          </view>
+          <view class="section-note">{{pendingOnlineRecommendationCard.title}}</view>
+          <view class="small muted">{{pendingOnlineRecommendationCard.stageText}}</view>
+          <view class="small muted">{{pendingOnlineRecommendationCard.note}}</view>
+        </view>
+        <view wx:if="{{pendingOfflineRecommendationCard}}" class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">离线深调推荐</view>
+            <button class="btn-secondary" size="mini" bindtap="openOfflineRecommendation">{{pendingOfflineRecommendationCard.actionLabel}}</button>
+          </view>
+          <view class="section-note">{{pendingOfflineRecommendationCard.title}}</view>
+          <view class="small muted">{{pendingOfflineRecommendationCard.stageText}}</view>
+          <view class="small muted">{{pendingOfflineRecommendationCard.note}}</view>
+        </view>
+      </view>
+      <view wx:else class="soft-panel section-note">当前没有待处理的参数治理对象。</view>
+    </section-card>
+
+    <section-card title="交易证据查询" subtitle="按 position_id / decision_id 查看 trade-trace 与参数治理上下文">
+      <view wx:if="{{totalRecentTradeTraceCount > 0}}" class="stack-12" style="margin-bottom: 18rpx;">
+        <view class="small muted">最近交易样本</view>
+        <input class="input" placeholder="搜索 position_id / trade_id / 因子 / 摘要" value="{{recentTraceSearch}}" bindinput="onRecentTraceSearchInput" />
+        <view class="segmented">
+          <view class="segmented-item {{recentTraceFilter === 'all' ? 'segmented-item-active' : ''}}" data-filter="all" bindtap="switchRecentTraceFilter">全部</view>
+          <view class="segmented-item {{recentTraceFilter === 'parameter_only' ? 'segmented-item-active' : ''}}" data-filter="parameter_only" bindtap="switchRecentTraceFilter">参数问题</view>
+          <view class="segmented-item {{recentTraceFilter === 'exit_only' ? 'segmented-item-active' : ''}}" data-filter="exit_only" bindtap="switchRecentTraceFilter">退出问题</view>
+          <view class="segmented-item {{recentTraceFilter === 'governance_hint' ? 'segmented-item-active' : ''}}" data-filter="governance_hint" bindtap="switchRecentTraceFilter">带治理提示</view>
+        </view>
+        <view class="segmented" style="margin-top: 10rpx;">
+          <view class="segmented-item {{recentTraceFilter === 'candidate_review' ? 'segmented-item-active' : ''}}" data-filter="candidate_review" bindtap="switchRecentTraceFilter">待审候选</view>
+          <view class="segmented-item {{recentTraceFilter === 'online_light_only' ? 'segmented-item-active' : ''}}" data-filter="online_light_only" bindtap="switchRecentTraceFilter">在线轻调</view>
+          <view class="segmented-item {{recentTraceFilter === 'offline_deep_only' ? 'segmented-item-active' : ''}}" data-filter="offline_deep_only" bindtap="switchRecentTraceFilter">离线深调</view>
+          <view class="segmented-item {{recentTraceFilter === 'deployed_watch' ? 'segmented-item-active' : ''}}" data-filter="deployed_watch" bindtap="switchRecentTraceFilter">发布观察</view>
+        </view>
+        <view wx:if="{{recentTraceTodoCard}}" class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">当前最该处理的样本</view>
+            <button
+              class="btn-primary"
+              size="mini"
+              catchtap="openRecentGovernance"
+              data-candidate-id="{{recentTraceTodoCard.candidateId}}"
+              data-recommendation-id="{{recentTraceTodoCard.recommendationId}}"
+              data-factor-id="{{recentTraceTodoCard.factorId}}"
+            >
+              {{recentTraceTodoCard.actionLabel}}
+            </button>
+          </view>
+          <view class="section-note">{{recentTraceTodoCard.title}}</view>
+          <view class="row-wrap">
+            <view wx:if="{{recentTraceTodoCard.priorityLabel}}" class="tag">{{recentTraceTodoCard.priorityLabel}}</view>
+            <view wx:if="{{recentTraceTodoCard.stageTag}}" class="tag">{{recentTraceTodoCard.stageTag}}</view>
+            <view wx:if="{{recentTraceTodoCard.targetTypeText}}" class="tag">{{recentTraceTodoCard.targetTypeText}}</view>
+          </view>
+          <view wx:if="{{recentTraceTodoCard.summary}}" class="section-note">{{recentTraceTodoCard.summary}}</view>
+          <view wx:if="{{recentTraceTodoCard.queueHint}}" class="small muted">{{recentTraceTodoCard.queueHint}}</view>
+        </view>
+        <view wx:for="{{recentTradeTraceItems}}" wx:key="id" class="soft-panel stack-12 tap-card" data-position-id="{{item.position_id}}" data-decision-id="{{item.exit_decision_id || item.entry_decision_id}}" bindtap="openRecentTradeTrace">
+          <view class="row-between">
+            <view class="small">{{item.title}}</view>
+            <view class="small muted">{{item.timeText}}</view>
+          </view>
+          <view wx:if="{{item.governancePriorityLabel}}" class="row-wrap">
+            <view class="tag">{{item.governancePriorityLabel}}</view>
+          </view>
+          <view class="section-note">{{item.outcomeText}} · {{item.responsibilityText}}</view>
+          <view wx:if="{{item.governanceText}}" class="section-note">参数治理：{{item.governanceText}}</view>
+          <view wx:if="{{item.governanceStageText || item.governanceTargetTypeText}}" class="row-wrap">
+            <view wx:if="{{item.governanceStageTag}}" class="tag">{{item.governanceStageTag}}</view>
+            <view wx:if="{{item.governanceTargetTypeText}}" class="tag">{{item.governanceTargetTypeText}}</view>
+          </view>
+          <view wx:if="{{item.governancePrioritySummary}}" class="section-note">{{item.governancePrioritySummary}}</view>
+          <view wx:if="{{item.governanceStageText}}" class="section-note">治理阶段：{{item.governanceStageText}}</view>
+          <view wx:if="{{item.governanceStageSummary}}" class="section-note">{{item.governanceStageSummary}}</view>
+          <view wx:if="{{item.governanceNextStepText}}" class="section-note">下一步：{{item.governanceNextStepText}}</view>
+          <view wx:if="{{item.governanceEntryTypeText}}" class="small muted">{{item.governanceEntryTypeText}}</view>
+          <view wx:if="{{item.summary_text}}" class="section-note">{{item.summary_text}}</view>
+          <view wx:if="{{item.governanceCandidateId || item.governanceRecommendationId}}" class="btn-row-compact">
+            <button
+              class="btn-secondary"
+              size="mini"
+              catchtap="openRecentGovernance"
+              data-candidate-id="{{item.governanceCandidateId}}"
+              data-recommendation-id="{{item.governanceRecommendationId}}"
+              data-factor-id="{{item.parameter_governance_factor}}"
+            >
+              {{item.governanceActionLabel}}
+            </button>
+          </view>
+        </view>
+        <view wx:if="{{!recentTradeTraceItems.length}}" class="soft-panel section-note">当前筛选条件下还没有最近样本。</view>
+      </view>
+      <view class="stack-12">
+        <input class="input" placeholder="position_id，例如 268085757" value="{{tracePositionId}}" bindinput="onTracePositionInput" />
+        <input class="input" placeholder="decision_id，可留空" value="{{traceDecisionId}}" bindinput="onTraceDecisionInput" />
+        <button class="btn-secondary btn-block" bindtap="onQueryTradeTrace">打开证据链页面</button>
+      </view>
+      <view wx:if="{{recentTraceQueries.length}}" class="stack-12" style="margin-top: 16rpx;">
+        <view class="small muted">最近查询</view>
+        <view class="row-wrap">
+          <view
+            wx:for="{{recentTraceQueries}}"
+            wx:key="id"
+            class="tag tap-card"
+            data-position-id="{{item.positionId}}"
+            data-decision-id="{{item.decisionId}}"
+            bindtap="replayRecentTrace"
+          >
+            {{item.label}}
+          </view>
+        </view>
+        <view wx:for="{{recentTraceQueries}}" wx:key="id" class="small muted">
+          {{item.label}} · {{item.sublabel}} · {{item.timeText}}
+        </view>
+      </view>
+    </section-card>
+
     <section-card title="运行风险" subtitle="系统环境有没有在拖后腿">
       <view wx:if="{{systemHealthSummary}}" class="stack-12">
         <view class="grid-3" style="margin-bottom: 18rpx;">

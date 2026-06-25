@@ -121,6 +121,9 @@
             </view>
             <view class="section-note">{{item.supervisorSummary}}</view>
           </view>
+          <view class="btn-row-compact" style="margin-top: 12rpx;">
+            <button class="btn-secondary" size="mini" data-position-id="{{item.position_id}}" bindtap="openTradeTrace">查看证据链</button>
+          </view>
           <view class="caption-grid" style="margin-top: 12rpx;">
             <view class="caption-card">
               <view class="caption-label">止损</view>

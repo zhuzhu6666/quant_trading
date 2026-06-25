@@ -238,6 +238,9 @@ class SignalNormalizer:
                     self._histories[name] = deque(maxlen=maxlen)
                 self._histories[name].append(value)
 
+    def update_configs(self, config: dict[str, dict] | None) -> None:
+        self._configs = dict(config or {})
+
     def _default_gp_config(self, name: str) -> dict:
         """GP 发现因子的默认配置, 尝试从 GPClassifier 获取标签."""
         tags = None

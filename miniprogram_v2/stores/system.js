@@ -9,6 +9,9 @@ const store = createStore({
   dbHealth: null,
   apiHealth: null,
   riskSummary: null,
+  recentTradeTraces: [],
+  pendingTradeTraceQuery: null,
+  recentTradeTraceQueries: [],
   updatedAt: 0,
 });
 

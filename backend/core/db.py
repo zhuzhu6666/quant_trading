@@ -381,6 +381,65 @@ CREATE TABLE IF NOT EXISTS learning_application_effect (
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS parameter_template_registry (
+    template_id TEXT PRIMARY KEY,
+    factor_id TEXT NOT NULL,
+    regime_key TEXT DEFAULT '',
+    template_version TEXT NOT NULL,
+    template_role TEXT DEFAULT 'default',
+    factor_family TEXT DEFAULT '',
+    formula_version TEXT DEFAULT '',
+    base_parameter_version TEXT DEFAULT '',
+    parameters_json TEXT DEFAULT '{}',
+    applicable_regimes_json TEXT DEFAULT '[]',
+    avoid_regimes_json TEXT DEFAULT '[]',
+    holding_profile_hint_json TEXT DEFAULT '{}',
+    evidence_json TEXT DEFAULT '{}',
+    source TEXT DEFAULT 'derived',
+    active INTEGER DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS parameter_template_active (
+    factor_id TEXT NOT NULL,
+    regime_key TEXT DEFAULT '',
+    template_id TEXT NOT NULL,
+    template_version TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    suggestion_id TEXT DEFAULT '',
+    context_json TEXT DEFAULT '{}',
+    activated_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (factor_id, regime_key)
+);
+
+CREATE TABLE IF NOT EXISTS parameter_template_switch_log (
+    switch_id TEXT PRIMARY KEY,
+    factor_id TEXT NOT NULL,
+    regime_key TEXT DEFAULT '',
+    old_template_id TEXT DEFAULT '',
+    new_template_id TEXT NOT NULL,
+    suggestion_id TEXT DEFAULT '',
+    risk_verdict_json TEXT DEFAULT '{}',
+    context_json TEXT DEFAULT '{}',
+    status TEXT DEFAULT 'applied',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS parameter_template_release_candidate (
+    candidate_id TEXT PRIMARY KEY,
+    factor_id TEXT NOT NULL,
+    template_id TEXT NOT NULL,
+    regime_key TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending_review',
+    boundary_json TEXT DEFAULT '{}',
+    validation_summary_json TEXT DEFAULT '{}',
+    validation_report_path TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE TABLE IF NOT EXISTS runtime_kv (
     key TEXT PRIMARY KEY,
     value_json TEXT NOT NULL DEFAULT '{}',
@@ -426,6 +485,10 @@ CREATE INDEX IF NOT EXISTS idx_experience_memory_regime ON experience_memory(reg
 CREATE INDEX IF NOT EXISTS idx_policy_suggestion_scope ON policy_suggestion(scope_type, scope_key, status);
 CREATE INDEX IF NOT EXISTS idx_learning_application_scope ON learning_application_log(scope_type, scope_key, cycle_ts);
 CREATE INDEX IF NOT EXISTS idx_learning_application_effect_scope ON learning_application_effect(scope_type, scope_key, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_parameter_template_registry_factor ON parameter_template_registry(factor_id, regime_key, template_version, active);
+CREATE INDEX IF NOT EXISTS idx_parameter_template_active_factor ON parameter_template_active(factor_id, regime_key, updated_at);
+CREATE INDEX IF NOT EXISTS idx_parameter_template_switch_log_factor ON parameter_template_switch_log(factor_id, regime_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_parameter_template_release_candidate_factor ON parameter_template_release_candidate(factor_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_runtime_kv_updated ON runtime_kv(updated_at);
 CREATE INDEX IF NOT EXISTS idx_recovery_position_status ON recovery_position_state(status, broker, last_seen_at);
 

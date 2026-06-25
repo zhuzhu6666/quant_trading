@@ -172,6 +172,90 @@ class TestAppendBar:
         finally:
             factor_registry._factors.pop(inf_name, None)
 
+    def test_parameter_overrides_change_factor_value(self):
+        bars = _make_bars(60, start_price=4500.0, trend=0.2, vol=2.5)
+
+        base_engine = StreamingFactorEngine()
+        override_engine = StreamingFactorEngine(
+            factor_runtime_config={
+                "macd_hist": {
+                    "parameter_overrides": {"fast_length": 8, "slow_length": 21, "signal_length": 5}
+                }
+            }
+        )
+
+        for bar in bars:
+            base_result = base_engine.append_bar(bar)
+            override_result = override_engine.append_bar(bar)
+
+        assert base_engine.is_warm is True
+        assert override_engine.is_warm is True
+        assert base_result["macd_hist"] is not None
+        assert override_result["macd_hist"] is not None
+        assert base_result["macd_hist"] != pytest.approx(override_result["macd_hist"])
+
+    @pytest.mark.parametrize(
+        ("factor_id", "overrides"),
+        [
+            ("ema_slope", {"period": 12, "lookback": 3}),
+            ("bb_width", {"length": 16, "stddev": 2.6}),
+            ("obv_slope", {"lookback": 12}),
+            ("vol_ma_ratio", {"period": 12}),
+            ("supertrend_str", {"atr_length": 7, "multiplier": 2.0}),
+            ("keltner_width", {"ema_length": 12, "atr_multiplier": 2.2}),
+        ],
+    )
+    def test_parameter_overrides_change_additional_runtime_tunable_factor_values(self, factor_id, overrides):
+        bars = _make_bars(70, start_price=4500.0, trend=0.35, vol=3.5)
+
+        base_engine = StreamingFactorEngine()
+        override_engine = StreamingFactorEngine(
+            factor_runtime_config={
+                factor_id: {
+                    "parameter_overrides": overrides,
+                }
+            }
+        )
+
+        for bar in bars:
+            base_result = base_engine.append_bar(bar)
+            override_result = override_engine.append_bar(bar)
+
+        assert base_engine.is_warm is True
+        assert override_engine.is_warm is True
+        assert base_result[factor_id] is not None
+        assert override_result[factor_id] is not None
+        assert base_result[factor_id] != pytest.approx(override_result[factor_id])
+
+    def test_parameter_overrides_change_stoch_k_value(self):
+        bars = []
+        base_price = 4500.0
+        for i in range(70):
+            wave = ((i % 10) - 5) * 3.0
+            drift = i * 0.15
+            close = base_price + drift + wave
+            high = close + (6.0 if i % 7 == 0 else 2.0)
+            low = close - (1.0 if i % 6 == 0 else 4.0)
+            open_ = close - (2.0 if i % 2 == 0 else -1.5)
+            bars.append(_make_bar(close=close, open_=open_, high=high, low=low, volume=120 + i))
+
+        base_engine = StreamingFactorEngine()
+        override_engine = StreamingFactorEngine(
+            factor_runtime_config={
+                "stoch_k": {
+                    "parameter_overrides": {"k_length": 5},
+                }
+            }
+        )
+
+        for bar in bars:
+            base_result = base_engine.append_bar(bar)
+            override_result = override_engine.append_bar(bar)
+
+        assert base_result["stoch_k"] is not None
+        assert override_result["stoch_k"] is not None
+        assert base_result["stoch_k"] != pytest.approx(override_result["stoch_k"])
+
 
 class TestRefreshFactorList:
 

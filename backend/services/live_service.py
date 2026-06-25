@@ -3430,7 +3430,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         from alpha.portfolio_compositor import PortfolioCompositor
         from alpha.execution_gate import ExecutionGate
 
-        engine = StreamingFactorEngine(max_buffer=200)
+        engine = StreamingFactorEngine(max_buffer=200, factor_runtime_config=_rcfg.factor_signal_config)
         normalizer = SignalNormalizer(_rcfg.factor_signal_config)
         compositor = PortfolioCompositor(
             _merge_portfolio_configs(
@@ -3474,14 +3474,32 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             from config.runtime_config import subscribe as _rc_subscribe
             def _on_config_change(cfg, version):
                 try:
-                    fw = cfg.factor_portfolio_weights
-                    if fw and compositor:
-                        compositor.update_weights(fw)
-                        logger.debug("[live] compositor weights hot-reloaded (v%d)", version)
+                    merged_cfg = _merge_portfolio_configs(
+                        cfg.factor_signal_config,
+                        cfg.factor_portfolio_weights,
+                        cfg.factor_tactical_alpha,
+                        cfg.factor_signal_threshold,
+                    )
+                    pipelines = [_factor_pipeline] + list((_factor_pipelines or {}).values())
+                    seen = set()
+                    for pipe in pipelines:
+                        if not pipe or id(pipe) in seen:
+                            continue
+                        seen.add(id(pipe))
+                        pipe_engine = pipe.get("engine")
+                        pipe_normalizer = pipe.get("normalizer")
+                        pipe_compositor = pipe.get("compositor")
+                        if pipe_engine and hasattr(pipe_engine, "set_factor_runtime_config"):
+                            pipe_engine.set_factor_runtime_config(cfg.factor_signal_config)
+                        if pipe_normalizer and hasattr(pipe_normalizer, "update_configs"):
+                            pipe_normalizer.update_configs(cfg.factor_signal_config)
+                        if pipe_compositor and hasattr(pipe_compositor, "reload_configs"):
+                            pipe_compositor.reload_configs(merged_cfg)
+                    logger.debug("[live] factor pipeline hot-reloaded (v%d)", version)
                 except Exception as _e:
-                    logger.debug("[live] compositor hot-reload: %s", _e)
+                    logger.debug("[live] factor pipeline hot-reload: %s", _e)
             _rc_subscribe(_on_config_change)
-            log("RuntimeConfig subscription active: compositor will hot-reload weights")
+            log("RuntimeConfig subscription active: factor pipeline will hot-reload configs")
         except Exception as e:
             log(f"RuntimeConfig subscription skipped: {e}")
         # ── 初始化决策审计日志 ──
@@ -3509,7 +3527,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     _factor_pipelines[sym] = _factor_pipeline
                     continue
                 # 为额外品种创建独立管道 (共用归因/AWE/IC tracker)
-                _sym_engine = StreamingFactorEngine(max_buffer=200)
+                _sym_engine = StreamingFactorEngine(max_buffer=200, factor_runtime_config=cfg2.factor_signal_config)
                 _sym_normalizer = SignalNormalizer(cfg2.factor_signal_config)
                 _sym_compositor = PortfolioCompositor(
                     _merge_portfolio_configs(

@@ -1,0 +1,7 @@
+{
+  "navigationBarTitleText": "交易证据链",
+  "usingComponents": {
+    "status-pill": "/components/status-pill/index",
+    "section-card": "/components/section-card/index"
+  }
+}

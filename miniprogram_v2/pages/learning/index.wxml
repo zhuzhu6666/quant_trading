@@ -25,6 +25,10 @@
           <view class="hero-metric-label">权重应用</view>
           <view class="hero-metric-value">{{applicationCountDisplay || 0}}</view>
         </view>
+        <view class="hero-metric">
+          <view class="hero-metric-label">模板候选</view>
+          <view class="hero-metric-value">{{offlineCandidateCountDisplay || 0}}</view>
+        </view>
       </view>
     </view>
 
@@ -49,9 +53,31 @@
           <view class="small muted">权重应用</view>
           <view class="value-md">{{applicationCountDisplay || 0}}</view>
         </view>
+        <view class="split-card stack-12">
+          <view class="small muted">模板候选</view>
+          <view class="value-md">{{offlineCandidateCountDisplay || 0}}</view>
+        </view>
       </view>
       <view wx:if="{{observationApplicationCount > 0}}" class="section-note" style="margin-top: 14rpx;">
         另有 {{observationApplicationCount}} 条观察记录，暂未真正改动运行权重。
+      </view>
+      <view class="status-banner status-banner-neutral" style="margin-top: 18rpx;">
+        <view class="small muted">参数治理运维摘要</view>
+        <view class="section-note">{{templateOpsSummary}}</view>
+      </view>
+      <view wx:if="{{pendingGovernanceTodoCard}}" class="status-banner status-banner-warning" style="margin-top: 18rpx;">
+        <view class="small muted">当前主待办</view>
+        <view class="row-between">
+          <view class="value-md">{{pendingGovernanceTodoCard.title}}</view>
+          <status-pill label="{{pendingGovernanceTodoCard.stageTag || '治理推进中'}}" tone="warning" />
+        </view>
+        <view wx:if="{{pendingGovernanceTodoCard.priorityLabel}}" class="row-wrap" style="margin-top: 10rpx;">
+          <view class="tag">{{pendingGovernanceTodoCard.priorityLabel}}</view>
+        </view>
+        <view class="section-note" style="margin-top: 10rpx;">下一步：{{pendingGovernanceTodoCard.actionLabel}}</view>
+        <view class="section-note" style="margin-top: 10rpx;">{{pendingGovernanceTodoCard.summary}}</view>
+        <view wx:if="{{pendingGovernanceTodoCard.prioritySummary}}" class="section-note" style="margin-top: 10rpx;">{{pendingGovernanceTodoCard.prioritySummary}}</view>
+        <button wx:if="{{pendingGovernanceTodoCard.buttonText}}" class="btn-secondary" style="margin-top: 12rpx;" bindtap="openPendingGovernanceTodo">{{pendingGovernanceTodoCard.buttonText}}</button>
       </view>
       <view wx:if="{{latestApplication}}" class="status-banner status-banner-{{latestApplication.effectTone || 'neutral'}}" style="margin-top: 18rpx;">
         <view class="small muted">最近一次应用效果</view>
@@ -126,6 +152,7 @@
             <status-pill label="{{item.status}}" tone="{{item.tone}}" />
           </view>
           <view class="small muted">{{item.actionLabel}} · 置信度 {{item.confidenceText}} · {{item.createdText}}</view>
+          <view wx:if="{{item.boundaryScopeLabel}}" class="small muted" style="margin-top: 6rpx;">边界 {{item.boundaryScopeLabel}}</view>
           <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.reasonText}}</view>
           <view class="section-note" style="margin-top: 10rpx;">{{item.impactText}}</view>
           <view wx:if="{{item.status === 'proposed'}}" class="btn-row" style="margin-top: 12rpx;">
@@ -153,9 +180,22 @@
             <view class="kv-label">置信度</view>
             <view class="kv-value">{{selectedSuggestion.confidenceText}}</view>
           </view>
+          <view wx:if="{{selectedSuggestion.boundaryScopeLabel}}" class="kv-item">
+            <view class="kv-label">边界结论</view>
+            <view class="kv-value">{{selectedSuggestion.boundaryScopeLabel}}</view>
+          </view>
         </view>
         <view class="soft-panel section-note">{{selectedSuggestion.reasonText}}</view>
         <view class="soft-panel section-note">{{selectedSuggestion.impactText}}</view>
+        <view wx:if="{{selectedSuggestion.boundaryReasonText}}" class="soft-panel section-note">{{selectedSuggestion.boundaryReasonText}}</view>
+        <view wx:if="{{selectedSuggestion.approvalPathText}}" class="soft-panel section-note">{{selectedSuggestion.approvalPathText}}</view>
+        <view wx:if="{{selectedSuggestion.actionStateLabel}}" class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">来源链路</view>
+            <view class="small">{{selectedSuggestion.actionStateLabel}}</view>
+          </view>
+          <view class="section-note">{{selectedSuggestion.actionStateSummary}}</view>
+        </view>
         <view wx:if="{{selectedSuggestion.evidence}}" class="kv-grid">
           <view class="kv-item">
             <view class="kv-label">样本数</view>
@@ -178,6 +218,7 @@
         <view wx:if="{{selectedSuggestion.evidence && selectedSuggestion.evidence.factor_breakdown}}" class="soft-panel section-note">
           因子拆解已生成，可作为后续模型接口的结构化输入。
         </view>
+        <button wx:if="{{selectedSuggestion.actionStateTargetType}}" class="btn-secondary" bindtap="openSuggestionProgressTarget">{{selectedSuggestion.actionStateButtonText}}</button>
         <button class="btn-secondary" bindtap="closeSuggestionDetail">收起详情</button>
       </view>
     </section-card>
@@ -223,8 +264,21 @@
           </view>
         </view>
         <view class="soft-panel section-note">{{selectedReview.meaningText}}</view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">主要责任</view>
+            <view class="kv-value">{{selectedReview.primaryResponsibilityText}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">退出结论</view>
+            <view class="kv-value">{{selectedReview.review.thesis_status_at_exit || '--'}}</view>
+          </view>
+        </view>
         <view wx:if="{{selectedReview.failure_tags && selectedReview.failure_tags.length}}" class="row-wrap">
           <view wx:for="{{selectedReview.failure_tags}}" wx:key="*this" class="tag">{{item}}</view>
+        </view>
+        <view wx:if="{{selectedReview.responsibilityLabelsText && selectedReview.responsibilityLabelsText.length}}" class="row-wrap">
+          <view wx:for="{{selectedReview.responsibilityLabelsText}}" wx:key="*this" class="tag">{{item}}</view>
         </view>
         <view wx:if="{{selectedReview.review}}" class="kv-grid">
           <view class="kv-item">
@@ -239,6 +293,7 @@
         <view wx:if="{{selectedReview.review && selectedReview.review.decision_trace}}" class="soft-panel section-note">
           已保留决策链路，可继续扩展成逐步 trace 面板。
         </view>
+        <button wx:if="{{selectedReview.trace_locator && (selectedReview.trace_locator.position_id || selectedReview.trace_locator.entry_decision_id || selectedReview.trace_locator.exit_decision_id)}}" class="btn-primary" bindtap="openTraceFromReview">查看来源证据链</button>
         <button class="btn-secondary" bindtap="closeReviewDetail">收起详情</button>
       </view>
     </section-card>
@@ -258,6 +313,155 @@
         </view>
       </view>
       <view wx:else class="empty">还没有权重应用记录</view>
+    </section-card>
+
+    <section-card title="参数模板候选" subtitle="离线验证后的待审、已发布与已回滚模板">
+      <view wx:if="{{offlineCandidates.length}}">
+        <view class="timeline">
+        <view wx:for="{{offlineCandidates}}" wx:key="candidate_id" class="timeline-item tap-card" data-id="{{item.candidate_id}}" bindtap="openOfflineCandidateDetail">
+          <view class="row-between">
+            <view class="list-title">{{item.factorLabel}}</view>
+            <status-pill label="{{item.statusLabel}}" tone="{{item.statusTone}}" />
+          </view>
+          <view class="small muted">{{item.templateLabel}} · {{item.createdText}}</view>
+          <view wx:if="{{item.governancePriorityLabel}}" class="row-wrap" style="margin-top: 10rpx;">
+            <view class="tag">{{item.governancePriorityLabel}}</view>
+          </view>
+          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.evidenceText}}</view>
+          <view wx:if="{{item.governancePrioritySummary}}" class="section-note" style="margin-top: 10rpx;">{{item.governancePrioritySummary}}</view>
+          <view wx:if="{{item.recommendationText}}" class="section-note" style="margin-top: 10rpx;">{{item.recommendationText}}</view>
+          <view class="section-note" style="margin-top: 10rpx;">下一步：{{item.nextStepLabel}}</view>
+          <view class="section-note" style="margin-top: 10rpx;">{{item.stageText}}</view>
+        </view>
+        </view>
+      </view>
+      <view wx:else class="empty">{{parameterTemplateEmptyStates.offline_candidates}}</view>
+    </section-card>
+
+    <section-card title="参数治理轨迹" subtitle="推荐、候选、审批和发布的生命周期事件">
+      <view wx:if="{{lifecycleEvents.length}}">
+        <view class="timeline">
+        <view wx:for="{{lifecycleEvents}}" wx:key="id" class="timeline-item tap-card" data-id="{{item.id}}" bindtap="openLifecycleDetail">
+          <view class="row-between">
+            <view class="list-title">{{item.factorLabel}}</view>
+            <status-pill label="{{item.eventLabel}}" tone="{{item.eventTone}}" />
+          </view>
+          <view class="small muted">{{item.createdText}}</view>
+          <view wx:if="{{item.recommendationText}}" class="soft-panel section-note" style="margin-top: 10rpx;">{{item.recommendationText}}</view>
+          <view wx:if="{{item.approvalPathText}}" class="section-note" style="margin-top: 10rpx;">{{item.approvalPathText}}</view>
+          <view class="section-note" style="margin-top: 10rpx;">下一步：{{item.nextStepLabel}}</view>
+          <view class="section-note" style="margin-top: 10rpx;">{{item.reasonText}}</view>
+        </view>
+        </view>
+      </view>
+      <view wx:else class="empty">{{parameterTemplateEmptyStates.lifecycle}}</view>
+    </section-card>
+
+    <section-card title="参数模板建议" subtitle="从参数可疑证据直接长出的推荐项">
+      <view wx:if="{{templateRecommendations.length}}">
+        <view class="timeline">
+        <view wx:for="{{templateRecommendations}}" wx:key="recommendation_id" class="timeline-item tap-card" data-id="{{item.recommendation_id}}" bindtap="openTemplateRecommendationDetail">
+          <view class="row-between">
+            <view class="list-title">{{item.factorLabel}}</view>
+            <status-pill label="{{item.statusLabel}}" tone="{{item.statusTone}}" />
+          </view>
+          <view class="small muted">{{item.templateLabel}} · {{item.roleLabel}}</view>
+          <view wx:if="{{item.governancePriorityLabel}}" class="row-wrap" style="margin-top: 10rpx;">
+            <view class="tag">{{item.governancePriorityLabel}}</view>
+          </view>
+          <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.reasonText}}</view>
+          <view wx:if="{{item.governancePrioritySummary}}" class="section-note" style="margin-top: 10rpx;">{{item.governancePrioritySummary}}</view>
+          <view class="section-note" style="margin-top: 10rpx;">下一步：{{item.nextStepLabel}}</view>
+          <view class="section-note" style="margin-top: 10rpx;">{{item.actionText}}</view>
+        </view>
+        </view>
+      </view>
+      <view wx:else class="empty">{{parameterTemplateEmptyStates.recommendations}}</view>
+    </section-card>
+
+    <section-card wx:if="{{selectedLifecycleEvent}}" title="治理轨迹详情" subtitle="这条生命周期事件如何沿着参数治理链推进">
+      <view class="detail-card stack-16">
+        <view class="row-between">
+          <view class="list-title">{{selectedLifecycleEvent.factorLabel}}</view>
+          <status-pill label="{{selectedLifecycleEvent.eventLabel}}" tone="{{selectedLifecycleEvent.eventTone}}" />
+        </view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">事件时间</view>
+            <view class="kv-value">{{selectedLifecycleEvent.createdText}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">事件来源</view>
+            <view class="kv-value">{{selectedLifecycleEvent.source || '--'}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">生命周期状态</view>
+            <view class="kv-value">{{selectedLifecycleEvent.status || '--'}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">推荐来源</view>
+            <view class="kv-value">{{selectedLifecycleEvent.metrics.candidate_trace.recommendation_id || '--'}}</view>
+          </view>
+        </view>
+        <view wx:if="{{selectedLifecycleEvent.recommendationText}}" class="soft-panel section-note">{{selectedLifecycleEvent.recommendationText}}</view>
+        <view wx:if="{{selectedLifecycleEvent.approvalPathText}}" class="soft-panel section-note">{{selectedLifecycleEvent.approvalPathText}}</view>
+        <view class="soft-panel section-note">下一步：{{selectedLifecycleEvent.nextStepSummary}}</view>
+        <view class="soft-panel section-note">{{selectedLifecycleEvent.reasonText}}</view>
+        <button wx:if="{{selectedLifecycleEvent.linkedActionText}}" class="btn-secondary" bindtap="openLifecycleProgressTarget">{{selectedLifecycleEvent.linkedActionText}}</button>
+        <button wx:if="{{selectedLifecycleEvent.metrics.candidate_trace.trace_locator && (selectedLifecycleEvent.metrics.candidate_trace.trace_locator.position_id || selectedLifecycleEvent.metrics.candidate_trace.trace_locator.entry_decision_id || selectedLifecycleEvent.metrics.candidate_trace.trace_locator.exit_decision_id)}}" class="btn-primary" bindtap="openTraceFromLifecycle">查看来源证据链</button>
+        <button class="btn-secondary" bindtap="closeLifecycleDetail">收起详情</button>
+      </view>
+    </section-card>
+
+    <section-card wx:if="{{selectedTemplateRecommendation}}" title="模板建议详情" subtitle="参数可疑证据如何进入模板治理链">
+      <view class="detail-card stack-16">
+        <view class="row-between">
+          <view class="list-title">{{selectedTemplateRecommendation.factorLabel}}</view>
+          <status-pill label="{{selectedTemplateRecommendation.statusLabel}}" tone="{{selectedTemplateRecommendation.statusTone}}" />
+        </view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">建议模板</view>
+            <view class="kv-value">{{selectedTemplateRecommendation.templateLabel}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">模板角色</view>
+            <view class="kv-value">{{selectedTemplateRecommendation.roleLabel}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">主要责任</view>
+            <view class="kv-value">{{selectedTemplateRecommendation.responsibilityText}}</view>
+          </view>
+        </view>
+        <view class="soft-panel section-note">{{selectedTemplateRecommendation.reasonText}}</view>
+        <view wx:if="{{selectedTemplateRecommendation.governancePriorityLabel}}" class="row-wrap">
+          <view class="tag">{{selectedTemplateRecommendation.governancePriorityLabel}}</view>
+        </view>
+        <view wx:if="{{selectedTemplateRecommendation.governancePrioritySummary}}" class="soft-panel section-note">{{selectedTemplateRecommendation.governancePrioritySummary}}</view>
+        <view wx:if="{{selectedTemplateRecommendation.labelText}}" class="soft-panel section-note">{{selectedTemplateRecommendation.labelText}}</view>
+        <view class="soft-panel section-note">下一步：{{selectedTemplateRecommendation.nextStepSummary}}</view>
+        <view class="soft-panel section-note">{{selectedTemplateRecommendation.actionText}}</view>
+        <view class="small muted">{{selectedTemplateRecommendation.actionDoneText}}</view>
+        <view wx:if="{{selectedTemplateRecommendation.actionStateLabel}}" class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">当前完成态</view>
+            <view class="small">{{selectedTemplateRecommendation.actionStateLabel}}</view>
+          </view>
+          <view class="section-note">{{selectedTemplateRecommendation.actionStateSummary}}</view>
+        </view>
+        <button
+          class="btn-primary {{recommendationBusyId === selectedTemplateRecommendation.recommendation_id || selectedTemplateRecommendation.actionStateDone ? 'btn-disabled' : ''}}"
+          data-id="{{selectedTemplateRecommendation.recommendation_id}}"
+          bindtap="materializeTemplateRecommendation"
+          loading="{{recommendationBusyId === selectedTemplateRecommendation.recommendation_id}}"
+          disabled="{{recommendationBusyId === selectedTemplateRecommendation.recommendation_id || selectedTemplateRecommendation.actionStateDone}}"
+        >
+          {{selectedTemplateRecommendation.actionStateDone ? '已处理完成' : selectedTemplateRecommendation.actionButtonText}}
+        </button>
+        <button wx:if="{{selectedTemplateRecommendation.actionStateDone && selectedTemplateRecommendation.actionStateTargetType}}" class="btn-secondary" bindtap="openRecommendationProgressTarget">{{selectedTemplateRecommendation.actionStateButtonText}}</button>
+        <button wx:if="{{selectedTemplateRecommendation.trace_locator && (selectedTemplateRecommendation.trace_locator.position_id || selectedTemplateRecommendation.trace_locator.entry_decision_id || selectedTemplateRecommendation.trace_locator.exit_decision_id)}}" class="btn-secondary" bindtap="openTraceFromTemplateRecommendation">查看来源证据链</button>
+        <button class="btn-secondary" bindtap="closeTemplateRecommendationDetail">收起详情</button>
+      </view>
     </section-card>
 
     <section-card wx:if="{{selectedApplication}}" title="{{selectedApplication.isObservationOnly ? '观察详情' : '应用详情'}}" subtitle="{{selectedApplication.isObservationOnly ? '这条记录为什么还在观察中' : '建议是怎么真正影响权重的'}}">
@@ -311,6 +515,70 @@
           <view wx:for="{{selectedApplication.suggestion_ids}}" wx:key="*this" class="tag">{{item}}</view>
         </view>
         <button class="btn-secondary" bindtap="closeApplicationDetail">收起详情</button>
+      </view>
+    </section-card>
+
+    <section-card wx:if="{{selectedOfflineCandidate}}" title="模板候选详情" subtitle="离线证据、审批结论与发布状态">
+      <view class="detail-card stack-16">
+        <view class="row-between">
+          <view class="list-title">{{selectedOfflineCandidate.factorLabel}}</view>
+          <status-pill label="{{selectedOfflineCandidate.statusLabel}}" tone="{{selectedOfflineCandidate.statusTone}}" />
+        </view>
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">模板版本</view>
+            <view class="kv-value">{{selectedOfflineCandidate.templateLabel}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">候选时间</view>
+            <view class="kv-value">{{selectedOfflineCandidate.createdText}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">候选 IC</view>
+            <view class="kv-value">{{selectedOfflineCandidate.validation_summary.candidate_avg_ic}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">基线 IC</view>
+            <view class="kv-value">{{selectedOfflineCandidate.validation_summary.baseline_avg_ic}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">方向准确率</view>
+            <view class="kv-value">{{selectedOfflineCandidate.validation_summary.candidate_avg_directional_accuracy}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">fold 数</view>
+            <view class="kv-value">{{selectedOfflineCandidate.validation_summary.fold_count}}</view>
+          </view>
+        </view>
+        <view class="soft-panel section-note">{{selectedOfflineCandidate.evidenceText}}</view>
+        <view wx:if="{{selectedOfflineCandidate.governancePriorityLabel}}" class="row-wrap">
+          <view class="tag">{{selectedOfflineCandidate.governancePriorityLabel}}</view>
+        </view>
+        <view wx:if="{{selectedOfflineCandidate.governancePrioritySummary}}" class="soft-panel section-note">{{selectedOfflineCandidate.governancePrioritySummary}}</view>
+        <view wx:if="{{selectedOfflineCandidate.recommendationText}}" class="soft-panel section-note">{{selectedOfflineCandidate.recommendationText}}</view>
+        <view wx:if="{{selectedOfflineCandidate.approvalPathText}}" class="soft-panel section-note">{{selectedOfflineCandidate.approvalPathText}}</view>
+        <view class="soft-panel section-note">下一步：{{selectedOfflineCandidate.nextStepSummary}}</view>
+        <view class="soft-panel section-note">{{selectedOfflineCandidate.stageText}}</view>
+        <view class="soft-panel section-note">{{selectedOfflineCandidate.reviewText}}</view>
+        <view class="soft-panel section-note">{{selectedOfflineCandidate.deploymentText}}</view>
+        <view wx:if="{{selectedOfflineCandidate.rollbackText}}" class="soft-panel section-note">{{selectedOfflineCandidate.rollbackText}}</view>
+        <view wx:if="{{selectedOfflineCandidate.actionButtons && selectedOfflineCandidate.actionButtons.length}}" class="btn-row">
+          <button
+            wx:for="{{selectedOfflineCandidate.actionButtons}}"
+            wx:key="key"
+            class="{{item.tone === 'primary' ? 'btn-primary' : 'btn-secondary'}} {{offlineCandidateBusyId === selectedOfflineCandidate.candidate_id || item.disabled ? 'btn-disabled' : ''}}"
+            size="mini"
+            data-id="{{selectedOfflineCandidate.candidate_id}}"
+            data-action="{{item.key}}"
+            bindtap="actOnOfflineCandidate"
+            loading="{{offlineCandidateBusyId === selectedOfflineCandidate.candidate_id && item.key !== 'observe'}}"
+            disabled="{{offlineCandidateBusyId === selectedOfflineCandidate.candidate_id || item.disabled}}"
+          >
+            {{item.label}}
+          </button>
+        </view>
+        <button wx:if="{{selectedOfflineCandidate.trace_locator && (selectedOfflineCandidate.trace_locator.position_id || selectedOfflineCandidate.trace_locator.entry_decision_id || selectedOfflineCandidate.trace_locator.exit_decision_id)}}" class="btn-primary" bindtap="openTraceFromOfflineCandidate">查看来源证据链</button>
+        <button class="btn-secondary" bindtap="closeOfflineCandidateDetail">收起详情</button>
       </view>
     </section-card>
 

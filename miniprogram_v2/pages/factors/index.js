@@ -1,8 +1,12 @@
 import systemStore from '../../stores/system';
 import { refreshFactorDomain } from '../../services/factors';
 import learningStore from '../../stores/learning';
-import { refreshLearning } from '../../services/learning';
+import { openLearningGovernancePage, refreshLearning } from '../../services/learning';
+import { openTradeTracePage } from '../../services/ops';
 import { formatDateTime } from '../../utils/format';
+import {
+  describeGovernanceStageSummary,
+} from '../../utils/governance';
 
 function humanizeScopeKey(scopeKey = '') {
   if (!scopeKey) return '未命名因子';
@@ -64,6 +68,19 @@ function describeLifecycle(item = {}) {
   if (typeof metrics.hit_rate === 'number' && metrics.hit_rate > 0) metricBits.push(`胜率 ${Math.round(metrics.hit_rate * 100)}%`);
   if (typeof metrics.health_score === 'number' && metrics.health_score > 0) metricBits.push(`健康 ${metrics.health_score.toFixed(1)}`);
   if (typeof metrics.independence_score === 'number' && metrics.independence_score > 0) metricBits.push(`独立 ${metrics.independence_score.toFixed(1)}`);
+  const candidateTrace = (metrics.candidate_trace || {});
+  const governance = item.governance || {};
+  const linkedCandidateId = String(governance.candidate_id || candidateTrace.candidate_id || '');
+  const linkedRecommendationId = String(governance.recommendation_id || candidateTrace.recommendation_id || '');
+  const governanceStageTag = String(governance.stage_label || '');
+  const governanceStageSummary = String(
+    governance.stage_summary
+    || governance.next_step_summary
+    || (governanceStageTag ? describeGovernanceStageSummary(governanceStageTag) : '')
+  );
+  const governanceTargetTypeText = String(governance.target_type || '');
+  const governanceActionLabel = String(governance.action_label || '');
+  const lifecycleJumpType = String(governance.jump_type || '');
 
   return {
     title,
@@ -74,6 +91,13 @@ function describeLifecycle(item = {}) {
     factorCompactText: truncateText(humanizeScopeKey(item.factor || ''), 18),
     stageText: item.next_stage || item.status || item.source || '--',
     metricText: metricBits.join(' · '),
+    governanceStageTag,
+    governanceStageSummary,
+    governanceTargetTypeText,
+    governanceActionLabel,
+    lifecycleJumpType,
+    linkedCandidateId,
+    linkedRecommendationId,
   };
 }
 
@@ -224,5 +248,34 @@ Page({
 
   closeLifecycleDetail() {
     this.setData({ selectedLifecycle: null });
+  },
+
+  openLifecycleTrace() {
+    const item = this.data.selectedLifecycle || null;
+    const locator = ((((item || {}).metrics || {}).candidate_trace || {}).trace_locator) || {};
+    openTradeTracePage({
+      positionId: locator.position_id || '',
+      decisionId: locator.exit_decision_id || locator.entry_decision_id || '',
+    });
+  },
+
+  openLifecycleGovernance() {
+    const item = this.data.selectedLifecycle || null;
+    if (!item) return;
+    if (item.lifecycleJumpType === 'offline_candidate' || item.linkedCandidateId) {
+      openLearningGovernancePage({
+        type: 'offline_candidate',
+        candidateId: item.linkedCandidateId,
+        factorId: item.factor || '',
+      });
+      return;
+    }
+    if (item.lifecycleJumpType === 'template_recommendation' || item.linkedRecommendationId) {
+      openLearningGovernancePage({
+        type: 'template_recommendation',
+        recommendationId: item.linkedRecommendationId,
+        factorId: item.factor || '',
+      });
+    }
   },
 });

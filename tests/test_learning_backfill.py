@@ -153,6 +153,13 @@ def test_learning_backfill_enriches_path_metrics_from_bars(monkeypatch, tmp_path
     assert review["profit_capture_ratio"] < 1.0
     assert review["giveback_ratio"] > 0.0
     assert review["time_in_profit_seconds"] > 0.0
+    assert review["contract_version"] == "phase_d.v1"
+    assert review["regime_fit"] == pytest.approx(review["regime_fit_score"])
+    assert review["thesis_status_at_exit"] == review["thesis_status"]
+    assert "primary_responsibility" in review
+    assert "responsibility_labels" in review
+    assert isinstance(review["responsibility_labels"], list)
+    assert review["failure_taxonomy"]["context_integrity"] == "partial"
     assert review["thesis_status"] in {"intact", "weakening", "broken"}
     assert review["phase_c_diagnosis"]["primary_issue"] == "exit_capture"
     assert "profit_giveback" in review["phase_c_diagnosis"]["drivers"]

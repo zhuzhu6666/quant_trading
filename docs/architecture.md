@@ -26,7 +26,7 @@
 
 一句话概括当前状态：
 
-**Phase B 已达到“可用闭环”，但系统还没有进入“主动持仓管理 + 因子治理 + 元模型调度”的完全体。**
+**Phase D 已完成，系统已进入“主动持仓管理 + 责任归因落地”，下一步转向因子治理与参数模板。**
 
 ---
 
@@ -52,11 +52,11 @@
 - 一个**规则驱动、证据可回放**的交易系统；
 - 一个**会记录自己为什么做出决定**的系统；
 - 一个**会在平仓后形成结构化经验**的系统；
+- 一个**能把退出问题、时长问题、regime 问题与参数可疑责任分开记录**的系统；
 - 一个**允许模型离线学习，但禁止模型直接接管实盘**的系统。
 
 它还不是：
 
-- 一个能主动管理持仓路径的系统；
 - 一个能系统性调参和治理因子的系统；
 - 一个有成熟元模型统一调度全局状态的系统；
 - 一个多品种、全组合、全上下文的完全体。
@@ -280,6 +280,8 @@
 - 预期持仓时长
 - 典型失效模式
 
+Phase E / E1 的正式字段 contract 见 [factor-card-schema.md](factor-card-schema.md)。
+
 ### Layer 4: 多因子组合层
 
 职责：
@@ -337,6 +339,10 @@ Phase C / C1 的正式 contract 见 [position-supervisor-contract.md](position-s
 - 统计因子在不同 regime 下的表现
 - 决定是降权、换模板、调阈值、调 lookback，还是拆成新版本
 - 负责在线轻调与离线深调的边界
+
+Phase E / E1 的因子解释卡片 contract 见 [factor-card-schema.md](factor-card-schema.md)。  
+Phase E / E2 的参数模板 contract 见 [parameter-template-contract.md](parameter-template-contract.md)。  
+Phase E / E3 的在线/离线边界见 [parameter-tuning-boundary.md](parameter-tuning-boundary.md)。
 
 建议拆成两类动作：
 

@@ -431,6 +431,7 @@ class RuleEvolutionGovernor:
         rolled_back = 0
         reinforced = 0
         waiting = 0
+        template_runtime_sync_needed = False
 
         with self._conn() as conn:
             rows = conn.execute(
@@ -445,9 +446,14 @@ class RuleEvolutionGovernor:
 
             for row in rows:
                 app = self._parse_application_row(row)
-                if str(app.get("scope_type") or "") != "factor":
+                scope_type = str(app.get("scope_type") or "")
+                if scope_type not in {"factor", "parameter_template"}:
                     continue
-                factor = str(app.get("scope_key") or "")
+                factor = (
+                    str(app.get("scope_key") or "")
+                    if scope_type == "factor"
+                    else str((app.get("details") or {}).get("factor_id") or str(app.get("scope_key") or "").split(":", 1)[0])
+                )
                 if not factor:
                     continue
 
@@ -499,6 +505,7 @@ class RuleEvolutionGovernor:
 
                 decision = {
                     "application_id": app["application_id"],
+                    "scope_type": scope_type,
                     "scope_key": factor,
                     "action": app["action"],
                     "post_review_ids": [r["review_id"] for r in post_reviews],
@@ -534,8 +541,8 @@ class RuleEvolutionGovernor:
                     """,
                     (
                         app["application_id"],
-                        "factor",
-                        factor,
+                        scope_type,
+                        str(app.get("scope_key") or factor),
                         app["action"],
                         next_status,
                         len(post_reviews),
@@ -585,6 +592,78 @@ class RuleEvolutionGovernor:
                         ],
                     )
                     rolled_back += 1
+                    if scope_type == "parameter_template":
+                        details = app.get("details") or {}
+                        factor_id = str(details.get("factor_id") or factor)
+                        regime_key = str(details.get("regime_key") or "")
+                        old_template_id = str(details.get("old_template_id") or "")
+                        new_template_id = str(details.get("new_template_id") or "")
+                        if old_template_id:
+                            conn.execute(
+                                """
+                                UPDATE parameter_template_registry
+                                SET active=CASE WHEN template_id=? THEN 1 ELSE 0 END, updated_at=?
+                                WHERE factor_id=? AND regime_key=?
+                                """,
+                                (old_template_id, now, factor_id, regime_key),
+                            )
+                            old_row = conn.execute(
+                                """
+                                SELECT template_version FROM parameter_template_registry WHERE template_id=?
+                                """,
+                                (old_template_id,),
+                            ).fetchone()
+                            conn.execute(
+                                """
+                                INSERT OR REPLACE INTO parameter_template_active
+                                (factor_id, regime_key, template_id, template_version, status, suggestion_id,
+                                 context_json, activated_at, updated_at)
+                                VALUES (?, ?, ?, ?, 'rolled_back', ?, ?, ?, ?)
+                                """,
+                                (
+                                    factor_id,
+                                    regime_key,
+                                    old_template_id,
+                                    str((old_row["template_version"] if old_row else "") or ""),
+                                    suggestion_ids[0],
+                                    json.dumps(
+                                        {
+                                            "rolled_back_from": new_template_id,
+                                            "reason": f"application effect delta={delta:.3f}",
+                                        },
+                                        ensure_ascii=False,
+                                        default=str,
+                                    ),
+                                    now,
+                                    now,
+                                ),
+                            )
+                            conn.execute(
+                                """
+                                INSERT INTO parameter_template_switch_log
+                                (switch_id, factor_id, regime_key, old_template_id, new_template_id,
+                                 suggestion_id, risk_verdict_json, context_json, status, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, '{}', ?, 'rolled_back', ?)
+                                """,
+                                (
+                                    self._new_id("ptsw"),
+                                    factor_id,
+                                    regime_key,
+                                    new_template_id,
+                                    old_template_id,
+                                    suggestion_ids[0],
+                                    json.dumps(
+                                        {
+                                            "application_id": app["application_id"],
+                                            "reason": f"auto rollback by application effect delta={delta:.3f}",
+                                        },
+                                        ensure_ascii=False,
+                                        default=str,
+                                    ),
+                                    now,
+                                ),
+                            )
+                            template_runtime_sync_needed = True
                 elif next_status == "effective" and len(post_reviews) >= observe_trades:
                     suggestion_id = self._new_id("psg")
                     evidence = {
@@ -600,11 +679,12 @@ class RuleEvolutionGovernor:
                         INSERT INTO policy_suggestion
                         (suggestion_id, scope_type, scope_key, action, confidence, reason,
                          evidence_json, status, reviewed_at, review_note, created_at)
-                        VALUES (?, 'factor', ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
                         """,
                         (
                             suggestion_id,
-                            factor,
+                            scope_type,
+                            str(app.get("scope_key") or factor),
                             app["action"],
                             min(0.75, 0.35 + max(0.0, delta)),
                             f"auto reinforced by application effect delta={delta:.3f}",
@@ -631,6 +711,14 @@ class RuleEvolutionGovernor:
                         (app["application_id"],),
                     )
                     reinforced += 1
+
+        if template_runtime_sync_needed:
+            try:
+                from backend.services.parameter_templates import ParameterTemplateService
+
+                ParameterTemplateService(str(self.db_path)).sync_runtime_config()
+            except Exception:
+                pass
 
         return {
             "observed": observed,

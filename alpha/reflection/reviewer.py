@@ -9,7 +9,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
+from backend.services.review_contract import normalize_trade_review_contract
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -214,6 +216,7 @@ class TradeReviewer:
             f"worst_factor={worst_factor or 'n/a'}"
         )
         review_json = {
+            "contract_version": "phase_d.v1",
             "position_id": position_id,
             "trade_id": trade_id,
             "entry_decision_id": entry_decision_id,
@@ -233,7 +236,9 @@ class TradeReviewer:
             "holding_efficiency": path_metrics["holding_efficiency"],
             "time_decay_score": path_metrics["time_decay_score"],
             "thesis_status": path_metrics["thesis_status"],
+            "thesis_status_at_exit": path_metrics["thesis_status"],
             "regime_shift": path_metrics["regime_shift"],
+            "regime_shift_at_exit": path_metrics["regime_shift"],
             "entry_score": entry_score,
             "top_weight_factor": top_weight_factor,
             "top_weight": top_weight,
@@ -249,7 +254,28 @@ class TradeReviewer:
             "failure_tags": failure_tags,
             "factor_contributions": contributions,
             "position_path_state": next_state,
+            "entry_quality": round(entry_quality, 4),
+            "hold_quality": round(hold_quality, 4),
+            "exit_quality": round(exit_quality, 4),
+            "regime_fit_score": round(regime_fit_score, 4),
+            "regime_fit": round(regime_fit_score, 4),
+            "execution_quality": round(execution_quality, 4),
         }
+        review_json = normalize_trade_review_contract(
+            review_json,
+            entry_quality=entry_quality,
+            hold_quality=hold_quality,
+            exit_quality=exit_quality,
+            regime_fit_score=regime_fit_score,
+            execution_quality=execution_quality,
+        )
+        taxonomy = build_failure_taxonomy({**review_json, "pnl": pnl})
+        review_json["failure_taxonomy"] = taxonomy
+        review_json["primary_responsibility"] = taxonomy["primary_responsibility"]
+        review_json["responsibility_labels"] = taxonomy["responsibility_labels"]
+        for label in taxonomy["responsibility_labels"]:
+            if label not in failure_tags:
+                failure_tags.append(label)
 
         review_id = self._new_id("review")
         with self._conn() as conn:
@@ -305,7 +331,20 @@ class TradeReviewer:
                         0.0,
                         round(float(mc), 6),
                         round(_clamp(abs(mc) / max(abs(pnl), 1.0)), 4),
-                        "rule_review",
+                        json.dumps(
+                            {
+                                "source": "rule_review",
+                                "primary_responsibility": taxonomy["primary_responsibility"],
+                                "responsibility_labels": taxonomy["responsibility_labels"],
+                                "factor_role": (
+                                    "harmful"
+                                    if float(mc) < 0
+                                    else ("helpful" if float(mc) > 0 else "neutral")
+                                ),
+                                "thesis_status_at_exit": review_json["thesis_status_at_exit"],
+                            },
+                            ensure_ascii=False,
+                        ),
                     ),
                 )
 

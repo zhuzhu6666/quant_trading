@@ -222,3 +222,8 @@ class PortfolioCompositor:
                 self._factor_configs[name] = self._default_gp_config(name)
             self._factor_configs[name]["weight"] = float(w)
         logger.debug("PortfolioCompositor: updated weights for %d factors", len(weights))
+
+    def reload_configs(self, config: dict[str, Any]) -> None:
+        self._factor_configs = dict(config or {})
+        self._tactical_alpha = float(self._factor_configs.get("_tactical_alpha", 0.7))
+        self._signal_threshold = float(self._factor_configs.get("_signal_threshold", 0.4))

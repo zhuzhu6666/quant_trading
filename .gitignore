@@ -33,6 +33,7 @@ data/charts/*.bak
 data/charts/backtest_*.txt
 data/charts/jobs.jsonl
 data/charts/factor_attribution.json
+data/parameter_template_validation_reports/
 data/ticks/
 data/dukascopy_raw/
 data/feature_models/
