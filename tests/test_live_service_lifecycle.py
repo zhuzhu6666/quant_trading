@@ -35,6 +35,8 @@ def _reset_loop_state():
     live_service._loop_started_at = None
     live_service._loop_strategy_name = None
     live_service._last_loop_end = None
+    live_service._pending_close_reasons.clear()
+    live_service._pending_close_verdicts.clear()
     live_service._live_state_update(
         broker=None,
         loop_running=False,
@@ -51,6 +53,8 @@ def _reset_loop_state():
     live_service._loop_started_at = None
     live_service._loop_strategy_name = None
     live_service._last_loop_end = None
+    live_service._pending_close_reasons.clear()
+    live_service._pending_close_verdicts.clear()
     live_service._live_state_update(
         broker=None,
         loop_running=False,
@@ -217,6 +221,50 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
     assert calls["positions"][0]["event_type"] == "opened"
     assert calls["upserts"][0][0]["entry_decision_id"] == "dec_open"
     assert calls["attr"][0] == 268
+
+
+def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
+    calls = []
+
+    class _Policy:
+        def evaluate(self, action, context):
+            calls.append((action, context))
+            return SimpleNamespace(
+                allowed=True,
+                reason="risk_reducing_action",
+                to_dict=lambda: {
+                    "allowed": True,
+                    "reason": "risk_reducing_action",
+                    "audit_payload": {
+                        "action": action,
+                        "position_id": context["position_id"],
+                        "close_reason": context["close_reason"],
+                    },
+                },
+            )
+
+    class _Bridge:
+        is_connected = True
+
+        def get_positions(self):
+            return [{"position_id": 268, "symbol": "XAUUSD+"}]
+
+        def close_position(self, pid):
+            return SimpleNamespace(success=True, position_id=pid)
+
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (_Bridge(), None, False))
+
+    result = live_service.emergency_close("ctrader", "XAUUSD+")
+
+    assert result["ok"] is True
+    assert result["closed"] == 1
+    assert calls[0][0] == "close_position"
+    assert calls[0][1]["close_reason"] == "emergency_close"
+    assert live_service._consume_close_reason(268) == "emergency_close"
+    verdict = live_service._consume_close_verdict(268, "emergency_close")
+    assert verdict["allowed"] is True
+    assert verdict["audit_payload"]["action"] == "close_position"
 
 
 def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):

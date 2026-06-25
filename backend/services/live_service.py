@@ -88,6 +88,7 @@ _trailing_state: dict[int, dict] = {}
 _pos_entry_scores: dict[int, float] = {}
 _pos_entry_decisions: dict[int, str] = {}
 _pending_close_reasons: dict[int, str] = {}
+_pending_close_verdicts: dict[int, dict] = {}
 
 _RUNTIME_KV_LOOP_DESIRED = "live.loop.desired_state"
 _RUNTIME_KV_LAST_SHUTDOWN = "live.loop.last_shutdown"
@@ -656,6 +657,38 @@ def _remember_close_reason(position_id: int, reason: str) -> None:
 
 def _consume_close_reason(position_id: int, default: str = "broker_close") -> str:
     return _pending_close_reasons.pop(int(position_id), default)
+
+
+def _remember_close_verdict(position_id: int, verdict) -> None:
+    if position_id <= 0 or verdict is None:
+        return
+    try:
+        _pending_close_verdicts[int(position_id)] = verdict.to_dict()
+    except Exception:
+        _pending_close_verdicts[int(position_id)] = {
+            "allowed": False,
+            "reason": "verdict_serialization_failed",
+        }
+
+
+def _consume_close_verdict(position_id: int, close_reason: str) -> dict:
+    pending = _pending_close_verdicts.pop(int(position_id), None)
+    if pending:
+        return pending
+    return _RISK_POLICY.evaluate(
+        "close_position",
+        {
+            "position_id": str(position_id),
+            "close_reason": close_reason,
+            "mode": "live",
+        },
+    ).to_dict()
+
+
+def _risk_state_with_verdict_dict(verdict: dict) -> dict:
+    state = _live_state_get("risk", {}, clone=True) or {}
+    state["policy_verdict"] = verdict or {"allowed": False, "reason": "missing_verdict"}
+    return state
 
 
 def _normalize_position_snapshot(raw: Any) -> dict:
@@ -3181,7 +3214,25 @@ def emergency_close(broker: str, symbol: str | None = None) -> dict:
                 pid = p.get("position_id") or p.get("ticket")
                 if pid is None:
                     continue
+                close_verdict = _RISK_POLICY.evaluate(
+                    "close_position",
+                    {
+                        "position_id": str(pid),
+                        "close_reason": "emergency_close",
+                        "mode": "live",
+                        "broker": broker,
+                        "symbol": p.get("symbol") or symbol or "",
+                    },
+                )
+                if not close_verdict.allowed:
+                    logger.warning(
+                        "[live] emergency close blocked by risk policy pos=%s reason=%s",
+                        pid,
+                        close_verdict.reason,
+                    )
+                    continue
                 _remember_close_reason(int(pid), "emergency_close")
+                _remember_close_verdict(int(pid), close_verdict)
                 result = bridge.close_position(pid)
                 if getattr(result, "success", False):
                     closed += 1
@@ -3537,6 +3588,7 @@ def _process_tick_factor_pipeline(
         try:
             real_pnl = _real_pnls.get(cpid)
             close_reason = _consume_close_reason(int(cpid), "broker_close")
+            close_verdict = _consume_close_verdict(int(cpid), close_reason)
             close_ts = float((real_pnl or {}).get("exec_timestamp") or time.time())
             mc = attr_engine.record_close(cpid,
                                           close_price=current_price,
@@ -3617,14 +3669,16 @@ def _process_tick_factor_pipeline(
                             "equity": acct.get("equity", 0),
                             "session_pnl": _live_state_get("session_pnl", 0),
                         },
-                        risk_state=_live_state_get("risk", {}, clone=True) or {},
+                        risk_state=_risk_state_with_verdict_dict(close_verdict),
                         action_score=float(total_pnl),
-                        action_reason="position_closed",
+                        action_reason=close_reason,
                         action_json={
                             "position_id": cpid,
                             "pnl": round(total_pnl, 2),
                             "price": round(current_price, 2),
                             "tick": tick,
+                            "close_reason": close_reason,
+                            "risk_verdict": close_verdict,
                             "factor_contributions": mc,
                             "real_pnl": real_pnl or {},
                         },
@@ -3636,7 +3690,13 @@ def _process_tick_factor_pipeline(
                         event_type="closed",
                         avg_price=current_price,
                         realized_pnl=float(total_pnl),
-                        details={"tick": tick, "real_pnl": real_pnl or {}, "factor_contributions": mc},
+                        details={
+                            "tick": tick,
+                            "real_pnl": real_pnl or {},
+                            "factor_contributions": mc,
+                            "close_reason": close_reason,
+                            "risk_verdict": close_verdict,
+                        },
                         event_ts=close_ts,
                     )
                 except Exception as _ledger_err:
