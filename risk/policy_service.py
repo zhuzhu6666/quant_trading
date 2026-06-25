@@ -84,6 +84,7 @@ class RiskPolicyService:
                     "source": "RiskGovernor",
                     "suggestion": gov_verdict.suggestion,
                     "state": state.extra,
+                    "temporal_context": context.get("temporal_context") or {},
                 },
             )
 
@@ -103,6 +104,7 @@ class RiskPolicyService:
                         "source": "var_gate",
                         "var_pct": var_pct,
                         "threshold_pct": threshold_pct,
+                        "temporal_context": context.get("temporal_context") or {},
                     },
                 )
 
@@ -118,6 +120,7 @@ class RiskPolicyService:
                     "source": "position_count",
                     "open_position_count": open_position_count,
                     "max_position_count": max_position_count,
+                    "temporal_context": context.get("temporal_context") or {},
                 },
             )
 
@@ -137,6 +140,7 @@ class RiskPolicyService:
                     "total_api_volume": total_api_volume,
                     "requested_api_volume": requested_api_volume,
                     "max_position_api_volume": max_api_volume,
+                    "temporal_context": context.get("temporal_context") or {},
                 },
             )
 
@@ -150,11 +154,12 @@ class RiskPolicyService:
                     severity="warn",
                     audit_payload={
                         "action": "open_trade",
-                        "source": "pyramid",
-                        "max_abs_entry_score": max_entry_score,
-                        "signal_score": signal_score,
-                    },
-                )
+                    "source": "pyramid",
+                    "max_abs_entry_score": max_entry_score,
+                    "signal_score": signal_score,
+                    "temporal_context": context.get("temporal_context") or {},
+                },
+            )
 
         return RiskVerdict(
             allowed=True,
@@ -168,12 +173,15 @@ class RiskPolicyService:
                 "requested_api_volume": requested_api_volume,
                 "max_position_count": max_position_count,
                 "max_position_api_volume": max_api_volume,
+                "state": state.extra,
+                "temporal_context": context.get("temporal_context") or {},
             },
         )
 
     def _build_governor_state(self, context: dict[str, Any]) -> GovernorState:
         account = context.get("account") or {}
         session = context.get("session") or {}
+        temporal_context = context.get("temporal_context") or {}
         session_pnl = float(session.get("pnl", 0.0) or 0.0)
         start_balance = float(session.get("start_balance", 0.0) or 0.0)
         daily_loss_pct = float(session.get("daily_loss_pct", 0.0) or 0.0)
@@ -187,6 +195,15 @@ class RiskPolicyService:
         runtime_health = context.get("runtime_health") or {}
         if runtime_health:
             extra["runtime_health"] = runtime_health
+        if temporal_context:
+            extra["temporal_context"] = temporal_context
+        extra["block_on_disk_critical"] = bool(context.get("block_on_disk_critical", True))
+        extra["require_l2_depth"] = bool(context.get("require_l2_depth", False))
+        loss_cooldown_after_losses = int(context.get("loss_cooldown_after_losses", 0) or 0)
+        loss_cooldown_bars = int(context.get("loss_cooldown_bars", 0) or 0)
+        if loss_cooldown_after_losses > 0 or loss_cooldown_bars > 0:
+            extra["loss_cooldown_after_losses"] = loss_cooldown_after_losses
+            extra["loss_cooldown_bars"] = loss_cooldown_bars
         return GovernorState(
             balance=float(account.get("balance", 0.0) or 0.0),
             equity=float(account.get("equity", 0.0) or 0.0),
@@ -199,10 +216,23 @@ class RiskPolicyService:
             data_lag_seconds=float(context.get("data_lag_seconds", 0.0) or 0.0),
             loop_running=bool(context.get("loop_running", True)),
             bridge_connected=bool(context.get("bridge_connected", True)),
+            timeframe_seconds=int(temporal_context.get("timeframe_seconds", 0) or 0),
+            seconds_since_last_trade=float(temporal_context.get("seconds_since_last_trade", 0.0) or 0.0),
+            bars_since_last_trade=float(temporal_context.get("bars_since_last_trade", 0.0) or 0.0),
             extra=extra,
         )
 
     def _evaluate_close_position(self, context: dict[str, Any]) -> RiskVerdict:
+        temporal_context = context.get("temporal_context") or {}
+        holding_seconds = float(context.get("holding_seconds", 0.0) or 0.0)
+        timeframe_seconds = int(
+            context.get("timeframe_seconds", temporal_context.get("timeframe_seconds", 0)) or 0
+        )
+        max_holding_bars = int(context.get("max_holding_bars", 0) or 0)
+        max_holding_seconds = float(context.get("max_holding_seconds", 0.0) or 0.0)
+        if max_holding_seconds <= 0 and max_holding_bars > 0 and timeframe_seconds > 0:
+            max_holding_seconds = float(max_holding_bars * timeframe_seconds)
+        holding_timeout_exceeded = bool(max_holding_seconds > 0 and holding_seconds >= max_holding_seconds)
         return RiskVerdict(
             allowed=True,
             reason="risk_reducing_action",
@@ -212,6 +242,12 @@ class RiskPolicyService:
                 "source": "risk_policy",
                 "position_id": context.get("position_id", ""),
                 "close_reason": context.get("close_reason", ""),
+                "holding_seconds": holding_seconds,
+                "holding_minutes": round(holding_seconds / 60.0, 3) if holding_seconds > 0 else 0.0,
+                "max_holding_bars": max_holding_bars,
+                "max_holding_seconds": max_holding_seconds,
+                "holding_timeout_exceeded": holding_timeout_exceeded,
+                "temporal_context": temporal_context,
             },
         )
 

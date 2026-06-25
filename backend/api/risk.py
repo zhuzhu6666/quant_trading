@@ -28,6 +28,15 @@ def _loads_json(raw: str | None, default: Any) -> Any:
         return default
 
 
+def _get_system_health_report():
+    try:
+        from monitor.system_health import shared as _system_health_shared
+
+        return _system_health_shared().get_last_report()
+    except Exception:
+        return None
+
+
 def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
     limit = max(1, min(int(limit or 50), 200))
     conn = get_state_conn()
@@ -56,6 +65,10 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
     for row in rows:
         risk_state = _loads_json(row["risk_state_json"], {})
         action_json = _loads_json(row["action_json"], {})
+        if not isinstance(risk_state, dict):
+            risk_state = {}
+        if not isinstance(action_json, dict):
+            action_json = {}
         verdict = risk_state.get("policy_verdict") or action_json.get("risk_verdict") or {}
         allowed = bool(verdict.get("allowed", False))
         reason = str(verdict.get("reason") or row["action_reason"] or "unknown")
@@ -82,6 +95,40 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
         "by_reason": by_reason,
         "by_action": by_action,
         "items": items,
+    }
+
+
+def _system_health_summary() -> dict[str, Any]:
+    report = _get_system_health_report()
+    if report is None:
+        return {
+            "overall": "unknown",
+            "overall_score": 0.0,
+            "critical_components": [],
+            "degraded_components": [],
+            "components": {},
+            "errors": [],
+        }
+
+    components = getattr(report, "components", {}) or {}
+    component_status = {
+        str(name): {
+            "status": str(getattr(component, "status", "") or ""),
+            "detail": str(getattr(component, "detail", "") or ""),
+            "score": float(getattr(component, "score", 0.0) or 0.0),
+        }
+        for name, component in components.items()
+    }
+    critical_components = [name for name, item in component_status.items() if item["status"] == "critical"]
+    degraded_components = [name for name, item in component_status.items() if item["status"] == "degraded"]
+    return {
+        "overall": str(getattr(report, "overall", "unknown") or "unknown"),
+        "overall_score": float(getattr(report, "overall_score", 0.0) or 0.0),
+        "critical_components": critical_components,
+        "degraded_components": degraded_components,
+        "components": component_status,
+        "errors": list(getattr(report, "errors", []) or []),
+        "ts": float(getattr(report, "ts", 0.0) or 0.0),
     }
 
 
@@ -119,6 +166,7 @@ def get_risk_summary(_user: RequireUser) -> dict[str, Any]:
         "stress": stress,
         "concentration": conc,
         "policy": _recent_policy_verdicts(limit=25),
+        "system_health": _system_health_summary(),
     }
 
 

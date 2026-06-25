@@ -40,6 +40,19 @@ export function formatDateTime(ts) {
   return `${y}-${m}-${day} ${hh}:${mm}`;
 }
 
+export function formatDurationMinutes(totalMinutes) {
+  const minutes = Number(totalMinutes || 0);
+  if (!Number.isFinite(minutes) || minutes <= 0) return '--';
+  if (minutes < 60) return `${Math.round(minutes)} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const mins = Math.round(minutes % 60);
+  if (hours < 24) return mins > 0 ? `${hours} 小时 ${mins} 分钟` : `${hours} 小时`;
+  const days = Math.floor(hours / 24);
+  const remainHours = hours % 24;
+  if (remainHours > 0) return `${days} 天 ${remainHours} 小时`;
+  return `${days} 天`;
+}
+
 export function toneFromPnl(value) {
   const n = Number(value || 0);
   if (n > 0) return 'positive';
@@ -82,9 +95,12 @@ export function humanizeRiskReason(reason) {
     loop_not_running: '实盘循环未运行，系统不允许开仓',
     bridge_disconnected: '交易桥接当前未连通，系统不允许开仓',
     data_lag: '行情数据延迟过高，系统暂停开仓',
+    disk_space_critical: '服务器磁盘空间过低，系统暂停新开仓',
+    l2_depth_unavailable: '当前依赖的深度数据不可用，系统暂停新开仓',
     circuit_broken: '熔断已触发，系统暂停开仓',
     drawdown_too_high: '回撤过高，系统暂停开仓',
     consecutive_losses: '连续亏损过多，系统暂停开仓',
+    loss_cooldown_active: '系统处于连续亏损后的冷静期，暂不新开仓',
     daily_loss_limit: '日内亏损超限，系统暂停开仓',
     daily_trade_limit: '日内交易次数超限，系统暂停开仓',
     drawdown_approaching_limit: '回撤接近上限，先冻结权重调整',
@@ -93,6 +109,7 @@ export function humanizeRiskReason(reason) {
     live_trading_capability_not_allowed: '候选模型带有实盘能力，已被拒绝',
     candidate_status_not_allowed: '候选模型状态还没到这一步，已被拒绝',
     risk_reducing_action: '这是降风险动作，风控允许继续',
+    holding_timeout: '持仓时间已超出上限，系统准备收口风险',
   };
   return map[key] || key || '--';
 }

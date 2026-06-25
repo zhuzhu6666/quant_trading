@@ -84,6 +84,29 @@ function summarizePolicy(policy = null) {
   };
 }
 
+function summarizeSystemHealth(systemHealth = null) {
+  if (!systemHealth) return null;
+  const critical = Array.isArray(systemHealth.critical_components) ? systemHealth.critical_components : [];
+  const degraded = Array.isArray(systemHealth.degraded_components) ? systemHealth.degraded_components : [];
+  const components = systemHealth.components && typeof systemHealth.components === 'object' ? systemHealth.components : {};
+  const componentRows = Object.keys(components)
+    .slice(0, 6)
+    .map((key) => ({
+      key,
+      status: components[key] && components[key].status ? components[key].status : 'unknown',
+    }));
+  return {
+    overall: systemHealth.overall || 'unknown',
+    tone: toneFromStatus(systemHealth.overall || 'unknown'),
+    criticalCount: critical.length,
+    degradedCount: degraded.length,
+    criticalText: critical.length ? critical.join(' / ') : '无',
+    degradedText: degraded.length ? degraded.join(' / ') : '无',
+    scoreText: Number(systemHealth.overall_score || 0).toFixed(2),
+    componentRows,
+  };
+}
+
 Page({
   data: {
     scheduler: null,
@@ -96,6 +119,7 @@ Page({
     evolutionMetricClass: '',
     jobsMetricClass: '',
     policySummary: null,
+    systemHealthSummary: null,
   },
 
   onLoad() {
@@ -119,6 +143,7 @@ Page({
     const jobs = (scheduler && scheduler.jobs) || [];
     const dbHealth = state.dbHealth;
     const riskSummary = state.riskSummary || null;
+    const systemHealthSummary = summarizeSystemHealth(riskSummary && riskSummary.system_health);
     const runningJobs = jobs.filter((item) => item.running).length;
     const dbCards = buildDbCards(dbHealth);
     const policySummary = summarizePolicy(riskSummary && riskSummary.policy);
@@ -133,6 +158,7 @@ Page({
         : null,
       dbHealth,
       policySummary,
+      systemHealthSummary,
       apiHealth: {
         ...apiHealth,
         tone: toneFromStatus(apiHealth.status || 'ok'),

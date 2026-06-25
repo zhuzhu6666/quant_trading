@@ -55,6 +55,9 @@ class GovernorState:
     loop_running: bool = True
     bridge_connected: bool = True
     data_lag_seconds: float = 0.0
+    timeframe_seconds: int = 0
+    seconds_since_last_trade: float = 0.0
+    bars_since_last_trade: float = 0.0
     # 额外
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -84,6 +87,8 @@ class RiskGovernor:
         max_daily_trades: int = 20,             # 日交易上限
         min_bridge_uptake: bool = True,         # 桥接断开时的应对
         data_lag_max_seconds: float = 3600.0,   # 数据最大延迟 (秒)
+        loss_cooldown_after_losses: int = 2,    # 连续亏损达到 N 笔后进入冷静期
+        loss_cooldown_bars: int = 3,            # 冷静期长度 (bar)
         circuit_breaker_bypass: bool = False,   # 是否绕过熔断
     ):
         self._cfg = {
@@ -93,6 +98,8 @@ class RiskGovernor:
             "max_daily_trades": max_daily_trades,
             "min_bridge_uptake": min_bridge_uptake,
             "data_lag_max_seconds": data_lag_max_seconds,
+            "loss_cooldown_after_losses": loss_cooldown_after_losses,
+            "loss_cooldown_bars": loss_cooldown_bars,
             "circuit_breaker_bypass": circuit_breaker_bypass,
         }
         self._dry_run_mode: bool = False          # governor 强制 dry-run
@@ -159,6 +166,27 @@ class RiskGovernor:
             return GovernorVerdict(False, "consecutive_losses",
                                    f"{state.consecutive_losses} >= {cfg['max_consecutive_losses']}")
 
+        # 连续亏损后的短冷静期
+        cooldown_after_losses = int(state.extra.get("loss_cooldown_after_losses", cfg.get("loss_cooldown_after_losses", 0)) or 0)
+        cooldown_bars = int(state.extra.get("loss_cooldown_bars", cfg.get("loss_cooldown_bars", 0)) or 0)
+        timeframe_seconds = int(state.timeframe_seconds or 0)
+        if (
+            cooldown_after_losses > 0
+            and cooldown_bars > 0
+            and timeframe_seconds > 0
+            and state.consecutive_losses >= cooldown_after_losses
+        ):
+            required_seconds = float(cooldown_bars * timeframe_seconds)
+            elapsed_seconds = float(max(0.0, state.seconds_since_last_trade or 0.0))
+            if elapsed_seconds < required_seconds:
+                remaining_seconds = max(0.0, required_seconds - elapsed_seconds)
+                remaining_bars = remaining_seconds / timeframe_seconds if timeframe_seconds > 0 else 0.0
+                return GovernorVerdict(
+                    False,
+                    "loss_cooldown_active",
+                    f"wait {remaining_seconds:.0f}s (~{remaining_bars:.1f} bars) after {state.consecutive_losses} losses",
+                )
+
         # 日亏损超限
         if state.daily_loss_pct >= cfg["max_daily_loss_pct"]:
             return GovernorVerdict(False, "daily_loss_limit",
@@ -173,6 +201,19 @@ class RiskGovernor:
         if state.data_lag_seconds > cfg["data_lag_max_seconds"]:
             return GovernorVerdict(False, "data_lag",
                                    f"data lag {state.data_lag_seconds:.0f}s > {cfg['data_lag_max_seconds']:.0f}s")
+
+        runtime_health = state.extra.get("runtime_health", {}) if isinstance(state.extra, dict) else {}
+        system_health = runtime_health.get("system_health", {}) if isinstance(runtime_health, dict) else {}
+        component_status = system_health.get("component_status", {}) if isinstance(system_health, dict) else {}
+        if system_health:
+            disk_status = str(component_status.get("disk_space") or "")
+            l2_status = str(component_status.get("l2_depth") or "")
+            block_on_disk_critical = bool(state.extra.get("block_on_disk_critical", True))
+            require_l2_depth = bool(state.extra.get("require_l2_depth", False))
+            if block_on_disk_critical and disk_status == "critical":
+                return GovernorVerdict(False, "disk_space_critical", "disk space is critically low")
+            if require_l2_depth and l2_status == "critical":
+                return GovernorVerdict(False, "l2_depth_unavailable", "required L2 depth feed is unavailable")
 
         return GovernorVerdict(True, "ok")
 

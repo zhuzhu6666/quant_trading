@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,51 @@ def _fmt(value: Any, digits: int = 4) -> str:
         return f"{float(value):.{digits}f}"
     except Exception:
         return str(value)
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    mapping = {
+        "M1": 60,
+        "M5": 300,
+        "M15": 900,
+        "M30": 1800,
+        "H1": 3600,
+        "H4": 14400,
+        "D1": 86400,
+    }
+    return mapping.get(str(timeframe or "").upper(), 0)
+
+
+def _derive_temporal_context(decision_ts: float, timeframe: str, risk_state: dict | None = None) -> dict:
+    risk_state = risk_state or {}
+    verdict = ((risk_state.get("policy_verdict") or {}).get("audit_payload") or {})
+    existing = verdict.get("temporal_context") or {}
+    if existing:
+        return existing
+
+    ts = _safe_float(decision_ts)
+    if ts <= 0:
+        return {}
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    hour = int(dt.hour)
+    if 0 <= hour < 7:
+        session_label = "asia"
+    elif 7 <= hour < 13:
+        session_label = "europe"
+    elif 13 <= hour < 21:
+        session_label = "us"
+    else:
+        session_label = "rollover"
+    return {
+        "decision_ts": ts,
+        "timeframe": str(timeframe or ""),
+        "timeframe_seconds": _timeframe_seconds(timeframe),
+        "hour_utc": hour,
+        "minute_utc": int(dt.minute),
+        "weekday_utc": int(dt.weekday()),
+        "session_label": session_label,
+        "is_weekend_utc": bool(dt.weekday() >= 5),
+    }
 
 
 class LearningFeatureProvider:
@@ -490,6 +536,11 @@ class LearningFeatureProvider:
         risk_state = _loads(row["risk_state_json"], {})
         portfolio_state = _loads(row["portfolio_state_json"], {})
         tags_breakdown = action.get("tags_breakdown") if isinstance(action, dict) else {}
+        temporal_context = _derive_temporal_context(
+            _safe_float(row["decision_ts"]),
+            str(row["timeframe"] or ""),
+            risk_state,
+        )
         return {
             "decision_id": str(row["decision_id"]),
             "event_type": str(row["event_type"] or ""),
@@ -510,6 +561,7 @@ class LearningFeatureProvider:
             "top_factors": factors[:10],
             "factor_evidence": factors,
             "factor_tags": tags_breakdown or {},
+            "temporal_context": temporal_context,
         }
 
     @staticmethod

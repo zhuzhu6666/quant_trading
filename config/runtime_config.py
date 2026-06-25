@@ -100,6 +100,11 @@ class RuntimeConfig:
     risk_sl_atr: float = 1.5
     risk_tp_atr: float = 2.5
     risk_cooldown_bars: int = 3
+    risk_loss_cooldown_after_losses: int = 2
+    risk_loss_cooldown_bars: int = 3
+    risk_max_holding_bars: int = 288
+    risk_block_on_disk_critical: bool = True
+    risk_require_l2_depth: bool = False
     risk_enable_nfp_skip: bool = False
     risk_enable_gvz_gate: bool = False
     risk_gvz_drop_pct: float = -2.0

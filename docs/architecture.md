@@ -98,6 +98,7 @@ risk/
 - `force_deleverage`
 
 它已经开始进入真实业务链路：live 开仓、学习权重同步、模型 shadow/canary API、因子 shadow 注册、手动 shadow promote、自动 canary promote 都会产出 `risk_verdict`。剩余工作是继续把历史分散检查收敛到同一 facade，并让前端风控面板直接展示这些 verdict。
+此外，`temporal_context` 第一版已经进入 live 开仓上下文与 `risk_verdict.audit_payload`，并会随 decision sample 一起导出，当前包含交易时段、weekday、bar 周期、距上次成交间隔、loop uptime 等可解释时间字段；这一步先解决“统一记录”，下一步才是把其中一部分提升为真正的 governor 规则。
 
 当前需要注意的结构债：
 
@@ -556,6 +557,9 @@ offline validated
 - live open 成功路径与风险阻断路径都会写入 policy verdict；`/api/risk/summary` 和 `/api/risk/policy/verdicts` 已可聚合最近 allowed/blocked verdict。
 - live close 路径已接入 `close_position` verdict：系统发起 emergency close 前审计，broker close 落账时写入 close ledger 和 position lifecycle。
 - Governor state 第一版 runtime health 已接入 live 开仓：`loop_running`、`bridge_connected`、`data_lag_seconds` 进入真实裁决，sync health 与 account/positions cache age 已进入审计上下文。
+- 时间规则第一批已进入真实链路：`open_trade` 会执行“连续亏损后的冷静期”拦截；`close_position` verdict 会记录持仓时长、超时阈值和是否超时，live loop 已具备按 `risk_max_holding_bars` 自动发起超时平仓的能力（默认关闭，待校准）。
+- 已基于服务器在线仓位样本把 `risk_max_holding_bars` 的首发默认值校准到 `288`（M5 约 24 小时），目的是先让超时收口真正生效，同时避免刚上线就误伤当前 7 小时到 13 小时级别的持仓。
+- 运行环境健康已继续收口到统一裁决：`system_health` 快照现已进入 `runtime_health`；其中 `disk_space=critical` 被视为硬阻断，`l2_depth=critical` 只在策略显式要求深度数据时阻断，否则先作为软风险保留在审计与展示层。
 - 后续还需要把前端风控面板接到该数据源，并补齐运行环境、跨品种、时间/空间上下文等更完整的 governor state。
 
 要完成：
@@ -566,7 +570,7 @@ offline validated
 - API 风控面板读取同一套状态。后端数据源已具备，前端展示待接入。
 - ledger 记录完整 risk verdict。open allowed / skip blocked / close risk-reducing 已覆盖，后续继续扩展到更多非交易高影响动作的统一审计表。
 - 运行环境健康第一版已接入开仓裁决；后续继续把磁盘空间、L2 深度、更多数据质量项纳入统一 governor state。
-- 将 `temporal_context` 纳入风控裁决：持仓时长、超时、事件窗口、交易时段、日内连续亏损节奏。
+- `temporal_context` 已先完成统一记录与样本导出，并已落第一批实规则：连续亏损后冷静期、持仓超时审计/自动收口钩子；下一步继续把事件窗口、交易时段、日内连续亏损节奏细化为更完整裁决。
 - 将 `market_space_context` 纳入风控裁决：价格空间位置、波动分位、结构冲突、相关性敞口。
 
 ### Phase C: 模型建议进入实时旁路

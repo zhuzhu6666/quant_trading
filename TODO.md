@@ -120,3 +120,7 @@ Factor Takeover v4 主体框架已经落地，规则驱动学习闭环已进入�
 - 2026-06-25: live open 成功路径也会把 allowed `open_trade` verdict 写入 open ledger；`/api/risk/summary` 和 `/api/risk/policy/verdicts` 已能从 decision ledger 汇总最近 allowed/blocked verdict，给风控面板做统一数据源。
 - 2026-06-25: `close_position` 已接入真实平仓入口：`emergency_close` 发起前先取 verdict 并缓存，后续 broker close 落账时消费；外部/手动 broker close 也会生成 risk-reducing verdict 写入 close ledger 与 position lifecycle。
 - 2026-06-25: Governor state 第一版 runtime health 已接入 live 开仓裁决：`loop_running`、`bridge_connected`、`data_lag_seconds`、sync health snapshot、account/positions cache age 会进入 `open_trade` context；当前已开始阻断 `loop_not_running / bridge_disconnected / data_lag`。
+- 2026-06-25: `temporal_context` 第一版已进入 live 开仓风控上下文、policy verdict 审计载荷和 decision sample 导出；当前先覆盖交易时段、weekday、bar 周期、距离上次成交时间、loop uptime，后续再逐步进入硬规则与训练特征。
+- 2026-06-25: 时间规则第一批已落地：`open_trade` 会阻断“连续亏损后的冷静期”内新开仓；`close_position` verdict 会统一记录持仓时长与是否超时，live loop 也已预留 `risk_max_holding_bars` 驱动的自动超时平仓能力（默认关闭，待参数校准）。
+- 2026-06-25: 基于服务器当前在线仓位样本（约 13.3h / 7.4h）把 `risk_max_holding_bars` 首发默认值校准为 `288`（M5 约 24 小时）；这样不会立刻误伤现有仓位，但能让超时收口链真正开始生效。
+- 2026-06-25: 系统健康第一批已进入统一开仓裁决：`runtime_health.system_health` 会进入 `open_trade` context；当前 `disk_space=critical` 会直接阻断新开仓，`l2_depth=critical` 仅在策略声明 `risk_require_l2_depth=True` 时阻断，否则先作为软风险记录和展示。

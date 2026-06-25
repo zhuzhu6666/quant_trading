@@ -1,11 +1,25 @@
 import liveStore from '../../stores/live';
 import { emergencyCloseAll, refreshLiveSnapshot, startTradingLoop, stopTradingLoop } from '../../services/live';
-import { formatMoney, formatPct, formatPrice, humanizeRiskAction, humanizeRiskReason } from '../../utils/format';
+import { formatMoney, formatPct, formatPrice, formatDurationMinutes, humanizeRiskAction, humanizeRiskReason } from '../../utils/format';
 
 function normalizePosition(item = {}) {
   const pnl = Number(item.pnl ?? item.netUnrealizedPnL ?? item.unrealized ?? item.profit ?? 0);
   const currentPrice = item.current_price ?? item.price_current ?? 0;
   const openPrice = item.open_price ?? item.price_open ?? 0;
+  const holdingMinutes = Number(item.holding_minutes || 0);
+  const timeoutStatus = String(item.holding_timeout_status || 'disabled');
+  let timeoutLabel = '未启用';
+  let timeoutTone = 'neutral';
+  if (timeoutStatus === 'expired') {
+    timeoutLabel = '已超时';
+    timeoutTone = 'negative';
+  } else if (timeoutStatus === 'watch') {
+    timeoutLabel = '接近上限';
+    timeoutTone = 'warning';
+  } else if (timeoutStatus === 'normal') {
+    timeoutLabel = '正常';
+    timeoutTone = 'positive';
+  }
   return {
     ...item,
     pnlValue: pnl,
@@ -15,6 +29,14 @@ function normalizePosition(item = {}) {
     volumeText: String(item.volume ?? item.size ?? '--'),
     directionText: item.type === 'buy' ? 'LONG' : item.type === 'sell' ? 'SHORT' : (item.direction || '--'),
     pnlToneClass: pnl >= 0 ? 'accent-pos' : 'accent-neg',
+    holdingText: formatDurationMinutes(holdingMinutes),
+    timeoutLabel,
+    timeoutTone,
+    timeoutHint: item.timeout_enabled
+      ? (item.holding_timeout_exceeded
+        ? '已经超过系统设定的持仓时长上限。'
+        : `距离上限还剩 ${formatDurationMinutes(Number(item.holding_timeout_remaining_seconds || 0) / 60)}。`)
+      : '当前没有启用自动超时平仓。',
   };
 }
 

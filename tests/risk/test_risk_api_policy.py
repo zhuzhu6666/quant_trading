@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from types import SimpleNamespace
 
 from backend.api import risk as risk_api
 
@@ -66,3 +67,33 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
     assert result["by_action"] == {"open_trade": 2}
     assert result["by_reason"]["ok"] == 1
     assert result["items"][0]["decision_id"] == "dec_allowed"
+
+
+def test_system_health_summary_serializes_latest_report(monkeypatch):
+    class _Component:
+        def __init__(self, status, detail, score):
+            self.status = status
+            self.detail = detail
+            self.score = score
+
+    class _SystemHealth:
+        def get_last_report(self):
+            return SimpleNamespace(
+                overall="critical",
+                overall_score=0.8,
+                ts=123.0,
+                errors=["disk low"],
+                components={
+                    "disk_space": _Component("critical", "3.2 GB left", 0.0),
+                    "l2_depth": _Component("degraded", "5 min stale", 0.5),
+                },
+            )
+
+    monkeypatch.setattr(risk_api, "_get_system_health_report", lambda: _SystemHealth().get_last_report())
+    result = risk_api._system_health_summary()
+
+    assert result["overall"] == "critical"
+    assert result["overall_score"] == 0.8
+    assert result["critical_components"] == ["disk_space"]
+    assert result["degraded_components"] == ["l2_depth"]
+    assert result["components"]["disk_space"]["detail"] == "3.2 GB left"

@@ -105,6 +105,14 @@
             <view class="tag">{{item.directionText}}</view>
             <view class="tag">开仓 {{item.openPriceText}}</view>
             <view class="tag">量 {{item.volumeText}}</view>
+            <view class="tag">已持有 {{item.holdingText}}</view>
+          </view>
+          <view class="status-banner status-banner-{{item.timeoutTone}}" style="margin-top: 12rpx;">
+            <view class="row-between">
+              <view class="small muted">持仓时长风控</view>
+              <status-pill label="{{item.timeoutLabel}}" tone="{{item.timeoutTone}}" />
+            </view>
+            <view class="section-note">{{item.timeoutHint}}</view>
           </view>
           <view class="caption-grid" style="margin-top: 12rpx;">
             <view class="caption-card">

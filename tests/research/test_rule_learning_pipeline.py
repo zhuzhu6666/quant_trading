@@ -265,6 +265,8 @@ def test_feature_provider_exports_explainable_skip_decision_samples(tmp_path):
     assert sample["target"]["skipped"] is True
     assert sample["target"]["skip_stage"] == "risk_var_gate"
     assert sample["target"]["gate_reason"] == "VaR limit exceeded"
+    assert sample["decision"]["temporal_context"]["timeframe"] == "M5"
+    assert "session_label" in sample["decision"]["temporal_context"]
     assert sample["llm_context"]["label_summary"]["skipped"] is True
     assert any("gate_passed=False" in item for item in sample["llm_context"]["evidence_bullets"])
     assert sample["explainability"]["top_factors"][0]["factor"] == "trend_alpha"

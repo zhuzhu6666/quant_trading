@@ -38,6 +38,22 @@ class TestRiskGovernor:
         assert not v.allowed
         assert "consecutive_losses" in v.reason
 
+    def test_loss_cooldown_blocks_trade(self, gov):
+        """连续亏损后未过冷静期 → 暂停开仓."""
+        v = gov.allow_trade(
+            GovernorState(
+                consecutive_losses=2,
+                timeframe_seconds=300,
+                seconds_since_last_trade=240.0,
+                extra={
+                    "loss_cooldown_after_losses": 2,
+                    "loss_cooldown_bars": 3,
+                },
+            )
+        )
+        assert not v.allowed
+        assert v.reason == "loss_cooldown_active"
+
     def test_daily_loss_blocks_trade(self, gov):
         """日亏损超 5% → 禁止交易."""
         v = gov.allow_trade(GovernorState(daily_loss_pct=6.0))
@@ -49,6 +65,51 @@ class TestRiskGovernor:
         v = gov.allow_trade(GovernorState(data_lag_seconds=4000))
         assert not v.allowed
         assert "data_lag" in v.reason
+
+    def test_disk_space_critical_blocks_trade(self, gov):
+        v = gov.allow_trade(
+            GovernorState(
+                extra={
+                    "block_on_disk_critical": True,
+                    "runtime_health": {
+                        "system_health": {
+                            "component_status": {"disk_space": "critical"},
+                        }
+                    },
+                }
+            )
+        )
+        assert not v.allowed
+        assert v.reason == "disk_space_critical"
+
+    def test_l2_depth_only_blocks_when_required(self, gov):
+        allowed = gov.allow_trade(
+            GovernorState(
+                extra={
+                    "require_l2_depth": False,
+                    "runtime_health": {
+                        "system_health": {
+                            "component_status": {"l2_depth": "critical"},
+                        }
+                    },
+                }
+            )
+        )
+        blocked = gov.allow_trade(
+            GovernorState(
+                extra={
+                    "require_l2_depth": True,
+                    "runtime_health": {
+                        "system_health": {
+                            "component_status": {"l2_depth": "critical"},
+                        }
+                    },
+                }
+            )
+        )
+        assert allowed.allowed is True
+        assert blocked.allowed is False
+        assert blocked.reason == "l2_depth_unavailable"
 
     def test_loop_not_running_blocks_trade(self, gov):
         """live loop 未运行 → 禁止交易."""

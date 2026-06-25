@@ -125,5 +125,36 @@
       </view>
       <view wx:else class="soft-panel section-note">风控汇总暂时不可用</view>
     </section-card>
+
+    <section-card title="运行风险" subtitle="系统环境有没有在拖后腿">
+      <view wx:if="{{systemHealthSummary}}" class="stack-12">
+        <view class="grid-3" style="margin-bottom: 18rpx;">
+          <view class="split-card stack-12">
+            <view class="small muted">总体状态</view>
+            <view class="value-md {{systemHealthSummary.tone === 'positive' ? 'accent-pos' : systemHealthSummary.tone === 'negative' ? 'accent-neg' : systemHealthSummary.tone === 'warning' ? 'accent-warn' : ''}}">{{systemHealthSummary.overall}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">严重项</view>
+            <view class="value-md accent-neg">{{systemHealthSummary.criticalCount}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">健康分</view>
+            <view class="value-md">{{systemHealthSummary.scoreText}}</view>
+          </view>
+        </view>
+        <view class="status-banner status-banner-{{systemHealthSummary.tone}}">
+          <view class="row-between">
+            <view class="small">当前最该盯的点</view>
+            <status-pill label="{{systemHealthSummary.criticalCount ? '有严重项' : systemHealthSummary.degradedCount ? '有观察项' : '状态正常'}}" tone="{{systemHealthSummary.tone}}" />
+          </view>
+          <view class="section-note">严重项：{{systemHealthSummary.criticalText}}</view>
+          <view class="section-note">观察项：{{systemHealthSummary.degradedText}}</view>
+        </view>
+        <view wx:if="{{systemHealthSummary.componentRows.length}}" class="row-wrap">
+          <view wx:for="{{systemHealthSummary.componentRows}}" wx:key="key" class="tag">{{item.key}} {{item.status}}</view>
+        </view>
+      </view>
+      <view wx:else class="soft-panel section-note">运行健康摘要暂时不可用</view>
+    </section-card>
   </view>
 </view>

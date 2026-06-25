@@ -21,12 +21,14 @@ def test_open_trade_allowed_with_clean_context():
             "total_api_volume": 100,
             "requested_api_volume": 100,
             "max_position_api_volume": 1000,
+            "temporal_context": {"session_label": "europe", "hour_utc": 9},
         },
     )
 
     assert verdict.allowed is True
     assert verdict.reason == "ok"
     assert verdict.to_dict()["audit_payload"]["action"] == "open_trade"
+    assert verdict.to_dict()["audit_payload"]["temporal_context"]["session_label"] == "europe"
 
 
 def test_open_trade_blocks_circuit_breaker():
@@ -80,6 +82,83 @@ def test_open_trade_blocks_when_bridge_disconnected():
 
     assert verdict.allowed is False
     assert verdict.reason == "bridge_disconnected"
+
+
+def test_open_trade_blocks_on_disk_space_critical():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "runtime_health": {
+                "system_health": {
+                    "component_status": {"disk_space": "critical"},
+                    "critical_components": ["disk_space"],
+                }
+            },
+            "block_on_disk_critical": True,
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "disk_space_critical"
+    assert verdict.audit_payload["source"] == "RiskGovernor"
+
+
+def test_open_trade_blocks_on_l2_depth_only_when_required():
+    service = _service()
+
+    allowed = service.evaluate(
+        "open_trade",
+        {
+            "runtime_health": {
+                "system_health": {
+                    "component_status": {"l2_depth": "critical"},
+                    "critical_components": ["l2_depth"],
+                }
+            },
+            "require_l2_depth": False,
+        },
+    )
+    blocked = service.evaluate(
+        "open_trade",
+        {
+            "runtime_health": {
+                "system_health": {
+                    "component_status": {"l2_depth": "critical"},
+                    "critical_components": ["l2_depth"],
+                }
+            },
+            "require_l2_depth": True,
+        },
+    )
+
+    assert allowed.allowed is True
+    assert blocked.allowed is False
+    assert blocked.reason == "l2_depth_unavailable"
+
+
+def test_open_trade_blocks_loss_cooldown_when_gap_too_short():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "session": {"consecutive_losses": 2},
+            "loss_cooldown_after_losses": 2,
+            "loss_cooldown_bars": 3,
+            "temporal_context": {
+                "timeframe": "M5",
+                "timeframe_seconds": 300,
+                "seconds_since_last_trade": 240.0,
+                "bars_since_last_trade": 0.8,
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "loss_cooldown_active"
+    assert verdict.audit_payload["temporal_context"]["timeframe"] == "M5"
 
 
 def test_open_trade_blocks_position_count():
@@ -141,6 +220,26 @@ def test_close_position_is_allowed_as_risk_reducing_action():
     assert verdict.allowed is True
     assert verdict.reason == "risk_reducing_action"
     assert verdict.audit_payload["position_id"] == "268"
+
+
+def test_close_position_marks_holding_timeout_in_audit():
+    service = _service()
+
+    verdict = service.evaluate(
+        "close_position",
+        {
+            "position_id": "268",
+            "close_reason": "holding_timeout",
+            "holding_seconds": 3900.0,
+            "max_holding_bars": 12,
+            "timeframe_seconds": 300,
+            "temporal_context": {"timeframe": "M5", "timeframe_seconds": 300},
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.audit_payload["holding_timeout_exceeded"] is True
+    assert verdict.audit_payload["holding_minutes"] == 65.0
 
 
 def test_update_weight_blocks_when_drawdown_near_limit():

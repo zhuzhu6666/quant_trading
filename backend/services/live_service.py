@@ -20,6 +20,7 @@ import json
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -268,6 +269,7 @@ def _build_open_trade_risk_context(
     positions_cache_age_seconds = max(0.0, now - positions_updated_at) if positions_updated_at > 0 else 0.0
     sync_snapshot = {}
     data_lag_seconds = 0.0
+    system_health_snapshot = {}
     try:
         from data.live_sync.health import SyncHealth
 
@@ -278,6 +280,38 @@ def _build_open_trade_risk_context(
         )
     except Exception:
         sync_snapshot = {}
+    try:
+        from monitor.system_health import shared as _system_health_shared
+
+        report = _system_health_shared().get_last_report()
+        if report is not None:
+            system_health_snapshot = {
+                "overall": str(getattr(report, "overall", "") or ""),
+                "overall_score": float(getattr(report, "overall_score", 0.0) or 0.0),
+                "component_status": {
+                    str(name): str(getattr(component, "status", "") or "")
+                    for name, component in (getattr(report, "components", {}) or {}).items()
+                },
+                "critical_components": [
+                    str(name)
+                    for name, component in (getattr(report, "components", {}) or {}).items()
+                    if str(getattr(component, "status", "") or "") == "critical"
+                ],
+                "degraded_components": [
+                    str(name)
+                    for name, component in (getattr(report, "components", {}) or {}).items()
+                    if str(getattr(component, "status", "") or "") == "degraded"
+                ],
+            }
+    except Exception:
+        system_health_snapshot = {}
+    timeframe = str(getattr(cfg, "timeframe", "M5") or "M5")
+    temporal_context = _temporal_context_for_trade(
+        decision_ts=now,
+        timeframe=timeframe,
+        session_last_trade_ts=float(_live_state_get("session_last_trade_ts", 0.0) or 0.0),
+        loop_started_at=float(_live_state_get("loop_started_at", 0.0) or 0.0),
+    )
 
     return {
         "account": acct or {},
@@ -309,7 +343,13 @@ def _build_open_trade_risk_context(
             "account_cache_age_seconds": account_cache_age_seconds,
             "positions_cache_age_seconds": positions_cache_age_seconds,
             "sync_health": sync_snapshot,
+            "system_health": system_health_snapshot,
         },
+        "loss_cooldown_after_losses": int(getattr(cfg, "risk_loss_cooldown_after_losses", 0) or 0),
+        "loss_cooldown_bars": int(getattr(cfg, "risk_loss_cooldown_bars", 0) or 0),
+        "block_on_disk_critical": bool(getattr(cfg, "risk_block_on_disk_critical", True)),
+        "require_l2_depth": bool(getattr(cfg, "risk_require_l2_depth", False)),
+        "temporal_context": temporal_context,
     }
 
 
@@ -346,6 +386,177 @@ def _position_open_price(pos: Any) -> float:
         if price > 0:
             return price
     return 0.0
+
+
+def _position_open_timestamp(pos: Any) -> float:
+    if pos is None:
+        return 0.0
+    if isinstance(pos, dict):
+        candidates = (
+            pos.get("open_time"),
+            pos.get("open_timestamp"),
+            pos.get("open_ts"),
+        )
+    else:
+        candidates = (
+            getattr(pos, "open_time", None),
+            getattr(pos, "open_timestamp", None),
+            getattr(pos, "open_ts", None),
+        )
+    for value in candidates:
+        try:
+            ts = float(value or 0.0)
+        except Exception:
+            continue
+        if ts <= 0:
+            continue
+        if ts > 10_000_000_000:
+            ts /= 1000.0
+        if ts > 0:
+            return ts
+    return 0.0
+
+
+def _classify_trading_session(hour_utc: int) -> str:
+    if 0 <= hour_utc < 7:
+        return "asia"
+    if 7 <= hour_utc < 13:
+        return "europe"
+    if 13 <= hour_utc < 21:
+        return "us"
+    return "rollover"
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    mapping = {
+        "M1": 60,
+        "M5": 300,
+        "M15": 900,
+        "M30": 1800,
+        "H1": 3600,
+        "H4": 14400,
+        "D1": 86400,
+    }
+    return mapping.get(str(timeframe or "").upper(), 0)
+
+
+def _temporal_context_for_trade(
+    *,
+    decision_ts: float,
+    timeframe: str,
+    session_last_trade_ts: float = 0.0,
+    loop_started_at: float = 0.0,
+) -> dict:
+    ts = float(decision_ts or time.time())
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    tf_seconds = _timeframe_seconds(timeframe)
+    last_trade_gap = max(0.0, ts - session_last_trade_ts) if session_last_trade_ts > 0 else 0.0
+    loop_uptime = max(0.0, ts - loop_started_at) if loop_started_at > 0 else 0.0
+    return {
+        "decision_ts": ts,
+        "timeframe": str(timeframe or ""),
+        "timeframe_seconds": tf_seconds,
+        "hour_utc": int(dt.hour),
+        "minute_utc": int(dt.minute),
+        "weekday_utc": int(dt.weekday()),
+        "session_label": _classify_trading_session(int(dt.hour)),
+        "is_weekend_utc": bool(dt.weekday() >= 5),
+        "seconds_since_last_trade": round(last_trade_gap, 3),
+        "bars_since_last_trade": round(last_trade_gap / tf_seconds, 3) if tf_seconds > 0 and last_trade_gap > 0 else 0.0,
+        "loop_uptime_seconds": round(loop_uptime, 3),
+    }
+
+
+def _build_close_position_risk_context(
+    *,
+    position_id: int,
+    close_reason: str,
+    mode: str = "live",
+    broker: str = "",
+    symbol: str = "",
+    position: Any | None = None,
+    cfg=None,
+    decision_ts: float | None = None,
+) -> dict:
+    if cfg is None:
+        try:
+            from config.runtime_config import shared as _rc
+
+            cfg = _rc()
+        except Exception:
+            cfg = None
+    now = float(decision_ts or time.time())
+    open_meta = _lookup_open_decision_context(int(position_id))
+    entry_ts = _position_open_timestamp(position) or float(open_meta.get("entry_ts", 0.0) or 0.0)
+    timeframe = str(open_meta.get("timeframe") or getattr(cfg, "timeframe", "M5") or "M5")
+    temporal_context = _temporal_context_for_trade(
+        decision_ts=now,
+        timeframe=timeframe,
+    )
+    holding_seconds = max(0.0, now - entry_ts) if entry_ts > 0 else 0.0
+    max_holding_bars = int(getattr(cfg, "risk_max_holding_bars", 0) or 0)
+    timeframe_seconds = int(temporal_context.get("timeframe_seconds", 0) or 0)
+    max_holding_seconds = float(max_holding_bars * timeframe_seconds) if max_holding_bars > 0 and timeframe_seconds > 0 else 0.0
+    return {
+        "position_id": str(position_id),
+        "close_reason": close_reason,
+        "mode": mode,
+        "broker": broker,
+        "symbol": symbol,
+        "entry_ts": entry_ts,
+        "entry_ts_source": str(open_meta.get("source") or ("broker_position" if position is not None else "")),
+        "holding_seconds": holding_seconds,
+        "timeframe_seconds": timeframe_seconds,
+        "max_holding_bars": max_holding_bars,
+        "max_holding_seconds": max_holding_seconds,
+        "temporal_context": temporal_context,
+    }
+
+
+def _holding_summary_for_position(position: Any, *, cfg=None, now_ts: float | None = None) -> dict:
+    try:
+        pid = int(
+            (position.get("position_id") if isinstance(position, dict) else getattr(position, "position_id", None))
+            or (position.get("ticket") if isinstance(position, dict) else getattr(position, "ticket", None))
+            or 0
+        )
+    except Exception:
+        pid = 0
+    if pid <= 0:
+        return {}
+    close_context = _build_close_position_risk_context(
+        position_id=pid,
+        close_reason="position_snapshot",
+        mode="snapshot",
+        symbol=str(position.get("symbol") if isinstance(position, dict) else getattr(position, "symbol", "") or ""),
+        position=position,
+        cfg=cfg,
+        decision_ts=now_ts,
+    )
+    holding_seconds = float(close_context.get("holding_seconds", 0.0) or 0.0)
+    max_holding_seconds = float(close_context.get("max_holding_seconds", 0.0) or 0.0)
+    timeout_enabled = bool(max_holding_seconds > 0)
+    timeout_ratio = (holding_seconds / max_holding_seconds) if timeout_enabled and max_holding_seconds > 0 else 0.0
+    if not timeout_enabled:
+        timeout_status = "disabled"
+    elif holding_seconds >= max_holding_seconds:
+        timeout_status = "expired"
+    elif timeout_ratio >= 0.8:
+        timeout_status = "watch"
+    else:
+        timeout_status = "normal"
+    remaining_seconds = max(0.0, max_holding_seconds - holding_seconds) if timeout_enabled else 0.0
+    return {
+        "holding_seconds": round(holding_seconds, 3),
+        "holding_minutes": round(holding_seconds / 60.0, 2) if holding_seconds > 0 else 0.0,
+        "timeout_enabled": timeout_enabled,
+        "max_holding_bars": int(close_context.get("max_holding_bars", 0) or 0),
+        "max_holding_seconds": round(max_holding_seconds, 3) if max_holding_seconds > 0 else 0.0,
+        "holding_timeout_exceeded": bool(close_context.get("max_holding_seconds", 0.0) and holding_seconds >= max_holding_seconds),
+        "holding_timeout_ratio": round(timeout_ratio, 4) if timeout_enabled else 0.0,
+        "holding_timeout_status": timeout_status,
+        "holding_timeout_remaining_seconds": round(remaining_seconds, 3) if timeout_enabled else 0.0,
+    }
 
 
 def _resolve_position_api_volume(
@@ -443,6 +654,7 @@ _live_state: dict = {
     "session_max_drawdown_pct": 0.0,
     "session_peak_equity": 0.0,
     "session_start_balance": 0.0,
+    "session_last_trade_ts": 0.0,
     "circuit_breaker": False,
     "circuit_reason": "",
     "trade_equity_history": [],
@@ -537,6 +749,42 @@ def _lookup_entry_decision_id(position_id: int) -> str:
             (str(position_id),),
         ).fetchone()
         return str(row["decision_id"]) if row and row["decision_id"] else ""
+    finally:
+        conn.close()
+
+
+def _lookup_open_decision_context(position_id: int) -> dict:
+    conn = _get_state_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT decision_ts, timeframe FROM decision_ledger
+            WHERE position_id=? AND event_type='open'
+            ORDER BY decision_ts DESC LIMIT 1
+            """,
+            (str(position_id),),
+        ).fetchone()
+        if row:
+            return {
+                "entry_ts": float(row["decision_ts"] or 0.0),
+                "timeframe": str(row["timeframe"] or ""),
+                "source": "decision_ledger",
+            }
+        recovery = conn.execute(
+            """
+            SELECT first_seen_at FROM recovery_position_state
+            WHERE position_id=?
+            ORDER BY first_seen_at DESC LIMIT 1
+            """,
+            (int(position_id),),
+        ).fetchone()
+        if recovery:
+            return {
+                "entry_ts": float(recovery["first_seen_at"] or 0.0),
+                "timeframe": "",
+                "source": "recovery_position_state",
+            }
+        return {"entry_ts": 0.0, "timeframe": "", "source": ""}
     finally:
         conn.close()
 
@@ -702,13 +950,14 @@ def _consume_close_verdict(position_id: int, close_reason: str) -> dict:
     pending = _pending_close_verdicts.pop(int(position_id), None)
     if pending:
         return pending
+    close_context = _build_close_position_risk_context(
+        position_id=int(position_id),
+        close_reason=close_reason,
+        mode="live",
+    )
     return _RISK_POLICY.evaluate(
         "close_position",
-        {
-            "position_id": str(position_id),
-            "close_reason": close_reason,
-            "mode": "live",
-        },
+        close_context,
     ).to_dict()
 
 
@@ -1092,6 +1341,7 @@ def _reset_session_state_for_new_day() -> None:
         session_consecutive_loss=0,
         session_max_drawdown_pct=0.0,
         session_start_balance=start_balance,
+        session_last_trade_ts=0.0,
     )
 
 
@@ -1137,6 +1387,7 @@ def _record_session_trade(total_pnl: float) -> dict:
             session_losing=losing,
             session_consecutive_loss=consecutive_loss,
             session_pnl=session_pnl,
+            session_last_trade_ts=time.time(),
         )
     return {
         "session_trades": trades,
@@ -1144,6 +1395,7 @@ def _record_session_trade(total_pnl: float) -> dict:
         "session_losing": losing,
         "session_consecutive_loss": consecutive_loss,
         "session_pnl": session_pnl,
+        "session_last_trade_ts": float(_live_state.get("session_last_trade_ts", 0.0) or 0.0),
     }
 
 
@@ -1599,12 +1851,28 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
     audit 2026-06-09: 同 get_account, live loop 在跑时短路读缓存."""
     # ── 缓存短路: loop 在跑 → 只读 _live_state ──
     readiness = get_live_readiness(broker)
+    try:
+        from config.runtime_config import shared as _rc
+
+        cfg = _rc()
+    except Exception:
+        cfg = None
+
+    def _enrich_positions(pos_list: list[Any]) -> list[dict]:
+        now_ts = time.time()
+        enriched: list[dict] = []
+        for raw in _coerce_live_positions(pos_list):
+            item = dict(raw)
+            item.update(_holding_summary_for_position(item, cfg=cfg, now_ts=now_ts))
+            enriched.append(item)
+        return enriched
+
     if _live_state_get("loop_running") and _live_state_get("broker") == broker:
         if readiness["positions_ready"]:
             return {
                 "ok": True,
                 "broker": broker,
-                "positions": readiness["positions"],
+                "positions": _enrich_positions(readiness["positions"]),
                 "warming_up": False,
                 "readiness": readiness,
             }
@@ -1620,7 +1888,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
         # 保留是为了 cache_fallback 的 robustness — 上层分支没匹配时这里兜底)
         cached_positions = _live_state_get("positions", clone=True)
         if cached_positions is not None and _live_state_get("loop_running"):
-            return {"ok": True, "broker": "ctrader", "positions": _coerce_live_positions(cached_positions), "readiness": readiness}
+            return {"ok": True, "broker": "ctrader", "positions": _enrich_positions(cached_positions), "readiness": readiness}
         # 缓存空 fallback
         def _fetch():
             # audit 2026-06-10: _get_ctrader 返 3-tuple, warming_up 短路
@@ -1639,7 +1907,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             positions = []
             for p in raw:
                 api_volume = _position_api_volume(p)
-                positions.append({
+                item = {
                     "ticket": p.get("position_id"),
                     "symbol": p.get("symbol"),
                     "type": p.get("type"),
@@ -1654,7 +1922,9 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                     "commission": p.get("commission", 0.0),
                     "magic": p.get("magic"),
                     "open_time": p.get("open_timestamp", 0),
-                })
+                }
+                item.update(_holding_summary_for_position(item, cfg=cfg))
+                positions.append(item)
             # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
             _live_state_update(positions=positions, positions_updated_at=time.time())
             return {"ok": True, "broker": "ctrader", "positions": positions, "readiness": get_live_readiness("ctrader")}
@@ -3241,15 +3511,17 @@ def emergency_close(broker: str, symbol: str | None = None) -> dict:
                 pid = p.get("position_id") or p.get("ticket")
                 if pid is None:
                     continue
+                close_context = _build_close_position_risk_context(
+                    position_id=int(pid),
+                    close_reason="emergency_close",
+                    mode="live",
+                    broker=broker,
+                    symbol=str(p.get("symbol") or symbol or ""),
+                    position=p,
+                )
                 close_verdict = _RISK_POLICY.evaluate(
                     "close_position",
-                    {
-                        "position_id": str(pid),
-                        "close_reason": "emergency_close",
-                        "mode": "live",
-                        "broker": broker,
-                        "symbol": p.get("symbol") or symbol or "",
-                    },
+                    close_context,
                 )
                 if not close_verdict.allowed:
                     logger.warning(
@@ -4295,6 +4567,14 @@ def _process_tick_factor_pipeline(
             bridge, pos, current_price, pipeline, atr_price,
             tick, log,
         )
+    if pos and bridge is not None and cfg is not None:
+        _enforce_holding_timeout(
+            bridge,
+            pos,
+            cfg=cfg,
+            tick=tick,
+            log=log,
+        )
 
     # ── 更新上一 tick 持仓 ID, 供下次平仓检测 ──
     _prev_position_ids = current_pids
@@ -4401,6 +4681,58 @@ def _update_trailing_stops(
                         f"best={state['best_price']:.2f} conv={conviction:.2f}")
                 except Exception as _e2:
                     logger.debug("[live] trail SHORT amend failed for pos %s: %s", pid, _e2)
+
+
+def _enforce_holding_timeout(
+    bridge,
+    pos: list,
+    *,
+    cfg,
+    tick: int,
+    log,
+) -> None:
+    max_holding_bars = int(getattr(cfg, "risk_max_holding_bars", 0) or 0)
+    if max_holding_bars <= 0:
+        return
+
+    for p in pos or []:
+        try:
+            pid = int(p.get("position_id") or p.get("ticket") or 0)
+        except Exception:
+            pid = 0
+        if pid <= 0:
+            continue
+
+        close_context = _build_close_position_risk_context(
+            position_id=pid,
+            close_reason="holding_timeout",
+            mode="live",
+            broker="ctrader",
+            symbol=str(p.get("symbol") or "XAUUSD+"),
+            position=p,
+            cfg=cfg,
+        )
+        max_holding_seconds = float(close_context.get("max_holding_seconds", 0.0) or 0.0)
+        holding_seconds = float(close_context.get("holding_seconds", 0.0) or 0.0)
+        if max_holding_seconds <= 0 or holding_seconds < max_holding_seconds:
+            continue
+
+        close_verdict = _RISK_POLICY.evaluate("close_position", close_context)
+        if not close_verdict.allowed:
+            logger.warning("[live] holding timeout close blocked pos=%s reason=%s", pid, close_verdict.reason)
+            continue
+        _remember_close_reason(pid, "holding_timeout")
+        _remember_close_verdict(pid, close_verdict)
+        try:
+            result = bridge.close_position(pid)
+        except Exception as exc:
+            logger.warning("[live] holding timeout close exception pos=%s: %s", pid, exc)
+            continue
+        if getattr(result, "success", False):
+            log(
+                f"tick {tick}: holding timeout close sent pos={pid} "
+                f"held={holding_seconds:.0f}s limit={max_holding_seconds:.0f}s"
+            )
 
 
 def _write_live_trade_log_factor(

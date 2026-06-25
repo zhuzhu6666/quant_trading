@@ -280,6 +280,21 @@ def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
     class _Bridge:
         is_connected = False
 
+    class _Component:
+        def __init__(self, status):
+            self.status = status
+
+    class _SystemHealth:
+        def get_last_report(self):
+            return SimpleNamespace(
+                overall="critical",
+                overall_score=0.8,
+                components={
+                    "l2_depth": _Component("critical"),
+                    "disk_space": _Component("degraded"),
+                },
+            )
+
     now = time.time()
     live_service._live_state_update(
         loop_running=True,
@@ -290,12 +305,19 @@ def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
     import data.live_sync.health as sync_health_module
 
     monkeypatch.setattr(sync_health_module.SyncHealth, "shared", staticmethod(lambda: _SyncHealth()))
+    import monitor.system_health as system_health_module
+
+    monkeypatch.setattr(system_health_module, "shared", staticmethod(lambda: _SystemHealth()))
 
     ctx = live_service._build_open_trade_risk_context(
         cfg=SimpleNamespace(
             timeframe="M5",
             var_enabled=True,
             var_cvar_threshold=0.02,
+            risk_loss_cooldown_after_losses=2,
+            risk_loss_cooldown_bars=3,
+            risk_block_on_disk_critical=True,
+            risk_require_l2_depth=False,
             max_position_count=3,
             max_position_api_volume=1000.0,
             pyramid_enabled=True,
@@ -310,7 +332,13 @@ def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
     assert ctx["bridge_connected"] is False
     assert ctx["loop_running"] is True
     assert ctx["data_lag_seconds"] == 321.0
+    assert ctx["loss_cooldown_after_losses"] == 2
+    assert ctx["loss_cooldown_bars"] == 3
+    assert ctx["temporal_context"]["timeframe"] == "M5"
+    assert "session_label" in ctx["temporal_context"]
     assert ctx["runtime_health"]["sync_health"]["degraded"] is True
+    assert ctx["runtime_health"]["system_health"]["overall"] == "critical"
+    assert "l2_depth" in ctx["runtime_health"]["system_health"]["critical_components"]
     assert ctx["runtime_health"]["account_cache_age_seconds"] >= 10.0
     assert ctx["runtime_health"]["positions_cache_age_seconds"] >= 30.0
 
@@ -385,3 +413,79 @@ def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):
     assert rows[0]["action_reason"] == "live_close_open_repair"
     assert recovery["entry_decision_id"] == decision_id
     assert recovery["context_integrity"] == "partial"
+
+
+def test_build_close_position_risk_context_marks_timeout(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+
+    open_ts = time.time() - 3900.0
+    ledger.log_decision(
+        event_type="open",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        trade_id="268",
+        position_id="268",
+        decision_ts=open_ts,
+        portfolio_state={},
+        risk_state={},
+        action_score=0.0,
+        action_reason="test_open",
+        action_json={},
+    )
+
+    ctx = live_service._build_close_position_risk_context(
+        position_id=268,
+        close_reason="holding_timeout",
+        cfg=SimpleNamespace(timeframe="M5", risk_max_holding_bars=12),
+        decision_ts=open_ts + 3900.0,
+    )
+
+    assert ctx["entry_ts_source"] == "decision_ledger"
+    assert ctx["holding_seconds"] == pytest.approx(3900.0)
+    assert ctx["max_holding_seconds"] == pytest.approx(3600.0)
+
+
+def test_holding_summary_for_position_reports_watch_status(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+
+    open_ts = time.time() - 3000.0
+    ledger.log_decision(
+        event_type="open",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        trade_id="9001",
+        position_id="9001",
+        decision_ts=open_ts,
+        portfolio_state={},
+        risk_state={},
+        action_score=0.0,
+        action_reason="test_open",
+        action_json={},
+    )
+
+    summary = live_service._holding_summary_for_position(
+        {"position_id": 9001, "symbol": "XAUUSD+", "open_time": open_ts},
+        cfg=SimpleNamespace(timeframe="M5", risk_max_holding_bars=12),
+        now_ts=open_ts + 3000.0,
+    )
+
+    assert summary["timeout_enabled"] is True
+    assert summary["holding_timeout_status"] == "watch"
+    assert summary["holding_timeout_exceeded"] is False
+    assert summary["holding_timeout_remaining_seconds"] == pytest.approx(600.0)
