@@ -2,7 +2,7 @@
 
 组合了信号强度/冷却期/事件过滤器。
 
-设计文档: docs/FACTOR_TAKEOVER_V4.md §7.3
+设计文档: docs/architecture.md
 """
 
 import logging

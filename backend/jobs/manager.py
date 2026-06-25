@@ -120,8 +120,11 @@ class JobManager:
                 logger.warning("skipping malformed persisted job line: %s", line[:120])
                 continue
 
-    def _append_persisted(self, js: JobState) -> None:
+    def _append_persisted(self, js: JobState, *, status: str | None = None) -> None:
         """持久化 job 到 state.db + JSONL 备份."""
+        status_value = status or js.status
+        payload = js.to_dict()
+        payload["status"] = status_value
         # 主存储: state.db
         try:
             from backend.core.db import get_state_conn
@@ -132,7 +135,7 @@ class JobManager:
                 conn.execute(
                     "INSERT OR REPLACE INTO jobs (id, kind, status, params_json, result_json, progress, error, created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (js.id, js.kind, js.status,
+                    (js.id, js.kind, status_value,
                      json.dumps(js.params, ensure_ascii=False),
                      json.dumps(js.result, ensure_ascii=False) if js.result else "{}",
                      js.progress_pct, js.error or "", created, now)
@@ -147,7 +150,7 @@ class JobManager:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(str(path), "a", encoding="utf-8") as f:
-                f.write(json.dumps(js.to_dict(), ensure_ascii=False) + "\n")
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
             lines = path.read_text(encoding="utf-8").strip().splitlines()
             if len(lines) > self.MAX_PERSISTED:
                 path.write_text(
@@ -198,6 +201,7 @@ class JobManager:
 
     async def _run(self, js: JobState, fn: Callable[[ProgressCB], Any]) -> None:
         js.status = "running"
+        terminal_status = "done"
         try:
             def cb(step: str, pct: float, msg: str) -> None:
                 js.progress_pct = max(0.0, min(100.0, pct))
@@ -215,20 +219,19 @@ class JobManager:
 
             js.result = result if isinstance(result, dict) else {"value": result}
             js.progress_pct = 100.0
-            js.status = "done"
         except asyncio.CancelledError:
-            js.status = "cancelled"
+            terminal_status = "cancelled"
             logger.info(f"job {js.id} ({js.kind}) cancelled")
-            raise
         except Exception as e:
-            js.status = "error"
+            terminal_status = "error"
             js.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()[-500:]}"
             logger.error(f"job {js.id} ({js.kind}) failed: {e}")
         finally:
             from datetime import datetime
             js.finished_at = datetime.now(timezone.utc)
+            self._append_persisted(js, status=terminal_status)
+            js.status = terminal_status
             self._tasks.pop(js.id, None)
-            self._append_persisted(js)
 
     def get(self, job_id: str) -> JobState | None:
         return self._jobs.get(job_id)

@@ -113,8 +113,9 @@ SQLite (运行时状态):
 
 - 2026-06-22: 全面修复 (进化闭环打通 / 数据库统一 / 权重热更新 / 影子隔离 / 并发锁 / 交易日志统一 / 死代码清理)
 - 2026-06-23: 归因真实 PnL 改造 — `record_close` 新增 `real_pnl` 参数, `FactorAttributionStats` 新增 total_gross/swap/commission/net 累加器, `state.db` 新增 `ctrader_deals` 表存原始成交, `execution/deal_sync.py` 同步模块, `live_service` 平仓检测自动调 deal_sync 获取真实 PnL
-- `docs/UPGRADE_BLUEPRINT.md` — Phase 0-7 全部完成
-- 剩余技术债务: `TODO.md` / 蓝图 Appendix C.1
+- `docs/architecture.md` — 当前权威架构入口
+- `docs/planning/self-evolving-upgrade-plan.md` — 学习闭环与模型数据管道
+- 剩余技术债务: `TODO.md`
 
 ## Startup
 

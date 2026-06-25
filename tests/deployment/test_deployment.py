@@ -24,6 +24,7 @@ from deployment.canary import (
     CANARY_5,
     CANARY_20,
     CANARY_50,
+    PROBATION,
     ACTIVE,
 )
 
@@ -145,14 +146,15 @@ class TestCanaryDirector:
         assert d.get_stage("f1") == CANARY_5
 
     def test_promote_full_ladder(self):
-        """完整晋升梯: SHADOW -> CANARY_5 -> CANARY_20 -> CANARY_50 -> ACTIVE"""
+        """完整晋升梯: SHADOW -> CANARY_5 -> CANARY_20 -> CANARY_50 -> PROBATION -> ACTIVE"""
         d = CanaryDirector()
 
         promotions = [
             (CanaryEvalContext(oos_bars=10, oos_pnl=0.005), CANARY_5),
             (CanaryEvalContext(oos_bars=25, oos_pnl=0.004), CANARY_20),
             (CanaryEvalContext(oos_bars=60, oos_pnl=0.006), CANARY_50),
-            (CanaryEvalContext(oos_bars=100, oos_pnl=0.01), ACTIVE),
+            (CanaryEvalContext(oos_bars=100, oos_pnl=0.01), PROBATION),
+            (CanaryEvalContext(oos_bars=120, oos_pnl=0.012), ACTIVE),
         ]
         for ctx, expected_stage in promotions:
             action = d.check_promotion("f1", ctx)
@@ -232,14 +234,14 @@ class TestCanaryDirector:
         d.promote("f1")     # -> CANARY_5
         d.promote("f2")     # -> CANARY_5
         # 手动设一个到 ACTIVE 用尽量多的晋升
-        for _ in range(4):
+        for _ in range(5):
             d.promote("f3")
 
         s = d.summary()
         assert s[CANARY_5]["count"] == 2  # f1, f2
         assert ACTIVE in s
         # f3 的 count 判断
-        # 注意: f3 promote 了 4 次从 SHADOW -> CANARY_5 -> CANARY_20 -> CANARY_50 -> ACTIVE
+        # 注意: f3 promote 了 5 次从 SHADOW -> CANARY_5 -> CANARY_20 -> CANARY_50 -> PROBATION -> ACTIVE
         assert s[ACTIVE]["count"] == 1
 
     def test_summary_text(self):
@@ -284,7 +286,7 @@ class TestCanaryDirector:
         d = CanaryDirector()
         assert d.can_promote("f1")
         # 升到 ACTIVE
-        for _ in range(4):
+        for _ in range(5):
             d.promote("f1")
         assert not d.can_promote("f1")
 

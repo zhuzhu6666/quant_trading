@@ -4,7 +4,7 @@
 使用线性 MC 近似作为默认方法, 当因子数 ≥ 3 且样本 ≥ 10 笔时
 升级到 Gram-Schmidt 正交归因 (复用 alpha/evaluation/attribution.py)。
 
-设计文档: docs/FACTOR_TAKEOVER_V4.md §8
+设计文档: docs/architecture.md
 """
 
 import json

@@ -58,6 +58,16 @@ class TestPortfolioCompositorInit:
 
 class TestCompose:
 
+    def test_preserves_bar_timestamp(self):
+        """CompositeSignal timestamp comes from the bar when provided."""
+        c = PortfolioCompositor(FULL_CONFIG)
+        result = c.compose(
+            {"rsi_14": 0.8},
+            {"rsi_14": 1.2},
+            timestamp=1_700_000_000.0,
+        )
+        assert result.timestamp == 1_700_000_000.0
+
     def test_tactical_only_signals(self):
         """仅战术层信号产生正确的 tactical_score。"""
         c = PortfolioCompositor(FULL_CONFIG)

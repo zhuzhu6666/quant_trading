@@ -1,8 +1,0 @@
-# Tune Report
-# risk_pct_grid: [0.5, 1.0, 1.5, 2.0]
-# cb_pct_grid: [5.0, 10.0, 15.0, 20.0]
-# n_bars: 5000
-
-NO VALID RESULTS
-
-TOP-5:

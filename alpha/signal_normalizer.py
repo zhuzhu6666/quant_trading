@@ -7,7 +7,7 @@
   - rank_mapping:  无量纲/宏观因子 (COT, 央行, 持仓...)
   - discrete:      分类因子 (形态, 事件, 时段...)
 
-设计文档: docs/FACTOR_TAKEOVER_V4.md §5
+设计文档: docs/architecture.md
 """
 
 import logging

@@ -4,7 +4,7 @@
   - Tactical Layer (70%): 技术/量价/形态/波动率/GP因子
   - Macro Layer (30%):    美元/利率/持仓/COT/央行/事件因子
 
-设计文档: docs/FACTOR_TAKEOVER_V4.md §6
+设计文档: docs/architecture.md
 """
 
 import logging
@@ -69,6 +69,7 @@ class PortfolioCompositor:
         self,
         signals: dict[str, float | None],
         factor_values: dict[str, float | None],
+        timestamp: float | None = None,
     ) -> CompositeSignal:
         """组合所有因子信号生成 CompositeSignal。
 
@@ -145,7 +146,7 @@ class PortfolioCompositor:
             n_abstain_factors=sum(
                 1 for s in signals.values() if s is None
             ),
-            timestamp=time.time(),
+            timestamp=float(timestamp if timestamp is not None else time.time()),
         )
 
     # ── 标签分解 ─────────────────────────────────────────

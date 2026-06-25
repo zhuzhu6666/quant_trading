@@ -331,9 +331,16 @@ def _get_state_conn():
     return get_state_conn()
 
 
+def _ensure_runtime_kv_schema(conn) -> None:
+    from backend.core.db import STATE_DB_DDL
+
+    conn.executescript(STATE_DB_DDL)
+
+
 def _runtime_kv_get(key: str, default=None):
     conn = _get_state_conn()
     try:
+        _ensure_runtime_kv_schema(conn)
         row = conn.execute(
             "SELECT value_json FROM runtime_kv WHERE key=?",
             (key,),
@@ -351,6 +358,7 @@ def _runtime_kv_get(key: str, default=None):
 def _runtime_kv_set(key: str, value) -> None:
     conn = _get_state_conn()
     try:
+        _ensure_runtime_kv_schema(conn)
         conn.execute(
             """
             INSERT INTO runtime_kv(key, value_json, updated_at)
@@ -2998,7 +3006,7 @@ def _process_tick_factor_pipeline(
         return
 
     signals = normalizer.normalize(factor_values)
-    composite = compositor.compose(signals, factor_values)
+    composite = compositor.compose(signals, factor_values, timestamp=bar.get("time", time.time()))
     gate_result = gate.filter(composite, factor_values, bar)
     gate.tick()
     # ★ 保存因子投票快照到 _live_state, 前端「因子投票」面板读取
@@ -3620,6 +3628,51 @@ def _process_tick_factor_pipeline(
                             else:
                                 log(f"tick {tick}: v4 {direction_name} AMEND FAILED "
                                     f"pos={pid}: {getattr(amend_res, 'comment', '?')}")
+                                if _LEDGER:
+                                    try:
+                                        amend_decision_id = _LEDGER.log_composite_decision(
+                                            event_type="amend_failed",
+                                            composite=composite,
+                                            gate_result=gate_result,
+                                            symbol="XAUUSD+",
+                                            timeframe=str(getattr(cfg, "timeframe", "") or ""),
+                                            decision_ts=bar.get("time", time.time()),
+                                            trade_id=str(pid),
+                                            position_id=str(pid),
+                                            portfolio_state={
+                                                "balance": acct.get("balance", 0),
+                                                "equity": acct.get("equity", 0),
+                                                "n_positions": len(pos),
+                                            },
+                                            risk_state=_live_state_get("risk", {}, clone=True) or {},
+                                            action_reason=str(getattr(amend_res, "comment", "amend_failed") or "amend_failed"),
+                                            action_json={
+                                                "tick": tick,
+                                                "skip_stage": "amend_sltp",
+                                                "position_id": pid,
+                                                "requested_volume": volume,
+                                                "fill_price": fill_price,
+                                                "sl": sl_price,
+                                                "tp": tp_price,
+                                            },
+                                        )
+                                        _LEDGER.log_order_event(
+                                            event_type="amend_failed",
+                                            decision_id=amend_decision_id,
+                                            trade_id=str(pid),
+                                            order_id=str(pid),
+                                            broker_order_id=str(pid),
+                                            price=float(fill_price),
+                                            volume=float(actual_api_volume),
+                                            status="failed",
+                                            details={
+                                                "tick": tick,
+                                                "direction": composite.direction,
+                                                "comment": str(getattr(amend_res, "comment", "") or ""),
+                                            },
+                                        )
+                                    except Exception as _ledger_err:
+                                        logger.debug("[live] ledger amend failed event failed for pos %s: %s", pid, _ledger_err)
                         except Exception as e:
                             log(f"tick {tick}: v4 {direction_name} amend exception: {e}")
                     else:
@@ -3628,6 +3681,52 @@ def _process_tick_factor_pipeline(
                 elif result is not None and not getattr(result, "success", False):
                     log(f"tick {tick}: v4 {direction_name} ORDER FAILED: "
                         f"{getattr(result, 'error_code', '?')} {getattr(result, 'comment', '')}")
+                    if _LEDGER:
+                        try:
+                            reason = (
+                                f"{getattr(result, 'error_code', '?')} "
+                                f"{getattr(result, 'comment', '')}"
+                            ).strip()
+                            failed_decision_id = _LEDGER.log_composite_decision(
+                                event_type="order_failed",
+                                composite=composite,
+                                gate_result=gate_result,
+                                symbol="XAUUSD+",
+                                timeframe=str(getattr(cfg, "timeframe", "") or ""),
+                                decision_ts=bar.get("time", time.time()),
+                                portfolio_state={
+                                    "balance": acct.get("balance", 0),
+                                    "equity": acct.get("equity", 0),
+                                    "n_positions": len(pos),
+                                },
+                                risk_state=_live_state_get("risk", {}, clone=True) or {},
+                                action_reason=reason or "order_failed",
+                                action_json={
+                                    "tick": tick,
+                                    "skip_stage": "broker_order_failed",
+                                    "requested_volume": volume,
+                                    "price": round(current_price, 2),
+                                    "sl": round(sl_price, 2),
+                                    "tp": round(tp_price, 2),
+                                    "error_code": str(getattr(result, "error_code", "") or ""),
+                                    "comment": str(getattr(result, "comment", "") or ""),
+                                },
+                            )
+                            _LEDGER.log_order_event(
+                                event_type="order_failed",
+                                decision_id=failed_decision_id,
+                                price=float(current_price),
+                                volume=float(volume),
+                                status="failed",
+                                details={
+                                    "tick": tick,
+                                    "direction": composite.direction,
+                                    "error_code": str(getattr(result, "error_code", "") or ""),
+                                    "comment": str(getattr(result, "comment", "") or ""),
+                                },
+                            )
+                        except Exception as _ledger_err:
+                            logger.debug("[live] ledger order failed event failed: %s", _ledger_err)
             except Exception as e:
                 log(f"tick {tick}: v4 {direction_name} order exception: {e}")
 

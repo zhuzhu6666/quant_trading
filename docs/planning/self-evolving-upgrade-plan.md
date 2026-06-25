@@ -17,7 +17,24 @@ The plan below is no longer purely aspirational. The current codebase already im
 5. learning application logging,
 6. application-effect tracking against subsequent trades,
 7. auto weight sync after governance,
-8. startup auto-resume and delayed learning backfill for restart-gap repair.
+8. startup auto-resume and delayed learning backfill for restart-gap repair,
+9. model-ready trade and decision sample export through `research/features/feature_provider.py`, `/api/learning/dataset`, and `/api/learning/decision-dataset`,
+10. factor outcome reconciliation in exported trade samples through `factor_outcomes` and `attribution_alignment`,
+11. persistent offline dataset snapshots through `LearningDatasetBuilder` and `/api/learning/dataset/export`,
+12. training-readiness audit through `LearningDatasetReadiness`, `/api/learning/dataset/readiness`, and manifest-embedded snapshot readiness,
+13. offline snapshot validation through `LearningDatasetValidator` and `/api/learning/dataset/validate`,
+14. safe baseline model adapter through `DatasetSummaryAdapter` and `/api/learning/dataset/model-card` for registered offline model cards and LLM review hints,
+15. offline statistical baseline training through `LearningStatisticalTrainer` and `/api/learning/dataset/train`, producing explainable weight artifacts from validated snapshots,
+16. offline promotion gating through `ModelPromotionGate` and `/api/learning/model/promotion-gate`, allowing only shadow-validation candidacy and never direct live execution,
+17. persistent shadow-validation candidate tracking through `ModelShadowQueue` and `/api/learning/model/shadow-queue`,
+18. offline shadow validation through `ModelShadowRunner` and `/api/learning/model/shadow-run`, producing explainable reports and passed/failed candidate status,
+19. canary pre-review through `ModelCanaryReviewer` and `/api/learning/model/canary-review`, converting shadow-passed candidates into `canary_ready` or `canary_rejected`,
+20. advisory-only inference contract through `ModelInferenceContract` and `/api/learning/model/inference`, accepting only `canary_ready` models and logging every score,
+21. controlled canary trial execution through `ModelCanaryExecutor` and `/api/learning/model/canary-trial`, producing `canary_passed` / `canary_failed` records without orders or weight changes,
+22. end-to-end model learning orchestration through `LearningModelPipeline` and `/api/learning/model/pipeline/run`,
+23. live factor-ledger coverage for `signal`, `open`, `close`, `skip`, `order_failed`, and `amend_failed` decisions,
+24. order and position lifecycle evidence in model samples through `execution_trace`,
+25. LLM-ready context cards through `llm_context` with prompt cards, evidence bullets, and label summaries.
 
 What is still in verification rather than fully "finished":
 
@@ -25,7 +42,7 @@ What is still in verification rather than fully "finished":
 2. cleanup of historical duplicate application rows from early iterations,
 3. more explicit frontend mapping for `observing`, `effective`, `ineffective`, `reinforced`, and `superseded`,
 4. eventual extraction of the current `_update_weights()` coupling into a clearer service contract,
-5. future model adapters once enough verified live data has accumulated.
+5. real demo-account validation and any future manual production enablement for `canary_passed` trained statistical models.
 
 This means the system is already in the "rule-driven learning stage", not in the "model-driven self-evolution stage" yet.
 
@@ -770,12 +787,59 @@ Implemented:
 5. governance run endpoint
 6. applications endpoint
 7. reviews list endpoint
+8. model-ready trade dataset endpoint
+9. explainable decision dataset endpoint for signal / skip / hold / open decisions
+10. offline dataset export endpoint
+11. dataset readiness endpoint
+12. offline snapshot validation endpoint
+13. offline model-card endpoint
+14. offline statistical training endpoint
+15. offline model promotion-gate endpoint
+16. model shadow-validation queue endpoints
+17. model shadow-validation runner endpoint
+18. model canary pre-review endpoint
+19. advisory-only model inference endpoint
+20. controlled model canary-trial endpoint
+21. end-to-end model pipeline endpoint
 
 Outcome:
 
 Frontend and later external monitoring tools can inspect the self-evolving loop through stable API contracts.
 
-#### E. New mini-program frontend (`miniprogram_v2`)
+#### E. Model-ready feature export baseline
+
+Implemented:
+
+1. `research/features/feature_provider.py`
+2. `LearningFeatureProvider.build_decision_features()`
+3. `LearningFeatureProvider.build_trade_features()`
+4. `LearningFeatureProvider.build_experience_features()`
+5. `LearningFeatureProvider.build_training_samples()`
+6. `LearningFeatureProvider.build_decision_sample()` / `build_decision_samples()`
+7. quality gating for real PnL, full context, decision linkage, factor snapshots, labels, and experience memory
+8. application-effect context attached to training samples when governance actions affected participating factors
+9. decision-level samples for `signal`, `skip`, `hold`, `open`, `order_failed`, and `amend_failed` events so future models can learn why the system did not trade or why execution failed
+10. factor outcome reconciliation with entry contribution, realized net contribution, contribution delta, confidence, attribution label, and helpful/harmful outcome role
+11. `LearningDatasetBuilder` for persistent JSONL snapshots with manifest, file hashes, dataset contract metadata, and embedded snapshot readiness
+12. `LearningDatasetReadiness` for pre-training checks covering sample counts, quality gates, schema contracts, and missing evidence
+13. `LearningDatasetValidator` for offline snapshot verification of file hashes, row counts, schema contracts, and manifest integrity
+14. `research/model_adapter.py` with a safe `ModelAdapter` protocol and `DatasetSummaryAdapter` baseline for offline model cards, optional registry entries, review hints, and `/api/learning/dataset/model-card`
+15. `research/offline_trainer.py` with `LearningStatisticalTrainer` for validator-approved snapshots, explainable sparse factor weights, holdout metrics, offline artifact writing, and optional `ModelRegistry` registration through `/api/learning/dataset/train`
+16. `research/model_promotion.py` with `ModelPromotionGate` for thresholded offline artifact review, producing `shadow_candidate` decisions without live eligibility
+17. `research/model_shadow_queue.py` with `ModelShadowQueue` for idempotent shadow candidate persistence, status updates, and API-visible candidate lists
+18. `research/model_shadow_runner.py` with `ModelShadowRunner` for queued candidate scoring, shadow reports, sample-level explanations, and passed/failed status updates
+19. `research/model_canary.py` with `ModelCanaryReviewer` for shadow report review, `canary_ready` / `canary_rejected` status updates, and persistent canary review records
+20. `research/model_inference_contract.py` with `ModelInferenceContract` for advisory-only scoring of `canary_ready` models, guardrails, explainability, and inference audit logs
+21. `research/model_canary_executor.py` with `ModelCanaryExecutor` for controlled advisory-only canary trials, trial records, and `canary_passed` / `canary_failed` status updates
+22. `research/model_pipeline.py` with `LearningModelPipeline` for train -> promotion gate -> shadow queue -> shadow run -> canary review -> controlled trial orchestration
+23. `execution_trace` on trade and decision samples, joining order lifecycle events, position lifecycle events, failed orders, and broker lifecycle summaries
+24. `llm_context` on trade and decision samples, providing compact prompt cards, evidence bullets, and label summaries for LLM-assisted review
+
+Outcome:
+
+The system can now export explainable `learning_sample.v1` records that join decision evidence, factor snapshots, factor outcome reconciliation, order/position lifecycle, post-trade review, experience memory, and governance/application context. It can also export `decision_sample.v1` records for non-trade and failed-execution decisions, including gate reasons, skip stages, broker rejection reasons, amend failures, and any related execution lifecycle. Each sample now includes an `llm_context` card so later LLM-assisted review can consume concise evidence without scraping raw JSON. These records can be persisted as JSONL snapshots with a manifest, file hashes, a compact contract for targets/features/quality gates, and an embedded readiness report for that exact snapshot. A snapshot validator can independently re-check file hashes, line counts, schema contracts, and manifest integrity after the dataset is copied or handed to a trainer. A safe baseline model adapter can build offline model cards and review hints from verified snapshots through code or `/api/learning/dataset/model-card`, optionally registering those cards in `ModelRegistry`, while explicitly refusing live-trading capability and avoiding fake OOS trading metrics. An offline statistical trainer can now consume the same verified snapshot through `/api/learning/dataset/train`, produce sparse factor-weight artifacts with holdout metrics and top-weight explanations, and register them as offline-only model versions. The promotion gate can review registered artifacts or direct artifact paths, verify sample counts, holdout metrics, feature counts, dataset validation, and live-safety declarations, then emit only `shadow_candidate` decisions that still require shadow/canary validation before any live use. Approved candidates can now be persisted idempotently in `experiments.db`, queried by API, advanced through queued/running/passed/failed/cancelled statuses, and consumed by an offline shadow runner that writes explainable reports with per-sample top terms before advancing status. Shadow-passed candidates can then receive a persistent canary pre-review, becoming `canary_ready` or `canary_rejected` without touching live execution. `canary_ready` models can now be scored through an advisory-only inference contract that logs every request and returns explanations plus explicit guardrails: no orders, no weight changes, and no live execution. A controlled canary trial runner can batch those advisory scores, persist trial evidence, and advance candidates to `canary_passed` or `canary_failed` while still making no live changes. The complete offline workflow can also be executed as one backend pipeline from a dataset reference, producing stage-by-stage evidence for training, gating, shadow validation, canary pre-review, and controlled trial. A readiness audit can also report whether the live source dataset is ready, warming up, or blocked before any trainer consumes it, giving later statistical models or LLM-assisted review a stable dataset reference.
+
+#### F. New mini-program frontend (`miniprogram_v2`)
 
 Implemented:
 
@@ -836,13 +900,30 @@ Already present:
 
 1. document-level interface reservations
 2. structured review and experience outputs that are model-friendly
+3. concrete `LearningFeatureProvider`
+4. `/api/learning/dataset` export endpoint
+5. `/api/learning/decision-dataset` export endpoint
+6. `/api/learning/dataset/export` persistent snapshot endpoint
+7. quality-scored `learning_sample.v1` and `decision_sample.v1` samples
+8. JSONL dataset manifests with file hashes and contract metadata
+9. factor outcome reconciliation in model-ready trade samples
+10. dataset readiness audit endpoint
+11. LLM-ready context cards in exported samples
+12. manifest-embedded readiness for exported snapshots
+13. offline snapshot validator endpoint
+14. safe baseline `ModelAdapter` implementation
+15. offline statistical baseline trainer
+16. offline model promotion gate
+17. shadow-validation candidate queue
+18. offline shadow-validation runner
+19. canary pre-review for shadow-passed models
+20. advisory-only model inference contract
+21. controlled advisory canary trial runner
+22. end-to-end model learning pipeline
 
 Still pending:
 
-1. concrete `ModelAdapter` implementation
-2. `FeatureProvider` implementation
-3. offline dataset builder
-4. artifact registry and model promotion flow
+1. real demo-account validation and any manual production enablement policy for `canary_passed` trained statistical models
 
 ### 17.3 Not yet implemented
 

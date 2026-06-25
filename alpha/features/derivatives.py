@@ -3,7 +3,7 @@
 在每个已有因子值 + OHLCV 原始数据上施加数学变换，
 自动膨胀候选特征池到 200+。
 
-设计文档: docs/UPGRADE_BLUEPRINT.md §3.1
+设计文档: docs/architecture.md
 """
 from __future__ import annotations
 

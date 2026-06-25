@@ -3,7 +3,7 @@
 核心: Newey-West HAC Sharpe 驱动权重调整, 带锚点回归。
 因子退役使用 CausalCheck + DSR 多重检验 + 健康分三重门控。
 
-设计文档: docs/FACTOR_TAKEOVER_V4.md §9
+设计文档: docs/architecture.md
 """
 
 import json

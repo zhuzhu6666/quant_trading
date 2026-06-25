@@ -3,7 +3,7 @@
 将 200+ 衍生特征压缩到 10-20 维正交特征，
 输出注册为因子 pca_1, pca_2, ..., pca_n。
 
-设计文档: docs/UPGRADE_BLUEPRINT.md §3.2
+设计文档: docs/architecture.md
 
 §12 过拟合警告: PCA 优先于 KPCA/AE。在 20K bar 上 KPCA 的 rbf kernel
 极度过拟合; 仅当 bar 积累到 100K+ 时考虑。

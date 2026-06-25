@@ -1,48 +1,51 @@
 # Quant Trading System
 
-量化交易框架 — XAUUSD 黄金交易，数据→因子→策略→风控→执行全链路闭环。
+XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4: 因子引擎、执行闸门、cTrader demo、决策账本、规则驱动学习和模型数据管道已经合并为一条可审计闭环。
 
-## 架构
+## Current Entry Points
 
+- Backend API: `python -m backend`
+- Frontend: open `miniprogram_v2` in WeChat DevTools
+- Current docs: [docs/README.md](docs/README.md)
+- Current status and TODO: [TODO.md](TODO.md)
+- Architecture: [docs/architecture.md](docs/architecture.md)
+- Startup guide: [docs/startup.md](docs/startup.md)
+
+## Architecture
+
+```text
+Market data
+  -> StreamingFactorEngine
+  -> SignalNormalizer
+  -> PortfolioCompositor
+  -> ExecutionGate / risk gate
+  -> cTrader demo execution
+  -> DecisionLedger / lifecycle events
+  -> Trade review / experience memory
+  -> learning dataset / model pipeline
 ```
-main.py (CLI 入口)
-├── cli/backtest.py   — 回测模式, backtrader 参数扫描
-├── cli/paper.py      — 模拟盘, 历史 bar 回放 + 模拟撮合
-├── cli/live.py       — 实盘, cTrader Open API (开发中)
-│
-├── core/             — EventBus / State / Clock / AppContext
-├── data/             — DuckDB 存储 + cTrader 实时拉取
-├── alpha/            — 因子引擎 (22+ 因子 + GP 发现 + 健康评估)
-├── strategy/         — MAB Thompson Sampling 路由 + 仓位管理
-├── execution/        — OMS 状态机 + 撮合 + 算法执行 (TWAP/VWAP/POV/IS)
-├── risk/             — 四道防线 (前置检查→熔断→VaR→Kelly)
-├── backend/          — FastAPI REST API + WebSocket
-├── monitor/          — metrics / alerter / structured logging
-├── config/           — YAML + RuntimeConfig 热更新
-├── tests/            — pytest 测试集
-└── scripts/          — 离线分析脚本
-```
 
-## 快速开始
+The browser Web Console and MT5-era documents are no longer maintained. The current frontend is `miniprogram_v2`.
+
+## Quick Start
 
 ```bash
 pip install -r requirements.txt
-python main.py --mode backtest --timeframe M15
-python main.py --mode paper --timeframe M15 --use-router
-python -m backend          # 启动 API (端口 8000)
+python -m backend
 ```
 
-## 测试
+Optional CLI flows:
 
 ```bash
-pip install pytest
-python -m pytest tests/ -v
+python main.py --mode backtest --timeframe M15
+python main.py --mode paper --timeframe M15 --use-router
 ```
 
-## 配置
+## Tests
 
-核心: `config/settings.yaml`。凭证通过 `.env` (已在 .gitignore 排除)。
+```bash
+python -m pytest tests\research\test_rule_learning_pipeline.py tests\research\test_model_registry.py -q
+python -m pytest tests\research tests\alpha\test_portfolio_compositor.py tests\test_live_service_lifecycle.py tests\test_evolution_closure_fixes.py tests\deployment\test_deployment.py tests\test_backend_jobs_manager.py tests\test_backend_jobs_state.py -q
+```
 
-## 前端
-
-Web 面板已移除，通过微信小程序接入后端 API。
+Full `tests` can be slower on Windows; prefer targeted suites for learning/live changes.

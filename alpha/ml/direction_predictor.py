@@ -5,7 +5,7 @@
        → PurgedWalkForward 验证 → 若 OOS acc > 0.51 则注册为因子
   预测: factor_registry 调用 predict(df) → 返回 [-1, +1] 信号
 
-设计文档: docs/UPGRADE_BLUEPRINT.md §2.1
+设计文档: docs/architecture.md
 """
 from __future__ import annotations
 

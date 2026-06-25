@@ -2,7 +2,7 @@
 scripts/refresh_external_data.py — 外部数据自动刷新（替代手动脚本）
 
 自动检测各外部数据源的时效性, 按频率自动拉取更新。
-可被 start-all.py 生命周期调用, 也可独立跑。
+可被后端启动流程、计划任务或手动命令调用。
 
 用法:
     python scripts/refresh_external_data.py              # 检查所有过期数据并更新

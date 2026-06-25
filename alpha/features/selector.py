@@ -8,7 +8,7 @@
 
 输出: selected_features: list[str]
 
-设计文档: docs/UPGRADE_BLUEPRINT.md §3.4
+设计文档: docs/architecture.md
 """
 from __future__ import annotations
 

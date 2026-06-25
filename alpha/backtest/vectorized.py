@@ -5,7 +5,7 @@
 
 输出完整的 equity_curve + 交易明细 + 统计指标。
 
-设计文档: docs/UPGRADE_BLUEPRINT.md §1.1
+设计文档: docs/architecture.md
 """
 from __future__ import annotations
 
