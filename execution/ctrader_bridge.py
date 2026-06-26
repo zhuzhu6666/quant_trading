@@ -14,14 +14,17 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 # Phase 4: 统一接口
+from backend.core.db import DUCKDB_L2, connect_duckdb
 from execution.base import BaseBrokerBridge, OrderResult, PositionInfo, AccountInfo
 from execution.ctrader_ssl_patch import _patch_ctrader_ssl_endpoint
 
@@ -129,6 +132,8 @@ class CTraderBridge(BaseBrokerBridge):
                  rate_limit_per_sec: int = 5,
                  request_timeout_sec: float = 10.0,
                  send_orders: bool = False,
+                 proxy_url: str = "",
+                 proxy_rdns: bool = True,
                  forced_symbol_id: int | None = None):
         if not HAS_CTRADER:
             raise ImportError("ctrader-open-api 未装; pip install ctrader-open-api")
@@ -142,6 +147,8 @@ class CTraderBridge(BaseBrokerBridge):
         self.rate_limit_per_sec = rate_limit_per_sec
         self.request_timeout_sec = request_timeout_sec
         self.send_orders = send_orders  # 安全闸: False 时只打 log 不真发
+        self.proxy_url = str(proxy_url or "").strip()
+        self.proxy_rdns = bool(proxy_rdns)
 
         self._client: "Client | None" = None
         self._reactor = None
@@ -149,8 +156,6 @@ class CTraderBridge(BaseBrokerBridge):
         self._connected_lock = threading.Lock()
         self._app_authed = False
         self._account_authed = False
-        self._spot_subscribed = False
-        self._depth_subscribed = False
         self._symbol_id: int | None = None
         self._forced_symbol_id = forced_symbol_id  # ProtoOASymbol 无 name, 需外部指定 ID
         self._server_version: str = "v0"  # ★ VersionReq 拿, 给后续 Req clientMsgId 用
@@ -176,11 +181,68 @@ class CTraderBridge(BaseBrokerBridge):
         # ── 持久 reactor 线程 (auth 后不停, 保持连接活跃) ──
         self._reactor_started = False
         self._reactor_thread: threading.Thread | None = None
+        self._connect_state_lock = threading.Lock()
+        self._connect_inflight = False
+        self._proxy_patched = False
+        self._connect_attempt_id = 0
+        self._connect_timeout_call = None
+        self._positions_cache: dict[int, PositionInfo] = {}
+        self._positions_cache_lock = threading.Lock()
+        self._account_cache = AccountInfo()
+        self._account_cache_lock = threading.Lock()
+        self._event_listeners: list[Callable[[str, dict[str, Any]], None]] = []
+        self._event_listeners_lock = threading.Lock()
+        self._last_reconcile_at: float = 0.0
+        self._depth_log_last_ts: float = 0.0
+        self._depth_log_accum_new: int = 0
+        self._depth_log_accum_deleted: int = 0
 
     def has_token(self) -> bool:
         """检查必要凭证是否已设置 (client_id + client_secret + access_token).
         用于 live_service 的 pre-flight 检查, 不做网络调用."""
         return bool(self.client_id and self.client_secret and self.access_token)
+
+    def _apply_proxy_socket_patch(self) -> None:
+        """Optionally route cTrader sockets through a configured proxy."""
+        if not self.proxy_url or self._proxy_patched:
+            return
+        try:
+            import socks  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "proxy configured but PySocks is not installed; run `pip install PySocks`"
+            ) from e
+
+        parsed = urlparse(self.proxy_url)
+        scheme = (parsed.scheme or "").lower()
+        host = parsed.hostname or ""
+        port = int(parsed.port or 0)
+        if not host or port <= 0:
+            raise RuntimeError(f"invalid CTRADER proxy URL: {self.proxy_url!r}")
+        proxy_type_map = {
+            "socks5": socks.SOCKS5,
+            "socks5h": socks.SOCKS5,
+            "socks4": socks.SOCKS4,
+            "http": socks.HTTP,
+            "https": socks.HTTP,
+        }
+        proxy_type = proxy_type_map.get(scheme)
+        if proxy_type is None:
+            raise RuntimeError(
+                f"unsupported CTRADER proxy scheme {scheme!r}; use socks5:// or http://"
+            )
+        socks.set_default_proxy(
+            proxy_type,
+            host,
+            port,
+            rdns=self.proxy_rdns,
+            username=parsed.username,
+            password=parsed.password,
+        )
+        if socket.socket is not socks.socksocket:
+            socket.socket = socks.socksocket
+        self._proxy_patched = True
+        logger.info("cTrader proxy enabled via %s://%s:%s", scheme, host, port)
 
     def _ensure_reactor(self):
         """确保 Twisted reactor 在后台 daemon 线程运行。幂等。
@@ -221,7 +283,10 @@ class CTraderBridge(BaseBrokerBridge):
         if client is None:
             return
         try:
-            client.stopService()
+            if self._reactor is not None and self._reactor_thread is not None and threading.current_thread() != self._reactor_thread:
+                self._reactor.callFromThread(client.stopService)
+            else:
+                client.stopService()
         except Exception:
             pass
 
@@ -231,176 +296,237 @@ class CTraderBridge(BaseBrokerBridge):
         """连 broker + App auth + Account auth + Symbol resolve。
         首次调用启动持久 reactor 线程 (auth 后不停, 保持 TCP 长连接);
         后续调用复用已运行的 reactor, 只做 auth 链。"""
-        if self._should_backoff():
-            if self._should_log_error("cTrader connect backoff active"):
-                logger.warning("cTrader connect skipped: backoff active")
-            return False
-
-        with self._connected_lock:
-            if (self._connected and self._app_authed
-                    and self._account_authed and self._symbol_id is not None):
+        with self._connect_state_lock:
+            if self.is_connected:
                 logger.info("Already connected")
                 return True
+            if self._connect_inflight:
+                logger.debug("cTrader connect already in progress")
+                return False
+            if self._should_backoff():
+                logger.info(
+                    "cTrader connect backoff active (retry in %.1fs)",
+                    self.connect_backoff_seconds(),
+                )
+                return False
+            self._connect_inflight = True
+            self._connect_attempt_id += 1
+            attempt_id = self._connect_attempt_id
 
-        # TLS SNI patch (reactor 启动前)
-        _patch_ctrader_ssl_endpoint()
-        self._ensure_reactor()
+        try:
+            self._apply_proxy_socket_patch()
+            # TLS SNI patch (reactor 启动前)
+            _patch_ctrader_ssl_endpoint()
+            self._ensure_reactor()
 
-        # 结果通过 Event 传递
-        self._conn_ready = threading.Event()
-        self._auth_ok = False
-        self._conn_ok = False
+            # 结果通过 Event 传递
+            self._conn_ready = threading.Event()
+            self._auth_ok = False
+            self._conn_ok = False
 
-        def _do_connect():
-            """在 reactor 线程内: 创建 Client → 等连接 → auth"""
-            nonlocal self
-            try:
-                if self._client:
-                    self._teardown_client()
-                client = Client(self.host, self.port, TcpProtocol)
-                self._client = client
-            except Exception as e:
-                logger.error(f"Client create failed: {e}")
-                self._record_failure()
-                self._conn_ready.set()
-                return
-
-            def _on_conn(c):
-                client = c or self._client
-                if client is None:
-                    raise RuntimeError("cTrader connected callback missing client")
-                logger.info("cTrader TCP+TLS connected, starting auth")
-                self._conn_ok = True
-                from twisted.internet import defer
-                import uuid
-                from ctrader_open_api import Protobuf
-
-                def _unwrap(resp):
-                    return Protobuf.extract(resp)
-
-                def _step_app(_dummy=None):
-                    req = TradeMsg.ProtoOAApplicationAuthReq()
-                    req.clientId = self.client_id
-                    req.clientSecret = self.client_secret
-                    d = client.send(req, clientMsgId=str(uuid.uuid4()),
-                                          responseTimeoutInSeconds=self.request_timeout_sec)
-                    d.addCallback(_unwrap)
-                    def _check(resp):
-                        if type(resp).__name__ == "ProtoOAErrorRes":
-                            raise RuntimeError(f"App auth rejected: code={resp.errorCode} {resp.description!r}")
-                        self._app_authed = True
-                        logger.info(f"App auth OK (clientId={self.client_id})")
-                    d.addCallback(_check)
-                    return d
-
-                def _step_account(_dummy):
-                    rl = TradeMsg.ProtoOAGetAccountListByAccessTokenReq()
-                    rl.accessToken = self.access_token
-                    d = client.send(rl, clientMsgId=str(uuid.uuid4()),
-                                          responseTimeoutInSeconds=self.request_timeout_sec)
-                    d.addCallback(_unwrap)
-                    def _check(resp):
-                        if type(resp).__name__ == "ProtoOAErrorRes":
-                            raise RuntimeError(f"Account list rejected: code={resp.errorCode}")
-                        accts = [a.ctidTraderAccountId for a in resp.ctidTraderAccount]
-                        logger.info(f"accessToken 绑定账户: {accts}")
-                        if not accts:
-                            raise RuntimeError("accessToken 没绑任何 ctid 账户")
-                        if self.account_id not in accts:
-                            raise RuntimeError(f"account_id={self.account_id} 不在列表 {accts}")
-                        r2 = TradeMsg.ProtoOAAccountAuthReq()
-                        r2.ctidTraderAccountId = self.account_id
-                        r2.accessToken = self.access_token
-                        d2 = client.send(r2, clientMsgId=str(uuid.uuid4()),
-                                               responseTimeoutInSeconds=self.request_timeout_sec)
-                        d2.addCallback(_unwrap)
-                        def _check2(resp2):
-                            if type(resp2).__name__ == "ProtoOAErrorRes":
-                                raise RuntimeError(f"Account auth rejected: code={resp2.errorCode}")
-                            self._account_authed = True
-                            logger.info(f"Account auth OK (account={self.account_id})")
-                        d2.addCallback(_check2)
-                        return d2
-                    d.addCallback(_check)
-                    return d
-
-                def _step_symbol(_dummy):
-                    req = TradeMsg.ProtoOASymbolsListReq()
-                    req.ctidTraderAccountId = self.account_id
-                    d = client.send(req, clientMsgId=str(uuid.uuid4()),
-                                          responseTimeoutInSeconds=self.request_timeout_sec)
-                    d.addCallback(_unwrap)
-                    def _check(resp):
-                        if type(resp).__name__ == "ProtoOAErrorRes":
-                            raise RuntimeError(f"Symbol list rejected: code={resp.errorCode}")
-                        for s in resp.symbol:
-                            if s.symbolName == self.symbol:
-                                self._symbol_id = s.symbolId
-                                logger.info(f"Symbol {self.symbol} id={self._symbol_id}")
-                                return
-                        raise RuntimeError(f"Symbol {self.symbol} not found in list")
-                    d.addCallback(_check)
-                    return d
-
-                def _on_done(_):
-                    self._auth_ok = True
-                    self._record_success()
-                    self._start_heartbeat()
-                    logger.info("cTrader fully authenticated")
-                    # ★ 在 reactor 线程内设置 _connected, 避免竞态
-                    with self._connected_lock:
-                        self._connected = True
+            def _do_connect():
+                """在 reactor 线程内: 创建 Client → 等连接 → auth"""
+                nonlocal self
+                try:
+                    if self._client:
+                        self._teardown_client()
+                    client = Client(self.host, self.port, TcpProtocol)
+                    self._client = client
+                except Exception as e:
+                    logger.error(f"Client create failed: {e}")
                     self._conn_ready.set()
-                    # ★ 不再 stop reactor — 保持 TCP 长连接活跃
+                    return
 
-                def _on_error(f):
-                    logger.error(f"cTrader auth failed: {f.getErrorMessage()}")
-                    self._record_failure()
-                    self._teardown_client()
-                    self._mark_disconnected()
+                def _is_stale() -> bool:
+                    return attempt_id != self._connect_attempt_id or self._client is not client
+
+                def _finish_connect() -> None:
+                    timeout_call = self._connect_timeout_call
+                    self._connect_timeout_call = None
+                    try:
+                        if timeout_call is not None and timeout_call.active():
+                            timeout_call.cancel()
+                    except Exception:
+                        pass
+
+                def _on_conn(c):
+                    if _is_stale():
+                        logger.debug("skip stale cTrader connect callback attempt=%s", attempt_id)
+                        try:
+                            client.stopService()
+                        except Exception:
+                            pass
+                        return
+                    logger.info("cTrader TCP+TLS connected, starting auth")
+                    self._conn_ok = True
+                    from twisted.internet import defer
+                    import uuid
+                    from ctrader_open_api import Protobuf
+
+                    def _unwrap(resp):
+                        return Protobuf.extract(resp)
+
+                    def _step_app(_dummy=None):
+                        if _is_stale():
+                            raise RuntimeError("stale connect attempt during app auth")
+                        req = TradeMsg.ProtoOAApplicationAuthReq()
+                        req.clientId = self.client_id
+                        req.clientSecret = self.client_secret
+                        d = client.send(
+                            req,
+                            clientMsgId=str(uuid.uuid4()),
+                            responseTimeoutInSeconds=self.request_timeout_sec,
+                        )
+                        d.addCallback(_unwrap)
+                        def _check(resp):
+                            if type(resp).__name__ == "ProtoOAErrorRes":
+                                raise RuntimeError(f"App auth rejected: code={resp.errorCode} {resp.description!r}")
+                            self._app_authed = True
+                            logger.info(f"App auth OK (clientId={self.client_id})")
+                        d.addCallback(_check)
+                        return d
+
+                    def _step_account(_dummy):
+                        if _is_stale():
+                            raise RuntimeError("stale connect attempt during account list")
+                        rl = TradeMsg.ProtoOAGetAccountListByAccessTokenReq()
+                        rl.accessToken = self.access_token
+                        d = client.send(
+                            rl,
+                            clientMsgId=str(uuid.uuid4()),
+                            responseTimeoutInSeconds=self.request_timeout_sec,
+                        )
+                        d.addCallback(_unwrap)
+                        def _check(resp):
+                            if type(resp).__name__ == "ProtoOAErrorRes":
+                                raise RuntimeError(f"Account list rejected: code={resp.errorCode}")
+                            accts = [a.ctidTraderAccountId for a in resp.ctidTraderAccount]
+                            logger.info(f"accessToken 绑定账户: {accts}")
+                            if not accts:
+                                raise RuntimeError("accessToken 没绑任何 ctid 账户")
+                            if self.account_id not in accts:
+                                raise RuntimeError(f"account_id={self.account_id} 不在列表 {accts}")
+                            r2 = TradeMsg.ProtoOAAccountAuthReq()
+                            r2.ctidTraderAccountId = self.account_id
+                            r2.accessToken = self.access_token
+                            d2 = client.send(
+                                r2,
+                                clientMsgId=str(uuid.uuid4()),
+                                responseTimeoutInSeconds=self.request_timeout_sec,
+                            )
+                            d2.addCallback(_unwrap)
+                            def _check2(resp2):
+                                if type(resp2).__name__ == "ProtoOAErrorRes":
+                                    raise RuntimeError(f"Account auth rejected: code={resp2.errorCode}")
+                                self._account_authed = True
+                                logger.info(f"Account auth OK (account={self.account_id})")
+                            d2.addCallback(_check2)
+                            return d2
+                        d.addCallback(_check)
+                        return d
+
+                    def _step_symbol(_dummy):
+                        if _is_stale():
+                            raise RuntimeError("stale connect attempt during symbol list")
+                        req = TradeMsg.ProtoOASymbolsListReq()
+                        req.ctidTraderAccountId = self.account_id
+                        d = client.send(
+                            req,
+                            clientMsgId=str(uuid.uuid4()),
+                            responseTimeoutInSeconds=self.request_timeout_sec,
+                        )
+                        d.addCallback(_unwrap)
+                        def _check(resp):
+                            if type(resp).__name__ == "ProtoOAErrorRes":
+                                raise RuntimeError(f"Symbol list rejected: code={resp.errorCode}")
+                            for s in resp.symbol:
+                                if s.symbolName == self.symbol:
+                                    self._symbol_id = s.symbolId
+                                    logger.info(f"Symbol {self.symbol} id={self._symbol_id}")
+                                    return
+                            raise RuntimeError(f"Symbol {self.symbol} not found in list")
+                        d.addCallback(_check)
+                        return d
+
+                    def _on_done(_):
+                        if _is_stale():
+                            logger.debug("ignore stale cTrader auth success attempt=%s", attempt_id)
+                            return
+                        _finish_connect()
+                        self._auth_ok = True
+                        self._record_success()
+                        self._start_heartbeat()
+                        logger.info("cTrader fully authenticated")
+                        # ★ 在 reactor 线程内设置 _connected, 避免竞态
+                        with self._connected_lock:
+                            self._connected = True
+                        self._conn_ready.set()
+                        # ★ 不再 stop reactor — 保持 TCP 长连接活跃
+
+                    def _on_error(f):
+                        if _is_stale():
+                            logger.debug("ignore stale cTrader auth error attempt=%s", attempt_id)
+                            return
+                        _finish_connect()
+                        logger.error(f"cTrader auth failed: {f.getErrorMessage()}")
+                        self._teardown_client()
+                        self._mark_disconnected()
+                        self._conn_ready.set()
+                        # Keep the process-level reactor, but tear down the failed
+                        # client instance so the SDK cannot spin in reconnect loops.
+
+                    chain = defer.succeed(None)
+                    chain.addCallback(_step_app)
+                    chain.addCallback(_step_account)
+                    chain.addCallback(_step_symbol)
+                    chain.addCallback(_on_done)
+                    chain.addErrback(_on_error)
+
+                client.setConnectedCallback(_on_conn)
+                client.setDisconnectedCallback(lambda c, r: self._on_disconnected(c, r))
+                client.setMessageReceivedCallback(lambda c, m: self._on_message(c, m))
+                try:
+                    client.startService()
+                except Exception as e:
+                    logger.warning(f"startService: {e}")
+                    _finish_connect()
                     self._conn_ready.set()
-                    # Keep the process-level reactor, but tear down the failed
-                    # client instance so the SDK cannot spin in reconnect loops.
 
-                chain = defer.succeed(None)
-                chain.addCallback(_step_app)
-                chain.addCallback(_step_account)
-                chain.addCallback(_step_symbol)
-                chain.addCallback(_on_done)
-                chain.addErrback(_on_error)
+            # 超时兜底
+            timeout = max(self.request_timeout_sec * 4 + 5, 30.0)
 
-            self._client.setConnectedCallback(_on_conn)
-            self._client.setDisconnectedCallback(lambda c, r: self._on_disconnected(c, r))
-            self._client.setMessageReceivedCallback(lambda c, m: self._on_message(c, m))
-            try:
-                self._client.startService()
-            except Exception as e:
-                logger.warning(f"startService: {e}")
-                self._record_failure()
+            def _on_connect_timeout():
+                if self._conn_ready.is_set():
+                    return
+                logger.error("cTrader connect/auth timeout after %.1fs", timeout)
+                self._teardown_client()
+                self._mark_disconnected()
                 self._conn_ready.set()
 
-        # 超时兜底
-        timeout = self.request_timeout_sec + 10
-        self._reactor.callLater(timeout,
-            lambda: (self._conn_ready.set() if not self._conn_ready.is_set() else None))
+            self._connect_timeout_call = self._reactor.callLater(timeout, _on_connect_timeout)
 
-        # 在已运行的 reactor 线程内执行 _do_connect
-        self._reactor.callFromThread(_do_connect)
+            # 在已运行的 reactor 线程内执行 _do_connect
+            self._reactor.callFromThread(_do_connect)
 
-        # 等 auth 完成 (reactor 线程会 set _conn_ready)
-        if not self._conn_ready.wait(timeout=timeout + 5):
-            logger.error(f"Connect/auth timeout after {timeout}s")
-            self._record_failure()
-            self._mark_disconnected()
-            return False
+            # 等 auth 完成 (reactor 线程会 set _conn_ready)
+            if not self._conn_ready.wait(timeout=timeout + 5):
+                logger.error(f"Connect/auth timeout after {timeout}s")
+                self._teardown_client()
+                self._mark_disconnected()
+                self._record_failure()
+                return False
 
-        if not self._conn_ok or not self._auth_ok:
-            logger.error(f"Connect/auth failed: conn={self._conn_ok} auth={self._auth_ok}")
-            self._record_failure()
-            self._mark_disconnected()
-            return False
+            if not self._conn_ok or not self._auth_ok:
+                logger.error(f"Connect/auth failed: conn={self._conn_ok} auth={self._auth_ok}")
+                self._teardown_client()
+                self._mark_disconnected()
+                self._record_failure()
+                return False
 
-        return True
+            return True
+        finally:
+            with self._connect_state_lock:
+                self._connect_inflight = False
 
     def _version_handshake(self) -> bool:
         """保留方法, 当前未使用 (官方 sample 不发 VersionReq)"""
@@ -410,10 +536,12 @@ class CTraderBridge(BaseBrokerBridge):
         logger.debug("cTrader Twisted: connected callback fired")
 
     def _on_disconnected(self, client, reason):
+        if client is not None and self._client is not None and client is not self._client:
+            logger.debug("ignore stale cTrader disconnect callback")
+            return
         logger.warning(f"cTrader Twisted: disconnected ({reason})")
         self._stop_heartbeat()
-        if client is None or self._client is client:
-            self._client = None
+        self._client = None
         self._mark_disconnected()
 
     # ── 熔断 / 退避 ─────────────────────────────────────
@@ -426,8 +554,6 @@ class CTraderBridge(BaseBrokerBridge):
             self._connected = False
         self._app_authed = False
         self._account_authed = False
-        self._spot_subscribed = False
-        self._depth_subscribed = False
 
     def _should_backoff(self) -> bool:
         """指数退避检查: 连续失败越久, 跳过时间越长.
@@ -453,6 +579,15 @@ class CTraderBridge(BaseBrokerBridge):
         with self._backoff_lock:
             self._fail_count = 0
 
+    def connect_backoff_seconds(self) -> float:
+        """Return remaining connect backoff seconds."""
+        with self._backoff_lock:
+            if self._fail_count == 0:
+                return 0.0
+            backoff = min(300, 1 << min(self._fail_count, 8))
+            remaining = backoff - (time.time() - self._last_fail_time)
+            return max(0.0, remaining)
+
     def _should_log_error(self, msg: str) -> bool:
         """相同错误聚合: 同一消息 60 秒内只打一次,
         避免超时风暴灌满磁盘."""
@@ -462,6 +597,10 @@ class CTraderBridge(BaseBrokerBridge):
         self._last_error_msg = msg
         self._last_error_time = now
         return True
+
+    def _is_soft_timeout_error(self, err: Exception) -> bool:
+        text = f"{type(err).__name__}: {err}"
+        return "TimeoutError" in text or "Deferred" in text and "10.0" in text
 
     # ── 心跳 (每 10s, 防服务端空闲断开) ──────────────────────
 
@@ -508,8 +647,159 @@ class CTraderBridge(BaseBrokerBridge):
             payload = Protobuf.extract(message)
             self._handle_spot_event(payload)
             self._handle_depth_event(payload)
+            self._handle_execution_event(payload)
+            self._handle_trader_update_event(payload)
         except Exception as e:
             logger.warning(f"_on_message parse failed: {e}")
+
+    def add_event_listener(self, listener: Callable[[str, dict[str, Any]], None]) -> None:
+        with self._event_listeners_lock:
+            if listener not in self._event_listeners:
+                self._event_listeners.append(listener)
+
+    def _emit_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        with self._event_listeners_lock:
+            listeners = list(self._event_listeners)
+        for listener in listeners:
+            try:
+                listener(event_type, payload)
+            except Exception as exc:
+                logger.debug("cTrader event listener failed (%s): %s", event_type, exc)
+
+    def _copy_account_cache(self) -> AccountInfo:
+        with self._account_cache_lock:
+            acct = self._account_cache
+            return AccountInfo(
+                balance=float(acct.balance or 0.0),
+                equity=float(acct.equity or 0.0),
+                margin=float(acct.margin or 0.0),
+                margin_free=float(acct.margin_free or 0.0),
+                margin_level=float(acct.margin_level or 0.0),
+                leverage=float(acct.leverage or 0.0),
+                currency=str(acct.currency or "USD"),
+                account_id=int(acct.account_id or 0),
+                name=str(acct.name or ""),
+            )
+
+    def _set_account_cache(self, account: AccountInfo, *, emit: bool = True, reason: str = "") -> AccountInfo:
+        cached = AccountInfo(
+            balance=float(account.balance or 0.0),
+            equity=float(account.equity or 0.0),
+            margin=float(account.margin or 0.0),
+            margin_free=float(account.margin_free or 0.0),
+            margin_level=float(account.margin_level or 0.0),
+            leverage=float(account.leverage or 0.0),
+            currency=str(account.currency or "USD"),
+            account_id=int(account.account_id or 0),
+            name=str(account.name or ""),
+        )
+        with self._account_cache_lock:
+            self._account_cache = cached
+        if emit:
+            self._emit_event("account", {"account": cached, "reason": reason or "cache_update"})
+        return cached
+
+    def _copy_position(self, pos: PositionInfo) -> PositionInfo:
+        return PositionInfo(
+            position_id=int(pos.position_id or 0),
+            symbol_id=int(pos.symbol_id or 0),
+            symbol=str(pos.symbol or ""),
+            direction=int(pos.direction or 0),
+            volume=float(pos.volume or 0.0),
+            entry_price=float(pos.entry_price or 0.0),
+            current_price=float(pos.current_price or 0.0),
+            sl=float(pos.sl or 0.0),
+            tp=float(pos.tp or 0.0),
+            pnl=float(pos.pnl or 0.0),
+            commission=float(pos.commission or 0.0),
+            swap=float(pos.swap or 0.0),
+            open_timestamp=float(pos.open_timestamp or 0.0),
+        )
+
+    def _positions_snapshot(self) -> list[PositionInfo]:
+        with self._positions_cache_lock:
+            return [self._copy_position(pos) for pos in self._positions_cache.values()]
+
+    def _set_positions_cache(self, positions: list[PositionInfo], *, emit: bool = True, reason: str = "") -> list[PositionInfo]:
+        snapshot = [self._copy_position(pos) for pos in positions]
+        with self._positions_cache_lock:
+            self._positions_cache = {int(pos.position_id): self._copy_position(pos) for pos in snapshot if int(pos.position_id or 0) > 0}
+        if emit:
+            self._emit_event("positions", {"positions": self._positions_snapshot(), "reason": reason or "cache_update"})
+        return snapshot
+
+    def _merge_position_cache(self, position: PositionInfo, *, emit: bool = True, reason: str = "") -> PositionInfo:
+        copied = self._copy_position(position)
+        with self._positions_cache_lock:
+            self._positions_cache[int(copied.position_id)] = self._copy_position(copied)
+        if emit:
+            self._emit_event("positions", {"positions": self._positions_snapshot(), "reason": reason or "position_update"})
+        return copied
+
+    def _remove_position_cache(self, position_id: int, *, emit: bool = True, reason: str = "") -> None:
+        with self._positions_cache_lock:
+            self._positions_cache.pop(int(position_id or 0), None)
+        if emit:
+            self._emit_event("positions", {"positions": self._positions_snapshot(), "reason": reason or "position_remove"})
+
+    def _recompute_account_equity_from_cache(self, *, emit: bool = True, reason: str = "") -> AccountInfo:
+        account = self._copy_account_cache()
+        positions = self._positions_snapshot()
+        unrealized = sum(float(pos.pnl or 0.0) for pos in positions)
+        account.equity = float(account.balance or 0.0) + unrealized
+        return self._set_account_cache(account, emit=emit, reason=reason or "equity_recompute")
+
+    def _account_from_trader(self, trader: Any, *, unrealized: float | None = None) -> AccountInfo:
+        if trader is None:
+            return self._copy_account_cache()
+        balance = float(getattr(trader, "balance", 0.0) or 0.0) / 100.0
+        login = int(getattr(trader, "traderLogin", 0) or 0)
+        self._trader_login = login or self._trader_login
+        deposit_asset_id = int(getattr(trader, "depositAssetId", 0) or 0)
+        currency = _ASSET_ID_TO_CODE.get(deposit_asset_id, f"ASSET_{deposit_asset_id}" if deposit_asset_id else "USD")
+        leverage_in_cents = float(getattr(trader, "leverageInCents", 0) or 0)
+        leverage = leverage_in_cents / 100.0 if leverage_in_cents > 0 else 0.0
+        if unrealized is None:
+            unrealized = sum(float(pos.pnl or 0.0) for pos in self._positions_snapshot())
+        return AccountInfo(
+            balance=balance,
+            equity=balance + float(unrealized or 0.0),
+            margin=0.0,
+            margin_free=0.0,
+            leverage=leverage,
+            currency=currency,
+            account_id=login,
+            name=f"cTrader-{login}" if login else "",
+        )
+
+    def _position_from_proto(self, proto_position: Any) -> PositionInfo | None:
+        if proto_position is None:
+            return None
+        td = getattr(proto_position, "tradeData", None)
+        if td is None:
+            return None
+        symbol_id = int(getattr(td, "symbolId", 0) or 0)
+        if symbol_id <= 0:
+            return None
+        direction = 1 if getattr(td, "tradeSide", 0) == TRADE_SIDE["BUY"] else -1
+        current_price = float(getattr(proto_position, "currentPrice", 0.0) or 0.0)
+        if current_price <= 0:
+            current_price = float(getattr(proto_position, "price", 0.0) or 0.0)
+        return PositionInfo(
+            position_id=int(getattr(proto_position, "positionId", 0) or 0),
+            symbol_id=symbol_id,
+            symbol=self.symbol,
+            direction=direction,
+            volume=float(getattr(td, "volume", 0.0) or 0.0),
+            entry_price=float(getattr(proto_position, "price", 0.0) or 0.0),
+            current_price=current_price,
+            sl=float(getattr(proto_position, "stopLoss", 0.0) or 0.0),
+            tp=float(getattr(proto_position, "takeProfit", 0.0) or 0.0),
+            pnl=float(getattr(proto_position, "netUnrealizedPnL", 0.0) or getattr(proto_position, "grossUnrealizedPnL", 0.0) or 0.0),
+            commission=float(getattr(proto_position, "commission", 0.0) or 0.0) / 100.0,
+            swap=float(getattr(proto_position, "swap", 0.0) or 0.0) / 100.0,
+            open_timestamp=(float(getattr(td, "openTimestamp", 0.0) or 0.0) / 1000.0) if getattr(td, "openTimestamp", 0) else 0.0,
+        )
 
     def _handle_spot_event(self, payload):
         """处理实时报价更新."""
@@ -544,8 +834,53 @@ class CTraderBridge(BaseBrokerBridge):
                     self._spot_price = bid
                 elif ask > 0:
                     self._spot_price = ask
+                spot = self._spot_price
+            if spot and spot > 0:
+                with self._positions_cache_lock:
+                    for pos in self._positions_cache.values():
+                        pos.current_price = spot
+                self._emit_event("spot", {"price": float(spot), "symbol": self.symbol})
         except Exception as e:
             logger.warning(f"spot event parse failed: {e}")
+
+    def _handle_execution_event(self, payload) -> None:
+        try:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAExecutionEvent
+            if not isinstance(payload, ProtoOAExecutionEvent):
+                return
+            position = self._position_from_proto(getattr(payload, "position", None))
+            deal = getattr(payload, "deal", None)
+            reason = str(getattr(payload, "executionType", "") or "execution_event")
+            if position is not None and int(position.position_id or 0) > 0:
+                closed_volume = float(getattr(getattr(deal, "closePositionDetail", None), "closedVolume", 0.0) or 0.0)
+                total_volume = float(position.volume or 0.0)
+                if total_volume > 0 and closed_volume >= total_volume:
+                    self._remove_position_cache(position.position_id, emit=False, reason=reason)
+                else:
+                    self._merge_position_cache(position, emit=False, reason=reason)
+                self._emit_event("positions", {"positions": self._positions_snapshot(), "reason": reason})
+                self._recompute_account_equity_from_cache(emit=True, reason=reason)
+            self._emit_event(
+                "execution",
+                {
+                    "reason": reason,
+                    "position_id": int(getattr(position, "position_id", 0) or 0),
+                    "deal_id": int(getattr(deal, "dealId", 0) or 0),
+                },
+            )
+        except Exception as exc:
+            logger.debug("execution event parse failed: %s", exc)
+
+    def _handle_trader_update_event(self, payload) -> None:
+        try:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOATraderUpdatedEvent
+            if not isinstance(payload, ProtoOATraderUpdatedEvent):
+                return
+            trader = getattr(payload, "trader", None)
+            account = self._account_from_trader(trader)
+            self._set_account_cache(account, emit=True, reason="trader_updated")
+        except Exception as exc:
+            logger.debug("trader updated event parse failed: %s", exc)
 
     def _load_depth_counter(self) -> int:
         """从现有 orderbook_changes 的最大 id 继续递增, 避免主键重复.""" 
@@ -558,7 +893,7 @@ class CTraderBridge(BaseBrokerBridge):
                 "..", "data", "l2.duckdb"
             )
             if os.path.exists(_db_path):
-                con = _duckdb.connect(str(_db_path), read_only=True)
+                con = connect_duckdb(DUCKDB_L2, read_only=True)
                 try:
                     row = con.execute(
                         "SELECT COALESCE(MAX(id), 0) FROM orderbook_changes"
@@ -648,41 +983,50 @@ class CTraderBridge(BaseBrokerBridge):
                             break
                     if not found:
                         self._depth_quotes.append(q)
-            logger.debug(f"depth event: {len(new_quotes)} new, {len(deleted_ids)} deleted, "
-                         f"total={len(self._depth_quotes)}")
+            self._depth_log_accum_new += len(new_quotes)
+            self._depth_log_accum_deleted += len(deleted_ids)
+            now = time.time()
+            if now - self._depth_log_last_ts >= 5.0:
+                logger.info(
+                    "depth events (5s): +%d / -%d, book=%d",
+                    self._depth_log_accum_new,
+                    self._depth_log_accum_deleted,
+                    len(self._depth_quotes),
+                )
+                self._depth_log_last_ts = now
+                self._depth_log_accum_new = 0
+                self._depth_log_accum_deleted = 0
 
             # ── 持久化到 l2.duckdb ──
             try:
-                import duckdb as _duckdb
-                import pandas as _pd
                 with self._l2_db_lock:
                     if self._l2_db is None:
-                        import os
-                        _db_path = os.path.join(
-                            os.path.dirname(os.path.abspath(__file__)),
-                            "..", "data", "l2.duckdb"
-                        )
-                        self._l2_db = _duckdb.connect(str(_db_path))
+                        self._l2_db = connect_duckdb(DUCKDB_L2)
                         self._ensure_l2_schema(self._l2_db)
                     _tdb = self._l2_db
                 now = time.time()
-                # 记录每个变动
+                rows_new = []
                 for q in new_quotes:
                     self._depth_counter += 1
                     side = 'bid' if q.get('bid', 0) > 0 else 'ask'
                     price = q.get('bid', 0) or q.get('ask', 0)
-                    _tdb.execute("""
+                    rows_new.append((self._depth_counter, now, q['id'], side, price, q['size'], now))
+                rows_delete = []
+                for did in deleted_ids:
+                    self._depth_counter += 1
+                    rows_delete.append((self._depth_counter, now, did, now))
+                if rows_new:
+                    _tdb.executemany("""
                         INSERT INTO orderbook_changes
                         (id, symbol, ts, quote_id, side, price, size, change_type, created_at)
                         VALUES (?, 'XAUUSD+', ?, ?, ?, ?, ?, 'new', ?)
-                    """, [self._depth_counter, now, q['id'], side, price, q['size'], now])
-                for did in deleted_ids:
-                    self._depth_counter += 1
-                    _tdb.execute("""
+                    """, rows_new)
+                if rows_delete:
+                    _tdb.executemany("""
                         INSERT INTO orderbook_changes
                         (id, symbol, ts, quote_id, side, price, size, change_type, created_at)
                         VALUES (?, 'XAUUSD+', ?, ?, '', 0, 0, 'delete', ?)
-                    """, [self._depth_counter, now, did, now])
+                    """, rows_delete)
             except Exception as _l2e:
                 logger.warning(f"l2 db write failed: {_l2e}")
         except Exception as e:
@@ -707,7 +1051,6 @@ class CTraderBridge(BaseBrokerBridge):
             req.ctidTraderAccountId = self.account_id
             req.symbolId.append(sid)
             self._send(req, timeout=5.0)
-            self._spot_subscribed = True
             logger.info(f"subscribe_spots OK for symbol_id={sid}")
             return True
         except Exception as e:
@@ -726,7 +1069,6 @@ class CTraderBridge(BaseBrokerBridge):
             req.ctidTraderAccountId = self.account_id
             req.symbolId.append(sid)
             self._send(req, timeout=5.0)
-            self._depth_subscribed = True
             logger.info(f"subscribe_depth OK for symbol_id={sid}")
             return True
         except Exception as e:
@@ -763,6 +1105,11 @@ class CTraderBridge(BaseBrokerBridge):
         with self._connected_lock:
             return (self._connected and self._app_authed
                     and self._account_authed and self._symbol_id is not None)
+
+    @property
+    def is_connecting(self) -> bool:
+        with self._connect_state_lock:
+            return bool(self._connect_inflight)
 
     # ── 内部: App auth / Account auth ──
 
@@ -1297,6 +1644,12 @@ class CTraderBridge(BaseBrokerBridge):
             return False
 
     def account_info(self) -> AccountInfo:
+        cached = self._copy_account_cache()
+        if cached.account_id or cached.balance or cached.equity:
+            return cached
+        return self.refresh_account_info()
+
+    def refresh_account_info(self) -> AccountInfo:
         """
         查账户余额/净值.
 
@@ -1311,46 +1664,34 @@ class CTraderBridge(BaseBrokerBridge):
         if not self.is_connected:
             return AccountInfo()
         if self._should_backoff():
-            return AccountInfo()
+            return self._copy_account_cache()
         try:
             req = TradeMsg.ProtoOATraderReq()
             req.ctidTraderAccountId = self.account_id
             resp = self._send(req, timeout=10.0)
             t = resp.trader
-            balance = t.balance / 100.0  # cTrader balance 存 centi-unit
             # equity = balance + 逐仓 unrealized PnL (centi-unit)
             try:
                 unrealized = self._unrealized_pnl()
             except Exception:
                 unrealized = 0.0
-            equity = balance + unrealized
-            login = t.traderLogin
-            self._trader_login = login  # 保存 traderLogin, 下单时用作 fallback
-            currency = _ASSET_ID_TO_CODE.get(t.depositAssetId, f"ASSET_{t.depositAssetId}")
-            leverage_in_cents = float(getattr(t, 'leverageInCents', 0) or 0)
-            leverage = leverage_in_cents / 100.0 if leverage_in_cents > 0 else 0.0
-            logger.info(
-                f"Trader info: login={login} balance={balance:.2f} "
-                f"depositAssetId={t.depositAssetId} currency={currency} "
-                f"leverage={leverage:.2f} (leverageInCents={leverage_in_cents:.0f}, maxLeverage={getattr(t, 'maxLeverage', 0)})"
+            account = self._account_from_trader(t, unrealized=unrealized)
+            balance = account.balance
+            equity = account.equity
+            logger.debug(
+                f"Trader info: login={account.account_id} balance={balance:.2f} "
+                f"depositAssetId={getattr(t, 'depositAssetId', 0)} currency={account.currency} "
+                f"leverage={account.leverage:.2f} (leverageInCents={float(getattr(t, 'leverageInCents', 0) or 0):.0f}, maxLeverage={getattr(t, 'maxLeverage', 0)})"
             )
             self._record_success()
-            return AccountInfo(
-                balance=balance,
-                equity=equity,
-                margin=0.0,
-                margin_free=0.0,
-                leverage=leverage,
-                currency=currency,
-                account_id=login,
-                name=f"cTrader-{login}",
-            )
+            return self._set_account_cache(account, emit=True, reason="account_info")
         except Exception as e:
-            self._mark_disconnected()
+            if not self._is_soft_timeout_error(e):
+                self._mark_disconnected()
             self._record_failure()
             if self._should_log_error(f"account_info failed: {e}"):
                 logger.error(f"account_info failed: {e}")
-            return AccountInfo()
+            return self._copy_account_cache()
 
     def _unrealized_pnl(self) -> float:
         """查所有持仓的浮动盈亏总和 (美元, 非 centi-unit).
@@ -1376,6 +1717,14 @@ class CTraderBridge(BaseBrokerBridge):
         return total
 
     def get_positions(self, symbol: str = "") -> list[PositionInfo]:
+        cached_positions = self._positions_snapshot()
+        if cached_positions:
+            if symbol and self._symbol_id is not None:
+                return [pos for pos in cached_positions if int(pos.symbol_id or 0) == int(self._symbol_id)]
+            return cached_positions
+        return self.refresh_positions(symbol)
+
+    def refresh_positions(self, symbol: str = "") -> list[PositionInfo]:
         """
         查当前持仓. 用 ProtoOAReconcileReq (增量大).
 
@@ -1385,7 +1734,10 @@ class CTraderBridge(BaseBrokerBridge):
         if not self.is_connected:
             return []
         if self._should_backoff():
-            return []
+            cached_positions = self._positions_snapshot()
+            if symbol and self._symbol_id is not None:
+                return [pos for pos in cached_positions if int(pos.symbol_id or 0) == int(self._symbol_id)]
+            return cached_positions
         try:
             req = TradeMsg.ProtoOAReconcileReq()
             req.ctidTraderAccountId = self.account_id
@@ -1422,14 +1774,23 @@ class CTraderBridge(BaseBrokerBridge):
                     pos.pnl = pnl_map.get(pos.position_id, 0.0)
             except Exception:
                 pass
+            self._last_reconcile_at = time.time()
+            self._set_positions_cache(result, emit=True, reason="reconcile")
+            self._recompute_account_equity_from_cache(emit=True, reason="reconcile")
             self._record_success()
+            if symbol and self._symbol_id is not None:
+                return [pos for pos in result if int(pos.symbol_id or 0) == int(self._symbol_id)]
             return result
         except Exception as e:
-            self._mark_disconnected()
+            if not self._is_soft_timeout_error(e):
+                self._mark_disconnected()
             self._record_failure()
             if self._should_log_error(f"get_positions failed: {e}"):
                 logger.error(f"get_positions failed: {e}")
-            return []
+            cached_positions = self._positions_snapshot()
+            if symbol and self._symbol_id is not None:
+                return [pos for pos in cached_positions if int(pos.symbol_id or 0) == int(self._symbol_id)]
+            return cached_positions
 
     def get_unrealized_pnl(self) -> dict[int, float]:
         """Query unrealized PnL for all open positions via ProtoOAGetPositionUnrealizedPnLReq.

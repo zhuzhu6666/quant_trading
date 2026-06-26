@@ -148,8 +148,8 @@ def main():
     print(f"Inserted {n} rows into cot_gold")
 
     # 验证
-    import sqlite3
-    con = sqlite3.connect("data/ctrader_data.duckdb")
+    from backend.core.db import connect_duckdb
+    con = connect_duckdb("data/ctrader_data.duckdb", read_only=True)
     print(f"cot_gold count: {con.execute('SELECT COUNT(*) FROM cot_gold').fetchone()[0]}")
     print(f"latest 3:")
     for r in con.execute("SELECT report_date, open_interest, mm_long, mm_short, mm_long-mm_short AS mm_net FROM cot_gold ORDER BY report_date DESC LIMIT 3"):
@@ -158,3 +158,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

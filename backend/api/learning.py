@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import sqlite3
+import threading
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -9,6 +12,7 @@ from pydantic import BaseModel
 import re
 
 from backend.core.auth import RequireUser
+from backend.core.db import connect_sqlite
 from backend.jobs import get_job_manager
 from backend.services.factor_cards import FactorCardService
 from backend.services.parameter_templates import ParameterTemplateService
@@ -38,6 +42,51 @@ from risk.policy_service import RiskPolicyService
 router = APIRouter(prefix="/api/learning", tags=["learning"])
 
 _CANDIDATE_ID_RE = re.compile(r"(ptrc_[0-9a-f]{16})")
+_LEARNING_CACHE_TTL_SEC = 30.0
+_LEARNING_CACHE_LOCK = threading.Lock()
+_LEARNING_CACHE: dict[str, tuple[float, Any]] = {}
+_LEARNING_COMPUTE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _learning_cache_get(key: str) -> Any | None:
+    now_ts = time.time()
+    with _LEARNING_CACHE_LOCK:
+        cached = _LEARNING_CACHE.get(key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at <= now_ts:
+            _LEARNING_CACHE.pop(key, None)
+            return None
+        return deepcopy(payload)
+
+
+def _learning_cache_set(key: str, payload: Any, ttl_sec: float = _LEARNING_CACHE_TTL_SEC) -> Any:
+    expires_at = time.time() + max(1.0, float(ttl_sec))
+    cloned = deepcopy(payload)
+    with _LEARNING_CACHE_LOCK:
+        _LEARNING_CACHE[key] = (expires_at, cloned)
+    return deepcopy(cloned)
+
+
+def _learning_cache_invalidate(*prefixes: str) -> None:
+    with _LEARNING_CACHE_LOCK:
+        if not prefixes:
+            _LEARNING_CACHE.clear()
+            return
+        keys = list(_LEARNING_CACHE.keys())
+        for key in keys:
+            if any(key.startswith(prefix) for prefix in prefixes):
+                _LEARNING_CACHE.pop(key, None)
+
+
+def _learning_compute_lock(key: str) -> threading.Lock:
+    with _LEARNING_CACHE_LOCK:
+        lock = _LEARNING_COMPUTE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LEARNING_COMPUTE_LOCKS[key] = lock
+        return lock
 
 
 def _humanize_template_responsibility(value: str) -> str:
@@ -1379,8 +1428,12 @@ def get_suggestions(
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict:
+    cache_key = f"suggestions:{status or '*'}:{int(limit)}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
     gov = RuleEvolutionGovernor()
-    conn = sqlite3.connect(str(ParameterTemplateService().db_path))
+    conn = connect_sqlite(ParameterTemplateService().db_path)
     conn.row_factory = sqlite3.Row
     try:
         items = []
@@ -1399,7 +1452,7 @@ def get_suggestions(
             item["progress"] = progress
             item["parameter_template_display"] = parameter_template_display
             items.append(item)
-        return {"items": items}
+        return _learning_cache_set(cache_key, {"items": items})
     finally:
         conn.close()
 
@@ -1413,6 +1466,15 @@ def review_suggestion(_user: RequireUser, req: ReviewRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
     if not ok:
         raise HTTPException(status_code=404, detail="suggestion not found")
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     return {
         "ok": True,
         "suggestion_id": req.suggestion_id,
@@ -1478,6 +1540,15 @@ def run_governance(_user: RequireUser) -> dict:
     elif (after_summary["approved"] > 0 or auto_actions > 0) and not weight_risk_verdict.get("allowed", False):
         message += f" 权重同步被风控阻断：{weight_risk_verdict.get('reason', 'unknown')}。"
     result_label = f"已处理 {auto_actions} 条" if auto_actions else "没有新动作"
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     return {
         "review_pending": review_result,
         "reconcile_active": reconcile_result,
@@ -1497,53 +1568,50 @@ def run_governance(_user: RequireUser) -> dict:
 def get_learning_summary(_user: RequireUser) -> dict:
     from backend.core.db import STATE_DB, get_state_conn
 
-    template_service = ParameterTemplateService(str(STATE_DB))
-    conn = get_state_conn()
-    try:
-        suggestions = conn.execute(
-            """
-            SELECT status, COUNT(*) AS c
-            FROM policy_suggestion
-            GROUP BY status
-            """
-        ).fetchall()
-        apps = conn.execute(
-            """
-            SELECT COUNT(*) AS c
-            FROM learning_application_log
-            """
-        ).fetchone()
-        candidate_rows = conn.execute(
-            """
-            SELECT candidate_id, factor_id, template_id, regime_key, status,
-                   validation_summary_json, validation_report_path, created_at, updated_at
-            FROM parameter_template_release_candidate
-            ORDER BY created_at DESC
-            """
-        ).fetchall()
+    cache_key = "summary"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    with _learning_compute_lock(cache_key):
+        cached = _learning_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        template_service = ParameterTemplateService(str(STATE_DB))
+        conn = get_state_conn()
         try:
-            lifecycle_count = int(conn.execute(
+            suggestions = conn.execute(
+                """
+                SELECT status, COUNT(*) AS c
+                FROM policy_suggestion
+                GROUP BY status
+                """
+            ).fetchall()
+            apps = conn.execute(
                 """
                 SELECT COUNT(*) AS c
-                FROM lifecycle_events
-                WHERE source='parameter_template'
+                FROM learning_application_log
                 """
-            ).fetchone()["c"] or 0)
-        except sqlite3.OperationalError:
-            lifecycle_count = 0
-        review_rows = conn.execute(
-            """
-            SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                   entry_quality, hold_quality, exit_quality, regime_fit_score,
-                   execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                   summary_text, review_json, created_at
-            FROM trade_outcome_review
-            ORDER BY created_at DESC
-            """
-        ).fetchone()
-        visible_reviews = []
-        if review_rows:
-            rows = conn.execute(
+            ).fetchone()
+            candidate_rows = conn.execute(
+                """
+                SELECT candidate_id, factor_id, template_id, regime_key, status,
+                       validation_summary_json, validation_report_path, created_at, updated_at
+                FROM parameter_template_release_candidate
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+            try:
+                lifecycle_count = int(conn.execute(
+                    """
+                    SELECT COUNT(*) AS c
+                    FROM lifecycle_events
+                    WHERE source='parameter_template'
+                    """
+                ).fetchone()["c"] or 0)
+            except sqlite3.OperationalError:
+                lifecycle_count = 0
+            review_rows = conn.execute(
                 """
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        entry_quality, hold_quality, exit_quality, regime_fit_score,
@@ -1552,152 +1620,165 @@ def get_learning_summary(_user: RequireUser) -> dict:
                 FROM trade_outcome_review
                 ORDER BY created_at DESC
                 """
-            ).fetchall()
-            visible_reviews = [
-                item for item in (_parse_review_row(row) for row in rows)
-                if _is_visible_review(item)
-            ]
-        review_counts: dict[str, int] = {}
-        for item in visible_reviews:
-            key = str(item.get("outcome_label") or "")
-            review_counts[key] = review_counts.get(key, 0) + 1
-        last_review = visible_reviews[0] if visible_reviews else None
-        candidate_counts: dict[str, int] = {}
-        latest_candidate = None
-        latest_candidate_trace = None
-        if candidate_rows:
-            for row in candidate_rows:
-                key = str(row["status"] or "")
-                candidate_counts[key] = candidate_counts.get(key, 0) + 1
-            first = candidate_rows[0]
-            try:
-                validation_summary = json.loads(first["validation_summary_json"] or "{}")
-            except Exception:
-                validation_summary = {}
-            latest_candidate = {
-                "candidate_id": str(first["candidate_id"] or ""),
-                "factor_id": str(first["factor_id"] or ""),
-                "template_id": str(first["template_id"] or ""),
-                "regime_key": str(first["regime_key"] or ""),
-                "status": str(first["status"] or ""),
-                "validation_summary": validation_summary,
-                "validation_report_path": str(first["validation_report_path"] or ""),
-                "created_at": float(first["created_at"] or 0.0),
-                "updated_at": float(first["updated_at"] or 0.0),
-            }
-            recommendation_source = dict(validation_summary.get("recommendation_source") or {})
-            if recommendation_source:
-                latest_candidate_trace = {
-                    "source": str(recommendation_source.get("source") or ""),
-                    "recommendation_id": str(recommendation_source.get("recommendation_id") or ""),
-                    "reason": str(recommendation_source.get("reason") or ""),
-                    "responsibility": dict(recommendation_source.get("responsibility") or {}),
-                    "approval_path": str(recommendation_source.get("approval_path") or ""),
+            ).fetchone()
+            visible_reviews = []
+            if review_rows:
+                rows = conn.execute(
+                    """
+                    SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+                           entry_quality, hold_quality, exit_quality, regime_fit_score,
+                           execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
+                           summary_text, review_json, created_at
+                    FROM trade_outcome_review
+                    ORDER BY created_at DESC
+                    """
+                ).fetchall()
+                visible_reviews = [
+                    item for item in (_parse_review_row(row) for row in rows)
+                    if _is_visible_review(item)
+                ]
+            review_counts: dict[str, int] = {}
+            for item in visible_reviews:
+                key = str(item.get("outcome_label") or "")
+                review_counts[key] = review_counts.get(key, 0) + 1
+            last_review = visible_reviews[0] if visible_reviews else None
+            candidate_counts: dict[str, int] = {}
+            latest_candidate = None
+            latest_candidate_trace = None
+            if candidate_rows:
+                for row in candidate_rows:
+                    key = str(row["status"] or "")
+                    candidate_counts[key] = candidate_counts.get(key, 0) + 1
+                first = candidate_rows[0]
+                try:
+                    validation_summary = json.loads(first["validation_summary_json"] or "{}")
+                except Exception:
+                    validation_summary = {}
+                latest_candidate = {
+                    "candidate_id": str(first["candidate_id"] or ""),
+                    "factor_id": str(first["factor_id"] or ""),
+                    "template_id": str(first["template_id"] or ""),
+                    "regime_key": str(first["regime_key"] or ""),
+                    "status": str(first["status"] or ""),
+                    "validation_summary": validation_summary,
+                    "validation_report_path": str(first["validation_report_path"] or ""),
+                    "created_at": float(first["created_at"] or 0.0),
+                    "updated_at": float(first["updated_at"] or 0.0),
                 }
-        recommendations = template_service.list_recommendations(limit=20)
-        suggestion_counts = {str(r["status"]): int(r["c"]) for r in suggestions}
-        recommendation_counts = {
-            "total": len(recommendations),
-            "online_light": sum(
-                1 for item in recommendations
-                if str(((item.get("boundary") or {}).get("recommended_scope") or "")) == "online_light"
-            ),
-            "offline_deep": sum(
-                1 for item in recommendations
-                if str(((item.get("boundary") or {}).get("recommended_scope") or "")) == "offline_deep"
-            ),
-        }
-        latest_recommendation = recommendations[0] if recommendations else None
-        first_pending_candidate = next(
-            (
-                {
-                    "candidate_id": str(row["candidate_id"] or ""),
-                    "factor_id": str(row["factor_id"] or ""),
-                    "template_id": str(row["template_id"] or ""),
-                    "regime_key": str(row["regime_key"] or ""),
-                    "status": str(row["status"] or ""),
-                    "created_at": float(row["created_at"] or 0.0),
-                    "updated_at": float(row["updated_at"] or 0.0),
-                }
-                for row in candidate_rows
-                if str(row["status"] or "").lower() == "pending_review"
-            ),
-            None,
-        )
-        first_online_recommendation = next(
-            (
-                item for item in recommendations
-                if str(((item.get("boundary") or {}).get("recommended_scope") or "")).lower() == "online_light"
-            ),
-            None,
-        )
-        first_offline_recommendation = next(
-            (
-                item for item in recommendations
-                if str(((item.get("boundary") or {}).get("recommended_scope") or "")).lower() == "offline_deep"
-            ),
-            None,
-        )
-        ops_summary = _build_parameter_template_ops_summary(
-            recommendation_counts=recommendation_counts,
-            latest_recommendation=latest_recommendation,
-            latest_candidate=latest_candidate,
-            latest_candidate_trace=latest_candidate_trace,
-        )
-        parameter_template_todo = _build_parameter_template_todo(
-            latest_candidate=latest_candidate,
-            latest_recommendation=latest_recommendation,
-            latest_candidate_trace=latest_candidate_trace,
-            recommendation_counts=recommendation_counts,
-        )
-        parameter_template_overview = _build_parameter_template_overview(
-            suggestion_counts=suggestion_counts,
-            first_pending_candidate=first_pending_candidate,
-            first_online_recommendation=first_online_recommendation,
-            first_offline_recommendation=first_offline_recommendation,
-        )
-        parameter_template_task_cards = _build_parameter_template_task_cards(
-            candidate_counts=candidate_counts,
-            recommendation_counts=recommendation_counts,
-            lifecycle_count=lifecycle_count,
-            parameter_template_todo=parameter_template_todo,
-            parameter_template_overview=parameter_template_overview,
-        )
-        return {
-            "suggestions": suggestion_counts,
-            "reviews": review_counts,
-            "applications": int((apps["c"] if apps else 0) or 0),
-            "parameter_template_candidates": candidate_counts,
-            "parameter_template_recommendations": recommendation_counts,
-            "parameter_template_ops_summary": ops_summary,
-            "parameter_template_todo": parameter_template_todo,
-            "parameter_template_overview": parameter_template_overview,
-            "parameter_template_empty_states": _build_parameter_template_empty_states(),
-            "parameter_template_task_cards": parameter_template_task_cards,
-            "latest_review": {
-                "review_id": last_review["review_id"],
-                "trade_id": last_review["trade_id"],
-                "position_id": last_review["position_id"],
-                "entry_decision_id": last_review["entry_decision_id"],
-                "exit_decision_id": last_review["exit_decision_id"],
-                "outcome_label": last_review["outcome_label"],
-                "pnl": last_review["pnl"],
-                "summary_text": last_review["summary_text"],
-                "created_at": last_review["created_at"],
-                "trace_locator": _trace_locator_from_review_row(last_review),
-            } if last_review else None,
-            "latest_parameter_template_candidate": latest_candidate,
-            "latest_parameter_template_candidate_trace": {
-                **latest_candidate_trace,
-                "trace_locator": _latest_factor_trace_locator(
-                    conn,
-                    str((latest_candidate or {}).get("factor_id") or ""),
+                recommendation_source = dict(validation_summary.get("recommendation_source") or {})
+                if recommendation_source:
+                    latest_candidate_trace = {
+                        "source": str(recommendation_source.get("source") or ""),
+                        "recommendation_id": str(recommendation_source.get("recommendation_id") or ""),
+                        "reason": str(recommendation_source.get("reason") or ""),
+                        "responsibility": dict(recommendation_source.get("responsibility") or {}),
+                        "approval_path": str(recommendation_source.get("approval_path") or ""),
+                    }
+            recommendations = template_service.list_recommendations(limit=20)
+            suggestion_counts = {str(r["status"]): int(r["c"]) for r in suggestions}
+            recommendation_counts = {
+                "total": len(recommendations),
+                "online_light": sum(
+                    1 for item in recommendations
+                    if str(((item.get("boundary") or {}).get("recommended_scope") or "")) == "online_light"
                 ),
-            } if latest_candidate_trace else None,
-            "latest_parameter_template_recommendation": latest_recommendation,
-        }
-    finally:
-        conn.close()
+                "offline_deep": sum(
+                    1 for item in recommendations
+                    if str(((item.get("boundary") or {}).get("recommended_scope") or "")) == "offline_deep"
+                ),
+            }
+            latest_recommendation = recommendations[0] if recommendations else None
+            first_pending_candidate = next(
+                (
+                    {
+                        "candidate_id": str(row["candidate_id"] or ""),
+                        "factor_id": str(row["factor_id"] or ""),
+                        "template_id": str(row["template_id"] or ""),
+                        "regime_key": str(row["regime_key"] or ""),
+                        "status": str(row["status"] or ""),
+                        "created_at": float(row["created_at"] or 0.0),
+                        "updated_at": float(row["updated_at"] or 0.0),
+                    }
+                    for row in candidate_rows
+                    if str(row["status"] or "").lower() == "pending_review"
+                ),
+                None,
+            )
+            first_online_recommendation = next(
+                (
+                    item for item in recommendations
+                    if str(((item.get("boundary") or {}).get("recommended_scope") or "")).lower() == "online_light"
+                ),
+                None,
+            )
+            first_offline_recommendation = next(
+                (
+                    item for item in recommendations
+                    if str(((item.get("boundary") or {}).get("recommended_scope") or "")).lower() == "offline_deep"
+                ),
+                None,
+            )
+            ops_summary = _build_parameter_template_ops_summary(
+                recommendation_counts=recommendation_counts,
+                latest_recommendation=latest_recommendation,
+                latest_candidate=latest_candidate,
+                latest_candidate_trace=latest_candidate_trace,
+            )
+            parameter_template_todo = _build_parameter_template_todo(
+                latest_candidate=latest_candidate,
+                latest_recommendation=latest_recommendation,
+                latest_candidate_trace=latest_candidate_trace,
+                recommendation_counts=recommendation_counts,
+            )
+            parameter_template_overview = _build_parameter_template_overview(
+                suggestion_counts=suggestion_counts,
+                first_pending_candidate=first_pending_candidate,
+                first_online_recommendation=first_online_recommendation,
+                first_offline_recommendation=first_offline_recommendation,
+            )
+            parameter_template_task_cards = _build_parameter_template_task_cards(
+                candidate_counts=candidate_counts,
+                recommendation_counts=recommendation_counts,
+                lifecycle_count=lifecycle_count,
+                parameter_template_todo=parameter_template_todo,
+                parameter_template_overview=parameter_template_overview,
+            )
+            payload = {
+                "suggestions": suggestion_counts,
+                "reviews": review_counts,
+                "applications": int((apps["c"] if apps else 0) or 0),
+                "parameter_template_candidates": candidate_counts,
+                "parameter_template_recommendations": recommendation_counts,
+                "parameter_template_ops_summary": ops_summary,
+                "parameter_template_todo": parameter_template_todo,
+                "parameter_template_overview": parameter_template_overview,
+                "parameter_template_empty_states": _build_parameter_template_empty_states(),
+                "parameter_template_task_cards": parameter_template_task_cards,
+                "latest_review": {
+                    "review_id": last_review["review_id"],
+                    "trade_id": last_review["trade_id"],
+                    "position_id": last_review["position_id"],
+                    "entry_decision_id": last_review["entry_decision_id"],
+                    "exit_decision_id": last_review["exit_decision_id"],
+                    "outcome_label": last_review["outcome_label"],
+                    "pnl": last_review["pnl"],
+                    "summary_text": last_review["summary_text"],
+                    "created_at": last_review["created_at"],
+                    "trace_locator": _trace_locator_from_review_row(last_review),
+                } if last_review else None,
+                "latest_parameter_template_candidate": latest_candidate,
+                "latest_parameter_template_candidate_trace": {
+                    **latest_candidate_trace,
+                    "trace_locator": _latest_factor_trace_locator(
+                        conn,
+                        str((latest_candidate or {}).get("factor_id") or ""),
+                    ),
+                } if latest_candidate_trace else None,
+                "latest_parameter_template_recommendation": latest_recommendation,
+            }
+            return _learning_cache_set(cache_key, payload)
+        finally:
+            conn.close()
 
 
 @router.get("/reviews")
@@ -1707,6 +1788,10 @@ def get_reviews(
 ) -> dict:
     from backend.core.db import get_state_conn
 
+    cache_key = f"reviews:{int(limit)}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
     conn = get_state_conn()
     try:
         rows = conn.execute(
@@ -1727,7 +1812,7 @@ def get_reviews(
         ]
         for item in items:
             item["trace_locator"] = _trace_locator_from_review_row(item)
-        return {"items": items}
+        return _learning_cache_set(cache_key, {"items": items})
     finally:
         conn.close()
 
@@ -1795,54 +1880,62 @@ def get_parameter_template_recommendations(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
-    service = ParameterTemplateService()
-    items = service.list_recommendations(factor_id=factor_id, limit=limit)
-    validation_service = ParameterTemplateValidationService(service.db_path)
-    conn = sqlite3.connect(str(service.db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        enriched = []
-        for item in items:
-            recommendation_id = str(item.get("recommendation_id") or "")
-            factor_id = str(item.get("factor_id") or "")
-            suggestion = _latest_template_suggestion_for_recommendation(conn, recommendation_id)
-            candidate = {}
-            candidates = validation_service.list_release_candidates(factor_id=factor_id, limit=20)
-            for candidate_item in candidates:
-                trace = dict(((candidate_item.get("validation_summary") or {}).get("recommendation_source") or {}))
-                if str(trace.get("recommendation_id") or "") == recommendation_id:
-                    candidate = candidate_item
-                    break
-            lifecycle = _latest_parameter_template_lifecycle_for_recommendation(
-                conn,
-                factor_id=factor_id,
-                recommendation_id=recommendation_id,
-                candidate_id=str(candidate.get("candidate_id") or ""),
-            )
-            governance = _parameter_template_recommendation_governance_snapshot(item)
-            progress = _parameter_template_recommendation_progress_snapshot(
-                recommendation_id=recommendation_id,
-                candidate=candidate,
-                suggestion=suggestion,
-                lifecycle=lifecycle,
-            )
-            enriched.append(
-                {
-                    **item,
-                    "governance": governance,
-                    "progress": progress,
-                    "suggestion": suggestion,
-                    "latest_candidate": candidate,
-                    "lifecycle_event": lifecycle,
-                    "trace_locator": _latest_factor_trace_locator(
-                        conn,
-                        factor_id,
-                    ),
-                }
-            )
-        return {"items": enriched}
-    finally:
-        conn.close()
+    cache_key = f"recommendations:{factor_id or '*'}:{int(limit)}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    with _learning_compute_lock(cache_key):
+        cached = _learning_cache_get(cache_key)
+        if cached is not None:
+            return cached
+        service = ParameterTemplateService()
+        items = service.list_recommendations(factor_id=factor_id, limit=limit)
+        validation_service = ParameterTemplateValidationService(service.db_path)
+        conn = connect_sqlite(service.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            enriched = []
+            for item in items:
+                recommendation_id = str(item.get("recommendation_id") or "")
+                factor_id = str(item.get("factor_id") or "")
+                suggestion = _latest_template_suggestion_for_recommendation(conn, recommendation_id)
+                candidate = {}
+                candidates = validation_service.list_release_candidates(factor_id=factor_id, limit=20)
+                for candidate_item in candidates:
+                    trace = dict(((candidate_item.get("validation_summary") or {}).get("recommendation_source") or {}))
+                    if str(trace.get("recommendation_id") or "") == recommendation_id:
+                        candidate = candidate_item
+                        break
+                lifecycle = _latest_parameter_template_lifecycle_for_recommendation(
+                    conn,
+                    factor_id=factor_id,
+                    recommendation_id=recommendation_id,
+                    candidate_id=str(candidate.get("candidate_id") or ""),
+                )
+                governance = _parameter_template_recommendation_governance_snapshot(item)
+                progress = _parameter_template_recommendation_progress_snapshot(
+                    recommendation_id=recommendation_id,
+                    candidate=candidate,
+                    suggestion=suggestion,
+                    lifecycle=lifecycle,
+                )
+                enriched.append(
+                    {
+                        **item,
+                        "governance": governance,
+                        "progress": progress,
+                        "suggestion": suggestion,
+                        "latest_candidate": candidate,
+                        "lifecycle_event": lifecycle,
+                        "trace_locator": _latest_factor_trace_locator(
+                            conn,
+                            factor_id,
+                        ),
+                    }
+                )
+            return _learning_cache_set(cache_key, {"items": enriched})
+        finally:
+            conn.close()
 
 
 @router.get("/parameter-templates/switch-logs")
@@ -1863,6 +1956,15 @@ def upsert_parameter_template(_user: RequireUser, req: ParameterTemplateUpsertRe
         item = service.upsert_template(req.template, source=req.source, activate=bool(req.activate))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     return {
         "ok": True,
         "item": item,
@@ -1890,6 +1992,15 @@ def suggest_parameter_template_switch(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     return {
         "ok": True,
         "item": item,
@@ -1950,6 +2061,15 @@ def materialize_parameter_template_recommendation(
             result["result_summary"] = "这条推荐已转成正式治理建议，下一步等待 governor 审批。"
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     return result
 
 
@@ -1969,6 +2089,15 @@ def apply_parameter_template_switch(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     if result.get("blocked"):
         return {
             **result,
@@ -2042,13 +2171,17 @@ def list_parameter_template_offline_candidates(
 ) -> dict:
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
     status = status if isinstance(status, str) and status else None
+    cache_key = f"offline_candidates:{factor_id or '*'}:{status or '*'}:{int(limit)}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
     service = ParameterTemplateValidationService()
     items = service.list_release_candidates(
         factor_id=factor_id,
         status=status,
         limit=limit,
     )
-    conn = sqlite3.connect(str(service.db_path))
+    conn = connect_sqlite(service.db_path)
     conn.row_factory = sqlite3.Row
     try:
         enriched = []
@@ -2064,7 +2197,7 @@ def list_parameter_template_offline_candidates(
                     ),
                 }
             )
-        return {"items": enriched}
+        return _learning_cache_set(cache_key, {"items": enriched})
     finally:
         conn.close()
 
@@ -2083,6 +2216,15 @@ def review_parameter_template_offline_candidate(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     return {
         "ok": True,
         "item": item,
@@ -2106,6 +2248,15 @@ def release_parameter_template_offline_candidate(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     if result.get("blocked"):
         return {
             **result,
@@ -2130,6 +2281,15 @@ def rollback_parameter_template_offline_candidate(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
     if result.get("blocked"):
         return {
             **result,
@@ -2148,6 +2308,10 @@ def get_applications(
 ) -> dict:
     from backend.core.db import get_state_conn
 
+    cache_key = f"applications:{int(limit)}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
     conn = get_state_conn()
     try:
         rows = conn.execute(
@@ -2176,7 +2340,7 @@ def get_applications(
             except Exception:
                 item["details"] = {}
             items.append(item)
-        return {"items": items}
+        return _learning_cache_set(cache_key, {"items": items})
     finally:
         conn.close()
 
@@ -2188,6 +2352,10 @@ def get_lifecycle(
 ) -> dict:
     from backend.core.db import get_state_conn
 
+    cache_key = f"lifecycle:{int(limit)}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
     conn = get_state_conn()
     try:
         rows = conn.execute(
@@ -2234,7 +2402,7 @@ def get_lifecycle(
                     "kind": "factor_lifecycle",
                 }
             )
-        return {"items": items}
+        return _learning_cache_set(cache_key, {"items": items})
     finally:
         conn.close()
 
@@ -2589,3 +2757,4 @@ def run_learning_model_pipeline(_user: RequireUser, req: ModelPipelineRunRequest
         min_trial_success_rate=float(req.min_trial_success_rate),
         min_trial_coverage=float(req.min_trial_coverage),
     )
+

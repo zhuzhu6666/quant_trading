@@ -20,12 +20,96 @@ from typing import Any
 
 import numpy as np
 
+from backend.core.db import DUCKDB_TRADES, connect_duckdb
+
 logger = logging.getLogger(__name__)
 
 _DB_ID_SEQ = count(1)
+_TRADES_SCHEMA_READY = False
 
 def _next_db_id() -> int:
     return int(time.time()) + next(_DB_ID_SEQ)
+
+
+def _ensure_trades_duckdb_schema() -> None:
+    """Ensure trades.duckdb uses the current volume-based schema.
+
+    Older deployments created `lots` columns manually and never migrated them.
+    Current attribution writes use `volume`, so we self-heal the schema here.
+    """
+    global _TRADES_SCHEMA_READY
+    if _TRADES_SCHEMA_READY:
+        return
+
+    con = connect_duckdb(DUCKDB_TRADES)
+    try:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                position_id INTEGER PRIMARY KEY,
+                symbol VARCHAR NOT NULL DEFAULT 'XAUUSD+',
+                direction INTEGER NOT NULL,
+                volume DOUBLE DEFAULT 0.01,
+                open_ts DOUBLE NOT NULL,
+                open_price DOUBLE NOT NULL,
+                open_reason VARCHAR,
+                close_ts DOUBLE,
+                close_price DOUBLE,
+                close_reason VARCHAR,
+                trade_pnl DOUBLE,
+                pnl_pct DOUBLE,
+                composite_score DOUBLE,
+                tactical_score DOUBLE,
+                macro_score DOUBLE,
+                created_at DOUBLE DEFAULT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP),
+                updated_at DOUBLE DEFAULT EXTRACT(EPOCH FROM CURRENT_TIMESTAMP),
+                status VARCHAR DEFAULT 'open'
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS trade_executions (
+                id INTEGER PRIMARY KEY,
+                trade_id INTEGER NOT NULL,
+                exec_ts DOUBLE NOT NULL,
+                exec_type VARCHAR NOT NULL,
+                price DOUBLE NOT NULL,
+                volume DOUBLE,
+                reason VARCHAR,
+                FOREIGN KEY (trade_id) REFERENCES trades(position_id)
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS trade_factor_attributions (
+                id INTEGER PRIMARY KEY,
+                trade_id INTEGER NOT NULL,
+                factor_name VARCHAR NOT NULL,
+                marginal_contribution DOUBLE,
+                weight DOUBLE,
+                signal_value DOUBLE,
+                FOREIGN KEY (trade_id) REFERENCES trades(position_id)
+            )
+        """)
+
+        def _cols(table: str) -> set[str]:
+            rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+            return {str(r[1]) for r in rows}
+
+        trades_cols = _cols("trades")
+        if "volume" not in trades_cols:
+            con.execute("ALTER TABLE trades ADD COLUMN volume DOUBLE DEFAULT 0.01")
+            trades_cols = _cols("trades")
+        if "lots" in trades_cols:
+            con.execute("UPDATE trades SET volume = COALESCE(volume, lots, 0.01)")
+
+        exec_cols = _cols("trade_executions")
+        if "volume" not in exec_cols:
+            con.execute("ALTER TABLE trade_executions ADD COLUMN volume DOUBLE")
+            exec_cols = _cols("trade_executions")
+        if "lots" in exec_cols:
+            con.execute("UPDATE trade_executions SET volume = COALESCE(volume, lots)")
+
+        _TRADES_SCHEMA_READY = True
+    finally:
+        con.close()
 
 
 
@@ -309,8 +393,8 @@ class AttributionEngine:
         self._open_trades[position_id] = attribution
         # 写入 trades.duckdb
         try:
-            import duckdb as _duckdb
-            _tdb = _duckdb.connect("data/trades.duckdb")
+            _ensure_trades_duckdb_schema()
+            _tdb = connect_duckdb(DUCKDB_TRADES)
             _tdb.execute("""
                 INSERT OR REPLACE INTO trades
                 (position_id, symbol, direction, volume,
@@ -544,8 +628,8 @@ class AttributionEngine:
 
         # ── 写入 trades.duckdb ──
         try:
-            import duckdb as _duckdb
-            _tdb = _duckdb.connect("data/trades.duckdb")
+            _ensure_trades_duckdb_schema()
+            _tdb = connect_duckdb(DUCKDB_TRADES)
             # 更新 trade 主表
             pnl_pct = round(trade_pnl / attrib.open_price * 100, 4) if attrib.open_price else 0.0
             _tdb.execute("""
@@ -755,3 +839,4 @@ class AttributionEngine:
         logger.info(
             "Restored %d factor stats from state.db", len(data),
         )
+

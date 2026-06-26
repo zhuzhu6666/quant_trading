@@ -8,7 +8,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 from backend.services.review_contract import normalize_trade_review_contract
@@ -28,7 +28,7 @@ class TradeReviewer:
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -360,3 +360,4 @@ class TradeReviewer:
             "summary_text": summary,
             "review_json": review_json,
         }
+

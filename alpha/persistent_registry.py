@@ -35,9 +35,8 @@ def restore_from_log(lifecycle_log_path: str = "",
 
     # 主路径: 从 state.db lifecycle_events 表读取
     try:
-        import sqlite3
-        from backend.core.db import STATE_DB
-        conn = sqlite3.connect(str(STATE_DB))
+        from backend.core.db import STATE_DB, connect_sqlite
+        conn = connect_sqlite(STATE_DB, read_only=True)
         conn.row_factory = sqlite3.Row
         # 按 factor 分组取最后一个 register/unregister 事件
         rows = conn.execute(
@@ -131,3 +130,4 @@ def restore_from_log(lifecycle_log_path: str = "",
             logger.info(f"[PersistentRegistry] 跳过 {skipped_invalid} 个无效描述因子")
         logger.info(f"[PersistentRegistry] 总共恢复 {restored} 因子 (从 {len(latest_event)} 事件)")
     return restored
+

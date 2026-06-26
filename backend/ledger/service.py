@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
 
 
 def _json_dumps(value: Any) -> str:
@@ -25,7 +25,7 @@ class DecisionLedger:
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -292,3 +292,4 @@ class DecisionLedger:
                     (decision_id,),
                 )
             )
+

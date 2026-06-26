@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from backend.core.db import connect_duckdb
 from loguru import logger
 
 # ── 数据类型 ────────────────────────────────────────────────────
@@ -65,6 +66,28 @@ THRESHOLDS = {
 ADVISORY_ONLY_COMPONENTS = {
     "tick_data",  # Dukascopy tick 库仅供研究/订单流分析, 不应阻断 cTrader live
 }
+
+
+def _active_bar_component() -> str:
+    """Return the bar freshness component that should block live trading."""
+    try:
+        from config.runtime_config import shared as _runtime_cfg
+
+        timeframe = str(getattr(_runtime_cfg(), "timeframe", "M5") or "M5").upper()
+    except Exception:
+        timeframe = "M5"
+    if timeframe == "M1":
+        return "bar_m1"
+    return "bar_m5"
+
+
+def _advisory_only_components() -> set[str]:
+    advisory = set(ADVISORY_ONLY_COMPONENTS)
+    active_bar = _active_bar_component()
+    for name in ("bar_m1", "bar_m5"):
+        if name != active_bar:
+            advisory.add(name)
+    return advisory
 
 
 # ── 健康检查器 ───────────────────────────────────────────────────
@@ -180,13 +203,14 @@ class SystemHealth:
         scores = [c.score for c in components.values()]
         report.overall_score = sum(scores) / len(scores) if scores else 0.0
 
+        advisory_only_components = _advisory_only_components()
         criticals = [
             name for name, c in components.items()
-            if c.status == "critical" and name not in ADVISORY_ONLY_COMPONENTS
+            if c.status == "critical" and name not in advisory_only_components
         ]
         degradeds = [
             name for name, c in components.items()
-            if c.status == "degraded" or (c.status == "critical" and name in ADVISORY_ONLY_COMPONENTS)
+            if c.status == "degraded" or (c.status == "critical" and name in advisory_only_components)
         ]
         if criticals:
             report.overall = "critical"
@@ -225,12 +249,11 @@ class SystemHealth:
     ) -> None:
         """检查 bars / ticks / L2 数据新鲜度."""
         now = time.time()
-        import duckdb
 
         try:
-            db = duckdb.connect(str(
+            db = connect_duckdb(
                 Path(__file__).resolve().parent.parent / "data" / "ctrader_data.duckdb"
-            ))
+            )
 
             # M1
             m1_ts = db.execute(
@@ -297,9 +320,9 @@ class SystemHealth:
 
         # Ticks (ticks.duckdb)
         try:
-            tdb = duckdb.connect(str(
+            tdb = connect_duckdb(
                 Path(__file__).resolve().parent.parent / "data" / "ticks.duckdb"
-            ))
+            )
             tick_ts = tdb.execute("SELECT MAX(time) FROM ticks").fetchone()[0]
             tdb.close()
             if tick_ts:
@@ -334,9 +357,9 @@ class SystemHealth:
         # L2 depth (l2.duckdb)
         ldb = None
         try:
-            ldb = duckdb.connect(str(
+            ldb = connect_duckdb(
                 Path(__file__).resolve().parent.parent / "data" / "l2.duckdb"
-            ))
+            )
             l2_ts = ldb.execute("SELECT MAX(ts) FROM orderbook_changes").fetchone()[0]
             l2_cnt = ldb.execute("SELECT COUNT(*) FROM orderbook_changes").fetchone()[0]
             if l2_ts and l2_cnt > 0:
@@ -386,7 +409,6 @@ class SystemHealth:
         for fname, label in dbs:
             conn = None
             try:
-                import duckdb
                 path = str(base / fname)
                 if not os.path.isfile(path):
                     components[f"db_{fname.split('.')[0]}"] = ComponentStatus(
@@ -395,7 +417,7 @@ class SystemHealth:
                     )
                     errors.append(f"DuckDB {fname} not found")
                     continue
-                conn = duckdb.connect(path)
+                conn = connect_duckdb(path)
                 conn.execute("SELECT 1")
                 components[f"db_{fname.split('.')[0]}"] = ComponentStatus(
                     name=label, status="ok", score=1.0,

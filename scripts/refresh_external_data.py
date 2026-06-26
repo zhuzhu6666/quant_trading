@@ -36,6 +36,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from backend.core.db import connect_duckdb
 from data.store import DataStore
 
 logging.basicConfig(
@@ -62,18 +63,16 @@ def _get_store() -> DataStore:
 
 def _get_latest_timestamp(store: DataStore, table: str, date_col: str) -> datetime | None:
     """查表中最新的时间戳"""
-    import sqlite3
-    con = sqlite3.connect(DB_PATH)
+    con = connect_duckdb(DB_PATH, read_only=True)
     try:
         row = con.execute(f"SELECT MAX({date_col}) FROM {table}").fetchone()
-        con.close()
         if row and row[0]:
             ts = datetime.fromisoformat(str(row[0]))
             return ts
-    except sqlite3.OperationalError:
-        con.close()
+    except Exception:
         return None
-    con.close()
+    finally:
+        con.close()
     return None
 
 
@@ -123,8 +122,6 @@ def _status_etf(store: DataStore) -> dict:
 
 
 def status_all(store: DataStore | None = None) -> list[dict]:
-    if store is None:
-        store = _get_store()
     return [
         _status_cot(store),
         _status_events(store),
@@ -283,10 +280,8 @@ def main():
     p.add_argument("--once", action="store_true", help="cron 模式: 一次拉完退出")
     args = p.parse_args()
 
-    store = _get_store()
-
     if args.status:
-        print_status(status_all(store))
+        print_status(status_all())
         return
 
     if args.once:
@@ -312,7 +307,7 @@ def main():
     print()
 
     if args.once:
-        print_status(status_all(store))
+        print_status(status_all())
 
     all_ok = all(v == "✓" for v in results.values())
     return 0 if all_ok else 1
@@ -320,3 +315,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

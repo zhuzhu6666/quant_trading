@@ -1,11 +1,11 @@
 """Liveness + db connectivity check."""
-import sqlite3
 import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from backend.core.db import connect_duckdb
 from backend.core.paths import DB_PATH
 
 router = APIRouter(prefix="/api", tags=["health"])
@@ -26,8 +26,7 @@ _START_TIME = time.time()
 def health() -> HealthResponse:
     db_status = "connected"
     try:
-        import duckdb
-        conn = duckdb.connect(str(DB_PATH))
+        conn = connect_duckdb(DB_PATH, read_only=True)
         conn.execute("SELECT 1").fetchone()
         conn.close()
     except Exception as e:
@@ -40,3 +39,4 @@ def health() -> HealthResponse:
         server_time=datetime.now(timezone.utc).isoformat(),
         uptime_seconds=time.time() - _START_TIME,
     )
+

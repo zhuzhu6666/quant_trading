@@ -19,6 +19,8 @@ ctrader:
   host: demo.ctraderapi.com                  # demo=模拟盘, live=实盘 host
   port: 5035
   symbol: XAUUSD                            # Pepperstone 是 XAUUSD (无 +)
+  proxy_url: ""                             # 例: socks5://127.0.0.1:7890 或 http://127.0.0.1:7890
+  proxy_rdns: true                          # 走代理时是否由代理端解析域名
   rate_limit_per_sec: 5                     # 跟 SDK 默认对齐, 防 broker 限速
   request_timeout_sec: 10
   send_orders: true                         # 真发单

@@ -299,6 +299,9 @@ class InProcessScheduler:
                         name=name,
                         id=name,
                         replace_existing=False,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=300,
                     )
                     self._jobs_aps[name] = job.id
                 except Exception as e:

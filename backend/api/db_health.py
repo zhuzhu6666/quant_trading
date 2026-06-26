@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter
+from backend.core.db import connect_duckdb, connect_sqlite
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -79,18 +80,16 @@ def _try_parse_ts(val) -> float | None:
 
 def _duckdb_stats(path: Path) -> dict:
     """查询 DuckDB 数据库的表统计"""
-    import duckdb
     tables = []
     total_rows = 0
     latest_ts = None
     errors = []
 
     try:
-        # 优先用默认模式（与实盘写入连接兼容），失败再试 read_only
         try:
-            con = duckdb.connect(str(path))
-        except duckdb.IOException:
-            con = duckdb.connect(str(path), read_only=True)
+            con = connect_duckdb(path)
+        except Exception:
+            con = connect_duckdb(path, read_only=True)
         try:
             for t in con.execute("SHOW TABLES").fetchall():
                 tname = t[0]
@@ -133,14 +132,13 @@ def _duckdb_stats(path: Path) -> dict:
 
 def _sqlite_stats(path: Path) -> dict:
     """查询 SQLite 数据库的表统计"""
-    import sqlite3
     tables = []
     total_rows = 0
     latest_ts = None
     errors = []
 
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con = connect_sqlite(path, read_only=True)
         con.row_factory = sqlite3.Row
         try:
             cur = con.execute(
@@ -335,3 +333,4 @@ def _on_startup():
 # (在 backend/app.py 中调用: db_health.register_startup(app))
 def register_startup(app):
     app.add_event_handler("startup", _on_startup)
+

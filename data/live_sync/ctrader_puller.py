@@ -18,6 +18,8 @@ import time as _time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from backend.core.db import connect_duckdb
+
 logger = logging.getLogger(__name__)
 
 # ── 接口定义 (原 mt5_puller.PullResult / TIMEFRAME_MAP) ──
@@ -32,11 +34,15 @@ class PullResult:
     n_bars: int
     first_time: float
     last_time: float = 0.0
+    last_close: float = 0.0
+    bars: list[dict] | None = None
+    elapsed_sec: float = 0.0
     success: bool = True
     error: str = ""
 
 
 TIMEFRAME_MAP = {
+    "M1": ("M1", 1),
     "M5": ("M5", 5),
     "M15": ("M15", 15),
     "M30": ("M30", 30),
@@ -62,6 +68,7 @@ class CTraderPuller:
     def __init__(self):
         self._bridge = None
         self._connected = False
+        self._owns_bridge = False
 
     def _import_bridge(self):
         """延迟导入 CTraderBridge (避免循环依赖)."""
@@ -74,6 +81,26 @@ class CTraderPuller:
         """连接 cTrader Open API (使用当前 env 中的凭证)."""
         if self._connected and self._bridge and self._bridge.is_connected:
             return True
+        try:
+            from backend.services.live_service import _get_ctrader, _wait_ctrader_ready
+
+            bridge, err, warming = _get_ctrader()
+            if err:
+                logger.error(f"[CTraderPuller] shared bridge unavailable: {err}")
+                return False
+            if warming:
+                wait_err = _wait_ctrader_ready(bridge, timeout_sec=30.0)
+                if wait_err:
+                    logger.error(f"[CTraderPuller] shared bridge warmup failed: {wait_err}")
+                    return False
+            self._bridge = bridge
+            self._owns_bridge = False
+            self._connected = bool(self._bridge and self._bridge.is_connected)
+            if not self._connected:
+                logger.error("[CTraderPuller] shared bridge not connected")
+            return self._connected
+        except Exception as e:
+            logger.debug(f"[CTraderPuller] shared bridge fallback: {e}")
         import os
         BridgeCls = self._import_bridge()
         self._bridge = BridgeCls(
@@ -84,6 +111,7 @@ class CTraderPuller:
             symbol="XAUUSD",
             send_orders=False,
         )
+        self._owns_bridge = True
         self._connected = self._bridge.connect()
         if not self._connected:
             logger.error("[CTraderPuller] connect failed")
@@ -91,10 +119,11 @@ class CTraderPuller:
 
     def shutdown(self):
         """断开 cTrader 连接."""
-        if self._bridge and self._bridge.is_connected:
+        if self._owns_bridge and self._bridge and self._bridge.is_connected:
             self._bridge.disconnect()
         self._bridge = None
         self._connected = False
+        self._owns_bridge = False
         logger.info("[CTraderPuller] disconnected")
 
     def _check_connect(self) -> bool:
@@ -187,7 +216,7 @@ class CTraderPuller:
         if timeframes is None:
             timeframes = list(TIMEFRAME_MAP)
         import duckdb
-        conn = duckdb.connect(str(store.db_path))
+        conn = connect_duckdb(store.db_path)
         try:
             for tf in timeframes:
                 conn.execute(
@@ -212,7 +241,7 @@ class CTraderPuller:
         from data.store import DataStore
         store = DataStore()
         import duckdb
-        conn = duckdb.connect(str(store.db_path))
+        conn = connect_duckdb(store.db_path)
         try:
             count = conn.execute(
                 "SELECT COUNT(*) FROM bars WHERE symbol = ?", [symbol]

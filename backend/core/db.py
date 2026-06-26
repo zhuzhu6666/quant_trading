@@ -9,6 +9,9 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Final
+
+import duckdb
 
 # ═══════════════════════════════════════════
 # 项目根 (兼容 backend/ 和顶层导入)
@@ -35,6 +38,22 @@ EXPERIMENTS_DB = DATA_DIR / "experiments.db"         # 实验记录(独立)
 LEGACY_ANALYTICS_DB    = DATA_DIR / "analytics.db"
 LEGACY_DECISION_LOG_DB = DATA_DIR / "decision_log.db"
 
+_SQLITE_EXTS: Final[set[str]] = {".db", ".sqlite", ".sqlite3"}
+_DUCKDB_EXTS: Final[set[str]] = {".duckdb"}
+_KNOWN_DUCKDB_PATHS: Final[set[Path]] = {
+    DUCKDB_BARS.resolve(),
+    DUCKDB_TICKS.resolve(),
+    DUCKDB_L2.resolve(),
+    DUCKDB_TRADES.resolve(),
+    DUCKDB_EVENTS.resolve(),
+}
+_KNOWN_SQLITE_PATHS: Final[set[Path]] = {
+    STATE_DB.resolve(),
+    EXPERIMENTS_DB.resolve(),
+    LEGACY_ANALYTICS_DB.resolve(),
+    LEGACY_DECISION_LOG_DB.resolve(),
+}
+
 
 # ═══════════════════════════════════════════
 # SQLite 连接管理 (线程安全, WAL 模式)
@@ -43,12 +62,64 @@ LEGACY_DECISION_LOG_DB = DATA_DIR / "decision_log.db"
 def _init_sqlite_db(db_path: Path, ddl: str) -> None:
     """初始化 SQLite 数据库，建表 (幂等)。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = connect_sqlite(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(ddl)
     conn.commit()
     conn.close()
+
+
+def _normalize_db_path(db_path: str | Path) -> Path:
+    path = Path(db_path).expanduser()
+    return path.resolve() if path.is_absolute() else path
+
+
+def is_duckdb_path(db_path: str | Path) -> bool:
+    path = _normalize_db_path(db_path)
+    return path.suffix.lower() in _DUCKDB_EXTS or path.resolve() in _KNOWN_DUCKDB_PATHS
+
+
+def is_sqlite_path(db_path: str | Path) -> bool:
+    path = _normalize_db_path(db_path)
+    return path.suffix.lower() in _SQLITE_EXTS or path.resolve() in _KNOWN_SQLITE_PATHS
+
+
+def connect_sqlite(db_path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
+    """Open a SQLite connection and reject DuckDB files early."""
+    path = _normalize_db_path(db_path)
+    if is_duckdb_path(path):
+        raise ValueError(f"Refusing to open DuckDB file with sqlite3: {path}")
+    if read_only:
+        return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    return sqlite3.connect(str(path))
+
+
+def connect_duckdb(db_path: str | Path, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """Open a DuckDB connection and reject SQLite files early."""
+    path = _normalize_db_path(db_path)
+    if is_sqlite_path(path):
+        raise ValueError(f"Refusing to open SQLite file with DuckDB: {path}")
+    if path.suffix.lower() not in _DUCKDB_EXTS and path.resolve() not in _KNOWN_DUCKDB_PATHS:
+        raise ValueError(f"Unknown DuckDB target path: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return duckdb.connect(str(path), read_only=read_only)
+
+
+def ensure_sqlite_columns(db_path: str | Path, table: str, columns: dict[str, str]) -> None:
+    """Best-effort SQLite column migrations for long-lived local files."""
+    conn = connect_sqlite(db_path)
+    try:
+        existing = {
+            str(row[1])
+            for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        }
+        for name, ddl in columns.items():
+            if name not in existing:
+                conn.execute(f'ALTER TABLE "{table}" ADD COLUMN {ddl}')
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ═══════════════════════════════════════════
@@ -526,7 +597,7 @@ def init_state_db() -> None:
 
 def get_state_conn() -> sqlite3.Connection:
     """获取 state.db 连接 (每次新建, 调用方负责关闭)."""
-    conn = sqlite3.connect(str(STATE_DB))
+    conn = connect_sqlite(STATE_DB)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -555,7 +626,43 @@ CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status);
 
 def init_experiments_db() -> None:
     """初始化 experiments.db (幂等)."""
-    _init_sqlite_db(EXPERIMENTS_DB, EXPERIMENTS_DB_DDL)
+    EXPERIMENTS_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect_sqlite(EXPERIMENTS_DB)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS experiments (
+                run_id TEXT PRIMARY KEY,
+                experiment_type TEXT,
+                params_json TEXT DEFAULT '{}',
+                metrics_json TEXT DEFAULT '{}',
+                tags_json TEXT DEFAULT '[]',
+                artifacts_json TEXT DEFAULT '[]',
+                status TEXT DEFAULT 'running',
+                timestamp REAL,
+                created_at REAL
+            )
+        """)
+        existing = {
+            str(row[1])
+            for row in conn.execute('PRAGMA table_info("experiments")').fetchall()
+        }
+        for name, ddl in {
+            "experiment_type": "experiment_type TEXT",
+            "params_json": "params_json TEXT DEFAULT '{}'",
+            "metrics_json": "metrics_json TEXT DEFAULT '{}'",
+            "tags_json": "tags_json TEXT DEFAULT '[]'",
+            "artifacts_json": "artifacts_json TEXT DEFAULT '[]'",
+            "status": "status TEXT DEFAULT 'running'",
+            "timestamp": "timestamp REAL",
+            "created_at": "created_at REAL",
+        }.items():
+            if name not in existing:
+                conn.execute(f'ALTER TABLE "experiments" ADD COLUMN {ddl}')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_type ON experiments(experiment_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status)")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ═══════════════════════════════════════════
@@ -575,3 +682,4 @@ def init_all() -> None:
         init_state_db()
         init_experiments_db()
         _initialized = True
+

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -9,10 +10,15 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
 from backend.services.factor_cards import FactorCardService
 from research.learning.governor import RuleEvolutionGovernor
 from risk.policy_service import RiskPolicyService
+
+
+_RECOMMENDATION_CACHE_TTL_SEC = 60.0
+_RECOMMENDATION_CACHE_LOCK = threading.Lock()
+_RECOMMENDATION_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -148,7 +154,7 @@ class ParameterTemplateService:
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -228,6 +234,13 @@ class ParameterTemplateService:
         factor_id: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
+        cache_key = str(factor_id or "*")
+        now_ts = time.time()
+        with _RECOMMENDATION_CACHE_LOCK:
+            cached = _RECOMMENDATION_CACHE.get(cache_key)
+            if cached and cached[0] > now_ts:
+                return deepcopy(cached[1][:limit])
+
         cards = self.cards.list_cards(limit=max(200, limit * 3), factor_id=factor_id)
         items: list[dict[str, Any]] = []
         for card in cards:
@@ -241,6 +254,8 @@ class ParameterTemplateService:
                 str(item.get("factor_id") or ""),
             )
         )
+        with _RECOMMENDATION_CACHE_LOCK:
+            _RECOMMENDATION_CACHE[cache_key] = (now_ts + _RECOMMENDATION_CACHE_TTL_SEC, deepcopy(items))
         return items[:limit]
 
     def get_recommendation(self, recommendation_id: str) -> dict[str, Any] | None:

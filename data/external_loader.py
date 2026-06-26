@@ -33,6 +33,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from backend.core.db import connect_duckdb
+
 
 class ExternalDataLoader:
     """外部数据 (宏观 + 事件 + ETF + 央行) 对齐到 bar 级别"""
@@ -42,7 +44,7 @@ class ExternalDataLoader:
 
     def _load_macro(self) -> pd.DataFrame:
         """加载 macro_daily, 列: date / dfii10 / dxy / gvz / vix"""
-        con = duckdb.connect(self.db_path)
+        con = connect_duckdb(self.db_path, read_only=True)
         rows = con.execute(
             "SELECT date, series, value FROM macro_daily ORDER BY date"
         ).fetchall()
@@ -57,7 +59,7 @@ class ExternalDataLoader:
 
     def _load_etf(self) -> pd.DataFrame:
         """加载 etf_daily, 列: gld / slv / tlt"""
-        con = duckdb.connect(self.db_path)
+        con = connect_duckdb(self.db_path, read_only=True)
         rows = con.execute(
             "SELECT date, symbol, close FROM etf_daily ORDER BY date"
         ).fetchall()
@@ -75,7 +77,7 @@ class ExternalDataLoader:
 
         返回列: gld_tonnes / slv_tonnes / gld_shares / slv_shares / gld_aum
         """
-        con = duckdb.connect(self.db_path)
+        con = connect_duckdb(self.db_path, read_only=True)
         try:
             rows = con.execute(
                 "SELECT symbol, date, total_tonnes, total_shares, aum_usd "
@@ -108,7 +110,7 @@ class ExternalDataLoader:
                 cb_china_total / cb_china_chg_monthly
                 ...
         """
-        con = duckdb.connect(self.db_path)
+        con = connect_duckdb(self.db_path, read_only=True)
         try:
             rows = con.execute(
                 "SELECT country, date, total_tonnes, monthly_chg_tonnes "
@@ -144,7 +146,7 @@ class ExternalDataLoader:
             cot_mm_net_pct_oi = mm_net / open_interest
             cot_mm_net_chg_4w = mm_net_pct_oi 4w diff
         """
-        con = duckdb.connect(self.db_path)
+        con = connect_duckdb(self.db_path, read_only=True)
         try:
             rows = con.execute(
                 "SELECT report_date, open_interest, mm_long, mm_short, mm_spread, "
@@ -186,7 +188,7 @@ class ExternalDataLoader:
 
     def _load_events(self) -> pd.DataFrame:
         """加载 events, 列: date / fomc / nfp / cpi / pce (1=是事件日)"""
-        con = duckdb.connect(self.db_path)
+        con = connect_duckdb(self.db_path, read_only=True)
         rows = con.execute(
             "SELECT date, type FROM events ORDER BY date"
         ).fetchall()
@@ -330,3 +332,4 @@ if __name__ == "__main__":
     for c in ext.columns:
         pct = (1 - ext[c].isna().mean()) * 100
         print(f"  {c:<30s}  {pct:>6.1f}%")
+

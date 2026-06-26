@@ -57,6 +57,27 @@ def _runtime_risk_policy() -> dict[str, bool]:
         }
 
 
+def _active_bar_component() -> str:
+    try:
+        from config.runtime_config import shared as _runtime_cfg
+
+        timeframe = str(getattr(_runtime_cfg(), "timeframe", "M5") or "M5").upper()
+    except Exception:
+        timeframe = "M5"
+    if timeframe == "M1":
+        return "bar_m1"
+    return "bar_m5"
+
+
+def _advisory_only_components() -> set[str]:
+    advisory = {"tick_data"}
+    active_bar = _active_bar_component()
+    for name in ("bar_m1", "bar_m5"):
+        if name != active_bar:
+            advisory.add(name)
+    return advisory
+
+
 def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
     limit = max(1, min(int(limit or 50), 200))
     conn = get_state_conn()
@@ -1665,7 +1686,7 @@ def _system_health_summary() -> dict[str, Any]:
     critical_components = [name for name, item in component_status.items() if item["status"] == "critical"]
     degraded_components = [name for name, item in component_status.items() if item["status"] == "degraded"]
 
-    advisory_only_components = {"tick_data"}
+    advisory_only_components = _advisory_only_components()
     blocking_components: list[str] = []
     advisory_critical_components: list[str] = []
     for name in critical_components:

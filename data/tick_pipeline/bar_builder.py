@@ -18,6 +18,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from backend.core.db import connect_duckdb
+
 logger = logging.getLogger(__name__)
 
 # 周期 → 秒
@@ -114,8 +116,7 @@ class TickBarBuilder:
 
         # load_ticks 需要 DuckDB store 支持
         # 直接用 duckdb 读取
-        import duckdb
-        conn = duckdb.connect(str(ds._backend.db_path))
+        conn = connect_duckdb(ds._backend.db_path, read_only=True)
         try:
             query = "SELECT * FROM ticks WHERE symbol = ?"
             params = [symbol]
@@ -179,3 +180,4 @@ class TickBarBuilder:
                 f"[BarBuilder] {symbol} {self.timeframe}: "
                 f"built {len(bar_dicts)} bars from ticks"
             )
+

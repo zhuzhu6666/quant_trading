@@ -16,6 +16,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from backend.core.paths import CHARTS_DIR  # noqa: E402
 
+BAR_TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+
 
 def _status_path() -> Path:
     return CHARTS_DIR / "live_sync_status.json"
@@ -42,25 +44,53 @@ def run_sync_once(
     Returns dict with `inserted` (per_tf) and `skipped` (per_tf) plus `total_inserted`.
     """
     if timeframes is None:
-        timeframes = ["M15", "H1", "D1"]
+        timeframes = BAR_TIMEFRAMES
     cb = progress_cb or (lambda *_: None)
     cb("loading", 5, f"sync {sync_type} {timeframes}")
 
     # CTraderPuller 替代原 MT5 orchestrator
     try:
         from data.live_sync.ctrader_puller import CTraderPuller
+        from data.store import DataStore
         from config.runtime_config import shared as rcc
         cfg = rcc()
         symbol = list(cfg.enabled_symbols)[0] if hasattr(cfg, 'enabled_symbols') and cfg.enabled_symbols else "XAUUSD+"
+        store = DataStore()
         results = {}
+        per_tf_status = {}
         total = 0
         for tf in timeframes:
-            puller = CTraderPuller(symbol=symbol)
+            puller = CTraderPuller()
             r = puller.pull_history(symbol=symbol, timeframe=tf, n=100)
-            n = r.n_bars if hasattr(r, 'n_bars') else 0
+            inserted = 0
+            if getattr(r, "bars", None):
+                inserted = int(store.insert_bars(r.bars, symbol, tf) or 0)
+            n = inserted
             results[tf] = n
+            per_tf_status[tf] = {
+                "inserted": n,
+                "fetched": int(getattr(r, "n_bars", 0) or 0),
+                "last_time": float(getattr(r, "last_time", 0.0) or 0.0),
+                "error": str(getattr(r, "error", "") or ""),
+                "updated_at": __import__("time").time(),
+            }
             total += n
         result = {"total_inserted": total, "per_tf": results}
+        _status_path().write_text(
+            json.dumps(
+                {
+                    "daemon_running": False,
+                    "last_sync_type": sync_type,
+                    "last_run_at": __import__("time").time(),
+                    "symbol": symbol,
+                    "per_tf": per_tf_status,
+                    "total_inserted": total,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
     except Exception as e:
         cb("error", 100, f"sync failed: {e}")
         raise
@@ -96,7 +126,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="T16 live data sync CLI")
     parser.add_argument("--mode", choices=["once", "daemon", "status"], default="status")
     parser.add_argument("--type", choices=["incremental", "full"], default="incremental")
-    parser.add_argument("--timeframes", type=str, default="M15,H1,D1", help="CSV of timeframes")
+    parser.add_argument("--timeframes", type=str, default="M1,M5,M15,M30,H1,H4,D1", help="CSV of timeframes")
     parser.add_argument("--interval-seconds", type=int, default=300)
     args = parser.parse_args()
 

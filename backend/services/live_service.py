@@ -53,7 +53,7 @@ _RISK_POLICY = RiskPolicyService.shared()
 # (MARKET 单限制). 改成: market_buy 成交后立即 amend_position_sltp 推
 # server. _local_positions 跟踪每个 position_id 的 SL/TP, amend 成功后
 # 覆盖, amend 失败时保留旧值(下次 tick 重试).
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 # ── Factor Takeover v4 管道 (Phase 3c) ──────────────────
 # lazy-import: 在 _run_loop 中按需导入, 避免启动时循环依赖
@@ -1193,6 +1193,9 @@ _live_state: dict = {
 
 # ★ 保护 _live_state 的读-改-写操作 (多线程: HTTP handler + live loop + scheduler)
 _LIVE_STATE_LOCK = threading.Lock()
+_ACCOUNT_REFRESH_LOCK = threading.Lock()
+_ACCOUNT_REFRESH_MIN_INTERVAL = 15.0
+_DATA_SYNC_LOCK = threading.Lock()
 
 
 def _live_state_get(key: str, default=None, *, clone: bool = False):
@@ -2031,6 +2034,7 @@ _CACHE_LOCK = threading.Lock()  # 防多个线程同时刷新 (WS + live tick �
 
 _probe_ctrader_cache: tuple[float, str, str | None] | None = None
 _CTRADER_PROBE_TTL = 15.0  # cTrader ping 也有 5s 超时, 按 _ACCOUNT_CACHE 节奏缓存
+_BAR_TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
 
 
 def _cache_get_or_refresh(cache: dict, ttl: float, fetcher):
@@ -2067,14 +2071,93 @@ def _make_ctrader_bridge(**overrides):
         from execution.ctrader_bridge import CTraderBridge
     except ImportError as e:
         return None, f"ctrader-open-api not installed: {e}"
+    try:
+        from config import load_config
+        cfg = load_config()
+        ctrader_cfg = cfg.get("ctrader", {}) if isinstance(cfg, dict) else {}
+    except Exception:
+        ctrader_cfg = {}
     kw = dict(
         client_id=os.getenv("CTRADER_CLIENT_ID", ""),
         client_secret=os.getenv("CTRADER_CLIENT_SECRET", ""),
         access_token=os.getenv("CTRADER_ACCESS_TOKEN", ""),
         account_id=int(os.getenv("CTRADER_ACCOUNT_ID", "0")),
+        host=str(os.getenv("CTRADER_HOST", ctrader_cfg.get("host", "demo.ctraderapi.com")) or "demo.ctraderapi.com"),
+        port=int(os.getenv("CTRADER_PORT", ctrader_cfg.get("port", 5035)) or 5035),
+        symbol=str(os.getenv("CTRADER_SYMBOL", ctrader_cfg.get("symbol", "XAUUSD")) or "XAUUSD"),
+        request_timeout_sec=float(
+            os.getenv("CTRADER_REQUEST_TIMEOUT_SEC", ctrader_cfg.get("request_timeout_sec", 10)) or 10
+        ),
+        proxy_url=str(
+            os.getenv("CTRADER_PROXY_URL", ctrader_cfg.get("proxy_url", "")) or ""
+        ),
+        proxy_rdns=str(
+            os.getenv("CTRADER_PROXY_RDNS", ctrader_cfg.get("proxy_rdns", True))
+        ).strip().lower() not in {"0", "false", "no", "off"},
     )
     kw.update(overrides)
-    return CTraderBridge(**kw), None
+    bridge = CTraderBridge(**kw)
+    _install_ctrader_live_listener(bridge)
+    return bridge, None
+
+
+def _install_ctrader_live_listener(bridge) -> None:
+    if bridge is None or getattr(bridge, "_live_service_listener_installed", False):
+        return
+
+    def _listener(event_type: str, payload: dict[str, Any]) -> None:
+        now_ts = time.time()
+        try:
+            if event_type == "spot":
+                price = float(payload.get("price") or 0.0)
+                if price > 0:
+                    positions = _live_state_get("positions", [], clone=True) or []
+                    patched_positions = []
+                    for item in positions:
+                        if isinstance(item, dict):
+                            item = dict(item)
+                            item["current_price"] = price
+                            patched_positions.append(item)
+                        else:
+                            patched_positions.append(item)
+                    _live_state_update(
+                        spot_price=price,
+                        positions=patched_positions or positions,
+                    )
+                return
+            if event_type == "account":
+                account = payload.get("account")
+                if account is None:
+                    return
+                if not isinstance(account, dict):
+                    account = asdict(account)
+                account.setdefault("ok", True)
+                account.setdefault("broker", "ctrader")
+                _live_state_update(account=account, account_updated_at=now_ts)
+                return
+            if event_type == "positions":
+                positions = payload.get("positions") or []
+                try:
+                    from config.runtime_config import shared as _rc
+
+                    cfg = _rc()
+                except Exception:
+                    cfg = None
+                enriched = _enrich_positions_with_path_metrics(
+                    positions,
+                    cfg=cfg,
+                    now_ts=now_ts,
+                    persist=True,
+                    broker="ctrader",
+                    strategy_name=str(_loop_strategy_name or "factor_v4"),
+                )
+                _live_state_update(positions=enriched, positions_updated_at=now_ts)
+                return
+        except Exception as exc:
+            logger.debug("[ctrader] live listener ignored %s: %s", event_type, exc)
+
+    bridge.add_event_listener(_listener)
+    setattr(bridge, "_live_service_listener_installed", True)
 
 
 # ── cTrader 连接管理 ──────────────────────────────────────────────
@@ -2090,27 +2173,101 @@ _ctrader_bridge = None  # type: "CTraderBridge | None"
 _ctrader_lock = threading.Lock()
 _ctrader_connect_thread: threading.Thread | None = None
 _ctrader_last_error: str | None = None
+_ctrader_next_retry_at: float = 0.0
+_ctrader_guard_handle = None
+
+
+def _ensure_ctrader_process_guard() -> str | None:
+    """Acquire a cross-process lock so only one backend owns the cTrader session."""
+    global _ctrader_guard_handle
+    if _ctrader_guard_handle is not None:
+        return None
+    lock_path = Path(__file__).resolve().parent.parent.parent / "runtime" / "ctrader_session.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a+", encoding="utf-8")
+    try:
+        try:
+            import fcntl  # type: ignore
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:
+            import msvcrt  # type: ignore
+
+            fh.seek(0)
+            if lock_path.stat().st_size == 0:
+                fh.write("0")
+                fh.flush()
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"pid={os.getpid()} started_at={time.time():.3f}\n")
+        fh.flush()
+        _ctrader_guard_handle = fh
+        return None
+    except OSError as e:
+        fh.close()
+        return f"ctrader session lock is held by another backend process: {e}"
+
+
+def _ctrader_retry_remaining() -> float:
+    remaining = _ctrader_next_retry_at - time.time()
+    return remaining if remaining > 0 else 0.0
 
 
 def _kickoff_ctrader_connect():
     """在后台线程跑 _ctrader_bridge.connect(). 不会阻塞调用方.
     必须已持有 _ctrader_lock 锁. 假定 _ctrader_bridge 已实例化."""
-    global _ctrader_last_error
+    global _ctrader_last_error, _ctrader_next_retry_at
     bridge = _ctrader_bridge
 
     def _bg():
-        global _ctrader_last_error
+        global _ctrader_last_error, _ctrader_next_retry_at
         try:
             ok = bridge.connect()
             if not ok:
+                retry_in = 5.0
+                try:
+                    retry_in = max(float(bridge.connect_backoff_seconds()), 1.0)
+                except Exception:
+                    pass
+                _ctrader_next_retry_at = time.time() + retry_in
                 _ctrader_last_error = "cTrader connect failed (check credentials / network)"
-                logger.warning(f"[ctrader] background connect failed: {_ctrader_last_error}")
+                logger.warning(
+                    "[ctrader] background connect failed: {}; retry in {:.1f}s",
+                    _ctrader_last_error,
+                    retry_in,
+                )
             else:
+                _ctrader_next_retry_at = 0.0
                 _ctrader_last_error = None
+                try:
+                    if hasattr(bridge, "refresh_account_info"):
+                        bridge.refresh_account_info()
+                    else:
+                        bridge.account_info()
+                except Exception as exc:
+                    logger.debug("[ctrader] initial account prime failed: %s", exc)
+                try:
+                    if hasattr(bridge, "refresh_positions"):
+                        bridge.refresh_positions()
+                    else:
+                        bridge.get_positions()
+                except Exception as exc:
+                    logger.debug("[ctrader] initial positions prime failed: %s", exc)
                 logger.info("[ctrader] background connect OK")
         except Exception as e:
+            retry_in = 5.0
+            try:
+                retry_in = max(float(bridge.connect_backoff_seconds()), 1.0)
+            except Exception:
+                pass
+            _ctrader_next_retry_at = time.time() + retry_in
             _ctrader_last_error = f"{type(e).__name__}: {e}"[:300]
-            logger.warning(f"[ctrader] background connect exception: {_ctrader_last_error}")
+            logger.warning(
+                "[ctrader] background connect exception: {}; retry in {:.1f}s",
+                _ctrader_last_error,
+                retry_in,
+            )
 
     t = threading.Thread(target=_bg, daemon=True, name="ctrader-bg-connect")
     t.start()
@@ -2139,10 +2296,18 @@ def _get_ctrader():
         return None, f"ctrader-open-api not installed: {e}", False
 
     with _ctrader_lock:
+        guard_err = _ensure_ctrader_process_guard()
+        if guard_err:
+            return None, guard_err, False
         # 复用已有连接 — 用 is_connected 属性 (瞬时), 不用 ping() (阻塞 5s)
         if _ctrader_bridge is not None:
             if _ctrader_bridge.is_connected:
                 return _ctrader_bridge, None, False
+            if getattr(_ctrader_bridge, "is_connecting", False):
+                return _ctrader_bridge, None, True
+            retry_remaining = _ctrader_retry_remaining()
+            if retry_remaining > 0:
+                return _ctrader_bridge, None, True
             # 旧实例断开且没在 reconnect — 后台起一次
             if _ctrader_connect_thread is None or not _ctrader_connect_thread.is_alive():
                 _ctrader_connect_thread = _kickoff_ctrader_connect()
@@ -2150,13 +2315,12 @@ def _get_ctrader():
 
         # 首次: 创建实例 + 后台启动 connect
         try:
-            _ctrader_bridge = CTraderBridge(
-                client_id=os.getenv("CTRADER_CLIENT_ID", ""),
-                client_secret=os.getenv("CTRADER_CLIENT_SECRET", ""),
-                access_token=os.getenv("CTRADER_ACCESS_TOKEN", ""),
-                account_id=int(os.getenv("CTRADER_ACCOUNT_ID", "0")),
+            _ctrader_bridge, build_err = _make_ctrader_bridge(
                 send_orders=True,  # cTrader 是唯一执行通道, 外层 _should_send_orders 控制闸
             )
+            if build_err:
+                _ctrader_bridge = None
+                return None, build_err, False
         except Exception as e:
             _ctrader_bridge = None
             return None, f"{type(e).__name__}: {e}"[:300], False
@@ -2266,7 +2430,7 @@ def get_live_readiness(broker: str = "ctrader") -> dict:
 
     loop_running = bool(loop.get("running"))
     account_ready = bool(account and account.get("ok") and account_updated_at > 0)
-    positions_ready = positions_updated_at > 0 and len(positions) > 0
+    positions_ready = positions_updated_at > 0
     bridge_ready = bool(diag.get("bridge_ready"))
 
     state = "idle"
@@ -2291,7 +2455,7 @@ def get_live_readiness(broker: str = "ctrader") -> dict:
         reasons.append("account_not_ready")
     if positions_updated_at <= 0:
         reasons.append("positions_never_synced")
-    elif not positions_ready:
+    elif len(positions) == 0:
         reasons.append("positions_empty")
     if broker_error:
         reasons.append("broker_error")
@@ -2789,6 +2953,9 @@ def _start_live_scheduler():
     from data.live_sync.health import SyncHealth
     def _data_sync():
         """先检查 bars + ticks 新鲜度, 有缺口才回补, 不缺就跳过。"""
+        if not _DATA_SYNC_LOCK.acquire(blocking=False):
+            logger.warning("[data_sync] previous run still active, skip overlapping trigger")
+            return
         t0 = time.time()
         health = SyncHealth.shared()
         try:
@@ -2796,12 +2963,20 @@ def _start_live_scheduler():
             cfg = _rcc()
             symbols = list(cfg.enabled_symbols) if hasattr(cfg, 'enabled_symbols') else ["XAUUSD+"]
             now = time.time()
-            import duckdb as _duckdb
+            from backend.core.db import DUCKDB_BARS, connect_duckdb
             _db_path = str(Path(__file__).resolve().parent.parent.parent / "data" / "ctrader_data.duckdb")
-            _dc = _duckdb.connect(_db_path)
+            _dc = connect_duckdb(DUCKDB_BARS)
 
             # 1. 检查 bar 新鲜度: 各周期最新 bar 时间 vs 预期阈值
-            bar_thresholds = {"M1": 600, "M5": 900, "M15": 1800, "M30": 3600, "H1": 7200, "D1": 172800}
+            bar_thresholds = {
+                "M1": 600,
+                "M5": 900,
+                "M15": 1800,
+                "M30": 3600,
+                "H1": 7200,
+                "H4": 28800,
+                "D1": 172800,
+            }
             stale_tfs = []
             fresh_tfs = []
             observed_bar_ts_by_tf: dict[str, float] = {}
@@ -2898,6 +3073,8 @@ def _start_live_scheduler():
                 health.record_failure(str(e)[:200])
             except Exception as _e2:
                 logger.debug("[data_sync] health.record_failure failed: %s", _e2)
+        finally:
+            _DATA_SYNC_LOCK.release()
     sched.add_job("data_sync", "*/5 * * * *", _data_sync)
     # 每小时: Dukascopy tick 增量 (替换 Hermes cron, 项目全自主)
     def _scheduled_dukascopy_tick():
@@ -2920,12 +3097,6 @@ def _start_live_scheduler():
         except Exception as e:
             logger.warning("[dukascopy_tick] error: {}", e)
     sched.add_job("dukascopy_tick", "0 * * * *", _scheduled_dukascopy_tick)
-    # 启动后立即补跑一次 tick 增量 (后台线程, 不阻塞启动)
-    threading.Thread(
-        target=_scheduled_dukascopy_tick,
-        daemon=True,
-        name="dukascopy-tick-catchup",
-    ).start()
     # 每天 8:00: 经济日历拉取
     def _scheduled_events_sync():
         import sys
@@ -2947,12 +3118,6 @@ def _start_live_scheduler():
         except Exception as e:
             logger.warning("[events_sync] error: {}", e)
     sched.add_job("events_sync", "0 8 * * *", _scheduled_events_sync)
-    # 启动后立即补跑一次 (后台线程)
-    threading.Thread(
-        target=_scheduled_events_sync,
-        daemon=True,
-        name="events-sync-catchup",
-    ).start()
     # 每周六 6:00: COT 持仓刷新 (CFTC 周五发布)
     def _scheduled_cot_sync():
         import sys
@@ -2999,14 +3164,15 @@ def _start_live_scheduler():
     logger.info("[live] InProcessScheduler started with 10 jobs")
 
     # ── 后台: 首次启动数据补充 (用主 bridge, 不开第二连接) ──
-    def _initial_ctrader_data_pull():
+    def _initial_ctrader_data_pull(timeframes=None, n_bars: int = 5000, phase: str = "startup"):
         """启动后立即从 cTrader 拉最近数据写入 DB.
         不清除现有 MT5 历史数据 (保留 203K 宝贵 bars).
         DuckDB UNIQUE constraint 自动处理同时间戳的 bar."""
+        timeframes = list(timeframes or _BAR_TIMEFRAMES)
         try:
             bridge, err, warming = _get_ctrader()
             if err:
-                logger.warning("[init] cTrader bridge unavailable: {}, skip initial pull", err)
+                logger.warning("[init:{}] cTrader bridge unavailable: {}, skip initial pull", phase, err)
                 return
             if warming:
                 # bridge 还在后台连接中, 等最多 30s
@@ -3016,16 +3182,22 @@ def _start_live_scheduler():
                         break
                     time.sleep(1)
                 if not bridge.is_connected:
-                    logger.warning("[init] cTrader bridge not connected after 30s, skip initial pull")
+                    logger.warning("[init:{}] cTrader bridge not connected after 30s, skip initial pull", phase)
                     return
-            # 拉最近 5000 根 M5 bars (cTrader 有 ~90天数据)
+            # 启动阶段优先保障交易所需周期, 其它周期延后错峰补齐.
             from data.store import DataStore
             store = DataStore()
-            for tf in ["M5", "M15", "H1"]:
+            for tf in timeframes:
                 try:
-                    df = bridge.fetch_bars(tf, n_bars=5000)
+                    df = None
+                    for attempt in range(2):
+                        df = bridge.fetch_bars(tf, n_bars=n_bars)
+                        if df is not None and not df.empty:
+                            break
+                        if attempt == 0:
+                            time.sleep(1.0)
                     if df is None or df.empty:
-                        logger.warning("[init] {} pull returned empty", tf)
+                        logger.warning("[init:{}] {} pull returned empty", phase, tf)
                         continue
                     bars = []
                     for idx, row in df.iterrows():
@@ -3037,41 +3209,70 @@ def _start_live_scheduler():
                             "spread": 0,
                         })
                     store.insert_bars(bars, "XAUUSD+", tf)
-                    logger.info("[init] {}: +{} bars ({} → {})", tf, len(bars),
+                    logger.info("[init:{}] {}: +{} bars ({} → {})", phase, tf, len(bars),
                                time.strftime('%m-%d %H:%M', time.gmtime(bars[0]["time"])),
                                time.strftime('%m-%d %H:%M', time.gmtime(bars[-1]["time"])))
                 except Exception as e:
-                    logger.warning("[init] {} pull failed: {}", tf, e)
-            logger.info("[init] ✅ cTrader 初始数据补充完成")
+                    logger.warning("[init:{}] {} pull failed: {}", phase, tf, e)
+            logger.info("[init:{}] ✅ cTrader 初始数据补充完成", phase)
         except Exception as _e:
-            logger.warning("[init] initial pull failed: {}", _e)
+            logger.warning("[init:{}] initial pull failed: {}", phase, _e)
 
     import threading as _th
-    _th.Thread(target=_initial_ctrader_data_pull, daemon=True).start()
-    # 开机补跑: 先拉数据, 再跑其他检查 (后台线程, 不阻塞 start_loop HTTP 响应)
+    _th.Thread(
+        target=lambda: _initial_ctrader_data_pull(["M1", "M5"], n_bars=1200, phase="fast"),
+        daemon=True,
+        name="init-ctrader-fast",
+    ).start()
+    _deferred_init_timer = _th.Timer(
+        30.0,
+        lambda: _initial_ctrader_data_pull(["M15", "M30", "H1", "H4", "D1"], n_bars=5000, phase="deferred"),
+    )
+    _deferred_init_timer.daemon = True
+    _deferred_init_timer.start()
+    # 开机补跑: 轻任务立即补, 重任务延迟错峰串行补, 避免冷启动瞬时打满 CPU
     def _catch_up_all_jobs():
         import traceback as _tb
-        # 使用 sched.run_job_now() 确保执行计入 run_count
-        # 冷启动补跑: 确保重启后数据立即刷新, 不错过低频任务的调度窗口
-        job_names = [
-            "data_sync",           # 每 5 分钟 — bars/ticks 补缺
-            "dukascopy_tick",      # 每小时 — Dukascopy tick 历史
-            "events_sync",         # 每日 08:00 — 经济事件日历
-            "cot_sync",            # 每周六 — COT 持仓报告
-            "etf_sync",            # 每季度 — ETF 持仓
-            "evolution_hourly",    # 每小时 — 进化闭环
-            "awe_adapt",           # 每 30 分钟 — 权重自适应
-            "ml_retrain",           # 每周日 — ML 重训
-            "feature_eng",         # 每日 03:00 — 特征工程
-            "ml_drift_check",      # 每 6 小时 — 概念漂移检测
-        ]
-        for name in job_names:
+        def _run_job(name: str):
             try:
                 logger.info("[catch-up] running {} ...", name)
                 sched.run_job_now(name)
                 logger.info("[catch-up] {} done", name)
             except Exception as e:
                 logger.warning("[catch-up] {} failed: {}\n{}", name, e, _tb.format_exc()[-200:])
+        immediate_jobs = [
+            "data_sync",
+            "dukascopy_tick",
+            "events_sync",
+        ]
+        deferred_jobs = [
+            (300.0, "cot_sync"),
+            (360.0, "etf_sync"),
+            (480.0, "evolution_hourly"),
+            (720.0, "awe_adapt"),
+            (960.0, "ml_drift_check"),
+            (1200.0, "feature_eng"),
+            (1500.0, "ml_retrain"),
+        ]
+        for name in immediate_jobs:
+            _run_job(name)
+        started_at = time.monotonic()
+
+        def _run_deferred_jobs_serially():
+            for delay_sec, name in deferred_jobs:
+                remain = delay_sec - (time.monotonic() - started_at)
+                if remain > 0:
+                    logger.info("[catch-up] defer {} by {}s", name, int(remain))
+                    time.sleep(remain)
+                _run_job(name)
+                # 给实时交易和 API 留一点喘息空间, 避免补跑任务背靠背长期霸占 CPU
+                time.sleep(30.0)
+
+        threading.Thread(
+            target=_run_deferred_jobs_serially,
+            name="scheduler_catch_up_deferred",
+            daemon=True,
+        ).start()
     threading.Thread(
         target=_catch_up_all_jobs,
         name="scheduler_catch_up",
@@ -3267,13 +3468,12 @@ def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bar
     实时 tick 走 broker spot event, 这里只保证 strategy 暖机有数据。
     """
     import time as _time
-    from backend.core.db import DUCKDB_BARS
+    from backend.core.db import DUCKDB_BARS, connect_duckdb
     db_path = str(DUCKDB_BARS)
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            import duckdb
-            conn = duckdb.connect(db_path)
+            conn = connect_duckdb(db_path)
             try:
                 df = conn.execute(
                     "SELECT time, open, high, low, close, volume "
@@ -3651,47 +3851,35 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         except Exception as e:
             log(f"Factor pipeline warmup failed: {e}")
 
-    def _ensure_ctrader_market_subscriptions(wait_timeout_sec: float = 0.0) -> bool:
-        try:
-            spot_bridge, spot_err, spot_warming = _get_ctrader()
-            require_l2_depth = bool(getattr(_rcfg, "risk_require_l2_depth", False))
-            if spot_err:
-                log(f"subscribe_spots skipped: {spot_err}")
-                return False
-            if spot_bridge is None:
-                return False
-            if spot_warming or not spot_bridge.is_connected:
-                if wait_timeout_sec <= 0:
-                    return False
-                wait_err = _wait_ctrader_ready(spot_bridge, timeout_sec=wait_timeout_sec)
-                if wait_err:
-                    log(f"subscribe_spots skipped: {wait_err}")
-                    return False
-            if not getattr(spot_bridge, "_spot_subscribed", False):
-                if not spot_bridge.subscribe_spots():
-                    log("subscribe_spots failed (non-fatal): subscribe request rejected")
-                    return False
-                if require_l2_depth:
-                    if not getattr(spot_bridge, "_depth_subscribed", False):
-                        spot_bridge.subscribe_depth()
-                    log("subscribed to spot and depth events for real-time price")
-                else:
-                    log("subscribed to spot events for real-time price (depth disabled)")
-                return True
-            if require_l2_depth and not getattr(spot_bridge, "_depth_subscribed", False):
-                if spot_bridge.subscribe_depth():
-                    log("subscribed depth events for real-time price")
-            return True
-        except Exception as e:
-            log(f"subscribe_spots failed (non-fatal): {e}")
-            return False
-
     # 订阅 cTrader 实时报价 (audit 2026-06-08)
     # audit 2026-06-10: warmup 走 local_db 路径时 bridge 变量未定义,
     # 之前直接调 bridge.subscribe_spots() 抛 NameError 被 except 吞,
     # log 误报 "failed (non-fatal)". 修: 从 _get_ctrader() 拿真 bridge, 短等 ready.
     if broker == "ctrader":
-        _ensure_ctrader_market_subscriptions(wait_timeout_sec=20.0)
+        try:
+            cfg = _rcfg
+            require_l2_depth = bool(getattr(_rcfg, "risk_require_l2_depth", False))
+            spot_bridge, spot_err, spot_warming = _get_ctrader()
+            if spot_err:
+                log(f"subscribe_spots skipped: {spot_err}")
+            elif spot_warming or not spot_bridge.is_connected:
+                wait_err = _wait_ctrader_ready(spot_bridge, timeout_sec=10.0)
+                if wait_err:
+                    log(f"subscribe_spots skipped: {wait_err}")
+                else:
+                    spot_bridge.subscribe_spots()
+                    if require_l2_depth:
+                        spot_bridge.subscribe_depth()
+                    log("subscribed to spot events for real-time price")
+            else:
+                spot_bridge.subscribe_spots()
+                if require_l2_depth:
+                    spot_bridge.subscribe_depth()
+                log("subscribed to spot events for real-time price")
+            if not require_l2_depth:
+                log("L2 depth subscription skipped: risk_require_l2_depth=false")
+        except Exception as e:
+            log(f"subscribe_spots failed (non-fatal): {e}")
 
     # ── Phase 3: 主循环 (60s tick) ──
     tick = 0
@@ -3733,8 +3921,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
             # 刷新账户缓存 (bridge 可用时才做)
             if bridge_ready:
-                _ensure_ctrader_market_subscriptions(wait_timeout_sec=0.0)
-                kickoff_account_refresh(bridge, broker, interval_sec=3.0)
+                kickoff_account_refresh(bridge, broker, interval_sec=30.0)
                 if not recovery_bootstrapped:
                     try:
                         recovery_bootstrapped = _bootstrap_position_recovery(
@@ -3877,48 +4064,60 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
 
     ★ v9-fix: 连接断开时立刻返回, 不做 API 调用防 timeout 风暴.
     """
-    # 连接预检: 断开时不调用, 避免 10s timeout 堆积
-    if hasattr(bridge, 'is_connected') and not bridge.is_connected:
+    if not _ACCOUNT_REFRESH_LOCK.acquire(blocking=False):
         return
     try:
-        raw = bridge.account_info()
-    except Exception as e:
-        logger.warning(f"[{broker}] background account_info failed: {e}")
-        return
-    if not raw:
-        return
-    # 统一转 dict: CTraderBridge 返 AccountInfo dataclass
-    if not isinstance(raw, dict):
-        from dataclasses import asdict
-        acct = asdict(raw)
-    else:
-        acct = raw
-    # audit 2026-06-10: ensure the cached account has `ok=True` so the
-    # WS snapshot doesn't mistake it for an error envelope.
-    acct.setdefault("ok", True)
-    acct.setdefault("broker", broker)
-    _live_state_update(account=acct, account_updated_at=time.time())
-    try:
-        pos_raw = bridge.get_positions() or []
-    except Exception as e:
-        logger.warning(f"[{broker}] background get_positions failed: {e}")
-        pos_raw = None
-    if pos_raw is not None:
-        try:
-            from config.runtime_config import shared as _rc
-
-            cfg = _rc()
-        except Exception:
-            cfg = None
-        enriched = _enrich_positions_with_path_metrics(
-            pos_raw,
-            cfg=cfg,
-            now_ts=time.time(),
-            persist=True,
-            broker=broker,
-            strategy_name=str(_loop_strategy_name or "factor_v4"),
+        # 连接预检: 断开时不调用, 避免 10s timeout 堆积
+        if hasattr(bridge, 'is_connected') and not bridge.is_connected:
+            return
+        now_ts = time.time()
+        freshest_ts = max(
+            float(_live_state_get("account_updated_at") or 0.0),
+            float(_live_state_get("positions_updated_at") or 0.0),
         )
-        _live_state_update(positions=enriched, positions_updated_at=time.time())
+        if freshest_ts > 0 and (now_ts - freshest_ts) < _ACCOUNT_REFRESH_MIN_INTERVAL:
+            return
+        try:
+            raw = bridge.refresh_account_info() if hasattr(bridge, "refresh_account_info") else bridge.account_info()
+        except Exception as e:
+            logger.warning(f"[{broker}] background account_info failed: {e}")
+            return
+        if not raw:
+            return
+        # 统一转 dict: CTraderBridge 返 AccountInfo dataclass
+        if not isinstance(raw, dict):
+            from dataclasses import asdict
+            acct = asdict(raw)
+        else:
+            acct = raw
+        # audit 2026-06-10: ensure the cached account has `ok=True` so the
+        # WS snapshot doesn't mistake it for an error envelope.
+        acct.setdefault("ok", True)
+        acct.setdefault("broker", broker)
+        _live_state_update(account=acct, account_updated_at=now_ts)
+        try:
+            pos_raw = bridge.refresh_positions() if hasattr(bridge, "refresh_positions") else (bridge.get_positions() or [])
+        except Exception as e:
+            logger.warning(f"[{broker}] background get_positions failed: {e}")
+            pos_raw = None
+        if pos_raw is not None:
+            try:
+                from config.runtime_config import shared as _rc
+
+                cfg = _rc()
+            except Exception:
+                cfg = None
+            enriched = _enrich_positions_with_path_metrics(
+                pos_raw,
+                cfg=cfg,
+                now_ts=time.time(),
+                persist=True,
+                broker=broker,
+                strategy_name=str(_loop_strategy_name or "factor_v4"),
+            )
+            _live_state_update(positions=enriched, positions_updated_at=time.time())
+    finally:
+        _ACCOUNT_REFRESH_LOCK.release()
 
 
 def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 30.0) -> threading.Thread:
@@ -4180,7 +4379,7 @@ def _record_filled_position_open_context(
                 gate_result=gate_result,
                 symbol="XAUUSD+",
                 timeframe=str(getattr(cfg, "timeframe", "") or ""),
-                decision_ts=time.time(),
+                decision_ts=bar.get("time", time.time()),
                 trade_id=str(pid),
                 position_id=str(pid),
                 portfolio_state={
@@ -4536,7 +4735,7 @@ def _process_tick_factor_pipeline(
                         event_type="close",
                         symbol="XAUUSD+",
                         timeframe=str(getattr(cfg, "timeframe", "") or ""),
-                        decision_ts=close_ts,
+                        decision_ts=bar.get("time", close_ts),
                         trade_id=str(cpid),
                         position_id=str(cpid),
                         portfolio_state={

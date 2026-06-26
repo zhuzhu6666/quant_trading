@@ -14,7 +14,7 @@ import pandas as pd
 from alpha.evaluation.evaluation_context import EvaluationContext
 from alpha.evaluation.purged_walkforward import PurgedWalkForward
 from alpha.streaming_factor_engine import StreamingFactorEngine
-from backend.core.db import DATA_DIR, STATE_DB, STATE_DB_DDL
+from backend.core.db import DATA_DIR, STATE_DB, STATE_DB_DDL, connect_sqlite
 from backend.jobs.progress import ProgressCB
 from backend.services.backtest_runner import _load_bars
 from backend.services.backtest_service import run_backtest
@@ -31,7 +31,7 @@ class ParameterTemplateValidationService:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         try:
             conn.executescript(STATE_DB_DDL)
             conn.commit()
@@ -49,7 +49,7 @@ class ParameterTemplateValidationService:
         score: float = 0.0,
     ) -> None:
         now = time.time()
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         try:
             conn.execute(
                 """
@@ -99,7 +99,7 @@ class ParameterTemplateValidationService:
             LIMIT ?
         """
         params.append(int(limit))
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(sql, tuple(params)).fetchall()
@@ -108,7 +108,7 @@ class ParameterTemplateValidationService:
         return [self._parse_release_candidate_row(row) for row in rows]
 
     def get_release_candidate(self, candidate_id: str) -> dict[str, Any] | None:
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute(
@@ -149,7 +149,7 @@ class ParameterTemplateValidationService:
             "fold_count": int((walk_forward.get("config") or {}).get("n_folds") or 0),
             "recommendation_source": dict(recommendation_context or {}),
         }
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         try:
             conn.execute(
                 """
@@ -386,7 +386,7 @@ class ParameterTemplateValidationService:
         validation_summary: dict[str, Any],
         updated_at: float,
     ) -> None:
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         try:
             conn.execute(
                 """
@@ -737,3 +737,4 @@ def run_parameter_template_offline_validation(
         "report_path": report_path,
         "note": "offline_deep now emits walk-forward evidence and a pending gray-release candidate",
     }
+

@@ -19,6 +19,8 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from backend.core.db import connect_duckdb
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +58,7 @@ class DuckDBDataStore:
 
     def _get_conn(self) -> duckdb.DuckDBPyConnection:
         """获取 DuckDB 连接 (每次调用新建，轻量)"""
-        return duckdb.connect(str(self.db_path))
+        return connect_duckdb(self.db_path)
 
     def _init_db(self):
         conn = self._get_conn()
@@ -378,3 +380,4 @@ class DuckDBDataStore:
             return int(r[0]) if r and r[0] else None
         finally:
             conn.close()
+

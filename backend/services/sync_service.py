@@ -19,6 +19,8 @@ from backend.runtime.runtime_state import RuntimeState
 # 保留模块级 logger 名称(老代码用 loguru,新代码用 stdlib logging,统一用 name 区分)
 _stdlib_logger = logging.getLogger(__name__)
 
+BAR_TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+
 
 def get_status() -> dict:
     """Return current sync status (from the live_sync_status.json on disk)."""
@@ -32,7 +34,7 @@ def run_sync_once(params: dict[str, Any], progress_cb: ProgressCB) -> dict:
     from scripts.live_sync import run_sync_once as _run
 
     return _run(
-        timeframes=params.get("timeframes", ["M15", "H1", "D1"]),
+        timeframes=params.get("timeframes", BAR_TIMEFRAMES),
         sync_type=params.get("type", "incremental"),
         progress_cb=progress_cb,
     )
@@ -68,15 +70,20 @@ async def _do_one_sync(state: RuntimeState, health) -> None:
     try:
         from data.live_sync.ctrader_puller import CTraderPuller
         from config.runtime_config import shared as rcc
+        from data.store import DataStore
 
         cfg = rcc()
         symbol = list(cfg.enabled_symbols)[0] if hasattr(cfg, 'enabled_symbols') and cfg.enabled_symbols else "XAUUSD+"
+        store = DataStore()
         results = {}
         last_bar_ts_by_tf = {}
-        for tf in ["M5", "M15"]:
+        for tf in BAR_TIMEFRAMES:
             puller = CTraderPuller()
             r = puller.pull_history(symbol=symbol, timeframe=tf, n=50)
-            results[tf] = r.n_bars if hasattr(r, 'n_bars') else 0
+            inserted = 0
+            if getattr(r, "bars", None):
+                inserted = int(store.insert_bars(r.bars, symbol, tf) or 0)
+            results[tf] = inserted
             if getattr(r, "last_time", 0):
                 last_bar_ts_by_tf[tf] = float(r.last_time)
 

@@ -5,10 +5,12 @@ import duckdb
 from datetime import datetime, timedelta
 from typing import Optional
 
+from backend.core.db import connect_duckdb
+
 
 def load_nfp_dates(db_path: str = "data/events.duckdb") -> set[str]:
     """NFP 日期集合（±2 天窗口已在调用方处理，这里只返回原始日期）"""
-    conn = duckdb.connect(db_path)
+    conn = connect_duckdb(db_path, read_only=True)
     cur = conn.cursor()
     cur.execute("SELECT date FROM events WHERE type='NFP'")
     dates = {r[0] for r in cur.fetchall()}
@@ -17,7 +19,7 @@ def load_nfp_dates(db_path: str = "data/events.duckdb") -> set[str]:
 
 
 def load_event_dates(db_path: str, event_type: str) -> set[str]:
-    conn = duckdb.connect(db_path)
+    conn = connect_duckdb(db_path, read_only=True)
     cur = conn.cursor()
     cur.execute("SELECT date FROM events WHERE type=?", (event_type,))
     dates = {r[0] for r in cur.fetchall()}
@@ -27,7 +29,7 @@ def load_event_dates(db_path: str, event_type: str) -> set[str]:
 
 def load_gvz_series(db_path: str = "data/ctrader_data.duckdb") -> dict[str, float]:
     """GVZ 日度值"""
-    conn = duckdb.connect(db_path)
+    conn = connect_duckdb(db_path, read_only=True)
     cur = conn.cursor()
     cur.execute("SELECT date, value FROM macro_daily WHERE series='GVZCLS' ORDER BY date")
     rows = dict(cur.fetchall())
@@ -74,7 +76,7 @@ def load_events_with_importance(
     Returns:
         list of dicts: [{date, type, description, importance}, ...]
     """
-    conn = duckdb.connect(db_path)
+    conn = connect_duckdb(db_path, read_only=True)
     cur = conn.cursor()
     cur.execute(
         "SELECT date, type, description, importance "
@@ -87,3 +89,4 @@ def load_events_with_importance(
     ]
     conn.close()
     return rows
+

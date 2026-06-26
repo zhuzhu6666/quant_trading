@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from backend.core.db import connect_duckdb
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,8 +104,7 @@ class EventSizing:
             return
 
         try:
-            import duckdb
-            conn = duckdb.connect(db_path)
+            conn = connect_duckdb(db_path, read_only=True)
             try:
                 cur = conn.execute(
                     "SELECT date, type, description, importance "
@@ -205,3 +206,4 @@ class EventSizing:
             "total_events": len(self._events),
             "min_multiplier": self._min_multiplier,
         }
+

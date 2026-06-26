@@ -28,14 +28,14 @@ from strategy import mab_router as _mab_router
 logger = logging.getLogger(__name__)
 
 # audit v3: 统一使用 STATE_DB, 不再用 decision_log.db
-from backend.core.db import STATE_DB as _CANARY_DB
+from backend.core.db import STATE_DB as _CANARY_DB, connect_sqlite
 
 
 def _ensure_canary_db() -> None:
     """确保 canary_state 表存在 (state.db, DDL已在backend/core/db.py定义)."""
     # state.db 的 DDL 已包含 canary_state 表, 此处幂等创建以防万一
     try:
-        conn = sqlite3.connect(str(_CANARY_DB))
+        conn = connect_sqlite(_CANARY_DB)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS canary_state (
                 factor_name TEXT PRIMARY KEY,
@@ -58,7 +58,7 @@ def _load_canary_states() -> dict[str, dict]:
     states: dict[str, dict] = {}
     try:
         _ensure_canary_db()
-        conn = sqlite3.connect(str(_CANARY_DB))
+        conn = connect_sqlite(_CANARY_DB)
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT * FROM canary_state").fetchall()
         conn.close()
@@ -84,7 +84,7 @@ def _save_canary_states(states: dict[str, dict]) -> None:
     """持久化 canary 状态到 state.db."""
     try:
         _ensure_canary_db()
-        conn = sqlite3.connect(str(_CANARY_DB))
+        conn = connect_sqlite(_CANARY_DB)
         now = _time.time()
         for name, s in states.items():
             events_json = _json.dumps(s.get("events", []), ensure_ascii=False)
@@ -578,7 +578,7 @@ def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
 
     # ── 次选: decision_log close 记录 ──
     try:
-        conn = sqlite3.connect(str(_CANARY_DB))
+        conn = connect_sqlite(_CANARY_DB)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT meta FROM decision_log WHERE decision_type='close' AND strategy=?",
@@ -660,7 +660,7 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
     approved_biases: dict[str, dict] = {}
     try:
         cutoff = _time.time() - max_age_days * 86400
-        conn = sqlite3.connect(str(_CANARY_DB))
+        conn = connect_sqlite(_CANARY_DB)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -902,3 +902,4 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     report = scheduled_evolution_cycle()
     print(_json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+

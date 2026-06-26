@@ -22,6 +22,8 @@ from dataclasses import dataclass
 import duckdb
 import pandas as pd
 
+from backend.core.db import connect_duckdb
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +52,7 @@ class CTraderTickPuller:
     def __init__(self, db_path: str = "data/ctrader_data.duckdb"):
         self._bridge = None
         self._connected = False
+        self._owns_bridge = False
         self.db_path = db_path
         self._symbol_id: int | None = None
 
@@ -62,6 +65,27 @@ class CTraderTickPuller:
     def connect(self) -> bool:
         if self._connected and self._bridge and self._bridge.is_connected:
             return True
+        try:
+            from backend.services.live_service import _get_ctrader, _wait_ctrader_ready
+
+            bridge, err, warming = _get_ctrader()
+            if err:
+                logger.error(f"[CTraderTickPuller] shared bridge unavailable: {err}")
+                return False
+            if warming:
+                wait_err = _wait_ctrader_ready(bridge, timeout_sec=30.0)
+                if wait_err:
+                    logger.error(f"[CTraderTickPuller] shared bridge warmup failed: {wait_err}")
+                    return False
+            self._bridge = bridge
+            self._owns_bridge = False
+            self._connected = bool(self._bridge and self._bridge.is_connected)
+            self._symbol_id = getattr(self._bridge, "_symbol_id", None)
+            if not self._connected:
+                logger.error("[CTraderTickPuller] shared bridge not connected")
+            return self._connected
+        except Exception as e:
+            logger.debug(f"[CTraderTickPuller] shared bridge fallback: {e}")
         import os
         BridgeCls = self._import_bridge()
         self._bridge = BridgeCls(
@@ -72,6 +96,7 @@ class CTraderTickPuller:
             symbol="XAUUSD",
             send_orders=False,
         )
+        self._owns_bridge = True
         if not self._bridge.connect():
             logger.error("[CTraderTickPuller] connect failed")
             return False
@@ -80,10 +105,11 @@ class CTraderTickPuller:
         return True
 
     def shutdown(self):
-        if self._bridge and self._bridge.is_connected:
+        if self._owns_bridge and self._bridge and self._bridge.is_connected:
             self._bridge.disconnect()
         self._bridge = None
         self._connected = False
+        self._owns_bridge = False
 
     @property
     def is_connected(self) -> bool:
@@ -231,7 +257,7 @@ class CTraderTickPuller:
         if not records:
             return 0
         try:
-            conn = duckdb.connect(self.db_path)
+            conn = connect_duckdb(self.db_path)
             df = pd.DataFrame(records)
             df["symbol"] = symbol
             df = df[["symbol", "time", "bid", "ask", "last", "volume", "flags"]]

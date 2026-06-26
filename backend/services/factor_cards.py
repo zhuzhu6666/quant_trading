@@ -4,12 +4,20 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
+import threading
+import time
 from typing import Any
 
 from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
+
+
+_CARD_CACHE_TTL_SEC = 60.0
+_CARD_CACHE_LOCK = threading.Lock()
+_CARD_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -97,7 +105,7 @@ class FactorCardService:
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
+        conn = connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -118,6 +126,13 @@ class FactorCardService:
         factor_id: str | None = None,
         factor_family: str | None = None,
     ) -> list[dict[str, Any]]:
+        cache_key = f"{source or '*'}|{lifecycle_status or '*'}|{factor_id or '*'}|{factor_family or '*'}"
+        now_ts = time.time()
+        with _CARD_CACHE_LOCK:
+            cached = _CARD_CACHE.get(cache_key)
+            if cached and cached[0] > now_ts:
+                return deepcopy(cached[1][:limit])
+
         ids = self._factor_ids()
         items = []
         for name in ids:
@@ -137,6 +152,8 @@ class FactorCardService:
                 str(item.get("factor_id") or ""),
             )
         )
+        with _CARD_CACHE_LOCK:
+            _CARD_CACHE[cache_key] = (now_ts + _CARD_CACHE_TTL_SEC, deepcopy(items))
         return items[:limit]
 
     def _factor_ids(self) -> list[str]:
