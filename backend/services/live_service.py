@@ -3651,36 +3651,47 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         except Exception as e:
             log(f"Factor pipeline warmup failed: {e}")
 
-    # 订阅 cTrader 实时报价 (audit 2026-06-08)
-    # audit 2026-06-10: warmup 走 local_db 路径时 bridge 变量未定义,
-    # 之前直接调 bridge.subscribe_spots() 抛 NameError 被 except 吞,
-    # log 误报 "failed (non-fatal)". 修: 从 _get_ctrader() 拿真 bridge, 短等 ready.
-    if broker == "ctrader":
+    def _ensure_ctrader_market_subscriptions(wait_timeout_sec: float = 0.0) -> bool:
         try:
             spot_bridge, spot_err, spot_warming = _get_ctrader()
             require_l2_depth = bool(getattr(_rcfg, "risk_require_l2_depth", False))
             if spot_err:
                 log(f"subscribe_spots skipped: {spot_err}")
-            elif spot_warming or not spot_bridge.is_connected:
-                wait_err = _wait_ctrader_ready(spot_bridge, timeout_sec=10.0)
+                return False
+            if spot_bridge is None:
+                return False
+            if spot_warming or not spot_bridge.is_connected:
+                if wait_timeout_sec <= 0:
+                    return False
+                wait_err = _wait_ctrader_ready(spot_bridge, timeout_sec=wait_timeout_sec)
                 if wait_err:
                     log(f"subscribe_spots skipped: {wait_err}")
-                else:
-                    spot_bridge.subscribe_spots()
-                    if require_l2_depth:
-                        spot_bridge.subscribe_depth()
-                        log("subscribed to spot and depth events for real-time price")
-                    else:
-                        log("subscribed to spot events for real-time price (depth disabled)")
-            else:
-                spot_bridge.subscribe_spots()
+                    return False
+            if not getattr(spot_bridge, "_spot_subscribed", False):
+                if not spot_bridge.subscribe_spots():
+                    log("subscribe_spots failed (non-fatal): subscribe request rejected")
+                    return False
                 if require_l2_depth:
-                    spot_bridge.subscribe_depth()
+                    if not getattr(spot_bridge, "_depth_subscribed", False):
+                        spot_bridge.subscribe_depth()
                     log("subscribed to spot and depth events for real-time price")
                 else:
                     log("subscribed to spot events for real-time price (depth disabled)")
+                return True
+            if require_l2_depth and not getattr(spot_bridge, "_depth_subscribed", False):
+                if spot_bridge.subscribe_depth():
+                    log("subscribed depth events for real-time price")
+            return True
         except Exception as e:
             log(f"subscribe_spots failed (non-fatal): {e}")
+            return False
+
+    # 订阅 cTrader 实时报价 (audit 2026-06-08)
+    # audit 2026-06-10: warmup 走 local_db 路径时 bridge 变量未定义,
+    # 之前直接调 bridge.subscribe_spots() 抛 NameError 被 except 吞,
+    # log 误报 "failed (non-fatal)". 修: 从 _get_ctrader() 拿真 bridge, 短等 ready.
+    if broker == "ctrader":
+        _ensure_ctrader_market_subscriptions(wait_timeout_sec=20.0)
 
     # ── Phase 3: 主循环 (60s tick) ──
     tick = 0
@@ -3722,6 +3733,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
             # 刷新账户缓存 (bridge 可用时才做)
             if bridge_ready:
+                _ensure_ctrader_market_subscriptions(wait_timeout_sec=0.0)
                 kickoff_account_refresh(bridge, broker, interval_sec=3.0)
                 if not recovery_bootstrapped:
                     try:

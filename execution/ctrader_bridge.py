@@ -149,6 +149,8 @@ class CTraderBridge(BaseBrokerBridge):
         self._connected_lock = threading.Lock()
         self._app_authed = False
         self._account_authed = False
+        self._spot_subscribed = False
+        self._depth_subscribed = False
         self._symbol_id: int | None = None
         self._forced_symbol_id = forced_symbol_id  # ProtoOASymbol 无 name, 需外部指定 ID
         self._server_version: str = "v0"  # ★ VersionReq 拿, 给后续 Req clientMsgId 用
@@ -235,7 +237,8 @@ class CTraderBridge(BaseBrokerBridge):
             return False
 
         with self._connected_lock:
-            if self._connected:
+            if (self._connected and self._app_authed
+                    and self._account_authed and self._symbol_id is not None):
                 logger.info("Already connected")
                 return True
 
@@ -423,6 +426,8 @@ class CTraderBridge(BaseBrokerBridge):
             self._connected = False
         self._app_authed = False
         self._account_authed = False
+        self._spot_subscribed = False
+        self._depth_subscribed = False
 
     def _should_backoff(self) -> bool:
         """指数退避检查: 连续失败越久, 跳过时间越长.
@@ -702,6 +707,7 @@ class CTraderBridge(BaseBrokerBridge):
             req.ctidTraderAccountId = self.account_id
             req.symbolId.append(sid)
             self._send(req, timeout=5.0)
+            self._spot_subscribed = True
             logger.info(f"subscribe_spots OK for symbol_id={sid}")
             return True
         except Exception as e:
@@ -720,6 +726,7 @@ class CTraderBridge(BaseBrokerBridge):
             req.ctidTraderAccountId = self.account_id
             req.symbolId.append(sid)
             self._send(req, timeout=5.0)
+            self._depth_subscribed = True
             logger.info(f"subscribe_depth OK for symbol_id={sid}")
             return True
         except Exception as e:
