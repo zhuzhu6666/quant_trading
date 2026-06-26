@@ -3658,6 +3658,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     if broker == "ctrader":
         try:
             spot_bridge, spot_err, spot_warming = _get_ctrader()
+            require_l2_depth = bool(getattr(_rcfg, "risk_require_l2_depth", False))
             if spot_err:
                 log(f"subscribe_spots skipped: {spot_err}")
             elif spot_warming or not spot_bridge.is_connected:
@@ -3666,12 +3667,18 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     log(f"subscribe_spots skipped: {wait_err}")
                 else:
                     spot_bridge.subscribe_spots()
-                    spot_bridge.subscribe_depth()
-                    log("subscribed to spot events for real-time price")
+                    if require_l2_depth:
+                        spot_bridge.subscribe_depth()
+                        log("subscribed to spot and depth events for real-time price")
+                    else:
+                        log("subscribed to spot events for real-time price (depth disabled)")
             else:
                 spot_bridge.subscribe_spots()
-                spot_bridge.subscribe_depth()
-                log("subscribed to spot events for real-time price")
+                if require_l2_depth:
+                    spot_bridge.subscribe_depth()
+                    log("subscribed to spot and depth events for real-time price")
+                else:
+                    log("subscribed to spot events for real-time price (depth disabled)")
         except Exception as e:
             log(f"subscribe_spots failed (non-fatal): {e}")
 

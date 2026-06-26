@@ -229,6 +229,11 @@ class CTraderBridge(BaseBrokerBridge):
         """连 broker + App auth + Account auth + Symbol resolve。
         首次调用启动持久 reactor 线程 (auth 后不停, 保持 TCP 长连接);
         后续调用复用已运行的 reactor, 只做 auth 链。"""
+        if self._should_backoff():
+            if self._should_log_error("cTrader connect backoff active"):
+                logger.warning("cTrader connect skipped: backoff active")
+            return False
+
         with self._connected_lock:
             if self._connected:
                 logger.info("Already connected")
@@ -249,13 +254,18 @@ class CTraderBridge(BaseBrokerBridge):
             try:
                 if self._client:
                     self._teardown_client()
-                self._client = Client(self.host, self.port, TcpProtocol)
+                client = Client(self.host, self.port, TcpProtocol)
+                self._client = client
             except Exception as e:
                 logger.error(f"Client create failed: {e}")
+                self._record_failure()
                 self._conn_ready.set()
                 return
 
             def _on_conn(c):
+                client = c or self._client
+                if client is None:
+                    raise RuntimeError("cTrader connected callback missing client")
                 logger.info("cTrader TCP+TLS connected, starting auth")
                 self._conn_ok = True
                 from twisted.internet import defer
@@ -269,7 +279,7 @@ class CTraderBridge(BaseBrokerBridge):
                     req = TradeMsg.ProtoOAApplicationAuthReq()
                     req.clientId = self.client_id
                     req.clientSecret = self.client_secret
-                    d = self._client.send(req, clientMsgId=str(uuid.uuid4()),
+                    d = client.send(req, clientMsgId=str(uuid.uuid4()),
                                           responseTimeoutInSeconds=self.request_timeout_sec)
                     d.addCallback(_unwrap)
                     def _check(resp):
@@ -283,7 +293,7 @@ class CTraderBridge(BaseBrokerBridge):
                 def _step_account(_dummy):
                     rl = TradeMsg.ProtoOAGetAccountListByAccessTokenReq()
                     rl.accessToken = self.access_token
-                    d = self._client.send(rl, clientMsgId=str(uuid.uuid4()),
+                    d = client.send(rl, clientMsgId=str(uuid.uuid4()),
                                           responseTimeoutInSeconds=self.request_timeout_sec)
                     d.addCallback(_unwrap)
                     def _check(resp):
@@ -298,7 +308,7 @@ class CTraderBridge(BaseBrokerBridge):
                         r2 = TradeMsg.ProtoOAAccountAuthReq()
                         r2.ctidTraderAccountId = self.account_id
                         r2.accessToken = self.access_token
-                        d2 = self._client.send(r2, clientMsgId=str(uuid.uuid4()),
+                        d2 = client.send(r2, clientMsgId=str(uuid.uuid4()),
                                                responseTimeoutInSeconds=self.request_timeout_sec)
                         d2.addCallback(_unwrap)
                         def _check2(resp2):
@@ -314,7 +324,7 @@ class CTraderBridge(BaseBrokerBridge):
                 def _step_symbol(_dummy):
                     req = TradeMsg.ProtoOASymbolsListReq()
                     req.ctidTraderAccountId = self.account_id
-                    d = self._client.send(req, clientMsgId=str(uuid.uuid4()),
+                    d = client.send(req, clientMsgId=str(uuid.uuid4()),
                                           responseTimeoutInSeconds=self.request_timeout_sec)
                     d.addCallback(_unwrap)
                     def _check(resp):
@@ -342,6 +352,7 @@ class CTraderBridge(BaseBrokerBridge):
 
                 def _on_error(f):
                     logger.error(f"cTrader auth failed: {f.getErrorMessage()}")
+                    self._record_failure()
                     self._teardown_client()
                     self._mark_disconnected()
                     self._conn_ready.set()
@@ -356,12 +367,13 @@ class CTraderBridge(BaseBrokerBridge):
                 chain.addErrback(_on_error)
 
             self._client.setConnectedCallback(_on_conn)
-            self._client.setDisconnectedCallback(lambda c, r: self._on_disconnected(r))
+            self._client.setDisconnectedCallback(lambda c, r: self._on_disconnected(c, r))
             self._client.setMessageReceivedCallback(lambda c, m: self._on_message(c, m))
             try:
                 self._client.startService()
             except Exception as e:
                 logger.warning(f"startService: {e}")
+                self._record_failure()
                 self._conn_ready.set()
 
         # 超时兜底
@@ -375,11 +387,13 @@ class CTraderBridge(BaseBrokerBridge):
         # 等 auth 完成 (reactor 线程会 set _conn_ready)
         if not self._conn_ready.wait(timeout=timeout + 5):
             logger.error(f"Connect/auth timeout after {timeout}s")
+            self._record_failure()
             self._mark_disconnected()
             return False
 
         if not self._conn_ok or not self._auth_ok:
             logger.error(f"Connect/auth failed: conn={self._conn_ok} auth={self._auth_ok}")
+            self._record_failure()
             self._mark_disconnected()
             return False
 
@@ -392,10 +406,11 @@ class CTraderBridge(BaseBrokerBridge):
     def _on_connected(self):
         logger.debug("cTrader Twisted: connected callback fired")
 
-    def _on_disconnected(self, reason):
+    def _on_disconnected(self, client, reason):
         logger.warning(f"cTrader Twisted: disconnected ({reason})")
         self._stop_heartbeat()
-        self._client = None
+        if client is None or self._client is client:
+            self._client = None
         self._mark_disconnected()
 
     # ── 熔断 / 退避 ─────────────────────────────────────
@@ -628,7 +643,7 @@ class CTraderBridge(BaseBrokerBridge):
                             break
                     if not found:
                         self._depth_quotes.append(q)
-            logger.info(f"depth event: {len(new_quotes)} new, {len(deleted_ids)} deleted, "
+            logger.debug(f"depth event: {len(new_quotes)} new, {len(deleted_ids)} deleted, "
                          f"total={len(self._depth_quotes)}")
 
             # ── 持久化到 l2.duckdb ──
