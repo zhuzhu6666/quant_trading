@@ -31,6 +31,10 @@ data/*.db-wal
 data/*.bak
 data/charts/*.bak
 data/charts/backtest_*.txt
+data/charts/evolution_story.jsonl
+data/charts/factor_health_report.json
+data/charts/factor_health_report.txt
+data/charts/server_backups/
 data/charts/jobs.jsonl
 data/charts/factor_attribution.json
 data/parameter_template_validation_reports/
@@ -40,6 +44,7 @@ data/feature_models/
 data/ml_models/
 data/browser/
 tick_vault_data/
+state.db
 
 # Logs
 logs/
