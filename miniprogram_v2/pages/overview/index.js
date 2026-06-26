@@ -25,10 +25,15 @@ Page({
     wsLabel: '未连接',
     wsTone: 'warning',
     equity: '--',
-    pnlToday: '--',
-    pnlTodayTone: 'neutral',
+    realizedPnl: '--',
+    realizedPnlTone: 'neutral',
+    unrealizedPnl: '--',
+    unrealizedPnlTone: 'neutral',
+    livePnl: '--',
+    livePnlTone: 'neutral',
     drawdown: '--',
     positions: '0',
+    positionSummary: '当前无持仓',
     loopLabel: '未知',
     loopTone: 'neutral',
     latestReview: null,
@@ -51,6 +56,8 @@ Page({
     pendingOfflineRecommendationHint: '',
     governanceHeadlineSummary: '',
     governanceTodoCard: null,
+    learningSummaryStatus: 'idle',
+    learningSummaryHint: '',
     updatedAt: '--',
   },
 
@@ -105,14 +112,26 @@ Page({
     const onlineLightHintObject = summaryOverview.online_light_hint || null;
     const offlineDeepHintObject = summaryOverview.offline_deep_hint || null;
     const templateOpsSummary = String(summary.parameter_template_ops_summary || '');
+    const realizedPnl = Number(trading.realized_pnl ?? (trading.daily && trading.daily.pnl) ?? 0);
+    const unrealizedPnl = Number(trading.unrealized_pnl || 0);
+    const livePnl = Number(trading.live_pnl ?? (realizedPnl + unrealizedPnl));
+    const learningSummaryStatus = String(learning.summaryStatus || 'idle');
+    const learningSummaryHint = learningSummaryStatus === 'error'
+      ? '学习摘要接口超时/失败，当前卡片可能显示的是空白兜底值，不代表系统没有学习数据。'
+      : '';
     this.setData({
       wsLabel: live.wsConnected ? '实时已连接' : '轮询兜底中',
       wsTone: live.wsConnected ? 'positive' : 'warning',
       equity: formatMoney(trading.equity),
-      pnlToday: formatMoney(trading.daily && trading.daily.pnl),
-      pnlTodayTone: toneFromPnl(trading.daily && trading.daily.pnl),
+      realizedPnl: formatMoney(realizedPnl),
+      realizedPnlTone: toneFromPnl(realizedPnl),
+      unrealizedPnl: formatMoney(unrealizedPnl),
+      unrealizedPnlTone: toneFromPnl(unrealizedPnl),
+      livePnl: formatMoney(livePnl),
+      livePnlTone: toneFromPnl(livePnl),
       drawdown: formatPct(trading.daily && trading.daily.drawdown_pct),
       positions: String(trading.n_positions || 0),
+      positionSummary: (trading.position_summary && trading.position_summary.label) || '当前无持仓',
       loopLabel: loopStatus.running ? '交易循环运行中' : '交易循环已停止',
       loopTone: loopStatus.running ? 'positive' : 'warning',
       loopRunning: !!loopStatus.running,
@@ -138,6 +157,8 @@ Page({
       pendingOfflineRecommendationHint: offlineDeepHintObject
         ? formatOverviewHintText(offlineDeepHintObject)
         : '',
+      learningSummaryStatus,
+      learningSummaryHint,
       closureSteps: [
         {
           id: 'signal',

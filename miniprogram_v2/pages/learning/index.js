@@ -422,6 +422,8 @@ function describeLifecycleEvent(item = {}) {
 Page({
   data: {
     summary: {},
+    summaryStatus: 'idle',
+    summaryError: '',
     templateOpsSummary: '',
     pendingGovernanceTodoCard: null,
     suggestions: [],
@@ -480,6 +482,8 @@ Page({
   syncView() {
     const state = learningStore.getState();
     const summary = state.summary || {};
+    const summaryStatus = String(state.summaryStatus || 'idle');
+    const summaryError = String(state.summaryError || '');
     const parameterTemplateEmptyStates = summary.parameter_template_empty_states || {};
     const parameterTemplateTaskCards = (summary.parameter_template_task_cards || []).map((item) => ({
       id: String(item.id || ''),
@@ -543,6 +547,8 @@ Page({
           : proposedSuggestions;
     this.setData({
       summary,
+      summaryStatus,
+      summaryError,
       templateOpsSummary: String(summary.parameter_template_ops_summary || ''),
       pendingGovernanceTodoCard,
       suggestions,

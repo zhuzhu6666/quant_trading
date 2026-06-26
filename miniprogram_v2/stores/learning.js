@@ -2,6 +2,8 @@ import { createStore } from '../utils/store';
 
 const store = createStore({
   summary: null,
+  summaryStatus: 'idle',
+  summaryError: '',
   suggestions: [],
   applications: [],
   reviews: [],

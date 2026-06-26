@@ -80,7 +80,7 @@ function buildDbCards(dbHealth) {
   ];
 }
 
-function summarizePolicy(policy = null) {
+function summarizePolicy(policy = null, systemHealth = null) {
   if (!policy) return null;
   const counts = policy.counts || {};
   const blocked = Number(counts.blocked || 0);
@@ -95,13 +95,34 @@ function summarizePolicy(policy = null) {
     .sort((a, b) => Number(byAction[b] || 0) - Number(byAction[a] || 0))
     .slice(0, 4)
     .map((key) => ({ key, label: humanizeRiskAction(key), value: byAction[key] }));
+  const tradingBlocked = !!(systemHealth && systemHealth.trading_blocked);
+  const impactStatus = systemHealth && systemHealth.impact_status ? systemHealth.impact_status : 'ok';
+  const blockingComponents = Array.isArray(systemHealth && systemHealth.blocking_components)
+    ? systemHealth.blocking_components
+    : [];
+  const currentTone = tradingBlocked ? 'negative' : impactStatus === 'observe' ? 'warning' : 'positive';
+  const currentStatus = tradingBlocked ? '现在不能开仓' : '现在可以开仓';
+  const currentReason = tradingBlocked
+    ? ((systemHealth && systemHealth.impact_summary) || '当前有硬风控项会直接阻断开仓。')
+    : ((systemHealth && systemHealth.impact_summary) || '当前没有会直接阻断开仓的硬风控项。');
+  const currentDetail = tradingBlocked
+    ? `直接阻断项：${blockingComponents.length ? blockingComponents.map(humanizeHealthComponent).join(' / ') : '未提供'}`
+    : '最近的拦截记录只代表历史，不代表现在这一刻。';
   return {
     blocked,
     allowed,
     total: Number(policy.total || items.length || 0),
+    currentTone,
+    currentStatus,
+    currentReason,
+    currentDetail,
     latestAction: latest ? humanizeRiskAction(latest.action || latest.event_type || '--') : '--',
     latestReason: latest ? humanizeRiskReason(latest.reason || '--') : '--',
     latestTone: latest ? (latest.allowed ? 'positive' : 'negative') : 'neutral',
+    latestTitle: latest
+      ? (latest.allowed ? '最近一次历史放行' : '最近一次历史拦截')
+      : '最近一次历史裁决',
+    latestTime: latest && latest.decision_ts ? formatDateTime(latest.decision_ts) : '--',
     topReason: humanizeRiskReason(topReason || '暂无'),
     actionRows,
   };
@@ -291,7 +312,7 @@ Page({
     const systemHealthSummary = summarizeSystemHealth(riskSummary && riskSummary.system_health);
     const runningJobs = jobs.filter((item) => item.running).length;
     const dbCards = buildDbCards(dbHealth);
-    const policySummary = summarizePolicy(riskSummary && riskSummary.policy);
+    const policySummary = summarizePolicy(riskSummary && riskSummary.policy, riskSummary && riskSummary.system_health);
     const recentTradeTraceItems = (state.recentTradeTraces || []).map((item) => {
       const governanceStageTag = String(item.parameter_governance_stage || '');
       const governanceStageSummary = String(item.parameter_governance_stage_summary || '');

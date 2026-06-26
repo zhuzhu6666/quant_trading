@@ -226,6 +226,14 @@ git commit -m "fix live loop factor restore path"
 - 服务器保留长期未提交热修
 - 看到异常先猜代码，再看日志
 
+补充说明：
+
+- 紧急线上止血时，允许做“小文件、单问题、可回滚”的临时同步，但必须满足：
+  - 先记录为什么没直接在服务器工作区改
+  - 只同步本次热修涉及的单个或少量文件
+  - 同步后立刻补文档、补验证结果、补后续服务器工作区收口动作
+- 这种临时同步只能算例外，不能重新退回“本地改后端、服务器只接收覆盖”的旧模式
+
 ## 9. 每次后端改动后的检查清单
 
 ```text
@@ -236,6 +244,23 @@ git commit -m "fix live loop factor restore path"
 [ ] 如涉及交易循环，已验证 start / stop 或相关状态接口
 [ ] 服务状态正常
 [ ] 改动已提交或明确记录原因
+
+如果这次改动牵涉：
+
+- cTrader 连接
+- `execution/ctrader_bridge.py`
+- `backend/services/live_service.py`
+- `/api/learning/*`
+- `DuckDB` / `SQLite` 路径
+
+则额外检查：
+
+```text
+[ ] 已确认 CPU 没有持续爬升
+[ ] 已确认 TCP 连接数没有持续异常增长
+[ ] 已确认 /api/live/status 最终回到 connected / ready
+[ ] 已确认没有把当前不需要的 L2 depth 默认挂回 live 主链
+```
 ```
 
 ## 10. 一句话版本

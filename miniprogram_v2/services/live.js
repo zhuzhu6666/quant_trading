@@ -9,27 +9,6 @@ let started = false;
 let pollInFlight = null;
 let lastPollAt = 0;
 
-function patchFromStatePayload(data) {
-  if (!data) return;
-  const trading = {
-    source: data.source || 'none',
-    equity: data.equity || 0,
-    balance: data.balance || 0,
-    pnl_today: data.pnl_today || 0,
-    position: data.position || { dir: 'FLAT', entry: 0, size: 0, unrealized: 0 },
-    positions_list: data.positions_list || [],
-    daily: data.daily || { trades: 0, win: 0, loss: 0, pnl: 0, drawdown_pct: 0 },
-    risk: data.risk || { circuit_breaker: false, consecutive_loss: 0 },
-    n_positions: data.n_positions || 0,
-    current_price: data.current_price || 0,
-  };
-  liveStore.setState({
-    trading,
-    wsConnected: true,
-    lastUpdate: Date.now(),
-  });
-}
-
 function normalizePositionsPayload(rawPositions = []) {
   return (rawPositions || []).map((item) => {
     const pnl = Number(
@@ -43,6 +22,73 @@ function normalizePositionsPayload(rawPositions = []) {
       open_price: item.open_price ?? item.price_open ?? 0,
       volume: item.volume ?? item.size ?? 0,
     };
+  });
+}
+
+function buildPositionSummary(positions = []) {
+  let buys = 0;
+  let sells = 0;
+  let grossVolume = 0;
+  positions.forEach((item) => {
+    const volume = Number(item.volume ?? item.size ?? 0);
+    grossVolume += volume;
+    if (item.type === 'buy') buys += volume;
+    if (item.type === 'sell') sells += volume;
+  });
+  const netVolume = buys - sells;
+  const direction = netVolume > 0 ? 'LONG' : netVolume < 0 ? 'SHORT' : 'FLAT';
+  let label = '当前无持仓';
+  if (positions.length > 0) {
+    label = `${direction} ${positions.length} 笔`;
+    if (direction === 'FLAT') {
+      label = `对冲/混合 ${positions.length} 笔`;
+    }
+  }
+  return {
+    direction,
+    label,
+    netVolume,
+    grossVolume,
+    buys,
+    sells,
+  };
+}
+
+function enrichTradingSnapshot(baseTrading = {}) {
+  const positionsList = normalizePositionsPayload(baseTrading.positions_list || []);
+  const realizedPnl = Number(baseTrading.realized_pnl ?? (baseTrading.daily && baseTrading.daily.pnl) ?? 0);
+  const unrealizedPnl = positionsList.reduce((sum, item) => sum + Number(item.pnl || 0), 0);
+  const positionSummary = buildPositionSummary(positionsList);
+  return {
+    ...baseTrading,
+    positions_list: positionsList,
+    n_positions: positionsList.length,
+    realized_pnl: realizedPnl,
+    unrealized_pnl: unrealizedPnl,
+    live_pnl: realizedPnl + unrealizedPnl,
+    position_summary: positionSummary,
+  };
+}
+
+function patchFromStatePayload(data) {
+  if (!data) return;
+  const trading = enrichTradingSnapshot({
+    source: data.source || 'none',
+    equity: data.equity || 0,
+    balance: data.balance || 0,
+    pnl_today: data.pnl_today || 0,
+    realized_pnl: data.pnl_today || 0,
+    position: data.position || { dir: 'FLAT', entry: 0, size: 0, unrealized: 0 },
+    positions_list: data.positions_list || [],
+    daily: data.daily || { trades: 0, win: 0, loss: 0, pnl: 0, drawdown_pct: 0 },
+    risk: data.risk || { circuit_breaker: false, consecutive_loss: 0 },
+    n_positions: data.n_positions || 0,
+    current_price: data.current_price || 0,
+  });
+  liveStore.setState({
+    trading,
+    wsConnected: true,
+    lastUpdate: Date.now(),
   });
 }
 
@@ -118,12 +164,13 @@ async function pollLoop(options = {}) {
     const currentTrading = liveStore.getState().trading || {};
     const posList = normalizePositionsPayload((positions && positions.positions) || []);
     const primaryPosition = posList[0] || null;
-    const nextTrading = {
+    const nextTrading = enrichTradingSnapshot({
       ...currentTrading,
       equity: (account && account.equity) || currentTrading.equity || 0,
       balance: (account && account.balance) || currentTrading.balance || 0,
       positions_list: posList,
       n_positions: posList.length,
+      realized_pnl: (sessionStats && sessionStats.pnl_today) || 0,
       position: primaryPosition
         ? {
             dir: primaryPosition.type === 'buy' ? 'LONG' : primaryPosition.type === 'sell' ? 'SHORT' : 'FLAT',
@@ -149,7 +196,7 @@ async function pollLoop(options = {}) {
         circuit_breaker: !!(strategyStatus && strategyStatus.circuit_breaker),
         consecutive_loss: (sessionStats && sessionStats.consecutive_loss) || 0,
       },
-    };
+    });
 
     liveStore.setState({
       account,

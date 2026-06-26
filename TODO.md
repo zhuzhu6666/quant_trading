@@ -69,6 +69,20 @@
 - 更多真实样本下的参数模板灰度发布 / 回滚观察
 - 更细粒度的退出责任细分与模板化治理动作（后续增强）
 
+### 2026-06-26 运行面收口结论
+
+今天新增确认并已落地的结论：
+
+- cTrader 现在不仅是唯一执行通道，也足够承担当前实盘所需的实时价格链路
+- 第二数据源当前不再参与开仓/风控主链，只保留给后续订单流分析与补充研究
+- `risk_require_l2_depth=false` 时，现网不再主动订阅 L2 depth；L2 不是当前实盘可开仓的前置条件
+- 本轮服务器长时间满 CPU 的真实根因已经定位并处理，不是单一 bug，而是三类问题叠加：
+  - `execution/ctrader_bridge.py` 的 depth 事件高频日志 + 逐条 DuckDB 写入
+  - 学习治理页接口重复重算 `factor_cards / parameter_templates`，导致 AnyIO worker 长时间占 CPU
+  - 当前配置并不需要 L2，但 live loop 仍默认 `subscribe_depth()`，白白消耗 CPU 与连接资源
+- cTrader 连接链路已经补上更稳的状态缓存、事件驱动同步、soft-timeout 容错；单次慢请求不应再直接把前端打回 `warming_up`
+- 当前仍需继续观察的不是 CPU 风暴本身，而是“重启后首次 cTrader 鉴权偶发超时”的恢复速度和重试节奏
+
 ### 当前唯一进行中主线
 
 `Phase E 完成：真实样本观察 / Phase F 准备`
@@ -1378,7 +1392,7 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 |---|---|---|---|
 | O1 | `learning_application_effect` 真实流观察 | 观察中 | 跟踪 observing / reinforced / ineffective 是否稳定推进 |
 | O2 | 重启恢复回归测试 | 待做 | 覆盖开仓后重启、重启期间平仓、延迟恢复 |
-| O3 | 运行环境健康专项 | 待做 | `l2_depth`、`disk_space` 继续治理 |
+| O3 | 运行环境健康专项 | 观察中 | `l2_depth` 已完成第一轮去负载收口；`disk_space` 与 cTrader 首次鉴权抖动继续观察 |
 | O4 | 风控运维页搜索入口 | 待做 | 继续强化按 `position_id / decision_id` 的查询体验 |
 | O5 | 历史重复 application 清理脚本 | 待做 | 清理旧数据噪声 |
 
@@ -1418,6 +1432,8 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 | TD8 | `execution/paper_bridge.py` | 旧版模拟盘桥接残留 |
 | TD9 | `live/` 目录 | 部分旧监控仅被旧 `main.py` 引用 |
 | TD10 | 根目录调试脚本 | 一次性脚本应移入 `scripts/debug/` |
+| TD11 | `backend/services/live_service.py` / `execution/ctrader_bridge.py` | cTrader 重启后首次鉴权偶发超时，虽能自动恢复，但还需继续平滑重试节奏 |
+| TD12 | `data/l2.duckdb` / L2 写入链路 | 已从实盘主链摘出，但未来若恢复订单流分析，需要补后台批处理/降采样方案，不能直接回到逐事件写库 |
 
 ---
 

@@ -15,18 +15,20 @@
           <view class="hero-metric-value">{{equity}}</view>
         </view>
         <view class="hero-metric">
-          <view class="hero-metric-label">当日 PnL</view>
-          <view class="hero-metric-value {{pnlTodayTone === 'positive' ? 'accent-pos' : pnlTodayTone === 'negative' ? 'accent-neg' : ''}}">{{pnlToday}}</view>
+          <view class="hero-metric-label">实时总 PnL</view>
+          <view class="hero-metric-value {{livePnlTone === 'positive' ? 'accent-pos' : livePnlTone === 'negative' ? 'accent-neg' : ''}}">{{livePnl}}</view>
         </view>
         <view class="hero-metric">
           <view class="hero-metric-label">持仓</view>
           <view class="hero-metric-value">{{positions}}</view>
+          <view class="small muted">{{positionSummary}}</view>
         </view>
       </view>
     </view>
 
     <view class="grid-2">
-      <metric-tile label="当日 PnL" value="{{pnlToday}}" tone="{{pnlTodayTone}}" hint="今日累计" />
+      <metric-tile label="已实现 PnL" value="{{realizedPnl}}" tone="{{realizedPnlTone}}" hint="只统计已平仓" />
+      <metric-tile label="浮动 PnL" value="{{unrealizedPnl}}" tone="{{unrealizedPnlTone}}" hint="当前持仓浮盈亏" />
       <metric-tile label="回撤" value="{{drawdown}}" hint="当日最大回撤" />
       <metric-tile label="持仓数" value="{{positions}}" hint="当前仓位数量" />
       <metric-tile label="最近同步" value="{{updatedAt}}" hint="最后刷新时间" />
@@ -58,10 +60,12 @@
             <view class="value-md">{{governanceLabel}}</view>
             <status-pill label="{{governanceLabel}}" tone="{{governanceTone}}" />
           </view>
+          <view wx:if="{{learningSummaryStatus === 'error'}}" class="section-note">学习摘要拉取失败，当前待审/已批等数字可能不是实时值。</view>
           <view class="section-note">{{governanceHeadlineSummary}}</view>
           <view class="section-note">已应用 {{learningApplications}} 次，最新复盘会在治理后进入下一轮权重。</view>
           <view class="section-note">{{templateOpsSummary}}</view>
         </view>
+        <view wx:if="{{learningSummaryHint}}" class="section-note" style="margin-top: 12rpx;">{{learningSummaryHint}}</view>
         <view class="grid-3">
           <metric-tile label="待审" value="{{learningSummary.proposed || 0}}" hint="proposed" />
           <metric-tile label="已批" value="{{learningSummary.approved || 0}}" hint="approved" />

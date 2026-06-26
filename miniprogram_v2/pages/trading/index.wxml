@@ -15,8 +15,8 @@
           <view class="hero-metric-value">{{currentPrice}}</view>
         </view>
         <view class="hero-metric">
-          <view class="hero-metric-label">方向</view>
-          <view class="hero-metric-value">{{strategy.positionDir || 'FLAT'}}</view>
+          <view class="hero-metric-label">持仓概况</view>
+          <view class="hero-metric-value">{{positionSummaryLabel}}</view>
         </view>
         <view class="hero-metric">
           <view class="hero-metric-label">实时回撤</view>
@@ -41,18 +41,19 @@
           <view class="value-md">{{currentPrice}}</view>
         </view>
         <view class="split-card stack-12">
-          <view class="small muted">当前方向</view>
-          <view class="value-md">{{strategy.positionDir || 'FLAT'}}</view>
+          <view class="small muted">总持仓方向</view>
+          <view class="value-md">{{positionSummaryLabel}}</view>
         </view>
         <view class="split-card stack-12">
-          <view class="small muted">实时 PnL</view>
+          <view class="small muted">实时总 PnL</view>
           <view class="value-md">{{daily.pnl}}</view>
         </view>
         <view class="split-card stack-12">
-          <view class="small muted">实时回撤</view>
-          <view class="value-md">{{daily.drawdown}}</view>
+          <view class="small muted">仓位暴露</view>
+          <view class="value-md">{{positionExposureLabel}}</view>
         </view>
       </view>
+      <view class="section-note" style="margin-top: 12rpx;">实时总 PnL = 已实现 + 当前所有持仓浮动盈亏，不再只看第一笔仓位。</view>
       <view class="btn-row" style="margin-top: 18rpx;">
         <button class="btn-primary {{loopRunning || startBusy || stopBusy ? 'btn-disabled' : ''}}" bindtap="onStart" loading="{{startBusy}}" disabled="{{loopRunning || startBusy || stopBusy}}">启动</button>
         <button class="btn-stop {{!loopRunning || stopBusy || startBusy ? 'btn-disabled' : ''}}" bindtap="onStop" loading="{{stopBusy}}" disabled="{{!loopRunning || stopBusy || startBusy}}">停止</button>
@@ -78,12 +79,17 @@
           <view class="small">日内交易数</view>
           <view class="small">{{daily.trades || 0}}</view>
         </view>
+        <view class="row-between">
+          <view class="small">已实现 / 浮动</view>
+          <view class="small">{{realizedPnlText}} / {{unrealizedPnlText}}</view>
+        </view>
         <view wx:if="{{currentGateView}}" class="status-banner status-banner-{{currentGateView.tone}}">
           <view class="row-between">
-            <view class="small">当前闸门状态</view>
+            <view class="small">{{currentGateView.title}}</view>
             <status-pill label="{{currentGateView.status}}" tone="{{currentGateView.tone}}" />
           </view>
           <view class="section-note">{{currentGateView.summary}}</view>
+          <view class="small muted">{{currentGateView.detail}}</view>
         </view>
         <view wx:if="{{policyHistoryView}}" class="status-banner status-banner-{{policyHistoryView.tone}}">
           <view class="row-between">
@@ -91,6 +97,7 @@
             <status-pill label="{{policyHistoryView.action}}" tone="{{policyHistoryView.tone}}" />
           </view>
           <view class="section-note">{{policyHistoryView.reason}}</view>
+          <view class="small muted">发生时间：{{policyHistoryView.timeText}}</view>
           <view class="row-wrap">
             <view class="tag">已放行 {{policyHistoryView.allowed}}</view>
             <view class="tag">已拦截 {{policyHistoryView.blocked}}</view>

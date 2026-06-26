@@ -1,6 +1,6 @@
 # Quant Trading — 启动指南
 
-> 最后更新: 2026-06-25
+> 最后更新: 2026-06-26
 > 当前形态: FastAPI API-only 后端 + 微信小程序 V2。旧 Vite/Web Console 启动方式已停用。
 
 > 2026-06-26 工作流更新:
@@ -103,6 +103,33 @@ python scripts/refresh_external_data.py --once
 # 强制刷新某个源
 python scripts/refresh_external_data.py --source cot --force
 ```
+
+---
+
+## 数据库体检
+
+2026-06-26 起，数据库层默认先体检再排障。
+
+统一规则:
+
+- `SQLite` 只用于 `state.db` / `experiments.db`
+- `DuckDB` 只用于行情、tick、L2、归因、事件库
+- 业务代码必须走 `backend/core/db.py` 的统一连接入口
+
+启动前或排障时优先执行:
+
+```bash
+# 标准修复 + 体检
+python scripts/db_doctor.py --repair
+```
+
+这个命令会检查:
+
+- 库文件是否能被正确引擎打开
+- 关键表和关键字段是否齐全
+- 历史 schema 漂移是否需要自动修复
+
+如果这里不通过，不要先怀疑策略逻辑，先修数据库契约。
 
 ---
 

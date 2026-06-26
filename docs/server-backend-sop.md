@@ -114,6 +114,23 @@ curl http://127.0.0.1:8000/api/health
 - `/api/live/session-stats`
 - `/api/risk/summary`
 
+## 5.1 数据库先行检查
+
+如果怀疑是数据、任务、归因、外部同步、学习卡片异常，先不要直接翻业务代码，先跑数据库体检：
+
+```bash
+cd /home/ubuntu/quant_trading
+./.venv/bin/python scripts/db_doctor.py --repair
+```
+
+目的：
+
+- 确认 SQLite / DuckDB 没有被错误引擎打开
+- 确认关键表和关键字段存在
+- 自动修复已知历史 schema 漂移
+
+如果 `db_doctor` 不通过，优先修数据库契约，再看策略逻辑。
+
 ## 6. 改代码前检查
 
 在服务器改代码前，先确认：
@@ -207,6 +224,51 @@ systemctl status quant-backend.service --no-pager
 - token / account 是否有效
 - bridge 状态是否正确释放
 - 后端是否存在旧 loop 或旧连接未退出
+
+### 2026-06-26 新增经验
+
+如果现象是：
+
+- 服务没挂
+- 前端显示“不能开仓”或 `warming_up`
+- CPU / TCP 连接数同时明显上升
+
+不要只盯登录、鉴权或 loop 开关，优先同时检查下面三件事：
+
+1. `journalctl` 中是否在高频刷 `depth event` / `depth events (5s)`
+2. 是否存在学习治理接口被频繁访问，导致 `factor_cards / parameter_templates` 重算
+3. 当前运行配置是否其实不需要 `L2 depth`
+
+### 高 CPU 排查 SOP
+
+默认顺序：
+
+```text
+看服务 CPU
+  -> 看最热线程
+  -> 看最近日志热点
+  -> 必要时 py-spy 抓 Python 栈
+  -> 再决定改哪条热路径
+```
+
+推荐命令：
+
+```bash
+PID=$(systemctl show -p MainPID --value quant-backend.service)
+ps -p $PID -o %cpu,%mem,etime,cmd --no-headers
+top -H -b -n 1 -p $PID | head -n 30
+sudo /home/ubuntu/quant_trading/.venv/bin/py-spy dump --pid $PID
+journalctl _PID=$PID -n 120 --no-pager
+```
+
+已确认过的真实根因：
+
+- `execution/ctrader_bridge.py` depth 事件高频日志
+- depth 事件逐条写 `data/l2.duckdb`
+- `/api/learning/*` 导致 `factor_cards.py` / `parameter_templates.py` 重复重算
+- 当前配置 `risk_require_l2_depth=false`，却仍默认 `subscribe_depth()`
+
+因此在当前现网配置下，如果 CPU 失控，先确认是否误把“未来订单流支路”重新挂回了实盘主链。
 
 ## 11. 提交前检查
 

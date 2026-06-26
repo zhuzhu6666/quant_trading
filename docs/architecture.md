@@ -1,6 +1,6 @@
 # Quant Trading Architecture
 
-> Last updated: 2026-06-25
+> Last updated: 2026-06-26
 > Scope: current system, target full architecture, and the delivery roadmap we will follow.
 
 本文现在是项目的主蓝图。后续讨论中形成的新架构结论，优先更新这里；`TODO.md` 只负责承接近期执行项和验证项。
@@ -27,6 +27,46 @@
 一句话概括当前状态：
 
 **Phase D 已完成，系统已进入“主动持仓管理 + 责任归因落地”，下一步转向因子治理与参数模板。**
+
+### 1.1 数据库治理基线
+
+2026-06-26 起，数据库层不再只是“路径统一”，而是正式进入治理模式：
+
+- `SQLite` 只负责运行时状态库
+  - `data/state.db`
+  - `data/experiments.db`
+- `DuckDB` 只负责市场/分析型库
+  - `data/ctrader_data.duckdb`
+  - `data/ticks.duckdb`
+  - `data/l2.duckdb`
+  - `data/trades.duckdb`
+  - `data/events.duckdb`
+- 业务代码禁止直接使用 `sqlite3.connect(...)` / `duckdb.connect(...)`
+- 统一连接入口在 `backend/core/db.py`
+  - `connect_sqlite(...)`
+  - `connect_duckdb(...)`
+- 启动与排障统一使用：
+  - `python scripts/db_doctor.py --repair`
+
+这样做的目的不是“形式统一”，而是避免下面三类历史问题再次发生：
+
+- 拿 `sqlite3` 去打开 `.duckdb`
+- 运行态 schema 漂移后没人迁移
+- 不同脚本/服务对同一个库的引擎和结构假设不一致
+
+### 1.2 现网数据源边界
+
+2026-06-26 起，现网对数据源职责做了进一步收口：
+
+- cTrader 是当前实盘唯一执行与实时状态源
+  - spot
+  - account
+  - positions
+  - execution / deals
+- 第二数据源当前不再参与 live 开仓、风控放行或 broker 状态判断
+- `L2 depth` 当前默认不是实盘前置依赖；只有在 `risk_require_l2_depth=true` 时，才允许重新进入 live 主链
+
+这条边界的目的，是把“今天真要交易必须依赖的数据”与“未来研究可能有帮助的数据”彻底分开，避免研究支路反向拖垮实盘链路。
 
 ---
 

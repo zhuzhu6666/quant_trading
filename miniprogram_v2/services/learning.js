@@ -1,9 +1,20 @@
 import { get, post } from './client';
 import learningStore from '../stores/learning';
 
-export async function refreshLearning() {
+const LEARNING_REFRESH_TTL = 30000;
+let refreshInFlight = null;
+let lastRefreshAt = 0;
+
+async function fetchLearningState() {
+  let summaryStatus = 'ok';
+  let summaryError = '';
+  const summaryPromise = get('/api/learning/summary').catch((err) => {
+    summaryStatus = 'error';
+    summaryError = String((err && err.errMsg) || (err && err.message) || '学习摘要拉取失败');
+    return null;
+  });
   const [summary, suggestionsRes, applicationsRes, reviewsRes, lifecycleRes, offlineCandidatesRes, recommendationsRes] = await Promise.all([
-    get('/api/learning/summary').catch(() => null),
+    summaryPromise,
     get('/api/learning/suggestions?limit=50').catch(() => null),
     get('/api/learning/applications?limit=50').catch(() => null),
     get('/api/learning/reviews?limit=20').catch(() => null),
@@ -25,6 +36,8 @@ export async function refreshLearning() {
       parameter_template_ops_summary: '',
       latest_parameter_template_recommendation: null,
     },
+    summaryStatus,
+    summaryError,
     suggestions: (suggestionsRes && suggestionsRes.items) || [],
     applications: (applicationsRes && applicationsRes.items) || [],
     reviews: (reviewsRes && reviewsRes.items) || [],
@@ -36,9 +49,30 @@ export async function refreshLearning() {
   return learningStore.getState();
 }
 
+export async function refreshLearning(options = {}) {
+  const force = !!options.force;
+  const now = Date.now();
+  if (!force && refreshInFlight) {
+    return refreshInFlight;
+  }
+  if (!force && lastRefreshAt > 0 && (now - lastRefreshAt) < LEARNING_REFRESH_TTL) {
+    return learningStore.getState();
+  }
+  refreshInFlight = (async () => {
+    try {
+      const nextState = await fetchLearningState();
+      lastRefreshAt = Date.now();
+      return nextState;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
 export async function runLearningGovernance() {
   const result = await post('/api/learning/govern/run', {});
-  await refreshLearning();
+  await refreshLearning({ force: true });
   return result;
 }
 
@@ -48,7 +82,7 @@ export async function reviewSuggestion(suggestionId, status, note = '') {
     status,
     note,
   });
-  await refreshLearning();
+  await refreshLearning({ force: true });
   return result;
 }
 
@@ -57,7 +91,7 @@ export async function materializeTemplateRecommendation(recommendationId, note =
     recommendation_id: recommendationId,
     note,
   });
-  await refreshLearning();
+  await refreshLearning({ force: true });
   return result;
 }
 
@@ -67,7 +101,7 @@ export async function reviewOfflineCandidate(candidateId, status, note = '') {
     status,
     note,
   });
-  await refreshLearning();
+  await refreshLearning({ force: true });
   return result;
 }
 
@@ -76,7 +110,7 @@ export async function releaseOfflineCandidate(candidateId, note = '') {
     candidate_id: candidateId,
     note,
   });
-  await refreshLearning();
+  await refreshLearning({ force: true });
   return result;
 }
 
@@ -85,7 +119,7 @@ export async function rollbackOfflineCandidate(candidateId, note = '') {
     candidate_id: candidateId,
     note,
   });
-  await refreshLearning();
+  await refreshLearning({ force: true });
   return result;
 }
 

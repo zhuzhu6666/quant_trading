@@ -32,6 +32,12 @@
       </view>
     </view>
 
+    <view wx:if="{{summaryStatus === 'error'}}" class="status-banner status-banner-warning">
+      <view class="small muted">学习摘要状态</view>
+      <view class="section-note">学习摘要接口当前拉取失败或超时，页内“待审/已批/模板候选”等摘要数字可能不是实时值。</view>
+      <view wx:if="{{summaryError}}" class="small muted">{{summaryError}}</view>
+    </view>
+
     <section-card title="学习摘要" subtitle="建议、应用、复盘的总体情况">
       <view class="progress-strip" style="margin-bottom: 18rpx;">
         <view wx:for="{{closureSteps}}" wx:key="id" class="progress-step progress-step-{{item.tone}}">
