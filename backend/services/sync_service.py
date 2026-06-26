@@ -72,14 +72,17 @@ async def _do_one_sync(state: RuntimeState, health) -> None:
         cfg = rcc()
         symbol = list(cfg.enabled_symbols)[0] if hasattr(cfg, 'enabled_symbols') and cfg.enabled_symbols else "XAUUSD+"
         results = {}
+        last_bar_ts_by_tf = {}
         for tf in ["M5", "M15"]:
-            puller = CTraderPuller(symbol=symbol)
+            puller = CTraderPuller()
             r = puller.pull_history(symbol=symbol, timeframe=tf, n=50)
             results[tf] = r.n_bars if hasattr(r, 'n_bars') else 0
+            if getattr(r, "last_time", 0):
+                last_bar_ts_by_tf[tf] = float(r.last_time)
 
         total = sum(results.values())
         _stdlib_logger.info("sync done: %d bars | %s", total, results)
-        health.record_success()
+        health.record_success(last_bar_ts_by_tf=last_bar_ts_by_tf or None)
         if total > 0:
             EvolutionStory.shared().append("sync_success", {"inserted": total})
     except Exception as e:

@@ -17,7 +17,7 @@ import json
 from typing import Optional
 
 from alpha.registry_adapter import RegistryAdapter
-from alpha.factor_dsl import evaluate_dsl
+from alpha.factor_dsl import FactorParser, evaluate_dsl
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ def restore_from_log(lifecycle_log_path: str = "",
     if adapter is None:
         adapter = RegistryAdapter.shared()
     restored = 0
+    skipped_invalid = 0
     for name, ev in latest_event.items():
         event_type = ev.get("event")
         source = ev.get("source", "")
@@ -98,6 +99,18 @@ def restore_from_log(lifecycle_log_path: str = "",
             continue
         if not description:
             # 没有表达式描述, 不能恢复
+            continue
+        try:
+            FactorParser(description).parse()
+        except Exception as e:
+            skipped_invalid += 1
+            if verbose:
+                logger.warning(
+                    "[PersistentRegistry] 跳过无效因子恢复: %s (%s): %s",
+                    name,
+                    source,
+                    e,
+                )
             continue
         # 重建函数
         def make_func(expr: str):
@@ -114,5 +127,7 @@ def restore_from_log(lifecycle_log_path: str = "",
             if verbose:
                 logger.info(f"[PersistentRegistry] 恢复: {name} ({source})")
     if verbose:
+        if skipped_invalid:
+            logger.info(f"[PersistentRegistry] 跳过 {skipped_invalid} 个无效描述因子")
         logger.info(f"[PersistentRegistry] 总共恢复 {restored} 因子 (从 {len(latest_event)} 事件)")
     return restored

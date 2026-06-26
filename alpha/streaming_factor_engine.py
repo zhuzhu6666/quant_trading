@@ -42,6 +42,8 @@ class StreamingFactorEngine:
         self._incremental_state: dict[str, float] = {}
         self._warm: bool = False
         self._factor_runtime_config: dict[str, dict] = dict(factor_runtime_config or {})
+        # Ensure restored shadow factors do not enter the live voting/calculation path.
+        self.refresh_factor_list()
 
     # ── 核心接口 ────────────────────────────────────────
 

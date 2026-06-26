@@ -2804,13 +2804,17 @@ def _start_live_scheduler():
             bar_thresholds = {"M1": 600, "M5": 900, "M15": 1800, "M30": 3600, "H1": 7200, "D1": 172800}
             stale_tfs = []
             fresh_tfs = []
+            observed_bar_ts_by_tf: dict[str, float] = {}
             for tf, max_age in bar_thresholds.items():
                 try:
                     row = _dc.execute(
                         "SELECT MAX(time) FROM bars WHERE symbol=? AND timeframe=?",
                         [symbols[0], tf],
                     ).fetchone()
-                    if row and row[0] and (now - float(row[0])) < max_age:
+                    row_ts = float(row[0]) if row and row[0] else 0.0
+                    if row_ts > 0:
+                        observed_bar_ts_by_tf[tf] = row_ts
+                    if row_ts > 0 and (now - row_ts) < max_age:
                         fresh_tfs.append(tf)
                     else:
                         stale_tfs.append(tf)
@@ -2840,7 +2844,7 @@ def _start_live_scheduler():
                 # 一切新鲜: 跳过数据拉取, 只记录健康状态
                 if not tick_stale:
                     logger.debug("[data_sync] all fresh ({}), skip pull", bar_status)
-                    health.record_success()
+                    health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
                     return
                 logger.info("[data_sync] bars ok, ticks stale (age={:.0f}m) → pulling", tick_age/60)
 
@@ -2877,13 +2881,15 @@ def _start_live_scheduler():
                                 from data.store import DataStore
                                 DataStore().insert_bars(bars, sym, tf)
                                 total_bars += len(bars)
+                                if bars:
+                                    observed_bar_ts_by_tf[tf] = float(bars[-1]["time"])
                                 logger.info("[data_sync] pulled {} {} bars: {} bars", sym, tf, len(bars))
                             except Exception as e:
                                 logger.warning("[data_sync] {} {} pull failed: {}", sym, tf, e)
 
             # 5. 记录健康状态
             elapsed = time.time() - t0
-            health.record_success()
+            health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
             if total_bars > 0 or tick_stale:
                 logger.info("[data_sync] done ({:.1f}s): +{} bars, tick_gap={:.0f}m", elapsed, total_bars, tick_age/60)
         except Exception as e:

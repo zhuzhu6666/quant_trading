@@ -62,6 +62,10 @@ THRESHOLDS = {
     "memory_max_pct": 80,    # 内存使用率上限 (%)
 }
 
+ADVISORY_ONLY_COMPONENTS = {
+    "tick_data",  # Dukascopy tick 库仅供研究/订单流分析, 不应阻断 cTrader live
+}
+
 
 # ── 健康检查器 ───────────────────────────────────────────────────
 
@@ -176,8 +180,14 @@ class SystemHealth:
         scores = [c.score for c in components.values()]
         report.overall_score = sum(scores) / len(scores) if scores else 0.0
 
-        criticals = [c for c in components.values() if c.status == "critical"]
-        degradeds = [c for c in components.values() if c.status == "degraded"]
+        criticals = [
+            name for name, c in components.items()
+            if c.status == "critical" and name not in ADVISORY_ONLY_COMPONENTS
+        ]
+        degradeds = [
+            name for name, c in components.items()
+            if c.status == "degraded" or (c.status == "critical" and name in ADVISORY_ONLY_COMPONENTS)
+        ]
         if criticals:
             report.overall = "critical"
         elif degradeds:
@@ -191,7 +201,11 @@ class SystemHealth:
         # 严重故障 → 告警
         if report.overall == "critical" and self._alerter:
             try:
-                detail = "; ".join(errors[:5])
+                blocking_errors = [
+                    err for err in errors
+                    if not err.lower().startswith("tick data stale:")
+                ]
+                detail = "; ".join((blocking_errors or errors)[:5])
                 self._alerter("ERROR", "⚠️ 系统健康检查", f"级别: critical\n{detail}")
             except Exception:
                 pass

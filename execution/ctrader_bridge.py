@@ -207,6 +207,22 @@ class CTraderBridge(BaseBrokerBridge):
         if not _ready.wait(timeout=5.0):
             raise RuntimeError("Reactor failed to start within 5s")
 
+    def _teardown_client(self) -> None:
+        """Stop the current SDK client and drop the reference.
+
+        When auth fails, leaving the client alive lets the SDK keep reconnecting
+        in the background, which can create a sustained CPU storm. We keep the
+        process-level reactor, but aggressively dispose the per-connect client.
+        """
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        try:
+            client.stopService()
+        except Exception:
+            pass
+
     # ── 连接管理 ──
 
     def connect(self) -> bool:
@@ -232,8 +248,7 @@ class CTraderBridge(BaseBrokerBridge):
             nonlocal self
             try:
                 if self._client:
-                    try: self._client.stopService()
-                    except: pass
+                    self._teardown_client()
                 self._client = Client(self.host, self.port, TcpProtocol)
             except Exception as e:
                 logger.error(f"Client create failed: {e}")
@@ -327,8 +342,11 @@ class CTraderBridge(BaseBrokerBridge):
 
                 def _on_error(f):
                     logger.error(f"cTrader auth failed: {f.getErrorMessage()}")
+                    self._teardown_client()
+                    self._mark_disconnected()
                     self._conn_ready.set()
-                    # ★ 不再 stop reactor — reactor 线程保持, 下次 connect() 重试
+                    # Keep the process-level reactor, but tear down the failed
+                    # client instance so the SDK cannot spin in reconnect loops.
 
                 chain = defer.succeed(None)
                 chain.addCallback(_step_app)
@@ -377,6 +395,7 @@ class CTraderBridge(BaseBrokerBridge):
     def _on_disconnected(self, reason):
         logger.warning(f"cTrader Twisted: disconnected ({reason})")
         self._stop_heartbeat()
+        self._client = None
         self._mark_disconnected()
 
     # ── 熔断 / 退避 ─────────────────────────────────────
@@ -709,10 +728,7 @@ class CTraderBridge(BaseBrokerBridge):
                     pass
                 self._l2_db = None
         if self._client:
-            try:
-                self._client.stopService()
-            except Exception:
-                pass
+            self._teardown_client()
         # 不调 reactor.stop() — 那是全局 reactor, 关了影响别的
         with self._connected_lock:
             self._connected = False

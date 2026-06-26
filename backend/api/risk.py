@@ -1665,10 +1665,13 @@ def _system_health_summary() -> dict[str, Any]:
     critical_components = [name for name, item in component_status.items() if item["status"] == "critical"]
     degraded_components = [name for name, item in component_status.items() if item["status"] == "degraded"]
 
+    advisory_only_components = {"tick_data"}
     blocking_components: list[str] = []
     advisory_critical_components: list[str] = []
     for name in critical_components:
-        if name == "l2_depth" and not policy_flags["require_l2_depth"]:
+        if name in advisory_only_components:
+            advisory_critical_components.append(name)
+        elif name == "l2_depth" and not policy_flags["require_l2_depth"]:
             advisory_critical_components.append(name)
         elif name == "disk_space" and not policy_flags["block_on_disk_critical"]:
             advisory_critical_components.append(name)
