@@ -4161,7 +4161,7 @@ def _record_filled_position_open_context(
                 gate_result=gate_result,
                 symbol="XAUUSD+",
                 timeframe=str(getattr(cfg, "timeframe", "") or ""),
-                decision_ts=bar.get("time", time.time()),
+                decision_ts=time.time(),
                 trade_id=str(pid),
                 position_id=str(pid),
                 portfolio_state={
@@ -4517,7 +4517,7 @@ def _process_tick_factor_pipeline(
                         event_type="close",
                         symbol="XAUUSD+",
                         timeframe=str(getattr(cfg, "timeframe", "") or ""),
-                        decision_ts=bar.get("time", close_ts),
+                        decision_ts=close_ts,
                         trade_id=str(cpid),
                         position_id=str(cpid),
                         portfolio_state={

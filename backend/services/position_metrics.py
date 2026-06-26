@@ -42,6 +42,7 @@ def update_position_path_metrics(
     max_holding_seconds: float = 0.0,
     entry_regime: str = "",
     current_regime: str = "",
+    min_thesis_break_seconds: float = 180.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     state = normalize_path_state(previous_state)
     current_pnl = _safe_float(current_pnl)
@@ -82,7 +83,14 @@ def update_position_path_metrics(
     else:
         regime_shift = "none"
 
-    if current_pnl < 0 and (timeout_ratio >= 1.0 or giveback_ratio >= 0.85 or holding_efficiency < 0.2):
+    min_thesis_break_seconds = max(0.0, _safe_float(min_thesis_break_seconds))
+    thesis_break_ready = holding_seconds >= min_thesis_break_seconds
+
+    if current_pnl < 0 and (
+        timeout_ratio >= 1.0
+        or giveback_ratio >= 0.85
+        or (holding_efficiency < 0.2 and thesis_break_ready)
+    ):
         thesis_status = "broken"
     elif giveback_ratio >= 0.5 or timeout_ratio >= 0.8 or holding_efficiency < 0.45:
         thesis_status = "weakening"
