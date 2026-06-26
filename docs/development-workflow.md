@@ -1,257 +1,247 @@
 # Development Workflow
 
-> Last updated: 2026-06-25
-> Scope: local, GitHub, and server synchronization rules.
+> Last updated: 2026-06-26
+> Scope: local mini-program frontend + Linux server backend workflow.
 
-本文固化三端协作流程，避免本地、GitHub、服务器出现长期分叉。
+本文用来固化当前项目的唯一推荐协作方式，目标只有一个：
+避免 Windows 本地副本和 Linux 服务器运行代码长期分叉。
 
-## 1. 三端角色
+## 1. 核心原则
 
-### 本地
+1. 本地 Windows 只负责微信小程序前端。
+2. Linux 服务器是后端、策略、执行、配置、日志的唯一真实工作区。
+3. 实盘相关代码不再采用“本地修改后再手工同步服务器”的方式。
+4. 后端问题以服务器复现、服务器修改、服务器验证为准。
+5. 前端问题以本地微信开发者工具验证为准。
 
-本地是主开发和编排端。
+## 2. 角色边界
 
-适合：
+### 本地 Windows
 
-- Codex 主控开发。
-- 架构设计和文档整理。
-- 小程序前端 `miniprogram_v2` 开发和验证。
-- 可在本地复现的后端改动。
-- 提交、推送、发布协调。
+本地只负责这些内容：
 
-### GitHub
+- `miniprogram_v2`
+- 前端交互、展示、登录态跳转
+- 小程序页面验证
+- 文档整理
 
-GitHub `main` 是唯一最终合并源。
+本地默认不再承担这些工作：
 
-所有端最终都必须回到 GitHub commit：
+- `backend`
+- `execution`
+- `alpha`
+- `risk`
+- `monitor`
+- `.env` / systemd / cTrader / 数据库 / 实盘日志
+
+### Linux 服务器
+
+服务器负责这些内容：
+
+- 后端接口
+- 交易循环
+- 风控逻辑
+- cTrader 连接与执行
+- 数据库、日志、环境变量、systemd
+- 所有实盘相关验证
+
+### Git
+
+Git 仍然保留，但用途要更明确：
+
+- 前端改动：本地提交
+- 后端改动：服务器提交
+- 不再要求“后端先在本地改，再推服务器”
+
+## 3. 目录约定
+
+### 本地主要目录
 
 ```text
-local / server changes
-  -> commit
-  -> push GitHub
-  -> pull --ff-only to other endpoints
+miniprogram_v2/
+docs/
+TODO.md
 ```
 
-### 服务器
-
-服务器是后端真实运行和验证端。
-
-适合：
-
-- 后端运行态验证。
-- `.env`、systemd、真实数据、cTrader 连接排查。
-- 服务器日志、数据库、定时任务检查。
-- 必要的短事务热修。
-
-服务器不适合作为长期第二开发分支。服务器如需改代码，必须短事务完成并立即回推 GitHub。
-
-> 2026-06-25 实践备注：
-> - 对外域名 `www.zhuzhu666.icu` 当前解析到 `124.221.7.195`。
-> - SSH / 发布时应优先以当前 DNS 或服务器控制台里的实际 IP 为准，不要依赖历史聊天里残留的旧 IP。
-
-## 2. 标准开发流程
-
-日常优先使用本流程：
+### 服务器主要目录
 
 ```text
-1. 本地开发
-2. 本地测试
-3. git commit
-4. git push origin main
-5. SSH 到服务器
-6. git pull --ff-only origin main
-7. 服务器测试
-8. 必要时重启服务
-9. 校验本地 / GitHub / 服务器 HEAD 一致
+backend/
+execution/
+alpha/
+risk/
+monitor/
+config/
+data/
+logs/
+scripts/
+tests/
 ```
 
-常用命令：
+## 4. 标准工作流
 
-```bash
-git status --short
-python -m pytest tests\research\test_rule_learning_pipeline.py tests\research\test_model_registry.py -q
-git add -A
-git commit -m "..."
-git push origin main
+### 前端开发流程
+
+```text
+本地修改 miniprogram_v2
+  -> 微信开发者工具验证
+  -> 如接口异常，再去服务器排查后端
+  -> 前端确认稳定后提交
 ```
 
-服务器：
+### 后端开发流程
+
+```text
+SSH 到服务器
+  -> 在服务器上改代码
+  -> 在服务器上跑最小验证
+  -> 看日志
+  -> 必要时重启服务
+  -> 再做接口验证
+  -> 确认后提交
+```
+
+### 实盘问题排查流程
+
+```text
+先看服务器日志
+  -> 再看接口状态
+  -> 再看数据库 / 配置 / 运行态
+  -> 最后才改代码
+```
+
+## 5. 服务器日常操作规范
+
+### 登录服务器
+
+当前服务器信息：
+
+- Host: `124.221.7.195`
+- User: `ubuntu`
+- 项目目录: `/home/ubuntu/quant_trading`
+
+### 常用命令
 
 ```bash
 cd /home/ubuntu/quant_trading
-git pull --ff-only origin main
-.venv/bin/python -m pytest tests/research/test_rule_learning_pipeline.py tests/research/test_model_registry.py -q
-.venv/bin/python scripts/phase_b_risk_check.py --api-base https://YOUR_HOST --username YOUR_USER --password YOUR_PASSWORD
-.venv/bin/python scripts/phase_b_risk_check.py --api-base https://YOUR_HOST --username YOUR_USER --password YOUR_PASSWORD --position-id 123456789
 git status --short
 git rev-parse HEAD
+systemctl status quant-backend.service --no-pager
+journalctl -u quant-backend.service -n 100 --no-pager
+curl http://127.0.0.1:8000/api/health
 ```
 
-三端校验：
+### 服务重启
 
 ```bash
-git rev-parse HEAD
-git ls-remote origin refs/heads/main
-ssh ubuntu@SERVER "cd /home/ubuntu/quant_trading && git rev-parse HEAD && git status --short"
+sudo systemctl restart quant-backend.service
+systemctl status quant-backend.service --no-pager -n 30
+journalctl -u quant-backend.service --since "2 min ago" --no-pager
 ```
 
-如果需要先确认域名当前指向：
+### 最小验证
+
+每次后端改动后，至少验证：
 
 ```bash
-nslookup www.zhuzhu666.icu
+curl http://127.0.0.1:8000/api/health
 ```
 
-## 3. 后端代码规则
-
-后端真实环境以服务器验证为准，但代码仍以 GitHub 为最终合并源。
-
-推荐方式：
-
-```text
-本地改后端
-  -> 本地测试
-  -> push GitHub
-  -> 服务器 pull
-  -> 服务器 .venv 测试
-  -> 重启服务 / 验证接口
-```
-
-如果问题只在服务器复现，可以在服务器短事务热修：
-
-```text
-服务器定位问题
-  -> 小范围修改
-  -> 服务器测试
-  -> git diff 审查
-  -> commit
-  -> push GitHub
-  -> 本地 pull --ff-only
-  -> 三端 HEAD 校验
-```
-
-服务器热修禁止长期保留未提交改动。
-
-## 4. 前端代码规则
-
-前端以本地 `miniprogram_v2` 开发和验证为准。
-
-推荐方式：
-
-```text
-本地小程序开发
-  -> 微信 DevTools 验证
-  -> commit
-  -> push GitHub
-  -> 服务器 pull
-```
-
-服务器不作为前端开发端，只同步最终代码。
-
-## 5. Codex CLI 使用建议
-
-当前推荐：
-
-- 本地 Codex 是主控。
-- 服务器可以安装 Codex CLI，但只作为现场排障和短事务热修工具。
-
-服务器 Codex CLI 适合：
-
-- 服务器才复现的后端错误。
-- systemd / 环境变量 / 权限 / 依赖排查。
-- 查看真实日志和数据库状态。
-- 小范围热修并立即提交。
-
-服务器 Codex CLI 不适合：
-
-- 和本地 Codex 并行做大改。
-- 长期保留未提交后端改动。
-- 直接绕过 GitHub 形成服务器专属版本。
-
-## 6. 同步安全规则
-
-- 默认使用 `git pull --ff-only`，避免服务器产生隐式 merge。
-- 发布前必须 `git status --short`。
-- 发布后必须校验三端 HEAD。
-- 服务器有本地改动时，先判断来源；不能直接覆盖未知改动。
-- 生成报告、缓存、数据库、日志不应进入提交。
-- 如果服务器存在旧生成文件挡住 pull，先备份或 stash，再同步。
-
-## 7. 发布检查清单
-
-每次发布至少检查：
-
-```text
-[ ] 本地测试通过
-[ ] 本地工作区干净
-[ ] GitHub push 成功
-[ ] 服务器 pull --ff-only 成功
-[ ] 服务器核心测试通过
-[ ] Phase B 风控摘要接口验证通过（`/api/risk/summary`、`/api/risk/policy/verdicts`）
-[ ] 必要服务已重启
-[ ] 本地 / GitHub / 服务器 HEAD 一致
-[ ] 服务器工作区干净
-```
-
-## 8. 冲突处理
-
-如果服务器有未提交代码：
+如果改动涉及登录或交易页，再额外验证：
 
 ```bash
-git status --short
-git diff
+curl -X POST http://127.0.0.1:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"zhu","password":"1994"}'
 ```
 
-然后二选一：
+如涉及实盘接口，再继续验证：
 
-- 是有效服务器热修：提交并 push GitHub，再本地 pull。
-- 是生成物或旧报告：备份或 stash，再从 GitHub fast-forward。
+- `/api/live/account`
+- `/api/live/positions`
+- `/api/live/strategy-status`
+- `/api/live/loop-status`
+- `/api/risk/summary`
 
-禁止在不了解改动来源时执行破坏性 reset。
+## 6. Codex CLI 使用规则
 
-## 9. 原则
+服务器已经安装并登录 `codex`，当前用法如下：
 
-1. GitHub 是最终真相源。
-2. 本地是主开发端。
-3. 服务器是运行和验证端。
-4. 服务器可以热修，但必须短事务回推。
-5. 前端本地验证，后端服务器验证。
-6. 每轮开发结束必须三端 HEAD 一致。
+```bash
+codex
+codex --version
+codex login status
+```
 
-## 10. 对话切换协作规则
+当前约定：
 
-长期项目不要求始终只用一个对话，也不建议每做一点就机械开新对话。推荐按“阶段”切换对话，而不是按“消息条数”切换。
+- 本地 Codex：负责前端、小程序、文档、总控协作
+- 服务器 Codex：负责后端、实盘、日志、配置、热修
 
-### 推荐方式
+服务器 Codex 适合：
 
-- 同一阶段内，尽量在同一对话里连续推进
-- 一个阶段收口后，可以开新对话进入下一阶段
-- 切换对话前，先把当前状态写回 `TODO.md`
-- 如果本轮有新的长期架构结论，再同步写入 `docs/architecture.md`
+- 服务器才复现的问题
+- 交易循环、风控、cTrader 排查
+- systemd / `.env` / 数据库 / 权限问题
+- 小范围后端改动和验证
 
-### 适合继续留在当前对话的情况
+服务器 Codex 不适合：
 
-- 正在连续实现同一个功能
-- 刚完成方案讨论，马上进入编码
-- 刚排查完 bug，准备继续修复和验证
-- 需要沿用刚读过的代码上下文
+- 改小程序页面
+- 本地 UI 联调
+- 长期在服务器堆积未整理改动
 
-### 适合新开对话的情况
+## 7. 提交规则
 
-- 一个 Phase 已经完成或基本收口
-- 准备从“架构讨论”切到“具体实现”
-- 准备从“后端开发”切到“前端展示 / 验证 / 部署”
-- 当前对话已经很长，主题开始混杂
+### 前端提交
 
-### 新对话启动默认顺序
+前端改动在本地提交。
 
-1. 先读 `TODO.md`
-2. 确认“当前唯一进行中主线”
-3. 如有需要，再读 `docs/architecture.md` 对应阶段章节
-4. 开工前先把对应任务状态更新为 `进行中`
+示例：
 
-### 核心原则
+```bash
+git add miniprogram_v2
+git commit -m "fix mini program trading status rendering"
+```
 
-- 对话不是唯一记忆载体，文档才是长期接力载体
-- `TODO.md` 负责记录当前推进到哪一步
-- `docs/architecture.md` 负责记录系统结构和长期结论
-- 只要两份文档持续更新，就可以安全切换对话，而不必每次重新扫全项目
+### 后端提交
+
+后端改动优先在服务器提交。
+
+示例：
+
+```bash
+cd /home/ubuntu/quant_trading
+git add backend execution alpha risk monitor config tests
+git commit -m "fix live loop factor restore path"
+```
+
+## 8. 明确禁止的做法
+
+以下做法从现在开始默认禁止：
+
+- 在本地修改后端代码，再手工 `scp` 整批覆盖服务器
+- 不确认服务器当前代码状态，就直接从本地覆盖
+- 后端同时在本地和服务器两边并行修改
+- 服务器保留长期未提交热修
+- 看到异常先猜代码，再看日志
+
+## 9. 每次后端改动后的检查清单
+
+```text
+[ ] 改动发生在服务器
+[ ] 已查看 git diff
+[ ] 已做最小接口验证
+[ ] 已查看最新 journalctl
+[ ] 如涉及交易循环，已验证 start / stop 或相关状态接口
+[ ] 服务状态正常
+[ ] 改动已提交或明确记录原因
+```
+
+## 10. 一句话版本
+
+当前项目从现在开始按这条规则执行：
+
+```text
+本地只做小程序，服务器只做后端。
+```

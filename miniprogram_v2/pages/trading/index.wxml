@@ -78,16 +78,22 @@
           <view class="small">日内交易数</view>
           <view class="small">{{daily.trades || 0}}</view>
         </view>
-        <view class="small muted">最近闸门原因：{{strategy.gateReason || '无'}}</view>
-        <view wx:if="{{policyView}}" class="status-banner status-banner-{{policyView.tone}}">
+        <view wx:if="{{currentGateView}}" class="status-banner status-banner-{{currentGateView.tone}}">
           <view class="row-between">
-            <view class="small">最新统一裁决</view>
-            <status-pill label="{{policyView.action}}" tone="{{policyView.tone}}" />
+            <view class="small">当前闸门状态</view>
+            <status-pill label="{{currentGateView.status}}" tone="{{currentGateView.tone}}" />
           </view>
-          <view class="section-note">{{policyView.reason}}</view>
+          <view class="section-note">{{currentGateView.summary}}</view>
+        </view>
+        <view wx:if="{{policyHistoryView}}" class="status-banner status-banner-{{policyHistoryView.tone}}">
+          <view class="row-between">
+            <view class="small">{{policyHistoryView.title}}</view>
+            <status-pill label="{{policyHistoryView.action}}" tone="{{policyHistoryView.tone}}" />
+          </view>
+          <view class="section-note">{{policyHistoryView.reason}}</view>
           <view class="row-wrap">
-            <view class="tag">已放行 {{policyView.allowed}}</view>
-            <view class="tag">已拦截 {{policyView.blocked}}</view>
+            <view class="tag">已放行 {{policyHistoryView.allowed}}</view>
+            <view class="tag">已拦截 {{policyHistoryView.blocked}}</view>
           </view>
         </view>
       </view>

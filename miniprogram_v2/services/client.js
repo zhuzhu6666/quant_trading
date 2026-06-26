@@ -2,6 +2,7 @@ import CONFIG from '../utils/config';
 import sessionStore from '../stores/session';
 
 let tokenCache = '';
+let unauthorizedRedirecting = false;
 
 function getToken() {
   return tokenCache || wx.getStorageSync('jwt_token') || '';
@@ -17,6 +18,32 @@ export function clearToken() {
   tokenCache = '';
   wx.removeStorageSync('jwt_token');
   sessionStore.setState({ token: '', user: null, isAuthenticated: false });
+}
+
+function redirectToLogin() {
+  if (unauthorizedRedirecting) return;
+  unauthorizedRedirecting = true;
+  try {
+    const app = getApp && getApp();
+    if (app && typeof app.beforeLogout === 'function') {
+      app.beforeLogout();
+    }
+  } catch (err) {
+    // Ignore app lifecycle lookup failures during forced logout.
+  }
+  wx.showToast({
+    title: '登录已失效，请重新登录',
+    icon: 'none',
+    duration: 2200,
+  });
+  setTimeout(() => {
+    wx.reLaunch({
+      url: '/pages/login/index',
+      complete: () => {
+        unauthorizedRedirecting = false;
+      },
+    });
+  }, 80);
 }
 
 export function loadToken() {
@@ -56,8 +83,9 @@ async function request(method, endpoint, data, options = {}) {
     const error = new Error('request_failed');
     error.statusCode = response && response.statusCode;
     error.payload = response && response.data;
-    if (error.statusCode === 401) {
+    if (error.statusCode === 401 && !options.skipAuth) {
       clearToken();
+      redirectToLogin();
     }
     throw error;
   }

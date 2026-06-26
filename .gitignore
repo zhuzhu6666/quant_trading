@@ -52,6 +52,7 @@ logs/
 *.key
 secrets/
 credentials/
+.agents/
 
 # Hermes
 .hermes/

@@ -146,6 +146,43 @@ def test_system_health_summary_marks_optional_l2_as_observe_only(monkeypatch):
     assert "不会直接阻断交易" in result["impact_summary"]
 
 
+def test_system_health_summary_marks_tick_data_as_observe_only(monkeypatch):
+    class _Component:
+        def __init__(self, status, detail, score):
+            self.status = status
+            self.detail = detail
+            self.score = score
+
+    monkeypatch.setattr(
+        risk_api,
+        "_get_system_health_report",
+        lambda: SimpleNamespace(
+            overall="critical",
+            overall_score=0.6,
+            ts=789.0,
+            errors=["Tick data stale: 440 min"],
+            components={
+                "tick_data": _Component("critical", "440 min stale", 0.0),
+                "bar_m5": _Component("ok", "2 min ago", 1.0),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        risk_api,
+        "_runtime_risk_policy",
+        lambda: {"require_l2_depth": False, "block_on_disk_critical": True},
+    )
+
+    result = risk_api._system_health_summary()
+
+    assert result["critical_components"] == ["tick_data"]
+    assert result["blocking_components"] == []
+    assert result["advisory_critical_components"] == ["tick_data"]
+    assert result["trading_blocked"] is False
+    assert result["impact_status"] == "observe"
+    assert "tick_data" in result["impact_summary"]
+
+
 def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))

@@ -5,9 +5,11 @@
 ## 主文档
 
 - [../README.md](../README.md) - 项目总览与快速入口
+- [../AGENTS.md](../AGENTS.md) - 当前工作区规则与防误操作提醒
 - [architecture.md](architecture.md) - 当前系统状态、目标完全体、分层定义、完整开发路线
 - [../TODO.md](../TODO.md) - 近期执行项、结构缺口、验证项、技术债
-- [development-workflow.md](development-workflow.md) - 本地 / GitHub / 服务器三端协作与发布流程
+- [development-workflow.md](development-workflow.md) - 本地前端 / 服务器后端的协作规则
+- [server-backend-sop.md](server-backend-sop.md) - 服务器后端日常操作 SOP
 - [startup.md](startup.md) - 后端、小程序和常用脚本启动方式
 - [CTRADER_INTEGRATION.md](CTRADER_INTEGRATION.md) - cTrader 执行通道说明
 - [../miniprogram_v2/README.md](../miniprogram_v2/README.md) - 当前微信小程序前端
@@ -31,3 +33,4 @@
 2. [architecture.md](architecture.md)
 3. [../TODO.md](../TODO.md)
 4. [development-workflow.md](development-workflow.md)
+5. [server-backend-sop.md](server-backend-sop.md)

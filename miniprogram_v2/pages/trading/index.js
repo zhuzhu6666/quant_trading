@@ -3,6 +3,10 @@ import { emergencyCloseAll, refreshLiveSnapshot, startTradingLoop, stopTradingLo
 import { openTradeTracePage } from '../../services/ops';
 import { formatMoney, formatPct, formatPrice, formatDurationMinutes, humanizeRiskAction, humanizeRiskReason } from '../../utils/format';
 
+function isActiveDirection(value) {
+  return value === 'LONG' || value === 'SHORT' || value === 1 || value === -1;
+}
+
 function normalizePosition(item = {}) {
   const pnl = Number(item.pnl ?? item.netUnrealizedPnL ?? item.unrealized ?? item.profit ?? 0);
   const currentPrice = item.current_price ?? item.price_current ?? 0;
@@ -63,7 +67,8 @@ Page({
     startBusy: false,
     stopBusy: false,
     emergencyBusy: false,
-    policyView: null,
+    currentGateView: null,
+    policyHistoryView: null,
   },
 
   onLoad() {
@@ -91,6 +96,7 @@ Page({
     const recentSignal = strategy.recent_signal || strategy.signal || {};
     const direction = recentSignal.direction || strategy.direction || trading.position.dir || 'FLAT';
     const positionDir = trading.position && trading.position.dir;
+    const hasActivePosition = positions.length > 0 || isActiveDirection(positionDir);
     const gateReason = strategy.gate_reason || '';
     const circuitBreaker = !!strategy.circuit_breaker;
     const pipelineRunning = !!(
@@ -107,7 +113,7 @@ Page({
     } else if (gateReason) {
       gateLabel = '信号被闸门拦截';
       gateTone = 'warning';
-    } else if (positionDir) {
+    } else if (hasActivePosition) {
       gateLabel = '策略已持仓';
       gateTone = 'positive';
     } else if (direction === 1 || direction === 'LONG' || direction === -1 || direction === 'SHORT') {
@@ -124,6 +130,23 @@ Page({
     const liveDrawdownPct = Math.max(sessionDrawdownPct, equityDrawdownPct);
     const policy = riskSummary.policy || {};
     const latestVerdict = Array.isArray(policy.items) ? policy.items[0] : null;
+    const currentGateView = {
+      tone: circuitBreaker ? 'negative' : gateReason ? 'warning' : hasActivePosition ? 'positive' : 'neutral',
+      status: circuitBreaker
+        ? '熔断中'
+        : gateReason
+          ? '阻断开仓'
+          : hasActivePosition
+            ? '持仓中'
+            : '未阻断',
+      summary: circuitBreaker
+        ? '风险熔断已触发，系统不会继续推进新的开仓。'
+        : gateReason
+          ? humanizeRiskReason(gateReason)
+          : hasActivePosition
+            ? '当前已有持仓，系统在管理现有仓位。'
+            : '当前没有额外拦截原因，策略将按规则继续推进。',
+    };
     this.setData({
       signalLabel: direction === 1 || direction === 'LONG' ? '偏多' : direction === -1 || direction === 'SHORT' ? '偏空' : '观望',
       signalTone: direction === 1 || direction === 'LONG' ? 'positive' : direction === -1 || direction === 'SHORT' ? 'negative' : 'neutral',
@@ -146,8 +169,10 @@ Page({
       },
       risk: trading.risk || {},
       currentPrice: formatPrice(trading.current_price, 3),
-      policyView: latestVerdict
+      currentGateView,
+      policyHistoryView: latestVerdict
         ? {
+            title: latestVerdict.allowed ? '最近一次历史放行' : '最近一次历史拦截',
             action: humanizeRiskAction(latestVerdict.action || latestVerdict.event_type || '--'),
             reason: humanizeRiskReason(latestVerdict.reason || '--'),
             tone: latestVerdict.allowed ? 'positive' : 'negative',

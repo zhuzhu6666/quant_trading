@@ -318,7 +318,8 @@
           </view>
           <view class="section-note">{{systemHealthSummary.impactSummary}}</view>
           <view class="section-note">会直接卡住开仓：{{systemHealthSummary.blockingText}}</view>
-          <view class="section-note">高优先级观察项：{{systemHealthSummary.criticalText}}</view>
+          <view class="section-note">高优先级阻断候选：{{systemHealthSummary.criticalText}}</view>
+          <view class="section-note">只观察不阻断：{{systemHealthSummary.advisoryText}}</view>
           <view class="section-note">一般观察项：{{systemHealthSummary.degradedText}}</view>
         </view>
         <view wx:if="{{systemHealthSummary.componentRows.length}}" class="row-wrap">

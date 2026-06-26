@@ -113,13 +113,22 @@ function summarizeSystemHealth(systemHealth = null) {
   const degraded = Array.isArray(systemHealth.degraded_components) ? systemHealth.degraded_components : [];
   const blocking = Array.isArray(systemHealth.blocking_components) ? systemHealth.blocking_components : [];
   const advisoryCritical = Array.isArray(systemHealth.advisory_critical_components) ? systemHealth.advisory_critical_components : [];
+  const effectiveCritical = critical.filter((key) => !advisoryCritical.includes(key));
   const components = systemHealth.components && typeof systemHealth.components === 'object' ? systemHealth.components : {};
   const componentRows = Object.keys(components)
     .slice(0, 6)
-    .map((key) => ({
-      key: humanizeHealthComponent(key),
-      status: components[key] && components[key].status ? components[key].status : 'unknown',
-    }));
+    .map((key) => {
+      const rawStatus = components[key] && components[key].status ? components[key].status : 'unknown';
+      const statusText = advisoryCritical.includes(key)
+        ? 'observe-only'
+        : blocking.includes(key)
+          ? 'blocking'
+          : rawStatus;
+      return {
+        key: humanizeHealthComponent(key),
+        status: statusText,
+      };
+    });
   const impactStatus = systemHealth.impact_status || (blocking.length ? 'blocked' : critical.length || degraded.length ? 'observe' : 'ok');
   const impactTone =
     impactStatus === 'blocked'
@@ -141,7 +150,7 @@ function summarizeSystemHealth(systemHealth = null) {
     criticalCount: critical.length,
     degradedCount: degraded.length,
     blockingCount: blocking.length,
-    criticalText: critical.length ? critical.map(humanizeHealthComponent).join(' / ') : '无',
+    criticalText: effectiveCritical.length ? effectiveCritical.map(humanizeHealthComponent).join(' / ') : '无',
     degradedText: degraded.length ? degraded.map(humanizeHealthComponent).join(' / ') : '无',
     blockingText: blocking.length ? blocking.map(humanizeHealthComponent).join(' / ') : '无',
     advisoryText: advisoryCritical.length ? advisoryCritical.map(humanizeHealthComponent).join(' / ') : '无',
