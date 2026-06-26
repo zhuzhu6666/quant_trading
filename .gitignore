@@ -38,6 +38,8 @@ data/charts/server_backups/
 data/charts/jobs.jsonl
 data/charts/factor_attribution.json
 data/parameter_template_validation_reports/
+data/model_artifacts/
+data/sec_gld/
 data/ticks/
 data/dukascopy_raw/
 data/feature_models/
@@ -45,6 +47,11 @@ data/ml_models/
 data/browser/
 tick_vault_data/
 state.db
+runtime/
+sync_local_*.patch
+settings.yaml
+/live_service.py
+/ctrader_bridge.py
 
 # Logs
 logs/

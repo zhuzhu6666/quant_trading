@@ -162,6 +162,9 @@ class CTraderBridge(BaseBrokerBridge):
         self._trader_login: int = 0  # account_info 返回的 traderLogin, 下单 fallback
         # audit 2026-06-08: 实时报价 (ProtoOASpotEvent 回调更新)
         self._spot_price: float | None = None
+        self._spot_bid: float | None = None
+        self._spot_ask: float | None = None
+        self._spot_ts: float = 0.0
         self._spot_lock = threading.Lock()
         # ── 熔断 / 退避 ──
         self._fail_count: int = 0
@@ -828,12 +831,18 @@ class CTraderBridge(BaseBrokerBridge):
                 max_val = max(bid, ask)
             logger.debug(f"spot raw: bid={raw_bid} ask={raw_ask} digits={price_digits} → bid={bid:.2f} ask={ask:.2f}")
             with self._spot_lock:
+                if bid > 0:
+                    self._spot_bid = bid
+                if ask > 0:
+                    self._spot_ask = ask
                 if bid > 0 and ask > 0:
                     self._spot_price = (bid + ask) / 2.0
                 elif bid > 0:
                     self._spot_price = bid
                 elif ask > 0:
                     self._spot_price = ask
+                if self._spot_price and self._spot_price > 0:
+                    self._spot_ts = time.time()
                 spot = self._spot_price
             if spot and spot > 0:
                 with self._positions_cache_lock:
@@ -1079,6 +1088,16 @@ class CTraderBridge(BaseBrokerBridge):
         """线程安全读最新 spot 价."""
         with self._spot_lock:
             return self._spot_price
+
+    def get_spot_quote(self) -> dict:
+        """Return latest bid/ask/mid quote and timestamp for session/SL guards."""
+        with self._spot_lock:
+            return {
+                "bid": self._spot_bid,
+                "ask": self._spot_ask,
+                "mid": self._spot_price,
+                "ts": self._spot_ts,
+            }
 
     def disconnect(self):
         """停 client service + 关连接; reactor 留着(全局 reactor 不能跨进程 stop)"""

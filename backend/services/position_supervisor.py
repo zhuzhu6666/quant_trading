@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.services.position_supervisor_templates import normalize_position_supervisor_template
+
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
@@ -46,6 +48,27 @@ def _tightened_sl(
     return round(target, 2)
 
 
+def _target_progress(
+    *,
+    direction: int,
+    entry_price: float,
+    current_price: float,
+    target_price: float,
+    target_kind: str,
+) -> float:
+    if entry_price <= 0 or current_price <= 0 or target_price <= 0:
+        return 0.0
+    if target_kind == "tp":
+        denom = (target_price - entry_price) if direction >= 0 else (entry_price - target_price)
+        move = (current_price - entry_price) if direction >= 0 else (entry_price - current_price)
+    else:
+        denom = (entry_price - target_price) if direction >= 0 else (target_price - entry_price)
+        move = (entry_price - current_price) if direction >= 0 else (current_price - entry_price)
+    if denom <= 0:
+        return 0.0
+    return _clamp(move / denom, 0.0, 10.0)
+
+
 def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any] | None = None) -> str:
     evidence = evidence or {}
     if reason == "holding_timeout_exceeded":
@@ -58,6 +81,10 @@ def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any
         return "这笔仓位已经拿得偏久，但收益效率没有跟上，系统判断继续硬拿的性价比在下降。"
     if reason == "regime_shift_detected":
         return "当前市场状态与入场时不再一致，系统怀疑这笔仓位的适用环境已经发生切换。"
+    if reason == "near_take_profit_capture":
+        return "仓位已经非常接近原始止盈目标，系统建议直接兑现利润，避免临门回吐。"
+    if reason == "near_stop_loss_preemptive_exit":
+        return "仓位已经非常接近止损，且持仓证据偏弱，系统建议提前止损离场，不再等到被动打掉。"
     if action == "reduce":
         return "系统判断这笔仓位仍有逻辑，但不值得继续满仓承受同样风险，建议先降一部分。"
     if action == "tighten":
@@ -66,6 +93,12 @@ def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any
 
 
 def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, Any]:
+    template = normalize_position_supervisor_template(
+        position_context.get("position_supervisor_template")
+        or position_context.get("supervisor_template")
+        or position_context.get("template")
+    )
+    thresholds = template.get("thresholds") or {}
     position = position_context.get("position") or {}
     risk = position_context.get("risk") or {}
     temporal = position_context.get("temporal_context") or {}
@@ -101,13 +134,62 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     action = "hold"
     summary_reason = "position_healthy"
     severity = "info"
+    min_thesis_break_seconds = _safe_float(thresholds.get("min_thesis_break_seconds"))
+    broken_holding_efficiency_threshold = _safe_float(thresholds.get("broken_holding_efficiency_threshold"), 0.20)
+    giveback_reduce_threshold = _safe_float(thresholds.get("giveback_reduce_threshold"), 0.70)
+    giveback_tighten_threshold = _safe_float(thresholds.get("giveback_tighten_threshold"), 0.35)
+    profit_capture_min_threshold = _safe_float(thresholds.get("profit_capture_min_threshold"), 0.35)
+    time_decay_reduce_threshold = _safe_float(thresholds.get("time_decay_reduce_threshold"), 0.35)
+    timeout_tighten_ratio = _safe_float(thresholds.get("timeout_tighten_ratio"), 0.80)
+    timeout_reduce_ratio = _safe_float(thresholds.get("timeout_reduce_ratio"), 0.80)
+    weakening_efficiency_threshold = _safe_float(thresholds.get("weakening_holding_efficiency_threshold"), 0.45)
+    near_tp_progress_threshold = _safe_float(thresholds.get("near_take_profit_progress"), 0.92)
+    near_sl_progress_threshold = _safe_float(thresholds.get("near_stop_loss_progress"), 0.85)
+    near_sl_efficiency_threshold = _safe_float(thresholds.get("near_stop_loss_efficiency_threshold"), 0.25)
+    take_profit_progress = _target_progress(
+        direction=direction,
+        entry_price=entry_price,
+        current_price=current_price,
+        target_price=current_tp,
+        target_kind="tp",
+    )
+    stop_loss_progress = _target_progress(
+        direction=direction,
+        entry_price=entry_price,
+        current_price=current_price,
+        target_price=current_sl,
+        target_kind="sl",
+    )
 
     if max_holding_seconds > 0 and holding_seconds >= max_holding_seconds:
         trigger_tags.append("holding_timeout_exceeded")
         action = "close"
         summary_reason = "holding_timeout_exceeded"
         severity = "warn"
-    elif thesis_status == "broken":
+    elif current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold:
+        trigger_tags.append("near_take_profit")
+        action = "close"
+        summary_reason = "near_take_profit_capture"
+        severity = "info"
+    elif (
+        stop_loss_progress >= near_sl_progress_threshold
+        and current_pnl <= 0
+        and (
+            thesis_status == "broken"
+            or holding_efficiency <= near_sl_efficiency_threshold
+            or time_decay_score <= time_decay_reduce_threshold
+            or regime_shift == "confirmed"
+        )
+    ):
+        trigger_tags.append("near_stop_loss")
+        action = "close"
+        summary_reason = "near_stop_loss_preemptive_exit"
+        severity = "warn"
+    elif (
+        thesis_status == "broken"
+        and holding_seconds >= min_thesis_break_seconds
+        and holding_efficiency <= broken_holding_efficiency_threshold
+    ):
         trigger_tags.append("thesis_broken")
         action = "close"
         summary_reason = "thesis_broken"
@@ -117,23 +199,26 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "close"
         summary_reason = "regime_shift_detected"
         severity = "warn"
-    elif giveback_ratio >= 0.7 and mfe > 0 and profit_capture_ratio <= 0.35:
+    elif giveback_ratio >= giveback_reduce_threshold and mfe > 0 and profit_capture_ratio <= profit_capture_min_threshold:
         trigger_tags.append("profit_giveback_after_mfe")
         action = "reduce"
         summary_reason = "profit_giveback_after_mfe"
         severity = "warn"
-    elif time_decay_score <= 0.35 or (timeout_ratio >= 0.8 and holding_efficiency <= 0.45):
+    elif time_decay_score <= time_decay_reduce_threshold or (timeout_ratio >= timeout_reduce_ratio and holding_efficiency <= weakening_efficiency_threshold):
         trigger_tags.append("time_decay_and_low_efficiency")
         action = "reduce" if current_pnl > 0 else "close"
         summary_reason = "time_decay_and_low_efficiency"
         severity = "warn"
-    elif giveback_ratio >= 0.35 or thesis_status == "weakening" or timeout_ratio >= 0.8:
-        if giveback_ratio >= 0.35:
+    elif giveback_ratio >= giveback_tighten_threshold or thesis_status in {"weakening", "broken"} or timeout_ratio >= timeout_tighten_ratio:
+        if giveback_ratio >= giveback_tighten_threshold:
             trigger_tags.append("profit_giveback_after_mfe")
             summary_reason = "profit_giveback_after_mfe"
-        elif timeout_ratio >= 0.8:
+        elif timeout_ratio >= timeout_tighten_ratio:
             trigger_tags.append("time_decay_and_low_efficiency")
             summary_reason = "time_decay_and_low_efficiency"
+        elif thesis_status == "broken":
+            trigger_tags.append("thesis_broken_delayed")
+            summary_reason = "thesis_weakening"
         else:
             trigger_tags.append("thesis_weakening")
             summary_reason = "thesis_weakening"
@@ -200,9 +285,13 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "volume": round(volume, 6),
         "distance_to_sl": _safe_float(market_space.get("distance_to_sl")),
         "distance_to_tp": _safe_float(market_space.get("distance_to_tp")),
+        "take_profit_progress": round(take_profit_progress, 6),
+        "stop_loss_progress": round(stop_loss_progress, 6),
         "entry_regime": str(entry_context.get("entry_regime") or risk.get("entry_regime") or ""),
         "current_regime": str(risk.get("current_regime") or ""),
         "trigger_tags": trigger_tags,
+        "supervisor_template_id": str(template.get("template_id") or ""),
+        "supervisor_template_version": str(template.get("template_version") or ""),
     }
     human_summary = humanize_supervisor_reason(action, summary_reason, evidence)
     return {
@@ -217,6 +306,13 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "human_summary": human_summary,
         "evidence": evidence,
         "recommended_controls": recommended_controls,
+        "supervisor_template": {
+            "schema_version": str(template.get("schema_version") or ""),
+            "template_id": str(template.get("template_id") or ""),
+            "template_version": str(template.get("template_version") or ""),
+            "template_role": str(template.get("template_role") or ""),
+            "thresholds": thresholds,
+        },
         "requires_risk_verdict": action in {"tighten", "reduce", "close"},
         "action_label": {
             "hold": "继续持有",

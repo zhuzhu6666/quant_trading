@@ -20,6 +20,17 @@ _CARD_CACHE_LOCK = threading.Lock()
 _CARD_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
+def clear_factor_card_cache(db_path: str | Path | None = None) -> None:
+    prefix = f"{Path(db_path).resolve()}|" if db_path else None
+    with _CARD_CACHE_LOCK:
+        if prefix is None:
+            _CARD_CACHE.clear()
+            return
+        for key in list(_CARD_CACHE):
+            if key.startswith(prefix):
+                _CARD_CACHE.pop(key, None)
+
+
 def _loads(value: Any, default: Any) -> Any:
     if value is None:
         return default
@@ -126,7 +137,10 @@ class FactorCardService:
         factor_id: str | None = None,
         factor_family: str | None = None,
     ) -> list[dict[str, Any]]:
-        cache_key = f"{source or '*'}|{lifecycle_status or '*'}|{factor_id or '*'}|{factor_family or '*'}"
+        cache_key = (
+            f"{self.db_path.resolve()}|{source or '*'}|{lifecycle_status or '*'}|"
+            f"{factor_id or '*'}|{factor_family or '*'}"
+        )
         now_ts = time.time()
         with _CARD_CACHE_LOCK:
             cached = _CARD_CACHE.get(cache_key)

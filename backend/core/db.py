@@ -363,6 +363,35 @@ CREATE TABLE IF NOT EXISTS trade_outcome_review (
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS supervisor_counterfactual_review (
+    counterfactual_id TEXT PRIMARY KEY,
+    review_id TEXT DEFAULT '',
+    trade_id TEXT DEFAULT '',
+    position_id TEXT NOT NULL,
+    close_ts REAL NOT NULL DEFAULT 0.0,
+    close_reason TEXT DEFAULT '',
+    supervisor_event_type TEXT DEFAULT '',
+    supervisor_reason TEXT DEFAULT '',
+    label TEXT DEFAULT '',
+    confidence REAL DEFAULT 0.0,
+    horizons_json TEXT DEFAULT '[]',
+    evidence_json TEXT DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS model_permission_audit (
+    audit_id TEXT PRIMARY KEY,
+    model_type TEXT DEFAULT '',
+    artifact_path TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    capabilities_json TEXT DEFAULT '{}',
+    violations_json TEXT DEFAULT '[]',
+    context_json TEXT DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE TABLE IF NOT EXISTS factor_contribution_review (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     review_id TEXT NOT NULL,
@@ -547,10 +576,16 @@ CREATE INDEX IF NOT EXISTS idx_shadow_factor_perf_updated ON shadow_factor_perf(
 CREATE INDEX IF NOT EXISTS idx_decision_ledger_ts ON decision_ledger(decision_ts);
 CREATE INDEX IF NOT EXISTS idx_decision_ledger_pos_event ON decision_ledger(position_id, event_type);
 CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_decision ON decision_factor_snapshot(decision_id);
+CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_factor ON decision_factor_snapshot(factor);
 CREATE INDEX IF NOT EXISTS idx_order_lifecycle_trade ON order_lifecycle_event(trade_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_event(position_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
+CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_position ON supervisor_counterfactual_review(position_id, close_ts);
+CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_label ON supervisor_counterfactual_review(label, updated_at);
+CREATE INDEX IF NOT EXISTS idx_model_permission_audit_created ON model_permission_audit(created_at);
+CREATE INDEX IF NOT EXISTS idx_model_permission_audit_model ON model_permission_audit(model_type, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_factor_contribution_review_trade ON factor_contribution_review(trade_id);
+CREATE INDEX IF NOT EXISTS idx_factor_contribution_review_factor ON factor_contribution_review(factor);
 CREATE INDEX IF NOT EXISTS idx_experience_memory_trade ON experience_memory(trade_id);
 CREATE INDEX IF NOT EXISTS idx_experience_memory_regime ON experience_memory(regime_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_policy_suggestion_scope ON policy_suggestion(scope_type, scope_key, status);

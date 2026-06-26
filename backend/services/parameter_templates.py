@@ -21,6 +21,17 @@ _RECOMMENDATION_CACHE_LOCK = threading.Lock()
 _RECOMMENDATION_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
+def clear_parameter_template_recommendation_cache(db_path: str | Path | None = None) -> None:
+    prefix = f"{Path(db_path).resolve()}|" if db_path else None
+    with _RECOMMENDATION_CACHE_LOCK:
+        if prefix is None:
+            _RECOMMENDATION_CACHE.clear()
+            return
+        for key in list(_RECOMMENDATION_CACHE):
+            if key.startswith(prefix):
+                _RECOMMENDATION_CACHE.pop(key, None)
+
+
 def _loads(value: Any, default: Any) -> Any:
     if value is None:
         return default
@@ -234,7 +245,7 @@ class ParameterTemplateService:
         factor_id: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
-        cache_key = str(factor_id or "*")
+        cache_key = f"{self.db_path.resolve()}|{factor_id or '*'}"
         now_ts = time.time()
         with _RECOMMENDATION_CACHE_LOCK:
             cached = _RECOMMENDATION_CACHE.get(cache_key)

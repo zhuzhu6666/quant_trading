@@ -4,6 +4,7 @@ import time
 
 from backend.api import risk as risk_api
 from backend.services.position_supervisor import evaluate_position_supervisor
+from backend.services.position_supervisor_templates import CONSERVATIVE_TEMPLATE_ID
 
 
 def test_position_supervisor_recommends_reduce_after_large_giveback():
@@ -86,6 +87,122 @@ def test_position_supervisor_recommends_close_when_timeout_exceeded():
     assert verdict["action"] == "close"
     assert verdict["summary_reason"] == "holding_timeout_exceeded"
     assert verdict["recommended_controls"]["protection_mode"] == "full_exit"
+
+
+def test_position_supervisor_default_template_preserves_thesis_broken_close():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "9003",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 2999.0,
+                "volume": 100.0,
+                "unrealized_pnl": -1.0,
+            },
+            "risk": {
+                "mfe": 0.0,
+                "mae": 1.0,
+                "holding_efficiency": 0.8,
+                "time_decay_score": 0.9,
+                "thesis_status": "broken",
+            },
+            "temporal_context": {"decision_ts": time.time(), "holding_seconds": 60.0},
+        }
+    )
+
+    assert verdict["action"] == "close"
+    assert verdict["summary_reason"] == "thesis_broken"
+    assert verdict["supervisor_template"]["template_version"] == "default.v1"
+
+
+def test_position_supervisor_conservative_template_delays_early_thesis_broken_close():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "9004",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 2999.0,
+                "volume": 100.0,
+                "unrealized_pnl": -1.0,
+            },
+            "risk": {
+                "mfe": 0.0,
+                "mae": 1.0,
+                "holding_efficiency": 0.4,
+                "time_decay_score": 0.9,
+                "thesis_status": "broken",
+            },
+            "temporal_context": {"decision_ts": time.time(), "holding_seconds": 60.0},
+            "position_supervisor_template": CONSERVATIVE_TEMPLATE_ID,
+        }
+    )
+
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "thesis_weakening"
+    assert "thesis_broken_delayed" in verdict["evidence"]["trigger_tags"]
+    assert verdict["supervisor_template"]["template_version"] == "conservative.v1"
+
+
+def test_position_supervisor_captures_when_near_take_profit():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "9005",
+                "direction": -1,
+                "entry_price": 4100.0,
+                "current_price": 4081.0,
+                "volume": 100.0,
+                "unrealized_pnl": 19.0,
+                "sl": 4110.0,
+                "tp": 4080.0,
+            },
+            "risk": {
+                "mfe": 19.0,
+                "mae": 0.2,
+                "holding_efficiency": 0.8,
+                "time_decay_score": 0.9,
+                "thesis_status": "intact",
+            },
+            "temporal_context": {"decision_ts": time.time(), "holding_seconds": 180.0},
+        }
+    )
+
+    assert verdict["action"] == "close"
+    assert verdict["summary_reason"] == "near_take_profit_capture"
+    assert "near_take_profit" in verdict["evidence"]["trigger_tags"]
+    assert verdict["evidence"]["take_profit_progress"] >= 0.9
+
+
+def test_position_supervisor_preempts_when_near_stop_loss_and_weak():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "9006",
+                "direction": -1,
+                "entry_price": 4100.0,
+                "current_price": 4109.0,
+                "volume": 100.0,
+                "unrealized_pnl": -9.0,
+                "sl": 4110.0,
+                "tp": 4080.0,
+            },
+            "risk": {
+                "mfe": 0.0,
+                "mae": 9.0,
+                "holding_efficiency": 0.05,
+                "time_decay_score": 0.9,
+                "thesis_status": "weakening",
+            },
+            "temporal_context": {"decision_ts": time.time(), "holding_seconds": 120.0},
+        }
+    )
+
+    assert verdict["action"] == "close"
+    assert verdict["summary_reason"] == "near_stop_loss_preemptive_exit"
+    assert "near_stop_loss" in verdict["evidence"]["trigger_tags"]
+    assert verdict["evidence"]["stop_loss_progress"] >= 0.85
 
 
 def test_trade_trace_exposes_position_supervisor_events(monkeypatch, tmp_path):

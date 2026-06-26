@@ -1609,6 +1609,107 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
                 parsed = _parse_ledger(row)
                 supervisor_events.append(parsed)
                 latest_supervisor = parsed
+
+        def _supervisor_action(item: dict[str, Any] | None) -> str:
+            if not item:
+                return ""
+            action = item.get("action") or {}
+            verdict = action.get("supervisor_verdict") or {}
+            return str(verdict.get("action") or "")
+
+        def _supervisor_reason(item: dict[str, Any] | None) -> str:
+            if not item:
+                return ""
+            action = item.get("action") or {}
+            verdict = action.get("supervisor_verdict") or {}
+            return str(verdict.get("summary_reason") or item.get("action_reason") or "")
+
+        def _close_source_snapshot() -> dict[str, Any]:
+            close_rows: list[dict[str, Any]] = []
+            for row in ledger_rows:
+                event_type = str(row["event_type"] or "")
+                parsed_action = _loads_json(row["action_json"], {})
+                verdict = parsed_action.get("supervisor_verdict") or {}
+                if event_type == "close" or str(verdict.get("action") or "") == "close":
+                    parsed = _parse_ledger(row)
+                    close_rows.append(parsed)
+            close_row = None
+            if review and str(review.get("exit_decision_id") or ""):
+                wanted = str(review.get("exit_decision_id") or "")
+                close_row = next((item for item in close_rows if str(item.get("decision_id") or "") == wanted), None)
+            if close_row is None and close_rows:
+                close_row = close_rows[-1]
+
+            direct_verdict = ((close_row or {}).get("action") or {}).get("supervisor_verdict") or {}
+            if direct_verdict:
+                return {
+                    "source": "supervisor_direct",
+                    "close_decision_id": str((close_row or {}).get("decision_id") or ""),
+                    "close_event_type": str((close_row or {}).get("event_type") or ""),
+                    "supervisor_decision_id": str((close_row or {}).get("decision_id") or ""),
+                    "supervisor_event_type": str((close_row or {}).get("event_type") or ""),
+                    "supervisor_action": str(direct_verdict.get("action") or ""),
+                    "supervisor_reason": str(direct_verdict.get("summary_reason") or (close_row or {}).get("action_reason") or ""),
+                    "seconds_before_close": 0.0,
+                    "evidence": direct_verdict.get("evidence") or {},
+                    "recommended_controls": direct_verdict.get("recommended_controls") or {},
+                }
+
+            close_ts = None
+            if position_events:
+                parsed_events = [_parse_event(row) for row in position_events]
+                closed_events = [
+                    item for item in parsed_events
+                    if str(item.get("event_type") or "") == "closed"
+                ]
+                if closed_events:
+                    close_ts = float(closed_events[-1].get("event_ts") or 0.0)
+            if not close_ts and review:
+                review_payload = review.get("review") or {}
+                close_ts = float(review_payload.get("close_ts") or review.get("created_at") or 0.0)
+            if not close_ts and close_row is not None:
+                close_ts = float(close_row.get("decision_ts") or 0.0)
+
+            inferred = None
+            if close_ts:
+                candidates = [
+                    item for item in supervisor_events
+                    if float(item.get("decision_ts") or 0.0) <= float(close_ts)
+                    and (float(close_ts) - float(item.get("decision_ts") or 0.0)) <= 300.0
+                ]
+                if candidates:
+                    inferred = candidates[-1]
+            if inferred is not None:
+                return {
+                    "source": "supervisor_inferred",
+                    "close_decision_id": str((close_row or {}).get("decision_id") or ""),
+                    "close_event_type": str((close_row or {}).get("event_type") or ""),
+                    "supervisor_decision_id": str(inferred.get("decision_id") or ""),
+                    "supervisor_event_type": str(inferred.get("event_type") or ""),
+                    "supervisor_action": _supervisor_action(inferred),
+                    "supervisor_reason": _supervisor_reason(inferred),
+                    "seconds_before_close": max(0.0, float(close_ts) - float(inferred.get("decision_ts") or 0.0)),
+                    "evidence": (((inferred.get("action") or {}).get("supervisor_verdict") or {}).get("evidence") or {}),
+                    "recommended_controls": (((inferred.get("action") or {}).get("supervisor_verdict") or {}).get("recommended_controls") or {}),
+                }
+
+            close_reason = str((review.get("review") or {}).get("close_reason") or "") if review else ""
+            if not close_reason and recovery_state is not None:
+                close_reason = str(recovery_state["close_reason"] or "")
+            return {
+                "source": close_reason or "unknown",
+                "close_decision_id": str((close_row or {}).get("decision_id") or ""),
+                "close_event_type": str((close_row or {}).get("event_type") or ""),
+                "supervisor_decision_id": "",
+                "supervisor_event_type": "",
+                "supervisor_action": "",
+                "supervisor_reason": "",
+                "seconds_before_close": None,
+                "evidence": {},
+                "recommended_controls": {},
+            }
+
+        close_source = _close_source_snapshot()
         parameter_governance = _build_trade_trace_parameter_governance(
             conn,
             factor_contributions=factor_contributions,
@@ -1629,8 +1730,11 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
             "factor_count": len(factor_contributions),
             "latest_outcome": str(review["outcome_label"] or "") if review else "",
             "latest_close_reason": str((review.get("review") or {}).get("close_reason") or "") if review else "",
+            "close_reason_source": str(close_source.get("source") or ""),
+            "inferred_close_supervisor_action": str(close_source.get("supervisor_action") or ""),
+            "inferred_close_supervisor_reason": str(close_source.get("supervisor_reason") or ""),
             "supervisor_events": len(supervisor_events),
-            "latest_supervisor_action": str((latest_supervisor or {}).get("action", {}).get("supervisor_verdict", {}).get("action") or ""),
+            "latest_supervisor_action": _supervisor_action(latest_supervisor),
             "parameter_governance_factor": str(parameter_governance.get("factor_id") or ""),
         }
         return {
@@ -1640,7 +1744,17 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
             "position_supervisor": {
                 "latest": latest_supervisor,
                 "events": supervisor_events,
+                "close_source": close_source,
             },
+            "inferred_close_supervisor": {
+                "decision_id": str(close_source.get("supervisor_decision_id") or ""),
+                "event_type": str(close_source.get("supervisor_event_type") or ""),
+                "action": str(close_source.get("supervisor_action") or ""),
+                "summary_reason": str(close_source.get("supervisor_reason") or ""),
+                "seconds_before_close": close_source.get("seconds_before_close"),
+                "evidence": close_source.get("evidence") or {},
+                "recommended_controls": close_source.get("recommended_controls") or {},
+            } if str(close_source.get("source") or "").startswith("supervisor_") else None,
             "position_lifecycle": [_parse_event(row) for row in position_events],
             "order_lifecycle": [_parse_event(row) for row in order_events],
             "review": review,

@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from typing import Any
 
 from backend.core.auth import RequireUser
+from backend.services.backend_readiness import BackendReadinessService
 from monitor.auto_recovery import AutoRecovery
 from research.report_generator import WeeklyReport
 from research.experiment_tracker import ExperimentTracker
@@ -67,6 +68,12 @@ def get_recovery_history(_user: RequireUser) -> dict[str, Any]:
         "history": [],
         "note": "待实现持久化",
     }
+
+
+@router.get("/backend-readiness")
+def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
+    """前端交接用的后端统一状态合约。"""
+    return BackendReadinessService().build()
 
 
 # ── Weekly Reports ──

@@ -311,13 +311,36 @@ def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path)
                 "9001",
                 "9001",
                 "close",
-                200.0,
+                150.0,
                 "{}",
                 json.dumps({"policy_verdict": {"allowed": True, "reason": "manual_close"}}),
                 0.0,
                 "manual_close",
                 json.dumps({"close_reason": "broker_close"}),
                 200.0,
+            ),
+            (
+                "dec_supervisor_close",
+                "9001",
+                "9001",
+                "supervisor_close",
+                180.0,
+                "{}",
+                json.dumps({"policy_verdict": {"allowed": True, "reason": "risk_reducing_action"}}),
+                0.91,
+                "thesis_broken",
+                json.dumps(
+                    {
+                        "supervisor_verdict": {
+                            "action": "close",
+                            "summary_reason": "thesis_broken",
+                            "evidence": {"holding_efficiency": 0.08},
+                            "recommended_controls": {"protection_mode": "full_exit"},
+                        },
+                        "risk_verdict": {"allowed": True, "reason": "risk_reducing_action"},
+                    }
+                ),
+                180.0,
             ),
         ],
     )
@@ -381,11 +404,17 @@ def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path)
     result = risk_api._trade_trace(position_id="9001")
 
     assert result["summary"]["position_id"] == "9001"
-    assert result["summary"]["ledger_events"] == 2
+    assert result["summary"]["ledger_events"] == 3
     assert result["summary"]["position_events"] == 1
     assert result["summary"]["order_events"] == 1
     assert result["summary"]["has_review"] is True
     assert result["summary"]["latest_close_reason"] == "broker_close"
+    assert result["summary"]["close_reason_source"] == "supervisor_inferred"
+    assert result["summary"]["inferred_close_supervisor_action"] == "close"
+    assert result["summary"]["inferred_close_supervisor_reason"] == "thesis_broken"
+    assert result["position_supervisor"]["close_source"]["supervisor_decision_id"] == "dec_supervisor_close"
+    assert result["position_supervisor"]["close_source"]["seconds_before_close"] == 20.0
+    assert result["inferred_close_supervisor"]["decision_id"] == "dec_supervisor_close"
     assert result["decision_ledger"][0]["risk_state"]["policy_verdict"]["reason"] == "ok"
     assert result["order_lifecycle"][0]["details"]["sl"] == 4020.0
     assert result["review"]["failure_tags"] == ["manual"]

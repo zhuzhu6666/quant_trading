@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -12,7 +13,7 @@ from pydantic import BaseModel
 import re
 
 from backend.core.auth import RequireUser
-from backend.core.db import connect_sqlite
+from backend.core.db import STATE_DB, connect_sqlite
 from backend.jobs import get_job_manager
 from backend.services.factor_cards import FactorCardService
 from backend.services.parameter_templates import ParameterTemplateService
@@ -20,7 +21,21 @@ from backend.services.parameter_template_validation import (
     ParameterTemplateValidationService,
     run_parameter_template_offline_validation,
 )
+from backend.services.position_supervisor_governance import (
+    build_position_supervisor_advisories,
+    replay_position_supervisor_templates,
+)
+from backend.services.position_supervisor_templates import list_position_supervisor_templates
 from backend.services.review_contract import normalize_trade_review_contract
+from backend.services.supervisor_counterfactual import (
+    evaluate_counterfactuals,
+    list_counterfactuals,
+)
+from backend.services.model_permissions import (
+    list_model_permission_audits,
+    validate_model_artifact,
+)
+from backend.services.meta_governance import MetaGovernanceService
 from research.features import (
     LearningDatasetBuilder,
     LearningDatasetReadiness,
@@ -37,6 +52,11 @@ from research.model_canary import ModelCanaryReviewer
 from research.model_canary_executor import ModelCanaryExecutor
 from research.model_inference_contract import ModelInferenceContract
 from research.model_pipeline import LearningModelPipeline
+from research.meta_model_sidecar import MetaModelSidecar
+from research.meta_model_lightgbm import MetaModelLightGBMService
+from research.llm_advisory import LLMAdvisoryService
+from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
+from research.position_quality_lightgbm import PositionQualityLightGBMService
 from risk.policy_service import RiskPolicyService
 
 router = APIRouter(prefix="/api/learning", tags=["learning"])
@@ -1354,6 +1374,136 @@ class ModelPipelineRunRequest(BaseModel):
     min_trial_coverage: float = 1.0
 
 
+class PositionQualityLightGBMTrainRequest(BaseModel):
+    db_path: str | None = None
+    artifact_dir: str | None = None
+    registry_db_path: str | None = None
+    symbol: str = "XAUUSD+"
+    timeframe: str = "M5"
+    limit: int = 1000
+    holdout_ratio: float = 0.25
+    min_samples: int = 20
+    register_model: bool = True
+    run_shadow: bool = True
+    shadow_limit: int = 100
+
+
+class PositionQualityLightGBMShadowRequest(BaseModel):
+    db_path: str | None = None
+    artifact_dir: str | None = None
+    artifact_path: str | None = None
+    limit: int = 100
+    mode: str = "shadow"
+
+
+class FactorGovernanceLightGBMTrainRequest(BaseModel):
+    db_path: str | None = None
+    artifact_dir: str | None = None
+    registry_db_path: str | None = None
+    symbol: str = "XAUUSD+"
+    timeframe: str = "M5"
+    limit: int = 2000
+    holdout_ratio: float = 0.25
+    min_samples: int = 30
+    register_model: bool = True
+    run_shadow: bool = True
+    shadow_limit: int = 200
+    materialize_suggestions: bool = False
+    min_weakness_score: float = 0.65
+
+
+class FactorGovernanceLightGBMShadowRequest(BaseModel):
+    db_path: str | None = None
+    artifact_dir: str | None = None
+    artifact_path: str | None = None
+    limit: int = 200
+    mode: str = "shadow"
+    materialize_suggestions: bool = False
+    min_weakness_score: float = 0.65
+
+
+class MetaModelLightGBMTrainRequest(BaseModel):
+    db_path: str | None = None
+    artifact_dir: str | None = None
+    registry_db_path: str | None = None
+    symbol: str = "XAUUSD+"
+    timeframe: str = "M5"
+    limit: int = 2000
+    window: int = 12
+    horizon: int = 3
+    holdout_ratio: float = 0.25
+    min_samples: int = 30
+    register_model: bool = True
+    run_shadow: bool = True
+    shadow_limit: int = 200
+    materialize_ledger: bool = False
+
+
+class MetaModelLightGBMShadowRequest(BaseModel):
+    db_path: str | None = None
+    artifact_dir: str | None = None
+    artifact_path: str | None = None
+    limit: int = 200
+    window: int = 12
+    horizon: int = 3
+    mode: str = "shadow"
+    materialize_ledger: bool = False
+
+
+class MetaModelLightGBMSnapshotRequest(BaseModel):
+    db_path: str | None = None
+    limit: int = 200
+    include_samples: bool = False
+    source: str = "manual"
+
+
+class MetaModelLightGBMGovernanceRequest(BaseModel):
+    db_path: str | None = None
+    limit: int = 200
+    snapshot: bool = True
+    source: str = "manual"
+
+
+class SupervisorCounterfactualRunRequest(BaseModel):
+    db_path: str | None = None
+    limit: int = 100
+    horizons_minutes: list[int] | None = None
+    materialize: bool = True
+
+
+class ModelPermissionValidateRequest(BaseModel):
+    artifact_path: str | None = None
+    artifact: dict[str, Any] | None = None
+    model_type: str | None = None
+    db_path: str | None = None
+    require_shadow: bool = True
+
+
+class MetaModelContextRequest(BaseModel):
+    db_path: str | None = None
+    context: dict[str, Any] | None = None
+
+
+class MetaModelAdvisoryRunRequest(BaseModel):
+    db_path: str | None = None
+    context: dict[str, Any] | None = None
+    materialize: bool = True
+
+
+class LLMAdvisoryRunRequest(BaseModel):
+    db_path: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    task_type: str = "review_summary"
+    target_type: str = ""
+    target_id: str = ""
+    context: dict[str, Any] = {}
+    dry_run: bool = False
+    max_tokens: int | None = None
+    temperature: float = 0.2
+
+
 class ParameterTemplateUpsertRequest(BaseModel):
     template: dict
     source: str = "manual"
@@ -1842,6 +1992,97 @@ def get_factor_cards(
             factor_family=factor_family,
         )
     }
+
+
+@router.get("/position-supervisor/templates")
+def list_position_supervisor_template_catalog(_user: RequireUser) -> dict:
+    return {
+        "schema_version": "position_supervisor_template_catalog.v1",
+        "items": list_position_supervisor_templates(),
+    }
+
+
+@router.get("/position-supervisor/replay")
+def replay_position_supervisor_template_catalog(
+    _user: RequireUser,
+    day: str = Query(default="2026-06-26"),
+    small_abs_pnl: float = Query(default=5.0, ge=0.0, le=100.0),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict:
+    cache_key = f"position_supervisor_replay:{day}:{float(small_abs_pnl):.4f}:{int(limit)}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        payload = replay_position_supervisor_templates(
+            day=day,
+            small_abs_pnl=small_abs_pnl,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _learning_cache_set(cache_key, payload)
+
+
+@router.get("/position-supervisor/advisories")
+def list_position_supervisor_advisories(
+    _user: RequireUser,
+    day: str = Query(default="2026-06-26"),
+) -> dict:
+    cache_key = f"position_supervisor_advisories:{day}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        payload = build_position_supervisor_advisories(day=day, materialize=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _learning_cache_set(cache_key, payload)
+
+
+@router.post("/position-supervisor/advisories/materialize")
+def materialize_position_supervisor_advisories(
+    _user: RequireUser,
+    day: str = Query(default="2026-06-26"),
+) -> dict:
+    try:
+        payload = build_position_supervisor_advisories(day=day, materialize=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _learning_cache_invalidate("position_supervisor_advisories:", "suggestions:", "summary")
+    return payload
+
+
+@router.post("/position-supervisor/counterfactual/run")
+def run_position_supervisor_counterfactual(
+    _user: RequireUser,
+    req: SupervisorCounterfactualRunRequest,
+) -> dict:
+    payload = evaluate_counterfactuals(
+        db_path=req.db_path or STATE_DB,
+        limit=max(1, int(req.limit)),
+        horizons_minutes=req.horizons_minutes,
+        materialize=bool(req.materialize),
+    )
+    if req.materialize:
+        _learning_cache_invalidate("position_supervisor_counterfactual:")
+    return payload
+
+
+@router.get("/position-supervisor/counterfactual")
+def get_position_supervisor_counterfactual(
+    _user: RequireUser,
+    limit: int = Query(default=100, ge=1, le=1000),
+    position_id: str | None = Query(default=None),
+    label: str | None = Query(default=None),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    return list_counterfactuals(
+        db_path=db_path or STATE_DB,
+        limit=limit,
+        position_id=position_id,
+        label=label,
+    )
 
 
 @router.get("/parameter-templates")
@@ -2686,6 +2927,405 @@ def list_learning_model_inference_audits(
         limit=limit,
     )
     return {"items": items, "count": len(items)}
+
+
+@router.post("/model/meta/context")
+def build_learning_meta_model_context(_user: RequireUser, req: MetaModelContextRequest) -> dict:
+    return MetaModelSidecar(req.db_path or STATE_DB).build_context(req.context)
+
+
+@router.post("/model/meta/advisory-run")
+def run_learning_meta_model_advisory(_user: RequireUser, req: MetaModelAdvisoryRunRequest) -> dict:
+    return MetaModelSidecar(req.db_path or STATE_DB).run(
+        context=req.context,
+        materialize=bool(req.materialize),
+    )
+
+
+@router.get("/model/meta/advisories")
+def list_learning_meta_model_advisories(
+    _user: RequireUser,
+    limit: int = Query(default=50, ge=1, le=500),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    return MetaModelSidecar(db_path or STATE_DB).list_advisories(limit=limit)
+
+
+@router.post("/model/llm/advisory-run")
+def run_learning_llm_advisory(_user: RequireUser, req: LLMAdvisoryRunRequest) -> dict:
+    max_output_tokens = max(1, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "32768") or 32768))
+    return LLMAdvisoryService(
+        req.db_path or STATE_DB,
+        provider=req.provider,
+        model=req.model,
+        base_url=req.base_url,
+    ).run(
+        task_type=req.task_type,
+        context=req.context,
+        target_type=req.target_type,
+        target_id=req.target_id,
+        dry_run=bool(req.dry_run),
+        max_tokens=None if req.max_tokens is None else max(1, min(int(req.max_tokens), max_output_tokens)),
+        temperature=max(0.0, min(float(req.temperature), 2.0)),
+    )
+
+
+@router.get("/model/llm/audits")
+def list_learning_llm_advisory_audits(
+    _user: RequireUser,
+    limit: int = Query(default=50, ge=1, le=500),
+    task_type: str | None = Query(default=None),
+    target_type: str | None = Query(default=None),
+    target_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    return LLMAdvisoryService(db_path or STATE_DB).list_audits(
+        limit=limit,
+        task_type=task_type,
+        target_type=target_type,
+        target_id=target_id,
+        status=status,
+    )
+
+
+@router.post("/model/permissions/validate")
+def validate_learning_model_permissions(_user: RequireUser, req: ModelPermissionValidateRequest) -> dict:
+    if not req.artifact_path and not req.artifact:
+        raise HTTPException(status_code=400, detail="artifact_path or artifact is required")
+    target: str | dict[str, Any] = req.artifact_path or req.artifact or {}
+    return validate_model_artifact(
+        target,
+        model_type=req.model_type,
+        db_path=req.db_path or STATE_DB,
+        context={"operation": "api_validate_model_permissions"},
+        require_shadow=bool(req.require_shadow),
+    )
+
+
+@router.get("/model/permissions/audits")
+def list_learning_model_permission_audits(
+    _user: RequireUser,
+    limit: int = Query(default=100, ge=1, le=1000),
+    model_type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    return list_model_permission_audits(
+        db_path=db_path or STATE_DB,
+        limit=limit,
+        model_type=model_type,
+        status=status,
+    )
+
+
+@router.post("/model/position-quality-lightgbm/train")
+def train_position_quality_lightgbm(_user: RequireUser, req: PositionQualityLightGBMTrainRequest) -> dict:
+    service = PositionQualityLightGBMService(
+        db_path=req.db_path or STATE_DB,
+        artifact_dir=req.artifact_dir,
+    )
+    result = service.train(
+        limit=max(1, int(req.limit)),
+        holdout_ratio=max(0.0, min(float(req.holdout_ratio), 0.8)),
+        min_samples=max(1, int(req.min_samples)),
+        register=bool(req.register_model),
+        registry_db_path=req.registry_db_path,
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+    )
+    if result.get("ok") and req.run_shadow:
+        result["shadow"] = service.score_samples(
+            artifact_path=result.get("artifact_path"),
+            limit=max(1, int(req.shadow_limit)),
+            mode="shadow_after_train",
+        )
+    return result
+
+
+@router.post("/model/position-quality-lightgbm/shadow-run")
+def run_position_quality_lightgbm_shadow(_user: RequireUser, req: PositionQualityLightGBMShadowRequest) -> dict:
+    service = PositionQualityLightGBMService(
+        db_path=req.db_path or STATE_DB,
+        artifact_dir=req.artifact_dir,
+    )
+    return service.score_samples(
+        artifact_path=req.artifact_path,
+        limit=max(1, int(req.limit)),
+        mode=req.mode or "shadow",
+    )
+
+
+@router.get("/model/position-quality-lightgbm/audits")
+def list_position_quality_lightgbm_audits(
+    _user: RequireUser,
+    limit: int = Query(default=100, ge=1, le=1000),
+    position_id: str | None = Query(default=None),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    service = PositionQualityLightGBMService(
+        db_path=db_path or STATE_DB,
+    )
+    return service.list_audits(limit=limit, position_id=position_id)
+
+
+@router.post("/model/factor-governance-lightgbm/train")
+def train_factor_governance_lightgbm(_user: RequireUser, req: FactorGovernanceLightGBMTrainRequest) -> dict:
+    service = FactorGovernanceLightGBMService(
+        db_path=req.db_path or STATE_DB,
+        artifact_dir=req.artifact_dir,
+    )
+    result = service.train(
+        limit=max(1, int(req.limit)),
+        holdout_ratio=max(0.0, min(float(req.holdout_ratio), 0.8)),
+        min_samples=max(1, int(req.min_samples)),
+        register=bool(req.register_model),
+        registry_db_path=req.registry_db_path,
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+    )
+    if result.get("ok") and req.run_shadow:
+        result["shadow"] = service.score_samples(
+            artifact_path=result.get("artifact_path"),
+            limit=max(1, int(req.shadow_limit)),
+            mode="shadow_after_train",
+            materialize=bool(req.materialize_suggestions),
+            min_weakness_score=max(0.0, min(float(req.min_weakness_score), 1.0)),
+        )
+    return result
+
+
+@router.post("/model/factor-governance-lightgbm/shadow-run")
+def run_factor_governance_lightgbm_shadow(_user: RequireUser, req: FactorGovernanceLightGBMShadowRequest) -> dict:
+    service = FactorGovernanceLightGBMService(
+        db_path=req.db_path or STATE_DB,
+        artifact_dir=req.artifact_dir,
+    )
+    return service.score_samples(
+        artifact_path=req.artifact_path,
+        limit=max(1, int(req.limit)),
+        mode=req.mode or "shadow",
+        materialize=bool(req.materialize_suggestions),
+        min_weakness_score=max(0.0, min(float(req.min_weakness_score), 1.0)),
+    )
+
+
+@router.get("/model/factor-governance-lightgbm/audits")
+def list_factor_governance_lightgbm_audits(
+    _user: RequireUser,
+    limit: int = Query(default=100, ge=1, le=1000),
+    factor: str | None = Query(default=None),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    service = FactorGovernanceLightGBMService(
+        db_path=db_path or STATE_DB,
+    )
+    return service.list_audits(limit=limit, factor=factor)
+
+
+@router.get("/model/factor-governance-lightgbm/advisories")
+def list_factor_governance_lightgbm_advisories(
+    _user: RequireUser,
+    limit: int = Query(default=500, ge=1, le=2000),
+    factor: str | None = Query(default=None),
+    materialize: bool = Query(default=False),
+    min_weakness_score: float = Query(default=0.65, ge=0.0, le=1.0),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    service = FactorGovernanceLightGBMService(
+        db_path=db_path or STATE_DB,
+    )
+    audits = service.list_audits(limit=limit, factor=factor)
+    payload = service.build_advisories(
+        items=audits["items"],
+        materialize=bool(materialize),
+        min_weakness_score=float(min_weakness_score),
+    )
+    if materialize:
+        _learning_cache_invalidate("suggestions:", "summary")
+    return payload
+
+
+@router.post("/model/meta-lightgbm/train")
+def train_meta_model_lightgbm(_user: RequireUser, req: MetaModelLightGBMTrainRequest) -> dict:
+    service = MetaModelLightGBMService(
+        db_path=req.db_path or STATE_DB,
+        artifact_dir=req.artifact_dir,
+    )
+    result = service.train(
+        limit=max(1, int(req.limit)),
+        window=max(1, int(req.window)),
+        horizon=max(1, int(req.horizon)),
+        holdout_ratio=max(0.0, min(float(req.holdout_ratio), 0.8)),
+        min_samples=max(1, int(req.min_samples)),
+        register=bool(req.register_model),
+        registry_db_path=req.registry_db_path,
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+    )
+    if result.get("ok") and req.run_shadow:
+        result["shadow"] = service.score_samples(
+            artifact_path=result.get("artifact_path"),
+            limit=max(1, int(req.shadow_limit)),
+            window=max(1, int(req.window)),
+            horizon=max(1, int(req.horizon)),
+            mode="shadow_after_train",
+            materialize_ledger=bool(req.materialize_ledger),
+        )
+    return result
+
+
+@router.post("/model/meta-lightgbm/shadow-run")
+def run_meta_model_lightgbm_shadow(_user: RequireUser, req: MetaModelLightGBMShadowRequest) -> dict:
+    service = MetaModelLightGBMService(
+        db_path=req.db_path or STATE_DB,
+        artifact_dir=req.artifact_dir,
+    )
+    return service.score_samples(
+        artifact_path=req.artifact_path,
+        limit=max(1, int(req.limit)),
+        window=max(1, int(req.window)),
+        horizon=max(1, int(req.horizon)),
+        mode=req.mode or "shadow",
+        materialize_ledger=bool(req.materialize_ledger),
+    )
+
+
+@router.get("/model/meta-lightgbm/audits")
+def list_meta_model_lightgbm_audits(
+    _user: RequireUser,
+    limit: int = Query(default=100, ge=1, le=1000),
+    posture: str | None = Query(default=None),
+    db_path: str | None = Query(default=None),
+    artifact_dir: str | None = Query(default=None),
+) -> dict:
+    service = MetaModelLightGBMService(
+        db_path=db_path or STATE_DB,
+        artifact_dir=artifact_dir,
+    )
+    return service.list_audits(limit=limit, posture=posture)
+
+
+@router.get("/model/meta-lightgbm/shadow-report")
+def build_meta_model_lightgbm_shadow_report(
+    _user: RequireUser,
+    limit: int = Query(default=200, ge=1, le=2000),
+    posture: str | None = Query(default=None),
+    include_samples: bool = Query(default=True),
+    db_path: str | None = Query(default=None),
+    artifact_dir: str | None = Query(default=None),
+) -> dict:
+    service = MetaModelLightGBMService(
+        db_path=db_path or STATE_DB,
+        artifact_dir=artifact_dir,
+    )
+    return service.build_shadow_report(
+        limit=limit,
+        posture=posture,
+        include_samples=bool(include_samples),
+    )
+
+
+@router.post("/model/meta-lightgbm/shadow-report/snapshot")
+def snapshot_meta_model_lightgbm_shadow_report(
+    _user: RequireUser,
+    req: MetaModelLightGBMSnapshotRequest,
+) -> dict:
+    report = MetaModelLightGBMService(db_path=req.db_path or STATE_DB).build_shadow_report(
+        limit=max(1, int(req.limit)),
+        include_samples=bool(req.include_samples),
+    )
+    return MetaGovernanceService(req.db_path or STATE_DB).create_shadow_report_snapshot(
+        report=report,
+        limit=max(1, int(req.limit)),
+        include_samples=bool(req.include_samples),
+        source=req.source or "manual",
+    )
+
+
+@router.get("/model/meta-lightgbm/shadow-report/snapshots")
+def list_meta_model_lightgbm_shadow_report_snapshots(
+    _user: RequireUser,
+    limit: int = Query(default=20, ge=1, le=200),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    return MetaGovernanceService(db_path or STATE_DB).list_shadow_report_snapshots(limit=limit)
+
+
+@router.post("/model/meta-lightgbm/governance-suggestion")
+def materialize_meta_model_lightgbm_governance_suggestion(
+    _user: RequireUser,
+    req: MetaModelLightGBMGovernanceRequest,
+) -> dict:
+    report = MetaModelLightGBMService(db_path=req.db_path or STATE_DB).build_shadow_report(
+        limit=max(1, int(req.limit)),
+        include_samples=False,
+    )
+    result = MetaGovernanceService(req.db_path or STATE_DB).materialize_meta_governance_suggestion(
+        report=report,
+        limit=max(1, int(req.limit)),
+        snapshot=bool(req.snapshot),
+        source=req.source or "manual",
+    )
+    _learning_cache_invalidate("suggestions:", "summary")
+    return result
+
+
+@router.get("/model/offmarket-high-load/audits")
+def list_offmarket_high_load_audits(
+    _user: RequireUser,
+    limit: int = Query(default=50, ge=1, le=500),
+    job_name: str | None = Query(default=None),
+) -> dict:
+    conn = connect_sqlite(STATE_DB)
+    try:
+        exists = conn.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='offmarket_high_load_job_audit'
+            """
+        ).fetchone()
+        if not exists:
+            return {"items": [], "count": 0}
+        clauses = []
+        params: list[Any] = []
+        if job_name:
+            clauses.append("job_name=?")
+            params.append(str(job_name))
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        cur = conn.execute(
+            f"""
+            SELECT *
+            FROM offmarket_high_load_job_audit
+            {where}
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (*params, int(limit)),
+        )
+        columns = [str(item[0]) for item in cur.description]
+        rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+        items = []
+        for row in rows:
+            payload_raw = row.get("payload_json") or "{}"
+            result_raw = row.get("result_json") or "{}"
+            items.append(
+                {
+                    "audit_id": str(row.get("audit_id") or ""),
+                    "job_name": str(row.get("job_name") or ""),
+                    "status": str(row.get("status") or ""),
+                    "session_status": str(row.get("session_status") or ""),
+                    "high_load_profile": str(row.get("high_load_profile") or ""),
+                    "payload": json.loads(payload_raw or "{}"),
+                    "result": json.loads(result_raw or "{}"),
+                    "error": str(row.get("error") or ""),
+                    "started_at": float(row.get("started_at") or 0.0),
+                    "finished_at": float(row.get("finished_at") or 0.0),
+                }
+            )
+        return {"items": items, "count": len(items)}
+    finally:
+        conn.close()
 
 
 @router.post("/model/canary-trial")

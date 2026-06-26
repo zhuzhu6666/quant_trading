@@ -23,11 +23,15 @@ def _reset_state():
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
+    live_service._live_state["market_session"] = None
+    live_service._live_state["spot_quote"] = None
     live_service._pos_open_api_volume.clear()
     yield
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
+    live_service._live_state["market_session"] = None
+    live_service._live_state["spot_quote"] = None
     live_service._pos_open_api_volume.clear()
 
 
@@ -65,6 +69,42 @@ def test_resolve_position_api_volume_prefers_refreshed_position():
     refreshed = [{"position_id": 12345, "volume": 130.0}]
     vol = live_service._resolve_position_api_volume(12345, refreshed, 100.0)
     assert vol == 130.0
+
+
+def test_supervisor_tighten_sl_plan_clips_long_stop_below_current_price():
+    plan = live_service._supervisor_tighten_sl_plan(
+        {"direction": 1, "current_price": 4100.0, "sl": 4088.0},
+        4102.0,
+        quote={"bid": 4099.50, "ask": 4100.20, "mid": 4099.85},
+    )
+
+    assert plan["allowed"] is True
+    assert plan["planned_sl"] < 4099.50
+    assert plan["planned_sl"] > 4088.0
+    assert plan["bid"] == 4099.50
+
+
+def test_supervisor_tighten_sl_plan_clips_short_stop_above_current_price():
+    plan = live_service._supervisor_tighten_sl_plan(
+        {"direction": -1, "current_price": 4100.0, "sl": 4112.0},
+        4098.0,
+        quote={"bid": 4099.80, "ask": 4100.50, "mid": 4100.15},
+    )
+
+    assert plan["allowed"] is True
+    assert plan["planned_sl"] > 4100.50
+    assert plan["planned_sl"] < 4112.0
+    assert plan["ask"] == 4100.50
+
+
+def test_supervisor_tighten_sl_plan_skips_when_not_more_protective():
+    plan = live_service._supervisor_tighten_sl_plan(
+        {"direction": 1, "current_price": 4100.0, "sl": 4099.9},
+        4102.0,
+    )
+
+    assert plan["allowed"] is False
+    assert plan["reason"] == "not_tightening_long_stop_loss"
 
 
 # ── _local_positions ─────────────────────────────────────

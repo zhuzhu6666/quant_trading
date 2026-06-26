@@ -37,6 +37,7 @@ from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
 from risk.policy_service import RiskPolicyService
+from backend.services.market_session import evaluate_market_session
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 from backend.services.position_supervisor import evaluate_position_supervisor
 _DECISION_LOG: DecisionLogStore | None = None
@@ -959,6 +960,127 @@ def _log_supervisor_decision(
         return ""
 
 
+def _float_payload_value(payload: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        try:
+            value = payload.get(key)
+        except Exception:
+            value = None
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return 0.0
+
+
+def _direction_from_position(position: dict[str, Any]) -> int:
+    try:
+        direction = int(position.get("direction") or 0)
+    except Exception:
+        direction = 0
+    if direction:
+        return 1 if direction > 0 else -1
+    ptype = str(position.get("type") or position.get("side") or "").lower()
+    if ptype in {"buy", "long"}:
+        return 1
+    if ptype in {"sell", "short"}:
+        return -1
+    return 0
+
+
+def _supervisor_tighten_sl_plan(position: dict[str, Any], target_sl: float, quote: dict[str, Any] | None = None) -> dict[str, Any]:
+    current_sl = _float_payload_value(position, "sl", "stop_loss", "stopLoss")
+    current_price = _float_payload_value(position, "current_price", "price_current", "price", "mark_price")
+    direction = _direction_from_position(position)
+    quote = quote or {}
+    bid = _float_payload_value(quote, "bid")
+    ask = _float_payload_value(quote, "ask")
+    mid = _float_payload_value(quote, "mid", "price")
+    reference_price = bid if direction > 0 and bid > 0 else ask if direction < 0 and ask > 0 else mid if mid > 0 else current_price
+    target_sl = float(target_sl or 0.0)
+    min_delta = 0.01
+    buffer = max(0.20, abs(reference_price) * 0.00008) if reference_price > 0 else 0.0
+    plan = {
+        "allowed": False,
+        "reason": "",
+        "target_sl": target_sl,
+        "planned_sl": 0.0,
+        "current_sl": current_sl,
+        "current_price": current_price,
+        "reference_price": reference_price,
+        "bid": bid,
+        "ask": ask,
+        "direction": direction,
+        "buffer": buffer,
+    }
+    if target_sl <= 0:
+        plan["reason"] = "missing_target_stop_loss"
+        return plan
+    if direction == 0:
+        plan["reason"] = "missing_position_direction"
+        return plan
+    if reference_price <= 0:
+        plan["reason"] = "missing_current_price"
+        return plan
+
+    if direction > 0:
+        legal_ceiling = reference_price - buffer
+        planned_sl = min(target_sl, legal_ceiling)
+        plan["legal_boundary"] = legal_ceiling
+        if planned_sl <= 0:
+            plan["reason"] = "invalid_long_stop_loss"
+            return plan
+        if current_sl > 0 and planned_sl <= current_sl + min_delta:
+            plan["reason"] = "not_tightening_long_stop_loss"
+            plan["planned_sl"] = round(planned_sl, 2)
+            return plan
+    else:
+        legal_floor = reference_price + buffer
+        planned_sl = max(target_sl, legal_floor)
+        plan["legal_boundary"] = legal_floor
+        if current_sl > 0 and planned_sl >= current_sl - min_delta:
+            plan["reason"] = "not_tightening_short_stop_loss"
+            plan["planned_sl"] = round(planned_sl, 2)
+            return plan
+
+    planned_sl = round(planned_sl, 2)
+    if current_sl > 0 and abs(planned_sl - current_sl) < min_delta:
+        plan["reason"] = "stop_loss_delta_too_small"
+        plan["planned_sl"] = planned_sl
+        return plan
+    plan["allowed"] = True
+    plan["reason"] = "ok"
+    plan["planned_sl"] = planned_sl
+    return plan
+
+
+def _log_supervisor_position_event(
+    *,
+    position: dict[str, Any],
+    event_type: str,
+    details: dict[str, Any],
+    realized_pnl: float = 0.0,
+) -> None:
+    if not _LEDGER:
+        return
+    try:
+        pid = str(position.get("position_id") or position.get("ticket") or "")
+        _LEDGER.log_position_event(
+            position_id=pid,
+            trade_id=pid,
+            symbol=str(position.get("symbol") or "XAUUSD+"),
+            event_type=event_type,
+            net_volume=float(position.get("volume", 0.0) or 0.0),
+            avg_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+            realized_pnl=realized_pnl,
+            details=details,
+        )
+    except Exception as exc:
+        logger.debug("[live] supervisor position event %s failed for pos %s: %s", event_type, position.get("position_id"), exc)
+
+
 def _run_position_supervision(
     bridge,
     pos: list,
@@ -1017,29 +1139,65 @@ def _run_position_supervision(
         try:
             if action == "tighten":
                 target_sl = float(controls.get("target_stop_loss", 0.0) or 0.0)
-                current_sl = float(position.get("sl", 0.0) or 0.0)
                 current_tp = float(position.get("tp", 0.0) or 0.0)
-                if target_sl > 0 and abs(target_sl - current_sl) >= 0.01:
-                    amend_res = bridge.amend_position_sltp(pid, sl=target_sl, tp=current_tp)
+                quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
+                sl_plan = _supervisor_tighten_sl_plan(position, target_sl, quote=quote)
+                if not sl_plan["allowed"]:
+                    _log_supervisor_position_event(
+                        position=position,
+                        event_type="amend_skipped",
+                        details={
+                            "supervisor_action": action,
+                            "supervisor_reason": verdict.get("summary_reason"),
+                            "risk_verdict_reason": risk_verdict.get("reason"),
+                            "skip_stage": "supervisor_tighten_sltp",
+                            "skip_reason": sl_plan.get("reason"),
+                            "sl_plan": sl_plan,
+                            "applied_controls": controls,
+                        },
+                    )
+                    log(f"tick {tick}: supervisor tighten SKIP pos={pid} reason={sl_plan.get('reason')}")
+                    _remember_supervisor_state(position, verdict, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                    continue
+                planned_sl = float(sl_plan.get("planned_sl") or 0.0)
+                if planned_sl > 0:
+                    amend_res = bridge.amend_position_sltp(pid, sl=planned_sl, tp=current_tp)
                     if getattr(amend_res, "success", False):
-                        _track_local_sl_tp(pid, sl=target_sl, tp=current_tp)
-                        if _LEDGER:
-                            _LEDGER.log_position_event(
-                                position_id=str(pid),
-                                trade_id=str(pid),
-                                symbol=str(position.get("symbol") or "XAUUSD+"),
-                                event_type="tightened",
-                                net_volume=float(position.get("volume", 0.0) or 0.0),
-                                avg_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
-                                details={
-                                    "supervisor_action": action,
-                                    "supervisor_reason": verdict.get("summary_reason"),
-                                    "risk_verdict_reason": risk_verdict.get("reason"),
-                                    "applied_controls": controls,
+                        _track_local_sl_tp(pid, sl=planned_sl, tp=current_tp)
+                        _log_supervisor_position_event(
+                            position=position,
+                            event_type="tightened",
+                            details={
+                                "supervisor_action": action,
+                                "supervisor_reason": verdict.get("summary_reason"),
+                                "risk_verdict_reason": risk_verdict.get("reason"),
+                                "applied_controls": {
+                                    **controls,
+                                    "target_stop_loss_original": target_sl,
+                                    "target_stop_loss_sent": planned_sl,
+                                    "sl_plan": sl_plan,
                                 },
-                            )
+                            },
+                        )
                         _remember_supervisor_state(position, verdict, action_applied=action, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
-                        log(f"tick {tick}: supervisor tighten pos={pid} sl->{target_sl:.2f}")
+                        log(f"tick {tick}: supervisor tighten pos={pid} sl->{planned_sl:.2f}")
+                    else:
+                        comment = str(getattr(amend_res, "comment", "") or getattr(amend_res, "error", "") or "amend_failed")
+                        _log_supervisor_position_event(
+                            position=position,
+                            event_type="amend_failed",
+                            details={
+                                "supervisor_action": action,
+                                "supervisor_reason": verdict.get("summary_reason"),
+                                "risk_verdict_reason": risk_verdict.get("reason"),
+                                "failure_stage": "supervisor_tighten_sltp",
+                                "failure_reason": comment,
+                                "sl_plan": sl_plan,
+                                "applied_controls": controls,
+                            },
+                        )
+                        _remember_supervisor_state(position, verdict, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                        log(f"tick {tick}: supervisor tighten AMEND FAILED pos={pid}: {comment}")
             elif action == "reduce":
                 current_volume = float(position.get("volume", position.get("api_volume", 0.0)) or 0.0)
                 reduce_fraction = float(controls.get("reduce_fraction", 0.0) or 0.0)
@@ -1171,6 +1329,8 @@ _live_state: dict = {
     "positions": [],        # [position, ...]
     "positions_updated_at": None,
     "spot_price": None,      # cTrader spot event
+    "spot_quote": None,
+    "market_session": None,
     "session_pnl": 0.0,
     "session_trades": 0,
     "session_winning": 0,
@@ -2355,6 +2515,89 @@ def warmup_ctrader(timeout_sec: float = 0.0) -> None:
         time.sleep(0.2)
 
 
+_last_market_connection_release_ts: float = 0.0
+_last_spot_subscription_attempt_ts: float = 0.0
+
+
+def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str, Any]:
+    quote = {}
+    if bridge is not None and hasattr(bridge, "get_spot_quote"):
+        try:
+            quote = bridge.get_spot_quote() or {}
+        except Exception:
+            quote = {}
+    positions = _live_state_get("positions", [], clone=True) or []
+    if isinstance(positions, dict):
+        positions = positions.get("positions", []) or []
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        latest_quote_ts=float((quote or {}).get("ts") or 0.0),
+        broker_error=broker_error,
+        has_open_positions=bool(positions),
+    ).to_dict()
+    _live_state_update(
+        market_session=state,
+        spot_quote=quote or _live_state_get("spot_quote", None, clone=True),
+    )
+    return state
+
+
+def _release_market_connection_if_safe(session: dict[str, Any], log=None) -> bool:
+    global _ctrader_bridge, _ctrader_connect_thread, _last_market_connection_release_ts
+    if session.get("can_keep_market_connection", True):
+        return False
+    if str(session.get("status") or "") != "closed_confirmed":
+        return False
+    now_ts = time.time()
+    if now_ts - _last_market_connection_release_ts < 300:
+        return False
+    with _ctrader_lock:
+        bridge = _ctrader_bridge
+        if bridge is None:
+            _last_market_connection_release_ts = now_ts
+            return False
+        try:
+            bridge.disconnect()
+        except Exception as exc:
+            logger.debug("[market_session] disconnect during closed session failed: %s", exc)
+        _ctrader_bridge = None
+        _ctrader_connect_thread = None
+        _last_market_connection_release_ts = now_ts
+    msg = f"market closed confirmed; released cTrader market connection reason={session.get('reason')}"
+    if log:
+        log(msg)
+    else:
+        logger.info(msg)
+    return True
+
+
+def _ensure_spot_subscription(bridge, *, require_l2_depth: bool = False, log=None) -> None:
+    global _last_spot_subscription_attempt_ts
+    if bridge is None or not getattr(bridge, "is_connected", False):
+        return
+    quote = {}
+    if hasattr(bridge, "get_spot_quote"):
+        try:
+            quote = bridge.get_spot_quote() or {}
+        except Exception:
+            quote = {}
+    if float((quote or {}).get("ts") or 0.0) > 0:
+        return
+    now_ts = time.time()
+    if now_ts - _last_spot_subscription_attempt_ts < 60:
+        return
+    _last_spot_subscription_attempt_ts = now_ts
+    try:
+        if hasattr(bridge, "subscribe_spots"):
+            bridge.subscribe_spots()
+        if require_l2_depth and hasattr(bridge, "subscribe_depth"):
+            bridge.subscribe_depth()
+        msg = "spot subscription refreshed after broker connection became ready"
+        log(msg) if log else logger.info(msg)
+    except Exception as exc:
+        logger.debug("[market_session] spot subscription refresh failed: %s", exc)
+
+
 def _wait_ctrader_ready(bridge, timeout_sec: float = 30.0) -> str | None:
     """blocking 等待 bridge 真正连好. 用于 live loop body 这种已知在后台线程
     可以阻塞的场景. Returns error_msg | None."""
@@ -2381,6 +2624,8 @@ def get_status() -> dict:
         "ctrader": {"status": ctrader_status, "error": ctrader_error},
         "loop": loop_status(),
         "readiness": get_live_readiness("ctrader"),
+        "market_session": _live_state_get("market_session", {}, clone=True) or {},
+        "spot_quote": _live_state_get("spot_quote", None, clone=True),
     }
 
 
@@ -2935,6 +3180,182 @@ def _scheduled_ml_drift_check():
         logger.warning("[ml_drift] failed: %s", e)
 
 
+def _ensure_offmarket_high_load_audit_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS offmarket_high_load_job_audit (
+            audit_id TEXT PRIMARY KEY,
+            job_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            session_status TEXT DEFAULT '',
+            high_load_profile TEXT DEFAULT '',
+            payload_json TEXT DEFAULT '{}',
+            result_json TEXT DEFAULT '{}',
+            error TEXT DEFAULT '',
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_offmarket_high_load_job_audit_created
+        ON offmarket_high_load_job_audit(started_at)
+        """
+    )
+
+
+def _record_offmarket_high_load_audit(
+    *,
+    job_name: str,
+    status: str,
+    session: dict[str, Any],
+    payload: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+    error: str = "",
+    started_at: float | None = None,
+) -> dict[str, Any]:
+    from backend.core.db import get_state_conn
+
+    now_ts = time.time()
+    started = float(started_at or now_ts)
+    audit_id = f"{job_name}:{int(started * 1000)}"
+    row = {
+        "audit_id": audit_id,
+        "job_name": job_name,
+        "status": status,
+        "session_status": str((session or {}).get("status") or ""),
+        "high_load_profile": str((session or {}).get("high_load_profile") or "disabled"),
+        "payload": payload or {},
+        "result": result or {},
+        "error": str(error or ""),
+        "started_at": started,
+        "finished_at": now_ts,
+    }
+    conn = get_state_conn()
+    try:
+        _ensure_offmarket_high_load_audit_table(conn)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO offmarket_high_load_job_audit
+            (audit_id, job_name, status, session_status, high_load_profile,
+             payload_json, result_json, error, started_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                audit_id,
+                row["job_name"],
+                row["status"],
+                row["session_status"],
+                row["high_load_profile"],
+                json.dumps(row["payload"], ensure_ascii=False, sort_keys=True),
+                json.dumps(row["result"], ensure_ascii=False, sort_keys=True),
+                row["error"],
+                row["started_at"],
+                row["finished_at"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return row
+
+
+def _offmarket_high_load_allowed(session: dict[str, Any]) -> tuple[bool, str]:
+    status = str((session or {}).get("status") or "")
+    if status not in {"closed_confirmed", "closed_pending_positions"}:
+        return False, f"market_session_not_offmarket:{status or 'unknown'}"
+    if not bool((session or {}).get("high_load_allowed", False)):
+        return False, "high_load_not_allowed"
+    return True, "ok"
+
+
+def _scheduled_offmarket_position_quality_lightgbm() -> dict[str, Any]:
+    """Off-market LightGBM sidecar training.
+
+    This is strictly advisory/shadow-only. It never places orders, closes
+    positions, changes risk limits, or touches cTrader execution.
+    """
+    job_name = "offmarket_position_quality_lightgbm"
+    started_at = time.time()
+    session = _live_state_get("market_session", {}, clone=True) or {}
+    if not session:
+        session = _market_session_snapshot(None)
+    allowed, reason = _offmarket_high_load_allowed(session)
+    profile = str(session.get("high_load_profile") or "disabled")
+    payload = {
+        "job_name": job_name,
+        "market_session": session,
+        "limit": 500 if profile == "full" else 250,
+        "shadow_limit": 100 if profile == "full" else 30,
+        "min_samples": 20,
+        "profile": profile,
+    }
+    if not allowed:
+        result = {"ok": False, "skipped": True, "reason": reason}
+        audit = _record_offmarket_high_load_audit(
+            job_name=job_name,
+            status="skipped",
+            session=session,
+            payload=payload,
+            result=result,
+            started_at=started_at,
+        )
+        logger.info("[offmarket_high_load] {} skipped: {}", job_name, reason)
+        return {"ok": True, "skipped": True, "reason": reason, "audit": audit}
+
+    try:
+        from backend.core.db import STATE_DB
+        from research.position_quality_lightgbm import PositionQualityLightGBMService
+
+        service = PositionQualityLightGBMService(db_path=STATE_DB)
+        train_result = service.train(
+            limit=int(payload["limit"]),
+            holdout_ratio=0.2,
+            min_samples=int(payload["min_samples"]),
+            register=True,
+            symbol="XAUUSD+",
+            timeframe="M5",
+        )
+        result: dict[str, Any] = {"train": train_result}
+        if train_result.get("ok"):
+            result["shadow"] = service.score_samples(
+                artifact_path=train_result.get("artifact_path"),
+                limit=int(payload["shadow_limit"]),
+                mode="offmarket_shadow_after_train",
+            )
+        status = "done" if train_result.get("ok") else "failed"
+        audit = _record_offmarket_high_load_audit(
+            job_name=job_name,
+            status=status,
+            session=session,
+            payload=payload,
+            result=result,
+            error=str(train_result.get("error") or ""),
+            started_at=started_at,
+        )
+        logger.info(
+            "[offmarket_high_load] {} {} profile={} samples={} shadow={}",
+            job_name,
+            status,
+            profile,
+            (train_result.get("metrics") or {}).get("sample_count") or train_result.get("sample_count"),
+            (result.get("shadow") or {}).get("count"),
+        )
+        return {"ok": status == "done", "status": status, "audit": audit, "result": result}
+    except Exception as exc:
+        audit = _record_offmarket_high_load_audit(
+            job_name=job_name,
+            status="error",
+            session=session,
+            payload=payload,
+            error=f"{type(exc).__name__}: {exc}"[:500],
+            started_at=started_at,
+        )
+        logger.warning("[offmarket_high_load] {} error: {}", job_name, exc)
+        return {"ok": False, "status": "error", "audit": audit, "error": str(exc)}
+
+
 
 def _start_live_scheduler():
     """注册并启动自进化 Scheduler (11 job). 幂等: 已运行时跳过."""
@@ -3159,9 +3580,11 @@ def _start_live_scheduler():
     sched.add_job("feature_eng", "0 3 * * *", _scheduled_feature_engineering)
     # Phase 2: ML 因子漂移检测 (每 6 小时)
     sched.add_job("ml_drift_check", "0 */6 * * *", _scheduled_ml_drift_check)
+    # Phase F1.1: 停盘确认窗口 LightGBM 旁路训练 (每小时检查, 非窗口只写 skip 审计)
+    sched.add_job("offmarket_position_quality_lightgbm", "20 * * * *", _scheduled_offmarket_position_quality_lightgbm)
     # ★ system_health 已由 EvolutionKernel 注册
     sched.start()
-    logger.info("[live] InProcessScheduler started with 10 jobs")
+    logger.info("[live] InProcessScheduler started with 11 jobs")
 
     # ── 后台: 首次启动数据补充 (用主 bridge, 不开第二连接) ──
     def _initial_ctrader_data_pull(timeframes=None, n_bars: int = 5000, phase: str = "startup"):
@@ -3904,13 +4327,37 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
 
         # ── 主循环体: 账户刷新 + 数据读取 + 交易 ──
         try:
+            market_session = _market_session_snapshot(None)
+            if str(market_session.get("status") or "") == "closed_confirmed":
+                _set_loop_diagnostic(tick, "market_closed", bridge_ready=False)
+                _release_market_connection_if_safe(market_session, log=log)
+                log(
+                    f"tick {tick}: market closed confirmed "
+                    f"({market_session.get('reason')}), open-market work paused; "
+                    f"high_load_allowed={market_session.get('high_load_allowed')}"
+                )
+                stop_flag.wait(300)
+                continue
+
             bridge, err, warming = _get_ctrader()
             if err:
+                _market_session_snapshot(None, broker_error=err)
                 log(f"tick {tick}: {err}; reconnect next tick")
                 stop_flag.wait(60)
                 continue
             # bridge 不可用时仍跑因子管道（用本地 DB），只跳过发单
             bridge_ready = bridge is not None and not warming and bridge.is_connected
+            market_session = _market_session_snapshot(bridge)
+            if str(market_session.get("status") or "") == "closed_confirmed":
+                _set_loop_diagnostic(tick, "market_closed", bridge_ready=False)
+                _release_market_connection_if_safe(market_session, log=log)
+                log(
+                    f"tick {tick}: market closed confirmed after broker check "
+                    f"({market_session.get('reason')}), open-market work paused; "
+                    f"high_load_allowed={market_session.get('high_load_allowed')}"
+                )
+                stop_flag.wait(300)
+                continue
             _set_loop_diagnostic(
                 tick,
                 "ready" if bridge_ready else ("warming" if warming else "disconnected"),
@@ -3918,6 +4365,12 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             )
             if not bridge_ready:
                 log(f"tick {tick}: cTrader warming/disconnected, running pipeline dry")
+            else:
+                try:
+                    require_l2_depth = bool(getattr(_rcfg, "risk_require_l2_depth", False))
+                    _ensure_spot_subscription(bridge, require_l2_depth=require_l2_depth, log=log)
+                except Exception as _spot_sub_err:
+                    logger.debug("[live] spot subscription refresh skipped: %s", _spot_sub_err)
 
             # 刷新账户缓存 (bridge 可用时才做)
             if bridge_ready:
@@ -3939,7 +4392,12 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 log(f"tick {tick}: local DB has no bars (waiting for CTraderPuller)")
             else:
                 # v9: 用 cTrader spot 覆盖最新 close, 但验证合理性 (spot 在 bar close ±20% 内)
-                spot = bridge.get_spot_price() if hasattr(bridge, "get_spot_price") else 0
+                quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}
+                if quote:
+                    _live_state_update(spot_quote=quote)
+                spot = float((quote or {}).get("mid") or 0.0)
+                if not spot:
+                    spot = bridge.get_spot_price() if bridge is not None and hasattr(bridge, "get_spot_price") else 0
                 last_close = float(df_new.iloc[-1]["close"])
                 if spot and spot > 0 and last_close > 0 and abs(spot - last_close) / last_close < 0.20:
                     df_new.loc[df_new.index[-1], "close"] = spot
@@ -4886,8 +5344,15 @@ def _process_tick_factor_pipeline(
             signal_score=float(composite.score or 0.0),
         )
         risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
-        order_blocked = not risk_verdict.allowed
-        block_reason = risk_verdict.reason
+        market_session = _live_state_get("market_session", {}, clone=True) or {}
+        market_block_reason = ""
+        if not bool(market_session.get("can_open_positions", False)):
+            market_block_reason = (
+                f"market_session:{market_session.get('status') or 'unknown'}:"
+                f"{market_session.get('reason') or 'unknown'}"
+            )
+        order_blocked = bool(market_block_reason) or not risk_verdict.allowed
+        block_reason = market_block_reason or risk_verdict.reason
 
         if order_blocked:
             log(f"tick {tick}: v4 {direction_name} SKIP ({block_reason})")
@@ -4912,7 +5377,8 @@ def _process_tick_factor_pipeline(
                         action_reason=block_reason,
                         action_json={
                             "tick": tick,
-                            "skip_stage": "risk_policy",
+                            "skip_stage": "market_session" if market_block_reason else "risk_policy",
+                            "market_session": market_session,
                             "risk_verdict": risk_verdict.to_dict(),
                         },
                     )

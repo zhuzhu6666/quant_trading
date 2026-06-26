@@ -1,6 +1,6 @@
 # TODO — 完整开发路线与当前进度
 
-本文档现在是项目的**执行总面板**。  
+本文档现在是项目的**执行总面板**。
 以后每完成一项、暂停一项、发现一项新缺口，都必须先更新这里，再继续开发。
 
 目标：
@@ -51,6 +51,10 @@
 ### 当前主阶段
 
 - ✅ Phase E：因子治理与参数模板（主链已完成，远程验收通过 / 真实样本观察）
+- ✅ Phase E.5：持仓监督参数治理与退出质量校准（2026-06-26 真实小仓位样本驱动）
+- ✅ Phase F：数学模型与大语言模型分层接入（后端旁路、权限、审计已完成）
+- ✅ Phase G：元模型旁路（后端 contract、shadow report、治理建议、前端交接入口已完成）
+- 下一步：本地前端对接，小程序展示 `backend_readiness.v1`、模型报告、治理建议
 
 ### 当前系统一句话状态
 
@@ -62,16 +66,21 @@
 - 平仓复盘与经验沉淀
 - 正式责任归因与责任回写链路
 - 离线模型训练 / shadow / canary / advisory 流程
+- LightGBM 数学模型旁路与 LLM API 旁路解释层
+- 元模型旁路、shadow report、治理建议入 `policy_suggestion / decision_ledger`
+- 前端交接总览接口 `GET /api/ops/backend-readiness`
 
 系统现在仍然缺：
 
-- 元模型层的全局调度能力
+- Phase H 的受限自动治理执行能力（当前故意不开自动执行）
+- 多品种、多风险池、组合级调度
+- 本地小程序对新后端 contract 的展示接入
 - 更多真实样本下的参数模板灰度发布 / 回滚观察
-- 更细粒度的退出责任细分与模板化治理动作（后续增强）
+- 重启恢复、持仓过夜、模型报告趋势的更长期观察
 
 ### 2026-06-26 运行面收口结论
 
-今天新增确认并已落地的结论：
+近期新增确认并已落地的结论：
 
 - cTrader 现在不仅是唯一执行通道，也足够承担当前实盘所需的实时价格链路
 - 第二数据源当前不再参与开仓/风控主链，只保留给后续订单流分析与补充研究
@@ -85,11 +94,16 @@
 
 ### 当前唯一进行中主线
 
-`Phase E 完成：真实样本观察 / Phase F 准备`
+`本地前端对接：展示后端已收口的 readiness / 模型 / 治理入口`
 
 ### 下一步入口
 
-Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F：数学模型与大语言模型分层接入**；Phase E 只保留真实样本观察与后续模板覆盖增强。
+服务器后端已完成 Phase F/G 收口。下一步默认回到本地 Windows，只做 **miniprogram_v2 前端对接**：
+
+- 首选入口：`GET /api/ops/backend-readiness`
+- 模型报告：`GET /api/learning/model/meta-lightgbm/shadow-report`
+- 报告趋势：`GET /api/learning/model/meta-lightgbm/shadow-report/snapshots`
+- 停盘高负载审计：`GET /api/learning/model/offmarket-high-load/audits`
 
 ---
 
@@ -100,17 +114,21 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 1. Phase C：持仓监督闭环
 2. Phase D：归因升级与责任分离
 3. Phase E：因子治理与参数模板
-4. Phase F：数学模型与大语言模型分层接入
-5. Phase G：元模型旁路
-6. Phase H：受限自动治理
-7. Phase I：多品种完全体
+4. Phase E.5：持仓监督参数治理与退出质量校准
+5. Phase F：数学模型与大语言模型分层接入
+6. Phase G：元模型旁路
+7. 本地前端对接：后端 readiness / 模型 / 治理展示
+8. Phase H：受限自动治理
+9. Phase I：多品种完全体
 
 说明：
 
 - **Phase C** 不做，系统持仓中仍然是“睡着的”
 - **Phase D** 不做，系统就分不清问题到底出在 entry、exit、timing、param 还是 regime
 - **Phase E** 不做，因子优化就只能靠零散人工干预
+- **Phase E.5** 不做，持仓监督的真实退出样本就只能被复盘记录，不能形成可治理的退出质量闭环
 - **Phase F/G** 是把模型系统化接入，但前提是前面几层已经清楚
+- **前端对接** 不做，后端已经留痕的模型/治理/健康信息仍然不能被稳定查看
 
 ---
 
@@ -118,7 +136,7 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 ### Phase A：稳定闭环
 
-状态：`已完成`  
+状态：`已完成`
 完成日期：`2026-06-25`
 
 已完成：
@@ -136,7 +154,7 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 ### Phase B：风控统一
 
-状态：`已完成（可用闭环）`  
+状态：`已完成（可用闭环）`
 完成日期：`2026-06-25`
 
 已完成：
@@ -161,8 +179,8 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 ## 4. Phase C：持仓监督闭环
 
-状态：`观察中（主链已完成，真实样本持续补充）`  
-优先级：`P0`  
+状态：`观察中（主链已完成，真实样本持续补充）`
+优先级：`P0`
 目标：让系统从“会开仓”走向“会管理已开仓位”。
 
 ### 为什么先做这个
@@ -351,7 +369,7 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 ### C6：用真实案例验收
 
-状态：`进行中`
+状态：`观察中（主链已完成，真实样本持续补充）`
 
 目标案例：
 
@@ -422,8 +440,8 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 ## 5. Phase D：归因升级与责任分离
 
-状态：`已完成`  
-优先级：`P0`  
+状态：`已完成`
+优先级：`P0`
 前置条件：`Phase C 基本落地`
 
 目标：让系统正式分清“问题到底出在哪”。
@@ -584,8 +602,8 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 ## 6. Phase E：因子治理与参数模板
 
-状态：`已完成（远程验收通过，真实样本观察中）`  
-优先级：`P1`  
+状态：`已完成（远程验收通过，真实样本观察中）`
+优先级：`P1`
 前置条件：`Phase D 基本落地`
 
 目标：建立正式的“因子教练层”。
@@ -1267,17 +1285,211 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 ---
 
+## 6.5 Phase E.5：持仓监督参数治理与退出质量校准
+
+状态：`已完成`
+优先级：`P0`
+前置条件：`Phase C/D/E 主链已落地`
+
+目标：把 2026-06-26 真实小仓位样本暴露出的退出质量问题，收口进现有架构：
+
+- Layer 5：`position_supervisor` 的证据、动作和阈值
+- Layer 6：参数治理从因子参数扩展到持仓监督模板
+- Layer 8：`RiskPolicyService` 继续保持最高裁决权
+- Layer 10：ledger / trade-trace 证据链必须能解释“谁建议、谁批准、谁执行、执行是否成功”
+
+### 2026-06-26 样本结论
+
+固定按北京时间 `2026-06-26` 复盘：
+
+- 当日 review：`24`
+- 小仓位结果（`abs(pnl)<=5`）：`22`
+- `thesis_broken`：`15` 笔，合计 `-24.40`
+  - 平均 `mfe=0.2987`
+  - 平均 `mae=2.3180`
+  - 平均 `profit_capture_ratio=0.0667`
+  - 平均 `holding_efficiency=0.0553`
+  - 多数是入场后没有证明自己，属于主动止血候选
+- `broker_close`：`7` 笔，合计 `+0.33`
+  - 平均 `mfe=3.9014`
+  - 平均 `giveback_ratio=0.9028`
+  - 平均 `profit_capture_ratio=0.0972`
+  - 暴露出利润保护不足 / 保护执行失败的问题
+- `supervisor` 当日动作：
+  - `supervisor_tighten / profit_giveback_after_mfe`: `112`
+  - `supervisor_tighten / thesis_weakening`: `23`
+  - `supervisor_close / thesis_broken`: `15`
+  - `supervisor_reduce / profit_giveback_after_mfe`: `15`
+- 发现 `TRADING_BAD_STOPS`：BUY 仓收紧 SL 时目标 SL 高于当前 BID，被 cTrader 拒绝
+
+### E5.1：退出证据链补强
+
+状态：`已完成`
+
+要完成：
+
+- `trade-trace` 自动把普通 `close` 事件回溯关联到同仓位最近的 `supervisor_*` verdict
+- 输出 `close_reason_source`
+  - `supervisor_direct`
+  - `supervisor_inferred`
+  - `broker_close`
+  - `manual_or_external`
+  - `unknown`
+- 输出 `inferred_close_supervisor`
+  - `decision_id`
+  - `event_type`
+  - `action`
+  - `summary_reason`
+  - `seconds_before_close`
+  - `evidence`
+  - `recommended_controls`
+
+完成标准：
+
+- 用 2026-06-26 小仓位样本查询 `/api/risk/trade-trace`，能明确看到“这笔 close 是否由 supervisor 触发或影响”
+- 不再只看 `review.close_reason=broker_close/thesis_broken` 推断真实来源
+
+验证：
+
+- 已在 `backend/api/risk.py` 为 `trade-trace` 增加 `close_reason_source`、`inferred_close_supervisor_action`、`inferred_close_supervisor_reason`
+- 已在 `position_supervisor.close_source` 输出 supervisor direct / inferred 证据
+- 已通过 `tests/risk/test_risk_api_policy.py::test_trade_trace_collects_ledger_review_and_lifecycle`
+
+### E5.2：cTrader SL/TP 修改合法性保护
+
+状态：`已完成，实盘观察中`
+
+要完成：
+
+- `tighten_position` 发给 cTrader 前做 broker 合法价裁剪
+  - BUY: `target_sl <= current_bid - min_stop_buffer`
+  - SELL: `target_sl >= current_ask + min_stop_buffer`
+- 若裁剪后无法形成有效保护，不发送 amend，写入 `amend_skipped`
+- amend 被 broker 拒绝时，不应把 supervisor action 记成已成功应用
+- ledger / lifecycle 要记录：
+  - 原始 supervisor target
+  - 实际发送 target
+  - skip / reject 原因
+
+完成标准：
+
+- 不再持续出现同类 `TRADING_BAD_STOPS`
+- 保护失败能在 `trade-trace` 里看到，而不是只留在 journalctl
+
+验证：
+
+- 已在 `backend/services/live_service.py` 增加 supervisor tighten SL 合法化计划
+- BUY 会把 SL 裁到当前价下方，SELL 会把 SL 裁到当前价上方
+- 裁剪后不能形成更紧保护时写入 `amend_skipped`
+- broker 拒绝时写入 `amend_failed`，且不把 supervisor action 标记为已成功应用
+- 已通过 `tests/test_live_service_tick.py` 中的 SL 合法化用例
+
+### E5.3：持仓监督阈值模板化
+
+状态：`已完成`
+
+要完成：
+
+- 新增 `position_supervisor_template.v1`
+- 把以下硬编码阈值迁入模板：
+  - `min_thesis_break_seconds`
+  - `broken_holding_efficiency_threshold`
+  - `giveback_reduce_threshold`
+  - `giveback_tighten_threshold`
+  - `profit_capture_min_threshold`
+  - `time_decay_reduce_threshold`
+- 先保留 `default.v1` 行为不变
+- 新增 `conservative.v1` 用于减少小亏过早平仓
+
+完成标准：
+
+- `position_supervisor` 行为来源可审计
+- 后续学习治理可以建议切换 supervisor 模板，但不能直接绕过 `RiskPolicyService`
+
+验证：
+
+- 已新增 `position_supervisor_template.v1`
+- 已内置 `position_supervisor:default.v1`，保持原有行为不变
+- 已内置 `position_supervisor:conservative.v1`，用于减少小亏过早 full close
+- `evaluate_position_supervisor()` 输出 `supervisor_template` 与 evidence 中的模板版本
+- 已通过模板行为单元测试
+
+### E5.4：退出质量离线回放
+
+状态：`已完成`
+
+要完成：
+
+- 用 2026-06-26 小仓位样本回放不同 supervisor 模板
+- 对比：
+  - 小亏平仓次数
+  - 总 PnL
+  - 平均 MFE 捕获率
+  - 平均 MAE 扩大幅度
+  - `TRADING_BAD_STOPS / amend_skipped` 次数
+
+完成标准：
+
+- 没有离线回放报告，不允许把 supervisor 模板切到 live
+
+验证：
+
+- 已新增 `/api/learning/position-supervisor/replay`
+- 2026-06-26 小仓位样本回放：
+  - 样本数：`22`
+  - `default.v1`: `hold=1 / tighten=1 / reduce=5 / close=15`
+  - `conservative.v1`: `hold=1 / tighten=1 / reduce=7 / close=13`
+  - 小亏直接 close 减少：`2`
+- 回放只做审计型动作对比，不伪造未持有路径的 PnL
+
+### E5.5：学习生成 supervisor 治理建议
+
+状态：`已完成`
+
+要完成：
+
+- 从 review 聚合生成 advisory-only 建议：
+  - `relax_thesis_break`
+  - `tighten_profit_protection`
+  - `increase_min_hold_window`
+  - `fix_stop_legality`
+- 建议进入 Governor / 人审，不直接执行 live 修改
+
+完成标准：
+
+- 学习能指出“退出策略该怎么改”，但仍没有越权平仓或越权改风控
+
+验证：
+
+- 已新增 `/api/learning/position-supervisor/advisories`
+- 已新增 `/api/learning/position-supervisor/advisories/materialize`
+- 已生成并写入 `policy_suggestion` 的 proposed 建议：
+  - `relax_thesis_break`
+  - `tighten_profit_protection`
+  - `increase_min_hold_window`
+- 建议为 `advisory_only=true`，进入治理/人审，不直接切换 live 风控模板
+
+---
+
 ## 7. Phase F：数学模型与大语言模型分层接入
 
-状态：`未开始`  
-优先级：`P1`  
-前置条件：`Phase C/D/E 的基础 contract 已明确`
+状态：`已完成，后端旁路与审计链路已收口`
+优先级：`P1`
+前置条件：`Phase C/D/E 的基础 contract 已明确；Phase E.5 已完成退出质量校准的 P0 项`
 
 目标：把模型接入位置写进系统，不让其悬空或越权。
 
+阶段结论：
+
+- 数学模型使用 LightGBM，全部保持 `shadow_only / advisory_only`
+- LLM 使用 OpenAI-compatible API 旁路解释层，不进入实盘信号
+- 模型权限统一经 `model_permission_audit` 审计
+- 训练/回放可在停盘确认后的高负载窗口执行
+- 当前后端已具备前端展示所需的模型审计、报告、权限与治理建议接口
+
 ### F1：数学模型接入持仓监督层
 
-状态：`未开始`
+状态：`已完成，旁路运行中`
 
 候选能力：
 
@@ -1286,9 +1498,128 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 - 时间衰减评分
 - 持仓继续持有概率评估
 
+落地记录：
+
+- 已新增 `position_quality_lightgbm` 旁路模型
+- 模型类型：`LightGBMClassifier`
+- 当前权限：`shadow_only / advisory_only / live_trading=false`
+- 模型输入来自已复盘的 `trade_outcome_review` 持仓路径特征：
+  - `mfe / mae`
+  - `giveback_ratio`
+  - `profit_capture_ratio`
+  - `time_in_profit`
+  - `holding_efficiency`
+  - `time_decay_score`
+  - `holding_seconds`
+  - `thesis_status`
+  - `regime_shift`
+- 明确不使用 `pnl / outcome_label / exit_quality / close_reason` 作为模型特征，避免事后泄漏
+- 已新增 API：
+  - `POST /api/learning/model/position-quality-lightgbm/train`
+  - `POST /api/learning/model/position-quality-lightgbm/shadow-run`
+  - `GET /api/learning/model/position-quality-lightgbm/audits`
+- 每次 shadow inference 写入 `position_quality_shadow_audit`
+- 已生成真实 artifact 并注册到 `model_registry`
+- HTTP 验证已通过：
+  - 训练接口 `200`，耗时约 `0.43s`
+  - 最新注册版本：`position_quality_lightgbm XAUUSD+/M5 v3`
+  - artifact：`data/model_artifacts/position_quality_lightgbm/position_quality_lightgbm_1782492066.json`
+  - 自动 shadow 写入：`30` 条
+  - audit 查询确认 `live_trading=false`
+- 当前真实训练结果：
+  - 样本数：`67`
+  - 特征数：`11`
+  - train accuracy：`0.94`
+  - holdout accuracy：`0.94`
+  - holdout AUC：`0.25`
+  - 结论：模型已正常运行并留痕，但样本少且类别不平衡，继续保持旁路观察，不接实盘动作
+
+补丁记录（2026-06-27）：
+
+- 已新增统一 `market_session` 判断，按 `config/instruments.yaml` 的交易时间以 `UTC` 解释
+- `market_session` 输出：
+  - `open_pending_quote`
+  - `open_confirmed`
+  - `pre_close_risk`
+  - `quote_stale`
+  - `closed_pending_confirmation`
+  - `closed_pending_positions`
+  - `closed_confirmed`
+- 开仓路径必须读取 `market_session.can_open_positions`
+  - 开盘必须同时满足计划交易时间和新鲜 bid/ask 报价
+  - 停盘、报价僵死、临近停盘时不只是阻断开仓，还写入 skip 审计
+- 临近计划停盘默认阻断新开仓：
+  - 先用硬风控避免持仓过夜和收盘前流动性变差
+  - 后续把 `seconds_to_close / near_close / session_state` 作为因子与旁路模型特征观察
+- 确认停盘时：
+  - `high_load_allowed=true`
+  - 无持仓：`high_load_profile=full`
+  - 有隔夜持仓：`high_load_profile=limited_with_positions`
+- 确认停盘且无持仓时才释放 open-market 连接：
+  - `can_keep_market_connection=false`
+  - 实盘循环释放 cTrader open-market 连接
+  - 循环降频等待
+- 持仓监督收紧止损改为使用真实 `bid/ask` 边界：
+  - BUY 的 SL 必须低于当前 `bid`
+  - SELL 的 SL 必须高于当前 `ask`
+  - 解决仅用 mid/current price 导致的 `TRADING_BAD_STOPS`
+
+### F1.1：停盘窗口训练与高负载任务调度
+
+状态：`已完成，旁路调度运行中`
+
+原则：
+
+- 仅当 `market_session.status in {closed_confirmed, closed_pending_positions}`
+- 且 `high_load_allowed=true`
+- 才允许执行 CPU/IO 较高的旁路任务
+- 无持仓时使用 `high_load_profile=full`
+- 有隔夜持仓时使用 `high_load_profile=limited_with_positions`
+  - 不释放 cTrader open-market 连接
+  - 训练任务要限制并发/线程
+  - 持仓监督、账户刷新、风控日志优先级高于训练
+
+候选任务：
+
+- `position_quality_lightgbm` 定时训练
+- shadow inference 批量回放
+- trade outcome review 回填
+- 因子 IC/归因批量重算
+- 数据完整性扫描和轻量压缩
+
+默认约束：
+
+- 训练任务仍保持 `shadow_only/advisory_only`
+- LightGBM 训练默认限制 `n_jobs=1`
+- 单次任务写入 job/audit 记录，不能静默运行
+- 实盘开盘前自动停止或跳过新任务，避免和交易循环抢 CPU
+
+落地记录：
+
+- 已新增 scheduler job：`offmarket_position_quality_lightgbm`
+  - cron：`20 * * * *`
+  - 每小时检查一次 market session
+  - 开盘、未确认停盘、报价僵死非停盘窗口时只写 skip audit，不训练
+- 已新增 audit 表：`offmarket_high_load_job_audit`
+  - 记录 `job_name / status / session_status / high_load_profile`
+  - 记录 payload、result、error、started_at、finished_at
+- 已新增 API：
+  - `GET /api/learning/model/offmarket-high-load/audits`
+- `closed_confirmed`：
+  - `high_load_profile=full`
+  - LightGBM 训练 limit 默认 `500`，shadow limit 默认 `100`
+- `closed_pending_positions`：
+  - `high_load_profile=limited_with_positions`
+  - LightGBM 训练 limit 默认 `250`，shadow limit 默认 `30`
+  - 不释放 cTrader open-market 连接
+- 训练仍注册为旁路模型，`live_trading=false / advisory_only=true / shadow_only=true`
+- 已通过单元测试：
+  - 开盘时 job skip 且写审计
+  - 停盘但有隔夜仓时 job 进入 limited profile 并训练/回放
+
 ### F2：数学模型接入因子治理层
 
-状态：`未开始`
+状态：`已完成，旁路模型与建议链路已接入`
 
 候选能力：
 
@@ -1296,9 +1627,105 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 - 参数失配检测
 - 阈值与模板效果比较
 
+落地记录：
+
+- 新增 `factor_governance_lightgbm` 旁路模型：
+  - 读取 `trade_outcome_review + factor_contribution_review`
+  - 样本粒度为“单笔复盘中的单个因子贡献”
+  - 标签为 `positive_factor_contribution`
+  - LightGBM 训练保持 `n_jobs=1`
+- 明确模型权限边界：
+  - `live_trading=false`
+  - `shadow_only=true`
+  - `advisory_only=true`
+  - 不允许下单、平仓、改风控、改 `factor_portfolio_weights`
+- 新增审计表：
+  - `factor_governance_shadow_audit`
+  - 每次 shadow inference 记录 `factor / review_id / trade_id / score / payload / result`
+- 新增因子治理建议：
+  - 将弱贡献样本聚合为 `policy_suggestion`
+  - `scope_type=factor`
+  - `action=review_factor_weight_or_template`
+  - 默认状态仍为 `proposed`
+  - 后续仍走 governor review + offline replay，不直接改实盘权重
+- 新增 API：
+  - `POST /api/learning/model/factor-governance-lightgbm/train`
+  - `POST /api/learning/model/factor-governance-lightgbm/shadow-run`
+  - `GET /api/learning/model/factor-governance-lightgbm/audits`
+  - `GET /api/learning/model/factor-governance-lightgbm/advisories`
+- 已补单元测试：
+  - 模型训练/缺依赖降级
+  - shadow inference 审计写入
+  - 因子级建议写入 `policy_suggestion`
+- 真实库旁路验证：
+  - 训练样本：`500`
+  - shadow inference：`120`
+  - 生成因子建议候选：`104`
+  - 本次验证 `materialized=false`，未直接写入 `policy_suggestion`
+
+### F2.1：Supervisor 打掉后反事实学习样本
+
+状态：`已完成，旁路审计运行`
+
+目标：
+
+- 针对 `supervisor_tighten -> broker_close`、`supervisor_close`、`restart_replay` 等退出链路
+- 继续观察平仓后 `5m / 15m / 30m / 60m` 的价格路径
+- 让学习后续能区分：
+  - `correct_stop`
+  - `premature_tighten`
+  - `protection_too_tight`
+  - `noise_stopout`
+  - `entry_failure_or_correct_stop`
+  - `insufficient_future_data`
+
+落地记录：
+
+- 新增表：`supervisor_counterfactual_review`
+- 新增服务：`backend.services.supervisor_counterfactual`
+- 新增 API：
+  - `POST /api/learning/position-supervisor/counterfactual/run`
+  - `GET /api/learning/position-supervisor/counterfactual`
+- 每条记录保留：
+  - 原始 review / position / close_reason
+  - 最近一次 supervisor verdict
+  - 原始 SL/TP
+  - 平仓后各 horizon 的 best/worst/end PnL
+  - 反事实标签与置信度
+- 该链路只写审计和学习标签，不直接改变实盘动作
+
+### F2.2：TP/SL 近线裁决显式化
+
+状态：`已完成，实盘观察中`
+
+目标：
+
+- 接近原始 TP 时，系统能明确建议 `near_take_profit_capture`
+- 接近原始 SL 且 thesis/效率弱时，系统能明确建议 `near_stop_loss_preemptive_exit`
+- 不再只把 `distance_to_tp / distance_to_sl` 放进 evidence 里而没有独立裁决
+
+落地记录：
+
+- `position_supervisor` 新增：
+  - `take_profit_progress`
+  - `stop_loss_progress`
+  - `near_take_profit_capture`
+  - `near_stop_loss_preemptive_exit`
+- supervisor 模板新增阈值：
+  - `near_take_profit_progress`
+  - `near_stop_loss_progress`
+  - `near_stop_loss_efficiency_threshold`
+- 默认模板保持偏积极：
+  - TP 进度 `>=0.92` 可主动获利出场
+  - SL 进度 `>=0.85` 且证据弱可提前止损
+- conservative 模板更严格：
+  - TP 进度 `>=0.95`
+  - SL 进度 `>=0.90`
+- 已补单元测试覆盖接近 TP 和接近 SL 的裁决
+
 ### F3：大语言模型接入归因与治理层
 
-状态：`未开始`
+状态：`已完成，API 旁路解释层已接入`
 
 候选能力：
 
@@ -1307,9 +1734,41 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 - 审查说明
 - 人话运维与风控摘要
 
+落地记录：
+
+- 新增 `research.llm_advisory.LLMAdvisoryService`
+- 接入 OpenAI-compatible Chat Completions API 适配层
+  - `LLM_API_BASE_URL`
+  - `LLM_API_KEY`
+  - `LLM_MODEL`
+  - `LLM_PROVIDER`
+  - `LLM_TIMEOUT_SEC`
+- 新增审计表：
+  - `llm_advisory_audit`
+- 新增 API：
+  - `POST /api/learning/model/llm/advisory-run`
+  - `GET /api/learning/model/llm/audits`
+- 支持任务类型：
+  - `trade_review`
+  - `meta_decision`
+  - `governance_review`
+  - `risk_ops_summary`
+  - `factor_review`
+- 没配置 API key / model / base_url 时返回 `disabled` 并写审计，不静默失败
+- 支持 `dry_run=true` 只生成 prompt 与审计，不调用外部 API
+- 每次运行先通过 `model_permission_audit`
+- 权限边界：
+  - `live_trading=false`
+  - `advisory_only=true`
+  - `shadow_only=true`
+  - 禁止下单、平仓、改风控、改因子权重、绕过 Governor / RiskPolicyService
+- LLM 输出只作为解释、复盘、治理审查说明，不作为实盘信号
+- 已补单元测试：
+  - `tests/test_llm_advisory.py`
+
 ### F4：模型权限边界固化
 
-状态：`未开始`
+状态：`已完成，统一权限审计已接入`
 
 必须明确禁止：
 
@@ -1318,22 +1777,76 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 - 直接提高硬风控上限
 - 直接绕过 `RiskPolicyService`
 
+落地记录：
+
+- 新增统一模型权限服务：`backend.services.model_permissions`
+- 新增审计表：`model_permission_audit`
+- 新增 API：
+  - `POST /api/learning/model/permissions/validate`
+  - `GET /api/learning/model/permissions/audits`
+- 统一阻断能力：
+  - `live_trading=true`
+  - `can_place_orders=true`
+  - `can_close_positions=true`
+  - `can_change_risk_limits=true`
+  - `can_increase_hard_risk_limits=true`
+  - `can_change_factor_weights=true`
+  - `can_bypass_risk_policy=true`
+  - `can_apply_policy_without_review=true`
+- 已接入：
+  - `position_quality_lightgbm` shadow inference
+  - `factor_governance_lightgbm` shadow inference
+- 后续 LLM 接入前必须先通过该权限审计
+- 该层只做权限验证和审计，不赋予任何模型实盘执行权
+
 ---
 
 ## 8. Phase G：元模型旁路
 
-状态：`未开始`  
+状态：`已完成，后端旁路与前端交接入口已收口`
 优先级：`P2`
 
 目标：让系统拥有全局调度脑，但仍然只有建议权。
 
+阶段结论：
+
+- 规则型 `meta_model_sidecar` 已能输出 `meta_decision.v1`
+- LightGBM 元模型旁路已能训练、shadow、审计、生成 report
+- report snapshot 已持久化
+- 元模型建议已能进入 `policy_suggestion` 与 `decision_ledger`
+- 仍不具备实盘执行权，不会下单、平仓、改硬风控或绕过 `RiskPolicyService`
+- 前端统一入口已由 `GET /api/ops/backend-readiness` 提供
+
 ### G1：定义 `meta_context.v1`
 
-状态：`未开始`
+状态：`已完成，旁路上下文已接入`
+
+落地记录：
+
+- 新增 `research.meta_model_sidecar.MetaModelSidecar`
+- 定义 `meta_context.v1`，汇总：
+  - market
+  - portfolio
+  - risk
+  - factor
+  - learning
+  - models
+  - system
+- 自动补充只读运行状态：
+  - 最近 risk verdict
+  - 24h blocked verdict count
+  - factor health weak count
+  - policy suggestion 状态分布
+  - `position_quality_shadow_audit` 弱样本比例
+  - `factor_governance_shadow_audit` 弱样本比例
+  - `model_permission_audit` 状态分布
+  - 最近 position lifecycle events
+- 新增 API：
+  - `POST /api/learning/model/meta/context`
 
 ### G2：元模型输出 contract
 
-状态：`未开始`
+状态：`已完成，advisory-only 输出与 ledger 留痕已接入`
 
 至少包括：
 
@@ -1343,20 +1856,257 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 - 可信因子族
 - 冻结/观察建议
 
+落地记录：
+
+- 定义 `meta_decision.v1`
+- 输出字段包括：
+  - `posture`: `recover / observe / contract`
+  - `risk_score`
+  - `risk_budget_advice`
+  - `trade_frequency_advice`
+  - `factor_family_advice`
+  - `rationale`
+  - `approval_path`
+  - `capabilities`
+- 权限边界：
+  - `live_trading=false`
+  - `advisory_only=true`
+  - `shadow_only=true`
+  - 禁止下单、平仓、改硬风控、改因子权重、绕过风控、自动应用治理
+- 每次运行先通过 `model_permission_audit`
+- materialize 时写入既有 `decision_ledger`
+  - `event_type=meta_model_advisory`
+  - `action_json.schema_version=meta_model_advisory_ledger.v1`
+- 新增 API：
+  - `POST /api/learning/model/meta/advisory-run`
+  - `GET /api/learning/model/meta/advisories`
+- 已补单元测试：
+  - `tests/test_meta_model_sidecar.py`
+
+### G2.1：元模型 LightGBM 旁路
+
+状态：`已完成，数学模型旁路与 v2 样本增强已接入`
+
+目标：
+
+- 把规则型 `meta_model_sidecar` 升级为可训练、可回放、可审计的数学模型旁路
+- 先不接实盘，只输出 `contract / observe / recover`
+
+落地记录：
+
+- 新增 `research.meta_model_lightgbm.MetaModelLightGBMService`
+- 模型类型：`LightGBMClassifier`
+- 任务类型：多分类 posture 预测
+  - `contract`
+  - `observe`
+  - `recover`
+- 第一版训练样本：
+  - 从 `trade_outcome_review` 构造滚动历史状态
+  - 特征只看目标样本之前的历史窗口，避免把目标 PnL 直接泄漏进特征
+  - 标签来自后续 review outcome / pnl，用于判断当时更应该收缩、观察还是恢复
+- 特征包括：
+  - 滚动交易数
+  - 滚动 PnL 汇总 / 均值
+  - 滚动亏损率 / bad loss 率 / win rate
+  - 滚动 MAE / MFE / MFE-MAE ratio
+  - thesis broken / broker close 比例
+  - profit capture / giveback / holding efficiency 均值
+- 新增审计表：
+  - `meta_model_shadow_audit`
+- 新增 API：
+  - `POST /api/learning/model/meta-lightgbm/train`
+  - `POST /api/learning/model/meta-lightgbm/shadow-run`
+  - `GET /api/learning/model/meta-lightgbm/audits`
+  - `GET /api/learning/model/meta-lightgbm/shadow-report`
+- 每次 shadow inference 记录：
+  - posture
+  - posture_score
+  - contract / observe / recover scores
+  - payload
+  - result
+  - 可选 `ledger_decision_id`
+- 权限边界：
+  - `live_trading=false`
+  - `advisory_only=true`
+  - `shadow_only=true`
+  - 禁止下单、平仓、改风控、改因子权重、绕过 Governor / RiskPolicyService
+- 已补单元测试：
+  - `tests/test_meta_model_lightgbm.py`
+
+v2 增强记录：
+
+- 模型版本提升到 `1.1`
+- 标签从“下一笔 review”升级为“后续窗口标签”
+  - `horizon` 默认 `3`
+  - 根据后续 N 笔总 PnL、bad loss rate、loss rate 标注 `contract / observe / recover`
+- 特征从单一 review 滚动统计扩展为多源状态窗口：
+  - `decision_ledger`
+    - risk blocked / allowed count
+    - supervisor close / reduce / tighten count
+  - `position_lifecycle_event`
+    - `amend_skipped_count`
+    - `amend_failed_count`
+  - `position_quality_shadow_audit`
+    - weak position rate
+  - `factor_governance_shadow_audit`
+    - weak factor rate
+  - `supervisor_counterfactual_review`
+    - premature / protection-too-tight / correct-stop rate
+  - `llm_advisory_audit`
+    - llm error rate
+  - `model_permission_audit`
+    - permission block rate
+- API 增加 `horizon`
+  - train
+  - shadow-run
+- 缺失表时特征自动回落为 0，不阻断训练
+- 训练样本会保留 `future_window` 摘要，方便以后复查标签来源
+- 新增 `meta_shadow_report`
+  - 从 `meta_model_shadow_audit` 只读生成报告
+  - 汇总 LightGBM shadow 输出与未来窗口标签的准确率、混淆矩阵、posture 分布
+  - 对照规则型 `meta_model_sidecar` 的 posture，记录 agreement / rule accuracy / disagreements
+  - 输出错误样本、主要非零特征和 artifact 训练摘要
+  - 报告仍是 advisory/shadow only，不进入实盘执行链路
+
 ### G3：接入 Governor 审批链
 
-状态：`未开始`
+状态：`已完成，advisory-only 审批入口已接入`
 
 完成标准：
 
 - 元模型建议进入 ledger
 - 元模型建议不能直接执行
 
+落地记录：
+
+- 新增 `backend.services.meta_governance.MetaGovernanceService`
+- 新增 `meta_shadow_report_snapshot` 表
+  - 保存每次元模型 shadow report 的快照
+  - 记录 accuracy / evaluated_count / artifact_path / 完整 report payload
+- 新增 API：
+  - `POST /api/learning/model/meta-lightgbm/shadow-report/snapshot`
+  - `GET /api/learning/model/meta-lightgbm/shadow-report/snapshots`
+  - `POST /api/learning/model/meta-lightgbm/governance-suggestion`
+- 元模型治理建议现在会同时写入：
+  - `policy_suggestion`
+    - `scope_type=meta_model`
+    - `scope_key=meta_model_lightgbm`
+    - `status=proposed`
+  - `decision_ledger`
+    - `event_type=meta_model_governance_suggestion`
+    - `action_json.schema_version=meta_model_governance_suggestion.v1`
+- 当前默认建议：
+  - holdout accuracy 不达标时生成 `block_meta_model_promotion`
+  - contract posture 占比过高时生成 `review_meta_contract_posture`
+  - 其他情况生成 `observe_meta_model_shadow`
+- 权限边界：
+  - `advisory_only=true`
+  - `requires_review=true`
+  - `live_trading=false`
+  - 禁止下单、平仓、改硬风控、绕过风控、未审改因子权重
+- 已补测试：
+  - `tests/test_backend_model_handoff.py`
+
+### G4：前端交接用后端统一总览
+
+状态：`已完成，前端可开始对接`
+
+目标：
+
+- 前端不要到处拼状态
+- 后端提供一个统一 contract，展示：
+  - 后端服务状态
+  - system health 语义
+  - market session / high-load 状态
+  - live loop / cTrader 状态
+  - 元模型 shadow report
+  - 模型上线资格门禁
+  - 权限审计
+  - pending governance 建议
+
+落地记录：
+
+- 新增 `backend.services.backend_readiness.BackendReadinessService`
+- 新增 API：
+  - `GET /api/ops/backend-readiness`
+- 输出 schema：
+  - `backend_readiness.v1`
+- 健康语义分层：
+  - `blocking_components`
+    - 真实阻断项，例如 cTrader / live_loop / tick / DB critical
+  - `known_observations`
+    - 已知观察项，例如 `l2_depth critical`、`disk_space degraded`、`bar_m1 degraded`
+  - `display_overall`
+    - 前端展示用状态，避免“已知观察项”把整个系统误显示成不可用
+- 高负载任务语义：
+  - `high_load.allowed_now`
+  - `high_load.profile`
+  - `high_load.can_run_training_with_positions`
+  - `high_load.requires_closed_confirmation`
+  - `high_load.latest_audit`
+- 模型门禁：
+  - `eligible_for_live=false`
+  - 当前 meta LightGBM 仍只能 shadow/advisory
+  - `holdout_accuracy`、`evaluated_count`、`min_*` 一起输出给前端
+- 前端入口：
+  - 首选从 `/api/ops/backend-readiness` 拉总览
+  - 详细模型页再拉 `/api/learning/model/meta-lightgbm/shadow-report`
+  - 趋势页拉 `/api/learning/model/meta-lightgbm/shadow-report/snapshots`
+
+---
+
+## 8.5 本地前端对接：后端 readiness / 模型 / 治理展示
+
+状态：`未开始（下一步）`
+优先级：`P1`
+执行位置：`本地 Windows，仅修改 miniprogram_v2 / 文档`
+
+目标：
+
+- 让小程序稳定展示服务器后端已经收口的状态
+- 前端只消费后端 contract，不在本地重复推导模型/治理/健康语义
+
+默认入口：
+
+- `GET /api/ops/backend-readiness`
+
+推荐页面落点：
+
+- Overview：
+  - 展示 `ready_for_frontend`
+  - 展示 `system_health.display_overall`
+  - 展示 `blockers / known_observations`
+  - 展示 `market_session.status`
+  - 展示 `high_load.allowed_now / profile`
+- Learning / Model：
+  - 展示 meta LightGBM `accuracy / holdout_accuracy / evaluated_count`
+  - 明确显示 `eligible_for_live=false`
+  - 展示 `confusion_matrix / posture_distribution / rule_comparison`
+  - 展示 shadow report snapshots 趋势
+- Ops：
+  - 展示 pending governance 建议数量
+  - 展示 latest offmarket high-load audit
+  - 展示模型权限审计状态
+
+前端禁止事项：
+
+- 不从模型页面调用任何实盘 mutation 接口
+- 不把 `shadow accuracy` 展示成“可上线”
+- 不在前端自行推断是否允许实盘，只显示后端 `promotion_gate`
+- 不把 `l2_depth critical / disk_space degraded` 直接等同于交易系统不可用，优先使用后端 `blocking_components / known_observations`
+
+完成标准：
+
+- 本地小程序能通过统一入口展示后端总览
+- 模型页能解释“为什么当前 meta LightGBM 不能上线”
+- 运维页能区分“真实阻断项”和“已知观察项”
+- 前端不需要重复拼接多个后端接口才能得到首页核心状态
+
 ---
 
 ## 9. Phase H：受限自动治理
 
-状态：`未开始`  
+状态：`未开始`
 优先级：`P2`
 
 目标：让系统自动应用低风险调整，但绝不越过硬风控。
@@ -1379,7 +2129,7 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 ## 10. Phase I：多品种完全体
 
-状态：`未开始`  
+状态：`未开始`
 优先级：`P3`
 
 目标：从 XAUUSD+ 扩展到多品种、多风险池、全组合调度。
@@ -1393,8 +2143,10 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 | O1 | `learning_application_effect` 真实流观察 | 观察中 | 跟踪 observing / reinforced / ineffective 是否稳定推进 |
 | O2 | 重启恢复回归测试 | 待做 | 覆盖开仓后重启、重启期间平仓、延迟恢复 |
 | O3 | 运行环境健康专项 | 观察中 | `l2_depth` 已完成第一轮去负载收口；`disk_space` 与 cTrader 首次鉴权抖动继续观察 |
-| O4 | 风控运维页搜索入口 | 待做 | 继续强化按 `position_id / decision_id` 的查询体验 |
-| O5 | 历史重复 application 清理脚本 | 待做 | 清理旧数据噪声 |
+| O4 | 风控运维页搜索入口 | 待做（前端） | 继续强化按 `position_id / decision_id` 的查询体验 |
+| O5 | 历史重复 application 清理脚本 | 待做（后端维护） | 清理旧数据噪声，不阻塞前端对接 |
+| O6 | meta shadow report 趋势观察 | 观察中 | 已有 snapshot 表与 API，等待更多交易日样本 |
+| O7 | 当前 live loop 自动恢复行为 | 观察中 | systemd 重启后会按现有 desired state 自动恢复交易循环，前端应显式展示 loop 状态 |
 
 ---
 
@@ -1402,12 +2154,11 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 | ID | 缺口 | 当前情况 | 归属阶段 |
 |---|---|---|---|
-| G-1 | 持仓中没有主动裁决层 | 当前更多是硬闸门 + TP/SL | Phase C |
-| G-2 | 时间/空间上下文仍未统一抽象 | 已有 `holding_seconds`，但远未成体系 | Phase C / D |
-| G-3 | 因子参数治理缺失 | 当前主要是权重治理 | Phase E |
-| G-4 | 归因结果未完整喂回 live 风控 | 复盘和风控仍偏分离 | Phase C / D |
-| G-5 | 数学模型和 LLM 接入层已写文档，但未正式落地 | 目前仍偏离线和辅助 | Phase F |
-| G-6 | 元模型尚未正式入位 | 仍无统一全局调度层 | Phase G |
+| G-1 | 受限自动治理尚未启用 | 已有建议与审批入口，但不自动执行低风险调整 | Phase H |
+| G-2 | 多品种/多风险池尚未实现 | 当前仍以 `XAUUSD+` 为主 | Phase I |
+| G-3 | 模型样本仍偏少 | meta LightGBM holdout accuracy 不达标，仍只能 shadow/advisory | Phase F/G 观察 |
+| G-4 | 前端尚未展示新后端 contract | 后端 readiness / snapshots / governance suggestion 已完成，待本地小程序接入 | 本地前端 |
+| G-5 | 重启恢复回归覆盖不足 | 已能自动恢复，但开仓后重启、持仓恢复、延迟恢复还需专项测试 | 运维/测试 |
 
 ---
 
@@ -1449,4 +2200,4 @@ Phase E 主链已完成并通过远程验收。下一步默认进入 **Phase F�
 
 当前默认下一步：
 
-**Phase F：数学模型与大语言模型分层接入**
+**本地前端对接：`miniprogram_v2` 展示 `/api/ops/backend-readiness`、meta shadow report、治理建议与高负载审计**

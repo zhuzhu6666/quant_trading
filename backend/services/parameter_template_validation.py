@@ -18,7 +18,11 @@ from backend.core.db import DATA_DIR, STATE_DB, STATE_DB_DDL, connect_sqlite
 from backend.jobs.progress import ProgressCB
 from backend.services.backtest_runner import _load_bars
 from backend.services.backtest_service import run_backtest
-from backend.services.parameter_templates import ParameterTemplateService
+from backend.services.factor_cards import clear_factor_card_cache
+from backend.services.parameter_templates import (
+    ParameterTemplateService,
+    clear_parameter_template_recommendation_cache,
+)
 from research.learning.governor import RuleEvolutionGovernor
 
 
@@ -37,6 +41,10 @@ class ParameterTemplateValidationService:
             conn.commit()
         finally:
             conn.close()
+
+    def _clear_governance_caches(self) -> None:
+        clear_factor_card_cache(self.db_path)
+        clear_parameter_template_recommendation_cache(self.db_path)
 
     def _log_lifecycle_event(
         self,
@@ -198,6 +206,7 @@ class ParameterTemplateValidationService:
             ),
             score=float(summary.get("candidate_avg_ic") or 0.0),
         )
+        self._clear_governance_caches()
         return item
 
     def review_release_candidate(
@@ -237,6 +246,7 @@ class ParameterTemplateValidationService:
             reason=note or f"candidate_{status}",
             score=float((updated.get("validation_summary") or {}).get("candidate_avg_ic") or 0.0),
         )
+        self._clear_governance_caches()
         return updated
 
     def deploy_release_candidate(
@@ -309,6 +319,7 @@ class ParameterTemplateValidationService:
             reason=note or "gray_release_deployed",
             score=float((updated.get("validation_summary") or {}).get("candidate_avg_ic") or 0.0),
         )
+        self._clear_governance_caches()
         return {
             "ok": True,
             "candidate": updated,
@@ -372,6 +383,7 @@ class ParameterTemplateValidationService:
             reason=note or "gray_release_rolled_back",
             score=float((updated.get("validation_summary") or {}).get("candidate_avg_ic") or 0.0),
         )
+        self._clear_governance_caches()
         return {
             "ok": True,
             "candidate": updated,
