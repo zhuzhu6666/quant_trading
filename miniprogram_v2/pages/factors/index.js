@@ -3,7 +3,7 @@ import { refreshFactorDomain } from '../../services/factors';
 import learningStore from '../../stores/learning';
 import { openLearningGovernancePage, refreshLearning } from '../../services/learning';
 import { openTradeTracePage } from '../../services/ops';
-import { formatDateTime } from '../../utils/format';
+import { formatDateTime, formatCount } from '../../utils/format';
 import {
   describeGovernanceStageSummary,
 } from '../../utils/governance';
@@ -15,9 +15,105 @@ function humanizeScopeKey(scopeKey = '') {
     .replace(/_/g, ' ');
 }
 
+const FACTOR_HINT_MAP = {
+  cot: '持仓/订单流线索',
+  gld: '黄金 ETF/库存线索',
+  cb: '宏观/债券变化线索',
+  unknown: '策略因子',
+};
+
 function truncateText(value, max = 24) {
   const text = String(value || '');
   return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function describeFactorHint(factor = '') {
+  const key = String(factor || '').toLowerCase();
+  if (key.startsWith('cot')) return FACTOR_HINT_MAP.cot;
+  if (key.startsWith('gld')) return FACTOR_HINT_MAP.gld;
+  if (key.startsWith('cb')) return FACTOR_HINT_MAP.cb;
+  const match = key.match(/^([a-z0-9_]+?)(?:_|$)/);
+  if (!match) return FACTOR_HINT_MAP.unknown;
+  const prefix = match[1];
+  return FACTOR_HINT_MAP[prefix] || FACTOR_HINT_MAP.unknown;
+}
+
+function formatMetric(value, digits = 4) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return '--';
+  return n.toFixed(digits);
+}
+
+function formatWinRate(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return '--';
+  return `${(n * 100).toFixed(2)}%`;
+}
+
+function buildFactorRow(item, stat = {}) {
+  const factor = item.factor;
+  const weight = Number(item.new || 0);
+  const avgMc = Number(stat.avg_mc || 0);
+  const winRate = Number(stat.win_rate || 0);
+  const trades = Number(stat.n_trades || 0);
+  const totalMc = Number(stat.total_mc || 0);
+  const sharpe = Number(stat.composite_sharpe_score || 0);
+  const hasSamples = trades > 0;
+
+  return {
+    factor,
+    factorHint: describeFactorHint(factor),
+    weight,
+    weightText: formatMetric(weight),
+    avg_mc: avgMc,
+    avgMcText: formatMetric(avgMc),
+    win_rate: winRate,
+    winRateText: formatWinRate(winRate),
+    trades,
+    tradesText: formatCount(trades),
+    total_mc: totalMc,
+    totalMcText: formatMetric(totalMc),
+    sharpe,
+    hasSamples,
+    noSampleTip: hasSamples ? '' : '还没有真实样本，先不要评价好坏',
+    hasContribution: hasSamples && (Math.abs(avgMc) > 0 || Math.abs(totalMc) > 0),
+  };
+}
+
+function buildTodayInsight(rows = []) {
+  const first = rows[0];
+  if (!first) {
+    return {
+      hasData: false,
+      driverFactor: '--',
+      driverFactorHint: '策略因子',
+      sampleText: '还没有真实样本',
+      contributionState: '默认权重',
+      explainText: '当前还没有真实样本，先不要评价好坏。',
+      tipText: '',
+      hasSamples: false,
+    };
+  }
+  const hasSamples = first.hasSamples;
+  const contributionState = hasSamples
+    ? (first.hasContribution ? '有样本贡献' : '有样本但还没贡献')
+    : '默认权重';
+  const sampleText = hasSamples ? `有 ${first.tradesText} 个真实样本` : '还没有真实样本';
+  const explainText = hasSamples
+    ? (first.hasContribution ? `当前主要驱动因子是“${first.factor}”（${first.factorHint}），它在真实样本下有可见贡献。`
+      : `当前主要驱动因子是“${first.factor}”（${first.factorHint}），但有真实样本下还没贡献。`)
+    : `当前主要驱动因子是“${first.factor}”（${first.factorHint}），还没有真实样本，先不要评价好坏。`;
+
+  return {
+    hasData: true,
+    driverFactor: first.factor,
+    driverFactorHint: first.factorHint,
+    sampleText,
+    contributionState,
+    explainText,
+    tipText: hasSamples ? '' : first.noSampleTip,
+    hasSamples,
+  };
 }
 
 function describeLifecycle(item = {}) {
@@ -107,8 +203,14 @@ Page({
     summary: null,
     health: null,
     sortMode: 'weight',
+    factorPanel: '',
+    factorPanelTitle: '',
+    factorPanelSubtitle: '',
     selectedRow: null,
+    previewRows: [],
     topContributors: [],
+    previewTopContributors: [],
+    todayInsight: null,
     lifecycle: [],
     lifecycleSummary: {
       promote: 0,
@@ -119,6 +221,7 @@ Page({
     lifecycleExpanded: false,
     lifecycleFilteredCount: 0,
     visibleLifecycle: [],
+    previewLifecycle: [],
     selectedLifecycle: null,
   },
 
@@ -145,22 +248,11 @@ Page({
     const learningState = learningStore.getState();
     const weights = systemState.factorWeights || [];
     const stats = (systemState.factorStats && systemState.factorStats.per_factor) || {};
-    const rows = weights.map((item) => {
-      const name = item.factor;
-      const stat = stats[name] || {};
-      return {
-        factor: name,
-        weight: Number(item.new || 0),
-        avg_mc: stat.avg_mc || 0,
-        win_rate: stat.win_rate || 0,
-        trades: stat.n_trades || 0,
-        total_mc: stat.total_mc || 0,
-        sharpe: stat.composite_sharpe_score || 0,
-      };
-    });
+    const rows = weights.map((item) => buildFactorRow(item, stats[item.factor] || {}));
     const sortMode = this.data.sortMode || 'weight';
     const sortedRows = this.sortRows(rows, sortMode).slice(0, 24);
-    const selectedRow = this.resolveSelectedRow(sortedRows, this.data.selectedRow && this.data.selectedRow.factor);
+    const selectedFactor = this.data.selectedRow && this.data.selectedRow.factor;
+    const selectedRow = selectedFactor ? this.resolveSelectedRow(sortedRows, selectedFactor) : null;
     const lifecycle = (learningState.lifecycle || []).map((item, index) => ({
       ...item,
       id: item.id || `${item.kind || 'life'}-${item.factor || 'factor'}-${item.event || 'event'}-${item.ts || index}`,
@@ -183,26 +275,40 @@ Page({
       if (lifecycleTab === 'risk') return item.tone === 'danger';
       return true;
     });
-    const lifecycleExpanded = !!this.data.lifecycleExpanded;
-    const visibleLifecycle = lifecycleExpanded ? filteredLifecycle : filteredLifecycle.slice(0, 4);
+    const visibleLifecycle = filteredLifecycle;
+    const sortedForInsight = this.sortRows(rows, 'weight');
+    const todayInsight = buildTodayInsight(sortedForInsight);
+    const rankedRows = sortedRows.map((item, index) => ({
+      ...item,
+      rank: index + 1,
+    }));
+    const topContributors = (((systemState.factorStats || {}).summary || {}).top_contributors || []).map((item = {}) => ({
+      ...item,
+      factor: item.name || item.factor || '',
+      factorHint: describeFactorHint(item.name || item.factor || ''),
+      avgMcText: formatMetric(item.avg_mc || 0),
+      winRateText: formatWinRate(item.win_rate || 0),
+    }));
+
     this.setData({
-      rows: sortedRows.map((item, index) => ({
-        ...item,
-        rank: index + 1,
-      })),
+      rows: rankedRows,
+      previewRows: rankedRows.slice(0, 1),
       summary: systemState.factorStats && systemState.factorStats.summary,
       health: systemState.factorHealth,
+      todayInsight,
       selectedRow: selectedRow
         ? {
             ...selectedRow,
             rank: (sortedRows.findIndex((item) => item.factor === selectedRow.factor) || 0) + 1,
           }
         : null,
-      topContributors: (systemState.factorStats && systemState.factorStats.summary && systemState.factorStats.summary.top_contributors) || [],
+      topContributors,
+      previewTopContributors: topContributors.slice(0, 1),
       lifecycle,
       lifecycleSummary,
       lifecycleFilteredCount: filteredLifecycle.length,
       visibleLifecycle,
+      previewLifecycle: visibleLifecycle.slice(0, 1),
     });
   },
 
@@ -230,6 +336,35 @@ Page({
     const row = (this.data.rows || []).find((item) => item.factor === factor) || null;
     this.setData({ selectedRow: row });
   },
+
+  closeFactorDetail() {
+    this.setData({ selectedRow: null });
+  },
+
+  openFactorPanel(e) {
+    const panel = String((e.currentTarget.dataset && e.currentTarget.dataset.panel) || '');
+    const titles = {
+      factors: ['核心因子', '按当前排序查看完整因子列表'],
+      lifecycle: ['因子生命周期', '查看晋升、观察、风险事件'],
+      contributors: ['主要贡献来源', '最近贡献排行，不等于永久有效'],
+    };
+    if (!titles[panel]) return;
+    this.setData({
+      factorPanel: panel,
+      factorPanelTitle: titles[panel][0],
+      factorPanelSubtitle: titles[panel][1],
+    });
+  },
+
+  closeFactorPanel() {
+    this.setData({
+      factorPanel: '',
+      factorPanelTitle: '',
+      factorPanelSubtitle: '',
+    });
+  },
+
+  noop() {},
 
   switchLifecycleTab(e) {
     const tab = e.currentTarget.dataset.tab;

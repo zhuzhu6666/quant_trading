@@ -20,6 +20,32 @@
       </view>
     </view>
 
+    <section-card title="今天因子在做什么" subtitle="告诉你谁在主导、有没有真实样本、是否还没开始贡献">
+      <view wx:if="{{todayInsight && todayInsight.hasData}}">
+        <view class="kv-grid">
+          <view class="kv-item">
+            <view class="kv-label">最主要驱动因子</view>
+            <view class="kv-value">{{todayInsight.driverFactor}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">线索类型</view>
+            <view class="kv-value">{{todayInsight.driverFactorHint}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">真实样本</view>
+            <view class="kv-value">{{todayInsight.sampleText}}</view>
+          </view>
+          <view class="kv-item">
+            <view class="kv-label">是否默认权重/有贡献</view>
+            <view class="kv-value">{{todayInsight.contributionState}}</view>
+          </view>
+        </view>
+        <view class="soft-panel section-note">{{todayInsight.explainText}}</view>
+        <view wx:if="{{!todayInsight.hasSamples && todayInsight.tipText}}" class="soft-panel section-note">{{todayInsight.tipText}}</view>
+      </view>
+      <view wx:else class="empty">今天还没有因子驱动数据</view>
+    </section-card>
+
     <section-card title="因子摘要" subtitle="当前归因体系的整体情况">
       <view wx:if="{{summary}}" class="grid-3">
         <view class="split-card stack-12">
@@ -46,20 +72,25 @@
         <view class="segmented-item {{sortMode === 'trades' ? 'segmented-item-active' : ''}}" data-mode="trades" bindtap="changeSortMode">样本</view>
       </view>
       <view wx:if="{{rows.length}}">
-        <view wx:for="{{rows}}" wx:key="factor" class="list-item tap-card" data-factor="{{item.factor}}" bindtap="openFactorDetail">
+        <view wx:for="{{previewRows}}" wx:key="factor" class="list-item tap-card" data-factor="{{item.factor}}" bindtap="openFactorDetail">
           <view class="row-between">
             <view class="row">
               <view class="rank-badge">#{{item.rank}}</view>
-              <view class="list-title" style="margin-left: 12rpx;">{{item.factor}}</view>
+              <view>
+                <view class="list-title" style="margin-left: 12rpx;">{{item.factor}}</view>
+                <view class="small muted" style="margin-left: 12rpx;">{{item.factorHint}}</view>
+              </view>
             </view>
-            <view class="tag">w {{item.weight}}</view>
+            <view class="tag">当前权重 {{item.weightText}}</view>
           </view>
           <view class="row-wrap" style="margin-top: 10rpx;">
-            <view class="tag">avg_mc {{item.avg_mc}}</view>
-            <view class="tag">win {{item.win_rate}}</view>
-            <view class="tag">trades {{item.trades}}</view>
+            <view class="tag">平均贡献 {{item.avgMcText}}</view>
+            <view class="tag">胜率 {{item.winRateText}}</view>
+            <view class="tag">样本数 {{item.tradesText}}</view>
           </view>
+          <view wx:if="{{!item.hasSamples}}" class="soft-panel section-note" style="margin-top: 10rpx;">还没有真实样本，先不要评价好坏</view>
         </view>
+        <button wx:if="{{rows.length > previewRows.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="factors" bindtap="openFactorPanel">查看全部 {{rows.length}} 个因子</button>
       </view>
       <view wx:else class="empty">还没有权重与因子映射数据</view>
     </section-card>
@@ -89,7 +120,7 @@
         </view>
 
         <view class="timeline" style="margin-top: 18rpx;">
-          <view wx:for="{{visibleLifecycle}}" wx:key="id" class="timeline-item tap-card" data-id="{{item.id}}" bindtap="openLifecycleDetail">
+          <view wx:for="{{previewLifecycle}}" wx:key="id" class="timeline-item tap-card" data-id="{{item.id}}" bindtap="openLifecycleDetail">
             <view class="row-between">
               <view class="list-title">{{item.factorCompactText}}</view>
               <status-pill label="{{item.title}}" tone="{{item.tone}}" />
@@ -104,60 +135,70 @@
             <view wx:if="{{item.metricText}}" class="small muted" style="margin-top: 10rpx;">{{item.metricText}}</view>
           </view>
         </view>
-        <button wx:if="{{lifecycleFilteredCount > 4}}" class="btn-secondary" style="margin-top: 18rpx;" bindtap="toggleLifecycleExpanded">
-          {{lifecycleExpanded ? '收起生命周期' : '查看更多生命周期'}}
-        </button>
+        <button wx:if="{{lifecycleFilteredCount > previewLifecycle.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="lifecycle" bindtap="openFactorPanel">查看全部 {{lifecycleFilteredCount}} 条</button>
       </view>
       <view wx:else class="empty">还没有因子生命周期事件</view>
     </section-card>
 
-    <section-card wx:if="{{selectedRow}}" title="单因子详情" subtitle="当前排序焦点因子的治理视图">
+    <view wx:if="{{selectedRow}}" class="factor-modal factor-detail-modal" catchtouchmove="noop">
+      <view class="factor-modal-mask" catchtap="closeFactorDetail"></view>
+      <scroll-view scroll-y="true" class="factor-modal-sheet" catchtap="noop">
+    <section-card title="单因子详情" subtitle="当前排序焦点因子的治理视图">
+      <button slot="extra" class="btn-secondary modal-close" bindtap="closeFactorDetail">关闭</button>
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="row">
             <view class="rank-badge">#{{selectedRow.rank}}</view>
             <view class="list-title" style="margin-left: 12rpx;">{{selectedRow.factor}}</view>
           </view>
-          <view class="tag">w {{selectedRow.weight}}</view>
+          <view class="tag">当前权重 {{selectedRow.weightText}}</view>
         </view>
+        <view class="small muted">线索类型：{{selectedRow.factorHint}}</view>
         <view class="kv-grid">
           <view class="kv-item">
-            <view class="kv-label">avg_mc</view>
-            <view class="kv-value">{{selectedRow.avg_mc}}</view>
+            <view class="kv-label">平均贡献</view>
+            <view class="kv-value">{{selectedRow.avgMcText}}</view>
           </view>
           <view class="kv-item">
-            <view class="kv-label">win_rate</view>
-            <view class="kv-value">{{selectedRow.win_rate}}</view>
+            <view class="kv-label">胜率</view>
+            <view class="kv-value">{{selectedRow.winRateText}}</view>
           </view>
           <view class="kv-item">
-            <view class="kv-label">trades</view>
-            <view class="kv-value">{{selectedRow.trades}}</view>
+            <view class="kv-label">样本数</view>
+            <view class="kv-value">{{selectedRow.tradesText}}</view>
           </view>
           <view class="kv-item">
-            <view class="kv-label">total_mc</view>
-            <view class="kv-value">{{selectedRow.total_mc}}</view>
+            <view class="kv-label">总贡献</view>
+            <view class="kv-value">{{selectedRow.totalMcText}}</view>
           </view>
         </view>
+        <view wx:if="{{!selectedRow.hasSamples}}" class="section-note">还没有真实样本，先不要评价好坏</view>
         <view class="soft-panel section-note">Sharpe {{selectedRow.sharpe || 0}}，这能帮助我们区分“偶然赚到”与“质量更高的贡献”。</view>
       </view>
     </section-card>
+      </scroll-view>
+    </view>
 
-    <section-card title="Top Contributors" subtitle="当前归因里最有影响力的因子">
+    <section-card title="主要贡献来源" subtitle="这是最近贡献排行，不等于永久有效">
       <view wx:if="{{topContributors.length}}">
-        <view wx:for="{{topContributors}}" wx:key="name" class="list-item">
+        <view wx:for="{{previewTopContributors}}" wx:key="factor" class="list-item">
           <view class="row-between">
             <view class="row">
               <view class="rank-badge">#{{index + 1}}</view>
-              <view class="list-title" style="margin-left: 12rpx;">{{item.name}}</view>
+              <view>
+                <view class="list-title" style="margin-left: 12rpx;">{{item.factor}}</view>
+                <view class="small muted" style="margin-left: 12rpx;">{{item.factorHint}}</view>
+              </view>
             </view>
-            <view class="tag">{{item.avg_mc}}</view>
+            <view class="tag">{{item.avgMcText}}</view>
           </view>
           <view class="row-wrap" style="margin-top: 10rpx;">
-            <view class="tag">win {{item.win_rate}}</view>
+            <view class="tag">胜率 {{item.winRateText}}</view>
           </view>
         </view>
+        <button wx:if="{{topContributors.length > previewTopContributors.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="contributors" bindtap="openFactorPanel">查看全部 {{topContributors.length}} 条</button>
       </view>
-      <view wx:else class="empty">还没有 top contributor 数据</view>
+      <view wx:else class="empty">还没有主要贡献来源数据</view>
     </section-card>
 
     <section-card title="健康报告" subtitle="因子健康引擎的最近输出">
@@ -165,7 +206,102 @@
       <view wx:else class="empty">还没有健康报告</view>
     </section-card>
 
-    <section-card wx:if="{{selectedLifecycle}}" title="生命周期详情" subtitle="这次状态变化为什么发生">
+    <view wx:if="{{factorPanel}}" class="factor-modal" catchtouchmove="noop">
+      <view class="factor-modal-mask" catchtap="closeFactorPanel"></view>
+      <scroll-view scroll-y="true" class="factor-modal-sheet" catchtap="noop">
+        <view class="factor-modal-card">
+          <view class="row-between factor-modal-head">
+            <view class="factor-modal-title">
+              <view class="card-title">{{factorPanelTitle}}</view>
+              <view class="card-subtitle">{{factorPanelSubtitle}}</view>
+            </view>
+            <button class="btn-secondary modal-close" bindtap="closeFactorPanel">关闭</button>
+          </view>
+
+          <block wx:if="{{factorPanel === 'factors'}}">
+            <view class="segmented" style="margin-bottom: 14rpx;">
+              <view class="segmented-item {{sortMode === 'weight' ? 'segmented-item-active' : ''}}" data-mode="weight" bindtap="changeSortMode">权重</view>
+              <view class="segmented-item {{sortMode === 'avg_mc' ? 'segmented-item-active' : ''}}" data-mode="avg_mc" bindtap="changeSortMode">贡献</view>
+              <view class="segmented-item {{sortMode === 'win_rate' ? 'segmented-item-active' : ''}}" data-mode="win_rate" bindtap="changeSortMode">胜率</view>
+              <view class="segmented-item {{sortMode === 'trades' ? 'segmented-item-active' : ''}}" data-mode="trades" bindtap="changeSortMode">样本</view>
+            </view>
+            <view wx:if="{{rows.length}}">
+              <view wx:for="{{rows}}" wx:key="factor" class="list-item tap-card" data-factor="{{item.factor}}" bindtap="openFactorDetail">
+                <view class="row-between">
+                  <view class="row">
+                    <view class="rank-badge">#{{item.rank}}</view>
+                    <view>
+                      <view class="list-title" style="margin-left: 12rpx;">{{item.factor}}</view>
+                      <view class="small muted" style="margin-left: 12rpx;">{{item.factorHint}}</view>
+                    </view>
+                  </view>
+                  <view class="tag">当前权重 {{item.weightText}}</view>
+                </view>
+                <view class="row-wrap" style="margin-top: 10rpx;">
+                  <view class="tag">平均贡献 {{item.avgMcText}}</view>
+                  <view class="tag">胜率 {{item.winRateText}}</view>
+                  <view class="tag">样本数 {{item.tradesText}}</view>
+                </view>
+                <view wx:if="{{!item.hasSamples}}" class="soft-panel section-note" style="margin-top: 10rpx;">还没有真实样本，先不要评价好坏</view>
+              </view>
+            </view>
+            <view wx:if="{{!rows.length}}" class="empty">还没有权重与因子映射数据</view>
+          </block>
+
+          <block wx:elif="{{factorPanel === 'lifecycle'}}">
+            <view class="segmented" style="margin-bottom: 14rpx;">
+              <view class="segmented-item {{lifecycleTab === 'all' ? 'segmented-item-active' : ''}}" data-tab="all" bindtap="switchLifecycleTab">全部</view>
+              <view class="segmented-item {{lifecycleTab === 'promote' ? 'segmented-item-active' : ''}}" data-tab="promote" bindtap="switchLifecycleTab">晋升</view>
+              <view class="segmented-item {{lifecycleTab === 'watch' ? 'segmented-item-active' : ''}}" data-tab="watch" bindtap="switchLifecycleTab">观察</view>
+              <view class="segmented-item {{lifecycleTab === 'risk' ? 'segmented-item-active' : ''}}" data-tab="risk" bindtap="switchLifecycleTab">风险</view>
+            </view>
+            <view wx:if="{{visibleLifecycle.length}}" class="timeline">
+              <view wx:for="{{visibleLifecycle}}" wx:key="id" class="timeline-item tap-card" data-id="{{item.id}}" bindtap="openLifecycleDetail">
+                <view class="row-between">
+                  <view class="list-title">{{item.factorCompactText}}</view>
+                  <status-pill label="{{item.title}}" tone="{{item.tone}}" />
+                </view>
+                <view class="small muted">{{item.createdText}} · {{item.stageText}}</view>
+                <view wx:if="{{item.governanceStageTag || item.governanceTargetTypeText}}" class="row-wrap" style="margin-top: 10rpx;">
+                  <view wx:if="{{item.governanceStageTag}}" class="tag">{{item.governanceStageTag}}</view>
+                  <view wx:if="{{item.governanceTargetTypeText}}" class="tag">{{item.governanceTargetTypeText}}</view>
+                </view>
+                <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.noteCompact}}</view>
+                <view wx:if="{{item.metricText}}" class="small muted" style="margin-top: 10rpx;">{{item.metricText}}</view>
+              </view>
+            </view>
+            <view wx:if="{{!visibleLifecycle.length}}" class="empty">当前分段没有生命周期事件</view>
+          </block>
+
+          <block wx:elif="{{factorPanel === 'contributors'}}">
+            <view wx:if="{{topContributors.length}}">
+              <view wx:for="{{topContributors}}" wx:key="factor" class="list-item">
+                <view class="row-between">
+                  <view class="row">
+                    <view class="rank-badge">#{{index + 1}}</view>
+                    <view>
+                      <view class="list-title" style="margin-left: 12rpx;">{{item.factor}}</view>
+                      <view class="small muted" style="margin-left: 12rpx;">{{item.factorHint}}</view>
+                    </view>
+                  </view>
+                  <view class="tag">{{item.avgMcText}}</view>
+                </view>
+                <view class="row-wrap" style="margin-top: 10rpx;">
+                  <view class="tag">胜率 {{item.winRateText}}</view>
+                </view>
+              </view>
+            </view>
+            <view wx:if="{{!topContributors.length}}" class="empty">还没有主要贡献来源数据</view>
+          </block>
+        </view>
+      </scroll-view>
+    </view>
+
+    <view wx:if="{{selectedLifecycle}}" class="factor-modal factor-detail-modal" catchtouchmove="noop">
+      <view class="factor-modal-mask" catchtap="closeLifecycleDetail"></view>
+      <scroll-view scroll-y="true" class="factor-modal-sheet" catchtap="noop">
+    <section-card title="生命周期详情" subtitle="这次状态变化的自然语言说明">
+      <button slot="extra" class="btn-secondary modal-close" bindtap="closeLifecycleDetail">关闭</button>
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedLifecycle.factorText}}</view>
@@ -173,7 +309,7 @@
         </view>
         <view class="kv-grid">
           <view class="kv-item">
-            <view class="kv-label">当前阶段</view>
+            <view class="kv-label">当前处于</view>
             <view class="kv-value">{{selectedLifecycle.stageText}}</view>
           </view>
           <view class="kv-item">
@@ -181,11 +317,11 @@
             <view class="kv-value">{{selectedLifecycle.createdText}}</view>
           </view>
           <view class="kv-item">
-            <view class="kv-label">事件类型</view>
+            <view class="kv-label">触发事件</view>
             <view class="kv-value">{{selectedLifecycle.event || '--'}}</view>
           </view>
           <view class="kv-item">
-            <view class="kv-label">来源</view>
+            <view class="kv-label">来源模块</view>
             <view class="kv-value">{{selectedLifecycle.kind || '--'}}</view>
           </view>
         </view>
@@ -201,5 +337,7 @@
         <button class="btn-secondary" bindtap="closeLifecycleDetail">收起详情</button>
       </view>
     </section-card>
+      </scroll-view>
+    </view>
   </view>
 </view>

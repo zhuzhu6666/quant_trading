@@ -54,7 +54,7 @@
 - ✅ Phase E.5：持仓监督参数治理与退出质量校准（2026-06-26 真实小仓位样本驱动）
 - ✅ Phase F：数学模型与大语言模型分层接入（后端旁路、权限、审计已完成）
 - ✅ Phase G：元模型旁路（后端 contract、shadow report、治理建议、前端交接入口已完成）
-- 下一步：本地前端对接，小程序展示 `backend_readiness.v1`、模型报告、治理建议
+- 下一步：微信开发者工具上传/实机复测，继续观察参数模板灰度发布、回滚与模型报告趋势
 
 ### 当前系统一句话状态
 
@@ -74,7 +74,7 @@
 
 - Phase H 的受限自动治理执行能力（当前故意不开自动执行）
 - 多品种、多风险池、组合级调度
-- 本地小程序对新后端 contract 的展示接入
+- 本地小程序已完成新后端 contract 展示接入，仍需继续观察真实样本下的灰度发布 / 回滚动作
 - 更多真实样本下的参数模板灰度发布 / 回滚观察
 - 重启恢复、持仓过夜、模型报告趋势的更长期观察
 
@@ -94,16 +94,16 @@
 
 ### 当前唯一进行中主线
 
-`本地前端对接：展示后端已收口的 readiness / 模型 / 治理入口`
+`本地前端对接已完成：当前进入微信上传、实机复测与真实样本观察`
 
 ### 下一步入口
 
-服务器后端已完成 Phase F/G 收口。下一步默认回到本地 Windows，只做 **miniprogram_v2 前端对接**：
+服务器后端已完成 Phase F/G 收口，本地 Windows 已完成 **miniprogram_v2 前端对接**。下一步默认仍在本地观察小程序上传、实机显示与治理动作反馈：
 
-- 首选入口：`GET /api/ops/backend-readiness`
-- 模型报告：`GET /api/learning/model/meta-lightgbm/shadow-report`
-- 报告趋势：`GET /api/learning/model/meta-lightgbm/shadow-report/snapshots`
-- 停盘高负载审计：`GET /api/learning/model/offmarket-high-load/audits`
+- 小程序上传：确认 `sitemap.json / miniprogramRoot` 配置稳定
+- 模型报告：继续观察 `GET /api/learning/model/meta-lightgbm/shadow-report`
+- 报告趋势：继续观察 `GET /api/learning/model/meta-lightgbm/shadow-report/snapshots`
+- 参数治理：继续观察候选审批、灰度发布、回滚动作的人话反馈
 
 ---
 
@@ -2057,7 +2057,8 @@ v2 增强记录：
 
 ## 8.5 本地前端对接：后端 readiness / 模型 / 治理展示
 
-状态：`未开始（下一步）`
+状态：`已完成（本地小程序已接入，上传与真实样本动作继续观察）`
+开工记录：`2026-06-27 本地前端对接开始，范围为 miniprogram_v2 展示 backend_readiness、meta report、governance、high-load audit`
 优先级：`P1`
 执行位置：`本地 Windows，仅修改 miniprogram_v2 / 文档`
 
@@ -2101,6 +2102,124 @@ v2 增强记录：
 - 模型页能解释“为什么当前 meta LightGBM 不能上线”
 - 运维页能区分“真实阻断项”和“已知观察项”
 - 前端不需要重复拼接多个后端接口才能得到首页核心状态
+
+2026-06-27 代码对接记录：
+
+- 已新增小程序只读接口/状态层：
+  - `miniprogram_v2/services/ops.js`
+  - `miniprogram_v2/services/learning.js`
+  - `miniprogram_v2/stores/ops.js`
+  - `miniprogram_v2/stores/learning.js`
+  - `miniprogram_v2/utils/backendReadiness.js`
+- 已在 Ops 页展示：
+  - `backend_readiness.v1`
+  - `ready_for_frontend`
+  - `system_health.display_overall`
+  - `blocking_components / blockers`
+  - `known_observations`
+  - `market_session.status`
+  - `high_load.allowed_now / profile / latest_audit`
+  - offmarket high-load audit 样本
+- 已在 Learning 页展示：
+  - meta LightGBM shadow report
+  - `accuracy / evaluated_count / audit_count`
+  - `posture_distribution`
+  - `confusion_matrix`
+  - `rule_comparison`
+  - `artifact_summary`
+  - report snapshots 摘要
+  - `capabilities` 显示 shadow/advisory-only、不可实盘
+- 审核修正：
+  - readiness 组件同时兼容字符串和对象形态
+  - Ops 页去重展示 blockers
+  - Learning 页直接调用已新增的 meta report / snapshots 只读接口
+  - 修正 Learning 页 hero WXML 结构
+- 验证结果：
+  - `node --check` 已覆盖新增/改动 JS 文件
+  - `git diff --check` 仅剩 Windows 换行提示，无空白错误
+- 待验证：
+  - 使用微信开发者工具打开 `miniprogram_v2`，检查 Ops / Learning 页面渲染、下拉刷新、后端真实数据展示
+
+2026-06-27 微信开发者工具验证记录：
+
+- Learning 页已渲染 `Meta LightGBM Shadow Report`，可见 `shadow/advisory-only`、`eligible_for_live=否`、`accuracy / evaluated_count / audit_count`、`posture_distribution`
+- Ops 页首次验证发现 `syncView()` 在 `backendReadinessView=null` 时访问 `blockingComponents` 抛错，导致 tab 切到运维后主体残留 Learning 内容
+- 已修复 Ops 页空值访问：
+  - 显式拆出 `readinessBlockingComponents / readinessKnownObservations / readinessGovernance / readinessModelPermissions / readinessHighLoad / readinessMarketSession`
+  - 所有 readiness 展示字段走安全兜底
+- 复测结果：
+  - Ops 页已正常显示 `系统运维 / 接口健康 / Backend Readiness`
+  - 点击页内刷新后，微信开发者工具控制台清空并复查，无新增 TypeError
+  - 调试器显示 `Errors: 0, Warnings: 0`
+
+2026-06-27 前端可读性优化记录：
+
+- 目标：
+  - 不减少系统组件
+  - 不隐藏原始证据
+  - 把机器字段翻译成“它是什么 / 现在有没有在做 / 是否需要处理 / 下一步看哪里”
+- 已新增/扩展解释层：
+  - `miniprogram_v2/utils/backendReadiness.js`
+  - 为 readiness、meta shadow report、offmarket high-load audit 增加 `displayName / purposeText / stateText / actionText / metricCards / explanation`
+- Learning 页已改为人话模型卡：
+  - `Meta LightGBM Shadow Report` 改为 `元模型旁路评估`
+  - 明确说明“只提供建议，不直接交易”
+  - `accuracy / evaluated_count / audit_count` 改为 `命中率 / 已评估样本 / 旁路记录`
+  - `posture_distribution` 改为 `收缩交易 / 继续观察 / 恢复节奏`
+  - `confusion_matrix` 改为 `模型自检证据（预测 vs 后验标签）`
+- Ops 页已改为结论化运维卡：
+  - `Backend Readiness` 改为 `后端交接状态`
+  - 展示“当前是否可用 / 是否影响交易或模型展示 / 建议下一步”
+  - `blocking_components / known_observations` 改为 `必须先处理的问题 / 可观察但不阻断的问题`
+  - `offmarket high-load audit` 改为 `离线重任务窗口`
+- Factors 页已改为人话因子视图：
+  - 新增 `今天因子在做什么`
+  - `w / avg_mc / win / trades` 改为 `当前权重 / 平均贡献 / 胜率 / 样本数`
+  - 对 `cot / gld / cb` 等因子前缀增加“线索”解释
+  - 样本为 0 时明确提示“还没有真实样本，先不要评价好坏”
+- Overview / Trading 页已补结论层：
+  - Overview 新增 `系统现在一句话`
+  - Trading 标题改为 `交易执行与持仓监督`
+  - Trading 首屏展示 `交易循环 / 持仓状态 / 开仓许可 / 监督提醒`
+  - 风控历史增加“这条记录意味着什么”
+- 共享组件修正：
+  - `status-pill` 增加 label/tone 兜底，避免接口短暂返回 null 时污染控制台
+- 验证结果：
+  - `node --check` 已覆盖本轮改动 JS 文件
+  - `git diff --check` 仅剩 Windows 换行提示
+  - 微信开发者工具已实看 Overview / Trading / Learning / Ops，Factors 可通过 accessibility 读到 `今天因子在做什么`
+- 观察：
+  - 微信开发者工具在热重载期间偶尔出现多 tab webview 截图层不同步；accessibility 与页面路径已显示目标页面内容，未见新增红色运行错误
+
+2026-06-27 前端结构瘦身与上传修复记录：
+
+- Overview：
+  - `闭环进度` 卡片不再直接塞完整参数治理机器摘要
+  - 卡片只显示短状态，完整参数治理文本放到详情区，避免窄卡片字体越界
+- Learning：
+  - `规则交叉比对 / 证据材料摘要` 改为“可读指标 + 内嵌滚动日志”
+  - 主学习页改为轻量总览，每组只显示最近/待处理 1 条
+  - 完整建议、复盘、应用、参数模板候选、治理轨迹、模板建议进入底部抽屉
+  - 单条建议、复盘、应用、模板候选、模板建议、治理轨迹进入弹窗详情，不再插入主滚动流
+  - 模型诊断、规则交叉比对、原始日志与 snapshots 收进“模型自检与快照”抽屉
+  - 弹窗统一改为居中宽度，左右保留安全边距，避免靠右贴边
+- Factors：
+  - 主因子页改为轻量总览，每组只展示最近/重点 1 条
+  - 核心因子、因子生命周期、主要贡献来源进入底部抽屉
+  - 单因子详情、生命周期详情改为弹窗，不再常驻主页面
+  - 弹窗统一居中并保留安全边距
+- WeChat 上传配置：
+  - `miniprogram_v2/sitemap.json` 增加明确 `rules`，修复上传时报 `Invalid SiteMap, sitemap 缺少 rules 字段`
+  - 根目录 `project.config.json` 增加 `miniprogramRoot: "miniprogram_v2/"`，避免从仓库根目录打开项目时读错小程序根
+- 参数模板动作反馈：
+  - HTTP 请求层保留后端 `detail / message / result_summary / error`
+  - 执行灰度发布前前端先检查候选状态，未批准时提示“先批准候选”
+  - 后端返回 400 时弹窗展示完整原因，不再只显示 `request_failed`
+- 验证结果：
+  - `node --check` 覆盖 `overview / learning / factors / services/client` 等改动 JS
+  - WXML 标签闭合检查覆盖 Learning / Factors
+  - `git diff --check` 仅剩 Windows 换行提示
+  - 微信开发者工具已实看 Learning / Factors 弹窗、抽屉与上传相关页面配置
 
 ---
 
@@ -2157,7 +2276,7 @@ v2 增强记录：
 | G-1 | 受限自动治理尚未启用 | 已有建议与审批入口，但不自动执行低风险调整 | Phase H |
 | G-2 | 多品种/多风险池尚未实现 | 当前仍以 `XAUUSD+` 为主 | Phase I |
 | G-3 | 模型样本仍偏少 | meta LightGBM holdout accuracy 不达标，仍只能 shadow/advisory | Phase F/G 观察 |
-| G-4 | 前端尚未展示新后端 contract | 后端 readiness / snapshots / governance suggestion 已完成，待本地小程序接入 | 本地前端 |
+| G-4 | 前端新 contract 展示已接入，待真实样本长期观察 | 小程序已展示 readiness / snapshots / governance suggestion / high-load audit；继续观察上传、实机显示、灰度发布与回滚反馈 | 本地前端观察 |
 | G-5 | 重启恢复回归覆盖不足 | 已能自动恢复，但开仓后重启、持仓恢复、延迟恢复还需专项测试 | 运维/测试 |
 
 ---

@@ -17,3 +17,117 @@
   min-width: 168rpx;
   padding-top: 6rpx;
 }
+
+.section-note,
+.kv-value,
+.list-title,
+.progress-note,
+.tag {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.diagnostic-panel .tag {
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.diagnostic-panel {
+  margin-top: 12rpx;
+}
+
+.diagnostic-intro {
+  margin-bottom: 12rpx;
+}
+
+.diagnostic-grid {
+  margin-top: 10rpx;
+}
+
+.diagnostic-raw {
+  margin-top: 14rpx;
+  padding-top: 14rpx;
+  border-top: 1rpx solid #e5edf5;
+}
+
+.diagnostic-raw-head {
+  margin-bottom: 10rpx;
+}
+
+.embedded-log {
+  box-sizing: border-box;
+  height: 260rpx;
+  border-radius: 16rpx;
+  border: 1rpx solid #dce5ef;
+  background: #0f172a;
+}
+
+.embedded-log-inner {
+  padding: 14rpx;
+}
+
+.embedded-log-text {
+  display: block;
+  color: #dbeafe;
+  font-size: 20rpx;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: Consolas, Monaco, monospace;
+}
+
+.learning-modal {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 60;
+}
+
+.learning-detail-modal {
+  z-index: 70;
+}
+
+.learning-modal-mask {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.learning-modal-sheet {
+  position: absolute;
+  left: 50%;
+  bottom: calc(24rpx + env(safe-area-inset-bottom));
+  box-sizing: border-box;
+  width: calc(100vw - 64rpx);
+  max-width: 686rpx;
+  max-height: 78vh;
+  transform: translateX(-50%);
+  border-radius: 24rpx;
+  background: #ffffff;
+  box-shadow: 0 24rpx 60rpx rgba(15, 23, 42, 0.18);
+}
+
+.learning-modal-card {
+  box-sizing: border-box;
+  padding: 22rpx;
+}
+
+.learning-modal-head {
+  margin-bottom: 16rpx;
+  gap: 16rpx;
+}
+
+.learning-modal-title {
+  min-width: 0;
+}
+
+.modal-close {
+  flex: 0 0 auto;
+  min-width: 128rpx;
+}

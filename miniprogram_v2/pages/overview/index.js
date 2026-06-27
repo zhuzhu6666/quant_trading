@@ -2,7 +2,7 @@ import liveStore from '../../stores/live';
 import learningStore from '../../stores/learning';
 import { refreshLiveSnapshot, startTradingLoop, stopTradingLoop } from '../../services/live';
 import { openLearningGovernancePage, refreshLearning, runLearningGovernance } from '../../services/learning';
-import { formatMoney, formatPct, formatTime, toneFromPnl, toneFromStatus } from '../../utils/format';
+import { formatMoney, formatPct, formatTime, toneFromPnl } from '../../utils/format';
 
 function humanizeResponsibility(value = '') {
   const key = String(value || '').toLowerCase();
@@ -20,10 +20,50 @@ function formatOverviewHintText(item = null) {
   return `${item.title || '--'} · ${item.stage_tag || '--'} · ${item.summary || ''}`;
 }
 
+function buildSystemNowSummary({ loopRunning, positionCount, pendingTodoCount, learningSummaryStatus }) {
+  const loopText = loopRunning ? '交易循环在线' : '交易循环未运行';
+  const positionText = positionCount > 0 ? `当前有 ${positionCount} 笔持仓` : '当前无持仓';
+  const learningText = pendingTodoCount > 0 ? `学习治理待处理 ${pendingTodoCount} 项` : '学习治理暂无待处理';
+  const needHuman = pendingTodoCount > 0 || learningSummaryStatus === 'error' || !loopRunning;
+  return {
+    tone: needHuman ? 'warning' : 'positive',
+    sentence: `系统现在：${loopText}；${positionText}；${learningText}；需要人工处理：${needHuman ? '是' : '否'}。`,
+    loopText,
+    positionText,
+    learningText,
+    humanActionText: needHuman ? '是' : '否',
+  };
+}
+
+function buildTemplateProgressNote({ candidateCounts = {}, recommendationCounts = {}, templateOpsSummary = '' }) {
+  const pendingCandidates = Number(candidateCounts.pending_review || 0);
+  const recommendations = Number(recommendationCounts.total || 0);
+  const online = Number(recommendationCounts.online_light || 0);
+  const offline = Number(recommendationCounts.offline_deep || 0);
+  if (pendingCandidates || recommendations) {
+    const parts = [];
+    if (pendingCandidates) parts.push(`候选待审 ${pendingCandidates}`);
+    if (recommendations) parts.push(`推荐 ${recommendations}`);
+    if (online || offline) parts.push(`在线 ${online} / 离线 ${offline}`);
+    return parts.join('，');
+  }
+  const summaryText = String(templateOpsSummary || '');
+  if (summaryText.includes('已批准')) return '最新候选已批准';
+  if (summaryText.includes('已拒绝')) return '最新候选已拒绝';
+  if (summaryText.includes('参数治理')) return '治理链已同步';
+  return '暂无待处理';
+}
+
 Page({
   data: {
     wsLabel: '未连接',
     wsTone: 'warning',
+    systemNowSentence: '系统现在：读取中',
+    systemNowTone: 'neutral',
+    systemNowLoopText: '交易循环未确认',
+    systemNowPositionText: '当前无持仓',
+    systemNowLearningText: '学习治理暂无待处理',
+    systemNowNeedHumanText: '否',
     equity: '--',
     realizedPnl: '--',
     realizedPnlTone: 'neutral',
@@ -43,6 +83,7 @@ Page({
     learningApplications: 0,
     templateOpsSummary: '',
     closureSteps: [],
+    progressDetailRows: [],
     loopRunning: false,
     startBusy: false,
     stopBusy: false,
@@ -119,7 +160,35 @@ Page({
     const learningSummaryHint = learningSummaryStatus === 'error'
       ? '学习摘要接口超时/失败，当前卡片可能显示的是空白兜底值，不代表系统没有学习数据。'
       : '';
+    const templateProgressNote = buildTemplateProgressNote({
+      candidateCounts,
+      recommendationCounts,
+      templateOpsSummary,
+    });
+    const templateProgressTone = Number(candidateCounts.pending_review || 0) || Number(recommendationCounts.total || 0)
+      ? 'warning'
+      : templateOpsSummary.includes('已批准') ? 'positive' : 'neutral';
+    const progressDetailRows = templateOpsSummary
+      ? [{
+          id: 'template',
+          title: '参数治理详情',
+          text: templateOpsSummary,
+        }]
+      : [];
+    const pendingTodoCount = Number(candidateCounts.pending_review || 0) + Number(recommendationCounts.total || 0);
+    const systemNow = buildSystemNowSummary({
+      loopRunning: !!loopStatus.running,
+      positionCount: Number(trading.n_positions || 0),
+      pendingTodoCount,
+      learningSummaryStatus,
+    });
     this.setData({
+      systemNowSentence: systemNow.sentence,
+      systemNowTone: systemNow.tone,
+      systemNowLoopText: systemNow.loopText,
+      systemNowPositionText: systemNow.positionText,
+      systemNowLearningText: systemNow.learningText,
+      systemNowNeedHumanText: systemNow.humanActionText,
       wsLabel: live.wsConnected ? '实时已连接' : '轮询兜底中',
       wsTone: live.wsConnected ? 'positive' : 'warning',
       equity: formatMoney(trading.equity),
@@ -192,10 +261,11 @@ Page({
           id: 'template',
           index: '5',
           title: '参数治理',
-          note: templateOpsSummary,
-          tone: recommendationCounts.total ? 'warning' : 'neutral',
+          note: templateProgressNote,
+          tone: templateProgressTone,
         },
       ],
+      progressDetailRows,
       updatedAt: formatTime(live.lastUpdate || learning.updatedAt),
     });
   },

@@ -1,4 +1,9 @@
 {
   "desc": "Quant agent mini-program sitemap",
-  "rules": []
+  "rules": [
+    {
+      "action": "allow",
+      "page": "*"
+    }
+  ]
 }

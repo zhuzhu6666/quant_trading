@@ -1,7 +1,8 @@
 import systemStore from '../../stores/system';
 import learningStore from '../../stores/learning';
-import { openTradeTracePage, refreshOpsDomain } from '../../services/ops';
-import { openLearningGovernancePage, refreshLearning } from '../../services/learning';
+import opsStore from '../../stores/ops';
+import * as opsService from '../../services/ops';
+import * as learningService from '../../services/learning';
 import { formatDateTime, humanizeRiskAction, humanizeRiskReason, toneFromStatus } from '../../utils/format';
 import {
   buildGovernanceTodoCard,
@@ -21,8 +22,25 @@ function humanizeHealthComponent(key) {
     db_ticks: 'Tick 库',
     db_l2: '深度库',
     disk_space: '磁盘空间',
+    promotion_gate: '交易启停门禁',
+    permission_audit: '权限审计',
+    live: '实盘运行',
+    high_load: '高负载窗口',
+    advisory_critical_components: '观察级关键组件',
+    blocking_components: '必须先解决',
+    known_observations: '可观察项',
   };
-  return mapping[key] || key || '--';
+  const normalized = String(key || '').trim().toLowerCase();
+  return mapping[normalized] || (normalized ? normalized.replace(/_/g, ' ') : '--');
+}
+
+function humanizeHealthStatus(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (['blocking', 'blocked', 'critical', 'error', 'fail', 'failed', 'down', 'offline'].includes(normalized)) return '阻断';
+  if (['degraded', 'observe', 'observed', 'warning'].includes(normalized)) return '观察';
+  if (['allowed', 'ok', 'healthy', 'running', 'connected', 'active', 'positive', 'ready', 'allowed'].includes(normalized)) return '正常';
+  if (['pending', 'stale'].includes(normalized)) return '待定';
+  return '未标注';
 }
 
 function resolveEventTone(eventType) {
@@ -37,6 +55,128 @@ function resolveEventTone(eventType) {
     return 'negative';
   }
   return toneFromStatus(normalized || 'ok');
+}
+
+function toneFromReadinessLevel(level) {
+  const normalized = String(level || '').toLowerCase();
+  if (['critical', 'error', 'blocked', 'fail', 'failed', 'down', 'offline'].includes(normalized)) return 'negative';
+  if (['degraded', 'warning', 'observed', 'observe', 'mixed', 'pending', 'stale'].includes(normalized)) return 'warning';
+  if (['ok', 'healthy', 'connected', 'running', 'good', 'active', 'allowed', 'ready', 'positive'].includes(normalized)) return 'positive';
+  return 'neutral';
+}
+
+function buildComponentRows(items = []) {
+  const seen = {};
+  return (Array.isArray(items) ? items : [])
+    .map((item = {}, index = 0) => {
+      const source = typeof item === 'string' ? { component: item, status: 'unknown' } : item;
+      const rawComponent = String(source.component || source.name || source.key || source.component_name || '--');
+      const component = humanizeHealthComponent(rawComponent);
+      const status = String(source.status || 'unknown');
+      return {
+        key: `${rawComponent}-${status}-${index}`,
+        rawComponent,
+        component,
+        status,
+        statusText: humanizeHealthStatus(status),
+        classification: String(source.classification || ''),
+        tone: toneFromReadinessLevel(status),
+      };
+    })
+    .filter((item) => {
+      const key = `${item.component}|${item.status}|${item.classification}`;
+      if (seen[key]) return false;
+      seen[key] = true;
+      return true;
+    })
+    .slice(0, 8);
+}
+
+function buildOffmarketRows(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((item = {}, index = 0) => {
+      const startedAt = item.startedAt || item.started_at || 0;
+      const finishedAt = item.finishedAt || item.finished_at || 0;
+      return {
+        key: String(item.audit_id || item.auditId || `${item.job_name || 'audit'}-${index}`),
+        jobName: String(item.job_name || item.jobName || '--'),
+        status: String(item.status || '--'),
+        statusTone: toneFromReadinessLevel(item.status || 'unknown'),
+        statusText: humanizeHealthStatus(item.status || 'unknown'),
+        sessionStatus: String(item.sessionStatus || item.session_status || '--'),
+        profile: String(item.high_load_profile || item.profile || '--'),
+        profileText: humanizeHealthComponent(item.high_load_profile || item.profile || ''),
+        runHintText: (item.status || '').toString().toLowerCase().includes('run') ? '正在用于运行窗口' : '离线任务',
+        startedAtText: formatDateTime(startedAt),
+        finishedAtText: formatDateTime(finishedAt),
+        errorText: String(item.error || item.error_message || ''),
+      };
+    })
+    .slice(0, 5);
+}
+
+function deriveReadinessConclusion(context = {}) {
+  const readyForFrontend = !!context.readyForFrontend;
+  const blockingCount = Number(context.blockingCount || 0);
+  const observationCount = Number(context.observationCount || 0);
+  const permissionOk = !!context.permissionOk;
+  const permissionAuditStatus = String(context.permissionAuditStatus || '').toLowerCase();
+  const tradingBlocked = !!context.tradingBlocked;
+  const hasBlocking = blockingCount > 0 || tradingBlocked;
+  const permissionBlocked = !permissionOk || ['blocked', 'failed', 'error'].includes(permissionAuditStatus);
+
+  let availability = '待确认';
+  let availabilityTone = 'neutral';
+  if (hasBlocking || permissionBlocked) {
+    availability = '有阻断';
+    availabilityTone = 'negative';
+  } else if (readyForFrontend) {
+    availability = observationCount > 0 ? '可用（含观察项）' : '可用';
+    availabilityTone = observationCount > 0 ? 'warning' : 'positive';
+  } else {
+    availability = '待交接/待确认';
+    availabilityTone = 'warning';
+  }
+
+  const tradeImpact = hasBlocking ? '会影响交易（可能被系统拦截）' : '不影响当前交易执行';
+  const modelImpact = readyForFrontend && !hasBlocking && !permissionBlocked ? '模型展示可按正式状态显示' : '模型展示建议降级，仅作参考';
+
+  let nextAction = '持续观察即可';
+  if (hasBlocking) {
+    nextAction = '先修复阻断组件，再恢复前端信任链路。';
+  } else if (!readyForFrontend) {
+    nextAction = '等待后端交接完成后再作为生产依据。';
+  } else if (permissionBlocked) {
+    nextAction = '先处理权限审计异常，再继续依赖该指标。';
+  } else if (observationCount > 0) {
+    nextAction = '当前可继续运行，但观察项上升时应触发人工复核。';
+  }
+
+  return {
+    availability,
+    availabilityTone,
+    tradeImpact,
+    modelImpact,
+    nextAction,
+  };
+}
+
+function formatHighLoadPermissionStatus(allowed = false, profile = 'disabled') {
+  if (allowed) {
+    return `现在能跑训练：是（策略 ${humanizeHealthComponent(profile)}）`;
+  }
+  return `现在能跑训练：否（策略 ${humanizeHealthComponent(profile)}）`;
+}
+
+function formatLatestHighLoadAuditSummary(latestAudit = {}) {
+  const status = String(latestAudit.status || latestAudit.session_status || '--');
+  const statusText = humanizeHealthStatus(status);
+  const job = String(latestAudit.job_name || latestAudit.jobName || '--');
+  const time = formatDateTime(latestAudit.finished_at || latestAudit.finishedAt || latestAudit.started_at || latestAudit.startedAt || 0);
+  if (!status || status === '--') {
+    return '暂无可用审计任务历史。';
+  }
+  return `${job} · ${statusText === '未标注' ? status : statusText} · ${time}`;
 }
 
 function buildDbCards(dbHealth) {
@@ -282,24 +422,72 @@ Page({
     pendingOfflineRecommendationCard: null,
     pendingGovernanceTodoCard: null,
     recentTraceTodoCard: null,
+    backendReadinessStatus: 'idle',
+    backendReadinessError: '',
+    backendReadinessReadyForFrontend: false,
+    backendReadinessReadyForFrontendText: 'unknown',
+    backendReadinessOverall: '--',
+    backendReadinessDisplayOverall: '--',
+    backendReadinessTone: 'neutral',
+    backendReadinessConclusionAvailability: '待确认',
+    backendReadinessConclusionAvailabilityTone: 'neutral',
+    backendReadinessTradeImpactText: '暂未评估',
+    backendReadinessModelImpactText: '暂未评估',
+    backendReadinessNextActionText: '持续观察即可',
+    backendReadinessMarketSessionStatus: '--',
+    backendReadinessBlockers: [],
+    backendReadinessObservations: [],
+    backendReadinessBlockingCount: 0,
+    backendReadinessObservationCount: 0,
+    backendReadinessPendingGovernance: 0,
+    backendReadinessPermissionOk: true,
+    backendReadinessPermissionAuditTone: 'neutral',
+    backendReadinessPermissionAuditStatus: '--',
+    backendReadinessPermissionAuditAt: '--',
+    backendReadinessPermissionAuditId: '',
+    backendReadinessHighLoadAllowed: false,
+    backendReadinessHighLoadProfile: 'disabled',
+    backendReadinessHighLoadAuditStatus: '--',
+    backendReadinessHighLoadAuditTone: 'neutral',
+    backendReadinessHighLoadAuditTime: '--',
+    backendReadinessHighLoadAuditJob: '--',
+    backendReadinessHighLoadAuditError: '',
+    backendReadinessHighLoadPermissionText: '现在能跑训练：未知',
+    backendReadinessHighLoadLatestSummaryText: '暂无可用审计任务历史。',
+    offmarketHighLoadAuditsStatus: 'idle',
+    offmarketHighLoadAuditsError: '',
+    offmarketHighLoadAuditsCount: 0,
+    offmarketHighLoadAuditsStatusRows: [],
+    offmarketHighLoadAuditsLatest: null,
+    offmarketHighLoadAuditsLatestText: '--',
+    offmarketHighLoadAuditsLatestStatus: '--',
+    offmarketHighLoadAuditsLatestTime: '--',
+    offmarketHighLoadAuditsRows: [],
   },
 
   onLoad() {
     this._unsubSystem = systemStore.subscribe(() => this.syncView());
     this._unsubLearning = learningStore.subscribe(() => this.syncView());
+    this._unsubOps = opsStore.subscribe(() => this.syncView());
     this.syncView();
-    refreshOpsDomain();
-    refreshLearning();
+    this.refreshReadinessData();
   },
 
   onShow() {
-    refreshOpsDomain();
-    refreshLearning();
+    this.refreshReadinessData();
   },
 
   onUnload() {
     this._unsubSystem && this._unsubSystem();
     this._unsubLearning && this._unsubLearning();
+    this._unsubOps && this._unsubOps();
+  },
+
+  refreshReadinessData() {
+    opsService.refreshOpsDomain && opsService.refreshOpsDomain();
+    if (typeof learningService.refreshLearning === 'function') learningService.refreshLearning();
+    if (typeof opsService.refreshBackendReadiness === 'function') opsService.refreshBackendReadiness();
+    if (typeof learningService.refreshOffmarketHighLoadAudits === 'function') learningService.refreshOffmarketHighLoadAudits();
   },
 
   syncView() {
@@ -365,6 +553,76 @@ Page({
     const sortedRecentTradeTraceItems = sortGovernanceItemsByPriority(filteredRecentTradeTraceItems);
     const recentTraceTodoCard = buildGovernanceTodoCard(sortedRecentTradeTraceItems);
     const summaryGovernanceTodo = learningSummary.parameter_template_todo || null;
+    const opsState = opsStore.getState();
+    const backendReadinessRaw = opsState.backendReadiness || {};
+    const readinessView = opsState.backendReadinessView || null;
+    const readinessStatus = String(opsState.backendReadinessStatus || 'idle');
+    const readinessError = String(opsState.backendReadinessError || '');
+    const readinessBlockingComponents = readinessView && Array.isArray(readinessView.blockingComponents)
+      ? readinessView.blockingComponents
+      : [];
+    const readinessKnownObservations = readinessView && Array.isArray(readinessView.knownObservations)
+      ? readinessView.knownObservations
+      : [];
+    const readinessGovernance = readinessView && readinessView.governance ? readinessView.governance : {};
+    const readinessModelPermissions = readinessView && readinessView.modelPermissions ? readinessView.modelPermissions : {};
+    const readinessHighLoad = readinessView && readinessView.highLoad ? readinessView.highLoad : {};
+    const readinessMarketSession = readinessView && readinessView.marketSession ? readinessView.marketSession : {};
+    const readinessBlockersSummary = readinessView && readinessView.blockersSummary ? readinessView.blockersSummary : {};
+    const readinessReadyForFrontend = readinessView ? !!readinessView.readyForFrontend : false;
+    const readinessOverall = readinessView && readinessView.overall ? readinessView.overall : '--';
+    const readinessDisplayOverall = readinessView && readinessView.displayOverall ? readinessView.displayOverall : '--';
+    const blockingRows = buildComponentRows([
+      ...(Array.isArray(backendReadinessRaw.blockers) ? backendReadinessRaw.blockers : []),
+      ...readinessBlockingComponents,
+    ]);
+    const observationRows = buildComponentRows(
+      Array.isArray(backendReadinessRaw.known_observations) ? backendReadinessRaw.known_observations : readinessKnownObservations
+    );
+    const governance = readinessGovernance;
+    const modelPermissions = readinessModelPermissions;
+    const highLoad = readinessHighLoad;
+    const marketSession = readinessMarketSession;
+    const latestPermissionAudit = modelPermissions.latestPermissionAudit || {};
+    const permissionAuditOk = !!modelPermissions.permissionOk;
+    const permissionAuditStatus = String(latestPermissionAudit.status || (permissionAuditOk ? 'ok' : 'blocked'));
+    const highLoadLatestAudit = highLoad.latestAudit || {};
+    const readinessBlockingCount = Number(
+      Array.isArray(backendReadinessRaw.blockers)
+        ? backendReadinessRaw.blockers.length
+        : readinessBlockersSummary && Number.isFinite(Number(readinessBlockersSummary.blockingCount))
+          ? Number(readinessBlockersSummary.blockingCount)
+          : blockingRows.length
+    );
+    const readinessObservationCount = Number(
+      Array.isArray(backendReadinessRaw.known_observations)
+        ? backendReadinessRaw.known_observations.length
+        : readinessBlockersSummary && Number.isFinite(Number(readinessBlockersSummary.knownObservationCount))
+          ? Number(readinessBlockersSummary.knownObservationCount)
+          : observationRows.length
+    );
+    const readinessTradingBlocked = !!(readinessView && readinessView.systemHealth && readinessView.systemHealth.trading_blocked);
+    const readinessConclusion = deriveReadinessConclusion({
+      readyForFrontend: readinessReadyForFrontend,
+      blockingCount: readinessBlockingCount,
+      observationCount: readinessObservationCount,
+      permissionOk: permissionAuditOk,
+      permissionAuditStatus: permissionAuditStatus,
+      tradingBlocked: readinessTradingBlocked,
+    });
+    const highLoadPermissionText = formatHighLoadPermissionStatus(!!highLoad.allowedNow, String(highLoad.profile || 'disabled'));
+    const highLoadLatestText = formatLatestHighLoadAuditSummary(highLoadLatestAudit);
+    const offmarketView = learning.offmarketHighLoadAuditsView || null;
+    const offmarketStatusCounts = offmarketView && offmarketView.statusCount ? offmarketView.statusCount : {};
+    const offmarketRows = buildOffmarketRows((offmarketView && offmarketView.items) || []);
+    const offmarketLatest = offmarketView ? offmarketView.latest || null : null;
+    const offmarketLatestStatus = offmarketLatest ? String(offmarketLatest.status || '--') : '--';
+    const offmarketLatestTime = offmarketLatest
+      ? formatDateTime(offmarketLatest.finishedAt || offmarketLatest.finished_at || offmarketLatest.startedAt || offmarketLatest.started_at || 0)
+      : '--';
+    const offmarketLatestText = offmarketLatest
+      ? `${offmarketLatest.job_name || offmarketLatest.jobName || '--'} · ${offmarketLatestStatus} · ${offmarketLatest.session_status || offmarketLatest.sessionStatus || '--'}`
+      : '--';
     const pendingGovernanceTodoCard = summaryGovernanceTodo
       ? {
           factorId: String(summaryGovernanceTodo.factor_id || ''),
@@ -393,6 +651,50 @@ Page({
       timeText: formatDateTime(item.ts || 0),
     }));
     this.setData({
+      backendReadinessStatus: readinessStatus,
+      backendReadinessError: readinessError,
+      backendReadinessReadyForFrontend: readinessReadyForFrontend,
+      backendReadinessConclusionAvailability: readinessConclusion.availability,
+      backendReadinessConclusionAvailabilityTone: readinessConclusion.availabilityTone,
+      backendReadinessTradeImpactText: readinessConclusion.tradeImpact,
+      backendReadinessModelImpactText: readinessConclusion.modelImpact,
+      backendReadinessNextActionText: readinessConclusion.nextAction,
+      backendReadinessReadyForFrontendText: readinessReadyForFrontend ? '可用' : (readinessView ? '不可用' : '未知'),
+      backendReadinessOverall: String(readinessOverall),
+      backendReadinessDisplayOverall: String(readinessDisplayOverall),
+      backendReadinessTone: toneFromReadinessLevel(readinessDisplayOverall && readinessDisplayOverall !== '--' ? readinessDisplayOverall : readinessOverall),
+      backendReadinessMarketSessionStatus: String(marketSession.status || marketSession.session_status || '--'),
+      backendReadinessBlockers: blockingRows,
+      backendReadinessObservations: observationRows,
+      backendReadinessBlockingCount: readinessBlockingCount,
+      backendReadinessObservationCount: readinessObservationCount,
+      backendReadinessPendingGovernance: Number(governance.pendingReviewCount || 0),
+      backendReadinessPermissionOk: permissionAuditOk,
+      backendReadinessPermissionAuditTone: permissionAuditOk ? 'positive' : 'negative',
+      backendReadinessPermissionAuditStatus: permissionAuditStatus || 'pending',
+      backendReadinessPermissionAuditAt: formatDateTime(latestPermissionAudit.created_at || latestPermissionAudit.createdAt || latestPermissionAudit.created_at_ms || 0),
+      backendReadinessPermissionAuditId: String(latestPermissionAudit.audit_id || latestPermissionAudit.permissionAuditId || ''),
+      backendReadinessHighLoadAllowed: !!highLoad.allowedNow,
+      backendReadinessHighLoadProfile: String(highLoad.profile || '--'),
+      backendReadinessHighLoadAuditStatus: String(highLoadLatestAudit.status || '--'),
+      backendReadinessHighLoadAuditTone: toneFromReadinessLevel(highLoadLatestAudit.status || 'unknown'),
+      backendReadinessHighLoadAuditTime: formatDateTime(highLoadLatestAudit.finishedAt || highLoadLatestAudit.finished_at || highLoadLatestAudit.startedAt || highLoadLatestAudit.started_at || 0),
+      backendReadinessHighLoadAuditJob: String(highLoadLatestAudit.job_name || highLoadLatestAudit.jobName || '--'),
+      backendReadinessHighLoadAuditError: String(highLoadLatestAudit.error || ''),
+      backendReadinessHighLoadPermissionText: highLoadPermissionText,
+      backendReadinessHighLoadLatestSummaryText: highLoadLatestText,
+      offmarketHighLoadAuditsStatus: String(learning.offmarketHighLoadAuditsStatus || 'idle'),
+      offmarketHighLoadAuditsError: String(learning.offmarketHighLoadAuditsError || ''),
+      offmarketHighLoadAuditsCount: Number(offmarketView ? offmarketView.count || offmarketRows.length : 0),
+    offmarketHighLoadAuditsStatusRows: Object.keys(offmarketStatusCounts).map((status) => ({
+        label: `${status}:${offmarketStatusCounts[status]}`,
+        tone: toneFromReadinessLevel(status),
+      })),
+      offmarketHighLoadAuditsLatest: offmarketView ? offmarketView.latest || null : null,
+      offmarketHighLoadAuditsLatestText: offmarketLatestText,
+      offmarketHighLoadAuditsLatestStatus: offmarketLatestStatus,
+      offmarketHighLoadAuditsLatestTime: offmarketLatestTime,
+      offmarketHighLoadAuditsRows: offmarketRows,
       scheduler,
       evolution: state.evolution
         ? {
@@ -451,10 +753,6 @@ Page({
     });
   },
 
-  async onRefresh() {
-    await refreshOpsDomain();
-  },
-
   onTracePositionInput(e) {
     this.setData({ tracePositionId: e.detail.value || '' });
   },
@@ -474,19 +772,19 @@ Page({
       });
       return;
     }
-    openTradeTracePage({ positionId, decisionId });
+    opsService.openTradeTracePage({ positionId, decisionId });
   },
 
   replayRecentTrace(e) {
     const positionId = String((e.currentTarget.dataset && e.currentTarget.dataset.positionId) || '').trim();
     const decisionId = String((e.currentTarget.dataset && e.currentTarget.dataset.decisionId) || '').trim();
-    openTradeTracePage({ positionId, decisionId });
+    opsService.openTradeTracePage({ positionId, decisionId });
   },
 
   openRecentTradeTrace(e) {
     const positionId = String((e.currentTarget.dataset && e.currentTarget.dataset.positionId) || '').trim();
     const decisionId = String((e.currentTarget.dataset && e.currentTarget.dataset.decisionId) || '').trim();
-    openTradeTracePage({ positionId, decisionId });
+    opsService.openTradeTracePage({ positionId, decisionId });
   },
 
   openRecentGovernance(e) {
@@ -494,7 +792,7 @@ Page({
     const recommendationId = String((e.currentTarget.dataset && e.currentTarget.dataset.recommendationId) || '').trim();
     const factorId = String((e.currentTarget.dataset && e.currentTarget.dataset.factorId) || '').trim();
     if (candidateId) {
-      openLearningGovernancePage({
+      learningService.openLearningGovernancePage({
         type: 'offline_candidate',
         candidateId,
         factorId,
@@ -502,7 +800,7 @@ Page({
       return;
     }
     if (recommendationId) {
-      openLearningGovernancePage({
+      learningService.openLearningGovernancePage({
         type: 'template_recommendation',
         recommendationId,
         factorId,
@@ -513,7 +811,7 @@ Page({
   openPendingCandidate() {
     const item = this.data.pendingCandidateCard || null;
     if (!item || !item.candidateId) return;
-    openLearningGovernancePage({
+    learningService.openLearningGovernancePage({
       type: 'offline_candidate',
       candidateId: item.candidateId,
       factorId: item.factorId,
@@ -523,7 +821,7 @@ Page({
   openPendingRecommendation() {
     const item = this.data.pendingOnlineRecommendationCard || null;
     if (!item || !item.recommendationId) return;
-    openLearningGovernancePage({
+    learningService.openLearningGovernancePage({
       type: 'template_recommendation',
       recommendationId: item.recommendationId,
       factorId: item.factorId,
@@ -533,7 +831,7 @@ Page({
   openOfflineRecommendation() {
     const item = this.data.pendingOfflineRecommendationCard || null;
     if (!item || !item.recommendationId) return;
-    openLearningGovernancePage({
+    learningService.openLearningGovernancePage({
       type: 'template_recommendation',
       recommendationId: item.recommendationId,
       factorId: item.factorId,
@@ -547,5 +845,15 @@ Page({
 
   onRecentTraceSearchInput(e) {
     this.setData({ recentTraceSearch: e.detail.value || '' }, () => this.syncView());
+  },
+
+  async onRefresh() {
+    const tasks = [
+      opsService.refreshOpsDomain && opsService.refreshOpsDomain(),
+      opsService.refreshBackendReadiness && opsService.refreshBackendReadiness({ force: true }),
+      learningService.refreshLearning && learningService.refreshLearning(),
+      learningService.refreshOffmarketHighLoadAudits && learningService.refreshOffmarketHighLoadAudits({ force: true }),
+    ].filter(Boolean);
+    await Promise.all(tasks);
   },
 });

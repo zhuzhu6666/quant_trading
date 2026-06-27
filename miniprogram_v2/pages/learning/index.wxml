@@ -32,6 +32,140 @@
       </view>
     </view>
 
+    <section-card title="元模型旁路评估" subtitle="判断系统现在该收缩、观察还是恢复；只提供建议，不直接交易">
+      <view wx:if="{{metaLightgbmHasReport}}" class="status-banner status-banner-{{metaLightgbmDeploymentTone}}" style="margin-bottom: 16rpx;">
+        <view class="row-between">
+          <view class="small muted">模型是否在工作（旁路记录/样本）</view>
+          <status-pill label="{{metaLightgbmWorkingText}}" tone="{{metaLightgbmWorkingTone}}" />
+        </view>
+        <view class="row-between" style="margin-top: 10rpx;">
+          <view class="small muted">当前模式</view>
+          <status-pill label="{{metaLightgbmDeploymentModeText}}" tone="{{metaLightgbmDeploymentTone}}" />
+        </view>
+        <view class="row-between" style="margin-top: 10rpx;">
+          <view class="small muted">是否能上线/执行</view>
+          <status-pill label="{{metaLightgbmTradingText}}" tone="{{metaLightgbmTradingTone}}" />
+        </view>
+        <view class="row-between" style="margin-top: 10rpx;">
+          <view class="small muted">用户下一步该做什么</view>
+          <status-pill label="{{metaLightgbmNextStepText}}" tone="{{metaLightgbmNextStepTone}}" />
+        </view>
+        <view wx:if="{{metaLightgbmDeploymentSummaryText}}" class="section-note" style="margin-top: 10rpx;">{{metaLightgbmDeploymentSummaryText}}</view>
+        <view wx:if="{{metaLightgbmNextStepDetailText}}" class="section-note" style="margin-top: 8rpx;">{{metaLightgbmNextStepDetailText}}</view>
+        <view wx:if="{{metaLightgbmExecutionText}}" class="section-note" style="margin-top: 8rpx;">执行说明：{{metaLightgbmExecutionText}}。</view>
+        <view wx:if="{{metaLightgbmPromotionGateText && metaLightgbmPromotionGateText !== '--'}}" class="section-note" style="margin-top: 10rpx;">
+          上线门控：{{metaLightgbmPromotionGateText}}
+        </view>
+      </view>
+
+      <view wx:if="{{!metaLightgbmHasReport}}" class="empty">当前接口暂未返回 meta LightGBM shadow 报告。</view>
+
+      <view wx:if="{{metaLightgbmHasReport}}" class="grid-3" style="margin-bottom: 16rpx;">
+        <view class="split-card stack-12">
+          <view class="small muted">命中率</view>
+          <view class="value-md">{{metaLightgbmAccuracyText}}</view>
+          <view class="small muted">最近预测落袋样本上的总体命中率；仅做参考。</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">已评估样本</view>
+          <view class="value-md">{{metaLightgbmEvaluatedCountText}}</view>
+          <view class="small muted">模型累计做过判断并有后验反馈的样本。</view>
+        </view>
+        <view class="split-card stack-12">
+          <view class="small muted">旁路记录</view>
+          <view class="value-md">{{metaLightgbmAuditCountText}}</view>
+          <view class="small muted">系统发出的旁路动作落地为建议的次数。</view>
+        </view>
+      </view>
+
+      <view wx:if="{{metaLightgbmHasReport}}" class="btn-row-compact" style="margin-top: 4rpx;">
+        <button class="btn-secondary" data-panel="meta" bindtap="openLearningPanel">查看模型自检与快照</button>
+      </view>
+
+      <view hidden="{{true}}">
+      <view wx:if="{{metaPostureDistributionRows.length}}" class="soft-panel">
+        <view class="small muted" style="margin-bottom: 10rpx;">模型最近怎么建议系统行动</view>
+        <view class="kv-grid">
+          <view wx:for="{{metaPostureDistributionRows}}" wx:key="key" class="kv-item">
+            <view class="kv-label">{{item.label}}</view>
+            <view class="kv-value">{{item.valueText}}</view>
+            <view class="small muted" style="margin-top: 6rpx;">{{item.explanationText}}</view>
+          </view>
+        </view>
+      </view>
+
+      <view wx:if="{{metaConfusionMatrixRows.length}}" class="soft-panel" style="margin-top: 12rpx;">
+        <view class="small muted" style="margin-bottom: 10rpx;">模型自检证据（预测 vs 后验标签）</view>
+        <view class="section-note" style="margin-bottom: 10rpx;">此处是模型自检交叉统计，用于看模型判断和真实结果是否匹配，不直接决定交易。</view>
+        <view class="kv-grid">
+          <view wx:for="{{metaConfusionMatrixRows}}" wx:key="key" class="kv-item">
+            <view class="kv-label">{{item.label}}</view>
+            <view class="kv-value">{{item.valueText}}</view>
+          </view>
+        </view>
+      </view>
+
+      <view wx:if="{{metaRuleComparisonRows.length || metaRuleComparisonRawText}}" class="soft-panel diagnostic-panel">
+        <view class="small muted" style="margin-bottom: 8rpx;">规则交叉比对</view>
+        <view class="section-note diagnostic-intro">这里比较“原来的规则判断”和“元模型判断”是否一致。短指标直接读；不一致样本等长明细放在下方日志框里。</view>
+        <view wx:if="{{metaRuleComparisonRows.length}}" class="kv-grid diagnostic-grid">
+          <view wx:for="{{metaRuleComparisonRows}}" wx:key="key" class="kv-item">
+            <view class="kv-label">{{item.label}}</view>
+            <view class="kv-value">{{item.valueText}}</view>
+          </view>
+        </view>
+        <view wx:if="{{metaRuleComparisonRawText}}" class="diagnostic-raw">
+          <view class="row-between diagnostic-raw-head">
+            <view class="small muted">原始详情</view>
+            <status-pill label="可滚动" tone="neutral" />
+          </view>
+          <scroll-view scroll-y="true" class="embedded-log">
+            <view class="embedded-log-inner">
+              <text class="embedded-log-text" selectable="true">{{metaRuleComparisonRawText}}</text>
+            </view>
+          </scroll-view>
+        </view>
+      </view>
+
+      <view wx:if="{{metaArtifactSummaryRows.length || metaArtifactSummaryRawText}}" class="soft-panel diagnostic-panel">
+        <view class="small muted" style="margin-bottom: 8rpx;">证据材料摘要</view>
+        <view class="section-note diagnostic-intro">这里是模型评估时引用的快照、报告和证据材料。页面只摘要关键信息，完整结构放进日志框。</view>
+        <view wx:if="{{metaArtifactSummaryRows.length}}" class="kv-grid diagnostic-grid">
+          <view wx:for="{{metaArtifactSummaryRows}}" wx:key="key" class="kv-item">
+            <view class="kv-label">{{item.label}}</view>
+            <view class="kv-value">{{item.valueText}}</view>
+          </view>
+        </view>
+        <view wx:if="{{metaArtifactSummaryRawText}}" class="diagnostic-raw">
+          <view class="row-between diagnostic-raw-head">
+            <view class="small muted">原始详情</view>
+            <status-pill label="可滚动" tone="neutral" />
+          </view>
+          <scroll-view scroll-y="true" class="embedded-log">
+            <view class="embedded-log-inner">
+              <text class="embedded-log-text" selectable="true">{{metaArtifactSummaryRawText}}</text>
+            </view>
+          </scroll-view>
+        </view>
+      </view>
+
+      <view class="small muted" style="margin-top: 16rpx; margin-bottom: 10rpx; font-weight: 700;">最近快照</view>
+      <view wx:if="{{metaLightgbmSnapshots.length}}">
+        <view class="timeline" style="margin-top: 10rpx;">
+          <view wx:for="{{metaLightgbmSnapshots}}" wx:key="id" class="timeline-item">
+            <view class="row-between">
+              <view class="list-title">{{item.title}}</view>
+              <status-pill label="{{item.createdAtText}}" tone="{{item.tone}}" />
+            </view>
+            <view class="small muted">命中率 {{item.accuracyText}} · 已评估样本 {{item.evaluatedCountText}} · 旁路记录 {{item.auditCountText}}</view>
+            <view class="section-note" style="margin-top: 8rpx;">{{item.summaryText}}</view>
+          </view>
+        </view>
+      </view>
+      <view wx:if="{{!metaLightgbmSnapshots.length}}" class="empty">暂无快照记录。</view>
+      </view>
+    </section-card>
+
     <view wx:if="{{summaryStatus === 'error'}}" class="status-banner status-banner-warning">
       <view class="small muted">学习摘要状态</view>
       <view class="section-note">学习摘要接口当前拉取失败或超时，页内“待审/已批/模板候选”等摘要数字可能不是实时值。</view>
@@ -152,7 +286,7 @@
             {{suggestionTab === 'approved' ? '已批准建议' : suggestionTab === 'rolled_back' ? '已回滚建议' : '待审核建议'}}
           </view>
         </view>
-        <view wx:for="{{visibleSuggestions}}" wx:key="suggestion_id" class="list-item tap-card" data-id="{{item.suggestion_id}}" bindtap="openSuggestionDetail">
+        <view wx:for="{{previewSuggestions}}" wx:key="suggestion_id" class="list-item tap-card" data-id="{{item.suggestion_id}}" bindtap="openSuggestionDetail">
           <view class="row-between">
             <view class="list-title">{{item.scopeLabel}}</view>
             <status-pill label="{{item.status}}" tone="{{item.tone}}" />
@@ -166,12 +300,17 @@
             <button class="btn-secondary" size="mini" data-id="{{item.suggestion_id}}" bindtap="rejectSuggestion">拒绝</button>
           </view>
         </view>
+        <button wx:if="{{visibleSuggestions.length > previewSuggestions.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="suggestions" bindtap="openLearningPanel">查看全部 {{visibleSuggestions.length}} 条</button>
       </view>
 
       <view wx:if="{{!suggestions.length}}" class="empty">还没有策略建议</view>
     </section-card>
 
-    <section-card wx:if="{{selectedSuggestion}}" title="建议详情" subtitle="证据、说明与治理状态">
+    <view wx:if="{{selectedSuggestion}}" class="learning-modal learning-detail-modal" catchtouchmove="noop">
+      <view class="learning-modal-mask" catchtap="closeSuggestionDetail"></view>
+      <scroll-view scroll-y="true" class="learning-modal-sheet" catchtap="noop">
+    <section-card title="建议详情" subtitle="证据、说明与治理状态">
+      <button slot="extra" class="btn-secondary modal-close" bindtap="closeSuggestionDetail">关闭</button>
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedSuggestion.scopeLabel}}</view>
@@ -228,11 +367,13 @@
         <button class="btn-secondary" bindtap="closeSuggestionDetail">收起详情</button>
       </view>
     </section-card>
+      </scroll-view>
+    </view>
 
     <section-card title="最近复盘" subtitle="平仓后系统对结果的解释">
       <view wx:if="{{reviews.length}}">
         <view class="timeline">
-        <view wx:for="{{reviews}}" wx:key="review_id" class="timeline-item tap-card" data-id="{{item.review_id}}" bindtap="openReviewDetail">
+        <view wx:for="{{previewReviews}}" wx:key="review_id" class="timeline-item tap-card" data-id="{{item.review_id}}" bindtap="openReviewDetail">
           <view class="row-between">
             <view class="list-title">{{item.position_id}}</view>
             <status-pill label="{{item.outcomeLabel}}" tone="{{item.tone}}" />
@@ -241,11 +382,16 @@
           <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.meaningText}}</view>
         </view>
         </view>
+        <button wx:if="{{reviews.length > previewReviews.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="reviews" bindtap="openLearningPanel">查看全部 {{reviews.length}} 条</button>
       </view>
       <view wx:else class="empty">还没有复盘记录</view>
     </section-card>
 
-    <section-card wx:if="{{selectedReview}}" title="复盘详情" subtitle="这笔交易为什么赚，或者为什么亏">
+    <view wx:if="{{selectedReview}}" class="learning-modal learning-detail-modal" catchtouchmove="noop">
+      <view class="learning-modal-mask" catchtap="closeReviewDetail"></view>
+      <scroll-view scroll-y="true" class="learning-modal-sheet" catchtap="noop">
+    <section-card title="复盘详情" subtitle="这笔交易为什么赚，或者为什么亏">
+      <button slot="extra" class="btn-secondary modal-close" bindtap="closeReviewDetail">关闭</button>
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedReview.position_id}}</view>
@@ -303,11 +449,13 @@
         <button class="btn-secondary" bindtap="closeReviewDetail">收起详情</button>
       </view>
     </section-card>
+      </scroll-view>
+    </view>
 
     <section-card title="应用记录" subtitle="哪些建议真的影响了权重">
       <view wx:if="{{applications.length}}">
         <view class="timeline">
-        <view wx:for="{{applications}}" wx:key="application_id" class="timeline-item tap-card" data-id="{{item.application_id}}" bindtap="openApplicationDetail">
+        <view wx:for="{{previewApplications}}" wx:key="application_id" class="timeline-item tap-card" data-id="{{item.application_id}}" bindtap="openApplicationDetail">
           <view class="row-between">
             <view class="list-title">{{item.scopeLabel}}</view>
             <status-pill label="{{item.effectLabel}}" tone="{{item.effectTone}}" />
@@ -317,6 +465,7 @@
           <view class="section-note" style="margin-top: 10rpx;">{{item.effectText}}</view>
         </view>
         </view>
+        <button wx:if="{{applications.length > previewApplications.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="applications" bindtap="openLearningPanel">查看全部 {{applications.length}} 条</button>
       </view>
       <view wx:else class="empty">还没有权重应用记录</view>
     </section-card>
@@ -324,7 +473,7 @@
     <section-card title="参数模板候选" subtitle="离线验证后的待审、已发布与已回滚模板">
       <view wx:if="{{offlineCandidates.length}}">
         <view class="timeline">
-        <view wx:for="{{offlineCandidates}}" wx:key="candidate_id" class="timeline-item tap-card" data-id="{{item.candidate_id}}" bindtap="openOfflineCandidateDetail">
+        <view wx:for="{{previewOfflineCandidates}}" wx:key="candidate_id" class="timeline-item tap-card" data-id="{{item.candidate_id}}" bindtap="openOfflineCandidateDetail">
           <view class="row-between">
             <view class="list-title">{{item.factorLabel}}</view>
             <status-pill label="{{item.statusLabel}}" tone="{{item.statusTone}}" />
@@ -340,6 +489,7 @@
           <view class="section-note" style="margin-top: 10rpx;">{{item.stageText}}</view>
         </view>
         </view>
+        <button wx:if="{{offlineCandidates.length > previewOfflineCandidates.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="offlineCandidates" bindtap="openLearningPanel">查看全部 {{offlineCandidates.length}} 条</button>
       </view>
       <view wx:else class="empty">{{parameterTemplateEmptyStates.offline_candidates}}</view>
     </section-card>
@@ -347,7 +497,7 @@
     <section-card title="参数治理轨迹" subtitle="推荐、候选、审批和发布的生命周期事件">
       <view wx:if="{{lifecycleEvents.length}}">
         <view class="timeline">
-        <view wx:for="{{lifecycleEvents}}" wx:key="id" class="timeline-item tap-card" data-id="{{item.id}}" bindtap="openLifecycleDetail">
+        <view wx:for="{{previewLifecycleEvents}}" wx:key="id" class="timeline-item tap-card" data-id="{{item.id}}" bindtap="openLifecycleDetail">
           <view class="row-between">
             <view class="list-title">{{item.factorLabel}}</view>
             <status-pill label="{{item.eventLabel}}" tone="{{item.eventTone}}" />
@@ -359,6 +509,7 @@
           <view class="section-note" style="margin-top: 10rpx;">{{item.reasonText}}</view>
         </view>
         </view>
+        <button wx:if="{{lifecycleEvents.length > previewLifecycleEvents.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="lifecycle" bindtap="openLearningPanel">查看全部 {{lifecycleEvents.length}} 条</button>
       </view>
       <view wx:else class="empty">{{parameterTemplateEmptyStates.lifecycle}}</view>
     </section-card>
@@ -366,7 +517,7 @@
     <section-card title="参数模板建议" subtitle="从参数可疑证据直接长出的推荐项">
       <view wx:if="{{templateRecommendations.length}}">
         <view class="timeline">
-        <view wx:for="{{templateRecommendations}}" wx:key="recommendation_id" class="timeline-item tap-card" data-id="{{item.recommendation_id}}" bindtap="openTemplateRecommendationDetail">
+        <view wx:for="{{previewTemplateRecommendations}}" wx:key="recommendation_id" class="timeline-item tap-card" data-id="{{item.recommendation_id}}" bindtap="openTemplateRecommendationDetail">
           <view class="row-between">
             <view class="list-title">{{item.factorLabel}}</view>
             <status-pill label="{{item.statusLabel}}" tone="{{item.statusTone}}" />
@@ -381,11 +532,16 @@
           <view class="section-note" style="margin-top: 10rpx;">{{item.actionText}}</view>
         </view>
         </view>
+        <button wx:if="{{templateRecommendations.length > previewTemplateRecommendations.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="recommendations" bindtap="openLearningPanel">查看全部 {{templateRecommendations.length}} 条</button>
       </view>
       <view wx:else class="empty">{{parameterTemplateEmptyStates.recommendations}}</view>
     </section-card>
 
-    <section-card wx:if="{{selectedLifecycleEvent}}" title="治理轨迹详情" subtitle="这条生命周期事件如何沿着参数治理链推进">
+    <view wx:if="{{selectedLifecycleEvent}}" class="learning-modal learning-detail-modal" catchtouchmove="noop">
+      <view class="learning-modal-mask" catchtap="closeLifecycleDetail"></view>
+      <scroll-view scroll-y="true" class="learning-modal-sheet" catchtap="noop">
+    <section-card title="治理轨迹详情" subtitle="这条生命周期事件如何沿着参数治理链推进">
+      <button slot="extra" class="btn-secondary modal-close" bindtap="closeLifecycleDetail">关闭</button>
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedLifecycleEvent.factorLabel}}</view>
@@ -418,8 +574,14 @@
         <button class="btn-secondary" bindtap="closeLifecycleDetail">收起详情</button>
       </view>
     </section-card>
+      </scroll-view>
+    </view>
 
-    <section-card wx:if="{{selectedTemplateRecommendation}}" title="模板建议详情" subtitle="参数可疑证据如何进入模板治理链">
+    <view wx:if="{{selectedTemplateRecommendation}}" class="learning-modal learning-detail-modal" catchtouchmove="noop">
+      <view class="learning-modal-mask" catchtap="closeTemplateRecommendationDetail"></view>
+      <scroll-view scroll-y="true" class="learning-modal-sheet" catchtap="noop">
+    <section-card title="模板建议详情" subtitle="参数可疑证据如何进入模板治理链">
+      <button slot="extra" class="btn-secondary modal-close" bindtap="closeTemplateRecommendationDetail">关闭</button>
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedTemplateRecommendation.factorLabel}}</view>
@@ -469,8 +631,14 @@
         <button class="btn-secondary" bindtap="closeTemplateRecommendationDetail">收起详情</button>
       </view>
     </section-card>
+      </scroll-view>
+    </view>
 
-    <section-card wx:if="{{selectedApplication}}" title="{{selectedApplication.isObservationOnly ? '观察详情' : '应用详情'}}" subtitle="{{selectedApplication.isObservationOnly ? '这条记录为什么还在观察中' : '建议是怎么真正影响权重的'}}">
+    <view wx:if="{{selectedApplication}}" class="learning-modal learning-detail-modal" catchtouchmove="noop">
+      <view class="learning-modal-mask" catchtap="closeApplicationDetail"></view>
+      <scroll-view scroll-y="true" class="learning-modal-sheet" catchtap="noop">
+    <section-card title="{{selectedApplication.isObservationOnly ? '观察详情' : '应用详情'}}" subtitle="{{selectedApplication.isObservationOnly ? '这条记录为什么还在观察中' : '建议是怎么真正影响权重的'}}">
+      <button slot="extra" class="btn-secondary modal-close" bindtap="closeApplicationDetail">关闭</button>
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedApplication.scopeLabel}}</view>
@@ -523,8 +691,14 @@
         <button class="btn-secondary" bindtap="closeApplicationDetail">收起详情</button>
       </view>
     </section-card>
+      </scroll-view>
+    </view>
 
-    <section-card wx:if="{{selectedOfflineCandidate}}" title="模板候选详情" subtitle="离线证据、审批结论与发布状态">
+    <view wx:if="{{selectedOfflineCandidate}}" class="learning-modal learning-detail-modal" catchtouchmove="noop">
+      <view class="learning-modal-mask" catchtap="closeOfflineCandidateDetail"></view>
+      <scroll-view scroll-y="true" class="learning-modal-sheet" catchtap="noop">
+    <section-card title="模板候选详情" subtitle="离线证据、审批结论与发布状态">
+      <button slot="extra" class="btn-secondary modal-close" bindtap="closeOfflineCandidateDetail">关闭</button>
       <view class="detail-card stack-16">
         <view class="row-between">
           <view class="list-title">{{selectedOfflineCandidate.factorLabel}}</view>
@@ -587,6 +761,192 @@
         <button class="btn-secondary" bindtap="closeOfflineCandidateDetail">收起详情</button>
       </view>
     </section-card>
+      </scroll-view>
+    </view>
+
+    <view wx:if="{{learningPanel}}" class="learning-modal" catchtouchmove="noop">
+      <view class="learning-modal-mask" catchtap="closeLearningPanel"></view>
+      <scroll-view scroll-y="true" class="learning-modal-sheet" catchtap="noop">
+        <view class="learning-modal-card">
+          <view class="row-between learning-modal-head">
+            <view class="learning-modal-title">
+              <view class="card-title">{{learningPanelTitle}}</view>
+              <view class="card-subtitle">{{learningPanelSubtitle}}</view>
+            </view>
+            <button class="btn-secondary modal-close" bindtap="closeLearningPanel">关闭</button>
+          </view>
+
+          <block wx:if="{{learningPanel === 'meta'}}">
+            <view wx:if="{{metaPostureDistributionRows.length}}" class="soft-panel">
+              <view class="small muted" style="margin-bottom: 10rpx;">模型最近怎么建议系统行动</view>
+              <view class="kv-grid">
+                <view wx:for="{{metaPostureDistributionRows}}" wx:key="key" class="kv-item">
+                  <view class="kv-label">{{item.label}}</view>
+                  <view class="kv-value">{{item.valueText}}</view>
+                  <view class="small muted" style="margin-top: 6rpx;">{{item.explanationText}}</view>
+                </view>
+              </view>
+            </view>
+            <view wx:if="{{metaConfusionMatrixRows.length}}" class="soft-panel" style="margin-top: 12rpx;">
+              <view class="small muted" style="margin-bottom: 10rpx;">模型自检证据（预测 vs 后验标签）</view>
+              <view class="section-note" style="margin-bottom: 10rpx;">此处是模型自检交叉统计，用于看模型判断和真实结果是否匹配，不直接决定交易。</view>
+              <view class="kv-grid">
+                <view wx:for="{{metaConfusionMatrixRows}}" wx:key="key" class="kv-item">
+                  <view class="kv-label">{{item.label}}</view>
+                  <view class="kv-value">{{item.valueText}}</view>
+                </view>
+              </view>
+            </view>
+            <view wx:if="{{metaRuleComparisonRows.length || metaRuleComparisonRawText}}" class="soft-panel diagnostic-panel">
+              <view class="small muted" style="margin-bottom: 8rpx;">规则交叉比对</view>
+              <view class="section-note diagnostic-intro">这里比较“原来的规则判断”和“元模型判断”是否一致。短指标直接读；不一致样本等长明细放在下方日志框里。</view>
+              <view wx:if="{{metaRuleComparisonRows.length}}" class="kv-grid diagnostic-grid">
+                <view wx:for="{{metaRuleComparisonRows}}" wx:key="key" class="kv-item">
+                  <view class="kv-label">{{item.label}}</view>
+                  <view class="kv-value">{{item.valueText}}</view>
+                </view>
+              </view>
+              <view wx:if="{{metaRuleComparisonRawText}}" class="diagnostic-raw">
+                <view class="row-between diagnostic-raw-head">
+                  <view class="small muted">原始详情</view>
+                  <status-pill label="可滚动" tone="neutral" />
+                </view>
+                <scroll-view scroll-y="true" class="embedded-log">
+                  <view class="embedded-log-inner">
+                    <text class="embedded-log-text" selectable="true">{{metaRuleComparisonRawText}}</text>
+                  </view>
+                </scroll-view>
+              </view>
+            </view>
+            <view wx:if="{{metaArtifactSummaryRows.length || metaArtifactSummaryRawText}}" class="soft-panel diagnostic-panel">
+              <view class="small muted" style="margin-bottom: 8rpx;">证据材料摘要</view>
+              <view class="section-note diagnostic-intro">这里是模型评估时引用的快照、报告和证据材料。页面只摘要关键信息，完整结构放进日志框。</view>
+              <view wx:if="{{metaArtifactSummaryRows.length}}" class="kv-grid diagnostic-grid">
+                <view wx:for="{{metaArtifactSummaryRows}}" wx:key="key" class="kv-item">
+                  <view class="kv-label">{{item.label}}</view>
+                  <view class="kv-value">{{item.valueText}}</view>
+                </view>
+              </view>
+              <view wx:if="{{metaArtifactSummaryRawText}}" class="diagnostic-raw">
+                <view class="row-between diagnostic-raw-head">
+                  <view class="small muted">原始详情</view>
+                  <status-pill label="可滚动" tone="neutral" />
+                </view>
+                <scroll-view scroll-y="true" class="embedded-log">
+                  <view class="embedded-log-inner">
+                    <text class="embedded-log-text" selectable="true">{{metaArtifactSummaryRawText}}</text>
+                  </view>
+                </scroll-view>
+              </view>
+            </view>
+            <view class="small muted" style="margin-top: 16rpx; margin-bottom: 10rpx; font-weight: 700;">最近快照</view>
+            <view wx:if="{{metaLightgbmSnapshots.length}}" class="timeline">
+              <view wx:for="{{metaLightgbmSnapshots}}" wx:key="id" class="timeline-item">
+                <view class="row-between">
+                  <view class="list-title">{{item.title}}</view>
+                  <status-pill label="{{item.createdAtText}}" tone="{{item.tone}}" />
+                </view>
+                <view class="small muted">命中率 {{item.accuracyText}} · 已评估样本 {{item.evaluatedCountText}} · 旁路记录 {{item.auditCountText}}</view>
+                <view class="section-note" style="margin-top: 8rpx;">{{item.summaryText}}</view>
+              </view>
+            </view>
+            <view wx:if="{{!metaLightgbmSnapshots.length}}" class="empty">暂无快照记录。</view>
+          </block>
+
+          <block wx:elif="{{learningPanel === 'suggestions'}}">
+            <view class="segmented" style="margin-bottom: 14rpx;">
+              <view class="segmented-item {{suggestionTab === 'proposed' ? 'segmented-item-active' : ''}}" data-tab="proposed" bindtap="switchSuggestionTab">待审 {{proposedSuggestions.length}}</view>
+              <view class="segmented-item {{suggestionTab === 'approved' ? 'segmented-item-active' : ''}}" data-tab="approved" bindtap="switchSuggestionTab">已批 {{approvedSuggestions.length}}</view>
+              <view class="segmented-item {{suggestionTab === 'rolled_back' ? 'segmented-item-active' : ''}}" data-tab="rolled_back" bindtap="switchSuggestionTab">回滚 {{rolledBackSuggestions.length}}</view>
+            </view>
+            <view wx:if="{{visibleSuggestions.length}}" class="timeline">
+              <view wx:for="{{visibleSuggestions}}" wx:key="suggestion_id" class="timeline-item tap-card" data-id="{{item.suggestion_id}}" bindtap="openSuggestionDetail">
+                <view class="row-between">
+                  <view class="list-title">{{item.scopeLabel}}</view>
+                  <status-pill label="{{item.status}}" tone="{{item.tone}}" />
+                </view>
+                <view class="small muted">{{item.actionLabel}} · 置信度 {{item.confidenceText}} · {{item.createdText}}</view>
+                <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.reasonText}}</view>
+              </view>
+            </view>
+            <view wx:if="{{!visibleSuggestions.length}}" class="empty">当前分段没有建议。</view>
+          </block>
+
+          <block wx:elif="{{learningPanel === 'reviews'}}">
+            <view wx:if="{{reviews.length}}" class="timeline">
+              <view wx:for="{{reviews}}" wx:key="review_id" class="timeline-item tap-card" data-id="{{item.review_id}}" bindtap="openReviewDetail">
+                <view class="row-between">
+                  <view class="list-title">{{item.position_id}}</view>
+                  <status-pill label="{{item.outcomeLabel}}" tone="{{item.tone}}" />
+                </view>
+                <view class="small muted">{{item.createdText}} · pnl {{item.pnl}}</view>
+                <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.meaningText}}</view>
+              </view>
+            </view>
+            <view wx:if="{{!reviews.length}}" class="empty">还没有复盘记录。</view>
+          </block>
+
+          <block wx:elif="{{learningPanel === 'applications'}}">
+            <view wx:if="{{applications.length}}" class="timeline">
+              <view wx:for="{{applications}}" wx:key="application_id" class="timeline-item tap-card" data-id="{{item.application_id}}" bindtap="openApplicationDetail">
+                <view class="row-between">
+                  <view class="list-title">{{item.scopeLabel}}</view>
+                  <status-pill label="{{item.effectLabel}}" tone="{{item.effectTone}}" />
+                </view>
+                <view class="small muted">{{item.actionLabel}} · {{item.createdText}}</view>
+                <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.effectSummary}}</view>
+              </view>
+            </view>
+            <view wx:if="{{!applications.length}}" class="empty">还没有权重应用记录。</view>
+          </block>
+
+          <block wx:elif="{{learningPanel === 'offlineCandidates'}}">
+            <view wx:if="{{offlineCandidates.length}}" class="timeline">
+              <view wx:for="{{offlineCandidates}}" wx:key="candidate_id" class="timeline-item tap-card" data-id="{{item.candidate_id}}" bindtap="openOfflineCandidateDetail">
+                <view class="row-between">
+                  <view class="list-title">{{item.factorLabel}}</view>
+                  <status-pill label="{{item.statusLabel}}" tone="{{item.statusTone}}" />
+                </view>
+                <view class="small muted">{{item.templateLabel}} · {{item.createdText}}</view>
+                <view wx:if="{{item.governancePriorityLabel}}" class="row-wrap" style="margin-top: 10rpx;">
+                  <view class="tag">{{item.governancePriorityLabel}}</view>
+                </view>
+                <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.evidenceText}}</view>
+              </view>
+            </view>
+            <view wx:if="{{!offlineCandidates.length}}" class="empty">{{parameterTemplateEmptyStates.offline_candidates}}</view>
+          </block>
+
+          <block wx:elif="{{learningPanel === 'lifecycle'}}">
+            <view wx:if="{{lifecycleEvents.length}}" class="timeline">
+              <view wx:for="{{lifecycleEvents}}" wx:key="id" class="timeline-item tap-card" data-id="{{item.id}}" bindtap="openLifecycleDetail">
+                <view class="row-between">
+                  <view class="list-title">{{item.factorLabel}}</view>
+                  <status-pill label="{{item.eventLabel}}" tone="{{item.eventTone}}" />
+                </view>
+                <view class="small muted">{{item.createdText}}</view>
+                <view class="section-note" style="margin-top: 10rpx;">下一步：{{item.nextStepLabel}}</view>
+              </view>
+            </view>
+            <view wx:if="{{!lifecycleEvents.length}}" class="empty">{{parameterTemplateEmptyStates.lifecycle}}</view>
+          </block>
+
+          <block wx:elif="{{learningPanel === 'recommendations'}}">
+            <view wx:if="{{templateRecommendations.length}}" class="timeline">
+              <view wx:for="{{templateRecommendations}}" wx:key="recommendation_id" class="timeline-item tap-card" data-id="{{item.recommendation_id}}" bindtap="openTemplateRecommendationDetail">
+                <view class="row-between">
+                  <view class="list-title">{{item.factorLabel}}</view>
+                  <status-pill label="{{item.statusLabel}}" tone="{{item.statusTone}}" />
+                </view>
+                <view class="small muted">{{item.templateLabel}} · {{item.roleLabel}}</view>
+                <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.reasonText}}</view>
+              </view>
+            </view>
+            <view wx:if="{{!templateRecommendations.length}}" class="empty">{{parameterTemplateEmptyStates.recommendations}}</view>
+          </block>
+        </view>
+      </scroll-view>
+    </view>
 
   </view>
 </view>

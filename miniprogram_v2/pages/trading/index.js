@@ -75,6 +75,26 @@ function normalizePosition(item = {}) {
       : item.supervisor_action === 'reduce' || item.supervisor_action === 'tighten'
         ? 'warning'
         : 'positive',
+    supervisorAction: item.supervisor_action || '',
+  };
+}
+
+function buildExecutionSummary({ loopRunning, hasActivePosition, positionCount, openReady, hasRiskAlert }) {
+  const loopText = loopRunning ? '交易循环在线' : '交易循环未运行';
+  const positionText = hasActivePosition ? `有持仓（${positionCount} 笔）` : '无持仓';
+  const openText = openReady ? '允许开仓' : '暂不允许开仓';
+  const riskText = hasRiskAlert ? '有 supervisor/风控提醒' : '无明显监督提醒';
+  return {
+    tone: hasRiskAlert
+      ? 'warning'
+      : loopRunning
+        ? 'positive'
+        : 'neutral',
+    sentence: `现在 ${loopText}，${positionText}，${openText}，${riskText}。`,
+    loopText,
+    positionText,
+    openText,
+    riskText,
   };
 }
 
@@ -84,7 +104,11 @@ Page({
     signalTone: 'neutral',
     gateLabel: '等待信号',
     gateTone: 'neutral',
-    strategy: {},
+    strategy: {
+      pipelineLabel: '执行流水线已停止',
+      pipelineRunning: false,
+      circuitBreaker: false,
+    },
     positions: [],
     daily: {},
     risk: {},
@@ -99,6 +123,12 @@ Page({
     emergencyBusy: false,
     currentGateView: null,
     policyHistoryView: null,
+    executionLoopText: '交易循环未运行',
+    executionPositionText: '无持仓',
+    executionOpenText: '暂不允许开仓',
+    executionRiskText: '暂无监督提醒',
+    executionSummary: '交易执行入口初始化中',
+    executionSummaryTone: 'neutral',
   },
 
   onLoad() {
@@ -129,6 +159,7 @@ Page({
     const direction = recentSignal.direction || strategy.direction || trading.position.dir || 'FLAT';
     const positionDir = trading.position && trading.position.dir;
     const hasActivePosition = positions.length > 0 || isActiveDirection(positionDir);
+    const hasSupervisorAlert = positions.some((item) => item.supervisorTone === 'warning' || item.supervisorTone === 'negative');
     const gateReason = strategy.gate_reason || '';
     const circuitBreaker = !!strategy.circuit_breaker;
     const pipelineRunning = !!(
@@ -175,6 +206,14 @@ Page({
     const latestVerdict = Array.isArray(policy.items) ? policy.items[0] : null;
     const impactSummary = systemHealth.impact_summary || '';
     const blockingComponents = Array.isArray(systemHealth.blocking_components) ? systemHealth.blocking_components : [];
+    const hasRiskAlert = !!(circuitBreaker || runtimeBlocked || hasSupervisorAlert || gateReason);
+    const executionSummary = buildExecutionSummary({
+      loopRunning: !!loopStatus.running,
+      hasActivePosition,
+      positionCount: positions.length,
+      openReady,
+      hasRiskAlert,
+    });
     const currentGateView = {
       tone: circuitBreaker || runtimeBlocked
         ? 'negative'
@@ -217,11 +256,18 @@ Page({
               : '系统在线，正在等待下一次满足条件的信号。'
     };
     this.setData({
+      executionSummary: executionSummary.sentence,
+      executionSummaryTone: executionSummary.tone,
+      executionLoopText: executionSummary.loopText,
+      executionPositionText: executionSummary.positionText,
+      executionOpenText: executionSummary.openText,
+      executionRiskText: executionSummary.riskText,
       signalLabel: direction === 1 || direction === 'LONG' ? '偏多' : direction === -1 || direction === 'SHORT' ? '偏空' : '观望',
       signalTone: direction === 1 || direction === 'LONG' ? 'positive' : direction === -1 || direction === 'SHORT' ? 'negative' : 'neutral',
       gateLabel,
       gateTone,
       strategy: {
+        pipelineLabel: pipelineRunning ? '执行流水线已启动' : '执行流水线已停止',
         pipelineRunning,
         positionDir,
         entry: trading.position && trading.position.entry,
@@ -252,6 +298,9 @@ Page({
             title: latestVerdict.allowed ? '最近一次历史放行（仅供回看）' : '最近一次历史拦截（仅供回看）',
             action: humanizeRiskAction(latestVerdict.action || latestVerdict.event_type || '--'),
             reason: humanizeRiskReason(latestVerdict.reason || '--'),
+            meaning: latestVerdict.allowed
+              ? '上一次风控已放行该类动作，系统当前可继续按规则推进。'
+              : '上一次风控拦截了该类动作，当前该动作先不执行。',
             tone: latestVerdict.allowed ? 'positive' : 'negative',
             blocked: Number((policy.counts && policy.counts.blocked) || 0),
             allowed: Number((policy.counts && policy.counts.allowed) || 0),

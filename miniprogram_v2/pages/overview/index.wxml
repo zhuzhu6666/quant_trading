@@ -24,14 +24,26 @@
           <view class="small muted">{{positionSummary}}</view>
         </view>
       </view>
+      <view class="status-banner status-banner-{{systemNowTone}}" style="margin-top: 16rpx;">
+        <view class="small muted">系统现在一句话</view>
+        <view class="section-note">{{systemNowSentence}}</view>
+        <view class="row-wrap" style="margin-top: 10rpx;">
+          <view class="tag">交易循环：{{systemNowLoopText}}</view>
+          <view class="tag">{{systemNowPositionText}}</view>
+          <view class="tag">学习/治理：{{systemNowLearningText}}</view>
+          <view class="tag">需要人工处理：{{systemNowNeedHumanText}}</view>
+        </view>
+      </view>
     </view>
 
     <view class="grid-2">
-      <metric-tile label="已实现 PnL" value="{{realizedPnl}}" tone="{{realizedPnlTone}}" hint="只统计已平仓" />
-      <metric-tile label="浮动 PnL" value="{{unrealizedPnl}}" tone="{{unrealizedPnlTone}}" hint="当前持仓浮盈亏" />
-      <metric-tile label="回撤" value="{{drawdown}}" hint="当日最大回撤" />
-      <metric-tile label="持仓数" value="{{positions}}" hint="当前仓位数量" />
-      <metric-tile label="最近同步" value="{{updatedAt}}" hint="最后刷新时间" />
+      <metric-tile label="权益" value="{{equity}}" hint="账户当前净值" />
+      <metric-tile label="已实现 PnL" value="{{realizedPnl}}" tone="{{realizedPnlTone}}" hint="仅统计已平仓盈亏" />
+      <metric-tile label="浮动 PnL" value="{{unrealizedPnl}}" tone="{{unrealizedPnlTone}}" hint="当前持仓的浮动盈亏" />
+      <metric-tile label="实时总 PnL" value="{{livePnl}}" tone="{{livePnlTone}}" hint="已实现 + 浮动，先看方向" />
+      <metric-tile label="回撤" value="{{drawdown}}" hint="当日最大回撤，值越小越稳健" />
+      <metric-tile label="持仓数" value="{{positions}}" hint="当前活跃仓位笔数" />
+      <metric-tile label="最近同步" value="{{updatedAt}}" hint="后端最近一次上报时间" />
     </view>
 
     <view class="grid-1-2">
@@ -67,9 +79,9 @@
         </view>
         <view wx:if="{{learningSummaryHint}}" class="section-note" style="margin-top: 12rpx;">{{learningSummaryHint}}</view>
         <view class="grid-3">
-          <metric-tile label="待审" value="{{learningSummary.proposed || 0}}" hint="proposed" />
-          <metric-tile label="已批" value="{{learningSummary.approved || 0}}" hint="approved" />
-          <metric-tile label="已回滚" value="{{learningSummary.rolled_back || 0}}" hint="rolled back" />
+          <metric-tile label="待审" value="{{learningSummary.proposed || 0}}" hint="待人工确认的候选" />
+          <metric-tile label="已批" value="{{learningSummary.approved || 0}}" hint="已通过审批" />
+          <metric-tile label="已回滚" value="{{learningSummary.rolled_back || 0}}" hint="发布后被回滚" />
         </view>
         <view wx:if="{{pendingTemplateCandidateCount || pendingTemplateRecommendationCount}}" class="soft-panel stack-12" style="margin-top: 16rpx;">
           <view class="row-between">
@@ -118,6 +130,12 @@
           <view class="progress-index">{{item.index}}</view>
           <view class="progress-title">{{item.title}}</view>
           <view class="progress-note">{{item.note}}</view>
+        </view>
+      </view>
+      <view wx:if="{{progressDetailRows.length}}" class="progress-detail-list">
+        <view wx:for="{{progressDetailRows}}" wx:key="id" class="progress-detail-item">
+          <view class="progress-detail-title">{{item.title}}</view>
+          <view class="progress-detail-text">{{item.text}}</view>
         </view>
       </view>
     </section-card>

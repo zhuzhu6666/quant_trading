@@ -26,3 +26,32 @@
 .btn-toolbar::after {
   border: none;
 }
+
+.ops-list-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.ops-list-item {
+  padding: 12rpx 14rpx;
+  border-radius: 12rpx;
+  border: 1rpx solid #273044;
+  background: rgba(20, 27, 38, 0.55);
+}
+
+.ops-evidence {
+  margin-top: 4rpx;
+  color: #8d96a5;
+}
+
+.ops-evidence-muted {
+  margin-top: 2rpx;
+  color: #6d7684;
+}
+
+.ops-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14rpx;
+}

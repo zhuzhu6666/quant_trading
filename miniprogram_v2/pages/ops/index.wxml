@@ -37,6 +37,156 @@
       </view>
     </section-card>
 
+    <section-card title="后端交接状态" subtitle="前端用它判断后端状态是否可信">
+      <view class="stack-12">
+        <view class="status-banner status-banner-{{backendReadinessConclusionAvailabilityTone}}">
+          <view class="row-between">
+            <view class="small">当前是否可用 / 有阻断</view>
+            <status-pill label="{{backendReadinessConclusionAvailability}}" tone="{{backendReadinessConclusionAvailabilityTone}}" />
+          </view>
+          <view class="section-note">是否影响交易：{{backendReadinessTradeImpactText}}</view>
+          <view class="section-note">模型展示是否可用：{{backendReadinessModelImpactText}}</view>
+          <view class="section-note">建议下一步：{{backendReadinessNextActionText}}</view>
+        </view>
+        <view class="grid-3" style="margin-bottom: 18rpx;">
+          <view class="split-card stack-12">
+            <view class="small muted">可用状态</view>
+            <view class="value-md">{{backendReadinessConclusionAvailability}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">真实阻断</view>
+            <view class="value-md accent-neg">{{backendReadinessBlockingCount}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">观察项</view>
+            <view class="value-md accent-warn">{{backendReadinessObservationCount}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">待审治理</view>
+            <view class="value-md accent-warn">{{backendReadinessPendingGovernance}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">交接机器字段</view>
+            <view class="value-md">{{backendReadinessReadyForFrontendText}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">执行状态</view>
+            <view class="value-md {{backendReadinessTone === 'positive' ? 'accent-pos' : backendReadinessTone === 'negative' ? 'accent-neg' : backendReadinessTone === 'warning' ? 'accent-warn' : ''}}">
+              {{backendReadinessDisplayOverall}}
+            </view>
+          </view>
+        </view>
+        <view class="status-banner status-banner-{{backendReadinessPermissionAuditTone}}">
+          <view class="row-between">
+            <view class="small">权限与上游审计</view>
+            <status-pill label="{{backendReadinessPermissionAuditStatus}}" tone="{{backendReadinessPermissionAuditTone}}" />
+          </view>
+          <view class="section-note">
+            audit_id: {{backendReadinessPermissionAuditId || '--'}} · {{backendReadinessPermissionAuditAt}}
+          </view>
+        </view>
+        <view class="soft-panel stack-12">
+          <view class="small">必须先处理的问题（{{backendReadinessBlockingCount}}）</view>
+          <view wx:if="{{backendReadinessBlockers.length}}" class="ops-list-stack">
+            <view wx:for="{{backendReadinessBlockers}}" wx:key="key" class="ops-list-item">
+              <view class="row-between">
+                <view class="small">{{item.component}}</view>
+                <status-pill label="{{item.statusText}}" tone="{{item.tone}}" />
+              </view>
+              <view class="small ops-evidence">{{item.rawComponent}}</view>
+              <view wx:if="{{item.evidenceText}}" class="small ops-evidence-muted">{{item.evidenceText}}</view>
+            </view>
+          </view>
+          <view wx:else class="small muted">当前无必须先处理的问题。</view>
+        </view>
+        <view class="soft-panel stack-12">
+          <view class="small">可观察但不阻断的问题（{{backendReadinessObservationCount}}）</view>
+          <view wx:if="{{backendReadinessObservations.length}}" class="ops-list-stack">
+            <view wx:for="{{backendReadinessObservations}}" wx:key="key" class="ops-list-item">
+              <view class="row-between">
+                <view class="small">{{item.component}}</view>
+                <status-pill label="{{item.statusText}}" tone="{{item.tone}}" />
+              </view>
+              <view class="small ops-evidence">{{item.rawComponent}}</view>
+              <view wx:if="{{item.evidenceText}}" class="small ops-evidence-muted">{{item.evidenceText}}</view>
+            </view>
+          </view>
+          <view wx:else class="small muted">当前无可观察但不阻断的问题。</view>
+        </view>
+        <view wx:if="{{backendReadinessStatus === 'error' && backendReadinessError}}" class="soft-panel section-note">
+          readiness 拉取失败：{{backendReadinessError}}
+        </view>
+        <view class="soft-panel section-note">
+          <view class="small">机器字段（仅作证据）</view>
+          <view class="small muted">market_session.status: {{backendReadinessMarketSessionStatus}}</view>
+          <view class="small muted">ready_for_frontend: {{backendReadinessReadyForFrontend ? 'true' : 'false'}}</view>
+          <view class="small muted">system_health.display_overall: {{backendReadinessDisplayOverall}}</view>
+          <view class="small muted">blocking_components: {{backendReadinessBlockingCount}}</view>
+          <view class="small muted">known_observations: {{backendReadinessObservationCount}}</view>
+        </view>
+      </view>
+    </section-card>
+
+    <section-card title="离线重任务窗口" subtitle="控制训练/离线审计什么时候跑，避免与交易窗口冲突。">
+      <view class="stack-12">
+        <view class="status-banner status-banner-{{backendReadinessHighLoadAllowed ? 'positive' : 'warning'}}">
+          <view class="row-between">
+            <view class="small">现在能不能跑训练</view>
+            <status-pill label="{{backendReadinessHighLoadAllowed ? '能' : '不能'}}" tone="{{backendReadinessHighLoadAllowed ? 'positive' : 'negative'}}" />
+          </view>
+          <view class="section-note">{{backendReadinessHighLoadPermissionText}}</view>
+          <view class="section-note">最近一次任务：{{backendReadinessHighLoadLatestSummaryText}}</view>
+          <view class="small muted">策略窗口：{{backendReadinessHighLoadProfile}}</view>
+          <view wx:if="{{backendReadinessHighLoadAuditError}}" class="small muted">最近一次任务异常：{{backendReadinessHighLoadAuditError}}</view>
+        </view>
+        <view class="ops-grid-2" style="margin-bottom: 18rpx;">
+          <view class="split-card stack-12">
+            <view class="small muted">离线任务执行状态</view>
+            <view class="value-md">{{backendReadinessHighLoadAuditStatus}}</view>
+          </view>
+          <view class="split-card stack-12">
+            <view class="small muted">记录时间</view>
+            <view class="value-md">{{backendReadinessHighLoadAuditTime}}</view>
+          </view>
+        </view>
+        <view class="soft-panel stack-12">
+          <view class="row-between">
+            <view class="small">offmarket 最新样本 {{offmarketHighLoadAuditsCount}}</view>
+            <status-pill label="{{offmarketHighLoadAuditsStatus}}" tone="{{offmarketHighLoadAuditsStatus === 'error' ? 'negative' : 'neutral'}}" />
+          </view>
+          <view class="section-note">最近一条：{{offmarketHighLoadAuditsLatestText}}</view>
+          <view wx:if="{{offmarketHighLoadAuditsLatest !== null}}" class="section-note">
+            最近状态 {{offmarketHighLoadAuditsLatestStatus}} · {{offmarketHighLoadAuditsLatestTime}}
+          </view>
+          <view wx:if="{{offmarketHighLoadAuditsStatusRows.length}}" class="row-wrap">
+            <view wx:for="{{offmarketHighLoadAuditsStatusRows}}" wx:key="label" class="tag">{{item.label}}</view>
+          </view>
+          <view wx:if="{{offmarketHighLoadAuditsError}}" class="small muted">audit 拉取异常：{{offmarketHighLoadAuditsError}}</view>
+          <view wx:if="{{offmarketHighLoadAuditsRows.length}}" class="stack-12" style="margin-top: 12rpx;">
+            <view class="small">最近样本（最多 5 条）</view>
+            <view wx:for="{{offmarketHighLoadAuditsRows}}" wx:key="key" class="soft-panel">
+              <view class="row-between">
+                <view class="small">{{item.jobName}}</view>
+                <status-pill label="{{item.statusText}}" tone="{{item.statusTone}}" />
+              </view>
+              <view class="row-wrap">
+                <view class="small muted">窗口策略 {{item.profileText || item.profile}}</view>
+                <view class="small muted">会话 {{item.sessionStatus}}</view>
+                <view class="small muted">{{item.runHintText}}</view>
+              </view>
+              <view class="small muted">开始 {{item.startedAtText}}</view>
+              <view class="small muted">结束 {{item.finishedAtText}}</view>
+              <view wx:if="{{item.errorText}}" class="small muted">异常：{{item.errorText}}</view>
+            </view>
+          </view>
+          <view wx:else class="section-note">offmarket 审计暂时为空。</view>
+          <view class="section-note">
+            机器字段：high_load.allowed_now {{backendReadinessHighLoadAllowed ? 'true' : 'false'}} · high_load.profile {{backendReadinessHighLoadProfile}}
+          </view>
+        </view>
+      </view>
+    </section-card>
+
     <section-card title="最新演化周期" subtitle="最近一次进化编排输出">
       <view wx:if="{{evolution}}" class="stack-12">
         <view class="row-between">

@@ -80,9 +80,11 @@ async function request(method, endpoint, data, options = {}) {
   });
 
   if (!response || response.statusCode < 200 || response.statusCode >= 300) {
-    const error = new Error('request_failed');
+    const payload = response && response.data;
+    const detail = payload && (payload.detail || payload.message || payload.result_summary || payload.error);
+    const error = new Error(detail ? String(detail) : 'request_failed');
     error.statusCode = response && response.statusCode;
-    error.payload = response && response.data;
+    error.payload = payload;
     if (error.statusCode === 401 && !options.skipAuth) {
       clearToken();
       redirectToLogin();

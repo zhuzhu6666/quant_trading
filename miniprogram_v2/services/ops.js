@@ -1,5 +1,7 @@
 import { get } from './client';
 import systemStore from '../stores/system';
+import opsStore from '../stores/ops';
+import { buildBackendReadinessView } from '../utils/backendReadiness';
 
 export async function refreshOpsDomain() {
   const [scheduler, evolution, dbHealth, apiHealth, riskSummary, recentTradeTraces] = await Promise.all([
@@ -20,6 +22,70 @@ export async function refreshOpsDomain() {
     updatedAt: Date.now(),
   });
   return systemStore.getState();
+}
+
+const BACKEND_READINESS_TTL = 30000;
+let backendReadinessRefreshInFlight = null;
+let lastBackendReadinessRefreshAt = 0;
+
+function normalizeBackendReadinessState(payload = null) {
+  const raw = payload && typeof payload === 'object' ? payload : null;
+  const readinessView = buildBackendReadinessView(raw || {});
+  return {
+    raw,
+    view: readinessView,
+  };
+}
+
+export async function fetchBackendReadiness() {
+  return get('/api/ops/backend-readiness');
+}
+
+async function fetchBackendReadinessState() {
+  opsStore.setState({
+    backendReadinessStatus: 'loading',
+    backendReadinessError: '',
+  });
+  let status = 'ok';
+  let error = '';
+  let payload = null;
+  try {
+    payload = await fetchBackendReadiness();
+  } catch (err) {
+    status = 'error';
+    error = String((err && err.errMsg) || (err && err.message) || '后端 readiness 拉取失败');
+  }
+  const state = normalizeBackendReadinessState(payload);
+  opsStore.setState({
+    backendReadiness: state.raw,
+    backendReadinessView: state.view,
+    backendReadinessStatus: status,
+    backendReadinessError: error,
+    updatedAt: Date.now(),
+  });
+  return opsStore.getState();
+}
+
+export async function refreshBackendReadiness(options = {}) {
+  const force = !!options.force;
+  const now = Date.now();
+  if (!force && backendReadinessRefreshInFlight) {
+    return backendReadinessRefreshInFlight;
+  }
+  if (!force && lastBackendReadinessRefreshAt > 0 && (now - lastBackendReadinessRefreshAt) < BACKEND_READINESS_TTL) {
+    return opsStore.getState();
+  }
+
+  backendReadinessRefreshInFlight = (async () => {
+    try {
+      const nextState = await fetchBackendReadinessState();
+      lastBackendReadinessRefreshAt = Date.now();
+      return nextState;
+    } finally {
+      backendReadinessRefreshInFlight = null;
+    }
+  })();
+  return backendReadinessRefreshInFlight;
 }
 
 export async function fetchTradeTrace({ positionId = '', decisionId = '' } = {}) {
