@@ -10,8 +10,13 @@ function getToken() {
 
 export function setToken(token) {
   tokenCache = token || '';
-  wx.setStorageSync('jwt_token', tokenCache);
-  sessionStore.setState({ token: tokenCache, isAuthenticated: !!tokenCache });
+  if (tokenCache) {
+    wx.setStorageSync('jwt_token', tokenCache);
+    sessionStore.setState({ token: tokenCache });
+    return;
+  }
+  wx.removeStorageSync('jwt_token');
+  sessionStore.setState({ token: '', user: null, isAuthenticated: false });
 }
 
 export function clearToken() {
@@ -49,7 +54,7 @@ function redirectToLogin() {
 export function loadToken() {
   tokenCache = wx.getStorageSync('jwt_token') || '';
   if (tokenCache) {
-    sessionStore.setState({ token: tokenCache, isAuthenticated: true });
+    sessionStore.setState({ token: tokenCache });
   }
   return tokenCache;
 }

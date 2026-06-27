@@ -25,6 +25,7 @@ export async function login(username, password) {
     sessionStore.setState({ token, user, isAuthenticated: true, busy: false });
     return true;
   } catch (err) {
+    clearToken();
     sessionStore.setState({ busy: false, isAuthenticated: false });
     return false;
   }

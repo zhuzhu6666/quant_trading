@@ -3,7 +3,7 @@ import sessionStore from '../../stores/session';
 
 Page({
   data: {
-    username: 'zhu',
+    username: '',
     password: '',
     loading: false,
     error: '',
@@ -42,12 +42,14 @@ Page({
   },
 
   async onSubmit() {
-    if (!this.data.username || !this.data.password) {
+    const username = (this.data.username || '').trim();
+    const password = this.data.password || '';
+    if (!username || !password) {
       this.setData({ error: '请输入用户名和密码' });
       return;
     }
-    this.setData({ loading: true, error: '' });
-    const ok = await login(this.data.username, this.data.password);
+    this.setData({ username, loading: true, error: '' });
+    const ok = await login(username, password);
     this.setData({ loading: false });
     if (!ok) {
       this.setData({ error: '登录失败，请检查账号或网络' });
