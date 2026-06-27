@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter
+from backend.core.auth import RequireUser
 from backend.core.db import connect_duckdb, connect_sqlite
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -290,7 +291,7 @@ def _start_background_refresh():
 
 
 @router.get("/db-health")
-def db_health() -> dict:
+def db_health(_user: RequireUser) -> dict:
     """返回所有数据库的健康状态 (后台自动刷新, 永远 <1ms)。
 
     后台 daemon 线程每 55s 更新缓存, 请求端永远直接读缓存。

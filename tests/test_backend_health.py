@@ -2,6 +2,7 @@
 from fastapi.testclient import TestClient
 
 from backend.app import app
+from backend.core.auth import create_token
 
 client = TestClient(app)
 
@@ -21,3 +22,14 @@ def test_health_db_field_present():
     r = client.get("/api/health")
     body = r.json()
     assert body["db"] in ("connected",) or body["db"].startswith("error:")
+
+
+def test_db_health_requires_auth():
+    r = client.get("/api/system/db-health")
+    assert r.status_code == 401
+
+
+def test_db_health_with_auth():
+    token = create_token("tester")
+    r = client.get("/api/system/db-health", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200

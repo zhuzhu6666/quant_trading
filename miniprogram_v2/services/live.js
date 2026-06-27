@@ -98,7 +98,8 @@ function connectSocket() {
   if (!token) return;
 
   socketTask = wx.connectSocket({
-    url: CONFIG.WS_URL + '?token=' + encodeURIComponent(token),
+    url: CONFIG.WS_URL,
+    protocols: [token],
     timeout: 6000,
   });
 

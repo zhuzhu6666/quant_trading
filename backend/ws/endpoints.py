@@ -260,16 +260,20 @@ async def ws_state(ws: WebSocket) -> None:
     _ws_log = logging.getLogger("ws.auth")
     from backend.core.auth import JWT_SECRET, JWT_ALGORITHM
     # 手动从 query string 取 token (FastAPI WebSocket 不自动解析 query params)
-    # 也用 subprotocol 做备选 (避免 token 出现在 proxy log)
+    # 也用 Sec-WebSocket-Protocol 做备选 (避免 token 出现在 proxy log)
     token = ""
+    accepted_subprotocol = None
     try:
         # Starlette WebSocket 提供 query_params
         params = getattr(ws, 'query_params', None)
         if params is not None:
             token = params.get("token", "")
-        # 备选: subprotocol
-        if not token and hasattr(ws, 'subprotocols') and ws.subprotocols:
-            token = ws.subprotocols[0]
+        # 备选: subprotocol header. Multiple values are comma-separated.
+        if not token:
+            protocol_header = ws.headers.get("sec-websocket-protocol", "")
+            if protocol_header:
+                token = protocol_header.split(",", 1)[0].strip()
+                accepted_subprotocol = token
     except Exception:
         pass
     if not token:
@@ -292,7 +296,7 @@ async def ws_state(ws: WebSocket) -> None:
     _ws_log.info("WS /ws/state connected OK")
     mgr = get_connection_manager()
     channel = "state"
-    await mgr.connect(ws, channel, subprotocol=token if hasattr(ws, 'subprotocols') else None)
+    await mgr.connect(ws, channel, subprotocol=accepted_subprotocol)
     try:
         await ws.send_text(json.dumps(_read_state_snapshot(), default=str))
         while True:
