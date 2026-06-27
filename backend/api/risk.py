@@ -1487,7 +1487,7 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
 
         if not anchor and ledger_rows:
             anchor = ledger_rows[0]
-        if not anchor and resolved_decision_id:
+        if not anchor and resolved_decision_id and not resolved_position_id:
             raise LookupError(f"decision_id not found: {resolved_decision_id}")
 
         trade_id = ""

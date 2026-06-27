@@ -919,3 +919,130 @@ def test_trade_trace_resolves_from_decision_id(monkeypatch, tmp_path):
     assert result["summary"]["decision_id"] == "dec_only"
     assert result["summary"]["position_id"] == "3003"
     assert result["decision_ledger"][0]["decision_id"] == "dec_only"
+
+
+def test_trade_trace_uses_position_when_decision_ledger_is_missing(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE decision_ledger (
+            decision_id TEXT PRIMARY KEY,
+            trade_id TEXT DEFAULT '',
+            position_id TEXT DEFAULT '',
+            event_type TEXT NOT NULL,
+            symbol TEXT DEFAULT '',
+            timeframe TEXT DEFAULT '',
+            decision_ts REAL NOT NULL DEFAULT 0.0,
+            regime_id TEXT DEFAULT '',
+            regime_confidence REAL DEFAULT 0.0,
+            portfolio_state_json TEXT DEFAULT '{}',
+            risk_state_json TEXT DEFAULT '{}',
+            policy_version TEXT DEFAULT '',
+            factor_set_version TEXT DEFAULT '',
+            action_score REAL DEFAULT 0.0,
+            action_reason TEXT DEFAULT '',
+            action_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE position_lifecycle_event (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            trade_id TEXT DEFAULT '',
+            symbol TEXT DEFAULT '',
+            event_type TEXT NOT NULL,
+            event_ts REAL NOT NULL DEFAULT 0.0,
+            net_volume REAL DEFAULT 0.0,
+            avg_price REAL DEFAULT 0.0,
+            unrealized_pnl REAL DEFAULT 0.0,
+            realized_pnl REAL DEFAULT 0.0,
+            details_json TEXT DEFAULT '{}'
+        );
+        CREATE TABLE order_lifecycle_event (
+            event_id TEXT PRIMARY KEY,
+            decision_id TEXT DEFAULT '',
+            trade_id TEXT DEFAULT '',
+            order_id TEXT DEFAULT '',
+            broker_order_id TEXT DEFAULT '',
+            event_type TEXT NOT NULL,
+            event_ts REAL NOT NULL DEFAULT 0.0,
+            price REAL DEFAULT 0.0,
+            volume REAL DEFAULT 0.0,
+            status TEXT DEFAULT '',
+            details_json TEXT DEFAULT '{}'
+        );
+        CREATE TABLE trade_outcome_review (
+            review_id TEXT PRIMARY KEY,
+            trade_id TEXT DEFAULT '',
+            position_id TEXT DEFAULT '',
+            entry_decision_id TEXT DEFAULT '',
+            exit_decision_id TEXT DEFAULT '',
+            entry_quality REAL DEFAULT 0.0,
+            hold_quality REAL DEFAULT 0.0,
+            exit_quality REAL DEFAULT 0.0,
+            regime_fit_score REAL DEFAULT 0.0,
+            execution_quality REAL DEFAULT 0.0,
+            pnl REAL DEFAULT 0.0,
+            mae REAL DEFAULT 0.0,
+            mfe REAL DEFAULT 0.0,
+            outcome_label TEXT DEFAULT '',
+            failure_tags_json TEXT DEFAULT '[]',
+            summary_text TEXT DEFAULT '',
+            review_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE factor_contribution_review (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_id TEXT NOT NULL,
+            trade_id TEXT DEFAULT '',
+            factor TEXT NOT NULL,
+            entry_contribution REAL DEFAULT 0.0,
+            hold_contribution REAL DEFAULT 0.0,
+            exit_contribution REAL DEFAULT 0.0,
+            net_contribution REAL DEFAULT 0.0,
+            confidence REAL DEFAULT 0.0,
+            notes TEXT DEFAULT ''
+        );
+        CREATE TABLE recovery_position_state (
+            position_id INTEGER PRIMARY KEY,
+            broker TEXT DEFAULT 'ctrader',
+            symbol TEXT DEFAULT '',
+            direction INTEGER DEFAULT 0,
+            open_price REAL DEFAULT 0.0,
+            volume REAL DEFAULT 0.0,
+            first_seen_at REAL DEFAULT 0.0,
+            last_seen_at REAL DEFAULT 0.0,
+            status TEXT DEFAULT 'open',
+            strategy_name TEXT DEFAULT '',
+            entry_decision_id TEXT DEFAULT '',
+            context_integrity TEXT DEFAULT 'full',
+            recovery_meta_json TEXT DEFAULT '{}',
+            closed_at REAL DEFAULT 0.0,
+            close_reason TEXT DEFAULT '',
+            close_pnl REAL DEFAULT 0.0
+        );
+        INSERT INTO trade_outcome_review
+        (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+         outcome_label, summary_text, review_json, created_at)
+        VALUES
+        ('review_recent', 'trade_recent', '268728362', 'dec_entry_missing', 'dec_exit_missing',
+         'acceptable_loss', '复盘记录已生成', '{"symbol":"XAUUSD+","close_reason":"thesis_invalid"}', 20.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    def _conn():
+        c = sqlite3.connect(str(db_path))
+        c.row_factory = sqlite3.Row
+        return c
+
+    monkeypatch.setattr(risk_api, "get_state_conn", _conn)
+
+    result = risk_api._trade_trace(position_id="268728362", decision_id="dec_exit_missing")
+
+    assert result["summary"]["position_id"] == "268728362"
+    assert result["summary"]["decision_id"] == "dec_exit_missing"
+    assert result["summary"]["has_review"] is True
+    assert result["summary"]["latest_outcome"] == "acceptable_loss"
+    assert result["review"]["review_id"] == "review_recent"
