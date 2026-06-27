@@ -486,6 +486,9 @@ function describeTradeTrace(trace = null) {
   const recommendation = parameterGovernance && parameterGovernance.recommendation
     ? parameterGovernance.recommendation
     : null;
+  const latestCandidate = parameterGovernance && parameterGovernance.latest_candidate
+    ? parameterGovernance.latest_candidate
+    : null;
   const governanceJump = describeGovernanceJump(parameterGovernance);
   const governanceOverviewView = buildGovernanceOverviewView(
     governanceOverview,
@@ -792,6 +795,7 @@ Page({
       this.setData({ traceErrorText: '' });
       this.syncTimelineView(tradeTraceView, this.data.timelineFilter || 'all');
     } catch (err) {
+      console.error('[trade-trace] query/render failed', err);
       const statusCode = Number(err && err.statusCode);
       const traceErrorText = statusCode === 404 ? '没有找到这笔交易。' : '查询失败，请稍后再试。';
       this.setData({
