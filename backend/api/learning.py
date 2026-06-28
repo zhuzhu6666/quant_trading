@@ -2488,7 +2488,11 @@ def release_parameter_template_offline_candidate(
             note=req.note,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        message = str(e)
+        if "candidate template missing/orphan candidate" in message:
+            friendly_message = "候选模板已不存在，请重新生成候选"
+            raise HTTPException(status_code=400, detail=friendly_message)
+        raise HTTPException(status_code=400, detail=message)
     _learning_cache_invalidate(
         "summary",
         "recommendations:",

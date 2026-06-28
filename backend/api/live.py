@@ -327,6 +327,9 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
     except Exception:
         pass
 
+    send_orders = _should_send_orders("ctrader")
+    execution_mode = "LIVE" if send_orders else "DRY-RUN"
+
     # 原因
     reason = ""
     if cb:
@@ -345,7 +348,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
             reason = f"最近信号: {last['direction']} score={last['score']:.3f} (闸门通过)"
         else:
             reason = f"最近信号: {last['direction']} score={last['score']:.3f} (闸门: {last.get('gate_reason', '?')})"
-    elif not _should_send_orders("ctrader"):
+    elif not send_orders:
         reason = "DRY-RUN 模式 (不发实单)"
     else:
         reason = "等待因子信号"
@@ -372,7 +375,10 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         "running": loop.get("running", False),
         "broker": loop.get("broker") or "ctrader",
         "strategy": "factor_pipeline_v4",
-        "mode": "DRY-RUN" if not _should_send_orders("ctrader") else "LIVE",
+        "mode": execution_mode,
+        "execution_mode": execution_mode,
+        "send_orders": send_orders,
+        "dry_run": not send_orders,
         "readiness": readiness,
         "position": {"dir": pos_dir, "entry": round(pos_entry, 2), "count": n_pos},
         "circuit_breaker": cb,

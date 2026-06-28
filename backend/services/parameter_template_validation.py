@@ -249,6 +249,58 @@ class ParameterTemplateValidationService:
         self._clear_governance_caches()
         return updated
 
+    def reject_orphan_approved_candidates(self, note: str = "") -> list[dict[str, Any]]:
+        """
+        Reject approved release candidates whose target template cannot be resolved anymore.
+        """
+        template_service = ParameterTemplateService(str(self.db_path))
+        custom_note = (
+            str(note).strip()
+            or "target template missing/orphan candidate: reviewed/reject because template not resolvable"
+        )
+        conn = connect_sqlite(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT candidate_id, factor_id, template_id, regime_key
+                FROM parameter_template_release_candidate
+                WHERE status='approved'
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+        rejected: list[dict[str, Any]] = []
+        for row in rows:
+            candidate_id = str(row["candidate_id"] or "")
+            template_id = str(row["template_id"] or "")
+            if not template_id:
+                continue
+            if template_service.get_template(template_id=template_id):
+                continue
+            candidate = self.get_release_candidate(candidate_id)
+            if not candidate:
+                continue
+            if candidate.get("status") != "approved":
+                continue
+            note_text = f"{custom_note} {template_id}"
+            updated = self.review_release_candidate(
+                candidate_id=candidate_id,
+                status="rejected",
+                note=note_text,
+            )
+            rejected.append(
+                {
+                    "candidate_id": candidate_id,
+                    "template_id": template_id,
+                    "from_status": "approved",
+                    "to_status": "rejected",
+                    "candidate": updated,
+                }
+            )
+        return rejected
+
     def deploy_release_candidate(
         self,
         *,
@@ -264,6 +316,10 @@ class ParameterTemplateValidationService:
         factor_id = str(candidate.get("factor_id") or "")
         regime_key = str(candidate.get("regime_key") or "")
         template_id = str(candidate.get("template_id") or "")
+        if not template_service.get_template(template_id=template_id):
+            raise ValueError(
+                f"candidate template missing/orphan candidate: {template_id}, please regenerate candidate first"
+            )
         active_before = template_service.get_active_template(factor_id=factor_id, regime_key=regime_key)
         old_template_id = str((active_before or {}).get("template_id") or "")
         suggestion = template_service.create_switch_suggestion(
