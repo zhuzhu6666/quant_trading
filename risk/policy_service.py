@@ -229,6 +229,10 @@ class RiskPolicyService:
         )
 
     def _evaluate_close_position(self, context: dict[str, Any]) -> RiskVerdict:
+        runtime_gate = self._evaluate_runtime_gate("close_position", context)
+        if runtime_gate is not None and not runtime_gate.allowed:
+            return runtime_gate
+
         temporal_context = context.get("temporal_context") or {}
         holding_seconds = float(context.get("holding_seconds", 0.0) or 0.0)
         timeframe_seconds = int(
@@ -258,6 +262,10 @@ class RiskPolicyService:
         )
 
     def _evaluate_position_adjustment(self, action: str, context: dict[str, Any]) -> RiskVerdict:
+        runtime_gate = self._evaluate_runtime_gate(action, context)
+        if runtime_gate is not None and not runtime_gate.allowed:
+            return runtime_gate
+
         temporal_context = context.get("temporal_context") or {}
         supervisor_action = str(context.get("supervisor_action") or action)
         recommended_controls = context.get("recommended_controls") or {}
@@ -277,6 +285,80 @@ class RiskPolicyService:
                 "temporal_context": temporal_context,
             },
         )
+
+    def _evaluate_runtime_gate(self, action: str, context: dict[str, Any]) -> RiskVerdict | None:
+        close_action = str(action or "").lower()
+        close_reason = str(context.get("close_reason") or "").strip().lower()
+        close_reason_whitelist = {"manual", "manual_close", "emergency_close", "restart_replay"}
+
+        # Emergency/manual closes are operational override paths and should stay permissive.
+        if close_action == "close_position" and close_reason in close_reason_whitelist:
+            return None
+
+        has_loop_running = "loop_running" in context
+        has_bridge_connected = "bridge_connected" in context
+        if has_loop_running and not bool(context.get("loop_running", True)):
+            return RiskVerdict(
+                allowed=False,
+                reason="loop_not_running",
+                severity="error",
+                audit_payload={
+                    "action": action,
+                    "source": "runtime_gate",
+                    "loop_running": context.get("loop_running", None),
+                },
+            )
+        if has_bridge_connected and not bool(context.get("bridge_connected", True)):
+            return RiskVerdict(
+                allowed=False,
+                reason="bridge_disconnected",
+                severity="error",
+                audit_payload={
+                    "action": action,
+                    "source": "runtime_gate",
+                    "bridge_connected": context.get("bridge_connected", None),
+                },
+            )
+
+        # For active execution mutation (tighten/reduce), if runtime fields are partially
+        # present but incomplete, fail fast.
+        if action in {"tighten_position", "reduce_position"} and (not has_loop_running or not has_bridge_connected):
+            return RiskVerdict(
+                allowed=False,
+                reason="runtime_state_missing",
+                severity="error",
+                audit_payload={
+                    "action": action,
+                    "source": "runtime_gate",
+                    "runtime_state_present": {
+                        "loop_running": has_loop_running,
+                        "bridge_connected": has_bridge_connected,
+                    },
+                },
+            )
+
+        # For close actions, tolerate absent runtime fields, but block incomplete explicit
+        # runtime hints to keep runtime-gate lightweight and non-intrusive.
+        if (
+            close_action == "close_position"
+            and (not has_loop_running or not has_bridge_connected)
+            and not (not has_loop_running and not has_bridge_connected)
+        ):
+            return RiskVerdict(
+                allowed=False,
+                reason="runtime_state_missing",
+                severity="error",
+                audit_payload={
+                    "action": action,
+                    "source": "runtime_gate",
+                    "runtime_state_present": {
+                        "loop_running": has_loop_running,
+                        "bridge_connected": has_bridge_connected,
+                    },
+                },
+            )
+
+        return None
 
     def _evaluate_governor_action(
         self,

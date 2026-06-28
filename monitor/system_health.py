@@ -477,7 +477,8 @@ class SystemHealth:
             proc = psutil.Process(os.getpid())
             mem_pct = proc.memory_percent()
             rss_mb = proc.memory_info().rss / (1024 ** 2)
-            if mem_pct < THRESHOLDS["memory_max_pct"] / 100.0:
+            # psutil.memory_percent() 已返回 0~100 百分比，直接与阈值比对
+            if mem_pct < THRESHOLDS["memory_max_pct"]:
                 components["memory"] = ComponentStatus(
                     name="进程内存", status="ok", score=1.0,
                     detail=f"{mem_pct:.1f}% ({rss_mb:.0f} MB)", ts=now,

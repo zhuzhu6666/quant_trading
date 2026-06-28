@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 
 from backend.core.paths import CONFIG_DIR
-from config.runtime_config import RuntimeConfig
+from config.runtime_config import RuntimeConfig, replace as replace_runtime_config
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
@@ -87,6 +87,7 @@ def patch_runtime_config(runtime_patch: dict[str, Any]) -> dict:
 
     yaml_text = yaml.safe_dump(current, sort_keys=False, allow_unicode=True)
     result = put_config(yaml_text)
+    replace_runtime_config(validated_runtime)
     result["runtime"] = validated_runtime.to_dict()
     result["updated_keys"] = sorted(runtime_patch.keys())
     return result

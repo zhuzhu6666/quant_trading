@@ -1112,6 +1112,22 @@ def _run_position_supervision(
             continue
         if _supervisor_recently_applied(pid, action):
             continue
+        if action == "close" and str(verdict.get("summary_reason") or "") == "holding_timeout_exceeded":
+            # keep timeout exits on the main timeout path and confirm with current cfg before skipping supervisor close.
+            timeout_context = _build_close_position_risk_context(
+                position_id=pid,
+                close_reason="holding_timeout",
+                mode="live",
+                broker="ctrader",
+                symbol=str(position.get("symbol") or "XAUUSD+"),
+                position=position,
+                cfg=cfg,
+            )
+            timeout_holding_seconds = float(timeout_context.get("holding_seconds", 0.0) or 0.0)
+            timeout_limit_seconds = float(timeout_context.get("max_holding_seconds", 0.0) or 0.0)
+            if timeout_limit_seconds > 0 and timeout_holding_seconds >= timeout_limit_seconds:
+                continue
+            continue
 
         risk_action = {
             "tighten": "tighten_position",
@@ -1121,6 +1137,12 @@ def _run_position_supervision(
         if not risk_action:
             continue
         risk_context = _supervisor_risk_context(position, verdict, cfg=cfg)
+        risk_context.update(
+            {
+                "loop_running": bool(_live_state_get("loop_running", True)),
+                "bridge_connected": bool(getattr(bridge, "is_connected", False)),
+            }
+        )
         risk_verdict = _RISK_POLICY.evaluate(risk_action, risk_context).to_dict()
         _log_supervisor_decision(
             position=position,
@@ -2461,6 +2483,7 @@ def _get_ctrader():
             return None, guard_err, False
         # 复用已有连接 — 用 is_connected 属性 (瞬时), 不用 ping() (阻塞 5s)
         if _ctrader_bridge is not None:
+            _ctrader_bridge.send_orders = _should_send_orders("ctrader")
             if _ctrader_bridge.is_connected:
                 return _ctrader_bridge, None, False
             if getattr(_ctrader_bridge, "is_connecting", False):
@@ -2476,7 +2499,7 @@ def _get_ctrader():
         # 首次: 创建实例 + 后台启动 connect
         try:
             _ctrader_bridge, build_err = _make_ctrader_bridge(
-                send_orders=True,  # cTrader 是唯一执行通道, 外层 _should_send_orders 控制闸
+                send_orders=_should_send_orders("ctrader"),
             )
             if build_err:
                 _ctrader_bridge = None
@@ -4688,7 +4711,8 @@ def _should_send_orders(broker: str) -> bool:
     """True = 真发单; False = dry-run (记 log, 不下单)."""
     if broker == "ctrader":
         from config.runtime_config import shared as cfg
-        return cfg().ctrader_send_orders
+        runtime_cfg = cfg()
+        return bool(runtime_cfg.ctrader_send_orders and not runtime_cfg.factor_dry_run)
     return False
 
 

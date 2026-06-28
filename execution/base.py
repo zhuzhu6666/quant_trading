@@ -1,8 +1,10 @@
 """
 execution/base.py — 统一经纪商抽象接口 + 公共数据类型
 
-Phase 4: BaseBrokerBridge 定义了所有执行通道 (cTrader / Paper / MT5) 的统一接口。
-所有 bridge 实现返回此模块定义的统一类型 (OrderResult / PositionInfo / AccountInfo)。
+该模块定义统一经纪商接口与公共类型（OrderResult / PositionInfo / AccountInfo）。
+当前实盘主链使用 execution/ctrader_bridge（经 live_service -> risk/policy_service ->
+execution/ctrader_bridge -> execution/deal_sync -> backend/ledger/service）。
+Paper / MT5 实现留作历史兼容和测试，不作为默认主链执行。
 """
 from __future__ import annotations
 
@@ -90,7 +92,7 @@ class AccountInfo:
 class BaseBrokerBridge(ABC):
     """统一经纪商接口
 
-    所有执行通道 (cTrader / Paper / MT5) 实现此接口。
+    当前实盘默认仅走 cTrader 实现；Paper 与历史 MT5 实现并存于同一抽象层，用于兼容/回归场景。
     Paper 和 Live 模式的区别仅在于注入的 bridge 实现不同，
     上层调用代码完全一致。
     """

@@ -1,11 +1,15 @@
 """
-Execution Router — 智能下单路由
+Execution Router — 智能下单路由（历史/兼容层）
 
 职责：
 1. 接收融合后的Signal → 创建Order
 2. 通过PreTrade风控检查
-3. 调用MT5执行
+3. 调用执行通道（当前历史兼容，不再是当前实盘主链）
 4. 记录成交信息
+
+当前实盘不通过该 router 路径执行；主链改为
+backend/services/live_service.py -> risk/policy_service.py ->
+execution/ctrader_bridge.py -> execution/deal_sync.py -> backend/ledger/service.py
 
 P1-B 增强: 集成智能路由算法 (TWAP / VWAP / POV / IS)
   - 大单 (> 0.05 手) 按 algos 拆成 child orders
@@ -31,8 +35,9 @@ class ExecutionRouter:
     """
     下单路由器
 
-    连接 Signal → Risk → OMS → MT5 的完整链路。
+    连接 Signal → Risk → OMS 的（历史）完整链路。
     P1-B: 大单走智能路由 (algos), 小单直接市价。
+    该实现主要保留用于历史兼容与兼容测试；当前主执行链路见 live_service 主链。
     """
 
     def __init__(self, oms: OrderManager, portfolio: PortfolioManager,

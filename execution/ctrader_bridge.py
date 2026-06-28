@@ -1,14 +1,14 @@
 """
-execution/ctrader_bridge.py — cTrader Open API 桥接 (并行 MT5, 2026-06-04)
+execution/ctrader_bridge.py — cTrader Open API 桥接（当前实盘主链）
 
 设计目标:
-  - 跟 MT5Bridge 同形态: connect/disconnect / market_buy / market_sell /
+  - 提供统一执行接口: connect/disconnect / market_buy / market_sell /
     close_position / get_positions / account_info / fetch_bars
   - 走 Twisted 异步 + Protobuf 消息 + 回调转 Deferred
   - Pepperstone demo 默认: host=demo.ctraderapi.com:5035, 无 password (走 access_token)
-  - 安全闸: send_orders=False 时 market_buy/sell 仅打印不真发 (PoC 默认)
+  - 安全闸: send_orders=False 时 market_buy/sell 仅打印不真发
 
-不依赖 MT5; 跟 MT5Bridge 并行, 不替换。
+当前项目实盘主链固定经此文件对接 cTrader，其它 MT5 路径属于历史/兼容残留。
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ except ImportError:  # 包未装
 
 @dataclass
 class CTraderOrderResult:
-    """统一订单结果 (跟 MT5OrderResult 同形态, 便于后续抽象 BaseBridge)"""
+    """统一订单结果（供 cTrader 桥接返回并转换为 BaseBrokerBridge 的 OrderResult）"""
     success: bool
     order_id: int = 0
     position_id: int = 0
@@ -67,7 +67,7 @@ def _to_order_result(r: CTraderOrderResult) -> "OrderResult":
     )
 
 
-# ── 常量映射 (跟 MT5 FILLING_MODES 风格统一) ────────────
+# ── 常量映射（保留历史命名风格，便于兼容抽象层对齐） ────────────
 
 # cTrader order type 常量 (ProtoOAOrderType enum)
 ORDER_TYPE = {
@@ -115,7 +115,7 @@ _ASSET_ID_TO_CODE = {
 
 class CTraderBridge(BaseBrokerBridge):
     """
-    cTrader Open API 桥接 (并行 MT5 接入).
+    cTrader Open API 桥接（当前实盘执行主通道）.
 
     异步客户端基于 Twisted Reactor; 对外暴露同步接口, 内部用 Deferred 等回包.
     Reactor 只在 connect()/disconnect() 期间运行, 其余方法阻塞等响应.

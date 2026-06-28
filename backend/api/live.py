@@ -2,17 +2,17 @@
 
 Endpoints (all JWT-protected except /api/auth/login; /api/health):
   GET  /api/live/status           — broker status + loop status
-  GET  /api/live/loop-status      — just the loop subprocess status
+  GET  /api/live/loop-status      — current in-process live loop status
   GET  /api/live/account          — real broker account info (balance/equity/margin)
   GET  /api/live/positions        — real open positions
-  POST /api/live/start            — spawn `python main.py --mode live` subprocess
-  POST /api/live/stop             — terminate the loop subprocess (SIGTERM, then SIGKILL)
+  POST /api/live/start            — start in-process live loop via start_loop thread model
+  POST /api/live/stop             — stop in-process live loop
   POST /api/live/emergency-close  — flatten all positions; requires X-Confirm: emergency
 
-(audit 2026-06-08: previously /start and /stop were placeholders. v8 added
-real subprocess management so the Web 总览 can drive the loop from the
-browser. /account and /positions expose the real cTrader state via the
-existing bridge.account_info() / get_positions() methods.)
+当前实盘主链口径：
+backend/services/live_service.py -> risk/policy_service.py -> execution/ctrader_bridge.py -> execution/deal_sync.py -> backend/ledger/service.py
+
+/start 和 /stop 仅负责通过 start_loop/stop_loop 控制该主链中的线程化循环，不是 subprocess 模型。
 """
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
@@ -69,13 +69,13 @@ def get_positions_endpoint(
 
 @router.post("/start")
 def start(_user: RequireUser, req: StartRequest) -> dict:
-    """Spawn live loop as background thread."""
+    """Start the in-process live loop thread via start_loop."""
     return start_loop(req.broker, strategy_name=req.strategy_name)
 
 
 @router.post("/stop")
 def stop(_user: RequireUser) -> dict:
-    """Terminate the loop subprocess."""
+    """Stop the in-process live loop thread."""
     return stop_loop()
 
 
