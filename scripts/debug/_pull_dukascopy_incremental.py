@@ -47,13 +47,17 @@ def import_to_db(y, m0, d, h):
         base = int(datetime(y, m0 + 1, d, h, tzinfo=timezone.utc).timestamp())
         records = []
         for i in range(n):
-            v = struct.unpack(">5i", dec[i * 20 : (i + 1) * 20])
-            if v[2] <= 0 or v[1] <= 0:
+            # Dukascopy .bi5 tick layout: ms offset, ask, bid, ask volume, bid volume.
+            tick_ms, ask_raw, bid_raw, ask_volume, bid_volume = struct.unpack(
+                ">3I2f", dec[i * 20 : (i + 1) * 20]
+            )
+            if bid_raw <= 0 or ask_raw <= 0:
                 continue
             records.append((
-                "XAUUSD+", base + v[0] / 1000.0,
-                v[2] * PIPET, v[1] * PIPET,
-                (v[2] + v[1]) * PIPET / 2, v[4],
+                "XAUUSD+", base + tick_ms / 1000.0,
+                bid_raw * PIPET, ask_raw * PIPET,
+                (bid_raw + ask_raw) * PIPET / 2,
+                float(max(ask_volume, 0.0) + max(bid_volume, 0.0)),
             ))
         if records:
             df = pd.DataFrame(records, columns=["symbol", "time", "bid", "ask", "last", "volume"])
