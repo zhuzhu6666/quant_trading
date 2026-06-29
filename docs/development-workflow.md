@@ -1,6 +1,6 @@
 # Development Workflow
 
-> Last updated: 2026-06-26
+> Last updated: 2026-06-29
 > Scope: local mini-program frontend + Linux server backend workflow.
 
 本文用来固化当前项目的唯一推荐协作方式，目标只有一个：
@@ -49,9 +49,38 @@
 
 Git 仍然保留，但用途要更明确：
 
-- 前端改动：本地提交
-- 后端改动：服务器提交
+- 前端改动：本地 `miniprogram-main` 提交
+- 后端改动：服务器 `main` 提交
 - 不再要求“后端先在本地改，再推服务器”
+
+### 当前分支和工作区
+
+本地 Windows 当前约定：
+
+```text
+branch: miniprogram-main
+sparse checkout:
+  miniprogram_v2/**
+  docs/**
+  AGENTS.md
+  README.md
+  .gitignore
+```
+
+服务器当前约定：
+
+```text
+branch: main
+workspace: /home/ubuntu/quant_trading
+scope: backend / execution / alpha / risk / monitor / scripts / data / logs / systemd
+```
+
+注意：
+
+- 本地 `miniprogram-main` 不是后端开发分支。
+- 服务器 `main` 是后端和运行态真实工作区。
+- 文档/协作规则如影响双方，应同时推送到 `main` 和 `miniprogram-main`。
+- 本地旧后端残留已归档到 `C:\Users\zhu\quant_trading_local_archive_20260629_191212`，不再作为工作区使用。
 
 ## 3. 目录约定
 
@@ -60,7 +89,9 @@ Git 仍然保留，但用途要更明确：
 ```text
 miniprogram_v2/
 docs/
-TODO.md
+AGENTS.md
+README.md
+.gitignore
 ```
 
 ### 服务器主要目录
@@ -76,6 +107,26 @@ data/
 logs/
 scripts/
 tests/
+```
+
+### 服务器运行数据
+
+服务器数据不进入 GitHub。当前关键数据结构：
+
+```text
+data/ticks_monthly/ticks_YYYY_MM.duckdb   # Dukascopy tick 月库
+data/ticks.duckdb                         # 指向当前月份 tick 月库的兼容 symlink
+data/dukascopy_raw/                       # Dukascopy 原始 .bi5 缓存
+data/l2.duckdb                            # cTrader L2 订单簿数据
+```
+
+当前 systemd 约定：
+
+```text
+quant-backend.service             # 后端主服务
+quant-l2-collector.service        # 独立 cTrader L2 采集
+quant-dukascopy-tick-pull.timer   # 每小时拉取已结束小时的 Dukascopy tick
+quant-tick-retention.timer        # 每周清理 365 天外 tick
 ```
 
 ## 4. 标准工作流
@@ -195,18 +246,19 @@ codex login status
 
 ### 前端提交
 
-前端改动在本地提交。
+前端改动在本地 `miniprogram-main` 提交。
 
 示例：
 
 ```bash
 git add miniprogram_v2
 git commit -m "fix mini program trading status rendering"
+git push
 ```
 
 ### 后端提交
 
-后端改动优先在服务器提交。
+后端改动优先在服务器 `main` 提交。
 
 示例：
 
@@ -214,6 +266,25 @@ git commit -m "fix mini program trading status rendering"
 cd /home/ubuntu/quant_trading
 git add backend execution alpha risk monitor config tests
 git commit -m "fix live loop factor restore path"
+git push
+```
+
+### 文档/规则同步
+
+如果修改 `AGENTS.md` 或 `docs/development-workflow.md` 这类双方都依赖的规则文档，需要让两个分支都能看到。
+
+示例：
+
+```bash
+git push origin HEAD:miniprogram-main
+git push origin HEAD:main
+```
+
+服务器随后执行：
+
+```bash
+cd /home/ubuntu/quant_trading
+git pull --ff-only
 ```
 
 ## 8. 明确禁止的做法
