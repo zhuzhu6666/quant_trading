@@ -2,6 +2,7 @@
   "pages": [
     "pages/login/index",
     "pages/overview/index",
+    "pages/pnl-chart/index",
     "pages/trading/index",
     "pages/learning/index",
     "pages/trade-trace/index",

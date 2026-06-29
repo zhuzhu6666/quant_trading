@@ -160,7 +160,7 @@ async function pollLoop(options = {}) {
       get('/api/live/session-stats').catch(() => null),
       get('/api/live/loop-status').catch(() => null),
       get('/api/risk/summary').catch(() => null),
-      get('/api/live/realized-pnl-series?scope=today').catch(() => null),
+      get('/api/live/realized-pnl-series?scope=all').catch(() => null),
     ]);
 
     const currentTrading = liveStore.getState().trading || {};
