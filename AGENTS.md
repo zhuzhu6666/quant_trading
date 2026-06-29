@@ -69,10 +69,21 @@
 - tick 数据在服务器上按月库保存：
   - `data/ticks_monthly/ticks_YYYY_MM.duckdb`
   - `data/ticks.duckdb` 是指向当前月份库的兼容链接
-- L2 数据在服务器上由独立服务采集：
-  - `quant-l2-collector.service`
-  - 数据库：`data/l2.duckdb`
+- L2 数据在服务器上由 cTrader 主连接采集，不再使用独立 Open API 连接：
+  - `quant-l2-collector.service` 和 `scripts/run_l2_collector.py` 属于旧方案，已移除；不要再恢复为默认方案
+  - 月库：`data/l2_monthly/l2_YYYY_MM.duckdb`
+  - `data/l2.duckdb` 是指向当前月份库的兼容链接，由 L2 writer 跨月自动刷新
+  - `risk_require_l2_depth=false` 只表示交易风控不依赖 L2；研究采集由 `l2_collection_enabled` 控制
 - 这些运行数据不进入 GitHub。
+
+## 3.3 当前小程序图表约定
+
+- 小程序收益图当前使用原生页面：
+  - `miniprogram_v2/pages/pnl-chart/index`
+- 图表库使用小程序本地 vendored `uCharts`：
+  - `miniprogram_v2/vendor/ucharts/u-charts.min.js`
+- 不再按 `web-view` / nginx 静态 H5 / `lightweight-charts` 方案理解。
+- 当前小程序没有 `web-view` 业务域名配置权限，因此不要再要求配置 `www.zhuzhu666.icu` 为 web-view 业务域名。
 
 ## 4. 遇到问题时的默认顺序
 

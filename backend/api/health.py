@@ -30,10 +30,16 @@ def health() -> HealthResponse:
         conn.execute("SELECT 1").fetchone()
         conn.close()
     except Exception as e:
-        db_status = f"error: {type(e).__name__}"
+        # DuckDB allows one writer process. During live collection a healthy DB
+        # can be temporarily unavailable to this liveness probe, so don't mark
+        # the whole service degraded just because an active writer owns the lock.
+        if type(e).__name__ == "ConnectionException" and DB_PATH.exists():
+            db_status = "locked_by_writer"
+        else:
+            db_status = f"error: {type(e).__name__}"
 
     return HealthResponse(
-        status="ok" if db_status == "connected" else "degraded",
+        status="ok" if db_status in {"connected", "locked_by_writer"} else "degraded",
         db=db_status,
         ctrader="unknown",
         server_time=datetime.now(timezone.utc).isoformat(),

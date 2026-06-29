@@ -1,67 +1,59 @@
-# Mobile PnL Chart H5
+# Mobile PnL Chart
 
-小程序的“TV 图表”入口会打开：
+> Last updated: 2026-06-29
 
-```text
-https://www.zhuzhu666.icu/mobile/pnl-chart/
-```
+当前小程序收益图已经不再走 `web-view` / nginx 静态 H5 方案。
 
-该页面是 nginx 静态 H5，不经过 FastAPI 渲染。页面内置 TradingView
-`lightweight-charts`，同域请求：
+## Current Implementation
 
-```text
-/api/live/realized-pnl-series?scope=all
-```
-
-## Server deploy
-
-1. 拉取最新代码。
-
-```bash
-cd /opt/quant_trading
-git pull --ff-only
-```
-
-2. 在 nginx 站点配置里加入静态目录。
-
-```nginx
-location /mobile/ {
-    alias /opt/quant_trading/server_static/mobile/;
-    try_files $uri $uri/ =404;
-}
-
-location /vendor/ {
-    alias /opt/quant_trading/server_static/vendor/;
-    try_files $uri =404;
-    access_log off;
-    expires 30d;
-    add_header Cache-Control "public, max-age=2592000, immutable";
-}
-```
-
-如果服务器仓库路径不是 `/opt/quant_trading`，把 `alias` 改成真实路径。
-
-3. 检查并重载 nginx。
-
-```bash
-nginx -t
-systemctl reload nginx
-```
-
-4. 确认 H5 可访问。
+当前实现是微信小程序原生页面：
 
 ```text
-https://www.zhuzhu666.icu/mobile/pnl-chart/
+miniprogram_v2/pages/pnl-chart/index
 ```
 
-直接浏览器打开时会提示从小程序进入，因为图表 API 需要小程序传入 JWT。
-
-## WeChat setup
-
-微信公众平台需要把下面域名加入 web-view 业务域名：
+入口在总览页：
 
 ```text
-www.zhuzhu666.icu
+miniprogram_v2/pages/overview/index.wxml
 ```
 
-后端 API 域名仍然保持现有 request 合法域名配置。
+页面使用本地 vendored `uCharts`：
+
+```text
+miniprogram_v2/vendor/ucharts/u-charts.min.js
+```
+
+这样做是因为当前小程序没有 `web-view` 业务域名配置权限，不能依赖微信公众平台配置 `www.zhuzhu666.icu` 作为 web-view 业务域名。
+
+## Data Contract
+
+图表数据仍来自后端接口：
+
+```text
+GET /api/live/realized-pnl-series?scope=all
+```
+
+小程序通过当前登录态和已有 request 合法域名访问后端 API，不通过 H5 页面转发，也不需要单独配置 web-view 域名。
+
+## Deprecated Plan
+
+以下方案已经废弃，不要再作为当前状态判断依据：
+
+- `https://www.zhuzhu666.icu/mobile/pnl-chart/`
+- nginx `location /mobile/`
+- nginx `location /vendor/` 为 TradingView/lightweight-charts H5 提供静态资源
+- 微信公众平台配置 `www.zhuzhu666.icu` 为 web-view 业务域名
+- H5 内置 TradingView `lightweight-charts`
+
+这些内容只代表历史尝试，不代表当前小程序实现。旧的 `server_static/mobile/pnl-chart/` 和 `server_static/vendor/lightweight-charts/` 静态文件已经从仓库移除。
+
+## Verification Notes
+
+当前验证入口应放在微信开发者工具或真机小程序内：
+
+1. 打开 `miniprogram_v2`
+2. 登录后进入总览页
+3. 点击“打开专业收益图”
+4. 确认进入 `/pages/pnl-chart/index`
+5. 确认图表能展示 `/api/live/realized-pnl-series?scope=all` 返回的数据

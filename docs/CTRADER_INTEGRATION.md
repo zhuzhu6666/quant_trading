@@ -1,7 +1,7 @@
 # cTrader 接入说明
 
-> 最后清理: 2026-06-25
-> 当前状态: cTrader demo 是唯一执行通道；历史 MT5 并行路线已归档。
+> 最后清理: 2026-06-29
+> 当前状态: cTrader demo 是唯一执行通道；L2 研究采集并入主连接，历史 MT5 并行路线已归档。
 
 ---
 
@@ -31,7 +31,14 @@ cTrader Open API 负责当前 demo 交易闭环:
 - 当前实盘主链只需要 cTrader 的 `spot / account / positions / execution` 即可运行
 - 第二数据源当前不再承担“实盘备份源”职责，只保留给未来订单流分析和研究特征
 - `tick 缺少高低点和成交量，所以必须依赖另一源才能跑 live` 这个判断不再成立；它只适用于后续研究扩展
-- 当 `RuntimeConfig.risk_require_l2_depth=false` 时，live loop 现在会跳过 `subscribe_depth()`，避免把 L2 深度流量带进当前实盘 CPU 热路径
+- `RuntimeConfig.risk_require_l2_depth=false` 只表示开仓/风控不依赖 L2；`l2_collection_enabled=true` 时仍会在同一条 cTrader 主连接上订阅 depth，作为研究数据异步落库
+
+2026-06-29 新确认:
+
+- cTrader Open API 同一账号类型不再保留第二条 L2 专用连接；当前目标是 `quant-backend.service` 内单 bridge 连接同时承担 spot / account / positions / execution / depth
+- `quant-l2-collector.service` / `scripts/run_l2_collector.py` 是历史独立采集方案，当前已移除，不应恢复为默认方案
+- L2 写入不再在 depth 回调里逐条写 DuckDB；回调只更新内存簿并入队，后台 writer 批量写 `data/l2.duckdb`
+- L2 库使用月库：`data/l2_monthly/l2_YYYY_MM.duckdb`，`data/l2.duckdb` 只作为当前月份兼容链接，并由 writer 跨月自动刷新
 
 ---
 
@@ -90,7 +97,19 @@ cTrader spot / account / positions
 
 - 当前主链默认依赖 `spot`，不依赖 `L2 depth`
 - `M1 / M5 / M15 / M30 / H1 / H4 / D1` K 线仍然是基础数据资产，要继续同步更新入库
-- `L2 depth` 若未来重新启用，应作为研究/订单流支路，而不是默认挂在当前 live 交易主线程上
+- `L2 depth` 当前作为研究/订单流支路采集，不能成为默认开仓门槛，除非显式打开 `risk_require_l2_depth=true`
+
+L2 研究采集:
+
+```text
+cTrader main bridge
+  -> subscribe_spots / subscribe_depth
+  -> in-memory spot + order book
+  -> async L2 writer queue
+  -> data/l2.duckdb -> data/l2_monthly/l2_YYYY_MM.duckdb
+```
+
+writer 每次批量写入前会按事件时间选择目标月库；如果跨月，会关闭旧月库连接、打开新月库，并把 `data/l2.duckdb` symlink 刷到新月份。
 
 ---
 
@@ -108,7 +127,7 @@ cTrader spot / account / positions
 
 - `journalctl` 里是否在刷 `depth event` / `depth events (5s)`
 - `py-spy dump` 是否卡在 `factor_cards.py` / `parameter_templates.py`
-- 当前配置是否其实并不需要 `subscribe_depth()`
+- depth 是否又被改回回调内同步写库，或是否有人恢复了历史独立 L2 collector
 
 ### `warming_up` 不一定代表真的断线
 

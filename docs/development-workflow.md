@@ -117,17 +117,43 @@ tests/
 data/ticks_monthly/ticks_YYYY_MM.duckdb   # Dukascopy tick 月库
 data/ticks.duckdb                         # 指向当前月份 tick 月库的兼容 symlink
 data/dukascopy_raw/                       # Dukascopy 原始 .bi5 缓存
-data/l2.duckdb                            # cTrader L2 订单簿数据
+data/l2_monthly/l2_YYYY_MM.duckdb         # cTrader L2 月库
+data/l2.duckdb                            # 指向当前月份 L2 月库的兼容 symlink，L2 writer 跨月自动刷新
 ```
 
 当前 systemd 约定：
 
 ```text
 quant-backend.service             # 后端主服务
-quant-l2-collector.service        # 独立 cTrader L2 采集
 quant-dukascopy-tick-pull.timer   # 每小时拉取已结束小时的 Dukascopy tick
 quant-tick-retention.timer        # 每周清理 365 天外 tick
 ```
+
+L2 depth 当前通过 `quant-backend.service` 内的 cTrader 主 bridge 订阅并异步写入 DuckDB。官方 Open API 连接约束下，同一 demo/live 账号类型不要再额外保留第二条 L2 专用连接。跨月时 writer 会按事件时间写入新的 `l2_YYYY_MM.duckdb`，并刷新 `data/l2.duckdb`。
+
+历史独立采集方案已清理：
+
+- `quant-l2-collector.service` 不再保留 systemd unit
+- `scripts/run_l2_collector.py` 已从仓库删除
+- 不要用独立 L2 collector 恢复第二条 cTrader Open API 连接
+
+### 订单流数据就绪状态
+
+2026-06-29 检查结论：
+
+- tick 数据已准备好，可直接作为订单流分析的 L1 输入
+  - `data/ticks_monthly/` 共 13 个 tick 月库
+  - 覆盖 `2025-06-29T22:00:01Z` 至 `2026-06-29T11:59:59Z`
+  - 总计约 8431 万行
+  - 当前月约 757 万行
+  - bad bid/ask、`ask < bid`、重复 timestamp 均为 0
+- L2 数据已准备好，可直接作为订单流分析的 L2 输入
+  - 新库从 `2026-06-29T11:55:29Z` 开始干净采集
+  - `orderbook_changes.id` 与 `orderbook_snapshots.id` 连续，无 gap
+  - `id` / `quote_id` 均为 `BIGINT`
+  - 当前为 5 秒 snapshot 节奏，change 事件持续写入
+
+注意：L2 历史长度从 2026-06-29 重新开始积累。在线特征、字段适配、小样本 sanity check 可以直接做；稳定统计、训练、回测和阈值校准应等 L2 至少积累到按天计的样本。
 
 ## 4. 标准工作流
 

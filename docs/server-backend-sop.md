@@ -237,7 +237,7 @@ systemctl status quant-backend.service --no-pager
 
 1. `journalctl` 中是否在高频刷 `depth event` / `depth events (5s)`
 2. 是否存在学习治理接口被频繁访问，导致 `factor_cards / parameter_templates` 重算
-3. 当前运行配置是否其实不需要 `L2 depth`
+3. L2 是否被误改成回调内同步写库，或是否恢复了历史独立 L2 collector
 
 ### 高 CPU 排查 SOP
 
@@ -264,11 +264,11 @@ journalctl _PID=$PID -n 120 --no-pager
 已确认过的真实根因：
 
 - `execution/ctrader_bridge.py` depth 事件高频日志
-- depth 事件逐条写 `data/l2.duckdb`
+- depth 事件逐条同步写 `data/l2.duckdb`
 - `/api/learning/*` 导致 `factor_cards.py` / `parameter_templates.py` 重复重算
-- 当前配置 `risk_require_l2_depth=false`，却仍默认 `subscribe_depth()`
+- 历史独立 L2 collector 与后端主 bridge 同时占用 cTrader Open API 连接
 
-因此在当前现网配置下，如果 CPU 失控，先确认是否误把“未来订单流支路”重新挂回了实盘主链。
+因此在当前现网配置下，如果 CPU 失控，先确认 L2 是否仍然只作为主 bridge 内的异步研究采集支路。`risk_require_l2_depth=false` 不能被误解为“禁止采集 L2”，它只表示 L2 不能作为开仓/风控门槛。
 
 ## 11. 提交前检查
 

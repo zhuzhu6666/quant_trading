@@ -2320,6 +2320,12 @@ def _make_ctrader_bridge(**overrides):
         ctrader_cfg = cfg.get("ctrader", {}) if isinstance(cfg, dict) else {}
     except Exception:
         ctrader_cfg = {}
+    try:
+        from config.runtime_config import shared as _runtime_cfg
+
+        runtime_cfg = _runtime_cfg()
+    except Exception:
+        runtime_cfg = None
     kw = dict(
         client_id=os.getenv("CTRADER_CLIENT_ID", ""),
         client_secret=os.getenv("CTRADER_CLIENT_SECRET", ""),
@@ -2337,11 +2343,33 @@ def _make_ctrader_bridge(**overrides):
         proxy_rdns=str(
             os.getenv("CTRADER_PROXY_RDNS", ctrader_cfg.get("proxy_rdns", True))
         ).strip().lower() not in {"0", "false", "no", "off"},
+        l2_persist_enabled=bool(getattr(runtime_cfg, "l2_collection_enabled", True)),
+        l2_snapshot_interval_sec=float(getattr(runtime_cfg, "l2_snapshot_interval_sec", 5.0) or 5.0),
+        l2_write_batch_size=int(getattr(runtime_cfg, "l2_write_batch_size", 1000) or 1000),
+        l2_write_flush_interval_sec=float(getattr(runtime_cfg, "l2_write_flush_interval_sec", 1.0) or 1.0),
     )
     kw.update(overrides)
     bridge = CTraderBridge(**kw)
     _install_ctrader_live_listener(bridge)
     return bridge, None
+
+
+def _apply_l2_runtime_config(bridge) -> None:
+    if bridge is None:
+        return
+    try:
+        from config.runtime_config import shared as _runtime_cfg
+
+        runtime_cfg = _runtime_cfg()
+    except Exception:
+        return
+    try:
+        bridge.l2_persist_enabled = bool(getattr(runtime_cfg, "l2_collection_enabled", True))
+        bridge.l2_snapshot_interval_sec = max(0.0, float(getattr(runtime_cfg, "l2_snapshot_interval_sec", 5.0) or 5.0))
+        bridge.l2_write_batch_size = max(1, int(getattr(runtime_cfg, "l2_write_batch_size", 1000) or 1000))
+        bridge.l2_write_flush_interval_sec = max(0.1, float(getattr(runtime_cfg, "l2_write_flush_interval_sec", 1.0) or 1.0))
+    except Exception as exc:
+        logger.debug("[ctrader] l2 runtime config apply skipped: %s", exc)
 
 
 def _install_ctrader_live_listener(bridge) -> None:
@@ -2545,6 +2573,7 @@ def _get_ctrader():
         # 复用已有连接 — 用 is_connected 属性 (瞬时), 不用 ping() (阻塞 5s)
         if _ctrader_bridge is not None:
             _ctrader_bridge.send_orders = _should_send_orders("ctrader")
+            _apply_l2_runtime_config(_ctrader_bridge)
             if _ctrader_bridge.is_connected:
                 return _ctrader_bridge, None, False
             if getattr(_ctrader_bridge, "is_connecting", False):
@@ -2572,6 +2601,7 @@ def _get_ctrader():
         if not _ctrader_bridge.has_token():
             _ctrader_bridge = None
             return None, "no cTrader credentials in .env (CTRADER_CLIENT_ID/SECRET/ACCESS_TOKEN/ACCOUNT_ID)", False
+        _apply_l2_runtime_config(_ctrader_bridge)
 
         # ★ 关键改动: 立刻返 warming_up, 后台线程做真 connect
         _ctrader_connect_thread = _kickoff_ctrader_connect()
@@ -2655,7 +2685,13 @@ def _release_market_connection_if_safe(session: dict[str, Any], log=None) -> boo
     return True
 
 
-def _ensure_spot_subscription(bridge, *, require_l2_depth: bool = False, log=None) -> None:
+def _ensure_spot_subscription(
+    bridge,
+    *,
+    require_l2_depth: bool = False,
+    l2_collection_enabled: bool = False,
+    log=None,
+) -> None:
     global _last_spot_subscription_attempt_ts
     if bridge is None or not getattr(bridge, "is_connected", False):
         return
@@ -2665,18 +2701,20 @@ def _ensure_spot_subscription(bridge, *, require_l2_depth: bool = False, log=Non
             quote = bridge.get_spot_quote() or {}
         except Exception:
             quote = {}
-    if float((quote or {}).get("ts") or 0.0) > 0:
+    spot_needed = float((quote or {}).get("ts") or 0.0) <= 0
+    depth_needed = bool(require_l2_depth or l2_collection_enabled) and hasattr(bridge, "subscribe_depth") and not bool(getattr(bridge, "_depth_subscribed", False))
+    if not spot_needed and not depth_needed:
         return
     now_ts = time.time()
     if now_ts - _last_spot_subscription_attempt_ts < 60:
         return
     _last_spot_subscription_attempt_ts = now_ts
     try:
-        if hasattr(bridge, "subscribe_spots"):
+        if spot_needed and hasattr(bridge, "subscribe_spots"):
             bridge.subscribe_spots()
-        if require_l2_depth and hasattr(bridge, "subscribe_depth"):
+        if depth_needed:
             bridge.subscribe_depth()
-        msg = "spot subscription refreshed after broker connection became ready"
+        msg = "market subscriptions refreshed after broker connection became ready"
         log(msg) if log else logger.info(msg)
     except Exception as exc:
         logger.debug("[market_session] spot subscription refresh failed: %s", exc)
@@ -4366,6 +4404,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         try:
             cfg = _rcfg
             require_l2_depth = bool(getattr(_rcfg, "risk_require_l2_depth", False))
+            l2_collection_enabled = bool(getattr(_rcfg, "l2_collection_enabled", True))
             spot_bridge, spot_err, spot_warming = _get_ctrader()
             if spot_err:
                 log(f"subscribe_spots skipped: {spot_err}")
@@ -4375,16 +4414,19 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     log(f"subscribe_spots skipped: {wait_err}")
                 else:
                     spot_bridge.subscribe_spots()
-                    if require_l2_depth:
+                    if require_l2_depth or l2_collection_enabled:
                         spot_bridge.subscribe_depth()
-                    log("subscribed to spot events for real-time price")
+                    log("subscribed to spot/depth events for real-time price and L2 research")
             else:
                 spot_bridge.subscribe_spots()
-                if require_l2_depth:
+                if require_l2_depth or l2_collection_enabled:
                     spot_bridge.subscribe_depth()
-                log("subscribed to spot events for real-time price")
+                log("subscribed to spot/depth events for real-time price and L2 research")
             if not require_l2_depth:
-                log("L2 depth subscription skipped: risk_require_l2_depth=false")
+                if l2_collection_enabled:
+                    log("L2 depth collected for research; risk_require_l2_depth=false so it is not a trading gate")
+                else:
+                    log("L2 depth subscription skipped: risk_require_l2_depth=false and l2_collection_enabled=false")
         except Exception as e:
             log(f"subscribe_spots failed (non-fatal): {e}")
 
@@ -4452,7 +4494,13 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             else:
                 try:
                     require_l2_depth = bool(getattr(_rcfg, "risk_require_l2_depth", False))
-                    _ensure_spot_subscription(bridge, require_l2_depth=require_l2_depth, log=log)
+                    l2_collection_enabled = bool(getattr(_rcfg, "l2_collection_enabled", True))
+                    _ensure_spot_subscription(
+                        bridge,
+                        require_l2_depth=require_l2_depth,
+                        l2_collection_enabled=l2_collection_enabled,
+                        log=log,
+                    )
                 except Exception as _spot_sub_err:
                     logger.debug("[live] spot subscription refresh skipped: %s", _spot_sub_err)
 

@@ -105,6 +105,10 @@ class RuntimeConfig:
     risk_max_holding_bars: int = 288
     risk_block_on_disk_critical: bool = True
     risk_require_l2_depth: bool = False
+    l2_collection_enabled: bool = True
+    l2_snapshot_interval_sec: float = 5.0
+    l2_write_batch_size: int = 1000
+    l2_write_flush_interval_sec: float = 1.0
     risk_enable_nfp_skip: bool = False
     risk_enable_gvz_gate: bool = False
     risk_gvz_drop_pct: float = -2.0

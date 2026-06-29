@@ -38,7 +38,7 @@
 - `DuckDB` 只负责市场/分析型库
   - `data/ctrader_data.duckdb`
   - `data/ticks.duckdb`
-  - `data/l2.duckdb`
+  - `data/l2.duckdb` -> `data/l2_monthly/l2_YYYY_MM.duckdb`，由 L2 writer 跨月自动刷新
   - `data/trades.duckdb`
   - `data/events.duckdb`
 - 业务代码禁止直接使用 `sqlite3.connect(...)` / `duckdb.connect(...)`
@@ -64,7 +64,7 @@
   - positions
   - execution / deals
 - 第二数据源当前不再参与 live 开仓、风控放行或 broker 状态判断
-- `L2 depth` 当前默认不是实盘前置依赖；只有在 `risk_require_l2_depth=true` 时，才允许重新进入 live 主链
+- `L2 depth` 当前可以作为研究支路在 cTrader 主连接内采集，但默认不是实盘前置依赖；只有在 `risk_require_l2_depth=true` 时，才允许成为 live 开仓/风控门槛
 
 这条边界的目的，是把“今天真要交易必须依赖的数据”与“未来研究可能有帮助的数据”彻底分开，避免研究支路反向拖垮实盘链路。
 
