@@ -29,6 +29,7 @@ from backend.services.live_service import (
     start_loop,
     stop_loop,
 )
+from backend.services.realized_pnl import get_realized_pnl_series
 
 router = APIRouter(prefix="/api/live", tags=["live"])
 
@@ -65,6 +66,17 @@ def get_positions_endpoint(
     symbol: str | None = Query(None),
 ) -> dict:
     return get_positions(broker, symbol)
+
+
+@router.get("/realized-pnl-series")
+def realized_pnl_series_endpoint(
+    _user: RequireUser,
+    scope: str = Query("today", pattern="^(today|24h|7d|30d|all)$"),
+    from_ts: float | None = Query(None),
+    to_ts: float | None = Query(None),
+    tz: str = Query("Asia/Shanghai"),
+) -> dict:
+    return get_realized_pnl_series(scope=scope, from_ts=from_ts, to_ts=to_ts, tz=tz)
 
 
 @router.post("/start")

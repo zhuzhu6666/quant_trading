@@ -858,23 +858,44 @@ class CTraderBridge(BaseBrokerBridge):
             if not isinstance(payload, ProtoOAExecutionEvent):
                 return
             position = self._position_from_proto(getattr(payload, "position", None))
+            raw_position = getattr(payload, "position", None)
             deal = getattr(payload, "deal", None)
             reason = str(getattr(payload, "executionType", "") or "execution_event")
-            if position is not None and int(position.position_id or 0) > 0:
-                closed_volume = float(getattr(getattr(deal, "closePositionDetail", None), "closedVolume", 0.0) or 0.0)
-                total_volume = float(position.volume or 0.0)
-                if total_volume > 0 and closed_volume >= total_volume:
-                    self._remove_position_cache(position.position_id, emit=False, reason=reason)
-                else:
+            position_id = int(getattr(position, "position_id", 0) or getattr(deal, "positionId", 0) or 0)
+            close_detail = getattr(deal, "closePositionDetail", None)
+            closed_volume = float(getattr(close_detail, "closedVolume", 0.0) or 0.0)
+            position_status = int(getattr(raw_position, "positionStatus", 0) or 0)
+            if position_id > 0:
+                remaining_volume = float(getattr(position, "volume", 0.0) or 0.0)
+                with self._positions_cache_lock:
+                    cached_position = self._positions_cache.get(position_id)
+                    cached_volume = float(getattr(cached_position, "volume", 0.0) or 0.0)
+                is_closed_status = position_status == 2  # ProtoOAPositionStatus.POSITION_STATUS_CLOSED
+                full_close = bool(
+                    is_closed_status
+                    or (position is None and closed_volume > 0)
+                    or (remaining_volume <= 0 and closed_volume > 0)
+                    or (cached_volume > 0 and closed_volume >= cached_volume)
+                )
+                if full_close:
+                    self._remove_position_cache(position_id, emit=False, reason=reason)
+                elif position is not None:
                     self._merge_position_cache(position, emit=False, reason=reason)
+                else:
+                    logger.debug(
+                        "execution event for pos=%s without position snapshot; leaving cache unchanged",
+                        position_id,
+                    )
                 self._emit_event("positions", {"positions": self._positions_snapshot(), "reason": reason})
                 self._recompute_account_equity_from_cache(emit=True, reason=reason)
             self._emit_event(
                 "execution",
                 {
                     "reason": reason,
-                    "position_id": int(getattr(position, "position_id", 0) or 0),
+                    "position_id": position_id,
                     "deal_id": int(getattr(deal, "dealId", 0) or 0),
+                    "closed_volume": closed_volume,
+                    "is_server_event": bool(getattr(payload, "isServerEvent", False)),
                 },
             )
         except Exception as exc:
@@ -1614,30 +1635,71 @@ class CTraderBridge(BaseBrokerBridge):
                 comment="DRY-RUN close (send_orders=False)",
             )
         try:
-            # 如果未传 volume, 自动查仓位 volume
+            # 如果未传 volume, 必须强制刷新 broker 当前仓位后再解析全平手数。
+            # 不能读缓存；缓存 stale 时会把已经不存在的仓位当成可平仓。
             if volume <= 0.0:
-                positions = self.get_positions()
+                positions = self.refresh_positions(force=True, allow_cache_fallback=False)
                 match = [p for p in positions if p.position_id == position_id]
                 if not match:
                     return OrderResult(
                         success=False, position_id=position_id,
-                        comment=f"Position {position_id} not found in open positions",
+                        error_code="position_not_found",
+                        comment=f"Position {position_id} not found in live broker positions",
                     )
                 volume = match[0].volume
                 logger.info(f"  auto-resolved volume={volume} for full close")
+            close_volume = int(round(volume))
+            if close_volume <= 0:
+                logger.error("close_position rejected locally pos=%s invalid volume=%s", position_id, volume)
+                return OrderResult(
+                    success=False,
+                    position_id=position_id,
+                    volume=float(volume or 0.0),
+                    error_code="invalid_close_volume",
+                    comment=f"close volume must be > 0, got {volume}",
+                )
 
             req = TradeMsg.ProtoOAClosePositionReq()
             req.ctidTraderAccountId = self.account_id
             req.positionId = int(position_id)
             # cTrader volume 字段: API 原生 volume unit
-            req.volume = int(round(volume))
+            req.volume = close_volume
             resp = self._send(req, timeout=10.0)
-            logger.info(f"close_position OK pos={position_id} vol={volume} resp={type(resp).__name__}")
+            resp_name = type(resp).__name__
+            if resp_name == "ProtoOAOrderErrorEvent":
+                err_code = getattr(resp, "errorCode", "?")
+                err_desc = getattr(resp, "description", "")
+                logger.error(
+                    "close_position rejected pos=%s vol=%s errorCode=%s desc=%r",
+                    position_id,
+                    volume,
+                    err_code,
+                    err_desc,
+                )
+                return OrderResult(
+                    success=False,
+                    position_id=position_id,
+                    volume=volume,
+                    error_code=str(err_code),
+                    comment=f"close rejected: {err_code} — {err_desc}",
+                )
+            if resp_name == "ProtoOAExecutionEvent":
+                err_code = getattr(resp, "errorCode", "")
+                if err_code:
+                    logger.error("close_position execution error pos=%s vol=%s errorCode=%s", position_id, volume, err_code)
+                    return OrderResult(
+                        success=False,
+                        position_id=position_id,
+                        volume=volume,
+                        error_code=str(err_code),
+                        comment=f"close execution error: {err_code}",
+                    )
+            logger.info(f"close_position OK pos={position_id} vol={volume} resp={resp_name}")
             return OrderResult(
                 success=True,
                 position_id=position_id,
                 volume=volume,
-                comment=f"close accepted, awaiting ProtoOAExecutionEvent",
+                comment=f"close accepted; resp={resp_name}",
             )
         except Exception as e:
             logger.error(f"close_position failed pos={position_id}: {e}")
@@ -1743,7 +1805,13 @@ class CTraderBridge(BaseBrokerBridge):
             return cached_positions
         return self.refresh_positions(symbol)
 
-    def refresh_positions(self, symbol: str = "") -> list[PositionInfo]:
+    def refresh_positions(
+        self,
+        symbol: str = "",
+        *,
+        force: bool = False,
+        allow_cache_fallback: bool = True,
+    ) -> list[PositionInfo]:
         """
         查当前持仓. 用 ProtoOAReconcileReq (增量大).
 
@@ -1752,7 +1820,7 @@ class CTraderBridge(BaseBrokerBridge):
         """
         if not self.is_connected:
             return []
-        if self._should_backoff():
+        if not force and self._should_backoff():
             cached_positions = self._positions_snapshot()
             if symbol and self._symbol_id is not None:
                 return [pos for pos in cached_positions if int(pos.symbol_id or 0) == int(self._symbol_id)]
@@ -1806,6 +1874,8 @@ class CTraderBridge(BaseBrokerBridge):
             self._record_failure()
             if self._should_log_error(f"get_positions failed: {e}"):
                 logger.error(f"get_positions failed: {e}")
+            if not allow_cache_fallback:
+                return []
             cached_positions = self._positions_snapshot()
             if symbol and self._symbol_id is not None:
                 return [pos for pos in cached_positions if int(pos.symbol_id or 0) == int(self._symbol_id)]

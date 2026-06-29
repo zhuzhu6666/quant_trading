@@ -65,7 +65,7 @@ function enrichTradingSnapshot(baseTrading = {}) {
     n_positions: positionsList.length,
     realized_pnl: realizedPnl,
     unrealized_pnl: unrealizedPnl,
-    live_pnl: realizedPnl + unrealizedPnl,
+    live_pnl: unrealizedPnl,
     position_summary: positionSummary,
   };
 }
@@ -153,17 +153,19 @@ async function pollLoop(options = {}) {
   lastPollAt = now;
   pollInFlight = (async () => {
     try {
-    const [account, positions, strategyStatus, sessionStats, loopStatus, riskSummary] = await Promise.all([
+    const [account, positions, strategyStatus, sessionStats, loopStatus, riskSummary, realizedPnlSeries] = await Promise.all([
       get('/api/live/account').catch(() => null),
       get('/api/live/positions').catch(() => null),
       get('/api/live/strategy-status').catch(() => null),
       get('/api/live/session-stats').catch(() => null),
       get('/api/live/loop-status').catch(() => null),
       get('/api/risk/summary').catch(() => null),
+      get('/api/live/realized-pnl-series?scope=today').catch(() => null),
     ]);
 
     const currentTrading = liveStore.getState().trading || {};
     const posList = normalizePositionsPayload((positions && positions.positions) || []);
+    const realizedSummary = (realizedPnlSeries && realizedPnlSeries.summary) || {};
     const primaryPosition = posList[0] || null;
     const nextTrading = enrichTradingSnapshot({
       ...currentTrading,
@@ -171,7 +173,7 @@ async function pollLoop(options = {}) {
       balance: (account && account.balance) || currentTrading.balance || 0,
       positions_list: posList,
       n_positions: posList.length,
-      realized_pnl: (sessionStats && sessionStats.pnl_today) || 0,
+      realized_pnl: Number(realizedSummary.realized_pnl ?? (sessionStats && sessionStats.pnl_today) ?? 0),
       position: primaryPosition
         ? {
             dir: primaryPosition.type === 'buy' ? 'LONG' : primaryPosition.type === 'sell' ? 'SHORT' : 'FLAT',
@@ -205,6 +207,7 @@ async function pollLoop(options = {}) {
       sessionStats,
       loopStatus,
       riskSummary,
+      realizedPnlSeries: realizedPnlSeries || liveStore.getState().realizedPnlSeries,
       trading: nextTrading,
       lastUpdate: Date.now(),
     });

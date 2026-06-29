@@ -31,6 +31,10 @@ const store = createStore({
   sessionStats: null,
   loopStatus: null,
   riskSummary: null,
+  realizedPnlSeries: {
+    summary: { realized_pnl: 0, trades: 0, wins: 0, losses: 0, win_rate: 0 },
+    points: [],
+  },
 });
 
 export default store;

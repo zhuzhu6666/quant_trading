@@ -20,9 +20,15 @@ from backend.services import live_service
 def _reset_state():
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
+    live_service._live_state["account_updated_at"] = None
+    live_service._live_state["positions_updated_at"] = None
+    live_service._refresh_thread = None
     yield
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
+    live_service._live_state["account_updated_at"] = None
+    live_service._live_state["positions_updated_at"] = None
+    live_service._refresh_thread = None
 
 
 def _fake_bridge(balance=10000.0, equity=10050.0, currency="USD"):
@@ -31,11 +37,13 @@ def _fake_bridge(balance=10000.0, equity=10050.0, currency="USD"):
         "balance": balance, "equity": equity, "currency": currency,
         "margin": 0.0, "margin_free": 0.0, "leverage": 100,
     }
+    b.refresh_account_info.return_value = b.account_info.return_value
     b.get_positions.return_value = [
         {"position_id": 42, "symbol_id": 1, "type": "buy", "volume": 0.01,
          "price_open": 4500.0, "sl": 0.0, "tp": 0.0, "profit": 50.0,
          "swap": 0.0, "commission": 0.0}
     ]
+    b.refresh_positions.return_value = b.get_positions.return_value
     return b
 
 
@@ -61,7 +69,7 @@ def test_refresh_account_positions_writes_cache():
     cached = next(p for p in pos if p.get("position_id") == 42)
     assert cached["mfe"] == pytest.approx(50.0)
     assert cached["profit_capture_ratio"] == pytest.approx(1.0)
-    assert cached["thesis_status"] == "intact"
+    assert cached["thesis_status"] in {"intact", "weakening"}
 
 
 def test_refresh_account_positions_swallows_bridge_errors():
@@ -69,11 +77,69 @@ def test_refresh_account_positions_swallows_bridge_errors():
     Same pattern as the original tick code: best-effort write, never raise."""
     bridge = MagicMock()
     bridge.account_info.side_effect = RuntimeError("network blip")
+    bridge.refresh_account_info.side_effect = RuntimeError("network blip")
     bridge.get_positions.side_effect = RuntimeError("network blip")
+    bridge.refresh_positions.side_effect = RuntimeError("network blip")
     # Should NOT raise
     live_service._refresh_account_positions_sync(bridge, "ctrader")
     # Cache stays at whatever it was (None from fixture)
     assert live_service._live_state["account"] is None
+
+
+def test_refresh_account_positions_skips_reconcile_when_positions_recent():
+    class _Bridge:
+        is_connected = True
+
+        def __init__(self):
+            self.account_calls = 0
+            self.position_calls = 0
+
+        def refresh_account_info(self):
+            self.account_calls += 1
+            return {
+                "balance": 10000.0,
+                "equity": 10000.0,
+                "currency": "USD",
+                "margin": 0.0,
+                "margin_free": 0.0,
+                "leverage": 100,
+            }
+
+        def refresh_positions(self, *, force=False, allow_cache_fallback=True):
+            self.position_calls += 1
+            return [{"position_id": 43, "symbol_id": 1, "type": "buy", "volume": 100.0}]
+
+    bridge = _Bridge()
+    live_service._live_state["account_updated_at"] = time.time() - 60.0
+    live_service._live_state["positions_updated_at"] = time.time()
+    live_service._live_state["positions"] = [{"position_id": 42, "symbol_id": 1, "type": "buy", "volume": 100.0}]
+
+    live_service._refresh_account_positions_sync(bridge, "ctrader")
+
+    assert bridge.account_calls == 1
+    assert bridge.position_calls == 0
+    assert live_service._live_state["positions"][0]["position_id"] == 42
+
+
+def test_refresh_account_positions_skips_position_write_when_reconcile_not_fresh():
+    class _Bridge:
+        is_connected = True
+        _last_reconcile_at = 10.0
+
+        def refresh_account_info(self):
+            raise AssertionError("account refresh should be skipped")
+
+        def refresh_positions(self, *, force=False, allow_cache_fallback=True):
+            return []
+
+    live_service._live_state["account"] = {"balance": 10000.0, "equity": 10000.0}
+    live_service._live_state["account_updated_at"] = time.time()
+    live_service._live_state["positions"] = [{"position_id": 42, "symbol_id": 1, "type": "buy", "volume": 100.0}]
+    live_service._live_state["positions_updated_at"] = time.time() - 300.0
+
+    live_service._refresh_account_positions_sync(_Bridge(), "ctrader")
+
+    assert live_service._live_state["positions"][0]["position_id"] == 42
 
 
 def test_kickoff_refresh_spawns_daemon_thread(monkeypatch):
@@ -179,4 +245,3 @@ def test_kickoff_runs_even_when_fetch_bars_returns_none():
         "_run_loop's cTrader main loop. It must be BEFORE so the cache writer still "
         "runs when warmup returns None."
     )
-

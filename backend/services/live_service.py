@@ -99,6 +99,8 @@ _RUNTIME_KV_LAST_SHUTDOWN = "live.loop.last_shutdown"
 _RECOVERY_CONTEXT_PARTIAL = "partial"
 _RECOVERY_CONTEXT_FULL = "full"
 _RECOVERY_REPLAY_LOOKBACK_SEC = 7 * 24 * 3600
+_RECOVERY_ZERO_CONFIRMATIONS_REQUIRED = 2
+_recovery_zero_confirmations: dict[str, int] = {}
 _AUTO_RESUME_DELAY_SEC = 4.0
 
 
@@ -1377,6 +1379,7 @@ _live_state: dict = {
 _LIVE_STATE_LOCK = threading.Lock()
 _ACCOUNT_REFRESH_LOCK = threading.Lock()
 _ACCOUNT_REFRESH_MIN_INTERVAL = 15.0
+_POSITION_RECONCILE_MIN_INTERVAL = 120.0
 _DATA_SYNC_LOCK = threading.Lock()
 
 
@@ -1755,7 +1758,11 @@ def _upsert_recovery_position_state(
                 symbol=excluded.symbol,
                 direction=excluded.direction,
                 open_price=excluded.open_price,
-                volume=excluded.volume,
+                volume=CASE
+                    WHEN excluded.volume > 0 THEN excluded.volume
+                    WHEN recovery_position_state.volume > 0 THEN recovery_position_state.volume
+                    ELSE excluded.volume
+                END,
                 last_seen_at=excluded.last_seen_at,
                 status=excluded.status,
                 strategy_name=excluded.strategy_name,
@@ -1944,11 +1951,19 @@ def _replay_recovered_close(
 
 
 def _read_positions_for_recovery(bridge) -> list[Any]:
-    cached_positions = _live_state_get("positions", clone=True) or []
-    if isinstance(cached_positions, dict):
-        cached_positions = cached_positions.get("positions", []) or []
-    if cached_positions:
-        return list(cached_positions)
+    if hasattr(bridge, "is_connected") and not bridge.is_connected:
+        raise RuntimeError("broker not connected")
+    if hasattr(bridge, "refresh_positions"):
+        has_reconcile_ts = hasattr(bridge, "_last_reconcile_at")
+        before_reconcile = float(getattr(bridge, "_last_reconcile_at", 0.0) or 0.0)
+        try:
+            positions = bridge.refresh_positions(force=True, allow_cache_fallback=False)
+        except TypeError:
+            positions = bridge.refresh_positions()
+        after_reconcile = float(getattr(bridge, "_last_reconcile_at", 0.0) or 0.0)
+        if has_reconcile_ts and after_reconcile <= before_reconcile:
+            raise RuntimeError("fresh broker reconcile unavailable")
+        return positions or []
     return bridge.get_positions() or []
 
 
@@ -1972,9 +1987,55 @@ def _bootstrap_position_recovery(
     current_ids = {item["position_id"] for item in normalized if item["position_id"] > 0}
     active_rows = _list_active_recovery_positions(broker)
     if not current_ids:
+        _live_state_update(positions=[], positions_updated_at=time.time())
+        _prev_position_ids = set()
         suffix = f" while {len(active_rows)} persisted positions remain" if active_rows else ""
+        if active_rows:
+            zero_count = _recovery_zero_confirmations.get(broker, 0) + 1
+            _recovery_zero_confirmations[broker] = zero_count
+            if zero_count < _RECOVERY_ZERO_CONFIRMATIONS_REQUIRED:
+                log(
+                    "recovery bootstrap deferred: broker returned 0 positions"
+                    f"{suffix}; confirmation {zero_count}/{_RECOVERY_ZERO_CONFIRMATIONS_REQUIRED}"
+                )
+                return False
+
+            from execution.deal_sync import sync_close_deals_batch
+
+            missing_ids = {int(row["position_id"]) for row in active_rows}
+            lookback_from = int(
+                max(
+                    0,
+                    min(float(row.get("last_seen_at") or time.time()) for row in active_rows)
+                    - _RECOVERY_REPLAY_LOOKBACK_SEC,
+                )
+            )
+            conn = _get_state_conn()
+            try:
+                replayed = sync_close_deals_batch(
+                    bridge,
+                    conn,
+                    missing_ids,
+                    from_ts=lookback_from,
+                    max_rows=500,
+                )
+            finally:
+                conn.close()
+            for row in active_rows:
+                position_id = int(row["position_id"])
+                _replay_recovered_close(
+                    broker=broker,
+                    position_id=position_id,
+                    position_state=row,
+                    real_pnl=replayed.get(position_id),
+                    strategy_name=strategy_name,
+                )
+            log(f"recovery bootstrap reconciled {len(active_rows)} persisted positions as closed after broker returned 0")
+            return True
+        _recovery_zero_confirmations.pop(broker, None)
         log(f"recovery bootstrap deferred: broker returned 0 positions{suffix}")
         return False
+    _recovery_zero_confirmations.pop(broker, None)
     missing_ids = {int(row["position_id"]) for row in active_rows if int(row["position_id"]) not in current_ids}
 
     if missing_ids:
@@ -4552,35 +4613,62 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
         if hasattr(bridge, 'is_connected') and not bridge.is_connected:
             return
         now_ts = time.time()
-        freshest_ts = max(
-            float(_live_state_get("account_updated_at") or 0.0),
-            float(_live_state_get("positions_updated_at") or 0.0),
+        account_updated_at = float(_live_state_get("account_updated_at") or 0.0)
+        positions_updated_at = float(_live_state_get("positions_updated_at") or 0.0)
+        account_fresh = account_updated_at > 0 and (now_ts - account_updated_at) < _ACCOUNT_REFRESH_MIN_INTERVAL
+        positions_fresh = (
+            positions_updated_at > 0
+            and (now_ts - positions_updated_at) < _POSITION_RECONCILE_MIN_INTERVAL
         )
-        if freshest_ts > 0 and (now_ts - freshest_ts) < _ACCOUNT_REFRESH_MIN_INTERVAL:
+        if account_fresh and positions_fresh:
             return
-        try:
-            raw = bridge.refresh_account_info() if hasattr(bridge, "refresh_account_info") else bridge.account_info()
-        except Exception as e:
-            logger.warning(f"[{broker}] background account_info failed: {e}")
-            return
-        if not raw:
-            return
-        # 统一转 dict: CTraderBridge 返 AccountInfo dataclass
-        if not isinstance(raw, dict):
-            from dataclasses import asdict
-            acct = asdict(raw)
-        else:
-            acct = raw
-        # audit 2026-06-10: ensure the cached account has `ok=True` so the
-        # WS snapshot doesn't mistake it for an error envelope.
-        acct.setdefault("ok", True)
-        acct.setdefault("broker", broker)
-        _live_state_update(account=acct, account_updated_at=now_ts)
-        try:
-            pos_raw = bridge.refresh_positions() if hasattr(bridge, "refresh_positions") else (bridge.get_positions() or [])
-        except Exception as e:
-            logger.warning(f"[{broker}] background get_positions failed: {e}")
-            pos_raw = None
+        if not account_fresh:
+            try:
+                raw = bridge.refresh_account_info() if hasattr(bridge, "refresh_account_info") else bridge.account_info()
+            except Exception as e:
+                logger.warning(f"[{broker}] background account_info failed: {e}")
+                raw = None
+            if raw:
+                # 统一转 dict: CTraderBridge 返 AccountInfo dataclass
+                if not isinstance(raw, dict):
+                    from dataclasses import asdict
+                    acct = asdict(raw)
+                else:
+                    acct = raw
+                # audit 2026-06-10: ensure the cached account has `ok=True` so the
+                # WS snapshot doesn't mistake it for an error envelope.
+                acct.setdefault("ok", True)
+                acct.setdefault("broker", broker)
+                _live_state_update(account=acct, account_updated_at=now_ts)
+        pos_raw = None
+        if not positions_fresh:
+            try:
+                if hasattr(bridge, "refresh_positions"):
+                    has_reconcile_ts = hasattr(bridge, "_last_reconcile_at")
+                    before_reconcile_raw = getattr(bridge, "_last_reconcile_at", 0.0)
+                    before_reconcile = (
+                        float(before_reconcile_raw)
+                        if isinstance(before_reconcile_raw, (int, float))
+                        else 0.0
+                    )
+                    try:
+                        pos_raw = bridge.refresh_positions(force=True, allow_cache_fallback=False)
+                    except TypeError:
+                        pos_raw = bridge.refresh_positions()
+                    after_reconcile_raw = getattr(bridge, "_last_reconcile_at", 0.0)
+                    after_reconcile = (
+                        float(after_reconcile_raw)
+                        if isinstance(after_reconcile_raw, (int, float))
+                        else before_reconcile + 1.0
+                    )
+                    if has_reconcile_ts and after_reconcile <= before_reconcile:
+                        logger.warning(f"[{broker}] background positions reconcile did not advance; skip cache write")
+                        pos_raw = None
+                else:
+                    pos_raw = bridge.get_positions() or []
+            except Exception as e:
+                logger.warning(f"[{broker}] background get_positions failed: {e}")
+                pos_raw = None
         if pos_raw is not None:
             try:
                 from config.runtime_config import shared as _rc
@@ -4755,18 +4843,32 @@ def emergency_close(broker: str, symbol: str | None = None) -> dict:
         try:
             # cTrader close_position() 必须传 position_id, 没传 server 必拒
             # (audit 2026-06-08: 之前分支里 close_position() 不带参会 fail).
-            # symbol 路径: 走 get_positions + filter by symbol_id + close 一个个.
-            positions = bridge.get_positions()
+            # symbol 路径: 强制走 broker reconcile + filter by symbol_id + close 一个个.
+            # 紧急平仓不能依赖缓存，否则会把 stale position 当成真实持仓。
+            try:
+                positions = bridge.refresh_positions(force=True, allow_cache_fallback=False)
+            except TypeError:
+                positions = bridge.refresh_positions()
             if symbol:
                 # symbol 这里可能是 symbol 名 (XAUUSD) 或 id (int), 简单按 name 匹配 fallback
                 target_positions = [p for p in positions if str(p.get("symbol_id")) == symbol or p.get("symbol") == symbol]
             else:
                 target_positions = positions
             closed = 0
+            failures: list[dict] = []
             for p in target_positions:
                 # 优先用 position_id; 旧 dict 形式也兼容
                 pid = p.get("position_id") or p.get("ticket")
                 if pid is None:
+                    continue
+                volume = _position_api_volume(p)
+                if volume <= 0:
+                    failures.append({
+                        "position_id": int(pid),
+                        "error_code": "invalid_close_volume",
+                        "comment": f"live broker position has invalid volume={volume}",
+                    })
+                    logger.error("[live] emergency close skipped pos=%s invalid volume=%s", pid, volume)
                     continue
                 close_context = _build_close_position_risk_context(
                     position_id=int(pid),
@@ -4786,13 +4888,33 @@ def emergency_close(broker: str, symbol: str | None = None) -> dict:
                         pid,
                         close_verdict.reason,
                     )
+                    failures.append({
+                        "position_id": int(pid),
+                        "error_code": "risk_blocked",
+                        "comment": str(close_verdict.reason or ""),
+                    })
                     continue
                 _remember_close_reason(int(pid), "emergency_close")
                 _remember_close_verdict(int(pid), close_verdict)
-                result = bridge.close_position(pid)
+                result = bridge.close_position(int(pid), volume=volume)
                 if getattr(result, "success", False):
                     closed += 1
-            return {"ok": True, "broker": "ctrader", "symbol": symbol or "ALL", "closed": closed}
+                else:
+                    failures.append({
+                        "position_id": int(pid),
+                        "error_code": str(getattr(result, "error_code", "") or ""),
+                        "comment": str(getattr(result, "comment", "") or ""),
+                    })
+            attempted = len(target_positions)
+            return {
+                "ok": not failures,
+                "broker": "ctrader",
+                "symbol": symbol or "ALL",
+                "attempted": attempted,
+                "closed": closed,
+                "failed": len(failures),
+                "failures": failures,
+            }
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc()[-300:]}
     else:

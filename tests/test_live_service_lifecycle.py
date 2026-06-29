@@ -38,6 +38,7 @@ def _reset_loop_state():
     live_service._last_loop_end = None
     live_service._pending_close_reasons.clear()
     live_service._pending_close_verdicts.clear()
+    live_service._recovery_zero_confirmations.clear()
     live_service._live_state_update(
         broker=None,
         loop_running=False,
@@ -56,6 +57,7 @@ def _reset_loop_state():
     live_service._last_loop_end = None
     live_service._pending_close_reasons.clear()
     live_service._pending_close_verdicts.clear()
+    live_service._recovery_zero_confirmations.clear()
     live_service._live_state_update(
         broker=None,
         loop_running=False,
@@ -226,6 +228,7 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
 
 def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     calls = []
+    close_calls = []
 
     class _Policy:
         def evaluate(self, action, context):
@@ -247,25 +250,204 @@ def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     class _Bridge:
         is_connected = True
 
-        def get_positions(self):
-            return [{"position_id": 268, "symbol": "XAUUSD+"}]
+        def refresh_positions(self, *, force=False, allow_cache_fallback=True):
+            self.refresh_args = {
+                "force": force,
+                "allow_cache_fallback": allow_cache_fallback,
+            }
+            return [{"position_id": 268, "symbol": "XAUUSD+", "volume": 100.0}]
 
-        def close_position(self, pid):
+        def close_position(self, pid, volume=0.0):
+            close_calls.append((pid, volume))
             return SimpleNamespace(success=True, position_id=pid)
 
+    bridge = _Bridge()
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (_Bridge(), None, False))
+    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
 
     result = live_service.emergency_close("ctrader", "XAUUSD+")
 
     assert result["ok"] is True
+    assert result["attempted"] == 1
     assert result["closed"] == 1
+    assert result["failed"] == 0
+    assert bridge.refresh_args == {"force": True, "allow_cache_fallback": False}
+    assert close_calls == [(268, 100.0)]
     assert calls[0][0] == "close_position"
     assert calls[0][1]["close_reason"] == "emergency_close"
     assert live_service._consume_close_reason(268) == "emergency_close"
     verdict = live_service._consume_close_verdict(268, "emergency_close")
     assert verdict["allowed"] is True
     assert verdict["audit_payload"]["action"] == "close_position"
+
+
+def test_emergency_close_reports_close_failures(monkeypatch):
+    class _Policy:
+        def evaluate(self, action, context):
+            return SimpleNamespace(
+                allowed=True,
+                reason="risk_reducing_action",
+                to_dict=lambda: {"allowed": True, "reason": "risk_reducing_action"},
+            )
+
+    class _Bridge:
+        is_connected = True
+
+        def refresh_positions(self, *, force=False, allow_cache_fallback=True):
+            return [{"position_id": 269, "symbol": "XAUUSD+", "volume": 100.0}]
+
+        def close_position(self, pid, volume=0.0):
+            return SimpleNamespace(
+                success=False,
+                position_id=pid,
+                error_code="TRADING_BAD_VOLUME",
+                comment="close rejected",
+            )
+
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (_Bridge(), None, False))
+
+    result = live_service.emergency_close("ctrader", "XAUUSD+")
+
+    assert result["ok"] is False
+    assert result["attempted"] == 1
+    assert result["closed"] == 0
+    assert result["failed"] == 1
+    assert result["failures"][0]["position_id"] == 269
+    assert result["failures"][0]["error_code"] == "TRADING_BAD_VOLUME"
+
+
+def test_upsert_recovery_position_state_preserves_valid_volume_on_zero_snapshot(monkeypatch, tmp_path):
+    from backend.core import db as db_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    monkeypatch.setattr(live_service, "_lookup_entry_decision_id", lambda position_id: "dec_open")
+
+    live_service._upsert_recovery_position_state(
+        {"position_id": 270, "symbol": "XAUUSD+", "direction": 1, "open_price": 4050.0, "volume": 100.0},
+        broker="ctrader",
+        strategy_name="factor_v4",
+        status="open",
+    )
+    live_service._upsert_recovery_position_state(
+        {"position_id": 270, "symbol": "XAUUSD+", "direction": 1, "open_price": 4051.0, "volume": 0.0},
+        broker="ctrader",
+        strategy_name="factor_v4",
+        status="open",
+    )
+
+    conn = _conn()
+    try:
+        row = conn.execute("SELECT volume, open_price FROM recovery_position_state WHERE position_id=270").fetchone()
+    finally:
+        conn.close()
+
+    assert row["volume"] == pytest.approx(100.0)
+    assert row["open_price"] == pytest.approx(4051.0)
+
+
+def test_recovery_bootstrap_reconciles_persisted_positions_after_confirmed_broker_zero(monkeypatch, tmp_path):
+    from backend.core import db as db_module
+    import execution.deal_sync as deal_sync_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO recovery_position_state
+            (position_id, broker, symbol, direction, open_price, volume,
+             first_seen_at, last_seen_at, status, strategy_name,
+             entry_decision_id, context_integrity, recovery_meta_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                301,
+                "ctrader",
+                "XAUUSD+",
+                1,
+                4060.0,
+                100.0,
+                1000.0,
+                2000.0,
+                "open",
+                "factor_v4",
+                "dec_open",
+                "full",
+                "{}",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _Bridge:
+        is_connected = True
+
+        def __init__(self):
+            self._last_reconcile_at = 0.0
+            self.calls = []
+
+        def refresh_positions(self, *, force=False, allow_cache_fallback=True):
+            self.calls.append((force, allow_cache_fallback))
+            self._last_reconcile_at += 1.0
+            return []
+
+    bridge = _Bridge()
+    logs = []
+    live_service._live_state_update(positions=[{"position_id": 301, "volume": 0.0}], positions_updated_at=time.time())
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    monkeypatch.setattr(live_service, "_LEDGER", None)
+    monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", lambda *args, **kwargs: {})
+
+    first = live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=logs.append,
+    )
+    second = live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=logs.append,
+    )
+
+    conn = _conn()
+    try:
+        row = conn.execute("SELECT status, close_reason FROM recovery_position_state WHERE position_id=301").fetchone()
+    finally:
+        conn.close()
+
+    assert first is False
+    assert second is True
+    assert bridge.calls == [(True, False), (True, False)]
+    assert live_service._live_state_get("positions", clone=True) == []
+    assert row["status"] == "closed_replayed"
+    assert row["close_reason"] == "restart_replay"
+    assert any("confirmation 1/2" in item for item in logs)
+    assert any("reconciled 1 persisted positions as closed" in item for item in logs)
 
 
 def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):

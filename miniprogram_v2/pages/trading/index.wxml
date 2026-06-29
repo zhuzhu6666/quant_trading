@@ -53,7 +53,7 @@
           <view class="value-md">{{positionSummaryLabel}}</view>
         </view>
         <view class="split-card stack-12">
-          <view class="small muted">实时总 PnL</view>
+          <view class="small muted">持仓 PnL</view>
           <view class="value-md">{{daily.pnl}}</view>
         </view>
         <view class="split-card stack-12">
@@ -61,7 +61,7 @@
           <view class="value-md">{{positionExposureLabel}}</view>
         </view>
       </view>
-      <view class="section-note" style="margin-top: 12rpx;">实时总 PnL = 已实现 + 当前所有持仓浮动盈亏，不再只看第一笔仓位。</view>
+      <view class="section-note" style="margin-top: 12rpx;">持仓 PnL 只看当前开放仓位的实时盈亏；已实现盈亏在总览页按平仓成交画累计曲线。</view>
       <view class="btn-row" style="margin-top: 18rpx;">
         <button class="btn-primary {{loopRunning || startBusy || stopBusy ? 'btn-disabled' : ''}}" bindtap="onStart" loading="{{startBusy}}" disabled="{{loopRunning || startBusy || stopBusy}}">启动</button>
         <button class="btn-stop {{!loopRunning || stopBusy || startBusy ? 'btn-disabled' : ''}}" bindtap="onStop" loading="{{stopBusy}}" disabled="{{!loopRunning || stopBusy || startBusy}}">停止</button>
@@ -88,7 +88,7 @@
           <view class="small">{{daily.trades || 0}}</view>
         </view>
         <view class="row-between">
-          <view class="small">已实现 / 浮动</view>
+          <view class="small">已实现曲线 / 持仓 PnL</view>
           <view class="small">{{realizedPnlText}} / {{unrealizedPnlText}}</view>
         </view>
         <view wx:if="{{currentGateView}}" class="status-banner status-banner-{{currentGateView.tone}}">

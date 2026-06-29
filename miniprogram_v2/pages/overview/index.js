@@ -54,6 +54,57 @@ function buildTemplateProgressNote({ candidateCounts = {}, recommendationCounts 
   return '暂无待处理';
 }
 
+function buildPnlCurve(series = {}) {
+  const rawPoints = Array.isArray(series.points) ? series.points : [];
+  const points = rawPoints
+    .map((item) => ({
+      ts: Number(item.ts || 0),
+      pnl: Number(item.pnl || 0),
+      cumulative: Number(item.cumulative || 0),
+      source: item.source || '',
+    }))
+    .filter((item) => Number.isFinite(item.cumulative));
+  const values = points.map((item) => item.cumulative);
+  const minValue = values.length ? Math.min(...values, 0) : 0;
+  const maxValue = values.length ? Math.max(...values, 0) : 0;
+  const span = maxValue - minValue || 1;
+  const chartPoints = points.map((item, index) => {
+    const x = points.length <= 1 ? 50 : (index / (points.length - 1)) * 100;
+    const y = 100 - ((item.cumulative - minValue) / span) * 100;
+    return {
+      ...item,
+      x,
+      y,
+      style: `left:${x}%;top:${y}%;`,
+      timeText: formatTime(item.ts),
+      pnlText: formatMoney(item.pnl),
+      cumulativeText: formatMoney(item.cumulative),
+      tone: toneFromPnl(item.pnl),
+    };
+  });
+  const segments = [];
+  for (let index = 1; index < chartPoints.length; index += 1) {
+    const prev = chartPoints[index - 1];
+    const curr = chartPoints[index];
+    const dx = curr.x - prev.x;
+    const dy = curr.y - prev.y;
+    const length = Math.sqrt(dx * dx + dy * dy);
+    const angle = Math.atan2(dy * 1.6, dx * 3.2) * 180 / Math.PI;
+    segments.push({
+      id: `${prev.ts}-${curr.ts}-${index}`,
+      style: `left:${prev.x}%;top:${prev.y}%;width:${length}%;transform:rotate(${angle}deg);`,
+    });
+  }
+  return {
+    points: chartPoints,
+    segments,
+    minText: formatMoney(minValue),
+    maxText: formatMoney(maxValue),
+    latest: chartPoints.length ? chartPoints[chartPoints.length - 1] : null,
+    recent: chartPoints.slice(-3).reverse(),
+  };
+}
+
 Page({
   data: {
     wsLabel: '未连接',
@@ -71,6 +122,16 @@ Page({
     unrealizedPnlTone: 'neutral',
     livePnl: '--',
     livePnlTone: 'neutral',
+    realizedCurve: [],
+    realizedCurveSegments: [],
+    realizedCurveEmpty: true,
+    realizedCurveMin: '--',
+    realizedCurveMax: '--',
+    realizedCurveSummary: '今日暂无已平仓记录',
+    realizedCurveLatest: '--',
+    realizedCurveTrades: '0',
+    realizedCurveWinRate: '0.00%',
+    realizedRecentTrades: [],
     drawdown: '--',
     positions: '0',
     positionSummary: '当前无持仓',
@@ -155,7 +216,12 @@ Page({
     const templateOpsSummary = String(summary.parameter_template_ops_summary || '');
     const realizedPnl = Number(trading.realized_pnl ?? (trading.daily && trading.daily.pnl) ?? 0);
     const unrealizedPnl = Number(trading.unrealized_pnl || 0);
-    const livePnl = Number(trading.live_pnl ?? (realizedPnl + unrealizedPnl));
+    const livePnl = Number(trading.live_pnl ?? unrealizedPnl);
+    const pnlSeries = live.realizedPnlSeries || {};
+    const pnlSeriesSummary = pnlSeries.summary || {};
+    const pnlCurve = buildPnlCurve(pnlSeries);
+    const realizedTrades = Number(pnlSeriesSummary.trades || 0);
+    const realizedWinRate = Number(pnlSeriesSummary.win_rate || 0);
     const learningSummaryStatus = String(learning.summaryStatus || 'idle');
     const learningSummaryHint = learningSummaryStatus === 'error'
       ? '学习摘要接口超时/失败，当前卡片可能显示的是空白兜底值，不代表系统没有学习数据。'
@@ -198,6 +264,18 @@ Page({
       unrealizedPnlTone: toneFromPnl(unrealizedPnl),
       livePnl: formatMoney(livePnl),
       livePnlTone: toneFromPnl(livePnl),
+      realizedCurve: pnlCurve.points,
+      realizedCurveSegments: pnlCurve.segments,
+      realizedCurveEmpty: !pnlCurve.points.length,
+      realizedCurveMin: pnlCurve.minText,
+      realizedCurveMax: pnlCurve.maxText,
+      realizedCurveSummary: realizedTrades
+        ? `今日已实现 ${formatMoney(realizedPnl)} · ${realizedTrades} 笔平仓`
+        : '今日暂无已平仓记录',
+      realizedCurveLatest: pnlCurve.latest ? pnlCurve.latest.cumulativeText : '--',
+      realizedCurveTrades: String(realizedTrades),
+      realizedCurveWinRate: formatPct(realizedWinRate * 100),
+      realizedRecentTrades: pnlCurve.recent,
       drawdown: formatPct(trading.daily && trading.daily.drawdown_pct),
       positions: String(trading.n_positions || 0),
       positionSummary: (trading.position_summary && trading.position_summary.label) || '当前无持仓',

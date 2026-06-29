@@ -15,7 +15,7 @@
           <view class="hero-metric-value">{{equity}}</view>
         </view>
         <view class="hero-metric">
-          <view class="hero-metric-label">实时总 PnL</view>
+          <view class="hero-metric-label">持仓 PnL</view>
           <view class="hero-metric-value {{livePnlTone === 'positive' ? 'accent-pos' : livePnlTone === 'negative' ? 'accent-neg' : ''}}">{{livePnl}}</view>
         </view>
         <view class="hero-metric">
@@ -38,13 +38,42 @@
 
     <view class="grid-2">
       <metric-tile label="权益" value="{{equity}}" hint="账户当前净值" />
-      <metric-tile label="已实现 PnL" value="{{realizedPnl}}" tone="{{realizedPnlTone}}" hint="仅统计已平仓盈亏" />
-      <metric-tile label="浮动 PnL" value="{{unrealizedPnl}}" tone="{{unrealizedPnlTone}}" hint="当前持仓的浮动盈亏" />
-      <metric-tile label="实时总 PnL" value="{{livePnl}}" tone="{{livePnlTone}}" hint="已实现 + 浮动，先看方向" />
-      <metric-tile label="回撤" value="{{drawdown}}" hint="当日最大回撤，值越小越稳健" />
+      <metric-tile label="持仓 PnL" value="{{livePnl}}" tone="{{livePnlTone}}" hint="当前开放仓位实时盈亏" />
       <metric-tile label="持仓数" value="{{positions}}" hint="当前活跃仓位笔数" />
+      <metric-tile label="回撤" value="{{drawdown}}" hint="当日最大回撤，值越小越稳健" />
       <metric-tile label="最近同步" value="{{updatedAt}}" hint="后端最近一次上报时间" />
     </view>
+
+    <section-card title="已实现 PnL 曲线" subtitle="来自 cTrader 已平仓成交，按平仓时间累计">
+      <view class="realized-head">
+        <view>
+          <view class="small muted">累计已实现</view>
+          <view class="value-md {{realizedPnlTone === 'positive' ? 'accent-pos' : realizedPnlTone === 'negative' ? 'accent-neg' : ''}}">{{realizedCurveLatest}}</view>
+        </view>
+        <view class="realized-stats">
+          <view class="tag">平仓 {{realizedCurveTrades}}</view>
+          <view class="tag">胜率 {{realizedCurveWinRate}}</view>
+        </view>
+      </view>
+      <view class="section-note">{{realizedCurveSummary}}</view>
+      <view wx:if="{{!realizedCurveEmpty}}" class="pnl-chart">
+        <view class="pnl-axis pnl-axis-top">{{realizedCurveMax}}</view>
+        <view class="pnl-axis pnl-axis-bottom">{{realizedCurveMin}}</view>
+        <view class="pnl-zero-line"></view>
+        <view wx:for="{{realizedCurveSegments}}" wx:key="id" class="pnl-line" style="{{item.style}}"></view>
+        <view wx:for="{{realizedCurve}}" wx:key="ts" class="pnl-point pnl-point-{{item.tone}}" style="{{item.style}}">
+          <view class="pnl-point-dot"></view>
+        </view>
+      </view>
+      <view wx:else class="empty">今日还没有已平仓记录</view>
+      <view wx:if="{{realizedRecentTrades.length}}" class="realized-recent">
+        <view wx:for="{{realizedRecentTrades}}" wx:key="ts" class="realized-trade-row">
+          <view class="small muted">{{item.timeText}}</view>
+          <view class="small {{item.tone === 'positive' ? 'accent-pos' : item.tone === 'negative' ? 'accent-neg' : ''}}">{{item.pnlText}}</view>
+          <view class="small">累计 {{item.cumulativeText}}</view>
+        </view>
+      </view>
+    </section-card>
 
     <view class="grid-1-2">
       <section-card title="系统状态" subtitle="运行与治理入口">

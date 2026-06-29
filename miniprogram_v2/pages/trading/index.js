@@ -193,9 +193,10 @@ Page({
       gateLabel = '信号可执行';
       gateTone = 'positive';
     }
-    const realizedDailyPnl = Number((trading.daily && trading.daily.pnl) || 0);
+    const realizedSeriesSummary = (state.realizedPnlSeries && state.realizedPnlSeries.summary) || {};
+    const realizedDailyPnl = Number(realizedSeriesSummary.realized_pnl ?? (trading.daily && trading.daily.pnl) ?? 0);
     const unrealizedPnl = Number(trading.unrealized_pnl ?? positions.reduce((sum, item) => sum + Number(item.pnlValue || 0), 0));
-    const livePnl = Number(trading.live_pnl ?? (realizedDailyPnl + unrealizedPnl));
+    const livePnl = Number(trading.live_pnl ?? unrealizedPnl);
     const balance = Number(trading.balance || 0);
     const equity = Number(trading.equity || 0);
     const equityDrawdownPct = balance > 0 ? Math.max(0, ((balance - equity) / balance) * 100) : 0;
