@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -126,7 +127,7 @@ class L2CollectorBridge(CTraderBridge):
 
     def _handle_depth_event(self, payload):
         try:
-            super()._handle_depth_event(payload)
+            self._handle_depth_event_with_retry(payload)
             if self.snapshot_interval_sec <= 0:
                 return
             now = time.time()
@@ -136,6 +137,105 @@ class L2CollectorBridge(CTraderBridge):
             self._persist_snapshot(now)
         finally:
             self._release_l2_db()
+
+    def _handle_depth_event_with_retry(self, payload) -> None:
+        if not hasattr(self, "_depth_quotes"):
+            self._depth_quotes = []
+            self._depth_lock = threading.Lock()
+            self._depth_counter = self._load_depth_counter()
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOADepthEvent
+
+        if not isinstance(payload, ProtoOADepthEvent):
+            return
+
+        new_quotes = []
+        for quote in payload.newQuotes:
+            bid = quote.bid / 100000.0
+            ask = quote.ask / 100000.0
+            size = quote.size / 100.0
+            new_quotes.append({
+                "id": quote.id,
+                "bid": round(bid, 2),
+                "ask": round(ask, 2),
+                "size": size,
+            })
+        deleted_ids = list(payload.deletedQuotes)
+
+        with self._depth_lock:
+            if deleted_ids:
+                deleted = set(deleted_ids)
+                self._depth_quotes = [quote for quote in self._depth_quotes if quote["id"] not in deleted]
+            for quote in new_quotes:
+                for existing in self._depth_quotes:
+                    if existing["id"] == quote["id"]:
+                        existing.update(quote)
+                        break
+                else:
+                    self._depth_quotes.append(quote)
+
+        self._depth_log_accum_new += len(new_quotes)
+        self._depth_log_accum_deleted += len(deleted_ids)
+        now = time.time()
+        if now - self._depth_log_last_ts >= 5.0:
+            LOG.info(
+                "depth events (5s): +%d / -%d, book=%d",
+                self._depth_log_accum_new,
+                self._depth_log_accum_deleted,
+                len(self._depth_quotes),
+            )
+            self._depth_log_last_ts = now
+            self._depth_log_accum_new = 0
+            self._depth_log_accum_deleted = 0
+
+        rows_new = []
+        rows_delete = []
+        for quote in new_quotes:
+            self._depth_counter += 1
+            side = "bid" if quote.get("bid", 0) > 0 else "ask"
+            price = quote.get("bid", 0) or quote.get("ask", 0)
+            rows_new.append((self._depth_counter, now, quote["id"], side, price, quote["size"], now))
+        for quote_id in deleted_ids:
+            self._depth_counter += 1
+            rows_delete.append((self._depth_counter, now, quote_id, now))
+
+        self._write_depth_rows(rows_new, rows_delete)
+
+    def _write_depth_rows(self, rows_new: list[tuple], rows_delete: list[tuple]) -> None:
+        if not rows_new and not rows_delete:
+            return
+        last_error: Exception | None = None
+        for attempt in range(10):
+            try:
+                with self._l2_db_lock:
+                    if self._l2_db is None:
+                        self._l2_db = connect_duckdb(DUCKDB_L2)
+                        self._ensure_l2_schema(self._l2_db)
+                    if rows_new:
+                        self._l2_db.executemany(
+                            """
+                            INSERT INTO orderbook_changes
+                            (id, symbol, ts, quote_id, side, price, size, change_type, created_at)
+                            VALUES (?, 'XAUUSD+', ?, ?, ?, ?, ?, 'new', ?)
+                            """,
+                            rows_new,
+                        )
+                    if rows_delete:
+                        self._l2_db.executemany(
+                            """
+                            INSERT INTO orderbook_changes
+                            (id, symbol, ts, quote_id, side, price, size, change_type, created_at)
+                            VALUES (?, 'XAUUSD+', ?, ?, '', 0, 0, 'delete', ?)
+                            """,
+                            rows_delete,
+                        )
+                if attempt:
+                    LOG.info("l2 db write recovered after %d retries", attempt)
+                return
+            except Exception as exc:
+                last_error = exc
+                self._release_l2_db()
+                time.sleep(0.2)
+        LOG.warning("l2 db write failed after retries: %s", last_error)
 
     def _release_l2_db(self) -> None:
         with self._l2_db_lock:
