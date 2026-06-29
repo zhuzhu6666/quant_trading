@@ -69,10 +69,10 @@ def main() -> int:
     else:
         start = datetime.fromtimestamp(last_ts, tz=timezone.utc)
 
-    now = datetime.now(timezone.utc)
+    stop = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     total = 0
     current = start.replace(minute=0, second=0, microsecond=0)
-    while current < now:
+    while current < stop:
         if should_skip_market_hour(current):
             current += timedelta(hours=1)
             continue
