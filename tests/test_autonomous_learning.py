@@ -1,0 +1,871 @@
+import json
+import sqlite3
+
+from backend.services import autonomous_learning as al
+
+
+def _create_sample_db(path):
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE decision_ledger (
+            decision_id TEXT PRIMARY KEY,
+            trade_id TEXT DEFAULT '',
+            position_id TEXT DEFAULT '',
+            event_type TEXT NOT NULL,
+            symbol TEXT DEFAULT '',
+            timeframe TEXT DEFAULT '',
+            decision_ts REAL NOT NULL DEFAULT 0.0,
+            regime_id TEXT DEFAULT '',
+            regime_confidence REAL DEFAULT 0.0,
+            portfolio_state_json TEXT DEFAULT '{}',
+            risk_state_json TEXT DEFAULT '{}',
+            policy_version TEXT DEFAULT '',
+            factor_set_version TEXT DEFAULT '',
+            action_score REAL DEFAULT 0.0,
+            action_reason TEXT DEFAULT '',
+            action_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE trade_outcome_review (
+            review_id TEXT PRIMARY KEY,
+            trade_id TEXT DEFAULT '',
+            position_id TEXT DEFAULT '',
+            entry_decision_id TEXT DEFAULT '',
+            exit_decision_id TEXT DEFAULT '',
+            entry_quality REAL DEFAULT 0.0,
+            hold_quality REAL DEFAULT 0.0,
+            exit_quality REAL DEFAULT 0.0,
+            regime_fit_score REAL DEFAULT 0.0,
+            execution_quality REAL DEFAULT 0.0,
+            pnl REAL DEFAULT 0.0,
+            mae REAL DEFAULT 0.0,
+            mfe REAL DEFAULT 0.0,
+            outcome_label TEXT DEFAULT '',
+            failure_tags_json TEXT DEFAULT '[]',
+            summary_text TEXT DEFAULT '',
+            review_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE supervisor_counterfactual_review (
+            counterfactual_id TEXT PRIMARY KEY,
+            review_id TEXT DEFAULT '',
+            trade_id TEXT DEFAULT '',
+            position_id TEXT NOT NULL,
+            close_ts REAL NOT NULL DEFAULT 0.0,
+            close_reason TEXT DEFAULT '',
+            supervisor_event_type TEXT DEFAULT '',
+            supervisor_reason TEXT DEFAULT '',
+            label TEXT DEFAULT '',
+            confidence REAL DEFAULT 0.0,
+            horizons_json TEXT DEFAULT '[]',
+            evidence_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0,
+            updated_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE position_supervisor_trace (
+            trace_id TEXT PRIMARY KEY,
+            decision_id TEXT DEFAULT '',
+            position_id TEXT NOT NULL,
+            trade_id TEXT DEFAULT '',
+            symbol TEXT DEFAULT '',
+            timeframe TEXT DEFAULT '',
+            tick INTEGER DEFAULT 0,
+            event_ts REAL NOT NULL DEFAULT 0.0,
+            action TEXT DEFAULT '',
+            summary_reason TEXT DEFAULT '',
+            confidence REAL DEFAULT 0.0,
+            template_id TEXT DEFAULT '',
+            template_version TEXT DEFAULT '',
+            stage TEXT DEFAULT '',
+            outcome TEXT DEFAULT '',
+            risk_action TEXT DEFAULT '',
+            risk_allowed INTEGER DEFAULT 0,
+            risk_reason TEXT DEFAULT '',
+            execution_status TEXT DEFAULT '',
+            execution_reason TEXT DEFAULT '',
+            context_json TEXT DEFAULT '{}',
+            verdict_json TEXT DEFAULT '{}',
+            risk_verdict_json TEXT DEFAULT '{}',
+            execution_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        """
+    )
+    risk_verdict = {"allowed": False, "reason": "max_positions_reached"}
+    conn.execute(
+        """
+        INSERT INTO decision_ledger
+        (decision_id, event_type, symbol, timeframe, decision_ts, action_reason,
+         action_score, portfolio_state_json, risk_state_json, action_json, created_at)
+        VALUES ('dec_skip', 'skip', 'XAUUSD+', 'M5', 100.0, 'max_positions_reached',
+                0.71, ?, ?, ?, 100.0)
+        """,
+        (
+            json.dumps({"n_positions": 1}),
+            json.dumps({"policy_verdict": risk_verdict}),
+            json.dumps({"skip_stage": "risk_policy", "risk_verdict": risk_verdict}),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_ledger
+        (decision_id, trade_id, position_id, event_type, symbol, timeframe,
+         decision_ts, action_reason, action_score, action_json, created_at)
+        VALUES ('dec_sup', 'p1', 'p1', 'supervisor_tighten', 'XAUUSD+', 'M5',
+                120.0, 'thesis_weakening', 0.66, ?, 120.0)
+        """,
+        (
+            json.dumps(
+                {
+                    "supervisor_verdict": {
+                        "action": "tighten",
+                        "summary_reason": "thesis_weakening",
+                        "evidence": {"giveback_ratio": 0.5},
+                    }
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_supervisor_trace
+        (trace_id, decision_id, position_id, trade_id, symbol, timeframe, tick,
+         event_ts, action, summary_reason, confidence, template_id,
+         template_version, stage, outcome, risk_action, risk_allowed,
+         risk_reason, execution_status, execution_reason, context_json,
+         verdict_json, risk_verdict_json, execution_json, created_at)
+        VALUES ('trace1', 'dec_sup', 'p1', 'p1', 'XAUUSD+', 'M5', 7,
+                121.0, 'tighten', 'thesis_weakening', 0.66,
+                'position_supervisor:default.v1', 'default.v1',
+                'executed', 'applied', 'tighten_position', 1,
+                'risk_reducing_action', 'applied', 'amend_position_sltp_success',
+                ?, ?, ?, ?, 121.0)
+        """,
+        (
+            json.dumps({"position": {"position_id": "p1", "pnl": 0.2}}),
+            json.dumps({"action": "tighten", "summary_reason": "thesis_weakening"}),
+            json.dumps({"allowed": True, "reason": "risk_reducing_action"}),
+            json.dumps({"target_stop_loss_sent": 4000.0}),
+        ),
+    )
+    review = {
+        "symbol": "XAUUSD+",
+        "timeframe": "M5",
+        "close_ts": 180.0,
+        "close_reason_source": "supervisor_tighten_stopout",
+        "attribution_integrity": "recovered",
+    }
+    conn.execute(
+        """
+        INSERT INTO trade_outcome_review
+        (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+         entry_quality, hold_quality, exit_quality, pnl, mae, mfe, outcome_label,
+         failure_tags_json, review_json, created_at)
+        VALUES ('rev1', 'p1', 'p1', 'dec_open', 'dec_sup', 0.4, 0.5, 0.6,
+                -1.2, 1.5, 0.1, 'bad_loss', '["exit"]', ?, 180.0)
+        """,
+        (json.dumps(review),),
+    )
+    conn.execute(
+        """
+        INSERT INTO supervisor_counterfactual_review
+        (counterfactual_id, review_id, trade_id, position_id, close_ts,
+         close_reason, supervisor_event_type, supervisor_reason, label,
+         confidence, horizons_json, evidence_json, created_at, updated_at)
+        VALUES ('scf1', 'rev1', 'p1', 'p1', 180.0, 'broker_close',
+                'supervisor_tighten', 'thesis_weakening', 'premature_tighten',
+                0.78, '[{"horizon_minutes": 15}]', '{"advisory_only": true}', 181.0, 181.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+
+    result = al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    assert result["counts"]["risk_rejection"] == 1
+    assert result["counts"]["supervisor_trajectory"] == 1
+    assert result["counts"]["supervisor_execution_trace"] == 1
+    assert result["counts"]["trade_review_outcome"] == 1
+    assert result["counts"]["post_close_counterfactual"] == 1
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            """
+            SELECT sample_type, label_status, integrity, train_weight, evidence_contract_json,
+                   config_version, config_hash, evolution_run_id
+            FROM autonomous_learning_sample
+            ORDER BY sample_type
+            """
+        ).fetchall()
+        events = conn.execute("SELECT event_type FROM evolution_events").fetchall()
+        runs = conn.execute("SELECT run_type, status FROM evolution_run").fetchall()
+    finally:
+        conn.close()
+
+    sample_types = {row[0] for row in rows}
+    assert "risk_rejection" in sample_types
+    assert "supervisor_trajectory" in sample_types
+    assert "supervisor_execution_trace" in sample_types
+    assert "trade_review_outcome" in sample_types
+    assert "post_close_counterfactual" in sample_types
+    supervisor_trace = [row for row in rows if row[0] == "supervisor_execution_trace"][0]
+    assert supervisor_trace[1] == "pending"
+    trace_contract = json.loads(supervisor_trace[4])
+    assert trace_contract["causal_level"] == "observational"
+    assert trace_contract["model_ready"] is False
+    assert "supervised_training" not in trace_contract["allowed_uses"]
+    assert supervisor_trace[5] > 0
+    assert supervisor_trace[6]
+    assert supervisor_trace[7]
+    recovered_review = [row for row in rows if row[0] == "trade_review_outcome"][0]
+    assert recovered_review[2] == "recovered"
+    assert recovered_review[3] == 0.5
+    assert json.loads(recovered_review[4])["schema_version"] == "learning_evidence_contract.v1"
+    assert ("autonomous_learning_samples",) in events
+    assert ("autonomous_learning_samples", "completed") in runs
+
+
+def test_materialize_autonomous_learning_orders_decisions_by_event_time(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    risk_verdict = {"allowed": False, "reason": "test"}
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO decision_ledger
+            (decision_id, event_type, symbol, timeframe, decision_ts, action_reason,
+             action_score, portfolio_state_json, risk_state_json, action_json, created_at)
+            VALUES ('dec_old_replay', 'skip', 'XAUUSD+', 'M5', 50.0, 'old_replay',
+                    0.1, '{}', ?, ?, 5000.0)
+            """,
+            (
+                json.dumps({"policy_verdict": risk_verdict}),
+                json.dumps({"skip_stage": "risk_policy", "risk_verdict": risk_verdict}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO decision_ledger
+            (decision_id, event_type, symbol, timeframe, decision_ts, action_reason,
+             action_score, portfolio_state_json, risk_state_json, action_json, created_at)
+            VALUES ('dec_new_event', 'skip', 'XAUUSD+', 'M5', 500.0, 'new_event',
+                    0.1, '{}', ?, ?, 10.0)
+            """,
+            (
+                json.dumps({"policy_verdict": risk_verdict}),
+                json.dumps({"skip_stage": "risk_policy", "risk_verdict": risk_verdict}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=1)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        ids = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT source_id
+                FROM autonomous_learning_sample
+                WHERE source_table='decision_ledger'
+                """
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert "dec_new_event" in ids
+    assert "dec_old_replay" not in ids
+
+
+def test_repair_evidence_contracts_removes_pending_supervised_training(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        bad_contract = {
+            "schema_version": "learning_evidence_contract.v1",
+            "allowed_uses": ["audit", "explainability", "supervised_training"],
+            "model_ready": False,
+        }
+        conn.execute(
+            """
+            UPDATE autonomous_learning_sample
+            SET evidence_contract_json=?
+            WHERE sample_type='supervisor_execution_trace'
+            """,
+            (json.dumps(bad_contract),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    before = al.validate_evidence_contract_health(db_path=db_path)
+    assert before["counts"]["non_matured_allows_supervised_training"] == 1
+
+    result = al.repair_evidence_contracts(db_path=db_path)
+
+    assert result["repaired"] >= 1
+    after = al.validate_evidence_contract_health(db_path=db_path)
+    assert after["counts"]["non_matured_allows_supervised_training"] == 0
+    conn = sqlite3.connect(str(db_path))
+    try:
+        decision = conn.execute(
+            """
+            SELECT decision_type, status
+            FROM evolution_decision
+            WHERE decision_type='repair_evidence_contracts'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert decision == ("repair_evidence_contracts", "completed")
+
+
+def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        review = {
+            "symbol": "XAUUSD+",
+            "timeframe": "M5",
+            "close_ts": 180.0,
+            "close_reason": "broker_close",
+            "attribution_integrity": "recovered",
+        }
+        conn.execute(
+            """
+            UPDATE trade_outcome_review
+            SET review_json=?
+            WHERE review_id='rev1'
+            """,
+            (json.dumps(review),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = al.backfill_trade_review_close_sources(db_path=db_path, limit=20)
+
+    assert result["updated"] == 1
+    assert result["by_source"]["supervisor_tighten_stopout"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
+        decision = conn.execute(
+            """
+            SELECT decision_type, status
+            FROM evolution_decision
+            WHERE decision_type='backfill_close_sources'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    repaired = json.loads(raw)
+    assert repaired["close_reason_source"] == "supervisor_tighten_stopout"
+    assert repaired["inferred_close_supervisor"]["event_type"] == "supervisor_tighten"
+    assert decision == ("backfill_close_sources", "completed")
+
+
+def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        review = {
+            "symbol": "XAUUSD+",
+            "timeframe": "M5",
+            "close_ts": 180.0,
+            "close_reason_source": "external_broker_close",
+        }
+        conn.execute(
+            """
+            UPDATE trade_outcome_review
+            SET review_json=?
+            WHERE review_id='rev1'
+            """,
+            (json.dumps(review),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = al.backfill_trade_review_integrity_markers(db_path=db_path, limit=20)
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    assert result["updated"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        review_raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
+        sample = conn.execute(
+            """
+            SELECT integrity, train_weight, evidence_contract_json
+            FROM autonomous_learning_sample
+            WHERE sample_type='trade_review_outcome' AND source_id='rev1'
+            """
+        ).fetchone()
+        decision = conn.execute(
+            """
+            SELECT decision_type, status
+            FROM evolution_decision
+            WHERE decision_type='backfill_review_integrity'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    review = json.loads(review_raw)
+    contract = json.loads(sample[2])
+    assert review["attribution_integrity"] == "missing"
+    assert sample[0] == "missing"
+    assert sample[1] == 0.0
+    assert contract["model_ready"] is False
+    assert "supervised_training" not in contract["allowed_uses"]
+    assert decision == ("backfill_review_integrity", "completed")
+
+
+def test_trade_review_minimal_integrity_materializes_as_missing(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        review = {
+            "symbol": "XAUUSD+",
+            "timeframe": "M5",
+            "close_ts": 180.0,
+            "context_integrity": "minimal",
+            "close_reason_source": "external_broker_close",
+        }
+        conn.execute(
+            """
+            UPDATE trade_outcome_review
+            SET review_json=?
+            WHERE review_id='rev1'
+            """,
+            (json.dumps(review),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT integrity, train_weight, evidence_contract_json
+            FROM autonomous_learning_sample
+            WHERE sample_type='trade_review_outcome' AND source_id='rev1'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row[0] == "missing"
+    assert row[1] == 0.0
+    contract = json.loads(row[2])
+    assert contract["integrity"] == "missing"
+    assert contract["model_ready"] is False
+
+
+def test_position_supervisor_trace_maturation_labels_over_protection(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+
+    result = al.mature_position_supervisor_traces(db_path=db_path, limit=20)
+
+    assert result["matured"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT label_status, integrity, train_weight, label_json, evidence_contract_json
+            FROM autonomous_learning_sample
+            WHERE sample_type='supervisor_execution_trace' AND source_id='trace1'
+            """
+        ).fetchone()
+        decision = conn.execute(
+            """
+            SELECT decision_type, status
+            FROM evolution_decision
+            WHERE decision_type='mature_traces'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "matured"
+    assert row[1] == "full"
+    assert row[2] > 0
+    assert json.loads(row[3])["label"] == "over_protected"
+    assert json.loads(row[3])["recommended_action"] == "less_tighten"
+    contract = json.loads(row[4])
+    assert contract["model_ready"] is True
+    assert "supervised_training" in contract["allowed_uses"]
+    assert decision == ("mature_traces", "completed")
+
+
+def test_materialization_does_not_downgrade_matured_supervisor_trace(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+
+    al.mature_position_supervisor_traces(db_path=db_path, limit=20)
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT label_status, label_json, evidence_contract_json
+            FROM autonomous_learning_sample
+            WHERE sample_type='supervisor_execution_trace' AND source_id='trace1'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "matured"
+    assert json.loads(row[1])["label"] == "over_protected"
+    assert json.loads(row[2])["model_ready"] is True
+
+
+def test_position_supervisor_trace_backfill_from_decision_ledger(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO decision_ledger
+            (decision_id, trade_id, position_id, event_type, symbol, timeframe,
+             decision_ts, action_reason, action_score, action_json, created_at)
+            VALUES ('dec_legacy_close', 'p2', 'p2', 'supervisor_close', 'XAUUSD+', 'M5',
+                    130.0, 'thesis_broken', 0.7, ?, 130.0)
+            """,
+            (
+                json.dumps(
+                    {
+                        "supervisor_verdict": {
+                            "action": "close",
+                            "summary_reason": "thesis_broken",
+                            "confidence": 0.7,
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = al.backfill_position_supervisor_traces(db_path=db_path, limit=20)
+
+    assert result["inserted"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT action, stage, outcome, trace_integrity, evolution_run_id
+            FROM position_supervisor_trace
+            WHERE decision_id='dec_legacy_close'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "close"
+    assert row[1] == "legacy_backfill"
+    assert row[2] == "legacy_recovered"
+    assert row[3] == "recovered"
+    assert row[4]
+
+
+def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE policy_suggestion (
+            suggestion_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            confidence REAL DEFAULT 0.0,
+            reason TEXT DEFAULT '',
+            evidence_json TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'proposed',
+            reviewed_at REAL DEFAULT 0.0,
+            review_note TEXT DEFAULT '',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE parameter_template_release_candidate (
+            candidate_id TEXT PRIMARY KEY,
+            factor_id TEXT NOT NULL,
+            template_id TEXT NOT NULL,
+            regime_key TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending_review',
+            boundary_json TEXT DEFAULT '{}',
+            validation_summary_json TEXT DEFAULT '{}',
+            validation_report_path TEXT DEFAULT '',
+            created_at REAL NOT NULL DEFAULT 0.0,
+            updated_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY,
+            kind TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            params_json TEXT DEFAULT '{}',
+            result_json TEXT DEFAULT '{}',
+            progress REAL DEFAULT 0.0,
+            error TEXT DEFAULT '',
+            created_at REAL,
+            updated_at REAL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    calls = []
+
+    class FakeParameterTemplateService:
+        def __init__(self, db_path_arg):
+            self.db_path_arg = db_path_arg
+
+        def list_recommendations(self, limit=20):
+            return [
+                {
+                    "recommendation_id": "rec_online",
+                    "recommended_action": "suggest_switch",
+                    "factor_id": "ema_slope",
+                    "target_template_id": "ema_slope:conservative.v1:default",
+                }
+            ]
+
+        def create_suggestion_from_recommendation(self, recommendation_id, note=""):
+            calls.append((recommendation_id, note))
+            return {"item": {"suggestion_id": "psg_online"}}
+
+    import backend.services.parameter_templates as parameter_templates
+
+    monkeypatch.setattr(parameter_templates, "ParameterTemplateService", FakeParameterTemplateService)
+
+    first = al.materialize_parameter_template_recommendations(db_path=db_path, limit=10)
+    assert first["counts"]["suggested"] == 1
+    assert calls == [("rec_online", "autonomous materialize from parameter template recommendation")]
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, evidence_json, status, created_at)
+            VALUES ('psg_existing', 'parameter_template', 'ema_slope:default',
+                    'switch_parameter_template', ?, 'proposed', 1.0)
+            """,
+            (json.dumps({"evidence_context": {"recommendation_id": "rec_online"}}),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    second = al.materialize_parameter_template_recommendations(db_path=db_path, limit=10)
+    assert second["counts"]["skipped_existing"] == 1
+    assert len(calls) == 1
+
+
+def test_demo_autonomy_auto_approves_policy_suggestions(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE policy_suggestion (
+            suggestion_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            confidence REAL DEFAULT 0.0,
+            reason TEXT DEFAULT '',
+            evidence_json TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'proposed',
+            reviewed_at REAL DEFAULT 0.0,
+            review_note TEXT DEFAULT '',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE learning_application_log (
+            application_id TEXT PRIMARY KEY,
+            cycle_ts REAL NOT NULL DEFAULT 0.0,
+            scope_type TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            bias_multiplier REAL DEFAULT 1.0,
+            old_weight REAL DEFAULT 0.0,
+            new_weight REAL DEFAULT 0.0,
+            suggestion_ids_json TEXT DEFAULT '[]',
+            status TEXT DEFAULT 'applied',
+            details_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE learning_application_effect (
+            application_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            status TEXT DEFAULT 'observing',
+            decision_json TEXT DEFAULT '{}',
+            updated_at REAL NOT NULL DEFAULT 0.0,
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO policy_suggestion
+        (suggestion_id, scope_type, scope_key, action, confidence, evidence_json, status, created_at)
+        VALUES ('psg_factor', 'factor', 'ema_slope', 'downweight', 0.8, '{}', 'proposed', 1.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(al, "_sync_factor_weights_for_demo", lambda experiment_id: {"synced": True})
+    monkeypatch.setattr(
+        al,
+        "_auto_apply_parameter_template_suggestions",
+        lambda **kwargs: {"applied": [], "skipped": []},
+    )
+    monkeypatch.setattr(
+        al,
+        "_auto_release_parameter_template_candidates",
+        lambda **kwargs: {"approved": [], "released": [], "skipped": []},
+    )
+    monkeypatch.setattr(
+        al,
+        "_auto_apply_position_supervisor_template_suggestions",
+        lambda **kwargs: {"applied": [], "skipped": []},
+    )
+
+    result = al.apply_demo_autonomy(db_path=db_path)
+
+    assert result["enabled"] is True
+    assert result["approvals"]["approved"][0]["suggestion_id"] == "psg_factor"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        status, note = conn.execute(
+            "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='psg_factor'"
+        ).fetchone()
+        events = [row[0] for row in conn.execute("SELECT event_type FROM evolution_events").fetchall()]
+        decisions = conn.execute(
+            "SELECT decision_type, scope_type, action, status FROM evolution_decision"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert status == "approved"
+    assert "demo_autonomous" in note
+    assert "demo_autonomy_auto_approve" in events
+    assert "demo_autonomy_apply" in events
+    assert ("demo_auto_approve", "factor", "downweight", "approved") in decisions
+
+
+def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(al, "_autonomy_mode", lambda: "manual")
+
+    result = al.apply_demo_autonomy(db_path=db_path)
+
+    assert result["enabled"] is False
+    assert result["mode"] == "manual"
+
+
+def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    al.ensure_autonomous_learning_tables(db_path)
+    calls = []
+
+    class _Gov:
+        def __init__(self, db_path_arg):
+            self.db_path_arg = db_path_arg
+
+        def review_pending(self):
+            calls.append("review_pending")
+            return {}
+
+        def reconcile_active(self):
+            calls.append("reconcile_active")
+            return {}
+
+        def reconcile_application_effects(self):
+            calls.append("reconcile_application_effects")
+            return {}
+
+    import backend.services.supervisor_counterfactual as scf
+    import research.learning.governor as governor_module
+
+    monkeypatch.setattr(
+        scf,
+        "evaluate_counterfactuals",
+        lambda **kwargs: calls.append("counterfactual") or {"count": 1},
+    )
+    monkeypatch.setattr(
+        al,
+        "mature_position_supervisor_traces",
+        lambda **kwargs: calls.append("mature_traces") or {"matured": 1, "pending": 0},
+    )
+    monkeypatch.setattr(
+        al,
+        "backfill_trade_review_integrity_markers",
+        lambda **kwargs: calls.append("backfill_review_integrity") or {"updated": 1},
+    )
+    monkeypatch.setattr(
+        al,
+        "backfill_trade_review_close_sources",
+        lambda **kwargs: calls.append("backfill_close_sources") or {"updated": 1},
+    )
+    monkeypatch.setattr(
+        al,
+        "materialize_autonomous_learning_samples",
+        lambda **kwargs: calls.append("materialize_samples") or {"counts": {}, "total_changed": 1},
+    )
+    monkeypatch.setattr(
+        al,
+        "repair_evidence_contracts",
+        lambda **kwargs: calls.append("repair_contracts") or {"repaired": 1},
+    )
+    monkeypatch.setattr(
+        al,
+        "materialize_parameter_template_recommendations",
+        lambda **kwargs: calls.append("recommendations") or {"counts": {}},
+    )
+    monkeypatch.setattr(
+        al,
+        "apply_demo_autonomy",
+        lambda **kwargs: calls.append("demo_apply") or {"enabled": True},
+    )
+    monkeypatch.setattr(governor_module, "RuleEvolutionGovernor", _Gov)
+
+    result = al.run_autonomous_learning_cycle(db_path=db_path, sample_limit=20)
+
+    assert result["counterfactuals"] == {"count": 1}
+    assert result["trace_maturation"]["matured"] == 1
+    assert result["close_source_backfill"]["updated"] == 1
+    assert result["evidence_contract_repair"]["repaired"] == 1
+    assert calls[:5] == [
+        "counterfactual",
+        "mature_traces",
+        "backfill_review_integrity",
+        "backfill_close_sources",
+        "materialize_samples",
+    ]
+    assert calls[5] == "repair_contracts"
+    assert calls[-1] == "demo_apply"

@@ -12,6 +12,10 @@
 - [server-backend-sop.md](server-backend-sop.md) - 服务器后端日常操作 SOP
 - [startup.md](startup.md) - 后端、小程序和常用脚本启动方式
 - [CTRADER_INTEGRATION.md](CTRADER_INTEGRATION.md) - cTrader 执行通道说明
+- [position-supervisor-contract.md](position-supervisor-contract.md) - 持仓监督、trace、反事实成熟化与模板治理 contract
+- [learning-evidence-contract.md](learning-evidence-contract.md) - 学习样本证据契约、训练准入与模型追溯语义
+- [parameter-template-contract.md](parameter-template-contract.md) - 参数模板治理 contract
+- [parameter-tuning-boundary.md](parameter-tuning-boundary.md) - 在线轻调 / 离线深调边界
 - [../miniprogram_v2/README.md](../miniprogram_v2/README.md) - 当前微信小程序前端
 
 ## 辅助规划文档
@@ -24,6 +28,7 @@
 
 - 长期架构、完全体定义、系统角色边界：写入 `docs/architecture.md`
 - 近期开发动作、验证项、技术债：写入 `TODO.md`
+- 持仓监督、学习证据、参数模板这类稳定接口：写入对应 contract 文档
 - 涉及三端开发、发布、同步规则：写入 `docs/development-workflow.md`
 - 不再把同主题内容拆成多份并行主文档
 

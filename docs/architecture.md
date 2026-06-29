@@ -1,6 +1,6 @@
 # Quant Trading Architecture
 
-> Last updated: 2026-06-26
+> Last updated: 2026-06-30
 > Scope: current system, target full architecture, and the delivery roadmap we will follow.
 
 本文现在是项目的主蓝图。后续讨论中形成的新架构结论，优先更新这里；`TODO.md` 只负责承接近期执行项和验证项。
@@ -26,7 +26,11 @@
 
 一句话概括当前状态：
 
-**Phase D 已完成，系统已进入“主动持仓管理 + 责任归因落地”，下一步转向因子治理与参数模板。**
+**Phase C / D / E 主链已完成，Phase H 自主进化地基已落地第一版；系统已进入“主动持仓管理 + 责任归因 + 参数治理 + 退出反事实审计 + 统一进化账本”并行观察阶段。**
+
+2026-06-30 后的当前补充状态：
+
+**系统已经具备 demo autonomous 下的自动样本物化、supervisor trace 永久记录、反事实成熟化、自动审批/应用/回滚账本和 RuntimeConfig 快照。当前重点是观察真实效果、补 freshness watchdog，并把配置/进化状态查询面继续收口成单一事实源。**
 
 ### 1.1 数据库治理基线
 
@@ -79,6 +83,12 @@
 - 决策账本与生命周期：`signal / skip / open / close / order_failed / amend_failed`
 - 平仓复盘与经验沉淀：`trade_outcome_review / experience_memory`
 - 规则驱动学习闭环：`PolicySuggester -> Governor -> learning_application_log / effect`
+- 持仓监督闭环：`position_supervisor -> RiskPolicyService -> cTrader amend/reduce/close -> ledger / trade-trace`
+- 归因恢复与反事实退出审计：`AttributionEngine.restore_open -> trade_outcome_review.attribution_integrity -> supervisor_counterfactual_review`
+- 学习证据契约：`learning_evidence_contract.v1 -> dataset/readiness/validator/train/shadow/inference audit`
+- supervisor 模板治理：`position_supervisor_template -> policy_suggestion -> switch_position_supervisor_template`
+- 统一进化账本：`evolution_run / evolution_decision / runtime_config_snapshot`
+- supervisor trace 成熟化：`position_supervisor_trace -> supervisor_counterfactual_review -> supervisor_execution_trace`
 - 离线模型流水线：dataset、readiness、validator、train、promotion gate、shadow、canary、advisory inference
 - 风控统一裁决第一阶段：`RiskPolicyService.evaluate(action, context) -> RiskVerdict`
 - 持仓时长记录第一阶段：`holding_seconds / holding_minutes / timeout_*`
@@ -95,47 +105,44 @@
 - 一个**能把退出问题、时长问题、regime 问题与参数可疑责任分开记录**的系统；
 - 一个**允许模型离线学习，但禁止模型直接接管实盘**的系统。
 
-它还不是：
+它仍然不是：
 
-- 一个能系统性调参和治理因子的系统；
+- 一个能完全自动调参和治理因子的系统；
 - 一个有成熟元模型统一调度全局状态的系统；
 - 一个多品种、全组合、全上下文的完全体。
+
+但在 demo autonomous 范围内，它已经可以自动推进低风险治理动作：
+
+- 自动物化 learning samples 和参数模板 recommendations；
+- 自动审批白名单内、证据充分、可回滚的建议；
+- 自动应用 `online_light` 参数模板和符合门禁的 supervisor 模板切换；
+- 自动把应用和回滚写入 `evolution_decision`，并保留 `previous_template_id` / config snapshot。
 
 ---
 
 ## 3. 当前系统的核心短板
 
-这几轮对话之后，短板已经很清楚了。真正缺的不是“再加几个指标”，而是缺下面四个层：
+这几轮对话之后，短板已经从“缺核心层”转为“核心层已入位，需要继续补真实样本、自动审计和受控治理”。
 
-### 3.1 持仓监督层缺失
+### 3.1 持仓监督层已入位，但仍需继续观察真实样本
 
-现在系统擅长开仓前判断，但对持仓中的过程理解还太弱。
+系统已经不再只是等待原始止盈止损。`position_supervisor` 已经能持续输出 `hold / tighten / reduce / close`，并经过 `RiskPolicyService` 统一裁决后执行。
 
-典型表现：
+当前仍需要继续补的不是“有没有 supervisor”，而是：
 
-- 有些仓位曾经明显盈利；
-- 后来利润回吐；
-- 持仓时间已经很长；
-- 但系统没有主动收紧、减仓或平仓；
-- 只是继续等待原始止盈止损。
+- 更多真实 `tighten / reduce / timeout` 执行样本；
+- 更稳定地区分 `supervisor_tighten_stopout` 与外部 broker close；
+- 在审批后安全切换 `position_supervisor_template`，而不是绕过风控。
 
-这说明当前风控更多是“硬闸门”，还不是“持仓裁决官”。
+### 3.2 归因层已进入主链，但重启恢复与证据完整性仍是重点
 
-### 3.2 归因层还没正式成为系统中枢
+系统已经把平仓复盘、责任标签、因子贡献、supervisor 事件和反事实审计接入学习链路。
 
-系统已经能做平仓复盘，但还没把这些知识正式转成“实时持仓解释”和“后续因子治理输入”。
+当前明确要求每笔 review 标记：
 
-也就是说，现在已经会记录：
-
-- 最终赚没赚
-- 为什么平仓
-- 某些因子贡献如何
-
-但还没完全做到：
-
-- 这笔单曾经是否证明过自己是对的
-- 最后亏损是因子错、退出错、时长错，还是市场切换
-- 这种结论怎样反馈给风控和因子治理
+- `attribution_integrity`: `full / recovered / missing`
+- `close_reason_source`: `supervisor_direct_close / supervisor_tighten_stopout / supervisor_reduce_partial_or_stopout / external_broker_close / restart_replay`
+- `inferred_close_supervisor`: close 前最近一次 supervisor verdict
 
 ### 3.3 因子治理层仍然偏弱
 
@@ -476,6 +483,21 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 结果如何
 - 后来学到了什么
 
+2026-06-30 起，Ledger 证据脊柱进一步拆成两类：
+
+- 交易事实账本：`decision_ledger / order_lifecycle_event / position_lifecycle_event / trade_outcome_review`
+- 进化治理账本：`evolution_run / evolution_decision / runtime_config_snapshot`
+
+其中：
+
+- `evolution_run` 记录一次自治运行，例如样本物化、trace 回填、trace 成熟化、demo 自动治理周期；
+- `evolution_decision` 记录这次运行内每个关键决策，例如自动审批、apply switch、rollback、样本成熟；
+- `runtime_config_snapshot` 记录当时 RuntimeConfig 的稳定 hash 和版本，供交易、trace、sample、application 回放。
+
+新的约束是：
+
+**任何自动学习或自动治理动作，都必须能从 `evolution_decision` 追溯到证据、风控 verdict、前后状态和配置版本。**
+
 ### Layer 11: 学习与模型实验室
 
 职责：
@@ -488,6 +510,13 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 原则：
 
 **先做解释和建议，再做受限影响，最后才可能有限介入 live policy。**
+
+2026-06-30 起，学习样本统一执行 `learning_evidence_contract.v1`：
+
+- `label_status=pending` 的样本不能声明 `supervised_training`
+- `integrity=missing` 不进入强监督训练
+- `recovered / partial` 样本必须降权
+- `supervisor_execution_trace` 只有结合 review / counterfactual 成熟后，才允许升级为强训练候选
 
 ---
 
@@ -789,11 +818,11 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 ### Phase C: 持仓监督闭环
 
-状态：下一阶段最高优先级
+状态：已完成主链，真实样本观察中
 
-这是从“会开仓”走向“会管理仓位”的关键一步。
+这是系统从“会开仓”走向“会管理仓位”的关键一步，当前主链已经在线上运行。
 
-要完成：
+已完成：
 
 1. 建立 `position_supervisor`
 2. 为每个活跃仓位持续计算：
@@ -811,20 +840,26 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
    - `close`
 4. 把建议送入 `RiskPolicyService`
 5. 所有动作写入 ledger 和 trade trace
+6. 持仓监督阈值已模板化，当前内置：
+   - `position_supervisor:default.v1`
+   - `position_supervisor:conservative.v1`
 
 验收标准：
 
 - 不再只会死等止盈止损
 - 对“曾经盈利但后来回吐”的仓位能给出可解释动作
 - 每次平仓都知道是 stop、timeout、giveback、regime shift，还是 thesis failure
+- supervisor 模板切换必须走 `policy_suggestion` 审批和 `RiskPolicyService.evaluate("switch_position_supervisor_template", ...)`
 
 ### Phase D: 归因升级与责任分离
+
+状态：已完成主链，继续提升真实样本覆盖
 
 目标：
 
 - 把“入场错 / 退出错 / 时长错 / 参数错 / regime 错”正式分离
 
-要完成：
+已完成：
 
 1. 扩展 trade review contract
 2. 引入统一 failure taxonomy v2
@@ -834,19 +869,27 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
    - factor contribution review
    - position supervisor close reason
    - learning sample
+5. 新增重启后归因恢复与 `attribution_integrity`
+6. 新增 supervisor 退出反事实样本：
+   - `supervisor_counterfactual_review`
+   - `backend.services.supervisor_counterfactual`
+   - `backend.services.supervisor_learning_scheduler`
 
 验收标准：
 
 - 单笔亏损不再粗暴归类为“因子失效”
 - 系统能识别“因子方向对，但退出不好”
+- 系统能识别“supervisor 平得对 / 平早了 / 保护太紧 / 噪音止损”
 
 ### Phase E: 因子治理与参数模板
+
+状态：主链已完成，真实样本与灰度效果观察中
 
 目标：
 
 - 正式建立“因子教练层”
 
-要完成：
+已完成主链：
 
 1. 因子解释卡片标准化
 2. 参数版本与模板系统
@@ -861,11 +904,13 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 ### Phase F: 元模型旁路
 
+状态：已完成后端旁路和审计，继续观察样本质量
+
 目标：
 
 - 让更高层的大脑开始看到全局，但仍不拥有执行特权
 
-要完成：
+已完成主链：
 
 1. 定义 `meta_context.v1`
 2. 汇总市场、因子、持仓、风控、学习、模型状态
@@ -878,18 +923,37 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 系统能判断现在该进攻、观望、收缩还是恢复
 - 元模型能建议降频、降权、冻结某些因子族
 
-### Phase G: 受限自动治理
+### Phase G: 元模型治理建议与前端交接
+
+状态：已完成后端 contract、shadow report、治理建议和前端交接入口
+
+目标：
+
+- 让 meta shadow / governance suggestion 能被后端和小程序稳定查看
+- 保持 advisory-only，不直接接 live
+
+已完成：
+
+- meta model context / shadow report / snapshot
+- governance suggestion 入 `policy_suggestion`
+- readiness 与 ops 聚合入口
+
+### Phase H: 自治数据工厂与分级自动治理
+
+状态：第一版地基已完成，后台观察中
 
 目标：
 
 - 在不突破安全边界的前提下，让系统自动做低风险调整
 
-允许自动化：
+已完成：
 
-- 降低风险预算
-- 暂停某类新开仓
-- 降低某类因子权重
-- 切换到保守参数模板
+- `autonomous_learning_sample`
+- `position_supervisor_trace`
+- `supervisor_counterfactual_review` 后台物化
+- `evolution_run / evolution_decision / runtime_config_snapshot`
+- demo autonomous 自动审批、自动应用、自动 rollback 账本
+- strict evidence contract training gate
 
 不允许自动化：
 
@@ -898,7 +962,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 启用 live-trading 模型
 - 绕过 Governor
 
-### Phase H: 多品种完全体
+### Phase I: 多品种完全体
 
 目标：
 
@@ -908,21 +972,20 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 ## 10. 后续开发的默认顺序
 
-如果没有新的外部强约束，后续默认按下面顺序推进：
+如果没有新的外部强约束，当前默认按下面顺序推进：
 
-1. 先做 `position_supervisor`
-2. 再做归因 contract 升级
-3. 再做因子解释卡片和参数模板
-4. 再做因子治理工作流
-5. 再做元模型旁路
-6. 最后做受限自动治理和多品种扩展
+1. 继续观察 Phase H 第一版自治地基的真实效果
+2. 补 `evolution_run / evolution_decision` 的查询与告警体验
+3. 补 shadow/model freshness watchdog
+4. 补 supervisor template / parameter template 的效果阈值和自动 rollback 策略
+5. 样本和治理稳定后，再推进 Phase I 多品种扩展
 
 原因很简单：
 
-- 没有持仓监督，系统持仓中还是“睡着的”
-- 没有归因升级，就分不清问题到底出在哪
-- 没有因子治理，参数优化就只能靠人工零散干预
-- 没有元模型，全局调度就永远碎片化
+- Phase C/D/E/F/G/H 的主链已经入位，接下来风险来自“自动系统是否持续可解释、可回滚、不过拟合”
+- 没有 freshness watchdog，模型/影子报告可能过旧还被治理层误读
+- 没有足够真实观察期，自动回滚阈值容易过早或过晚
+- 多品种会放大所有治理问题，所以必须在单品种自治链路稳定后再扩展
 
 ---
 
@@ -952,6 +1015,9 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - `/api/learning/dataset`
 - `/api/learning/decision-dataset`
 - `/api/learning/model/pipeline/run`
+- `/api/learning/evolution/runs`
+- `/api/learning/position-supervisor/traces/backfill`
+- `/api/learning/position-supervisor/traces/materialize-labels`
 
 ### 数据
 
@@ -970,12 +1036,12 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 ## 13. 当前结论
 
-这套系统现在已经有了“骨架”和“血管”，但还没长出完整的“中枢神经”。
+这套系统现在已经有了“骨架、血管和第一版自治神经”。
 
-下一阶段真正的突破点，不是再加一个模型，也不是急着让模型接管实盘，而是先把下面三件事做完整：
+下一阶段真正的突破点，不是急着让模型接管实盘，而是把下面三件事继续做稳：
 
-1. 持仓监督
-2. 责任归因
-3. 因子治理
+1. 进化账本的长期连续性
+2. supervisor / 参数模板自动治理的效果观察与回滚
+3. 模型和 shadow 审计的新鲜度与准入门禁
 
-这三层一旦立住，后面的元模型、自动治理、多品种扩展才有稳定地基。
+这三层稳定后，模型更深参与和多品种扩展才有足够稳的地基。

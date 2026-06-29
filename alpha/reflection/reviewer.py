@@ -18,6 +18,20 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, v))
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
 class TradeReviewer:
     """Rule-based post-trade reviewer."""
 
@@ -77,8 +91,13 @@ class TradeReviewer:
         real_pnl: dict | None = None,
         close_reason: str = "",
         context_integrity: str = "full",
+        attribution_integrity: str = "full",
+        close_reason_source: str = "",
+        inferred_close_supervisor: dict | None = None,
     ) -> dict:
         contributions = contributions or {}
+        attribution_integrity = str(attribution_integrity or ("full" if contributions else "missing"))
+        inferred_close_supervisor = inferred_close_supervisor or {}
         is_verifiable, skip_reason = self.is_review_verifiable(
             real_pnl=real_pnl,
             close_reason=close_reason,
@@ -98,7 +117,10 @@ class TradeReviewer:
                     "position_id": position_id,
                     "real_pnl": real_pnl or {},
                     "close_reason": close_reason,
+                    "close_reason_source": close_reason_source,
+                    "inferred_close_supervisor": inferred_close_supervisor,
                     "context_integrity": context_integrity,
+                    "attribution_integrity": attribution_integrity,
                 },
             }
         with self._conn() as conn:
@@ -175,6 +197,8 @@ class TradeReviewer:
 
         if not failure_tags and pnl <= 0:
             failure_tags.append("unavoidable_noise")
+        if attribution_integrity == "missing" and "attribution_missing" not in failure_tags:
+            failure_tags.append("attribution_missing")
 
         entry_quality = _clamp(0.55 + (0.25 if pnl > 0 else -0.30) * min(abs(entry_score), 1.0))
         hold_quality = _clamp(0.55 if pnl > 0 else 0.40)
@@ -250,7 +274,10 @@ class TradeReviewer:
             "close_price": close_price,
             "real_pnl": real_pnl or {},
             "close_reason": close_reason,
+            "close_reason_source": close_reason_source,
+            "inferred_close_supervisor": inferred_close_supervisor,
             "context_integrity": context_integrity,
+            "attribution_integrity": attribution_integrity,
             "failure_tags": failure_tags,
             "factor_contributions": contributions,
             "position_path_state": next_state,
@@ -279,6 +306,28 @@ class TradeReviewer:
 
         review_id = self._new_id("review")
         with self._conn() as conn:
+            existing = self._find_existing_review(
+                conn,
+                position_id=position_id,
+                real_pnl=real_pnl or {},
+                close_ts=close_ts,
+            )
+            if existing:
+                existing_review = dict(existing["review_json"])
+                existing_review["deduplicated"] = True
+                return {
+                    "accepted": True,
+                    "review_id": existing["review_id"],
+                    "trade_id": existing["trade_id"],
+                    "position_id": position_id,
+                    "regime_id": regime_id,
+                    "outcome_label": existing["outcome_label"],
+                    "pnl": float(existing["pnl"]),
+                    "failure_tags": existing["failure_tags"],
+                    "summary_text": existing["summary_text"],
+                    "review_json": existing_review,
+                    "deduplicated": True,
+                }
             conn.execute(
                 """
                 INSERT INTO trade_outcome_review
@@ -306,7 +355,7 @@ class TradeReviewer:
                     json.dumps(failure_tags, ensure_ascii=False),
                     summary,
                     json.dumps(review_json, ensure_ascii=False, default=str),
-                    time.time(),
+                    close_ts,
                 ),
             )
             for factor, mc in contributions.items():
@@ -360,4 +409,51 @@ class TradeReviewer:
             "summary_text": summary,
             "review_json": review_json,
         }
+
+    def _find_existing_review(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        position_id: str,
+        real_pnl: dict,
+        close_ts: float,
+    ) -> dict | None:
+        real_deal_id = _safe_int((real_pnl or {}).get("deal_id"))
+        rows = conn.execute(
+            """
+            SELECT review_id, trade_id, position_id, outcome_label, pnl,
+                   failure_tags_json, summary_text, review_json, created_at
+            FROM trade_outcome_review
+            WHERE position_id=?
+            ORDER BY created_at DESC
+            LIMIT 20
+            """,
+            (position_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                review_json = json.loads(row["review_json"] or "{}")
+            except Exception:
+                review_json = {}
+            existing_real = review_json.get("real_pnl") or {}
+            existing_deal_id = _safe_int(existing_real.get("deal_id"))
+            existing_close_ts = _safe_float(review_json.get("close_ts"), _safe_float(row["created_at"]))
+            same_deal = real_deal_id > 0 and existing_deal_id == real_deal_id
+            same_close = real_deal_id <= 0 and existing_close_ts > 0 and abs(existing_close_ts - close_ts) < 1.0
+            if not (same_deal or same_close):
+                continue
+            try:
+                failure_tags = json.loads(row["failure_tags_json"] or "[]")
+            except Exception:
+                failure_tags = []
+            return {
+                "review_id": str(row["review_id"]),
+                "trade_id": str(row["trade_id"] or position_id),
+                "outcome_label": str(row["outcome_label"] or ""),
+                "pnl": float(row["pnl"] or 0.0),
+                "failure_tags": failure_tags if isinstance(failure_tags, list) else [],
+                "summary_text": str(row["summary_text"] or ""),
+                "review_json": review_json,
+            }
+        return None
 

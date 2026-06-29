@@ -360,6 +360,119 @@ def test_upsert_recovery_position_state_preserves_valid_volume_on_zero_snapshot(
     assert row["open_price"] == pytest.approx(4051.0)
 
 
+def test_pending_close_intent_survives_memory_loss_via_recovery_meta(monkeypatch, tmp_path):
+    from backend.core import db as db_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO recovery_position_state
+            (position_id, broker, symbol, direction, open_price, volume,
+             first_seen_at, last_seen_at, status, strategy_name,
+             entry_decision_id, context_integrity, recovery_meta_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (271, "ctrader", "XAUUSD+", 1, 4050.0, 100.0, 10.0, 20.0, "open", "factor_v4", "dec_open", "full", "{}"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+
+    live_service._remember_close_reason(271, "holding_timeout")
+    live_service._remember_close_verdict(271, SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"}))
+    live_service._pending_close_reasons.clear()
+    live_service._pending_close_verdicts.clear()
+
+    assert live_service._consume_close_reason(271) == "holding_timeout"
+    assert live_service._consume_close_verdict(271, "holding_timeout")["allowed"] is True
+
+
+def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
+    from backend.core import db as db_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    live_service._live_state_update(
+        session_pnl=-18.5,
+        session_trades=2,
+        session_winning=0,
+        session_losing=2,
+        session_consecutive_loss=2,
+        session_max_drawdown_pct=1.85,
+        session_start_balance=1000.0,
+        session_last_trade_ts=123.0,
+        circuit_breaker=True,
+        circuit_reason="daily drawdown 5.1%",
+        trade_equity_history=[1000.0, 981.5],
+    )
+    live_service._persist_session_state("2026-06-30")
+    live_service._reset_session_state_for_new_day()
+
+    assert live_service._restore_session_state_for_day("2026-06-30") is True
+    assert live_service._live_state_get("session_pnl") == pytest.approx(-18.5)
+    assert live_service._live_state_get("session_consecutive_loss") == 2
+    assert live_service._live_state_get("circuit_breaker") is True
+    assert live_service._live_state_get("trade_equity_history", clone=True) == [1000.0, 981.5]
+
+
+def test_close_pnl_fallback_reads_recovery_when_memory_cache_missing(monkeypatch, tmp_path):
+    from backend.core import db as db_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO recovery_position_state
+            (position_id, broker, symbol, direction, open_price, volume,
+             first_seen_at, last_seen_at, status, strategy_name,
+             entry_decision_id, context_integrity, recovery_meta_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (272, "ctrader", "XAUUSD+", -1, 4050.0, 100.0, 10.0, 20.0, "open", "factor_v4", "dec_open", "full", "{}"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    live_service._pos_open_prices.pop(272, None)
+    live_service._pos_open_api_volume.pop(272, None)
+
+    assert live_service._estimate_close_pnl_from_cached_state(272, 4040.0) == pytest.approx(1000.0)
+
+
 def test_recovery_bootstrap_reconciles_persisted_positions_after_confirmed_broker_zero(monkeypatch, tmp_path):
     from backend.core import db as db_module
     import execution.deal_sync as deal_sync_module
@@ -635,6 +748,92 @@ def test_build_close_position_risk_context_marks_timeout(monkeypatch, tmp_path):
     assert ctx["max_holding_seconds"] == pytest.approx(3600.0)
 
 
+def test_classify_close_source_infers_supervisor_tighten_stopout(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+
+    close_ts = time.time()
+    decision_id = ledger.log_decision(
+        event_type="supervisor_tighten",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        trade_id="7001",
+        position_id="7001",
+        decision_ts=close_ts - 20.0,
+        portfolio_state={},
+        risk_state={"policy_verdict": {"allowed": True, "reason": "ok"}},
+        action_score=0.8,
+        action_reason="profit_giveback_after_mfe",
+        action_json={
+            "supervisor_verdict": {
+                "action": "tighten",
+                "summary_reason": "profit_giveback_after_mfe",
+                "evidence": {"giveback_ratio": 0.8},
+                "recommended_controls": {"target_stop_loss": 4000.0},
+            }
+        },
+    )
+
+    result = live_service._classify_close_source(7001, "broker_close", close_ts)
+
+    assert decision_id
+    assert result["close_reason_source"] == "supervisor_tighten_stopout"
+    assert result["inferred_close_supervisor"]["event_type"] == "supervisor_tighten"
+    assert result["inferred_close_supervisor"]["seconds_before_close"] == pytest.approx(20.0)
+
+
+def test_classify_close_source_infers_legacy_awe_trailing_stopout_from_trace(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+
+    close_ts = time.time()
+    ledger.log_position_supervisor_trace(
+        position_id="7101",
+        trade_id="7101",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        event_ts=close_ts - 10.0,
+        action="tighten",
+        summary_reason="legacy_awe_trailing",
+        confidence=0.8,
+        stage="protection_arbitrated",
+        outcome="applied",
+        risk_action="tighten_position",
+        risk_allowed=True,
+        risk_reason="risk_reducing_action",
+        execution_status="applied",
+        execution_reason="amend_position_sltp_success",
+        verdict={
+            "action": "tighten",
+            "summary_reason": "legacy_awe_trailing",
+            "evidence": {"protection_source": "legacy_awe_trailing"},
+            "recommended_controls": {"target_stop_loss": 4000.0},
+        },
+        risk_verdict={"allowed": True, "reason": "risk_reducing_action"},
+        execution={"target_stop_loss_sent": 4000.0},
+    )
+
+    result = live_service._classify_close_source(7101, "broker_close", close_ts)
+
+    assert result["close_reason_source"] == "legacy_awe_trailing_stopout"
+    assert result["inferred_close_supervisor"]["event_type"] == "legacy_awe_trailing"
+    assert result["inferred_close_supervisor"]["seconds_before_close"] == pytest.approx(10.0)
+
+
 def test_holding_summary_for_position_reports_watch_status(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     ledger = DecisionLedger(str(db_path))
@@ -722,3 +921,257 @@ def test_position_path_metrics_tracks_mfe_giveback_and_time_in_profit(monkeypatc
     assert second["profit_capture_ratio"] == pytest.approx(0.25)
     assert second["time_in_profit"] == pytest.approx(600.0)
     assert second["thesis_status"] == "weakening"
+
+
+def test_awe_trailing_builds_candidate_without_direct_broker_amend():
+    class _Awe:
+        def composite_conviction(self):
+            return 0.8
+
+    class _Bridge:
+        def amend_position_sltp(self, *args, **kwargs):
+            raise AssertionError("trailing must not directly amend broker state")
+
+    live_service._trailing_state.clear()
+    candidates = live_service._update_trailing_stops(
+        _Bridge(),
+        [
+            {
+                "position_id": 701,
+                "symbol": "XAUUSD+",
+                "direction": 1,
+                "entry_price": 4000.0,
+                "current_price": 4012.0,
+                "sl": 3990.0,
+                "tp": 4030.0,
+                "volume": 100.0,
+            }
+        ],
+        current_price=4012.0,
+        pipeline={"awe": _Awe()},
+        atr_price=5.0,
+        tick=1,
+        log=lambda msg: None,
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.source == "legacy_awe_trailing"
+    assert candidate.action == "tighten"
+    assert candidate.risk_action == "tighten_position"
+    assert candidate.controls["target_stop_loss"] == pytest.approx(4004.5)
+
+
+def test_supervisor_tighten_trace_keeps_decision_id(monkeypatch):
+    traces = []
+    decisions = []
+    events = []
+
+    class _Ledger:
+        def log_decision(self, **kwargs):
+            decisions.append(kwargs)
+            return "dec_supervisor_tighten"
+
+        def log_position_supervisor_trace(self, **kwargs):
+            traces.append(kwargs)
+            return "trace1"
+
+        def log_position_event(self, **kwargs):
+            events.append(kwargs)
+
+    class _Policy:
+        def evaluate(self, action, context):
+            return SimpleNamespace(
+                allowed=True,
+                reason="risk_reducing_action",
+                to_dict=lambda: {"allowed": True, "reason": "risk_reducing_action"},
+            )
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05}
+
+        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
+            return SimpleNamespace(success=True, position_id=pid, sl=sl, tp=tp)
+
+    verdict = {
+        "position_id": "702",
+        "decision_ts": time.time(),
+        "action": "tighten",
+        "confidence": 0.75,
+        "summary_reason": "profit_giveback_after_mfe",
+        "evidence": {"giveback_ratio": 0.7},
+        "recommended_controls": {
+            "target_stop_loss": 4005.0,
+            "target_take_profit": 4030.0,
+            "close_reason": "supervisor_tighten",
+            "protection_mode": "tightened_stop",
+        },
+        "supervisor_template": {
+            "template_id": "position_supervisor:default.v1",
+            "template_version": "default.v1",
+        },
+    }
+
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_evaluate_position_supervisor_for_position", lambda *args, **kwargs: verdict)
+    monkeypatch.setattr(live_service, "_supervisor_recently_applied", lambda *args, **kwargs: False)
+    monkeypatch.setattr(live_service, "_remember_supervisor_state", lambda *args, **kwargs: None)
+
+    handled = live_service._run_position_supervision(
+        _Bridge(),
+        [
+            {
+                "position_id": 702,
+                "symbol": "XAUUSD+",
+                "direction": 1,
+                "entry_price": 4000.0,
+                "current_price": 4010.0,
+                "sl": 3990.0,
+                "tp": 4030.0,
+                "volume": 100.0,
+            }
+        ],
+        cfg=SimpleNamespace(timeframe="M5"),
+        acct={"balance": 10000.0, "equity": 10000.0},
+        tick=3,
+        log=lambda msg: None,
+    )
+
+    assert handled == {702}
+    assert decisions[0]["event_type"] == "supervisor_tighten"
+    applied_traces = [item for item in traces if item["outcome"] == "applied"]
+    assert applied_traces
+    assert applied_traces[0]["decision_id"] == "dec_supervisor_tighten"
+    assert events[0]["event_type"] == "tightened"
+
+
+def test_protection_cycle_supersedes_trailing_when_supervisor_handles_position(monkeypatch):
+    superseded = []
+    candidate = live_service.ProtectionCandidate(
+        source="legacy_awe_trailing",
+        action="tighten",
+        priority=50,
+        position_id=703,
+        risk_action="tighten_position",
+        controls={"target_stop_loss": 4005.0},
+        reason="legacy_awe_trailing",
+        position={"position_id": 703, "symbol": "XAUUSD+", "direction": 1},
+    )
+
+    monkeypatch.setattr(live_service, "_update_trailing_stops", lambda *args, **kwargs: [candidate])
+    monkeypatch.setattr(live_service, "_enforce_holding_timeout", lambda *args, **kwargs: set())
+    monkeypatch.setattr(live_service, "_run_position_supervision", lambda *args, **kwargs: {703})
+    monkeypatch.setattr(
+        live_service,
+        "_log_protection_candidate_superseded",
+        lambda item, **kwargs: superseded.append((item.position_id, kwargs["reason"])),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_execute_trailing_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("superseded candidate must not execute")),
+    )
+
+    result = live_service._run_position_protection_cycle(
+        SimpleNamespace(is_connected=True),
+        [{"position_id": 703}],
+        cfg=SimpleNamespace(timeframe="M5"),
+        acct={},
+        pipeline={},
+        current_price=4010.0,
+        atr_price=5.0,
+        tick=4,
+        log=lambda msg: None,
+    )
+
+    assert result["supervisor"] == [703]
+    assert result["trailing_superseded"] == [703]
+    assert superseded == [(703, "position_supervisor")]
+
+
+def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(monkeypatch):
+    traces = []
+    decisions = []
+    protection_states = []
+
+    class _Ledger:
+        def log_decision(self, **kwargs):
+            decisions.append(kwargs)
+            return "dec_legacy_awe"
+
+        def log_position_supervisor_trace(self, **kwargs):
+            traces.append(kwargs)
+            return "trace_legacy_awe"
+
+        def log_position_event(self, **kwargs):
+            pass
+
+    class _Policy:
+        def evaluate(self, action, context):
+            return SimpleNamespace(
+                allowed=True,
+                reason="risk_reducing_action",
+                to_dict=lambda: {"allowed": True, "reason": "risk_reducing_action"},
+            )
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05}
+
+        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
+            return SimpleNamespace(success=True, position_id=pid, sl=sl, tp=tp)
+
+    candidate = live_service.ProtectionCandidate(
+        source="legacy_awe_trailing",
+        action="tighten",
+        priority=50,
+        position_id=704,
+        risk_action="tighten_position",
+        controls={"target_stop_loss": 4005.0, "target_take_profit": 4030.0},
+        evidence={"confidence": 0.4},
+        reason="legacy_awe_trailing",
+        position={
+            "position_id": 704,
+            "symbol": "XAUUSD+",
+            "direction": 1,
+            "entry_price": 4000.0,
+            "current_price": 4010.0,
+            "sl": 3990.0,
+            "tp": 4030.0,
+            "volume": 100.0,
+        },
+    )
+
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(
+        live_service,
+        "_remember_supervisor_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy AWE must not update supervisor cooldown")),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_remember_protection_state",
+        lambda *args, **kwargs: protection_states.append(kwargs),
+    )
+
+    handled = live_service._execute_trailing_candidate(
+        candidate,
+        bridge=_Bridge(),
+        cfg=SimpleNamespace(timeframe="M5"),
+        tick=5,
+        log=lambda msg: None,
+        acct={},
+    )
+
+    assert handled is True
+    assert decisions[0]["event_type"] == "legacy_awe_trailing"
+    assert protection_states[0]["source"] == "legacy_awe_trailing"
+    assert protection_states[0]["action_applied"] == "tighten"
+    assert traces[0]["decision_id"] == "dec_legacy_awe"

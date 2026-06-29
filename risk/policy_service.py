@@ -62,6 +62,8 @@ class RiskPolicyService:
             return self._evaluate_governor_action(action, context, "allow_weight_update")
         if action == "switch_parameter_template":
             return self._evaluate_governor_action(action, context, "allow_weight_update")
+        if action == "switch_position_supervisor_template":
+            return self._evaluate_position_supervisor_template_switch(context)
         if action == "promote_factor":
             return self._evaluate_governor_action(action, context, "allow_promotion")
         if action == "register_factor":
@@ -283,6 +285,97 @@ class RiskPolicyService:
                 "supervisor_evidence": context.get("supervisor_evidence") or {},
                 "recommended_controls": recommended_controls,
                 "temporal_context": temporal_context,
+            },
+        )
+
+    def _evaluate_position_supervisor_template_switch(self, context: dict[str, Any]) -> RiskVerdict:
+        target_template_id = str(context.get("target_template_id") or "").strip()
+        suggestion_status = str(context.get("suggestion_status") or "").strip().lower()
+        if suggestion_status != "approved":
+            return RiskVerdict(
+                allowed=False,
+                reason="suggestion_not_approved",
+                severity="error",
+                required_mode="governed",
+                audit_payload={
+                    "action": "switch_position_supervisor_template",
+                    "source": "risk_policy",
+                    "target_template_id": target_template_id,
+                    "suggestion_status": suggestion_status,
+                },
+            )
+        try:
+            from backend.services.position_supervisor_templates import list_position_supervisor_templates
+
+            templates = list_position_supervisor_templates()
+            valid_templates = {str(item.get("template_id") or "") for item in templates}
+            template_meta = next((item for item in templates if str(item.get("template_id") or "") == target_template_id), {})
+        except Exception:
+            valid_templates = set()
+            template_meta = {}
+        if not target_template_id or target_template_id not in valid_templates:
+            return RiskVerdict(
+                allowed=False,
+                reason="invalid_position_supervisor_template",
+                severity="error",
+                required_mode="governed",
+                audit_payload={
+                    "action": "switch_position_supervisor_template",
+                    "source": "risk_policy",
+                    "target_template_id": target_template_id,
+                    "valid_templates": sorted(valid_templates),
+                },
+            )
+        evidence = context.get("evidence") or {}
+        has_replay = bool(evidence.get("replay_summary") or evidence.get("replay") or evidence.get("day"))
+        has_counterfactual = bool(evidence.get("counterfactual_summary") or evidence.get("counterfactual"))
+        if not (has_replay and has_counterfactual):
+            return RiskVerdict(
+                allowed=False,
+                reason="missing_supervisor_switch_evidence",
+                severity="error",
+                required_mode="governed",
+                audit_payload={
+                    "action": "switch_position_supervisor_template",
+                    "source": "risk_policy",
+                    "target_template_id": target_template_id,
+                    "has_replay": has_replay,
+                    "has_counterfactual": has_counterfactual,
+                },
+            )
+        if bool(context.get("autonomous_apply", False)):
+            try:
+                from config.runtime_config import shared as runtime_config
+
+                autonomy_mode = str(getattr(runtime_config(), "autonomy_mode", "") or "manual")
+            except Exception:
+                autonomy_mode = str(context.get("autonomy_mode") or "manual")
+            boundary = template_meta.get("risk_boundary") or {}
+            allowed_modes = set(boundary.get("auto_deploy_modes") or [])
+            if autonomy_mode != "demo_autonomous" or autonomy_mode not in allowed_modes:
+                return RiskVerdict(
+                    allowed=False,
+                    reason="autonomous_deploy_mode_not_allowed",
+                    severity="error",
+                    required_mode="governed",
+                    audit_payload={
+                        "action": "switch_position_supervisor_template",
+                        "source": "risk_policy",
+                        "target_template_id": target_template_id,
+                        "autonomy_mode": autonomy_mode,
+                        "allowed_modes": sorted(allowed_modes),
+                    },
+                )
+        return RiskVerdict(
+            allowed=True,
+            reason="ok",
+            required_mode="governed",
+            audit_payload={
+                "action": "switch_position_supervisor_template",
+                "source": "risk_policy",
+                "target_template_id": target_template_id,
+                "previous_template_id": context.get("previous_template_id", ""),
+                "suggestion_id": context.get("suggestion_id", ""),
             },
         )
 

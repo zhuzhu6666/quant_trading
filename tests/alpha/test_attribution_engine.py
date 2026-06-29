@@ -123,6 +123,19 @@ class TestAttributionEngine:
         result = engine.record_close(999, close_price=4550.0, close_ts=time.time())
         assert result == {}
 
+    def test_restore_open_rebuilds_in_memory_context_without_record_open(self):
+        attr = _make_attribution(position_id=7, signals={"rsi_14": 0.5, "di_spread": 0.5})
+        payload = attr.to_jsonable()
+
+        engine = AttributionEngine()
+        restored = engine.restore_open(7, payload)
+        result = engine.record_close(7, close_price=4510.0, close_ts=time.time())
+
+        assert restored is True
+        assert engine.open_integrity(7) == "missing"
+        assert result["rsi_14"] == pytest.approx(5.0)
+        assert result["di_spread"] == pytest.approx(5.0)
+
     def test_short_position_negative_pnl(self):
         """空头方向计算正确。"""
         engine = AttributionEngine()

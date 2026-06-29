@@ -12,6 +12,7 @@ execution/ctrader_bridge.py — cTrader Open API 桥接（当前实盘主链）
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -24,6 +25,30 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _persist_runtime_kv(key: str, value: dict[str, Any]) -> None:
+    try:
+        from backend.core.db import STATE_DB_DDL, get_state_conn
+
+        conn = get_state_conn()
+        try:
+            conn.executescript(STATE_DB_DDL)
+            conn.execute(
+                """
+                INSERT INTO runtime_kv(key, value_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value_json=excluded.value_json,
+                    updated_at=excluded.updated_at
+                """,
+                (key, json.dumps(value, ensure_ascii=False, default=str), time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("runtime_kv persist skipped for %s: %s", key, exc)
 
 # Phase 4: 统一接口
 from backend.core.db import DUCKDB_L2, connect_duckdb
@@ -268,7 +293,11 @@ class CTraderBridge(BaseBrokerBridge):
         self._l2_writer_thread: threading.Thread | None = None
         self._l2_writer_started = False
         self._l2_dropped_rows: int = 0
+        self._l2_written_rows: int = 0
+        self._l2_last_write_ts: float = 0.0
+        self._l2_last_error: str = ""
         self._l2_drop_log_ts: float = 0.0
+        self._l2_health_persist_ts: float = 0.0
         self._snapshot_last_ts: float = 0.0
         self._snapshot_counter: int | None = None
 
@@ -1132,6 +1161,31 @@ class CTraderBridge(BaseBrokerBridge):
                     pass
                 self._l2_db = None
                 self._l2_db_path = None
+        self._persist_l2_writer_health(force=True)
+
+    def _persist_l2_writer_health(self, *, force: bool = False, status: str = "running") -> None:
+        now = time.time()
+        if not force and now - self._l2_health_persist_ts < 30.0:
+            return
+        self._l2_health_persist_ts = now
+        try:
+            queue_size = int(self._l2_writer_queue.qsize())
+        except Exception:
+            queue_size = -1
+        _persist_runtime_kv(
+            "live.l2_writer.health",
+            {
+                "status": status,
+                "persist_enabled": bool(self.l2_persist_enabled),
+                "db_path": str(self._l2_db_path or ""),
+                "queue_size": queue_size,
+                "dropped_rows": int(self._l2_dropped_rows),
+                "written_rows": int(self._l2_written_rows),
+                "last_write_ts": float(self._l2_last_write_ts or 0.0),
+                "last_error": str(self._l2_last_error or ""),
+                "updated_at": now,
+            },
+        )
 
     def _enqueue_l2_row(self, kind: str, row: tuple) -> None:
         if not self.l2_persist_enabled:
@@ -1145,6 +1199,7 @@ class CTraderBridge(BaseBrokerBridge):
             if now - self._l2_drop_log_ts > 30:
                 logger.warning("L2 writer queue full; dropped rows=%d", self._l2_dropped_rows)
                 self._l2_drop_log_ts = now
+                self._persist_l2_writer_health(force=True, status="dropping")
 
     def _l2_writer_loop(self) -> None:
         changes: list[tuple[str, tuple]] = []
@@ -1188,6 +1243,7 @@ class CTraderBridge(BaseBrokerBridge):
                         new_rows = [row for kind, row in bucket["changes"] if kind == "new"]
                         delete_rows = [row for kind, row in bucket["changes"] if kind == "delete"]
                         snapshot_rows = bucket["snapshots"]
+                        rows_written = len(new_rows) + len(delete_rows) + len(snapshot_rows)
                         conn.execute("BEGIN TRANSACTION")
                         if new_rows:
                             conn.executemany(
@@ -1230,10 +1286,16 @@ class CTraderBridge(BaseBrokerBridge):
                                 snapshot_rows,
                             )
                         conn.execute("COMMIT")
+                        self._l2_written_rows += rows_written
+                        self._l2_last_write_ts = now
+                        self._l2_last_error = ""
                 changes.clear()
                 snapshots.clear()
                 last_flush = now
+                self._persist_l2_writer_health(status="running")
             except Exception as exc:
+                self._l2_last_error = str(exc)[:300]
+                self._persist_l2_writer_health(force=True, status="error")
                 logger.warning("L2 async write failed: %s", exc)
                 with self._l2_db_lock:
                     if self._l2_db is not None:

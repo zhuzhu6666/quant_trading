@@ -56,6 +56,22 @@ def _create_db(path):
             review_note TEXT DEFAULT '',
             created_at REAL NOT NULL DEFAULT 0.0
         );
+        CREATE TABLE supervisor_counterfactual_review (
+            counterfactual_id TEXT PRIMARY KEY,
+            review_id TEXT DEFAULT '',
+            trade_id TEXT DEFAULT '',
+            position_id TEXT NOT NULL,
+            close_ts REAL NOT NULL DEFAULT 0.0,
+            close_reason TEXT DEFAULT '',
+            supervisor_event_type TEXT DEFAULT '',
+            supervisor_reason TEXT DEFAULT '',
+            label TEXT DEFAULT '',
+            confidence REAL DEFAULT 0.0,
+            horizons_json TEXT DEFAULT '[]',
+            evidence_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0,
+            updated_at REAL NOT NULL DEFAULT 0.0
+        );
         """
     )
     # 2026-06-26 10:00 Asia/Shanghai.
@@ -96,6 +112,18 @@ def _create_db(path):
         """,
         (created_at - 60, json.dumps({"sl": 2980.0, "tp": 3040.0})),
     )
+    conn.execute(
+        """
+        INSERT INTO supervisor_counterfactual_review
+        (counterfactual_id, review_id, trade_id, position_id, close_ts,
+         close_reason, supervisor_event_type, supervisor_reason, label,
+         confidence, horizons_json, evidence_json, created_at, updated_at)
+        VALUES ('cf_1', 'rev_1', '1001', '1001', ?, 'thesis_broken',
+                'supervisor_close', 'thesis_broken', 'protection_too_tight',
+                0.72, '[]', '{}', ?, ?)
+        """,
+        (created_at, created_at, created_at),
+    )
     conn.commit()
     conn.close()
 
@@ -127,6 +155,7 @@ def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp
     assert result["materialized"] is True
     actions = {item["action"] for item in result["items"]}
     assert "relax_thesis_break" in actions
+    assert result["replay_summary"]["counterfactual_summary"]["labels"]["protection_too_tight"] == 1
 
     conn = sqlite3.connect(str(db_path))
     try:

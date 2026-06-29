@@ -34,6 +34,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         "risk_boundary": {
             "approval_path": "built_in_default",
             "can_auto_deploy": True,
+            "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": False,
         },
     },
@@ -61,6 +62,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         "risk_boundary": {
             "approval_path": "offline_replay_then_human_review",
             "can_auto_deploy": False,
+            "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": True,
         },
     },

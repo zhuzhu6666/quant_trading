@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import EXPERIMENTS_DB
+from research.features.evidence_contract import stable_hash
 from research.model_shadow_queue import ModelShadowQueue
 from research.offline_trainer import _factor_features, _predict_score
 
@@ -161,6 +162,13 @@ class ModelInferenceContract:
             "candidate_id": candidate_id,
             "model_type": candidate.get("model_type"),
             "mode": mode,
+            "traceability": {
+                "sample_id": str((sample or {}).get("sample_id") or ""),
+                "artifact_path": str(artifact_path),
+                "artifact_sha256": stable_hash(artifact),
+                "features_sha256": stable_hash(features),
+                "input_evidence_contract": (sample or {}).get("evidence_contract") or {},
+            },
             "score": round(score, 8),
             "prediction": prediction,
             "prediction_label": "positive_outcome_hint" if prediction == 1 else "negative_outcome_hint",

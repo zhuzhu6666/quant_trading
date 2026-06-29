@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import DATA_DIR
+from research.features.evidence_contract import EVIDENCE_CONTRACT_VERSION
 from research.features.feature_provider import (
     DECISION_SCHEMA_VERSION,
     SCHEMA_VERSION,
@@ -58,6 +59,39 @@ def _quality_summary(items: list[dict]) -> dict[str, Any]:
         "needs_attention": len(items) - len(ready),
         "ready_ratio": round(len(ready) / max(len(items), 1), 6),
         "missing": missing,
+    }
+
+
+def _evidence_summary(items: list[dict]) -> dict[str, Any]:
+    integrity: dict[str, int] = {}
+    causal: dict[str, int] = {}
+    uses: dict[str, int] = {}
+    blockers: dict[str, int] = {}
+    weights: list[float] = []
+    for item in items:
+        contract = item.get("evidence_contract") or {}
+        integrity_key = str(contract.get("integrity") or "missing")
+        causal_key = str(contract.get("causal_level") or "observational")
+        integrity[integrity_key] = integrity.get(integrity_key, 0) + 1
+        causal[causal_key] = causal.get(causal_key, 0) + 1
+        for use in contract.get("allowed_uses") or []:
+            key = str(use)
+            uses[key] = uses.get(key, 0) + 1
+        for blocker in contract.get("blockers") or []:
+            key = str(blocker)
+            blockers[key] = blockers.get(key, 0) + 1
+        try:
+            weights.append(float(contract.get("train_weight") or 0.0))
+        except Exception:
+            weights.append(0.0)
+    return {
+        "contract_version": EVIDENCE_CONTRACT_VERSION,
+        "count": len(items),
+        "integrity": dict(sorted(integrity.items())),
+        "causal_level": dict(sorted(causal.items())),
+        "allowed_uses": dict(sorted(uses.items())),
+        "blockers": dict(sorted(blockers.items())),
+        "avg_train_weight": round(sum(weights) / max(len(weights), 1), 6),
     }
 
 
@@ -188,17 +222,18 @@ class LearningDatasetBuilder:
             "schemas": {
                 "trade": SCHEMA_VERSION,
                 "decision": DECISION_SCHEMA_VERSION,
+                "evidence_contract": EVIDENCE_CONTRACT_VERSION,
             },
             "contracts": {
                 "trade": {
                     "target": ["outcome_label", "reward_score", "pnl", "failure_tags", "recommended_action"],
-                    "features": ["decision", "factor_outcomes", "attribution_alignment", "execution_trace", "application_context", "llm_context"],
-                    "quality_gate": "model_ready requires verifiable pnl, full context, entry decision, factor snapshot, factor contribution review, outcome label, and experience memory",
+                    "features": ["evidence_contract", "decision", "factor_outcomes", "attribution_alignment", "execution_trace", "application_context", "llm_context"],
+                    "quality_gate": "model_ready requires verifiable pnl, context, entry decision, factor snapshot, factor contribution review, outcome label, experience memory, and evidence_contract supervised_training eligibility",
                 },
                 "decision": {
                     "target": ["event_type", "executed", "skipped", "gate_passed", "gate_reason", "skip_stage", "direction", "action_score"],
-                    "features": ["decision.factor_evidence", "decision.factor_tags", "execution_trace", "llm_context", "explainability.top_factors"],
-                    "quality_gate": "model_ready requires factor snapshot, action payload, action reason, symbol, and timeframe",
+                    "features": ["evidence_contract", "decision.factor_evidence", "decision.factor_tags", "execution_trace", "llm_context", "explainability.top_factors"],
+                    "quality_gate": "model_ready requires factor snapshot, action payload, action reason, symbol, timeframe, and evidence_contract supervised_training eligibility",
                 },
             },
             "filters": {
@@ -224,6 +259,10 @@ class LearningDatasetBuilder:
             "quality": {
                 "trade": _quality_summary(trade_samples),
                 "decision": _quality_summary(decision_samples),
+            },
+            "evidence": {
+                "trade": _evidence_summary(trade_samples),
+                "decision": _evidence_summary(decision_samples),
             },
             "readiness": readiness,
         }

@@ -31,6 +31,20 @@ from backend.services.supervisor_counterfactual import (
     evaluate_counterfactuals,
     list_counterfactuals,
 )
+from backend.services.autonomous_learning import (
+    backfill_position_supervisor_traces,
+    list_autonomous_learning_samples,
+    mature_position_supervisor_traces,
+    run_autonomous_learning_cycle,
+)
+from backend.services.evolution_ledger import (
+    get_evolution_run,
+    list_evolution_runs,
+    persist_runtime_config_snapshot,
+    record_evolution_decision,
+    start_evolution_run,
+    finish_evolution_run,
+)
 from backend.services.model_permissions import (
     list_model_permission_audits,
     validate_model_artifact,
@@ -1471,6 +1485,23 @@ class SupervisorCounterfactualRunRequest(BaseModel):
     materialize: bool = True
 
 
+class AutonomousLearningRunRequest(BaseModel):
+    db_path: str | None = None
+    sample_limit: int = 500
+    recommendation_limit: int = 20
+    submit_offline_deep: bool = True
+
+
+class PositionSupervisorTraceMaterializeRequest(BaseModel):
+    db_path: str | None = None
+    limit: int = 500
+
+
+class PositionSupervisorTemplateApplySwitchRequest(BaseModel):
+    suggestion_id: str
+    note: str = ""
+
+
 class ModelPermissionValidateRequest(BaseModel):
     artifact_path: str | None = None
     artifact: dict[str, Any] | None = None
@@ -2053,6 +2084,187 @@ def materialize_position_supervisor_advisories(
     return payload
 
 
+@router.post("/position-supervisor/templates/apply-switch")
+def apply_position_supervisor_template_switch(
+    _user: RequireUser,
+    req: PositionSupervisorTemplateApplySwitchRequest,
+) -> dict:
+    suggestion_id = str(req.suggestion_id or "").strip()
+    if not suggestion_id:
+        raise HTTPException(status_code=400, detail="suggestion_id_required")
+    evo_run = start_evolution_run(
+        run_type="position_supervisor_template_switch",
+        trigger_source="learning_api",
+        db_path=STATE_DB,
+        summary={"suggestion_id": suggestion_id, "note": req.note},
+    )
+    conn = connect_sqlite(STATE_DB)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM policy_suggestion
+            WHERE suggestion_id=?
+            LIMIT 1
+            """,
+            (suggestion_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="suggestion_not_found")
+        scope_type = str(row["scope_type"] or "")
+        scope_key = str(row["scope_key"] or "")
+        status = str(row["status"] or "")
+        if scope_type != "position_supervisor_template":
+            raise HTTPException(status_code=400, detail="not_position_supervisor_template_suggestion")
+        evidence = json.loads(row["evidence_json"] or "{}")
+        valid_templates = {str(item.get("template_id") or "") for item in list_position_supervisor_templates()}
+        if scope_key not in valid_templates:
+            raise HTTPException(status_code=400, detail="invalid_position_supervisor_template")
+        try:
+            from config.runtime_config import patch as patch_runtime_config
+            from config.runtime_config import shared as runtime_config
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"runtime_config_unavailable: {exc}")
+        previous_template_id = str(getattr(runtime_config(), "position_supervisor_template_id", "") or "position_supervisor:default.v1")
+        verdict = RiskPolicyService.shared().evaluate(
+            "switch_position_supervisor_template",
+            {
+                "suggestion_id": suggestion_id,
+                "suggestion_status": status,
+                "target_template_id": scope_key,
+                "previous_template_id": previous_template_id,
+                "evidence": evidence,
+            },
+        ).to_dict()
+        if not verdict.get("allowed", False):
+            payload = {
+                "blocked": True,
+                "suggestion_id": suggestion_id,
+                "target_template_id": scope_key,
+                "previous_template_id": previous_template_id,
+                "risk_verdict": verdict,
+            }
+            record_evolution_decision(
+                run_id=str(evo_run.get("run_id") or ""),
+                decision_type="apply_switch",
+                scope_type="position_supervisor_template",
+                scope_key=scope_key,
+                action="switch_position_supervisor_template",
+                status="blocked",
+                evidence=evidence,
+                risk_verdict=verdict,
+                before={"template_id": previous_template_id},
+                after={"template_id": scope_key},
+                result=payload,
+                db_path=STATE_DB,
+            )
+            finish_evolution_run(str(evo_run.get("run_id") or ""), status="blocked", summary=payload, db_path=STATE_DB)
+            return payload
+        patch_runtime_config({"position_supervisor_template_id": scope_key})
+        snapshot = persist_runtime_config_snapshot(
+            runtime_config(),
+            source="learning_api.position_supervisor_template_switch",
+            db_path=STATE_DB,
+            run_id=str(evo_run.get("run_id") or ""),
+        )
+        now_ts = time.time()
+        application_id = f"psv_apply_{int(now_ts)}_{suggestion_id[-8:]}"
+        details = {
+            "schema_version": "position_supervisor_template_switch.v1",
+            "suggestion_id": suggestion_id,
+            "previous_template_id": previous_template_id,
+            "target_template_id": scope_key,
+            "note": req.note,
+            "risk_verdict": verdict,
+            "evidence": evidence,
+            "config_version": int(snapshot.get("config_version") or 0),
+            "config_hash": str(snapshot.get("config_hash") or ""),
+        }
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO learning_application_log
+            (application_id, cycle_ts, scope_type, scope_key, action,
+             bias_multiplier, old_weight, new_weight, suggestion_ids_json,
+             status, details_json, created_at)
+            VALUES (?, ?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
+                    1.0, 0.0, 0.0, ?, 'applied', ?, ?)
+            """,
+            (
+                application_id,
+                now_ts,
+                scope_key,
+                json.dumps([suggestion_id], ensure_ascii=False),
+                json.dumps(details, ensure_ascii=False, default=str),
+                now_ts,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO learning_application_effect
+            (application_id, scope_type, scope_key, action, status,
+             decision_json, updated_at, created_at)
+            VALUES (?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
+                    'observing', ?, ?, COALESCE(
+                        (SELECT created_at FROM learning_application_effect WHERE application_id=?),
+                        ?
+                    ))
+            """,
+            (
+                application_id,
+                scope_key,
+                json.dumps(details, ensure_ascii=False, default=str),
+                now_ts,
+                application_id,
+                now_ts,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE policy_suggestion
+            SET status='applied', reviewed_at=CASE WHEN reviewed_at > 0 THEN reviewed_at ELSE ? END,
+                review_note=?
+            WHERE suggestion_id=?
+            """,
+            (now_ts, req.note or "applied position supervisor template switch", suggestion_id),
+        )
+        conn.commit()
+        _learning_cache_invalidate("position_supervisor_advisories:", "suggestions:", "summary", "applications:")
+        payload = {
+            "blocked": False,
+            "suggestion_id": suggestion_id,
+            "application_id": application_id,
+            "previous_template_id": previous_template_id,
+            "target_template_id": scope_key,
+            "risk_verdict": verdict,
+        }
+        record_evolution_decision(
+            run_id=str(evo_run.get("run_id") or ""),
+            decision_type="apply_switch",
+            scope_type="position_supervisor_template",
+            scope_key=scope_key,
+            action="switch_position_supervisor_template",
+            status="applied",
+            evidence=evidence,
+            risk_verdict=verdict,
+            before={"template_id": previous_template_id},
+            after={"template_id": scope_key},
+            result={"suggestion_id": suggestion_id, "application_id": application_id},
+            rollback={"previous_template_id": previous_template_id},
+            config_version=int(snapshot.get("config_version") or 0),
+            config_hash=str(snapshot.get("config_hash") or ""),
+            db_path=STATE_DB,
+        )
+        finish_evolution_run(str(evo_run.get("run_id") or ""), status="completed", summary=payload, db_path=STATE_DB)
+        return payload
+    except HTTPException:
+        raise
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid_suggestion_evidence_json")
+    finally:
+        conn.close()
+
+
 @router.post("/position-supervisor/counterfactual/run")
 def run_position_supervisor_counterfactual(
     _user: RequireUser,
@@ -2082,6 +2294,90 @@ def get_position_supervisor_counterfactual(
         limit=limit,
         position_id=position_id,
         label=label,
+    )
+
+
+@router.post("/position-supervisor/traces/backfill")
+def backfill_position_supervisor_trace_api(
+    _user: RequireUser,
+    req: PositionSupervisorTraceMaterializeRequest,
+) -> dict:
+    payload = backfill_position_supervisor_traces(
+        db_path=req.db_path or STATE_DB,
+        limit=max(1, int(req.limit)),
+    )
+    _learning_cache_invalidate("autonomous:samples", "evolution:")
+    return payload
+
+
+@router.post("/position-supervisor/traces/materialize-labels")
+def materialize_position_supervisor_trace_labels_api(
+    _user: RequireUser,
+    req: PositionSupervisorTraceMaterializeRequest,
+) -> dict:
+    payload = mature_position_supervisor_traces(
+        db_path=req.db_path or STATE_DB,
+        limit=max(1, int(req.limit)),
+    )
+    _learning_cache_invalidate("autonomous:samples", "evolution:")
+    return payload
+
+
+@router.get("/evolution/runs")
+def get_learning_evolution_runs(
+    _user: RequireUser,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    cache_key = f"evolution:runs:{int(limit)}"
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    return _learning_cache_set(cache_key, list_evolution_runs(db_path=STATE_DB, limit=limit))
+
+
+@router.get("/evolution/runs/{run_id}")
+def get_learning_evolution_run(_user: RequireUser, run_id: str) -> dict:
+    payload = get_evolution_run(run_id, db_path=STATE_DB)
+    if not payload:
+        raise HTTPException(status_code=404, detail="evolution_run_not_found")
+    return payload
+
+
+@router.post("/autonomous/run")
+def run_learning_autonomous_cycle(_user: RequireUser, req: AutonomousLearningRunRequest) -> dict:
+    payload = run_autonomous_learning_cycle(
+        db_path=req.db_path or STATE_DB,
+        sample_limit=max(1, int(req.sample_limit)),
+        recommendation_limit=max(1, int(req.recommendation_limit)),
+        submit_offline_deep=bool(req.submit_offline_deep),
+    )
+    _learning_cache_invalidate(
+        "summary",
+        "recommendations:",
+        "suggestions:",
+        "applications:",
+        "reviews:",
+        "lifecycle:",
+        "offline_candidates:",
+    )
+    return payload
+
+
+@router.get("/autonomous/samples")
+def get_learning_autonomous_samples(
+    _user: RequireUser,
+    limit: int = Query(default=100, ge=1, le=1000),
+    sample_type: str | None = Query(default=None),
+    label_status: str | None = Query(default=None),
+    position_id: str | None = Query(default=None),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    return list_autonomous_learning_samples(
+        db_path=db_path or STATE_DB,
+        limit=limit,
+        sample_type=sample_type,
+        label_status=label_status,
+        position_id=position_id,
     )
 
 

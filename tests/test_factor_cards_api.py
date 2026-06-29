@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -1897,3 +1898,55 @@ def test_offline_candidates_endpoint_includes_trace_locator(tmp_path, monkeypatc
     assert result["items"]
     assert result["items"][0]["trace_locator"]["review_id"] == "rev_1"
     assert result["items"][0]["trace_locator"]["position_id"] == "p1"
+
+
+def test_apply_position_supervisor_template_switch_requires_approved_suggestion(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, created_at)
+            VALUES (?, 'position_supervisor_template', ?, 'relax_thesis_break',
+                    0.8, 'test approved switch', ?, 'approved', ?)
+            """,
+            (
+                "psv_test_apply",
+                "position_supervisor:conservative.v1",
+                json.dumps({"replay_summary": {"sample_count": 3}}, ensure_ascii=False),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(learning_api, "STATE_DB", db_path)
+    rc.reset_for_tests()
+    try:
+        result = learning_api.apply_position_supervisor_template_switch(
+            None,
+            learning_api.PositionSupervisorTemplateApplySwitchRequest(
+                suggestion_id="psv_test_apply",
+                note="pytest apply",
+            ),
+        )
+        assert result["blocked"] is False
+        assert result["previous_template_id"] == "position_supervisor:default.v1"
+        assert result["target_template_id"] == "position_supervisor:conservative.v1"
+        assert rc.shared().position_supervisor_template_id == "position_supervisor:conservative.v1"
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            suggestion = conn.execute("SELECT status FROM policy_suggestion WHERE suggestion_id='psv_test_apply'").fetchone()
+            application = conn.execute("SELECT * FROM learning_application_log").fetchone()
+        finally:
+            conn.close()
+        assert suggestion["status"] == "applied"
+        assert application["scope_type"] == "position_supervisor_template"
+    finally:
+        rc.reset_for_tests()

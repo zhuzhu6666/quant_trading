@@ -104,6 +104,9 @@ class PolicySuggester:
                 return None
 
             payload = {
+                "source_table": experience.get("source_table", ""),
+                "source_id": experience.get("source_id", ""),
+                "append_source": experience.get("append_source", ""),
                 "sample_count": sample_count,
                 "win_count": win_count,
                 "bad_loss_count": bad_loss_count,

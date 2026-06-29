@@ -144,7 +144,13 @@ def find_close_deal(
         close_detail dict 或 None (找不到 / 只有开仓腿).
     """
     row = conn.execute(
-        "SELECT * FROM ctrader_deals WHERE position_id=? AND gross_profit!=0 ORDER BY exec_timestamp DESC LIMIT 1",
+        """
+        SELECT *
+        FROM ctrader_deals
+        WHERE position_id=? AND (is_close=1 OR closed_volume > 0)
+        ORDER BY exec_timestamp DESC, deal_id DESC
+        LIMIT 1
+        """,
         (position_id,),
     ).fetchone()
     if row is None:
@@ -276,6 +282,9 @@ def _cd_to_real_pnl(cd: dict) -> dict:
         "net": gross + swap - commission,
         "entry_price": cd.get("entry_price", 0.0),
         "exec_price": cd.get("exec_price", 0.0),
+        "exec_timestamp": cd.get("exec_timestamp", 0.0),
         "balance": cd.get("balance", 0.0),
+        "closed_volume": cd.get("closed_volume", 0),
         "deal_id": cd.get("deal_id", 0),
+        "source": "ctrader_deals",
     }

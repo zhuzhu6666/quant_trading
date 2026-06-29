@@ -133,6 +133,62 @@ class TradeAttribution:
     tags_breakdown: dict[str, float]
     total_signal_abs: float           # Σ|signal_j| 用于 MC 计算
     api_volume: float = 1.0           # cTrader API volume (filled)
+    attribution_integrity: str = "full"
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return {
+            "position_id": int(self.position_id),
+            "open_ts": float(self.open_ts),
+            "open_price": float(self.open_price),
+            "direction": int(self.direction),
+            "factor_signals": dict(self.factor_signals or {}),
+            "factor_values": dict(self.factor_values or {}),
+            "active_weights": dict(self.active_weights or {}),
+            "composite_score": float(self.composite_score),
+            "tactical_score": float(self.tactical_score),
+            "macro_score": float(self.macro_score),
+            "tags_breakdown": dict(self.tags_breakdown or {}),
+            "total_signal_abs": float(self.total_signal_abs),
+            "api_volume": float(self.api_volume),
+            "attribution_integrity": str(self.attribution_integrity or "full"),
+        }
+
+    @classmethod
+    def from_jsonable(cls, payload: dict[str, Any] | None) -> "TradeAttribution | None":
+        if not isinstance(payload, dict):
+            return None
+        try:
+            position_id = int(payload.get("position_id") or 0)
+            open_price = float(payload.get("open_price") or 0.0)
+            direction = int(payload.get("direction") or 0)
+            factor_signals = {
+                str(k): float(v)
+                for k, v in dict(payload.get("factor_signals") or {}).items()
+                if v is not None
+            }
+            if position_id <= 0 or open_price <= 0 or direction == 0 or not factor_signals:
+                return None
+            total_signal_abs = float(payload.get("total_signal_abs") or 0.0)
+            if total_signal_abs <= 0:
+                total_signal_abs = sum(abs(v) for v in factor_signals.values())
+            return cls(
+                position_id=position_id,
+                open_ts=float(payload.get("open_ts") or 0.0),
+                open_price=open_price,
+                direction=direction,
+                factor_signals=factor_signals,
+                factor_values=dict(payload.get("factor_values") or {}),
+                active_weights=dict(payload.get("active_weights") or {}),
+                composite_score=float(payload.get("composite_score") or 0.0),
+                tactical_score=float(payload.get("tactical_score") or 0.0),
+                macro_score=float(payload.get("macro_score") or 0.0),
+                tags_breakdown=dict(payload.get("tags_breakdown") or {}),
+                total_signal_abs=total_signal_abs,
+                api_volume=float(payload.get("api_volume") or 1.0),
+                attribution_integrity=str(payload.get("attribution_integrity") or "recovered"),
+            )
+        except Exception:
+            return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -390,6 +446,7 @@ class AttributionEngine:
 
     def record_open(self, position_id: int, attribution: TradeAttribution):
         """开仓时记录归因数据。"""
+        attribution.attribution_integrity = attribution.attribution_integrity or "full"
         self._open_trades[position_id] = attribution
         # 写入 trades.duckdb
         try:
@@ -420,6 +477,27 @@ class AttributionEngine:
             _tdb.close()
         except Exception as e:
             logger.warning("Failed to record open trade to DB: %s", e)
+
+    def restore_open(self, position_id: int, payload: dict[str, Any] | TradeAttribution | None) -> bool:
+        """Restore in-memory attribution context without writing a new open execution."""
+        if position_id in self._open_trades:
+            return False
+        attrib = payload if isinstance(payload, TradeAttribution) else TradeAttribution.from_jsonable(payload)
+        if attrib is None:
+            return False
+        attrib.position_id = int(position_id or attrib.position_id)
+        attrib.attribution_integrity = "recovered"
+        self._open_trades[int(position_id)] = attrib
+        return True
+
+    def has_open(self, position_id: int) -> bool:
+        return int(position_id) in self._open_trades
+
+    def open_integrity(self, position_id: int) -> str:
+        attrib = self._open_trades.get(int(position_id))
+        if attrib is None:
+            return "missing"
+        return str(getattr(attrib, "attribution_integrity", "") or "full")
 
     # ── 平仓 ────────────────────────────────────────────
 

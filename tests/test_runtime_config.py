@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from backend.runtime.runtime_state import RuntimeState
+from backend.services.evolution_ledger import persist_runtime_config_snapshot
 from config import runtime_config as rc
 
 
@@ -81,3 +82,14 @@ def test_unknown_keys_go_to_extra() -> None:
     cfg = rc.RuntimeConfig.from_dict({"shadow_vote_weight": 0.3, "made_up_field": 999})
     assert cfg.shadow_vote_weight == 0.3
     assert cfg.extra.get("made_up_field") == 999
+
+
+def test_runtime_config_snapshot_hash_stable_and_version_increments(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    cfg = rc.RuntimeConfig(shadow_vote_weight=0.33)
+
+    first = persist_runtime_config_snapshot(cfg, source="test", db_path=db_path)
+    second = persist_runtime_config_snapshot(cfg, source="test", db_path=db_path)
+
+    assert first["config_hash"] == second["config_hash"]
+    assert second["config_version"] == first["config_version"] + 1

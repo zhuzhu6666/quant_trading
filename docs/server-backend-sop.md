@@ -1,6 +1,6 @@
 # Server Backend SOP
 
-> Last updated: 2026-06-26
+> Last updated: 2026-06-30
 > Scope: Linux server backend daily operations.
 
 这份文档只服务一个目标：
@@ -130,6 +130,44 @@ cd /home/ubuntu/quant_trading
 - 自动修复已知历史 schema 漂移
 
 如果 `db_doctor` 不通过，优先修数据库契约，再看策略逻辑。
+
+### Phase H 自主进化链路检查
+
+如果怀疑自治学习、supervisor 学习、自动审批/应用/回滚异常，优先查统一进化账本：
+
+```bash
+python - <<'PY'
+import sqlite3, time
+conn = sqlite3.connect('file:data/state.db?mode=ro', uri=True)
+conn.row_factory = sqlite3.Row
+for table in ('evolution_run', 'evolution_decision', 'runtime_config_snapshot'):
+    print(f'[{table}]')
+    for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT 5"):
+        print(dict(row))
+conn.close()
+PY
+```
+
+常用 API：
+
+- `GET /api/learning/evolution/runs`
+- `GET /api/learning/evolution/runs/{run_id}`
+- `POST /api/learning/position-supervisor/traces/backfill`
+- `POST /api/learning/position-supervisor/traces/materialize-labels`
+
+常用验证：
+
+```bash
+python scripts/phase_a_health_check.py
+python scripts/phase_c_supervisor_check.py --db data/state.db --limit 30
+```
+
+判断原则：
+
+- `evolution_run` 应能看到样本物化、trace 回填、trace 成熟化、demo 自动治理周期；
+- `evolution_decision` 应能看到自动审批、apply switch、rollback 或样本成熟记录；
+- `runtime_config_snapshot` 应能看到 startup、parameter template sync、supervisor template switch 等配置版本；
+- pending 样本不能直接进入强监督训练，先查 `evidence_contract_json.allowed_uses`。
 
 ## 6. 改代码前检查
 

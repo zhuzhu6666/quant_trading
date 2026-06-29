@@ -54,7 +54,7 @@
 - ✅ Phase E.5：持仓监督参数治理与退出质量校准（2026-06-26 真实小仓位样本驱动）
 - ✅ Phase F：数学模型与大语言模型分层接入（后端旁路、权限、审计已完成）
 - ✅ Phase G：元模型旁路（后端 contract、shadow report、治理建议、前端交接入口已完成）
-- 下一步：微信开发者工具上传/实机复测，继续观察参数模板灰度发布、回滚与模型报告趋势
+- 当前切入：Phase H：自治数据工厂与分级自动治理（统一进化账本与 supervisor 学习地基已完成第一版，进入观察和二层自治）
 
 ### 当前系统一句话状态
 
@@ -72,7 +72,7 @@
 
 系统现在仍然缺：
 
-- Phase H 的受限自动治理执行能力（当前故意不开自动执行）
+- Phase H 的二层自治能力：模型/shadow 新鲜度、回滚阈值、配置单一事实源和更长期真实效果观察仍需继续补强
 - 多品种、多风险池、组合级调度
 - 本地小程序已完成新后端 contract 展示接入，仍需继续观察真实样本下的灰度发布 / 回滚动作
 - 更多真实样本下的参数模板灰度发布 / 回滚观察
@@ -94,16 +94,16 @@
 
 ### 当前唯一进行中主线
 
-`本地前端对接已完成：当前进入微信上传、实机复测与真实样本观察`
+`Phase H：自治数据工厂与分级自动治理（第一版地基已落地，继续观察和补二层自治）`
 
 ### 下一步入口
 
-服务器后端已完成 Phase F/G 收口，本地 Windows 已完成 **miniprogram_v2 前端对接**。下一步默认仍在本地观察小程序上传、实机显示与治理动作反馈：
+服务器后端已完成 Phase H 第一版地基：自治样本、supervisor trace、反事实成熟化、统一进化账本、运行配置快照和 demo 自动治理门禁已经落地。下一步默认继续服务器后端观察和补强：
 
-- 小程序上传：确认 `sitemap.json / miniprogramRoot` 配置稳定
-- 模型报告：继续观察 `GET /api/learning/model/meta-lightgbm/shadow-report`
-- 报告趋势：继续观察 `GET /api/learning/model/meta-lightgbm/shadow-report/snapshots`
-- 参数治理：继续观察候选审批、灰度发布、回滚动作的人话反馈
+- 观察 H1/H2/H3/H6：确认真实样本、trace 成熟化、自动审批/应用/回滚是否稳定推进
+- 补二层自治：shadow/model freshness watchdog、回滚阈值策略、配置单一事实源查询面
+- 暂不做 H4：模型 live 权限、核心风控阈值、大幅改变开平仓行为继续人工审批
+- 小程序上传、实机显示、灰度发布反馈继续作为观察项，不打断 Phase H 主线
 
 ---
 
@@ -118,7 +118,7 @@
 5. Phase F：数学模型与大语言模型分层接入
 6. Phase G：元模型旁路
 7. 本地前端对接：后端 readiness / 模型 / 治理展示
-8. Phase H：受限自动治理
+8. Phase H：自治数据工厂与分级自动治理
 9. Phase I：多品种完全体
 
 说明：
@@ -144,6 +144,7 @@
 - 决策账本、平仓复盘、经验沉淀、规则建议、治理审批主链路打通
 - 手动 broker close 已验证能进入复盘与经验链
 - learning backfill 与重启恢复主链路打通
+- 归因恢复主链路已打通：开仓归因上下文进入 `recovery_position_state`，重启后可恢复到 `AttributionEngine`
 - `holding_seconds / holding_minutes` 已开始沉淀
 
 主要验证：
@@ -228,12 +229,12 @@
 验证结果：
 
 - contract 已对齐现有 `RiskPolicyService.evaluate(action, context)`、`decision_ledger`、`position_lifecycle_event`、`/api/risk/trade-trace` 的现有接口形态
-- 已明确 C4 之前 `tighten / reduce` 仅能先作为 advisory verdict 存证，`close` 可优先复用现有 `close_position`
+- C1 时曾明确 `tighten / reduce` 在 C4 前只能 advisory；当前 C4 已完成，`tighten_position / reduce_position / close_position` 均已进入 `RiskPolicyService`
 
-新发现的缺口 / 后续子任务：
+后续观察项：
 
-- C4 需要为 `tighten_position` / `reduce_position` 增加正式 risk action
-- C5 需要让 `trade-trace` 显式展示 supervisor verdict，而不是只依赖 review 或 action_json 旁带
+- 继续补真实 `tighten / reduce / timeout` 样本
+- 继续观察 `trade-trace` 与 review 中的 close source 是否长期一致
 
 ### C2：补齐持仓路径核心字段
 
@@ -1463,11 +1464,41 @@
 
 - 已新增 `/api/learning/position-supervisor/advisories`
 - 已新增 `/api/learning/position-supervisor/advisories/materialize`
+- 已新增 `/api/learning/position-supervisor/templates/apply-switch`
 - 已生成并写入 `policy_suggestion` 的 proposed 建议：
   - `relax_thesis_break`
   - `tighten_profit_protection`
   - `increase_min_hold_window`
-- 建议为 `advisory_only=true`，进入治理/人审，不直接切换 live 风控模板
+- 建议为 `advisory_only=true`，进入治理/人审
+- 只有 `approved` 的 `position_supervisor_template` 建议可以经 `RiskPolicyService.evaluate("switch_position_supervisor_template", ...)` 切换 live 模板
+- 切换会写入 `RuntimeConfig.position_supervisor_template_id`、`learning_application_log`、`learning_application_effect`
+
+### E5.6：归因恢复与 close source 入 review
+
+状态：`已完成，实盘观察中`
+
+目标：
+
+- 修复服务重启后 `AttributionEngine` 只在内存保存 open context，导致平仓归因 `factors=0` 的问题
+- 把“谁平的”从 trace 推断推进到 review / learning 样本
+
+落地记录：
+
+- `TradeAttribution` 新增可序列化恢复字段
+- `AttributionEngine.restore_open()` 可以只恢复内存，不重复写 open execution
+- `live_service` 开仓时写入 `recovery_meta.trade_attribution`
+- live tick 会对当前 open positions 尝试恢复 attribution context
+- 平仓 review 新增：
+  - `attribution_integrity`
+  - `close_reason_source`
+  - `inferred_close_supervisor`
+- `attribution_integrity=missing` 的样本只作为退出质量 / supervisor 学习证据，不直接触发强因子降权
+
+验证：
+
+- `tests/alpha/test_attribution_engine.py`
+- `tests/test_live_service_lifecycle.py`
+- `tests/research/test_rule_learning_pipeline.py` 兼容旧学习链
 
 ---
 
@@ -1665,7 +1696,7 @@
 
 ### F2.1：Supervisor 打掉后反事实学习样本
 
-状态：`已完成，旁路审计运行`
+状态：`已完成，已接入后台自动物化`
 
 目标：
 
@@ -1683,6 +1714,7 @@
 
 - 新增表：`supervisor_counterfactual_review`
 - 新增服务：`backend.services.supervisor_counterfactual`
+- 新增调度：`backend.services.supervisor_learning_scheduler`
 - 新增 API：
   - `POST /api/learning/position-supervisor/counterfactual/run`
   - `GET /api/learning/position-supervisor/counterfactual`
@@ -1693,6 +1725,14 @@
   - 平仓后各 horizon 的 best/worst/end PnL
   - 反事实标签与置信度
 - 该链路只写审计和学习标签，不直接改变实盘动作
+- 后台调度会周期性调用 `evaluate_counterfactuals(materialize=True)`
+- 每次物化后会触发 supervisor advisory 聚合，写入 `policy_suggestion(scope_type=position_supervisor_template)`
+
+验证：
+
+- `quant-backend.service` 启动日志应出现 `supervisor learning scheduled`
+- `tests/test_supervisor_counterfactual.py`
+- `tests/test_position_supervisor_governance.py`
 
 ### F2.2：TP/SL 近线裁决显式化
 
@@ -2223,26 +2263,409 @@ v2 增强记录：
 
 ---
 
-## 9. Phase H：受限自动治理
+## 9. Phase H：Demo 全自治实验权限
 
-状态：`未开始`
-优先级：`P2`
+状态：`进行中`
+优先级：`P0`
 
-目标：让系统自动应用低风险调整，但绝不越过硬风控。
+目标：当前使用 demo 账户，不再让用户承担看不懂的人工审批；系统在完整审计、硬风控、回滚点和实验编号约束下自动试错、自动审批、自动应用、自动回滚观察。
 
-允许自动化：
+阶段原则：
 
-- 降低风险预算
-- 降低交易频率
-- 切换到保守参数模板
-- 暂停某些弱势因子
+- **数据层完全自治**：所有开仓、拒绝、持仓监督、平仓、归因、反事实、shadow 判断、治理建议都应自动落库。
+- **学习层完全自治**：review / experience / counterfactual / replay / shadow report / policy suggestion 自动生成，不能依赖小程序按钮。
+- **demo 执行层自治**：在 `autonomy_mode=demo_autonomous` 下，系统可自动批准并应用可回滚的治理动作。
+- **RiskPolicyService 仍是唯一 live 治理裁决层**：任何自动应用都必须先调用风控 action，禁止绕过。
+- **硬限制不可关闭**：不能无限开仓、不能无限加仓、不能关闭熔断、不能绕过报价/断连/数据质量检查、不能关闭日志。
+- **用户看实验报告，不看审批按钮**：小程序审批入口只保留为人工覆盖和追责，不再是主路径。
 
-禁止自动化：
+### H0：当前非规则驱动项审计
+
+状态：`已完成`
+完成日期：`2026-06-29`
+
+审计结论：
+
+- 交易运行态：`position_supervisor -> RiskPolicyService -> cTrader` 基本已规则驱动。
+- 学习证据：`learning_backfill` 与 `supervisor_learning_scheduler` 已后台自动补跑。
+- 规则治理：`evolution_hourly -> RuleEvolutionGovernor.review_pending()` 已在运行，但当前 3 条因子建议因证据未过阈值停留在 `proposed`。
+- 仍需人工或手动触发的项：
+  - `policy_suggestion` 的手动 approve/reject 入口仍存在；
+  - 参数模板 recommendation materialize 仍需点击；
+  - 参数模板 offline candidate review/release/rollback 仍是人工闸门；
+  - supervisor template 即使生成建议，也必须 approved 后才允许 apply；
+  - 模型 pipeline / canary / LLM advisory 保持手动或旁路，不接 live。
+
+当前真实状态样本：
+
+- `policy_suggestion`：3 条因子建议仍为 `proposed`
+- `parameter_template_release_candidate`：2 条 `pending_review`，1 条 `approved` 待发布
+- `supervisor_counterfactual_review`：当天已自动物化 37 条
+- `parameter_template_active / parameter_template_switch_log`：当前为空
+
+### H1：自治数据工厂
+
+状态：`已完成第一版，后台观察中`
+
+目标：不通过扩大 live 风险来制造数据，而是在每个真实 bar、每个持仓状态、每次拒绝/平仓后自动生成可学习样本。
+
+要完成：
+
+- 新增或扩展自动样本生成任务：
+  - shadow open decision sample：记录“如果此刻开仓/不开仓”的规则与模型判断
+  - shadow close decision sample：记录“如果此刻平仓/继续持有”的 supervisor 与反事实判断
+  - risk rejection sample：记录每次风控拒绝的上下文，形成“为什么不该交易”的负样本
+  - supervisor trajectory sample：每个活跃仓位按周期记录 supervisor verdict 轨迹
+  - supervisor execution trace：永久记录每次 supervisor 对仓位的处理、跳过、风控裁决和执行结果
+  - post-close counterfactual sample：平仓后自动补 `5m / 15m / 30m / 60m` 标签
+- 样本必须带：
+  - `position_id / trade_id / decision_id`
+  - `symbol / timeframe / regime / session_status`
+  - `rule_verdict / risk_verdict / supervisor_verdict`
+  - `features_snapshot`
+  - `label_status=pending|matured|invalid`
+  - `integrity=full|recovered|partial|missing`
+- 样本生成不能触发下单、平仓或改配置。
+
+完成标准：
+
+- 每个交易日即使真实成交很少，也能产生足够多的 shadow / rejection / trajectory 样本。
+- 所有样本可从 `trade-trace` 或等价 trace locator 回溯证据。
+- 数据质量差、报价 stale、市场关闭状态下的样本必须标记为不可训练或低权重，不混入强监督标签。
+
+落地记录（2026-06-29）：
+
+- 新增 `autonomous_learning_sample` 表
+- 新增服务：`backend.services.autonomous_learning`
+- 已自动派生样本类型：
+  - `shadow_open_decision`
+  - `risk_rejection`
+  - `supervisor_trajectory`
+  - `supervisor_execution_trace`
+  - `trade_review_outcome`
+  - `post_close_counterfactual`
+- 新增 `position_supervisor_trace` 表，永久记录每次 supervisor 处理：
+  - `hold / tighten / reduce / close`
+  - `cooldown_skipped / risk_rejected / execution_skipped / executed / execution_failed / exception`
+  - supervisor verdict、模板、风控 verdict、执行结果、上下文快照
+- `supervisor_execution_trace` 默认 `label_status=pending`，只作为轨迹证据；收益标签必须等待 review / counterfactual 成熟后再参与强训练。
+- 每条样本写入：
+  - `label_status`
+  - `integrity`
+  - `train_weight`
+  - `features_json / verdict_json / label_json / trace_json`
+- 真实库第一轮已生成/更新样本 `727` 条：
+  - `shadow_open_decision`: `44`
+  - `risk_rejection`: `28`
+  - `supervisor_trajectory`: `456`
+  - `trade_review_outcome`: `121`
+  - `post_close_counterfactual`: `78`
+- 每轮写入 `evolution_events(event_type=autonomous_learning_samples)` 审计
+
+### H2：学习与治理建议自动物化
+
+状态：`已完成第一版，后台观察中`
+
+目标：把“小程序上需要点一下才生成”的学习产物改成后台自动物化。
+
+要完成：
+
+- 给规则治理增加后台调度：
+  - 定时运行 `RuleEvolutionGovernor.review_pending()`
+  - 定时运行 `reconcile_active()`
+  - 定时运行 `reconcile_application_effects()`
+  - 复用或收口到现有 `evolution_hourly`，但要有明确审计事件和失败告警
+- 给参数模板 recommendation 增加自动 materialize：
+  - `online_light`：自动转成 `policy_suggestion`
+  - `offline_deep`：自动提交离线验证 job，但不得自动发布
+  - 重复 recommendation 要去重，避免反复生成候选
+- supervisor advisory 已有后台物化，继续补：
+  - 无建议时也写运行审计
+  - 证据不足时说明原因
+  - materialized suggestion 去重
+
+完成标准：
+
+- 小程序“生成治理建议 / 创建离线验证 / 自动治理”按钮变成手动兜底，不再是主路径。
+- 每次自动物化都有 `lifecycle_events / evolution_events / learning_application_log` 或等价审计记录。
+
+落地记录（2026-06-29）：
+
+- 新增后台调度：`schedule_autonomous_learning`
+  - 后端启动后延迟运行
+  - 周期运行自治学习 cycle
+  - shutdown 时调用 `stop_autonomous_learning`
+- cycle 当前包含：
+  - `materialize_autonomous_learning_samples`
+  - `RuleEvolutionGovernor.review_pending`
+  - `RuleEvolutionGovernor.reconcile_active`
+  - `RuleEvolutionGovernor.reconcile_application_effects`
+  - `materialize_parameter_template_recommendations`
+- 参数模板推荐自动物化规则：
+  - `online_light` 自动转 `policy_suggestion`
+  - `offline_deep` 只在 offmarket high-load 窗口自动提交离线验证 job
+  - 开盘或高负载不允许时写审计并跳过
+  - 按 `recommendation_id` 去重，避免重复 suggestion / candidate / job
+- 新增 API：
+  - `POST /api/learning/autonomous/run`
+  - `GET /api/learning/autonomous/samples`
+- 真实库第一轮 cycle：
+  - governance：`approved=0 / rejected=0 / unchanged=3`
+  - parameter recommendation：`suggested=0 / offline_jobs=0 / errors=0`
+  - 已写入 `evolution_events(event_type=autonomous_learning_cycle / parameter_template_auto_materialize)`
+
+验证：
+
+- `python -m pytest tests/test_autonomous_learning.py tests/test_factor_cards_api.py tests/test_supervisor_counterfactual.py tests/test_position_supervisor_governance.py tests/test_live_service_lifecycle.py tests/risk/test_policy_service.py -q`
+- `python -m py_compile backend/services/autonomous_learning.py backend/api/learning.py backend/app.py`
+
+### H3：Demo 自动审批与自动应用器
+
+状态：`已完成第一版，后台观察中`
+
+目标：在 demo 账户内把人工审核改为系统规则审核。系统自动批准、应用、记录实验编号和回滚点；用户只看实验报告。
+
+允许自动批准 / 自动应用：
+
+- 小幅降低弱势因子权重
+- 小幅提高稳定正贡献因子权重
+- 暂停或隔离 observation-only 弱势因子
+- 切换到更保守的参数模板
+- 对 `online_light` 参数模板切换自动 apply
+- 对已通过离线验证的 `offline_deep` 候选自动 approve + release
+- 对有 replay / counterfactual 证据的 supervisor 模板建议自动 approve + apply
+
+必须满足：
+
+- `RuntimeConfig.autonomy_mode == demo_autonomous`
+- evidence 包含 replay / counterfactual / application effect 摘要
+- `RiskPolicyService.evaluate(action, context)` 放行
+- 自动动作写入 `experiment_id`
+- 写入 previous template / rollback target
+- 写入 application log / effect
+- 自动应用后进入 observation
+
+禁止自动应用：
 
 - 提高最大亏损阈值
 - 关闭熔断
 - 提高最大仓位
+- 大幅增加交易频率
 - 直接启用 live-trading 模型
+- 关闭日志、跳过 `RiskPolicyService` 或跳过数据质量检查
+
+完成标准：
+
+- 用户不需要再点“批准 / 发布 / 生成建议”才能推进主链。
+- 被阻断的动作要写审计，不能静默失败。
+- 自动应用后进入观察期，效果差自动回滚或降级为人工复核。
+- 每轮输出“系统试了什么、为什么试、结果如何、下一轮怎么改”的实验记录。
+
+落地记录（2026-06-29）：
+
+- `RuntimeConfig` 新增：
+  - `autonomy_mode="demo_autonomous"`
+  - `autonomy_demo_auto_apply=true`
+- `autonomous_learning` cycle 新增 `apply_demo_autonomy`
+- demo 模式下会自动：
+  - approve 白名单内的 `policy_suggestion`
+  - 调用 `_update_weights()` 同步已批准因子治理建议
+  - 自动 apply `online_light` 参数模板建议
+  - 自动 approve/release 已通过 walk-forward 的参数模板候选
+  - 自动 apply 有 replay/counterfactual evidence 的 supervisor template 建议
+- 自动动作仍必须经过 `RiskPolicyService`
+- 自动动作写入：
+  - `experiment_id`
+  - `evolution_events(demo_autonomy_auto_approve / demo_autonomy_apply)`
+  - `learning_application_log / learning_application_effect`
+- orphan 参数模板候选处理：
+  - 如果候选指向的模板已经不存在，自动 reject，不再让用户人工审核一个无法发布的对象
+
+真实库首轮结果：
+
+- 自动批准并同步 3 条因子建议：
+  - `di_spread / boost_small`
+  - `ema_slope / downweight`
+  - `stoch_k / downweight`
+- `factor_weights.synced=true`
+- 参数模板候选发现 orphan template，已自动拒绝不可发布候选
+- 第二轮 cycle 无重复 approve，说明去重与状态推进生效
+
+验证：
+
+- `python -m pytest tests/test_autonomous_learning.py tests/test_factor_cards_api.py tests/test_position_supervisor_governance.py tests/test_supervisor_counterfactual.py tests/test_live_service_lifecycle.py tests/risk/test_policy_service.py -q`
+
+### H4：受控灰度但仍保留审批
+
+状态：`未开始`
+
+目标：允许系统自动推进灰度流程，但高影响 live 切换仍要有人审或显式审批状态。
+
+范围：
+
+- `position_supervisor_template` 切换
+- `offline_deep` 参数模板发布
+- 模型从 shadow 到 canary
+
+规则：
+
+- 系统可自动生成 evidence、replay、counterfactual、candidate。
+- 系统可自动把 evidence 打包成审批对象。
+- 未达到审批条件前不得改 live。
+- 审批后是否自动 apply 需要单独开关，默认关闭。
+
+完成标准：
+
+- 小程序看到的是“证据已准备好，等待审批/发布”，而不是“必须点一下才开始生成证据”。
+
+### H5：模型数据质量与训练准入
+
+状态：`已完成第一版，后台观察中`
+
+目标：保证新增样本能提高模型质量，而不是把噪声喂给模型。
+
+要完成：
+
+- 训练集准入规则：
+  - `integrity=missing` 不进入强监督因子训练
+  - `partial/recovered` 降权
+  - 市场关闭、报价 stale、broker 异常样本默认隔离
+  - post-close counterfactual 未成熟前不作为最终标签
+- 训练报告必须输出：
+  - 样本来源分布
+  - 标签成熟度
+  - integrity 分布
+  - replay / live / shadow 的一致率
+  - 最近 N 天漂移
+- 模型继续保持 `shadow_only/advisory_only`，直到 Phase H/H4 另行审批。
+
+完成标准：
+
+- 每次模型训练都能解释“用了哪些样本、丢弃了哪些样本、为什么”。
+- 样本量增加后，holdout 指标和 live shadow agreement 有趋势记录。
+
+落地记录（2026-06-29）：
+
+- 新增统一证据契约：`learning_evidence_contract.v1`
+- 训练样本 schema 升级：
+  - `learning_sample.v2`
+  - `decision_sample.v2`
+- 每条 trade / decision 样本新增 `evidence_contract`：
+  - `source`
+  - `integrity`
+  - `causal_level`
+  - `label_status`
+  - `train_weight`
+  - `allowed_uses`
+  - `blockers`
+  - `features / label / trace / explanation` hash
+- `LearningDatasetReadiness` 和 `LearningDatasetValidator` 已把 `evidence_contract` 作为硬 contract 校验
+- dataset manifest 新增：
+  - `schemas.evidence_contract`
+  - `evidence.trade`
+  - `evidence.decision`
+- `LearningStatisticalTrainer` 只使用：
+  - `quality.model_ready=true`
+  - 且 `evidence_contract.allowed_uses` 包含 `supervised_training`
+- 模型 artifact / shadow report / inference audit 新增或保留：
+  - dataset evidence summary
+  - input evidence contract
+  - input feature hash
+  - artifact path / artifact hash
+  - advisory / shadow guardrails
+- `autonomous_learning_sample` 新增 `evidence_contract_json`
+  - 规则系统自动产生的 shadow / rejection / supervisor / review / counterfactual 样本也进入同一证据契约
+
+明确边界：
+
+- 当前做到的是“证据分级 + 全链路可追溯 + 不合格禁止强监督训练”
+- 深层因果按 `causal_level` 标注为：
+  - `observational`
+  - `counterfactual`
+  - `replay_validated`
+  - `intervention_observed`
+- 不承诺任何金融样本具备实验室意义上的绝对因果真相；系统只允许把证据等级足够高的样本用于更强的训练/治理动作。
+
+验证：
+
+- `python -m pytest tests/research/test_rule_learning_pipeline.py tests/test_autonomous_learning.py -q`
+
+---
+
+### H6：统一进化账本与 supervisor 反事实成熟化地基
+
+状态：`已完成第一版，后台观察中`
+完成日期：`2026-06-30`
+
+目标：把学习、建议、审批、应用、回滚从零散日志升级为统一可回放状态机，让系统能回答“这次自动进化从哪里来、用了什么证据、经过什么风控、改了什么配置、之后效果如何”。
+
+已完成：
+
+- 新增统一进化账本：
+  - `evolution_run`
+  - `evolution_decision`
+  - `runtime_config_snapshot`
+- 新增服务：
+  - `backend.services.evolution_ledger`
+  - `start_evolution_run(...)`
+  - `record_evolution_decision(...)`
+  - `persist_runtime_config_snapshot(...)`
+- `RuntimeConfig` 启动加载后会写入 `runtime_config_snapshot`
+- 参数模板 runtime sync 会写入新的 config snapshot
+- `autonomous_learning_sample` 与 `position_supervisor_trace` 已扩展：
+  - `config_version`
+  - `config_hash`
+  - `evolution_run_id`
+- `position_supervisor_trace` 已扩展：
+  - `trace_integrity`
+  - legacy backfill 支持从 `decision_ledger` 恢复历史 supervisor trace
+- 新增 supervisor trace 成熟化：
+  - `protection_too_tight / premature_tighten / noise_stopout` -> `over_protected`
+  - `correct_stop` -> `correct_action`
+  - 证据不足保持 `pending / inconclusive`
+- 新增 API：
+  - `GET /api/learning/evolution/runs`
+  - `GET /api/learning/evolution/runs/{run_id}`
+  - `POST /api/learning/position-supervisor/traces/backfill`
+  - `POST /api/learning/position-supervisor/traces/materialize-labels`
+- demo 自动审批、supervisor template apply、自动 rollback 均会写 `evolution_decision`
+- `RiskPolicyService.switch_position_supervisor_template` 已收紧：
+  - 必须是 approved suggestion
+  - 模板必须是内置模板
+  - 必须同时具备 replay 和 counterfactual 摘要
+  - 自动部署只允许 `autonomy_mode=demo_autonomous`
+- `learning_evidence_contract.v1` 已收紧：
+  - `label_status != matured` 时不允许 `supervised_training`
+  - pending 样本只能用于 audit / explainability / weak supervision，不进入强监督训练
+
+真实库落位记录：
+
+- legacy supervisor trace 回填：`1000`
+- supervisor trace 成熟：`76` 条 matured，`924` 条 pending
+- autonomous learning samples 重新物化：`1241` 条变更
+- `runtime_config_snapshot` 已记录：
+  - `runtime_current`
+  - `backend_lifespan_startup`
+  - `parameter_template_sync_runtime_config`
+
+验证：
+
+- `python -m pytest tests/test_autonomous_learning.py tests/test_position_supervisor_governance.py tests/test_supervisor_counterfactual.py tests/test_live_service_lifecycle.py tests/risk/test_policy_service.py tests/test_runtime_config.py -q`
+  - `57 passed`
+- `python scripts/phase_a_health_check.py`
+  - `healthy`
+- `python scripts/phase_c_supervisor_check.py --db data/state.db --limit 30`
+  - 正常输出 supervisor 覆盖样本
+- `curl http://127.0.0.1:8000/api/health`
+  - `db=connected`
+- `PRAGMA integrity_check`
+  - `ok`
+
+后续观察项：
+
+- `learning_application_effect` 对 supervisor template 的观察样本达到阈值后，确认自动 rollback 是否能正确触发
+- 继续补 shadow/model freshness watchdog，避免 meta/factor shadow 审计过旧还参与治理
+- 继续观察 legacy recovered trace 的训练权重，避免历史弱证据进入强治理
 
 ---
 
@@ -2273,7 +2696,7 @@ v2 增强记录：
 
 | ID | 缺口 | 当前情况 | 归属阶段 |
 |---|---|---|---|
-| G-1 | 受限自动治理尚未启用 | 已有建议与审批入口，但不自动执行低风险调整 | Phase H |
+| G-1 | 二层自治仍需观察和补强 | demo 自动审批/应用/回滚地基已启用；仍需观察真实效果阈值、freshness watchdog 与配置查询面 | Phase H |
 | G-2 | 多品种/多风险池尚未实现 | 当前仍以 `XAUUSD+` 为主 | Phase I |
 | G-3 | 模型样本仍偏少 | meta LightGBM holdout accuracy 不达标，仍只能 shadow/advisory | Phase F/G 观察 |
 | G-4 | 前端新 contract 展示已接入，待真实样本长期观察 | 小程序已展示 readiness / snapshots / governance suggestion / high-load audit；继续观察上传、实机显示、灰度发布与回滚反馈 | 本地前端观察 |
@@ -2319,4 +2742,4 @@ v2 增强记录：
 
 当前默认下一步：
 
-**本地前端对接：`miniprogram_v2` 展示 `/api/ops/backend-readiness`、meta shadow report、治理建议与高负载审计**
+**服务器 Phase H 观察与二层自治：检查 `evolution_run / evolution_decision / runtime_config_snapshot` 的持续写入，观察 supervisor trace 成熟化和自动回滚阈值，并补 shadow/model freshness watchdog**

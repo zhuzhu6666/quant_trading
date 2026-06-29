@@ -1,10 +1,10 @@
 # Position Supervisor Contract
 
-> Last updated: 2026-06-25
-> Phase: C1
-> Status: approved contract for implementation
+> Last updated: 2026-06-30
+> Phase: C-H
+> Status: implemented contract, live governance enabled, autonomous trace learning foundation enabled
 
-本文定义 `position_supervisor` 的第一版 contract，用来指导 Phase C 后续编码落地。
+本文定义并固化 `position_supervisor` 的运行 contract。Phase C 的持仓监督主链已经落地；后续修改应保持本文的权力边界、证据结构和治理入口不变。
 
 ---
 
@@ -23,7 +23,7 @@
 它不能直接：
 
 - 开新仓
-- 直接平仓
+- 绕过风控直接平仓
 - 绕过 `RiskPolicyService`
 - 直接提高任何硬风控上限
 
@@ -275,17 +275,21 @@ supervisor.action = close
 
 ### 6.3 C1 对风控接口的结论
 
-现状里 `RiskPolicyService` 只正式支持：
+当前 `RiskPolicyService` 已正式支持：
 
 - `open_trade`
 - `close_position`
+- `tighten_position`
+- `reduce_position`
+- `switch_position_supervisor_template`
 - 治理类 action
 
-因此 C1 明确：
+当前约束：
 
-- C4 需要为 `tighten_position` / `reduce_position` 新增正式 action
-- 在 C4 完成前，supervisor 的 `tighten` / `reduce` 只能先作为 advisory verdict 存证，不能直接执行
-- `close` 可以最先复用现有 `close_position` 通道
+- `tighten / reduce / close` 必须先形成 supervisor verdict，再交给 `RiskPolicyService`
+- 风控拒绝时只写审计，不执行 broker 修改
+- broker amend / close 失败时必须写入 lifecycle，不得把 action 记成成功
+- supervisor 模板切换必须来自已审批的 `policy_suggestion`
 
 ### 6.4 风控上下文扩展要求
 
@@ -297,6 +301,8 @@ supervisor.action = close
 - `supervisor_evidence`
 - `supervisor_decision_ts`
 - `entry_decision_id`
+- `position_supervisor_template_id`
+- `previous_template_id / target_template_id`（仅模板切换）
 
 ---
 
@@ -333,7 +339,84 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 - `risk_verdict_reason`
 - `applied_controls`
 
-### 7.3 trade trace
+### 7.3 position supervisor trace
+
+`position_supervisor_trace` 是 supervisor 自治学习的永久轨迹表。
+
+它和 `decision_ledger` 的职责不同：
+
+- `decision_ledger` 记录进入正式决策账本的 supervisor 动作；
+- `position_supervisor_trace` 记录每一次 supervisor 对仓位的处理结果，包括 `hold`、冷却跳过、风控拒绝、执行跳过、执行成功、执行失败和异常。
+
+每条 trace 至少保留：
+
+- `position_id / trade_id / decision_id`
+- `trace_integrity`
+- `config_version / config_hash / evolution_run_id`
+- `action / summary_reason / confidence`
+- `template_id / template_version`
+- `stage / outcome`
+- `risk_action / risk_allowed / risk_reason`
+- `execution_status / execution_reason`
+- `context_json`
+- `verdict_json`
+- `risk_verdict_json`
+- `execution_json`
+
+标准 `stage / outcome` 口径：
+
+- `evaluated / hold`
+- `cooldown_skipped / skipped`
+- `timeout_delegated / skipped`
+- `risk_rejected / blocked`
+- `execution_skipped / skipped`
+- `executed / applied`
+- `execution_failed / failed`
+- `exception / failed`
+
+这张表服务于后续自治闭环：
+
+- 识别同一类 supervisor 错误是否重复发生；
+- 将 `premature_tighten / protection_too_tight / late_exit` 与当时的动作和模板绑定；
+- 形成 `supervisor_execution_trace` 学习样本；
+- 支持自动降权、模板调整、冷却窗口调整和回滚观察。
+
+`supervisor_execution_trace` 样本默认 `label_status=pending`，不能直接作为强收益标签；只有平仓 review 与 counterfactual 成熟后，才允许升级为更高权重训练/治理证据。
+
+2026-06-30 起，系统支持两类 trace 来源：
+
+- live trace：由 `live_service -> DecisionLedger.log_position_supervisor_trace()` 写入，默认 `trace_integrity=full`
+- legacy trace：由 `backfill_position_supervisor_traces()` 从历史 `decision_ledger` 回填，标记为 `recovered / partial`
+
+legacy trace 只用于补齐历史审计和弱监督，不应直接进入强治理。
+
+### 7.4 supervisor trace 成熟化
+
+`mature_position_supervisor_traces()` 会把 `position_supervisor_trace` 与 `supervisor_counterfactual_review` 对齐，生成或更新 `supervisor_execution_trace` 学习样本。
+
+统一标签口径：
+
+- `protection_too_tight / premature_tighten / noise_stopout` -> `over_protected`
+- `correct_stop` -> `correct_action`
+- `missed_protection` -> `missed_protection`
+- 证据不足 -> `inconclusive`
+
+统一推荐动作：
+
+- `hold`
+- `tighten`
+- `reduce`
+- `close`
+- `less_tighten`
+
+成熟化规则：
+
+- 有成熟 counterfactual 且 trace integrity 足够时，`label_status=matured`
+- 证据不足时保持 `pending`
+- `trace_integrity=recovered / partial` 自动降权
+- `trace_integrity=missing` 权重为 0
+
+### 7.5 trade trace
 
 `/api/risk/trade-trace` 后续需要能同时回答：
 
@@ -344,39 +427,90 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 
 因此 trade trace 需要把 supervisor verdict 作为一等证据，而不只是 review 附注。
 
+### 7.6 review / learning 写入要求
+
+平仓复盘必须额外写入：
+
+- `close_reason_source`
+  - `supervisor_direct_close`
+  - `supervisor_tighten_stopout`
+  - `supervisor_reduce_partial_or_stopout`
+  - `external_broker_close`
+  - `restart_replay`
+- `inferred_close_supervisor`
+- `attribution_integrity`
+  - `full`
+  - `recovered`
+  - `missing`
+
+`attribution_integrity=missing` 的样本只能作为退出质量 / supervisor 学习证据，不应直接触发强因子降权。
+
 ---
 
-## 8. 与现有系统的最小落地关系
+## 8. supervisor 模板治理
 
-基于当前代码，C1 先明确以下复用点：
+当前内置模板：
+
+- `position_supervisor:default.v1`
+- `position_supervisor:conservative.v1`
+
+治理流程：
+
+```text
+supervisor review / counterfactual
+  -> build_position_supervisor_advisories
+  -> policy_suggestion(scope_type=position_supervisor_template)
+  -> 人审 / Governor 审批
+  -> RiskPolicyService.evaluate("switch_position_supervisor_template", ...)
+  -> RuntimeConfig.position_supervisor_template_id
+  -> learning_application_log / learning_application_effect
+```
+
+约束：
+
+- `proposed` 建议不能切 live 模板
+- 只有 `approved` 建议可以申请切换
+- 模板 ID 必须来自内置模板列表
+- 自动部署只允许 `RuntimeConfig.autonomy_mode=demo_autonomous`
+- 自动部署必须同时具备 replay summary 和 counterfactual summary
+- 切换必须保留 `previous_template_id`，便于回滚审计
+- 切换必须写入 `runtime_config_snapshot / evolution_decision / learning_application_log / learning_application_effect`
+
+---
+
+## 9. 与现有系统的最小落地关系
+
+基于当前代码，稳定复用以下入口：
 
 - 持仓时长口径复用 `backend/services/live_service.py` 里的 `_build_close_position_risk_context()` 与 `_holding_summary_for_position()`
 - 风控裁决入口继续统一走 `risk/policy_service.py`
 - 证据存储继续复用 `backend/ledger/service.py`
 - 运维查询继续复用 `backend/api/risk.py` 的 `trade-trace`
+- supervisor 反事实审计走 `backend.services.supervisor_counterfactual`
+- 自动物化调度走 `backend.services.supervisor_learning_scheduler`
 
-这意味着 C2-C5 不需要重造链路，只需要把 supervisor 补进现有骨架。
+这意味着后续不应重造平行 supervisor 链路，只应扩展这些既有骨架。
 
 ---
 
-## 9. C1 完成标准
+## 10. 当前完成标准
 
-本 contract 在 C1 阶段视为完成，当且仅当：
+当前 contract 视为满足，当且仅当：
 
 - 模块职责清楚
 - 输入输出 schema 清楚
 - 与 `RiskPolicyService` 的边界清楚
 - ledger / trace 写入要求清楚
-- 能直接指导 C2 / C3 / C4 编码，而不再依赖口头解释
+- review / learning 能回答“谁平的、该不该平、系统是否学到了”
+- 模板切换必须有审批和风控裁决
 
 ---
 
-## 10. C2 的直接入口
+## 11. 后续扩展入口
 
-C2 将按本文 contract 补齐实际计算字段，优先顺序建议为：
+后续扩展优先顺序建议为：
 
-1. `mfe / mae`
-2. `giveback_ratio / profit_capture_ratio`
-3. `time_in_profit / holding_efficiency`
+1. 增加真实 `tighten / reduce / timeout` 样本覆盖
+2. 提升 `supervisor_counterfactual_review` 的标签置信度
+3. 增加受控 rollback / gray-release 展示
 4. `time_decay_score / thesis_status / regime_shift`
-

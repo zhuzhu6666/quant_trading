@@ -317,6 +317,7 @@ class ParameterTemplateService:
 
     def sync_runtime_config(self) -> int:
         from config.runtime_config import patch as _rc_patch, shared as _rc_shared
+        from backend.services.evolution_ledger import persist_runtime_config_snapshot
 
         runtime_cfg = _rc_shared()
         signal_config = self.build_runtime_signal_config()
@@ -331,12 +332,21 @@ class ParameterTemplateService:
         }
         merged_extra = dict(getattr(runtime_cfg, "extra", {}) or {})
         merged_extra["active_parameter_templates"] = active_payload
-        return _rc_patch(
+        version = _rc_patch(
             {
                 "factor_signal_config": signal_config,
                 "extra": merged_extra,
             }
         )
+        try:
+            persist_runtime_config_snapshot(
+                _rc_shared(),
+                source="parameter_template_sync_runtime_config",
+                db_path=self.db_path,
+            )
+        except Exception:
+            pass
+        return version
 
     def upsert_template(
         self,

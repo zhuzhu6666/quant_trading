@@ -4,11 +4,10 @@ import hashlib
 import json
 import sqlite3
 import time
-import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, ensure_sqlite_columns
 
 
 class ExperienceBuilder:
@@ -36,10 +35,140 @@ class ExperienceBuilder:
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_columns(
+            self.db_path,
+            "experience_memory",
+            {
+                "source_table": "source_table TEXT DEFAULT ''",
+                "source_id": "source_id TEXT DEFAULT ''",
+                "append_source": "append_source TEXT DEFAULT ''",
+                "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
+            },
+        )
+        with self._conn() as conn:
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_experience_memory_source
+                ON experience_memory(source_table, source_id, append_source)
+                """
+            )
+            self._backfill_legacy_experience_sources(conn)
+            self._repair_experience_event_timestamps(conn)
+
+    def _backfill_legacy_experience_sources(self, conn: sqlite3.Connection) -> None:
+        try:
+            rows = conn.execute(
+                """
+                SELECT experience_id, trade_id, decision_context_json
+                FROM experience_memory
+                WHERE COALESCE(source_table, '')=''
+                  AND COALESCE(source_id, '')=''
+                  AND COALESCE(trade_id, '')!=''
+                LIMIT 10000
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        for row in rows:
+            review = conn.execute(
+                """
+                SELECT review_id, created_at
+                FROM trade_outcome_review
+                WHERE trade_id=?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (str(row["trade_id"] or ""),),
+            ).fetchone()
+            if not review:
+                continue
+            try:
+                context = json.loads(row["decision_context_json"] or "{}")
+            except Exception:
+                context = {}
+            context["experience_source"] = {
+                "source_table": "trade_outcome_review",
+                "source_id": str(review["review_id"] or ""),
+                "append_source": "legacy_experience_migrated.v1",
+                "event_ts": float(review["created_at"] or 0.0),
+            }
+            conn.execute(
+                """
+                UPDATE experience_memory
+                SET source_table='trade_outcome_review',
+                    source_id=?,
+                    append_source='legacy_experience_migrated.v1',
+                    decision_context_json=?,
+                    created_at=CASE
+                        WHEN ? > 0 THEN ?
+                        ELSE created_at
+                    END
+                WHERE experience_id=?
+                """,
+                (
+                    str(review["review_id"] or ""),
+                    json.dumps(context, ensure_ascii=False, default=str),
+                    float(review["created_at"] or 0.0),
+                    float(review["created_at"] or 0.0),
+                    str(row["experience_id"] or ""),
+                ),
+            )
+
+    def _repair_experience_event_timestamps(self, conn: sqlite3.Connection) -> None:
+        try:
+            rows = conn.execute(
+                """
+                SELECT e.experience_id, e.decision_context_json, r.created_at AS review_created_at
+                FROM experience_memory e
+                JOIN trade_outcome_review r
+                  ON e.source_table='trade_outcome_review'
+                 AND e.source_id = r.review_id
+                WHERE ABS(COALESCE(e.created_at, 0) - COALESCE(r.created_at, 0)) > 5.0
+                LIMIT 10000
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        for row in rows:
+            try:
+                context = json.loads(row["decision_context_json"] or "{}")
+            except Exception:
+                context = {}
+            source = context.get("experience_source") if isinstance(context.get("experience_source"), dict) else {}
+            source["event_ts"] = float(row["review_created_at"] or 0.0)
+            context["experience_source"] = source
+            conn.execute(
+                """
+                UPDATE experience_memory
+                SET created_at=?, decision_context_json=?
+                WHERE experience_id=?
+                """,
+                (
+                    float(row["review_created_at"] or 0.0),
+                    json.dumps(context, ensure_ascii=False, default=str),
+                    str(row["experience_id"] or ""),
+                ),
+            )
 
     @staticmethod
-    def _new_id(prefix: str) -> str:
-        return f"{prefix}_{uuid.uuid4().hex[:16]}"
+    def _stable_experience_id(append_source: str, source_table: str, source_id: str) -> str:
+        digest = hashlib.sha1(f"{append_source}:{source_table}:{source_id}".encode("utf-8")).hexdigest()[:18]
+        return f"exp_{digest}"
+
+    @staticmethod
+    def _review_event_ts(review: dict, review_json: dict) -> float:
+        for value in (
+            review_json.get("close_ts"),
+            review.get("created_at"),
+            review_json.get("entry_ts"),
+        ):
+            try:
+                ts = float(value or 0.0)
+            except (TypeError, ValueError):
+                ts = 0.0
+            if ts > 0:
+                return ts
+        return time.time()
 
     def build_from_review(self, review: dict) -> dict:
         review_json = review.get("review_json", {}) or {}
@@ -47,8 +176,11 @@ class ExperienceBuilder:
         outcome_label = str(review.get("outcome_label", "") or "")
         close_reason = str(review_json.get("close_reason", "") or "")
         context_integrity = str(review_json.get("context_integrity", "full") or "full")
+        attribution_integrity = str(review_json.get("attribution_integrity", "full") or "full")
         if context_integrity != "full" and "partial_context" not in failure_tags:
             failure_tags.append("partial_context")
+        if attribution_integrity == "missing" and "attribution_missing" not in failure_tags:
+            failure_tags.append("attribution_missing")
         if close_reason == "emergency_close" and "manual_intervention" not in failure_tags:
             failure_tags.append("manual_intervention")
         if close_reason == "restart_replay" and "restart_replay" not in failure_tags:
@@ -100,6 +232,9 @@ class ExperienceBuilder:
         if context_integrity != "full":
             reward_scale *= 0.5
             evidence_scale *= 0.35
+        if attribution_integrity == "missing":
+            reward_scale *= 0.5
+            evidence_scale *= 0.25
         if close_reason in {"emergency_close", "restart_replay"}:
             reward_scale *= 0.6
             evidence_scale *= 0.5
@@ -113,7 +248,7 @@ class ExperienceBuilder:
             recommended_action = "watch"
         else:
             recommended_action = "watch"
-        if context_integrity != "full" or close_reason in {"emergency_close", "restart_replay"}:
+        if context_integrity != "full" or attribution_integrity == "missing" or close_reason in {"emergency_close", "restart_replay"}:
             recommended_action = "watch"
 
         evidence_strength = min(1.0, max(0.15, abs(reward_score) + 0.20 * len(failure_tags)))
@@ -132,22 +267,37 @@ class ExperienceBuilder:
             "failure_tags": failure_tags,
             "close_reason": close_reason,
             "context_integrity": context_integrity,
+            "attribution_integrity": attribution_integrity,
             "summary_text": review.get("summary_text", ""),
             "review_json": review_json,
         }
-        experience_id = self._new_id("exp")
+        source_table = "trade_outcome_review"
+        source_id = str(review.get("review_id") or review_json.get("review_id") or review.get("trade_id") or "")
+        append_source = "live_review"
+        experience_id = self._stable_experience_id(append_source, source_table, source_id) if source_id else f"exp_{hashlib.sha1(str(time.time()).encode('utf-8')).hexdigest()[:18]}"
+        event_ts = self._review_event_ts(review, review_json)
+        context["experience_source"] = {
+            "source_table": source_table,
+            "source_id": source_id,
+            "append_source": append_source,
+            "event_ts": event_ts,
+        }
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO experience_memory
-                (experience_id, trade_id, regime_id, setup_hash, decision_context_json,
+                INSERT OR REPLACE INTO experience_memory
+                (experience_id, trade_id, source_table, source_id, append_source,
+                 regime_id, setup_hash, decision_context_json,
                  outcome_label, reward_score, failure_tags_json, recommended_action,
-                 evidence_strength, artifact_version, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v1', ?)
+                 evidence_strength, artifact_version, evolution_run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v1', '', ?)
                 """,
                 (
                     experience_id,
                     str(review.get("trade_id", "")),
+                    source_table,
+                    source_id,
+                    append_source,
                     str(review.get("regime_id", "") or ""),
                     setup_hash,
                     json.dumps(context, ensure_ascii=False, default=str),
@@ -156,13 +306,16 @@ class ExperienceBuilder:
                     json.dumps(failure_tags, ensure_ascii=False),
                     recommended_action,
                     round(evidence_strength, 6),
-                    time.time(),
+                    event_ts,
                 ),
             )
 
         return {
             "experience_id": experience_id,
             "trade_id": str(review.get("trade_id", "")),
+            "source_table": source_table,
+            "source_id": source_id,
+            "append_source": append_source,
             "regime_id": str(review.get("regime_id", "") or ""),
             "setup_hash": setup_hash,
             "primary_factor": primary_factor,

@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL
+from research.features.evidence_contract import build_evidence_contract
 
 
-SCHEMA_VERSION = "learning_sample.v1"
-DECISION_SCHEMA_VERSION = "decision_sample.v1"
+SCHEMA_VERSION = "learning_sample.v2"
+DECISION_SCHEMA_VERSION = "decision_sample.v2"
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -596,6 +597,15 @@ class LearningFeatureProvider:
             "missing": [k for k, ok in checks.items() if not ok],
         }
 
+    @staticmethod
+    def _decision_integrity(decision: dict, quality: dict) -> str:
+        if quality.get("model_ready"):
+            return "full"
+        missing = set(quality.get("missing") or [])
+        if {"has_factor_snapshot", "has_action_reason"} & missing:
+            return "partial"
+        return "recovered" if quality.get("quality_score", 0.0) >= 0.7 else "missing"
+
     def build_decision_sample(self, decision_id: str) -> dict:
         decision = self.build_decision_features(decision_id)
         action = decision.get("action") if isinstance(decision.get("action"), dict) else {}
@@ -624,28 +634,55 @@ class LearningFeatureProvider:
             factors=factors,
             execution_trace=execution_trace,
         )
+        quality = self._decision_quality(decision)
+        sample_id = f"decision:{decision_id}"
+        explainability = {
+            "summary_text": (
+                f"{event_type} decision score={target['action_score']:.4f}; "
+                f"reason={target['gate_reason'] or decision.get('action_reason') or 'n/a'}"
+            ),
+            "top_factors": factors[:5],
+            "factor_count": len(factors),
+            "execution_summary": execution_trace["summary"],
+            "evidence_bullets": llm_context["evidence_bullets"],
+            "ledger_links": {
+                "decision_id": decision_id,
+                "trade_id": str(action.get("position_id") or ""),
+            },
+        }
+        contract = build_evidence_contract(
+            sample_id=sample_id,
+            sample_kind="decision",
+            source={
+                "table": "decision_ledger",
+                "source_id": decision_id,
+                "decision_id": decision_id,
+                "event_type": event_type,
+            },
+            features={"decision": decision, "execution_trace": execution_trace},
+            label=target,
+            trace={
+                "decision_id": decision_id,
+                "ledger_links": explainability["ledger_links"],
+                "execution_summary": execution_trace["summary"],
+            },
+            quality=quality,
+            integrity=self._decision_integrity(decision, quality),
+            causal_level="intervention_observed",
+            label_status="matured",
+            explanation=explainability,
+        )
+        quality = {**quality, "model_ready": bool(contract["model_ready"]), "evidence_contract": contract}
         return {
             "schema_version": DECISION_SCHEMA_VERSION,
-            "sample_id": f"decision:{decision_id}",
-            "quality": self._decision_quality(decision),
+            "sample_id": sample_id,
+            "evidence_contract": contract,
+            "quality": quality,
             "target": target,
             "decision": decision,
             "execution_trace": execution_trace,
             "llm_context": llm_context,
-            "explainability": {
-                "summary_text": (
-                    f"{event_type} decision score={target['action_score']:.4f}; "
-                    f"reason={target['gate_reason'] or decision.get('action_reason') or 'n/a'}"
-                ),
-                "top_factors": factors[:5],
-                "factor_count": len(factors),
-                "execution_summary": execution_trace["summary"],
-                "evidence_bullets": llm_context["evidence_bullets"],
-                "ledger_links": {
-                    "decision_id": decision_id,
-                    "trade_id": str(action.get("position_id") or ""),
-                },
-            },
+            "explainability": explainability,
         }
 
     def _experience_for_trade(self, trade_id: str) -> dict | None:
@@ -780,6 +817,42 @@ class LearningFeatureProvider:
             "missing": [k for k, ok in checks.items() if not ok],
         }
 
+    @staticmethod
+    def _trade_integrity(
+        *,
+        review: dict,
+        decision: dict | None,
+        factors: list[dict],
+        contribution_reviews: list[dict],
+        experience: dict | None,
+    ) -> str:
+        review_json = review.get("review") or {}
+        explicit = str(review_json.get("attribution_integrity") or "").strip()
+        if explicit in {"full", "recovered", "partial", "missing"}:
+            return explicit
+        context_integrity = str(review_json.get("context_integrity") or "").strip()
+        if context_integrity in {"partial", "missing"}:
+            return context_integrity
+        if decision and factors and contribution_reviews and experience:
+            return "recovered"
+        if decision or factors or contribution_reviews:
+            return "partial"
+        return "missing"
+
+    @staticmethod
+    def _trade_causal_level(*, review: dict, execution_trace: dict, application_context: list[dict]) -> str:
+        review_json = review.get("review") or {}
+        if application_context:
+            return "intervention_observed"
+        if review.get("trade_id") and review.get("outcome_label"):
+            return "intervention_observed"
+        if review_json.get("counterfactual") or review_json.get("counterfactual_summary"):
+            return "counterfactual"
+        summary = execution_trace.get("summary") or {}
+        if summary.get("has_broker_lifecycle"):
+            return "replay_validated"
+        return "observational"
+
     def build_trade_features(self, trade_id: str) -> dict:
         with self._conn() as conn:
             row = conn.execute(
@@ -878,9 +951,72 @@ class LearningFeatureProvider:
             execution_trace=execution_trace,
             application_context=application_context,
         )
+        sample_id = f"trade:{review['trade_id'] or review['review_id']}"
+        explainability = {
+            "summary_text": review["summary_text"],
+            "top_factors": factor_outcomes[:5],
+            "factor_count": len(factors),
+            "attribution_alignment": attribution_alignment,
+            "execution_summary": execution_trace["summary"],
+            "evidence_bullets": llm_context["evidence_bullets"],
+            "failure_tags": review["failure_tags"],
+            "primary_responsibility": review["primary_responsibility"],
+            "responsibility_labels": review["responsibility_labels"],
+            "ledger_links": {
+                "entry_decision_id": review["entry_decision_id"],
+                "exit_decision_id": review["exit_decision_id"],
+                "trade_id": review["trade_id"],
+                "position_id": review["position_id"],
+            },
+        }
+        integrity = self._trade_integrity(
+            review=review,
+            decision=decision,
+            factors=factors,
+            contribution_reviews=contribution_reviews,
+            experience=experience,
+        )
+        contract = build_evidence_contract(
+            sample_id=sample_id,
+            sample_kind="trade",
+            source={
+                "table": "trade_outcome_review",
+                "source_id": review["review_id"],
+                "review_id": review["review_id"],
+                "trade_id": review["trade_id"],
+                "position_id": review["position_id"],
+                "entry_decision_id": review["entry_decision_id"],
+                "exit_decision_id": review["exit_decision_id"],
+                "integrity_basis": "explicit_review" if (review["review"] or {}).get("attribution_integrity") else "derived_from_ledger",
+                "close_reason_source": str((review["review"] or {}).get("close_reason_source") or ""),
+            },
+            features={
+                "decision": decision,
+                "factor_outcomes": factor_outcomes,
+                "attribution_alignment": attribution_alignment,
+                "application_context": application_context,
+            },
+            label=target,
+            trace={
+                "ledger_links": explainability["ledger_links"],
+                "execution_summary": execution_trace["summary"],
+                "application_count": len(application_context),
+            },
+            quality=quality,
+            integrity=integrity,
+            causal_level=self._trade_causal_level(
+                review=review,
+                execution_trace=execution_trace,
+                application_context=application_context,
+            ),
+            label_status="matured",
+            explanation=explainability,
+        )
+        quality = {**quality, "model_ready": bool(contract["model_ready"]), "evidence_contract": contract}
         return {
             "schema_version": SCHEMA_VERSION,
-            "sample_id": f"trade:{review['trade_id'] or review['review_id']}",
+            "sample_id": sample_id,
+            "evidence_contract": contract,
             "quality": quality,
             "target": target,
             "decision": decision,
@@ -891,23 +1027,7 @@ class LearningFeatureProvider:
             "execution_trace": execution_trace,
             "application_context": application_context,
             "llm_context": llm_context,
-            "explainability": {
-                "summary_text": review["summary_text"],
-                "top_factors": factor_outcomes[:5],
-                "factor_count": len(factors),
-                "attribution_alignment": attribution_alignment,
-                "execution_summary": execution_trace["summary"],
-                "evidence_bullets": llm_context["evidence_bullets"],
-                "failure_tags": review["failure_tags"],
-                "primary_responsibility": review["primary_responsibility"],
-                "responsibility_labels": review["responsibility_labels"],
-                "ledger_links": {
-                    "entry_decision_id": review["entry_decision_id"],
-                    "exit_decision_id": review["exit_decision_id"],
-                    "trade_id": review["trade_id"],
-                    "position_id": review["position_id"],
-                },
-            },
+            "explainability": explainability,
         }
 
     def build_training_samples(

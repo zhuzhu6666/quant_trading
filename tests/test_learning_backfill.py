@@ -163,3 +163,84 @@ def test_learning_backfill_enriches_path_metrics_from_bars(monkeypatch, tmp_path
     assert review["thesis_status"] in {"intact", "weakening", "broken"}
     assert review["phase_c_diagnosis"]["primary_issue"] == "exit_capture"
     assert "profit_giveback" in review["phase_c_diagnosis"]["drivers"]
+
+
+def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, created_at)
+            VALUES ('psv_keep', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1', 'switch_template',
+                    0.8, 'approved template switch', '{"source":"test"}',
+                    'approved', 100.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO experience_pattern_stats
+            (scope_type, scope_key, sample_count, updated_at)
+            VALUES ('position_supervisor_template', 'position_supervisor:default.v1', 3, 100.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO experience_memory
+            (experience_id, trade_id, source_table, source_id, append_source,
+             regime_id, setup_hash, decision_context_json, outcome_label,
+             reward_score, failure_tags_json, recommended_action,
+             evidence_strength, artifact_version, created_at)
+            VALUES ('exp_live_keep', 'live_trade', 'trade_outcome_review',
+                    'review_live_keep', 'live_review', '', 'live_hash',
+                    '{}', 'good_win', 0.4, '[]', 'watch', 0.7, 'v1', 100.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO experience_memory
+            (experience_id, trade_id, source_table, source_id, append_source,
+             regime_id, setup_hash, decision_context_json, outcome_label,
+             reward_score, failure_tags_json, recommended_action,
+             evidence_strength, artifact_version, created_at)
+            VALUES ('exp_old_backfill', 'old_trade', 'trade_outcome_review',
+                    'review_old_backfill', 'learning_backfill.v1', '', 'old_hash',
+                    '{}', 'bad_loss', -0.4, '[]', 'downweight', 0.7, 'v1', 90.0)
+            """
+        )
+        learning_backfill.rebuild_learning_state(conn)
+        kept = conn.execute(
+            """
+            SELECT scope_type, status
+            FROM policy_suggestion
+            WHERE suggestion_id='psv_keep'
+            """
+        ).fetchone()
+        template_stat = conn.execute(
+            """
+            SELECT sample_count
+            FROM experience_pattern_stats
+            WHERE scope_type='position_supervisor_template'
+              AND scope_key='position_supervisor:default.v1'
+            """
+        ).fetchone()
+        live_exp = conn.execute(
+            "SELECT append_source FROM experience_memory WHERE experience_id='exp_live_keep'"
+        ).fetchone()
+        old_backfill = conn.execute(
+            "SELECT 1 FROM experience_memory WHERE experience_id='exp_old_backfill'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert kept is not None
+    assert kept["scope_type"] == "position_supervisor_template"
+    assert kept["status"] == "approved"
+    assert template_stat["sample_count"] == 3
+    assert live_exp["append_source"] == "live_review"
+    assert old_backfill is None

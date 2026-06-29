@@ -88,6 +88,7 @@ class DatasetSummaryAdapter:
             "schemas": manifest.get("schemas") or {},
             "readiness": manifest.get("readiness") or {},
             "quality": manifest.get("quality") or {},
+            "evidence": manifest.get("evidence") or {},
             "label_distribution": {
                 "trade_outcome": trade_labels,
                 "recommended_action": recommended_actions,
@@ -102,6 +103,7 @@ class DatasetSummaryAdapter:
             },
             "notes": [
                 "Baseline adapter summarizes verified datasets only.",
+                "Evidence contract statistics are preserved for downstream model and audit consumers.",
                 "It must not be wired directly into live execution.",
             ],
         }
@@ -162,6 +164,7 @@ class DatasetSummaryAdapter:
             "safe_for_live_trading": False,
             "confidence": float(quality.get("quality_score") or 0.0),
             "label_hint": label_summary or target,
+            "evidence_contract": features.get("evidence_contract") or {},
             "prompt_card": llm_context.get("prompt_card", ""),
         }
 
@@ -174,4 +177,5 @@ class DatasetSummaryAdapter:
             "summary": llm_context.get("prompt_card", ""),
             "evidence_bullets": list(llm_context.get("evidence_bullets") or []),
             "label_summary": llm_context.get("label_summary") or prediction.get("label_hint") or {},
+            "evidence_contract": features.get("evidence_contract") or prediction.get("evidence_contract") or {},
         }

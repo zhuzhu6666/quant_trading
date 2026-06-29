@@ -79,10 +79,20 @@ Factor Takeover v4 pipeline
   -> cTrader demo account
   -> deal_sync
   -> ctrader_deals
-  -> AttributionEngine / learning backfill
+  -> AttributionEngine / recovery_position_state
+  -> trade review / experience / supervisor counterfactual
+  -> policy_suggestion / governed template switch
 ```
 
 平仓后的真实 PnL 来自 cTrader deal，同步内容包含 gross / swap / commission / net。归因层和学习闭环应优先使用这条真实成交链路。
+
+2026-06-29 起，归因和退出学习的现网口径为：
+
+- 开仓时把可恢复的 `TradeAttribution` 写入 `recovery_position_state.recovery_meta_json.trade_attribution`
+- 服务重启后，`AttributionEngine.restore_open()` 会从 recovery state 恢复仍然活跃仓位的归因上下文
+- 平仓 review 会标记 `attribution_integrity=full/recovered/missing`
+- `broker_close` 会回溯最近 supervisor verdict，写入 `close_reason_source` 和 `inferred_close_supervisor`
+- `supervisor_learning_scheduler` 会定时物化 `supervisor_counterfactual_review`，并生成 supervisor 模板治理建议
 
 当前实盘可以简化理解为:
 
@@ -91,6 +101,7 @@ cTrader spot / account / positions
   -> live_service
   -> RiskPolicyService / position_supervisor
   -> cTrader execution
+  -> ledger / trace / review
 ```
 
 说明:

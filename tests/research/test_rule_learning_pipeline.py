@@ -180,6 +180,9 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     assert review["review_json"]["holding_efficiency"] >= 0.0
     assert experience["decision_context_json"]["holding_minutes"] == pytest.approx(100_000.0 / 60.0)
     assert "primary_responsibility" in experience["decision_context_json"]
+    assert experience["source_table"] == "trade_outcome_review"
+    assert experience["source_id"] == review["review_id"]
+    assert experience["append_source"] == "live_review"
     assert "overweight_noise_factor" in review["failure_tags"]
     assert experience["recommended_action"] == "downweight"
     assert suggestion is None
@@ -189,11 +192,20 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     assert len(_rows(db_path, "SELECT * FROM trade_outcome_review")) == 1
     assert len(_rows(db_path, "SELECT * FROM factor_contribution_review")) == 2
     assert len(_rows(db_path, "SELECT * FROM experience_memory")) == 1
+    stored_experience = _rows(db_path, "SELECT * FROM experience_memory")[0]
+    assert stored_experience["source_table"] == "trade_outcome_review"
+    assert stored_experience["source_id"] == review["review_id"]
+    assert stored_experience["append_source"] == "live_review"
+    assert stored_experience["created_at"] == pytest.approx(1_000_000.0)
     assert len(_rows(db_path, "SELECT * FROM policy_suggestion")) == 0
 
     provider = LearningFeatureProvider(db_path)
     sample = provider.build_trade_features("101")
-    assert sample["schema_version"] == "learning_sample.v1"
+    assert sample["schema_version"] == "learning_sample.v2"
+    assert sample["evidence_contract"]["schema_version"] == "learning_evidence_contract.v1"
+    assert sample["evidence_contract"]["integrity"] in {"full", "recovered"}
+    assert sample["evidence_contract"]["causal_level"] == "intervention_observed"
+    assert "supervised_training" in sample["evidence_contract"]["allowed_uses"]
     assert sample["quality"]["model_ready"] is True
     assert sample["target"]["outcome_label"] == "bad_loss"
     assert sample["target"]["recommended_action"] == "downweight"
@@ -225,6 +237,51 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
 
     ready = provider.build_training_samples(model_ready_only=True)
     assert len(ready) == 1
+
+
+def test_experience_builder_migrates_legacy_experience_sources(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    ExperienceBuilder(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, outcome_label, review_json, created_at)
+            VALUES ('review_legacy', 'legacy_trade', 'legacy_pos', 'good_win', '{}', 100.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO experience_memory
+            (experience_id, trade_id, regime_id, setup_hash, decision_context_json,
+             outcome_label, reward_score, failure_tags_json, recommended_action,
+             evidence_strength, artifact_version, created_at)
+            VALUES ('exp_legacy', 'legacy_trade', '', 'legacy_hash', '{}',
+                    'good_win', 0.3, '[]', 'watch', 0.5, 'v1', 101.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ExperienceBuilder(db_path)
+
+    row = _rows(
+        db_path,
+        """
+        SELECT source_table, source_id, append_source, decision_context_json, created_at
+        FROM experience_memory
+        WHERE experience_id='exp_legacy'
+        """,
+    )[0]
+    context = json.loads(row["decision_context_json"])
+    assert row["source_table"] == "trade_outcome_review"
+    assert row["source_id"] == "review_legacy"
+    assert row["append_source"] == "legacy_experience_migrated.v1"
+    assert row["created_at"] == pytest.approx(100.0)
+    assert context["experience_source"]["source_id"] == "review_legacy"
+    assert context["experience_source"]["event_ts"] == pytest.approx(100.0)
 
 
 def test_feature_provider_exports_explainable_skip_decision_samples(tmp_path):
@@ -268,7 +325,10 @@ def test_feature_provider_exports_explainable_skip_decision_samples(tmp_path):
     provider = LearningFeatureProvider(db_path)
     sample = provider.build_decision_sample(decision_id)
 
-    assert sample["schema_version"] == "decision_sample.v1"
+    assert sample["schema_version"] == "decision_sample.v2"
+    assert sample["evidence_contract"]["schema_version"] == "learning_evidence_contract.v1"
+    assert sample["evidence_contract"]["causal_level"] == "intervention_observed"
+    assert "supervised_training" in sample["evidence_contract"]["allowed_uses"]
     assert sample["quality"]["model_ready"] is True
     assert sample["target"]["skipped"] is True
     assert sample["target"]["skip_stage"] == "risk_var_gate"
@@ -325,7 +385,10 @@ def test_feature_provider_exports_execution_failure_decision_samples(tmp_path):
     provider = LearningFeatureProvider(db_path)
     sample = provider.build_decision_sample(decision_id)
 
-    assert sample["schema_version"] == "decision_sample.v1"
+    assert sample["schema_version"] == "decision_sample.v2"
+    assert sample["evidence_contract"]["schema_version"] == "learning_evidence_contract.v1"
+    assert sample["evidence_contract"]["causal_level"] == "intervention_observed"
+    assert "supervised_training" in sample["evidence_contract"]["allowed_uses"]
     assert sample["quality"]["model_ready"] is True
     assert sample["target"]["executed"] is False
     assert sample["target"]["skipped"] is True
@@ -386,8 +449,9 @@ def test_dataset_builder_persists_trade_and_decision_jsonl(tmp_path):
     )
 
     assert export["dataset_id"] == "unit_dataset"
-    assert export["schemas"]["trade"] == "learning_sample.v1"
-    assert export["schemas"]["decision"] == "decision_sample.v1"
+    assert export["schemas"]["trade"] == "learning_sample.v2"
+    assert export["schemas"]["decision"] == "decision_sample.v2"
+    assert export["schemas"]["evidence_contract"] == "learning_evidence_contract.v1"
     assert export["quality"]["trade"]["model_ready"] == 1
     assert export["quality"]["decision"]["model_ready"] == 1
     assert export["readiness"]["ready"] is True
@@ -413,7 +477,9 @@ def test_dataset_builder_persists_trade_and_decision_jsonl(tmp_path):
     assert manifest["files"]["trade_samples"]["count"] == 1
     assert manifest["files"]["decision_samples"]["count"] == 1
     assert manifest["readiness"]["ready"] is True
+    assert manifest["evidence"]["trade"]["contract_version"] == "learning_evidence_contract.v1"
     assert "factor_outcomes" in manifest["contracts"]["trade"]["features"]
+    assert "evidence_contract" in manifest["contracts"]["trade"]["features"]
     assert "execution_trace" in manifest["contracts"]["trade"]["features"]
     assert "llm_context" in manifest["contracts"]["trade"]["features"]
     assert "factor contribution review" in manifest["contracts"]["trade"]["quality_gate"]
@@ -1058,6 +1124,9 @@ def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path
         result = suggester.suggest_from_experience(
             {
                 "experience_id": f"exp_fast_{idx}",
+                "source_table": "trade_outcome_review",
+                "source_id": f"rev_fast_{idx}",
+                "append_source": "live_review",
                 "primary_factor": "fast_factor",
                 "outcome_label": "good_win",
                 "reward_score": reward,
@@ -1072,6 +1141,10 @@ def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path
         "SELECT * FROM policy_suggestion WHERE scope_key='fast_factor'",
     )
     assert len(rows) == 1
+    evidence = json.loads(rows[0]["evidence_json"])
+    assert evidence["source_table"] == "trade_outcome_review"
+    assert evidence["source_id"] == "rev_fast_4"
+    assert evidence["append_source"] == "live_review"
 
 
 def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import DATA_DIR
+from research.features.evidence_contract import stable_hash
 from research.features.snapshot_validator import LearningDatasetValidator
 from research.model_shadow_queue import ModelShadowQueue
 from research.offline_trainer import (
@@ -97,6 +98,7 @@ class ModelShadowRunner:
         trade_items = [
             item for item in _read_jsonl(root / "trade_samples.jsonl")
             if (item.get("quality") or {}).get("model_ready")
+            and "supervised_training" in ((item.get("evidence_contract") or {}).get("allowed_uses") or [])
         ]
         scored = []
         skipped = 0
@@ -128,6 +130,8 @@ class ModelShadowRunner:
             scored.append(
                 {
                     "sample_id": item.get("sample_id"),
+                    "evidence_contract": item.get("evidence_contract") or {},
+                    "features_sha256": stable_hash(features),
                     "label": label,
                     "prediction": pred,
                     "score": round(score, 8),
@@ -156,6 +160,7 @@ class ModelShadowRunner:
             "artifact_sha256": _sha256(artifact_path),
             "dataset_ref": str(root),
             "dataset_validation": validation,
+            "dataset_evidence": ((artifact.get("explainability") or {}).get("evidence_contract") or {}).get("dataset_evidence") or {},
             "metrics": metrics,
             "decision": "passed" if passed else "failed",
             "capabilities": {

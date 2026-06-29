@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from research.features.feature_provider import DECISION_SCHEMA_VERSION, SCHEMA_VERSION
+from research.features.evidence_contract import EVIDENCE_CONTRACT_VERSION, validate_evidence_contract
 from research.features.readiness import DECISION_REQUIRED_FIELDS, TRADE_REQUIRED_FIELDS
 
 
@@ -71,6 +72,7 @@ def _schema_issues(items: list[dict], *, schema: str, required: list[str], kind:
                         "issue": "missing_field",
                     }
                 )
+        issues.extend(validate_evidence_contract(item, kind=kind))
     return issues
 
 
@@ -105,7 +107,7 @@ class LearningDatasetValidator:
         ):
             meta = files.get(key) or {}
             file_path = Path(str(meta.get("path") or root / f"{key}.jsonl"))
-            if not file_path.is_absolute():
+            if not file_path.is_absolute() and not file_path.exists():
                 file_path = root / file_path
             if not file_path.exists():
                 issues.append({"file": str(file_path), "issue": "missing_file", "key": key})

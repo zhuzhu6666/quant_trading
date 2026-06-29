@@ -49,6 +49,12 @@ async def lifespan(app: FastAPI):
         yaml_cfg = get_config()["parsed"]
         rc = RuntimeConfig.from_yaml(yaml_cfg)
         rc_replace(rc)
+        try:
+            from backend.services.evolution_ledger import persist_runtime_config_snapshot
+
+            persist_runtime_config_snapshot(rc, source="backend_lifespan_startup")
+        except Exception as snap_exc:
+            _lg.warning(f"[lifespan] RuntimeConfig snapshot failed (non-fatal): {snap_exc}")
         _lg.info("[lifespan] RuntimeConfig loaded from config/settings.yaml")
     except Exception as e:
         _lg.warning(f"[lifespan] RuntimeConfig load failed (non-fatal): {e}")
@@ -106,6 +112,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _lg.warning(f"[lifespan] learning backfill schedule failed (non-fatal): {e}")
 
+    # Supervisor counterfactual/advisory materialization.
+    try:
+        from backend.services.supervisor_learning_scheduler import schedule_supervisor_learning
+        if schedule_supervisor_learning(delay_sec=300.0, interval_sec=1800.0, limit=200):
+            _lg.info("[lifespan] supervisor learning scheduled")
+    except Exception as e:
+        _lg.warning(f"[lifespan] supervisor learning schedule failed (non-fatal): {e}")
+
+    # Autonomous learning factory: samples + governed suggestion materialization only.
+    try:
+        from backend.services.autonomous_learning import schedule_autonomous_learning
+        if schedule_autonomous_learning(delay_sec=420.0, interval_sec=1800.0, sample_limit=500, recommendation_limit=20):
+            _lg.info("[lifespan] autonomous learning scheduled")
+    except Exception as e:
+        _lg.warning(f"[lifespan] autonomous learning schedule failed (non-fatal): {e}")
+
     # Background warm-up db-health cache (避免首次请求阻塞线程池 20s)
     try:
         from backend.api.db_health import _on_startup as _warm_db_health
@@ -117,6 +139,18 @@ async def lifespan(app: FastAPI):
     yield
 
     # Stop scheduler on shutdown
+    try:
+        from backend.services.supervisor_learning_scheduler import stop_supervisor_learning
+        stop_supervisor_learning()
+    except Exception as e:
+        _lg.warning(f"[lifespan] supervisor learning stop failed: {e}")
+
+    try:
+        from backend.services.autonomous_learning import stop_autonomous_learning
+        stop_autonomous_learning()
+    except Exception as e:
+        _lg.warning(f"[lifespan] autonomous learning stop failed: {e}")
+
     try:
         if hasattr(app.state, "_evolution_scheduler"):
             app.state._evolution_scheduler.stop()

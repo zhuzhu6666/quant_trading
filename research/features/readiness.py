@@ -7,11 +7,13 @@ from research.features.feature_provider import (
     SCHEMA_VERSION,
     LearningFeatureProvider,
 )
+from research.features.evidence_contract import validate_evidence_contract
 
 
 TRADE_REQUIRED_FIELDS = [
     "schema_version",
     "sample_id",
+    "evidence_contract",
     "quality",
     "target",
     "decision",
@@ -27,6 +29,7 @@ TRADE_REQUIRED_FIELDS = [
 DECISION_REQUIRED_FIELDS = [
     "schema_version",
     "sample_id",
+    "evidence_contract",
     "quality",
     "target",
     "decision",
@@ -96,6 +99,8 @@ class LearningDatasetReadiness:
                         "issue": "missing_field",
                     }
                 )
+
+        issues.extend(validate_evidence_contract(item, kind=kind))
 
         quality = item.get("quality") or {}
         if quality.get("model_ready"):

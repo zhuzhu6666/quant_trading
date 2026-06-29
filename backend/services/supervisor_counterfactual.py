@@ -70,11 +70,12 @@ def _latest_supervisor_before_close(conn, position_id: str, close_ts: float) -> 
         FROM decision_ledger
         WHERE position_id=?
           AND event_type LIKE 'supervisor_%'
-          AND created_at <= ?
-        ORDER BY created_at DESC
+          AND decision_ts <= ?
+          AND decision_ts >= ?
+        ORDER BY decision_ts DESC, created_at DESC
         LIMIT 1
         """,
-        (str(position_id), float(close_ts) + 5.0),
+        (str(position_id), float(close_ts) + 5.0, float(close_ts) - 3600.0),
     ).fetchone()
     if not row:
         return {}

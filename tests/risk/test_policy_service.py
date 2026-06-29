@@ -222,6 +222,50 @@ def test_close_position_is_allowed_as_risk_reducing_action():
     assert verdict.audit_payload["position_id"] == "268"
 
 
+def test_position_supervisor_switch_requires_replay_and_counterfactual_evidence():
+    service = _service()
+
+    verdict = service.evaluate(
+        "switch_position_supervisor_template",
+        {
+            "suggestion_status": "approved",
+            "target_template_id": "position_supervisor:conservative.v1",
+            "previous_template_id": "position_supervisor:default.v1",
+            "evidence": {"replay_summary": {"sample_count": 10}},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "missing_supervisor_switch_evidence"
+    assert verdict.audit_payload["has_replay"] is True
+    assert verdict.audit_payload["has_counterfactual"] is False
+
+
+def test_position_supervisor_autonomous_switch_requires_demo_mode(monkeypatch):
+    from types import SimpleNamespace
+    from config import runtime_config as rc
+
+    monkeypatch.setattr(rc, "shared", lambda: SimpleNamespace(autonomy_mode="manual"))
+    service = _service()
+
+    verdict = service.evaluate(
+        "switch_position_supervisor_template",
+        {
+            "suggestion_status": "approved",
+            "target_template_id": "position_supervisor:conservative.v1",
+            "previous_template_id": "position_supervisor:default.v1",
+            "autonomous_apply": True,
+            "evidence": {
+                "replay_summary": {"sample_count": 10},
+                "counterfactual_summary": {"labels": {"over_protected": 3}},
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "autonomous_deploy_mode_not_allowed"
+
+
 def test_close_position_marks_holding_timeout_in_audit():
     service = _service()
 
@@ -240,6 +284,47 @@ def test_close_position_marks_holding_timeout_in_audit():
     assert verdict.allowed is True
     assert verdict.audit_payload["holding_timeout_exceeded"] is True
     assert verdict.audit_payload["holding_minutes"] == 65.0
+
+
+def test_switch_position_supervisor_template_requires_approval_and_valid_template():
+    service = _service()
+
+    blocked = service.evaluate(
+        "switch_position_supervisor_template",
+        {
+            "suggestion_status": "proposed",
+            "target_template_id": "position_supervisor:conservative.v1",
+            "evidence": {"day": "2026-06-29"},
+        },
+    )
+    assert blocked.allowed is False
+    assert blocked.reason == "suggestion_not_approved"
+
+    invalid = service.evaluate(
+        "switch_position_supervisor_template",
+        {
+            "suggestion_status": "approved",
+            "target_template_id": "position_supervisor:unknown.v1",
+            "evidence": {"day": "2026-06-29"},
+        },
+    )
+    assert invalid.allowed is False
+    assert invalid.reason == "invalid_position_supervisor_template"
+
+    allowed = service.evaluate(
+        "switch_position_supervisor_template",
+        {
+            "suggestion_status": "approved",
+            "target_template_id": "position_supervisor:conservative.v1",
+            "previous_template_id": "position_supervisor:default.v1",
+            "evidence": {
+                "replay_summary": {"sample_count": 3},
+                "counterfactual_summary": {"labels": {"over_protected": 1}},
+            },
+        },
+    )
+    assert allowed.allowed is True
+    assert allowed.audit_payload["target_template_id"] == "position_supervisor:conservative.v1"
 
 
 def test_update_weight_blocks_when_drawdown_near_limit():

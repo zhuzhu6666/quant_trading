@@ -112,6 +112,9 @@ class RuntimeConfig:
     risk_enable_nfp_skip: bool = False
     risk_enable_gvz_gate: bool = False
     risk_gvz_drop_pct: float = -2.0
+    position_supervisor_template_id: str = "position_supervisor:default.v1"
+    autonomy_mode: str = "demo_autonomous"
+    autonomy_demo_auto_apply: bool = True
     # 别名兼容 (旧代码仍读 strategy_sl_atr 等, 这里存一份等同值供 RuntimeConfig.patch)
     strategy_sl_atr: float = 1.5
     strategy_tp_atr: float = 2.5

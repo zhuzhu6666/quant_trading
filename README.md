@@ -1,6 +1,6 @@
 # Quant Trading System
 
-XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4: 因子引擎、执行闸门、cTrader demo、决策账本、规则驱动学习和模型数据管道已经合并为一条可审计闭环。
+XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4 + Phase H autonomous foundation: 因子引擎、执行闸门、cTrader demo、持仓监督、归因复盘、规则驱动学习、模型数据管道和统一进化账本已经合并为一条可审计、可回放的闭环。
 
 ## Current Entry Points
 
@@ -30,8 +30,11 @@ Market data
   -> PortfolioCompositor
   -> ExecutionGate / risk gate
   -> cTrader demo execution
+  -> PositionSupervisor / RiskPolicyService
   -> DecisionLedger / lifecycle events
-  -> Trade review / experience memory
+  -> Trade review / attribution recovery / experience memory
+  -> supervisor trace / counterfactual / policy suggestion
+  -> evolution_run / evolution_decision / runtime_config_snapshot
   -> learning dataset / model pipeline
 ```
 
@@ -54,8 +57,17 @@ python main.py --mode paper --timeframe M15 --use-router
 ## Tests
 
 ```bash
-python -m pytest tests\research\test_rule_learning_pipeline.py tests\research\test_model_registry.py -q
-python -m pytest tests\research tests\alpha\test_portfolio_compositor.py tests\test_live_service_lifecycle.py tests\test_evolution_closure_fixes.py tests\deployment\test_deployment.py tests\test_backend_jobs_manager.py tests\test_backend_jobs_state.py -q
+python -m pytest tests/test_autonomous_learning.py tests/test_position_supervisor_governance.py tests/test_supervisor_counterfactual.py tests/test_live_service_lifecycle.py tests/risk/test_policy_service.py tests/test_runtime_config.py -q
+python scripts/phase_a_health_check.py
+python scripts/phase_c_supervisor_check.py --db data/state.db --limit 30
 ```
 
 Full `tests` can be slower on Windows; prefer targeted suites for learning/live changes.
+
+## Current Autonomous Interfaces
+
+- `GET /api/learning/evolution/runs`
+- `GET /api/learning/evolution/runs/{run_id}`
+- `POST /api/learning/position-supervisor/traces/backfill`
+- `POST /api/learning/position-supervisor/traces/materialize-labels`
+- `POST /api/learning/autonomous/run`

@@ -87,7 +87,7 @@ def _create_db(path):
         (decision_id, trade_id, position_id, event_type, action_reason,
          action_score, action_json, created_at, decision_ts)
         VALUES ('d1', 'p1', 'p1', 'supervisor_tighten', 'thesis_weakening',
-                0.6, ?, 990.0, 990.0)
+                0.6, ?, 1300.0, 990.0)
         """,
         (
             json.dumps(

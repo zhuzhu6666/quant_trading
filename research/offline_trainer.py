@@ -57,6 +57,7 @@ def _label_from_trade(item: dict) -> int | None:
 
 def _factor_features(item: dict) -> dict[str, float]:
     features: dict[str, float] = {}
+    contract = item.get("evidence_contract") or {}
     for factor in item.get("factor_outcomes") or []:
         name = str(factor.get("factor") or "").strip()
         if not name:
@@ -85,6 +86,7 @@ def _factor_features(item: dict) -> dict[str, float]:
     decision = item.get("decision") or {}
     features["decision:action_score"] = _safe_float(decision.get("action_score"))
     features["quality:score"] = _safe_float((item.get("quality") or {}).get("quality_score"))
+    features["evidence:train_weight"] = _safe_float(contract.get("train_weight"), 1.0)
     execution = ((item.get("execution_trace") or {}).get("summary") or {})
     features["execution:failed_order"] = 1.0 if execution.get("has_failed_order") else 0.0
     features["execution:order_events"] = _safe_float(execution.get("order_event_count"))
@@ -186,6 +188,7 @@ class LearningStatisticalTrainer:
         trade_items = [
             item for item in _read_jsonl(root / "trade_samples.jsonl")
             if (item.get("quality") or {}).get("model_ready")
+            and "supervised_training" in ((item.get("evidence_contract") or {}).get("allowed_uses") or [])
         ]
         rows: list[tuple[dict[str, float], int]] = []
         skipped = 0
@@ -238,9 +241,11 @@ class LearningStatisticalTrainer:
             "dataset_validation": validation,
             "schemas": manifest.get("schemas") or {},
             "readiness": manifest.get("readiness") or {},
+            "evidence": manifest.get("evidence") or {},
             "feature_schema": {
                 "kind": "sparse_factor_statistics",
                 "sources": [
+                    "evidence_contract.train_weight",
                     "factor_outcomes",
                     "attribution_alignment",
                     "decision.action_score",
@@ -259,8 +264,13 @@ class LearningStatisticalTrainer:
             "metrics": metrics,
             "explainability": {
                 "top_weights": top_weights,
+                "evidence_contract": {
+                    "dataset_evidence": manifest.get("evidence") or {},
+                    "training_rule": "only samples with quality.model_ready=true and supervised_training in evidence_contract.allowed_uses are used",
+                },
                 "evidence_summary": [
                     "Model trained only from validator-approved snapshot files.",
+                    "Evidence contract controls train_weight and blocks weak or non-matured labels from supervised training.",
                     "Weights are mean feature differences between positive and negative trade outcomes.",
                     "Artifact is offline-only and is not eligible for direct live execution.",
                 ],

@@ -10,6 +10,7 @@ from typing import Any
 from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite
 from backend.ledger.service import DecisionLedger
 from backend.services.model_permissions import validate_model_artifact
+from research.features.evidence_contract import stable_hash
 
 
 MODEL_TYPE = "meta_model_lightgbm"
@@ -291,6 +292,14 @@ class MetaModelLightGBMService:
                         "label": label,
                         "label_name": POSTURE_LABELS[label],
                         "features": {name: _safe_float(features.get(name)) for name in FEATURE_NAMES},
+                        "traceability": {
+                            "source_table": "trade_outcome_review",
+                            "target_review_id": target["review_id"],
+                            "target_position_id": target["position_id"],
+                            "history_count": len(history),
+                            "future_count": len(future),
+                            "causal_level": "observational",
+                        },
                     }
                 )
         finally:
@@ -581,6 +590,11 @@ class MetaModelLightGBMService:
             "explainability": {
                 "feature_importance": feature_importance,
                 "summary": "LightGBM shadow-only meta posture model. Scores are advisory and logged.",
+                "evidence_contract": {
+                    "causal_level": "observational",
+                    "source": "rolling aggregate of trade reviews, risk verdicts, shadow audits, counterfactual reviews, LLM audits, and permission audits",
+                    "training_rule": "shadow-only aggregate posture model; not a single-trade causal proof",
+                },
             },
             "capabilities": {
                 "live_trading": False,
@@ -752,6 +766,12 @@ class MetaModelLightGBMService:
                 "shadow_only": True,
             },
             "guardrails": list(artifact.get("guardrails") or []),
+            "traceability": {
+                "sample_id": sample["sample_id"],
+                "artifact_path": str(artifact.get("artifact_path") or ""),
+                "features_sha256": stable_hash(sample.get("features") or {}),
+                "input_traceability": sample.get("traceability") or {},
+            },
         }
         payload = {
             "sample_id": sample["sample_id"],
@@ -762,6 +782,10 @@ class MetaModelLightGBMService:
             "label": sample["label"],
             "label_name": sample["label_name"],
             "features": sample["features"],
+            "traceability": {
+                **(sample.get("traceability") or {}),
+                "features_sha256": stable_hash(sample.get("features") or {}),
+            },
         }
         ledger_decision_id = ""
         if materialize_ledger:

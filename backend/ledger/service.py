@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, ensure_sqlite_columns
 
 
 def _json_dumps(value: Any) -> str:
@@ -40,6 +40,16 @@ class DecisionLedger:
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_columns(
+            self.db_path,
+            "position_supervisor_trace",
+            {
+                "trace_integrity": "trace_integrity TEXT DEFAULT 'full'",
+                "config_version": "config_version INTEGER DEFAULT 0",
+                "config_hash": "config_hash TEXT DEFAULT ''",
+                "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
+            },
+        )
 
     @staticmethod
     def new_id(prefix: str) -> str:
@@ -268,6 +278,95 @@ class DecisionLedger:
                 ),
             )
         return event_id
+
+    def log_position_supervisor_trace(
+        self,
+        *,
+        position_id: str,
+        decision_id: str = "",
+        trade_id: str = "",
+        symbol: str = "",
+        timeframe: str = "",
+        tick: int = 0,
+        event_ts: float | None = None,
+        action: str = "",
+        summary_reason: str = "",
+        confidence: float = 0.0,
+        template_id: str = "",
+        template_version: str = "",
+        stage: str = "",
+        outcome: str = "",
+        risk_action: str = "",
+        risk_allowed: bool = False,
+        risk_reason: str = "",
+        execution_status: str = "",
+        execution_reason: str = "",
+        context: dict | None = None,
+        verdict: dict | None = None,
+        risk_verdict: dict | None = None,
+        execution: dict | None = None,
+        trace_integrity: str = "full",
+        config_version: int = 0,
+        config_hash: str = "",
+        evolution_run_id: str = "",
+    ) -> str:
+        trace_id = self.new_id("psvtrace")
+        now = time.time()
+        if not config_version or not config_hash:
+            try:
+                from backend.services.evolution_ledger import current_runtime_config_snapshot
+
+                snapshot = current_runtime_config_snapshot(db_path=self.db_path, create_if_missing=False)
+                config_version = int(snapshot.get("config_version") or 0)
+                config_hash = str(snapshot.get("config_hash") or "")
+            except Exception:
+                config_version = int(config_version or 0)
+                config_hash = str(config_hash or "")
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO position_supervisor_trace
+                (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
+                 tick, event_ts, action, summary_reason, confidence, template_id,
+                 template_version, stage, outcome, risk_action, risk_allowed,
+                 risk_reason, execution_status, execution_reason, context_json,
+                 verdict_json, risk_verdict_json, execution_json, trace_integrity,
+                 config_version, config_hash, evolution_run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trace_id,
+                    decision_id,
+                    str(position_id or ""),
+                    trade_id,
+                    symbol,
+                    timeframe,
+                    int(tick or 0),
+                    float(event_ts or now),
+                    action,
+                    summary_reason,
+                    float(confidence or 0.0),
+                    template_id,
+                    template_version,
+                    stage,
+                    outcome,
+                    risk_action,
+                    1 if risk_allowed else 0,
+                    risk_reason,
+                    execution_status,
+                    execution_reason,
+                    _json_dumps(context),
+                    _json_dumps(verdict),
+                    _json_dumps(risk_verdict),
+                    _json_dumps(execution),
+                    str(trace_integrity or "full"),
+                    int(config_version or 0),
+                    str(config_hash or ""),
+                    str(evolution_run_id or ""),
+                    now,
+                ),
+            )
+        return trace_id
 
     def get_latest_entry_decision(self, position_id: str) -> sqlite3.Row | None:
         with self._conn() as conn:

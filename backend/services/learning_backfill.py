@@ -225,12 +225,12 @@ def fetch_missing_positions(
         SELECT
             position_id,
             MAX(exec_timestamp) AS close_ts,
-            SUM(COALESCE(gross_profit, 0) + COALESCE(swap, 0) - COALESCE(commission, 0)) AS net_pnl,
+            SUM(COALESCE(gross_profit, 0) + COALESCE(swap, 0) - COALESCE(close_commission, 0)) AS net_pnl,
             MAX(entry_price) AS entry_price,
             MAX(exec_price) AS exec_price,
             MAX(balance) AS balance,
             MAX(deal_id) AS deal_id,
-            MAX(ABS(commission)) AS close_commission,
+            SUM(COALESCE(close_commission, 0)) AS close_commission,
             MAX(gross_profit) AS gross_profit,
             MAX(swap) AS swap,
             MIN(CASE WHEN is_close = 0 THEN exec_timestamp END) AS broker_entry_ts,
@@ -449,10 +449,34 @@ def insert_review(conn: sqlite3.Connection, record: dict) -> None:
     )
 
 
+def _ensure_experience_memory_source_columns(conn: sqlite3.Connection) -> None:
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(experience_memory)").fetchall()}
+    migrations = {
+        "source_table": "ALTER TABLE experience_memory ADD COLUMN source_table TEXT DEFAULT ''",
+        "source_id": "ALTER TABLE experience_memory ADD COLUMN source_id TEXT DEFAULT ''",
+        "append_source": "ALTER TABLE experience_memory ADD COLUMN append_source TEXT DEFAULT ''",
+        "evolution_run_id": "ALTER TABLE experience_memory ADD COLUMN evolution_run_id TEXT DEFAULT ''",
+    }
+    for name, ddl in migrations.items():
+        if name not in cols:
+            conn.execute(ddl)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_experience_memory_source
+        ON experience_memory(source_table, source_id, append_source)
+        """
+    )
+
+
+def _stable_experience_id(append_source: str, source_table: str, source_id: str) -> str:
+    digest = hashlib.sha1(f"{append_source}:{source_table}:{source_id}".encode("utf-8")).hexdigest()[:18]
+    return f"exp_{digest}"
+
+
 def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
-    conn.execute("DELETE FROM experience_memory")
-    conn.execute("DELETE FROM experience_pattern_stats")
-    conn.execute("DELETE FROM policy_suggestion")
+    _ensure_experience_memory_source_columns(conn)
+    conn.execute("DELETE FROM experience_memory WHERE append_source='learning_backfill.v1'")
+    conn.execute("DELETE FROM experience_pattern_stats WHERE scope_type='factor'")
     reviews = conn.execute(
         """
         SELECT review_id, trade_id, position_id, outcome_label, pnl, failure_tags_json,
@@ -516,10 +540,18 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
         evidence_strength = max(0.05, evidence_strength * evidence_scale)
 
         setup_hash = hashlib.sha1(f"|{primary_factor}|{outcome_label}".encode("utf-8")).hexdigest()[:16]
-        experience_id = new_id("exp")
+        source_table = "trade_outcome_review"
+        source_id = str(row["review_id"] or row["trade_id"] or row["position_id"] or "")
+        append_source = "learning_backfill.v1"
+        experience_id = _stable_experience_id(append_source, source_table, source_id)
         context = {
             "position_id": str(row["position_id"] or ""),
             "trade_id": str(row["trade_id"] or ""),
+            "experience_source": {
+                "source_table": source_table,
+                "source_id": source_id,
+                "append_source": append_source,
+            },
             "primary_factor": primary_factor,
             "failure_tags": failure_tags,
             "close_reason": close_reason,
@@ -529,15 +561,19 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
         }
         conn.execute(
             """
-            INSERT INTO experience_memory
-            (experience_id, trade_id, regime_id, setup_hash, decision_context_json,
+            INSERT OR REPLACE INTO experience_memory
+            (experience_id, trade_id, source_table, source_id, append_source,
+             regime_id, setup_hash, decision_context_json,
              outcome_label, reward_score, failure_tags_json, recommended_action,
-             evidence_strength, artifact_version, created_at)
-            VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'v1', ?)
+             evidence_strength, artifact_version, evolution_run_id, created_at)
+            VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'v1', '', ?)
             """,
             (
                 experience_id,
                 str(row["trade_id"] or ""),
+                source_table,
+                source_id,
+                append_source,
                 setup_hash,
                 json.dumps(context, ensure_ascii=False),
                 outcome_label,
@@ -609,6 +645,10 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
                 (primary_factor, action),
             ).fetchone()
             evidence = {
+                "source": "learning_backfill.v1",
+                "source_table": source_table,
+                "source_id": source_id,
+                "append_source": append_source,
                 "sample_count": sample_count,
                 "win_count": win_count,
                 "bad_loss_count": bad_loss_count,

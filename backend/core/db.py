@@ -380,6 +380,108 @@ CREATE TABLE IF NOT EXISTS supervisor_counterfactual_review (
     updated_at REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS runtime_config_snapshot (
+    config_version INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_hash TEXT NOT NULL,
+    source TEXT DEFAULT '',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    run_id TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS evolution_run (
+    run_id TEXT PRIMARY KEY,
+    run_type TEXT NOT NULL,
+    trigger_source TEXT DEFAULT '',
+    status TEXT DEFAULT 'running',
+    config_version INTEGER DEFAULT 0,
+    config_hash TEXT DEFAULT '',
+    summary_json TEXT DEFAULT '{}',
+    started_at REAL NOT NULL DEFAULT 0.0,
+    ended_at REAL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS evolution_decision (
+    decision_id TEXT PRIMARY KEY,
+    run_id TEXT DEFAULT '',
+    decision_type TEXT NOT NULL,
+    scope_type TEXT DEFAULT '',
+    scope_key TEXT DEFAULT '',
+    action TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    evidence_json TEXT DEFAULT '{}',
+    risk_verdict_json TEXT DEFAULT '{}',
+    before_json TEXT DEFAULT '{}',
+    after_json TEXT DEFAULT '{}',
+    result_json TEXT DEFAULT '{}',
+    rollback_json TEXT DEFAULT '{}',
+    config_version INTEGER DEFAULT 0,
+    config_hash TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS position_supervisor_trace (
+    trace_id TEXT PRIMARY KEY,
+    decision_id TEXT DEFAULT '',
+    position_id TEXT NOT NULL,
+    trade_id TEXT DEFAULT '',
+    symbol TEXT DEFAULT '',
+    timeframe TEXT DEFAULT '',
+    tick INTEGER DEFAULT 0,
+    event_ts REAL NOT NULL DEFAULT 0.0,
+    action TEXT DEFAULT '',
+    summary_reason TEXT DEFAULT '',
+    confidence REAL DEFAULT 0.0,
+    template_id TEXT DEFAULT '',
+    template_version TEXT DEFAULT '',
+    stage TEXT DEFAULT '',
+    outcome TEXT DEFAULT '',
+    risk_action TEXT DEFAULT '',
+    risk_allowed INTEGER DEFAULT 0,
+    risk_reason TEXT DEFAULT '',
+    execution_status TEXT DEFAULT '',
+    execution_reason TEXT DEFAULT '',
+    context_json TEXT DEFAULT '{}',
+    verdict_json TEXT DEFAULT '{}',
+    risk_verdict_json TEXT DEFAULT '{}',
+    execution_json TEXT DEFAULT '{}',
+    trace_integrity TEXT DEFAULT 'full',
+    config_version INTEGER DEFAULT 0,
+    config_hash TEXT DEFAULT '',
+    evolution_run_id TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_position_supervisor_trace_position_ts
+ON position_supervisor_trace(position_id, event_ts);
+CREATE INDEX IF NOT EXISTS idx_position_supervisor_trace_action_outcome
+ON position_supervisor_trace(action, outcome, event_ts);
+
+CREATE TABLE IF NOT EXISTS autonomous_learning_sample (
+    sample_id TEXT PRIMARY KEY,
+    sample_type TEXT NOT NULL,
+    source_table TEXT DEFAULT '',
+    source_id TEXT DEFAULT '',
+    decision_id TEXT DEFAULT '',
+    trade_id TEXT DEFAULT '',
+    position_id TEXT DEFAULT '',
+    symbol TEXT DEFAULT '',
+    timeframe TEXT DEFAULT '',
+    event_ts REAL NOT NULL DEFAULT 0.0,
+    label_status TEXT DEFAULT 'pending',
+    integrity TEXT DEFAULT 'full',
+    train_weight REAL DEFAULT 1.0,
+    features_json TEXT DEFAULT '{}',
+    verdict_json TEXT DEFAULT '{}',
+    label_json TEXT DEFAULT '{}',
+    trace_json TEXT DEFAULT '{}',
+    evidence_contract_json TEXT DEFAULT '{}',
+    config_version INTEGER DEFAULT 0,
+    config_hash TEXT DEFAULT '',
+    evolution_run_id TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE TABLE IF NOT EXISTS model_permission_audit (
     audit_id TEXT PRIMARY KEY,
     model_type TEXT DEFAULT '',
@@ -408,6 +510,9 @@ CREATE TABLE IF NOT EXISTS factor_contribution_review (
 CREATE TABLE IF NOT EXISTS experience_memory (
     experience_id TEXT PRIMARY KEY,
     trade_id TEXT DEFAULT '',
+    source_table TEXT DEFAULT '',
+    source_id TEXT DEFAULT '',
+    append_source TEXT DEFAULT '',
     regime_id TEXT DEFAULT '',
     setup_hash TEXT DEFAULT '',
     decision_context_json TEXT DEFAULT '{}',
@@ -417,6 +522,7 @@ CREATE TABLE IF NOT EXISTS experience_memory (
     recommended_action TEXT DEFAULT '',
     evidence_strength REAL DEFAULT 0.0,
     artifact_version TEXT DEFAULT 'v1',
+    evolution_run_id TEXT DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -582,6 +688,11 @@ CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_even
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
 CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_position ON supervisor_counterfactual_review(position_id, close_ts);
 CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_label ON supervisor_counterfactual_review(label, updated_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_config_snapshot_hash ON runtime_config_snapshot(config_hash, created_at);
+CREATE INDEX IF NOT EXISTS idx_evolution_run_type ON evolution_run(run_type, status, started_at);
+CREATE INDEX IF NOT EXISTS idx_evolution_decision_run ON evolution_decision(run_id, decision_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_autonomous_learning_sample_type ON autonomous_learning_sample(sample_type, label_status, event_ts);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_autonomous_learning_sample_source ON autonomous_learning_sample(sample_type, source_table, source_id);
 CREATE INDEX IF NOT EXISTS idx_model_permission_audit_created ON model_permission_audit(created_at);
 CREATE INDEX IF NOT EXISTS idx_model_permission_audit_model ON model_permission_audit(model_type, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_factor_contribution_review_trade ON factor_contribution_review(trade_id);
@@ -628,6 +739,26 @@ CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp
 def init_state_db() -> None:
     """初始化 state.db (幂等, 启动时调用)."""
     _init_sqlite_db(STATE_DB, STATE_DB_DDL)
+    ensure_sqlite_columns(
+        STATE_DB,
+        "position_supervisor_trace",
+        {
+            "trace_integrity": "trace_integrity TEXT DEFAULT 'full'",
+            "config_version": "config_version INTEGER DEFAULT 0",
+            "config_hash": "config_hash TEXT DEFAULT ''",
+            "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
+        },
+    )
+    ensure_sqlite_columns(
+        STATE_DB,
+        "autonomous_learning_sample",
+        {
+            "evidence_contract_json": "evidence_contract_json TEXT DEFAULT '{}'",
+            "config_version": "config_version INTEGER DEFAULT 0",
+            "config_hash": "config_hash TEXT DEFAULT ''",
+            "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
+        },
+    )
 
 
 def get_state_conn() -> sqlite3.Connection:

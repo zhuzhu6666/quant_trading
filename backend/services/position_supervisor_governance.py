@@ -155,6 +155,37 @@ def _amend_issue_count(conn: sqlite3.Connection, *, day: str) -> dict[str, int]:
     return {str(row["event_type"]): int(row["n"] or 0) for row in rows}
 
 
+def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, Any]:
+    start_ts, end_ts = _day_bounds(day)
+    try:
+        rows = conn.execute(
+            """
+            SELECT label, supervisor_event_type, COUNT(*) AS n
+            FROM supervisor_counterfactual_review
+            WHERE updated_at >= ? AND updated_at < ?
+            GROUP BY label, supervisor_event_type
+            ORDER BY n DESC
+            """,
+            (start_ts, end_ts),
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    labels: dict[str, int] = {}
+    events: dict[str, int] = {}
+    for row in rows:
+        label = str(row["label"] or "")
+        event_type = str(row["supervisor_event_type"] or "")
+        n = int(row["n"] or 0)
+        labels[label] = labels.get(label, 0) + n
+        events[event_type] = events.get(event_type, 0) + n
+    return {
+        "day": day,
+        "total": sum(labels.values()),
+        "labels": labels,
+        "events": events,
+    }
+
+
 def replay_position_supervisor_templates(
     *,
     day: str = "2026-06-26",
@@ -251,10 +282,26 @@ def build_position_supervisor_advisories(
     default_summary = next((x for x in replay["templates"] if x["template_id"] == DEFAULT_TEMPLATE_ID), {})
     candidate_summary = next((x for x in replay["templates"] if x["template_id"] == CONSERVATIVE_TEMPLATE_ID), {})
     amend_issues = replay.get("amend_issues") or {}
+    conn = connect_sqlite(db_path, read_only=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        counterfactual_summary = _counterfactual_summary(conn, day=day)
+    finally:
+        conn.close()
+    replay_summary = {
+        "sample_count": replay.get("sample_count"),
+        "comparison": replay.get("comparison"),
+        "amend_issues": amend_issues,
+    }
     suggestions: list[dict[str, Any]] = []
 
     def _add(action: str, confidence: float, reason: str, evidence: dict[str, Any]) -> None:
         suggestion_id = "psv_" + hashlib.sha1(f"{day}:{action}:{reason}".encode("utf-8")).hexdigest()[:16]
+        evidence = {
+            **evidence,
+            "replay_summary": replay_summary,
+            "counterfactual_summary": counterfactual_summary,
+        }
         suggestions.append(
             {
                 "suggestion_id": suggestion_id,
@@ -353,9 +400,8 @@ def build_position_supervisor_advisories(
         "advisory_only": True,
         "materialized": bool(materialize),
         "replay_summary": {
-            "sample_count": replay.get("sample_count"),
-            "comparison": replay.get("comparison"),
-            "amend_issues": replay.get("amend_issues"),
+            **replay_summary,
+            "counterfactual_summary": counterfactual_summary,
         },
         "items": suggestions,
     }
