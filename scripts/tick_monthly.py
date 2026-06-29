@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import lzma
+import os
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -154,3 +155,30 @@ def monthly_summary(root: Path = MONTHLY_ROOT) -> tuple[int, float | None]:
         if max_ts is not None:
             latest = max(float(max_ts), latest or 0.0)
     return total, latest
+
+
+def refresh_legacy_ticks_pointer(
+    latest_ts: float | None,
+    *,
+    root: Path = MONTHLY_ROOT,
+    legacy_db: Path = Path("data/ticks.duckdb"),
+) -> bool:
+    """Point data/ticks.duckdb at the latest monthly DB on Linux servers.
+
+    The function only updates an existing symlink or creates a missing one. It
+    deliberately leaves a regular ticks.duckdb file untouched.
+    """
+    if latest_ts is None or os.name == "nt":
+        return False
+    latest_dt = datetime.fromtimestamp(float(latest_ts), tz=timezone.utc)
+    target = month_db_path(latest_dt.year, latest_dt.month, root)
+    if not target.exists():
+        return False
+    if legacy_db.exists() or legacy_db.is_symlink():
+        if not legacy_db.is_symlink():
+            return False
+        legacy_db.unlink()
+    legacy_db.parent.mkdir(parents=True, exist_ok=True)
+    relative_target = Path("ticks_monthly") / target.name
+    legacy_db.symlink_to(relative_target)
+    return True

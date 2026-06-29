@@ -20,6 +20,7 @@ from scripts.tick_monthly import (  # noqa: E402
     decode_bi5,
     latest_tick_ts,
     monthly_summary,
+    refresh_legacy_ticks_pointer,
     write_hour_records,
 )
 
@@ -81,6 +82,7 @@ def main() -> int:
         current += timedelta(hours=1)
 
     count, max_ts = monthly_summary()
+    refresh_legacy_ticks_pointer(max_ts)
     latest = datetime.fromtimestamp(max_ts, tz=timezone.utc) if max_ts else "N/A"
     print(f"✅ Dukascopy 月库增量完成: +{total} ticks", flush=True)
     print(f"   DB: {count:,} ticks | 最新: {latest}", flush=True)
