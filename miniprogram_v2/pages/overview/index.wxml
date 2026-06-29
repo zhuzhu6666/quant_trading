@@ -61,8 +61,8 @@
       <view class="section-note">{{realizedCurveSummary}}</view>
       <view wx:if="{{!realizedCurveEmpty}}" class="pnl-tv-card" bindtap="onOpenPnlChart">
         <view>
-          <view class="pnl-tv-title">打开 TradingView 图表</view>
-          <view class="pnl-tv-sub">支持拖动、缩放、十字线和完整历史曲线</view>
+          <view class="pnl-tv-title">打开专业收益图</view>
+          <view class="pnl-tv-sub">所有历史平仓 · 系统权益曲线</view>
         </view>
         <view class="pnl-tv-action">进入</view>
       </view>
