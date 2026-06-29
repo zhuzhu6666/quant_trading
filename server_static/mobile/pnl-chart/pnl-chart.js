@@ -16,11 +16,13 @@
 
   function getToken() {
     const params = new URLSearchParams(window.location.search);
-    const token = params.get('token') || sessionStorage.getItem(TOKEN_KEY) || '';
-    if (params.get('token')) {
+    const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+    const token = params.get('token') || hashParams.get('token') || sessionStorage.getItem(TOKEN_KEY) || '';
+    if (params.get('token') || hashParams.get('token')) {
       sessionStorage.setItem(TOKEN_KEY, token);
       params.delete('token');
-      const cleanUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`;
+      hashParams.delete('token');
+      const cleanUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ''}${hashParams.toString() ? `#${hashParams}` : ''}`;
       window.history.replaceState(null, '', cleanUrl);
     }
     return token;
