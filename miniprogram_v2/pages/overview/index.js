@@ -30,6 +30,24 @@ function formatCapital(value) {
   return n.toFixed(2);
 }
 
+function uniqueRecentTrades(points = [], limit = 3) {
+  const seen = new Set();
+  const rows = [];
+  for (let index = points.length - 1; index >= 0 && rows.length < limit; index -= 1) {
+    const item = points[index];
+    const key = [
+      item.timeText || '',
+      item.pnlText || formatMoney(item.pnl),
+      item.cumulativeText || formatMoney(item.cumulative),
+      item.equityText || formatCapital(item.equity),
+    ].join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(item);
+  }
+  return rows;
+}
+
 function buildSystemNowSummary({ loopRunning, positionCount, pendingTodoCount, learningSummaryStatus }) {
   const loopText = loopRunning ? '交易循环在线' : '交易循环未运行';
   const positionText = positionCount > 0 ? `当前有 ${positionCount} 笔持仓` : '当前无持仓';
@@ -113,7 +131,7 @@ function buildPnlCurve(series = {}) {
     minText: formatMoney(minValue),
     maxText: formatMoney(maxValue),
     latest: chartPoints.length ? chartPoints[chartPoints.length - 1] : null,
-    recent: chartPoints.slice(-3).reverse(),
+    recent: uniqueRecentTrades(chartPoints, 4),
   };
 }
 

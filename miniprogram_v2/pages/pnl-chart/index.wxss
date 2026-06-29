@@ -140,10 +140,6 @@
   border-top: 1rpx solid #edf2f7;
 }
 
-.trade-row:first-of-type {
-  border-top: 0;
-}
-
 .trade-values {
   min-width: 0;
   text-align: right;

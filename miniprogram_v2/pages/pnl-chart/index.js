@@ -7,6 +7,15 @@ const UCharts = UChartsModule.default || UChartsModule;
 
 const INITIAL_CAPITAL = 500;
 const CHART_ID = 'pnlChart';
+const MAX_CHART_POINTS = 80;
+
+function buildChartHint(rangeKey, total) {
+  if (!total) return '暂无历史平仓记录';
+  if (rangeKey === 'all') {
+    return `全量共 ${total} 笔 · 当前预览最近 ${Math.min(MAX_CHART_POINTS, total)} 笔 · 初始资金 ${formatCapital(INITIAL_CAPITAL)}`;
+  }
+  return `当前显示 最近 ${rangeKey} 笔 · 初始资金 ${formatCapital(INITIAL_CAPITAL)}`;
+}
 
 function getCanvasScale() {
   if (wx.getWindowInfo) {
@@ -40,6 +49,24 @@ function makeSummarySignature(summary = {}, points = []) {
     Number(summary.trades || points.length || 0),
     Number(summary.win_rate || 0),
   ].join('|');
+}
+
+function uniqueRecentRows(points = [], limit = 8) {
+  const seen = new Set();
+  const rows = [];
+  for (let index = points.length - 1; index >= 0 && rows.length < limit; index -= 1) {
+    const item = points[index];
+    const key = [
+      item.timeText || '',
+      item.pnlText || formatMoney(item.pnl),
+      item.cumulativeText || formatMoney(item.cumulative),
+      item.equityText || formatCapital(item.equity),
+    ].join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(item);
+  }
+  return rows;
 }
 
 function normalizePoints(series = {}) {
@@ -80,7 +107,11 @@ function buildRange(points, rangeKey) {
     equityText: formatCapital(INITIAL_CAPITAL),
     toneClass: '',
   };
-  if (rangeKey === 'all') return [basePoint].concat(points);
+  if (rangeKey === 'all') {
+    const startIndex = Math.max(points.length - MAX_CHART_POINTS, 0);
+    const anchor = startIndex > 0 ? points[startIndex - 1] : basePoint;
+    return [anchor].concat(points.slice(startIndex));
+  }
   const size = Number(rangeKey || 80);
   const startIndex = Math.max(points.length - size, 0);
   const anchor = startIndex > 0 ? points[startIndex - 1] : basePoint;
@@ -113,11 +144,12 @@ Page({
   },
 
   onReady() {
-    this.renderChart();
+    this.scheduleRenderChart();
   },
 
   onUnload() {
     if (this._unsub) this._unsub();
+    if (this._renderTimer) clearTimeout(this._renderTimer);
   },
 
   async onRefresh() {
@@ -153,16 +185,12 @@ Page({
       profitToneClass: toneFromPnl(realized) === 'positive' ? 'accent-pos' : toneFromPnl(realized) === 'negative' ? 'accent-neg' : '',
       tradeCountText: String(summary.trades || points.length),
       winRateText: formatPct(winRate * 100),
-      chartHint: points.length
-        ? `当前显示 ${this.data.rangeKey === 'all' ? '全量' : `最近 ${this.data.rangeKey} 笔`} · 初始资金 ${formatCapital(INITIAL_CAPITAL)}`
-        : '暂无历史平仓记录',
+      chartHint: buildChartHint(this.data.rangeKey, points.length),
       selectedText: latest
         ? `${latest.timeText} · 单笔 ${latest.pnlText} · 累计 ${latest.cumulativeText} · 权益 ${latest.equityText}`
         : '等待历史平仓数据',
-      recentRows: points.slice(-8).reverse(),
-    }, () => {
-      this.renderChart();
-    });
+      recentRows: uniqueRecentRows(points, 8),
+    }, () => this.scheduleRenderChart());
   },
 
   onRangeTap(event) {
@@ -172,8 +200,16 @@ Page({
     this._chartSignature = '';
     this.setData({
       rangeKey,
-      chartHint: `当前显示 ${rangeKey === 'all' ? '全量' : `最近 ${rangeKey} 笔`} · 初始资金 ${formatCapital(INITIAL_CAPITAL)}`,
-    }, () => this.renderChart());
+      chartHint: buildChartHint(rangeKey, (this._points || []).length),
+    }, () => this.scheduleRenderChart());
+  },
+
+  scheduleRenderChart() {
+    if (this._renderTimer) clearTimeout(this._renderTimer);
+    this._renderTimer = setTimeout(() => {
+      this._renderTimer = null;
+      this.renderChart();
+    }, 80);
   },
 
   renderChart() {
@@ -188,13 +224,8 @@ Page({
         if (renderSeq !== this._chartRenderSeq) return;
         if (!(res && res.node && res.width && res.height)) return;
         const canvas = res.node;
-        const context = canvas.getContext('2d');
         const width = res.width;
         const height = res.height;
-        const canvasScale = getCanvasScale();
-        canvas.width = Math.round(width * canvasScale);
-        canvas.height = Math.round(height * canvasScale);
-        context.scale(canvasScale, canvasScale);
 
         const visiblePoints = buildRange(points, this.data.rangeKey);
         const categories = visiblePoints.map((item, index) => {
@@ -210,7 +241,7 @@ Page({
         const yMax = maxValue + span * 0.12;
         const color = data[data.length - 1] >= INITIAL_CAPITAL ? '#16a34a' : '#dc2626';
         this._visiblePoints = visiblePoints;
-        const scrollEnabled = this.data.rangeKey === 'all' && visiblePoints.length > 80;
+        const scrollEnabled = false;
         const dataChecksum = data.reduce((sum, value, index) => sum + Math.round(value * 100) * (index + 1), 0);
         const nextChartSignature = [
           this.data.rangeKey,
@@ -226,6 +257,13 @@ Page({
         ].join('|');
         if (nextChartSignature === this._chartSignature) return;
         this._chartSignature = nextChartSignature;
+
+        const context = canvas.getContext('2d');
+        const canvasScale = getCanvasScale();
+        canvas.width = Math.round(width * canvasScale);
+        canvas.height = Math.round(height * canvasScale);
+        context.scale(canvasScale, canvasScale);
+
         this._chart = new UCharts({
           type: 'line',
           context,

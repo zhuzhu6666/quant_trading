@@ -46,37 +46,32 @@
 
     <section-card title="系统收益曲线" subtitle="初始资金 500，来自所有历史系统平仓">
       <view class="realized-head">
-        <view>
+        <view class="realized-main">
           <view class="small muted">当前系统权益</view>
           <view class="value-md {{realizedPnlTone === 'positive' ? 'accent-pos' : realizedPnlTone === 'negative' ? 'accent-neg' : ''}}">{{realizedCurveLatest}}</view>
           <view class="small muted">累计盈利 {{realizedCurveProfit}}</view>
         </view>
         <view class="realized-stats">
           <view class="tag">初始 {{realizedCurveInitialCapital}}</view>
-          <view class="tag">主图：累计盈利</view>
+          <view class="tag">主图：系统权益</view>
           <view class="tag">历史平仓 {{realizedCurveTrades}}</view>
           <view class="tag">胜率 {{realizedCurveWinRate}}</view>
         </view>
       </view>
       <view class="section-note">{{realizedCurveSummary}}</view>
-      <view wx:if="{{!realizedCurveEmpty}}" class="pnl-tv-card" bindtap="onOpenPnlChart">
+      <navigator wx:if="{{!realizedCurveEmpty}}" class="pnl-tv-card" url="/pages/pnl-chart/index" hover-class="pnl-tv-card-hover">
         <view>
           <view class="pnl-tv-title">打开专业收益图</view>
           <view class="pnl-tv-sub">所有历史平仓 · 系统权益曲线</view>
         </view>
         <view class="pnl-tv-action">进入</view>
-      </view>
+      </navigator>
       <view wx:else class="empty">暂无历史平仓记录</view>
-      <view wx:if="{{realizedSelectedTrade}}" class="pnl-selected-row">
-        <view class="small muted">{{realizedSelectedTrade.timeText}}</view>
-        <view class="small {{realizedSelectedTrade.tone === 'positive' ? 'accent-pos' : realizedSelectedTrade.tone === 'negative' ? 'accent-neg' : ''}}">{{realizedSelectedTrade.pnlText}}</view>
-        <view class="small">累计 {{realizedSelectedTrade.cumulativeText}} · 权益 {{realizedSelectedTrade.equityText}}</view>
-      </view>
       <view wx:if="{{realizedRecentTrades.length}}" class="realized-recent">
         <view wx:for="{{realizedRecentTrades}}" wx:key="id" class="realized-trade-row">
           <view class="small muted">{{item.timeText}}</view>
           <view class="small {{item.tone === 'positive' ? 'accent-pos' : item.tone === 'negative' ? 'accent-neg' : ''}}">{{item.pnlText}}</view>
-          <view class="small">累计 {{item.cumulativeText}} · 权益 {{item.equityText}}</view>
+          <view class="small pnl-row-values">累计 {{item.cumulativeText}} · 权益 {{item.equityText}}</view>
         </view>
       </view>
     </section-card>
