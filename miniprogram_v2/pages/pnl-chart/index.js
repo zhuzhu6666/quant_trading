@@ -21,6 +21,27 @@ function formatCapital(value) {
   return n.toFixed(2);
 }
 
+function makePointsSignature(points = []) {
+  if (!points.length) return 'empty';
+  const first = points[0];
+  const latest = points[points.length - 1];
+  return [
+    points.length,
+    first.ts,
+    first.cumulative,
+    latest.ts,
+    latest.cumulative,
+  ].join('|');
+}
+
+function makeSummarySignature(summary = {}, points = []) {
+  return [
+    Number(summary.realized_pnl || 0),
+    Number(summary.trades || points.length || 0),
+    Number(summary.win_rate || 0),
+  ].join('|');
+}
+
 function normalizePoints(series = {}) {
   const rawPoints = Array.isArray(series.points) ? series.points : [];
   return rawPoints
@@ -84,6 +105,8 @@ Page({
   onLoad() {
     this._points = [];
     this._chart = null;
+    this._viewSignature = '';
+    this._chartSignature = '';
     this._unsub = liveStore.subscribe(() => this.syncFromStore());
     this.syncFromStore();
     this.onRefresh();
@@ -114,6 +137,13 @@ Page({
     const points = normalizePoints(series);
     this._points = points;
     const latest = points[points.length - 1] || null;
+    const nextViewSignature = [
+      this.data.rangeKey,
+      makePointsSignature(points),
+      makeSummarySignature(summary, points),
+    ].join('::');
+    if (nextViewSignature === this._viewSignature) return;
+    this._viewSignature = nextViewSignature;
     const realized = Number(summary.realized_pnl ?? (latest ? latest.cumulative : 0));
     const winRate = Number(summary.win_rate || 0);
     this.setData({
@@ -137,6 +167,9 @@ Page({
 
   onRangeTap(event) {
     const rangeKey = String((event.currentTarget && event.currentTarget.dataset && event.currentTarget.dataset.range) || '80');
+    if (rangeKey === this.data.rangeKey) return;
+    this._viewSignature = '';
+    this._chartSignature = '';
     this.setData({
       rangeKey,
       chartHint: `当前显示 ${rangeKey === 'all' ? '全量' : `最近 ${rangeKey} 笔`} · 初始资金 ${formatCapital(INITIAL_CAPITAL)}`,
@@ -178,6 +211,21 @@ Page({
         const color = data[data.length - 1] >= INITIAL_CAPITAL ? '#16a34a' : '#dc2626';
         this._visiblePoints = visiblePoints;
         const scrollEnabled = this.data.rangeKey === 'all' && visiblePoints.length > 80;
+        const dataChecksum = data.reduce((sum, value, index) => sum + Math.round(value * 100) * (index + 1), 0);
+        const nextChartSignature = [
+          this.data.rangeKey,
+          width,
+          height,
+          scrollEnabled ? 'scroll' : 'fixed',
+          data.length,
+          data[0],
+          data[data.length - 1],
+          minValue,
+          maxValue,
+          dataChecksum,
+        ].join('|');
+        if (nextChartSignature === this._chartSignature) return;
+        this._chartSignature = nextChartSignature;
         this._chart = new UCharts({
           type: 'line',
           context,
