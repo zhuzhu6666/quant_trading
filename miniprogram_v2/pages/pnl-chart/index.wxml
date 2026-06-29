@@ -43,7 +43,7 @@
     <view wx:if="{{!empty}}" class="canvas-wrap">
       <canvas
         id="pnlChart"
-        canvas-id="pnlChart"
+        type="2d"
         class="pnl-canvas-native"
         bindtouchstart="onChartTouchStart"
         bindtouchmove="onChartTouchMove"

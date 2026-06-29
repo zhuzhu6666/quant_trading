@@ -8,6 +8,14 @@ const UCharts = UChartsModule.default || UChartsModule;
 const INITIAL_CAPITAL = 500;
 const CHART_ID = 'pnlChart';
 
+function getCanvasScale() {
+  if (wx.getWindowInfo) {
+    const info = wx.getWindowInfo();
+    return Number(info.pixelRatio || 1);
+  }
+  return 1;
+}
+
 function formatCapital(value) {
   const n = Number(value || 0);
   return n.toFixed(2);
@@ -138,11 +146,23 @@ Page({
   renderChart() {
     const points = this._points || [];
     if (!points.length) return;
+    const renderSeq = (this._chartRenderSeq || 0) + 1;
+    this._chartRenderSeq = renderSeq;
     wx.createSelectorQuery()
       .in(this)
       .select(`#${CHART_ID}`)
-      .boundingClientRect((rect) => {
-        if (!(rect && rect.width && rect.height)) return;
+      .fields({ node: true, size: true }, (res) => {
+        if (renderSeq !== this._chartRenderSeq) return;
+        if (!(res && res.node && res.width && res.height)) return;
+        const canvas = res.node;
+        const context = canvas.getContext('2d');
+        const width = res.width;
+        const height = res.height;
+        const canvasScale = getCanvasScale();
+        canvas.width = Math.round(width * canvasScale);
+        canvas.height = Math.round(height * canvasScale);
+        context.scale(canvasScale, canvasScale);
+
         const visiblePoints = buildRange(points, this.data.rangeKey);
         const categories = visiblePoints.map((item, index) => {
           if (index === 0 || index === visiblePoints.length - 1) return item.timeText;
@@ -157,12 +177,15 @@ Page({
         const yMax = maxValue + span * 0.12;
         const color = data[data.length - 1] >= INITIAL_CAPITAL ? '#16a34a' : '#dc2626';
         this._visiblePoints = visiblePoints;
+        const scrollEnabled = this.data.rangeKey === 'all' && visiblePoints.length > 80;
         this._chart = new UCharts({
           type: 'line',
-          context: wx.createCanvasContext(CHART_ID, this),
-          width: rect.width,
-          height: rect.height,
-          pixelRatio: (wx.getSystemInfoSync && wx.getSystemInfoSync().pixelRatio) || 1,
+          context,
+          canvas2d: true,
+          width,
+          height,
+          pixelRatio: 1,
+          fontSize: 10,
           categories,
           series: [{
             name: '系统权益',
@@ -171,28 +194,33 @@ Page({
           }],
           animation: false,
           background: '#ffffff',
-          padding: [12, 12, 18, 8],
-          enableScroll: this.data.rangeKey === 'all' || visiblePoints.length > 45,
+          padding: [8, 8, 10, 4],
+          enableScroll: scrollEnabled,
           dataLabel: false,
-          dataPointShape: visiblePoints.length <= 80,
+          dataPointShape: false,
           legend: { show: false },
           xAxis: {
             disableGrid: true,
-            itemCount: Math.min(80, Math.max(visiblePoints.length, 1)),
-            scrollShow: visiblePoints.length > 80,
+            itemCount: scrollEnabled ? 80 : Math.max(visiblePoints.length, 1),
+            scrollShow: false,
             fontColor: '#8a95a3',
             fontSize: 10,
+            lineHeight: 14,
+            marginTop: 4,
+            axisLine: false,
           },
           yAxis: {
             gridType: 'dash',
             dashLength: 4,
             splitNumber: 4,
+            gridColor: '#e2e8f0',
+            padding: 4,
             data: [{
               min: Number(yMin.toFixed(2)),
               max: Number(yMax.toFixed(2)),
               axisLine: false,
               fontColor: '#8a95a3',
-              format: (val) => Number(val).toFixed(2),
+              format: (val) => Number(val).toFixed(0),
             }],
           },
           extra: {
@@ -215,7 +243,13 @@ Page({
   },
 
   onChartTouchMove(event) {
-    if (this._chart) this._chart.scroll(event);
+    if (!this._chart) return;
+    const touches = event.touches || event.changedTouches || [];
+    if (touches.length > 1 && this._chart.dobuleZoom) {
+      this._chart.dobuleZoom(event);
+      return;
+    }
+    this._chart.scroll(event);
   },
 
   onChartTouchEnd(event) {

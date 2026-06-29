@@ -104,12 +104,12 @@
 
 .canvas-wrap {
   width: 100%;
-  height: 560rpx;
+  height: 460rpx;
 }
 
 .pnl-canvas-native {
   width: 100%;
-  height: 560rpx;
+  height: 460rpx;
 }
 
 .chart-tip {
