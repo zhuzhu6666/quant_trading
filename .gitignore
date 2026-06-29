@@ -41,6 +41,7 @@ data/parameter_template_validation_reports/
 data/model_artifacts/
 data/sec_gld/
 data/ticks/
+data/ticks_monthly/
 data/dukascopy_raw/
 data/feature_models/
 data/ml_models/
