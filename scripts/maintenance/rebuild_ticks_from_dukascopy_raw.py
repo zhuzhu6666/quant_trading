@@ -110,6 +110,7 @@ def rebuild(raw_root: Path, output: Path, symbol: str, batch_rows: int) -> None:
                 flush=True,
             )
     total += flush_batch(conn, rows)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ticks_sym_time ON ticks(symbol, time)")
     conn.execute("CHECKPOINT")
     summary = conn.execute(
         "SELECT COUNT(*), MIN(time), MAX(time), MIN(volume), MAX(volume), AVG(volume) FROM ticks"
