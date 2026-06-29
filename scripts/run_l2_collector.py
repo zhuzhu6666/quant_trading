@@ -125,14 +125,27 @@ class L2CollectorBridge(CTraderBridge):
             return 0
 
     def _handle_depth_event(self, payload):
-        super()._handle_depth_event(payload)
-        if self.snapshot_interval_sec <= 0:
-            return
-        now = time.time()
-        if now - self._snapshot_last_ts < self.snapshot_interval_sec:
-            return
-        self._snapshot_last_ts = now
-        self._persist_snapshot(now)
+        try:
+            super()._handle_depth_event(payload)
+            if self.snapshot_interval_sec <= 0:
+                return
+            now = time.time()
+            if now - self._snapshot_last_ts < self.snapshot_interval_sec:
+                return
+            self._snapshot_last_ts = now
+            self._persist_snapshot(now)
+        finally:
+            self._release_l2_db()
+
+    def _release_l2_db(self) -> None:
+        with self._l2_db_lock:
+            if self._l2_db is None:
+                return
+            try:
+                self._l2_db.close()
+            except Exception:
+                pass
+            self._l2_db = None
 
     def _persist_snapshot(self, ts: float) -> None:
         quotes = self.get_depth_quotes()
