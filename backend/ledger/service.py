@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, ensure_sqlite_columns
+
+logger = logging.getLogger(__name__)
 
 
 def _json_dumps(value: Any) -> str:
@@ -77,6 +80,44 @@ class DecisionLedger:
     ) -> str:
         now = time.time()
         decision_id = self.new_id("dec")
+        decision_payload = {
+            "decision_id": decision_id,
+            "trade_id": str(trade_id or ""),
+            "position_id": str(position_id or ""),
+            "event_type": str(event_type),
+            "symbol": str(symbol or ""),
+            "timeframe": str(timeframe or ""),
+            "decision_ts": float(decision_ts or now),
+            "regime_id": str(regime_id or ""),
+            "regime_confidence": float(regime_confidence or 0.0),
+            "portfolio_state_json": _json_dumps(portfolio_state),
+            "risk_state_json": _json_dumps(risk_state),
+            "policy_version": str(policy_version or ""),
+            "factor_set_version": str(factor_set_version or ""),
+            "action_score": float(action_score or 0.0),
+            "action_reason": str(action_reason or ""),
+            "action_json": _json_dumps(action_json),
+            "created_at": now,
+        }
+        factor_payloads: list[dict[str, Any]] = []
+        for row in factor_snapshots or []:
+            factor_payloads.append(
+                {
+                    "decision_id": decision_id,
+                    "factor": str(row.get("factor", "")),
+                    "source": str(row.get("source", "registry")),
+                    "raw_value": float(row.get("raw_value", 0.0) or 0.0),
+                    "normalized_value": float(row.get("normalized_value", 0.0) or 0.0),
+                    "direction": float(row.get("direction", 0.0) or 0.0),
+                    "base_weight": float(row.get("base_weight", 0.0) or 0.0),
+                    "policy_weight": float(row.get("policy_weight", 0.0) or 0.0),
+                    "shadow_score": float(row.get("shadow_score", 0.0) or 0.0),
+                    "health_score": float(row.get("health_score", 0.0) or 0.0),
+                    "gated": int(1 if row.get("gated") else 0),
+                    "gated_reason": str(row.get("gated_reason", "")),
+                    "contribution_score": float(row.get("contribution_score", 0.0) or 0.0),
+                }
+            )
         with self._conn() as conn:
             conn.execute(
                 """
@@ -87,27 +128,27 @@ class DecisionLedger:
                  action_reason, action_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    decision_id,
-                    trade_id,
-                    position_id,
-                    event_type,
-                    symbol,
-                    timeframe,
-                    float(decision_ts or now),
-                    regime_id,
-                    float(regime_confidence or 0.0),
-                    _json_dumps(portfolio_state),
-                    _json_dumps(risk_state),
-                    policy_version,
-                    factor_set_version,
-                    float(action_score or 0.0),
-                    action_reason,
-                    _json_dumps(action_json),
-                    now,
-                ),
+                tuple(decision_payload[k] for k in (
+                    "decision_id",
+                    "trade_id",
+                    "position_id",
+                    "event_type",
+                    "symbol",
+                    "timeframe",
+                    "decision_ts",
+                    "regime_id",
+                    "regime_confidence",
+                    "portfolio_state_json",
+                    "risk_state_json",
+                    "policy_version",
+                    "factor_set_version",
+                    "action_score",
+                    "action_reason",
+                    "action_json",
+                    "created_at",
+                )),
             )
-            for row in factor_snapshots or []:
+            for row in factor_payloads:
                 conn.execute(
                     """
                     INSERT INTO decision_factor_snapshot
@@ -118,20 +159,30 @@ class DecisionLedger:
                     """,
                     (
                         decision_id,
-                        str(row.get("factor", "")),
-                        str(row.get("source", "registry")),
-                        float(row.get("raw_value", 0.0) or 0.0),
-                        float(row.get("normalized_value", 0.0) or 0.0),
-                        float(row.get("direction", 0.0) or 0.0),
-                        float(row.get("base_weight", 0.0) or 0.0),
-                        float(row.get("policy_weight", 0.0) or 0.0),
-                        float(row.get("shadow_score", 0.0) or 0.0),
-                        float(row.get("health_score", 0.0) or 0.0),
-                        int(1 if row.get("gated") else 0),
-                        str(row.get("gated_reason", "")),
-                        float(row.get("contribution_score", 0.0) or 0.0),
+                        row["factor"],
+                        row["source"],
+                        row["raw_value"],
+                        row["normalized_value"],
+                        row["direction"],
+                        row["base_weight"],
+                        row["policy_weight"],
+                        row["shadow_score"],
+                        row["health_score"],
+                        row["gated"],
+                        row["gated_reason"],
+                        row["contribution_score"],
                     ),
                 )
+        try:
+            from backend.services.state_dual_write import enqueue_decision_ledger_event
+
+            enqueue_decision_ledger_event(
+                db_path=self.db_path,
+                decision=decision_payload,
+                factor_snapshots=factor_payloads,
+            )
+        except Exception as exc:
+            logger.warning("decision ledger dual-write enqueue failed: %s", exc)
         return decision_id
 
     def log_composite_decision(

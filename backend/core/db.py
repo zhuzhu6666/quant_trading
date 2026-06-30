@@ -6,10 +6,16 @@ DuckDB 保留时序数据，SQLite 收纳运行时状态。
 
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
 import threading
+import time
+import tempfile
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final
+from typing import Final, Iterator
 
 import duckdb
 
@@ -22,7 +28,11 @@ DATA_DIR = _PROJECT_ROOT / "data"
 # ═══════════════════════════════════════════
 # DuckDB — 时序/市场数据 (不可合并)
 # ═══════════════════════════════════════════
-DUCKDB_BARS    = DATA_DIR / "ctrader_data.duckdb"   # K线 + 外部数据(COT/ETF)
+DUCKDB_BARS_LEGACY = DATA_DIR / "ctrader_data.duckdb"   # 旧 K线 + 外部数据(COT/ETF)
+DUCKDB_BARS_MONTHLY_DIR = DATA_DIR / "bars_monthly"
+DUCKDB_BARS_CURRENT = DATA_DIR / "bars.duckdb"           # 当前月 K线兼容链接
+DUCKDB_BARS    = DUCKDB_BARS_CURRENT                     # K线当前月入口
+DUCKDB_EXTERNAL = DATA_DIR / "external_data.duckdb"      # COT/ETF/宏观等外部数据
 DUCKDB_TICKS   = DATA_DIR / "ticks.duckdb"           # Dukascopy tick
 DUCKDB_L2      = DATA_DIR / "l2.duckdb"              # L2 订单簿深度
 DUCKDB_TRADES  = DATA_DIR / "trades.duckdb"          # 交易记录(归因用)
@@ -42,6 +52,9 @@ _SQLITE_EXTS: Final[set[str]] = {".db", ".sqlite", ".sqlite3"}
 _DUCKDB_EXTS: Final[set[str]] = {".duckdb"}
 _KNOWN_DUCKDB_PATHS: Final[set[Path]] = {
     DUCKDB_BARS.resolve(),
+    DUCKDB_BARS_LEGACY.resolve(),
+    DUCKDB_BARS_CURRENT.resolve(),
+    DUCKDB_EXTERNAL.resolve(),
     DUCKDB_TICKS.resolve(),
     DUCKDB_L2.resolve(),
     DUCKDB_TRADES.resolve(),
@@ -85,14 +98,31 @@ def is_sqlite_path(db_path: str | Path) -> bool:
     return path.suffix.lower() in _SQLITE_EXTS or path.resolve() in _KNOWN_SQLITE_PATHS
 
 
+def _configure_sqlite_connection(conn: sqlite3.Connection, *, read_only: bool = False) -> sqlite3.Connection:
+    conn.execute("PRAGMA busy_timeout=30000")
+    if read_only:
+        try:
+            conn.execute("PRAGMA query_only=ON")
+        except sqlite3.Error:
+            pass
+    else:
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            pass
+    return conn
+
+
 def connect_sqlite(db_path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     """Open a SQLite connection and reject DuckDB files early."""
     path = _normalize_db_path(db_path)
     if is_duckdb_path(path):
         raise ValueError(f"Refusing to open DuckDB file with sqlite3: {path}")
     if read_only:
-        return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    return sqlite3.connect(str(path))
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30.0)
+        return _configure_sqlite_connection(conn, read_only=True)
+    conn = sqlite3.connect(str(path), timeout=30.0)
+    return _configure_sqlite_connection(conn, read_only=False)
 
 
 def connect_duckdb(db_path: str | Path, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
@@ -104,6 +134,122 @@ def connect_duckdb(db_path: str | Path, *, read_only: bool = False) -> duckdb.Du
         raise ValueError(f"Unknown DuckDB target path: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(str(path), read_only=read_only)
+
+
+_DUCKDB_LOCK_MARKERS: Final[tuple[str, ...]] = (
+    "Could not set lock",
+    "Conflicting lock is held",
+    "database is locked",
+    "different configuration",
+)
+
+
+def is_duckdb_lock_error(exc: Exception | str) -> bool:
+    """Return True for DuckDB single-writer/read-lock conflicts."""
+    msg = str(exc)
+    return any(marker in msg for marker in _DUCKDB_LOCK_MARKERS)
+
+
+@contextmanager
+def duckdb_readonly_connection(
+    db_path: str | Path,
+    *,
+    snapshot_on_lock: bool = True,
+    snapshot_first: bool = False,
+) -> Iterator[duckdb.DuckDBPyConnection]:
+    """Open DuckDB read-only, optionally falling back to a temporary snapshot on lock conflicts."""
+    path = _normalize_db_path(db_path)
+    tmp_dir: tempfile.TemporaryDirectory[str] | None = None
+    conn: duckdb.DuckDBPyConnection | None = None
+    source = path.resolve() if path.is_symlink() else path
+
+    def _connect_snapshot() -> duckdb.DuckDBPyConnection:
+        nonlocal tmp_dir
+        tmp_dir = tempfile.TemporaryDirectory(prefix="duckdb_snapshot_")
+        snapshot = Path(tmp_dir.name) / path.name
+        shutil.copy2(source, snapshot)
+        wal = source.with_suffix(source.suffix + ".wal")
+        if wal.exists():
+            shutil.copy2(wal, snapshot.with_suffix(snapshot.suffix + ".wal"))
+        return connect_duckdb(snapshot, read_only=True)
+
+    try:
+        try:
+            conn = _connect_snapshot() if snapshot_first else connect_duckdb(path, read_only=True)
+        except Exception as exc:
+            if not snapshot_on_lock or not is_duckdb_lock_error(exc):
+                raise
+            conn = _connect_snapshot()
+        yield conn
+    finally:
+        if conn is not None:
+            conn.close()
+        if tmp_dir is not None:
+            tmp_dir.cleanup()
+
+
+BAR_TABLE_DDL: Final[str] = """
+CREATE TABLE IF NOT EXISTS bars (
+    symbol VARCHAR NOT NULL,
+    timeframe VARCHAR NOT NULL,
+    time BIGINT NOT NULL,
+    open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+    volume DOUBLE DEFAULT 0,
+    spread INTEGER DEFAULT 0,
+    UNIQUE(symbol, timeframe, time)
+)
+"""
+
+
+def ensure_bars_table(conn: duckdb.DuckDBPyConnection) -> None:
+    """Create/upgrade the standard bars table in an opened DuckDB connection."""
+    conn.execute(BAR_TABLE_DDL)
+    try:
+        conn.execute("ALTER TABLE bars ADD COLUMN IF NOT EXISTS spread INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bars_sym_tf_time "
+        "ON bars(symbol, timeframe, time)"
+    )
+
+
+def bars_month_key(ts: float | int | None = None) -> str:
+    """Return YYYY_MM month key using UTC market timestamps."""
+    value = time.time() if ts is None else float(ts)
+    return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y_%m")
+
+
+def bars_monthly_path(ts: float | int | None = None) -> Path:
+    """Return monthly K-line DuckDB path for a UTC epoch timestamp."""
+    return DUCKDB_BARS_MONTHLY_DIR / f"bars_{bars_month_key(ts)}.duckdb"
+
+
+def refresh_current_bars_link(ts: float | int | None = None) -> Path:
+    """Point data/bars.duckdb at the current month database and return target."""
+    target = bars_monthly_path(ts)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        conn = connect_duckdb(target)
+        try:
+            ensure_bars_table(conn)
+        finally:
+            conn.close()
+
+    link = DUCKDB_BARS_CURRENT
+    if link.exists() or link.is_symlink():
+        try:
+            if link.is_symlink() and link.resolve() == target.resolve():
+                return target
+            link.unlink()
+        except OSError:
+            return target
+    try:
+        os.symlink(os.path.relpath(target, start=link.parent), link)
+    except OSError:
+        # Filesystems without symlink support can still use the target path directly.
+        pass
+    return target
 
 
 def ensure_sqlite_columns(db_path: str | Path, table: str, columns: dict[str, str]) -> None:
@@ -312,6 +458,21 @@ CREATE TABLE IF NOT EXISTS decision_factor_snapshot (
     gated INTEGER DEFAULT 0,
     gated_reason TEXT DEFAULT '',
     contribution_score REAL DEFAULT 0.0
+);
+
+-- PostgreSQL migration audit outbox.
+-- This is not a trading dependency: SQLite remains the source of truth and
+-- pending rows are replayable when the PostgreSQL audit sink is available.
+CREATE TABLE IF NOT EXISTS state_dual_write_outbox (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0,
+    synced_at REAL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS order_lifecycle_event (
@@ -683,6 +844,7 @@ CREATE INDEX IF NOT EXISTS idx_decision_ledger_ts ON decision_ledger(decision_ts
 CREATE INDEX IF NOT EXISTS idx_decision_ledger_pos_event ON decision_ledger(position_id, event_type);
 CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_decision ON decision_factor_snapshot(decision_id);
 CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_factor ON decision_factor_snapshot(factor);
+CREATE INDEX IF NOT EXISTS idx_state_dual_write_outbox_status ON state_dual_write_outbox(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_order_lifecycle_trade ON order_lifecycle_event(trade_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_event(position_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
@@ -765,7 +927,6 @@ def get_state_conn() -> sqlite3.Connection:
     """获取 state.db 连接 (每次新建, 调用方负责关闭)."""
     conn = connect_sqlite(STATE_DB)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 

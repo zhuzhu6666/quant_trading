@@ -31,6 +31,8 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from backend.core.db import DUCKDB_EXTERNAL, connect_duckdb
+from data.external_schema import record_raw_file
 from data.store import DataStore
 
 
@@ -43,10 +45,10 @@ CACHE_DIR = Path("data/cot")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def download_year(year: int, max_retries: int = 3) -> Path:
+def download_year(year: int, max_retries: int = 3, force_refresh: bool = False) -> Path:
     """下载 CFTC disagg COT zip, 缓存到本地. retry 3 次."""
     zip_path = CACHE_DIR / f"fut_disagg_txt_{year}.zip"
-    if zip_path.exists() and zip_path.stat().st_size > 100_000:
+    if not force_refresh and zip_path.exists() and zip_path.stat().st_size > 100_000:
         return zip_path
     url = f"https://www.cftc.gov/files/dea/history/fut_disagg_txt_{year}.zip"
     print(f"Downloading {url} ...")
@@ -111,6 +113,7 @@ def main():
     for y in years:
         try:
             zp = download_year(y)
+            record_raw_file("cot", zp, source_url=f"https://www.cftc.gov/files/dea/history/fut_disagg_txt_{y}.zip")
             df = parse_year(zp)
             if not df.empty:
                 print(f"  {y}: {len(df)} GOLD rows, range {df['report_date'].iloc[0].date()} → {df['report_date'].iloc[-1].date()}")
@@ -128,7 +131,7 @@ def main():
     print(f"Years covered: {(df_all['report_date'].iloc[-1] - df_all['report_date'].iloc[0]).days / 365.25:.1f} years")
 
     # 写库
-    store = DataStore("data/ctrader_data.duckdb")
+    store = DataStore(str(DUCKDB_EXTERNAL))
     n = 0
     for _, row in df_all.iterrows():
         store.insert_cot_gold(
@@ -148,8 +151,7 @@ def main():
     print(f"Inserted {n} rows into cot_gold")
 
     # 验证
-    from backend.core.db import connect_duckdb
-    con = connect_duckdb("data/ctrader_data.duckdb", read_only=True)
+    con = connect_duckdb(DUCKDB_EXTERNAL, read_only=True)
     print(f"cot_gold count: {con.execute('SELECT COUNT(*) FROM cot_gold').fetchone()[0]}")
     print(f"latest 3:")
     for r in con.execute("SELECT report_date, open_interest, mm_long, mm_short, mm_long-mm_short AS mm_net FROM cot_gold ORDER BY report_date DESC LIMIT 3"):

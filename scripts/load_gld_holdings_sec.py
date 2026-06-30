@@ -3,6 +3,8 @@ import re, sys, time, json, subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.core.db import DUCKDB_EXTERNAL
+from data.external_schema import etf_release_at, record_raw_file
 from data.store import DataStore
 
 CACHE_DIR = Path("data/sec_gld")
@@ -50,6 +52,10 @@ def download_filing(accn: str, accn_clean: str, doc: str) -> Path:
         print(f"    attempt {attempt+1} failed, size={out.stat().st_size if out.exists() else 0}")
         time.sleep(3)
     return None
+
+
+def filing_url(accn_clean: str, doc: str) -> str:
+    return f"https://www.sec.gov/Archives/edgar/data/1222333/{accn_clean}/{doc}"
 
 def parse_10q(path: Path) -> list[dict]:
     """从 10-Q/10-K 提取月度 oz per share"""
@@ -102,6 +108,10 @@ def main():
             print(f"  {f['filing_date']} {f['document']}: download FAIL")
             continue
         records = parse_10q(path)
+        for record in records:
+            record["filing_date"] = f["filing_date"]
+            record["source_url"] = filing_url(f["accession_clean"], f["document"])
+        record_raw_file("sec_edgar", path, source_url=filing_url(f["accession_clean"], f["document"]))
         print(f"  {f['filing_date']} {f['document']}: {len(records)} monthly records, size={path.stat().st_size//1024}KB")
         all_monthly.extend(records)
         time.sleep(1)
@@ -116,14 +126,16 @@ def main():
         k = r["month_end"]
         if k not in seen:
             seen[k] = r
+        elif str(r.get("filing_date") or "") < str(seen[k].get("filing_date") or ""):
+            seen[k] = r
     unique = sorted(seen.values(), key=lambda x: x["month_end"])
 
     print(f"\nUnique records: {len(unique)}")
     for r in unique[-5:]:
-        print(f"  {r["month_end"]}: oz/share={r["oz_per_share"]}, shares={r["shares"]:,}")
+        print(f"  {r['month_end']}: oz/share={r['oz_per_share']}, shares={r['shares']:,}")
 
     # 写库
-    store = DataStore("data/ctrader_data.duckdb")
+    store = DataStore(str(DUCKDB_EXTERNAL))
     inserted = 0
     for r in unique:
         total_oz = r["oz_per_share"] * r["shares"]
@@ -134,9 +146,17 @@ def main():
             total_tonnes=round(total_tonnes, 2),
             total_shares=r["shares"],
             aum_usd=None,
+            release_at=etf_release_at(r.get("filing_date"), r["month_end"]),
+            source="sec_edgar",
         )
         inserted += 1
     print(f"\nInserted {inserted} rows into etf_holdings")
+    latest = unique[-1] if unique else {}
+    return {
+        "rows": inserted,
+        "latest_date": latest.get("month_end"),
+        "latest_release_at": etf_release_at(latest.get("filing_date"), latest.get("month_end")) if latest else None,
+    }
 
 if __name__ == "__main__":
     main()

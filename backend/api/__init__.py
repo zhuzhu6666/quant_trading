@@ -18,6 +18,7 @@ ALL_ROUTERS: list[APIRouter] = [
     factor_v4.router,
     learning.router,
     external_data.router,
+    external_data.alias_router,
     sync.router,
     discover.router,
     tuning.router,

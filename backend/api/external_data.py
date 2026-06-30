@@ -16,6 +16,7 @@ from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/data", tags=["data"])
+alias_router = APIRouter(prefix="/api/external-data", tags=["data"])
 
 REFRESH_SCRIPT = Path(__file__).resolve().parent.parent.parent / "scripts" / "refresh_external_data.py"
 PYTHON = sys.executable or "python"
@@ -113,13 +114,22 @@ def _parse_status(stdout: str) -> list[dict]:
 def get_external_status(_user: RequireUser):
     """返回所有外部数据源的时效状态"""
     try:
-        stdout = _run_script("--status")
-        sources = _parse_status(stdout)
+        stdout = _run_script("--status", "--json")
+        try:
+            payload = json.loads(stdout)
+            sources = payload.get("sources") or []
+        except Exception:
+            sources = _parse_status(stdout)
         return {"sources": sources if sources else stdout.strip().splitlines()}
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@alias_router.get("/status")
+def get_external_status_alias(_user: RequireUser):
+    return get_external_status(_user)
 
 
 class RefreshRequest(BaseModel):
@@ -155,6 +165,11 @@ def trigger_refresh(_user: RequireUser, req: RefreshRequest = RefreshRequest()):
     }
 
 
+@alias_router.post("/refresh")
+def trigger_refresh_alias(_user: RequireUser, req: RefreshRequest = RefreshRequest()):
+    return trigger_refresh(_user, req)
+
+
 @router.get("/external-refresh/{job_id}")
 def get_refresh_status(_user: RequireUser, job_id: str):
     """查询刷新任务进度"""
@@ -163,3 +178,8 @@ def get_refresh_status(_user: RequireUser, job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail=f"job_id={job_id} not found")
     return dict(job)  # 返回 copy, 防 torn read
+
+
+@alias_router.get("/refresh/{job_id}")
+def get_refresh_status_alias(_user: RequireUser, job_id: str):
+    return get_refresh_status(_user, job_id)

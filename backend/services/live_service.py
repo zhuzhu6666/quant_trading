@@ -4255,9 +4255,8 @@ def _start_live_scheduler():
             cfg = _rcc()
             symbols = list(cfg.enabled_symbols) if hasattr(cfg, 'enabled_symbols') else ["XAUUSD+"]
             now = time.time()
-            from backend.core.db import DUCKDB_BARS, connect_duckdb
+            from backend.core.db import DUCKDB_BARS, DUCKDB_TICKS, duckdb_readonly_connection
             _db_path = str(Path(__file__).resolve().parent.parent.parent / "data" / "ctrader_data.duckdb")
-            _dc = connect_duckdb(DUCKDB_BARS)
 
             # 1. 检查 bar 新鲜度: 各周期最新 bar 时间 vs 预期阈值
             bar_thresholds = {
@@ -4272,35 +4271,41 @@ def _start_live_scheduler():
             stale_tfs = []
             fresh_tfs = []
             observed_bar_ts_by_tf: dict[str, float] = {}
-            for tf, max_age in bar_thresholds.items():
-                try:
-                    row = _dc.execute(
-                        "SELECT MAX(time) FROM bars WHERE symbol=? AND timeframe=?",
-                        [symbols[0], tf],
-                    ).fetchone()
-                    row_ts = float(row[0]) if row and row[0] else 0.0
-                    if row_ts > 0:
-                        observed_bar_ts_by_tf[tf] = row_ts
-                    if row_ts > 0 and (now - row_ts) < max_age:
-                        fresh_tfs.append(tf)
-                    else:
+            with duckdb_readonly_connection(DUCKDB_BARS, snapshot_first=True) as _dc:
+                for tf, max_age in bar_thresholds.items():
+                    try:
+                        row = _dc.execute(
+                            "SELECT MAX(time) FROM bars WHERE symbol=? AND timeframe=?",
+                            [symbols[0], tf],
+                        ).fetchone()
+                        row_ts = float(row[0]) if row and row[0] else 0.0
+                        if row_ts > 0:
+                            observed_bar_ts_by_tf[tf] = row_ts
+                        if row_ts > 0 and (now - row_ts) < max_age:
+                            fresh_tfs.append(tf)
+                        else:
+                            stale_tfs.append(tf)
+                    except Exception:
                         stale_tfs.append(tf)
-                except Exception:
-                    stale_tfs.append(tf)
 
-            # 2. 检查 tick 新鲜度
+            # 2. 检查 tick 新鲜度 (advisory only; never gates trading/bar sync)
             tick_gap = 600.0  # 10 分钟阈值
+            tick_query_error = ""
             try:
-                tick_row = _dc.execute(
-                    "SELECT MAX(time) FROM ticks WHERE symbol=?", [symbols[0]],
-                ).fetchone()
-                tick_latest = float(tick_row[0]) if tick_row and tick_row[0] else 0
+                with duckdb_readonly_connection(DUCKDB_TICKS, snapshot_first=True) as _tdc:
+                    tick_row = _tdc.execute(
+                        "SELECT MAX(time) FROM ticks WHERE symbol=?", [symbols[0]],
+                    ).fetchone()
+                    tick_latest = float(tick_row[0]) if tick_row and tick_row[0] else 0
+                    if tick_latest <= 0:
+                        tick_row = _tdc.execute("SELECT MAX(time) FROM ticks").fetchone()
+                        tick_latest = float(tick_row[0]) if tick_row and tick_row[0] else 0
                 tick_stale = tick_latest == 0 or (now - tick_latest) > tick_gap
                 tick_age = (now - tick_latest) if tick_latest > 0 else float("inf")
-            except Exception:
+            except Exception as e:
                 tick_stale = True
                 tick_age = float("inf")
-            _dc.close()
+                tick_query_error = str(e)[:120]
 
             # 3. 日志: 数据健康摘要
             bar_status = f"{len(fresh_tfs)}/{len(bar_thresholds)} fresh"
@@ -4308,12 +4313,23 @@ def _start_live_scheduler():
             if stale_tfs:
                 logger.info("[data_sync] stale: bars={} tick_age={:.0f}m → pulling", stale_tfs, tick_age/60)
             else:
-                # 一切新鲜: 跳过数据拉取, 只记录健康状态
-                if not tick_stale:
-                    logger.debug("[data_sync] all fresh ({}), skip pull", bar_status)
-                    health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
-                    return
-                logger.info("[data_sync] bars ok, ticks stale (age={:.0f}m) → pulling", tick_age/60)
+                # Tick data is research/advisory only; it must not trigger live bar pulls
+                # or become a trading gate. The hourly dukascopy_tick job owns tick catch-up.
+                if tick_stale:
+                    if tick_query_error:
+                        logger.info(
+                            "[data_sync] bars ok, tick advisory unavailable ({}) → skip bar pull",
+                            tick_query_error,
+                        )
+                    else:
+                        logger.info(
+                            "[data_sync] bars ok, tick advisory stale (age={:.0f}m) → skip bar pull",
+                            tick_age / 60,
+                        )
+                else:
+                    logger.debug("[data_sync] all fresh ({}), tick age={:.0f}m, skip pull", bar_status, tick_age / 60)
+                health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
+                return
 
             # 4. 回补 bars (用主 bridge 直接拉, 不再开第二连接)
             total_bars = 0
@@ -4444,6 +4460,23 @@ def _start_live_scheduler():
         except Exception as e:
             logger.warning("[etf_sync] error: {}", e)
     sched.add_job("etf_sync", "0 4 1 */3 *", _scheduled_etf_sync)
+    # 每天 5:20: FRED 宏观日度数据刷新 (无 QUANT_FRED_API_KEY 时安全跳过)
+    def _scheduled_fred_sync():
+        import sys
+        try:
+            import subprocess
+            script = Path(__file__).resolve().parent.parent.parent / "scripts" / "refresh_external_data.py"
+            result = subprocess.run(
+                [sys.executable or "python", str(script), "--source", "fred"],
+                capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode == 0:
+                logger.info("[fred_sync] ok")
+            else:
+                logger.warning("[fred_sync] failed (rc={}): {}", result.returncode, (result.stderr or "")[:200])
+        except Exception as e:
+            logger.warning("[fred_sync] error: {}", e)
+    sched.add_job("fred_sync", "20 5 * * *", _scheduled_fred_sync)
     # ★ awe_adapt / evolution_hourly / system_health 已由 EvolutionKernel 注册
     # Phase 2: ML 因子自动重训 (每周日凌晨 5:00)
     sched.add_job("ml_retrain", "0 5 * * 0", _scheduled_ml_retrain)
@@ -4455,7 +4488,7 @@ def _start_live_scheduler():
     sched.add_job("offmarket_position_quality_lightgbm", "20 * * * *", _scheduled_offmarket_position_quality_lightgbm)
     # ★ system_health 已由 EvolutionKernel 注册
     sched.start()
-    logger.info("[live] InProcessScheduler started with 11 jobs")
+    logger.info("[live] InProcessScheduler started with 12 jobs")
 
     # ── 后台: 首次启动数据补充 (用主 bridge, 不开第二连接) ──
     def _initial_ctrader_data_pull(timeframes=None, n_bars: int = 5000, phase: str = "startup"):
@@ -4762,21 +4795,18 @@ def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bar
     实时 tick 走 broker spot event, 这里只保证 strategy 暖机有数据。
     """
     import time as _time
-    from backend.core.db import DUCKDB_BARS, connect_duckdb
+    from backend.core.db import DUCKDB_BARS, duckdb_readonly_connection
     db_path = str(DUCKDB_BARS)
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            conn = connect_duckdb(db_path)
-            try:
+            with duckdb_readonly_connection(db_path, snapshot_first=True) as conn:
                 df = conn.execute(
                     "SELECT time, open, high, low, close, volume "
                     "FROM bars WHERE symbol=? AND timeframe=? "
                     "ORDER BY time DESC LIMIT ?",
                     [symbol, timeframe, n_bars]
                 ).df()
-            finally:
-                conn.close()
             if df is None or len(df) == 0:
                 logger.warning(f"DuckDB has no bars for {symbol} {timeframe}")
                 return None

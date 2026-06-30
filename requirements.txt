@@ -6,6 +6,7 @@ numpy>=1.26
 pandas>=2.1
 pyyaml>=6.0
 duckdb>=1.0
+psycopg[binary]>=3.1,<4.0
 
 # cTrader Open API (执行通道)
 ctrader-open-api>=0.9

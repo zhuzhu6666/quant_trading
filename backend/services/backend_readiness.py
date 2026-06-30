@@ -22,7 +22,6 @@ KNOWN_OBSERVATION_COMPONENTS = {
 BLOCKING_COMPONENTS = {
     "ctrader_bridge",
     "live_loop",
-    "tick_data",
     "db_ctrader_data",
     "db_ticks",
     "db_l2",

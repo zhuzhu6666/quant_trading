@@ -533,27 +533,21 @@ class FactorBacktester:
         end_ts: Optional[int] = None,
         **kwargs,
     ) -> "FactorBacktester":
-        """从 SQLite 加载数据并构造回测器。"""
-        import sqlite3
+        """从本地 K 线存储加载数据并构造回测器。"""
+        from data.store import DataStore
 
-        conn = sqlite3.connect(db_path)
-        params = [symbol, timeframe]
-        where = "symbol=? AND timeframe=?"
-        if start_ts is not None:
-            where += " AND time >= ?"
-            params.append(start_ts)
-        if end_ts is not None:
-            where += " AND time < ?"
-            params.append(end_ts)
-
-        df = pd.read_sql_query(
-            f"SELECT time, open, high, low, close, volume FROM bars "
-            f"WHERE {where} ORDER BY time ASC",
-            conn,
-            params=params,
-            parse_dates=False,
+        df = DataStore(db_path).load_bars(
+            symbol,
+            timeframe,
+            start=start_ts,
+            end=end_ts,
         )
-        conn.close()
+        if not df.empty and "time" in df.columns:
+            df = df[["time", "open", "high", "low", "close", "volume"]].copy()
+            idx_seconds = df.index.astype("int64")
+            if len(idx_seconds) and int(idx_seconds.max()) > 10_000_000_000:
+                idx_seconds = idx_seconds // 1_000_000_000
+            df["time"] = idx_seconds
         if len(df) == 0:
             raise ValueError(f"No bars found for {symbol} {timeframe}")
 

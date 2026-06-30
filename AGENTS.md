@@ -66,6 +66,20 @@
 
 ## 3.2 当前数据约定
 
+- K 线数据在服务器上按月库保存：
+  - `data/bars_monthly/bars_YYYY_MM.duckdb`
+  - `data/bars.duckdb` 是指向当前月份库的兼容链接
+  - `data/ctrader_data.duckdb` 暂保留为旧 K 线冷备/兼容库，不再作为 live K 线主写入入口
+- 外部研究数据主库：
+  - `data/external_data.duckdb`
+  - 承载 `cot_gold`、`etf_holdings`、`cb_gold`、`macro_daily`、`etf_daily`
+  - 外部表需要保留 `release_at`、`fetched_at`、`source`，因子/回测只能在 `release_at` 之后使用
+  - FRED 宏观数据使用 `QUANT_FRED_API_KEY`；未配置时跳过，不阻塞 COT/ETF/events
+  - 原始响应/文件缓存放在 `data/external_raw/`、`data/cot/`、`data/sec_gld/`
+  - 旧路径 `DataStore("data/ctrader_data.duckdb")` 的外部表写入会兼容跳转到该库
+- 经济事件日历独立保存：
+  - `data/events.duckdb`
+  - 风控事件缩放模块 `execution/event_sizing.py` 直接读取该库
 - tick 数据在服务器上按月库保存：
   - `data/ticks_monthly/ticks_YYYY_MM.duckdb`
   - `data/ticks.duckdb` 是指向当前月份库的兼容链接

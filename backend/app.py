@@ -136,6 +136,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _lg.warning(f"[lifespan] db-health warmup failed (non-fatal): {e}")
 
+    # PostgreSQL audit dual-write is migration-only.  It must never block the
+    # SQLite source-of-truth write path or live trading if the sink is absent.
+    try:
+        from backend.services.state_dual_write import start_state_dual_write_worker
+
+        if start_state_dual_write_worker():
+            _lg.info("[lifespan] state dual-write worker started")
+        else:
+            _lg.info("[lifespan] state dual-write worker disabled")
+    except Exception as e:
+        _lg.warning(f"[lifespan] state dual-write worker start failed (non-fatal): {e}")
+
     yield
 
     # Stop scheduler on shutdown
@@ -150,6 +162,13 @@ async def lifespan(app: FastAPI):
         stop_autonomous_learning()
     except Exception as e:
         _lg.warning(f"[lifespan] autonomous learning stop failed: {e}")
+
+    try:
+        from backend.services.state_dual_write import stop_state_dual_write_worker
+
+        stop_state_dual_write_worker()
+    except Exception as e:
+        _lg.warning(f"[lifespan] state dual-write worker stop failed: {e}")
 
     try:
         if hasattr(app.state, "_evolution_scheduler"):

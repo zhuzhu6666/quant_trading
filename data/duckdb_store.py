@@ -14,12 +14,23 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 
-from backend.core.db import connect_duckdb
+from backend.core.db import (
+    DUCKDB_BARS_CURRENT,
+    DUCKDB_BARS_LEGACY,
+    DUCKDB_BARS_MONTHLY_DIR,
+    DUCKDB_EXTERNAL,
+    bars_monthly_path,
+    connect_duckdb,
+    ensure_bars_table,
+    refresh_current_bars_link,
+)
+from data.external_schema import cot_release_at, ensure_external_schema, etf_release_at, macro_release_at
 
 logger = logging.getLogger(__name__)
 
@@ -53,57 +64,77 @@ class DuckDBDataStore:
                 return
             self.db_path = Path(db_path)
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._monthly_bars = self.db_path.name in {
+                DUCKDB_BARS_LEGACY.name,
+                DUCKDB_BARS_CURRENT.name,
+            }
+            self._external_only = self.db_path.name == DUCKDB_EXTERNAL.name
+            self._externalized_legacy = self.db_path.name == DUCKDB_BARS_LEGACY.name
+            self.bars_db_path = DUCKDB_BARS_CURRENT if self._monthly_bars else self.db_path
+            self.external_db_path = DUCKDB_EXTERNAL if self._externalized_legacy else self.db_path
             self._init_db()
+            if self._external_only or self._externalized_legacy:
+                ensure_external_schema(self.external_db_path)
             self._initialized = True
 
     def _get_conn(self) -> duckdb.DuckDBPyConnection:
-        """获取 DuckDB 连接 (每次调用新建，轻量)"""
-        return connect_duckdb(self.db_path)
+        """获取非 bars DuckDB 连接 (每次调用新建，轻量)"""
+        return connect_duckdb(self.external_db_path)
+
+    def _get_bars_conn(self, ts: int | float | None = None) -> duckdb.DuckDBPyConnection:
+        """Open the DuckDB file that owns bars for the given timestamp."""
+        path = bars_monthly_path(ts) if self._monthly_bars else self.bars_db_path
+        conn = connect_duckdb(path)
+        ensure_bars_table(conn)
+        if self._monthly_bars:
+            refresh_current_bars_link()
+        return conn
+
+    def _bar_read_paths(self) -> list[Path]:
+        if not self._monthly_bars:
+            return [self.bars_db_path]
+        paths = sorted(DUCKDB_BARS_MONTHLY_DIR.glob("bars_*.duckdb"))
+        if paths:
+            return paths
+        # Cold-start compatibility before migration: read the legacy monolith.
+        return [self.db_path]
+
+    @staticmethod
+    def _to_epoch(value: str | int | float | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        return int(pd.Timestamp(value).timestamp())
 
     def _init_db(self):
         conn = self._get_conn()
         try:
-            # DuckDB 自动处理并发，不需要 PRAGMA
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS bars (
-                    symbol VARCHAR NOT NULL,
-                    timeframe VARCHAR NOT NULL,
-                    time BIGINT NOT NULL,
-                    open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
-                    volume DOUBLE DEFAULT 0,
-                    spread INTEGER DEFAULT 0,
-                    UNIQUE(symbol, timeframe, time)
-                )
-            """)
-            # 迁移: 旧表可能没有 spread 列
-            try:
-                conn.execute("ALTER TABLE bars ADD COLUMN IF NOT EXISTS spread INTEGER DEFAULT 0")
-            except Exception:
-                pass
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_bars_sym_tf_time
-                ON bars(symbol, timeframe, time)
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS ticks (
-                    symbol VARCHAR NOT NULL,
-                    time DOUBLE NOT NULL,
-                    bid DOUBLE, ask DOUBLE, last DOUBLE,
-                    volume DOUBLE DEFAULT 0,
-                    flags INTEGER DEFAULT 0
-                )
-            """)
-            # DuckDB 1.x: UNIQUE INDEX 不是约束, INSERT OR REPLACE 无法用.
-            # 改用普通 INDEX + 纯 INSERT (增量 tick 按时间序, 无重复).
-            # 先尝试删旧 UNIQUE INDEX (若表已存在), 再建普通 INDEX.
-            try:
-                conn.execute("DROP INDEX IF EXISTS idx_ticks_sym_time")
-            except Exception:
-                pass
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_ticks_sym_time
-                ON ticks(symbol, time)
-            """)
+            # DuckDB 自动处理并发，不需要 PRAGMA. bars 由月库承载；
+            # legacy ctrader_data.duckdb 的外部表写入自动跳到 external_data.duckdb。
+            if not self._monthly_bars and not self._external_only:
+                ensure_bars_table(conn)
+            if not self._external_only and not self._externalized_legacy:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS ticks (
+                        symbol VARCHAR NOT NULL,
+                        time DOUBLE NOT NULL,
+                        bid DOUBLE, ask DOUBLE, last DOUBLE,
+                        volume DOUBLE DEFAULT 0,
+                        flags INTEGER DEFAULT 0
+                    )
+                """)
+                # DuckDB 1.x: UNIQUE INDEX 不是约束, INSERT OR REPLACE 无法用.
+                # 改用普通 INDEX + 纯 INSERT (增量 tick 按时间序, 无重复).
+                # 先尝试删旧 UNIQUE INDEX (若表已存在), 再建普通 INDEX.
+                try:
+                    conn.execute("DROP INDEX IF EXISTS idx_ticks_sym_time")
+                except Exception:
+                    pass
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ticks_sym_time
+                    ON ticks(symbol, time)
+                """)
             # ETF 持仓
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS etf_holdings (
@@ -112,6 +143,9 @@ class DuckDBDataStore:
                     total_tonnes DOUBLE,
                     total_shares DOUBLE,
                     aum_usd DOUBLE,
+                    release_at DOUBLE DEFAULT 0,
+                    fetched_at DOUBLE DEFAULT 0,
+                    source VARCHAR DEFAULT 'unknown',
                     PRIMARY KEY (symbol, date)
                 )
             """)
@@ -122,6 +156,9 @@ class DuckDBDataStore:
                     date VARCHAR NOT NULL,
                     total_tonnes DOUBLE,
                     monthly_chg_tonnes DOUBLE,
+                    release_at DOUBLE DEFAULT 0,
+                    fetched_at DOUBLE DEFAULT 0,
+                    source VARCHAR DEFAULT 'unknown',
                     PRIMARY KEY (country, date)
                 )
             """)
@@ -134,6 +171,9 @@ class DuckDBDataStore:
                     pm_long BIGINT, pm_short BIGINT,
                     swap_long BIGINT, swap_short BIGINT,
                     other_long BIGINT, other_short BIGINT,
+                    release_at DOUBLE DEFAULT 0,
+                    fetched_at DOUBLE DEFAULT 0,
+                    source VARCHAR DEFAULT 'unknown',
                     PRIMARY KEY (report_date)
                 )
             """)
@@ -143,6 +183,9 @@ class DuckDBDataStore:
                     series VARCHAR NOT NULL,
                     date VARCHAR NOT NULL,
                     value DOUBLE,
+                    release_at DOUBLE DEFAULT 0,
+                    fetched_at DOUBLE DEFAULT 0,
+                    source VARCHAR DEFAULT 'unknown',
                     PRIMARY KEY (series, date)
                 )
             """)
@@ -152,19 +195,16 @@ class DuckDBDataStore:
                     symbol VARCHAR NOT NULL,
                     date VARCHAR NOT NULL,
                     close DOUBLE,
+                    release_at DOUBLE DEFAULT 0,
+                    fetched_at DOUBLE DEFAULT 0,
+                    source VARCHAR DEFAULT 'unknown',
                     PRIMARY KEY (symbol, date)
                 )
             """)
-            # 经济事件
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS events (
-                    date VARCHAR NOT NULL,
-                    type VARCHAR NOT NULL,
-                    description VARCHAR,
-                    importance INTEGER DEFAULT 0,
-                    PRIMARY KEY (date, type)
-                )
-            """)
+            for table in ("etf_holdings", "cb_gold", "cot_gold", "macro_daily", "etf_daily"):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS release_at DOUBLE DEFAULT 0")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS fetched_at DOUBLE DEFAULT 0")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'unknown'")
             logger.info("[DuckDB] tables initialized: %s", self.db_path)
         finally:
             conn.close()
@@ -172,17 +212,7 @@ class DuckDBDataStore:
     # ── Bars ───────────────────────────────────────────────
 
     def insert_bar(self, bar: dict, symbol: str, timeframe: str):
-        conn = self._get_conn()
-        try:
-            conn.execute("""
-                INSERT OR REPLACE INTO bars
-                (symbol, timeframe, time, open, high, low, close, volume, spread)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [symbol, timeframe, int(bar["time"]),
-                  bar["open"], bar["high"], bar["low"], bar["close"],
-                  bar.get("volume", 0), int(bar.get("spread", 0) or 0)])
-        finally:
-            conn.close()
+        self.insert_bars([bar], symbol, timeframe)
 
     def insert_bars(self, bars: list[dict], symbol: str = "", timeframe: str = "") -> int:
         if not bars:
@@ -193,15 +223,24 @@ class DuckDBDataStore:
              b.get("volume", 0), int(b.get("spread", 0) or 0))
             for b in bars
         ]
-        conn = self._get_conn()
-        try:
-            conn.executemany("""
-                INSERT OR REPLACE INTO bars
-                (symbol, timeframe, time, open, high, low, close, volume, spread)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, rows)
-        finally:
-            conn.close()
+        grouped: dict[str, list[tuple]] = {}
+        for row in rows:
+            key = str(bars_monthly_path(row[2]) if self._monthly_bars else self.bars_db_path)
+            grouped.setdefault(key, []).append(row)
+
+        for path_str, batch in grouped.items():
+            conn = connect_duckdb(path_str)
+            try:
+                ensure_bars_table(conn)
+                conn.executemany("""
+                    INSERT OR REPLACE INTO bars
+                    (symbol, timeframe, time, open, high, low, close, volume, spread)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, batch)
+            finally:
+                conn.close()
+        if self._monthly_bars:
+            refresh_current_bars_link()
         return len(rows)
 
     # (P1-a: first insert_ticks removed — duplicate, second one below is the live version)
@@ -210,35 +249,57 @@ class DuckDBDataStore:
                   start: str | None = None, end: str | None = None,
                   limit: int | None = None) -> pd.DataFrame:
         """加载历史 bar → DataFrame (API 与 DataStore 完全兼容)"""
-        conn = self._get_conn()
-        try:
-            query = "SELECT * FROM bars WHERE symbol=? AND timeframe=?"
-            params = [symbol, timeframe]
+        start_ts = self._to_epoch(start)
+        end_ts = self._to_epoch(end)
+        frames: list[pd.DataFrame] = []
+        paths = self._bar_read_paths()
+        if limit is not None and start_ts is None and end_ts is None:
+            paths = list(reversed(paths))
 
-            if start:
-                query += " AND time >= ?"
-                params.append(int(pd.Timestamp(start).timestamp()))
-            if end:
-                query += " AND time <= ?"
-                params.append(int(pd.Timestamp(end).timestamp()))
+        remaining = int(limit) if limit is not None else None
+        for path in paths:
+            if remaining is not None and remaining <= 0:
+                break
+            if not path.exists():
+                continue
+            try:
+                conn = connect_duckdb(path, read_only=True)
+            except Exception:
+                conn = connect_duckdb(path)
+            try:
+                query = "SELECT * FROM bars WHERE symbol=? AND timeframe=?"
+                params: list = [symbol, timeframe]
+                if start_ts is not None:
+                    query += " AND time >= ?"
+                    params.append(start_ts)
+                if end_ts is not None:
+                    query += " AND time <= ?"
+                    params.append(end_ts)
+                if remaining is not None:
+                    query += " ORDER BY time DESC LIMIT ?"
+                    params.append(remaining)
+                else:
+                    query += " ORDER BY time ASC"
+                df_part = conn.execute(query, params).df()
+            finally:
+                conn.close()
+            if df_part.empty:
+                continue
+            frames.append(df_part)
+            if remaining is not None:
+                remaining -= len(df_part)
 
-            if limit is not None:
-                query += " ORDER BY time DESC LIMIT ?"
-                params.append(int(limit))
-            else:
-                query += " ORDER BY time ASC"
-
-            df = conn.execute(query, params).df()
-
-            if not df.empty:
-                df["time"] = pd.to_datetime(df["time"], unit="s")
-                df.set_index("time", inplace=True)
-                df["time"] = df.index  # 保留为列供因子计算使用
-                if limit is not None:
-                    df = df.sort_index()
-            return df
-        finally:
-            conn.close()
+        if not frames:
+            return pd.DataFrame()
+        df = pd.concat(frames, ignore_index=True)
+        df = df.drop_duplicates(subset=["symbol", "timeframe", "time"], keep="last")
+        df = df.sort_values("time")
+        if limit is not None and len(df) > limit:
+            df = df.tail(limit)
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        df.set_index("time", inplace=True)
+        df["time"] = df.index  # 保留为列供因子计算使用
+        return df
 
     # ── Ticks ──────────────────────────────────────────────
 
@@ -297,27 +358,43 @@ class DuckDBDataStore:
     def insert_etf_holding(self, symbol: str, date: str,
                            total_tonnes: float | None = None,
                            total_shares: float | None = None,
-                           aum_usd: float | None = None):
+                           aum_usd: float | None = None,
+                           release_at: float | None = None,
+                           fetched_at: float | None = None,
+                           source: str = "sec_edgar"):
         conn = self._get_conn()
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO etf_holdings
-                (symbol, date, total_tonnes, total_shares, aum_usd)
-                VALUES (?, ?, ?, ?, ?)
-            """, [symbol, date, total_tonnes, total_shares, aum_usd])
+                (symbol, date, total_tonnes, total_shares, aum_usd, release_at, fetched_at, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                symbol, date, total_tonnes, total_shares, aum_usd,
+                float(release_at if release_at is not None else etf_release_at(None, date)),
+                float(fetched_at or time.time()),
+                source,
+            ])
         finally:
             conn.close()
 
     def insert_cb_gold(self, country: str, date: str,
                        total_tonnes: float | None = None,
-                       monthly_chg_tonnes: float | None = None):
+                       monthly_chg_tonnes: float | None = None,
+                       release_at: float | None = None,
+                       fetched_at: float | None = None,
+                       source: str = "external"):
         conn = self._get_conn()
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO cb_gold
-                (country, date, total_tonnes, monthly_chg_tonnes)
-                VALUES (?, ?, ?, ?)
-            """, [country, date, total_tonnes, monthly_chg_tonnes])
+                (country, date, total_tonnes, monthly_chg_tonnes, release_at, fetched_at, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [
+                country, date, total_tonnes, monthly_chg_tonnes,
+                float(release_at if release_at is not None else macro_release_at(date)),
+                float(fetched_at or time.time()),
+                source,
+            ])
         finally:
             conn.close()
 
@@ -331,53 +408,107 @@ class DuckDBDataStore:
                         swap_long: int | None = None,
                         swap_short: int | None = None,
                         other_long: int | None = None,
-                        other_short: int | None = None):
+                        other_short: int | None = None,
+                        release_at: float | None = None,
+                        fetched_at: float | None = None,
+                        source: str = "cftc"):
         conn = self._get_conn()
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO cot_gold
                 (report_date, open_interest, mm_long, mm_short, mm_spread,
-                 pm_long, pm_short, swap_long, swap_short, other_long, other_short)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 pm_long, pm_short, swap_long, swap_short, other_long, other_short,
+                 release_at, fetched_at, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [report_date, open_interest, mm_long, mm_short, mm_spread,
-                  pm_long, pm_short, swap_long, swap_short, other_long, other_short])
+                  pm_long, pm_short, swap_long, swap_short, other_long, other_short,
+                  float(release_at if release_at is not None else cot_release_at(report_date)),
+                  float(fetched_at or time.time()),
+                  source])
+        finally:
+            conn.close()
+
+    def insert_macro_daily(self, series: str, date: str, value: float | None,
+                           release_at: float | None = None,
+                           fetched_at: float | None = None,
+                           source: str = "fred"):
+        conn = self._get_conn()
+        try:
+            conn.execute("""
+                INSERT OR REPLACE INTO macro_daily
+                (series, date, value, release_at, fetched_at, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [
+                series, date, value,
+                float(release_at if release_at is not None else macro_release_at(date)),
+                float(fetched_at or time.time()),
+                source,
+            ])
         finally:
             conn.close()
 
     # ── 统计 ───────────────────────────────────────────────
 
     def bar_count(self, symbol: str, timeframe: str) -> int:
-        conn = self._get_conn()
-        try:
-            r = conn.execute(
-                "SELECT COUNT(*) FROM bars WHERE symbol=? AND timeframe=?",
-                [symbol, timeframe],
-            ).fetchone()
-            return int(r[0]) if r else 0
-        finally:
-            conn.close()
+        total = 0
+        for path in self._bar_read_paths():
+            if not path.exists():
+                continue
+            try:
+                conn = connect_duckdb(path, read_only=True)
+                try:
+                    r = conn.execute(
+                        "SELECT COUNT(*) FROM bars WHERE symbol=? AND timeframe=?",
+                        [symbol, timeframe],
+                    ).fetchone()
+                    total += int(r[0]) if r else 0
+                finally:
+                    conn.close()
+            except Exception:
+                continue
+        return total
 
     def summary(self) -> list[tuple]:
         """返回 (symbol, timeframe, count) 列表"""
-        conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT symbol, timeframe, COUNT(*) as cnt FROM bars "
-                "GROUP BY symbol, timeframe ORDER BY symbol, timeframe"
-            ).fetchall()
-            return [(r[0], r[1], r[2]) for r in rows]
-        finally:
-            conn.close()
+        totals: dict[tuple[str, str], int] = {}
+        for path in self._bar_read_paths():
+            if not path.exists():
+                continue
+            try:
+                conn = connect_duckdb(path, read_only=True)
+                try:
+                    rows = conn.execute(
+                        "SELECT symbol, timeframe, COUNT(*) as cnt FROM bars "
+                        "GROUP BY symbol, timeframe"
+                    ).fetchall()
+                finally:
+                    conn.close()
+            except Exception:
+                continue
+            for symbol, timeframe, count in rows:
+                key = (symbol, timeframe)
+                totals[key] = totals.get(key, 0) + int(count)
+        return [(s, tf, cnt) for (s, tf), cnt in sorted(totals.items())]
 
     def latest_bar_time(self, symbol: str, timeframe: str) -> int | None:
         """返回最新 bar 的 epoch 秒"""
-        conn = self._get_conn()
-        try:
-            r = conn.execute(
-                "SELECT MAX(time) FROM bars WHERE symbol=? AND timeframe=?",
-                [symbol, timeframe],
-            ).fetchone()
-            return int(r[0]) if r and r[0] else None
-        finally:
-            conn.close()
+        latest: int | None = None
+        for path in self._bar_read_paths():
+            if not path.exists():
+                continue
+            try:
+                conn = connect_duckdb(path, read_only=True)
+                try:
+                    r = conn.execute(
+                        "SELECT MAX(time) FROM bars WHERE symbol=? AND timeframe=?",
+                        [symbol, timeframe],
+                    ).fetchone()
+                finally:
+                    conn.close()
+            except Exception:
+                continue
+            if r and r[0]:
+                value = int(r[0])
+                latest = value if latest is None else max(latest, value)
+        return latest
 

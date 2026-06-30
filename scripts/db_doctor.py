@@ -21,6 +21,8 @@ sys.path.insert(0, str(ROOT))
 
 from backend.core.db import (  # noqa: E402
     DUCKDB_BARS,
+    DUCKDB_BARS_LEGACY,
+    DUCKDB_EXTERNAL,
     DUCKDB_EVENTS,
     DUCKDB_L2,
     DUCKDB_TICKS,
@@ -110,10 +112,25 @@ def main() -> int:
                 DUCKDB_BARS,
                 {
                     "bars": {"symbol", "timeframe", "time", "open", "high", "low", "close", "volume", "spread"},
-                    "cot_gold": {"report_date"},
-                    "events": {"date", "type"},
                 },
             ),
+        ),
+        (
+            DUCKDB_EXTERNAL.name,
+            _check_duckdb(
+                DUCKDB_EXTERNAL,
+                {
+                    "cot_gold": {"report_date", "release_at", "fetched_at", "source"},
+                    "etf_holdings": {"symbol", "date", "release_at", "fetched_at", "source"},
+                    "macro_daily": {"series", "date", "value", "release_at", "fetched_at", "source"},
+                    "external_refresh_audit": {"source", "started_at", "status"},
+                    "external_raw_metadata": {"source", "raw_path", "sha256", "fetched_at"},
+                },
+            ),
+        ),
+        (
+            DUCKDB_BARS_LEGACY.name,
+            _check_duckdb(DUCKDB_BARS_LEGACY, {}),
         ),
         (
             DUCKDB_TICKS.name,
@@ -136,11 +153,18 @@ def main() -> int:
         ),
         (
             DUCKDB_EVENTS.name,
-            _check_duckdb(DUCKDB_EVENTS, {}),
+            _check_duckdb(DUCKDB_EVENTS, {"events": {"date", "type", "importance"}}),
         ),
         (
             STATE_DB.name,
-            _check_sqlite(STATE_DB, {"decision_log": {"decision_type"}, "ctrader_deals": {"deal_id", "position_id"}}),
+            _check_sqlite(
+                STATE_DB,
+                {
+                    "decision_log": {"decision_type"},
+                    "ctrader_deals": {"deal_id", "position_id"},
+                    "state_dual_write_outbox": {"event_id", "payload_json", "status", "attempts"},
+                },
+            ),
         ),
         (
             EXPERIMENTS_DB.name,

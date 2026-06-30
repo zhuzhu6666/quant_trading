@@ -4,7 +4,9 @@ data/external_loader.py
 
 把日度宏观/事件数据 forward-fill 到 M15 bar 级别, 供 alpha/registry 因子调用。
 
-数据源 (data/ctrader_data.duckdb):
+数据源:
+  - external_data.duckdb: macro_daily / etf_daily / etf_holdings / cb_gold / cot_gold
+  - events.duckdb: FOMC / NFP / CPI / PCE 事件日
   - macro_daily: DFII10 / DTWEXBGS (DXY 代理) / GVZCLS / VIXCLS
   - etf_daily:   GLD / SLV / TLT  (收盘价)
   - etf_holdings: GLD / SLV 持仓量 (吨) + shares outstanding  (P0-ETF 2026-06-03)
@@ -20,40 +22,53 @@ data/external_loader.py
   + 央行列:     cb_total_chg_3m  (全球央行 3 月累计净买入, 吨)
 
 用法:
-    loader = ExternalDataLoader("data/ctrader_data.duckdb")
+    loader = ExternalDataLoader()
     df_ext = loader.load_aligned(bar_df)  # bar_df 必须是 M15 DatetimeIndex
     # 之后 df = bar_df.join(df_ext) 即可让因子访问到
 """
 from __future__ import annotations
 
-import duckdb
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from backend.core.db import connect_duckdb
+from backend.core.db import DUCKDB_EVENTS, DUCKDB_EXTERNAL, connect_duckdb
 
 
 class ExternalDataLoader:
     """外部数据 (宏观 + 事件 + ETF + 央行) 对齐到 bar 级别"""
 
-    def __init__(self, db_path: str = "data/ctrader_data.duckdb"):
-        self.db_path = db_path
+    def __init__(self, db_path: str | Path = DUCKDB_EXTERNAL, events_db_path: str | Path = DUCKDB_EVENTS):
+        self.db_path = Path(db_path)
+        self.events_db_path = Path(events_db_path)
+
+    @staticmethod
+    def _release_index(values) -> pd.DatetimeIndex:
+        idx = pd.to_datetime(list(values), unit="s", utc=True)
+        return pd.DatetimeIndex(idx).tz_convert(None)
+
+    @staticmethod
+    def _as_epoch(as_of: datetime | str | int | float | None) -> float | None:
+        if as_of is None:
+            return None
+        if isinstance(as_of, (int, float)):
+            return float(as_of)
+        return float(pd.Timestamp(as_of).timestamp())
 
     def _load_macro(self) -> pd.DataFrame:
         """加载 macro_daily, 列: date / dfii10 / dxy / gvz / vix"""
         con = connect_duckdb(self.db_path, read_only=True)
         rows = con.execute(
-            "SELECT date, series, value FROM macro_daily ORDER BY date"
+            "SELECT date, series, value, release_at FROM macro_daily ORDER BY release_at, date"
         ).fetchall()
         con.close()
         if not rows:
             return pd.DataFrame()
-        df = pd.DataFrame(rows, columns=["date", "series", "value"])
-        df = df.pivot(index="date", columns="series", values="value")
-        df.index = pd.to_datetime(df.index)
+        df = pd.DataFrame(rows, columns=["date", "series", "value", "release_at"])
+        df["release_dt"] = self._release_index(df["release_at"])
+        df = df.pivot_table(index="release_dt", columns="series", values="value", aggfunc="last")
         df = df.sort_index()
         return df
 
@@ -61,14 +76,14 @@ class ExternalDataLoader:
         """加载 etf_daily, 列: gld / slv / tlt"""
         con = connect_duckdb(self.db_path, read_only=True)
         rows = con.execute(
-            "SELECT date, symbol, close FROM etf_daily ORDER BY date"
+            "SELECT date, symbol, close, release_at FROM etf_daily ORDER BY release_at, date"
         ).fetchall()
         con.close()
         if not rows:
             return pd.DataFrame()
-        df = pd.DataFrame(rows, columns=["date", "symbol", "close"])
-        df = df.pivot(index="date", columns="symbol", values="close")
-        df.index = pd.to_datetime(df.index)
+        df = pd.DataFrame(rows, columns=["date", "symbol", "close", "release_at"])
+        df["release_dt"] = self._release_index(df["release_at"])
+        df = df.pivot_table(index="release_dt", columns="symbol", values="close", aggfunc="last")
         df = df.sort_index()
         return df
 
@@ -80,7 +95,7 @@ class ExternalDataLoader:
         con = connect_duckdb(self.db_path, read_only=True)
         try:
             rows = con.execute(
-                "SELECT symbol, date, total_tonnes, total_shares, aum_usd "
+                "SELECT symbol, date, total_tonnes, total_shares, aum_usd, release_at "
                 "FROM etf_holdings ORDER BY date"
             ).fetchall()
         except Exception:
@@ -90,14 +105,16 @@ class ExternalDataLoader:
         con.close()
         if not rows:
             return pd.DataFrame()
-        df = pd.DataFrame(rows, columns=["symbol", "date", "tonnes", "shares", "aum"])
+        df = pd.DataFrame(rows, columns=["symbol", "date", "tonnes", "shares", "aum", "release_at"])
         df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values(["symbol", "date"])
+        df["release_dt"] = self._release_index(df["release_at"])
         # pivot: 每个 symbol → 独立列
-        tonnes = df.pivot(index="date", columns="symbol", values="tonnes")
+        tonnes = df.pivot_table(index="release_dt", columns="symbol", values="tonnes", aggfunc="last")
         tonnes.columns = [f"{c}_tonnes" for c in tonnes.columns]
-        shares = df.pivot(index="date", columns="symbol", values="shares")
+        shares = df.pivot_table(index="release_dt", columns="symbol", values="shares", aggfunc="last")
         shares.columns = [f"{c}_shares" for c in shares.columns]
-        aum = df.pivot(index="date", columns="symbol", values="aum")
+        aum = df.pivot_table(index="release_dt", columns="symbol", values="aum", aggfunc="last")
         aum.columns = [f"{c}_aum" for c in aum.columns]
         out = tonnes.join(shares, how="outer").join(aum, how="outer")
         out = out.sort_index()
@@ -113,7 +130,7 @@ class ExternalDataLoader:
         con = connect_duckdb(self.db_path, read_only=True)
         try:
             rows = con.execute(
-                "SELECT country, date, total_tonnes, monthly_chg_tonnes "
+                "SELECT country, date, total_tonnes, monthly_chg_tonnes, release_at "
                 "FROM cb_gold ORDER BY date"
             ).fetchall()
         except Exception:
@@ -122,12 +139,13 @@ class ExternalDataLoader:
         con.close()
         if not rows:
             return pd.DataFrame()
-        df = pd.DataFrame(rows, columns=["country", "date", "total", "chg"])
+        df = pd.DataFrame(rows, columns=["country", "date", "total", "chg", "release_at"])
         df["date"] = pd.to_datetime(df["date"])
+        df["release_dt"] = self._release_index(df["release_at"])
         # 国家 → 前缀
-        total = df.pivot(index="date", columns="country", values="total")
+        total = df.pivot_table(index="release_dt", columns="country", values="total", aggfunc="last")
         total.columns = [f"cb_{c.lower()}_total" for c in total.columns]
-        chg = df.pivot(index="date", columns="country", values="chg")
+        chg = df.pivot_table(index="release_dt", columns="country", values="chg", aggfunc="last")
         chg.columns = [f"cb_{c.lower()}_chg" for c in chg.columns]
         out = total.join(chg, how="outer")
         out = out.sort_index()
@@ -150,7 +168,7 @@ class ExternalDataLoader:
         try:
             rows = con.execute(
                 "SELECT report_date, open_interest, mm_long, mm_short, mm_spread, "
-                "pm_long, pm_short, swap_long, swap_short, other_long, other_short "
+                "pm_long, pm_short, swap_long, swap_short, other_long, other_short, release_at "
                 "FROM cot_gold ORDER BY report_date"
             ).fetchall()
         except Exception:
@@ -161,10 +179,10 @@ class ExternalDataLoader:
             return pd.DataFrame()
         df = pd.DataFrame(rows, columns=[
             "report_date", "open_interest", "mm_long", "mm_short", "mm_spread",
-            "pm_long", "pm_short", "swap_long", "swap_short", "other_long", "other_short",
+            "pm_long", "pm_short", "swap_long", "swap_short", "other_long", "other_short", "release_at",
         ])
         df["report_date"] = pd.to_datetime(df["report_date"])
-        df = df.set_index("report_date").sort_index()
+        df = df.sort_values("report_date")
         # 派生
         df["cot_mm_net"] = df["mm_long"] - df["mm_short"]
         df["cot_pm_net"] = df["pm_long"] - df["pm_short"]
@@ -184,11 +202,13 @@ class ExternalDataLoader:
             "other_short": "cot_other_short",
         }
         df = df.rename(columns=rename_map)
+        df.index = self._release_index(df["release_at"])
+        df = df.drop(columns=["release_at"])
         return df
 
     def _load_events(self) -> pd.DataFrame:
         """加载 events, 列: date / fomc / nfp / cpi / pce (1=是事件日)"""
-        con = connect_duckdb(self.db_path, read_only=True)
+        con = connect_duckdb(self.events_db_path, read_only=True)
         rows = con.execute(
             "SELECT date, type FROM events ORDER BY date"
         ).fetchall()
@@ -241,7 +261,14 @@ class ExternalDataLoader:
                 out[f"cb_{country}_chg_12m"] = out[chg_col].rolling(12, min_periods=1).sum()
         return out
 
-    def align_to_bars(self, bar_df: pd.DataFrame) -> pd.DataFrame:
+    @staticmethod
+    def _limit_as_of(df: pd.DataFrame, as_of_epoch: float | None) -> pd.DataFrame:
+        if df.empty or as_of_epoch is None:
+            return df
+        as_of_dt = pd.to_datetime(as_of_epoch, unit="s", utc=True).tz_convert(None)
+        return df[df.index <= as_of_dt]
+
+    def align_to_bars(self, bar_df: pd.DataFrame, as_of: datetime | str | int | float | None = None) -> pd.DataFrame:
         """
         把所有外部数据 forward-fill 到 bar_df 的 DatetimeIndex。
 
@@ -259,13 +286,14 @@ class ExternalDataLoader:
         if not isinstance(bar_df.index, pd.DatetimeIndex):
             raise ValueError("bar_df must have DatetimeIndex")
 
-        macro = self._load_macro()
-        etf = self._load_etf()
-        etf_holdings_raw = self._load_etf_holdings()
+        as_of_epoch = self._as_epoch(as_of)
+        macro = self._limit_as_of(self._load_macro(), as_of_epoch)
+        etf = self._limit_as_of(self._load_etf(), as_of_epoch)
+        etf_holdings_raw = self._limit_as_of(self._load_etf_holdings(), as_of_epoch)
         etf_holdings = self._compute_etf_derived(etf_holdings_raw)
-        cb_raw = self._load_cb_gold()
+        cb_raw = self._limit_as_of(self._load_cb_gold(), as_of_epoch)
         cb_gold = self._compute_cb_derived(cb_raw)
-        cot_gold = self._load_cot_gold()
+        cot_gold = self._limit_as_of(self._load_cot_gold(), as_of_epoch)
         events = self._load_events()
 
         # 列重命名, 标准化
@@ -284,32 +312,46 @@ class ExternalDataLoader:
                 evt_cols[f"evt_{c.lower()}"] = events[c]
         events_df = pd.DataFrame(evt_cols) if evt_cols else pd.DataFrame()
 
-        # 合并到一个 df (按日 index)
+        # 合并到一个 df (按 release_at index for external data). Event flags
+        # are aligned separately so they do not forward-fill beyond event day.
         ext = (macro
                .join(etf, how="outer")
                .join(etf_holdings, how="outer")
                .join(cb_gold, how="outer")
-               .join(cot_gold, how="outer")
-               .join(events_df, how="outer"))
+               .join(cot_gold, how="outer"))
         ext = ext.sort_index()
 
-        # Reindex 到 bar 级别 (含周末/假日的 bar index), forward-fill
-        # 先对日度数据 ffill (消除尾部 NaN), 再 reindex 到 bar 频率
-        ext = ext.ffill()
-        # 统一 index 精度 (bar 可能是 datetime64[s], 外部数据是 datetime64[us])
-        if ext.index.dtype != bar_df.index.dtype:
-            ext.index = ext.index.astype(bar_df.index.dtype)
-        ext = ext.reindex(bar_df.index, method="ffill")
+        bar_index = pd.DatetimeIndex(bar_df.index).tz_localize(None)
+        out = pd.DataFrame(index=bar_df.index)
 
-        # 边界处理: 头部 bfill (取最早已知值), 尾部若全 NaN 则保留
-        ext = ext.bfill(axis=0)
+        if not ext.empty:
+            # Reindex 到 bar 级别, 只能 forward-fill release_at 已经发生的数据。
+            ext = ext.ffill()
+            ext.index = pd.DatetimeIndex(ext.index).tz_localize(None)
+            ext = ext.reindex(bar_index, method="ffill")
+            ext.index = bar_df.index
+            out = out.join(ext, how="left")
 
-        # 事件列 NaN → 0 (非事件日)
-        for c in ext.columns:
+        if not events_df.empty:
+            events_df.index = pd.DatetimeIndex(events_df.index).tz_localize(None).normalize()
+            event_aligned = events_df.reindex(bar_index.normalize()).fillna(0)
+            event_aligned.index = bar_df.index
+            out = out.join(event_aligned, how="left")
+
+        for c in out.columns:
             if c.startswith("evt_"):
-                ext[c] = ext[c].fillna(0).astype(np.int8)
+                out[c] = out[c].fillna(0).astype(np.int8)
 
-        return ext
+        return out
+
+
+def align_external_to_bars(
+    bar_df: pd.DataFrame,
+    as_of: datetime | str | int | float | None = None,
+    db_path: str | Path = DUCKDB_EXTERNAL,
+    events_db_path: str | Path = DUCKDB_EVENTS,
+) -> pd.DataFrame:
+    return ExternalDataLoader(db_path=db_path, events_db_path=events_db_path).align_to_bars(bar_df, as_of=as_of)
 
 
 if __name__ == "__main__":
@@ -322,7 +364,7 @@ if __name__ == "__main__":
     bars = store.load_bars("XAUUSD+", "M15")
     print(f"Loaded {len(bars)} bars, range: {bars.index[0]} → {bars.index[-1]}")
 
-    loader = ExternalDataLoader("data/ctrader_data.duckdb")
+    loader = ExternalDataLoader()
     ext = loader.align_to_bars(bars)
     print(f"\nExternal df shape: {ext.shape}")
     print(f"Columns ({len(ext.columns)}): {list(ext.columns)}")

@@ -22,7 +22,8 @@ def main():
 
     # ── 打包必要的数据文件 ──
     data_files = [
-        "ctrader_data.duckdb",
+        "bars.duckdb",
+        "external_data.duckdb",
         "ticks.duckdb",
         "l2.duckdb",
     ]

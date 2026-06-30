@@ -69,8 +69,14 @@ class DataStore:
     def insert_etf_holding(self, symbol: str, date: str,
                            total_tonnes: float | None = None,
                            total_shares: float | None = None,
-                           aum_usd: float | None = None):
-        self._backend.insert_etf_holding(symbol, date, total_tonnes, total_shares, aum_usd)
+                           aum_usd: float | None = None,
+                           release_at: float | None = None,
+                           fetched_at: float | None = None,
+                           source: str = "sec_edgar"):
+        self._backend.insert_etf_holding(
+            symbol, date, total_tonnes, total_shares, aum_usd,
+            release_at=release_at, fetched_at=fetched_at, source=source,
+        )
 
     def insert_cb_gold(self, country: str, date: str,
                        total_tonnes: float | None = None,
@@ -87,11 +93,21 @@ class DataStore:
                         swap_long: int | None = None,
                         swap_short: int | None = None,
                         other_long: int | None = None,
-                        other_short: int | None = None):
+                        other_short: int | None = None,
+                        release_at: float | None = None,
+                        fetched_at: float | None = None,
+                        source: str = "cftc"):
         self._backend.insert_cot_gold(report_date, open_interest,
                                       mm_long, mm_short, mm_spread,
                                       pm_long, pm_short, swap_long, swap_short,
-                                      other_long, other_short)
+                                      other_long, other_short,
+                                      release_at=release_at, fetched_at=fetched_at, source=source)
+
+    def insert_macro_daily(self, series: str, date: str, value: float | None,
+                           release_at: float | None = None,
+                           fetched_at: float | None = None,
+                           source: str = "fred"):
+        self._backend.insert_macro_daily(series, date, value, release_at, fetched_at, source)
 
     def bar_count(self, symbol: str, timeframe: str) -> int:
         return self._backend.bar_count(symbol, timeframe)

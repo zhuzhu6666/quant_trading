@@ -117,9 +117,20 @@ tests/
 data/ticks_monthly/ticks_YYYY_MM.duckdb   # Dukascopy tick 月库
 data/ticks.duckdb                         # 指向当前月份 tick 月库的兼容 symlink
 data/dukascopy_raw/                       # Dukascopy 原始 .bi5 缓存
+data/bars_monthly/bars_YYYY_MM.duckdb     # cTrader K 线月库
+data/bars.duckdb                          # 指向当前月份 K 线月库的兼容 symlink
+data/external_data.duckdb                 # 外部研究数据主库(COT/ETF/宏观), 按 release_at 做 point-in-time 对齐
+data/ctrader_data.duckdb                  # 旧 K 线冷备/兼容库，不再作为 live K 线主写入入口
 data/l2_monthly/l2_YYYY_MM.duckdb         # cTrader L2 月库
 data/l2.duckdb                            # 指向当前月份 L2 月库的兼容 symlink，L2 writer 跨月自动刷新
+data/events.duckdb                        # 经济事件日历，供风控事件缩放读取
+data/external_raw/                        # 外部数据原始响应快照(FRED/events 等)，不入 Git
+data/cot/                                 # CFTC COT 原始 zip 缓存，不入 Git
+data/sec_gld/                             # SEC GLD filing 缓存，不入 Git
+data/archive/                             # 已归档的旧运行库，例如 legacy decision_log.db
 ```
+
+`data/state.db` 仍是 live 运行状态与学习审计的 SQLite 主库。当前服务器已启用 PostgreSQL 双写审计副本，用于新增 `decision_ledger` 和完整 `decision_factor_snapshot` 的迁移留痕；PostgreSQL 不参与交易阻断，也不替代 SQLite 主写。配置只放服务器本地 `.env` / systemd 环境，详见 [state-dual-write-postgres.md](state-dual-write-postgres.md)。
 
 当前 systemd 约定：
 

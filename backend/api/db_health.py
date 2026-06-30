@@ -3,13 +3,14 @@
 启动时自动预热缓存，避免首次请求阻塞线程池导致其他接口超时。
 """
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
 
 from fastapi import APIRouter
 from backend.core.auth import RequireUser
-from backend.core.db import connect_duckdb, connect_sqlite
+from backend.core.db import connect_sqlite, duckdb_readonly_connection
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -26,7 +27,9 @@ _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 # 需要报告的数据库列表
 _DB_LIST = [
     # (文件名, 显示名, 类型)
-    ("ctrader_data.duckdb", "cTrader K线", "duckdb"),
+    ("bars.duckdb", "当前月K线", "duckdb"),
+    ("external_data.duckdb", "外部数据(COT/ETF/宏观)", "duckdb"),
+    ("ctrader_data.duckdb", "旧K线/外部数据兼容库", "duckdb"),
     ("ticks.duckdb", "Dukascopy Tick", "duckdb"),
     ("l2.duckdb", "L2 深度", "duckdb"),
     ("trades.duckdb", "交易记录", "duckdb"),
@@ -87,11 +90,7 @@ def _duckdb_stats(path: Path) -> dict:
     errors = []
 
     try:
-        try:
-            con = connect_duckdb(path)
-        except Exception:
-            con = connect_duckdb(path, read_only=True)
-        try:
+        with duckdb_readonly_connection(path, snapshot_first=True) as con:
             for t in con.execute("SHOW TABLES").fetchall():
                 tname = t[0]
                 try:
@@ -123,8 +122,6 @@ def _duckdb_stats(path: Path) -> dict:
                         latest_ts = tbl_latest
                 except Exception as e:
                     errors.append(f"{tname}: {e}")
-        finally:
-            con.close()
     except Exception as e:
         errors.append(f"connect: {e}")
 

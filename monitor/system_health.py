@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from backend.core.db import connect_duckdb
+from backend.core.db import duckdb_readonly_connection
 from loguru import logger
 
 # ── 数据类型 ────────────────────────────────────────────────────
@@ -251,66 +251,64 @@ class SystemHealth:
         now = time.time()
 
         try:
-            db = connect_duckdb(
-                Path(__file__).resolve().parent.parent / "data" / "ctrader_data.duckdb"
-            )
+            from backend.core.db import DUCKDB_BARS
+            with duckdb_readonly_connection(DUCKDB_BARS, snapshot_first=True) as db:
 
-            # M1
-            m1_ts = db.execute(
-                "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M1'"
-            ).fetchone()[0]
-            if m1_ts:
-                age = now - m1_ts
-                if age < THRESHOLDS["m1_max_age"]:
-                    components["bar_m1"] = ComponentStatus(
-                        name="M1 Bar", status="ok", score=1.0,
-                        detail=f"{age/60:.0f} min ago", ts=now,
-                    )
-                elif age < THRESHOLDS["m1_warn_age"]:
-                    components["bar_m1"] = ComponentStatus(
-                        name="M1 Bar", status="degraded", score=0.5,
-                        detail=f"{age/60:.0f} min ago", ts=now,
-                    )
+                # M1
+                m1_ts = db.execute(
+                    "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M1'"
+                ).fetchone()[0]
+                if m1_ts:
+                    age = now - m1_ts
+                    if age < THRESHOLDS["m1_max_age"]:
+                        components["bar_m1"] = ComponentStatus(
+                            name="M1 Bar", status="ok", score=1.0,
+                            detail=f"{age/60:.0f} min ago", ts=now,
+                        )
+                    elif age < THRESHOLDS["m1_warn_age"]:
+                        components["bar_m1"] = ComponentStatus(
+                            name="M1 Bar", status="degraded", score=0.5,
+                            detail=f"{age/60:.0f} min ago", ts=now,
+                        )
+                    else:
+                        components["bar_m1"] = ComponentStatus(
+                            name="M1 Bar", status="critical", score=0.0,
+                            detail=f"{age/60:.0f} min ago (stale)", ts=now,
+                        )
+                        errors.append(f"M1 bar stale: {age/60:.0f} min")
                 else:
                     components["bar_m1"] = ComponentStatus(
                         name="M1 Bar", status="critical", score=0.0,
-                        detail=f"{age/60:.0f} min ago (stale)", ts=now,
+                        detail="no data", ts=now,
                     )
-                    errors.append(f"M1 bar stale: {age/60:.0f} min")
-            else:
-                components["bar_m1"] = ComponentStatus(
-                    name="M1 Bar", status="critical", score=0.0,
-                    detail="no data", ts=now,
-                )
 
-            # M5
-            m5_ts = db.execute(
-                "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M5'"
-            ).fetchone()[0]
-            if m5_ts:
-                age = now - m5_ts
-                if age < THRESHOLDS["m5_max_age"]:
-                    components["bar_m5"] = ComponentStatus(
-                        name="M5 Bar", status="ok", score=1.0,
-                        detail=f"{age/60:.0f} min ago", ts=now,
-                    )
-                elif age < THRESHOLDS["m5_warn_age"]:
-                    components["bar_m5"] = ComponentStatus(
-                        name="M5 Bar", status="degraded", score=0.5,
-                        detail=f"{age/60:.0f} min ago", ts=now,
-                    )
+                # M5
+                m5_ts = db.execute(
+                    "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M5'"
+                ).fetchone()[0]
+                if m5_ts:
+                    age = now - m5_ts
+                    if age < THRESHOLDS["m5_max_age"]:
+                        components["bar_m5"] = ComponentStatus(
+                            name="M5 Bar", status="ok", score=1.0,
+                            detail=f"{age/60:.0f} min ago", ts=now,
+                        )
+                    elif age < THRESHOLDS["m5_warn_age"]:
+                        components["bar_m5"] = ComponentStatus(
+                            name="M5 Bar", status="degraded", score=0.5,
+                            detail=f"{age/60:.0f} min ago", ts=now,
+                        )
+                    else:
+                        components["bar_m5"] = ComponentStatus(
+                            name="M5 Bar", status="critical", score=0.0,
+                            detail=f"{age/60:.0f} min ago (stale)", ts=now,
+                        )
+                        errors.append(f"M5 bar stale: {age/60:.0f} min")
                 else:
                     components["bar_m5"] = ComponentStatus(
                         name="M5 Bar", status="critical", score=0.0,
-                        detail=f"{age/60:.0f} min ago (stale)", ts=now,
+                        detail="no data", ts=now,
                     )
-                    errors.append(f"M5 bar stale: {age/60:.0f} min")
-            else:
-                components["bar_m5"] = ComponentStatus(
-                    name="M5 Bar", status="critical", score=0.0,
-                    detail="no data", ts=now,
-                )
-            db.close()
         except Exception as e:
             components["data_freshness"] = ComponentStatus(
                 name="数据新鲜度", status="critical", score=0.0,
@@ -320,11 +318,11 @@ class SystemHealth:
 
         # Ticks (ticks.duckdb)
         try:
-            tdb = connect_duckdb(
-                Path(__file__).resolve().parent.parent / "data" / "ticks.duckdb"
-            )
-            tick_ts = tdb.execute("SELECT MAX(time) FROM ticks").fetchone()[0]
-            tdb.close()
+            with duckdb_readonly_connection(
+                Path(__file__).resolve().parent.parent / "data" / "ticks.duckdb",
+                snapshot_first=True,
+            ) as tdb:
+                tick_ts = tdb.execute("SELECT MAX(time) FROM ticks").fetchone()[0]
             if tick_ts:
                 age = now - tick_ts
                 if age < THRESHOLDS["tick_max_age"]:
@@ -355,13 +353,13 @@ class SystemHealth:
             )
 
         # L2 depth (l2.duckdb)
-        ldb = None
         try:
-            ldb = connect_duckdb(
-                Path(__file__).resolve().parent.parent / "data" / "l2.duckdb"
-            )
-            l2_ts = ldb.execute("SELECT MAX(ts) FROM orderbook_changes").fetchone()[0]
-            l2_cnt = ldb.execute("SELECT COUNT(*) FROM orderbook_changes").fetchone()[0]
+            with duckdb_readonly_connection(
+                Path(__file__).resolve().parent.parent / "data" / "l2.duckdb",
+                snapshot_first=True,
+            ) as ldb:
+                l2_ts = ldb.execute("SELECT MAX(ts) FROM orderbook_changes").fetchone()[0]
+                l2_cnt = ldb.execute("SELECT COUNT(*) FROM orderbook_changes").fetchone()[0]
             if l2_ts and l2_cnt > 0:
                 age = now - l2_ts
                 if age < THRESHOLDS["l2_max_age"]:
@@ -389,25 +387,18 @@ class SystemHealth:
                 name="L2 订单簿", status="critical", score=0.0,
                 detail=f"check failed: {e}", ts=now,
             )
-        finally:
-            if ldb is not None:
-                try:
-                    ldb.close()
-                except Exception:
-                    pass
 
     def _check_duckdb(
         self, components: dict[str, ComponentStatus], errors: list[str]
     ) -> None:
         """确认 3 个 DuckDB 库可读写."""
         dbs = [
-            ("ctrader_data.duckdb", "K 线库"),
+            ("bars.duckdb", "K 线库"),
             ("ticks.duckdb", "Tick 库"),
             ("l2.duckdb", "L2 库"),
         ]
         base = Path(__file__).resolve().parent.parent / "data"
         for fname, label in dbs:
-            conn = None
             try:
                 path = str(base / fname)
                 if not os.path.isfile(path):
@@ -417,8 +408,8 @@ class SystemHealth:
                     )
                     errors.append(f"DuckDB {fname} not found")
                     continue
-                conn = connect_duckdb(path)
-                conn.execute("SELECT 1")
+                with duckdb_readonly_connection(path, snapshot_first=True) as conn:
+                    conn.execute("SELECT 1")
                 components[f"db_{fname.split('.')[0]}"] = ComponentStatus(
                     name=label, status="ok", score=1.0,
                     detail="readable",
@@ -429,12 +420,6 @@ class SystemHealth:
                     detail=str(e)[:100], ts=time.time(),
                 )
                 errors.append(f"DuckDB {fname}: {e}")
-            finally:
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
 
     def _check_system_resources(
         self, components: dict[str, ComponentStatus], errors: list[str]
