@@ -115,7 +115,7 @@
 
 - 观察 H1/H2/H3/H6：确认真实样本、trace 成熟化、自动审批/应用/回滚是否稳定推进
 - 补二层自治：shadow/model freshness watchdog、回滚阈值策略、配置单一事实源查询面
-- 暂不做 H4：模型 live 权限、核心风控阈值、大幅改变开平仓行为继续人工审批
+- 暂不做 H4：模型 live 权限、核心风控阈值、大幅改变开平仓行为继续显式审批
 - 小程序上传、实机显示、灰度发布反馈继续作为观察项，不打断 Phase H 主线
 
 ---
@@ -138,7 +138,7 @@
 
 - **Phase C** 不做，系统持仓中仍然是“睡着的”
 - **Phase D** 不做，系统就分不清问题到底出在 entry、exit、timing、param 还是 regime
-- **Phase E** 不做，因子优化就只能靠零散人工干预
+- **Phase E** 不做，因子优化就只能靠零散手工干预
 - **Phase E.5** 不做，持仓监督的真实退出样本就只能被复盘记录，不能形成可治理的退出质量闭环
 - **Phase F/G** 是把模型系统化接入，但前提是前面几层已经清楚
 - **前端对接** 不做，后端已经留痕的模型/治理/健康信息仍然不能被稳定查看
@@ -915,7 +915,7 @@
   - 用户能更快知道当前是“可直接推进上线”，还是“必须先走离线验证链”
 - Learning / Overview / Ops 现已继续把参数治理待办翻译成“下一步动作摘要”：
   - recommendation / candidate / lifecycle detail 会直接显示下一步该走的审批或验证动作
-  - Overview / Ops 不只显示数量，也会提示“先人工审核 / 先离线验证 / 先生成治理建议”
+  - Overview / Ops 不只显示数量，也会提示“等待系统规则审核 / 先离线验证 / 先生成治理建议”
 - Overview 现已继续补上聚合态的人话治理摘要：
   - 首页治理状态会优先聚焦当前最重要的对象：`候选待审 / 在线轻调 / 离线深调 / 待审核经验 / 已形成可用经验`
   - 参数治理待办里的 hint 也已显式带上 `待审候选 / 在线轻调 / 离线深调 / 发布观察` 这类阶段词，减少只看数量时的信息损失
@@ -2281,7 +2281,7 @@ v2 增强记录：
 状态：`进行中`
 优先级：`P0`
 
-目标：当前使用 demo 账户，不再让用户承担看不懂的人工审批；系统在完整审计、硬风控、回滚点和实验编号约束下自动试错、自动审批、自动应用、自动回滚观察。
+目标：当前使用 demo 账户，不再让用户承担看不懂的审批动作；系统在完整审计、硬风控、回滚点和实验编号约束下自动试错、自动审批、自动应用、自动回滚观察。
 
 阶段原则：
 
@@ -2290,7 +2290,7 @@ v2 增强记录：
 - **demo 执行层自治**：在 `autonomy_mode=demo_autonomous` 下，系统可自动批准并应用可回滚的治理动作。
 - **RiskPolicyService 仍是唯一 live 治理裁决层**：任何自动应用都必须先调用风控 action，禁止绕过。
 - **硬限制不可关闭**：不能无限开仓、不能无限加仓、不能关闭熔断、不能绕过报价/断连/数据质量检查、不能关闭日志。
-- **用户看实验报告，不看审批按钮**：小程序审批入口只保留为人工覆盖和追责，不再是主路径。
+- **用户看实验报告，不看审批按钮**：小程序审批入口只保留为运维覆盖和追责，不再是主路径。
 
 ### H0：当前非规则驱动项审计
 
@@ -2302,12 +2302,11 @@ v2 增强记录：
 - 交易运行态：`position_supervisor -> RiskPolicyService -> cTrader` 基本已规则驱动。
 - 学习证据：`learning_backfill` 与 `supervisor_learning_scheduler` 已后台自动补跑。
 - 规则治理：`evolution_hourly -> RuleEvolutionGovernor.review_pending()` 已在运行，但当前 3 条因子建议因证据未过阈值停留在 `proposed`。
-- 仍需人工或手动触发的项：
-  - `policy_suggestion` 的手动 approve/reject 入口仍存在；
-  - 参数模板 recommendation materialize 仍需点击；
-  - 参数模板 offline candidate review/release/rollback 仍是人工闸门；
-  - supervisor template 即使生成建议，也必须 approved 后才允许 apply；
-  - 模型 pipeline / canary / LLM advisory 保持手动或旁路，不接 live。
+- 历史遗留的手动入口审计结论：
+  - `policy_suggestion` 的 approve/reject 入口保留为覆盖和追责入口，不再是 demo 主路径；
+  - 参数模板 recommendation materialize、offline candidate review/release/rollback 已由 demo 自动治理链规则推进；
+  - supervisor template 建议在有 replay / counterfactual evidence 且通过 `RiskPolicyService` 后可自动 approve + apply；
+  - 模型 pipeline / canary / LLM advisory 保持旁路，不接 live；核心风控和模型 live 权限仍不得自动放开。
 
 当前真实状态样本：
 
@@ -2436,7 +2435,7 @@ v2 增强记录：
 
 状态：`已完成第一版，后台观察中`
 
-目标：在 demo 账户内把人工审核改为系统规则审核。系统自动批准、应用、记录实验编号和回滚点；用户只看实验报告。
+目标：在 demo 账户内把旧审批动作改为系统规则审核。系统自动批准、应用、记录实验编号和回滚点；用户只看实验报告。
 
 允许自动批准 / 自动应用：
 
@@ -2471,7 +2470,7 @@ v2 增强记录：
 
 - 用户不需要再点“批准 / 发布 / 生成建议”才能推进主链。
 - 被阻断的动作要写审计，不能静默失败。
-- 自动应用后进入观察期，效果差自动回滚或降级为人工复核。
+- 自动应用后进入观察期，效果差自动回滚或降级为治理复核。
 - 每轮输出“系统试了什么、为什么试、结果如何、下一轮怎么改”的实验记录。
 
 落地记录（2026-06-29）：
@@ -2492,7 +2491,7 @@ v2 增强记录：
   - `evolution_events(demo_autonomy_auto_approve / demo_autonomy_apply)`
   - `learning_application_log / learning_application_effect`
 - orphan 参数模板候选处理：
-  - 如果候选指向的模板已经不存在，自动 reject，不再让用户人工审核一个无法发布的对象
+  - 如果候选指向的模板已经不存在，自动 reject，不再让用户处理一个无法发布的对象
 
 真实库首轮结果：
 

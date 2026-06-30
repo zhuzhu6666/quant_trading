@@ -121,3 +121,5 @@ def test_backend_readiness_contract(monkeypatch, tmp_path):
     assert result["high_load"]["can_run_training_with_positions"] is True
     assert result["models"]["meta_lightgbm"]["promotion_gate"]["eligible_for_live"] is False
     assert result["frontend_contract"]["preferred_entry"] == "/api/ops/backend-readiness"
+    assert result["governance"]["automatic_execution_enabled"] is True
+    assert result["governance"]["autonomy_mode"] == "demo_autonomous"

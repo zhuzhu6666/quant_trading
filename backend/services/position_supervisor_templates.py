@@ -60,7 +60,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "near_stop_loss_efficiency_threshold": 0.18,
         },
         "risk_boundary": {
-            "approval_path": "offline_replay_then_human_review",
+            "approval_path": "offline_replay_then_governed_release",
             "can_auto_deploy": False,
             "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": True,

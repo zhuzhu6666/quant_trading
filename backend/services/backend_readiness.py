@@ -149,7 +149,7 @@ class BackendReadinessService:
                     "reason": (
                         "shadow_only_artifact"
                         if not eligible
-                        else "would_require_manual_contract_change_before_live"
+                        else "would_require_governance_contract_change_before_live"
                     ),
                     "min_holdout_accuracy": 0.6,
                     "holdout_accuracy": holdout_accuracy,
@@ -202,6 +202,16 @@ class BackendReadinessService:
         conn = connect_sqlite(self.db_path)
         conn.row_factory = __import__("sqlite3").Row
         try:
+            try:
+                from config.runtime_config import shared as runtime_config
+
+                cfg = runtime_config()
+                autonomy_mode = str(getattr(cfg, "autonomy_mode", "") or "manual")
+                demo_auto_apply = bool(getattr(cfg, "autonomy_demo_auto_apply", False))
+            except Exception:
+                autonomy_mode = "unknown"
+                demo_auto_apply = False
+            automatic_execution_enabled = autonomy_mode == "demo_autonomous" and demo_auto_apply
             counts = {}
             if _table_exists(conn, "policy_suggestion"):
                 rows = conn.execute(
@@ -217,7 +227,9 @@ class BackendReadinessService:
                 "policy_suggestion_counts": counts,
                 "pending_review_count": int(counts.get("proposed", 0)) + int(counts.get("pending_review", 0)),
                 "meta_shadow_report_snapshots": snapshots,
-                "automatic_execution_enabled": False,
+                "automatic_execution_enabled": automatic_execution_enabled,
+                "autonomy_mode": autonomy_mode,
+                "autonomy_demo_auto_apply": demo_auto_apply,
             }
         finally:
             conn.close()

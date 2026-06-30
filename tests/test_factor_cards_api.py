@@ -1312,7 +1312,7 @@ def test_parameter_template_offline_candidates_endpoint_lists_release_candidates
     assert result["items"][0]["governance"]["source_summary"] == "来源推荐 ptr_candidate_list · 参数问题"
     assert result["items"][0]["governance"]["approval_path_text"] == "先离线验证再灰度发布"
     assert result["items"][0]["governance"]["evidence_display"] == "Walk-forward IC 0.120，基线 0.080，Δ +0.040"
-    assert result["items"][0]["governance"]["review_display"] == "尚未人工审核"
+    assert result["items"][0]["governance"]["review_display"] == "等待系统规则审核"
     assert result["items"][0]["governance"]["deployment_display"] == "尚未发布"
     assert result["items"][0]["governance"]["rollback_display"] == ""
     assert result["items"][0]["governance"]["action_buttons"] == [
@@ -1584,7 +1584,7 @@ def test_learning_summary_includes_parameter_template_candidate_stats(tmp_path):
     assert summary["parameter_template_todo"]["entry_type"] == "candidate"
     assert summary["parameter_template_overview"]["headline"]["label"] == "待审候选"
     assert summary["parameter_template_overview"]["headline"]["tone"] == "warning"
-    assert "优先处理人工审核" in summary["parameter_template_overview"]["headline"]["summary"]
+    assert "优先等待系统规则审核" in summary["parameter_template_overview"]["headline"]["summary"]
     assert summary["parameter_template_overview"]["pending_candidate_hint"]["action_label"] == "去审候选"
     assert summary["parameter_template_overview"]["online_light_hint"]["action_label"] == "去审建议"
     assert summary["parameter_template_overview"]["offline_deep_hint"] is None

@@ -147,9 +147,9 @@ function buildMetaShadowReportInterpretation(payload = {}) {
     tone = 'negative';
     actionText = '仅用于治理复核和报告展示，不要直接用于上线决策。';
   } else if (holdoutSufficient) {
-    stateText = '可进入人工复核';
+    stateText = '可进入治理复核';
     tone = 'warning';
-    actionText = '表现与样本已达门禁条件，可提交治理流程进行人工复核。';
+    actionText = '表现与样本已达门禁条件，可提交治理流程进行规则复核。';
   } else {
     stateText = '只读观察中';
     tone = 'warning';
@@ -244,13 +244,13 @@ function buildBackendReadinessInterpretation({
     tone = 'warning';
     actionText = '以待后端交接完成后再作为可用依据。';
   } else if (permissionBlocked) {
-    stateText = '权限审计未通过，前端需要人工确认';
+    stateText = '权限审计未通过，需要运维确认';
     tone = 'negative';
     actionText = '先处理权限审计异常，再放开治理与交易相关展示。';
   } else if (knownObservationCount > 0) {
     stateText = '阻断项清零，存在观察项，前端可参考但需提示警惕';
     tone = 'warning';
-    actionText = '可继续运行；发现观察项上升时触发人工复核。';
+    actionText = '可继续运行；发现观察项上升时触发系统治理复核。';
   } else {
     stateText = '后端交接正常，可作为当前可信状态';
     tone = 'positive';
@@ -274,7 +274,7 @@ function buildBackendReadinessMetricCards({
   return [
     toMetricCard('阻断项', formatCount(blockingCount), blockingCount > 0 ? 'negative' : 'positive', 'blocking_components'),
     toMetricCard('观察项', formatCount(knownObservationCount), knownObservationCount > 0 ? 'warning' : 'positive', 'known_observations'),
-    toMetricCard('人工治理待审', formatCount(pendingGovernance), pendingGovernance > 0 ? 'warning' : 'positive', 'pending_review_count'),
+    toMetricCard('系统治理待处理', formatCount(pendingGovernance), pendingGovernance > 0 ? 'warning' : 'positive', 'pending_review_count'),
     toMetricCard('高负载状态', `${highLoadAllowed ? '可执行' : '不可执行'} / ${highLoadProfile}`, highLoadAllowed ? 'positive' : 'warning', 'high_load'),
   ];
 }
@@ -390,7 +390,9 @@ export function buildBackendReadinessView(payload = {}) {
       pendingReviewCount: Number(governance.pending_review_count || 0),
       policySuggestionCounts: governance.policy_suggestion_counts || {},
       metaShadowReportSnapshots: governance.meta_shadow_report_snapshots || {},
-      // false 表示人工治理，不是自动执行
+      autonomyMode: safeString(governance.autonomy_mode),
+      autonomyDemoAutoApply: !!governance.autonomy_demo_auto_apply,
+      // false 表示当前没有自动治理应用权限，并不等同于交易需要用户接管。
       requiresHumanReview: governance.automatic_execution_enabled === false,
     },
     highLoad: {

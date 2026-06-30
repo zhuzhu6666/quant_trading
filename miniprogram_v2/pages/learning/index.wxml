@@ -14,7 +14,7 @@
       </view>
       <view class="hero-metrics">
         <view class="hero-metric">
-          <view class="hero-metric-label">待审</view>
+          <view class="hero-metric-label">待治理</view>
           <view class="hero-metric-value">{{summary.suggestions.proposed || 0}}</view>
         </view>
         <view class="hero-metric">
@@ -168,7 +168,7 @@
 
     <view wx:if="{{summaryStatus === 'error'}}" class="status-banner status-banner-warning">
       <view class="small muted">学习摘要状态</view>
-      <view class="section-note">学习摘要接口当前拉取失败或超时，页内“待审/已批/模板候选”等摘要数字可能不是实时值。</view>
+      <view class="section-note">学习摘要接口当前拉取失败或超时，页内“待治理/已批/模板候选”等摘要数字可能不是实时值。</view>
       <view wx:if="{{summaryError}}" class="small muted">{{summaryError}}</view>
     </view>
 
@@ -275,7 +275,7 @@
 
     <section-card title="策略建议" subtitle="按治理状态分段查看">
       <view class="segmented">
-        <view class="segmented-item {{suggestionTab === 'proposed' ? 'segmented-item-active' : ''}}" data-tab="proposed" bindtap="switchSuggestionTab">待审 {{proposedSuggestions.length}}</view>
+        <view class="segmented-item {{suggestionTab === 'proposed' ? 'segmented-item-active' : ''}}" data-tab="proposed" bindtap="switchSuggestionTab">待治理 {{proposedSuggestions.length}}</view>
         <view class="segmented-item {{suggestionTab === 'approved' ? 'segmented-item-active' : ''}}" data-tab="approved" bindtap="switchSuggestionTab">已批 {{approvedSuggestions.length}}</view>
         <view class="segmented-item {{suggestionTab === 'rolled_back' ? 'segmented-item-active' : ''}}" data-tab="rolled_back" bindtap="switchSuggestionTab">回滚 {{rolledBackSuggestions.length}}</view>
       </view>
@@ -283,7 +283,7 @@
       <view wx:if="{{visibleSuggestions.length}}" style="margin-top: 18rpx;">
         <view class="divider-title">
           <view class="band-title" style="margin-bottom: 0;">
-            {{suggestionTab === 'approved' ? '已批准建议' : suggestionTab === 'rolled_back' ? '已回滚建议' : '待审核建议'}}
+            {{suggestionTab === 'approved' ? '已批准建议' : suggestionTab === 'rolled_back' ? '已回滚建议' : '待治理建议'}}
           </view>
         </view>
         <view wx:for="{{previewSuggestions}}" wx:key="suggestion_id" class="list-item tap-card" data-id="{{item.suggestion_id}}" bindtap="openSuggestionDetail">
@@ -470,7 +470,7 @@
       <view wx:else class="empty">还没有权重应用记录</view>
     </section-card>
 
-    <section-card title="参数模板候选" subtitle="离线验证后的待审、已发布与已回滚模板">
+    <section-card title="参数模板候选" subtitle="离线验证后的待治理、已发布与已回滚模板">
       <view wx:if="{{offlineCandidates.length}}">
         <view class="timeline">
         <view wx:for="{{previewOfflineCandidates}}" wx:key="candidate_id" class="timeline-item tap-card" data-id="{{item.candidate_id}}" bindtap="openOfflineCandidateDetail">
@@ -855,7 +855,7 @@
 
           <block wx:elif="{{learningPanel === 'suggestions'}}">
             <view class="segmented" style="margin-bottom: 14rpx;">
-              <view class="segmented-item {{suggestionTab === 'proposed' ? 'segmented-item-active' : ''}}" data-tab="proposed" bindtap="switchSuggestionTab">待审 {{proposedSuggestions.length}}</view>
+              <view class="segmented-item {{suggestionTab === 'proposed' ? 'segmented-item-active' : ''}}" data-tab="proposed" bindtap="switchSuggestionTab">待治理 {{proposedSuggestions.length}}</view>
               <view class="segmented-item {{suggestionTab === 'approved' ? 'segmented-item-active' : ''}}" data-tab="approved" bindtap="switchSuggestionTab">已批 {{approvedSuggestions.length}}</view>
               <view class="segmented-item {{suggestionTab === 'rolled_back' ? 'segmented-item-active' : ''}}" data-tab="rolled_back" bindtap="switchSuggestionTab">回滚 {{rolledBackSuggestions.length}}</view>
             </view>

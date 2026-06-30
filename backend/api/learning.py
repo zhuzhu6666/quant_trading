@@ -144,6 +144,8 @@ def _humanize_approval_path(value: str) -> str:
     key = str(value or "").lower()
     if key == "offline_validation_then_gray_release":
         return "先离线验证再灰度发布"
+    if key == "offline_replay_then_governed_release":
+        return "先离线回放再规则发布"
     if key == "governed_apply_switch":
         return "经治理审批后受控切换"
     if key == "governor_review_then_live_switch":
@@ -269,7 +271,7 @@ def _governance_priority(entry_type: str, stage_tag: str, has_governance_factor:
     normalized_type = str(entry_type or "").lower()
     normalized_stage = str(stage_tag or "")
     if normalized_type == "candidate" and normalized_stage == "待审候选":
-        return {"score": 100, "label": "优先审核", "summary": "这条治理对象已经形成候选，优先把人工审核处理掉。"}
+        return {"score": 100, "label": "优先治理", "summary": "这条治理对象已经形成候选，优先等待系统规则审核推进。"}
     if normalized_type == "candidate" and normalized_stage == "等待发布":
         return {"score": 90, "label": "优先发布", "summary": "这条治理对象已经批准，下一步应推进灰度发布。"}
     if normalized_type == "recommendation" and normalized_stage == "离线深调":
@@ -340,7 +342,7 @@ def _build_parameter_template_todo(
             "priority_label": str(priority["label"]),
             "priority_summary": str(priority["summary"]),
             "summary": (
-                "下一步等待人工审核，通过后才允许灰度发布。" if status == "pending_review"
+                "下一步等待系统规则审核，通过后才允许灰度发布。" if status == "pending_review"
                 else "下一步执行灰度发布，并继续观察后验效果。" if status == "approved"
                 else "下一步观察发布后的 reward 和胜率表现。" if status == "deployed"
                 else "下一步复核回滚原因，再决定是否重新离线调参。" if status == "rolled_back"
@@ -403,7 +405,7 @@ def _build_parameter_template_overview(
         headline = {
             "label": "待审候选",
             "tone": "warning",
-            "summary": f"{pending_candidate.get('factor_id') or '--'} 已形成模板候选，当前优先处理人工审核。",
+            "summary": f"{pending_candidate.get('factor_id') or '--'} 已形成模板候选，当前优先等待系统规则审核。",
         }
     elif online_recommendation:
         headline = {
@@ -603,7 +605,7 @@ def _parameter_template_candidate_governance_snapshot(item: dict | None) -> dict
         "stage_label": stage_tag,
         "stage_tone": _governance_stage_tone("candidate", stage_tag),
         "stage_summary": (
-            "离线证据已形成候选，当前优先等待人工审核。"
+            "离线证据已形成候选，当前优先等待系统规则审核。"
             if status == "pending_review"
             else "离线证据已审核通过，当前等待灰度发布。"
             if status == "approved"
@@ -616,7 +618,7 @@ def _parameter_template_candidate_governance_snapshot(item: dict | None) -> dict
             else "候选模板正在治理链中推进。"
         ),
         "next_step_label": (
-            "等待人工审核" if status == "pending_review"
+            "等待规则审核" if status == "pending_review"
             else "等待灰度发布" if status == "approved"
             else "观察发布效果" if status == "deployed"
             else "复核回滚原因" if status == "rolled_back"
@@ -624,7 +626,7 @@ def _parameter_template_candidate_governance_snapshot(item: dict | None) -> dict
             else "继续观察"
         ),
         "next_step_summary": (
-            "下一步由人工审核离线证据；通过后才允许进入灰度发布。"
+            "下一步由系统规则审核离线证据；通过后才允许进入灰度发布。"
             if status == "pending_review"
             else "下一步执行灰度发布，把候选模板切到运行态，并继续观察后验效果。"
             if status == "approved"
@@ -639,9 +641,9 @@ def _parameter_template_candidate_governance_snapshot(item: dict | None) -> dict
         "action_label": _governance_action_label("candidate", stage_tag),
         "action_buttons": action_buttons,
         "review_display": (
-            f"{_humanize_template_candidate_status(review.get('status') or '')} · {review.get('note') or '已人工处理'}"
+            f"{_humanize_template_candidate_status(review.get('status') or '')} · {review.get('note') or '已治理处理'}"
             if review.get("status")
-            else "尚未人工审核"
+            else "等待系统规则审核"
         ),
         "deployment_display": (
             f"已发布，旧模板 {deployment.get('old_template_id') or '--'}"
@@ -681,7 +683,7 @@ def _parameter_template_recommendation_governance_snapshot(item: dict | None) ->
         ),
         "next_step_label": "先做离线验证" if scope == "offline_deep" else "生成治理建议",
         "next_step_summary": (
-            "下一步先创建离线验证，验证通过后再登记灰度候选并进入人工审核。"
+            "下一步先创建离线验证，验证通过后再登记灰度候选并进入系统规则审核。"
             if scope == "offline_deep"
             else "下一步把推荐转成正式治理建议，再走 governor 审批后受控切换运行态模板。"
         ),
@@ -740,9 +742,9 @@ def _parameter_template_lifecycle_governance_snapshot(
             "status_label": "待审候选",
             "stage_label": "待审候选",
             "stage_tone": _governance_stage_tone("candidate", "待审候选"),
-            "stage_summary": "这条治理轨迹已登记候选，当前应进入人工审核。",
-            "next_step_label": "等待人工审核",
-            "next_step_summary": "下一步应进入人工审核，决定这条候选是否可以继续推进到发布。",
+            "stage_summary": "这条治理轨迹已登记候选，当前应进入系统规则审核。",
+            "next_step_label": "等待规则审核",
+            "next_step_summary": "下一步应进入系统规则审核，决定这条候选是否可以继续推进到发布。",
             "action_label": "去审候选",
             "target_type": target_type,
             "target_id": target_id,
@@ -984,7 +986,7 @@ def _offline_candidate_action_result_display(
     if key == "review" and status_key == "approved":
         return {
             "result_label": "已批准候选",
-            "result_summary": "这条离线候选已通过人工审核，下一步可进入灰度发布。",
+            "result_summary": "这条离线候选已通过规则审核，下一步可进入灰度发布。",
         }
     if key == "review" and status_key == "rejected":
         return {

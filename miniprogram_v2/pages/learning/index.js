@@ -129,9 +129,9 @@ function decideMetaModelNextStep({
   }
   if ((accuracyPercent || 0) >= 58 && (evaluatedCount || 0) >= 100) {
     return {
-      text: '人工复核',
+      text: '治理复核',
       tone: 'warning',
-      detail: '样本和命中率都较充分，请结合当前市场环境做人工确认。',
+      detail: '样本和命中率都较充分，可进入系统治理复核；运行态仍由风控门禁约束。',
     };
   }
   return {

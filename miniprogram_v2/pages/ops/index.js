@@ -149,7 +149,7 @@ function deriveReadinessConclusion(context = {}) {
   } else if (permissionBlocked) {
     nextAction = '先处理权限审计异常，再继续依赖该指标。';
   } else if (observationCount > 0) {
-    nextAction = '当前可继续运行，但观察项上升时应触发人工复核。';
+    nextAction = '当前可继续运行；观察项上升时进入系统治理复核。';
   }
 
   return {

@@ -9,7 +9,7 @@ const STAGE_META = {
   },
   pending_review: {
     label: '待审候选',
-    summary: '离线证据已经形成，当前重点是人工审核。',
+    summary: '离线证据已经形成，当前等待系统规则审核。',
   },
   approved: {
     label: '等待发布',
@@ -89,7 +89,7 @@ export function describeRecommendationStage(item = {}) {
 
 export function describeCandidateNextStep(item = {}) {
   const status = String(item.status || '').toLowerCase();
-  if (status === 'pending_review') return '下一步等待人工审核，通过后才允许灰度发布。';
+  if (status === 'pending_review') return '下一步等待系统规则审核，通过后才允许灰度发布。';
   if (status === 'approved') return '下一步执行灰度发布，并继续观察后验效果。';
   if (status === 'deployed') return '下一步观察发布后的 reward 和胜率表现。';
   if (status === 'rolled_back') return '下一步复核回滚原因，再决定是否重新离线调参。';
@@ -140,8 +140,8 @@ export function describeGovernancePriority({ entryType = '', stage = '', hasGove
   if (normalizedType === 'candidate' && normalizedStage === '待审候选') {
     return {
       score: 100,
-      label: '优先审核',
-      summary: '这条治理对象已经形成候选，优先把人工审核处理掉。',
+      label: '优先治理',
+      summary: '这条治理对象已经形成候选，优先等待系统规则审核推进。',
     };
   }
   if (normalizedType === 'candidate' && normalizedStage === '等待发布') {

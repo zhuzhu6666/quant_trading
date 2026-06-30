@@ -62,7 +62,7 @@
             <view class="value-md accent-warn">{{backendReadinessObservationCount}}</view>
           </view>
           <view class="split-card stack-12">
-            <view class="small muted">待审治理</view>
+            <view class="small muted">待治理项</view>
             <view class="value-md accent-warn">{{backendReadinessPendingGovernance}}</view>
           </view>
           <view class="split-card stack-12">
@@ -285,7 +285,7 @@
       <view wx:else class="soft-panel section-note">风控汇总暂时不可用</view>
     </section-card>
 
-    <section-card title="参数治理待办" subtitle="把待审候选和新推荐直接抬到运维入口">
+    <section-card title="参数治理待办" subtitle="把候选和新推荐直接抬到运维入口">
       <view wx:if="{{pendingTemplateCandidateCount || pendingTemplateRecommendationCount}}" class="stack-12">
         <view class="grid-3">
           <view class="split-card stack-12">

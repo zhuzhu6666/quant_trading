@@ -88,7 +88,7 @@ factor card 就是这个统一对象。
 
 - `factor_id` 必须与 `factor_registry` / `registry_adapter` 中的唯一标识一致
 - `display_name` 允许先复用现有 `description`
-- `factor_family` 先允许人工枚举，不要求自动推断
+- `factor_family` 先允许显式枚举，不要求自动推断
 - `formula_version` 与 `parameter_version` 在 Phase E / E2 之前允许使用占位版本
 
 ---

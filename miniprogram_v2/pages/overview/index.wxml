@@ -31,7 +31,7 @@
           <view class="tag">交易循环：{{systemNowLoopText}}</view>
           <view class="tag">{{systemNowPositionText}}</view>
           <view class="tag">学习/治理：{{systemNowLearningText}}</view>
-          <view class="tag">需要人工处理：{{systemNowNeedHumanText}}</view>
+          <view class="tag">接管状态：{{systemNowNeedHumanText}}</view>
         </view>
       </view>
     </view>
@@ -102,14 +102,14 @@
             <view class="value-md">{{governanceLabel}}</view>
             <status-pill label="{{governanceLabel}}" tone="{{governanceTone}}" />
           </view>
-          <view wx:if="{{learningSummaryStatus === 'error'}}" class="section-note">学习摘要拉取失败，当前待审/已批等数字可能不是实时值。</view>
+          <view wx:if="{{learningSummaryStatus === 'error'}}" class="section-note">学习摘要拉取失败，当前待治理/已批等数字可能不是实时值。</view>
           <view class="section-note">{{governanceHeadlineSummary}}</view>
           <view class="section-note">已应用 {{learningApplications}} 次，最新复盘会在治理后进入下一轮权重。</view>
           <view class="section-note">{{templateOpsSummary}}</view>
         </view>
         <view wx:if="{{learningSummaryHint}}" class="section-note" style="margin-top: 12rpx;">{{learningSummaryHint}}</view>
         <view class="grid-3">
-          <metric-tile label="待审" value="{{learningSummary.proposed || 0}}" hint="待人工确认的候选" />
+          <metric-tile label="待治理" value="{{learningSummary.proposed || 0}}" hint="待系统规则治理的候选" />
           <metric-tile label="已批" value="{{learningSummary.approved || 0}}" hint="已通过审批" />
           <metric-tile label="已回滚" value="{{learningSummary.rolled_back || 0}}" hint="发布后被回滚" />
         </view>

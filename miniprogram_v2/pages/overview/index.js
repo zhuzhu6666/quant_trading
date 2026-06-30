@@ -51,15 +51,16 @@ function uniqueRecentTrades(points = [], limit = 3) {
 function buildSystemNowSummary({ loopRunning, positionCount, pendingTodoCount, learningSummaryStatus }) {
   const loopText = loopRunning ? '交易循环在线' : '交易循环未运行';
   const positionText = positionCount > 0 ? `当前有 ${positionCount} 笔持仓` : '当前无持仓';
-  const learningText = pendingTodoCount > 0 ? `学习治理待处理 ${pendingTodoCount} 项` : '学习治理暂无待处理';
-  const needHuman = pendingTodoCount > 0 || learningSummaryStatus === 'error' || !loopRunning;
+  const learningText = pendingTodoCount > 0 ? `自动治理队列 ${pendingTodoCount} 项` : '自动治理暂无待处理';
+  const needsOperator = learningSummaryStatus === 'error' || !loopRunning;
+  const hasGovernanceQueue = pendingTodoCount > 0;
   return {
-    tone: needHuman ? 'warning' : 'positive',
-    sentence: `系统现在：${loopText}；${positionText}；${learningText}；需要人工处理：${needHuman ? '是' : '否'}。`,
+    tone: needsOperator ? 'warning' : hasGovernanceQueue ? 'warning' : 'positive',
+    sentence: `系统现在：${loopText}；${positionText}；${learningText}；接管状态：${needsOperator ? '需要运维查看' : '无需接管'}。`,
     loopText,
     positionText,
     learningText,
-    humanActionText: needHuman ? '是' : '否',
+    humanActionText: needsOperator ? '需要运维查看' : '无需接管',
   };
 }
 
@@ -70,7 +71,7 @@ function buildTemplateProgressNote({ candidateCounts = {}, recommendationCounts 
   const offline = Number(recommendationCounts.offline_deep || 0);
   if (pendingCandidates || recommendations) {
     const parts = [];
-    if (pendingCandidates) parts.push(`候选待审 ${pendingCandidates}`);
+    if (pendingCandidates) parts.push(`候选待治理 ${pendingCandidates}`);
     if (recommendations) parts.push(`推荐 ${recommendations}`);
     if (online || offline) parts.push(`在线 ${online} / 离线 ${offline}`);
     return parts.join('，');

@@ -293,6 +293,8 @@ def _humanize_approval_path(value: str) -> str:
     key = str(value or "").lower()
     if key == "offline_validation_then_gray_release":
         return "先离线验证再灰度发布"
+    if key == "offline_replay_then_governed_release":
+        return "先离线回放再规则发布"
     if key == "governed_apply_switch":
         return "经治理审批后受控切换"
     if key == "governor_review_then_live_switch":
@@ -314,7 +316,7 @@ def _parameter_governance_stage_snapshot(
             return {
                 "stage_label": "待审候选",
                 "next_step_label": "进入候选审核",
-                "next_step_summary": "下一步先人工审核离线证据；只有审核通过后，才允许继续灰度发布到运行态。",
+                "next_step_summary": "下一步先由系统规则审核离线证据；只有审核通过后，才允许继续灰度发布到运行态。",
                 "entry_type": "candidate",
             }
         if candidate_status == "approved":
@@ -352,7 +354,7 @@ def _parameter_governance_stage_snapshot(
             return {
                 "stage_label": "离线深调",
                 "next_step_label": "创建离线验证",
-                "next_step_summary": "下一步先发起离线验证；验证通过后再登记灰度候选，并进入人工审核与发布链。",
+                "next_step_summary": "下一步先发起离线验证；验证通过后再登记灰度候选，并进入系统规则审核与发布链。",
                 "entry_type": "recommendation",
             }
         return {
@@ -415,8 +417,8 @@ def _parameter_governance_priority_snapshot(
     if normalized_type == "candidate" and normalized_stage == "待审候选":
         return {
             "score": 100,
-            "label": "优先审核",
-            "summary": "这条样本已经形成候选，优先把人工审核处理掉。",
+            "label": "优先治理",
+            "summary": "这条样本已经形成候选，优先等待系统规则审核推进。",
         }
     if normalized_type == "candidate" and normalized_stage == "等待发布":
         return {
@@ -489,7 +491,7 @@ def _parameter_governance_jump_snapshot(
             "type_label": target_type or "模板候选",
             "button_text": action_label or _parameter_governance_action_label("candidate", stage_label),
             "summary": (
-                f"当前最该处理的是候选 {candidate_id} 的人工审核。"
+                f"当前最该处理的是候选 {candidate_id} 的规则审核。"
                 if candidate_status == "pending_review"
                 else f"当前最该处理的是候选 {candidate_id} 的灰度发布。"
                 if candidate_status == "approved"
@@ -604,7 +606,7 @@ def _parameter_governance_todo_queue_snapshot(
             "target_id": candidate_id,
             "title": f"{candidate_id} · {stage_label or _humanize_template_candidate_status(candidate.get('status') or '')}",
             "reason": (
-                "离线证据已经收敛，当前卡点就是人工审核。"
+                "离线证据已经收敛，当前卡点是系统规则审核。"
                 if candidate_status == "pending_review"
                 else "候选已经通过审核，当前最关键的是推进灰度发布。"
                 if candidate_status == "approved"
@@ -832,7 +834,7 @@ def _parameter_governance_timeline_filter_context_snapshot() -> dict[str, Any]:
             },
             "pending_review": {
                 "label": "待审候选",
-                "summary": "离线证据已经形成，当前重点是人工审核。",
+                "summary": "离线证据已经形成，当前重点是系统规则审核。",
             },
             "approved": {
                 "label": "等待发布",

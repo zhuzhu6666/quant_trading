@@ -756,7 +756,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 汇总风控、归因、因子治理、数学模型建议
 - 生成系统状态说明
 - 生成 rollout / rollback 理由
-- 支持人工审批和运维排障
+- 支持治理审批覆盖和运维排障
 
 它在这里更像：
 
