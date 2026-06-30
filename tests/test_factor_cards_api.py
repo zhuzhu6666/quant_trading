@@ -1559,6 +1559,9 @@ def test_learning_summary_includes_parameter_template_candidate_stats(tmp_path):
         status="approved",
         note="approve for summary",
     )
+    learning_api._LEARNING_CACHE.clear()
+    learning_api._LEARNING_LAST_GOOD.clear()
+    ParameterTemplateService(db_path).list_recommendations(limit=20)
     import backend.core.db as core_db
 
     original_get_state_conn = core_db.get_state_conn
@@ -1621,6 +1624,68 @@ def test_learning_summary_includes_parameter_template_candidate_stats(tmp_path):
     assert "参数治理最新进展" in summary["parameter_template_ops_summary"]
     assert "在线" in summary["parameter_template_ops_summary"]
     assert summary["latest_parameter_template_recommendation"]["factor_id"] == "rsi_14"
+    assert summary["stale"] is False
+    assert summary["recommendations_source"] == "cache"
+
+
+def test_learning_summary_returns_last_good_when_state_db_locked(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+    learning_api._LEARNING_CACHE.clear()
+    learning_api._LEARNING_LAST_GOOD.clear()
+
+    import backend.core.db as core_db
+
+    monkeypatch.setattr(core_db, "STATE_DB", Path(db_path))
+    good_summary = learning_api.get_learning_summary(None)
+    assert good_summary["stale"] is False
+    learning_api._LEARNING_CACHE.clear()
+
+    def _locked_connect(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(core_db, "connect_sqlite", _locked_connect)
+    stale_summary = learning_api.get_learning_summary(None)
+
+    assert stale_summary["stale"] is True
+    assert stale_summary["stale_reason"] == "database_locked"
+    assert stale_summary["suggestions"] == good_summary["suggestions"]
+    assert stale_summary["applications"] == good_summary["applications"]
+
+
+def test_parameter_template_release_candidate_registration_is_idempotent(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+    validation_service = ParameterTemplateValidationService(db_path)
+    kwargs = {
+        "factor_id": "bb_width",
+        "template_id": "bb_width:bb_custom.v2:default",
+        "regime_key": "",
+        "boundary": {"recommended_scope": "offline_deep"},
+        "walk_forward": {
+            "passed": True,
+            "candidate_summary": {"avg_ic": 0.04, "avg_directional_accuracy": 0.6},
+            "baseline_summary": {"avg_ic": -0.01, "avg_directional_accuracy": 0.52},
+            "config": {"n_folds": 3},
+        },
+        "validation_report_path": str(tmp_path / "report.json"),
+        "recommendation_context": {
+            "source": "parameter_template_recommendation",
+            "recommendation_id": "ptr_test_bb_width",
+        },
+    }
+
+    first = validation_service.register_release_candidate(**kwargs)
+    second = validation_service.register_release_candidate(**kwargs)
+    items = validation_service.list_release_candidates(limit=10)
+
+    assert second["candidate_id"] == first["candidate_id"]
+    assert [
+        item for item in items
+        if item["factor_id"] == "bb_width" and item["template_id"] == "bb_width:bb_custom.v2:default"
+    ] == [first]
 
 
 def test_factor_card_template_state_reflects_release_candidate_status(tmp_path):

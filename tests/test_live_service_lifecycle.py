@@ -102,7 +102,7 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     monkeypatch.setattr(live_service, "_start_live_scheduler", lambda: scheduler_calls.append("started"))
     monkeypatch.setattr(live_service.threading, "Thread", _IdleThread)
 
-    result = live_service.start_loop("ctrader", strategy_name="smoke")
+    result = live_service.start_loop("ctrader", strategy_name="smoke", persist_desired=False)
 
     assert result["ok"] is True
     assert result["broker"] == "ctrader"

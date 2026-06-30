@@ -157,11 +157,12 @@ class ParameterTemplateService:
         "keltner_width",
     }
 
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None, *, ensure_schema: bool = True):
         self.db_path = Path(db_path or str(STATE_DB))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cards = FactorCardService(str(self.db_path))
-        self._ensure_schema()
+        self.cards = FactorCardService(str(self.db_path), ensure_schema=ensure_schema)
+        if ensure_schema:
+            self._ensure_schema()
 
     @contextmanager
     def _conn(self):
@@ -244,6 +245,7 @@ class ParameterTemplateService:
         *,
         factor_id: str | None = None,
         limit: int = 50,
+        allow_compute: bool = True,
     ) -> list[dict[str, Any]]:
         cache_key = f"{self.db_path.resolve()}|{factor_id or '*'}"
         now_ts = time.time()
@@ -251,6 +253,8 @@ class ParameterTemplateService:
             cached = _RECOMMENDATION_CACHE.get(cache_key)
             if cached and cached[0] > now_ts:
                 return deepcopy(cached[1][:limit])
+        if not allow_compute:
+            return []
 
         cards = self.cards.list_cards(limit=max(200, limit * 3), factor_id=factor_id)
         items: list[dict[str, Any]] = []

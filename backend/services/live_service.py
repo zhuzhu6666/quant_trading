@@ -47,6 +47,117 @@ _TRADE_REVIEWER: TradeReviewer | None = None
 _EXPERIENCE_BUILDER: ExperienceBuilder | None = None
 _POLICY_SUGGESTER: PolicySuggester | None = None
 _RISK_POLICY = RiskPolicyService.shared()
+_DECISION_LOG_PENDING_PATH = Path("data/charts/decision_log.pending.jsonl")
+_DECISION_LOG_PENDING_LOCK = threading.Lock()
+_DECISION_LOG_LAST_DRAIN = 0.0
+_RUNTIME_KV_PENDING_PATH = Path("data/charts/runtime_kv.pending.jsonl")
+_RUNTIME_KV_PENDING_LOCK = threading.Lock()
+
+
+def _append_decision_log_pending(payload: dict[str, Any], error: str = "") -> None:
+    _DECISION_LOG_PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "queued_at": time.time(),
+        "error": str(error or ""),
+        "payload": payload,
+    }
+    line = json.dumps(record, ensure_ascii=False, default=str)
+    with _DECISION_LOG_PENDING_LOCK:
+        with _DECISION_LOG_PENDING_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+
+def _rewrite_decision_log_pending_unlocked(lines: list[str]) -> None:
+    if lines:
+        tmp_path = _DECISION_LOG_PENDING_PATH.with_suffix(".pending.tmp")
+        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp_path.replace(_DECISION_LOG_PENDING_PATH)
+    else:
+        _DECISION_LOG_PENDING_PATH.unlink(missing_ok=True)
+
+
+def _drain_decision_log_pending(log_store: DecisionLogStore, limit: int = 100) -> int:
+    if not _DECISION_LOG_PENDING_PATH.exists():
+        return 0
+    with _DECISION_LOG_PENDING_LOCK:
+        lines = _DECISION_LOG_PENDING_PATH.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines()
+        if not lines:
+            _DECISION_LOG_PENDING_PATH.unlink(missing_ok=True)
+            return 0
+
+        drained = 0
+        remaining: list[str] = []
+        for idx, raw in enumerate(lines):
+            if drained >= limit:
+                remaining.extend(lines[idx:])
+                break
+            try:
+                record = json.loads(raw)
+                payload = record.get("payload") if isinstance(record, dict) else None
+                if not isinstance(payload, dict):
+                    remaining.append(raw)
+                    continue
+                log_store.log(**payload)
+                drained += 1
+            except Exception:
+                remaining.append(raw)
+                remaining.extend(lines[idx + 1:])
+                break
+        _rewrite_decision_log_pending_unlocked(remaining)
+        return drained
+
+
+def _safe_decision_log(log_store: DecisionLogStore | None, **kwargs) -> None:
+    global _DECISION_LOG_LAST_DRAIN
+    if log_store is None:
+        return
+    now = time.time()
+    if _DECISION_LOG_PENDING_PATH.exists() and now - _DECISION_LOG_LAST_DRAIN >= 5.0:
+        _DECISION_LOG_LAST_DRAIN = now
+        try:
+            drained = _drain_decision_log_pending(log_store)
+            if drained:
+                logger.info("[live] legacy decision_log pending drained: {}", drained)
+        except Exception as exc:
+            logger.warning("[live] legacy decision_log pending drain deferred: {}", exc)
+    try:
+        log_store.log(**kwargs)
+    except Exception as exc:
+        try:
+            _append_decision_log_pending(dict(kwargs), str(exc))
+            logger.warning("[live] legacy decision_log write queued: {}", exc)
+        except Exception as queue_exc:
+            logger.error(
+                "[live] legacy decision_log write failed and queue failed: write={} queue={}",
+                exc,
+                queue_exc,
+            )
+
+
+def _append_runtime_kv_pending(key: str, value, error: str = "") -> None:
+    _RUNTIME_KV_PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "queued_at": time.time(),
+        "error": str(error or ""),
+        "key": str(key),
+        "value": value,
+    }
+    line = json.dumps(record, ensure_ascii=False, default=str)
+    with _RUNTIME_KV_PENDING_LOCK:
+        with _RUNTIME_KV_PENDING_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+
+def _rewrite_runtime_kv_pending_unlocked(lines: list[str]) -> None:
+    if lines:
+        tmp_path = _RUNTIME_KV_PENDING_PATH.with_suffix(".pending.tmp")
+        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp_path.replace(_RUNTIME_KV_PENDING_PATH)
+    else:
+        _RUNTIME_KV_PENDING_PATH.unlink(missing_ok=True)
 
 # ── Local SL/TP tracking (live loop only) ──────────────────────────
 # audit 2026-06-10: 之前 SL/TP 完全靠本地 Python 监控 1 bar 延迟的
@@ -656,7 +767,7 @@ def _position_unrealized_pnl(position: Any) -> float:
 def _load_recovery_position_row(position_id: int) -> dict[str, Any]:
     if position_id <= 0:
         return {}
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
         row = conn.execute(
             """
@@ -709,6 +820,26 @@ def _merge_recovery_position_meta(position_id: int, meta: dict[str, Any] | None)
                 int(position_id),
             ),
         )
+        final_row = conn.execute(
+            "SELECT * FROM recovery_position_state WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        if final_row is not None:
+            try:
+                from backend.services.state_dual_write import enqueue_state_row_event_on_conn
+
+                final_payload = dict(final_row)
+                enqueue_state_row_event_on_conn(
+                    conn,
+                    db_path=_state_db_path_for_conn(conn),
+                    table_name="recovery_position_state",
+                    entity_key=str(position_id),
+                    row=final_payload,
+                    operation="upsert",
+                    source_updated_at=float(final_payload.get("last_seen_at") or now),
+                )
+            except Exception as exc:
+                logger.debug("[live] recovery state dual-write enqueue failed: {}", exc)
         conn.commit()
     finally:
         conn.close()
@@ -1954,6 +2085,32 @@ def _get_state_conn():
     return get_state_conn()
 
 
+def _get_state_read_conn():
+    conn = _get_state_conn()
+    try:
+        conn.execute("PRAGMA query_only=ON")
+    except Exception:
+        pass
+    return conn
+
+
+def _state_db_path_for_conn(conn) -> str:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        if row is not None:
+            if isinstance(row, dict):
+                value = row.get("file")
+            else:
+                value = row["file"] if "file" in getattr(row, "keys", lambda: [])() else row[2]
+            if value:
+                return str(value)
+    except Exception:
+        pass
+    from backend.core.db import STATE_DB
+
+    return str(STATE_DB)
+
+
 def _ensure_runtime_kv_schema(conn) -> None:
     from backend.core.db import STATE_DB_DDL
 
@@ -1961,13 +2118,14 @@ def _ensure_runtime_kv_schema(conn) -> None:
 
 
 def _runtime_kv_get(key: str, default=None):
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
-        _ensure_runtime_kv_schema(conn)
         row = conn.execute(
             "SELECT value_json FROM runtime_kv WHERE key=?",
             (key,),
         ).fetchone()
+    except Exception:
+        return default
     finally:
         conn.close()
     if row is None:
@@ -1978,27 +2136,98 @@ def _runtime_kv_get(key: str, default=None):
         return default
 
 
+def _runtime_kv_write_on_conn(conn, key: str, value, updated_at: float | None = None) -> None:
+    ts = float(updated_at or time.time())
+    value_json = json.dumps(value, ensure_ascii=False, default=str)
+    conn.execute(
+        """
+        INSERT INTO runtime_kv(key, value_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value_json=excluded.value_json,
+            updated_at=excluded.updated_at
+        """,
+        (key, value_json, ts),
+    )
+    try:
+        from backend.services.state_dual_write import enqueue_state_row_event_on_conn
+
+        enqueue_state_row_event_on_conn(
+            conn,
+            db_path=_state_db_path_for_conn(conn),
+            table_name="runtime_kv",
+            entity_key=str(key),
+            row={"key": str(key), "value_json": value_json, "updated_at": ts},
+            operation="upsert",
+            source_updated_at=ts,
+        )
+    except Exception as exc:
+        logger.debug("[live] runtime_kv dual-write enqueue failed: {}", exc)
+
+
+def _drain_runtime_kv_pending(conn, limit: int = 100) -> int:
+    if not _RUNTIME_KV_PENDING_PATH.exists():
+        return 0
+    with _RUNTIME_KV_PENDING_LOCK:
+        lines = _RUNTIME_KV_PENDING_PATH.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines()
+        if not lines:
+            _RUNTIME_KV_PENDING_PATH.unlink(missing_ok=True)
+            return 0
+        drained = 0
+        remaining: list[str] = []
+        for idx, raw in enumerate(lines):
+            if drained >= limit:
+                remaining.extend(lines[idx:])
+                break
+            try:
+                record = json.loads(raw)
+                key = str(record.get("key") or "")
+                if not key:
+                    remaining.append(raw)
+                    continue
+                _runtime_kv_write_on_conn(
+                    conn,
+                    key,
+                    record.get("value"),
+                    updated_at=float(record.get("queued_at") or time.time()),
+                )
+                drained += 1
+            except Exception:
+                remaining.append(raw)
+                remaining.extend(lines[idx + 1:])
+                break
+        _rewrite_runtime_kv_pending_unlocked(remaining)
+        return drained
+
+
 def _runtime_kv_set(key: str, value) -> None:
     conn = _get_state_conn()
     try:
         _ensure_runtime_kv_schema(conn)
-        conn.execute(
-            """
-            INSERT INTO runtime_kv(key, value_json, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value_json=excluded.value_json,
-                updated_at=excluded.updated_at
-            """,
-            (key, json.dumps(value, ensure_ascii=False, default=str), time.time()),
-        )
+        drained = _drain_runtime_kv_pending(conn)
+        if drained:
+            logger.info("[live] runtime_kv pending drained: {}", drained)
+        _runtime_kv_write_on_conn(conn, key, value)
         conn.commit()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            _append_runtime_kv_pending(key, value, str(exc))
+            logger.warning("[live] runtime_kv write queued: {}", exc)
+        except Exception as queue_exc:
+            logger.error("[live] runtime_kv write failed and queue failed: write={} queue={}", exc, queue_exc)
     finally:
         conn.close()
 
 
 def _lookup_entry_decision_id(position_id: int) -> str:
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
         row = conn.execute(
             """
@@ -2014,7 +2243,7 @@ def _lookup_entry_decision_id(position_id: int) -> str:
 
 
 def _lookup_open_decision_context(position_id: int) -> dict:
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
         row = conn.execute(
             """
@@ -2067,7 +2296,7 @@ def _ensure_open_ledger_for_recovered_close(
     if not _LEDGER:
         return ""
 
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
         row = conn.execute(
             "SELECT * FROM recovery_position_state WHERE position_id=?",
@@ -2149,7 +2378,7 @@ def _ensure_open_ledger_for_recovered_close(
 
 
 def _lookup_recovery_context_integrity(position_id: int, default: str = _RECOVERY_CONTEXT_FULL) -> str:
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
         row = conn.execute(
             "SELECT context_integrity FROM recovery_position_state WHERE position_id=?",
@@ -2306,7 +2535,7 @@ def _consume_close_verdict(position_id: int, close_reason: str) -> dict:
 
 
 def _latest_supervisor_event_before_close(position_id: int, close_ts: float, lookback_sec: float = 3600.0) -> dict[str, Any]:
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
         row = conn.execute(
             """
@@ -2354,7 +2583,7 @@ def _latest_supervisor_event_before_close(position_id: int, close_ts: float, loo
 
 
 def _latest_protection_trace_before_close(position_id: int, close_ts: float, lookback_sec: float = 3600.0) -> dict[str, Any]:
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
         try:
             row = conn.execute(
@@ -2588,7 +2817,7 @@ def _upsert_recovery_position_state(
 
 
 def _list_active_recovery_positions(broker: str) -> list[dict]:
-    conn = _get_state_conn()
+    conn = _get_state_read_conn()
     try:
         rows = conn.execute(
             """
@@ -4180,6 +4409,26 @@ def _record_offmarket_high_load_audit(
                 row["finished_at"],
             ),
         )
+        final_row = conn.execute(
+            "SELECT * FROM recovery_position_state WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        if final_row is not None:
+            try:
+                from backend.services.state_dual_write import enqueue_state_row_event_on_conn
+
+                final_payload = dict(final_row)
+                enqueue_state_row_event_on_conn(
+                    conn,
+                    db_path=_state_db_path_for_conn(conn),
+                    table_name="recovery_position_state",
+                    entity_key=str(position_id),
+                    row=final_payload,
+                    operation="update",
+                    source_updated_at=float(final_payload.get("closed_at") or closed_at),
+                )
+            except Exception as exc:
+                logger.debug("[live] recovery close dual-write enqueue failed: {}", exc)
         conn.commit()
     finally:
         conn.close()
@@ -6057,7 +6306,8 @@ def _process_tick_factor_pipeline(
         bar_ts = bar.get("time", 0)
         if bar_ts:
             bar_date = time.strftime("%Y-%m-%d", time.gmtime(bar_ts))
-            _DECISION_LOG.log(
+            _safe_decision_log(
+                _DECISION_LOG,
                 run_id=_DECISION_LOG_RUN_ID,
                 ts=bar_ts,
                 bar_date=bar_date,
@@ -6198,7 +6448,8 @@ def _process_tick_factor_pipeline(
             if _DECISION_LOG:
                 bar_ts = bar.get("time", 0)
                 bar_date = time.strftime("%Y-%m-%d", time.gmtime(bar_ts)) if bar_ts else ""
-                _DECISION_LOG.log(
+                _safe_decision_log(
+                    _DECISION_LOG,
                     run_id=_DECISION_LOG_RUN_ID,
                     ts=bar_ts or time.time(),
                     bar_date=bar_date,
@@ -6643,7 +6894,8 @@ def _process_tick_factor_pipeline(
                                         bar_date = time.strftime(
                                             "%Y-%m-%d", time.gmtime(bar_ts)
                                         ) if bar_ts else ""
-                                        _DECISION_LOG.log(
+                                        _safe_decision_log(
+                                            _DECISION_LOG,
                                             run_id=_DECISION_LOG_RUN_ID,
                                             ts=bar_ts or time.time(),
                                             bar_date=bar_date,
@@ -7468,7 +7720,8 @@ def _write_live_trade_log_factor(
                 "tags": composite.tags_breakdown,
             }
         if _DECISION_LOG:
-            _DECISION_LOG.log(
+            _safe_decision_log(
+                _DECISION_LOG,
                 run_id=_DECISION_LOG_RUN_ID,
                 ts=time.time(),
                 bar_date="",

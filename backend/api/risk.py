@@ -80,7 +80,8 @@ def _advisory_only_components() -> set[str]:
 
 def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
     limit = max(1, min(int(limit or 50), 200))
-    conn = get_state_conn()
+    from backend.core.db import STATE_DB, connect_sqlite
+    conn = connect_sqlite(STATE_DB, read_only=True)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -1321,7 +1322,8 @@ def _build_trade_trace_parameter_governance(
 
 def _recent_trade_trace_index(limit: int = 20) -> dict[str, Any]:
     limit = max(1, min(int(limit or 20), 100))
-    conn = get_state_conn()
+    from backend.core.db import STATE_DB, connect_sqlite
+    conn = connect_sqlite(STATE_DB, read_only=True)
     conn.row_factory = sqlite3.Row
     try:
         try:
@@ -1454,7 +1456,8 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
     if not resolved_position_id and not resolved_decision_id:
         raise ValueError("position_id or decision_id is required")
 
-    conn = get_state_conn()
+    from backend.core.db import STATE_DB, connect_sqlite
+    conn = connect_sqlite(STATE_DB, read_only=True)
     conn.row_factory = sqlite3.Row
     try:
         anchor = None

@@ -109,10 +109,11 @@ _FAMILY_DEFAULTS: dict[str, dict[str, Any]] = {
 
 
 class FactorCardService:
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None, *, ensure_schema: bool = True):
         self.db_path = Path(db_path or str(STATE_DB))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        if ensure_schema:
+            self._ensure_schema()
 
     @contextmanager
     def _conn(self):

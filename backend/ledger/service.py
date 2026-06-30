@@ -373,6 +373,37 @@ class DecisionLedger:
             except Exception:
                 config_version = int(config_version or 0)
                 config_hash = str(config_hash or "")
+        trace_payload = {
+            "trace_id": trace_id,
+            "decision_id": decision_id,
+            "position_id": str(position_id or ""),
+            "trade_id": trade_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "tick": int(tick or 0),
+            "event_ts": float(event_ts or now),
+            "action": action,
+            "summary_reason": summary_reason,
+            "confidence": float(confidence or 0.0),
+            "template_id": template_id,
+            "template_version": template_version,
+            "stage": stage,
+            "outcome": outcome,
+            "risk_action": risk_action,
+            "risk_allowed": 1 if risk_allowed else 0,
+            "risk_reason": risk_reason,
+            "execution_status": execution_status,
+            "execution_reason": execution_reason,
+            "context_json": _json_dumps(context),
+            "verdict_json": _json_dumps(verdict),
+            "risk_verdict_json": _json_dumps(risk_verdict),
+            "execution_json": _json_dumps(execution),
+            "trace_integrity": str(trace_integrity or "full"),
+            "config_version": int(config_version or 0),
+            "config_hash": str(config_hash or ""),
+            "evolution_run_id": str(evolution_run_id or ""),
+            "created_at": now,
+        }
         with self._conn() as conn:
             conn.execute(
                 """
@@ -385,38 +416,52 @@ class DecisionLedger:
                  config_version, config_hash, evolution_run_id, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    trace_id,
-                    decision_id,
-                    str(position_id or ""),
-                    trade_id,
-                    symbol,
-                    timeframe,
-                    int(tick or 0),
-                    float(event_ts or now),
-                    action,
-                    summary_reason,
-                    float(confidence or 0.0),
-                    template_id,
-                    template_version,
-                    stage,
-                    outcome,
-                    risk_action,
-                    1 if risk_allowed else 0,
-                    risk_reason,
-                    execution_status,
-                    execution_reason,
-                    _json_dumps(context),
-                    _json_dumps(verdict),
-                    _json_dumps(risk_verdict),
-                    _json_dumps(execution),
-                    str(trace_integrity or "full"),
-                    int(config_version or 0),
-                    str(config_hash or ""),
-                    str(evolution_run_id or ""),
-                    now,
-                ),
+                tuple(trace_payload[k] for k in (
+                    "trace_id",
+                    "decision_id",
+                    "position_id",
+                    "trade_id",
+                    "symbol",
+                    "timeframe",
+                    "tick",
+                    "event_ts",
+                    "action",
+                    "summary_reason",
+                    "confidence",
+                    "template_id",
+                    "template_version",
+                    "stage",
+                    "outcome",
+                    "risk_action",
+                    "risk_allowed",
+                    "risk_reason",
+                    "execution_status",
+                    "execution_reason",
+                    "context_json",
+                    "verdict_json",
+                    "risk_verdict_json",
+                    "execution_json",
+                    "trace_integrity",
+                    "config_version",
+                    "config_hash",
+                    "evolution_run_id",
+                    "created_at",
+                )),
             )
+            try:
+                from backend.services.state_dual_write import enqueue_state_row_event_on_conn
+
+                enqueue_state_row_event_on_conn(
+                    conn,
+                    db_path=self.db_path,
+                    table_name="position_supervisor_trace",
+                    entity_key=trace_id,
+                    row=trace_payload,
+                    operation="insert",
+                    source_updated_at=float(trace_payload["event_ts"] or now),
+                )
+            except Exception as exc:
+                logger.warning("position supervisor trace dual-write enqueue failed: %s", exc)
         return trace_id
 
     def get_latest_entry_decision(self, position_id: str) -> sqlite3.Row | None:

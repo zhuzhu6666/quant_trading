@@ -80,6 +80,7 @@ _LEARNING_CACHE_TTL_SEC = 30.0
 _LEARNING_CACHE_LOCK = threading.Lock()
 _LEARNING_CACHE: dict[str, tuple[float, Any]] = {}
 _LEARNING_COMPUTE_LOCKS: dict[str, threading.Lock] = {}
+_LEARNING_LAST_GOOD: dict[str, tuple[float, Any]] = {}
 
 
 def _learning_cache_get(key: str) -> Any | None:
@@ -103,6 +104,21 @@ def _learning_cache_set(key: str, payload: Any, ttl_sec: float = _LEARNING_CACHE
     return deepcopy(cloned)
 
 
+def _learning_last_good_set(key: str, payload: Any) -> None:
+    cloned = deepcopy(payload)
+    with _LEARNING_CACHE_LOCK:
+        _LEARNING_LAST_GOOD[key] = (time.time(), cloned)
+
+
+def _learning_last_good_get(key: str) -> tuple[float, Any] | None:
+    with _LEARNING_CACHE_LOCK:
+        item = _LEARNING_LAST_GOOD.get(key)
+        if not item:
+            return None
+        created_at, payload = item
+        return created_at, deepcopy(payload)
+
+
 def _learning_cache_invalidate(*prefixes: str) -> None:
     with _LEARNING_CACHE_LOCK:
         if not prefixes:
@@ -121,6 +137,11 @@ def _learning_compute_lock(key: str) -> threading.Lock:
             lock = threading.Lock()
             _LEARNING_COMPUTE_LOCKS[key] = lock
         return lock
+
+
+def _is_sqlite_lock_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database table is locked" in msg
 
 
 def _humanize_template_responsibility(value: str) -> str:
@@ -1749,7 +1770,7 @@ def run_governance(_user: RequireUser) -> dict:
 
 @router.get("/summary")
 def get_learning_summary(_user: RequireUser) -> dict:
-    from backend.core.db import STATE_DB, get_state_conn
+    from backend.core.db import STATE_DB, connect_sqlite
 
     cache_key = "summary"
     cached = _learning_cache_get(cache_key)
@@ -1760,9 +1781,11 @@ def get_learning_summary(_user: RequireUser) -> dict:
         if cached is not None:
             return cached
 
-        template_service = ParameterTemplateService(str(STATE_DB))
-        conn = get_state_conn()
+        conn = None
         try:
+            template_service = ParameterTemplateService(str(STATE_DB), ensure_schema=False)
+            conn = connect_sqlite(STATE_DB, read_only=True)
+            conn.row_factory = sqlite3.Row
             suggestions = conn.execute(
                 """
                 SELECT status, COUNT(*) AS c
@@ -1802,6 +1825,7 @@ def get_learning_summary(_user: RequireUser) -> dict:
                        summary_text, review_json, created_at
                 FROM trade_outcome_review
                 ORDER BY created_at DESC
+                LIMIT 1
                 """
             ).fetchone()
             visible_reviews = []
@@ -1814,6 +1838,7 @@ def get_learning_summary(_user: RequireUser) -> dict:
                            summary_text, review_json, created_at
                     FROM trade_outcome_review
                     ORDER BY created_at DESC
+                    LIMIT 200
                     """
                 ).fetchall()
                 visible_reviews = [
@@ -1857,7 +1882,7 @@ def get_learning_summary(_user: RequireUser) -> dict:
                         "responsibility": dict(recommendation_source.get("responsibility") or {}),
                         "approval_path": str(recommendation_source.get("approval_path") or ""),
                     }
-            recommendations = template_service.list_recommendations(limit=20)
+            recommendations = template_service.list_recommendations(limit=20, allow_compute=False)
             suggestion_counts = {str(r["status"]): int(r["c"]) for r in suggestions}
             recommendation_counts = {
                 "total": len(recommendations),
@@ -1958,10 +1983,63 @@ def get_learning_summary(_user: RequireUser) -> dict:
                     ),
                 } if latest_candidate_trace else None,
                 "latest_parameter_template_recommendation": latest_recommendation,
+                "stale": False,
+                "stale_reason": "",
+                "recommendations_source": "cache",
             }
+            _learning_last_good_set(cache_key, payload)
             return _learning_cache_set(cache_key, payload)
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_lock_error(exc):
+                raise
+            fallback = _learning_last_good_get(cache_key)
+            if fallback:
+                created_at, payload = fallback
+                payload["stale"] = True
+                payload["stale_reason"] = "database_locked"
+                payload["stale_at"] = time.time()
+                payload["last_good_age_sec"] = round(max(0.0, time.time() - created_at), 3)
+                return payload
+            suggestion_counts: dict[str, int] = {}
+            candidate_counts: dict[str, int] = {}
+            recommendation_counts = {"total": 0, "online_light": 0, "offline_deep": 0}
+            parameter_template_overview = _build_parameter_template_overview(
+                suggestion_counts=suggestion_counts,
+                first_pending_candidate=None,
+                first_online_recommendation=None,
+                first_offline_recommendation=None,
+            )
+            payload = {
+                "suggestions": suggestion_counts,
+                "reviews": {},
+                "applications": 0,
+                "parameter_template_candidates": candidate_counts,
+                "parameter_template_recommendations": recommendation_counts,
+                "parameter_template_ops_summary": "学习摘要读取被数据库锁暂时阻塞，当前展示上一轮或空白兜底。",
+                "parameter_template_todo": None,
+                "parameter_template_overview": parameter_template_overview,
+                "parameter_template_empty_states": _build_parameter_template_empty_states(),
+                "parameter_template_task_cards": _build_parameter_template_task_cards(
+                    candidate_counts=candidate_counts,
+                    recommendation_counts=recommendation_counts,
+                    lifecycle_count=0,
+                    parameter_template_todo=None,
+                    parameter_template_overview=parameter_template_overview,
+                ),
+                "latest_review": None,
+                "latest_parameter_template_candidate": None,
+                "latest_parameter_template_candidate_trace": None,
+                "latest_parameter_template_recommendation": None,
+                "stale": True,
+                "stale_reason": "database_locked",
+                "stale_at": time.time(),
+                "last_good_age_sec": None,
+                "recommendations_source": "cache",
+            }
+            return payload
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
 
 @router.get("/reviews")
@@ -1969,13 +2047,14 @@ def get_reviews(
     _user: RequireUser,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
-    from backend.core.db import get_state_conn
+    from backend.core.db import STATE_DB, connect_sqlite
 
     cache_key = f"reviews:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
-    conn = get_state_conn()
+    conn = connect_sqlite(STATE_DB, read_only=True)
+    conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
             """
@@ -2430,7 +2509,7 @@ def get_parameter_template_recommendations(
         service = ParameterTemplateService()
         items = service.list_recommendations(factor_id=factor_id, limit=limit)
         validation_service = ParameterTemplateValidationService(service.db_path)
-        conn = connect_sqlite(service.db_path)
+        conn = connect_sqlite(service.db_path, read_only=True)
         conn.row_factory = sqlite3.Row
         try:
             enriched = []
@@ -2720,7 +2799,7 @@ def list_parameter_template_offline_candidates(
         status=status,
         limit=limit,
     )
-    conn = connect_sqlite(service.db_path)
+    conn = connect_sqlite(service.db_path, read_only=True)
     conn.row_factory = sqlite3.Row
     try:
         enriched = []
@@ -2849,13 +2928,14 @@ def get_applications(
     _user: RequireUser,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict:
-    from backend.core.db import get_state_conn
+    from backend.core.db import STATE_DB, connect_sqlite
 
     cache_key = f"applications:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
-    conn = get_state_conn()
+    conn = connect_sqlite(STATE_DB, read_only=True)
+    conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
             """
@@ -2893,13 +2973,14 @@ def get_lifecycle(
     _user: RequireUser,
     limit: int = Query(default=60, ge=1, le=500),
 ) -> dict:
-    from backend.core.db import get_state_conn
+    from backend.core.db import STATE_DB, connect_sqlite
 
     cache_key = f"lifecycle:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
-    conn = get_state_conn()
+    conn = connect_sqlite(STATE_DB, read_only=True)
+    conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
             """
@@ -3579,7 +3660,8 @@ def list_offmarket_high_load_audits(
     limit: int = Query(default=50, ge=1, le=500),
     job_name: str | None = Query(default=None),
 ) -> dict:
-    conn = connect_sqlite(STATE_DB)
+    conn = connect_sqlite(STATE_DB, read_only=True)
+    conn.row_factory = sqlite3.Row
     try:
         exists = conn.execute(
             """

@@ -882,8 +882,9 @@ class AttributionEngine:
         # 尝试从 state.db 恢复 (更可靠, 事务保护)
         if not _os.environ.get("PYTEST_CURRENT_TEST"):
             try:
-                from backend.core.db import get_state_conn
-                conn = get_state_conn()
+                from backend.core.db import STATE_DB, connect_sqlite
+                conn = connect_sqlite(STATE_DB, read_only=True)
+                conn.row_factory = __import__("sqlite3").Row
                 try:
                     rows = conn.execute(
                         "SELECT factor, data_json FROM attribution_snapshot"

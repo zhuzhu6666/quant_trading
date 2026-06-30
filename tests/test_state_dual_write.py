@@ -158,3 +158,81 @@ def test_duplicate_event_id_is_idempotent_in_outbox(monkeypatch, tmp_path):
     assert len(rows) == 1
     payload = json.loads(rows[0]["payload_json"])
     assert payload["decision"]["action_score"] == 0.2
+
+
+def test_state_row_event_can_be_enqueued_inside_existing_transaction(monkeypatch, tmp_path):
+    monkeypatch.setenv("QUANT_AUDIT_PG_DSN", "postgresql://example")
+    monkeypatch.setenv("QUANT_AUDIT_PG_DUAL_WRITE", "true")
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        queued = state_dual_write.enqueue_state_row_event_on_conn(
+            conn,
+            db_path=db_path,
+            table_name="runtime_kv",
+            entity_key="loop_desired",
+            row={"key": "loop_desired", "value_json": '{"enabled": true}', "updated_at": 42.0},
+            operation="upsert",
+            source_updated_at=42.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert queued is True
+    rows = _outbox_rows(db_path)
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == state_dual_write.EVENT_STATE_ROW
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["table_name"] == "runtime_kv"
+    assert payload["entity_key"] == "loop_desired"
+    assert payload["row"]["key"] == "loop_desired"
+    assert payload["source_updated_at"] == 42.0
+
+
+def test_flush_state_row_event_marks_synced(monkeypatch, tmp_path):
+    monkeypatch.setenv("QUANT_AUDIT_PG_DSN", "postgresql://example")
+    monkeypatch.setenv("QUANT_AUDIT_PG_DUAL_WRITE", "true")
+    db_path = tmp_path / "state.db"
+    state_dual_write.enqueue_state_row_event(
+        db_path=db_path,
+        table_name="recovery_position_state",
+        entity_key="123",
+        row={"position_id": 123, "status": "open", "last_seen_at": 99.0},
+        operation="upsert",
+        source_updated_at=99.0,
+    )
+    sink = _FakeSink()
+
+    result = state_dual_write.flush_once(db_path=db_path, sink=sink)
+
+    assert result == {"processed": 1, "synced": 1, "failed": 0}
+    assert sink.events[0]["event_type"] == state_dual_write.EVENT_STATE_ROW
+    assert sink.events[0]["table_name"] == "recovery_position_state"
+    rows = _outbox_rows(db_path)
+    assert rows[0]["status"] == "synced"
+
+
+def test_position_supervisor_trace_generates_state_row_outbox(monkeypatch, tmp_path):
+    monkeypatch.setenv("QUANT_AUDIT_PG_DSN", "postgresql://example")
+    monkeypatch.setenv("QUANT_AUDIT_PG_DUAL_WRITE", "true")
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+
+    trace_id = ledger.log_position_supervisor_trace(
+        position_id="pos-1",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        event_ts=101.0,
+        action="tighten",
+        summary_reason="unit_test",
+        verdict={"action": "tighten"},
+    )
+
+    rows = _outbox_rows(db_path)
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload_json"])
+    assert rows[0]["event_type"] == state_dual_write.EVENT_STATE_ROW
+    assert payload["table_name"] == "position_supervisor_trace"
+    assert payload["entity_key"] == trace_id
+    assert payload["row"]["position_id"] == "pos-1"

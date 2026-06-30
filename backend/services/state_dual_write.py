@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -21,10 +22,13 @@ from backend.core.db import STATE_DB, connect_sqlite
 
 SCHEMA_VERSION = "state_dual_write.v1"
 EVENT_DECISION_LEDGER = "decision_ledger.v1"
+EVENT_STATE_ROW = "state_row.v1"
 PENDING_STATUSES = ("pending", "retry")
 
 _worker: "StateDualWriteWorker | None" = None
 _worker_lock = threading.Lock()
+_schema_ready: set[str] = set()
+_schema_lock = threading.Lock()
 
 
 def _env_value(name: str, default: str = "") -> str:
@@ -61,6 +65,10 @@ def dual_write_enabled() -> bool:
 
 
 def ensure_outbox_schema(db_path: str | Path = STATE_DB) -> None:
+    key = str(Path(db_path).resolve())
+    with _schema_lock:
+        if key in _schema_ready:
+            return
     conn = connect_sqlite(db_path)
     try:
         conn.execute(
@@ -85,8 +93,183 @@ def ensure_outbox_schema(db_path: str | Path = STATE_DB) -> None:
             """
         )
         conn.commit()
+        with _schema_lock:
+            _schema_ready.add(key)
     finally:
         conn.close()
+
+
+def ensure_outbox_schema_on_conn(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS state_dual_write_outbox (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT DEFAULT '',
+            created_at REAL NOT NULL DEFAULT 0.0,
+            updated_at REAL NOT NULL DEFAULT 0.0,
+            synced_at REAL DEFAULT 0.0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_state_dual_write_outbox_status
+        ON state_dual_write_outbox(status, updated_at)
+        """
+    )
+
+
+def _payload_hash(payload: Any) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _event_id(prefix: str, *parts: Any) -> str:
+    raw = "|".join(str(part) for part in parts)
+    return f"{prefix}_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _enqueue_outbox_event_on_conn(
+    conn,
+    *,
+    event_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    now: float | None = None,
+) -> bool:
+    if not dual_write_enabled():
+        return False
+    ts = float(now or time.time())
+    ensure_outbox_schema_on_conn(conn)
+    conn.execute(
+        """
+        INSERT INTO state_dual_write_outbox
+        (event_id, event_type, payload_json, status, attempts, last_error, created_at, updated_at, synced_at)
+        VALUES (?, ?, ?, 'pending', 0, '', ?, ?, 0.0)
+        ON CONFLICT(event_id) DO UPDATE SET
+            event_type=excluded.event_type,
+            payload_json=excluded.payload_json,
+            status=CASE
+                WHEN state_dual_write_outbox.status='synced' THEN 'synced'
+                ELSE 'pending'
+            END,
+            updated_at=excluded.updated_at
+        """,
+        (
+            event_id,
+            event_type,
+            json.dumps(payload, ensure_ascii=False, default=str),
+            ts,
+            ts,
+        ),
+    )
+    return True
+
+
+def _state_row_payload(
+    *,
+    db_path: str | Path,
+    table_name: str,
+    entity_key: str,
+    row: dict[str, Any],
+    operation: str,
+    source_updated_at: float | None,
+    event_id: str,
+    now: float,
+) -> dict[str, Any]:
+    row_payload = dict(row)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "source_db": str(Path(db_path)),
+        "outbox_event_id": event_id,
+        "event_type": EVENT_STATE_ROW,
+        "table_name": str(table_name),
+        "entity_key": str(entity_key),
+        "operation": str(operation or "upsert"),
+        "payload_hash": _payload_hash(row_payload),
+        "source_updated_at": float(source_updated_at or row_payload.get("updated_at") or row_payload.get("created_at") or now),
+        "row": row_payload,
+        "created_at": now,
+    }
+
+
+def enqueue_state_row_event_on_conn(
+    conn,
+    *,
+    db_path: str | Path,
+    table_name: str,
+    entity_key: str,
+    row: dict[str, Any],
+    operation: str = "upsert",
+    source_updated_at: float | None = None,
+) -> bool:
+    """Queue a full-fidelity state row mirror event inside the caller's SQLite transaction."""
+    if not dual_write_enabled():
+        return False
+    now = time.time()
+    row_payload = dict(row)
+    event_id = _event_id(
+        "state",
+        table_name,
+        entity_key,
+        operation,
+        source_updated_at or row_payload.get("updated_at") or row_payload.get("created_at") or now,
+        _payload_hash(row_payload),
+    )
+    payload = _state_row_payload(
+        db_path=db_path,
+        table_name=table_name,
+        entity_key=entity_key,
+        row=row_payload,
+        operation=operation,
+        source_updated_at=source_updated_at,
+        event_id=event_id,
+        now=now,
+    )
+    return _enqueue_outbox_event_on_conn(
+        conn,
+        event_id=event_id,
+        event_type=EVENT_STATE_ROW,
+        payload=payload,
+        now=now,
+    )
+
+
+def enqueue_state_row_event(
+    *,
+    db_path: str | Path,
+    table_name: str,
+    entity_key: str,
+    row: dict[str, Any],
+    operation: str = "upsert",
+    source_updated_at: float | None = None,
+) -> bool:
+    """Queue a state row mirror event using a short standalone SQLite transaction."""
+    if not dual_write_enabled():
+        return False
+    try:
+        conn = connect_sqlite(db_path)
+        try:
+            queued = enqueue_state_row_event_on_conn(
+                conn,
+                db_path=db_path,
+                table_name=table_name,
+                entity_key=entity_key,
+                row=row,
+                operation=operation,
+                source_updated_at=source_updated_at,
+            )
+            conn.commit()
+            return queued
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("[state_dual_write] state enqueue failed for {}:{}: {}", table_name, entity_key, exc)
+        return False
 
 
 def enqueue_decision_ledger_event(
@@ -118,34 +301,19 @@ def enqueue_decision_ledger_event(
         ensure_outbox_schema(db_path)
         conn = connect_sqlite(db_path)
         try:
-            conn.execute(
-                """
-                INSERT INTO state_dual_write_outbox
-                (event_id, event_type, payload_json, status, attempts, last_error, created_at, updated_at, synced_at)
-                VALUES (?, ?, ?, 'pending', 0, '', ?, ?, 0.0)
-                ON CONFLICT(event_id) DO UPDATE SET
-                    event_type=excluded.event_type,
-                    payload_json=excluded.payload_json,
-                    status=CASE
-                        WHEN state_dual_write_outbox.status='synced' THEN 'synced'
-                        ELSE 'pending'
-                    END,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    event_id,
-                    EVENT_DECISION_LEDGER,
-                    json.dumps(payload, ensure_ascii=False, default=str),
-                    now,
-                    now,
-                ),
+            queued = _enqueue_outbox_event_on_conn(
+                conn,
+                event_id=event_id,
+                event_type=EVENT_DECISION_LEDGER,
+                payload=payload,
+                now=now,
             )
             conn.commit()
-            return True
+            return queued
         finally:
             conn.close()
     except Exception as exc:
-        logger.warning("[state_dual_write] enqueue failed for %s: %s", event_id, exc)
+        logger.warning("[state_dual_write] enqueue failed for {}: {}", event_id, exc)
         return False
 
 
@@ -177,7 +345,7 @@ def outbox_status(db_path: str | Path = STATE_DB) -> dict[str, Any]:
 
 def _load_pending_events(db_path: str | Path, limit: int) -> list[dict[str, Any]]:
     ensure_outbox_schema(db_path)
-    conn = connect_sqlite(db_path)
+    conn = connect_sqlite(db_path, read_only=True)
     conn.row_factory = __import__("sqlite3").Row
     try:
         rows = conn.execute(
@@ -278,6 +446,38 @@ CREATE TABLE IF NOT EXISTS audit_decision_factor_snapshot (
 
 CREATE INDEX IF NOT EXISTS idx_audit_decision_ledger_ts ON audit_decision_ledger(decision_ts);
 CREATE INDEX IF NOT EXISTS idx_audit_decision_factor_factor ON audit_decision_factor_snapshot(factor);
+
+CREATE TABLE IF NOT EXISTS audit_state_mirror_event (
+    event_id TEXT PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    payload_hash TEXT NOT NULL DEFAULT '',
+    source_updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    schema_version TEXT NOT NULL,
+    source_db TEXT NOT NULL,
+    outbox_event_id TEXT NOT NULL,
+    synced_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS audit_state_mirror_latest (
+    table_name TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    payload_hash TEXT NOT NULL DEFAULT '',
+    source_updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    last_event_id TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    source_db TEXT NOT NULL,
+    synced_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (table_name, entity_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_state_mirror_event_table
+ON audit_state_mirror_event(table_name, source_updated_at);
 """
 
 
@@ -299,6 +499,9 @@ class PostgresAuditSink:
             conn.commit()
 
     def write_event(self, payload: dict[str, Any]) -> None:
+        if str(payload.get("event_type") or "") == EVENT_STATE_ROW:
+            self.write_state_row_event(payload)
+            return
         decision = payload["decision"]
         snapshots = payload.get("factor_snapshots") or []
         synced_at = time.time()
@@ -391,6 +594,91 @@ class PostgresAuditSink:
                 )
             conn.commit()
 
+    def write_state_row_event(self, payload: dict[str, Any]) -> None:
+        synced_at = time.time()
+        table_name = str(payload.get("table_name") or "")
+        entity_key = str(payload.get("entity_key") or "")
+        operation = str(payload.get("operation") or "upsert")
+        row = payload.get("row") if isinstance(payload.get("row"), dict) else {}
+        schema_version = str(payload.get("schema_version") or SCHEMA_VERSION)
+        source_db = str(payload.get("source_db") or "")
+        outbox_event_id = str(payload.get("outbox_event_id") or "")
+        payload_hash = str(payload.get("payload_hash") or _payload_hash(row))
+        source_updated_at = float(payload.get("source_updated_at") or payload.get("created_at") or 0.0)
+        created_at = float(payload.get("created_at") or time.time())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO audit_state_mirror_event
+                (event_id, table_name, entity_key, operation, payload_json, payload_hash,
+                 source_updated_at, created_at, schema_version, source_db, outbox_event_id, synced_at)
+                VALUES
+                (%(event_id)s, %(table_name)s, %(entity_key)s, %(operation)s, %(payload_json)s::jsonb,
+                 %(payload_hash)s, %(source_updated_at)s, %(created_at)s, %(schema_version)s,
+                 %(source_db)s, %(outbox_event_id)s, %(synced_at)s)
+                ON CONFLICT (event_id) DO UPDATE SET
+                    table_name=excluded.table_name,
+                    entity_key=excluded.entity_key,
+                    operation=excluded.operation,
+                    payload_json=excluded.payload_json,
+                    payload_hash=excluded.payload_hash,
+                    source_updated_at=excluded.source_updated_at,
+                    created_at=excluded.created_at,
+                    schema_version=excluded.schema_version,
+                    source_db=excluded.source_db,
+                    outbox_event_id=excluded.outbox_event_id,
+                    synced_at=excluded.synced_at
+                """,
+                {
+                    "event_id": outbox_event_id,
+                    "table_name": table_name,
+                    "entity_key": entity_key,
+                    "operation": operation,
+                    "payload_json": json.dumps(row, ensure_ascii=False, default=str),
+                    "payload_hash": payload_hash,
+                    "source_updated_at": source_updated_at,
+                    "created_at": created_at,
+                    "schema_version": schema_version,
+                    "source_db": source_db,
+                    "outbox_event_id": outbox_event_id,
+                    "synced_at": synced_at,
+                },
+            )
+            conn.execute(
+                """
+                INSERT INTO audit_state_mirror_latest
+                (table_name, entity_key, operation, payload_json, payload_hash,
+                 source_updated_at, last_event_id, schema_version, source_db, synced_at)
+                VALUES
+                (%(table_name)s, %(entity_key)s, %(operation)s, %(payload_json)s::jsonb,
+                 %(payload_hash)s, %(source_updated_at)s, %(last_event_id)s, %(schema_version)s,
+                 %(source_db)s, %(synced_at)s)
+                ON CONFLICT (table_name, entity_key) DO UPDATE SET
+                    operation=excluded.operation,
+                    payload_json=excluded.payload_json,
+                    payload_hash=excluded.payload_hash,
+                    source_updated_at=excluded.source_updated_at,
+                    last_event_id=excluded.last_event_id,
+                    schema_version=excluded.schema_version,
+                    source_db=excluded.source_db,
+                    synced_at=excluded.synced_at
+                WHERE audit_state_mirror_latest.source_updated_at <= excluded.source_updated_at
+                """,
+                {
+                    "table_name": table_name,
+                    "entity_key": entity_key,
+                    "operation": operation,
+                    "payload_json": json.dumps(row, ensure_ascii=False, default=str),
+                    "payload_hash": payload_hash,
+                    "source_updated_at": source_updated_at,
+                    "last_event_id": outbox_event_id,
+                    "schema_version": schema_version,
+                    "source_db": source_db,
+                    "synced_at": synced_at,
+                },
+            )
+            conn.commit()
+
 
 def flush_once(*, db_path: str | Path = STATE_DB, limit: int = 20, sink: Any | None = None) -> dict[str, int]:
     if not dual_write_enabled() and sink is None:
@@ -407,7 +695,7 @@ def flush_once(*, db_path: str | Path = STATE_DB, limit: int = 20, sink: Any | N
         except Exception as exc:
             failed += 1
             _mark_event_retry(db_path, event["event_id"], int(event.get("attempts") or 0), str(exc))
-            logger.warning("[state_dual_write] flush failed for %s: %s", event["event_id"], exc)
+            logger.warning("[state_dual_write] flush failed for {}: {}", event["event_id"], exc)
     return {"processed": processed, "synced": synced, "failed": failed}
 
 
@@ -440,7 +728,7 @@ class StateDualWriteWorker:
             try:
                 flush_once(db_path=self.db_path, limit=self.batch_size)
             except Exception as exc:
-                logger.warning("[state_dual_write] worker cycle failed: %s", exc)
+                logger.warning("[state_dual_write] worker cycle failed: {}", exc)
             self._stop.wait(self.interval_sec)
         logger.info("[state_dual_write] worker stopped")
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass, field, asdict
@@ -67,6 +68,8 @@ class RegistryAdapter:
         # 用现有 factor_registry._factors 直接操作 (不另开 dict)
         self._log_path = Path(log_path)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._pending_log_path = self._log_path.with_suffix(".pending.jsonl")
+        self._pending_log_lock = threading.Lock()
         # 因子的元数据 (source / register_time / description)
         # key: factor_name, value: dict
         self._meta: dict[str, dict] = {}
@@ -316,8 +319,9 @@ class RegistryAdapter:
         """
         scores: dict[str, float] = {}
         try:
-            from backend.core.db import get_state_conn
-            conn = get_state_conn()
+            from backend.core.db import STATE_DB, connect_sqlite
+            conn = connect_sqlite(STATE_DB, read_only=True)
+            conn.row_factory = __import__("sqlite3").Row
             try:
                 rows = conn.execute(
                     "SELECT factor, score FROM factor_health"
@@ -354,8 +358,9 @@ class RegistryAdapter:
         from alpha.factor_health import FactorHealthStatus
         statuses: list = []
         try:
-            from backend.core.db import get_state_conn
-            conn = get_state_conn()
+            from backend.core.db import STATE_DB, connect_sqlite
+            conn = connect_sqlite(STATE_DB, read_only=True)
+            conn.row_factory = __import__("sqlite3").Row
             try:
                 rows = conn.execute(
                     "SELECT factor, score, status, n_obs, rolling_ic, components_json FROM factor_health"
@@ -410,23 +415,119 @@ class RegistryAdapter:
 
     # ── 事件日志 ───────────────────────────────────────────────
 
+    def _event_payload(self, event: FactorLifecycleEvent) -> dict:
+        return asdict(event)
+
+    def _append_jsonl(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+    def _insert_lifecycle_event(self, conn, event: FactorLifecycleEvent) -> bool:
+        exists = conn.execute(
+            """
+            SELECT 1
+            FROM lifecycle_events
+            WHERE timestamp=? AND event=? AND factor=? AND source=?
+              AND description=? AND score=? AND status=? AND reason=?
+            LIMIT 1
+            """,
+            (
+                event.timestamp,
+                event.event,
+                event.factor,
+                event.source,
+                event.description,
+                event.score,
+                event.status,
+                event.reason,
+            ),
+        ).fetchone()
+        if exists:
+            return False
+        conn.execute(
+            "INSERT INTO lifecycle_events (timestamp, event, factor, source, description, score, status, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.timestamp,
+                event.event,
+                event.factor,
+                event.source,
+                event.description,
+                event.score,
+                event.status,
+                event.reason,
+            ),
+        )
+        return True
+
+    def _drain_pending_lifecycle_events(self, conn, limit: int = 200) -> int:
+        if not self._pending_log_path.exists():
+            return 0
+        with self._pending_log_lock:
+            lines = self._pending_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if not lines:
+                self._pending_log_path.unlink(missing_ok=True)
+                return 0
+            drained = 0
+            remaining: list[str] = []
+            for raw in lines:
+                if drained >= limit:
+                    remaining.append(raw)
+                    continue
+                try:
+                    payload = json.loads(raw)
+                    event = FactorLifecycleEvent(**payload)
+                    self._insert_lifecycle_event(conn, event)
+                    drained += 1
+                except Exception:
+                    remaining.append(raw)
+            if remaining:
+                tmp_path = self._pending_log_path.with_suffix(".pending.tmp")
+                tmp_path.write_text("\n".join(remaining) + "\n", encoding="utf-8")
+                tmp_path.replace(self._pending_log_path)
+            else:
+                self._pending_log_path.unlink(missing_ok=True)
+            return drained
+
     def _log_event(self, event: FactorLifecycleEvent):
         """写入 state.db lifecycle_events 表 + 联动 EvolutionStory / Metrics."""
+        payload = self._event_payload(event)
+        try:
+            self._append_jsonl(self._log_path, payload)
+        except Exception as e:
+            logger.warning("[RegistryAdapter] lifecycle JSONL write failed: {}", e)
         try:
             from backend.core.db import get_state_conn
             conn = get_state_conn()
             try:
-                conn.execute(
-                    "INSERT INTO lifecycle_events (timestamp, event, factor, source, description, score, status, reason) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (event.timestamp, event.event, event.factor, event.source,
-                     event.description, event.score, event.status, event.reason)
-                )
+                self._drain_pending_lifecycle_events(conn)
+                self._insert_lifecycle_event(conn, event)
+                try:
+                    from backend.core.db import STATE_DB
+                    from backend.services.state_dual_write import enqueue_state_row_event_on_conn
+
+                    enqueue_state_row_event_on_conn(
+                        conn,
+                        db_path=STATE_DB,
+                        table_name="lifecycle_events",
+                        entity_key=f"{event.timestamp}:{event.event}:{event.factor}:{event.source}",
+                        row=payload,
+                        operation="insert",
+                        source_updated_at=event.timestamp,
+                    )
+                except Exception as dual_write_err:
+                    logger.warning("[RegistryAdapter] lifecycle dual-write enqueue failed: {}", dual_write_err)
                 conn.commit()
             finally:
                 conn.close()
         except Exception as e:
             logger.warning(f"[RegistryAdapter] lifecycle event DB write failed: {e}")
+            try:
+                with self._pending_log_lock:
+                    self._append_jsonl(self._pending_log_path, payload)
+            except Exception as pending_err:
+                logger.warning("[RegistryAdapter] lifecycle pending write failed: {}", pending_err)
         # Phase 2.0 接入层:同步广播到 EvolutionStory + RuntimeState(可观测,失败不抛)
         try:
             from monitor.evolution_story import EvolutionStory
@@ -455,8 +556,9 @@ class RegistryAdapter:
     def read_events(self, n: int = 100) -> list[dict]:
         """读最近 n 条事件 (从 state.db)."""
         try:
-            from backend.core.db import get_state_conn
-            conn = get_state_conn()
+            from backend.core.db import STATE_DB, connect_sqlite
+            conn = connect_sqlite(STATE_DB, read_only=True)
+            conn.row_factory = __import__("sqlite3").Row
             try:
                 rows = conn.execute(
                     "SELECT * FROM lifecycle_events ORDER BY id DESC LIMIT ?", (n,)

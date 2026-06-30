@@ -36,8 +36,9 @@ def get_weight_history(_user: RequireUser) -> list[dict]:
 
     # 1. Load latest AWE weight per factor from state.db
     try:
-        from backend.core.db import get_state_conn
-        conn = get_state_conn()
+        from backend.core.db import STATE_DB, connect_sqlite
+        conn = connect_sqlite(STATE_DB, read_only=True)
+        conn.row_factory = __import__("sqlite3").Row
         try:
             rows = conn.execute(
                 "SELECT factor, new_weight FROM weight_history "
@@ -102,8 +103,9 @@ def get_attribution_stats(_user: RequireUser) -> dict:
     # ── Primary: state.db attribution_snapshot ──
     raw: dict[str, Any] = {}
     try:
-        from backend.core.db import get_state_conn
-        conn = get_state_conn()
+        from backend.core.db import STATE_DB, connect_sqlite
+        conn = connect_sqlite(STATE_DB, read_only=True)
+        conn.row_factory = __import__("sqlite3").Row
         try:
             rows = conn.execute(
                 "SELECT factor, data_json FROM attribution_snapshot"
@@ -211,8 +213,9 @@ def get_recent_ticks(_user: RequireUser, n: int = 30) -> list[dict]:
     """返回最近 N 个 v4 信号记录 (从 state.db decision_log 读取)。"""
     entries: list[dict] = []
     try:
-        from backend.core.db import get_state_conn
-        conn = get_state_conn()
+        from backend.core.db import STATE_DB, connect_sqlite
+        conn = connect_sqlite(STATE_DB, read_only=True)
+        conn.row_factory = __import__("sqlite3").Row
         try:
             rows = conn.execute(
                 "SELECT meta, ts FROM decision_log WHERE strategy='factor_v4' "

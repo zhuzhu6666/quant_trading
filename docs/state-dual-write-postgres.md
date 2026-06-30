@@ -1,6 +1,6 @@
 # PostgreSQL State Dual-Write Audit
 
-Last updated: 2026-06-30
+Last updated: 2026-07-01
 
 ## Purpose
 
@@ -8,13 +8,21 @@ Last updated: 2026-06-30
 runtime state.  PostgreSQL dual-write is a migration audit layer only.  It must
 not block the live loop, order flow, or risk decisions when PostgreSQL is down.
 
-The first dual-written scope is intentionally narrow:
+The dual-written scope is still an audit/migration layer, but it now covers
+both append-only decision evidence and the key state rows needed to reconstruct
+the learning/control plane:
 
 - `decision_ledger`
 - full `decision_factor_snapshot`
+- `lifecycle_events`
+- `runtime_kv`
+- `recovery_position_state`
+- `position_supervisor_trace`
+- `autonomous_learning_sample`
+- `evolution_events`
 
-These tables carry the highest-value learning evidence and the fastest growth
-rate.  Data granularity is preserved.
+Data granularity is preserved. State rows are mirrored as full JSON payloads in
+PostgreSQL rather than downsampled summaries.
 
 ## Configuration
 
@@ -45,16 +53,20 @@ secret location for this stage.
 
 ## Data Flow
 
-1. `DecisionLedger.log_decision()` writes SQLite `decision_ledger` and
-   `decision_factor_snapshot` exactly as before.
-2. After that SQLite transaction succeeds, the same decision payload is written
-   to `state_dual_write_outbox`.
+1. SQLite writes remain the first write and the source of truth.
+2. The same SQLite transaction queues a replayable row in
+   `state_dual_write_outbox` for state rows that are already inside an open
+   transaction. Decision ledger events may enqueue immediately after their
+   SQLite transaction succeeds.
 3. A background worker reads pending outbox rows and writes PostgreSQL audit
    tables.
-4. Successful rows are marked `synced`; failures are marked `retry` with
+4. Successful outbox rows are marked `synced`; failures are marked `retry` with
    `attempts` and `last_error`.
 
-The outbox `event_id` is the `decision_id`, so replay is idempotent.
+Decision events use `decision_id` as the outbox `event_id`. State-row mirror
+events use a deterministic hash of table, entity key, operation, timestamp, and
+payload hash, so replay is idempotent while preserving every distinct state
+mutation event.
 
 ## PostgreSQL Tables
 
@@ -63,6 +75,11 @@ The outbox `event_id` is the `decision_id`, so replay is idempotent.
 - `audit_decision_factor_snapshot`: mirrors every factor snapshot, plus
   `snapshot_seq`, `schema_version`, `source_db`, `outbox_event_id`,
   `synced_at`.
+- `audit_state_mirror_event`: append-only state-row mirror event stream. Each
+  event contains `table_name`, `entity_key`, operation, full `payload_json`,
+  payload hash, source timestamp, and sync metadata.
+- `audit_state_mirror_latest`: latest full JSON state per
+  `(table_name, entity_key)`, useful for read-heavy audit/reporting queries.
 
 `snapshot_seq` is generated from the original factor snapshot order and does not
 depend on SQLite autoincrement ids.
@@ -109,9 +126,11 @@ python scripts/db_doctor.py
 
 ## Migration Path
 
-1. Keep SQLite as source of truth and dual-write only new decisions.
+1. Keep SQLite as source of truth and dual-write new decisions/state rows.
 2. Verify PostgreSQL row counts and outbox `synced` counts.
-3. Add a separate offline historical backfill from `state.db` to PostgreSQL.
-4. Switch read-heavy audit/learning queries to PostgreSQL.
+3. Add a separate offline historical backfill from `state.db` to PostgreSQL for
+   rows written before dual-write coverage existed.
+4. Switch read-heavy audit/learning queries to PostgreSQL once coverage and
+   backfill parity are verified.
 5. Later split hot transactional state and cold append-only evidence into the
    final storage layout.

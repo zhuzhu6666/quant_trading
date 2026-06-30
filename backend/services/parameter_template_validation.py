@@ -76,6 +76,29 @@ class ParameterTemplateValidationService:
                     reason,
                 ),
             )
+            try:
+                from backend.services.state_dual_write import enqueue_state_row_event_on_conn
+
+                enqueue_state_row_event_on_conn(
+                    conn,
+                    db_path=self.db_path,
+                    table_name="lifecycle_events",
+                    entity_key=f"{now}:{event}:{factor_id}:parameter_template",
+                    row={
+                        "timestamp": now,
+                        "event": event,
+                        "factor": factor_id,
+                        "source": "parameter_template",
+                        "description": description,
+                        "score": float(score or 0.0),
+                        "status": status,
+                        "reason": reason,
+                    },
+                    operation="insert",
+                    source_updated_at=now,
+                )
+            except Exception:
+                pass
             conn.commit()
         finally:
             conn.close()
@@ -106,17 +129,29 @@ class ParameterTemplateValidationService:
             ORDER BY created_at DESC
             LIMIT ?
         """
-        params.append(int(limit))
-        conn = connect_sqlite(self.db_path)
+        fetch_limit = max(int(limit), min(500, int(limit) * 5))
+        params.append(fetch_limit)
+        conn = connect_sqlite(self.db_path, read_only=True)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(sql, tuple(params)).fetchall()
         finally:
             conn.close()
-        return [self._parse_release_candidate_row(row) for row in rows]
+        items = [self._parse_release_candidate_row(row) for row in rows]
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for item in items:
+            key = self._release_candidate_dedupe_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+            if len(deduped) >= int(limit):
+                break
+        return deduped
 
     def get_release_candidate(self, candidate_id: str) -> dict[str, Any] | None:
-        conn = connect_sqlite(self.db_path)
+        conn = connect_sqlite(self.db_path, read_only=True)
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute(
@@ -142,6 +177,14 @@ class ParameterTemplateValidationService:
         validation_report_path: str,
         recommendation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        existing = self._find_existing_release_candidate(
+            factor_id=factor_id,
+            template_id=template_id,
+            regime_key=regime_key,
+            recommendation_context=recommendation_context,
+        )
+        if existing:
+            return existing
         now = time.time()
         candidate_id = self._new_id("ptrc")
         summary = {
@@ -209,6 +252,37 @@ class ParameterTemplateValidationService:
         self._clear_governance_caches()
         return item
 
+    def _find_existing_release_candidate(
+        self,
+        *,
+        factor_id: str,
+        template_id: str,
+        regime_key: str,
+        recommendation_context: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        recommendation_id = str((recommendation_context or {}).get("recommendation_id") or "").strip()
+        clauses = ["factor_id=?", "template_id=?", "COALESCE(regime_key, '')=?"]
+        params: list[Any] = [factor_id, template_id, regime_key or ""]
+        if recommendation_id:
+            clauses.append("validation_summary_json LIKE ?")
+            params.append(f"%{recommendation_id}%")
+        else:
+            clauses.append("status IN ('pending_review','approved','deployed')")
+        sql = f"""
+            SELECT *
+            FROM parameter_template_release_candidate
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+        conn = connect_sqlite(self.db_path, read_only=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(sql, tuple(params)).fetchone()
+        finally:
+            conn.close()
+        return self._parse_release_candidate_row(row) if row else None
+
     def review_release_candidate(
         self,
         *,
@@ -258,7 +332,7 @@ class ParameterTemplateValidationService:
             str(note).strip()
             or "target template missing/orphan candidate: reviewed/reject because template not resolvable"
         )
-        conn = connect_sqlite(self.db_path)
+        conn = connect_sqlite(self.db_path, read_only=True)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
@@ -487,6 +561,20 @@ class ParameterTemplateValidationService:
             "created_at": float(row["created_at"] or 0.0),
             "updated_at": float(row["updated_at"] or 0.0),
         }
+
+    @staticmethod
+    def _release_candidate_dedupe_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
+        summary = dict(item.get("validation_summary") or {})
+        source = dict(summary.get("recommendation_source") or {})
+        recommendation_id = str(source.get("recommendation_id") or "").strip()
+        if not recommendation_id:
+            recommendation_id = "manual_or_unknown"
+        return (
+            str(item.get("factor_id") or ""),
+            str(item.get("template_id") or ""),
+            str(item.get("regime_key") or ""),
+            recommendation_id,
+        )
 
 
 def build_offline_validation_plan(boundary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -805,4 +893,3 @@ def run_parameter_template_offline_validation(
         "report_path": report_path,
         "note": "offline_deep now emits walk-forward evidence and a pending gray-release candidate",
     }
-

@@ -38,6 +38,19 @@ def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _sqlite_db_path(conn, default: str | Path = STATE_DB) -> str:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        if row is not None:
+            keys = getattr(row, "keys", lambda: [])()
+            value = row["file"] if "file" in keys else row[2]
+            if value:
+                return str(value)
+    except Exception:
+        pass
+    return str(default)
+
+
 def _sample_id(sample_type: str, source_table: str, source_id: str) -> str:
     digest = hashlib.sha1(f"{sample_type}:{source_table}:{source_id}".encode("utf-8")).hexdigest()[:18]
     return f"als_{digest}"
@@ -246,6 +259,31 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         explanation={"verdict": verdict},
     )
     before = conn.total_changes
+    row_payload = {
+        "sample_id": sample_id,
+        "sample_type": sample_type,
+        "source_table": source_table,
+        "source_id": source_id,
+        "decision_id": str(item.get("decision_id") or ""),
+        "trade_id": str(item.get("trade_id") or ""),
+        "position_id": str(item.get("position_id") or ""),
+        "symbol": str(item.get("symbol") or ""),
+        "timeframe": str(item.get("timeframe") or ""),
+        "event_ts": float(item.get("event_ts") or 0.0),
+        "label_status": label_status,
+        "integrity": integrity,
+        "train_weight": train_weight,
+        "features_json": _dumps(features),
+        "verdict_json": _dumps(verdict),
+        "label_json": _dumps(label),
+        "trace_json": _dumps(trace),
+        "evidence_contract_json": _dumps(evidence_contract),
+        "config_version": config_version,
+        "config_hash": config_hash,
+        "evolution_run_id": evolution_run_id,
+        "created_at": now,
+        "updated_at": now,
+    }
     conn.execute(
         """
         INSERT INTO autonomous_learning_sample
@@ -275,43 +313,85 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
             evolution_run_id=excluded.evolution_run_id,
             updated_at=excluded.updated_at
         """,
-        (
-            sample_id,
-            sample_type,
-            source_table,
-            source_id,
-            str(item.get("decision_id") or ""),
-            str(item.get("trade_id") or ""),
-            str(item.get("position_id") or ""),
-            str(item.get("symbol") or ""),
-            str(item.get("timeframe") or ""),
-            float(item.get("event_ts") or 0.0),
-            label_status,
-            integrity,
-            train_weight,
-            _dumps(features),
-            _dumps(verdict),
-            _dumps(label),
-            _dumps(trace),
-            _dumps(evidence_contract),
-            config_version,
-            config_hash,
-            evolution_run_id,
-            now,
-            now,
-        ),
+        tuple(row_payload[k] for k in (
+            "sample_id",
+            "sample_type",
+            "source_table",
+            "source_id",
+            "decision_id",
+            "trade_id",
+            "position_id",
+            "symbol",
+            "timeframe",
+            "event_ts",
+            "label_status",
+            "integrity",
+            "train_weight",
+            "features_json",
+            "verdict_json",
+            "label_json",
+            "trace_json",
+            "evidence_contract_json",
+            "config_version",
+            "config_hash",
+            "evolution_run_id",
+            "created_at",
+            "updated_at",
+        )),
     )
-    return conn.total_changes > before
+    changed = conn.total_changes > before
+    if changed:
+        final = conn.execute(
+            "SELECT * FROM autonomous_learning_sample WHERE sample_id=?",
+            (sample_id,),
+        ).fetchone()
+        try:
+            from backend.services.state_dual_write import enqueue_state_row_event_on_conn
+
+            enqueue_state_row_event_on_conn(
+                conn,
+                db_path=_sqlite_db_path(conn),
+                table_name="autonomous_learning_sample",
+                entity_key=sample_id,
+                row=dict(final) if final is not None else row_payload,
+                operation="upsert",
+                source_updated_at=now,
+            )
+        except Exception as exc:
+            logger.debug("[autonomous_learning] sample dual-write enqueue failed: {}", exc)
+    return changed
 
 
 def _insert_evolution_event(conn, event_type: str, payload: dict[str, Any]) -> None:
-    conn.execute(
+    now = time.time()
+    payload_json = _dumps(payload)
+    cur = conn.execute(
         """
         INSERT INTO evolution_events (timestamp, event_type, payload_json)
         VALUES (?, ?, ?)
         """,
-        (time.time(), event_type, _dumps(payload)),
+        (now, event_type, payload_json),
     )
+    try:
+        from backend.services.state_dual_write import enqueue_state_row_event_on_conn
+
+        event_id = int(getattr(cur, "lastrowid", 0) or 0)
+        enqueue_state_row_event_on_conn(
+            conn,
+            db_path=_sqlite_db_path(conn),
+            table_name="evolution_events",
+            entity_key=str(event_id or f"{now}:{event_type}"),
+            row={
+                "id": event_id,
+                "timestamp": now,
+                "event_type": str(event_type),
+                "payload_json": payload_json,
+            },
+            operation="insert",
+            source_updated_at=now,
+        )
+    except Exception as exc:
+        logger.debug("[autonomous_learning] evolution event dual-write enqueue failed: {}", exc)
 
 
 def _autonomy_mode() -> str:

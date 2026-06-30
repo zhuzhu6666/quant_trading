@@ -162,7 +162,7 @@ class BackendReadinessService:
         }
 
     def _latest_permission_audit(self, model_type: str) -> dict[str, Any]:
-        conn = connect_sqlite(self.db_path)
+        conn = connect_sqlite(self.db_path, read_only=True)
         conn.row_factory = __import__("sqlite3").Row
         try:
             if not _table_exists(conn, "model_permission_audit"):
@@ -199,7 +199,7 @@ class BackendReadinessService:
             conn.close()
 
     def _governance_status(self) -> dict[str, Any]:
-        conn = connect_sqlite(self.db_path)
+        conn = connect_sqlite(self.db_path, read_only=True)
         conn.row_factory = __import__("sqlite3").Row
         try:
             try:
@@ -236,7 +236,7 @@ class BackendReadinessService:
 
     def _factor_data_status(self) -> dict[str, Any]:
         state_counts: dict[str, Any] = {}
-        conn = connect_sqlite(self.db_path)
+        conn = connect_sqlite(self.db_path, read_only=True)
         conn.row_factory = __import__("sqlite3").Row
         try:
             if _table_exists(conn, "factor_health"):
@@ -301,7 +301,7 @@ class BackendReadinessService:
         ]
         now = time.time()
         freshness: dict[str, Any] = {}
-        conn = connect_sqlite(self.db_path)
+        conn = connect_sqlite(self.db_path, read_only=True)
         conn.row_factory = __import__("sqlite3").Row
         try:
             for table in tables:
@@ -360,7 +360,7 @@ class BackendReadinessService:
         }
 
     def _latest_offmarket_audit(self) -> dict[str, Any]:
-        conn = connect_sqlite(self.db_path)
+        conn = connect_sqlite(self.db_path, read_only=True)
         conn.row_factory = __import__("sqlite3").Row
         try:
             if not _table_exists(conn, "offmarket_high_load_job_audit"):
