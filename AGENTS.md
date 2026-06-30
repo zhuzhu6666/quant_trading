@@ -1,6 +1,6 @@
 # Workspace Rules
 
-> Last updated: 2026-06-29
+> Last updated: 2026-06-30
 
 这个仓库从现在开始按下面的规则协作：
 
@@ -52,17 +52,16 @@
 
 ## 3.1 当前分支/工作区约定
 
-- 本地 Windows 默认使用 `miniprogram-main` 分支。
+- 本地 Windows 和 Linux 服务器统一使用 `main` 分支。
 - 本地 Windows 已启用 sparse checkout，默认只保留：
   - `miniprogram_v2/`
   - `docs/`
   - `AGENTS.md`
   - `README.md`
   - `.gitignore`
-- Linux 服务器默认使用 `main` 分支。
 - 后端、交易、数据库、systemd、日志相关改动一律在服务器 `main` 上完成。
-- 小程序改动一律在本地 `miniprogram-main` 上完成。
-- 文档/规则类改动如影响双方，需要同时同步到 `main` 和 `miniprogram-main`。
+- 小程序改动一律在本地 Windows 的 `main` 上完成。
+- 文档/规则类改动统一提交到 `main`，本地和服务器都从 `main` 拉取。
 
 ## 3.2 当前数据约定
 

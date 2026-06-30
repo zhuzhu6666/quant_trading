@@ -1,6 +1,6 @@
 # Development Workflow
 
-> Last updated: 2026-06-29
+> Last updated: 2026-06-30
 > Scope: local mini-program frontend + Linux server backend workflow.
 
 本文用来固化当前项目的唯一推荐协作方式，目标只有一个：
@@ -49,8 +49,8 @@
 
 Git 仍然保留，但用途要更明确：
 
-- 前端改动：本地 `miniprogram-main` 提交
-- 后端改动：服务器 `main` 提交
+- 前端改动：本地 Windows 的 `main` 提交
+- 后端改动：Linux 服务器的 `main` 提交
 - 不再要求“后端先在本地改，再推服务器”
 
 ### 当前分支和工作区
@@ -58,7 +58,7 @@ Git 仍然保留，但用途要更明确：
 本地 Windows 当前约定：
 
 ```text
-branch: miniprogram-main
+branch: main
 sparse checkout:
   miniprogram_v2/**
   docs/**
@@ -77,9 +77,9 @@ scope: backend / execution / alpha / risk / monitor / scripts / data / logs / sy
 
 注意：
 
-- 本地 `miniprogram-main` 不是后端开发分支。
+- 本地 `main` 通过 sparse checkout 只作为小程序和文档工作区使用。
 - 服务器 `main` 是后端和运行态真实工作区。
-- 文档/协作规则如影响双方，应同时推送到 `main` 和 `miniprogram-main`。
+- 文档/协作规则统一推送到 `main`。
 - 本地旧后端残留已归档到 `C:\Users\zhu\quant_trading_local_archive_20260629_191212`，不再作为工作区使用。
 
 ## 3. 目录约定
@@ -285,14 +285,14 @@ codex login status
 
 ### 前端提交
 
-前端改动在本地 `miniprogram-main` 提交。
+前端改动在本地 Windows 的 `main` 提交。
 
 示例：
 
 ```bash
 git add miniprogram_v2
 git commit -m "fix mini program trading status rendering"
-git push
+git push origin main
 ```
 
 ### 后端提交
@@ -310,13 +310,12 @@ git push
 
 ### 文档/规则同步
 
-如果修改 `AGENTS.md` 或 `docs/development-workflow.md` 这类双方都依赖的规则文档，需要让两个分支都能看到。
+如果修改 `AGENTS.md` 或 `docs/development-workflow.md` 这类双方都依赖的规则文档，统一推送到 `main`。
 
 示例：
 
 ```bash
-git push origin HEAD:miniprogram-main
-git push origin HEAD:main
+git push origin main
 ```
 
 服务器随后执行：
