@@ -1,4 +1,4 @@
-import { get, post } from './client';
+import { get } from './client';
 import learningStore from '../stores/learning';
 import {
   buildMetaShadowReportSnapshotsView,
@@ -313,59 +313,6 @@ export async function refreshLearning(options = {}) {
     }
   })();
   return refreshInFlight;
-}
-
-export async function runLearningGovernance() {
-  const result = await post('/api/learning/govern/run', {});
-  await refreshLearning({ force: true });
-  return result;
-}
-
-export async function reviewSuggestion(suggestionId, status, note = '') {
-  const result = await post('/api/learning/review', {
-    suggestion_id: suggestionId,
-    status,
-    note,
-  });
-  await refreshLearning({ force: true });
-  return result;
-}
-
-export async function materializeTemplateRecommendation(recommendationId, note = '') {
-  const result = await post('/api/learning/parameter-templates/recommendations/materialize', {
-    recommendation_id: recommendationId,
-    note,
-  });
-  await refreshLearning({ force: true });
-  return result;
-}
-
-export async function reviewOfflineCandidate(candidateId, status, note = '') {
-  const result = await post('/api/learning/parameter-templates/offline-candidates/review', {
-    candidate_id: candidateId,
-    status,
-    note,
-  });
-  await refreshLearning({ force: true });
-  return result;
-}
-
-export async function releaseOfflineCandidate(candidateId, note = '') {
-  const result = await post('/api/learning/parameter-templates/offline-candidates/release', {
-    candidate_id: candidateId,
-    note,
-  });
-  await refreshLearning({ force: true });
-  return result;
-}
-
-export async function rollbackOfflineCandidate(candidateId, note = '') {
-  const result = await post('/api/learning/parameter-templates/offline-candidates/rollback', {
-    candidate_id: candidateId,
-    note,
-  });
-  await refreshLearning({ force: true });
-  return result;
 }
 
 export function stageLearningGovernanceFocus(focus = {}) {

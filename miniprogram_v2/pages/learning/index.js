@@ -2,12 +2,6 @@ import learningStore from '../../stores/learning';
 import {
   consumeLearningGovernanceFocus,
   refreshLearning,
-  reviewSuggestion,
-  runLearningGovernance,
-  materializeTemplateRecommendation,
-  reviewOfflineCandidate,
-  releaseOfflineCandidate,
-  rollbackOfflineCandidate,
 } from '../../services/learning';
 import * as learningService from '../../services/learning';
 import { openTradeTracePage } from '../../services/ops';
@@ -769,8 +763,8 @@ function buildLearningGovernanceTodoCard(todo = null) {
 function describeOfflineCandidate(item = {}) {
   const status = String(item.status || '').toLowerCase();
   const governance = item.governance || {};
-  let stageText = '等待人审决定是否发布。';
-  if (status === 'approved') stageText = '离线证据已通过，等待正式发布。';
+  let stageText = '等待系统治理决定是否发布。';
+  if (status === 'approved') stageText = '离线证据已通过，等待系统发布。';
   else if (status === 'deployed') stageText = '模板已经进入运行态，继续观察后验效果。';
   else if (status === 'rolled_back') stageText = '候选模板已回滚到发布前版本。';
   else if (status === 'rejected') stageText = '候选模板被拒绝，暂不进入运行态。';
@@ -781,16 +775,6 @@ function describeOfflineCandidate(item = {}) {
       summary: governance.priority_summary || '',
     }
     : { score: 0, label: '', summary: '' };
-  const actionButtons = (governance.action_buttons || []).map((entry) => {
-    const key = String(entry.key || '');
-    const releaseBlockedByStatus = key === 'release' && !['approved', 'deployed'].includes(status);
-    return {
-      key,
-      label: releaseBlockedByStatus ? '先批准候选' : String(entry.label || ''),
-      tone: String(entry.tone || 'secondary'),
-      disabled: !!entry.disabled || releaseBlockedByStatus,
-    };
-  });
   return {
     statusLabel: governance.status_label || '',
     statusTone: toneFromStatus(governance.stage_tone || ''),
@@ -811,7 +795,6 @@ function describeOfflineCandidate(item = {}) {
     governancePrioritySummary: priority.summary,
     governanceActionLabel: governance.action_label || '',
     governanceStageLabel: governance.stage_label || governance.status_label || '',
-    actionButtons,
   };
 }
 
@@ -976,9 +959,7 @@ Page({
     templateRecommendations: [],
     previewTemplateRecommendations: [],
     selectedTemplateRecommendation: null,
-    recommendationBusyId: '',
     selectedOfflineCandidate: null,
-    offlineCandidateBusyId: '',
     offlineCandidateCountDisplay: 0,
     recommendationCountDisplay: 0,
     parameterTemplateEmptyStates: {
@@ -994,7 +975,6 @@ Page({
     previewLifecycleEvents: [],
     selectedLifecycleEvent: null,
     lifecycleCountDisplay: 0,
-    governBusy: false,
     updatedAt: '--',
   },
 
@@ -1205,8 +1185,8 @@ Page({
         {
           id: 'approve',
           index: '3',
-          title: '治理审批',
-          note: proposedSuggestions.length ? `${proposedSuggestions.length} 条待审` : approvedSuggestions.length ? `${approvedSuggestions.length} 条已批` : '暂无审批动作',
+          title: '系统治理',
+          note: proposedSuggestions.length ? `${proposedSuggestions.length} 条待系统治理` : approvedSuggestions.length ? `${approvedSuggestions.length} 条已通过` : '暂无治理动作',
           tone: proposedSuggestions.length ? 'warning' : approvedSuggestions.length ? 'positive' : 'neutral',
         },
         {
@@ -1250,41 +1230,6 @@ Page({
       ) || null;
       if (recommendation) this.setData({ selectedTemplateRecommendation: recommendation });
     }
-  },
-
-  async onRunGovernance() {
-    if (this.data.governBusy) return;
-    this.setData({ governBusy: true });
-    try {
-      const result = await runLearningGovernance();
-      wx.showToast({
-        title: String((result && result.result_label) || '处理完成'),
-        icon: 'none',
-        duration: 2200,
-      });
-    } finally {
-      this.setData({ governBusy: false });
-    }
-  },
-
-  async approveSuggestion(e) {
-    const id = e.currentTarget.dataset.id;
-    const result = await reviewSuggestion(id, 'approved', 'manual approve from mini-program');
-    wx.showToast({
-      title: String((result && result.result_label) || '处理完成'),
-      icon: 'none',
-      duration: 2000,
-    });
-  },
-
-  async rejectSuggestion(e) {
-    const id = e.currentTarget.dataset.id;
-    const result = await reviewSuggestion(id, 'rejected', 'manual reject from mini-program');
-    wx.showToast({
-      title: String((result && result.result_label) || '处理完成'),
-      icon: 'none',
-      duration: 2000,
-    });
   },
 
   switchSuggestionTab(e) {
@@ -1375,26 +1320,6 @@ Page({
     this.setData({ selectedLifecycleEvent: item });
   },
 
-  async materializeTemplateRecommendation(e) {
-    const id = e.currentTarget.dataset.id;
-    if (!id || this.data.recommendationBusyId) return;
-    this.setData({ recommendationBusyId: id });
-    try {
-      const result = await materializeTemplateRecommendation(id, 'materialize from learning page');
-      wx.showToast({
-        title: result && result.ok
-          ? String(result.result_label || '处理完成')
-          : '生成失败',
-        icon: 'none',
-        duration: 2000,
-      });
-      const refreshed = (learningStore.getState().templateRecommendations || []).find((x) => x.recommendation_id === id) || null;
-      this.setData({ selectedTemplateRecommendation: refreshed });
-    } finally {
-      this.setData({ recommendationBusyId: '' });
-    }
-  },
-
   openRecommendationProgressTarget() {
     const item = this.data.selectedTemplateRecommendation || null;
     if (!item || !item.actionStateTargetType || !item.actionStateTargetId) return;
@@ -1435,62 +1360,6 @@ Page({
         (entry) => String(entry.recommendation_id) === String(item.linkedRecommendationId)
       ) || null;
       if (recommendation) this.setData({ selectedTemplateRecommendation: recommendation });
-    }
-  },
-
-  async actOnOfflineCandidate(e) {
-    const candidateId = String((e.currentTarget.dataset && e.currentTarget.dataset.id) || '');
-    const action = String((e.currentTarget.dataset && e.currentTarget.dataset.action) || '');
-    if (!candidateId || !action || this.data.offlineCandidateBusyId) return;
-    const currentCandidate = (this.data.offlineCandidates || []).find((x) => String(x.candidate_id) === candidateId)
-      || this.data.selectedOfflineCandidate
-      || null;
-    if (action === 'release') {
-      const status = String((currentCandidate && currentCandidate.status) || '').toLowerCase();
-      if (status && status !== 'approved' && status !== 'deployed') {
-        wx.showToast({
-          title: '先批准候选，再执行灰度发布',
-          icon: 'none',
-          duration: 2400,
-        });
-        return;
-      }
-    }
-    this.setData({ offlineCandidateBusyId: candidateId });
-    try {
-      let result = null;
-      if (action === 'approve') {
-        result = await reviewOfflineCandidate(candidateId, 'approved', 'approved from learning page');
-      } else if (action === 'reject') {
-        result = await reviewOfflineCandidate(candidateId, 'rejected', 'rejected from learning page');
-      } else if (action === 'release') {
-        result = await releaseOfflineCandidate(candidateId, 'release from learning page');
-      } else if (action === 'rollback') {
-        result = await rollbackOfflineCandidate(candidateId, 'rollback from learning page');
-      } else {
-        return;
-      }
-      const refreshed = (learningStore.getState().offlineCandidates || []).find((x) => x.candidate_id === candidateId) || null;
-      this.setData({ selectedOfflineCandidate: refreshed });
-      wx.showToast({
-        title: result && result.blocked
-          ? String(result.result_label || '当前动作被阻断')
-          : String((result && result.result_label) || '处理完成'),
-        icon: 'none',
-        duration: 2200,
-      });
-    } catch (err) {
-      await refreshLearning({ force: true }).catch(() => null);
-      const payload = (err && err.payload) || {};
-      const message = payload.detail || payload.result_summary || payload.message || payload.error || (err && err.message) || '候选动作执行失败';
-      wx.showModal({
-        title: '候选动作未执行',
-        content: String(message),
-        showCancel: false,
-        confirmText: '知道了',
-      });
-    } finally {
-      this.setData({ offlineCandidateBusyId: '' });
     }
   },
 

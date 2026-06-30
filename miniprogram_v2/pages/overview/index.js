@@ -1,7 +1,7 @@
 import liveStore from '../../stores/live';
 import learningStore from '../../stores/learning';
 import { refreshLiveSnapshot, startTradingLoop, stopTradingLoop } from '../../services/live';
-import { openLearningGovernancePage, refreshLearning, runLearningGovernance } from '../../services/learning';
+import { openLearningGovernancePage, refreshLearning } from '../../services/learning';
 import { formatMoney, formatPct, formatTime, toneFromPnl } from '../../utils/format';
 
 const PNL_CANVAS_ID = 'realizedPnlCanvas';
@@ -258,7 +258,6 @@ Page({
     loopRunning: false,
     startBusy: false,
     stopBusy: false,
-    governBusy: false,
     pendingTemplateCandidateCount: 0,
     pendingTemplateRecommendationCount: 0,
     onlineLightRecommendationCount: 0,
@@ -805,16 +804,6 @@ Page({
       await refreshLiveSnapshot({ force: true });
     } finally {
       this.setData({ stopBusy: false });
-    }
-  },
-
-  async onGovern() {
-    if (this.data.governBusy) return;
-    this.setData({ governBusy: true });
-    try {
-      await runLearningGovernance();
-    } finally {
-      this.setData({ governBusy: false });
     }
   },
 

@@ -9,7 +9,6 @@
         </view>
         <view class="hero-actions learning-actions">
           <status-pill label="{{updatedAt}}" tone="neutral" />
-          <button class="btn-secondary btn-block {{governBusy ? 'btn-disabled' : ''}}" bindtap="onRunGovernance" loading="{{governBusy}}" disabled="{{governBusy}}">自动治理</button>
         </view>
       </view>
       <view class="hero-metrics">
@@ -295,10 +294,6 @@
           <view wx:if="{{item.boundaryScopeLabel}}" class="small muted" style="margin-top: 6rpx;">边界 {{item.boundaryScopeLabel}}</view>
           <view class="soft-panel section-note" style="margin-top: 10rpx;">{{item.reasonText}}</view>
           <view class="section-note" style="margin-top: 10rpx;">{{item.impactText}}</view>
-          <view wx:if="{{item.status === 'proposed'}}" class="btn-row" style="margin-top: 12rpx;">
-            <button class="btn-primary" size="mini" data-id="{{item.suggestion_id}}" bindtap="approveSuggestion">批准</button>
-            <button class="btn-secondary" size="mini" data-id="{{item.suggestion_id}}" bindtap="rejectSuggestion">拒绝</button>
-          </view>
         </view>
         <button wx:if="{{visibleSuggestions.length > previewSuggestions.length}}" class="btn-secondary btn-block" style="margin-top: 12rpx;" data-panel="suggestions" bindtap="openLearningPanel">查看全部 {{visibleSuggestions.length}} 条</button>
       </view>
@@ -617,15 +612,6 @@
           </view>
           <view class="section-note">{{selectedTemplateRecommendation.actionStateSummary}}</view>
         </view>
-        <button
-          class="btn-primary {{recommendationBusyId === selectedTemplateRecommendation.recommendation_id || selectedTemplateRecommendation.actionStateDone ? 'btn-disabled' : ''}}"
-          data-id="{{selectedTemplateRecommendation.recommendation_id}}"
-          bindtap="materializeTemplateRecommendation"
-          loading="{{recommendationBusyId === selectedTemplateRecommendation.recommendation_id}}"
-          disabled="{{recommendationBusyId === selectedTemplateRecommendation.recommendation_id || selectedTemplateRecommendation.actionStateDone}}"
-        >
-          {{selectedTemplateRecommendation.actionStateDone ? '已处理完成' : selectedTemplateRecommendation.actionButtonText}}
-        </button>
         <button wx:if="{{selectedTemplateRecommendation.actionStateDone && selectedTemplateRecommendation.actionStateTargetType}}" class="btn-secondary" bindtap="openRecommendationProgressTarget">{{selectedTemplateRecommendation.actionStateButtonText}}</button>
         <button wx:if="{{selectedTemplateRecommendation.trace_locator && (selectedTemplateRecommendation.trace_locator.position_id || selectedTemplateRecommendation.trace_locator.entry_decision_id || selectedTemplateRecommendation.trace_locator.exit_decision_id)}}" class="btn-secondary" bindtap="openTraceFromTemplateRecommendation">查看来源证据链</button>
         <button class="btn-secondary" bindtap="closeTemplateRecommendationDetail">收起详情</button>
@@ -742,21 +728,6 @@
         <view class="soft-panel section-note">{{selectedOfflineCandidate.reviewText}}</view>
         <view class="soft-panel section-note">{{selectedOfflineCandidate.deploymentText}}</view>
         <view wx:if="{{selectedOfflineCandidate.rollbackText}}" class="soft-panel section-note">{{selectedOfflineCandidate.rollbackText}}</view>
-        <view wx:if="{{selectedOfflineCandidate.actionButtons && selectedOfflineCandidate.actionButtons.length}}" class="btn-row">
-          <button
-            wx:for="{{selectedOfflineCandidate.actionButtons}}"
-            wx:key="key"
-            class="{{item.tone === 'primary' ? 'btn-primary' : 'btn-secondary'}} {{offlineCandidateBusyId === selectedOfflineCandidate.candidate_id || item.disabled ? 'btn-disabled' : ''}}"
-            size="mini"
-            data-id="{{selectedOfflineCandidate.candidate_id}}"
-            data-action="{{item.key}}"
-            bindtap="actOnOfflineCandidate"
-            loading="{{offlineCandidateBusyId === selectedOfflineCandidate.candidate_id && item.key !== 'observe'}}"
-            disabled="{{offlineCandidateBusyId === selectedOfflineCandidate.candidate_id || item.disabled}}"
-          >
-            {{item.label}}
-          </button>
-        </view>
         <button wx:if="{{selectedOfflineCandidate.trace_locator && (selectedOfflineCandidate.trace_locator.position_id || selectedOfflineCandidate.trace_locator.entry_decision_id || selectedOfflineCandidate.trace_locator.exit_decision_id)}}" class="btn-primary" bindtap="openTraceFromOfflineCandidate">查看来源证据链</button>
         <button class="btn-secondary" bindtap="closeOfflineCandidateDetail">收起详情</button>
       </view>
