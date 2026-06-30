@@ -71,7 +71,10 @@ python main.py --mode paper --timeframe M15 --use-router
 # 因子健康评估
 python main.py --mode paper --timeframe M15 --factor-health-report
 
-# L2 因子发现
+# 因子发现：默认只生成报告，不自动注册
+python scripts/discover_factors.py --n-candidates 1000 --top-k 50
+
+# 明确完成 review / 多 forward / 风控门槛后，才允许显式注册 shadow 因子
 python scripts/discover_factors.py --n-candidates 1000 --top-k 50 --auto-register
 ```
 
@@ -113,7 +116,7 @@ python scripts/refresh_external_data.py --source cot --force
 统一规则:
 
 - `SQLite` 只用于 `state.db` / `experiments.db`
-- `DuckDB` 只用于行情、tick、L2、归因、事件库
+- `DuckDB` 只用于行情、外部研究数据、tick、L2、归因、事件库
 - 业务代码必须走 `backend/core/db.py` 的统一连接入口
 
 启动前或排障时优先执行:

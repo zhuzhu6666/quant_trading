@@ -112,6 +112,61 @@ def test_event_flags_do_not_forward_fill_forever(tmp_path):
     assert out.iloc[1]["evt_fomc"] == 0
 
 
+def test_event_hour_buckets_are_signed_and_windowed(tmp_path):
+    external = tmp_path / "external.duckdb"
+    events = tmp_path / "events.duckdb"
+    ensure_external_schema(external)
+    con = connect_duckdb(events)
+    try:
+        con.execute("CREATE TABLE events(date VARCHAR, type VARCHAR, description VARCHAR, importance INTEGER)")
+        con.execute("INSERT INTO events VALUES ('2026-01-02', 'FOMC', 'FOMC decision', 3)")
+    finally:
+        con.close()
+
+    out = ExternalDataLoader(external, events, event_times={"FOMC": "19:00"}).align_to_bars(
+        _bars(
+            "2026-01-01 20:00:00",
+            "2026-01-02 19:30:00",
+            "2026-01-03 20:00:00",
+            "2026-01-05 20:00:00",
+        )
+    )
+
+    assert out.iloc[0]["hours_to_fomc"] == -24
+    assert out.iloc[1]["hours_to_fomc"] == 0
+    assert out.iloc[2]["hours_to_fomc"] == 48
+    assert pd.isna(out.iloc[3]["hours_to_fomc"])
+
+
+def test_precomputed_macro_derived_columns_are_point_in_time(tmp_path):
+    external = tmp_path / "external.duckdb"
+    events = tmp_path / "events.duckdb"
+    ensure_external_schema(external)
+    con = connect_duckdb(external)
+    try:
+        rows = []
+        for i in range(6):
+            release = pd.Timestamp(f"2026-01-{i + 2:02d} 00:00:00").timestamp()
+            rows.append(("DFII10", f"2026-01-{i + 1:02d}", i / 100.0, release, 1, "test"))
+        con.executemany(
+            """
+            INSERT INTO macro_daily (series, date, value, release_at, fetched_at, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    finally:
+        con.close()
+    connect_duckdb(events).execute("CREATE TABLE events(date VARCHAR, type VARCHAR, description VARCHAR, importance INTEGER)").close()
+
+    out = ExternalDataLoader(external, events).align_to_bars(
+        _bars("2026-01-06 23:00:00", "2026-01-07 01:00:00")
+    )
+
+    assert pd.isna(out.iloc[0]["real_yield_chg_5d"])
+    assert out.iloc[1]["real_yield_chg_5d"] == 5.0
+
+
 def test_fred_without_key_is_skip_not_failure(monkeypatch):
     import scripts.refresh_external_data as refresh
 

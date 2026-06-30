@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from alpha.registry import factor_registry
+from data.factor_frame import FactorFrameBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,46 @@ class StreamingFactorEngine:
 
     # 所有因子所需最小 bar 数（取 max 安全值）
     MIN_BARS = 50
+    EXTERNAL_FACTOR_IDS = {
+        "dxy_corr_20",
+        "slv_gld_ratio",
+        "real_yield_chg",
+        "hours_to_fomc",
+        "hours_to_nfp",
+        "gld_tonnes_chg_5d",
+        "gld_tonnes_chg_20d",
+        "gld_tonnes_pct_20d",
+        "gld_tonnes_zscore_60d",
+        "slv_tonnes_chg_20d",
+        "silver_gold_holdings_ratio",
+        "cb_total_chg_3m",
+        "cb_china_chg_3m",
+        "cb_russia_chg_3m",
+        "cb_china_3m_zscore",
+        "real_yield_pct_rank",
+        "cot_mm_net",
+        "cot_mm_net_pct_oi",
+        "cot_mm_net_chg_4w",
+        "cot_mm_net_zscore_52w",
+        "cot_pm_net",
+        "cot_extreme_signal",
+    }
 
-    def __init__(self, max_buffer: int = 200, factor_runtime_config: dict | None = None):
+    def __init__(
+        self,
+        max_buffer: int = 200,
+        factor_runtime_config: dict | None = None,
+        factor_frame_builder: FactorFrameBuilder | None = None,
+        factor_ids: list[str] | None = None,
+    ):
         self._buffer: deque[dict] = deque(maxlen=max_buffer)
         self._factor_cache: dict[str, float | None] = {}
         self._available_factors: list[str] = list(factor_registry.list())
+        self._requested_factor_ids = list(factor_ids) if factor_ids is not None else None
         self._incremental_state: dict[str, float] = {}
         self._warm: bool = False
         self._factor_runtime_config: dict[str, dict] = dict(factor_runtime_config or {})
+        self._factor_frame_builder = factor_frame_builder or FactorFrameBuilder(cache_ttl_sec=300)
         # Ensure restored shadow factors do not enter the live voting/calculation path.
         self.refresh_factor_list()
 
@@ -95,7 +128,7 @@ class StreamingFactorEngine:
 
     def refresh_factor_list(self):
         """重新扫描 factor_registry，跳过 shadow 因子（不参与投票）。"""
-        all_factors = factor_registry.list()
+        all_factors = list(self._requested_factor_ids) if self._requested_factor_ids is not None else factor_registry.list()
         # 过滤掉 shadow 因子——只让 BUILTIN 和 DISCOVERED 参与交易
         try:
             from alpha.registry_adapter import RegistryAdapter
@@ -129,7 +162,17 @@ class StreamingFactorEngine:
 
     def _to_dataframe(self) -> pd.DataFrame:
         """将 buffer 转为 DataFrame。"""
-        return pd.DataFrame(list(self._buffer))
+        raw = pd.DataFrame(list(self._buffer))
+        if not self._needs_external_enrichment():
+            return FactorFrameBuilder._normalize_bar_frame(raw)
+        try:
+            return self._factor_frame_builder.enrich_bars(raw)
+        except Exception as exc:
+            logger.warning("Factor frame enrichment failed, using raw bars: %s", exc)
+            return FactorFrameBuilder._normalize_bar_frame(raw)
+
+    def _needs_external_enrichment(self) -> bool:
+        return any(name in self.EXTERNAL_FACTOR_IDS for name in self._available_factors)
 
     def export_factor_history(self) -> tuple[dict[str, "np.ndarray"], "np.ndarray"]:
         """导出 buffer 内所有 bar 的因子值序列 + forward returns。

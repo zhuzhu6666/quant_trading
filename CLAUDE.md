@@ -10,6 +10,7 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 
 | Layer | Path | Purpose |
 |-------|------|---------|
+| **Factor Frame** | `data/factor_frame.py` | 统一 PIT 因子帧：bars + external_data + events；live/health/evolution 共用同一事实来源 |
 | **Factor Engine** | `alpha/streaming_factor_engine.py` | 流式因子计算，deque buffer 200，每 bar 增量计算 39+ 因子；shadow 因子被过滤不参与投票 |
 | **Signal Normalizer** | `alpha/signal_normalizer.py` | 三域归一：zscore_tanh / rank_mapping / discrete → [-1, +1] |
 | **Portfolio Compositor** | `alpha/portfolio_compositor.py` | Tactical/Macro 两层加权组合，tags_breakdown；支持 RuntimeConfig 热更新权重 |
@@ -20,12 +21,12 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 | Alpha mining | `alpha/search/` | GP/Random search, MAP-Elites, BlendSearch SLSQP |
 | **Backend** | `backend/` | FastAPI app, REST/WS, scheduler, live loop |
 | **Registry Adapter** | `alpha/registry_adapter.py` | 因子注册表适配器 — 单例(shared)，动态 register/unregister/promote/retire，生命周期事件写 state.db |
-| **Evolution Orchestrator** | `backend/runtime/evolution_orchestrator.py` | 自进化闭环：GP搜索→影子注册→Canary评估(持久化)→晋升执行→退役检查→权重更新 |
+| **Evolution Orchestrator** | `backend/runtime/evolution_orchestrator.py` | 自进化闭环：统一 PIT 因子帧→GP/Random 发现→治理评估→显式 shadow 注册→Canary→晋升/退役→权重更新 |
 | **Backtest** | `alpha/backtest/vectorized.py` | 向量化回测引擎 (202K bar 实测) |
 | **ML** | `alpha/ml/` | XGBoost 方向预测器, 概念漂移检测 |
-| **Features** | `alpha/features/` | FeatureDeriver(200+), PCA/KPCA, FeatureSelector；PCA 因子注册为 SOURCE_SHADOW |
-| **Data** | `data/` | DuckDB 5 库: ctrader K线, Dukascopy tick, L2订单簿, 开平仓, 事件日历 |
-| **State DB** | `data/state.db` | SQLite 统一状态库 (15表): decision_log, lifecycle_events, weight_history, canary_state, factor_health, evolution_events, jobs, attribution_snapshot, param_tune, calibrator, sync_health, strategy_perf, ctrader_deals, live_trades(已废弃) |
+| **Features** | `alpha/features/` | FeatureDeriver(200+), PCA/KPCA, FeatureSelector；PCA/model artifact 不作为 DSL runtime 因子恢复 |
+| **Data** | `data/` | DuckDB 时序/研究库: bars_monthly/bars.duckdb, external_data.duckdb, ticks_monthly/ticks.duckdb, l2_monthly/l2.duckdb, trades.duckdb, events.duckdb |
+| **State DB** | `data/state.db` | SQLite 统一运行时状态库: decision_log, lifecycle_events, weight_history, canary_state, factor_health, evolution_events, jobs, attribution_snapshot, ctrader_deals, decision_ledger 等 |
 | **Execution** | `execution/` | cTrader bridge, OMS, BaseBrokerBridge, VWAP/TWAP, 执行质量分析, deal_sync (成交同步模块) |
 | **Risk** | `risk/` | VaR/CVaR, Kelly, 压力测试, 集中度监控, 跨品种协方差 |
 | **Platform** | `research/` | ExperimentTracker, WeeklyReport |
@@ -37,7 +38,8 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
 ## Architecture Flow
 
 ```
-每根 M5 bar → StreamingFactorEngine.append_bar(bar)
+每根 M5 bar → FactorFrameBuilder.enrich_bars(bar_window)  # bars + PIT external/events
+    → StreamingFactorEngine.append_bar(bar)
     → 过滤 shadow 因子 (仅 BUILTIN + DISCOVERED 参与投票)
     → SignalNormalizer.normalize(values)           # 39 因子 → [-1, +1]
     → PortfolioCompositor.compose(signals)          # Tactical 70% + Macro 30%
@@ -52,7 +54,8 @@ A production-grade algorithmic trading system focused on gold (XAUUSD) futures, 
     → compositor.update_weights(...)                # 热更新，不需重启
 
 Evolution Pipeline (每小时):
-    GP搜索 → 注册shadow → Canary评估(持久化state.db) → 晋升执行(adapter.promote)
+    FactorFrameBuilder.build(...) → GP/Random 搜索 → 多 forward/去重/风控门槛
+    → 显式 auto_register 时才注册 shadow → Canary评估(持久化state.db) → 晋升执行(adapter.promote)
     → 退役检查 → 退役执行(adapter.retire) → 权重更新(WeightPolicy) → compositor热更新
 ```
 
@@ -60,7 +63,7 @@ Evolution Pipeline (每小时):
 
 - **No legacy strategy**: `multi_factor_m15` 已删除，全部由因子管道驱动
 - **cTrader 唯一执行通道**: `ctrader_send_orders=True` 默认发单到 demo
-- **Data source**: cTrader 为唯一数据源 + 执行通道, Dukascopy 补充 tick 历史
+- **Data source**: cTrader 为实时行情/账户/执行唯一主源；Dukascopy 补充 tick 历史；COT/ETF/FRED/events 只作为 PIT 外部研究因子
 - **Factor lifecycle**: SHADOW → (Canary评估) → DISCOVERED → ACTIVE；退役 → DEAD
   - SHADOW: GP 或 PCA 新发现，注册到 factor_registry 但 StreamingFactorEngine 跳过不投票
   - DISCOVERED: 通过 Canary 晋升，开始参与交易
@@ -68,7 +71,9 @@ Evolution Pipeline (每小时):
 - **Factor health**: 5-dimension (mean_abs_ic 40%, ic_stability 20%, regime_consistency 20%, decay_rate 10%, independence 10%)
 - **Scheduler**: 11 jobs (evolution_hourly, data_sync, dukascopy_tick, events_sync, cot_sync, etf_sync, awe_adapt, ml_retrain, feature_eng, ml_drift_check, system_health)
 - **Default symbol**: XAUUSD+, timeframe M5
-- **Weight system**: AWE(实盘归因驱动)+WeightPolicy(健康分驱动)→同写 factor_portfolio_weights→compositor 热更新
+- **Factor frame**: `data.factor_frame.FactorFrameBuilder` 是 live / health / evolution 的统一因子帧入口；外部 enrichment 失败时实盘降级，不阻断开仓链路
+- **Discovery default**: `scripts/discover_factors.py` / API 默认 `auto_register=False`，发现结果先进入 report/governance；显式注册也必须通过多 forward 与风控门槛
+- **Weight system**: AWE(实盘归因驱动)+WeightPolicy(健康分驱动)→完整合并后写 factor_portfolio_weights→compositor 热更新；禁止局部 patch 丢 key
 - **Database**: 所有路径统一在 `backend/core/db.py`；DuckDB 存时序，SQLite(state.db) 存运行时状态
 - **RegistryAdapter**: 使用 `RegistryAdapter.shared()` 单例，不要 `RegistryAdapter()`
 - **_live_state**: 读写锁 `_LIVE_STATE_LOCK` 保护读-改-写操作
@@ -87,14 +92,17 @@ Evolution Pipeline (每小时):
 
 ```
 DuckDB (时序市场数据):
-  data/ctrader_data.duckdb — K线 bars + 外部数据(COT/ETF/GVZ)
-  data/ticks.duckdb        — Dukascopy Tick
-  data/l2.duckdb           — L2 订单簿深度
-  data/trades.duckdb       — 交易记录(归因用)
-  data/events.duckdb       — 经济事件日历
+  data/bars_monthly/bars_YYYY_MM.duckdb — cTrader K线月库
+  data/bars.duckdb                      — 当前月份 K线兼容链接
+  data/external_data.duckdb             — COT/ETF/宏观外部研究数据，按 release_at 做 PIT 对齐
+  data/ctrader_data.duckdb              — 旧 K线冷备/兼容库，不再作为 live 主写入入口
+  data/ticks_monthly/ticks_YYYY_MM.duckdb / data/ticks.duckdb — tick 月库与兼容链接
+  data/l2_monthly/l2_YYYY_MM.duckdb / data/l2.duckdb          — L2 月库与兼容链接
+  data/trades.duckdb                    — 交易记录(归因用)
+  data/events.duckdb                    — 经济事件日历，EventSizing 直接读取
 
 SQLite (运行时状态):
-  data/state.db            — 统一状态库 (15 表, 含 ctrader_deals)
+  data/state.db            — 统一状态库 (表数量随 schema 演进, 含 ctrader_deals / decision_ledger / autonomous_learning_sample)
   data/experiments.db      — 实验记录
 
 路径常量: backend/core/db.py (DUCKDB_BARS, STATE_DB, etc.)

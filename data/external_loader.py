@@ -30,19 +30,63 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import time as _time
 
 import numpy as np
 import pandas as pd
 
-from backend.core.db import DUCKDB_EVENTS, DUCKDB_EXTERNAL, connect_duckdb
+from backend.core.db import DUCKDB_EVENTS, DUCKDB_EXTERNAL, duckdb_readonly_connection
+
+
+DEFAULT_EVENT_TIMES: dict[str, str] = {
+    "FOMC": "19:00",
+    "NFP": "13:30",
+    "CPI": "13:30",
+    "PCE": "13:30",
+}
 
 
 class ExternalDataLoader:
     """外部数据 (宏观 + 事件 + ETF + 央行) 对齐到 bar 级别"""
 
-    def __init__(self, db_path: str | Path = DUCKDB_EXTERNAL, events_db_path: str | Path = DUCKDB_EVENTS):
+    _CACHE_TTL_SEC = 300.0
+    _LOAD_CACHE: dict[tuple[str, str, int, int], tuple[float, pd.DataFrame]] = {}
+
+    def __init__(
+        self,
+        db_path: str | Path = DUCKDB_EXTERNAL,
+        events_db_path: str | Path = DUCKDB_EVENTS,
+        event_times: dict[str, str] | None = None,
+    ):
         self.db_path = Path(db_path)
         self.events_db_path = Path(events_db_path)
+        self.event_times = event_times or DEFAULT_EVENT_TIMES
+
+    @classmethod
+    def _cache_key(cls, name: str, path: Path) -> tuple[str, str, int, int]:
+        try:
+            stat = path.stat()
+            return (name, str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            return (name, str(path), 0, 0)
+
+    @classmethod
+    def _get_cached(cls, name: str, path: Path) -> pd.DataFrame | None:
+        key = cls._cache_key(name, path)
+        cached = cls._LOAD_CACHE.get(key)
+        if cached is None:
+            return None
+        created_at, frame = cached
+        if _time.time() - created_at > cls._CACHE_TTL_SEC:
+            cls._LOAD_CACHE.pop(key, None)
+            return None
+        return frame.copy()
+
+    @classmethod
+    def _set_cached(cls, name: str, path: Path, frame: pd.DataFrame) -> pd.DataFrame:
+        key = cls._cache_key(name, path)
+        cls._LOAD_CACHE[key] = (_time.time(), frame.copy())
+        return frame
 
     @staticmethod
     def _release_index(values) -> pd.DatetimeIndex:
@@ -59,52 +103,57 @@ class ExternalDataLoader:
 
     def _load_macro(self) -> pd.DataFrame:
         """加载 macro_daily, 列: date / dfii10 / dxy / gvz / vix"""
-        con = connect_duckdb(self.db_path, read_only=True)
-        rows = con.execute(
-            "SELECT date, series, value, release_at FROM macro_daily ORDER BY release_at, date"
-        ).fetchall()
-        con.close()
+        cached = self._get_cached("macro", self.db_path)
+        if cached is not None:
+            return cached
+        with duckdb_readonly_connection(self.db_path) as con:
+            rows = con.execute(
+                "SELECT date, series, value, release_at FROM macro_daily ORDER BY release_at, date"
+            ).fetchall()
         if not rows:
-            return pd.DataFrame()
+            return self._set_cached("macro", self.db_path, pd.DataFrame())
         df = pd.DataFrame(rows, columns=["date", "series", "value", "release_at"])
         df["release_dt"] = self._release_index(df["release_at"])
         df = df.pivot_table(index="release_dt", columns="series", values="value", aggfunc="last")
         df = df.sort_index()
-        return df
+        return self._set_cached("macro", self.db_path, df)
 
     def _load_etf(self) -> pd.DataFrame:
         """加载 etf_daily, 列: gld / slv / tlt"""
-        con = connect_duckdb(self.db_path, read_only=True)
-        rows = con.execute(
-            "SELECT date, symbol, close, release_at FROM etf_daily ORDER BY release_at, date"
-        ).fetchall()
-        con.close()
+        cached = self._get_cached("etf", self.db_path)
+        if cached is not None:
+            return cached
+        with duckdb_readonly_connection(self.db_path) as con:
+            rows = con.execute(
+                "SELECT date, symbol, close, release_at FROM etf_daily ORDER BY release_at, date"
+            ).fetchall()
         if not rows:
-            return pd.DataFrame()
+            return self._set_cached("etf", self.db_path, pd.DataFrame())
         df = pd.DataFrame(rows, columns=["date", "symbol", "close", "release_at"])
         df["release_dt"] = self._release_index(df["release_at"])
         df = df.pivot_table(index="release_dt", columns="symbol", values="close", aggfunc="last")
         df = df.sort_index()
-        return df
+        return self._set_cached("etf", self.db_path, df)
 
     def _load_etf_holdings(self) -> pd.DataFrame:
         """加载 etf_holdings (P0-ETF 2026-06-03).
 
         返回列: gld_tonnes / slv_tonnes / gld_shares / slv_shares / gld_aum
         """
-        con = connect_duckdb(self.db_path, read_only=True)
+        cached = self._get_cached("etf_holdings", self.db_path)
+        if cached is not None:
+            return cached
         try:
-            rows = con.execute(
-                "SELECT symbol, date, total_tonnes, total_shares, aum_usd, release_at "
-                "FROM etf_holdings ORDER BY date"
-            ).fetchall()
+            with duckdb_readonly_connection(self.db_path) as con:
+                rows = con.execute(
+                    "SELECT symbol, date, total_tonnes, total_shares, aum_usd, release_at "
+                    "FROM etf_holdings ORDER BY date"
+                ).fetchall()
         except Exception:
             # 表不存在 (旧库) → 返空
-            con.close()
-            return pd.DataFrame()
-        con.close()
+            return self._set_cached("etf_holdings", self.db_path, pd.DataFrame())
         if not rows:
-            return pd.DataFrame()
+            return self._set_cached("etf_holdings", self.db_path, pd.DataFrame())
         df = pd.DataFrame(rows, columns=["symbol", "date", "tonnes", "shares", "aum", "release_at"])
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values(["symbol", "date"])
@@ -118,7 +167,7 @@ class ExternalDataLoader:
         aum.columns = [f"{c}_aum" for c in aum.columns]
         out = tonnes.join(shares, how="outer").join(aum, how="outer")
         out = out.sort_index()
-        return out
+        return self._set_cached("etf_holdings", self.db_path, out)
 
     def _load_cb_gold(self) -> pd.DataFrame:
         """加载 cb_gold (P0-CB 2026-06-03).
@@ -127,18 +176,19 @@ class ExternalDataLoader:
                 cb_china_total / cb_china_chg_monthly
                 ...
         """
-        con = connect_duckdb(self.db_path, read_only=True)
+        cached = self._get_cached("cb_gold", self.db_path)
+        if cached is not None:
+            return cached
         try:
-            rows = con.execute(
-                "SELECT country, date, total_tonnes, monthly_chg_tonnes, release_at "
-                "FROM cb_gold ORDER BY date"
-            ).fetchall()
+            with duckdb_readonly_connection(self.db_path) as con:
+                rows = con.execute(
+                    "SELECT country, date, total_tonnes, monthly_chg_tonnes, release_at "
+                    "FROM cb_gold ORDER BY date"
+                ).fetchall()
         except Exception:
-            con.close()
-            return pd.DataFrame()
-        con.close()
+            return self._set_cached("cb_gold", self.db_path, pd.DataFrame())
         if not rows:
-            return pd.DataFrame()
+            return self._set_cached("cb_gold", self.db_path, pd.DataFrame())
         df = pd.DataFrame(rows, columns=["country", "date", "total", "chg", "release_at"])
         df["date"] = pd.to_datetime(df["date"])
         df["release_dt"] = self._release_index(df["release_at"])
@@ -149,7 +199,7 @@ class ExternalDataLoader:
         chg.columns = [f"cb_{c.lower()}_chg" for c in chg.columns]
         out = total.join(chg, how="outer")
         out = out.sort_index()
-        return out
+        return self._set_cached("cb_gold", self.db_path, out)
 
     def _load_cot_gold(self) -> pd.DataFrame:
         """加载 cot_gold (P0-COT 2026-06-03, CFTC disagg 周度).
@@ -164,19 +214,20 @@ class ExternalDataLoader:
             cot_mm_net_pct_oi = mm_net / open_interest
             cot_mm_net_chg_4w = mm_net_pct_oi 4w diff
         """
-        con = connect_duckdb(self.db_path, read_only=True)
+        cached = self._get_cached("cot_gold", self.db_path)
+        if cached is not None:
+            return cached
         try:
-            rows = con.execute(
-                "SELECT report_date, open_interest, mm_long, mm_short, mm_spread, "
-                "pm_long, pm_short, swap_long, swap_short, other_long, other_short, release_at "
-                "FROM cot_gold ORDER BY report_date"
-            ).fetchall()
+            with duckdb_readonly_connection(self.db_path) as con:
+                rows = con.execute(
+                    "SELECT report_date, open_interest, mm_long, mm_short, mm_spread, "
+                    "pm_long, pm_short, swap_long, swap_short, other_long, other_short, release_at "
+                    "FROM cot_gold ORDER BY report_date"
+                ).fetchall()
         except Exception:
-            con.close()
-            return pd.DataFrame()
-        con.close()
+            return self._set_cached("cot_gold", self.db_path, pd.DataFrame())
         if not rows:
-            return pd.DataFrame()
+            return self._set_cached("cot_gold", self.db_path, pd.DataFrame())
         df = pd.DataFrame(rows, columns=[
             "report_date", "open_interest", "mm_long", "mm_short", "mm_spread",
             "pm_long", "pm_short", "swap_long", "swap_short", "other_long", "other_short", "release_at",
@@ -186,8 +237,17 @@ class ExternalDataLoader:
         # 派生
         df["cot_mm_net"] = df["mm_long"] - df["mm_short"]
         df["cot_pm_net"] = df["pm_long"] - df["pm_short"]
-        df["cot_mm_net_pct_oi"] = df["cot_mm_net"] / df["open_interest"]
+        df["cot_mm_net_pct_oi"] = np.divide(
+            df["cot_mm_net"],
+            df["open_interest"],
+            out=np.full(len(df), np.nan, dtype=float),
+            where=df["open_interest"].to_numpy(dtype=float) != 0,
+        )
         df["cot_mm_net_chg_4w"] = df["cot_mm_net_pct_oi"].diff(4)
+        roll52 = df["cot_mm_net_pct_oi"].rolling(52, min_periods=20)
+        df["cot_mm_net_zscore_52w"] = (
+            (df["cot_mm_net_pct_oi"] - roll52.mean()) / roll52.std()
+        )
         # 重命名原始列
         rename_map = {
             "open_interest": "cot_open_interest",
@@ -204,23 +264,25 @@ class ExternalDataLoader:
         df = df.rename(columns=rename_map)
         df.index = self._release_index(df["release_at"])
         df = df.drop(columns=["release_at"])
-        return df
+        return self._set_cached("cot_gold", self.db_path, df)
 
     def _load_events(self) -> pd.DataFrame:
         """加载 events, 列: date / fomc / nfp / cpi / pce (1=是事件日)"""
-        con = connect_duckdb(self.events_db_path, read_only=True)
-        rows = con.execute(
-            "SELECT date, type FROM events ORDER BY date"
-        ).fetchall()
-        con.close()
+        cached = self._get_cached("events", self.events_db_path)
+        if cached is not None:
+            return cached
+        with duckdb_readonly_connection(self.events_db_path) as con:
+            rows = con.execute(
+                "SELECT date, type FROM events ORDER BY date"
+            ).fetchall()
         if not rows:
-            return pd.DataFrame()
+            return self._set_cached("events", self.events_db_path, pd.DataFrame())
         df = pd.DataFrame(rows, columns=["date", "type"])
         df["date"] = pd.to_datetime(df["date"])
         df["flag"] = 1
         pivot = df.pivot(index="date", columns="type", values="flag").fillna(0)
         pivot = pivot.reindex(columns=["FOMC", "NFP", "CPI", "PCE"], fill_value=0)
-        return pivot
+        return self._set_cached("events", self.events_db_path, pivot)
 
     def _compute_etf_derived(self, etf_holdings: pd.DataFrame) -> pd.DataFrame:
         """从原始 holdings 计算派生列: chg_5d / chg_20d / chg_pct."""
@@ -245,6 +307,28 @@ class ExternalDataLoader:
                 )
         return out
 
+    def _compute_macro_derived(self, macro: pd.DataFrame) -> pd.DataFrame:
+        """从日级宏观数据计算标准派生列，再 forward-fill 到 bar 级别。"""
+        if macro.empty:
+            return pd.DataFrame()
+        out = macro.copy()
+        if "real_yield_10y" not in out.columns:
+            return out
+        ry = out["real_yield_10y"]
+        out["real_yield_chg_5d"] = ry.diff(5) * 100.0
+        out["real_yield_chg"] = out["real_yield_chg_5d"]
+        ranks: list[float] = []
+        for i in range(len(ry)):
+            hist = ry.iloc[max(0, i - 1260 + 1): i + 1].dropna()
+            cur = ry.iloc[i]
+            if pd.isna(cur) or len(hist) < 60:
+                ranks.append(np.nan)
+            else:
+                ranks.append(float((hist <= cur).mean()))
+        out["real_yield_pct_rank_5y"] = ranks
+        out["real_yield_pct_rank"] = out["real_yield_pct_rank_5y"]
+        return out
+
     def _compute_cb_derived(self, cb_gold: pd.DataFrame) -> pd.DataFrame:
         """从央行月度数据派生 3m/6m 累计净买入."""
         if cb_gold.empty:
@@ -260,6 +344,53 @@ class ExternalDataLoader:
                 # 12 月累计 (年度)
                 out[f"cb_{country}_chg_12m"] = out[chg_col].rolling(12, min_periods=1).sum()
         return out
+
+    def _compute_event_hour_buckets(
+        self,
+        bar_index: pd.DatetimeIndex,
+        events: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Compute signed event buckets: negative before event, positive after."""
+        out = pd.DataFrame(index=bar_index)
+        if events.empty or len(bar_index) == 0:
+            return out
+        event_index = pd.DatetimeIndex(events.index).tz_localize(None)
+        for event_type in ["FOMC", "NFP", "CPI", "PCE"]:
+            if event_type not in events.columns:
+                continue
+            mask = events[event_type].fillna(0).astype(int).to_numpy() == 1
+            event_datetimes: list[pd.Timestamp] = []
+            for date in event_index[mask]:
+                time_str = self.event_times.get(event_type, "13:30")
+                try:
+                    event_datetimes.append(pd.Timestamp(f"{date.date()} {time_str}"))
+                except Exception:
+                    continue
+            values = np.full(len(bar_index), np.nan)
+            for i, ts in enumerate(bar_index):
+                if not event_datetimes:
+                    continue
+                signed = [
+                    (pd.Timestamp(ts) - event_dt).total_seconds() / 3600.0
+                    for event_dt in event_datetimes
+                ]
+                values[i] = self._bucket_signed_event_hours(min(signed, key=lambda h: abs(h)))
+            out[f"hours_to_{event_type.lower()}"] = values
+        return out
+
+    @staticmethod
+    def _bucket_signed_event_hours(signed_hours: float) -> float:
+        if not np.isfinite(signed_hours) or signed_hours < -48.0 or signed_hours > 48.0:
+            return np.nan
+        if -4.0 <= signed_hours <= 4.0:
+            return 0.0
+        if signed_hours < -24.0:
+            return -48.0
+        if signed_hours < 0.0:
+            return -24.0
+        if signed_hours <= 24.0:
+            return 24.0
+        return 48.0
 
     @staticmethod
     def _limit_as_of(df: pd.DataFrame, as_of_epoch: float | None) -> pd.DataFrame:
@@ -304,6 +435,7 @@ class ExternalDataLoader:
             "VIXCLS": "vix",
         }
         macro = macro.rename(columns=col_map)
+        macro = self._compute_macro_derived(macro)
 
         # 事件 0/1 化
         evt_cols = {}
@@ -337,6 +469,10 @@ class ExternalDataLoader:
             event_aligned = events_df.reindex(bar_index.normalize()).fillna(0)
             event_aligned.index = bar_df.index
             out = out.join(event_aligned, how="left")
+            event_buckets = self._compute_event_hour_buckets(bar_index, events)
+            if not event_buckets.empty:
+                event_buckets.index = bar_df.index
+                out = out.join(event_buckets, how="left")
 
         for c in out.columns:
             if c.startswith("evt_"):

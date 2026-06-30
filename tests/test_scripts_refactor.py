@@ -62,6 +62,14 @@ def test_service_function_signature(script_name, import_path, func_name, expecte
         assert p in actual_params, f"{func_name} missing param '{p}'; has {actual_params}"
 
 
+def test_discovery_auto_register_defaults_to_false():
+    from scripts import discover_factors
+
+    sig = inspect.signature(discover_factors.run_discovery)
+
+    assert sig.parameters["auto_register"].default is False
+
+
 def test_cli_help_is_fast():
     """All --help calls must complete in <3s — guards against --help accidentally
     triggering heavy imports or computation."""
@@ -116,3 +124,40 @@ def test_discovery_auto_register_blocked_by_risk_policy(monkeypatch):
     assert registered == []
     assert verdict["allowed"] is False
     assert verdict["reason"] == "force_factor_freeze"
+
+
+def test_discovery_multi_forward_filter_requires_all_periods(monkeypatch):
+    from scripts import discover_factors
+    import alpha.factor_score_evaluator as evaluator_mod
+
+    class _Score:
+        def __init__(self, score: float):
+            self.score = score
+            self.abs_ic_mean = score / 100.0
+            self.n_obs = 100
+            self.status = "ok"
+            self.error = ""
+
+    class _Evaluator:
+        def __init__(self, df, forward_period):
+            self.forward_period = int(forward_period)
+
+        def score_expression(self, expression):
+            if expression == "rank(close)":
+                return _Score(60.0)
+            if self.forward_period == 5:
+                return _Score(40.0)
+            return _Score(60.0)
+
+    monkeypatch.setattr(evaluator_mod, "FactorScoreEvaluator", _Evaluator)
+
+    kept, governance = discover_factors._filter_multi_forward(
+        [_Candidate("rank(close)"), _Candidate("rank(open)")],
+        df=object(),
+        forward_periods=[1, 5],
+        min_score=50.0,
+    )
+
+    assert [candidate.expression for candidate in kept] == ["rank(close)"]
+    assert governance["items"][0]["passed"] is True
+    assert governance["items"][1]["passed"] is False

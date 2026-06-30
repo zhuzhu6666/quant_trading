@@ -429,10 +429,10 @@ def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
         circuit_reason="daily drawdown 5.1%",
         trade_equity_history=[1000.0, 981.5],
     )
-    live_service._persist_session_state("2026-06-30")
+    live_service._persist_session_state("2026-06-29")
     live_service._reset_session_state_for_new_day()
 
-    assert live_service._restore_session_state_for_day("2026-06-30") is True
+    assert live_service._restore_session_state_for_day("2026-06-29") is True
     assert live_service._live_state_get("session_pnl") == pytest.approx(-18.5)
     assert live_service._live_state_get("session_consecutive_loss") == 2
     assert live_service._live_state_get("circuit_breaker") is True

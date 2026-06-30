@@ -112,5 +112,5 @@
 
 完整说明见：
 
-- [docs/development-workflow.md](C:/Users/zhu/quant_trading/docs/development-workflow.md)
-- [docs/server-backend-sop.md](C:/Users/zhu/quant_trading/docs/server-backend-sop.md)
+- [docs/development-workflow.md](docs/development-workflow.md)
+- [docs/server-backend-sop.md](docs/server-backend-sop.md)

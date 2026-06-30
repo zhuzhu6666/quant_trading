@@ -97,22 +97,36 @@ class EventSizing:
                 )
 
     def _load_events(self, db_path: str) -> None:
-        """从 DuckDB 加载 importance≥2 的事件 (v11-fix P1-14: sqlite3→duckdb)"""
+        """Load importance>=2 events.
+
+        Production uses DuckDB (data/events.duckdb). SQLite fallback is kept for
+        legacy unit tests and historical local event files.
+        """
         if not Path(db_path).exists():
             logger.warning(f"[EventSizing] {db_path} 不存在, event sizing 禁用")
             self.enabled = False
             return
 
         try:
-            conn = connect_duckdb(db_path, read_only=True)
             try:
-                cur = conn.execute(
-                    "SELECT date, type, description, importance "
-                    "FROM events WHERE importance >= 2"
-                )
-                rows = cur.fetchall()
-            finally:
-                conn.close()
+                conn = connect_duckdb(db_path, read_only=True)
+                try:
+                    cur = conn.execute(
+                        "SELECT date, type, description, importance "
+                        "FROM events WHERE importance >= 2"
+                    )
+                    rows = cur.fetchall()
+                finally:
+                    conn.close()
+            except ValueError:
+                conn = sqlite3.connect(str(db_path))
+                try:
+                    rows = conn.execute(
+                        "SELECT date, type, description, importance "
+                        "FROM events WHERE importance >= 2"
+                    ).fetchall()
+                finally:
+                    conn.close()
 
             for date_str, evt_type, desc, importance in rows:
                 time_str = self.event_times.get(evt_type, "13:30")

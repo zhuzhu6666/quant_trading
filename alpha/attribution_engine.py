@@ -530,11 +530,12 @@ class AttributionEngine:
             actual_pnl = real_pnl["net"]
 
         # ── 尝试 Gram-Schmidt 正交归因 ──
-        marginal_contributions = self._orthogonal_close(attrib, trade_pnl)
+        allocation_pnl = float(actual_pnl)
+        marginal_contributions = self._orthogonal_close(attrib, allocation_pnl)
 
         # ── 回退到线性 MC 近似 ──
         if marginal_contributions is None:
-            marginal_contributions = self._linear_mc_close(attrib, trade_pnl)
+            marginal_contributions = self._linear_mc_close(attrib, allocation_pnl)
 
         # ── 更新滚动统计 (使用真实 PnL 判断盈亏) ──
         for name, mc in marginal_contributions.items():
@@ -545,8 +546,8 @@ class AttributionEngine:
                 real_pnl=real_pnl,
             )
 
-        # ── 记录 trade PnL (用于后续 Gram-Schmidt Y 向量) ──
-        self._recent_trade_pnls.append(trade_pnl)
+        # ── 记录分配口径 PnL (用于后续 Gram-Schmidt Y 向量) ──
+        self._recent_trade_pnls.append(allocation_pnl)
 
         # ── 系统级真实 PnL 累计 (仅统计一次, 非因子级) ──
         if real_pnl:

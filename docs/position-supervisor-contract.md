@@ -378,7 +378,7 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 
 - 识别同一类 supervisor 错误是否重复发生；
 - 将 `premature_tighten / protection_too_tight / late_exit` 与当时的动作和模板绑定；
-- 形成 `supervisor_execution_trace` 学习样本；
+- 形成 `supervisor_execution_trace` 学习样本 (`autonomous_learning_sample.sample_type`，不是独立表)；
 - 支持自动降权、模板调整、冷却窗口调整和回滚观察。
 
 `supervisor_execution_trace` 样本默认 `label_status=pending`，不能直接作为强收益标签；只有平仓 review 与 counterfactual 成熟后，才允许升级为更高权重训练/治理证据。
@@ -392,7 +392,7 @@ legacy trace 只用于补齐历史审计和弱监督，不应直接进入强治�
 
 ### 7.4 supervisor trace 成熟化
 
-`mature_position_supervisor_traces()` 会把 `position_supervisor_trace` 与 `supervisor_counterfactual_review` 对齐，生成或更新 `supervisor_execution_trace` 学习样本。
+`mature_position_supervisor_traces()` 会把 `position_supervisor_trace` 与 `supervisor_counterfactual_review` 对齐，生成或更新 `sample_type=supervisor_execution_trace` 的学习样本。
 
 统一标签口径：
 

@@ -48,7 +48,7 @@ position:
 
 event_sizing:
   enabled: true                 # 事件感知动态仓位
-  db_path: data/ctrader_data.duckdb
+  db_path: data/events.duckdb
   event_times:                  # 假设发布时间 (UTC)
     FOMC: "19:00"
     NFP: "13:30"

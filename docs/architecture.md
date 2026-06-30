@@ -13,6 +13,7 @@
 
 ```text
 市场数据
+  -> 统一 PIT 因子帧
   -> 实时因子计算
   -> 信号归一化与多因子组合
   -> 执行闸门 / 风控裁决
@@ -40,7 +41,10 @@
   - `data/state.db`
   - `data/experiments.db`
 - `DuckDB` 只负责市场/分析型库
-  - `data/ctrader_data.duckdb`
+  - `data/bars_monthly/bars_YYYY_MM.duckdb`
+  - `data/bars.duckdb`
+  - `data/external_data.duckdb`
+  - `data/ctrader_data.duckdb` 旧 K 线冷备/兼容库
   - `data/ticks.duckdb`
   - `data/l2.duckdb` -> `data/l2_monthly/l2_YYYY_MM.duckdb`，由 L2 writer 跨月自动刷新
   - `data/trades.duckdb`
@@ -68,6 +72,7 @@
   - positions
   - execution / deals
 - 第二数据源当前不再参与 live 开仓、风控放行或 broker 状态判断
+- COT / ETF / FRED / events 属于外部研究数据，只能按 `release_at` 做 point-in-time 因子输入，不能替代 cTrader 实时行情/执行状态
 - `L2 depth` 当前可以作为研究支路在 cTrader 主连接内采集，但默认不是实盘前置依赖；只有在 `risk_require_l2_depth=true` 时，才允许成为 live 开仓/风控门槛
 
 这条边界的目的，是把“今天真要交易必须依赖的数据”与“未来研究可能有帮助的数据”彻底分开，避免研究支路反向拖垮实盘链路。
@@ -79,6 +84,7 @@
 ### 2.1 已经落地的能力
 
 - 实时因子链路：`StreamingFactorEngine -> SignalNormalizer -> PortfolioCompositor`
+- 统一因子帧：`data.factor_frame.FactorFrameBuilder -> bars + external_data + events`，live / health / evolution 共用同一 PIT 数据帧
 - live 执行链路：`ExecutionGate -> live_service -> ctrader_bridge`
 - 决策账本与生命周期：`signal / skip / open / close / order_failed / amend_failed`
 - 平仓复盘与经验沉淀：`trade_outcome_review / experience_memory`
@@ -88,7 +94,7 @@
 - 学习证据契约：`learning_evidence_contract.v1 -> dataset/readiness/validator/train/shadow/inference audit`
 - supervisor 模板治理：`position_supervisor_template -> policy_suggestion -> switch_position_supervisor_template`
 - 统一进化账本：`evolution_run / evolution_decision / runtime_config_snapshot`
-- supervisor trace 成熟化：`position_supervisor_trace -> supervisor_counterfactual_review -> supervisor_execution_trace`
+- supervisor trace 成熟化：`position_supervisor_trace -> supervisor_counterfactual_review -> autonomous_learning_sample(sample_type=supervisor_execution_trace)`
 - 离线模型流水线：dataset、readiness、validator、train、promotion gate、shadow、canary、advisory inference
 - 风控统一裁决第一阶段：`RiskPolicyService.evaluate(action, context) -> RiskVerdict`
 - 持仓时长记录第一阶段：`holding_seconds / holding_minutes / timeout_*`
@@ -117,6 +123,23 @@
 - 自动审批白名单内、证据充分、可回滚的建议；
 - 自动应用 `online_light` 参数模板和符合门禁的 supervisor 模板切换；
 - 自动把应用和回滚写入 `evolution_decision`，并保留 `previous_template_id` / config snapshot。
+
+### 2.3 因子数据与发现治理
+
+2026-06-30 起，因子系统的事实来源统一为 `data.factor_frame.FactorFrameBuilder`：
+
+- `build(symbol="XAUUSD+", timeframe="M5", ...)` 负责读取 bars 并拼接 PIT 外部因子；
+- `enrich_bars(bar_df, as_of=...)` 负责给 live bar window 补充外部数据和事件 bucket；
+- 输出保留 OHLCV、`time` 列和 `DatetimeIndex`；
+- 外部 enrichment 失败时，live 降级为原始 bar 帧，readiness 暴露 `last_enrichment` 告警，不阻断实盘。
+
+低频外部因子只允许使用日/周级预计算标准列，例如 `GLD_tonnes_chg_5d`、`cot_mm_net_chg_4w`、`real_yield_chg_5d`。在 M5 forward-fill 后的数据上，不再用 `diff(5)` 或 `rolling(52)` 近似日/周变化。
+
+发现流程默认是 research/shadow：
+
+- `scripts/discover_factors.py`、discover service、discover API 默认 `auto_register=False`；
+- 显式 `--auto-register` 前必须先通过多 forward、去重和风控门槛；
+- restore 只恢复 DSL 因子；PCA/model artifact 明确跳过。
 
 ---
 
@@ -516,7 +539,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - `label_status=pending` 的样本不能声明 `supervised_training`
 - `integrity=missing` 不进入强监督训练
 - `recovered / partial` 样本必须降权
-- `supervisor_execution_trace` 只有结合 review / counterfactual 成熟后，才允许升级为强训练候选
+- `supervisor_execution_trace` 是 `autonomous_learning_sample.sample_type`；只有结合 review / counterfactual 成熟后，才允许升级为强训练候选
 
 ---
 

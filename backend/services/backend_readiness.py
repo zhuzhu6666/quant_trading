@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite
+from backend.core.db import DUCKDB_EXTERNAL, STATE_DB, connect_duckdb, connect_sqlite
 from backend.services.meta_governance import MetaGovernanceService
 from research.meta_model_lightgbm import MetaModelLightGBMService
 
@@ -67,6 +67,9 @@ class BackendReadinessService:
         model_status = self._model_status()
         high_load = self._high_load_status(market_session)
         governance = self._governance_status()
+        factor_data = self._factor_data_status()
+        governance_freshness = self._governance_freshness_status()
+        runtime_weight_integrity = self._runtime_weight_integrity_status()
         blockers = []
         blockers.extend(system_health.get("blocking_components") or [])
         if not model_status.get("permission_ok", True):
@@ -88,6 +91,9 @@ class BackendReadinessService:
             "high_load": high_load,
             "models": model_status,
             "governance": governance,
+            "factor_data": factor_data,
+            "governance_freshness": governance_freshness,
+            "runtime_weight_integrity": runtime_weight_integrity,
             "frontend_contract": {
                 "preferred_entry": "/api/ops/backend-readiness",
                 "model_shadow_report": "/api/learning/model/meta-lightgbm/shadow-report",
@@ -215,6 +221,120 @@ class BackendReadinessService:
             }
         finally:
             conn.close()
+
+    def _factor_data_status(self) -> dict[str, Any]:
+        state_counts: dict[str, Any] = {}
+        conn = connect_sqlite(self.db_path)
+        conn.row_factory = __import__("sqlite3").Row
+        try:
+            if _table_exists(conn, "factor_health"):
+                rows = conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM factor_health GROUP BY status"
+                ).fetchall()
+                state_counts["factor_health_by_status"] = {
+                    str(row["status"] or "UNKNOWN"): int(row["n"] or 0) for row in rows
+                }
+                state_counts["factor_health_total"] = sum(state_counts["factor_health_by_status"].values())
+        finally:
+            conn.close()
+
+        external_counts: dict[str, int] = {}
+        try:
+            dconn = connect_duckdb(DUCKDB_EXTERNAL, read_only=True)
+            try:
+                for table in ["cot_gold", "etf_holdings", "macro_daily", "cb_gold", "etf_daily"]:
+                    try:
+                        external_counts[table] = int(dconn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
+                    except Exception:
+                        external_counts[table] = 0
+            finally:
+                dconn.close()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "state": state_counts,
+                "external_counts": external_counts,
+            }
+
+        return {
+            "ok": bool(state_counts.get("factor_health_total", 0) > 0 and external_counts.get("macro_daily", 0) > 0),
+            "state": state_counts,
+            "external_counts": external_counts,
+            "canonical_frame": "data.factor_frame.FactorFrameBuilder",
+            "last_enrichment": self._last_factor_frame_enrichment(),
+        }
+
+    @staticmethod
+    def _last_factor_frame_enrichment() -> dict[str, Any]:
+        try:
+            from data.factor_frame import latest_factor_frame_status
+
+            status = latest_factor_frame_status()
+            return {
+                "ok": bool(status.get("ok", True)),
+                "updated_at": _safe_float(status.get("updated_at")),
+                "error": str(status.get("error") or ""),
+            }
+        except Exception as exc:
+            return {"ok": False, "updated_at": 0.0, "error": str(exc)}
+
+    def _governance_freshness_status(self) -> dict[str, Any]:
+        tables = [
+            "meta_model_shadow_audit",
+            "factor_governance_shadow_audit",
+            "position_quality_shadow_audit",
+            "shadow_factor_perf",
+            "factor_health",
+        ]
+        now = time.time()
+        freshness: dict[str, Any] = {}
+        conn = connect_sqlite(self.db_path)
+        conn.row_factory = __import__("sqlite3").Row
+        try:
+            for table in tables:
+                if not _table_exists(conn, table):
+                    freshness[table] = {"status": "missing_table"}
+                    continue
+                ts_col = "updated_at"
+                cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                if "created_at" in cols:
+                    ts_col = "created_at"
+                elif "updated_at" in cols:
+                    ts_col = "updated_at"
+                else:
+                    freshness[table] = {"status": "no_timestamp"}
+                    continue
+                latest = _safe_float(conn.execute(f"SELECT MAX({ts_col}) AS ts FROM {table}").fetchone()["ts"])
+                age_sec = max(0.0, now - latest) if latest > 0 else None
+                freshness[table] = {
+                    "latest_ts": latest,
+                    "age_seconds": round(age_sec, 3) if age_sec is not None else None,
+                    "status": "fresh" if age_sec is not None and age_sec <= 3 * 86400 else "stale_or_empty",
+                }
+        finally:
+            conn.close()
+        return {"tables": freshness}
+
+    @staticmethod
+    def _runtime_weight_integrity_status() -> dict[str, Any]:
+        try:
+            from config.runtime_config import shared as runtime_config
+
+            cfg = runtime_config()
+            weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
+            signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
+            missing_weight = sorted(set(signal_cfg) - set(weights))
+            orphan_weight = sorted(set(weights) - set(signal_cfg))
+            return {
+                "ok": bool(weights),
+                "weight_count": len(weights),
+                "signal_config_count": len(signal_cfg),
+                "signal_without_weight": missing_weight[:50],
+                "weight_without_signal_config": orphan_weight[:50],
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def _high_load_status(self, market_session: dict[str, Any]) -> dict[str, Any]:
         latest = self._latest_offmarket_audit()

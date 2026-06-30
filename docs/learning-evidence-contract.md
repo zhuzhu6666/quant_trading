@@ -46,7 +46,7 @@
 特别约束：
 
 - `pending` 样本不得声明 `supervised_training`
-- `supervisor_execution_trace` 初始默认是 pending，只能作为轨迹证据
+- `supervisor_execution_trace` 是 `autonomous_learning_sample.sample_type`，不是独立表；初始默认是 pending，只能作为轨迹证据
 - supervisor trace 只有结合 `trade_outcome_review / supervisor_counterfactual_review` 成熟后，才能进入强训练候选
 
 ## Model Output

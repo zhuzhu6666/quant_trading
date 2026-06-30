@@ -104,11 +104,57 @@ def _register_top_factors(top: list[Any], *, engine: str, auto_register: bool) -
     return registered, verdict
 
 
+def _filter_multi_forward(
+    top: list[Any],
+    df,
+    forward_periods: list[int],
+    *,
+    min_score: float = 50.0,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Re-score registration candidates across all forward periods."""
+    if not top:
+        return [], {"min_score": min_score, "items": []}
+
+    from alpha.factor_score_evaluator import FactorScoreEvaluator
+
+    evaluators = {
+        int(fp): FactorScoreEvaluator(df, forward_period=int(fp))
+        for fp in forward_periods
+        if int(fp) > 0
+    }
+    kept: list[Any] = []
+    items: list[dict[str, Any]] = []
+    for i, candidate in enumerate(top):
+        expression = _candidate_expression(candidate)
+        name = _candidate_name(candidate, i)
+        scores: list[dict[str, Any]] = []
+        passed = bool(expression and evaluators)
+        for fp, evaluator in evaluators.items():
+            score = evaluator.score_expression(expression)
+            ok = not score.error and score.score >= min_score
+            passed = passed and ok
+            scores.append(
+                {
+                    "forward_period": fp,
+                    "score": round(float(score.score), 4),
+                    "abs_ic_mean": round(float(score.abs_ic_mean), 6),
+                    "n_obs": int(score.n_obs),
+                    "status": score.status,
+                    "error": score.error,
+                    "passed": bool(ok),
+                }
+            )
+        items.append({"name": name, "expr": expression, "passed": passed, "scores": scores})
+        if passed:
+            kept.append(candidate)
+    return kept, {"min_score": min_score, "items": items}
+
+
 def run_discovery(
     n_candidates: int = 1000,
     top_k: int = 50,
     forward_periods: list[int] | None = None,
-    auto_register: bool = True,
+    auto_register: bool = False,
     engine: str = "gp",
     gp_pop: int = 100,
     gp_gen: int = 20,
@@ -146,14 +192,22 @@ def run_discovery(
 
     cb("evaluating", 70, f"evaluating {len(candidates) if isinstance(candidates, list) else '?'} candidates")
     top = candidates[:top_k] if isinstance(candidates, list) else []
-    registered_shadow, risk_verdict = _register_top_factors(top, engine=engine, auto_register=auto_register)
+    governed_top, governance = _filter_multi_forward(top, df, forward_periods, min_score=50.0)
+    registered_shadow, risk_verdict = _register_top_factors(governed_top, engine=engine, auto_register=auto_register)
 
     cb("writing", 95, f"writing report to {report_path}")
+    governance_by_expr = {
+        str(item.get("expr") or ""): item
+        for item in governance.get("items", [])
+        if isinstance(item, dict)
+    }
     top_factors = [
         {
             "name": _candidate_name(c, i),
             "expr": _candidate_expression(c),
             "ic": _candidate_ic(c),
+            "governance_passed": bool(governance_by_expr.get(_candidate_expression(c), {}).get("passed", False)),
+            "multi_forward_scores": governance_by_expr.get(_candidate_expression(c), {}).get("scores", []),
         }
         for i, c in enumerate(top)
     ]
@@ -168,6 +222,7 @@ def run_discovery(
                 "auto_register": auto_register,
                 "registered_shadow": registered_shadow,
                 "risk_verdict": risk_verdict,
+                "governance": governance,
             },
             indent=2,
             ensure_ascii=False,
@@ -183,6 +238,7 @@ def run_discovery(
         "top_factors": top_factors,
         "registered_shadow": registered_shadow,
         "risk_verdict": risk_verdict,
+        "governance": governance,
         "report_path": str(report_path),
     }
 
@@ -193,7 +249,7 @@ def main() -> int:
     parser.add_argument("--n-candidates", type=int, default=1000, help="Number of candidates to generate (random search)")
     parser.add_argument("--top-k", type=int, default=50, help="Number of top factors to keep")
     parser.add_argument("--forward-periods", type=str, default="1,5,20", help="CSV of forward periods")
-    parser.add_argument("--auto-register", action="store_true", default=True, help="Auto-register top factors as shadow")
+    parser.add_argument("--auto-register", action="store_true", default=False, help="Auto-register top factors as shadow")
     parser.add_argument("--no-auto-register", dest="auto_register", action="store_false")
     parser.add_argument("--engine", type=str, default="gp", choices=["gp", "random"], help="Search engine")
     parser.add_argument("--gp-pop", type=int, default=100, help="GP population size")

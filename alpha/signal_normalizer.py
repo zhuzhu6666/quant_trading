@@ -100,7 +100,10 @@ def _normalize_discrete(
     直接把原始值映射到 value_map 定义的信号值。
     未知值 → 中性 (0.0)。
     """
-    key = str(value)
+    if isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value).is_integer():
+        key = str(int(value))
+    else:
+        key = str(value)
     return value_map.get(key, 0.0)
 
 

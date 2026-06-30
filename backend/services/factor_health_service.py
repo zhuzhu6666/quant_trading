@@ -21,13 +21,11 @@ def run_factor_health(
     threshold = float(params.get("threshold", 0.04))
     bar_count = int(params.get("bar_count", 50000))
 
-    progress_cb("loading", 10, f"loading {bar_count} bars from db")
-    from data.store import DataStore
-    import pandas as pd
-    store = DataStore("data/ctrader_data.duckdb")
-    df = store.load_bars("XAUUSD+", "M15")
-    if bar_count and len(df) > bar_count:
-        df = df.tail(bar_count)
+    symbol = str(params.get("symbol", "XAUUSD+") or "XAUUSD+")
+    timeframe = str(params.get("timeframe", "M15") or "M15")
+    progress_cb("loading", 10, f"loading {bar_count} enriched bars from factor frame")
+    from data.factor_frame import FactorFrameBuilder
+    df = FactorFrameBuilder().build(symbol=symbol, timeframe=timeframe, limit=bar_count or None)
     progress_cb("loaded", 30, f"loaded {len(df)} bars")
 
     progress_cb("evaluating", 40, "evaluating factors (5-dim scoring)")

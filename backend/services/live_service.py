@@ -197,6 +197,38 @@ def _risk_kelly_volume(
     return _to_step(vol_api)
 
 
+def _round_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
+    min_vol = float((bridge_meta or {}).get("api_min_volume") or 1.0)
+    step_vol = float((bridge_meta or {}).get("api_step_volume") or 1.0)
+    if step_vol <= 0:
+        return max(min_vol, float(volume or 0.0))
+    return max(min_vol, round(float(volume or 0.0) / step_vol) * step_vol)
+
+
+def _event_sizing_context(event_sizing: Any, bar_time: float) -> dict[str, Any]:
+    if event_sizing is None:
+        return {"enabled": False, "multiplier": 1.0}
+    try:
+        multiplier = float(event_sizing.get_multiplier(bar_time))
+    except Exception:
+        multiplier = 1.0
+    try:
+        event_near, event_desc = event_sizing.is_event_near(bar_time)
+    except Exception:
+        event_near, event_desc = False, None
+    try:
+        stats = event_sizing.stats()
+    except Exception:
+        stats = {}
+    return {
+        "enabled": bool(getattr(event_sizing, "enabled", False)),
+        "multiplier": max(0.0, min(1.0, multiplier)),
+        "event_near": bool(event_near),
+        "event": event_desc,
+        "stats": stats,
+    }
+
+
 def _protection_prices_from_reference(
     direction: int,
     reference_price: float,
@@ -297,6 +329,7 @@ def _build_open_trade_risk_context(
     positions: list[Any],
     requested_api_volume: float,
     signal_score: float,
+    event_sizing_context: dict[str, Any] | None = None,
 ) -> dict:
     risk_snapshot = _live_state_get("risk", {}, clone=True) or {}
     loop_running = bool(_live_state_get("loop_running", True))
@@ -372,6 +405,7 @@ def _build_open_trade_risk_context(
         "total_api_volume": _tracked_total_api_volume(positions or []),
         "requested_api_volume": float(requested_api_volume or 0.0),
         "max_position_api_volume": float(getattr(cfg, "max_position_api_volume", 1000.0) or 0.0),
+        "event_sizing": dict(event_sizing_context or {"enabled": False, "multiplier": 1.0}),
         "pyramid_enabled": bool(getattr(cfg, "pyramid_enabled", True)),
         "max_abs_entry_score": _max_abs_entry_score_for_positions(positions or []),
         "signal_score": float(signal_score or 0.0),
@@ -3884,7 +3918,14 @@ def _scheduled_awe_adapt():
             except Exception as _e2:
                 logger.debug("[awe_adapt] blend_baseline compute failed: %s", _e2)
 
-        patches = awe.adapt(attr, cfg.factor_portfolio_weights,
+        current_weights = dict(cfg.factor_portfolio_weights or {})
+        factor_configs = _merge_portfolio_configs(
+            cfg.factor_signal_config,
+            current_weights,
+            cfg.factor_tactical_alpha,
+            cfg.factor_signal_threshold,
+        )
+        patches = awe.adapt(attr, factor_configs,
                            use_blend_baseline=use_blend,
                            factor_values=fv_dict if fv_dict else None,
                            forward_returns=fwd_ret)
@@ -3899,12 +3940,25 @@ def _scheduled_awe_adapt():
                 decisions = dp.fast_decide(
                     awe_patches=patches,
                     weight_policy_weights=None,
-                    factor_configs=cfg.factor_signal_config,
-                    current_weights=cfg.factor_portfolio_weights,
+                    factor_configs=factor_configs,
+                    current_weights=current_weights,
                 )
-                merged = DecisionPolicy.to_weights(decisions)
+                partial = DecisionPolicy.to_weights(decisions)
+                merged = dict(current_weights)
+                merged.update(partial)
+                missing = set(current_weights) - set(merged)
+                if missing:
+                    logger.warning(
+                        "[awe_adapt] refusing partial weight patch; missing=%s",
+                        sorted(missing)[:20],
+                    )
+                    return
                 _rc_patch({"factor_portfolio_weights": merged})
-                logger.info("[awe_adapt] weights pushed via DecisionPolicy ({} factors)", len(merged))
+                logger.info(
+                    "[awe_adapt] weights pushed via DecisionPolicy (%d changed, %d total)",
+                    len(partial),
+                    len(merged),
+                )
             except Exception as _e2:
                 logger.warning("[awe_adapt] DecisionPolicy weight push failed: %s", _e2)
         else:
@@ -4973,6 +5027,9 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         gate = ExecutionGate({
             "signal_threshold": _rcfg.factor_signal_threshold,
             "cooldown_bars": _rcfg.strategy_cooldown_bars,
+            "risk_enable_nfp_skip": getattr(_rcfg, "risk_enable_nfp_skip", False),
+            "risk_enable_gvz_gate": getattr(_rcfg, "risk_enable_gvz_gate", False),
+            "risk_gvz_drop_pct": getattr(_rcfg, "risk_gvz_drop_pct", -2.0),
         })
         from alpha.attribution_engine import AttributionEngine
         from alpha.adaptive_weight_engine import AdaptiveWeightEngine
@@ -4992,10 +5049,18 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             "awe_max_type_weight_pct": _rcfg.awe_max_type_weight_pct,
         }, ictracker=ictracker)
         awe.initialize(_rcfg.factor_portfolio_weights, ictracker=ictracker)
+        event_sizing = None
+        try:
+            from backend.core.db import DUCKDB_EVENTS
+            from execution.event_sizing import EventSizing
+            event_sizing = EventSizing(db_path=str(DUCKDB_EVENTS), enabled=True)
+        except Exception as _event_sizing_err:
+            logger.debug("[live] event sizing init skipped: %s", _event_sizing_err)
         _factor_pipeline = {
             "engine": engine, "normalizer": normalizer,
             "compositor": compositor, "gate": gate,
             "attribution": attr, "awe": awe, "ic_tracker": ictracker,
+            "event_sizing": event_sizing,
         }
         log(f"Factor Takeover v4 pipeline initialized "
             f"(ctrader_demo={_rcfg.ctrader_send_orders})")
@@ -5070,11 +5135,15 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 _sym_gate = ExecutionGate({
                     "signal_threshold": cfg2.factor_signal_threshold,
                     "cooldown_bars": cfg2.strategy_cooldown_bars,
+                    "risk_enable_nfp_skip": getattr(cfg2, "risk_enable_nfp_skip", False),
+                    "risk_enable_gvz_gate": getattr(cfg2, "risk_enable_gvz_gate", False),
+                    "risk_gvz_drop_pct": getattr(cfg2, "risk_gvz_drop_pct", -2.0),
                 })
                 _factor_pipelines[sym] = {
                     "engine": _sym_engine, "normalizer": _sym_normalizer,
                     "compositor": _sym_compositor, "gate": _sym_gate,
                     "attribution": attr, "awe": awe, "ic_tracker": ictracker,
+                    "event_sizing": event_sizing,
                 }
             if len(symbols) > 1:
                 log(f"Multi-symbol pipelines initialized: {symbols}")
@@ -6310,8 +6379,17 @@ def _process_tick_factor_pipeline(
         acct_clean = _live_state_get("account", {}, clone=True) or {}
         volume = _risk_kelly_volume(cfg, composite.direction, current_price,
                                     sl_price, _meta, acct_clean)
+        base_volume = float(volume)
+        event_sizing_context = _event_sizing_context(
+            pipeline.get("event_sizing"),
+            float(bar.get("time", time.time()) or time.time()),
+        )
+        event_multiplier = float(event_sizing_context.get("multiplier", 1.0) or 1.0)
+        if event_multiplier < 1.0:
+            volume = _round_api_volume_to_step(base_volume * event_multiplier, _meta)
         log(f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
-            f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)})")
+            f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)} "
+            f"event_mult={event_multiplier:.2f})")
 
         # ── Phase B: 统一风控裁决 ──
         risk_context = _build_open_trade_risk_context(
@@ -6321,6 +6399,7 @@ def _process_tick_factor_pipeline(
             positions=pos,
             requested_api_volume=volume,
             signal_score=float(composite.score or 0.0),
+            event_sizing_context=event_sizing_context,
         )
         risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
         market_session = _live_state_get("market_session", {}, clone=True) or {}
@@ -6359,6 +6438,7 @@ def _process_tick_factor_pipeline(
                             "skip_stage": "market_session" if market_block_reason else "risk_policy",
                             "market_session": market_session,
                             "risk_verdict": risk_verdict.to_dict(),
+                            "event_sizing": event_sizing_context,
                         },
                     )
                 except Exception as _ledger_err:
@@ -6479,6 +6559,8 @@ def _process_tick_factor_pipeline(
                                                     "position_id": pid,
                                                     "volume": actual_api_volume,
                                                     "requested_volume": volume,
+                                                    "base_requested_volume": base_volume,
+                                                    "event_sizing": event_sizing_context,
                                                     "price": round(current_price, 2),
                                                     "sl": round(sl_price, 2),
                                                     "tp": round(tp_price, 2),
@@ -6507,7 +6589,11 @@ def _process_tick_factor_pipeline(
                                                 price=float(fill_price),
                                                 volume=float(actual_api_volume),
                                                 status="filled",
-                                                details={"tick": tick, "direction": composite.direction},
+                                                details={
+                                                    "tick": tick,
+                                                    "direction": composite.direction,
+                                                    "event_sizing": event_sizing_context,
+                                                },
                                             )
                                             _LEDGER.log_position_event(
                                                 position_id=str(pid),
@@ -6521,6 +6607,7 @@ def _process_tick_factor_pipeline(
                                                     "direction": composite.direction,
                                                     "sl": round(sl_price, 2),
                                                     "tp": round(tp_price, 2),
+                                                    "event_sizing": event_sizing_context,
                                                 },
                                                 event_ts=time.time(),
                                             )
@@ -6544,6 +6631,7 @@ def _process_tick_factor_pipeline(
                                                 "tick": tick,
                                                 "sl": round(sl_price, 2),
                                                 "tp": round(tp_price, 2),
+                                                "event_sizing": event_sizing_context,
                                                 "trade_attribution": trade_attr.to_jsonable(),
                                             },
                                         )
@@ -6568,6 +6656,8 @@ def _process_tick_factor_pipeline(
                                                 "position_id": pid,
                                                 "volume": actual_api_volume,
                                                 "requested_volume": volume,
+                                                "base_requested_volume": base_volume,
+                                                "event_sizing": event_sizing_context,
                                                 "price": round(current_price, 2),
                                                 "sl": round(sl_price, 2),
                                                 "tp": round(tp_price, 2),

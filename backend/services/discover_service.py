@@ -13,7 +13,7 @@ def run_discovery(params: dict[str, Any], progress_cb: ProgressCB) -> dict:
         n_candidates=int(params.get("n_candidates", 1000)),
         top_k=int(params.get("top_k", 50)),
         forward_periods=params.get("forward_periods", [1, 5, 20]),
-        auto_register=bool(params.get("auto_register", True)),
+        auto_register=bool(params.get("auto_register", False)),
         engine=params.get("engine", "gp"),
         gp_pop=int(params.get("gp_pop", 100)),
         gp_gen=int(params.get("gp_gen", 20)),

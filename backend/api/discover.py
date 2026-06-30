@@ -14,7 +14,7 @@ class DiscoverRequest(BaseModel):
     n_candidates: int = 1000
     top_k: int = 50
     forward_periods: list[int] = [1, 5, 20]
-    auto_register: bool = True
+    auto_register: bool = False
     gp_pop: int = 100
     gp_gen: int = 20
 

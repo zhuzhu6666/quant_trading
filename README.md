@@ -7,7 +7,7 @@ XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4 + Phase H autono
 - Backend API: `python -m backend`
 - Frontend: open `miniprogram_v2` in WeChat DevTools
 - Current docs: [docs/README.md](docs/README.md)
-- Workspace rules: [AGENTS.md](C:/Users/zhu/quant_trading/AGENTS.md)
+- Workspace rules: [AGENTS.md](AGENTS.md)
 - Current status and TODO: [TODO.md](TODO.md)
 - Architecture: [docs/architecture.md](docs/architecture.md)
 - Startup guide: [docs/startup.md](docs/startup.md)
@@ -19,12 +19,13 @@ XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4 + Phase H autono
 - 本地 Windows 只负责 `miniprogram_v2`
 - Linux 服务器负责后端、策略、执行、日志和实盘验证
 
-具体规则见 [AGENTS.md](C:/Users/zhu/quant_trading/AGENTS.md) 和 [docs/development-workflow.md](C:/Users/zhu/quant_trading/docs/development-workflow.md)。
+具体规则见 [AGENTS.md](AGENTS.md) 和 [docs/development-workflow.md](docs/development-workflow.md)。
 
 ## Architecture
 
 ```text
 Market data
+  -> FactorFrameBuilder (bars + PIT external/events)
   -> StreamingFactorEngine
   -> SignalNormalizer
   -> PortfolioCompositor
@@ -39,6 +40,8 @@ Market data
 ```
 
 The browser Web Console and MT5-era documents are no longer maintained. The current frontend is `miniprogram_v2`.
+
+Factor data now has a single internal source of truth: `data.factor_frame.FactorFrameBuilder`. Live calculation, factor health, and evolution should all consume the same point-in-time factor frame instead of rebuilding external joins separately.
 
 ## Quick Start
 

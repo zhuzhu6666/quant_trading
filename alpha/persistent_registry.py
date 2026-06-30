@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import json
+import sqlite3
 from typing import Optional
 
 from alpha.registry_adapter import RegistryAdapter
@@ -33,23 +34,53 @@ def restore_from_log(lifecycle_log_path: str = "",
     """
     latest_event: dict[str, dict] = {}
 
+    def _apply_lifecycle_event(ev: dict) -> None:
+        factor = ev.get("factor")
+        if not factor:
+            return
+        event_type = str(ev.get("event") or "")
+        state = latest_event.setdefault(
+            factor,
+            {
+                "factor": factor,
+                "event": "",
+                "source": "",
+                "description": "",
+                "active": False,
+            },
+        )
+        if event_type == "register":
+            state["active"] = True
+            state["source"] = ev.get("source") or state.get("source") or "shadow"
+            state["description"] = ev.get("description") or state.get("description") or ""
+        elif event_type == "promote":
+            if state.get("active", False):
+                state["source"] = ev.get("source") or "discovered"
+        elif event_type in {"retire", "unregister"}:
+            state["active"] = False
+            state["source"] = ev.get("source") or "removed"
+        elif event_type == "unretire":
+            state["active"] = True
+            state["source"] = ev.get("source") or state.get("source") or "discovered"
+        else:
+            return
+        state["event"] = event_type
+        state["timestamp"] = ev.get("timestamp", state.get("timestamp", 0.0))
+
     # 主路径: 从 state.db lifecycle_events 表读取
     try:
         from backend.core.db import STATE_DB, connect_sqlite
         conn = connect_sqlite(STATE_DB, read_only=True)
         conn.row_factory = sqlite3.Row
-        # 按 factor 分组取最后一个 register/unregister 事件
         rows = conn.execute(
             "SELECT factor, event, source, description, timestamp "
             "FROM lifecycle_events "
-            "WHERE event IN ('register', 'unregister') "
+            "WHERE event IN ('register', 'promote', 'retire', 'unregister', 'unretire') "
             "ORDER BY timestamp ASC"
         ).fetchall()
         conn.close()
         for r in rows:
-            factor = r["factor"]
-            if factor:
-                latest_event[factor] = dict(r)
+            _apply_lifecycle_event(dict(r))
         if verbose and latest_event:
             logger.info(f"[PersistentRegistry] 从 state.db 读取 {len(latest_event)} 个因子事件")
     except Exception as e:
@@ -72,8 +103,8 @@ def restore_from_log(lifecycle_log_path: str = "",
                     factor = ev.get("factor")
                     if not factor:
                         continue
-                    if ev.get("event") in ("register", "unregister"):
-                        latest_event[factor] = ev
+                    if ev.get("event") in ("register", "promote", "retire", "unregister", "unretire"):
+                        _apply_lifecycle_event(ev)
             if verbose and latest_event:
                 logger.info(f"[PersistentRegistry] 从 JSONL 降级读取 {len(latest_event)} 个因子事件")
 
@@ -86,18 +117,28 @@ def restore_from_log(lifecycle_log_path: str = "",
         adapter = RegistryAdapter.shared()
     restored = 0
     skipped_invalid = 0
+    skipped_artifact = 0
     for name, ev in latest_event.items():
         event_type = ev.get("event")
         source = ev.get("source", "")
         description = ev.get("description", "")
-        # unregister 事件: 跳过 (已经被 unregister)
-        if event_type == "unregister":
+        if not ev.get("active", False):
             continue
         if source not in ("shadow", "discovered"):
             # builtin 已经被 @register 加载, 跳过
             continue
         if not description:
             # 没有表达式描述, 不能恢复
+            continue
+        desc_l = str(description).strip().lower()
+        if desc_l.startswith("pca component") or desc_l.startswith("model artifact"):
+            skipped_artifact += 1
+            if verbose:
+                logger.info(
+                    "[PersistentRegistry] 跳过不可恢复 artifact: %s (%s)",
+                    name,
+                    description[:80],
+                )
             continue
         try:
             FactorParser(description).parse()
@@ -126,6 +167,8 @@ def restore_from_log(lifecycle_log_path: str = "",
             if verbose:
                 logger.info(f"[PersistentRegistry] 恢复: {name} ({source})")
     if verbose:
+        if skipped_artifact:
+            logger.info(f"[PersistentRegistry] 跳过 {skipped_artifact} 个 artifact 因子")
         if skipped_invalid:
             logger.info(f"[PersistentRegistry] 跳过 {skipped_invalid} 个无效描述因子")
         logger.info(f"[PersistentRegistry] 总共恢复 {restored} 因子 (从 {len(latest_event)} 事件)")

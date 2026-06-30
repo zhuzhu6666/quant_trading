@@ -98,7 +98,7 @@ class FactorScoreEvaluator:
             score.ic_stability = self._stability(ic_series)
             score.ic_decay_rate = self._decay_rate(ic_series)
             # 4. 综合分 (跟 FactorHealth 公式一致, 简化版: 只用 mean_abs + stability + decay)
-            mean_abs_score = min(100.0, score.abs_ic_mean / 0.1 * 100.0)
+            mean_abs_score = min(100.0, score.abs_ic_mean / 0.04 * 100.0)
             decay_score = max(0.0, min(100.0, score.ic_decay_rate * 100.0))
             score.score = (mean_abs_score * 0.5
                           + score.ic_stability * 0.3

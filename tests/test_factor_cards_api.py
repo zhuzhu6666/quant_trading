@@ -1913,13 +1913,19 @@ def test_apply_position_supervisor_template_switch_requires_approved_suggestion(
             VALUES (?, 'position_supervisor_template', ?, 'relax_thesis_break',
                     0.8, 'test approved switch', ?, 'approved', ?)
             """,
-            (
-                "psv_test_apply",
-                "position_supervisor:conservative.v1",
-                json.dumps({"replay_summary": {"sample_count": 3}}, ensure_ascii=False),
-                time.time(),
-            ),
-        )
+                (
+                    "psv_test_apply",
+                    "position_supervisor:conservative.v1",
+                    json.dumps(
+                        {
+                            "replay_summary": {"sample_count": 3},
+                            "counterfactual_summary": {"sample_count": 3},
+                        },
+                        ensure_ascii=False,
+                    ),
+                    time.time(),
+                ),
+            )
         conn.commit()
     finally:
         conn.close()

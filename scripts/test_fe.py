@@ -9,7 +9,7 @@ t = json.loads(r.stdout).get("token", "")
 if not t:
     print("LOGIN FAILED")
     exit(1)
-h = "Authorization: Bearer *** + t
+h = "Authorization: Bearer " + t
 
 def api(path, need_auth=True):
     args = ["curl", "-s", BASE + path]

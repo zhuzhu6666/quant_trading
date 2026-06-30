@@ -311,3 +311,59 @@ class TestStats:
         assert s["enabled"] is True
         assert s["total_events"] == 2
         assert s["min_multiplier"] == pytest.approx(0.2)
+
+
+class TestLiveServiceAuditContext:
+    def test_event_sizing_context_exposes_multiplier_and_event(self):
+        from backend.services import live_service
+
+        class _Sizing:
+            enabled = True
+
+            def get_multiplier(self, ts):
+                return 0.5
+
+            def is_event_near(self, ts):
+                return True, "FOMC decision"
+
+            def stats(self):
+                return {"events_loaded": 1}
+
+        ctx = live_service._event_sizing_context(_Sizing(), 123.0)
+
+        assert ctx["enabled"] is True
+        assert ctx["multiplier"] == 0.5
+        assert ctx["event_near"] is True
+        assert ctx["event"] == "FOMC decision"
+        assert ctx["stats"]["events_loaded"] == 1
+
+    def test_event_sizing_context_is_in_open_trade_risk_context(self, monkeypatch):
+        from types import SimpleNamespace
+        from backend.services import live_service
+
+        monkeypatch.setattr(live_service, "_live_state_get", lambda key, default=None, clone=False: default)
+
+        ctx = live_service._build_open_trade_risk_context(
+            cfg=SimpleNamespace(
+                timeframe="M5",
+                var_enabled=False,
+                var_cvar_threshold=0.02,
+                max_position_count=3,
+                max_position_api_volume=1000.0,
+                pyramid_enabled=True,
+                risk_loss_cooldown_after_losses=0,
+                risk_loss_cooldown_bars=0,
+                risk_block_on_disk_critical=True,
+                risk_require_l2_depth=False,
+            ),
+            bridge=SimpleNamespace(is_connected=True),
+            acct={"equity": 1000.0},
+            positions=[],
+            requested_api_volume=5.0,
+            signal_score=0.6,
+            event_sizing_context={"enabled": True, "multiplier": 0.2, "event": "NFP"},
+        )
+
+        assert ctx["event_sizing"]["enabled"] is True
+        assert ctx["event_sizing"]["multiplier"] == 0.2
+        assert ctx["event_sizing"]["event"] == "NFP"

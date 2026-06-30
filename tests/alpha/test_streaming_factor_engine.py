@@ -47,6 +47,20 @@ def _make_bars(n=60, start_price=4500.0, trend=0.0, vol=5.0):
     return bars
 
 
+TEST_FACTORS = [
+    "rsi_14",
+    "di_spread",
+    "stoch_k",
+    "adx",
+    "atr_ratio",
+    "macd_hist",
+    "ema_slope",
+    "bb_width",
+    "obv_slope",
+    "vol_ma_ratio",
+]
+
+
 # ── 测试开始 ──────────────────────────────────────────────
 
 class TestStreamingFactorEngineInit:
@@ -68,7 +82,7 @@ class TestAppendBar:
 
     def test_append_warmup_returns_empty(self):
         """buffer < 50 时 append_bar 返回空 dict."""
-        engine = StreamingFactorEngine()
+        engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
         for i in range(49):
             result = engine.append_bar(_make_bar(close=4500 + i))
             if i < 48:
@@ -78,7 +92,7 @@ class TestAppendBar:
 
     def test_warm_after_50_bars(self):
         """50根 bar 后 is_warm=True, append_bar 返回因子 dict."""
-        engine = StreamingFactorEngine()
+        engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
         bars = _make_bars(50)
         for i, bar in enumerate(bars):
             result = engine.append_bar(bar)
@@ -92,7 +106,7 @@ class TestAppendBar:
 
     def test_snapshot_equals_last_result(self):
         """get_snapshot 应与上次 append_bar 结果一致."""
-        engine = StreamingFactorEngine()
+        engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
         bars = _make_bars(55)
         last_result = {}
         for bar in bars:
@@ -111,7 +125,7 @@ class TestAppendBar:
         factor_registry._factors[bad_name] = _bad_fn
         
         try:
-            engine = StreamingFactorEngine()
+            engine = StreamingFactorEngine(factor_ids=TEST_FACTORS + [bad_name])
             # 强制刷新列表
             engine.refresh_factor_list()
             bars = _make_bars(55)
@@ -141,7 +155,7 @@ class TestAppendBar:
         factor_registry._factors[nan_name] = _nan_fn
         
         try:
-            engine = StreamingFactorEngine()
+            engine = StreamingFactorEngine(factor_ids=TEST_FACTORS + [nan_name])
             engine.refresh_factor_list()
             bars = _make_bars(55)
             for bar in bars:
@@ -162,7 +176,7 @@ class TestAppendBar:
         factor_registry._factors[inf_name] = _inf_fn
         
         try:
-            engine = StreamingFactorEngine()
+            engine = StreamingFactorEngine(factor_ids=TEST_FACTORS + [inf_name])
             engine.refresh_factor_list()
             bars = _make_bars(55)
             for bar in bars:
@@ -175,8 +189,9 @@ class TestAppendBar:
     def test_parameter_overrides_change_factor_value(self):
         bars = _make_bars(60, start_price=4500.0, trend=0.2, vol=2.5)
 
-        base_engine = StreamingFactorEngine()
+        base_engine = StreamingFactorEngine(factor_ids=["macd_hist"])
         override_engine = StreamingFactorEngine(
+            factor_ids=["macd_hist"],
             factor_runtime_config={
                 "macd_hist": {
                     "parameter_overrides": {"fast_length": 8, "slow_length": 21, "signal_length": 5}
@@ -208,8 +223,9 @@ class TestAppendBar:
     def test_parameter_overrides_change_additional_runtime_tunable_factor_values(self, factor_id, overrides):
         bars = _make_bars(70, start_price=4500.0, trend=0.35, vol=3.5)
 
-        base_engine = StreamingFactorEngine()
+        base_engine = StreamingFactorEngine(factor_ids=[factor_id])
         override_engine = StreamingFactorEngine(
+            factor_ids=[factor_id],
             factor_runtime_config={
                 factor_id: {
                     "parameter_overrides": overrides,
@@ -239,8 +255,9 @@ class TestAppendBar:
             open_ = close - (2.0 if i % 2 == 0 else -1.5)
             bars.append(_make_bar(close=close, open_=open_, high=high, low=low, volume=120 + i))
 
-        base_engine = StreamingFactorEngine()
+        base_engine = StreamingFactorEngine(factor_ids=["stoch_k"])
         override_engine = StreamingFactorEngine(
+            factor_ids=["stoch_k"],
             factor_runtime_config={
                 "stoch_k": {
                     "parameter_overrides": {"k_length": 5},
@@ -281,7 +298,7 @@ class TestReset:
 
     def test_reset_clears_state(self):
         """reset 应清空 buffer/cache/warm 状态."""
-        engine = StreamingFactorEngine()
+        engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
         bars = _make_bars(55)
         for bar in bars:
             engine.append_bar(bar)

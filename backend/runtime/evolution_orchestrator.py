@@ -305,9 +305,8 @@ def scheduled_evolution_cycle(
 
 def _load_bars(symbol: str, timeframe: str, n_bars: int) -> pd.DataFrame | None:
     try:
-        from data.store import DataStore
-        ds = DataStore()
-        return ds.load_bars(symbol, timeframe, limit=n_bars)
+        from data.factor_frame import FactorFrameBuilder
+        return FactorFrameBuilder().build(symbol=symbol, timeframe=timeframe, limit=n_bars)
     except Exception as e:
         logger.warning("[Evolve] load_bars failed: %s", e)
         return None

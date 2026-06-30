@@ -411,6 +411,25 @@ def _has_external(df: pd.DataFrame, cols: list[str]) -> bool:
     return all(c in df.columns for c in cols)
 
 
+def _standard_col(df: pd.DataFrame, col: str) -> np.ndarray | None:
+    if isinstance(df, pd.DataFrame) and col in df.columns:
+        return df[col].values
+    return None
+
+
+def _is_low_frequency_frame(df: pd.DataFrame, min_hours: float = 20.0) -> bool:
+    """True when rolling/diff periods can be interpreted as daily/weekly rows."""
+    if not isinstance(df, pd.DataFrame) or not isinstance(df.index, pd.DatetimeIndex):
+        return False
+    if len(df.index) < 3:
+        return False
+    diffs = pd.Series(df.index.sort_values()).diff().dropna()
+    if diffs.empty:
+        return False
+    median_hours = diffs.median().total_seconds() / 3600.0
+    return bool(median_hours >= min_hours)
+
+
 @factor_registry.register("dxy_corr_20", "20-bar rolling DXY (DTWEXBGS) 相关性")
 def factor_dxy_corr_20(df, period: int = 20):
     """20-bar close 跟 DXY 的滚动相关系数。
@@ -465,7 +484,13 @@ def factor_real_yield_chg(df, lookback: int = 5):
     Real yield 是黄金最直接的"对手盘": 上升 = 黄金承压, 下降 = 黄金利好。
     5-bar 变化 ≥ +10bp = 重大利空, ≤ -10bp = 重大利好。
     """
-    if not _has_external(df, ["real_yield_10y"]):
+    standard = _standard_col(df, "real_yield_chg_5d")
+    if standard is not None:
+        return standard
+    standard = _standard_col(df, "real_yield_chg")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["real_yield_10y"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     ry = df["real_yield_10y"].values
     n = len(ry)
@@ -487,12 +512,18 @@ def factor_hours_to_fomc(df):
 
     假设: 决议日 ± 1 天内黄金波动率显著放大, 趋势策略应 skip (现有 R5 配置)
     """
+    standard = _standard_col(df, "hours_to_fomc")
+    if standard is not None:
+        return standard
     return _compute_event_distance(df, "evt_fomc")
 
 
 @factor_registry.register("hours_to_nfp", "距下次 NFP 的日历天数 (0=事件日)")
 def factor_hours_to_nfp(df):
     """距离下次 NFP 发布的天数。NFP 偏离预期 → 黄金 1-3% 跳空窗口。"""
+    standard = _standard_col(df, "hours_to_nfp")
+    if standard is not None:
+        return standard
     return _compute_event_distance(df, "evt_nfp")
 
 
@@ -589,7 +620,10 @@ def factor_gld_tonnes_chg_5d(df):
     典型: GLD 5d 净增 5 吨 ≈ 1.6 亿美元流入。
     需要 df 包含 'gld_tonnes' 列 (由 external_loader 注入)。
     """
-    if not _has_external(df, ["GLD_tonnes"]):
+    standard = _standard_col(df, "GLD_tonnes_chg_5d")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["GLD_tonnes"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     return pd.Series(df["GLD_tonnes"].values).diff(5).values
 
@@ -601,7 +635,10 @@ def factor_gld_tonnes_chg_20d(df):
     月度级别的资金流向, 慢信号。适合跟短期价格回归一起做反转策略。
     极值: GLD 20d 净减 > 30 吨 = 长期资本撤离, 黄金触底信号。
     """
-    if not _has_external(df, ["GLD_tonnes"]):
+    standard = _standard_col(df, "GLD_tonnes_chg_20d")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["GLD_tonnes"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     return pd.Series(df["GLD_tonnes"].values).diff(20).values
 
@@ -613,7 +650,10 @@ def factor_gld_tonnes_pct_20d(df):
     相对量纲, 跨时间可比。背景: GLD 历史上总持仓在 600-1100 吨区间波动,
     20d 1% 变化 ≈ 6-11 吨净流动, 是显著事件。
     """
-    if not _has_external(df, ["GLD_tonnes"]):
+    standard = _standard_col(df, "GLD_tonnes_pct_20d")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["GLD_tonnes"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     return pd.Series(df["GLD_tonnes"].values).pct_change(20).values * 100
 
@@ -626,7 +666,10 @@ def factor_gld_tonnes_zscore_60d(df):
     极值正: 持仓异常高 → 拥挤交易, 短期回调风险
     极值负: 持仓异常低 → 投降, 长期底部信号
     """
-    if not _has_external(df, ["GLD_tonnes"]):
+    standard = _standard_col(df, "GLD_tonnes_zscore_60d")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["GLD_tonnes"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     s = pd.Series(df["GLD_tonnes"].values)
     roll = s.rolling(60, min_periods=20)
@@ -643,7 +686,10 @@ def factor_slv_tonnes_chg_20d(df):
     银的 ETF 持仓是黄金的强相关但更波动的代理 (散户参与度高)。
     银/金持仓比 (silver_gold_holdings_ratio) 看相对配置, 见 'silver_gold_holdings_ratio' 因子。
     """
-    if not _has_external(df, ["SLV_tonnes"]):
+    standard = _standard_col(df, "SLV_tonnes_chg_20d")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["SLV_tonnes"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     return pd.Series(df["SLV_tonnes"].values).diff(20).values
 
@@ -657,7 +703,7 @@ def factor_silver_gold_holdings_ratio(df, lookback: int = 5):
 
     历史上金银 ETF 持仓比突破 +5% 5d, 跟黄金短期回调 -0.5%~-1% 同步。
     """
-    if not _has_external(df, ["SLV_tonnes", "GLD_tonnes"]):
+    if not _has_external(df, ["SLV_tonnes", "GLD_tonnes"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     s_slv = df["SLV_tonnes"].values
     s_gld = df["GLD_tonnes"].values
@@ -748,7 +794,13 @@ def factor_real_yield_pct_rank(df, lookback: int = 1260):
 
     IC 报告: 5-bar 实际利率变化 IC=0.022 → 5y percentile rank IC 预期 0.05+
     """
-    if not _has_external(df, ["real_yield_10y"]):
+    standard = _standard_col(df, "real_yield_pct_rank_5y")
+    if standard is not None:
+        return standard
+    standard = _standard_col(df, "real_yield_pct_rank")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["real_yield_10y"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     s = pd.Series(df["real_yield_10y"].values)
     out = np.full(len(df), np.nan)
@@ -804,7 +856,10 @@ def factor_cot_mm_net_chg_4w(df):
     负值 = 投机者 4 周累计减仓 (看多削弱 / 反向)
     极值 (>0.2 OI): 拥挤, 反转风险
     """
-    if not _has_external(df, ["cot_mm_net_pct_oi"]):
+    standard = _standard_col(df, "cot_mm_net_chg_4w")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["cot_mm_net_pct_oi"]) or not _is_low_frequency_frame(df, min_hours=24.0 * 5.0):
         return np.full(len(df), np.nan)
     return pd.Series(df["cot_mm_net_pct_oi"].values).diff(4).values
 
@@ -817,7 +872,10 @@ def factor_cot_mm_net_zscore_52w(df):
     极值正: 投机者极端看多 → 拥挤, 短期回调风险
     极值负: 投机者极端看空 → 投降, 长期底部信号
     """
-    if not _has_external(df, ["cot_mm_net_pct_oi"]):
+    standard = _standard_col(df, "cot_mm_net_zscore_52w")
+    if standard is not None:
+        return standard
+    if not _has_external(df, ["cot_mm_net_pct_oi"]) or not _is_low_frequency_frame(df, min_hours=24.0 * 5.0):
         return np.full(len(df), np.nan)
     s = pd.Series(df["cot_mm_net_pct_oi"].values)
     roll = s.rolling(52, min_periods=12)
@@ -851,7 +909,7 @@ def factor_cot_extreme_signal(df):
     黄金历史: 2020-08 投机者 +260k → 黄金顶部 2075
               2018-08 投机者 -100k → 黄金底部 1160
     """
-    if not _has_external(df, ["cot_mm_net_pct_oi", "cot_pm_net"]):
+    if not _has_external(df, ["cot_mm_net_pct_oi", "cot_pm_net"]) or not _is_low_frequency_frame(df, min_hours=24.0 * 5.0):
         return np.full(len(df), np.nan)
     mm_s = pd.Series(df["cot_mm_net_pct_oi"].values)
     pm_s = pd.Series(df["cot_pm_net"].values)

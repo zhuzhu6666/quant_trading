@@ -69,6 +69,8 @@
 - LightGBM 数学模型旁路与 LLM API 旁路解释层
 - 元模型旁路、shadow report、治理建议入 `policy_suggestion / decision_ledger`
 - 前端交接总览接口 `GET /api/ops/backend-readiness`
+- 因子数据事实来源已收敛为 `data.factor_frame.FactorFrameBuilder`，live / health / evolution 共用 PIT bars + external_data + events
+- discovery 默认 research/shadow，不自动注册；显式注册需通过多 forward、去重和风控门槛
 
 系统现在仍然缺：
 
@@ -84,13 +86,24 @@
 
 - cTrader 现在不仅是唯一执行通道，也足够承担当前实盘所需的实时价格链路
 - 第二数据源当前不再参与开仓/风控主链，只保留给后续订单流分析与补充研究
-- `risk_require_l2_depth=false` 时，现网不再主动订阅 L2 depth；L2 不是当前实盘可开仓的前置条件
+- `risk_require_l2_depth=false` 只表示交易风控不依赖 L2；是否采集研究 L2 由 `l2_collection_enabled` 决定，采集走 cTrader 主连接异步 writer
 - 本轮服务器长时间满 CPU 的真实根因已经定位并处理，不是单一 bug，而是三类问题叠加：
   - `execution/ctrader_bridge.py` 的 depth 事件高频日志 + 逐条 DuckDB 写入
   - 学习治理页接口重复重算 `factor_cards / parameter_templates`，导致 AnyIO worker 长时间占 CPU
-  - 当前配置并不需要 L2，但 live loop 仍默认 `subscribe_depth()`，白白消耗 CPU 与连接资源
+  - 当前交易配置并不需要 L2 作为开仓门槛；如果启用研究采集，必须保持主连接异步批量写库，不能回到逐事件同步写库
 - cTrader 连接链路已经补上更稳的状态缓存、事件驱动同步、soft-timeout 容错；单次慢请求不应再直接把前端打回 `warming_up`
 - 当前仍需继续观察的不是 CPU 风暴本身，而是“重启后首次 cTrader 鉴权偶发超时”的恢复速度和重试节奏
+
+### 2026-06-30 因子系统稳定化收口结论
+
+近期新增确认并已落地的结论：
+
+- live、factor health、evolution 已统一走 `FactorFrameBuilder` 构造 point-in-time 因子帧
+- ETF / COT / macro 低频因子优先使用预计算日/周级标准列，不再在 M5 forward-fill 数据上用 bar 数近似日/周窗口
+- AWE runtime 权重写入改为完整 merge，避免局部 patch 覆盖并丢失其他因子 key
+- dynamic registry 恢复只恢复 DSL 因子，retire / unregister 不恢复，PCA/model artifact 明确跳过
+- EventSizing 已接入 live open path，读取 `data/events.duckdb`，并把 multiplier / 事件上下文写入审计上下文
+- `/api/ops/backend-readiness` 已增加 `factor_data`、`governance_freshness`、`runtime_weight_integrity`
 
 ### 当前唯一进行中主线
 
@@ -2341,14 +2354,14 @@ v2 增强记录：
   - `shadow_open_decision`
   - `risk_rejection`
   - `supervisor_trajectory`
-  - `supervisor_execution_trace`
+  - `supervisor_execution_trace` (`autonomous_learning_sample.sample_type`，不是独立表)
   - `trade_review_outcome`
   - `post_close_counterfactual`
 - 新增 `position_supervisor_trace` 表，永久记录每次 supervisor 处理：
   - `hold / tighten / reduce / close`
   - `cooldown_skipped / risk_rejected / execution_skipped / executed / execution_failed / exception`
   - supervisor verdict、模板、风控 verdict、执行结果、上下文快照
-- `supervisor_execution_trace` 默认 `label_status=pending`，只作为轨迹证据；收益标签必须等待 review / counterfactual 成熟后再参与强训练。
+- `supervisor_execution_trace` 是 `autonomous_learning_sample.sample_type`；默认 `label_status=pending`，只作为轨迹证据；收益标签必须等待 review / counterfactual 成熟后再参与强训练。
 - 每条样本写入：
   - `label_status`
   - `integrity`

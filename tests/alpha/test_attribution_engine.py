@@ -117,6 +117,25 @@ class TestAttributionEngine:
         assert result["rsi_14"] == pytest.approx(0.6 / 1.4 * 50, rel=1e-3)
         assert result["di_spread"] == pytest.approx(0.8 / 1.4 * 50, rel=1e-3)
 
+    def test_close_uses_actual_net_pnl_for_allocation(self):
+        engine = AttributionEngine()
+        attr = _make_attribution(
+            position_id=11,
+            signals={"rsi_14": 0.5, "di_spread": 0.5},
+        )
+        engine.record_open(11, attr)
+
+        result = engine.record_close(
+            11,
+            close_price=4550.0,
+            close_ts=time.time(),
+            real_pnl={"gross": 12.0, "swap": 0.0, "commission": -2.0, "net": 10.0},
+        )
+
+        assert sum(result.values()) == pytest.approx(10.0)
+        assert result["rsi_14"] == pytest.approx(5.0)
+        assert result["di_spread"] == pytest.approx(5.0)
+
     def test_close_unknown_position(self):
         """不存在的 position_id 返回空 dict。"""
         engine = AttributionEngine()

@@ -6,8 +6,7 @@ r = subprocess.run(["curl", "-s", BASE + "/api/auth/login",
     "-d", '{"username":"zhu","password":"1994"}'],
     capture_output=True, text=True, timeout=10)
 token = json.loads(r.stdout).get("token", "")
-h = "Authorization: Bearer *** + token
-AUTH=*** 
+h = "Authorization: Bearer " + token
 def api(path):
     r = subprocess.run(["curl", "-s", BASE + path, "-H", h],
         capture_output=True, text=True, timeout=10)

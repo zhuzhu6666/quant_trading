@@ -153,9 +153,18 @@ class ExecutionGate:
 
     def _event_filter(self, direction: int, bar: dict[str, Any]) -> GateResult:
         """事件过滤器: NFP skip / FOMC boost / GVZ gate。"""
-        cfg_enable_nfp = self._config.get("strategy_enable_nfp_skip", False)
-        cfg_enable_gvz = self._config.get("strategy_enable_gvz_gate", False)
-        cfg_gvz_threshold = self._config.get("strategy_gvz_drop_pct", -2.0)
+        cfg_enable_nfp = self._config.get(
+            "strategy_enable_nfp_skip",
+            self._config.get("risk_enable_nfp_skip", False),
+        )
+        cfg_enable_gvz = self._config.get(
+            "strategy_enable_gvz_gate",
+            self._config.get("risk_enable_gvz_gate", False),
+        )
+        cfg_gvz_threshold = self._config.get(
+            "strategy_gvz_drop_pct",
+            self._config.get("risk_gvz_drop_pct", -2.0),
+        )
 
         bar_ts = bar.get("time", 0)
         bar_date = datetime.fromtimestamp(bar_ts, tz=timezone.utc).strftime("%Y-%m-%d")

@@ -73,7 +73,7 @@ class _RiskPolicy:
 
 def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
     rc.reset_for_tests()
-    rc.patch({"awe_min_trades": 1, "factor_portfolio_weights": {"foo": 1.0}})
+    rc.patch({"awe_min_trades": 1, "factor_portfolio_weights": {"foo": 1.0, "bar": 2.0}})
 
     monkeypatch.setattr(
         live_service,
@@ -83,7 +83,7 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
 
     live_service._scheduled_awe_adapt()
 
-    assert rc.shared().factor_portfolio_weights == {"foo": 0.0}
+    assert rc.shared().factor_portfolio_weights == {"foo": 0.0, "bar": 2.0}
 
 
 def test_canary_intermediate_stage_does_not_execute_promotion(monkeypatch):
