@@ -29,6 +29,8 @@ data/*.duckdb.wal
 data/*.db-shm
 data/*.db-wal
 data/*.bak
+data/*.pkl
+data/charts/
 data/charts/*.bak
 data/charts/backtest_*.txt
 data/charts/evolution_story.jsonl
