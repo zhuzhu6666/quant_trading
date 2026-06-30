@@ -428,6 +428,7 @@ Page({
     backendReadinessReadyForFrontendText: 'unknown',
     backendReadinessOverall: '--',
     backendReadinessDisplayOverall: '--',
+    backendReadinessDisplayOverallText: '--',
     backendReadinessTone: 'neutral',
     backendReadinessConclusionAvailability: '待确认',
     backendReadinessConclusionAvailabilityTone: 'neutral',
@@ -610,6 +611,13 @@ Page({
       permissionAuditStatus: permissionAuditStatus,
       tradingBlocked: readinessTradingBlocked,
     });
+    const readinessDisplayOverallRaw = String(readinessDisplayOverall || '--');
+    const readinessDisplayOverallText = readinessDisplayOverallRaw.toLowerCase() === 'unknown'
+      && readinessReadyForFrontend
+      && readinessBlockingCount === 0
+      && readinessObservationCount === 0
+      ? '未上报'
+      : readinessDisplayOverallRaw;
     const highLoadPermissionText = formatHighLoadPermissionStatus(!!highLoad.allowedNow, String(highLoad.profile || 'disabled'));
     const highLoadLatestText = formatLatestHighLoadAuditSummary(highLoadLatestAudit);
     const offmarketView = learning.offmarketHighLoadAuditsView || null;
@@ -661,7 +669,8 @@ Page({
       backendReadinessNextActionText: readinessConclusion.nextAction,
       backendReadinessReadyForFrontendText: readinessReadyForFrontend ? '可用' : (readinessView ? '不可用' : '未知'),
       backendReadinessOverall: String(readinessOverall),
-      backendReadinessDisplayOverall: String(readinessDisplayOverall),
+      backendReadinessDisplayOverall: readinessDisplayOverallRaw,
+      backendReadinessDisplayOverallText: readinessDisplayOverallText,
       backendReadinessTone: toneFromReadinessLevel(readinessDisplayOverall && readinessDisplayOverall !== '--' ? readinessDisplayOverall : readinessOverall),
       backendReadinessMarketSessionStatus: String(marketSession.status || marketSession.session_status || '--'),
       backendReadinessBlockers: blockingRows,

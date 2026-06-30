@@ -72,7 +72,7 @@
           <view class="split-card stack-12">
             <view class="small muted">执行状态</view>
             <view class="value-md {{backendReadinessTone === 'positive' ? 'accent-pos' : backendReadinessTone === 'negative' ? 'accent-neg' : backendReadinessTone === 'warning' ? 'accent-warn' : ''}}">
-              {{backendReadinessDisplayOverall}}
+              {{backendReadinessDisplayOverallText}}
             </view>
           </view>
         </view>

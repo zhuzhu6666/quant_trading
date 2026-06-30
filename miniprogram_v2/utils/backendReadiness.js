@@ -333,6 +333,12 @@ export function buildBackendReadinessView(payload = {}) {
   const models = payload.models || {};
   const metaModel = models.meta_lightgbm || {};
   const promotionGate = metaModel.promotion_gate || {};
+  const latestPermissionAudit = models.latest_permission_audit || metaModel.latest_permission_audit || {};
+  const permissionOk = models.permission_ok !== undefined
+    ? !!models.permission_ok
+    : metaModel.permission_ok !== undefined
+      ? !!metaModel.permission_ok
+      : true;
   const governance = payload.governance || {};
   const highLoad = payload.high_load || {};
   const blockers = normalizeHealthItem;
@@ -382,8 +388,8 @@ export function buildBackendReadinessView(payload = {}) {
       eligibleForLiveLocked: false,
     },
     modelPermissions: {
-      permissionOk: !!(payload.models && metaModel.permission_ok),
-      latestPermissionAudit: metaModel.latest_permission_audit || {},
+      permissionOk,
+      latestPermissionAudit,
     },
     governance: {
       automaticExecutionEnabled: !!governance.automatic_execution_enabled,
