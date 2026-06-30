@@ -276,6 +276,24 @@ function summarizeSystemHealth(systemHealth = null) {
   const advisoryCritical = Array.isArray(systemHealth.advisory_critical_components) ? systemHealth.advisory_critical_components : [];
   const effectiveCritical = critical.filter((key) => !advisoryCritical.includes(key));
   const components = systemHealth.components && typeof systemHealth.components === 'object' ? systemHealth.components : {};
+  const componentDetail = (key) => {
+    const item = components[key] || {};
+    return String(item.detail || '');
+  };
+  const componentImpact = (key, status) => {
+    const normalized = String(key || '').toLowerCase();
+    const normalizedStatus = String(status || '').toLowerCase();
+    if (blocking.includes(key)) return '会直接阻断开仓，需先处理。';
+    if (normalized === 'tick_data') return '研究/订单流观察项，不直接阻断当前交易。';
+    if (normalized === 'bar_m1') return '1分钟线是辅助观察项；当前主交易周期不是 M1 时不直接阻断。';
+    if (normalized === 'bar_m5') return normalizedStatus === 'degraded'
+      ? '当前主交易 K线轻度滞后，继续恶化前通常只提示观察。'
+      : '当前主交易 K线状态正常。';
+    if (normalized === 'l2_depth') return '盘口深度当前不作为开仓硬依赖，主要用于观察。';
+    if (advisoryCritical.includes(key)) return '观察级关键项，不按当前配置直接阻断交易。';
+    if (normalizedStatus === 'degraded') return '观察项，暂不直接阻断交易。';
+    return '状态正常或仅作辅助证据。';
+  };
   const componentRows = Object.keys(components)
     .slice(0, 6)
     .map((key) => {
@@ -290,6 +308,29 @@ function summarizeSystemHealth(systemHealth = null) {
         status: statusText,
       };
     });
+  const watchKeys = [...new Set([...advisoryCritical, ...degraded])].filter((key) => !blocking.includes(key));
+  const watchRows = watchKeys.map((key) => {
+    const rawStatus = components[key] && components[key].status ? components[key].status : 'unknown';
+    return {
+      key,
+      label: humanizeHealthComponent(key),
+      statusText: humanizeHealthStatus(rawStatus),
+      tone: toneFromReadinessLevel(rawStatus),
+      detail: componentDetail(key) || '后端未提供具体时间',
+      impactText: componentImpact(key, rawStatus),
+    };
+  });
+  const blockingRows = blocking.map((key) => {
+    const rawStatus = components[key] && components[key].status ? components[key].status : 'blocking';
+    return {
+      key,
+      label: humanizeHealthComponent(key),
+      statusText: humanizeHealthStatus(rawStatus),
+      tone: 'negative',
+      detail: componentDetail(key) || '后端未提供具体原因',
+      impactText: componentImpact(key, rawStatus),
+    };
+  });
   const impactStatus = systemHealth.impact_status || (blocking.length ? 'blocked' : critical.length || degraded.length ? 'observe' : 'ok');
   const impactTone =
     impactStatus === 'blocked'
@@ -305,8 +346,14 @@ function summarizeSystemHealth(systemHealth = null) {
       impactStatus === 'blocked'
         ? '会阻断交易'
         : impactStatus === 'observe'
-          ? '需要盯住'
+          ? '观察不阻断'
           : '暂不影响交易',
+    plainConclusion:
+      impactStatus === 'blocked'
+        ? '当前存在会直接卡住开仓的问题。'
+        : impactStatus === 'observe'
+          ? '当前没有直接阻断交易的问题，但有数据或环境观察项。'
+          : '当前没有明显运行风险。',
     impactSummary: systemHealth.impact_summary || '暂无运行风险摘要',
     criticalCount: critical.length,
     degradedCount: degraded.length,
@@ -317,6 +364,8 @@ function summarizeSystemHealth(systemHealth = null) {
     advisoryText: advisoryCritical.length ? advisoryCritical.map(humanizeHealthComponent).join(' / ') : '无',
     scoreText: Number(systemHealth.overall_score || 0).toFixed(2),
     componentRows,
+    watchRows,
+    blockingRows,
   };
 }
 

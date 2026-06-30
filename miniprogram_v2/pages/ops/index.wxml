@@ -472,14 +472,25 @@
         </view>
         <view class="status-banner status-banner-{{systemHealthSummary.tone}}">
           <view class="row-between">
-            <view class="small">当前最该盯的点</view>
+            <view class="small">当前结论</view>
             <status-pill label="{{systemHealthSummary.impactLabel}}" tone="{{systemHealthSummary.tone}}" />
           </view>
+          <view class="section-note">{{systemHealthSummary.plainConclusion}}</view>
           <view class="section-note">{{systemHealthSummary.impactSummary}}</view>
           <view class="section-note">会直接卡住开仓：{{systemHealthSummary.blockingText}}</view>
           <view class="section-note">高优先级阻断候选：{{systemHealthSummary.criticalText}}</view>
-          <view class="section-note">只观察不阻断：{{systemHealthSummary.advisoryText}}</view>
-          <view class="section-note">一般观察项：{{systemHealthSummary.degradedText}}</view>
+        </view>
+        <view wx:if="{{systemHealthSummary.blockingRows.length}}" class="soft-panel stack-12">
+          <view class="small">必须先处理的阻断项</view>
+          <view wx:for="{{systemHealthSummary.blockingRows}}" wx:key="key" class="section-note">
+            {{item.label}} · {{item.statusText}} · {{item.detail}}。{{item.impactText}}
+          </view>
+        </view>
+        <view wx:if="{{systemHealthSummary.watchRows.length}}" class="soft-panel stack-12">
+          <view class="small">观察项明细（不等于阻断）</view>
+          <view wx:for="{{systemHealthSummary.watchRows}}" wx:key="key" class="section-note">
+            {{item.label}} · {{item.statusText}} · {{item.detail}}。{{item.impactText}}
+          </view>
         </view>
         <view wx:if="{{systemHealthSummary.componentRows.length}}" class="row-wrap">
           <view wx:for="{{systemHealthSummary.componentRows}}" wx:key="key" class="tag">{{item.key}} {{item.status}}</view>
