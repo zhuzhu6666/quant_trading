@@ -37,8 +37,11 @@
 
 2026-06-26 起，数据库层不再只是“路径统一”，而是正式进入治理模式：
 
-- `SQLite` 只负责运行时状态库
-  - `data/state.db`
+- `PostgreSQL state_v1` 负责运行时状态、学习、恢复、审计主状态库
+  - `QUANT_STATE_BACKEND=postgres`
+  - `QUANT_STATE_PG_DSN`
+  - `data/state.db` 仅作为迁移冷备/回滚源保留，不再作为 live 主写入口
+- `SQLite` 仅保留显式临时/实验库
   - `data/experiments.db`
 - `DuckDB` 只负责市场/分析型库
   - `data/bars_monthly/bars_YYYY_MM.duckdb`
@@ -1044,7 +1047,8 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 ### 数据
 
-- `data/state.db`
+- PostgreSQL `state_v1`
+- `data/state.db` 仅作为迁移冷备/回滚源
 - `data/experiments.db`
 - `data/*.duckdb`
 
