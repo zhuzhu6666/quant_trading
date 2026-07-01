@@ -197,6 +197,28 @@ class ExperienceBuilder:
         close_reason = str(review_json.get("close_reason", "") or "")
         context_integrity = str(review_json.get("context_integrity", "full") or "full")
         attribution_integrity = str(review_json.get("attribution_integrity", "full") or "full")
+        inferred_supervisor = review_json.get("inferred_close_supervisor") or {}
+        close_reason_source = str(review_json.get("close_reason_source", "") or "")
+        supervisor_event_type = str(inferred_supervisor.get("event_type") or "")
+        supervisor_action = str(inferred_supervisor.get("action") or "")
+        supervisor_reason = str(
+            inferred_supervisor.get("summary_reason")
+            or inferred_supervisor.get("action_reason")
+            or close_reason
+            or ""
+        )
+        supervisor_evidence = inferred_supervisor.get("evidence") or {}
+        thesis_status_at_exit = str(
+            review_json.get("thesis_status_at_exit")
+            or review_json.get("thesis_status")
+            or supervisor_evidence.get("thesis_status")
+            or ""
+        )
+        has_supervisor_feedback = bool(
+            close_reason_source.startswith("supervisor")
+            or supervisor_event_type.startswith("supervisor_")
+            or supervisor_action in {"tighten", "reduce", "close"}
+        )
         if context_integrity != "full" and "partial_context" not in failure_tags:
             failure_tags.append("partial_context")
         if attribution_integrity == "missing" and "attribution_missing" not in failure_tags:
@@ -205,6 +227,18 @@ class ExperienceBuilder:
             failure_tags.append("manual_intervention")
         if close_reason == "restart_replay" and "restart_replay" not in failure_tags:
             failure_tags.append("restart_replay")
+        if has_supervisor_feedback and "supervisor_entry_feedback" not in failure_tags:
+            failure_tags.append("supervisor_entry_feedback")
+        supervisor_thesis_broken = bool(
+            has_supervisor_feedback
+            and (
+                thesis_status_at_exit == "broken"
+                or supervisor_reason == "thesis_broken"
+                or close_reason == "thesis_broken"
+            )
+        )
+        if supervisor_thesis_broken and "supervisor_thesis_broken" not in failure_tags:
+            failure_tags.append("supervisor_thesis_broken")
 
         def _factor_source(name: object) -> str:
             factor = str(name or "")
@@ -246,6 +280,10 @@ class ExperienceBuilder:
             reward_score = min(1.0, pnl / max(abs(pnl), 50.0))
         elif pnl < 0:
             reward_score = -min(1.0, abs(pnl) / max(abs(pnl), 50.0))
+        if supervisor_thesis_broken and pnl <= 0:
+            reward_score = min(reward_score, -0.35)
+        elif has_supervisor_feedback and pnl <= 0:
+            reward_score = min(reward_score, -0.12)
 
         reward_scale = 1.0
         evidence_scale = 1.0
@@ -260,7 +298,13 @@ class ExperienceBuilder:
             evidence_scale *= 0.5
         reward_score *= reward_scale
 
-        if review.get("outcome_label") == "bad_loss":
+        supervisor_entry_failure = bool(
+            supervisor_thesis_broken
+            and pnl <= 0
+            and context_integrity == "full"
+            and attribution_integrity != "missing"
+        )
+        if review.get("outcome_label") == "bad_loss" or supervisor_entry_failure:
             recommended_action = "downweight"
         elif review.get("outcome_label") == "good_win":
             recommended_action = "watch"
@@ -286,6 +330,16 @@ class ExperienceBuilder:
             "timeframe": review_json.get("timeframe", ""),
             "failure_tags": failure_tags,
             "close_reason": close_reason,
+            "close_reason_source": close_reason_source,
+            "supervisor_feedback": {
+                "has_feedback": has_supervisor_feedback,
+                "entry_failure": supervisor_entry_failure,
+                "event_type": supervisor_event_type,
+                "action": supervisor_action,
+                "reason": supervisor_reason,
+                "thesis_status_at_exit": thesis_status_at_exit,
+                "inferred_close_supervisor": inferred_supervisor,
+            },
             "context_integrity": context_integrity,
             "attribution_integrity": attribution_integrity,
             "summary_text": review.get("summary_text", ""),

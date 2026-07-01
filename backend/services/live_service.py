@@ -224,6 +224,8 @@ _pos_entry_scores: dict[int, float] = {}
 _pos_entry_decisions: dict[int, str] = {}
 _pending_close_reasons: dict[int, str] = {}
 _pending_close_verdicts: dict[int, dict] = {}
+_supervisor_reentry_blocks: dict[str, dict[str, Any]] = {}
+_supervisor_reentry_blocks_lock = threading.Lock()
 
 _RUNTIME_KV_LOOP_DESIRED = "live.loop.desired_state"
 _RUNTIME_KV_LAST_SHUTDOWN = "live.loop.last_shutdown"
@@ -543,6 +545,146 @@ def _max_abs_entry_score_for_positions(positions: list[Any]) -> float:
     return abs(float(max_entry))
 
 
+def _payload_get(payload: Any, key: str, default: Any = None) -> Any:
+    if payload is None:
+        return default
+    if hasattr(payload, "get"):
+        try:
+            return payload.get(key, default)
+        except Exception:
+            return default
+    return getattr(payload, key, default)
+
+
+def _position_symbol_value(position: Any, default: str = "XAUUSD") -> str:
+    raw = str(_payload_get(position, "symbol", "") or _payload_get(position, "symbol_name", "") or default)
+    raw = raw.strip() or default
+    return raw.replace("+", "").upper()
+
+
+def _direction_from_position_payload(position: Any) -> int:
+    try:
+        direction = int(_payload_get(position, "direction", 0) or 0)
+    except Exception:
+        direction = 0
+    if direction:
+        return 1 if direction > 0 else -1
+    side = str(_payload_get(position, "type", "") or _payload_get(position, "side", "") or "").lower()
+    if side in {"buy", "long"}:
+        return 1
+    if side in {"sell", "short"}:
+        return -1
+    return 0
+
+
+def _supervisor_reentry_key(symbol: str, direction: int) -> str:
+    return f"{str(symbol or 'XAUUSD').replace('+', '').upper()}:{1 if int(direction or 0) > 0 else -1}"
+
+
+def _supervisor_reentry_cooldown_seconds(cfg) -> float:
+    bars = int(getattr(cfg, "risk_supervisor_reentry_cooldown_bars", 3) or 0)
+    if bars <= 0:
+        return 0.0
+    tf_seconds = _timeframe_seconds(str(getattr(cfg, "timeframe", "M5") or "M5")) or 300
+    return float(max(1, bars) * tf_seconds)
+
+
+def _remember_supervisor_reentry_block(
+    *,
+    position: Any,
+    action: str,
+    reason: str,
+    cfg,
+    current_price: float = 0.0,
+    tick: int = 0,
+) -> None:
+    direction = _direction_from_position_payload(position)
+    if direction == 0:
+        return
+    symbol = _position_symbol_value(position)
+    cooldown_seconds = _supervisor_reentry_cooldown_seconds(cfg)
+    if cooldown_seconds <= 0:
+        return
+    now = time.time()
+    try:
+        pid = int(_payload_get(position, "position_id", 0) or _payload_get(position, "ticket", 0) or 0)
+    except Exception:
+        pid = 0
+    payload = {
+        "active": True,
+        "source": "position_supervisor",
+        "symbol": symbol,
+        "direction": direction,
+        "position_id": pid,
+        "action": str(action or ""),
+        "reason": str(reason or ""),
+        "started_at": now,
+        "expires_at": now + cooldown_seconds,
+        "cooldown_seconds": cooldown_seconds,
+        "price": float(current_price or _payload_get(position, "current_price", 0.0) or 0.0),
+        "tick": int(tick or 0),
+    }
+    with _supervisor_reentry_blocks_lock:
+        _supervisor_reentry_blocks[_supervisor_reentry_key(symbol, direction)] = payload
+
+
+def _active_supervisor_reentry_block(*, symbol: str, direction: int) -> dict[str, Any] | None:
+    if int(direction or 0) == 0:
+        return None
+    key = _supervisor_reentry_key(symbol, direction)
+    now = time.time()
+    with _supervisor_reentry_blocks_lock:
+        block = dict(_supervisor_reentry_blocks.get(key) or {})
+        expires_at = float(block.get("expires_at", 0.0) or 0.0)
+        if not block or (expires_at > 0 and now >= expires_at):
+            _supervisor_reentry_blocks.pop(key, None)
+            return None
+    block["remaining_seconds"] = max(0.0, float(block.get("expires_at", 0.0) or 0.0) - now)
+    return block
+
+
+def _pending_supervisor_reentry_block_from_positions(
+    positions: list[Any],
+    *,
+    symbol: str,
+    direction: int,
+    cfg,
+) -> dict[str, Any] | None:
+    if int(direction or 0) == 0:
+        return None
+    allow_reduce_block = bool(getattr(cfg, "risk_supervisor_reentry_block_reduce", True))
+    for position in positions or []:
+        pos_direction = _direction_from_position_payload(position)
+        if pos_direction != int(direction):
+            continue
+        if _position_symbol_value(position, symbol) != _position_symbol_value({"symbol": symbol}):
+            continue
+        supervisor = _payload_get(position, "supervisor", {}) or {}
+        action = str((supervisor.get("action") if hasattr(supervisor, "get") else "") or _payload_get(position, "supervisor_action", "") or "").lower()
+        reason = str((supervisor.get("summary_reason") if hasattr(supervisor, "get") else "") or _payload_get(position, "supervisor_reason", "") or "")
+        evidence = (supervisor.get("evidence") if hasattr(supervisor, "get") else {}) or {}
+        thesis_status = str(evidence.get("thesis_status") or _payload_get(position, "thesis_status", "") or "").lower()
+        should_block = action == "close" or (allow_reduce_block and action == "reduce") or thesis_status == "broken"
+        if not should_block:
+            continue
+        try:
+            pid = int(_payload_get(position, "position_id", 0) or _payload_get(position, "ticket", 0) or 0)
+        except Exception:
+            pid = 0
+        return {
+            "active": True,
+            "source": "pending_position_supervisor",
+            "symbol": _position_symbol_value(position, symbol),
+            "direction": int(direction),
+            "position_id": pid,
+            "action": action or "unknown",
+            "reason": reason or thesis_status or "position_supervisor",
+            "thesis_status": thesis_status,
+            "remaining_seconds": _supervisor_reentry_cooldown_seconds(cfg),
+        }
+    return None
+
+
 def _build_open_trade_risk_context(
     *,
     cfg,
@@ -551,6 +693,10 @@ def _build_open_trade_risk_context(
     positions: list[Any],
     requested_api_volume: float,
     signal_score: float,
+    symbol: str = "XAUUSD",
+    direction: int = 0,
+    current_price: float = 0.0,
+    atr_price: float = 0.0,
     event_sizing_context: dict[str, Any] | None = None,
 ) -> dict:
     risk_snapshot = _live_state_get("risk", {}, clone=True) or {}
@@ -606,8 +752,22 @@ def _build_open_trade_risk_context(
         session_last_trade_ts=float(_live_state_get("session_last_trade_ts", 0.0) or 0.0),
         loop_started_at=float(_live_state_get("loop_started_at", 0.0) or 0.0),
     )
+    active_supervisor_block = _active_supervisor_reentry_block(symbol=symbol, direction=direction)
+    pending_supervisor_block = _pending_supervisor_reentry_block_from_positions(
+        positions or [],
+        symbol=symbol,
+        direction=direction,
+        cfg=cfg,
+    )
+    supervisor_reentry_block = pending_supervisor_block or active_supervisor_block
 
     return {
+        "trade": {
+            "symbol": str(symbol or "XAUUSD"),
+            "direction": int(direction or 0),
+            "current_price": float(current_price or 0.0),
+            "atr_price": float(atr_price or 0.0),
+        },
         "account": acct or {},
         "session": {
             "pnl": float(_live_state_get("session_pnl", 0.0) or 0.0),
@@ -645,6 +805,7 @@ def _build_open_trade_risk_context(
         "block_on_disk_critical": bool(getattr(cfg, "risk_block_on_disk_critical", True)),
         "require_l2_depth": bool(getattr(cfg, "risk_require_l2_depth", False)),
         "temporal_context": temporal_context,
+        "supervisor_reentry_block": supervisor_reentry_block or {},
     }
 
 
@@ -1949,6 +2110,14 @@ def _run_position_supervision(
                             },
                         )
                         _remember_supervisor_state(position, verdict, action_applied=action, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                        _remember_supervisor_reentry_block(
+                            position=position,
+                            action=action,
+                            reason=str(verdict.get("summary_reason") or controls.get("close_reason") or "supervisor_reduce"),
+                            cfg=cfg,
+                            current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                            tick=tick,
+                        )
                         _log_supervisor_trace(
                             position=position,
                             verdict=verdict,
@@ -2113,6 +2282,14 @@ def _run_position_supervision(
                         )(),
                     )
                     _remember_supervisor_state(position, verdict, action_applied=action, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                    _remember_supervisor_reentry_block(
+                        position=position,
+                        action=action,
+                        reason=str(controls.get("close_reason") or verdict.get("summary_reason") or "supervisor_close"),
+                        cfg=cfg,
+                        current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                        tick=tick,
+                    )
                     _log_supervisor_trace(
                         position=position,
                         verdict=verdict,
@@ -3599,6 +3776,13 @@ def schedule_auto_resume_loop(delay_sec: float = _AUTO_RESUME_DELAY_SEC) -> bool
     def _resume():
         time.sleep(max(0.0, delay_sec))
         try:
+            latest_desired = _read_loop_desired_state()
+            if not latest_desired or not latest_desired.get("enabled"):
+                logger.info("[live] auto-resume cancelled: desired state disabled")
+                return
+            if loop_status().get("running"):
+                logger.info("[live] auto-resume skipped: loop already running")
+                return
             result = start_loop(
                 broker,
                 strategy_name=strategy_name,
@@ -3734,11 +3918,15 @@ def _install_ctrader_live_listener(bridge) -> None:
             if event_type == "spot":
                 price = float(payload.get("price") or 0.0)
                 if price > 0:
+                    global _latest_price, _latest_price_updated_at
+                    _latest_price = price
+                    _latest_price_updated_at = float(payload.get("ts") or now_ts)
                     quote = {
                         "bid": float(payload.get("bid") or 0.0),
                         "ask": float(payload.get("ask") or 0.0),
                         "mid": price,
                         "ts": float(payload.get("ts") or now_ts),
+                        "source": "spot",
                     }
                     positions = _live_state_get("positions", [], clone=True) or []
                     patched_positions = []
@@ -4119,6 +4307,7 @@ _CTRADER_PROBE_TTL = 15.0  # cTrader ping 也有 5s 超时, 按 _ACCOUNT_CACHE �
 def get_status() -> dict:
     """Report current broker connection status (best-effort, no broker call)."""
     ctrader_status, ctrader_error = _probe_ctrader()
+    get_latest_price()
     return {
         "ctrader": {"status": ctrader_status, "error": ctrader_error},
         "loop": loop_status(),
@@ -5419,6 +5608,13 @@ def stop_loop(
 
     with _loop_state_lock:
         if _loop_thread is None or not _loop_thread.is_alive():
+            if persist_desired:
+                _persist_loop_desired_state(
+                    False,
+                    broker=_loop_broker or "ctrader",
+                    strategy_name=_loop_strategy_name or "factor_v4",
+                    reason=trigger_reason,
+                )
             return {"ok": True, "was_running": False, "broker": None, "msg": "no loop running"}
         broker = _loop_broker
         if _loop_stop_flag is not None:
@@ -5609,7 +5805,16 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             log(f"FATAL: insufficient history bars (got {0 if df is None else len(df)} < 30) "
                 f"— local DB empty, broker returned 0, and no backup cache")
             return
-    log(f"warmed up: {len(df)} bars (source={df_source}), last close={df['close'].iloc[-1]:.2f}")
+    warmup_price = float(df["close"].iloc[-1])
+    warmup_ts = time.time()
+    try:
+        last_index = df.index[-1]
+        if hasattr(last_index, "timestamp"):
+            warmup_ts = float(last_index.timestamp())
+    except Exception:
+        warmup_ts = time.time()
+    _publish_latest_price(warmup_price, source=f"warmup_{df_source or 'bar'}", ts=warmup_ts)
+    log(f"warmed up: {len(df)} bars (source={df_source}), last close={warmup_price:.2f}")
     # ★ v9-fix: 成功后缓存 bar 供下次启动使用
     _save_bar_cache(df)
 
@@ -5787,20 +5992,31 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         try:
             fp["engine"].reset()
             snapshots = []
-            for i in range(len(df)):
+            min_warmup = int(getattr(fp["engine"], "MIN_BARS", 50) or 50)
+            warmup_limit = int(getattr(_rcfg, "live_factor_warmup_bars", 80) or 80)
+            warmup_limit = max(min_warmup, min(warmup_limit, len(df)))
+            warmup_df = df.tail(warmup_limit)
+            log(f"Factor pipeline warmup feeding {len(warmup_df)} / {len(df)} bars")
+            warmup_bars = []
+            for i in range(len(warmup_df)):
                 bar = {
-                    "open": float(df["open"].iloc[i]),
-                    "high": float(df["high"].iloc[i]),
-                    "low": float(df["low"].iloc[i]),
-                    "close": float(df["close"].iloc[i]),
-                    "volume": float(df["volume"].iloc[i]) if "volume" in df.columns else 0.0,
-                    "time": float(df.index[i].timestamp()) if hasattr(df.index[i], "timestamp") else 0.0,
+                    "open": float(warmup_df["open"].iloc[i]),
+                    "high": float(warmup_df["high"].iloc[i]),
+                    "low": float(warmup_df["low"].iloc[i]),
+                    "close": float(warmup_df["close"].iloc[i]),
+                    "volume": float(warmup_df["volume"].iloc[i]) if "volume" in warmup_df.columns else 0.0,
+                    "time": float(warmup_df.index[i].timestamp()) if hasattr(warmup_df.index[i], "timestamp") else 0.0,
                     "timeframe": TF,
                     "complete": True,
                 }
-                fv = fp["engine"].append_bar(bar)
-                if fv:
-                    snapshots.append(fv)
+                warmup_bars.append(bar)
+            if hasattr(fp["engine"], "warmup_bars"):
+                snapshots = fp["engine"].warmup_bars(warmup_bars)
+            else:
+                for bar in warmup_bars:
+                    fv = fp["engine"].append_bar(bar)
+                    if fv:
+                        snapshots.append(fv)
             if snapshots:
                 fp["normalizer"].warmup(snapshots)
             # ★ 预热完成后立即跑一次 compose+gate, 生成初始因子投票数据
@@ -6320,28 +6536,94 @@ def _should_send_orders(broker: str) -> bool:
 
 # 模块级,供 _read_state_snapshot 读
 _latest_price: float | None = None
+_latest_price_updated_at: float = 0.0
+_latest_bar_price_cache: tuple[float, float] | None = None
+
+
+def _publish_latest_price(price: float | int | str | None, *, source: str = "unknown", ts: float | None = None) -> float | None:
+    """Publish the latest known XAU price to the shared in-process state."""
+    try:
+        value = float(price or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+
+    global _latest_price, _latest_price_updated_at
+    now_ts = float(ts or time.time())
+    _latest_price = value
+    _latest_price_updated_at = now_ts
+
+    quote = _live_state_get("spot_quote", None, clone=True)
+    if not _quote_is_fresh(quote):
+        _live_state_update(
+            spot_price=value,
+            spot_quote={
+                "bid": 0.0,
+                "ask": 0.0,
+                "mid": value,
+                "ts": now_ts,
+                "source": source,
+            },
+        )
+    else:
+        _live_state_update(spot_price=value)
+    return value
+
+
+def _latest_bar_close_from_store() -> float | None:
+    """Read the latest local XAU M5 bar close with a short TTL; no broker call."""
+    global _latest_bar_price_cache
+    now_ts = time.time()
+    if _latest_bar_price_cache and now_ts - _latest_bar_price_cache[0] < 5.0:
+        return _latest_bar_price_cache[1]
+    try:
+        from data.store import DataStore
+
+        store = DataStore()
+        df = store.load_bars("XAUUSD+", "M5", limit=1)
+        if df is None or len(df) == 0:
+            return None
+        price = float(df.iloc[-1]["close"] or 0.0)
+        if price > 0:
+            _latest_bar_price_cache = (now_ts, price)
+            return price
+    except Exception as exc:
+        logger.debug("[live] latest bar close fallback failed: %s", exc)
+    return None
 
 
 def get_latest_price() -> float | None:
-    """返回最新价. 优先共享缓存 (live loop 写), 其次 bridge spot, 最后 bar close."""
+    """返回最新价. 优先共享缓存 (live loop 写), 其次 bridge spot, 最后本地 bar close."""
     quote = _live_state_get("spot_quote", None, clone=True)
     if _quote_is_fresh(quote):
         spot = float((quote or {}).get("mid") or 0.0)
         if spot > 0:
             return spot
+    cached_spot = _live_state_get("spot_price", None)
+    try:
+        if cached_spot is not None and float(cached_spot or 0.0) > 0:
+            return float(cached_spot)
+    except (TypeError, ValueError):
+        pass
     global _latest_price
+    if _latest_price and _latest_price > 0:
+        return _latest_price
     try:
         # audit 2026-06-10: 3-tuple; warming_up 时返旧价不阻塞
         bridge, err, warming = _get_ctrader()
         if bridge is None or err or warming or not bridge.is_connected:
-            return _latest_price
+            fallback = _latest_bar_close_from_store()
+            return _publish_latest_price(fallback, source="bar_close") if fallback else _latest_price
         quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
         spot = float((quote or {}).get("mid") or 0.0) if _quote_is_fresh(quote) else 0.0
         if spot > 0:
+            _live_state_update(spot_quote=quote)
             return spot
     except Exception as _e2:
         logger.debug("[live] get_latest_price spot query failed: %s", _e2)
-    return _latest_price
+    fallback = _latest_bar_close_from_store()
+    return _publish_latest_price(fallback, source="bar_close") if fallback else _latest_price
 
 
 # ── Emergency close ──────────────────────────────────────────────────────
@@ -7036,6 +7318,10 @@ def _process_tick_factor_pipeline(
             positions=pos,
             requested_api_volume=volume,
             signal_score=float(composite.score or 0.0),
+            symbol="XAUUSD",
+            direction=int(composite.direction or 0),
+            current_price=float(current_price or 0.0),
+            atr_price=float(atr_price or 0.0),
             event_sizing_context=event_sizing_context,
         )
         risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
@@ -7603,8 +7889,7 @@ def _process_tick_factor_pipeline(
     # ── 更新上一 tick 持仓 ID, 供下次平仓检测 ──
     _prev_position_ids = current_pids
 
-    global _latest_price
-    _latest_price = current_price
+    _publish_latest_price(current_price, source="loop_tick")
 
 
 # ── AWE 自适应追踪止损 ──────────────────────────────────────

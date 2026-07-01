@@ -31,13 +31,71 @@ def _state_sql(sql: str) -> str:
     return sql.replace("%", "%%").replace("?", "%s")
 
 
-def _loads_json(raw: str | None, default: Any) -> Any:
+def _loads_json(raw: Any, default: Any) -> Any:
     if not raw:
         return default
+    if isinstance(raw, (dict, list)):
+        return raw
     try:
         return json.loads(raw)
     except Exception:
         return default
+
+
+def _coerce_direction(value: Any) -> int:
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        if value > 0:
+            return 1
+        if value < 0:
+            return -1
+        return 0
+    text = str(value).strip().lower()
+    if text in {"1", "+1", "long", "buy", "b", "多"}:
+        return 1
+    if text in {"-1", "short", "sell", "s", "空"}:
+        return -1
+    return 0
+
+
+def _direction_from_policy_payload(action_json: dict[str, Any], verdict: dict[str, Any]) -> int:
+    audit_payload = verdict.get("audit_payload") or {}
+    if not isinstance(audit_payload, dict):
+        audit_payload = {}
+    supervisor_evidence = audit_payload.get("supervisor_evidence") or {}
+    if not isinstance(supervisor_evidence, dict):
+        supervisor_evidence = {}
+    for value in (
+        action_json.get("direction"),
+        action_json.get("side"),
+        action_json.get("type"),
+        audit_payload.get("direction"),
+        audit_payload.get("side"),
+        supervisor_evidence.get("direction"),
+        supervisor_evidence.get("side"),
+    ):
+        direction = _coerce_direction(value)
+        if direction:
+            return direction
+    return 0
+
+
+def _position_id_from_policy_payload(row: Any, action_json: dict[str, Any], verdict: dict[str, Any]) -> str:
+    audit_payload = verdict.get("audit_payload") or {}
+    if not isinstance(audit_payload, dict):
+        audit_payload = {}
+    for value in (
+        row["position_id"] if "position_id" in row else "",
+        action_json.get("position_id"),
+        audit_payload.get("position_id"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _get_system_health_report():
@@ -92,7 +150,7 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
     try:
         rows = conn.execute(
             _state_sql("""
-            SELECT decision_id, event_type, symbol, timeframe, decision_ts,
+            SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
                    action_reason, action_json, risk_state_json
             FROM decision_ledger
             WHERE risk_state_json LIKE '%policy_verdict%'
@@ -102,6 +160,39 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
             """),
             (limit,),
         ).fetchall()
+        parsed: list[tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any], int, str]] = []
+        position_ids: set[str] = set()
+        for row in rows:
+            risk_state = _loads_json(row["risk_state_json"], {})
+            action_json = _loads_json(row["action_json"], {})
+            if not isinstance(risk_state, dict):
+                risk_state = {}
+            if not isinstance(action_json, dict):
+                action_json = {}
+            verdict = risk_state.get("policy_verdict") or action_json.get("risk_verdict") or {}
+            if not isinstance(verdict, dict):
+                verdict = {}
+            direction = _direction_from_policy_payload(action_json, verdict)
+            position_id = _position_id_from_policy_payload(row, action_json, verdict)
+            if not direction and position_id:
+                position_ids.add(position_id)
+            parsed.append((row, risk_state, action_json, verdict, direction, position_id))
+
+        position_directions: dict[str, int] = {}
+        if position_ids:
+            placeholders = ",".join("?" for _ in position_ids)
+            position_rows = conn.execute(
+                _state_sql(f"""
+                SELECT position_id, direction
+                FROM recovery_position_state
+                WHERE position_id IN ({placeholders})
+                """),
+                tuple(int(pid) if pid.isdigit() else pid for pid in position_ids),
+            ).fetchall()
+            position_directions = {
+                str(item["position_id"]): _coerce_direction(item["direction"])
+                for item in position_rows
+            }
     finally:
         conn.close()
 
@@ -110,22 +201,18 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
     by_reason: dict[str, int] = {}
     by_action: dict[str, int] = {}
 
-    for row in rows:
-        risk_state = _loads_json(row["risk_state_json"], {})
-        action_json = _loads_json(row["action_json"], {})
-        if not isinstance(risk_state, dict):
-            risk_state = {}
-        if not isinstance(action_json, dict):
-            action_json = {}
-        verdict = risk_state.get("policy_verdict") or action_json.get("risk_verdict") or {}
+    for row, _risk_state, _action_json, verdict, direction, position_id in parsed:
+        if not direction and position_id:
+            direction = position_directions.get(position_id, 0)
         allowed = bool(verdict.get("allowed", False))
         reason = str(verdict.get("reason") or row["action_reason"] or "unknown")
-        action = str((verdict.get("audit_payload") or {}).get("action") or action_json.get("skip_stage") or row["event_type"])
+        action = str((verdict.get("audit_payload") or {}).get("action") or _action_json.get("skip_stage") or row["event_type"])
         counts["allowed" if allowed else "blocked"] += 1
         by_reason[reason] = by_reason.get(reason, 0) + 1
         by_action[action] = by_action.get(action, 0) + 1
         items.append({
             "decision_id": row["decision_id"],
+            "position_id": position_id,
             "event_type": row["event_type"],
             "symbol": row["symbol"],
             "timeframe": row["timeframe"],
@@ -133,6 +220,7 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
             "allowed": allowed,
             "reason": reason,
             "action": action,
+            "direction": direction,
             "risk_verdict": verdict,
         })
 

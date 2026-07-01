@@ -76,7 +76,14 @@ def realized_pnl_series_endpoint(
     to_ts: float | None = Query(None),
     tz: str = Query("Asia/Shanghai"),
 ) -> dict:
-    return get_realized_pnl_series(scope=scope, from_ts=from_ts, to_ts=to_ts, tz=tz)
+    result = get_realized_pnl_series(scope=scope, from_ts=from_ts, to_ts=to_ts, tz=tz)
+    try:
+        currency = str((get_account("ctrader") or {}).get("currency") or "").strip()
+        if currency:
+            result["currency"] = currency
+    except Exception:
+        pass
+    return result
 
 
 @router.post("/start")

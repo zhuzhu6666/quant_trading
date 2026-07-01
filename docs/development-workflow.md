@@ -1,18 +1,18 @@
 # Development Workflow
 
-> Last updated: 2026-06-30
-> Scope: local mini-program frontend + Linux server backend workflow.
+> Last updated: 2026-07-01
+> Scope: local frontend (mini-program + planned Web console) + Linux server backend workflow.
 
 本文用来固化当前项目的唯一推荐协作方式，目标只有一个：
 避免 Windows 本地副本和 Linux 服务器运行代码长期分叉。
 
 ## 1. 核心原则
 
-1. 本地 Windows 只负责微信小程序前端。
+1. 本地 Windows 负责前端：微信小程序，以及建立后的 Web 操作台。
 2. Linux 服务器是后端、策略、执行、配置、日志的唯一真实工作区。
 3. 实盘相关代码不再采用“本地修改后再手工同步服务器”的方式。
 4. 后端问题以服务器复现、服务器修改、服务器验证为准。
-5. 前端问题以本地微信开发者工具验证为准。
+5. 小程序问题以本地微信开发者工具验证为准；Web 问题以本地浏览器和 Playwright 验证为准。
 
 ## 2. 角色边界
 
@@ -21,8 +21,10 @@
 本地只负责这些内容：
 
 - `miniprogram_v2`
+- `web_frontend`（建立后）
 - 前端交互、展示、登录态跳转
 - 小程序页面验证
+- Web 页面验证
 - 文档整理
 
 本地默认不再承担这些工作：
@@ -61,6 +63,7 @@ Git 仍然保留，但用途要更明确：
 branch: main
 sparse checkout:
   miniprogram_v2/**
+  web_frontend/**
   docs/**
   AGENTS.md
   README.md
@@ -88,6 +91,7 @@ scope: backend / execution / alpha / risk / monitor / scripts / data / logs / sy
 
 ```text
 miniprogram_v2/
+web_frontend/
 docs/
 AGENTS.md
 README.md
@@ -138,9 +142,18 @@ data/archive/                             # 已归档的旧运行库，例如 le
 
 ```text
 quant-backend.service             # 后端主服务
+caddy.service                     # 当前公网 TLS / 反代入口
 quant-dukascopy-tick-pull.timer   # 每小时拉取已结束小时的 Dukascopy tick
 quant-tick-retention.timer        # 每周清理 365 天外 tick
 ```
+
+当前公网入口：
+
+```text
+https://www.zhuzhu666.icu -> caddy.service -> 127.0.0.1:8000
+```
+
+当前服务器主入口是 Caddy。排查公网 502 / TLS / WebSocket 时优先看 `caddy.service` 和 `/etc/caddy/Caddyfile`。
 
 L2 depth 当前通过 `quant-backend.service` 内的 cTrader 主 bridge 订阅并异步写入 DuckDB。官方 Open API 连接约束下，同一 demo/live 账号类型不要再额外保留第二条 L2 专用连接。跨月时 writer 会按事件时间写入新的 `l2_YYYY_MM.duckdb`，并刷新 `data/l2.duckdb`。
 
@@ -170,12 +183,21 @@ L2 depth 当前通过 `quant-backend.service` 内的 cTrader 主 bridge 订阅�
 
 ## 4. 标准工作流
 
-### 前端开发流程
+### 小程序开发流程
 
 ```text
 本地修改 miniprogram_v2
   -> 微信开发者工具验证
   -> 如接口异常，再去服务器排查后端
+  -> 前端确认稳定后提交
+```
+
+### Web 前端开发流程
+
+```text
+本地修改 web_frontend
+  -> 浏览器 / Playwright 验证
+  -> 如接口异常，再去服务器排查后端或 Caddy
   -> 前端确认稳定后提交
 ```
 
@@ -240,9 +262,11 @@ curl http://127.0.0.1:8000/api/health
 如果改动涉及登录或交易页，再额外验证：
 
 ```bash
+read -rsp "Password: " QUANT_LOGIN_PASSWORD; echo
 curl -X POST http://127.0.0.1:8000/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"zhu","password":"1994"}'
+  -d "{\"username\":\"zhu\",\"password\":\"${QUANT_LOGIN_PASSWORD}\"}"
+unset QUANT_LOGIN_PASSWORD
 ```
 
 如涉及实盘接口，再继续验证：
@@ -377,5 +401,5 @@ git pull --ff-only
 当前项目从现在开始按这条规则执行：
 
 ```text
-本地只做小程序，服务器只做后端。
+本地做前端（小程序 + Web），服务器做后端和运行态。
 ```

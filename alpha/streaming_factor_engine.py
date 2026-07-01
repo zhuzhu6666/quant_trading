@@ -110,6 +110,62 @@ class StreamingFactorEngine:
 
         return self.get_snapshot()
 
+    def warmup_bars(self, bars: list[dict]) -> list[dict[str, float | None]]:
+        """Prime the rolling buffer and compute historical factor snapshots once.
+
+        Live startup only needs the latest rolling window in memory plus enough
+        recent factor snapshots for the normalizer. Calling append_bar() for
+        every warmup bar repeatedly recomputes all factors and can pin a CPU
+        core for minutes when external factors are enabled.
+        """
+        self.reset()
+        for bar in bars[-self._buffer.maxlen:]:
+            self._buffer.append(bar)
+        if len(self._buffer) < self.MIN_BARS:
+            return []
+
+        self._warm = True
+        df = self._to_dataframe()
+        n = len(df)
+        snapshots: list[dict[str, float | None]] = [dict() for _ in range(n)]
+
+        for name in self._available_factors:
+            try:
+                series = self._compute_factor_series(name, df)
+                if series is None:
+                    self._factor_cache[name] = None
+                    continue
+                if hasattr(series, "iloc"):
+                    values = series.to_numpy()
+                else:
+                    values = np.asarray(series)
+                if values.ndim == 0:
+                    values = np.full(n, float(values))
+                if len(values) < n:
+                    padded = np.full(n, np.nan)
+                    padded[-len(values):] = values
+                    values = padded
+                elif len(values) > n:
+                    values = values[-n:]
+
+                last_value: float | None = None
+                for idx, raw in enumerate(values):
+                    try:
+                        val = float(raw)
+                    except (TypeError, ValueError):
+                        val = math.nan
+                    if math.isnan(val) or math.isinf(val):
+                        snapshots[idx][name] = None
+                    else:
+                        snapshots[idx][name] = val
+                        last_value = val
+                self._factor_cache[name] = last_value
+            except Exception as e:
+                logger.warning("Factor '%s' warmup calculation failed: %s", name, e)
+                self._factor_cache[name] = None
+
+        return snapshots
+
     def get_snapshot(self) -> dict[str, float | None]:
         """返回最近一次计算的因子值快照。"""
         return dict(self._factor_cache)

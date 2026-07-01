@@ -1,10 +1,10 @@
 # Quant Trading — 启动指南
 
-> 最后更新: 2026-06-26
-> 当前形态: FastAPI API-only 后端 + 微信小程序 V2。旧 Vite/Web Console 启动方式已停用。
+> 最后更新: 2026-07-01
+> 当前形态: FastAPI API-only 后端 + 微信小程序 V2；新 Web 操作台进入规划阶段。旧 Vite/Web Console 构建产物不再维护。
 
 > 2026-06-26 工作流更新:
-> - 本地 Windows 默认只负责 `miniprogram_v2`
+> - 本地 Windows 默认负责前端：`miniprogram_v2`，以及建立后的 `web_frontend`
 > - 后端、策略、执行、日志排查默认都在 Linux 服务器完成
 > - 本文保留本地启动命令，主要用于临时调试，不再作为实盘后端的主工作流
 
@@ -40,7 +40,7 @@ python -m backend --reload
 
 ## 小程序前端
 
-当前唯一维护的前端是微信小程序 V2:
+当前已维护的移动端前端是微信小程序 V2:
 
 ```text
 C:\Users\zhu\quant_trading\miniprogram_v2
@@ -56,6 +56,38 @@ C:\Users\zhu\quant_trading\miniprogram_v2
 - `/api/learning/*`
 
 更多说明见 `miniprogram_v2/README.md`。
+
+---
+
+## Web 前端
+
+Web 前端目标是接替小程序的完整操作台能力，目录约定为：
+
+```text
+web_frontend/
+```
+
+已有源码目录，推荐本地开发与生产调试命令如下：
+
+```bash
+cd web_frontend
+npm install
+npm run dev
+```
+
+生产入口由服务器 Caddy 承接：
+
+```text
+https://www.zhuzhu666.icu -> Caddy -> FastAPI / Web static
+```
+
+当前服务器状态：
+
+- Caddy 监听公网 `:80` / `:443`
+- FastAPI 后端只监听 `127.0.0.1:8000`
+- `/api/*` 与 `/ws/state` 由 Caddy 反代到 FastAPI
+
+规划见 [web-frontend-upgrade-plan.md](web-frontend-upgrade-plan.md)。
 
 ---
 
@@ -141,7 +173,7 @@ python scripts/db_doctor.py --repair
 - Python 3.11+，推荐 3.12
 - cTrader 凭证写入 `.env`
 - 微信开发者工具用于 `miniprogram_v2`
-- Node.js 只在维护旧构建产物或浏览器测试工具时需要，不是当前主启动链路
+- Node.js 用于新 `web_frontend` 开发和浏览器测试；不要用它维护旧 Web Console 构建产物
 
 ---
 

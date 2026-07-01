@@ -5,7 +5,7 @@ XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4 + Phase H autono
 ## Current Entry Points
 
 - Backend API: `python -m backend`
-- Frontend: open `miniprogram_v2` in WeChat DevTools
+- Frontend: `miniprogram_v2` in WeChat DevTools; `web_frontend` is the planned full Web console
 - Current docs: [docs/README.md](docs/README.md)
 - Workspace rules: [AGENTS.md](AGENTS.md)
 - Current status and TODO: [TODO.md](TODO.md)
@@ -16,7 +16,7 @@ XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4 + Phase H autono
 
 当前默认工作流已经收紧为：
 
-- 本地 Windows 只负责 `miniprogram_v2`
+- 本地 Windows 负责前端：`miniprogram_v2` 和计划中的 `web_frontend`
 - Linux 服务器负责后端、策略、执行、日志和实盘验证
 
 具体规则见 [AGENTS.md](AGENTS.md) 和 [docs/development-workflow.md](docs/development-workflow.md)。
@@ -39,7 +39,7 @@ Market data
   -> learning dataset / model pipeline
 ```
 
-The browser Web Console and MT5-era documents are no longer maintained. The current frontend is `miniprogram_v2`.
+The old browser Web Console and MT5-era documents are no longer maintained. The current maintained frontend is `miniprogram_v2`; the next frontend target is a new `web_frontend` browser console that will take over full operator views while the mini-program becomes a lightweight status surface.
 
 Factor data now has a single internal source of truth: `data.factor_frame.FactorFrameBuilder`. Live calculation, factor health, and evolution should all consume the same point-in-time factor frame instead of rebuilding external joins separately.
 

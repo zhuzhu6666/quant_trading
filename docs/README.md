@@ -12,6 +12,7 @@
 - [development-workflow.md](development-workflow.md) - 本地前端 / 服务器后端的协作规则
 - [server-backend-sop.md](server-backend-sop.md) - 服务器后端日常操作 SOP
 - [startup.md](startup.md) - 后端、小程序和常用脚本启动方式
+- [web-frontend-upgrade-plan.md](web-frontend-upgrade-plan.md) - Web 操作台接替小程序完整展示能力的升级计划
 - [CTRADER_INTEGRATION.md](CTRADER_INTEGRATION.md) - cTrader 执行通道说明
 - [position-supervisor-contract.md](position-supervisor-contract.md) - 持仓监督、trace、反事实成熟化与模板治理 contract
 - [learning-evidence-contract.md](learning-evidence-contract.md) - 学习样本证据契约、训练准入与模型追溯语义

@@ -1,0 +1,491 @@
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Activity, Gauge, Play, PowerOff, RefreshCw, RotateCcw, ShieldAlert, Wallet } from "lucide-react";
+import { ActionButton } from "@/components/ActionButton";
+import { MetricCard } from "@/components/Card";
+import { Field, StatTile, toneFromStatus } from "@/components/DashboardBits";
+import { StatusPill } from "@/components/StatusPill";
+import { useAuth } from "@/contexts/AuthContext";
+import { useLiveState } from "@/hooks/useLiveState";
+import {
+  emergencyClose,
+  getAccount,
+  getFactorV4RecentTicks,
+  getFactorV4Stats,
+  getLiveStatus,
+  getLoopStatus,
+  getPositions,
+  getStrategyStatus,
+  startTrading,
+  stopTrading,
+} from "@/api/client";
+import { formatDecimal, formatMoney } from "@/lib/format";
+import {
+  asRecord,
+  formatDirection,
+  formatReadableTime,
+  pick,
+  pickArray,
+  pickBoolean,
+  pickNumber,
+  pickString,
+} from "@/lib/compat";
+import { translateDisplayValue } from "@/lib/display";
+
+type PositionRow = {
+  symbol: string;
+  direction: string;
+  volume: number;
+  entry: number;
+  current: number;
+  unrealized: number;
+  stop: number;
+  take: number;
+  source: string;
+  id: string;
+  openTs: unknown;
+};
+
+function normalizePositions(raw: unknown): PositionRow[] {
+  const list = pickArray(raw, ["positions_list", "positions", "items", "rows", "data", "payload"]);
+  if (!list.length) return [];
+
+  return list
+    .map((item): PositionRow => {
+      const row = asRecord(item);
+      const id = pickString(row, ["position_id", "positionId", "ticket", "id", "deal_id", "order_id"], "");
+      return {
+        symbol: pickString(row, ["symbol", "instrument", "code", "asset"], "--"),
+        direction: formatDirection(pick(row, ["direction", "dir", "type", "side"])),
+        volume: pickNumber(row, ["api_volume", "volume", "lots", "size", "positionSize", "qty"], 0),
+        entry: pickNumber(row, ["price_open", "open_price", "entry_price", "open", "entry"], 0),
+        current: pickNumber(row, ["price_current", "current_price", "mark_price", "price", "last"], 0),
+        unrealized: pickNumber(
+          row,
+          ["unrealized", "unrealized_pnl", "unrealized_profit", "pnl", "profit", "floating_pnl", "unrealized_pl"],
+          0,
+        ),
+        stop: pickNumber(row, ["sl", "stop_loss", "stop", "stop_loss_price"], 0),
+        take: pickNumber(row, ["tp", "take_profit", "take", "take_profit_price"], 0),
+        source: pickString(row, ["source", "origin", "route", "broker"], "--"),
+        id: id || pickString(row, ["position_id_str", "ticket_str"], "--"),
+        openTs: pick(row, ["open_time", "openTs", "open_timestamp", "openTsMs", "created_at", "opened_at"]),
+      };
+    })
+    .filter((row) => row.symbol !== "--" || row.id !== "--");
+}
+
+function normalizePositionCount(raw: unknown): number {
+  if (typeof raw === "number") return raw;
+  const direct = pickNumber(raw, ["n_positions", "count", "position_count", "positions_count", "open_positions"], NaN);
+  if (!Number.isNaN(direct)) return direct;
+  return pickArray(raw, ["positions_list", "positions", "items", "rows", "data"]).length;
+}
+
+export function TradingPage() {
+  const { authenticated } = useAuth();
+  const { snapshot, source, connected, refresh, error: wsError } = useLiveState({ enabled: authenticated });
+  const queryClient = useQueryClient();
+
+  const loopQuery = useQuery({
+    queryKey: ["loop-status", "trading"],
+    queryFn: getLoopStatus,
+    refetchInterval: 2500,
+    staleTime: 1500,
+    enabled: authenticated,
+  });
+
+  const accountQuery = useQuery({
+    queryKey: ["account", "trading"],
+    queryFn: getAccount,
+    refetchInterval: 2500,
+    staleTime: 1500,
+    enabled: authenticated,
+  });
+
+  const positionsQuery = useQuery({
+    queryKey: ["positions", "trading"],
+    queryFn: getPositions,
+    refetchInterval: 2500,
+    staleTime: 1500,
+    enabled: authenticated,
+  });
+  const liveStatusQuery = useQuery({
+    queryKey: ["live-status", "trading"],
+    queryFn: getLiveStatus,
+    refetchInterval: 2500,
+    staleTime: 1500,
+    enabled: authenticated,
+  });
+  const strategyStatusQuery = useQuery({
+    queryKey: ["strategy-status", "trading"],
+    queryFn: getStrategyStatus,
+    refetchInterval: 5000,
+    staleTime: 2500,
+    enabled: authenticated,
+  });
+  const factorStatsQuery = useQuery({
+    queryKey: ["factor-v4-stats", "trading"],
+    queryFn: getFactorV4Stats,
+    refetchInterval: 15_000,
+    staleTime: 5_000,
+    enabled: authenticated,
+  });
+  const recentTicksQuery = useQuery({
+    queryKey: ["factor-v4-recent-ticks", "trading"],
+    queryFn: getFactorV4RecentTicks,
+    refetchInterval: 10_000,
+    staleTime: 5_000,
+    enabled: authenticated,
+  });
+
+  const [startError, setStartError] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [startBusy, setStartBusy] = useState(false);
+  const [stopBusy, setStopBusy] = useState(false);
+  const [closeBusy, setCloseBusy] = useState(false);
+
+  const loop = useMemo(
+    () => ({ ...asRecord(loopQuery.data), ...asRecord(pick(liveStatusQuery.data, ["loop"])), ...asRecord(pick(snapshot, ["loop_status", "loop"])) }),
+    [loopQuery.data, liveStatusQuery.data, snapshot],
+  );
+  const account = useMemo(
+    () => ({ ...asRecord(accountQuery.data), ...asRecord(pick(snapshot, ["account"])) }),
+    [accountQuery.data, snapshot],
+  );
+  const positions = useMemo(() => {
+    const fromSnapshot = normalizePositions(pick(snapshot, ["positions_list", "positions"]));
+    return fromSnapshot.length ? fromSnapshot : normalizePositions(positionsQuery.data);
+  }, [positionsQuery.data, snapshot]);
+
+  const risk = asRecord(pick(snapshot, ["risk", "risk_overview", "closed_loop.risk"]));
+  const closedLoop = asRecord(pick(snapshot, ["closed_loop"]));
+  const executionSummary = { ...closedLoop, ...asRecord(pick(snapshot, ["execution_summary", "execution"])) };
+  const liveStatus = asRecord(liveStatusQuery.data);
+  const marketSession = asRecord(pick(liveStatus, ["market_session"]));
+  const spotQuote = asRecord(pick(liveStatus, ["spot_quote"]));
+  const strategyStatus = asRecord(strategyStatusQuery.data);
+  const lastComposite = asRecord(pick(strategyStatus, ["last_composite"]));
+  const v4Status = asRecord(pick(strategyStatus, ["v4_status"]));
+  const factorSummary = asRecord(pick(factorStatsQuery.data, ["summary"]));
+  const topContributors = pickArray(factorSummary, ["top_contributors"]);
+  const recentTicks = Array.isArray(recentTicksQuery.data) ? recentTicksQuery.data : pickArray(recentTicksQuery.data, ["items", "data"]);
+  const factorTicks = useMemo(() => {
+    const seen = new Set<string>();
+    return recentTicks
+      .map((raw) => asRecord(raw))
+      .filter((item) => pick(item, ["tactical_score"]) !== undefined || pick(item, ["macro_score"]) !== undefined)
+      .sort((a, b) => pickNumber(b, ["tick"], 0) - pickNumber(a, ["tick"], 0))
+      .filter((item) => {
+        const key = pickString(item, ["tick"], "");
+        if (!key || seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
+  }, [recentTicks]);
+  const executionEvents = pickArray(strategyStatus, ["execution_events"]);
+  const liveExecutionSummary = { ...executionSummary, ...asRecord(pick(strategyStatus, ["execution_summary"])) };
+
+  const connectionTone = connected ? "ok" : source === "polling" ? "warn" : "bad";
+  const loopRunning = pickBoolean(loop, ["running", "is_running", "pipeline_active", "alive", "status"], false);
+  const broker = pickString(loop, ["broker", "broker_name", "exchange"], pickString(account, ["broker"], "ctrader"));
+  const strategy = pickString(loop, ["strategy_name", "strategy", "strategyName", "active_strategy"], "live");
+  const reason = pickString(loop, ["reason", "status", "stop_reason", "message", "state"], loopRunning ? "running" : "--");
+  const loopPid = pickNumber(loop, ["pid", "process_id", "pid_file"], 0);
+  const loopStarted = formatReadableTime(pick(loop, ["started_at", "startedAt", "loop_started_at", "started", "start_time"]));
+  const loopMode = pickString(loop, ["mode", "execution_mode", "send_mode"], "--");
+
+  const currency = pickString(account, ["currency", "ccy"], "EUR");
+  const balance = pickNumber(account, ["balance", "account_balance"], 0);
+  const equity = pickNumber(account, ["equity", "account_equity"], 0);
+  const leverage = pickString(account, ["leverage", "leverage_ratio"], "--");
+  const spotMid = pickNumber(spotQuote, ["mid"], pickNumber(snapshot, ["current_price"], 0));
+  const spotBid = pickNumber(spotQuote, ["bid"], 0);
+  const spotAsk = pickNumber(spotQuote, ["ask"], 0);
+  const marketStatus = pickString(marketSession, ["status"], "--");
+
+  const positionCount = positions.length || normalizePositionCount(positionsQuery.data);
+  const cumulativeVolume = positions.reduce((sum, p) => sum + Math.abs(p.volume), 0);
+  const unrealized = positions.reduce((sum, p) => sum + p.unrealized, 0);
+  const bestUnrealized = positions.reduce((best, p) => Math.max(best, p.unrealized), 0);
+  const worstUnrealized = positions.reduce((best, p) => Math.min(best, p.unrealized), 0);
+
+  const session = asRecord(pick(snapshot, ["session_stats", "daily", "session"]));
+  const sessionPnl = pickNumber(session, ["pnl_today", "pnl", "session_pnl"], 0);
+  const totalRisk = pickNumber(risk, ["var", "var_limit", "kelly.risk_budget"], 0);
+  const circuitBreaker = pickBoolean(risk, ["circuit_breaker", "circuit_breaker_active", "cb"], false);
+  const consecutiveLoss = pickNumber(risk, ["consecutive_loss", "session.consecutive_loss", "stats.consecutive_loss"], 0);
+  const attempts = pickNumber(liveExecutionSummary, ["attempts", "attempt_count"], 0);
+  const successes = pickNumber(liveExecutionSummary, ["successes", "success", "wire_sends"], 0);
+  const failures = pickNumber(liveExecutionSummary, ["failures", "reject_count"], 0);
+  const signalDirection = formatDirection(pick(lastComposite, ["direction"]));
+  const signalScore = pickNumber(lastComposite, ["score"], 0);
+  const gatePassed = pickBoolean(lastComposite, ["gate_passed"], false);
+  const gateReason = pickString(lastComposite, ["gate_reason"], pickString(strategyStatus, ["reason"], "--"));
+  const engineWarm = pickBoolean(v4Status, ["engine_warm"], false);
+  const bufferSize = pickNumber(v4Status, ["buffer_size"], 0);
+  const aweConviction = pickNumber(v4Status, ["awe_conviction"], 0);
+  const attributedTrades = pickNumber(v4Status, ["n_attribution_trades"], pickNumber(factorSummary, ["total_voted"], 0));
+  const overallWinRate = pickNumber(factorSummary, ["overall_win_rate"], 0);
+
+  const refreshAll = async () => {
+    await refresh();
+    await queryClient.invalidateQueries({ queryKey: ["loop-status", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: ["account", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: ["positions", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: ["live-status", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: ["strategy-status", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: ["factor-v4-stats", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: ["factor-v4-recent-ticks", "trading"] });
+  };
+
+  const runStart = async () => {
+    setStartError(null);
+    setStartBusy(true);
+    try {
+      await startTrading("ctrader", strategy || "live");
+      await refreshAll();
+    } catch (exc) {
+      setStartError(exc instanceof Error ? exc.message : "启动失败");
+    } finally {
+      setStartBusy(false);
+    }
+  };
+
+  const runStop = async () => {
+    setStopError(null);
+    setStopBusy(true);
+    try {
+      await stopTrading();
+      await refreshAll();
+    } catch (exc) {
+      setStopError(exc instanceof Error ? exc.message : "停止失败");
+    } finally {
+      setStopBusy(false);
+    }
+  };
+
+  const runEmergency = async () => {
+    setCloseError(null);
+    setCloseBusy(true);
+    try {
+      await emergencyClose();
+      await refreshAll();
+    } catch (exc) {
+      setCloseError(exc instanceof Error ? exc.message : "紧急平仓失败");
+    } finally {
+      setCloseBusy(false);
+    }
+  };
+
+  return (
+    <section className="dashboard">
+      <div className="dashboard-header">
+        <div>
+          <div className="eyebrow">交易台</div>
+          <h1>交易控制与持仓</h1>
+          <p>启动、停止、紧急平仓和持仓监控集中在这一页，所有数值以实时接口为准。</p>
+        </div>
+        <div className="header-status">
+          <StatusPill status={connected ? `连接 ${source}` : "连接中断"} tone={connectionTone} />
+          <StatusPill status={loopRunning ? "循环运行中" : "循环未运行"} tone={loopRunning ? "ok" : "warn"} />
+          <StatusPill status={`市场 ${translateDisplayValue(marketStatus)}`} tone={toneFromStatus(marketStatus)} />
+          <StatusPill status={broker} tone="mute" />
+        </div>
+      </div>
+
+      <div className="trading-toolbar">
+        <ActionButton icon={Play} label="启动" variant="primary" disabled={loopRunning || startBusy} loading={startBusy} error={startError} onAction={runStart} />
+        <ActionButton icon={PowerOff} label="停止" variant="danger" disabled={!loopRunning || stopBusy} loading={stopBusy} error={stopError} onAction={runStop} />
+        <ActionButton icon={RotateCcw} label="紧急平仓" variant="danger" disabled={closeBusy} loading={closeBusy} error={closeError} onAction={runEmergency} />
+        <button className="action-btn action-ghost refresh-inline" type="button" onClick={() => void refreshAll()}>
+          <RefreshCw size={15} />
+          <span>刷新</span>
+        </button>
+        <div className="toolbar-account-strip">
+          <span>币种 <strong>{currency}</strong></span>
+          <span>余额 <strong>{formatMoney(balance, currency)}</strong></span>
+          <span>权益 <strong>{formatMoney(equity, currency)}</strong></span>
+          <span>杠杆 <strong>{leverage}</strong></span>
+        </div>
+        {wsError ? <span className="toolbar-error">WS：{wsError}</span> : null}
+      </div>
+
+      <div className="stat-grid">
+        <StatTile icon={Activity} label="交易循环" value={loopRunning ? "运行中" : "未运行"} detail={translateDisplayValue(reason)} tone={loopRunning ? "ok" : "warn"} />
+        <StatTile icon={Wallet} label="账户权益" value={formatMoney(equity, currency)} detail={`余额 ${formatMoney(balance, currency)}`} tone={equity > 0 ? "ok" : "mute"} />
+        <StatTile icon={Gauge} label="XAU 现价" value={spotMid > 0 ? formatDecimal(spotMid, 2) : "--"} detail={spotBid && spotAsk ? `买 ${formatDecimal(spotBid, 2)} · 卖 ${formatDecimal(spotAsk, 2)}` : `持仓 ${formatDecimal(positionCount, 0)} 个`} tone={spotMid > 0 ? "ok" : "mute"} />
+        <StatTile icon={ShieldAlert} label="浮动盈亏" value={formatMoney(unrealized, currency)} detail={`会话 ${formatMoney(sessionPnl, currency)}`} tone={unrealized > 0 ? "ok" : unrealized < 0 ? "bad" : "mute"} />
+      </div>
+
+      <div className="dashboard-grid">
+        <MetricCard title="循环摘要">
+          <div className="field-list">
+            <Field label="状态" value={loopRunning ? "运行中" : "未运行"} tone={loopRunning ? "ok" : "warn"} />
+            <Field label="经纪商" value={broker} />
+            <Field label="策略" value={strategy} />
+            <Field label="执行模式" value={translateDisplayValue(loopMode)} />
+            <Field label="PID" value={loopPid || "--"} />
+            <Field label="启动时间" value={loopStarted} />
+            <Field label="状态说明" value={reason} tone={toneFromStatus(reason)} />
+          </div>
+        </MetricCard>
+
+        <MetricCard title="策略信号">
+          <div className="field-list">
+            <Field label="实单发送" value={pickBoolean(strategyStatus, ["send_orders"], false) ? "开启" : "关闭"} tone={pickBoolean(strategyStatus, ["send_orders"], false) ? "ok" : "warn"} />
+            <Field label="执行模式" value={translateDisplayValue(pickString(strategyStatus, ["execution_mode", "mode"], loopMode))} />
+            <Field label="当前方向" value={translateDisplayValue(signalDirection)} />
+            <Field label="综合分" value={formatDecimal(signalScore, 4)} />
+            <Field label="闸门" value={gatePassed ? "通过" : "未通过"} tone={gatePassed ? "ok" : "warn"} />
+            <Field label="闸门原因" value={translateDisplayValue(gateReason)} />
+          </div>
+        </MetricCard>
+
+        <MetricCard title="因子管道">
+          <div className="field-list">
+            <Field label="管道状态" value={engineWarm ? "已预热" : "预热中"} tone={engineWarm ? "ok" : "warn"} />
+            <Field label="缓冲区" value={formatDecimal(bufferSize, 0)} />
+            <Field label="活跃因子" value={formatDecimal(pickNumber(lastComposite, ["n_active"], 0), 0)} />
+            <Field label="弃权因子" value={formatDecimal(pickNumber(lastComposite, ["n_abstain"], 0), 0)} />
+            <Field label="归因样本" value={formatDecimal(attributedTrades, 0)} />
+            <Field label="AWE 置信" value={formatDecimal(aweConviction * 100, 1) + "%"} />
+            <Field label="归因胜率" value={overallWinRate ? `${formatDecimal(overallWinRate * 100, 1)}%` : "--"} />
+          </div>
+          <div className="compact-list">
+            {topContributors.slice(0, 6).map((raw, index) => {
+              const item = asRecord(raw);
+              const factor = pickString(item, ["factor", "name"], String(index + 1));
+              const value = pickNumber(item, ["pnl", "contribution", "score", "gross"], 0);
+              return <span className="data-badge" key={`${factor}-${index}`}>{factor}: {formatDecimal(value, 2)}</span>;
+            })}
+          </div>
+        </MetricCard>
+
+        <MetricCard title="风控与执行">
+          <div className="field-list">
+            <Field label="熔断器" value={circuitBreaker ? "触发" : "未触发"} tone={circuitBreaker ? "bad" : "ok"} />
+            <Field label="连续亏损" value={formatDecimal(consecutiveLoss, 0)} tone={consecutiveLoss >= 3 ? "warn" : "mute"} />
+            <Field label="风险值" value={formatDecimal(totalRisk, 4)} />
+            <Field label="执行尝试" value={formatDecimal(attempts, 0)} />
+            <Field label="下单成功" value={formatDecimal(successes, 0)} tone={successes > 0 ? "ok" : "mute"} />
+            <Field label="失败" value={formatDecimal(failures, 0)} tone={failures > 0 ? "bad" : "ok"} />
+            <Field label="最近执行" value={translateDisplayValue(pickString(liveExecutionSummary, ["last_reason", "last_reason_text", "lastReason"], "--"))} />
+          </div>
+          <div className="compact-list">
+            {executionEvents.slice(0, 4).map((raw, index) => {
+              const item = asRecord(raw);
+              const stage = pickString(item, ["stage"], "--");
+              return (
+                <span className={`data-badge ${stage === "success" ? "data-badge-ok" : stage === "failure" ? "data-badge-bad" : "data-badge-warn"}`} key={`${pickString(item, ["time"], String(index))}-${index}`}>
+                  {translateDisplayValue(stage)} · {translateDisplayValue(formatDirection(pick(item, ["direction"])))}
+                </span>
+              );
+            })}
+          </div>
+        </MetricCard>
+      </div>
+
+      <MetricCard title="最近因子信号 Tick" className="wide-panel">
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>Tick</th>
+                <th>战术分</th>
+                <th>宏观分</th>
+                <th>活跃因子</th>
+                <th>弃权</th>
+                <th>闸门原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!factorTicks.length ? (
+                <tr><td colSpan={7} className="empty-state-small">暂无因子 tick</td></tr>
+              ) : null}
+              {factorTicks.slice(0, 8).map((item, index) => {
+                return (
+                  <tr key={`${pickString(item, ["tick"], String(index))}-${index}`}>
+                    <td>{formatReadableTime(pick(item, ["ts", "time"]))}</td>
+                    <td>{formatDecimal(pickNumber(item, ["tick"], 0), 0)}</td>
+                    <td>{formatDecimal(pickNumber(item, ["tactical_score"], 0), 4)}</td>
+                    <td>{formatDecimal(pickNumber(item, ["macro_score"], 0), 4)}</td>
+                    <td>{formatDecimal(pickNumber(item, ["n_active"], 0), 0)}</td>
+                    <td>{formatDecimal(pickNumber(item, ["n_abstain"], 0), 0)}</td>
+                    <td>{translateDisplayValue(pickString(item, ["gate_reason"], "--"))}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </MetricCard>
+
+      <MetricCard title="持仓表" className="wide-panel">
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>品种</th>
+                <th>方向</th>
+                <th>数量</th>
+                <th>开仓价</th>
+                <th>当前价</th>
+                <th>浮盈</th>
+                <th>止损</th>
+                <th>止盈</th>
+                <th>持仓ID</th>
+                <th>来源</th>
+                <th>开仓时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!positions.length ? (
+                <tr>
+                  <td colSpan={11} className="empty-state-small">当前无持仓</td>
+                </tr>
+              ) : null}
+              {positions.map((item) => (
+                <tr key={`${item.id}-${item.symbol}-${String(item.openTs || "")}`}>
+                  <td>{item.symbol}</td>
+                  <td>
+                    <span className={`status-pill ${item.direction === "LONG" ? "status-ok" : item.direction === "SHORT" ? "status-bad" : "status-neutral"}`}>
+                      {translateDisplayValue(item.direction)}
+                    </span>
+                  </td>
+                  <td>{formatDecimal(item.volume, 2)}</td>
+                  <td>{item.entry ? formatDecimal(item.entry, 5) : "--"}</td>
+                  <td>{item.current ? formatDecimal(item.current, 5) : "--"}</td>
+                  <td className={item.unrealized >= 0 ? "status-ok" : "status-bad"}>{formatMoney(item.unrealized, currency)}</td>
+                  <td>{item.stop ? formatDecimal(item.stop, 5) : "--"}</td>
+                  <td>{item.take ? formatDecimal(item.take, 5) : "--"}</td>
+                  <td>{item.id}</td>
+                  <td>{item.source}</td>
+                  <td>{formatReadableTime(item.openTs)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {positions.length ? (
+          <p className="summary-note">浮盈区间：{formatMoney(worstUnrealized, currency)} 到 {formatMoney(bestUnrealized, currency)}</p>
+        ) : null}
+      </MetricCard>
+
+      {wsError || loopQuery.isError || accountQuery.isError || positionsQuery.isError ? (
+        <MetricCard title="错误状态" className="wide-panel">
+          <ul className="error-list">
+            {wsError ? <li>WS：{wsError}</li> : null}
+            {loopQuery.isError ? <li>loop-status：{loopQuery.error instanceof Error ? loopQuery.error.message : "请求失败"}</li> : null}
+            {accountQuery.isError ? <li>account：{accountQuery.error instanceof Error ? accountQuery.error.message : "请求失败"}</li> : null}
+            {positionsQuery.isError ? <li>positions：{positionsQuery.error instanceof Error ? positionsQuery.error.message : "请求失败"}</li> : null}
+          </ul>
+        </MetricCard>
+      ) : null}
+    </section>
+  );
+}

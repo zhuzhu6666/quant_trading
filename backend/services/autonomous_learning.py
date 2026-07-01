@@ -307,7 +307,7 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         "created_at": now,
         "updated_at": now,
     }
-    _execute(
+    cur = _execute(
         conn,
         """
         INSERT INTO autonomous_learning_sample
@@ -572,6 +572,111 @@ def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
             "counterfactual_id": str(row["counterfactual_id"] or ""),
             "review_id": str(row["review_id"] or ""),
             "position_id": str(row["position_id"] or ""),
+        },
+    }
+
+
+def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
+    review = _loads(row["review_json"], {})
+    inferred = review.get("inferred_close_supervisor") or {}
+    close_reason_source = str(review.get("close_reason_source") or "")
+    event_type = str(inferred.get("event_type") or "")
+    action = str(inferred.get("action") or "")
+    reason = str(inferred.get("summary_reason") or inferred.get("action_reason") or review.get("close_reason") or "")
+    evidence = inferred.get("evidence") or {}
+    has_feedback = bool(
+        close_reason_source.startswith("supervisor")
+        or event_type.startswith("supervisor_")
+        or action in {"tighten", "reduce", "close"}
+    )
+    if not has_feedback:
+        return None
+    thesis_status = str(
+        review.get("thesis_status_at_exit")
+        or review.get("thesis_status")
+        or evidence.get("thesis_status")
+        or ""
+    )
+    pnl = float(row["pnl"] or review.get("pnl") or 0.0)
+    context_integrity = str(review.get("context_integrity") or "full")
+    attribution_integrity = str(review.get("attribution_integrity") or "full")
+    thesis_broken = bool(
+        thesis_status == "broken"
+        or reason == "thesis_broken"
+        or str(review.get("close_reason") or "") == "thesis_broken"
+    )
+    entry_failure = bool(thesis_broken and pnl <= 0)
+    label_status = "matured" if context_integrity == "full" and attribution_integrity != "missing" else "pending"
+    if entry_failure:
+        label = "entry_thesis_broken"
+        recommended_action = "downweight_entry_factor"
+        train_weight = 0.82
+    elif thesis_broken:
+        label = "entry_thesis_broken_watch"
+        recommended_action = "watch"
+        train_weight = 0.55
+    else:
+        label = "supervisor_feedback_observed"
+        recommended_action = "watch"
+        train_weight = 0.35
+    if label_status != "matured":
+        train_weight *= 0.5
+    review_id = str(row["review_id"] or "")
+    return {
+        "sample_type": "entry_supervisor_feedback",
+        "source_table": "trade_outcome_review",
+        "source_id": review_id,
+        "decision_id": str(row["entry_decision_id"] or review.get("entry_decision_id") or ""),
+        "trade_id": str(row["trade_id"] or review.get("trade_id") or ""),
+        "position_id": str(row["position_id"] or review.get("position_id") or ""),
+        "symbol": str(review.get("symbol") or "XAUUSD"),
+        "timeframe": str(review.get("timeframe") or ""),
+        "event_ts": float(review.get("close_ts") or row["created_at"] or 0.0),
+        "label_status": label_status,
+        "integrity": "full" if label_status == "matured" else "partial",
+        "train_weight": round(max(0.0, min(1.0, train_weight)), 6),
+        "causal_level": "post_trade_feedback",
+        "features": {
+            "feedback_target": "entry_agent",
+            "entry_score": review.get("entry_score"),
+            "top_weight_factor": review.get("top_weight_factor") or "",
+            "top_factor": review.get("top_factor") or "",
+            "worst_factor": review.get("worst_factor") or "",
+            "factor_contributions": review.get("factor_contributions") or {},
+            "primary_responsibility": review.get("primary_responsibility") or "",
+            "responsibility_labels": review.get("responsibility_labels") or [],
+            "close_reason": review.get("close_reason") or "",
+            "close_reason_source": close_reason_source,
+            "pnl": pnl,
+            "mfe": review.get("mfe"),
+            "mae": review.get("mae"),
+            "holding_seconds": review.get("holding_seconds"),
+            "thesis_status_at_exit": thesis_status,
+            "supervisor": {
+                "event_type": event_type,
+                "action": action,
+                "reason": reason,
+                "evidence": evidence,
+                "raw": inferred,
+            },
+        },
+        "verdict": {
+            "feedback_target": "entry_agent",
+            "supervisor_feedback": True,
+            "entry_failure": entry_failure,
+            "thesis_broken": thesis_broken,
+            "recommended_action": recommended_action,
+        },
+        "label": {
+            "label": label,
+            "recommended_action": recommended_action,
+            "pnl": pnl,
+        },
+        "trace": {
+            "review_id": review_id,
+            "entry_decision_id": str(row["entry_decision_id"] or review.get("entry_decision_id") or ""),
+            "exit_decision_id": str(row["exit_decision_id"] or review.get("exit_decision_id") or ""),
+            "position_id": str(row["position_id"] or review.get("position_id") or ""),
         },
     }
 
@@ -881,6 +986,7 @@ def materialize_autonomous_learning_samples(
     counts = {
         "shadow_open_decision": 0,
         "risk_rejection": 0,
+        "entry_supervisor_feedback": 0,
         "supervisor_trajectory": 0,
         "supervisor_execution_trace": 0,
         "trade_review_outcome": 0,
@@ -940,6 +1046,9 @@ def materialize_autonomous_learning_samples(
         for row in reviews:
             if _upsert_sample(conn, {**_sample_from_review(row), **sample_context}):
                 counts["trade_review_outcome"] += 1
+            entry_feedback = _sample_from_entry_supervisor_feedback(row)
+            if entry_feedback and _upsert_sample(conn, {**entry_feedback, **sample_context}):
+                counts["entry_supervisor_feedback"] += 1
 
         if state_table_exists(conn, "supervisor_counterfactual_review"):
             cfs = _execute(

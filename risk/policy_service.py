@@ -96,6 +96,31 @@ class RiskPolicyService:
                 },
             )
 
+        supervisor_block = context.get("supervisor_reentry_block") or {}
+        if bool(supervisor_block.get("active", False)):
+            remaining_seconds = float(supervisor_block.get("remaining_seconds", 0.0) or 0.0)
+            reason = str(supervisor_block.get("reason") or "position_supervisor")
+            action = str(supervisor_block.get("action") or "")
+            source = str(supervisor_block.get("source") or "position_supervisor")
+            return RiskVerdict(
+                allowed=False,
+                reason="supervisor_reentry_cooldown",
+                severity="warn",
+                audit_payload={
+                    "action": "open_trade",
+                    "source": source,
+                    "blocked_by": "position_supervisor",
+                    "supervisor_action": action,
+                    "supervisor_reason": reason,
+                    "symbol": supervisor_block.get("symbol"),
+                    "direction": supervisor_block.get("direction"),
+                    "position_id": supervisor_block.get("position_id"),
+                    "remaining_seconds": round(remaining_seconds, 3),
+                    "trade": context.get("trade") or {},
+                    "temporal_context": context.get("temporal_context") or {},
+                },
+            )
+
         risk_snapshot = context.get("risk_snapshot") or {}
         var_cfg = context.get("var") or {}
         if bool(var_cfg.get("enabled", False)):

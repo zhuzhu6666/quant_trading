@@ -1,6 +1,6 @@
 # Workspace Rules
 
-> Last updated: 2026-06-30
+> Last updated: 2026-07-01
 
 这个仓库从现在开始按下面的规则协作：
 
@@ -9,7 +9,9 @@
 本地默认只做这些内容：
 
 - `miniprogram_v2`
+- `web_frontend`（新 Web 操作台，规划/开发中）
 - 小程序页面、交互、展示
+- Web 前端页面、交互、展示
 - 微信开发者工具验证
 - 文档
 
@@ -46,7 +48,7 @@
 ## 3. 默认工作流
 
 ```text
-本地只做小程序
+本地做前端（小程序 + Web）
 服务器只做后端
 ```
 
@@ -55,12 +57,13 @@
 - 本地 Windows 和 Linux 服务器统一使用 `main` 分支。
 - 本地 Windows 已启用 sparse checkout，默认只保留：
   - `miniprogram_v2/`
+  - `web_frontend/`（建立后纳入）
   - `docs/`
   - `AGENTS.md`
   - `README.md`
   - `.gitignore`
 - 后端、交易、数据库、systemd、日志相关改动一律在服务器 `main` 上完成。
-- 小程序改动一律在本地 Windows 的 `main` 上完成。
+- 小程序和 Web 前端改动一律在本地 Windows 的 `main` 上完成。
 - 文档/规则类改动统一提交到 `main`，本地和服务器都从 `main` 拉取。
 
 ## 3.2 当前数据约定
@@ -97,6 +100,15 @@
   - `miniprogram_v2/vendor/ucharts/u-charts.min.js`
 - 不再按 `web-view` / nginx 静态 H5 / `lightweight-charts` 方案理解。
 - 当前小程序没有 `web-view` 业务域名配置权限，因此不要再要求配置 `www.zhuzhu666.icu` 为 web-view 业务域名。
+
+## 3.4 Web 前端升级约定
+
+- 新 Web 前端用于接替小程序的完整操作台能力，目录约定为 `web_frontend/`。
+- 小程序最终只保留简洁状态界面；复杂图表、交易明细、风控、学习治理、因子治理、运维调试放到 Web 端。
+- 当前公网入口由服务器 Caddy 承接：
+  - `https://www.zhuzhu666.icu`
+  - Caddy 反代到本机 `127.0.0.1:8000`
+- 旧 Web Console 打包产物、旧小程序 H5/web-view 静态入口、旧 Nginx H5 路线均不再保留。
 
 ## 4. 遇到问题时的默认顺序
 

@@ -24,6 +24,7 @@ Thumbs.db
 
 # Data files (reproducible, not in repo)
 data/*.db
+data/*.sqlite
 data/*.duckdb
 data/*.duckdb.wal
 data/*.db-shm
@@ -84,9 +85,11 @@ desktop.ini
 $RECYCLE.BIN/
 *.lnk
 
-# Node / frontend (removed — now WeChat mini-program)
+# Node / frontend
 node_modules/
 package-lock.json
+!web_frontend/package-lock.json
+*.tsbuildinfo
 
 # Build artifacts
 *.egg-info/

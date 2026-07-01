@@ -102,6 +102,8 @@ class RuntimeConfig:
     risk_cooldown_bars: int = 3
     risk_loss_cooldown_after_losses: int = 2
     risk_loss_cooldown_bars: int = 3
+    risk_supervisor_reentry_cooldown_bars: int = 3
+    risk_supervisor_reentry_block_reduce: bool = True
     risk_max_holding_bars: int = 288
     risk_block_on_disk_critical: bool = True
     risk_require_l2_depth: bool = False

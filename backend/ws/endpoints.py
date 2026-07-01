@@ -216,6 +216,7 @@ def _read_state_snapshot() -> dict:
 
     source = "live" if live_running else "frozen"
 
+    current_price = _live_get_latest_price()
     return {
         "source": source,
         "broker": live_broker,
@@ -242,7 +243,8 @@ def _read_state_snapshot() -> dict:
         "currency": acct.get("currency"),
         "n_positions": n_positions,
         "positions_list": positions_list,
-        "current_price": _live_get_latest_price(),
+        "current_price": current_price,
+        "spot_quote": _live_state.get("spot_quote"),
         "active_strategy": {
             "id": _live_state.get("loop_strategy") or loop.get("strategy_name"),
             "mode": "single",

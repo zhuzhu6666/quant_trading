@@ -1,6 +1,6 @@
 # Server Backend SOP
 
-> Last updated: 2026-06-30
+> Last updated: 2026-07-01
 > Scope: Linux server backend daily operations.
 
 这份文档只服务一个目标：
@@ -30,6 +30,9 @@
 - SSH User: `ubuntu`
 - Project Root: `/home/ubuntu/quant_trading`
 - Service: `quant-backend.service`
+- Public domain: `www.zhuzhu666.icu`
+- Public reverse proxy: `caddy.service`
+- Backend bind: `127.0.0.1:8000`
 
 ## 3. 登录后第一步
 
@@ -41,6 +44,7 @@ pwd
 git status --short
 git rev-parse --short HEAD
 systemctl is-active quant-backend.service
+systemctl is-active caddy.service
 ```
 
 目的：
@@ -49,6 +53,7 @@ systemctl is-active quant-backend.service
 - 确认工作区是否脏
 - 确认当前代码版本
 - 确认后端服务是否还活着
+- 确认公网反代是否还活着
 
 ## 4. 日志排查顺序
 
@@ -89,20 +94,26 @@ journalctl -u quant-backend.service --since "10 min ago" --no-pager | egrep "ERR
 
 ```bash
 curl http://127.0.0.1:8000/api/health
+curl https://www.zhuzhu666.icu/api/health
 ```
 
 ### 登录检查
 
+不要在文档里硬编码真实密码。登录验证时从本机环境变量或临时输入读取：
+
 ```bash
+read -rsp "Password: " QUANT_LOGIN_PASSWORD; echo
 curl -X POST http://127.0.0.1:8000/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"zhu","password":"1994"}'
+  -d "{\"username\":\"zhu\",\"password\":\"${QUANT_LOGIN_PASSWORD}\"}"
+unset QUANT_LOGIN_PASSWORD
 ```
 
 ### 常用业务接口
 
+多数业务接口需要 JWT。未带 token 时返回 `missing_authorization` 是预期行为，不代表接口挂了。
+
 ```bash
-curl http://127.0.0.1:8000/api/live/loop-status
 curl http://127.0.0.1:8000/api/health
 ```
 
@@ -113,6 +124,22 @@ curl http://127.0.0.1:8000/api/health
 - `/api/live/strategy-status`
 - `/api/live/session-stats`
 - `/api/risk/summary`
+
+### 公网入口 / Caddy 检查
+
+当前公网入口不是 Nginx，而是 Caddy：
+
+```bash
+systemctl status caddy.service --no-pager -n 40
+journalctl -u caddy --since "30 min ago" --no-pager
+sed -n '1,220p' /etc/caddy/Caddyfile
+```
+
+判断原则：
+
+- `https://www.zhuzhu666.icu/api/health` 正常，说明公网 TLS、Caddy、后端反代基本通。
+- Caddy 日志中 `dial tcp 127.0.0.1:8000: connect: connection refused` 通常表示当时 `quant-backend.service` 没有监听或正在重启。
+- `nginx -t` 不是当前主入口检查项；除非明确切回 Nginx，否则优先看 Caddy。
 
 ## 5.1 数据库先行检查
 

@@ -38,6 +38,19 @@ _DB_LIST = [
     ("experiments.db", "实验记录", "sqlite"),
 ]
 
+_ARCHIVED_DATABASES = {
+    "ctrader_data.duckdb": "旧 K 线冷备/兼容库；当前 live K 线写入 data/bars_monthly/bars_YYYY_MM.duckdb，data/bars.duckdb 指向当前月库",
+}
+
+_IDLE_DATABASES = {
+    "experiments.db": "独立实验记录库；没有近期实验不代表运行异常",
+}
+
+_FRESHNESS_THRESHOLDS = {
+    # 外部研究数据含周度 COT、季度 ETF 和日频 FRED；用 3 天作为正常窗口，避免把周末/假日延迟误报为过期。
+    "external_data.duckdb": (3600, 3 * 86400, 7 * 86400),
+}
+
 _TS_CANDIDATES = [
     "time", "ts", "timestamp", "bar_ts", "open_ts", "close_ts",
     "created_at", "updated_at", "tick_ts", "exec_ts",
@@ -201,7 +214,8 @@ def _postgres_state_stats() -> dict:
             for row in rows:
                 tname = row["name"]
                 try:
-                    cnt = con.execute(f'SELECT COUNT(*) FROM "{tname}"').fetchone()[0]
+                    cnt_row = con.execute(f'SELECT COUNT(*) AS n FROM "{tname}"').fetchone()
+                    cnt = int((cnt_row or {}).get("n") or 0)
                     total_rows += cnt
                     cols = state_table_columns(con, tname)
                     tbl_latest = None
@@ -209,10 +223,11 @@ def _postgres_state_stats() -> dict:
                         if tc in cols:
                             try:
                                 res = con.execute(
-                                    f'SELECT MAX("{tc}") FROM "{tname}" WHERE "{tc}" IS NOT NULL'
+                                    f'SELECT MAX("{tc}") AS latest FROM "{tname}" WHERE "{tc}" IS NOT NULL'
                                 ).fetchone()
-                                if res and res[0]:
-                                    tbl_latest = _try_parse_ts(res[0])
+                                raw_latest = (res or {}).get("latest")
+                                if raw_latest:
+                                    tbl_latest = _try_parse_ts(raw_latest)
                                     if tbl_latest:
                                         break
                             except Exception:
@@ -288,14 +303,26 @@ def _compute_db_health() -> dict:
         freshness = "unknown"
         if latest and isinstance(latest, (int, float)):
             age_sec = now - latest
-            if age_sec < 3600:
+            fresh_limit, recent_limit, stale_limit = _FRESHNESS_THRESHOLDS.get(
+                filename,
+                (3600, 86400, 259200),
+            )
+            if age_sec < fresh_limit:
                 freshness = "fresh"
-            elif age_sec < 86400:
+            elif age_sec < recent_limit:
                 freshness = "recent"
-            elif age_sec < 259200:
+            elif age_sec < stale_limit:
                 freshness = "stale"
             else:
                 freshness = "old"
+
+        health_note = ""
+        if filename in _ARCHIVED_DATABASES:
+            freshness = "archived"
+            health_note = _ARCHIVED_DATABASES[filename]
+        elif filename in _IDLE_DATABASES and stats["total_rows"] > 0 and not stats["errors"]:
+            freshness = "idle"
+            health_note = _IDLE_DATABASES[filename]
 
         databases.append({
             "name": label,
@@ -309,6 +336,7 @@ def _compute_db_health() -> dict:
             "latest_ts": latest,
             "freshness": freshness,
             "errors": stats["errors"],
+            "health_note": health_note,
         })
 
     # 整体健康分
@@ -375,7 +403,9 @@ def db_health(_user: RequireUser) -> dict:
     with _cache_lock:
         if _cache is not None:
             result = dict(_cache)
-            result["checked_at"] = now
+            checked_at = result.get("checked_at")
+            result["served_at"] = now
+            result["cache_age_sec"] = max(0.0, now - float(checked_at or now))
             return result
 
     # 极端情况: 缓存尚未初始化 (刚启动, 预热还没跑完)

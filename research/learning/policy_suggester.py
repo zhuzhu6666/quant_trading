@@ -55,6 +55,13 @@ class PolicySuggester:
 
         reward = float(experience.get("reward_score", 0.0) or 0.0)
         outcome_label = str(experience.get("outcome_label", "") or "")
+        failure_tags = list(experience.get("failure_tags", []) or [])
+        recommended_action = str(experience.get("recommended_action", "") or "")
+        supervisor_entry_failure = bool(
+            "supervisor_thesis_broken" in failure_tags
+            and "supervisor_entry_feedback" in failure_tags
+            and recommended_action == "downweight"
+        )
         now = time.time()
         with self._conn() as conn:
             p = self._p()
@@ -68,19 +75,22 @@ class PolicySuggester:
             if row:
                 sample_count = int(row["sample_count"]) + 1
                 win_count = int(row["win_count"]) + (1 if reward > 0 else 0)
-                bad_loss_count = int(row["bad_loss_count"]) + (1 if outcome_label == "bad_loss" else 0)
+                bad_loss_count = int(row["bad_loss_count"]) + (1 if outcome_label == "bad_loss" or supervisor_entry_failure else 0)
                 prev_avg = float(row["avg_reward"] or 0.0)
                 avg_reward = prev_avg + (reward - prev_avg) / max(sample_count, 1)
             else:
                 sample_count = 1
                 win_count = 1 if reward > 0 else 0
-                bad_loss_count = 1 if outcome_label == "bad_loss" else 0
+                bad_loss_count = 1 if outcome_label == "bad_loss" or supervisor_entry_failure else 0
                 avg_reward = reward
 
             if sample_count >= 3 and avg_reward <= -0.20:
                 action = "downweight"
                 confidence = min(0.95, 0.45 + 0.08 * sample_count + 0.10 * bad_loss_count)
-                reason = f"factor {primary_factor} shows repeated negative outcomes ({sample_count} samples)"
+                if supervisor_entry_failure:
+                    reason = f"factor {primary_factor} repeatedly led to supervisor thesis-broken exits ({sample_count} samples)"
+                else:
+                    reason = f"factor {primary_factor} shows repeated negative outcomes ({sample_count} samples)"
             elif sample_count >= 4 and win_count >= 3 and avg_reward >= 0.22:
                 action = "boost_small"
                 confidence = min(0.85, 0.40 + 0.05 * sample_count)
@@ -130,6 +140,7 @@ class PolicySuggester:
                 "avg_reward": round(avg_reward, 6),
                 "experience_id": experience.get("experience_id", ""),
                 "failure_tags": experience.get("failure_tags", []),
+                "supervisor_entry_failure": supervisor_entry_failure,
             }
             existing = conn.execute(
                 f"""
