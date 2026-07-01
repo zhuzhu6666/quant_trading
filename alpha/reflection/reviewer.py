@@ -8,7 +8,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 from backend.services.review_contract import normalize_trade_review_contract
@@ -40,10 +40,22 @@ class TradeReviewer:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _sql(self, sql: str) -> str:
+        return sql.replace("?", "%s") if self._use_pg() else sql
+
+    def _execute(self, conn, sql: str, params: tuple | list | None = None):
+        if params is None:
+            return conn.execute(self._sql(sql))
+        return conn.execute(self._sql(sql), tuple(params))
+
     @contextmanager
     def _conn(self):
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         except Exception:
@@ -56,7 +68,8 @@ class TradeReviewer:
 
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
-            conn.executescript(STATE_DB_DDL)
+            if not self._use_pg():
+                conn.executescript(STATE_DB_DDL)
 
     @staticmethod
     def _new_id(prefix: str) -> str:
@@ -124,7 +137,7 @@ class TradeReviewer:
                 },
             }
         with self._conn() as conn:
-            entry = conn.execute(
+            entry = self._execute(conn,
                 """
                 SELECT * FROM decision_ledger
                 WHERE position_id=? AND event_type='open'
@@ -139,7 +152,7 @@ class TradeReviewer:
             entry_ts = float(entry["decision_ts"] or 0.0) if entry else 0.0
             timeframe = str(entry["timeframe"] or "") if entry else ""
             entry_factors = list(
-                conn.execute(
+                self._execute(conn,
                     """
                     SELECT * FROM decision_factor_snapshot
                     WHERE decision_id=?
@@ -148,7 +161,7 @@ class TradeReviewer:
                     (entry_decision_id,),
                 )
             ) if entry_decision_id else []
-            recovery = conn.execute(
+            recovery = self._execute(conn,
                 """
                 SELECT recovery_meta_json
                 FROM recovery_position_state
@@ -328,7 +341,7 @@ class TradeReviewer:
                     "review_json": existing_review,
                     "deduplicated": True,
                 }
-            conn.execute(
+            self._execute(conn,
                 """
                 INSERT INTO trade_outcome_review
                 (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
@@ -364,7 +377,7 @@ class TradeReviewer:
                     if str(row["factor"]) == factor:
                         entry_contribution = float(row["contribution_score"] or 0.0)
                         break
-                conn.execute(
+                self._execute(conn,
                     """
                     INSERT INTO factor_contribution_review
                     (review_id, trade_id, factor, entry_contribution, hold_contribution,
@@ -419,7 +432,7 @@ class TradeReviewer:
         close_ts: float,
     ) -> dict | None:
         real_deal_id = _safe_int((real_pnl or {}).get("deal_id"))
-        rows = conn.execute(
+        rows = self._execute(conn,
             """
             SELECT review_id, trade_id, position_id, outcome_label, pnl,
                    failure_tags_json, summary_text, review_json, created_at

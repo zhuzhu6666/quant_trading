@@ -14,7 +14,7 @@ cTrader Open API 负责当前 demo 交易闭环:
 - market buy / sell
 - SL/TP 修改
 - 平仓
-- 成交同步到 `data/state.db` 的 `ctrader_deals`
+- 成交同步到 PostgreSQL `state_v1.ctrader_deals`
 
 主要代码:
 

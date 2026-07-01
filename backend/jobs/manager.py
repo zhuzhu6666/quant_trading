@@ -14,6 +14,16 @@ from backend.jobs.progress import ProgressCB
 from backend.jobs.state import JobState, new_job_id
 
 
+def _state_conn():
+    from backend.core.db import get_state_pg_conn
+
+    return get_state_pg_conn()
+
+
+def _state_sql(sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s")
+
+
 class JobManager:
     """Manages long-running tasks. v1: single process, in-memory dict + JSONL persist.
 
@@ -51,13 +61,12 @@ class JobManager:
             self._loop = loop
 
     def _load_persisted(self) -> None:
-        """从 state.db 加载持久化 jobs。降级到 JSONL。"""
+        """从 PostgreSQL state store 加载持久化 jobs。降级到 JSONL。"""
         try:
-            from backend.core.db import get_state_conn
-            conn = get_state_conn()
+            conn = _state_conn()
             try:
                 rows = conn.execute(
-                    "SELECT * FROM jobs WHERE status IN ('running','pending') ORDER BY updated_at DESC LIMIT ?",
+                    _state_sql("SELECT * FROM jobs WHERE status IN ('running','pending') ORDER BY updated_at DESC LIMIT ?"),
                     (self.MAX_PERSISTED,)
                 ).fetchall()
                 for r in rows:
@@ -121,20 +130,31 @@ class JobManager:
                 continue
 
     def _append_persisted(self, js: JobState, *, status: str | None = None) -> None:
-        """持久化 job 到 state.db + JSONL 备份."""
+        """持久化 job 到 PostgreSQL state store + JSONL 备份."""
         status_value = status or js.status
         payload = js.to_dict()
         payload["status"] = status_value
-        # 主存储: state.db
+        # 主存储: PostgreSQL state store
         try:
-            from backend.core.db import get_state_conn
-            conn = get_state_conn()
+            conn = _state_conn()
             try:
                 now = js.finished_at.timestamp() if js.finished_at else None
                 created = js.started_at.timestamp() if js.started_at else None
                 conn.execute(
-                    "INSERT OR REPLACE INTO jobs (id, kind, status, params_json, result_json, progress, error, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    _state_sql("""
+                    INSERT INTO jobs
+                    (id, kind, status, params_json, result_json, progress, error, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        kind=excluded.kind,
+                        status=excluded.status,
+                        params_json=excluded.params_json,
+                        result_json=excluded.result_json,
+                        progress=excluded.progress,
+                        error=excluded.error,
+                        created_at=excluded.created_at,
+                        updated_at=excluded.updated_at
+                    """),
                     (js.id, js.kind, status_value,
                      json.dumps(js.params, ensure_ascii=False),
                      json.dumps(js.result, ensure_ascii=False) if js.result else "{}",

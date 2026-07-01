@@ -29,19 +29,19 @@ logger = logging.getLogger(__name__)
 
 def _persist_runtime_kv(key: str, value: dict[str, Any]) -> None:
     try:
-        from backend.core.db import STATE_DB_DDL, get_state_conn
+        from backend.core.db import get_state_pg_conn
 
-        conn = get_state_conn()
+        conn = get_state_pg_conn()
         try:
-            conn.executescript(STATE_DB_DDL)
-            conn.execute(
-                """
+            sql = """
                 INSERT INTO runtime_kv(key, value_json, updated_at)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
                 ON CONFLICT(key) DO UPDATE SET
                     value_json=excluded.value_json,
                     updated_at=excluded.updated_at
-                """,
+                """
+            conn.execute(
+                sql,
                 (key, json.dumps(value, ensure_ascii=False, default=str), time.time()),
             )
             conn.commit()
@@ -263,6 +263,7 @@ class CTraderBridge(BaseBrokerBridge):
         self._app_authed = False
         self._account_authed = False
         self._symbol_id: int | None = None
+        self._symbol_meta: dict[str, Any] = {}
         self._forced_symbol_id = forced_symbol_id  # ProtoOASymbol 无 name, 需外部指定 ID
         self._server_version: str = "v0"  # ★ VersionReq 拿, 给后续 Req clientMsgId 用
         self._trader_login: int = 0  # account_info 返回的 traderLogin, 下单 fallback
@@ -969,7 +970,16 @@ class CTraderBridge(BaseBrokerBridge):
                 with self._positions_cache_lock:
                     for pos in self._positions_cache.values():
                         pos.current_price = spot
-                self._emit_event("spot", {"price": float(spot), "symbol": self.symbol})
+                self._emit_event(
+                    "spot",
+                    {
+                        "price": float(spot),
+                        "bid": float(bid or 0.0),
+                        "ask": float(ask or 0.0),
+                        "ts": float(self._spot_ts or time.time()),
+                        "symbol": self.symbol,
+                    },
+                )
         except Exception as e:
             logger.warning(f"spot event parse failed: {e}")
 
@@ -1967,6 +1977,41 @@ class CTraderBridge(BaseBrokerBridge):
                 logger.error("Reconciliation failed: %s", reconcile_err)
             return CTraderOrderResult(success=False, error_code="SEND_ERR", comment=str(e))
 
+    def _normalize_close_volume(self, volume: float) -> tuple[int, str, str]:
+        raw_volume = int(round(float(volume or 0.0)))
+        if raw_volume <= 0:
+            return (
+                0,
+                "invalid_close_volume",
+                f"close volume must be > 0, got {volume}",
+            )
+
+        meta = getattr(self, "_symbol_meta", None) or {}
+        if not meta:
+            try:
+                self._resolve_symbol_id()
+                meta = getattr(self, "_symbol_meta", None) or {}
+            except Exception as exc:
+                logger.warning("close volume metadata resolve failed: %s", exc)
+        if not meta and str(self.symbol or "").upper().startswith("XAUUSD"):
+            meta = {"api_min_volume": 100, "api_step_volume": 100}
+
+        min_volume = max(1, int(round(float(meta.get("api_min_volume") or 1))))
+        step_volume = max(1, int(round(float(meta.get("api_step_volume") or 1))))
+        if raw_volume < min_volume:
+            return (
+                0,
+                "invalid_close_volume_step",
+                f"close volume {raw_volume} is below minVolume={min_volume}",
+            )
+        if raw_volume % step_volume != 0:
+            return (
+                0,
+                "invalid_close_volume_step",
+                f"close volume {raw_volume} is not a multiple of stepVolume={step_volume}",
+            )
+        return raw_volume, "", ""
+
     def close_position(self, position_id: int,
                        volume: float = 0.0) -> OrderResult:
         """平仓 (走 ProtoOAClosePositionReq, DRY-RUN 时仅打印).
@@ -2005,15 +2050,20 @@ class CTraderBridge(BaseBrokerBridge):
                     )
                 volume = match[0].volume
                 logger.info(f"  auto-resolved volume={volume} for full close")
-            close_volume = int(round(volume))
-            if close_volume <= 0:
-                logger.error("close_position rejected locally pos=%s invalid volume=%s", position_id, volume)
+            close_volume, volume_error_code, volume_error = self._normalize_close_volume(volume)
+            if volume_error_code:
+                logger.warning(
+                    "close_position rejected locally pos=%s volume=%s: %s",
+                    position_id,
+                    volume,
+                    volume_error,
+                )
                 return OrderResult(
                     success=False,
                     position_id=position_id,
                     volume=float(volume or 0.0),
-                    error_code="invalid_close_volume",
-                    comment=f"close volume must be > 0, got {volume}",
+                    error_code=volume_error_code,
+                    comment=volume_error,
                 )
 
             req = TradeMsg.ProtoOAClosePositionReq()

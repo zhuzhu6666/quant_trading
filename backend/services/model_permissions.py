@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite
+from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 
 
 FORBIDDEN_TRUE_CAPABILITIES = {
@@ -34,10 +34,40 @@ REQUIRED_TRUE_CAPABILITIES = {
 }
 
 
+def _use_pg(db_path: str | Path = STATE_DB) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
+    conn = get_state_pg_conn(read_only=read_only) if _use_pg(db_path) else connect_sqlite(db_path, read_only=read_only)
+    if not _use_pg(db_path):
+        conn.row_factory = __import__("sqlite3").Row
+    return conn
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
+
+
 def ensure_model_permission_audit_table(db_path: str | Path = STATE_DB) -> None:
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
-        conn.execute(
+        if _conn_is_pg(conn):
+            if not state_table_exists(conn, "model_permission_audit"):
+                raise RuntimeError("missing state table: model_permission_audit")
+            return
+        _execute(
+            conn,
             """
             CREATE TABLE IF NOT EXISTS model_permission_audit (
                 audit_id TEXT PRIMARY KEY,
@@ -52,13 +82,15 @@ def ensure_model_permission_audit_table(db_path: str | Path = STATE_DB) -> None:
             )
             """
         )
-        conn.execute(
+        _execute(
+            conn,
             """
             CREATE INDEX IF NOT EXISTS idx_model_permission_audit_created
             ON model_permission_audit(created_at)
             """
         )
-        conn.execute(
+        _execute(
+            conn,
             """
             CREATE INDEX IF NOT EXISTS idx_model_permission_audit_model
             ON model_permission_audit(model_type, status, created_at)
@@ -148,9 +180,10 @@ def audit_model_permissions(
     ensure_model_permission_audit_table(db_path)
     now = time.time()
     audit_id = f"mpa:{evaluation.get('model_type') or 'model'}:{int(now * 1000)}"
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
-        conn.execute(
+        _execute(
+            conn,
             """
             INSERT INTO model_permission_audit
             (audit_id, model_type, artifact_path, status, reason, capabilities_json,
@@ -220,10 +253,10 @@ def list_model_permission_audits(
         clauses.append("status=?")
         params.append(str(status))
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path, read_only=True)
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             f"""
             SELECT *
             FROM model_permission_audit

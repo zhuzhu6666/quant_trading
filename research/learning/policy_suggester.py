@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 
 
 class PolicySuggester:
@@ -18,10 +18,17 @@ class PolicySuggester:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _p(self) -> str:
+        return "%s" if self._use_pg() else "?"
+
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         except Exception:
@@ -34,7 +41,8 @@ class PolicySuggester:
 
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
-            conn.executescript(STATE_DB_DDL)
+            if not self._use_pg():
+                conn.executescript(STATE_DB_DDL)
 
     @staticmethod
     def _new_id(prefix: str) -> str:
@@ -49,10 +57,11 @@ class PolicySuggester:
         outcome_label = str(experience.get("outcome_label", "") or "")
         now = time.time()
         with self._conn() as conn:
+            p = self._p()
             row = conn.execute(
-                """
+                f"""
                 SELECT * FROM experience_pattern_stats
-                WHERE scope_type='factor' AND scope_key=?
+                WHERE scope_type='factor' AND scope_key={p}
                 """,
                 (primary_factor,),
             ).fetchone()
@@ -82,11 +91,19 @@ class PolicySuggester:
                 reason = f"factor {primary_factor} still accumulating evidence"
 
             conn.execute(
-                """
-                INSERT OR REPLACE INTO experience_pattern_stats
+                f"""
+                INSERT INTO experience_pattern_stats
                 (scope_type, scope_key, sample_count, win_count, bad_loss_count,
                  avg_reward, last_outcome_label, recommended_action, updated_at)
-                VALUES ('factor', ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES ('factor', {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
+                ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+                    sample_count=excluded.sample_count,
+                    win_count=excluded.win_count,
+                    bad_loss_count=excluded.bad_loss_count,
+                    avg_reward=excluded.avg_reward,
+                    last_outcome_label=excluded.last_outcome_label,
+                    recommended_action=excluded.recommended_action,
+                    updated_at=excluded.updated_at
                 """,
                 (
                     primary_factor,
@@ -115,10 +132,10 @@ class PolicySuggester:
                 "failure_tags": experience.get("failure_tags", []),
             }
             existing = conn.execute(
-                """
+                f"""
                 SELECT suggestion_id
                 FROM policy_suggestion
-                WHERE scope_type='factor' AND scope_key=? AND action=? AND status='proposed'
+                WHERE scope_type='factor' AND scope_key={p} AND action={p} AND status='proposed'
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -127,10 +144,10 @@ class PolicySuggester:
             if existing:
                 suggestion_id = str(existing["suggestion_id"])
                 conn.execute(
-                    """
+                    f"""
                     UPDATE policy_suggestion
-                    SET confidence=?, reason=?, evidence_json=?, created_at=?
-                    WHERE suggestion_id=?
+                    SET confidence={p}, reason={p}, evidence_json={p}, created_at={p}
+                    WHERE suggestion_id={p}
                     """,
                     (
                         round(confidence, 6),
@@ -143,11 +160,11 @@ class PolicySuggester:
             else:
                 suggestion_id = self._new_id("psg")
                 conn.execute(
-                    """
+                    f"""
                     INSERT INTO policy_suggestion
                     (suggestion_id, scope_type, scope_key, action, confidence, reason,
                      evidence_json, status, created_at)
-                    VALUES (?, 'factor', ?, ?, ?, ?, ?, 'proposed', ?)
+                    VALUES ({p}, 'factor', {p}, {p}, {p}, {p}, {p}, 'proposed', {p})
                     """,
                     (
                         suggestion_id,

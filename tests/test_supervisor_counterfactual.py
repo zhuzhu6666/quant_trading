@@ -132,3 +132,44 @@ def test_counterfactual_labels_premature_tighten_when_future_recovers(monkeypatc
     stored = scf.list_counterfactuals(db_path=db_path)
     assert stored["count"] == 1
     assert stored["items"][0]["evidence"]["advisory_only"] is True
+
+
+def test_counterfactual_respects_original_sl_before_later_tp(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+
+    bars = pd.DataFrame(
+        [
+            {"time": 1100.0, "open": 100.0, "high": 103.2, "low": 99.0, "close": 102.8, "volume": 1},
+            {"time": 1300.0, "open": 102.8, "high": 103.0, "low": 94.9, "close": 95.2, "volume": 1},
+        ]
+    )
+    monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: bars)
+
+    result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
+
+    assert result["count"] == 1
+    item = result["items"][0]
+    assert item["label"] == "correct_stop"
+    assert item["horizons"][0]["first_original_hit"] == "sl"
+
+
+def test_counterfactual_default_horizon_catches_two_hour_recovery(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+
+    bars = pd.DataFrame(
+        [
+            {"time": 1000.0 + 70 * 60, "open": 100.0, "high": 100.2, "low": 97.5, "close": 98.0, "volume": 1},
+            {"time": 1000.0 + 90 * 60, "open": 98.0, "high": 98.2, "low": 94.9, "close": 95.2, "volume": 1},
+        ]
+    )
+    monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: bars)
+
+    result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
+
+    assert result["count"] == 1
+    item = result["items"][0]
+    assert item["label"] == "premature_tighten"
+    assert [h["horizon_minutes"] for h in item["horizons"]] == [120]
+    assert item["horizons"][0]["first_original_hit"] == "tp"

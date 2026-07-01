@@ -775,17 +775,25 @@ class AttributionEngine:
                     'ir_mid': round(s.ir_mid, 4) if not math.isnan(s.ir_mid) else None,
                     'ir_long': round(s.ir_long, 4) if not math.isnan(s.ir_long) else None,
                 }
-            # ★ 写入 state.db (唯一持久化路径)
+            # ★ 写入 state store (唯一持久化路径)
             if not _os.environ.get("PYTEST_CURRENT_TEST"):
                 try:
-                    from backend.core.db import get_state_conn
-                    conn = get_state_conn()
+                    from backend.core.db import get_state_pg_conn
+                    conn = get_state_pg_conn()
                     try:
                         import time as _t
                         now = _t.time()
                         for name, s in snapshot.items():
+                            sql = """
+                                INSERT INTO attribution_snapshot (factor, data_json, updated_at)
+                                VALUES (?, ?, ?)
+                                ON CONFLICT(factor) DO UPDATE SET
+                                    data_json=excluded.data_json,
+                                    updated_at=excluded.updated_at
+                                """
+                            sql = sql.replace("?", "%s")
                             conn.execute(
-                                "INSERT OR REPLACE INTO attribution_snapshot (factor, data_json, updated_at) VALUES (?, ?, ?)",
+                                sql,
                                 (name, json.dumps(s, ensure_ascii=False, default=str), now)
                             )
                         # ── 系统级真实 PnL 汇总 (非因子级, 避免重复求和) ──
@@ -796,15 +804,23 @@ class AttributionEngine:
                             "total_commission": round(self._system_pnl["commission"], 6),
                             "total_net_pnl": round(self._system_pnl["net"], 6),
                         }
+                        sql = """
+                            INSERT INTO attribution_snapshot (factor, data_json, updated_at)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(factor) DO UPDATE SET
+                                data_json=excluded.data_json,
+                                updated_at=excluded.updated_at
+                            """
+                        sql = sql.replace("?", "%s")
                         conn.execute(
-                            "INSERT OR REPLACE INTO attribution_snapshot (factor, data_json, updated_at) VALUES (?, ?, ?)",
+                            sql,
                             ("__SYSTEM__", json.dumps(system_data, ensure_ascii=False, default=str), now)
                         )
                         conn.commit()
                     finally:
                         conn.close()
                 except Exception as _sdb_err:
-                    logger.warning("Failed to write attribution_snapshot to state.db: %s", _sdb_err)
+                    logger.warning("Failed to write attribution_snapshot to state store: %s", _sdb_err)
         except Exception as e:
             logger.warning("Failed to save stats snapshot: %s", e)
 
@@ -876,15 +892,14 @@ class AttributionEngine:
     # ── 加载快照 ──────────────────────────────────────────
 
     def _load_stats_snapshot(self):
-        """从 state.db (首选) 或 JSON 文件恢复因子统计 (启动时调用)。"""
+        """从主状态库 (首选) 或 JSON 文件恢复因子统计 (启动时调用)。"""
         data: dict[str, Any] = {}
 
-        # 尝试从 state.db 恢复 (更可靠, 事务保护)
+        # 尝试从主状态库恢复 (更可靠, 事务保护)
         if not _os.environ.get("PYTEST_CURRENT_TEST"):
             try:
-                from backend.core.db import STATE_DB, connect_sqlite
-                conn = connect_sqlite(STATE_DB, read_only=True)
-                conn.row_factory = __import__("sqlite3").Row
+                from backend.core.db import get_state_pg_conn
+                conn = get_state_pg_conn(read_only=True)
                 try:
                     rows = conn.execute(
                         "SELECT factor, data_json FROM attribution_snapshot"
@@ -897,7 +912,7 @@ class AttributionEngine:
                 finally:
                     conn.close()
             except Exception as e:
-                logger.warning("Failed to load stats from state.db: %s", e)
+                logger.warning("Failed to load stats from state store: %s", e)
 
         if not data:
             return
@@ -917,6 +932,6 @@ class AttributionEngine:
                 stats.recent_pnl_directions.extend(dirs)
             self._per_factor[name] = stats
         logger.info(
-            "Restored %d factor stats from state.db", len(data),
+            "Restored %d factor stats from state store", len(data),
         )
 

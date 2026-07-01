@@ -1,136 +1,61 @@
-# PostgreSQL State Dual-Write Audit
+# PostgreSQL State Store
 
 Last updated: 2026-07-01
 
-## Purpose
+## Current Status
 
-`state.db` remains the source of truth for live trading, risk, learning, and
-runtime state.  PostgreSQL dual-write is a migration audit layer only.  It must
-not block the live loop, order flow, or risk decisions when PostgreSQL is down.
+Runtime state has been migrated from `data/state.db` to local PostgreSQL schema
+`state_v1`.
 
-The dual-written scope is still an audit/migration layer, but it now covers
-both append-only decision evidence and the key state rows needed to reconstruct
-the learning/control plane:
-
-- `decision_ledger`
-- full `decision_factor_snapshot`
-- `lifecycle_events`
-- `runtime_kv`
-- `recovery_position_state`
-- `position_supervisor_trace`
-- `autonomous_learning_sample`
-- `evolution_events`
-
-Data granularity is preserved. State rows are mirrored as full JSON payloads in
-PostgreSQL rather than downsampled summaries.
+- PostgreSQL is now the source of truth for live runtime state, recovery state,
+  decision ledger, supervisor traces, learning state, and frontend state reads.
+- `data/state.db` is retained only as the migration cold backup and rollback
+  source.
+- Historical `audit_*` dual-write tables are retained as audit/migration
+  evidence. They are not the main state schema.
 
 ## Configuration
 
-Set these values in `.env` or the systemd environment.  Do not commit secrets.
+Server-local `.env` contains the state backend settings. Do not commit or print
+the DSN value.
 
 ```bash
-QUANT_AUDIT_PG_DSN=postgresql://user:password@host:5432/dbname
-QUANT_AUDIT_PG_DUAL_WRITE=true
+QUANT_STATE_BACKEND=postgres
+QUANT_STATE_PG_DSN=postgresql://user:password@host:5432/dbname
 ```
 
-If the DSN is missing or `QUANT_AUDIT_PG_DUAL_WRITE` is not true, the system
-continues to write SQLite only.
+Legacy audit settings may remain only as historical configuration. Runtime
+state writes do not use the SQLite outbox path.
 
-## Current Server Status
+## Migration Artifacts
 
-The Linux backend server is currently configured with a local PostgreSQL 16
-audit sink:
-
-- service: `postgresql`
-- database: `quant_audit`
-- login role: `quant_audit`
-- DSN location: server-local `.env`
-- enabled flag: `QUANT_AUDIT_PG_DUAL_WRITE=true`
-
-The DSN contains a generated password and must not be printed into logs,
-committed, or copied into documentation.  `.env` remains the only configured
-secret location for this stage.
-
-## Data Flow
-
-1. SQLite writes remain the first write and the source of truth.
-2. The same SQLite transaction queues a replayable row in
-   `state_dual_write_outbox` for state rows that are already inside an open
-   transaction. Decision ledger events may enqueue immediately after their
-   SQLite transaction succeeds.
-3. A background worker reads pending outbox rows and writes PostgreSQL audit
-   tables.
-4. Successful outbox rows are marked `synced`; failures are marked `retry` with
-   `attempts` and `last_error`.
-
-Decision events use `decision_id` as the outbox `event_id`. State-row mirror
-events use a deterministic hash of table, entity key, operation, timestamp, and
-payload hash, so replay is idempotent while preserving every distinct state
-mutation event.
-
-## PostgreSQL Tables
-
-- `audit_decision_ledger`: mirrors `decision_ledger`, plus
-  `schema_version`, `source_db`, `outbox_event_id`, `synced_at`.
-- `audit_decision_factor_snapshot`: mirrors every factor snapshot, plus
-  `snapshot_seq`, `schema_version`, `source_db`, `outbox_event_id`,
-  `synced_at`.
-- `audit_state_mirror_event`: append-only state-row mirror event stream. Each
-  event contains `table_name`, `entity_key`, operation, full `payload_json`,
-  payload hash, source timestamp, and sync metadata.
-- `audit_state_mirror_latest`: latest full JSON state per
-  `(table_name, entity_key)`, useful for read-heavy audit/reporting queries.
-
-`snapshot_seq` is generated from the original factor snapshot order and does not
-depend on SQLite autoincrement ids.
-
-## Operations
-
-Inspect status:
-
-```bash
-python scripts/state_dual_write_status.py --json
-```
-
-Expected enabled state on the server:
+The migration cold backup directory is:
 
 ```text
-enabled: true
-dsn_configured: true
+data/migration_backups/pg_migration_20260701_162925/
 ```
 
-Check PostgreSQL table counts without exposing the DSN:
+It contains:
+
+- `state.db`: SQLite cold backup before PostgreSQL cutover.
+- `postgres_before_state_v1.sql`: PostgreSQL dump before creating `state_v1`.
+- `sqlite_state_manifest.json`: source table/column/index/count manifest.
+
+The full migration and parity commands are:
 
 ```bash
-.venv/bin/python - <<'PY'
-from backend.services.state_dual_write import audit_pg_dsn
-import psycopg
-
-with psycopg.connect(audit_pg_dsn()) as conn:
-    for table in ["audit_decision_ledger", "audit_decision_factor_snapshot"]:
-        print(table, conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-PY
+python scripts/migrate_state_sqlite_to_pg.py --drop-schema --backup-dir data/migration_backups/pg_migration_20260701_162925
+python scripts/verify_state_pg_parity.py --strict
 ```
 
-Flush one batch manually:
+The strict parity check passed for all 47 migrated tables before the safe-start
+runtime flag was changed in PostgreSQL.
 
-```bash
-python scripts/state_dual_write_status.py --flush-once --limit 50 --json
-```
+## Operational Notes
 
-Run database doctor:
-
-```bash
-python scripts/db_doctor.py
-```
-
-## Migration Path
-
-1. Keep SQLite as source of truth and dual-write new decisions/state rows.
-2. Verify PostgreSQL row counts and outbox `synced` counts.
-3. Add a separate offline historical backfill from `state.db` to PostgreSQL for
-   rows written before dual-write coverage existed.
-4. Switch read-heavy audit/learning queries to PostgreSQL once coverage and
-   backfill parity are verified.
-5. Later split hot transactional state and cold append-only evidence into the
-   final storage layout.
+- Use `backend.core.db.get_state_pg_conn()` for runtime state access.
+- Do not add new production code that writes `data/state.db`.
+- DuckDB market databases remain separate and are not part of this migration.
+- `experiments.db` remains separate unless explicitly migrated later.
+- When starting after migration, keep `live.loop.desired_state.enabled=false`
+  until frontend/API verification is complete.

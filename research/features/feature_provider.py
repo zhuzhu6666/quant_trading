@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from research.features.evidence_contract import build_evidence_contract
 
 
@@ -98,31 +98,44 @@ class LearningFeatureProvider:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _p(self) -> str:
+        return "%s" if self._use_pg() else "?"
+
     @contextmanager
-    def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+    def _conn(self, *, read_only: bool = True):
+        conn = (
+            get_state_pg_conn(read_only=read_only)
+            if self._use_pg()
+            else connect_sqlite(self.db_path, read_only=read_only)
+        )
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
             conn.close()
 
     def _ensure_schema(self) -> None:
-        with self._conn() as conn:
-            conn.executescript(STATE_DB_DDL)
+        with self._conn(read_only=self._use_pg()) as conn:
+            if not self._use_pg():
+                conn.executescript(STATE_DB_DDL)
             conn.commit()
 
     def _factor_snapshots(self, decision_id: str) -> list[dict]:
         if not decision_id:
             return []
         with self._conn() as conn:
+            p = self._p()
             rows = conn.execute(
-                """
+                f"""
                 SELECT factor, source, raw_value, normalized_value, direction,
                        base_weight, policy_weight, shadow_score, health_score,
                        gated, gated_reason, contribution_score
                 FROM decision_factor_snapshot
-                WHERE decision_id=?
+                WHERE decision_id={p}
                 ORDER BY ABS(contribution_score) DESC, factor ASC
                 """,
                 (decision_id,),
@@ -149,12 +162,13 @@ class LearningFeatureProvider:
         if not review_id:
             return []
         with self._conn() as conn:
+            p = self._p()
             rows = conn.execute(
-                """
+                f"""
                 SELECT factor, entry_contribution, hold_contribution,
                        exit_contribution, net_contribution, confidence, notes
                 FROM factor_contribution_review
-                WHERE review_id=?
+                WHERE review_id={p}
                 ORDER BY ABS(net_contribution) DESC, factor ASC
                 """,
                 (review_id,),
@@ -177,11 +191,12 @@ class LearningFeatureProvider:
         ids = [str(item) for item in (decision_ids or []) if str(item)]
         clauses = []
         params: list[Any] = []
+        p = self._p()
         if trade_id:
-            clauses.append("trade_id=?")
+            clauses.append(f"trade_id={p}")
             params.append(str(trade_id))
         if ids:
-            placeholders = ",".join("?" for _ in ids)
+            placeholders = ",".join(p for _ in ids)
             clauses.append(f"decision_id IN ({placeholders})")
             params.extend(ids)
         if not clauses:
@@ -224,11 +239,12 @@ class LearningFeatureProvider:
     def _position_events(self, *, position_id: str = "", trade_id: str = "") -> list[dict]:
         clauses = []
         params: list[Any] = []
+        p = self._p()
         if position_id:
-            clauses.append("position_id=?")
+            clauses.append(f"position_id={p}")
             params.append(str(position_id))
         if trade_id:
-            clauses.append("trade_id=?")
+            clauses.append(f"trade_id={p}")
             params.append(str(trade_id))
         if not clauses:
             return []
@@ -532,8 +548,9 @@ class LearningFeatureProvider:
 
     def build_decision_features(self, decision_id: str) -> dict:
         with self._conn() as conn:
+            p = self._p()
             row = conn.execute(
-                "SELECT * FROM decision_ledger WHERE decision_id=?",
+                f"SELECT * FROM decision_ledger WHERE decision_id={p}",
                 (decision_id,),
             ).fetchone()
         if not row:
@@ -689,11 +706,12 @@ class LearningFeatureProvider:
         if not trade_id:
             return None
         with self._conn() as conn:
+            p = self._p()
             row = conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM experience_memory
-                WHERE trade_id=?
+                WHERE trade_id={p}
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -705,7 +723,8 @@ class LearningFeatureProvider:
         names = [f["factor"] for f in factors if f.get("factor")]
         if not names:
             return []
-        placeholders = ",".join("?" for _ in names)
+        p = self._p()
+        placeholders = ",".join(p for _ in names)
         with self._conn() as conn:
             rows = conn.execute(
                 f"""
@@ -720,7 +739,7 @@ class LearningFeatureProvider:
                   ON e.application_id = l.application_id
                 WHERE l.scope_type='factor'
                   AND l.scope_key IN ({placeholders})
-                  AND l.cycle_ts <= ?
+                  AND l.cycle_ts <= {p}
                 ORDER BY l.cycle_ts DESC
                 LIMIT 20
                 """,
@@ -855,11 +874,12 @@ class LearningFeatureProvider:
 
     def build_trade_features(self, trade_id: str) -> dict:
         with self._conn() as conn:
+            p = self._p()
             row = conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM trade_outcome_review
-                WHERE trade_id=? OR position_id=? OR review_id=?
+                WHERE trade_id={p} OR position_id={p} OR review_id={p}
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -871,8 +891,9 @@ class LearningFeatureProvider:
 
     def build_experience_features(self, experience_id: str) -> dict:
         with self._conn() as conn:
+            p = self._p()
             row = conn.execute(
-                "SELECT * FROM experience_memory WHERE experience_id=?",
+                f"SELECT * FROM experience_memory WHERE experience_id={p}",
                 (experience_id,),
             ).fetchone()
         if not row:
@@ -1037,12 +1058,13 @@ class LearningFeatureProvider:
         model_ready_only: bool = False,
     ) -> list[dict]:
         with self._conn() as conn:
+            p = self._p()
             rows = conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM trade_outcome_review
                 ORDER BY created_at DESC
-                LIMIT ?
+                LIMIT {p}
                 """,
                 (int(limit),),
             ).fetchall()
@@ -1063,18 +1085,19 @@ class LearningFeatureProvider:
         if event_types:
             clean = [str(item) for item in event_types if str(item)]
             if clean:
-                placeholders = ",".join("?" for _ in clean)
+                placeholders = ",".join(self._p() for _ in clean)
                 where = f"WHERE event_type IN ({placeholders})"
                 params.extend(clean)
         params.append(int(limit))
         with self._conn() as conn:
+            p = self._p()
             rows = conn.execute(
                 f"""
                 SELECT decision_id
                 FROM decision_ledger
                 {where}
                 ORDER BY decision_ts DESC, created_at DESC
-                LIMIT ?
+                LIMIT {p}
                 """,
                 tuple(params),
             ).fetchall()

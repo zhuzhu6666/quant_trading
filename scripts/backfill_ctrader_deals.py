@@ -1,6 +1,6 @@
 """scripts/backfill_ctrader_deals.py — 历史成交数据回填.
 
-从 cTrader get_deals() 拉全量历史成交, 写入 state.db ctrader_deals 表.
+从 cTrader get_deals() 拉全量历史成交, 写入 PostgreSQL state_v1.ctrader_deals 表.
 
 用法:
     .venv/bin/python scripts/backfill_ctrader_deals.py [--days 30] [--max-rows 500]
@@ -26,7 +26,7 @@ logger = logging.getLogger("backfill_deals")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="回填 cTrader 历史成交到 state.db")
+    parser = argparse.ArgumentParser(description="回填 cTrader 历史成交到 PostgreSQL state_v1")
     parser.add_argument("--days", type=int, default=30, help="回填天数 (默认 30)")
     parser.add_argument("--max-rows", type=int, default=500, help="每批最大条数 (默认 500)")
     args = parser.parse_args()
@@ -51,7 +51,7 @@ def main():
 
     # ── 分批回填 ──
     from execution.deal_sync import fetch_deals_since, store_deals
-    from backend.core.db import get_state_conn
+    from backend.core.db import get_state_pg_conn
 
     now = int(time.time())
     days = args.days
@@ -67,7 +67,7 @@ def main():
                     day_offset + 1, days)
         deals = fetch_deals_since(bridge, from_ts=from_ts, to_ts=to_ts, max_rows=max_rows)
         if deals:
-            conn = get_state_conn()
+            conn = get_state_pg_conn()
             try:
                 n = store_deals(conn, deals)
                 total_stored += n

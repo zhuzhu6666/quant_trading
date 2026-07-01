@@ -86,13 +86,19 @@ def update_position_path_metrics(
     min_thesis_break_seconds = max(0.0, _safe_float(min_thesis_break_seconds))
     thesis_break_ready = holding_seconds >= min_thesis_break_seconds
 
+    low_efficiency_after_observation = (
+        holding_efficiency < 0.45
+        and thesis_break_ready
+        and (current_pnl < 0 or mae > 0)
+    )
+
     if current_pnl < 0 and (
         timeout_ratio >= 1.0
         or giveback_ratio >= 0.85
         or (holding_efficiency < 0.2 and thesis_break_ready)
     ):
         thesis_status = "broken"
-    elif giveback_ratio >= 0.5 or timeout_ratio >= 0.8 or holding_efficiency < 0.45:
+    elif giveback_ratio >= 0.5 or timeout_ratio >= 0.8 or low_efficiency_after_observation:
         thesis_status = "weakening"
     else:
         thesis_status = "intact"

@@ -1,8 +1,8 @@
 """db.store — analytics store with bulk insert helpers.
 
-Thin wrapper around SQLite.  Same patterns as ``data.store.DataStore``
-(``@contextmanager`` for connections, ``row_factory = sqlite3.Row``)
-but living in a separate file/DB to keep raw market data clean.
+Thin wrapper around the configured analytics state store.  The default runtime
+state path uses PostgreSQL; explicit non-state paths are still supported for
+tests and isolated research runs.
 
 Why a separate file from ``data.store``?
   * Different concern: analytics vs market data
@@ -20,12 +20,13 @@ from pathlib import Path
 from typing import Iterable
 
 from .schema import DDL
+from backend.core.db import get_state_pg_conn, connect_sqlite, is_state_db_path
 
 logger = logging.getLogger(__name__)
 
 
 class AnalyticsStore:
-    """Run/strategy analytics — one SQLite file, multiple tables."""
+    """Run/strategy analytics."""
 
     def __init__(self, db_path: str = None):
         if db_path is None:
@@ -35,12 +36,19 @@ class AnalyticsStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _p(self) -> str:
+        return "%s" if self._use_pg() else "?"
+
     # ── connection plumbing ─────────────────────────────────────
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         except Exception:
@@ -53,6 +61,8 @@ class AnalyticsStore:
 
     def _init_db(self):
         with self._conn() as conn:
+            if self._use_pg():
+                return
             for ddl in DDL:
                 conn.execute(ddl)
 
@@ -104,11 +114,16 @@ class AnalyticsStore:
                 str(meta),
             ))
 
+        p = self._p()
         sql = (
-            "INSERT OR REPLACE INTO strategy_perf "
+            "INSERT INTO strategy_perf "
             "(run_id, bar_ts, bar_date, strategy, regime, direction, "
             " hold_bars, unrealized_pnl, cum_pnl, position_open, meta) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            f"VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})"
+            " ON CONFLICT(run_id, bar_ts, strategy) DO UPDATE SET "
+            "bar_date=excluded.bar_date, regime=excluded.regime, direction=excluded.direction, "
+            "hold_bars=excluded.hold_bars, unrealized_pnl=excluded.unrealized_pnl, "
+            "cum_pnl=excluded.cum_pnl, position_open=excluded.position_open, meta=excluded.meta"
         )
         with self._conn() as conn:
             conn.executemany(sql, rows)
@@ -119,7 +134,7 @@ class AnalyticsStore:
     def count_strategy_perf(self, run_id: int) -> int:
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS c FROM strategy_perf WHERE run_id=?",
+                f"SELECT COUNT(*) AS c FROM strategy_perf WHERE run_id={self._p()}",
                 (run_id,),
             ).fetchone()
             return int(row["c"])
@@ -127,11 +142,12 @@ class AnalyticsStore:
     def fetch_strategy_perf(self, run_id: int,
                             limit: int | None = None
                             ) -> list[sqlite3.Row]:
-        sql = ("SELECT * FROM strategy_perf WHERE run_id=? "
+        p = self._p()
+        sql = (f"SELECT * FROM strategy_perf WHERE run_id={p} "
                "ORDER BY bar_ts ASC, strategy ASC")
         params: tuple = (run_id,)
         if limit is not None:
-            sql += " LIMIT ?"
+            sql += f" LIMIT {p}"
             params = (run_id, int(limit))
         with self._conn() as conn:
             return list(conn.execute(sql, params))
@@ -141,7 +157,7 @@ class AnalyticsStore:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT direction, COUNT(*) AS c FROM strategy_perf "
-                "WHERE run_id=? GROUP BY direction",
+                f"WHERE run_id={self._p()} GROUP BY direction",
                 (run_id,),
             ).fetchall()
         return {int(r["direction"]): int(r["c"]) for r in rows}
@@ -166,12 +182,19 @@ class DecisionLogStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _p(self) -> str:
+        return "%s" if self._use_pg() else "?"
+
     # ── connection plumbing ─────────────────────────────────────
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         except Exception:
@@ -186,6 +209,8 @@ class DecisionLogStore:
         from .schema import DECISION_LOG_DDL
 
         with self._conn() as conn:
+            if self._use_pg():
+                return
             for ddl in DECISION_LOG_DDL:
                 conn.execute(ddl)
 
@@ -202,19 +227,25 @@ class DecisionLogStore:
         if meta is not None and not isinstance(meta, str):
             meta = json.dumps(meta, ensure_ascii=False, default=str)
 
+        p = self._p()
         sql = (
             "INSERT INTO decision_log "
             "(run_id, ts, bar_date, decision_type, strategy, regime, "
             " direction, confidence, factor_scores, decision, meta) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            f"VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})"
         )
         with self._conn() as conn:
+            if self._use_pg():
+                sql += " RETURNING id"
             cur = conn.execute(sql, (
                 int(run_id), float(ts), str(bar_date), str(decision_type),
                 str(strategy), str(regime), int(direction),
                 confidence, factor_scores, str(decision),
                 str(meta or ""),
             ))
+            if self._use_pg():
+                row = cur.fetchone()
+                return int(row["id"] if row else 0)
             return int(cur.lastrowid)
 
     def log_batch(self, records: list[dict]) -> int:
@@ -244,11 +275,12 @@ class DecisionLogStore:
                 str(meta or ""),
             ))
 
+        p = self._p()
         sql = (
             "INSERT INTO decision_log "
             "(run_id, ts, bar_date, decision_type, strategy, regime, "
             " direction, confidence, factor_scores, decision, meta) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            f"VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})"
         )
         with self._conn() as conn:
             conn.executemany(sql, rows)
@@ -267,17 +299,17 @@ class DecisionLogStore:
         params: list = []
 
         if run_id is not None:
-            conditions.append("run_id=?")
+            conditions.append(f"run_id={self._p()}")
             params.append(int(run_id))
         if decision_type is not None:
-            conditions.append("decision_type=?")
+            conditions.append(f"decision_type={self._p()}")
             params.append(decision_type)
         if strategy is not None:
-            conditions.append("strategy=?")
+            conditions.append(f"strategy={self._p()}")
             params.append(strategy)
 
         where = " AND ".join(conditions) if conditions else "1=1"
-        sql = f"SELECT * FROM decision_log WHERE {where} ORDER BY ts ASC LIMIT ?"
+        sql = f"SELECT * FROM decision_log WHERE {where} ORDER BY ts ASC LIMIT {self._p()}"
         params.append(int(limit))
 
         with self._conn() as conn:
@@ -292,7 +324,7 @@ class DecisionLogStore:
                 r["decision_type"]: int(r["c"])
                 for r in conn.execute(
                     "SELECT decision_type, COUNT(*) AS c FROM decision_log "
-                    "WHERE run_id=? GROUP BY decision_type ORDER BY c DESC",
+                    f"WHERE run_id={self._p()} GROUP BY decision_type ORDER BY c DESC",
                     (run_id,),
                 ).fetchall()
             }
@@ -302,7 +334,7 @@ class DecisionLogStore:
                 r["decision"]: int(r["c"])
                 for r in conn.execute(
                     "SELECT decision, COUNT(*) AS c FROM decision_log "
-                    "WHERE run_id=? GROUP BY decision ORDER BY c DESC",
+                    f"WHERE run_id={self._p()} GROUP BY decision ORDER BY c DESC",
                     (run_id,),
                 ).fetchall()
             }
@@ -311,7 +343,7 @@ class DecisionLogStore:
             router_dist = {}
             for r in conn.execute(
                 "SELECT meta FROM decision_log "
-                "WHERE run_id=? AND decision_type='router_select'",
+                f"WHERE run_id={self._p()} AND decision_type='router_select'",
                 (run_id,),
             ).fetchall():
                 try:
@@ -322,7 +354,7 @@ class DecisionLogStore:
                     pass
 
             total = conn.execute(
-                "SELECT COUNT(*) AS c FROM decision_log WHERE run_id=?",
+                f"SELECT COUNT(*) AS c FROM decision_log WHERE run_id={self._p()}",
                 (run_id,),
             ).fetchone()
             total_count = int(total["c"])

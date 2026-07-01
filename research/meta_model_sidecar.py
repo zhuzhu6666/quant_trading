@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite
+from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.ledger.service import DecisionLedger
 from backend.services.model_permissions import validate_model_artifact
 
@@ -41,18 +41,28 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,),
-    ).fetchone()
-    return bool(row)
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: tuple | list | None = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), tuple(params))
+
+
+def _table_exists(conn, table: str) -> bool:
+    return state_table_exists(conn, table)
 
 
 def _count_by_status(conn: sqlite3.Connection, table: str, status_col: str = "status") -> dict[str, int]:
     if not _table_exists(conn, table):
         return {}
-    rows = conn.execute(
+    rows = _execute(conn,
         f"""
         SELECT {status_col} AS status, COUNT(*) AS n
         FROM {table}
@@ -72,9 +82,13 @@ class MetaModelSidecar:
     def __init__(self, db_path: str | Path = STATE_DB):
         self.db_path = Path(db_path)
 
-    def _conn(self, *, read_only: bool = True) -> sqlite3.Connection:
-        conn = connect_sqlite(self.db_path, read_only=read_only)
-        conn.row_factory = sqlite3.Row
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _conn(self, *, read_only: bool = True):
+        conn = get_state_pg_conn(read_only=read_only) if self._use_pg() else connect_sqlite(self.db_path, read_only=read_only)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         return conn
 
     @staticmethod
@@ -275,7 +289,7 @@ class MetaModelSidecar:
     def list_advisories(self, *, limit: int = 50) -> dict[str, Any]:
         try:
             with self._conn(read_only=True) as conn:
-                rows = conn.execute(
+                rows = _execute(conn,
                     """
                     SELECT decision_id, event_type, symbol, timeframe, decision_ts,
                            action_score, action_reason, action_json, risk_state_json, created_at
@@ -312,7 +326,7 @@ class MetaModelSidecar:
     def _recent_policy_verdicts(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
         if not _table_exists(conn, "decision_ledger"):
             return []
-        rows = conn.execute(
+        rows = _execute(conn,
             """
             SELECT decision_id, event_type, risk_state_json, created_at
             FROM decision_ledger
@@ -340,7 +354,7 @@ class MetaModelSidecar:
     def _blocked_verdict_count(conn: sqlite3.Connection, since_ts: float) -> int:
         if not _table_exists(conn, "decision_ledger"):
             return 0
-        rows = conn.execute(
+        rows = _execute(conn,
             """
             SELECT risk_state_json
             FROM decision_ledger
@@ -360,7 +374,7 @@ class MetaModelSidecar:
     def _factor_health_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         if not _table_exists(conn, "factor_health"):
             return {"count": 0, "weak_count": 0, "items": []}
-        rows = conn.execute(
+        rows = _execute(conn,
             """
             SELECT factor, score, status, section, updated_at
             FROM factor_health
@@ -388,7 +402,7 @@ class MetaModelSidecar:
     def _shadow_audit_snapshot(conn: sqlite3.Connection, table: str) -> dict[str, Any]:
         if not _table_exists(conn, table):
             return {"count": 0, "weak_count": 0, "weak_rate": 0.0}
-        rows = conn.execute(
+        rows = _execute(conn,
             f"""
             SELECT prediction, result_json
             FROM {table}
@@ -412,7 +426,7 @@ class MetaModelSidecar:
     def _recent_position_events(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
         if not _table_exists(conn, "position_lifecycle_event"):
             return []
-        rows = conn.execute(
+        rows = _execute(conn,
             """
             SELECT position_id, event_type, symbol, unrealized_pnl, realized_pnl, event_ts
             FROM position_lifecycle_event

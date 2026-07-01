@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
-from backend.core.db import get_state_conn
+from backend.core.db import get_state_pg_conn
 
 _DEFAULT_TZ = "Asia/Shanghai"
 _VALID_SCOPES = {"today", "24h", "7d", "30d", "all"}
@@ -38,13 +38,28 @@ def _net_from_close_row(row) -> float:
     return gross + swap - close_commission
 
 
+def _connect_state():
+    return get_state_pg_conn(read_only=True)
+
+
+def _state_sql(sql: str) -> str:
+    return sql.replace("?", "%s")
+
+
+def _execute(conn, sql: str, params: list | tuple | None = None):
+    if params is None:
+        return conn.execute(_state_sql(sql))
+    return conn.execute(_state_sql(sql), tuple(params))
+
+
 def _fetch_ctrader_close_points(conn, *, from_ts: float | None, to_ts: float) -> list[dict]:
     clauses = ["is_close=1", "exec_timestamp > 0", "exec_timestamp <= ?"]
     params: list[float] = [float(to_ts)]
     if from_ts is not None:
         clauses.append("exec_timestamp >= ?")
         params.append(float(from_ts))
-    rows = conn.execute(
+    rows = _execute(
+        conn,
         f"""
         SELECT
             deal_id, position_id, exec_timestamp, exec_price, entry_price,
@@ -84,16 +99,17 @@ def _fetch_recovery_fallback_points(
 ) -> list[dict]:
     excluded = {int(pid) for pid in excluded_position_ids if int(pid or 0) > 0}
     clauses = [
-        "status LIKE 'closed%'",
+        "status LIKE ?",
         "closed_at > 0",
         "closed_at <= ?",
         "ABS(close_pnl) > 0.0000001",
     ]
-    params: list[float] = [float(to_ts)]
+    params: list = ["closed%", float(to_ts)]
     if from_ts is not None:
         clauses.append("closed_at >= ?")
         params.append(float(from_ts))
-    rows = conn.execute(
+    rows = _execute(
+        conn,
         f"""
         SELECT position_id, symbol, direction, volume, closed_at, close_reason, close_pnl
         FROM recovery_position_state
@@ -133,7 +149,7 @@ def get_realized_pnl_series(
     from_ts: float | None = None,
     to_ts: float | None = None,
     tz: str = _DEFAULT_TZ,
-    conn_factory: Callable[[], object] = get_state_conn,
+    conn_factory: Callable[[], object] = _connect_state,
 ) -> dict:
     """Return close-by-close realized PnL and cumulative curve.
 

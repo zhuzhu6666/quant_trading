@@ -8,7 +8,14 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite, ensure_sqlite_columns
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    ensure_sqlite_columns,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_pg_enabled,
+)
 
 
 def _dumps(value: Any) -> str:
@@ -34,6 +41,18 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def _use_pg(db_path: str | Path) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _connect(db_path: str | Path, *, read_only: bool = False):
+    return get_state_pg_conn(read_only=read_only) if _use_pg(db_path) else connect_sqlite(db_path, read_only=read_only)
+
+
+def _p(db_path: str | Path, sql: str) -> str:
+    return sql.replace("?", "%s") if _use_pg(db_path) else sql
+
+
 def _as_dict(config: Any) -> dict[str, Any]:
     if config is None:
         return {}
@@ -50,6 +69,8 @@ def _as_dict(config: Any) -> dict[str, Any]:
 
 
 def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
+    if _use_pg(db_path):
+        return
     conn = connect_sqlite(db_path)
     try:
         conn.execute(
@@ -110,6 +131,8 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
 
 
 def ensure_evolution_columns(db_path: str | Path = STATE_DB) -> None:
+    if _use_pg(db_path):
+        return
     ensure_sqlite_columns(
         db_path,
         "position_supervisor_trace",
@@ -142,18 +165,21 @@ def persist_runtime_config_snapshot(
     payload = _as_dict(config)
     config_hash = _stable_hash(payload)
     now = time.time()
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
         cur = conn.execute(
-            """
+            _p(db_path, """
             INSERT INTO runtime_config_snapshot (config_hash, source, config_json, run_id, created_at)
             VALUES (?, ?, ?, ?, ?)
-            """,
+            RETURNING config_version
+            """),
             (config_hash, str(source or ""), _dumps(payload), str(run_id or ""), now),
         )
+        row = cur.fetchone()
+        config_version = row["config_version"] if hasattr(row, "keys") and "config_version" in row.keys() else (row[0] if row else 0)
         conn.commit()
         return {
-            "config_version": int(cur.lastrowid or 0),
+            "config_version": int(config_version or 0),
             "config_hash": config_hash,
             "source": str(source or ""),
             "created_at": now,
@@ -169,8 +195,9 @@ def current_runtime_config_snapshot(
     source: str = "runtime_current",
 ) -> dict[str, Any]:
     ensure_evolution_ledger_tables(db_path)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path, read_only=True)
+    if not _use_pg(db_path):
+        conn.row_factory = __import__("sqlite3").Row
     try:
         row = conn.execute(
             """
@@ -207,15 +234,24 @@ def start_evolution_run(
     snapshot = persist_runtime_config_snapshot(config, source=f"evolution_run:{run_type}", db_path=db_path, run_id=run_id) if config is not None else current_runtime_config_snapshot(db_path=db_path)
     rid = str(run_id or _new_id("evorun"))
     now = time.time()
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
         conn.execute(
-            """
-            INSERT OR REPLACE INTO evolution_run
+            _p(db_path, """
+            INSERT INTO evolution_run
             (run_id, run_type, trigger_source, status, config_version, config_hash,
              summary_json, started_at, ended_at)
             VALUES (?, ?, ?, 'running', ?, ?, ?, ?, 0.0)
-            """,
+            ON CONFLICT(run_id) DO UPDATE SET
+                run_type=excluded.run_type,
+                trigger_source=excluded.trigger_source,
+                status=excluded.status,
+                config_version=excluded.config_version,
+                config_hash=excluded.config_hash,
+                summary_json=excluded.summary_json,
+                started_at=excluded.started_at,
+                ended_at=excluded.ended_at
+            """),
             (
                 rid,
                 str(run_type or ""),
@@ -240,14 +276,14 @@ def finish_evolution_run(
     db_path: str | Path = STATE_DB,
 ) -> None:
     ensure_evolution_ledger_tables(db_path)
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
         conn.execute(
-            """
+            _p(db_path, """
             UPDATE evolution_run
             SET status=?, summary_json=?, ended_at=?
             WHERE run_id=?
-            """,
+            """),
             (str(status or "completed"), _dumps(summary or {}), time.time(), str(run_id or "")),
         )
         conn.commit()
@@ -277,25 +313,42 @@ def record_evolution_decision(
     ensure_evolution_ledger_tables(db_path)
     did = str(decision_id or _new_id("evodec"))
     if (not config_version or not config_hash) and run_id:
-        conn = connect_sqlite(db_path)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _connect(db_path, read_only=True)
+        if not _use_pg(db_path):
+            conn.row_factory = __import__("sqlite3").Row
         try:
-            row = conn.execute("SELECT config_version, config_hash FROM evolution_run WHERE run_id=?", (run_id,)).fetchone()
+            row = conn.execute(_p(db_path, "SELECT config_version, config_hash FROM evolution_run WHERE run_id=?"), (run_id,)).fetchone()
             if row:
                 config_version = int(row["config_version"] or 0)
                 config_hash = str(row["config_hash"] or "")
         finally:
             conn.close()
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
         conn.execute(
-            """
-            INSERT OR REPLACE INTO evolution_decision
+            _p(db_path, """
+            INSERT INTO evolution_decision
             (decision_id, run_id, decision_type, scope_type, scope_key, action, status,
              evidence_json, risk_verdict_json, before_json, after_json, result_json,
              rollback_json, config_version, config_hash, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            ON CONFLICT(decision_id) DO UPDATE SET
+                run_id=excluded.run_id,
+                decision_type=excluded.decision_type,
+                scope_type=excluded.scope_type,
+                scope_key=excluded.scope_key,
+                action=excluded.action,
+                status=excluded.status,
+                evidence_json=excluded.evidence_json,
+                risk_verdict_json=excluded.risk_verdict_json,
+                before_json=excluded.before_json,
+                after_json=excluded.after_json,
+                result_json=excluded.result_json,
+                rollback_json=excluded.rollback_json,
+                config_version=excluded.config_version,
+                config_hash=excluded.config_hash,
+                created_at=excluded.created_at
+            """),
             (
                 did,
                 str(run_id or ""),
@@ -323,16 +376,17 @@ def record_evolution_decision(
 
 def list_evolution_runs(*, db_path: str | Path = STATE_DB, limit: int = 100) -> dict[str, Any]:
     ensure_evolution_ledger_tables(db_path)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path, read_only=True)
+    if not _use_pg(db_path):
+        conn.row_factory = __import__("sqlite3").Row
     try:
         rows = conn.execute(
-            """
+            _p(db_path, """
             SELECT *
             FROM evolution_run
             ORDER BY started_at DESC
             LIMIT ?
-            """,
+            """),
             (max(1, int(limit)),),
         ).fetchall()
         items = []
@@ -347,22 +401,23 @@ def list_evolution_runs(*, db_path: str | Path = STATE_DB, limit: int = 100) -> 
 
 def get_evolution_run(run_id: str, *, db_path: str | Path = STATE_DB) -> dict[str, Any]:
     ensure_evolution_ledger_tables(db_path)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path, read_only=True)
+    if not _use_pg(db_path):
+        conn.row_factory = __import__("sqlite3").Row
     try:
-        row = conn.execute("SELECT * FROM evolution_run WHERE run_id=?", (str(run_id or ""),)).fetchone()
+        row = conn.execute(_p(db_path, "SELECT * FROM evolution_run WHERE run_id=?"), (str(run_id or ""),)).fetchone()
         if not row:
             return {}
         item = dict(row)
         item["summary"] = _loads(item.pop("summary_json", "{}"), {})
         decisions = []
         for drow in conn.execute(
-            """
+            _p(db_path, """
             SELECT *
             FROM evolution_decision
             WHERE run_id=?
             ORDER BY created_at ASC
-            """,
+            """),
             (str(run_id or ""),),
         ).fetchall():
             d = dict(drow)
@@ -373,4 +428,3 @@ def get_evolution_run(run_id: str, *, db_path: str | Path = STATE_DB) -> dict[st
         return item
     finally:
         conn.close()
-

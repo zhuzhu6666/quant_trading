@@ -10,7 +10,14 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
+from backend.core.db import (
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_pg_enabled,
+)
 from backend.services.factor_cards import FactorCardService
 from research.learning.governor import RuleEvolutionGovernor
 from risk.policy_service import RiskPolicyService
@@ -19,6 +26,24 @@ from risk.policy_service import RiskPolicyService
 _RECOMMENDATION_CACHE_TTL_SEC = 60.0
 _RECOMMENDATION_CACHE_LOCK = threading.Lock()
 _RECOMMENDATION_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _use_pg(db_path: str | Path) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
 
 
 def clear_parameter_template_recommendation_cache(db_path: str | Path | None = None) -> None:
@@ -166,8 +191,9 @@ class ParameterTemplateService:
 
     @contextmanager
     def _conn(self):
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
+        if not _use_pg(self.db_path):
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
@@ -175,7 +201,8 @@ class ParameterTemplateService:
 
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
-            conn.executescript(STATE_DB_DDL)
+            if not _conn_is_pg(conn):
+                conn.executescript(STATE_DB_DDL)
             conn.commit()
 
     @staticmethod
@@ -218,7 +245,8 @@ class ParameterTemplateService:
     def list_active_templates(self, *, factor_id: str | None = None) -> list[dict[str, Any]]:
         with self._conn() as conn:
             if factor_id:
-                rows = conn.execute(
+                rows = _execute(
+                    conn,
                     """
                     SELECT * FROM parameter_template_active
                     WHERE factor_id=?
@@ -227,7 +255,8 @@ class ParameterTemplateService:
                     (factor_id,),
                 ).fetchall()
             else:
-                rows = conn.execute(
+                rows = _execute(
+                    conn,
                     """
                     SELECT * FROM parameter_template_active
                     ORDER BY updated_at DESC
@@ -362,19 +391,30 @@ class ParameterTemplateService:
         item = self._normalize_template(template, source=source)
         now = time.time()
         with self._conn() as conn:
-            conn.execute(
+            _execute(
+                conn,
                 """
-                INSERT OR REPLACE INTO parameter_template_registry
+                INSERT INTO parameter_template_registry
                 (template_id, factor_id, regime_key, template_version, template_role,
                  factor_family, formula_version, base_parameter_version, parameters_json,
                  applicable_regimes_json, avoid_regimes_json, holding_profile_hint_json,
                  evidence_json, source, active, created_at, updated_at)
-                VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    COALESCE((SELECT active FROM parameter_template_registry WHERE template_id=?), 0),
-                    COALESCE((SELECT created_at FROM parameter_template_registry WHERE template_id=?), ?),
-                    ?
-                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                ON CONFLICT(template_id) DO UPDATE SET
+                    factor_id=excluded.factor_id,
+                    regime_key=excluded.regime_key,
+                    template_version=excluded.template_version,
+                    template_role=excluded.template_role,
+                    factor_family=excluded.factor_family,
+                    formula_version=excluded.formula_version,
+                    base_parameter_version=excluded.base_parameter_version,
+                    parameters_json=excluded.parameters_json,
+                    applicable_regimes_json=excluded.applicable_regimes_json,
+                    avoid_regimes_json=excluded.avoid_regimes_json,
+                    holding_profile_hint_json=excluded.holding_profile_hint_json,
+                    evidence_json=excluded.evidence_json,
+                    source=excluded.source,
+                    updated_at=excluded.updated_at
                 """,
                 (
                     item["template_id"],
@@ -391,8 +431,6 @@ class ParameterTemplateService:
                     json.dumps(item["holding_profile_hint"], ensure_ascii=False, default=str),
                     json.dumps(item["evidence"], ensure_ascii=False, default=str),
                     source,
-                    item["template_id"],
-                    item["template_id"],
                     now,
                     now,
                 ),
@@ -458,7 +496,8 @@ class ParameterTemplateService:
             else f"{factor_id} requires offline_deep before switching to {target['template_version']}"
         )
         with self._conn() as conn:
-            conn.execute(
+            _execute(
+                conn,
                 """
                 INSERT INTO policy_suggestion
                 (suggestion_id, scope_type, scope_key, action, confidence, reason,
@@ -677,7 +716,8 @@ class ParameterTemplateService:
             "allow_offline_deep": bool(allow_offline_deep),
         }
         with self._conn() as conn:
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE parameter_template_registry
                 SET active=CASE WHEN template_id=? THEN 1 ELSE 0 END, updated_at=?
@@ -685,12 +725,21 @@ class ParameterTemplateService:
                 """,
                 (template_id, now, factor_id, regime_key),
             )
-            conn.execute(
+            _execute(
+                conn,
                 """
-                INSERT OR REPLACE INTO parameter_template_active
+                INSERT INTO parameter_template_active
                 (factor_id, regime_key, template_id, template_version, status, suggestion_id,
                  context_json, activated_at, updated_at)
                 VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                ON CONFLICT(factor_id, regime_key) DO UPDATE SET
+                    template_id=excluded.template_id,
+                    template_version=excluded.template_version,
+                    status=excluded.status,
+                    suggestion_id=excluded.suggestion_id,
+                    context_json=excluded.context_json,
+                    activated_at=excluded.activated_at,
+                    updated_at=excluded.updated_at
                 """,
                 (
                     factor_id,
@@ -703,7 +752,8 @@ class ParameterTemplateService:
                     now,
                 ),
             )
-            conn.execute(
+            _execute(
+                conn,
                 """
                 INSERT INTO parameter_template_switch_log
                 (switch_id, factor_id, regime_key, old_template_id, new_template_id,
@@ -783,7 +833,8 @@ class ParameterTemplateService:
 
     def get_active_template(self, *, factor_id: str, regime_key: str = "") -> dict[str, Any] | None:
         with self._conn() as conn:
-            row = conn.execute(
+            row = _execute(
+                conn,
                 """
                 SELECT * FROM parameter_template_active
                 WHERE factor_id=? AND regime_key=?
@@ -800,7 +851,8 @@ class ParameterTemplateService:
     def list_switch_logs(self, *, factor_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         with self._conn() as conn:
             if factor_id:
-                rows = conn.execute(
+                rows = _execute(
+                    conn,
                     """
                     SELECT * FROM parameter_template_switch_log
                     WHERE factor_id=?
@@ -810,7 +862,8 @@ class ParameterTemplateService:
                     (factor_id, limit),
                 ).fetchall()
             else:
-                rows = conn.execute(
+                rows = _execute(
+                    conn,
                     """
                     SELECT * FROM parameter_template_switch_log
                     ORDER BY created_at DESC
@@ -900,7 +953,7 @@ class ParameterTemplateService:
             params.append(template_version)
         sql += " ORDER BY updated_at DESC, created_at DESC"
         with self._conn() as conn:
-            rows = conn.execute(sql, tuple(params)).fetchall()
+            rows = _execute(conn, sql, tuple(params)).fetchall()
         return [self._parse_registry_row(row) for row in rows]
 
     @staticmethod
@@ -1134,7 +1187,8 @@ class ParameterTemplateService:
 
     def _suggestion_is_approved(self, suggestion_id: str) -> bool:
         with self._conn() as conn:
-            row = conn.execute(
+            row = _execute(
+                conn,
                 """
                 SELECT status FROM policy_suggestion WHERE suggestion_id=?
                 """,

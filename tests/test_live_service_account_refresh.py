@@ -72,6 +72,26 @@ def test_refresh_account_positions_writes_cache():
     assert cached["thesis_status"] in {"intact", "weakening"}
 
 
+def test_refresh_account_positions_fills_single_position_pnl_from_account_equity():
+    bridge = _fake_bridge(balance=503.24, equity=501.81)
+    bridge.get_positions.return_value = [
+        {"position_id": 88, "symbol_id": 1, "symbol": "XAUUSD", "type": "sell", "volume": 100.0,
+         "price_open": 3968.85, "price_current": 3970.22, "sl": 3986.08, "tp": 3943.01,
+         "profit": 0.0, "swap": 0.0, "commission": 0.0}
+    ]
+    bridge.refresh_positions.return_value = bridge.get_positions.return_value
+
+    live_service._refresh_account_positions_sync(bridge, "ctrader")
+
+    pos = live_service._live_state["positions"]
+    cached = next(p for p in pos if p.get("position_id") == 88)
+    assert cached["pnl"] == pytest.approx(-1.43)
+    assert cached["profit"] == pytest.approx(-1.43)
+    assert cached["unrealized_pnl"] == pytest.approx(-1.43)
+    assert cached["netUnrealizedPnL"] == pytest.approx(-1.43)
+    assert cached["pnl_source"] == "account_equity"
+
+
 def test_refresh_account_positions_swallows_bridge_errors():
     """If bridge.account_info raises, we should NOT crash — just log and leave cache.
     Same pattern as the original tick code: best-effort write, never raise."""

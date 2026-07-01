@@ -7,10 +7,35 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite
+from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 
 
-DEFAULT_HORIZONS_MINUTES = [5, 15, 30, 60]
+DEFAULT_HORIZONS_MINUTES = [5, 15, 30, 60, 120]
+
+
+def _use_pg(db_path: str | Path = STATE_DB) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
+    conn = get_state_pg_conn(read_only=read_only) if _use_pg(db_path) else connect_sqlite(db_path, read_only=read_only)
+    if not _use_pg(db_path):
+        conn.row_factory = __import__("sqlite3").Row
+    return conn
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -45,7 +70,8 @@ def _direction_from_review(review: dict[str, Any]) -> int:
 
 
 def _position_open_event(conn, position_id: str) -> dict[str, Any]:
-    row = conn.execute(
+    row = _execute(
+        conn,
         """
         SELECT details_json, event_ts
         FROM position_lifecycle_event
@@ -63,7 +89,8 @@ def _position_open_event(conn, position_id: str) -> dict[str, Any]:
 
 
 def _latest_supervisor_before_close(conn, position_id: str, close_ts: float) -> dict[str, Any]:
-    row = conn.execute(
+    row = _execute(
+        conn,
         """
         SELECT decision_id, event_type, action_reason, action_score, action_json,
                risk_state_json, created_at, decision_ts
@@ -113,6 +140,29 @@ def _pnl_from_price(*, direction: int, entry_price: float, price: float, unit: f
     return (price - entry_price) * int(direction or 1) * unit
 
 
+def _first_original_barrier_hit(*, window, direction: int, original_tp: float, original_sl: float) -> dict[str, Any]:
+    if original_tp <= 0 and original_sl <= 0:
+        return {"first_original_hit": "", "first_original_hit_ts": 0.0}
+    sorted_window = window.sort_values("_epoch_time")
+    for _, row in sorted_window.iterrows():
+        high = _safe_float(row.get("high"))
+        low = _safe_float(row.get("low"))
+        ts = _safe_float(row.get("_epoch_time"))
+        if direction >= 0:
+            tp_hit = bool(original_tp > 0 and high >= original_tp)
+            sl_hit = bool(original_sl > 0 and low <= original_sl)
+        else:
+            tp_hit = bool(original_tp > 0 and low <= original_tp)
+            sl_hit = bool(original_sl > 0 and high >= original_sl)
+        if tp_hit and sl_hit:
+            return {"first_original_hit": "ambiguous", "first_original_hit_ts": ts}
+        if tp_hit:
+            return {"first_original_hit": "tp", "first_original_hit_ts": ts}
+        if sl_hit:
+            return {"first_original_hit": "sl", "first_original_hit_ts": ts}
+    return {"first_original_hit": "", "first_original_hit_ts": 0.0}
+
+
 def _horizon_metrics(
     *,
     bars,
@@ -131,9 +181,12 @@ def _horizon_metrics(
         try:
             import pandas as pd
 
-            time_values = pd.to_datetime(bars["time"], utc=True, errors="coerce")
             bars = bars.copy()
-            bars["_epoch_time"] = (time_values.astype("int64") / 1_000_000_000).astype(float)
+            if pd.api.types.is_numeric_dtype(bars["time"]):
+                bars["_epoch_time"] = bars["time"].apply(_safe_float)
+            else:
+                time_values = pd.to_datetime(bars["time"], utc=True, errors="coerce")
+                bars["_epoch_time"] = (time_values.astype("int64") / 1_000_000_000).astype(float)
         except Exception:
             bars = bars.copy()
             bars["_epoch_time"] = bars["time"].apply(_safe_float)
@@ -160,6 +213,12 @@ def _horizon_metrics(
         best_pnl = _pnl_from_price(direction=direction, entry_price=entry_price, price=favorable_price, unit=unit)
         worst_pnl = _pnl_from_price(direction=direction, entry_price=entry_price, price=adverse_price, unit=unit)
         end_pnl = _pnl_from_price(direction=direction, entry_price=entry_price, price=end_close, unit=unit)
+        first_hit = _first_original_barrier_hit(
+            window=window,
+            direction=direction,
+            original_tp=original_tp,
+            original_sl=original_sl,
+        )
         out.append(
             {
                 "horizon_minutes": int(minutes),
@@ -171,6 +230,8 @@ def _horizon_metrics(
                 "end_delta_vs_close": round(end_pnl - close_pnl, 6),
                 "hit_original_tp": bool(hit_tp),
                 "hit_original_sl": bool(hit_sl),
+                "first_original_hit": first_hit["first_original_hit"],
+                "first_original_hit_ts": round(_safe_float(first_hit["first_original_hit_ts"]), 3),
             }
         )
     return out
@@ -186,7 +247,28 @@ def _classify_counterfactual(close_pnl: float, horizons: list[dict[str, Any]], s
     hit_sl = any(bool(item.get("hit_original_sl")) for item in horizons)
     reason = str(supervisor.get("action_reason") or "")
     tags = []
-    if hit_tp or max_best_delta >= max(1.0, abs(close_pnl) * 2.0):
+    ordered_hits = sorted(
+        (
+            item
+            for item in horizons
+            if str(item.get("first_original_hit") or "") in {"tp", "sl", "ambiguous"}
+            and _safe_float(item.get("first_original_hit_ts")) > 0
+        ),
+        key=lambda item: _safe_float(item.get("first_original_hit_ts")),
+    )
+    first_hit = str(ordered_hits[0].get("first_original_hit") or "") if ordered_hits else ""
+    if first_hit == "sl":
+        tags.extend(["future_worse", "original_sl_first"])
+        return "correct_stop", 0.78, tags
+    if first_hit == "tp":
+        tags.extend(["future_recovered", "original_tp_first"])
+        if reason == "thesis_weakening":
+            return "premature_tighten", 0.8, tags
+        return "protection_too_tight", 0.74, tags
+    if first_hit == "ambiguous":
+        tags.append("original_barrier_ambiguous")
+        return "inconclusive", 0.4, tags
+    if (hit_tp and not hit_sl) or max_best_delta >= max(1.0, abs(close_pnl) * 2.0):
         tags.append("future_recovered")
         if reason == "thesis_weakening":
             return "premature_tighten", 0.78, tags
@@ -205,9 +287,14 @@ def _classify_counterfactual(close_pnl: float, horizons: list[dict[str, Any]], s
 
 
 def ensure_counterfactual_table(db_path: str | Path = STATE_DB) -> None:
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
-        conn.execute(
+        if _conn_is_pg(conn):
+            if not state_table_exists(conn, "supervisor_counterfactual_review"):
+                raise RuntimeError("missing state table: supervisor_counterfactual_review")
+            return
+        _execute(
+            conn,
             """
             CREATE TABLE IF NOT EXISTS supervisor_counterfactual_review (
                 counterfactual_id TEXT PRIMARY KEY,
@@ -227,13 +314,15 @@ def ensure_counterfactual_table(db_path: str | Path = STATE_DB) -> None:
             )
             """
         )
-        conn.execute(
+        _execute(
+            conn,
             """
             CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_position
             ON supervisor_counterfactual_review(position_id, close_ts)
             """
         )
-        conn.execute(
+        _execute(
+            conn,
             """
             CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_label
             ON supervisor_counterfactual_review(label, updated_at)
@@ -253,10 +342,10 @@ def evaluate_counterfactuals(
 ) -> dict[str, Any]:
     ensure_counterfactual_table(db_path)
     horizons_minutes = list(horizons_minutes or DEFAULT_HORIZONS_MINUTES)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                    pnl, review_json, created_at
@@ -267,6 +356,8 @@ def evaluate_counterfactuals(
             """,
             (int(limit),),
         ).fetchall()
+        if _conn_is_pg(conn):
+            conn.commit()
         items = []
         for row in rows:
             review = _loads(row["review_json"], {})
@@ -276,12 +367,16 @@ def evaluate_counterfactuals(
             position_id = str(row["position_id"] or "")
             close_ts = _safe_float(review.get("close_ts") or row["created_at"])
             supervisor = _latest_supervisor_before_close(conn, position_id, close_ts)
+            if _conn_is_pg(conn):
+                conn.commit()
             if not supervisor:
                 continue
             supervisor_event = str(supervisor.get("event_type") or "")
             if supervisor_event not in {"supervisor_tighten", "supervisor_reduce", "supervisor_close"}:
                 continue
             opened = _position_open_event(conn, position_id)
+            if _conn_is_pg(conn):
+                conn.commit()
             direction = int(opened.get("direction") or _direction_from_review(review) or 1)
             real = review.get("real_pnl") or {}
             entry_price = _safe_float(real.get("entry_price") or review.get("entry_price"))
@@ -342,16 +437,27 @@ def evaluate_counterfactuals(
             items.append(item)
             if materialize:
                 now = time.time()
-                conn.execute(
+                _execute(
+                    conn,
                     """
-                    INSERT OR REPLACE INTO supervisor_counterfactual_review
+                    INSERT INTO supervisor_counterfactual_review
                     (counterfactual_id, review_id, trade_id, position_id, close_ts,
                      close_reason, supervisor_event_type, supervisor_reason, label,
                      confidence, horizons_json, evidence_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(
-                        (SELECT created_at FROM supervisor_counterfactual_review WHERE counterfactual_id=?),
-                        ?
-                    ), ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(counterfactual_id) DO UPDATE SET
+                        review_id=excluded.review_id,
+                        trade_id=excluded.trade_id,
+                        position_id=excluded.position_id,
+                        close_ts=excluded.close_ts,
+                        close_reason=excluded.close_reason,
+                        supervisor_event_type=excluded.supervisor_event_type,
+                        supervisor_reason=excluded.supervisor_reason,
+                        label=excluded.label,
+                        confidence=excluded.confidence,
+                        horizons_json=excluded.horizons_json,
+                        evidence_json=excluded.evidence_json,
+                        updated_at=excluded.updated_at
                     """,
                     (
                         item["counterfactual_id"],
@@ -366,7 +472,6 @@ def evaluate_counterfactuals(
                         item["confidence"],
                         json.dumps(item["horizons"], ensure_ascii=False, sort_keys=True),
                         json.dumps(item["evidence"], ensure_ascii=False, sort_keys=True),
-                        item["counterfactual_id"],
                         now,
                         now,
                     ),
@@ -400,10 +505,10 @@ def list_counterfactuals(
         clauses.append("label=?")
         params.append(str(label))
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path, read_only=True)
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             f"""
             SELECT *
             FROM supervisor_counterfactual_review

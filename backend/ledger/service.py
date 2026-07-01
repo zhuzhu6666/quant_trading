@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, ensure_sqlite_columns
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, ensure_sqlite_columns, get_state_pg_conn, is_state_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +26,22 @@ class DecisionLedger:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _sql(self, sql: str) -> str:
+        return sql.replace("?", "%s") if self._use_pg() else sql
+
+    def _execute(self, conn, sql: str, params: tuple | list | None = None):
+        if params is None:
+            return conn.execute(self._sql(sql))
+        return conn.execute(self._sql(sql), tuple(params))
+
     @contextmanager
     def _conn(self):
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         except Exception:
@@ -42,17 +54,19 @@ class DecisionLedger:
 
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
-            conn.executescript(STATE_DB_DDL)
-        ensure_sqlite_columns(
-            self.db_path,
-            "position_supervisor_trace",
-            {
-                "trace_integrity": "trace_integrity TEXT DEFAULT 'full'",
-                "config_version": "config_version INTEGER DEFAULT 0",
-                "config_hash": "config_hash TEXT DEFAULT ''",
-                "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-            },
-        )
+            if not self._use_pg():
+                conn.executescript(STATE_DB_DDL)
+        if not self._use_pg():
+            ensure_sqlite_columns(
+                self.db_path,
+                "position_supervisor_trace",
+                {
+                    "trace_integrity": "trace_integrity TEXT DEFAULT 'full'",
+                    "config_version": "config_version INTEGER DEFAULT 0",
+                    "config_hash": "config_hash TEXT DEFAULT ''",
+                    "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
+                },
+            )
 
     @staticmethod
     def new_id(prefix: str) -> str:
@@ -119,7 +133,7 @@ class DecisionLedger:
                 }
             )
         with self._conn() as conn:
-            conn.execute(
+            self._execute(conn,
                 """
                 INSERT INTO decision_ledger
                 (decision_id, trade_id, position_id, event_type, symbol, timeframe,
@@ -149,7 +163,7 @@ class DecisionLedger:
                 )),
             )
             for row in factor_payloads:
-                conn.execute(
+                self._execute(conn,
                     """
                     INSERT INTO decision_factor_snapshot
                     (decision_id, factor, source, raw_value, normalized_value, direction,
@@ -173,16 +187,6 @@ class DecisionLedger:
                         row["contribution_score"],
                     ),
                 )
-        try:
-            from backend.services.state_dual_write import enqueue_decision_ledger_event
-
-            enqueue_decision_ledger_event(
-                db_path=self.db_path,
-                decision=decision_payload,
-                factor_snapshots=factor_payloads,
-            )
-        except Exception as exc:
-            logger.warning("decision ledger dual-write enqueue failed: %s", exc)
         return decision_id
 
     def log_composite_decision(
@@ -268,7 +272,7 @@ class DecisionLedger:
     ) -> str:
         event_id = self.new_id("ordevt")
         with self._conn() as conn:
-            conn.execute(
+            self._execute(conn,
                 """
                 INSERT INTO order_lifecycle_event
                 (event_id, decision_id, trade_id, order_id, broker_order_id,
@@ -307,7 +311,7 @@ class DecisionLedger:
     ) -> str:
         event_id = self.new_id("posevt")
         with self._conn() as conn:
-            conn.execute(
+            self._execute(conn,
                 """
                 INSERT INTO position_lifecycle_event
                 (event_id, position_id, trade_id, symbol, event_type, event_ts,
@@ -405,7 +409,7 @@ class DecisionLedger:
             "created_at": now,
         }
         with self._conn() as conn:
-            conn.execute(
+            self._execute(conn,
                 """
                 INSERT INTO position_supervisor_trace
                 (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
@@ -448,25 +452,11 @@ class DecisionLedger:
                     "created_at",
                 )),
             )
-            try:
-                from backend.services.state_dual_write import enqueue_state_row_event_on_conn
-
-                enqueue_state_row_event_on_conn(
-                    conn,
-                    db_path=self.db_path,
-                    table_name="position_supervisor_trace",
-                    entity_key=trace_id,
-                    row=trace_payload,
-                    operation="insert",
-                    source_updated_at=float(trace_payload["event_ts"] or now),
-                )
-            except Exception as exc:
-                logger.warning("position supervisor trace dual-write enqueue failed: %s", exc)
         return trace_id
 
     def get_latest_entry_decision(self, position_id: str) -> sqlite3.Row | None:
         with self._conn() as conn:
-            return conn.execute(
+            return self._execute(conn,
                 """
                 SELECT * FROM decision_ledger
                 WHERE position_id=? AND event_type='open'
@@ -478,7 +468,7 @@ class DecisionLedger:
     def get_factor_snapshots(self, decision_id: str) -> list[sqlite3.Row]:
         with self._conn() as conn:
             return list(
-                conn.execute(
+                self._execute(conn,
                     """
                     SELECT * FROM decision_factor_snapshot
                     WHERE decision_id=?

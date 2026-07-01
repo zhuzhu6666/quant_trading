@@ -40,13 +40,14 @@ def save(buckets: list[dict]) -> dict:
     existing["buckets"] = buckets
     existing["saved_at"] = datetime.now(timezone.utc).isoformat()
     CALIBRATOR_PATH.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
-    # ★ 写入 state.db
+    # 写入 PostgreSQL state store.
     try:
-        from backend.core.db import get_state_conn
-        conn = get_state_conn()
+        from backend.core.db import get_state_pg_conn
+
+        conn = get_state_pg_conn()
         try:
             conn.execute(
-                "INSERT INTO calibrator (data_json, updated_at) VALUES (?, ?)",
+                "INSERT INTO calibrator (data_json, updated_at) VALUES (%s, %s)",
                 (json.dumps(existing, ensure_ascii=False), time.time())
             )
             conn.commit()

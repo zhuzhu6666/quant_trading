@@ -78,13 +78,13 @@ class EvolutionStory:
                     f.write(line + "\n")
             except OSError:
                 pass
-        # ★ 主存储: state.db
+        # 主存储: PostgreSQL state schema.
         try:
-            from backend.core.db import get_state_conn
-            conn = get_state_conn()
+            from backend.core.db import get_state_pg_conn
+            conn = get_state_pg_conn()
             try:
                 conn.execute(
-                    "INSERT INTO evolution_events (timestamp, event_type, payload_json) VALUES (?, ?, ?)",
+                    "INSERT INTO evolution_events (timestamp, event_type, payload_json) VALUES (%s, %s, %s)",
                     (record["ts"], event_type, json.dumps(payload or {}, ensure_ascii=False))
                 )
                 conn.commit()

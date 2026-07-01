@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.ledger.service import DecisionLedger
 from research.meta_model_lightgbm import MODEL_TYPE, MetaModelLightGBMService
 
@@ -34,6 +34,24 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _use_pg(db_path: str | Path = STATE_DB) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
+
+
 class MetaGovernanceService:
     """Advisory-only bridge from meta shadow reports into human/governor review."""
 
@@ -42,12 +60,17 @@ class MetaGovernanceService:
         self._ensure_tables()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
+        if not _use_pg(self.db_path):
+            conn.row_factory = sqlite3.Row
         return conn
 
     def _ensure_tables(self) -> None:
         with self._conn() as conn:
+            if _conn_is_pg(conn):
+                if not state_table_exists(conn, "meta_shadow_report_snapshot"):
+                    raise RuntimeError("missing state table: meta_shadow_report_snapshot")
+                return
             conn.executescript(STATE_DB_DDL)
             conn.execute(
                 """
@@ -93,7 +116,8 @@ class MetaGovernanceService:
         report_id = self._new_id("msr")
         now = time.time()
         with self._conn() as conn:
-            conn.execute(
+            _execute(
+                conn,
                 """
                 INSERT INTO meta_shadow_report_snapshot
                 (report_id, model_type, model_version, source, accuracy,
@@ -124,7 +148,8 @@ class MetaGovernanceService:
 
     def list_shadow_report_snapshots(self, *, limit: int = 20) -> dict[str, Any]:
         with self._conn() as conn:
-            rows = conn.execute(
+            rows = _execute(
+                conn,
                 """
                 SELECT *
                 FROM meta_shadow_report_snapshot
@@ -171,7 +196,8 @@ class MetaGovernanceService:
         suggestion = self._suggestion_from_report(report, snapshot_result=snapshot_result)
         now = time.time()
         with self._conn() as conn:
-            existing = conn.execute(
+            existing = _execute(
+                conn,
                 """
                 SELECT suggestion_id, status
                 FROM policy_suggestion
@@ -186,7 +212,8 @@ class MetaGovernanceService:
             ).fetchone()
             if existing:
                 suggestion_id = str(existing["suggestion_id"] or "")
-                conn.execute(
+                _execute(
+                    conn,
                     """
                     UPDATE policy_suggestion
                     SET confidence=?, reason=?, evidence_json=?, reviewed_at=0, review_note=''
@@ -201,7 +228,8 @@ class MetaGovernanceService:
                 )
             else:
                 suggestion_id = self._new_id("psg")
-                conn.execute(
+                _execute(
+                    conn,
                     """
                     INSERT INTO policy_suggestion
                     (suggestion_id, scope_type, scope_key, action, confidence, reason,

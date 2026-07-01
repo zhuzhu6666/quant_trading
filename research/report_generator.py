@@ -173,12 +173,11 @@ class WeeklyReport:
 
     def _section_attribution(self) -> str:
         """
-        Read attribution data from state.db and produce a summary table.
+        Read attribution data from PostgreSQL state store and produce a summary table.
         """
         try:
-            from backend.core.db import get_state_conn
-            import sqlite3
-            conn = get_state_conn()
+            from backend.core.db import get_state_pg_conn
+            conn = get_state_pg_conn(read_only=True)
             try:
                 rows = conn.execute(
                     "SELECT factor, data_json FROM attribution_snapshot"

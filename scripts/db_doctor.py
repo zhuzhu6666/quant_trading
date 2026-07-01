@@ -162,7 +162,6 @@ def main() -> int:
                 {
                     "decision_log": {"decision_type"},
                     "ctrader_deals": {"deal_id", "position_id"},
-                    "state_dual_write_outbox": {"event_id", "payload_json", "status", "attempts"},
                 },
             ),
         ),

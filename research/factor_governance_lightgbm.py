@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite
+from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.model_permissions import validate_model_artifact
 
 
@@ -132,15 +132,27 @@ class FactorGovernanceLightGBMService:
         self.artifact_dir = Path(artifact_dir) if artifact_dir else DATA_DIR / "model_artifacts" / MODEL_TYPE
         self._ensure_tables()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _sql(self, sql: str) -> str:
+        return sql.replace("?", "%s") if self._use_pg() else sql
+
+    def _execute(self, conn, sql: str, params: tuple | list | None = None):
+        if params is None:
+            return conn.execute(self._sql(sql))
+        return conn.execute(self._sql(sql), tuple(params))
+
     def _conn(self):
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = __import__("sqlite3").Row
         return conn
 
     def _ensure_tables(self) -> None:
-        conn = connect_sqlite(self.db_path)
+        conn = self._conn()
         try:
-            conn.execute(
+            self._execute(conn,
                 """
                 CREATE TABLE IF NOT EXISTS factor_governance_shadow_audit (
                     inference_id TEXT PRIMARY KEY,
@@ -161,13 +173,13 @@ class FactorGovernanceLightGBMService:
                 )
                 """
             )
-            conn.execute(
+            self._execute(conn,
                 """
                 CREATE INDEX IF NOT EXISTS idx_factor_governance_audit_created
                 ON factor_governance_shadow_audit(created_at)
                 """
             )
-            conn.execute(
+            self._execute(conn,
                 """
                 CREATE INDEX IF NOT EXISTS idx_factor_governance_audit_factor
                 ON factor_governance_shadow_audit(factor, created_at)
@@ -180,7 +192,7 @@ class FactorGovernanceLightGBMService:
     def load_samples(self, *, limit: int = 2000) -> list[dict[str, Any]]:
         conn = self._conn()
         try:
-            rows = conn.execute(
+            rows = self._execute(conn,
                 """
                 SELECT f.review_id, f.trade_id, f.factor, f.entry_contribution,
                        f.hold_contribution, f.exit_contribution, f.net_contribution,
@@ -496,7 +508,7 @@ class FactorGovernanceLightGBMService:
         inference_id = f"{MODEL_TYPE}:{sample['sample_id']}:{int(now * 1000)}"
         conn = self._conn()
         try:
-            conn.execute(
+            self._execute(conn,
                 """
                 INSERT INTO factor_governance_shadow_audit
                 (inference_id, model_type, model_version, artifact_path, review_id,
@@ -604,9 +616,9 @@ class FactorGovernanceLightGBMService:
         try:
             now = time.time()
             for item in suggestions:
-                conn.execute(
+                self._execute(conn,
                     """
-                    INSERT OR REPLACE INTO policy_suggestion
+                    INSERT INTO policy_suggestion
                     (suggestion_id, scope_type, scope_key, action, confidence, reason,
                      evidence_json, status, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(
@@ -616,6 +628,15 @@ class FactorGovernanceLightGBMService:
                         (SELECT created_at FROM policy_suggestion WHERE suggestion_id=?),
                         ?
                     ))
+                    ON CONFLICT(suggestion_id) DO UPDATE SET
+                        scope_type=excluded.scope_type,
+                        scope_key=excluded.scope_key,
+                        action=excluded.action,
+                        confidence=excluded.confidence,
+                        reason=excluded.reason,
+                        evidence_json=excluded.evidence_json,
+                        status=excluded.status,
+                        created_at=excluded.created_at
                     """,
                     (
                         item["suggestion_id"],
@@ -643,7 +664,7 @@ class FactorGovernanceLightGBMService:
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         conn = self._conn()
         try:
-            rows = conn.execute(
+            rows = self._execute(conn,
                 f"""
                 SELECT *
                 FROM factor_governance_shadow_audit

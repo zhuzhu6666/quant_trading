@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 
@@ -78,6 +79,39 @@ def get_position_supervisor_template(template_id: str | None = None) -> dict[str
     if key not in _TEMPLATES:
         key = DEFAULT_TEMPLATE_ID
     return deepcopy(_TEMPLATES[key])
+
+
+def latest_applied_position_supervisor_template_id(*, db_path: str | Path | None = None) -> str:
+    try:
+        from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+
+        path = Path(db_path or STATE_DB)
+        use_pg = is_state_db_path(path)
+        conn = get_state_pg_conn(read_only=True) if use_pg else connect_sqlite(path, read_only=True)
+        if not use_pg:
+            conn.row_factory = __import__("sqlite3").Row
+    except Exception:
+        return DEFAULT_TEMPLATE_ID
+    try:
+        row = conn.execute(
+            """
+            SELECT scope_key
+            FROM learning_application_log
+            WHERE scope_type='position_supervisor_template'
+              AND action='switch_position_supervisor_template'
+              AND status IN ('applied', 'observing')
+            ORDER BY cycle_ts DESC, created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        template_id = str(row["scope_key"] or "") if row else ""
+        if template_id in _TEMPLATES:
+            return template_id
+        return DEFAULT_TEMPLATE_ID
+    except Exception:
+        return DEFAULT_TEMPLATE_ID
+    finally:
+        conn.close()
 
 
 def normalize_position_supervisor_template(template: dict[str, Any] | str | None = None) -> dict[str, Any]:

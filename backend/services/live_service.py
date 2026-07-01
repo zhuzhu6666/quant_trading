@@ -198,6 +198,10 @@ class ProtectionCandidate:
 
 _local_positions: dict[int, _LocalSLTP] = {}
 _local_positions_lock = threading.Lock()
+_ENTRY_PROTECTION_PLAN_SCHEMA = "entry_protection_plan.v1"
+_ENTRY_PROTECTION_REPAIR_SOURCE = "entry_protection_repair"
+_ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS = 20.0
+_PENDING_OPEN_ATTACH_TTL_SECONDS = 300.0
 
 # P1-d: module-level state for _scheduled_param_tune
 _PARAM_TUNE_STATE: dict[str, Any] = {}
@@ -210,6 +214,7 @@ _prev_position_ids: set[int] = set()
 _pos_open_prices: dict[int, float] = {}
 # 用于仓位上限/展示的策略口径 API volume (开仓后回查到的实际 API 量)
 _pos_open_api_volume: dict[int, float] = {}
+_pending_open_attach_until: dict[int, float] = {}
 # ── 追踪止损状态 ──
 # position_id → {best_price, activated, entry_price, direction}
 _trailing_state: dict[int, dict] = {}
@@ -316,6 +321,16 @@ def _round_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
     return max(min_vol, round(float(volume or 0.0) / step_vol) * step_vol)
 
 
+def _floor_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
+    min_vol = float((bridge_meta or {}).get("api_min_volume") or 1.0)
+    step_vol = float((bridge_meta or {}).get("api_step_volume") or 1.0)
+    raw = max(0.0, float(volume or 0.0))
+    if step_vol <= 0:
+        return raw if raw >= min_vol else 0.0
+    floored = (raw // step_vol) * step_vol
+    return floored if floored >= min_vol else 0.0
+
+
 def _event_sizing_context(event_sizing: Any, bar_time: float) -> dict[str, Any]:
     if event_sizing is None:
         return {"enabled": False, "multiplier": 1.0}
@@ -401,6 +416,102 @@ def _estimate_close_pnl_from_cached_state(position_id: int, current_price: float
     if cpid_vol <= 0:
         cpid_vol = 0.01 * 100.0  # final fallback: 0.01 lot = 1 API unit
     return (float(current_price) - open_price) * dir_sign * cpid_vol
+
+
+def _position_direction_sign(position: dict[str, Any]) -> int:
+    direction = int(position.get("direction") or 0)
+    if direction != 0:
+        return 1 if direction > 0 else -1
+    ptype = str(position.get("type") or "").lower()
+    return -1 if ptype == "sell" else 1
+
+
+def _position_price_pnl_estimate(position: dict[str, Any]) -> float:
+    open_price = float(
+        position.get("open_price")
+        or position.get("entry_price")
+        or position.get("price_open")
+        or 0.0
+    )
+    current_price = float(
+        position.get("current_price")
+        or position.get("price_current")
+        or open_price
+        or 0.0
+    )
+    if open_price <= 0 or current_price <= 0:
+        return 0.0
+    api_volume = _position_api_volume(position)
+    # cTrader XAUUSD volume=100 corresponds to roughly 0.01 lot / 1 oz PnL.
+    display_units = api_volume / 100.0 if api_volume > 10.0 else api_volume
+    if display_units <= 0:
+        display_units = 1.0
+    return (current_price - open_price) * _position_direction_sign(position) * display_units
+
+
+def _account_unrealized_pnl(account: dict | None) -> float:
+    if not account:
+        return 0.0
+    try:
+        equity = float(account.get("equity", 0.0) or 0.0)
+        balance = float(account.get("balance", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+    return equity - balance
+
+
+def _apply_unrealized_pnl_fields(
+    positions: list[dict],
+    *,
+    account: dict | None = None,
+) -> list[dict]:
+    if not positions:
+        return []
+    out = [dict(item) for item in positions]
+    existing_values: list[float] = []
+    missing_or_zero = True
+    for item in out:
+        value = _position_unrealized_pnl(item)
+        existing_values.append(value)
+        if abs(value) > 1e-9:
+            missing_or_zero = False
+    account_pnl = _account_unrealized_pnl(account)
+    estimates = [_position_price_pnl_estimate(item) for item in out]
+    sum_existing = sum(existing_values)
+    use_account_fallback = (
+        abs(account_pnl) > 1e-9
+        and missing_or_zero
+        and abs(sum_existing) < 1e-9
+    )
+    values: list[float]
+    source = "broker"
+    if use_account_fallback and len(out) == 1:
+        values = [account_pnl]
+        source = "account_equity"
+    elif use_account_fallback:
+        weight_total = sum(abs(item) for item in estimates)
+        if weight_total > 1e-9:
+            values = [account_pnl * (abs(item) / weight_total) for item in estimates]
+            source = "account_equity_allocated"
+        else:
+            values = estimates
+            source = "price_estimate"
+    else:
+        values = [
+            existing if abs(existing) > 1e-9 else estimate
+            for existing, estimate in zip(existing_values, estimates)
+        ]
+        if all(abs(existing) <= 1e-9 for existing in existing_values) and any(abs(v) > 1e-9 for v in values):
+            source = "price_estimate"
+    for item, value in zip(out, values):
+        pnl = round(float(value or 0.0), 6)
+        item["profit"] = pnl
+        item["pnl"] = pnl
+        item["unrealized"] = pnl
+        item["unrealized_pnl"] = pnl
+        item["netUnrealizedPnL"] = pnl
+        item["pnl_source"] = source
+    return out
 
 
 def _tracked_total_api_volume(positions: list[Any]) -> float:
@@ -769,7 +880,8 @@ def _load_recovery_position_row(position_id: int) -> dict[str, Any]:
         return {}
     conn = _get_state_read_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             """
             SELECT *
             FROM recovery_position_state
@@ -793,9 +905,11 @@ def _load_recovery_position_row(position_id: int) -> dict[str, Any]:
 def _merge_recovery_position_meta(position_id: int, meta: dict[str, Any] | None) -> None:
     if position_id <= 0 or not meta:
         return
-    conn = _get_state_conn()
+    now = time.time()
+    conn = _get_state_pg_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
             (int(position_id),),
         ).fetchone()
@@ -808,7 +922,8 @@ def _merge_recovery_position_meta(position_id: int, meta: dict[str, Any] | None)
             except Exception:
                 merged = {}
         merged.update(meta)
-        conn.execute(
+        _state_execute(
+            conn,
             """
             UPDATE recovery_position_state
             SET recovery_meta_json=?, last_seen_at=?
@@ -820,29 +935,102 @@ def _merge_recovery_position_meta(position_id: int, meta: dict[str, Any] | None)
                 int(position_id),
             ),
         )
-        final_row = conn.execute(
+        final_row = _state_execute(
+            conn,
             "SELECT * FROM recovery_position_state WHERE position_id=?",
             (position_id,),
         ).fetchone()
-        if final_row is not None:
-            try:
-                from backend.services.state_dual_write import enqueue_state_row_event_on_conn
-
-                final_payload = dict(final_row)
-                enqueue_state_row_event_on_conn(
-                    conn,
-                    db_path=_state_db_path_for_conn(conn),
-                    table_name="recovery_position_state",
-                    entity_key=str(position_id),
-                    row=final_payload,
-                    operation="upsert",
-                    source_updated_at=float(final_payload.get("last_seen_at") or now),
-                )
-            except Exception as exc:
-                logger.debug("[live] recovery state dual-write enqueue failed: {}", exc)
         conn.commit()
     finally:
         conn.close()
+
+
+def _entry_protection_plan_payload(
+    *,
+    position_id: int,
+    direction: int,
+    entry_price: float,
+    target_stop_loss: float,
+    target_take_profit: float,
+    requested_volume: float,
+    actual_api_volume: float,
+    tick: int,
+    status: str = "pending",
+    source: str = "factor_v4_open",
+    error: str = "",
+) -> dict[str, Any]:
+    anchor = _runtime_config_anchor()
+    now = time.time()
+    return {
+        "schema_version": _ENTRY_PROTECTION_PLAN_SCHEMA,
+        "position_id": int(position_id),
+        "source": str(source or "factor_v4_open"),
+        "status": str(status or "pending"),
+        "direction": int(direction or 0),
+        "entry_price": round(float(entry_price or 0.0), 2),
+        "target_stop_loss": round(float(target_stop_loss or 0.0), 2),
+        "target_take_profit": round(float(target_take_profit or 0.0), 2),
+        "requested_volume": float(requested_volume or 0.0),
+        "actual_api_volume": float(actual_api_volume or 0.0),
+        "tick": int(tick or 0),
+        "attempts": 0,
+        "last_attempt_ts": 0.0,
+        "last_error": str(error or ""),
+        "created_at": now,
+        "updated_at": now,
+        "config_version": int(anchor.get("config_version") or 0),
+        "config_hash": str(anchor.get("config_hash") or ""),
+    }
+
+
+def _update_entry_protection_plan_status(
+    position_id: int,
+    *,
+    status: str,
+    error: str = "",
+    attempted: bool = False,
+    applied_sl: float = 0.0,
+    applied_tp: float = 0.0,
+) -> None:
+    row = _load_recovery_position_row(int(position_id))
+    meta = dict((row or {}).get("recovery_meta") or {})
+    plan = dict(meta.get("entry_protection_plan") or {})
+    if not plan:
+        return
+    now = time.time()
+    plan["status"] = str(status or plan.get("status") or "pending")
+    plan["updated_at"] = now
+    if attempted:
+        plan["attempts"] = int(plan.get("attempts") or 0) + 1
+        plan["last_attempt_ts"] = now
+    if error:
+        plan["last_error"] = str(error)
+    elif status == "applied":
+        plan["last_error"] = ""
+    if applied_sl > 0:
+        plan["applied_stop_loss"] = round(float(applied_sl), 2)
+    if applied_tp > 0:
+        plan["applied_take_profit"] = round(float(applied_tp), 2)
+    meta["entry_protection_plan"] = plan
+    _merge_recovery_position_meta(int(position_id), meta)
+
+
+def _remember_pending_open_attach(position_id: int) -> None:
+    if int(position_id or 0) <= 0:
+        return
+    _pending_open_attach_until[int(position_id)] = time.time() + _PENDING_OPEN_ATTACH_TTL_SECONDS
+
+
+def _active_pending_open_attach_ids(current_position_ids: set[int] | None = None) -> list[int]:
+    current_position_ids = set(current_position_ids or set())
+    now = time.time()
+    active: list[int] = []
+    for pid, until_ts in list(_pending_open_attach_until.items()):
+        if pid in current_position_ids or float(until_ts or 0.0) <= now:
+            _pending_open_attach_until.pop(pid, None)
+            continue
+        active.append(int(pid))
+    return sorted(active)
 
 
 def _trade_attribution_payload_from_composite(
@@ -1117,10 +1305,15 @@ def _enrich_positions_with_path_metrics(
     persist: bool = False,
     broker: str = "",
     strategy_name: str = "",
+    account: dict | None = None,
 ) -> list[dict]:
     now_ts = float(now_ts or time.time())
     enriched: list[dict] = []
-    for raw in _coerce_live_positions(pos_list):
+    raw_positions = _apply_unrealized_pnl_fields(
+        _coerce_live_positions(pos_list),
+        account=account or (_live_state_get("account", {}, clone=True) or {}),
+    )
+    for raw in raw_positions:
         item = dict(raw)
         item.update(_holding_summary_for_position(item, cfg=cfg, now_ts=now_ts))
         item.update(
@@ -1804,11 +1997,24 @@ def _run_position_supervision(
                             acct=acct,
                         )
                         log(f"tick {tick}: supervisor tighten AMEND FAILED pos={pid}: {comment}")
+                        if _result_is_position_not_found(amend_res):
+                            _retire_broker_missing_position(
+                                bridge,
+                                pid,
+                                broker="ctrader",
+                                strategy_name=str(_loop_strategy_name or "factor_v4"),
+                                reason=comment,
+                                log=log,
+                            )
             elif action == "reduce":
                 current_volume = float(position.get("volume", position.get("api_volume", 0.0)) or 0.0)
                 reduce_fraction = float(controls.get("reduce_fraction", 0.0) or 0.0)
-                reduce_volume = max(0.0, round(current_volume * reduce_fraction))
-                if reduce_volume > 0 and current_volume - reduce_volume >= 1.0:
+                raw_reduce_volume = current_volume * reduce_fraction
+                bridge_meta = getattr(bridge, "_symbol_meta", None) or {}
+                min_volume = float(bridge_meta.get("api_min_volume") or 1.0)
+                step_volume = float(bridge_meta.get("api_step_volume") or 1.0)
+                reduce_volume = _floor_api_volume_to_step(raw_reduce_volume, bridge_meta)
+                if reduce_volume > 0 and current_volume - reduce_volume >= min_volume:
                     result = bridge.close_position(pid, volume=reduce_volume)
                     if getattr(result, "success", False):
                         if _LEDGER:
@@ -1842,6 +2048,15 @@ def _run_position_supervision(
                             execution={"reduce_volume": reduce_volume, "applied_controls": controls},
                             acct=acct,
                         )
+                        if _result_is_position_not_found(result):
+                            _retire_broker_missing_position(
+                                bridge,
+                                pid,
+                                broker="ctrader",
+                                strategy_name=str(_loop_strategy_name or "factor_v4"),
+                                reason=reason,
+                                log=log,
+                            )
                         log(f"tick {tick}: supervisor reduce pos={pid} vol={reduce_volume:.0f}")
                     else:
                         reason = str(getattr(result, "comment", "") or getattr(result, "error", "") or "reduce_failed")
@@ -1871,11 +2086,18 @@ def _run_position_supervision(
                         decision_id=decision_id,
                         risk_action=risk_action,
                         risk_verdict=risk_verdict,
-                        execution_status="skipped",
-                        execution_reason="invalid_reduce_volume",
-                        execution={"current_volume": current_volume, "reduce_fraction": reduce_fraction, "reduce_volume": reduce_volume},
-                        acct=acct,
-                    )
+                            execution_status="skipped",
+                            execution_reason="invalid_reduce_volume",
+                            execution={
+                                "current_volume": current_volume,
+                                "reduce_fraction": reduce_fraction,
+                                "raw_reduce_volume": raw_reduce_volume,
+                                "reduce_volume": reduce_volume,
+                                "min_volume": min_volume,
+                                "step_volume": step_volume,
+                            },
+                            acct=acct,
+                        )
             elif action == "close":
                 result = bridge.close_position(pid)
                 if getattr(result, "success", False):
@@ -1906,6 +2128,15 @@ def _run_position_supervision(
                         execution={"applied_controls": controls},
                         acct=acct,
                     )
+                    if _result_is_position_not_found(result):
+                        _retire_broker_missing_position(
+                            bridge,
+                            pid,
+                            broker="ctrader",
+                            strategy_name=str(_loop_strategy_name or "factor_v4"),
+                            reason=reason,
+                            log=log,
+                        )
                     log(f"tick {tick}: supervisor close sent pos={pid} reason={verdict.get('summary_reason')}")
                 else:
                     reason = str(getattr(result, "comment", "") or getattr(result, "error", "") or "close_failed")
@@ -1967,7 +2198,7 @@ def _resolve_position_api_volume(
 
 
 def _save_param_tune_state() -> None:
-    """Persist param tune state to state.db + JSON backup."""
+    """Persist param tune state to the state store + JSON backup."""
     import json, time as _time
     from pathlib import Path
 
@@ -1979,12 +2210,18 @@ def _save_param_tune_state() -> None:
         logger.warning("Failed to save param tune state: %s", e)
 
     try:
-        from backend.core.db import get_state_conn
-        conn = get_state_conn()
+        conn = _get_state_pg_conn()
         try:
             for key, val in _PARAM_TUNE_STATE.items():
-                conn.execute(
-                    "INSERT OR REPLACE INTO param_tune (key, value_json, updated_at) VALUES (?, ?, ?)",
+                _state_execute(
+                    conn,
+                    """
+                    INSERT INTO param_tune (key, value_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value_json=excluded.value_json,
+                        updated_at=excluded.updated_at
+                    """,
                     (key, json.dumps(val, default=str), _time.time())
                 )
             conn.commit()
@@ -2079,48 +2316,45 @@ def _live_state_update(**kwargs) -> None:
         _live_state.update(kwargs)
 
 
-def _get_state_conn():
-    from backend.core.db import get_state_conn
+def _get_state_pg_conn():
+    from backend.core.db import get_state_pg_conn
 
-    return get_state_conn()
+    return get_state_pg_conn()
 
 
 def _get_state_read_conn():
-    conn = _get_state_conn()
-    try:
-        conn.execute("PRAGMA query_only=ON")
-    except Exception:
-        pass
-    return conn
+    from backend.core.db import get_state_pg_conn
+
+    return get_state_pg_conn(read_only=True)
 
 
-def _state_db_path_for_conn(conn) -> str:
-    try:
-        row = conn.execute("PRAGMA database_list").fetchone()
-        if row is not None:
-            if isinstance(row, dict):
-                value = row.get("file")
-            else:
-                value = row["file"] if "file" in getattr(row, "keys", lambda: [])() else row[2]
-            if value:
-                return str(value)
-    except Exception:
-        pass
-    from backend.core.db import STATE_DB
+def _state_conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
 
-    return str(STATE_DB)
+
+def _state_sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _state_conn_is_pg(conn) else sql
+
+
+def _state_execute(conn, sql: str, params=None):
+    if params is None:
+        return conn.execute(_state_sql(conn, sql))
+    return conn.execute(_state_sql(conn, sql), params)
 
 
 def _ensure_runtime_kv_schema(conn) -> None:
     from backend.core.db import STATE_DB_DDL
 
+    if _state_conn_is_pg(conn):
+        return
     conn.executescript(STATE_DB_DDL)
 
 
 def _runtime_kv_get(key: str, default=None):
     conn = _get_state_read_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             "SELECT value_json FROM runtime_kv WHERE key=?",
             (key,),
         ).fetchone()
@@ -2139,7 +2373,8 @@ def _runtime_kv_get(key: str, default=None):
 def _runtime_kv_write_on_conn(conn, key: str, value, updated_at: float | None = None) -> None:
     ts = float(updated_at or time.time())
     value_json = json.dumps(value, ensure_ascii=False, default=str)
-    conn.execute(
+    _state_execute(
+        conn,
         """
         INSERT INTO runtime_kv(key, value_json, updated_at)
         VALUES (?, ?, ?)
@@ -2149,22 +2384,6 @@ def _runtime_kv_write_on_conn(conn, key: str, value, updated_at: float | None = 
         """,
         (key, value_json, ts),
     )
-    try:
-        from backend.services.state_dual_write import enqueue_state_row_event_on_conn
-
-        enqueue_state_row_event_on_conn(
-            conn,
-            db_path=_state_db_path_for_conn(conn),
-            table_name="runtime_kv",
-            entity_key=str(key),
-            row={"key": str(key), "value_json": value_json, "updated_at": ts},
-            operation="upsert",
-            source_updated_at=ts,
-        )
-    except Exception as exc:
-        logger.debug("[live] runtime_kv dual-write enqueue failed: {}", exc)
-
-
 def _drain_runtime_kv_pending(conn, limit: int = 100) -> int:
     if not _RUNTIME_KV_PENDING_PATH.exists():
         return 0
@@ -2204,7 +2423,7 @@ def _drain_runtime_kv_pending(conn, limit: int = 100) -> int:
 
 
 def _runtime_kv_set(key: str, value) -> None:
-    conn = _get_state_conn()
+    conn = _get_state_pg_conn()
     try:
         _ensure_runtime_kv_schema(conn)
         drained = _drain_runtime_kv_pending(conn)
@@ -2229,7 +2448,8 @@ def _runtime_kv_set(key: str, value) -> None:
 def _lookup_entry_decision_id(position_id: int) -> str:
     conn = _get_state_read_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             """
             SELECT decision_id FROM decision_ledger
             WHERE position_id=? AND event_type='open'
@@ -2245,7 +2465,8 @@ def _lookup_entry_decision_id(position_id: int) -> str:
 def _lookup_open_decision_context(position_id: int) -> dict:
     conn = _get_state_read_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             """
             SELECT decision_ts, timeframe FROM decision_ledger
             WHERE position_id=? AND event_type='open'
@@ -2259,7 +2480,8 @@ def _lookup_open_decision_context(position_id: int) -> dict:
                 "timeframe": str(row["timeframe"] or ""),
                 "source": "decision_ledger",
             }
-        recovery = conn.execute(
+        recovery = _state_execute(
+            conn,
             """
             SELECT first_seen_at FROM recovery_position_state
             WHERE position_id=?
@@ -2298,7 +2520,8 @@ def _ensure_open_ledger_for_recovered_close(
 
     conn = _get_state_read_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             "SELECT * FROM recovery_position_state WHERE position_id=?",
             (position_id,),
         ).fetchone()
@@ -2380,7 +2603,8 @@ def _ensure_open_ledger_for_recovered_close(
 def _lookup_recovery_context_integrity(position_id: int, default: str = _RECOVERY_CONTEXT_FULL) -> str:
     conn = _get_state_read_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             "SELECT context_integrity FROM recovery_position_state WHERE position_id=?",
             (position_id,),
         ).fetchone()
@@ -2537,7 +2761,8 @@ def _consume_close_verdict(position_id: int, close_reason: str) -> dict:
 def _latest_supervisor_event_before_close(position_id: int, close_ts: float, lookback_sec: float = 3600.0) -> dict[str, Any]:
     conn = _get_state_read_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             """
             SELECT decision_id, event_type, action_reason, action_json, risk_state_json, decision_ts
             FROM decision_ledger
@@ -2586,7 +2811,8 @@ def _latest_protection_trace_before_close(position_id: int, close_ts: float, loo
     conn = _get_state_read_conn()
     try:
         try:
-            row = conn.execute(
+            row = _state_execute(
+                conn,
                 """
                 SELECT trace_id, decision_id, action, summary_reason, event_ts,
                        verdict_json, risk_verdict_json, execution_json, stage, outcome
@@ -2733,9 +2959,10 @@ def _upsert_recovery_position_state(
     now = time.time()
     entry_decision_id = _lookup_entry_decision_id(position_id)
     desired_integrity = context_integrity or (_RECOVERY_CONTEXT_FULL if entry_decision_id else _RECOVERY_CONTEXT_PARTIAL)
-    conn = _get_state_conn()
+    conn = _get_state_pg_conn()
     try:
-        prev = conn.execute(
+        prev = _state_execute(
+            conn,
             "SELECT * FROM recovery_position_state WHERE position_id=?",
             (position_id,),
         ).fetchone()
@@ -2752,7 +2979,8 @@ def _upsert_recovery_position_state(
         prev_integrity = str(prev["context_integrity"]) if prev and prev["context_integrity"] else ""
         if prev_integrity == _RECOVERY_CONTEXT_FULL:
             desired_integrity = _RECOVERY_CONTEXT_FULL
-        conn.execute(
+        _state_execute(
+            conn,
             """
             INSERT INTO recovery_position_state
             (position_id, broker, symbol, direction, open_price, volume,
@@ -2819,7 +3047,8 @@ def _upsert_recovery_position_state(
 def _list_active_recovery_positions(broker: str) -> list[dict]:
     conn = _get_state_read_conn()
     try:
-        rows = conn.execute(
+        rows = _state_execute(
+            conn,
             """
             SELECT * FROM recovery_position_state
             WHERE broker=? AND status IN ('open', 'recovered')
@@ -2840,9 +3069,10 @@ def _mark_recovery_position_closed(
     closed_at: float,
     meta: dict | None = None,
 ) -> None:
-    conn = _get_state_conn()
+    conn = _get_state_pg_conn()
     try:
-        row = conn.execute(
+        row = _state_execute(
+            conn,
             "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
             (position_id,),
         ).fetchone()
@@ -2854,7 +3084,8 @@ def _mark_recovery_position_closed(
                 merged_meta = {}
         if meta:
             merged_meta.update(meta)
-        conn.execute(
+        _state_execute(
+            conn,
             """
             UPDATE recovery_position_state
             SET status='closed_replayed',
@@ -2957,6 +3188,115 @@ def _replay_recovered_close(
             logger.debug("[live] replay close learning failed for pos %s: %s", position_id, exc)
 
 
+def _result_is_position_not_found(result: Any) -> bool:
+    text = " ".join(
+        str(part or "")
+        for part in (
+            getattr(result, "error_code", ""),
+            getattr(result, "comment", ""),
+            getattr(result, "error", ""),
+        )
+    ).upper()
+    return "POSITION_NOT_FOUND" in text or "POSITION NOT FOUND" in text
+
+
+def _remove_live_position_state(position_id: int) -> None:
+    global _prev_position_ids
+    pid = int(position_id)
+    positions = _live_state_get("positions", [], clone=True) or []
+    filtered = [
+        pos for pos in positions
+        if int((pos or {}).get("position_id") or (pos or {}).get("ticket") or 0) != pid
+    ]
+    if len(filtered) != len(positions):
+        _live_state_update(positions=filtered, positions_updated_at=time.time())
+    _prev_position_ids.discard(pid)
+    _pos_open_prices.pop(pid, None)
+    _pos_open_api_volume.pop(pid, None)
+    _pending_close_reasons.pop(pid, None)
+    _pending_close_verdicts.pop(pid, None)
+
+
+def _retire_broker_missing_position(
+    bridge,
+    position_id: int,
+    *,
+    broker: str,
+    strategy_name: str,
+    reason: str,
+    log=None,
+) -> bool:
+    pid = int(position_id)
+    try:
+        live_positions = _read_positions_for_recovery(bridge)
+    except Exception as exc:
+        logger.debug("[live] missing-position confirm failed for pos %s: %s", pid, exc)
+        return False
+    live_ids = {
+        int(item["position_id"])
+        for item in (_normalize_position_snapshot(pos) for pos in live_positions)
+        if int(item["position_id"]) > 0
+    }
+    if pid in live_ids:
+        return False
+
+    conn = _get_state_read_conn()
+    try:
+        row = _state_execute(
+            conn,
+            "SELECT * FROM recovery_position_state WHERE position_id=?",
+            (pid,),
+        ).fetchone()
+        position_state = dict(row) if row else {
+            "position_id": pid,
+            "broker": broker,
+            "symbol": "XAUUSD+",
+            "open_price": float(_pos_open_prices.get(pid, 0.0) or 0.0),
+            "close_pnl": 0.0,
+            "context_integrity": _RECOVERY_CONTEXT_PARTIAL,
+        }
+    finally:
+        conn.close()
+
+    real_pnl = None
+    try:
+        from execution.deal_sync import sync_close_deals_batch
+
+        write_conn = _get_state_pg_conn()
+        try:
+            from_ts = int(max(0.0, float(position_state.get("last_seen_at") or time.time()) - _RECOVERY_REPLAY_LOOKBACK_SEC))
+            real_pnl = sync_close_deals_batch(
+                bridge,
+                write_conn,
+                {pid},
+                from_ts=from_ts,
+                max_rows=200,
+            ).get(pid)
+        finally:
+            write_conn.close()
+    except Exception as exc:
+        logger.debug("[live] missing-position deal sync failed for pos %s: %s", pid, exc)
+
+    _replay_recovered_close(
+        broker=broker,
+        position_id=pid,
+        position_state=position_state,
+        real_pnl=real_pnl,
+        strategy_name=strategy_name,
+    )
+    _mark_recovery_position_closed(
+        pid,
+        close_reason="broker_position_not_found",
+        close_pnl=float((real_pnl or {}).get("net", position_state.get("close_pnl", 0.0)) or 0.0),
+        closed_at=float((real_pnl or {}).get("exec_timestamp", time.time()) or time.time()),
+        meta={"broker_position_not_found": True, "failure_reason": reason, "retired_at": time.time()},
+    )
+    _remove_live_position_state(pid)
+    if log:
+        log(f"broker missing position retired pos={pid}: {reason}")
+    return True
+
+
 def _read_positions_for_recovery(bridge) -> list[Any]:
     if hasattr(bridge, "is_connected") and not bridge.is_connected:
         raise RuntimeError("broker not connected")
@@ -3017,7 +3357,7 @@ def _bootstrap_position_recovery(
                     - _RECOVERY_REPLAY_LOOKBACK_SEC,
                 )
             )
-            conn = _get_state_conn()
+            conn = _get_state_pg_conn()
             try:
                 replayed = sync_close_deals_batch(
                     bridge,
@@ -3055,7 +3395,7 @@ def _bootstrap_position_recovery(
                 - _RECOVERY_REPLAY_LOOKBACK_SEC,
             )
         )
-        conn = _get_state_conn()
+        conn = _get_state_pg_conn()
         try:
             replayed = sync_close_deals_batch(
                 bridge,
@@ -3394,6 +3734,12 @@ def _install_ctrader_live_listener(bridge) -> None:
             if event_type == "spot":
                 price = float(payload.get("price") or 0.0)
                 if price > 0:
+                    quote = {
+                        "bid": float(payload.get("bid") or 0.0),
+                        "ask": float(payload.get("ask") or 0.0),
+                        "mid": price,
+                        "ts": float(payload.get("ts") or now_ts),
+                    }
                     positions = _live_state_get("positions", [], clone=True) or []
                     patched_positions = []
                     for item in positions:
@@ -3405,6 +3751,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                             patched_positions.append(item)
                     _live_state_update(
                         spot_price=price,
+                        spot_quote=quote,
                         positions=patched_positions or positions,
                     )
                 return
@@ -3643,6 +3990,21 @@ def warmup_ctrader(timeout_sec: float = 0.0) -> None:
 
 _last_market_connection_release_ts: float = 0.0
 _last_spot_subscription_attempt_ts: float = 0.0
+_SPOT_QUOTE_STALE_SECONDS = 300.0
+
+
+def _quote_age_seconds(quote: dict | None, *, now_ts: float | None = None) -> float | None:
+    if not quote:
+        return None
+    ts = float((quote or {}).get("ts") or 0.0)
+    if ts <= 0:
+        return None
+    return max(0.0, float(now_ts or time.time()) - ts)
+
+
+def _quote_is_fresh(quote: dict | None, *, now_ts: float | None = None) -> bool:
+    age = _quote_age_seconds(quote, now_ts=now_ts)
+    return age is not None and age <= _SPOT_QUOTE_STALE_SECONDS
 
 
 def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str, Any]:
@@ -3713,11 +4075,14 @@ def _ensure_spot_subscription(
             quote = bridge.get_spot_quote() or {}
         except Exception:
             quote = {}
-    spot_needed = float((quote or {}).get("ts") or 0.0) <= 0
+    now_ts = time.time()
+    spot_needed = (
+        float((quote or {}).get("ts") or 0.0) <= 0
+        or not _quote_is_fresh(quote, now_ts=now_ts)
+    )
     depth_needed = bool(require_l2_depth or l2_collection_enabled) and hasattr(bridge, "subscribe_depth") and not bool(getattr(bridge, "_depth_subscribed", False))
     if not spot_needed and not depth_needed:
         return
-    now_ts = time.time()
     if now_ts - _last_spot_subscription_attempt_ts < 60:
         return
     _last_spot_subscription_attempt_ts = now_ts
@@ -3927,7 +4292,14 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
         cfg = None
 
     def _enrich_positions(pos_list: list[Any]) -> list[dict]:
-        return _enrich_positions_with_path_metrics(pos_list, cfg=cfg, now_ts=time.time(), persist=False, broker=broker)
+        return _enrich_positions_with_path_metrics(
+            pos_list,
+            cfg=cfg,
+            now_ts=time.time(),
+            persist=False,
+            broker=broker,
+            account=_live_state_get("account", {}, clone=True) or {},
+        )
 
     if _live_state_get("loop_running") and _live_state_get("broker") == broker:
         if readiness["positions_ready"]:
@@ -4335,7 +4707,8 @@ def _scheduled_ml_drift_check():
 
 
 def _ensure_offmarket_high_load_audit_table(conn) -> None:
-    conn.execute(
+    _state_execute(
+        conn,
         """
         CREATE TABLE IF NOT EXISTS offmarket_high_load_job_audit (
             audit_id TEXT PRIMARY KEY,
@@ -4351,7 +4724,8 @@ def _ensure_offmarket_high_load_audit_table(conn) -> None:
         )
         """
     )
-    conn.execute(
+    _state_execute(
+        conn,
         """
         CREATE INDEX IF NOT EXISTS idx_offmarket_high_load_job_audit_created
         ON offmarket_high_load_job_audit(started_at)
@@ -4369,8 +4743,6 @@ def _record_offmarket_high_load_audit(
     error: str = "",
     started_at: float | None = None,
 ) -> dict[str, Any]:
-    from backend.core.db import get_state_conn
-
     now_ts = time.time()
     started = float(started_at or now_ts)
     audit_id = f"{job_name}:{int(started * 1000)}"
@@ -4386,15 +4758,26 @@ def _record_offmarket_high_load_audit(
         "started_at": started,
         "finished_at": now_ts,
     }
-    conn = get_state_conn()
+    conn = _get_state_pg_conn()
     try:
         _ensure_offmarket_high_load_audit_table(conn)
-        conn.execute(
+        _state_execute(
+            conn,
             """
-            INSERT OR REPLACE INTO offmarket_high_load_job_audit
+            INSERT INTO offmarket_high_load_job_audit
             (audit_id, job_name, status, session_status, high_load_profile,
              payload_json, result_json, error, started_at, finished_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(audit_id) DO UPDATE SET
+                job_name=excluded.job_name,
+                status=excluded.status,
+                session_status=excluded.session_status,
+                high_load_profile=excluded.high_load_profile,
+                payload_json=excluded.payload_json,
+                result_json=excluded.result_json,
+                error=excluded.error,
+                started_at=excluded.started_at,
+                finished_at=excluded.finished_at
             """,
             (
                 audit_id,
@@ -4409,26 +4792,6 @@ def _record_offmarket_high_load_audit(
                 row["finished_at"],
             ),
         )
-        final_row = conn.execute(
-            "SELECT * FROM recovery_position_state WHERE position_id=?",
-            (position_id,),
-        ).fetchone()
-        if final_row is not None:
-            try:
-                from backend.services.state_dual_write import enqueue_state_row_event_on_conn
-
-                final_payload = dict(final_row)
-                enqueue_state_row_event_on_conn(
-                    conn,
-                    db_path=_state_db_path_for_conn(conn),
-                    table_name="recovery_position_state",
-                    entity_key=str(position_id),
-                    row=final_payload,
-                    operation="update",
-                    source_updated_at=float(final_payload.get("closed_at") or closed_at),
-                )
-            except Exception as exc:
-                logger.debug("[live] recovery close dual-write enqueue failed: {}", exc)
         conn.commit()
     finally:
         conn.close()
@@ -5630,9 +5993,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}
                 if quote:
                     _live_state_update(spot_quote=quote)
-                spot = float((quote or {}).get("mid") or 0.0)
-                if not spot:
-                    spot = bridge.get_spot_price() if bridge is not None and hasattr(bridge, "get_spot_price") else 0
+                spot = float((quote or {}).get("mid") or 0.0) if _quote_is_fresh(quote) else 0.0
                 last_close = float(df_new.iloc[-1]["close"])
                 if spot and spot > 0 and last_close > 0 and abs(spot - last_close) / last_close < 0.20:
                     df_new.loc[df_new.index[-1], "close"] = spot
@@ -5764,6 +6125,7 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
         if hasattr(bridge, 'is_connected') and not bridge.is_connected:
             return
         now_ts = time.time()
+        acct = _live_state_get("account", {}, clone=True) or {}
         account_updated_at = float(_live_state_get("account_updated_at") or 0.0)
         positions_updated_at = float(_live_state_get("positions_updated_at") or 0.0)
         account_fresh = account_updated_at > 0 and (now_ts - account_updated_at) < _ACCOUNT_REFRESH_MIN_INTERVAL
@@ -5831,9 +6193,10 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
                 pos_raw,
                 cfg=cfg,
                 now_ts=time.time(),
-                persist=True,
+                persist=False,
                 broker=broker,
                 strategy_name=str(_loop_strategy_name or "factor_v4"),
+                account=acct,
             )
             _live_state_update(positions=enriched, positions_updated_at=time.time())
     finally:
@@ -5941,7 +6304,7 @@ _cross_asset_covar: "CrossAssetCovariance | None" = None  # 跨品种协方差
 
 
 # ═══════════════════════════════════════════════════════════
-# 审计日志 (统一使用 DecisionLogStore → state.db)
+# 审计日志 (统一使用 DecisionLogStore → PostgreSQL state store)
 # ═══════════════════════════════════════════════════════════
 import json as _json
 
@@ -5961,17 +6324,20 @@ _latest_price: float | None = None
 
 def get_latest_price() -> float | None:
     """返回最新价. 优先共享缓存 (live loop 写), 其次 bridge spot, 最后 bar close."""
-    spot = _live_state_get("spot_price")
-    if spot and spot > 0:
-        return spot
+    quote = _live_state_get("spot_quote", None, clone=True)
+    if _quote_is_fresh(quote):
+        spot = float((quote or {}).get("mid") or 0.0)
+        if spot > 0:
+            return spot
     global _latest_price
     try:
         # audit 2026-06-10: 3-tuple; warming_up 时返旧价不阻塞
         bridge, err, warming = _get_ctrader()
         if bridge is None or err or warming or not bridge.is_connected:
             return _latest_price
-        spot = bridge.get_spot_price()
-        if spot is not None and spot > 0:
+        quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
+        spot = float((quote or {}).get("mid") or 0.0) if _quote_is_fresh(quote) else 0.0
+        if spot > 0:
             return spot
     except Exception as _e2:
         logger.debug("[live] get_latest_price spot query failed: %s", _e2)
@@ -6199,6 +6565,17 @@ def _record_filled_position_open_context(
             logger.debug("[live] ledger open persist failed for pos %s: %s", pid, ledger_err)
 
     try:
+        entry_protection_plan = _entry_protection_plan_payload(
+            position_id=pid,
+            direction=composite.direction,
+            entry_price=float(fill_price or current_price),
+            target_stop_loss=sl_price,
+            target_take_profit=tp_price,
+            requested_volume=requested_volume,
+            actual_api_volume=actual_api_volume,
+            tick=tick,
+            status="pending",
+        )
         _upsert_recovery_position_state(
             {
                 "position_id": pid,
@@ -6216,6 +6593,7 @@ def _record_filled_position_open_context(
                 "tick": tick,
                 "sl": round(sl_price, 2),
                 "tp": round(tp_price, 2),
+                "entry_protection_plan": entry_protection_plan,
                 "trade_attribution": trade_attribution_payload,
             },
         )
@@ -6381,6 +6759,7 @@ def _process_tick_factor_pipeline(
         pid = p.get("position_id") or p.get("ticket")
         if pid is not None:
             current_pids.add(int(pid))
+    pending_open_attach_ids = _active_pending_open_attach_ids(current_pids)
     closed_pids: set[int] = set()
     attr_engine = pipeline.get("attribution")
     positions_snapshot_ready = bool(_live_state_get("positions_updated_at", 0.0))
@@ -6401,8 +6780,7 @@ def _process_tick_factor_pipeline(
     if closed_pids and bridge is not None:
         try:
             from execution.deal_sync import sync_close_deals_batch
-            from backend.core.db import get_state_conn
-            _sconn = get_state_conn()
+            _sconn = _get_state_pg_conn()
             try:
                 _real_pnls = sync_close_deals_batch(bridge, _sconn, closed_pids)
             finally:
@@ -6571,6 +6949,7 @@ def _process_tick_factor_pipeline(
             # 清理金字塔规则状态
             _pos_entry_scores.pop(cpid, None)
             _pos_entry_decisions.pop(int(cpid), None)
+            _pending_open_attach_until.pop(int(cpid), None)
         except Exception as exc:
             log(f"tick {tick}: attribution close pos={cpid} error: {exc}")
     # 记录当前仓位 open price (供下次 close 使用)
@@ -6595,9 +6974,10 @@ def _process_tick_factor_pipeline(
                 f"DataStore may be stale, check CTraderPuller")
 
     # 价格守卫
-    if bridge is not None and hasattr(bridge, "get_spot_price"):
+    if bridge is not None and hasattr(bridge, "get_spot_quote"):
         try:
-            spot = bridge.get_spot_price()
+            quote = bridge.get_spot_quote() or {}
+            spot = float((quote or {}).get("mid") or 0.0) if _quote_is_fresh(quote) else 0.0
             if (spot and spot > 0 and current_price > 0
                     and abs(spot - current_price) / current_price < 0.20):
                 current_price = spot
@@ -6609,7 +6989,13 @@ def _process_tick_factor_pipeline(
     atr_price = atr_val * current_price if atr_val and atr_val > 0 else 0
     sl_price = 0.0
     tp_price = 0.0
-    if composite.direction != 0 and gate_result.passed and send:
+    if composite.direction != 0 and gate_result.passed and send and pending_open_attach_ids:
+        log(
+            f"tick {tick}: v4 open SKIP (pending_open_attach "
+            f"positions={pending_open_attach_ids})"
+        )
+
+    if composite.direction != 0 and gate_result.passed and send and not pending_open_attach_ids:
         direction_name = {1: "LONG", -1: "SHORT"}.get(composite.direction, "?")
         sl_dist = atr_price * cfg.strategy_sl_atr if atr_price > 0 else current_price * 0.02
         tp_dist = atr_price * cfg.strategy_tp_atr if atr_price > 0 else current_price * 0.03
@@ -6736,12 +7122,64 @@ def _process_tick_factor_pipeline(
                                         composite.direction, protection_ref, sl_dist, tp_dist, _digits,
                                     )
                                 break
+                        _remember_pending_open_attach(int(pid))
+                        entry_protection_plan = _entry_protection_plan_payload(
+                            position_id=int(pid),
+                            direction=composite.direction,
+                            entry_price=float(fill_price or current_price),
+                            target_stop_loss=sl_price,
+                            target_take_profit=tp_price,
+                            requested_volume=volume,
+                            actual_api_volume=actual_api_volume,
+                            tick=tick,
+                            status="pending",
+                        )
+                        try:
+                            _upsert_recovery_position_state(
+                                {
+                                    "position_id": pid,
+                                    "symbol": "XAUUSD+",
+                                    "direction": composite.direction,
+                                    "open_price": float(fill_price or current_price),
+                                    "volume": float(actual_api_volume),
+                                    "entry_decision_id": _lookup_entry_decision_id(int(pid)),
+                                },
+                                broker=broker,
+                                strategy_name=str(_loop_strategy_name or "factor_v4"),
+                                status="open",
+                                meta={
+                                    "tick": tick,
+                                    "sl": round(sl_price, 2),
+                                    "tp": round(tp_price, 2),
+                                    "entry_protection_plan": entry_protection_plan,
+                                },
+                            )
+                        except Exception as _protection_plan_err:
+                            logger.debug(
+                                "[live] entry protection plan persist failed for pos %s: %s",
+                                pid,
+                                _protection_plan_err,
+                            )
                         try:
                             amend_res = bridge.amend_position_sltp(
                                 position_id=pid, sl=sl_price, tp=tp_price,
                             )
                             if getattr(amend_res, "success", False):
                                 _track_local_sl_tp(pid, sl=sl_price, tp=tp_price)
+                                try:
+                                    _update_entry_protection_plan_status(
+                                        int(pid),
+                                        status="applied",
+                                        attempted=True,
+                                        applied_sl=sl_price,
+                                        applied_tp=tp_price,
+                                    )
+                                except Exception as _plan_update_err:
+                                    logger.debug(
+                                        "[live] entry protection applied update failed for pos %s: %s",
+                                        pid,
+                                        _plan_update_err,
+                                    )
                                 _pos_entry_scores[pid] = composite.score
                                 log(f"tick {tick}: v4 {direction_name} ORDER+AMEND OK "
                                     f"api_volume={actual_api_volume:.0f} pos={pid} score={composite.score:.4f}")
@@ -6882,6 +7320,13 @@ def _process_tick_factor_pipeline(
                                                 "tick": tick,
                                                 "sl": round(sl_price, 2),
                                                 "tp": round(tp_price, 2),
+                                                "entry_protection_plan": {
+                                                    **entry_protection_plan,
+                                                    "status": "applied",
+                                                    "updated_at": time.time(),
+                                                    "applied_stop_loss": round(sl_price, 2),
+                                                    "applied_take_profit": round(tp_price, 2),
+                                                },
                                                 "event_sizing": event_sizing_context,
                                                 "trade_attribution": trade_attr.to_jsonable(),
                                             },
@@ -6919,8 +7364,13 @@ def _process_tick_factor_pipeline(
                                 except Exception as attr_err:
                                     log(f"tick {tick}: attribution record_open error: {attr_err}")
                             else:
+                                amend_failure_reason = str(
+                                    getattr(amend_res, "comment", "")
+                                    or getattr(amend_res, "error", "")
+                                    or "amend_failed"
+                                )
                                 log(f"tick {tick}: v4 {direction_name} AMEND FAILED "
-                                    f"pos={pid}: {getattr(amend_res, 'comment', '?')}")
+                                    f"pos={pid}: {amend_failure_reason}")
                                 _record_filled_position_open_context(
                                     attr_engine=attr_engine,
                                     broker=broker,
@@ -6939,6 +7389,12 @@ def _process_tick_factor_pipeline(
                                     composite=composite,
                                     gate_result=gate_result,
                                     risk_verdict=risk_verdict,
+                                )
+                                _update_entry_protection_plan_status(
+                                    int(pid),
+                                    status="failed",
+                                    error=amend_failure_reason,
+                                    attempted=True,
                                 )
                                 if _LEDGER:
                                     try:
@@ -7005,6 +7461,12 @@ def _process_tick_factor_pipeline(
                                 composite=composite,
                                 gate_result=gate_result,
                                 risk_verdict=risk_verdict,
+                            )
+                            _update_entry_protection_plan_status(
+                                int(pid),
+                                status="failed",
+                                error=f"amend_exception:{type(e).__name__}:{str(e)[:220]}",
+                                attempted=True,
                             )
                             if _LEDGER:
                                 try:
@@ -7299,6 +7761,94 @@ def _update_trailing_stops(
     return candidates
 
 
+def _entry_protection_repair_candidates(
+    pos: list,
+    *,
+    current_price: float,
+    tick: int,
+) -> list[ProtectionCandidate]:
+    candidates: list[ProtectionCandidate] = []
+    for p in pos or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            pid = int(p.get("position_id") or p.get("ticket") or 0)
+        except Exception:
+            pid = 0
+        if pid <= 0:
+            continue
+        row = _load_recovery_position_row(pid)
+        meta = dict((row or {}).get("recovery_meta") or {})
+        plan = dict(meta.get("entry_protection_plan") or {})
+        if plan.get("schema_version") != _ENTRY_PROTECTION_PLAN_SCHEMA:
+            continue
+        target_sl = float(plan.get("target_stop_loss") or 0.0)
+        target_tp = float(plan.get("target_take_profit") or 0.0)
+        if target_sl <= 0 and target_tp <= 0:
+            continue
+        last_attempt_ts = float(plan.get("last_attempt_ts") or 0.0)
+        if last_attempt_ts > 0 and time.time() - last_attempt_ts < _ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS:
+            continue
+        direction = int(plan.get("direction") or _direction_from_position(p) or 0)
+        current_sl = _float_payload_value(p, "sl", "stop_loss", "stopLoss")
+        current_tp = _float_payload_value(p, "tp", "take_profit", "takeProfit")
+        needs_sl = False
+        if target_sl > 0:
+            if current_sl <= 0:
+                needs_sl = True
+            elif direction > 0 and target_sl > current_sl + 0.01:
+                needs_sl = True
+            elif direction < 0 and target_sl < current_sl - 0.01:
+                needs_sl = True
+        needs_tp = bool(target_tp > 0 and current_tp <= 0)
+        if not needs_sl and not needs_tp:
+            if str(plan.get("status") or "") != "applied":
+                try:
+                    _update_entry_protection_plan_status(
+                        pid,
+                        status="applied",
+                        applied_sl=current_sl,
+                        applied_tp=current_tp,
+                    )
+                except Exception as exc:
+                    logger.debug("[live] entry protection applied-state update failed pos=%s: %s", pid, exc)
+            continue
+        anchor = _runtime_config_anchor()
+        candidates.append(
+            ProtectionCandidate(
+                source=_ENTRY_PROTECTION_REPAIR_SOURCE,
+                action="repair_entry_protection",
+                priority=10,
+                position_id=pid,
+                risk_action="tighten_position",
+                controls={
+                    "target_stop_loss": round(target_sl, 2) if target_sl > 0 else 0.0,
+                    "target_take_profit": round(target_tp, 2) if target_tp > 0 else 0.0,
+                    "close_reason": _ENTRY_PROTECTION_REPAIR_SOURCE,
+                    "protection_mode": "entry_sltp_repair",
+                },
+                evidence={
+                    "tick": int(tick or 0),
+                    "current_price": round(float(current_price or 0.0), 2),
+                    "current_sl": round(float(current_sl or 0.0), 2),
+                    "current_tp": round(float(current_tp or 0.0), 2),
+                    "target_sl": round(float(target_sl or 0.0), 2),
+                    "target_tp": round(float(target_tp or 0.0), 2),
+                    "needs_sl": needs_sl,
+                    "needs_tp": needs_tp,
+                    "plan_status": str(plan.get("status") or ""),
+                    "plan_attempts": int(plan.get("attempts") or 0),
+                    "confidence": 1.0,
+                },
+                reason="entry_protection_missing_on_broker",
+                position=dict(p),
+                config_version=int(anchor.get("config_version") or 0),
+                config_hash=str(anchor.get("config_hash") or ""),
+            )
+        )
+    return candidates
+
+
 def _execute_trailing_candidate(
     candidate: ProtectionCandidate,
     *,
@@ -7363,9 +7913,21 @@ def _execute_trailing_candidate(
         return True
 
     target_sl = float(candidate.controls.get("target_stop_loss", 0.0) or 0.0)
-    current_tp = float(candidate.controls.get("target_take_profit", 0.0) or position.get("tp", 0.0) or 0.0)
+    target_tp = float(candidate.controls.get("target_take_profit", 0.0) or 0.0)
+    position_sl = _float_payload_value(position, "sl", "stop_loss", "stopLoss")
+    position_tp = _float_payload_value(position, "tp", "take_profit", "takeProfit")
+    current_tp = target_tp if target_tp > 0 else position_tp
     quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
     sl_plan = _supervisor_tighten_sl_plan(position, target_sl, quote=quote)
+    planned_sl = float(sl_plan.get("planned_sl") or 0.0)
+    if candidate.source == _ENTRY_PROTECTION_REPAIR_SOURCE and not sl_plan["allowed"] and position_sl > 0:
+        planned_sl = position_sl
+        sl_plan = {
+            **sl_plan,
+            "allowed": True,
+            "planned_sl": planned_sl,
+            "reason": "preserve_existing_stop_loss_for_tp_repair",
+        }
     if not sl_plan["allowed"]:
         _log_supervisor_position_event(
             position=position,
@@ -7399,13 +7961,23 @@ def _execute_trailing_candidate(
         log(f"tick {tick}: protection {candidate.source} SKIP pos={pid} reason={sl_plan.get('reason')}")
         return True
 
-    planned_sl = float(sl_plan.get("planned_sl") or 0.0)
     try:
         amend_res = bridge.amend_position_sltp(pid, sl=planned_sl, tp=current_tp)
     except Exception as exc:
         amend_res = type("AmendResult", (), {"success": False, "comment": str(exc)})()
     if getattr(amend_res, "success", False):
         _track_local_sl_tp(pid, sl=planned_sl, tp=current_tp)
+        if candidate.source == _ENTRY_PROTECTION_REPAIR_SOURCE:
+            try:
+                _update_entry_protection_plan_status(
+                    pid,
+                    status="applied",
+                    attempted=True,
+                    applied_sl=planned_sl,
+                    applied_tp=current_tp,
+                )
+            except Exception as exc:
+                logger.debug("[live] entry protection applied update failed pos=%s: %s", pid, exc)
         _remember_protection_state(
             position,
             verdict_payload,
@@ -7419,17 +7991,18 @@ def _execute_trailing_candidate(
             event_type="tightened",
             details={
                 "protection_source": candidate.source,
-                "supervisor_action": candidate.action,
-                "supervisor_reason": candidate.reason,
-                "risk_verdict_reason": risk_verdict.get("reason"),
-                "close_reason_source": "legacy_awe_trailing",
-                "applied_controls": {
-                    **candidate.controls,
-                    "target_stop_loss_original": target_sl,
-                    "target_stop_loss_sent": planned_sl,
-                    "sl_plan": sl_plan,
+                    "supervisor_action": candidate.action,
+                    "supervisor_reason": candidate.reason,
+                    "risk_verdict_reason": risk_verdict.get("reason"),
+                    "close_reason_source": candidate.source,
+                    "applied_controls": {
+                        **candidate.controls,
+                        "target_stop_loss_original": target_sl,
+                        "target_stop_loss_sent": planned_sl,
+                        "target_take_profit_sent": current_tp,
+                        "sl_plan": sl_plan,
+                    },
                 },
-            },
         )
         _log_supervisor_trace(
             position=position,
@@ -7443,12 +8016,27 @@ def _execute_trailing_candidate(
             risk_verdict=risk_verdict,
             execution_status="applied",
             execution_reason="amend_position_sltp_success",
-            execution={"target_stop_loss_sent": planned_sl, "sl_plan": sl_plan, "candidate": asdict(candidate)},
+            execution={
+                "target_stop_loss_sent": planned_sl,
+                "target_take_profit_sent": current_tp,
+                "sl_plan": sl_plan,
+                "candidate": asdict(candidate),
+            },
             acct=acct,
         )
-        log(f"tick {tick}: protection {candidate.source} pos={pid} sl->{planned_sl:.2f}")
+        log(f"tick {tick}: protection {candidate.source} pos={pid} sl->{planned_sl:.2f} tp->{current_tp:.2f}")
     else:
         reason = str(getattr(amend_res, "comment", "") or getattr(amend_res, "error", "") or "amend_failed")
+        if candidate.source == _ENTRY_PROTECTION_REPAIR_SOURCE:
+            try:
+                _update_entry_protection_plan_status(
+                    pid,
+                    status="failed",
+                    error=reason,
+                    attempted=True,
+                )
+            except Exception as exc:
+                logger.debug("[live] entry protection failure update failed pos=%s: %s", pid, exc)
         _log_supervisor_position_event(
             position=position,
             event_type="amend_failed",
@@ -7632,7 +8220,7 @@ def _run_position_protection_cycle(
     log,
 ) -> dict[str, Any]:
     if not pos or bridge is None or cfg is None:
-        return {"timeout": [], "supervisor": [], "trailing_applied": [], "trailing_superseded": []}
+        return {"timeout": [], "entry_repair": [], "supervisor": [], "trailing_applied": [], "trailing_superseded": []}
 
     trailing_candidates: list[ProtectionCandidate] = []
     if atr_price > 0:
@@ -7653,6 +8241,19 @@ def _run_position_protection_cycle(
         tick=tick,
         log=log,
     )
+    entry_repair_candidates = _entry_protection_repair_candidates(
+        pos,
+        current_price=current_price,
+        tick=tick,
+    )
+    entry_repair_applied: set[int] = set()
+    for candidate in sorted(entry_repair_candidates, key=lambda item: item.priority):
+        if candidate.position_id in timeout_handled:
+            _log_protection_candidate_superseded(candidate, cfg=cfg, tick=tick, reason="holding_timeout", acct=acct)
+            continue
+        if _execute_trailing_candidate(candidate, bridge=bridge, cfg=cfg, tick=tick, log=log, acct=acct):
+            entry_repair_applied.add(candidate.position_id)
+
     supervisor_handled = _run_position_supervision(
         bridge,
         pos,
@@ -7660,9 +8261,9 @@ def _run_position_protection_cycle(
         acct=acct,
         tick=tick,
         log=log,
-        skip_position_ids=timeout_handled,
+        skip_position_ids=set(timeout_handled) | set(entry_repair_applied),
     )
-    protected_pids = set(timeout_handled) | set(supervisor_handled)
+    protected_pids = set(timeout_handled) | set(entry_repair_applied) | set(supervisor_handled)
     trailing_applied: set[int] = set()
     trailing_superseded: set[int] = set()
     for candidate in sorted(trailing_candidates, key=lambda item: item.priority):
@@ -7677,6 +8278,7 @@ def _run_position_protection_cycle(
 
     return {
         "timeout": sorted(timeout_handled),
+        "entry_repair": sorted(entry_repair_applied),
         "supervisor": sorted(supervisor_handled),
         "trailing_applied": sorted(trailing_applied),
         "trailing_superseded": sorted(trailing_superseded),
@@ -7687,7 +8289,7 @@ def _write_live_trade_log_factor(
     tick: int, price: float, acct: dict, pos: list,
     composite, gate_result, state: dict,
 ) -> None:
-    """因子管道版结构化审计日志 (写入 DecisionLogStore → state.db)。"""
+    """因子管道版结构化审计日志 (写入 DecisionLogStore → PostgreSQL state store)。"""
     try:
         meta = {
             "tick": tick, "price": round(price, 2),

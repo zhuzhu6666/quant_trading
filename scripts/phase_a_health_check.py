@@ -18,45 +18,73 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, ensure_sqlite_columns
+from backend.core.db import (
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_exists,
+)
 
 
-def _connect(db_path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.executescript(STATE_DB_DDL)
-    conn.commit()
-    conn.close()
-    ensure_sqlite_columns(
-        db_path,
-        "experience_memory",
-        {
-            "source_table": "source_table TEXT DEFAULT ''",
-            "source_id": "source_id TEXT DEFAULT ''",
-            "append_source": "append_source TEXT DEFAULT ''",
-            "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-        },
-    )
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+def _use_pg(db_path: str | Path) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: tuple[Any, ...] = ()):
+    return conn.execute(_sql(conn, sql), params)
+
+
+def _json_text(conn, column: str, path: str) -> str:
+    if _conn_is_pg(conn):
+        parts = ",".join(part.strip() for part in path.split(".") if part.strip())
+        return f"(COALESCE(NULLIF({column}, ''), '{{}}')::jsonb #>> '{{{parts}}}')"
+    return f"json_extract({column}, '$.{path}')"
+
+
+def _json_int(conn, column: str, path: str) -> str:
+    text_expr = _json_text(conn, column, path)
+    if _conn_is_pg(conn):
+        return f"CAST(NULLIF({text_expr}, '') AS BIGINT)"
+    return f"CAST({text_expr} AS INTEGER)"
+
+
+def _string_agg(conn, column: str) -> str:
+    return f"string_agg({column}, ',')" if _conn_is_pg(conn) else f"GROUP_CONCAT({column})"
+
+
+def _connect(db_path: str | Path):
+    conn = get_state_pg_conn(read_only=True) if _use_pg(db_path) else connect_sqlite(db_path)
+    if not _use_pg(db_path):
+        conn.row_factory = sqlite3.Row
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
     return conn
 
 
-def _scalar(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> int:
-    row = conn.execute(sql, params).fetchone()
-    return int(row[0] or 0) if row else 0
+def _scalar(conn, sql: str, params: tuple[Any, ...] = ()) -> int:
+    row = _execute(conn, sql, params).fetchone()
+    if not row:
+        return 0
+    value = next(iter(row.values())) if isinstance(row, dict) else row[0]
+    return int(value or 0)
 
 
-def _rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> list[dict]:
-    return [dict(row) for row in conn.execute(sql, params).fetchall()]
+def _rows(conn, sql: str, params: tuple[Any, ...] = ()) -> list[dict]:
+    return [dict(row) for row in _execute(conn, sql, params).fetchall()]
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-        (table,),
-    ).fetchone()
-    return row is not None
+def _table_exists(conn, table: str) -> bool:
+    return state_table_exists(conn, table)
 
 
 def _json_loads(raw: str | None, default: Any) -> Any:
@@ -66,7 +94,7 @@ def _json_loads(raw: str | None, default: Any) -> Any:
         return default
 
 
-def _evidence_contract_counts(conn: sqlite3.Connection, limit: int = 10000) -> dict[str, int]:
+def _evidence_contract_counts(conn, limit: int = 10000) -> dict[str, int]:
     counts = {
         "checked": 0,
         "non_matured_allows_supervised_training": 0,
@@ -75,7 +103,8 @@ def _evidence_contract_counts(conn: sqlite3.Connection, limit: int = 10000) -> d
     }
     if not _table_exists(conn, "autonomous_learning_sample"):
         return counts
-    rows = conn.execute(
+    rows = _execute(
+        conn,
         """
         SELECT label_status, integrity, features_json, label_json, trace_json, evidence_contract_json
         FROM autonomous_learning_sample
@@ -131,20 +160,28 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
             "closed_recovery_positions_recent": _scalar(conn, "SELECT COUNT(*) FROM recovery_position_state WHERE status IN ('closed', 'closed_replayed') AND closed_at >= ?", (since,)),
         }
         evidence_contract_counts = _evidence_contract_counts(conn)
+        review_close_source = _json_text(conn, "review_json", "close_reason_source")
+        review_attribution_integrity = _json_text(conn, "review_json", "attribution_integrity")
+        review_context_integrity = _json_text(conn, "review_json", "context_integrity")
+        review_real_deal_id = _json_text(conn, "review_json", "real_pnl.deal_id")
+        review_real_deal_id_int = _json_int(conn, "review_json", "real_pnl.deal_id")
+        r_review_real_deal_id = _json_text(conn, "r.review_json", "real_pnl.deal_id")
+        r_review_real_deal_id_int = _json_int(conn, "r.review_json", "real_pnl.deal_id")
+        p_experience_id = _json_text(conn, "p.evidence_json", "experience_id")
         missing_close_source_total = _scalar(
             conn,
-            """
+            f"""
             SELECT COUNT(*)
             FROM trade_outcome_review
-            WHERE COALESCE(json_extract(review_json, '$.close_reason_source'), '') = ''
+            WHERE COALESCE({review_close_source}, '') = ''
             """,
         )
         missing_review_integrity_total = _scalar(
             conn,
-            """
+            f"""
             SELECT COUNT(*)
             FROM trade_outcome_review
-            WHERE COALESCE(json_extract(review_json, '$.attribution_integrity'), json_extract(review_json, '$.context_integrity'), '') = ''
+            WHERE COALESCE({review_attribution_integrity}, {review_context_integrity}, '') = ''
             """,
         )
         experience_missing_source_total = _scalar(
@@ -159,26 +196,26 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
         )
         review_broker_time_mismatch_total = _scalar(
             conn,
-            """
+            f"""
             SELECT COUNT(*)
             FROM trade_outcome_review r
             JOIN ctrader_deals d
-              ON d.deal_id = CAST(json_extract(r.review_json, '$.real_pnl.deal_id') AS INTEGER)
-            WHERE COALESCE(json_extract(r.review_json, '$.real_pnl.deal_id'), '') != ''
+              ON d.deal_id = {r_review_real_deal_id_int}
+            WHERE COALESCE({r_review_real_deal_id}, '') != ''
               AND ABS(COALESCE(r.created_at, 0) - COALESCE(d.exec_timestamp, 0)) > 5.0
             """,
         )
         duplicate_review_deal_total = _scalar(
             conn,
-            """
+            f"""
             SELECT COUNT(*)
             FROM (
-                SELECT CAST(json_extract(review_json, '$.real_pnl.deal_id') AS INTEGER) AS deal_id,
+                SELECT {review_real_deal_id_int} AS deal_id,
                        COUNT(*) AS n
                 FROM trade_outcome_review
-                WHERE COALESCE(json_extract(review_json, '$.real_pnl.deal_id'), '') != ''
+                WHERE COALESCE({review_real_deal_id}, '') != ''
                 GROUP BY deal_id
-                HAVING n > 1
+                HAVING COUNT(*) > 1
             )
             """,
         )
@@ -195,15 +232,15 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
         )
         policy_suggestion_dangling_experience_total = _scalar(
             conn,
-            """
+            f"""
             SELECT COUNT(*)
             FROM policy_suggestion p
-            WHERE json_extract(p.evidence_json, '$.experience_id') IS NOT NULL
-              AND json_extract(p.evidence_json, '$.experience_id') != ''
+            WHERE {p_experience_id} IS NOT NULL
+              AND {p_experience_id} != ''
               AND NOT EXISTS (
                   SELECT 1
                   FROM experience_memory e
-                  WHERE e.experience_id = json_extract(p.evidence_json, '$.experience_id')
+                  WHERE e.experience_id = {p_experience_id}
               )
             """,
         )
@@ -302,16 +339,16 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
         )
         review_broker_time_mismatches = _rows(
             conn,
-            """
+            f"""
             SELECT r.review_id, r.position_id,
-                   json_extract(r.review_json, '$.real_pnl.deal_id') AS deal_id,
+                   {r_review_real_deal_id} AS deal_id,
                    r.created_at AS review_created_at,
                    d.exec_timestamp AS broker_exec_timestamp,
                    ABS(COALESCE(r.created_at, 0) - COALESCE(d.exec_timestamp, 0)) AS drift_seconds
             FROM trade_outcome_review r
             JOIN ctrader_deals d
-              ON d.deal_id = CAST(json_extract(r.review_json, '$.real_pnl.deal_id') AS INTEGER)
-            WHERE COALESCE(json_extract(r.review_json, '$.real_pnl.deal_id'), '') != ''
+              ON d.deal_id = {r_review_real_deal_id_int}
+            WHERE COALESCE({r_review_real_deal_id}, '') != ''
               AND ABS(COALESCE(r.created_at, 0) - COALESCE(d.exec_timestamp, 0)) > 5.0
             ORDER BY drift_seconds DESC
             LIMIT ?
@@ -320,14 +357,14 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
         )
         duplicate_review_deals = _rows(
             conn,
-            """
-            SELECT CAST(json_extract(review_json, '$.real_pnl.deal_id') AS INTEGER) AS deal_id,
-                   GROUP_CONCAT(review_id) AS review_ids,
+            f"""
+            SELECT {review_real_deal_id_int} AS deal_id,
+                   {_string_agg(conn, 'review_id')} AS review_ids,
                    COUNT(*) AS review_count
             FROM trade_outcome_review
-            WHERE COALESCE(json_extract(review_json, '$.real_pnl.deal_id'), '') != ''
+            WHERE COALESCE({review_real_deal_id}, '') != ''
             GROUP BY deal_id
-            HAVING review_count > 1
+            HAVING COUNT(*) > 1
             ORDER BY review_count DESC
             LIMIT ?
             """,

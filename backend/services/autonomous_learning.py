@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -9,7 +10,15 @@ from typing import Any
 
 from loguru import logger
 
-from backend.core.db import STATE_DB, connect_sqlite
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_pg_enabled,
+    state_table_columns,
+    state_table_exists,
+)
 from backend.services.evolution_ledger import (
     ensure_evolution_columns,
     ensure_evolution_ledger_tables,
@@ -38,17 +47,29 @@ def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def _sqlite_db_path(conn, default: str | Path = STATE_DB) -> str:
-    try:
-        row = conn.execute("PRAGMA database_list").fetchone()
-        if row is not None:
-            keys = getattr(row, "keys", lambda: [])()
-            value = row["file"] if "file" in keys else row[2]
-            if value:
-                return str(value)
-    except Exception:
-        pass
-    return str(default)
+def _use_pg(db_path: str | Path = STATE_DB) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
+    conn = get_state_pg_conn(read_only=read_only) if _use_pg(db_path) else connect_sqlite(db_path, read_only=read_only)
+    if not _use_pg(db_path):
+        conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
 
 
 def _sample_id(sample_type: str, source_table: str, source_id: str) -> str:
@@ -75,6 +96,8 @@ def _sample_integrity_level(value: Any) -> str:
 
 def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
     ensure_evolution_ledger_tables(db_path)
+    if _use_pg(db_path):
+        return
     conn = connect_sqlite(db_path)
     try:
         conn.execute(
@@ -151,7 +174,7 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
             )
             """
         )
-        cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(autonomous_learning_sample)").fetchall()}
+        cols = state_table_columns(conn, "autonomous_learning_sample")
         if "evidence_contract_json" not in cols:
             conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN evidence_contract_json TEXT DEFAULT '{}'")
         if "config_version" not in cols:
@@ -160,7 +183,7 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
             conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN config_hash TEXT DEFAULT ''")
         if "evolution_run_id" not in cols:
             conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN evolution_run_id TEXT DEFAULT ''")
-        trace_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(position_supervisor_trace)").fetchall()}
+        trace_cols = state_table_columns(conn, "position_supervisor_trace")
         if "trace_integrity" not in trace_cols:
             conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN trace_integrity TEXT DEFAULT 'full'")
         if "config_version" not in trace_cols:
@@ -219,7 +242,8 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
     config_version = int(item.get("config_version") or (snapshot or {}).get("config_version") or 0)
     config_hash = str(item.get("config_hash") or (snapshot or {}).get("config_hash") or "")
     evolution_run_id = str(item.get("evolution_run_id") or "")
-    existing = conn.execute(
+    existing = _execute(
+        conn,
         """
         SELECT label_status
         FROM autonomous_learning_sample
@@ -258,7 +282,6 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         label_status=label_status,
         explanation={"verdict": verdict},
     )
-    before = conn.total_changes
     row_payload = {
         "sample_id": sample_id,
         "sample_type": sample_type,
@@ -284,7 +307,8 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         "created_at": now,
         "updated_at": now,
     }
-    conn.execute(
+    _execute(
+        conn,
         """
         INSERT INTO autonomous_learning_sample
         (sample_id, sample_type, source_table, source_id, decision_id, trade_id,
@@ -339,61 +363,27 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
             "updated_at",
         )),
     )
-    changed = conn.total_changes > before
+    changed = getattr(cur, "rowcount", 0) != 0
     if changed:
-        final = conn.execute(
+        final = _execute(
+            conn,
             "SELECT * FROM autonomous_learning_sample WHERE sample_id=?",
             (sample_id,),
         ).fetchone()
-        try:
-            from backend.services.state_dual_write import enqueue_state_row_event_on_conn
-
-            enqueue_state_row_event_on_conn(
-                conn,
-                db_path=_sqlite_db_path(conn),
-                table_name="autonomous_learning_sample",
-                entity_key=sample_id,
-                row=dict(final) if final is not None else row_payload,
-                operation="upsert",
-                source_updated_at=now,
-            )
-        except Exception as exc:
-            logger.debug("[autonomous_learning] sample dual-write enqueue failed: {}", exc)
     return changed
 
 
 def _insert_evolution_event(conn, event_type: str, payload: dict[str, Any]) -> None:
     now = time.time()
     payload_json = _dumps(payload)
-    cur = conn.execute(
+    _execute(
+        conn,
         """
         INSERT INTO evolution_events (timestamp, event_type, payload_json)
         VALUES (?, ?, ?)
         """,
         (now, event_type, payload_json),
     )
-    try:
-        from backend.services.state_dual_write import enqueue_state_row_event_on_conn
-
-        event_id = int(getattr(cur, "lastrowid", 0) or 0)
-        enqueue_state_row_event_on_conn(
-            conn,
-            db_path=_sqlite_db_path(conn),
-            table_name="evolution_events",
-            entity_key=str(event_id or f"{now}:{event_type}"),
-            row={
-                "id": event_id,
-                "timestamp": now,
-                "event_type": str(event_type),
-                "payload_json": payload_json,
-            },
-            operation="insert",
-            source_updated_at=now,
-        )
-    except Exception as exc:
-        logger.debug("[autonomous_learning] evolution event dual-write enqueue failed: {}", exc)
-
-
 def _autonomy_mode() -> str:
     try:
         from config.runtime_config import shared as runtime_config
@@ -711,12 +701,12 @@ def backfill_position_supervisor_traces(
 ) -> dict[str, Any]:
     ensure_autonomous_learning_tables(db_path)
     run = start_evolution_run(run_type="position_supervisor_trace_backfill", trigger_source="decision_ledger", db_path=db_path)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     inserted = 0
     skipped = 0
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT *
             FROM decision_ledger
@@ -737,10 +727,10 @@ def backfill_position_supervisor_traces(
             action = str(verdict.get("action") or event_type.replace("supervisor_", "") or "")
             trace_id = "psvtrace_legacy_" + hashlib.sha1(str(row["decision_id"] or "").encode("utf-8")).hexdigest()[:16]
             integrity = "recovered" if verdict else "partial"
-            before = conn.total_changes
-            conn.execute(
+            cur = _execute(
+                conn,
                 """
-                INSERT OR IGNORE INTO position_supervisor_trace
+                INSERT INTO position_supervisor_trace
                 (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
                  tick, event_ts, action, summary_reason, confidence, template_id,
                  template_version, stage, outcome, risk_action, risk_allowed,
@@ -750,6 +740,7 @@ def backfill_position_supervisor_traces(
                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'legacy_backfill',
                         'legacy_recovered', '', 0, '', 'unknown', 'legacy decision_ledger backfill',
                         ?, ?, '{}', '{}', ?, ?, ?, ?, ?)
+                ON CONFLICT(trace_id) DO NOTHING
                 """,
                 (
                     trace_id,
@@ -773,7 +764,7 @@ def backfill_position_supervisor_traces(
                     time.time(),
                 ),
             )
-            if conn.total_changes > before:
+            if getattr(cur, "rowcount", 0) > 0:
                 inserted += 1
             else:
                 skipped += 1
@@ -813,12 +804,12 @@ def mature_position_supervisor_traces(
         "config_hash": str(run.get("config_hash") or ""),
         "evolution_run_id": str(run.get("run_id") or ""),
     }
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     matured = 0
     pending = 0
     try:
-        traces = conn.execute(
+        traces = _execute(
+            conn,
             """
             SELECT *
             FROM position_supervisor_trace
@@ -832,7 +823,8 @@ def mature_position_supervisor_traces(
             (max(1, int(limit)),),
         ).fetchall()
         for trace in traces:
-            cf = conn.execute(
+            cf = _execute(
+                conn,
                 """
                 SELECT *
                 FROM supervisor_counterfactual_review
@@ -885,8 +877,7 @@ def materialize_autonomous_learning_samples(
         "config_hash": str(run.get("config_hash") or ""),
         "evolution_run_id": str(run.get("run_id") or ""),
     }
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     counts = {
         "shadow_open_decision": 0,
         "risk_rejection": 0,
@@ -896,7 +887,8 @@ def materialize_autonomous_learning_samples(
         "post_close_counterfactual": 0,
     }
     try:
-        decisions = conn.execute(
+        decisions = _execute(
+            conn,
             """
             SELECT *
             FROM decision_ledger
@@ -920,14 +912,9 @@ def materialize_autonomous_learning_samples(
                 if _upsert_sample(conn, {**_sample_from_decision(row, "supervisor_trajectory"), **sample_context}):
                     counts["supervisor_trajectory"] += 1
 
-        trace_exists = conn.execute(
-            """
-            SELECT 1 FROM sqlite_master
-            WHERE type='table' AND name='position_supervisor_trace'
-            """
-        ).fetchone()
-        if trace_exists:
-            traces = conn.execute(
+        if state_table_exists(conn, "position_supervisor_trace"):
+            traces = _execute(
+                conn,
                 """
                 SELECT *
                 FROM position_supervisor_trace
@@ -940,7 +927,8 @@ def materialize_autonomous_learning_samples(
                 if _upsert_sample(conn, {**_sample_from_supervisor_trace(row), **sample_context}):
                     counts["supervisor_execution_trace"] += 1
 
-        reviews = conn.execute(
+        reviews = _execute(
+            conn,
             """
             SELECT *
             FROM trade_outcome_review
@@ -953,14 +941,9 @@ def materialize_autonomous_learning_samples(
             if _upsert_sample(conn, {**_sample_from_review(row), **sample_context}):
                 counts["trade_review_outcome"] += 1
 
-        exists = conn.execute(
-            """
-            SELECT 1 FROM sqlite_master
-            WHERE type='table' AND name='supervisor_counterfactual_review'
-            """
-        ).fetchone()
-        if exists:
-            cfs = conn.execute(
+        if state_table_exists(conn, "supervisor_counterfactual_review"):
+            cfs = _execute(
+                conn,
                 """
                 SELECT *
                 FROM supervisor_counterfactual_review
@@ -1020,10 +1003,10 @@ def list_autonomous_learning_samples(
         clauses.append("position_id=?")
         params.append(str(position_id))
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             f"""
             SELECT *
             FROM autonomous_learning_sample
@@ -1104,8 +1087,7 @@ def _rebuilt_evidence_contract_from_sample(row: Any) -> dict[str, Any]:
 
 def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: int = 10000) -> dict[str, Any]:
     ensure_autonomous_learning_tables(db_path)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path, read_only=True)
     counts = {
         "checked": 0,
         "non_matured_allows_supervised_training": 0,
@@ -1116,7 +1098,8 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
     }
     examples: list[dict[str, Any]] = []
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT sample_id, sample_type, label_status, integrity,
                    features_json, label_json, trace_json, evidence_contract_json
@@ -1179,12 +1162,12 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
 def repair_evidence_contracts(*, db_path: str | Path = STATE_DB, limit: int = 10000) -> dict[str, Any]:
     ensure_autonomous_learning_tables(db_path)
     run = start_evolution_run(run_type="evidence_contract_repair", trigger_source="contract_health", db_path=db_path)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     checked = 0
     repaired = 0
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT *
             FROM autonomous_learning_sample
@@ -1200,7 +1183,8 @@ def repair_evidence_contracts(*, db_path: str | Path = STATE_DB, limit: int = 10
             rebuilt_json = _dumps(rebuilt)
             if rebuilt_json == str(row["evidence_contract_json"] or "{}"):
                 continue
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE autonomous_learning_sample
                 SET evidence_contract_json=?, updated_at=?
@@ -1244,7 +1228,8 @@ def _latest_protection_evidence_before_close(
     lower = float(close_ts or time.time()) - max(1.0, float(lookback_sec or 0.0))
     upper = float(close_ts or time.time())
     try:
-        row = conn.execute(
+        row = _execute(
+            conn,
             """
             SELECT decision_id, event_type, action_reason, action_json, risk_state_json, decision_ts
             FROM decision_ledger
@@ -1280,7 +1265,8 @@ def _latest_protection_evidence_before_close(
             "source_table": "decision_ledger",
         }
     try:
-        trace = conn.execute(
+        trace = _execute(
+            conn,
             """
             SELECT trace_id, decision_id, action, summary_reason, event_ts,
                    verdict_json, risk_verdict_json, execution_json, stage, outcome
@@ -1355,13 +1341,13 @@ def _classify_review_close_source_from_evidence(close_reason: str, latest: dict[
 def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit: int = 10000) -> dict[str, Any]:
     ensure_autonomous_learning_tables(db_path)
     run = start_evolution_run(run_type="trade_review_close_source_backfill", trigger_source="review_contract_health", db_path=db_path)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     checked = 0
     updated = 0
     by_source: dict[str, int] = {}
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT review_id, position_id, review_json, created_at
             FROM trade_outcome_review
@@ -1390,7 +1376,8 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
                 "backfilled_at": now,
                 "method": "decision_ledger_or_position_supervisor_trace" if latest else "conservative_no_system_evidence",
             }
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE trade_outcome_review
                 SET review_json=?
@@ -1428,19 +1415,31 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
 def backfill_trade_review_integrity_markers(*, db_path: str | Path = STATE_DB, limit: int = 10000) -> dict[str, Any]:
     ensure_autonomous_learning_tables(db_path)
     run = start_evolution_run(run_type="trade_review_integrity_backfill", trigger_source="review_contract_health", db_path=db_path)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     checked = 0
     updated = 0
     try:
-        rows = conn.execute(
+        integrity_filter_sql = (
             """
             SELECT review_id, review_json
             FROM trade_outcome_review
             WHERE COALESCE(json_extract(review_json, '$.attribution_integrity'), json_extract(review_json, '$.context_integrity'), '') = ''
             ORDER BY created_at DESC
             LIMIT ?
-            """,
+            """
+            if not _use_pg(db_path)
+            else """
+            SELECT review_id, review_json
+            FROM trade_outcome_review
+            WHERE COALESCE(review_json, '') NOT LIKE '%attribution_integrity%'
+              AND COALESCE(review_json, '') NOT LIKE '%context_integrity%'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """
+        )
+        rows = _execute(
+            conn,
+            integrity_filter_sql,
             (max(1, int(limit)),),
         ).fetchall()
         now = time.time()
@@ -1454,7 +1453,8 @@ def backfill_trade_review_integrity_markers(*, db_path: str | Path = STATE_DB, l
                 "backfilled_at": now,
                 "reason": "legacy_review_missing_integrity_marker",
             }
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE trade_outcome_review
                 SET review_json=?
@@ -1519,7 +1519,7 @@ def _recommendation_already_materialized(conn, recommendation_id: str) -> bool:
     ]
     for sql, params in checks:
         try:
-            if conn.execute(sql, params).fetchone():
+            if _execute(conn, sql, params).fetchone():
                 return True
         except Exception:
             continue
@@ -1552,8 +1552,7 @@ def materialize_parameter_template_recommendations(
 
     service = ParameterTemplateService(str(db_path))
     recommendations = service.list_recommendations(limit=limit)
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     counts = {"suggested": 0, "offline_jobs": 0, "skipped_existing": 0, "skipped_offmarket": 0, "errors": 0}
     items: list[dict[str, Any]] = []
     try:
@@ -1593,11 +1592,21 @@ def materialize_parameter_template_recommendations(
                     }
                     fn = lambda cb, _params=params: run_parameter_template_offline_validation(_params, cb)
                     js = get_job_manager().submit("parameter_template_validation", params, fn)
-                    conn.execute(
+                    _execute(
+                        conn,
                         """
-                        INSERT OR REPLACE INTO jobs
+                        INSERT INTO jobs
                         (id, kind, status, params_json, result_json, progress, error, created_at, updated_at)
                         VALUES (?, 'parameter_template_validation', 'pending', ?, '{}', 0.0, '', ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            kind=excluded.kind,
+                            status=excluded.status,
+                            params_json=excluded.params_json,
+                            result_json=excluded.result_json,
+                            progress=excluded.progress,
+                            error=excluded.error,
+                            created_at=excluded.created_at,
+                            updated_at=excluded.updated_at
                         """,
                         (js.id, _dumps(params), time.time(), time.time()),
                     )
@@ -1650,7 +1659,8 @@ def _approve_demo_policy_suggestions(
         "fix_stop_legality",
         "switch_position_supervisor_template",
     }
-    rows = conn.execute(
+    rows = _execute(
+        conn,
         """
         SELECT *
         FROM policy_suggestion
@@ -1677,7 +1687,8 @@ def _approve_demo_policy_suggestions(
             if not (has_replay and has_counterfactual):
                 skipped.append({"suggestion_id": suggestion_id, "reason": "missing_supervisor_switch_evidence"})
                 continue
-        conn.execute(
+        _execute(
+            conn,
             """
             UPDATE policy_suggestion
             SET status='approved', reviewed_at=?, review_note=?
@@ -1744,12 +1755,12 @@ def _auto_apply_parameter_template_suggestions(
     from backend.services.parameter_templates import ParameterTemplateService
 
     service = ParameterTemplateService(str(db_path))
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path, read_only=True)
     applied = []
     skipped = []
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT *
             FROM policy_suggestion
@@ -1876,12 +1887,12 @@ def _auto_apply_position_supervisor_template_suggestions(
 
     valid_templates = {str(item.get("template_id") or "") for item in list_position_supervisor_templates()}
     previous_template_id = str(getattr(runtime_config(), "position_supervisor_template_id", "") or "position_supervisor:default.v1")
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     applied = []
     skipped = []
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT *
             FROM policy_suggestion
@@ -1953,14 +1964,27 @@ def _auto_apply_position_supervisor_template_suggestions(
                 "config_version": int(snapshot.get("config_version") or 0),
                 "config_hash": str(snapshot.get("config_hash") or ""),
             }
-            conn.execute(
+            _execute(
+                conn,
                 """
-                INSERT OR REPLACE INTO learning_application_log
+                INSERT INTO learning_application_log
                 (application_id, cycle_ts, scope_type, scope_key, action,
                  bias_multiplier, old_weight, new_weight, suggestion_ids_json,
                  status, details_json, created_at)
                 VALUES (?, ?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
                         1.0, 0.0, 0.0, ?, 'applied', ?, ?)
+                ON CONFLICT(application_id) DO UPDATE SET
+                    cycle_ts=excluded.cycle_ts,
+                    scope_type=excluded.scope_type,
+                    scope_key=excluded.scope_key,
+                    action=excluded.action,
+                    bias_multiplier=excluded.bias_multiplier,
+                    old_weight=excluded.old_weight,
+                    new_weight=excluded.new_weight,
+                    suggestion_ids_json=excluded.suggestion_ids_json,
+                    status=excluded.status,
+                    details_json=excluded.details_json,
+                    created_at=excluded.created_at
                 """,
                 (
                     application_id,
@@ -1971,9 +1995,10 @@ def _auto_apply_position_supervisor_template_suggestions(
                     now_ts,
                 ),
             )
-            conn.execute(
+            _execute(
+                conn,
                 """
-                INSERT OR REPLACE INTO learning_application_effect
+                INSERT INTO learning_application_effect
                 (application_id, scope_type, scope_key, action, status,
                  decision_json, updated_at, created_at)
                 VALUES (?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
@@ -1981,6 +2006,14 @@ def _auto_apply_position_supervisor_template_suggestions(
                             (SELECT created_at FROM learning_application_effect WHERE application_id=?),
                             ?
                         ))
+                ON CONFLICT(application_id) DO UPDATE SET
+                    scope_type=excluded.scope_type,
+                    scope_key=excluded.scope_key,
+                    action=excluded.action,
+                    status=excluded.status,
+                    decision_json=excluded.decision_json,
+                    updated_at=excluded.updated_at,
+                    created_at=excluded.created_at
                 """,
                 (
                     application_id,
@@ -1991,7 +2024,8 @@ def _auto_apply_position_supervisor_template_suggestions(
                     now_ts,
                 ),
             )
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE policy_suggestion
                 SET status='applied', reviewed_at=CASE WHEN reviewed_at > 0 THEN reviewed_at ELSE ? END,
@@ -2045,13 +2079,13 @@ def _auto_rollback_position_supervisor_template(
     from config.runtime_config import shared as runtime_config
     from backend.services.evolution_ledger import persist_runtime_config_snapshot
 
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     rolled_back = []
     skipped = []
     try:
         try:
-            rows = conn.execute(
+            rows = _execute(
+                conn,
                 """
                 SELECT l.*, e.observed_trade_count, e.delta_avg_reward, e.status AS effect_status
                 FROM learning_application_log l
@@ -2105,7 +2139,8 @@ def _auto_rollback_position_supervisor_template(
                 "config_version": int(snapshot.get("config_version") or 0),
                 "config_hash": str(snapshot.get("config_hash") or ""),
             }
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE learning_application_log
                 SET status='rolled_back', details_json=?
@@ -2113,7 +2148,8 @@ def _auto_rollback_position_supervisor_template(
                 """,
                 (_dumps({**details, "rollback": rollback}), application_id),
             )
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE learning_application_effect
                 SET status='rolled_back', decision_json=?, updated_at=?
@@ -2167,8 +2203,7 @@ def apply_demo_autonomy(
         }
         finish_evolution_run(str(run.get("run_id") or experiment_id), status="skipped", summary=payload, db_path=db_path)
         return payload
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = _connect(db_path)
     try:
         approvals = _approve_demo_policy_suggestions(
             conn,
@@ -2217,7 +2252,7 @@ def apply_demo_autonomy(
         "supervisor_templates": supervisor_templates,
         "supervisor_rollbacks": supervisor_rollbacks,
     }
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
         _insert_evolution_event(conn, "demo_autonomy_apply", payload)
         conn.commit()
@@ -2255,7 +2290,7 @@ def run_autonomous_learning_cycle(
         submit_offline_deep=submit_offline_deep,
     )
     demo_apply = apply_demo_autonomy(db_path=db_path)
-    conn = connect_sqlite(db_path)
+    conn = _connect(db_path)
     try:
         payload = {
             "schema_version": "autonomous_learning_cycle.v1",

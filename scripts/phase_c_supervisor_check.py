@@ -21,6 +21,8 @@ from urllib import error, request
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path  # noqa: E402
+
 
 def _loads(raw: str | None, default):
     if not raw:
@@ -31,9 +33,24 @@ def _loads(raw: str | None, default):
         return default
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+def _use_pg(db_path: Path) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("?", "%s") if conn.__class__.__module__.split(".", 1)[0] == "psycopg" else sql
+
+
+def _execute(conn, sql: str, params: tuple | list | None = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), tuple(params))
+
+
+def _connect(db_path: Path):
+    conn = get_state_pg_conn(read_only=True) if _use_pg(db_path) else connect_sqlite(db_path, read_only=True)
+    if not _use_pg(db_path):
+        conn.row_factory = sqlite3.Row
     return conn
 
 
@@ -76,7 +93,8 @@ def _remote_login(api_base: str, username: str, password: str, timeout: float) -
 
 
 def _fetch_cases(conn: sqlite3.Connection, limit: int) -> list[dict]:
-    rows = conn.execute(
+    rows = _execute(
+        conn,
         """
         SELECT review_id, trade_id, position_id, outcome_label, pnl, mae, mfe, summary_text, review_json, created_at
         FROM trade_outcome_review
@@ -348,7 +366,7 @@ def _build_coverage(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Phase C supervisor acceptance check.")
-    parser.add_argument("--db", default="data/state.db", help="SQLite state db path")
+    parser.add_argument("--db", default=str(STATE_DB), help="State DB path; defaults to PostgreSQL state when enabled")
     parser.add_argument("--limit", type=int, default=30, help="Number of recent reviews to inspect")
     parser.add_argument("--api-base", default=os.environ.get("QUANT_API_BASE", "").strip(), help="Remote API base URL")
     parser.add_argument("--username", default=os.environ.get("QUANT_AUTH_USER", "zhu").strip(), help="Remote login username")
@@ -373,7 +391,7 @@ def main() -> int:
         open_positions = _fetch_direct_broker_open_positions()
     else:
         db_path = Path(args.db)
-        if not db_path.exists():
+        if not _use_pg(db_path) and not db_path.exists():
             print(f"db_not_found: {db_path}")
             return 1
         conn = _connect(db_path)

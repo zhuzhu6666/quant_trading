@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.core.db import DUCKDB_TRADES, STATE_DB, connect_duckdb, connect_sqlite
+from backend.core.db import DUCKDB_TRADES, connect_duckdb, get_state_pg_conn
 
 
 @dataclass
@@ -101,8 +101,19 @@ def _open_trade_rows(limit: int | None = None) -> list[dict[str, Any]]:
         con.close()
 
 
-def _state_context(conn: sqlite3.Connection, position_id: int) -> dict[str, Any]:
-    close_deal = conn.execute(
+def _state_sql(sql: str) -> str:
+    return sql.replace("?", "%s")
+
+
+def _state_execute(conn, sql: str, params: tuple | list | None = None):
+    if params is None:
+        return conn.execute(_state_sql(sql))
+    return conn.execute(_state_sql(sql), tuple(params))
+
+
+def _state_context(conn, position_id: int) -> dict[str, Any]:
+    close_deal = _state_execute(
+        conn,
         """
         SELECT *
         FROM ctrader_deals
@@ -112,7 +123,8 @@ def _state_context(conn: sqlite3.Connection, position_id: int) -> dict[str, Any]
         """,
         (position_id,),
     ).fetchone()
-    open_deal = conn.execute(
+    open_deal = _state_execute(
+        conn,
         """
         SELECT *
         FROM ctrader_deals
@@ -122,7 +134,8 @@ def _state_context(conn: sqlite3.Connection, position_id: int) -> dict[str, Any]
         """,
         (position_id,),
     ).fetchone()
-    review = conn.execute(
+    review = _state_execute(
+        conn,
         """
         SELECT *
         FROM trade_outcome_review
@@ -132,7 +145,8 @@ def _state_context(conn: sqlite3.Connection, position_id: int) -> dict[str, Any]
         """,
         (str(position_id), str(position_id)),
     ).fetchone()
-    recovery = conn.execute(
+    recovery = _state_execute(
+        conn,
         """
         SELECT *
         FROM recovery_position_state
@@ -260,8 +274,7 @@ def _classify(trade: dict[str, Any], ctx: dict[str, Any], *, min_evidence: int) 
 
 
 def analyze(*, limit: int | None = None, min_evidence: int = 1) -> list[ReconcileRow]:
-    state = connect_sqlite(STATE_DB, read_only=True)
-    state.row_factory = sqlite3.Row
+    state = get_state_pg_conn(read_only=True)
     try:
         return [
             _classify(trade, _state_context(state, int(trade["position_id"])), min_evidence=min_evidence)

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import APIRouter
 from backend.core.auth import RequireUser
-from backend.core.db import connect_sqlite, duckdb_readonly_connection
+from backend.core.db import connect_sqlite, duckdb_readonly_connection, get_state_pg_conn, state_pg_enabled, state_table_columns
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -34,7 +34,7 @@ _DB_LIST = [
     ("l2.duckdb", "L2 深度", "duckdb"),
     ("trades.duckdb", "交易记录", "duckdb"),
     ("events.duckdb", "事件日历", "duckdb"),
-    ("state.db", "统一状态库", "sqlite"),
+    ("state_v1", "统一状态库(PostgreSQL)", "postgres_state"),
     ("experiments.db", "实验记录", "sqlite"),
 ]
 
@@ -182,6 +182,53 @@ def _sqlite_stats(path: Path) -> dict:
     return {"tables": tables, "total_rows": total_rows, "latest_ts": latest_ts, "errors": errors}
 
 
+def _postgres_state_stats() -> dict:
+    tables = []
+    total_rows = 0
+    latest_ts = None
+    errors = []
+    try:
+        con = get_state_pg_conn(read_only=True)
+        try:
+            rows = con.execute(
+                """
+                SELECT table_name AS name
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                ORDER BY table_name
+                """
+            ).fetchall()
+            for row in rows:
+                tname = row["name"]
+                try:
+                    cnt = con.execute(f'SELECT COUNT(*) FROM "{tname}"').fetchone()[0]
+                    total_rows += cnt
+                    cols = state_table_columns(con, tname)
+                    tbl_latest = None
+                    for tc in _TS_CANDIDATES:
+                        if tc in cols:
+                            try:
+                                res = con.execute(
+                                    f'SELECT MAX("{tc}") FROM "{tname}" WHERE "{tc}" IS NOT NULL'
+                                ).fetchone()
+                                if res and res[0]:
+                                    tbl_latest = _try_parse_ts(res[0])
+                                    if tbl_latest:
+                                        break
+                            except Exception:
+                                continue
+                    tables.append({"name": tname, "rows": cnt, "latest_ts": tbl_latest})
+                    if tbl_latest and tbl_latest > (latest_ts or 0):
+                        latest_ts = tbl_latest
+                except Exception as e:
+                    errors.append(f"{tname}: {e}")
+        finally:
+            con.close()
+    except Exception as e:
+        errors.append(f"connect: {e}")
+    return {"tables": tables, "total_rows": total_rows, "latest_ts": latest_ts, "errors": errors}
+
+
 def _compute_db_health() -> dict:
     """计算所有数据库的健康状态（阻塞，约 20s）"""
     databases = []
@@ -189,6 +236,35 @@ def _compute_db_health() -> dict:
 
     for filename, label, db_type in _DB_LIST:
         path = _DATA_DIR / filename
+        if db_type == "postgres_state":
+            stats = _postgres_state_stats()
+            exists = state_pg_enabled() and not any(str(e).startswith("connect:") for e in stats["errors"])
+            latest = stats["latest_ts"]
+            freshness = "unknown"
+            if latest and isinstance(latest, (int, float)):
+                age_sec = now - latest
+                if age_sec < 3600:
+                    freshness = "fresh"
+                elif age_sec < 86400:
+                    freshness = "recent"
+                elif age_sec < 259200:
+                    freshness = "stale"
+                else:
+                    freshness = "old"
+            databases.append({
+                "name": label,
+                "file": filename,
+                "type": "postgres",
+                "exists": exists,
+                "size": "server",
+                "size_bytes": 0,
+                "tables": stats["tables"],
+                "total_rows": stats["total_rows"],
+                "latest_ts": latest,
+                "freshness": freshness if exists else "missing",
+                "errors": stats["errors"],
+            })
+            continue
         if not path.exists():
             databases.append({
                 "name": label,

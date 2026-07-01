@@ -7,7 +7,15 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, ensure_sqlite_columns
+from backend.core.db import (
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    ensure_sqlite_columns,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_pg_enabled,
+)
 
 
 class ExperienceBuilder:
@@ -18,10 +26,17 @@ class ExperienceBuilder:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _p(self) -> str:
+        return "%s" if self._use_pg() else "?"
+
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         except Exception:
@@ -34,28 +49,32 @@ class ExperienceBuilder:
 
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
-            conn.executescript(STATE_DB_DDL)
-        ensure_sqlite_columns(
-            self.db_path,
-            "experience_memory",
-            {
-                "source_table": "source_table TEXT DEFAULT ''",
-                "source_id": "source_id TEXT DEFAULT ''",
-                "append_source": "append_source TEXT DEFAULT ''",
-                "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-            },
-        )
-        with self._conn() as conn:
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_experience_memory_source
-                ON experience_memory(source_table, source_id, append_source)
-                """
+            if not self._use_pg():
+                conn.executescript(STATE_DB_DDL)
+        if not self._use_pg():
+            ensure_sqlite_columns(
+                self.db_path,
+                "experience_memory",
+                {
+                    "source_table": "source_table TEXT DEFAULT ''",
+                    "source_id": "source_id TEXT DEFAULT ''",
+                    "append_source": "append_source TEXT DEFAULT ''",
+                    "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
+                },
             )
+        with self._conn() as conn:
+            if not self._use_pg():
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_experience_memory_source
+                    ON experience_memory(source_table, source_id, append_source)
+                    """
+                )
             self._backfill_legacy_experience_sources(conn)
             self._repair_experience_event_timestamps(conn)
 
-    def _backfill_legacy_experience_sources(self, conn: sqlite3.Connection) -> None:
+    def _backfill_legacy_experience_sources(self, conn) -> None:
+        p = self._p()
         try:
             rows = conn.execute(
                 """
@@ -71,10 +90,10 @@ class ExperienceBuilder:
             return
         for row in rows:
             review = conn.execute(
-                """
+                f"""
                 SELECT review_id, created_at
                 FROM trade_outcome_review
-                WHERE trade_id=?
+                WHERE trade_id={p}
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -93,17 +112,17 @@ class ExperienceBuilder:
                 "event_ts": float(review["created_at"] or 0.0),
             }
             conn.execute(
-                """
+                f"""
                 UPDATE experience_memory
                 SET source_table='trade_outcome_review',
-                    source_id=?,
+                    source_id={p},
                     append_source='legacy_experience_migrated.v1',
-                    decision_context_json=?,
+                    decision_context_json={p},
                     created_at=CASE
-                        WHEN ? > 0 THEN ?
+                        WHEN {p} > 0 THEN {p}
                         ELSE created_at
                     END
-                WHERE experience_id=?
+                WHERE experience_id={p}
                 """,
                 (
                     str(review["review_id"] or ""),
@@ -114,7 +133,8 @@ class ExperienceBuilder:
                 ),
             )
 
-    def _repair_experience_event_timestamps(self, conn: sqlite3.Connection) -> None:
+    def _repair_experience_event_timestamps(self, conn) -> None:
+        p = self._p()
         try:
             rows = conn.execute(
                 """
@@ -138,10 +158,10 @@ class ExperienceBuilder:
             source["event_ts"] = float(row["review_created_at"] or 0.0)
             context["experience_source"] = source
             conn.execute(
-                """
+                f"""
                 UPDATE experience_memory
-                SET created_at=?, decision_context_json=?
-                WHERE experience_id=?
+                SET created_at={p}, decision_context_json={p}
+                WHERE experience_id={p}
                 """,
                 (
                     float(row["review_created_at"] or 0.0),
@@ -283,14 +303,31 @@ class ExperienceBuilder:
             "event_ts": event_ts,
         }
         with self._conn() as conn:
+            p = self._p()
             conn.execute(
-                """
-                INSERT OR REPLACE INTO experience_memory
+                f"""
+                INSERT INTO experience_memory
                 (experience_id, trade_id, source_table, source_id, append_source,
                  regime_id, setup_hash, decision_context_json,
                  outcome_label, reward_score, failure_tags_json, recommended_action,
                  evidence_strength, artifact_version, evolution_run_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v1', '', ?)
+                VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, 'v1', '', {p})
+                ON CONFLICT(experience_id) DO UPDATE SET
+                    trade_id=excluded.trade_id,
+                    source_table=excluded.source_table,
+                    source_id=excluded.source_id,
+                    append_source=excluded.append_source,
+                    regime_id=excluded.regime_id,
+                    setup_hash=excluded.setup_hash,
+                    decision_context_json=excluded.decision_context_json,
+                    outcome_label=excluded.outcome_label,
+                    reward_score=excluded.reward_score,
+                    failure_tags_json=excluded.failure_tags_json,
+                    recommended_action=excluded.recommended_action,
+                    evidence_strength=excluded.evidence_strength,
+                    artifact_version=excluded.artifact_version,
+                    evolution_run_id=excluded.evolution_run_id,
+                    created_at=excluded.created_at
                 """,
                 (
                     experience_id,

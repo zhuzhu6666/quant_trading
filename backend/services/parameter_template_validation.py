@@ -14,7 +14,15 @@ import pandas as pd
 from alpha.evaluation.evaluation_context import EvaluationContext
 from alpha.evaluation.purged_walkforward import PurgedWalkForward
 from alpha.streaming_factor_engine import StreamingFactorEngine
-from backend.core.db import DATA_DIR, STATE_DB, STATE_DB_DDL, connect_sqlite
+from backend.core.db import (
+    DATA_DIR,
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_pg_enabled,
+)
 from backend.jobs.progress import ProgressCB
 from backend.services.backtest_runner import _load_bars
 from backend.services.backtest_service import run_backtest
@@ -26,6 +34,24 @@ from backend.services.parameter_templates import (
 from research.learning.governor import RuleEvolutionGovernor
 
 
+def _use_pg(db_path: str | Path) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
+
+
 class ParameterTemplateValidationService:
     def __init__(self, db_path: str | None = None):
         self.db_path = Path(db_path or str(STATE_DB))
@@ -35,9 +61,10 @@ class ParameterTemplateValidationService:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        conn = connect_sqlite(self.db_path)
+        conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
         try:
-            conn.executescript(STATE_DB_DDL)
+            if not _conn_is_pg(conn):
+                conn.executescript(STATE_DB_DDL)
             conn.commit()
         finally:
             conn.close()
@@ -57,9 +84,10 @@ class ParameterTemplateValidationService:
         score: float = 0.0,
     ) -> None:
         now = time.time()
-        conn = connect_sqlite(self.db_path)
+        conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
         try:
-            conn.execute(
+            _execute(
+                conn,
                 """
                 INSERT INTO lifecycle_events
                 (timestamp, event, factor, source, description, score, status, reason)
@@ -76,29 +104,6 @@ class ParameterTemplateValidationService:
                     reason,
                 ),
             )
-            try:
-                from backend.services.state_dual_write import enqueue_state_row_event_on_conn
-
-                enqueue_state_row_event_on_conn(
-                    conn,
-                    db_path=self.db_path,
-                    table_name="lifecycle_events",
-                    entity_key=f"{now}:{event}:{factor_id}:parameter_template",
-                    row={
-                        "timestamp": now,
-                        "event": event,
-                        "factor": factor_id,
-                        "source": "parameter_template",
-                        "description": description,
-                        "score": float(score or 0.0),
-                        "status": status,
-                        "reason": reason,
-                    },
-                    operation="insert",
-                    source_updated_at=now,
-                )
-            except Exception:
-                pass
             conn.commit()
         finally:
             conn.close()
@@ -131,10 +136,11 @@ class ParameterTemplateValidationService:
         """
         fetch_limit = max(int(limit), min(500, int(limit) * 5))
         params.append(fetch_limit)
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn(read_only=True) if _use_pg(self.db_path) else connect_sqlite(self.db_path, read_only=True)
+        if not _use_pg(self.db_path):
+            conn.row_factory = sqlite3.Row
         try:
-            rows = conn.execute(sql, tuple(params)).fetchall()
+            rows = _execute(conn, sql, tuple(params)).fetchall()
         finally:
             conn.close()
         items = [self._parse_release_candidate_row(row) for row in rows]
@@ -151,10 +157,12 @@ class ParameterTemplateValidationService:
         return deduped
 
     def get_release_candidate(self, candidate_id: str) -> dict[str, Any] | None:
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn(read_only=True) if _use_pg(self.db_path) else connect_sqlite(self.db_path, read_only=True)
+        if not _use_pg(self.db_path):
+            conn.row_factory = sqlite3.Row
         try:
-            row = conn.execute(
+            row = _execute(
+                conn,
                 """
                 SELECT *
                 FROM parameter_template_release_candidate
@@ -200,9 +208,10 @@ class ParameterTemplateValidationService:
             "fold_count": int((walk_forward.get("config") or {}).get("n_folds") or 0),
             "recommendation_source": dict(recommendation_context or {}),
         }
-        conn = connect_sqlite(self.db_path)
+        conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
         try:
-            conn.execute(
+            _execute(
+                conn,
                 """
                 INSERT INTO parameter_template_release_candidate
                 (candidate_id, factor_id, template_id, regime_key, status,
@@ -275,10 +284,11 @@ class ParameterTemplateValidationService:
             ORDER BY created_at DESC
             LIMIT 1
         """
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn(read_only=True) if _use_pg(self.db_path) else connect_sqlite(self.db_path, read_only=True)
+        if not _use_pg(self.db_path):
+            conn.row_factory = sqlite3.Row
         try:
-            row = conn.execute(sql, tuple(params)).fetchone()
+            row = _execute(conn, sql, tuple(params)).fetchone()
         finally:
             conn.close()
         return self._parse_release_candidate_row(row) if row else None
@@ -332,10 +342,12 @@ class ParameterTemplateValidationService:
             str(note).strip()
             or "target template missing/orphan candidate: reviewed/reject because template not resolvable"
         )
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn(read_only=True) if _use_pg(self.db_path) else connect_sqlite(self.db_path, read_only=True)
+        if not _use_pg(self.db_path):
+            conn.row_factory = sqlite3.Row
         try:
-            rows = conn.execute(
+            rows = _execute(
+                conn,
                 """
                 SELECT candidate_id, factor_id, template_id, regime_key
                 FROM parameter_template_release_candidate
@@ -528,9 +540,10 @@ class ParameterTemplateValidationService:
         validation_summary: dict[str, Any],
         updated_at: float,
     ) -> None:
-        conn = connect_sqlite(self.db_path)
+        conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
         try:
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE parameter_template_release_candidate
                 SET status=?, validation_summary_json=?, updated_at=?

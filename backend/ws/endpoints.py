@@ -63,8 +63,9 @@ def _read_closed_loop_status() -> dict:
     attr_status = "no_data"
     attr_trades = 0
     try:
-        from backend.core.db import get_state_conn
-        conn = get_state_conn()
+        from backend.core.db import get_state_pg_conn
+
+        conn = get_state_pg_conn(read_only=True)
         try:
             rows = conn.execute(
                 "SELECT data_json FROM attribution_snapshot"

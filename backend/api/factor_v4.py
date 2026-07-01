@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from backend.core.auth import RequireUser
+from backend.core.db import get_state_pg_conn
 from backend.services.live_service import _scheduled_ml_retrain
 
 logger = logging.getLogger(__name__)
@@ -29,16 +30,22 @@ DATA_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "charts" / 
 _ATTR_SNAPSHOT = Path(__file__).resolve().parent.parent.parent / "data" / "charts" / "factor_attribution.json"
 
 
+def _state_conn():
+    return get_state_pg_conn(read_only=True)
+
+
+def _state_sql(sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s")
+
+
 @router.get("/weights")
 def get_weight_history(_user: RequireUser) -> list[dict]:
-    """Return latest effective weights: config baseline + state.db weight_history merged."""
+    """Return latest effective weights: config baseline + state store weight_history merged."""
     weights: dict[str, float] = {}
 
-    # 1. Load latest AWE weight per factor from state.db
+    # 1. Load latest AWE weight per factor from state store
     try:
-        from backend.core.db import STATE_DB, connect_sqlite
-        conn = connect_sqlite(STATE_DB, read_only=True)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _state_conn()
         try:
             rows = conn.execute(
                 "SELECT factor, new_weight FROM weight_history "
@@ -95,17 +102,15 @@ def get_weight_history(_user: RequireUser) -> list[dict]:
 
 @router.get("/stats")
 def get_attribution_stats(_user: RequireUser) -> dict:
-    """Return attribution stats per-factor from state.db (primary) or JSON file (fallback).
+    """Return attribution stats per-factor from state store (primary) or JSON file (fallback).
 
     Data written by AttributionEngine._save_stats_snapshot() after every close.
     Returns empty dict when no trades have been attributed yet.
     """
-    # ── Primary: state.db attribution_snapshot ──
+    # ── Primary: state store attribution_snapshot ──
     raw: dict[str, Any] = {}
     try:
-        from backend.core.db import STATE_DB, connect_sqlite
-        conn = connect_sqlite(STATE_DB, read_only=True)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _state_conn()
         try:
             rows = conn.execute(
                 "SELECT factor, data_json FROM attribution_snapshot"
@@ -118,7 +123,7 @@ def get_attribution_stats(_user: RequireUser) -> dict:
         finally:
             conn.close()
     except Exception as e:
-        logger.warning("Failed to read attribution_snapshot from state.db: %s", e)
+        logger.warning("Failed to read attribution_snapshot from state store: %s", e)
 
     # ── Fallback: JSON file ──
     if not raw and _ATTR_SNAPSHOT.exists():
@@ -210,16 +215,14 @@ async def trigger_ml_retrain(_user: RequireUser) -> dict:
 
 @router.get("/recent-ticks")
 def get_recent_ticks(_user: RequireUser, n: int = 30) -> list[dict]:
-    """返回最近 N 个 v4 信号记录 (从 state.db decision_log 读取)。"""
+    """返回最近 N 个 v4 信号记录 (从主状态库 decision_log 读取)。"""
     entries: list[dict] = []
     try:
-        from backend.core.db import STATE_DB, connect_sqlite
-        conn = connect_sqlite(STATE_DB, read_only=True)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _state_conn()
         try:
             rows = conn.execute(
-                "SELECT meta, ts FROM decision_log WHERE strategy='factor_v4' "
-                "AND decision_type='signal' ORDER BY id DESC LIMIT ?",
+                _state_sql("SELECT meta, ts FROM decision_log WHERE strategy='factor_v4' "
+                "AND decision_type='signal' ORDER BY id DESC LIMIT ?"),
                 (n,)
             ).fetchall()
             for r in reversed(rows):

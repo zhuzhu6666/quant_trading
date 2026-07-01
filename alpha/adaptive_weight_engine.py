@@ -479,16 +479,19 @@ class AdaptiveWeightEngine:
     # ── 权重历史 ────────────────────────────────────────
 
     def _write_weight_history(self, patches: dict[str, dict]):
-        """写入权重变更记录到 state.db weight_history 表。"""
+        """写入权重变更记录到主状态库 weight_history 表。"""
         try:
-            from backend.core.db import get_state_conn
+            from backend.core.db import get_state_pg_conn
             ts = time.time()
-            conn = get_state_conn()
+            conn = get_state_pg_conn()
             try:
                 for name, p in patches.items():
-                    conn.execute(
+                    sql = (
                         "INSERT INTO weight_history (timestamp, factor, old_weight, new_weight, reason) "
-                        "VALUES (?, ?, ?, ?, ?)",
+                        "VALUES (%s, %s, %s, %s, %s)"
+                    )
+                    conn.execute(
+                        sql,
                         (ts, name, self._current_weights.get(name, 0),
                          p["weight"], p.get("reason", ""))
                     )

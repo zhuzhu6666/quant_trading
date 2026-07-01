@@ -28,6 +28,16 @@ from alpha.ic_tracker import ICTracker
 logger = logging.getLogger(__name__)
 
 
+def _connect_state():
+    from backend.core.db import get_state_pg_conn
+
+    return get_state_pg_conn()
+
+
+def _p(sql: str) -> str:
+    return sql.replace("?", "%s")
+
+
 @dataclass
 class FactorHealthStatus:
     """单因子健康状态"""
@@ -464,10 +474,9 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
     lines.append("=" * 72)
     out_txt.write_text("\n".join(lines), encoding="utf-8")
 
-    # ★ 写入 state.db (主存储)
+    # 写入 PostgreSQL state store (主存储)
     try:
-        from backend.core.db import get_state_conn
-        conn = get_state_conn()
+        conn = _connect_state()
         try:
             import time as _time
             now = _time.time()
@@ -483,9 +492,13 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
                 rolling_ic = float(f.get("rolling_ic", 0.0))
                 comp_json = json.dumps(f.get("components", {}), ensure_ascii=False)
                 conn.execute(
-                    "INSERT OR REPLACE INTO factor_health "
+                    _p("INSERT INTO factor_health "
                     "(factor, score, status, section, n_obs, rolling_ic, components_json, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(factor) DO UPDATE SET "
+                    "score=excluded.score, status=excluded.status, section=excluded.section, "
+                    "n_obs=excluded.n_obs, rolling_ic=excluded.rolling_ic, "
+                    "components_json=excluded.components_json, updated_at=excluded.updated_at"),
                     (name, score, status, section, n_obs, rolling_ic, comp_json, now)
                 )
             # 清理孤儿: 删除不在本次评估结果中的 factor_health 记录
@@ -493,7 +506,7 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
             if evaluated_names:
                 placeholders = ",".join("?" * len(evaluated_names))
                 conn.execute(
-                    f"DELETE FROM factor_health WHERE factor NOT IN ({placeholders})",
+                    _p(f"DELETE FROM factor_health WHERE factor NOT IN ({placeholders})"),
                     tuple(evaluated_names),
                 )
             conn.commit()

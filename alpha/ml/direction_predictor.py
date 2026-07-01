@@ -48,8 +48,8 @@ def _load_attribution_stats() -> dict[str, dict]:
         无数据时返回空 dict。
     """
     try:
-        from backend.core.db import get_state_conn
-        conn = get_state_conn()
+        from backend.core.db import get_state_pg_conn
+        conn = get_state_pg_conn(read_only=True)
         try:
             rows = conn.execute(
                 "SELECT factor, data_json FROM attribution_snapshot"
@@ -64,7 +64,7 @@ def _load_attribution_stats() -> dict[str, dict]:
         finally:
             conn.close()
     except Exception:
-        logger.debug("[xgb_dir] failed to load attribution stats from state.db")
+        logger.debug("[xgb_dir] failed to load attribution stats from state store")
         return {}
 
 

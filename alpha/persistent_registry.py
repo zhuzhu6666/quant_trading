@@ -3,7 +3,7 @@
 问题: RegistryAdapter.register_runtime 修改的 factor_registry._factors
 只在当前进程有效, 进程退出就丢.
 
-v2 (audit 2026-06-22): 从 state.db lifecycle_events 表恢复,
+v2 (audit 2026-06-22): 从主状态库 lifecycle_events 表恢复,
 不再依赖 JSONL 文件. JSONL 作为降级备份.
 
 用法:
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import json
-import sqlite3
 from typing import Optional
 
 from alpha.registry_adapter import RegistryAdapter
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 def restore_from_log(lifecycle_log_path: str = "",
                      verbose: bool = True,
                      adapter: "RegistryAdapter | None" = None) -> int:
-    """从 state.db lifecycle_events 表恢复所有 shadow / discovered 因子.
+    """从主状态库 lifecycle_events 表恢复所有 shadow / discovered 因子.
 
     降级到 JSONL 文件 (如果传了路径且文件存在).
 
@@ -67,11 +66,11 @@ def restore_from_log(lifecycle_log_path: str = "",
         state["event"] = event_type
         state["timestamp"] = ev.get("timestamp", state.get("timestamp", 0.0))
 
-    # 主路径: 从 state.db lifecycle_events 表读取
+    # 主路径: 从 PostgreSQL state store lifecycle_events 表读取
     try:
-        from backend.core.db import STATE_DB, connect_sqlite
-        conn = connect_sqlite(STATE_DB, read_only=True)
-        conn.row_factory = sqlite3.Row
+        from backend.core.db import get_state_pg_conn
+
+        conn = get_state_pg_conn(read_only=True)
         rows = conn.execute(
             "SELECT factor, event, source, description, timestamp "
             "FROM lifecycle_events "
@@ -82,9 +81,9 @@ def restore_from_log(lifecycle_log_path: str = "",
         for r in rows:
             _apply_lifecycle_event(dict(r))
         if verbose and latest_event:
-            logger.info(f"[PersistentRegistry] 从 state.db 读取 {len(latest_event)} 个因子事件")
+            logger.info(f"[PersistentRegistry] 从 PostgreSQL state_v1 读取 {len(latest_event)} 个因子事件")
     except Exception as e:
-        logger.debug(f"[PersistentRegistry] state.db 读取失败: {e}")
+        logger.debug(f"[PersistentRegistry] 主状态库读取失败: {e}")
 
     # 降级: JSONL 文件 (如果传了路径且 DB 没读到)
     if not latest_event and lifecycle_log_path:

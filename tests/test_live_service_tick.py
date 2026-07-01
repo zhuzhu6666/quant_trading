@@ -10,6 +10,7 @@ Tests for the pipeline itself are in tests/alpha/.
 """
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import MagicMock
@@ -105,6 +106,89 @@ def test_supervisor_tighten_sl_plan_skips_when_not_more_protective():
 
     assert plan["allowed"] is False
     assert plan["reason"] == "not_tightening_long_stop_loss"
+
+
+def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeypatch):
+    position = {
+        "position_id": 270244024,
+        "symbol": "XAUUSD+",
+        "direction": -1,
+        "current_price": 3976.5,
+        "sl": 4014.95,
+        "tp": 0.0,
+    }
+    protection_plan = {
+        "schema_version": live_service._ENTRY_PROTECTION_PLAN_SCHEMA,
+        "status": "failed",
+        "direction": -1,
+        "target_stop_loss": 4026.09,
+        "target_take_profit": 3996.81,
+        "last_attempt_ts": 0.0,
+        "attempts": 1,
+    }
+    monkeypatch.setattr(
+        live_service,
+        "_load_recovery_position_row",
+        lambda pid: {"recovery_meta": {"entry_protection_plan": protection_plan}},
+    )
+
+    candidates = live_service._entry_protection_repair_candidates(
+        [position],
+        current_price=3976.5,
+        tick=12,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].source == live_service._ENTRY_PROTECTION_REPAIR_SOURCE
+    assert candidates[0].controls["target_take_profit"] == 3996.81
+
+    class _Policy:
+        def evaluate(self, action, context):
+            return SimpleNamespace(
+                allowed=True,
+                reason="risk_reducing_action",
+                to_dict=lambda: {"allowed": True, "reason": "risk_reducing_action"},
+            )
+
+    class _Bridge:
+        def __init__(self):
+            self.amends = []
+
+        def get_spot_quote(self):
+            return {"bid": 3976.39, "ask": 3976.46, "mid": 3976.425}
+
+        def amend_position_sltp(self, position_id, *, sl, tp):
+            self.amends.append((position_id, sl, tp))
+            return SimpleNamespace(success=True, position_id=position_id, comment="ok")
+
+    updates = []
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec_repair")
+    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)
+    monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: None)
+    monkeypatch.setattr(live_service, "_remember_protection_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        live_service,
+        "_update_entry_protection_plan_status",
+        lambda position_id, **kwargs: updates.append((position_id, kwargs)),
+    )
+
+    bridge = _Bridge()
+    handled = live_service._execute_trailing_candidate(
+        candidates[0],
+        bridge=bridge,
+        cfg=SimpleNamespace(),
+        tick=12,
+        log=lambda msg: None,
+        acct={},
+    )
+
+    assert handled is True
+    assert bridge.amends == [(270244024, 4014.95, 3996.81)]
+    assert updates[0][0] == 270244024
+    assert updates[0][1]["status"] == "applied"
+    assert updates[0][1]["applied_sl"] == 4014.95
+    assert updates[0][1]["applied_tp"] == 3996.81
 
 
 # ── _local_positions ─────────────────────────────────────

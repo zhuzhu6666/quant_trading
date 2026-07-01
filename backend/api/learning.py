@@ -13,7 +13,7 @@ from pydantic import BaseModel
 import re
 
 from backend.core.auth import RequireUser
-from backend.core.db import STATE_DB, connect_sqlite
+from backend.core.db import STATE_DB, get_state_pg_conn
 from backend.jobs import get_job_manager
 from backend.services.factor_cards import FactorCardService
 from backend.services.parameter_templates import ParameterTemplateService
@@ -78,6 +78,21 @@ router = APIRouter(prefix="/api/learning", tags=["learning"])
 _CANDIDATE_ID_RE = re.compile(r"(ptrc_[0-9a-f]{16})")
 _LEARNING_CACHE_TTL_SEC = 30.0
 _LEARNING_CACHE_LOCK = threading.Lock()
+
+
+def _state_conn(*, read_only: bool = True):
+    return get_state_pg_conn(read_only=read_only)
+
+
+def _state_sql(sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s")
+
+
+def _execute(conn, sql: str, params: Any = None):
+    sql = _state_sql(sql)
+    if params is None:
+        return conn.execute(sql)
+    return conn.execute(sql, params)
 _LEARNING_CACHE: dict[str, tuple[float, Any]] = {}
 _LEARNING_COMPUTE_LOCKS: dict[str, threading.Lock] = {}
 _LEARNING_LAST_GOOD: dict[str, tuple[float, Any]] = {}
@@ -1116,7 +1131,8 @@ def _blocked_by_risk(verdict: dict) -> dict:
 def _candidate_trace_by_id(conn, candidate_id: str) -> dict:
     if not candidate_id:
         return {}
-    row = conn.execute(
+    row = _execute(
+        conn,
         """
         SELECT validation_summary_json
         FROM parameter_template_release_candidate
@@ -1164,7 +1180,8 @@ def _latest_template_suggestion_for_recommendation(
     if not recommendation_key:
         return {}
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT suggestion_id, scope_type, scope_key, action, confidence, reason,
                    evidence_json, status, reviewed_at, review_note, created_at
@@ -1213,7 +1230,8 @@ def _latest_parameter_template_lifecycle_for_recommendation(
     if not factor_key and not recommendation_key and not candidate_key:
         return {}
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT id, timestamp, event, factor, source, description, score, status, reason
             FROM lifecycle_events
@@ -1268,7 +1286,8 @@ def _latest_factor_trace_locator(conn, factor_id: str) -> dict:
     factor_key = str(factor_id or "").strip()
     if not factor_key:
         return {}
-    row = conn.execute(
+    row = _execute(
+        conn,
         """
         SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.exit_decision_id, r.created_at
         FROM factor_contribution_review f
@@ -1637,8 +1656,7 @@ def get_suggestions(
     if cached is not None:
         return cached
     gov = RuleEvolutionGovernor()
-    conn = connect_sqlite(ParameterTemplateService().db_path)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
         items = []
         for raw in gov.list_suggestions(status=status, limit=limit):
@@ -1770,8 +1788,6 @@ def run_governance(_user: RequireUser) -> dict:
 
 @router.get("/summary")
 def get_learning_summary(_user: RequireUser) -> dict:
-    from backend.core.db import STATE_DB, connect_sqlite
-
     cache_key = "summary"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
@@ -1784,22 +1800,24 @@ def get_learning_summary(_user: RequireUser) -> dict:
         conn = None
         try:
             template_service = ParameterTemplateService(str(STATE_DB), ensure_schema=False)
-            conn = connect_sqlite(STATE_DB, read_only=True)
-            conn.row_factory = sqlite3.Row
-            suggestions = conn.execute(
+            conn = _state_conn(read_only=True)
+            suggestions = _execute(
+                conn,
                 """
                 SELECT status, COUNT(*) AS c
                 FROM policy_suggestion
                 GROUP BY status
                 """
             ).fetchall()
-            apps = conn.execute(
+            apps = _execute(
+                conn,
                 """
                 SELECT COUNT(*) AS c
                 FROM learning_application_log
                 """
             ).fetchone()
-            candidate_rows = conn.execute(
+            candidate_rows = _execute(
+                conn,
                 """
                 SELECT candidate_id, factor_id, template_id, regime_key, status,
                        validation_summary_json, validation_report_path, created_at, updated_at
@@ -1808,7 +1826,8 @@ def get_learning_summary(_user: RequireUser) -> dict:
                 """
             ).fetchall()
             try:
-                lifecycle_count = int(conn.execute(
+                lifecycle_count = int(_execute(
+                    conn,
                     """
                     SELECT COUNT(*) AS c
                     FROM lifecycle_events
@@ -1817,7 +1836,8 @@ def get_learning_summary(_user: RequireUser) -> dict:
                 ).fetchone()["c"] or 0)
             except sqlite3.OperationalError:
                 lifecycle_count = 0
-            review_rows = conn.execute(
+            review_rows = _execute(
+                conn,
                 """
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        entry_quality, hold_quality, exit_quality, regime_fit_score,
@@ -1830,7 +1850,8 @@ def get_learning_summary(_user: RequireUser) -> dict:
             ).fetchone()
             visible_reviews = []
             if review_rows:
-                rows = conn.execute(
+                rows = _execute(
+                    conn,
                     """
                     SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                            entry_quality, hold_quality, exit_quality, regime_fit_score,
@@ -2047,16 +2068,14 @@ def get_reviews(
     _user: RequireUser,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
-    from backend.core.db import STATE_DB, connect_sqlite
-
     cache_key = f"reviews:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
-    conn = connect_sqlite(STATE_DB, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                    entry_quality, hold_quality, exit_quality, regime_fit_score,
@@ -2179,10 +2198,10 @@ def apply_position_supervisor_template_switch(
         db_path=STATE_DB,
         summary={"suggestion_id": suggestion_id, "note": req.note},
     )
-    conn = connect_sqlite(STATE_DB)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=False)
     try:
-        row = conn.execute(
+        row = _execute(
+            conn,
             """
             SELECT *
             FROM policy_suggestion
@@ -2262,14 +2281,27 @@ def apply_position_supervisor_template_switch(
             "config_version": int(snapshot.get("config_version") or 0),
             "config_hash": str(snapshot.get("config_hash") or ""),
         }
-        conn.execute(
+        _execute(
+            conn,
             """
-            INSERT OR REPLACE INTO learning_application_log
+            INSERT INTO learning_application_log
             (application_id, cycle_ts, scope_type, scope_key, action,
              bias_multiplier, old_weight, new_weight, suggestion_ids_json,
              status, details_json, created_at)
             VALUES (?, ?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
                     1.0, 0.0, 0.0, ?, 'applied', ?, ?)
+            ON CONFLICT(application_id) DO UPDATE SET
+                cycle_ts=excluded.cycle_ts,
+                scope_type=excluded.scope_type,
+                scope_key=excluded.scope_key,
+                action=excluded.action,
+                bias_multiplier=excluded.bias_multiplier,
+                old_weight=excluded.old_weight,
+                new_weight=excluded.new_weight,
+                suggestion_ids_json=excluded.suggestion_ids_json,
+                status=excluded.status,
+                details_json=excluded.details_json,
+                created_at=excluded.created_at
             """,
             (
                 application_id,
@@ -2280,9 +2312,10 @@ def apply_position_supervisor_template_switch(
                 now_ts,
             ),
         )
-        conn.execute(
+        _execute(
+            conn,
             """
-            INSERT OR REPLACE INTO learning_application_effect
+            INSERT INTO learning_application_effect
             (application_id, scope_type, scope_key, action, status,
              decision_json, updated_at, created_at)
             VALUES (?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
@@ -2290,6 +2323,14 @@ def apply_position_supervisor_template_switch(
                         (SELECT created_at FROM learning_application_effect WHERE application_id=?),
                         ?
                     ))
+            ON CONFLICT(application_id) DO UPDATE SET
+                scope_type=excluded.scope_type,
+                scope_key=excluded.scope_key,
+                action=excluded.action,
+                status=excluded.status,
+                decision_json=excluded.decision_json,
+                updated_at=excluded.updated_at,
+                created_at=excluded.created_at
             """,
             (
                 application_id,
@@ -2300,7 +2341,8 @@ def apply_position_supervisor_template_switch(
                 now_ts,
             ),
         )
-        conn.execute(
+        _execute(
+            conn,
             """
             UPDATE policy_suggestion
             SET status='applied', reviewed_at=CASE WHEN reviewed_at > 0 THEN reviewed_at ELSE ? END,
@@ -2509,8 +2551,7 @@ def get_parameter_template_recommendations(
         service = ParameterTemplateService()
         items = service.list_recommendations(factor_id=factor_id, limit=limit)
         validation_service = ParameterTemplateValidationService(service.db_path)
-        conn = connect_sqlite(service.db_path, read_only=True)
-        conn.row_factory = sqlite3.Row
+        conn = _state_conn(read_only=True)
         try:
             enriched = []
             for item in items:
@@ -2799,8 +2840,7 @@ def list_parameter_template_offline_candidates(
         status=status,
         limit=limit,
     )
-    conn = connect_sqlite(service.db_path, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
         enriched = []
         for item in items:
@@ -2928,16 +2968,14 @@ def get_applications(
     _user: RequireUser,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict:
-    from backend.core.db import STATE_DB, connect_sqlite
-
     cache_key = f"applications:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
-    conn = connect_sqlite(STATE_DB, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT l.application_id, l.cycle_ts, l.scope_type, l.scope_key, l.action, l.bias_multiplier,
                    l.old_weight, l.new_weight, l.suggestion_ids_json, l.status, l.details_json, l.created_at,
@@ -2973,16 +3011,14 @@ def get_lifecycle(
     _user: RequireUser,
     limit: int = Query(default=60, ge=1, le=500),
 ) -> dict:
-    from backend.core.db import STATE_DB, connect_sqlite
-
     cache_key = f"lifecycle:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
-    conn = connect_sqlite(STATE_DB, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT id, timestamp, event, factor, source, description, score, status, reason
             FROM lifecycle_events
@@ -3660,16 +3696,11 @@ def list_offmarket_high_load_audits(
     limit: int = Query(default=50, ge=1, le=500),
     job_name: str | None = Query(default=None),
 ) -> dict:
-    conn = connect_sqlite(STATE_DB, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
-        exists = conn.execute(
-            """
-            SELECT 1 FROM sqlite_master
-            WHERE type='table' AND name='offmarket_high_load_job_audit'
-            """
-        ).fetchone()
-        if not exists:
+        from backend.core.db import state_table_exists
+
+        if not state_table_exists(conn, "offmarket_high_load_job_audit"):
             return {"items": [], "count": 0}
         clauses = []
         params: list[Any] = []
@@ -3677,7 +3708,8 @@ def list_offmarket_high_load_audits(
             clauses.append("job_name=?")
             params.append(str(job_name))
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
-        cur = conn.execute(
+        cur = _execute(
+            conn,
             f"""
             SELECT *
             FROM offmarket_high_load_job_audit
@@ -3687,8 +3719,12 @@ def list_offmarket_high_load_audits(
             """,
             (*params, int(limit)),
         )
-        columns = [str(item[0]) for item in cur.description]
-        rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+        fetched = cur.fetchall()
+        if fetched and isinstance(fetched[0], dict):
+            rows = [dict(row) for row in fetched]
+        else:
+            columns = [str(getattr(item, "name", item[0])) for item in cur.description]
+            rows = [dict(zip(columns, row)) for row in fetched]
         items = []
         for row in rows:
             payload_raw = row.get("payload_json") or "{}"

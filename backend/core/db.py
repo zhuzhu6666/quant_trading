@@ -19,6 +19,8 @@ from typing import Final, Iterator
 
 import duckdb
 
+from backend.core.state_store import STATE_SCHEMA, connect_state_store
+
 # ═══════════════════════════════════════════
 # 项目根 (兼容 backend/ 和顶层导入)
 # ═══════════════════════════════════════════
@@ -39,9 +41,9 @@ DUCKDB_TRADES  = DATA_DIR / "trades.duckdb"          # 交易记录(归因用)
 DUCKDB_EVENTS  = DATA_DIR / "events.duckdb"          # 经济事件日历
 
 # ═══════════════════════════════════════════
-# SQLite — 运行时状态 (统一为 state.db)
+# PostgreSQL — 运行时状态；data/state.db 仅作为迁移冷备/源库
 # ═══════════════════════════════════════════
-STATE_DB       = DATA_DIR / "state.db"               # 所有运行时状态
+STATE_DB       = DATA_DIR / "state.db"               # 旧 SQLite 状态冷备/迁移源
 EXPERIMENTS_DB = DATA_DIR / "experiments.db"         # 实验记录(独立)
 
 # 兼容旧路径 (逐步迁移后删除)
@@ -66,6 +68,42 @@ _KNOWN_SQLITE_PATHS: Final[set[Path]] = {
     LEGACY_ANALYTICS_DB.resolve(),
     LEGACY_DECISION_LOG_DB.resolve(),
 }
+
+
+def _env_value(name: str, default: str = "") -> str:
+    value = os.environ.get(name)
+    if value is not None:
+        return value
+    env_path = _PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        return default
+    try:
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                continue
+            key, val = raw.split("=", 1)
+            if key.strip() == name:
+                return val.strip().strip('"').strip("'")
+    except Exception:
+        return default
+    return default
+
+
+def state_backend() -> str:
+    return _env_value("QUANT_STATE_BACKEND", "postgres").strip().lower() or "postgres"
+
+
+def state_pg_dsn() -> str:
+    return _env_value("QUANT_STATE_PG_DSN") or _env_value("QUANT_AUDIT_PG_DSN")
+
+
+def state_pg_enabled() -> bool:
+    return state_backend() == "postgres" and bool(state_pg_dsn())
+
+
+def is_state_db_path(db_path: str | Path) -> bool:
+    return _normalize_db_path(db_path).resolve() == STATE_DB.resolve()
 
 
 # ═══════════════════════════════════════════
@@ -116,6 +154,8 @@ def _configure_sqlite_connection(conn: sqlite3.Connection, *, read_only: bool = 
 def connect_sqlite(db_path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     """Open a SQLite connection and reject DuckDB files early."""
     path = _normalize_db_path(db_path)
+    if is_state_db_path(path):
+        raise RuntimeError("data/state.db has migrated to PostgreSQL; use get_state_pg_conn() for runtime state")
     if is_duckdb_path(path):
         raise ValueError(f"Refusing to open DuckDB file with sqlite3: {path}")
     if read_only:
@@ -266,6 +306,44 @@ def ensure_sqlite_columns(db_path: str | Path, table: str, columns: dict[str, st
         conn.commit()
     finally:
         conn.close()
+
+
+def state_table_exists(conn, table: str) -> bool:
+    """Return whether a runtime state table exists on SQLite or PostgreSQL."""
+    if conn.__class__.__module__.split(".", 1)[0] == "psycopg":
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = current_schema() AND table_name = %s
+            LIMIT 1
+            """,
+            (table,),
+        ).fetchone()
+        return row is not None
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def state_table_columns(conn, table: str) -> set[str]:
+    """Return runtime state table columns without exposing engine-specific metadata SQL."""
+    if conn.__class__.__module__.split(".", 1)[0] == "psycopg":
+        return {
+            str(row["column_name"])
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = %s
+                ORDER BY ordinal_position
+                """,
+                (table,),
+            ).fetchall()
+        }
+    return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
 
 
 # ═══════════════════════════════════════════
@@ -458,21 +536,6 @@ CREATE TABLE IF NOT EXISTS decision_factor_snapshot (
     gated INTEGER DEFAULT 0,
     gated_reason TEXT DEFAULT '',
     contribution_score REAL DEFAULT 0.0
-);
-
--- PostgreSQL migration audit outbox.
--- This is not a trading dependency: SQLite remains the source of truth and
--- pending rows are replayable when the PostgreSQL audit sink is available.
-CREATE TABLE IF NOT EXISTS state_dual_write_outbox (
-    event_id TEXT PRIMARY KEY,
-    event_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT DEFAULT '',
-    created_at REAL NOT NULL DEFAULT 0.0,
-    updated_at REAL NOT NULL DEFAULT 0.0,
-    synced_at REAL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS order_lifecycle_event (
@@ -844,7 +907,6 @@ CREATE INDEX IF NOT EXISTS idx_decision_ledger_ts ON decision_ledger(decision_ts
 CREATE INDEX IF NOT EXISTS idx_decision_ledger_pos_event ON decision_ledger(position_id, event_type);
 CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_decision ON decision_factor_snapshot(decision_id);
 CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_factor ON decision_factor_snapshot(factor);
-CREATE INDEX IF NOT EXISTS idx_state_dual_write_outbox_status ON state_dual_write_outbox(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_order_lifecycle_trade ON order_lifecycle_event(trade_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_event(position_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
@@ -899,35 +961,27 @@ CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp
 
 
 def init_state_db() -> None:
-    """初始化 state.db (幂等, 启动时调用)."""
-    _init_sqlite_db(STATE_DB, STATE_DB_DDL)
-    ensure_sqlite_columns(
-        STATE_DB,
-        "position_supervisor_trace",
-        {
-            "trace_integrity": "trace_integrity TEXT DEFAULT 'full'",
-            "config_version": "config_version INTEGER DEFAULT 0",
-            "config_hash": "config_hash TEXT DEFAULT ''",
-            "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-        },
-    )
-    ensure_sqlite_columns(
-        STATE_DB,
-        "autonomous_learning_sample",
-        {
-            "evidence_contract_json": "evidence_contract_json TEXT DEFAULT '{}'",
-            "config_version": "config_version INTEGER DEFAULT 0",
-            "config_hash": "config_hash TEXT DEFAULT ''",
-            "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-        },
-    )
+    """Verify PostgreSQL state schema is available."""
+    conn = get_state_pg_conn(read_only=True)
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+            """
+        ).fetchone()
+        if row is None or int(row["n"] or 0) == 0:
+            raise RuntimeError("PostgreSQL state schema is empty; run scripts/migrate_state_sqlite_to_pg.py first")
+    finally:
+        conn.close()
 
 
-def get_state_conn() -> sqlite3.Connection:
-    """获取 state.db 连接 (每次新建, 调用方负责关闭)."""
-    conn = connect_sqlite(STATE_DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_state_pg_conn(*, read_only: bool = False):
+    """Return a direct psycopg connection to the PostgreSQL state schema."""
+    if not state_pg_enabled():
+        raise RuntimeError("PostgreSQL state backend is not enabled")
+    return connect_state_store(state_pg_dsn(), read_only=read_only, schema=STATE_SCHEMA)
 
 
 # ═══════════════════════════════════════════

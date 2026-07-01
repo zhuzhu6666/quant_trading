@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite
+from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.ledger.service import DecisionLedger
 from backend.services.model_permissions import validate_model_artifact
 from research.features.evidence_contract import stable_hash
@@ -80,12 +80,22 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _conn_is_pg(conn: Any) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn: Any, sql: str) -> str:
+    return sql.replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn: Any, sql: str, params: tuple | list | None = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), tuple(params))
+
+
 def _table_exists(conn: Any, table: str) -> bool:
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,),
-    ).fetchone()
-    return bool(row)
+    return state_table_exists(conn, table)
 
 
 def _sha256(path: Path) -> str:
@@ -208,15 +218,19 @@ class MetaModelLightGBMService:
         self.artifact_dir = Path(artifact_dir) if artifact_dir else DATA_DIR / "model_artifacts" / MODEL_TYPE
         self._ensure_table()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
     def _conn(self):
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = __import__("sqlite3").Row
         return conn
 
     def _ensure_table(self) -> None:
-        conn = connect_sqlite(self.db_path)
+        conn = self._conn()
         try:
-            conn.execute(
+            _execute(conn,
                 """
                 CREATE TABLE IF NOT EXISTS meta_model_shadow_audit (
                     inference_id TEXT PRIMARY KEY,
@@ -236,7 +250,7 @@ class MetaModelLightGBMService:
                 )
                 """
             )
-            conn.execute(
+            _execute(conn,
                 """
                 CREATE INDEX IF NOT EXISTS idx_meta_model_shadow_audit_created
                 ON meta_model_shadow_audit(created_at)
@@ -249,7 +263,7 @@ class MetaModelLightGBMService:
     def load_reviews(self, *, limit: int = 2000) -> list[dict[str, Any]]:
         conn = self._conn()
         try:
-            rows = conn.execute(
+            rows = _execute(conn,
                 """
                 SELECT review_id, trade_id, position_id, pnl, mae, mfe,
                        outcome_label, review_json, created_at
@@ -331,7 +345,7 @@ class MetaModelLightGBMService:
             "permission_block_rate": 0.0,
         }
         if _table_exists(conn, "decision_ledger"):
-            rows = conn.execute(
+            rows = _execute(conn,
                 """
                 SELECT event_type, risk_state_json
                 FROM decision_ledger
@@ -356,7 +370,7 @@ class MetaModelLightGBMService:
                         features["risk_allowed_count"] += 1.0
 
         if _table_exists(conn, "position_lifecycle_event"):
-            rows = conn.execute(
+            rows = _execute(conn,
                 """
                 SELECT event_type, COUNT(*) AS n
                 FROM position_lifecycle_event
@@ -405,7 +419,7 @@ class MetaModelLightGBMService:
     def _shadow_weak_rate(conn: Any, *, table: str, start_ts: float, end_ts: float) -> float:
         if not _table_exists(conn, table):
             return 0.0
-        rows = conn.execute(
+        rows = _execute(conn,
             f"""
             SELECT prediction, result_json
             FROM {table}
@@ -432,7 +446,7 @@ class MetaModelLightGBMService:
         }
         if not _table_exists(conn, "supervisor_counterfactual_review"):
             return out
-        rows = conn.execute(
+        rows = _execute(conn,
             """
             SELECT label
             FROM supervisor_counterfactual_review
@@ -460,7 +474,7 @@ class MetaModelLightGBMService:
     ) -> float:
         if not _table_exists(conn, table):
             return 0.0
-        rows = conn.execute(
+        rows = _execute(conn,
             f"""
             SELECT status
             FROM {table}
@@ -808,7 +822,7 @@ class MetaModelLightGBMService:
         inference_id = f"{MODEL_TYPE}:{sample['sample_id']}:{int(now * 1000)}"
         conn = self._conn()
         try:
-            conn.execute(
+            _execute(conn,
                 """
                 INSERT INTO meta_model_shadow_audit
                 (inference_id, model_type, model_version, artifact_path, mode,
@@ -870,7 +884,7 @@ class MetaModelLightGBMService:
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         conn = self._conn()
         try:
-            rows = conn.execute(
+            rows = _execute(conn,
                 f"""
                 SELECT *
                 FROM meta_model_shadow_audit

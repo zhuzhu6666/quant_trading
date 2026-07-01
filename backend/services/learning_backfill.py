@@ -9,7 +9,7 @@ import time
 import uuid
 from typing import Any
 
-from backend.core.db import get_state_conn
+from backend.core.db import get_state_pg_conn, state_table_columns
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import update_position_path_metrics
 from backend.services.review_contract import normalize_trade_review_contract
@@ -20,6 +20,24 @@ logger = logging.getLogger(__name__)
 _DEFAULT_LIMIT = 100
 _DEFAULT_DELAY_SEC = 180.0
 _backfill_thread: threading.Thread | None = None
+
+
+def _connect_state():
+    return get_state_pg_conn()
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s")
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
 
 
 def new_id(prefix: str) -> str:
@@ -276,7 +294,7 @@ def fetch_missing_positions(
     sql += " ORDER BY m.close_ts DESC LIMIT ?"
     params.append(int(limit))
     try:
-        return list(conn.execute(sql, params).fetchall())
+        return list(_execute(conn, sql, params).fetchall())
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower():
             logger.warning("[learning_backfill] skipped: required tables missing: %s", exc)
@@ -417,7 +435,7 @@ def build_review_record(row: sqlite3.Row) -> dict:
 
 
 def insert_review(conn: sqlite3.Connection, record: dict) -> None:
-    conn.execute(
+    _execute(conn,
         """
         INSERT INTO trade_outcome_review
         (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
@@ -450,7 +468,7 @@ def insert_review(conn: sqlite3.Connection, record: dict) -> None:
 
 
 def _ensure_experience_memory_source_columns(conn: sqlite3.Connection) -> None:
-    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(experience_memory)").fetchall()}
+    cols = state_table_columns(conn, "experience_memory")
     migrations = {
         "source_table": "ALTER TABLE experience_memory ADD COLUMN source_table TEXT DEFAULT ''",
         "source_id": "ALTER TABLE experience_memory ADD COLUMN source_id TEXT DEFAULT ''",
@@ -459,8 +477,8 @@ def _ensure_experience_memory_source_columns(conn: sqlite3.Connection) -> None:
     }
     for name, ddl in migrations.items():
         if name not in cols:
-            conn.execute(ddl)
-    conn.execute(
+            _execute(conn, ddl)
+    _execute(conn,
         """
         CREATE INDEX IF NOT EXISTS idx_experience_memory_source
         ON experience_memory(source_table, source_id, append_source)
@@ -475,9 +493,9 @@ def _stable_experience_id(append_source: str, source_table: str, source_id: str)
 
 def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
     _ensure_experience_memory_source_columns(conn)
-    conn.execute("DELETE FROM experience_memory WHERE append_source='learning_backfill.v1'")
-    conn.execute("DELETE FROM experience_pattern_stats WHERE scope_type='factor'")
-    reviews = conn.execute(
+    _execute(conn, "DELETE FROM experience_memory WHERE append_source='learning_backfill.v1'")
+    _execute(conn, "DELETE FROM experience_pattern_stats WHERE scope_type='factor'")
+    reviews = _execute(conn,
         """
         SELECT review_id, trade_id, position_id, outcome_label, pnl, failure_tags_json,
                summary_text, review_json, created_at
@@ -559,14 +577,30 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
             "summary_text": str(row["summary_text"] or ""),
             "review_json": review_json,
         }
-        conn.execute(
+        _execute(conn,
             """
-            INSERT OR REPLACE INTO experience_memory
+            INSERT INTO experience_memory
             (experience_id, trade_id, source_table, source_id, append_source,
              regime_id, setup_hash, decision_context_json,
              outcome_label, reward_score, failure_tags_json, recommended_action,
              evidence_strength, artifact_version, evolution_run_id, created_at)
             VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'v1', '', ?)
+            ON CONFLICT(experience_id) DO UPDATE SET
+                trade_id=excluded.trade_id,
+                source_table=excluded.source_table,
+                source_id=excluded.source_id,
+                append_source=excluded.append_source,
+                regime_id=excluded.regime_id,
+                setup_hash=excluded.setup_hash,
+                decision_context_json=excluded.decision_context_json,
+                outcome_label=excluded.outcome_label,
+                reward_score=excluded.reward_score,
+                failure_tags_json=excluded.failure_tags_json,
+                recommended_action=excluded.recommended_action,
+                evidence_strength=excluded.evidence_strength,
+                artifact_version=excluded.artifact_version,
+                evolution_run_id=excluded.evolution_run_id,
+                created_at=excluded.created_at
             """,
             (
                 experience_id,
@@ -614,12 +648,20 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
             confidence = 0.0
             reason = f"factor {primary_factor} still accumulating evidence"
 
-        conn.execute(
+        _execute(conn,
             """
-            INSERT OR REPLACE INTO experience_pattern_stats
+            INSERT INTO experience_pattern_stats
             (scope_type, scope_key, sample_count, win_count, bad_loss_count,
              avg_reward, last_outcome_label, recommended_action, updated_at)
             VALUES ('factor', ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+                sample_count=excluded.sample_count,
+                win_count=excluded.win_count,
+                bad_loss_count=excluded.bad_loss_count,
+                avg_reward=excluded.avg_reward,
+                last_outcome_label=excluded.last_outcome_label,
+                recommended_action=excluded.recommended_action,
+                updated_at=excluded.updated_at
             """,
             (
                 primary_factor,
@@ -634,7 +676,7 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
         )
 
         if action != "watch":
-            existing = conn.execute(
+            existing = _execute(conn,
                 """
                 SELECT suggestion_id
                 FROM policy_suggestion
@@ -657,7 +699,7 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
                 "failure_tags": failure_tags,
             }
             if existing:
-                conn.execute(
+                _execute(conn,
                     """
                     UPDATE policy_suggestion
                     SET confidence=?, reason=?, evidence_json=?, created_at=?
@@ -672,7 +714,7 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
                     ),
                 )
             else:
-                conn.execute(
+                _execute(conn,
                     """
                     INSERT INTO policy_suggestion
                     (suggestion_id, scope_type, scope_key, action, confidence, reason,
@@ -700,7 +742,7 @@ def run_learning_backfill(
     allow_partial: bool = False,
     rebuild_learning: bool = True,
 ) -> dict:
-    conn = get_state_conn()
+    conn = _connect_state()
     try:
         rows = fetch_missing_positions(conn, limit=limit, require_decision=not allow_partial)
         inserted = []

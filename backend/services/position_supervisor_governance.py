@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from backend.core.db import STATE_DB, connect_sqlite
+from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.position_supervisor import evaluate_position_supervisor
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
@@ -20,6 +20,31 @@ from backend.services.position_supervisor_templates import (
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _use_pg(db_path: str | Path = STATE_DB) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
+    conn = get_state_pg_conn(read_only=read_only) if _use_pg(db_path) else connect_sqlite(db_path, read_only=read_only)
+    if not _use_pg(db_path):
+        conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
 
 
 def _loads(raw: str | None, default: Any) -> Any:
@@ -56,7 +81,8 @@ def _direction_from_review(payload: dict[str, Any]) -> int:
 
 
 def _position_prices(conn: sqlite3.Connection, position_id: str) -> dict[str, float]:
-    row = conn.execute(
+    row = _execute(
+        conn,
         """
         SELECT details_json
         FROM position_lifecycle_event
@@ -125,7 +151,8 @@ def _load_review_rows(
     limit: int,
 ) -> list[sqlite3.Row]:
     start_ts, end_ts = _day_bounds(day)
-    return conn.execute(
+    return _execute(
+        conn,
         """
         SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
@@ -142,7 +169,8 @@ def _load_review_rows(
 
 def _amend_issue_count(conn: sqlite3.Connection, *, day: str) -> dict[str, int]:
     start_ts, end_ts = _day_bounds(day)
-    rows = conn.execute(
+    rows = _execute(
+        conn,
         """
         SELECT event_type, COUNT(*) AS n
         FROM position_lifecycle_event
@@ -158,7 +186,8 @@ def _amend_issue_count(conn: sqlite3.Connection, *, day: str) -> dict[str, int]:
 def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, Any]:
     start_ts, end_ts = _day_bounds(day)
     try:
-        rows = conn.execute(
+        rows = _execute(
+            conn,
             """
             SELECT label, supervisor_event_type, COUNT(*) AS n
             FROM supervisor_counterfactual_review
@@ -193,8 +222,7 @@ def replay_position_supervisor_templates(
     small_abs_pnl: float = 5.0,
     limit: int = 200,
 ) -> dict[str, Any]:
-    conn = connect_sqlite(db_path, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _connect(db_path, read_only=True)
     try:
         rows = _load_review_rows(conn, day=day, small_abs_pnl=small_abs_pnl, limit=limit)
         templates = list_position_supervisor_templates()
@@ -282,8 +310,7 @@ def build_position_supervisor_advisories(
     default_summary = next((x for x in replay["templates"] if x["template_id"] == DEFAULT_TEMPLATE_ID), {})
     candidate_summary = next((x for x in replay["templates"] if x["template_id"] == CONSERVATIVE_TEMPLATE_ID), {})
     amend_issues = replay.get("amend_issues") or {}
-    conn = connect_sqlite(db_path, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _connect(db_path, read_only=True)
     try:
         counterfactual_summary = _counterfactual_summary(conn, day=day)
     finally:
@@ -360,22 +387,24 @@ def build_position_supervisor_advisories(
         )
 
     if materialize and suggestions:
-        conn = connect_sqlite(db_path)
+        conn = _connect(db_path)
         try:
             now_ts = time.time()
             for item in suggestions:
-                conn.execute(
+                _execute(
+                    conn,
                     """
-                    INSERT OR REPLACE INTO policy_suggestion
+                    INSERT INTO policy_suggestion
                     (suggestion_id, scope_type, scope_key, action, confidence, reason,
                      evidence_json, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(
-                        (SELECT status FROM policy_suggestion WHERE suggestion_id=?),
-                        'proposed'
-                    ), COALESCE(
-                        (SELECT created_at FROM policy_suggestion WHERE suggestion_id=?),
-                        ?
-                    ))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                    ON CONFLICT(suggestion_id) DO UPDATE SET
+                        scope_type=excluded.scope_type,
+                        scope_key=excluded.scope_key,
+                        action=excluded.action,
+                        confidence=excluded.confidence,
+                        reason=excluded.reason,
+                        evidence_json=excluded.evidence_json
                     """,
                     (
                         item["suggestion_id"],
@@ -385,8 +414,6 @@ def build_position_supervisor_advisories(
                         float(item["confidence"]),
                         item["reason"],
                         json.dumps(item["evidence"], ensure_ascii=False),
-                        item["suggestion_id"],
-                        item["suggestion_id"],
                         now_ts,
                     ),
                 )

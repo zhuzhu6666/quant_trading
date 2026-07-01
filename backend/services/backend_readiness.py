@@ -6,7 +6,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import DUCKDB_EXTERNAL, STATE_DB, connect_duckdb, connect_sqlite
+from backend.core.db import (
+    DUCKDB_EXTERNAL,
+    STATE_DB,
+    connect_duckdb,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_pg_enabled,
+    state_table_columns,
+    state_table_exists,
+)
 from backend.services.meta_governance import MetaGovernanceService
 from research.meta_model_lightgbm import MetaModelLightGBMService
 
@@ -47,11 +57,32 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _table_exists(conn: Any, table: str) -> bool:
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,),
-    ).fetchone()
-    return bool(row)
+    return state_table_exists(conn, table)
+
+
+def _use_pg(db_path: str | Path = STATE_DB) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _connect_state(db_path: str | Path = STATE_DB):
+    conn = get_state_pg_conn(read_only=True) if _use_pg(db_path) else connect_sqlite(db_path, read_only=True)
+    if not _use_pg(db_path):
+        conn.row_factory = __import__("sqlite3").Row
+    return conn
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
 
 
 class BackendReadinessService:
@@ -162,12 +193,12 @@ class BackendReadinessService:
         }
 
     def _latest_permission_audit(self, model_type: str) -> dict[str, Any]:
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _connect_state(self.db_path)
         try:
             if not _table_exists(conn, "model_permission_audit"):
                 return {"ok": True, "status": "missing_table"}
-            row = conn.execute(
+            row = _execute(
+                conn,
                 """
                 SELECT *
                 FROM model_permission_audit
@@ -199,8 +230,7 @@ class BackendReadinessService:
             conn.close()
 
     def _governance_status(self) -> dict[str, Any]:
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _connect_state(self.db_path)
         try:
             try:
                 from config.runtime_config import shared as runtime_config
@@ -214,7 +244,8 @@ class BackendReadinessService:
             automatic_execution_enabled = autonomy_mode == "demo_autonomous" and demo_auto_apply
             counts = {}
             if _table_exists(conn, "policy_suggestion"):
-                rows = conn.execute(
+                rows = _execute(
+                    conn,
                     """
                     SELECT status, COUNT(*) AS n
                     FROM policy_suggestion
@@ -236,11 +267,11 @@ class BackendReadinessService:
 
     def _factor_data_status(self) -> dict[str, Any]:
         state_counts: dict[str, Any] = {}
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _connect_state(self.db_path)
         try:
             if _table_exists(conn, "factor_health"):
-                rows = conn.execute(
+                rows = _execute(
+                    conn,
                     "SELECT status, COUNT(*) AS n FROM factor_health GROUP BY status"
                 ).fetchall()
                 state_counts["factor_health_by_status"] = {
@@ -301,15 +332,14 @@ class BackendReadinessService:
         ]
         now = time.time()
         freshness: dict[str, Any] = {}
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _connect_state(self.db_path)
         try:
             for table in tables:
                 if not _table_exists(conn, table):
                     freshness[table] = {"status": "missing_table"}
                     continue
                 ts_col = "updated_at"
-                cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                cols = state_table_columns(conn, table)
                 if "created_at" in cols:
                     ts_col = "created_at"
                 elif "updated_at" in cols:
@@ -317,7 +347,7 @@ class BackendReadinessService:
                 else:
                     freshness[table] = {"status": "no_timestamp"}
                     continue
-                latest = _safe_float(conn.execute(f"SELECT MAX({ts_col}) AS ts FROM {table}").fetchone()["ts"])
+                latest = _safe_float(_execute(conn, f"SELECT MAX({ts_col}) AS ts FROM {table}").fetchone()["ts"])
                 age_sec = max(0.0, now - latest) if latest > 0 else None
                 freshness[table] = {
                     "latest_ts": latest,
@@ -360,12 +390,12 @@ class BackendReadinessService:
         }
 
     def _latest_offmarket_audit(self) -> dict[str, Any]:
-        conn = connect_sqlite(self.db_path, read_only=True)
-        conn.row_factory = __import__("sqlite3").Row
+        conn = _connect_state(self.db_path)
         try:
             if not _table_exists(conn, "offmarket_high_load_job_audit"):
                 return {}
-            row = conn.execute(
+            row = _execute(
+                conn,
                 """
                 SELECT *
                 FROM offmarket_high_load_job_audit

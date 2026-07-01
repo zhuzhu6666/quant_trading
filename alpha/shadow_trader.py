@@ -3,7 +3,7 @@
 This module gives Canary a real shadow-performance source without routing
 shadow factors into live votes. It evaluates registered shadow/discovered
 factors on recent bars, builds a simple one-bar-ahead virtual PnL stream, and
-persists aggregate OOS metrics to state.db.
+persists aggregate OOS metrics to the PostgreSQL state store.
 """
 
 from __future__ import annotations
@@ -21,6 +21,16 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 INVALID_FACTOR_ERROR_THRESHOLD = 3
+
+
+def _connect_state(*, read_only: bool = False):
+    from backend.core.db import get_state_pg_conn
+
+    return get_state_pg_conn(read_only=read_only)
+
+
+def _p(sql: str) -> str:
+    return sql.replace("?", "%s")
 
 
 @dataclass
@@ -43,46 +53,8 @@ class ShadowPerf:
 
 
 def _ensure_shadow_tables() -> None:
-    """Create shadow performance tables if an older state.db is already present."""
-    from backend.core.db import get_state_conn
-
-    conn = get_state_conn()
-    try:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS shadow_factor_perf (
-                factor TEXT PRIMARY KEY,
-                source TEXT DEFAULT 'shadow',
-                symbol TEXT DEFAULT '',
-                timeframe TEXT DEFAULT '',
-                oos_bars INTEGER DEFAULT 0,
-                cumulative_pnl REAL DEFAULT 0.0,
-                hit_rate REAL DEFAULT 0.0,
-                max_drawdown REAL DEFAULT 0.0,
-                last_signal REAL DEFAULT 0.0,
-                metrics_json TEXT DEFAULT '{}',
-                updated_at REAL DEFAULT 0.0
-            );
-            CREATE TABLE IF NOT EXISTS shadow_trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                factor TEXT NOT NULL,
-                symbol TEXT DEFAULT '',
-                timeframe TEXT DEFAULT '',
-                ts REAL,
-                signal REAL DEFAULT 0.0,
-                position INTEGER DEFAULT 0,
-                pnl REAL DEFAULT 0.0,
-                created_at REAL
-            );
-            CREATE INDEX IF NOT EXISTS idx_shadow_trades_factor_ts
-                ON shadow_trades(factor, ts);
-            CREATE INDEX IF NOT EXISTS idx_shadow_factor_perf_updated
-                ON shadow_factor_perf(updated_at);
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    """Shadow tables are created by the PostgreSQL state migration."""
+    return
 
 
 def _as_array(values, n: int) -> np.ndarray:
@@ -129,12 +101,11 @@ def _record_shadow_error(
     error: str = "",
 ) -> None:
     _ensure_shadow_tables()
-    from backend.core.db import get_state_conn
 
-    conn = get_state_conn()
+    conn = _connect_state()
     try:
         row = conn.execute(
-            "SELECT metrics_json FROM shadow_factor_perf WHERE factor = ?",
+            _p("SELECT metrics_json FROM shadow_factor_perf WHERE factor = ?"),
             (factor,),
         ).fetchone()
         metrics = {}
@@ -155,12 +126,23 @@ def _record_shadow_error(
             "last_error_at": time.time(),
         })
         conn.execute(
-            """
-            INSERT OR REPLACE INTO shadow_factor_perf
+            _p("""
+            INSERT INTO shadow_factor_perf
             (factor, source, symbol, timeframe, oos_bars, cumulative_pnl,
              hit_rate, max_drawdown, last_signal, metrics_json, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            ON CONFLICT(factor) DO UPDATE SET
+                source=excluded.source,
+                symbol=excluded.symbol,
+                timeframe=excluded.timeframe,
+                oos_bars=excluded.oos_bars,
+                cumulative_pnl=excluded.cumulative_pnl,
+                hit_rate=excluded.hit_rate,
+                max_drawdown=excluded.max_drawdown,
+                last_signal=excluded.last_signal,
+                metrics_json=excluded.metrics_json,
+                updated_at=excluded.updated_at
+            """),
             (
                 factor,
                 source,
@@ -182,9 +164,8 @@ def _record_shadow_error(
 
 def list_invalid_shadow_factors(max_errors: int = INVALID_FACTOR_ERROR_THRESHOLD) -> list[dict]:
     _ensure_shadow_tables()
-    from backend.core.db import get_state_conn
 
-    conn = get_state_conn()
+    conn = _connect_state(read_only=True)
     try:
         rows = conn.execute(
             "SELECT factor, source, symbol, timeframe, metrics_json, updated_at FROM shadow_factor_perf"
@@ -285,17 +266,27 @@ def evaluate_factor(
 
 def persist_shadow_perf(perf: ShadowPerf) -> None:
     _ensure_shadow_tables()
-    from backend.core.db import get_state_conn
 
-    conn = get_state_conn()
+    conn = _connect_state()
     try:
         conn.execute(
-            """
-            INSERT OR REPLACE INTO shadow_factor_perf
+            _p("""
+            INSERT INTO shadow_factor_perf
             (factor, source, symbol, timeframe, oos_bars, cumulative_pnl,
              hit_rate, max_drawdown, last_signal, metrics_json, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            ON CONFLICT(factor) DO UPDATE SET
+                source=excluded.source,
+                symbol=excluded.symbol,
+                timeframe=excluded.timeframe,
+                oos_bars=excluded.oos_bars,
+                cumulative_pnl=excluded.cumulative_pnl,
+                hit_rate=excluded.hit_rate,
+                max_drawdown=excluded.max_drawdown,
+                last_signal=excluded.last_signal,
+                metrics_json=excluded.metrics_json,
+                updated_at=excluded.updated_at
+            """),
             (
                 perf.factor,
                 perf.source,
@@ -317,12 +308,11 @@ def persist_shadow_perf(perf: ShadowPerf) -> None:
 
 def load_shadow_perf(factor: str) -> ShadowPerf | None:
     _ensure_shadow_tables()
-    from backend.core.db import get_state_conn
 
-    conn = get_state_conn()
+    conn = _connect_state(read_only=True)
     try:
         row = conn.execute(
-            "SELECT * FROM shadow_factor_perf WHERE factor = ?",
+            _p("SELECT * FROM shadow_factor_perf WHERE factor = ?"),
             (factor,),
         ).fetchone()
     finally:

@@ -28,6 +28,16 @@ from alpha.factor_health import FactorHealth, FactorHealthStatus, ACTIVE_IC_THRE
 logger = logging.getLogger(__name__)
 
 
+def _connect_state(*, read_only: bool = False):
+    from backend.core.db import get_state_pg_conn
+
+    return get_state_pg_conn(read_only=read_only)
+
+
+def _p(sql: str) -> str:
+    return sql.replace("?", "%s")
+
+
 # ── 因子来源枚举 ─────────────────────────────────────
 SOURCE_BUILTIN = "builtin"          # 写代码时 @register
 SOURCE_DISCOVERED = "discovered"    # DSL 搜索出来, 通过 shadow 升 ACTIVE
@@ -128,12 +138,11 @@ class RegistryAdapter:
     def _clean_health_record(self, name: str) -> None:
         """删除 factor_health / canary_state / weight_history 中的孤儿记录."""
         try:
-            from backend.core.db import get_state_conn
-            conn = get_state_conn()
+            conn = _connect_state()
             try:
-                conn.execute("DELETE FROM factor_health WHERE factor = ?", (name,))
-                conn.execute("DELETE FROM canary_state WHERE factor = ?", (name,))
-                conn.execute("DELETE FROM weight_history WHERE factor = ?", (name,))
+                conn.execute(_p("DELETE FROM factor_health WHERE factor = ?"), (name,))
+                conn.execute(_p("DELETE FROM canary_state WHERE factor = ?"), (name,))
+                conn.execute(_p("DELETE FROM weight_history WHERE factor = ?"), (name,))
                 conn.commit()
             finally:
                 conn.close()
@@ -315,13 +324,11 @@ class RegistryAdapter:
     def all_health_scores(self) -> dict[str, float]:
         """返回所有已注册因子的当前健康分映射 {name: score_0_100}.
 
-        读取 state.db factor_health 表；缺失因子回退到 50.0。
+        读取 PostgreSQL state store factor_health 表；缺失因子回退到 50.0。
         """
         scores: dict[str, float] = {}
         try:
-            from backend.core.db import STATE_DB, connect_sqlite
-            conn = connect_sqlite(STATE_DB, read_only=True)
-            conn.row_factory = __import__("sqlite3").Row
+            conn = _connect_state(read_only=True)
             try:
                 rows = conn.execute(
                     "SELECT factor, score FROM factor_health"
@@ -354,13 +361,11 @@ class RegistryAdapter:
         return scores
 
     def all_statuses(self) -> list:
-        """返回所有已知因子的 FactorHealthStatus 列表。从 state.db factor_health 表构造。"""
+        """返回所有已知因子的 FactorHealthStatus 列表。从 PostgreSQL state store factor_health 表构造。"""
         from alpha.factor_health import FactorHealthStatus
         statuses: list = []
         try:
-            from backend.core.db import STATE_DB, connect_sqlite
-            conn = connect_sqlite(STATE_DB, read_only=True)
-            conn.row_factory = __import__("sqlite3").Row
+            conn = _connect_state(read_only=True)
             try:
                 rows = conn.execute(
                     "SELECT factor, score, status, n_obs, rolling_ic, components_json FROM factor_health"
@@ -425,13 +430,13 @@ class RegistryAdapter:
 
     def _insert_lifecycle_event(self, conn, event: FactorLifecycleEvent) -> bool:
         exists = conn.execute(
-            """
+            _p("""
             SELECT 1
             FROM lifecycle_events
             WHERE timestamp=? AND event=? AND factor=? AND source=?
               AND description=? AND score=? AND status=? AND reason=?
             LIMIT 1
-            """,
+            """),
             (
                 event.timestamp,
                 event.event,
@@ -446,8 +451,8 @@ class RegistryAdapter:
         if exists:
             return False
         conn.execute(
-            "INSERT INTO lifecycle_events (timestamp, event, factor, source, description, score, status, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            _p("INSERT INTO lifecycle_events (timestamp, event, factor, source, description, score, status, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
             (
                 event.timestamp,
                 event.event,
@@ -498,26 +503,10 @@ class RegistryAdapter:
         except Exception as e:
             logger.warning("[RegistryAdapter] lifecycle JSONL write failed: {}", e)
         try:
-            from backend.core.db import get_state_conn
-            conn = get_state_conn()
+            conn = _connect_state()
             try:
                 self._drain_pending_lifecycle_events(conn)
                 self._insert_lifecycle_event(conn, event)
-                try:
-                    from backend.core.db import STATE_DB
-                    from backend.services.state_dual_write import enqueue_state_row_event_on_conn
-
-                    enqueue_state_row_event_on_conn(
-                        conn,
-                        db_path=STATE_DB,
-                        table_name="lifecycle_events",
-                        entity_key=f"{event.timestamp}:{event.event}:{event.factor}:{event.source}",
-                        row=payload,
-                        operation="insert",
-                        source_updated_at=event.timestamp,
-                    )
-                except Exception as dual_write_err:
-                    logger.warning("[RegistryAdapter] lifecycle dual-write enqueue failed: {}", dual_write_err)
                 conn.commit()
             finally:
                 conn.close()
@@ -554,14 +543,12 @@ class RegistryAdapter:
             logger.debug("RuntimeState.emit_metric skipped", exc_info=True)
 
     def read_events(self, n: int = 100) -> list[dict]:
-        """读最近 n 条事件 (从 state.db)."""
+        """读最近 n 条事件 (从 PostgreSQL state store)."""
         try:
-            from backend.core.db import STATE_DB, connect_sqlite
-            conn = connect_sqlite(STATE_DB, read_only=True)
-            conn.row_factory = __import__("sqlite3").Row
+            conn = _connect_state(read_only=True)
             try:
                 rows = conn.execute(
-                    "SELECT * FROM lifecycle_events ORDER BY id DESC LIMIT ?", (n,)
+                    _p("SELECT * FROM lifecycle_events ORDER BY id DESC LIMIT ?"), (n,)
                 ).fetchall()
                 return [dict(r) for r in reversed(rows)]
             finally:

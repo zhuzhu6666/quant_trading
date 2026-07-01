@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 
 
 class RuleEvolutionGovernor:
@@ -18,10 +18,29 @@ class RuleEvolutionGovernor:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _sql(self, sql: str) -> str:
+        return sql.replace("?", "%s") if self._use_pg() else sql
+
+    def _execute(self, conn, sql: str, params: tuple | list | None = None):
+        if params is None:
+            return conn.execute(self._sql(sql))
+        return conn.execute(self._sql(sql), tuple(params))
+
+    def _executemany(self, conn, sql: str, seq_of_params):
+        if self._use_pg():
+            cur = conn.cursor()
+            cur.executemany(self._sql(sql), [tuple(params) for params in seq_of_params])
+            return cur
+        return conn.executemany(sql, seq_of_params)
+
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         except Exception:
@@ -34,7 +53,8 @@ class RuleEvolutionGovernor:
 
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
-            conn.executescript(STATE_DB_DDL)
+            if not self._use_pg():
+                conn.executescript(STATE_DB_DDL)
 
     @staticmethod
     def _new_id(prefix: str) -> str:
@@ -97,7 +117,7 @@ class RuleEvolutionGovernor:
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(int(limit))
         with self._conn() as conn:
-            rows = conn.execute(sql, tuple(params)).fetchall()
+            rows = self._execute(conn, sql, tuple(params)).fetchall()
         result = []
         for row in rows:
             item = dict(row)
@@ -114,7 +134,7 @@ class RuleEvolutionGovernor:
         rejected = 0
         unchanged = 0
         with self._conn() as conn:
-            rows = conn.execute(
+            rows = self._execute(conn,
                 """
                 SELECT * FROM policy_suggestion
                 WHERE status='proposed'
@@ -127,7 +147,7 @@ class RuleEvolutionGovernor:
                 scope_key = str(row["scope_key"] or "")
                 action = str(row["action"] or "watch")
                 confidence = float(row["confidence"] or 0.0)
-                stats = conn.execute(
+                stats = self._execute(conn,
                     """
                     SELECT * FROM experience_pattern_stats
                     WHERE scope_type=? AND scope_key=?
@@ -175,7 +195,7 @@ class RuleEvolutionGovernor:
                     unchanged += 1
                     continue
 
-                conn.execute(
+                self._execute(conn,
                     """
                     UPDATE policy_suggestion
                     SET status=?, reviewed_at=?, review_note=?
@@ -190,7 +210,7 @@ class RuleEvolutionGovernor:
         rolled_back = 0
         kept = 0
         with self._conn() as conn:
-            rows = conn.execute(
+            rows = self._execute(conn,
                 """
                 SELECT * FROM policy_suggestion
                 WHERE status='approved'
@@ -199,7 +219,7 @@ class RuleEvolutionGovernor:
             ).fetchall()
             now = time.time()
             for row in rows:
-                stats = conn.execute(
+                stats = self._execute(conn,
                     """
                     SELECT * FROM experience_pattern_stats
                     WHERE scope_type=? AND scope_key=?
@@ -222,7 +242,7 @@ class RuleEvolutionGovernor:
                     note = f"rolled back: factor deteriorated avg_reward={avg_reward:.3f}"
 
                 if should_rollback:
-                    conn.execute(
+                    self._execute(conn,
                         """
                         UPDATE policy_suggestion
                         SET status='rolled_back', reviewed_at=?, review_note=?
@@ -239,7 +259,7 @@ class RuleEvolutionGovernor:
         if status not in {"approved", "rejected", "rolled_back", "proposed"}:
             raise ValueError(f"unsupported status: {status}")
         with self._conn() as conn:
-            cur = conn.execute(
+            cur = self._execute(conn,
                 """
                 UPDATE policy_suggestion
                 SET status=?, reviewed_at=?, review_note=?
@@ -267,7 +287,7 @@ class RuleEvolutionGovernor:
         suggestion_ids_json = json.dumps(sorted(set(suggestion_ids)), ensure_ascii=False)
         details_json = json.dumps(details or {}, ensure_ascii=False, default=str)
         with self._conn() as conn:
-            existing = conn.execute(
+            existing = self._execute(conn,
                 """
                 SELECT application_id, suggestion_ids_json, status
                 FROM learning_application_log
@@ -288,7 +308,7 @@ class RuleEvolutionGovernor:
                     existing_ids = "[]"
                 existing_status = str(existing["status"] or "")
                 if existing_ids == suggestion_ids_json and existing_status in {"applied", "observing", "effective"}:
-                    conn.execute(
+                    self._execute(conn,
                         """
                         UPDATE learning_application_log
                         SET status='superseded'
@@ -305,7 +325,7 @@ class RuleEvolutionGovernor:
                             suggestion_ids_json,
                         ),
                     )
-                    conn.execute(
+                    self._execute(conn,
                         """
                         UPDATE learning_application_effect
                         SET status='superseded', updated_at=?
@@ -327,7 +347,7 @@ class RuleEvolutionGovernor:
                             suggestion_ids_json,
                         ),
                     )
-                    conn.execute(
+                    self._execute(conn,
                         """
                         UPDATE learning_application_log
                         SET cycle_ts=?, bias_multiplier=?, old_weight=?, new_weight=?, details_json=?
@@ -342,7 +362,7 @@ class RuleEvolutionGovernor:
                             str(existing["application_id"]),
                         ),
                     )
-                    conn.execute(
+                    self._execute(conn,
                         """
                         UPDATE learning_application_effect
                         SET decision_json=?, updated_at=?
@@ -367,7 +387,7 @@ class RuleEvolutionGovernor:
                     return str(existing["application_id"])
 
             application_id = self._new_id("lapp")
-            conn.execute(
+            self._execute(conn,
                 """
                 INSERT INTO learning_application_log
                 (application_id, cycle_ts, scope_type, scope_key, action, bias_multiplier,
@@ -389,12 +409,19 @@ class RuleEvolutionGovernor:
                     time.time(),
                 ),
             )
-            conn.execute(
+            self._execute(conn,
                 """
-                INSERT OR REPLACE INTO learning_application_effect
+                INSERT INTO learning_application_effect
                 (application_id, scope_type, scope_key, action, status, decision_json,
                  updated_at, created_at)
                 VALUES (?, ?, ?, ?, 'observing', ?, ?, ?)
+                ON CONFLICT(application_id) DO UPDATE SET
+                    scope_type=excluded.scope_type,
+                    scope_key=excluded.scope_key,
+                    action=excluded.action,
+                    status=excluded.status,
+                    decision_json=excluded.decision_json,
+                    updated_at=excluded.updated_at
                 """,
                 (
                     application_id,
@@ -434,7 +461,7 @@ class RuleEvolutionGovernor:
         template_runtime_sync_needed = False
 
         with self._conn() as conn:
-            rows = conn.execute(
+            rows = self._execute(conn,
                 """
                 SELECT *
                 FROM learning_application_log
@@ -457,7 +484,7 @@ class RuleEvolutionGovernor:
                 if not factor:
                     continue
 
-                post_rows = conn.execute(
+                post_rows = self._execute(conn,
                     """
                     SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
                            r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
@@ -476,7 +503,7 @@ class RuleEvolutionGovernor:
                 ).fetchall()
                 post_reviews = [self._parse_review_row(r) for r in post_rows]
 
-                pre_rows = conn.execute(
+                pre_rows = self._execute(conn,
                     """
                     SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
                            r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
@@ -529,15 +556,30 @@ class RuleEvolutionGovernor:
                 else:
                     next_status = "mixed"
 
-                conn.execute(
+                self._execute(conn,
                     """
-                    INSERT OR REPLACE INTO learning_application_effect
+                    INSERT INTO learning_application_effect
                     (application_id, scope_type, scope_key, action, status,
                      observed_trade_count, baseline_trade_count,
                      post_avg_reward, baseline_avg_reward, delta_avg_reward,
                      post_win_rate, baseline_win_rate, decision_json,
                      last_review_at, updated_at, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM learning_application_effect WHERE application_id=?), ?))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(application_id) DO UPDATE SET
+                        scope_type=excluded.scope_type,
+                        scope_key=excluded.scope_key,
+                        action=excluded.action,
+                        status=excluded.status,
+                        observed_trade_count=excluded.observed_trade_count,
+                        baseline_trade_count=excluded.baseline_trade_count,
+                        post_avg_reward=excluded.post_avg_reward,
+                        baseline_avg_reward=excluded.baseline_avg_reward,
+                        delta_avg_reward=excluded.delta_avg_reward,
+                        post_win_rate=excluded.post_win_rate,
+                        baseline_win_rate=excluded.baseline_win_rate,
+                        decision_json=excluded.decision_json,
+                        last_review_at=excluded.last_review_at,
+                        updated_at=excluded.updated_at
                     """,
                     (
                         app["application_id"],
@@ -555,12 +597,11 @@ class RuleEvolutionGovernor:
                         json.dumps(decision, ensure_ascii=False, default=str),
                         max((float(r.get("created_at", 0.0) or 0.0) for r in post_reviews), default=0.0),
                         now,
-                        app["application_id"],
                         now,
                     ),
                 )
 
-                conn.execute(
+                self._execute(conn,
                     """
                     UPDATE learning_application_log
                     SET status=?, details_json=?
@@ -580,7 +621,7 @@ class RuleEvolutionGovernor:
 
                 suggestion_ids = list(app.get("suggestion_ids") or [])
                 if next_status == "ineffective" and suggestion_ids:
-                    conn.executemany(
+                    self._executemany(conn,
                         """
                         UPDATE policy_suggestion
                         SET status='rolled_back', reviewed_at=?, review_note=?
@@ -599,7 +640,7 @@ class RuleEvolutionGovernor:
                         old_template_id = str(details.get("old_template_id") or "")
                         new_template_id = str(details.get("new_template_id") or "")
                         if old_template_id:
-                            conn.execute(
+                            self._execute(conn,
                                 """
                                 UPDATE parameter_template_registry
                                 SET active=CASE WHEN template_id=? THEN 1 ELSE 0 END, updated_at=?
@@ -607,18 +648,26 @@ class RuleEvolutionGovernor:
                                 """,
                                 (old_template_id, now, factor_id, regime_key),
                             )
-                            old_row = conn.execute(
+                            old_row = self._execute(conn,
                                 """
                                 SELECT template_version FROM parameter_template_registry WHERE template_id=?
                                 """,
                                 (old_template_id,),
                             ).fetchone()
-                            conn.execute(
+                            self._execute(conn,
                                 """
-                                INSERT OR REPLACE INTO parameter_template_active
+                                INSERT INTO parameter_template_active
                                 (factor_id, regime_key, template_id, template_version, status, suggestion_id,
                                  context_json, activated_at, updated_at)
                                 VALUES (?, ?, ?, ?, 'rolled_back', ?, ?, ?, ?)
+                                ON CONFLICT(factor_id, regime_key) DO UPDATE SET
+                                    template_id=excluded.template_id,
+                                    template_version=excluded.template_version,
+                                    status=excluded.status,
+                                    suggestion_id=excluded.suggestion_id,
+                                    context_json=excluded.context_json,
+                                    activated_at=excluded.activated_at,
+                                    updated_at=excluded.updated_at
                                 """,
                                 (
                                     factor_id,
@@ -638,7 +687,7 @@ class RuleEvolutionGovernor:
                                     now,
                                 ),
                             )
-                            conn.execute(
+                            self._execute(conn,
                                 """
                                 INSERT INTO parameter_template_switch_log
                                 (switch_id, factor_id, regime_key, old_template_id, new_template_id,
@@ -674,7 +723,7 @@ class RuleEvolutionGovernor:
                         "baseline_avg_reward": round(pre_avg, 6),
                         "delta_avg_reward": round(delta, 6),
                     }
-                    conn.execute(
+                    self._execute(conn,
                         """
                         INSERT INTO policy_suggestion
                         (suggestion_id, scope_type, scope_key, action, confidence, reason,
@@ -694,7 +743,7 @@ class RuleEvolutionGovernor:
                             now,
                         ),
                     )
-                    conn.execute(
+                    self._execute(conn,
                         """
                         UPDATE learning_application_effect
                         SET status='reinforced', updated_at=?
@@ -702,7 +751,7 @@ class RuleEvolutionGovernor:
                         """,
                         (now, app["application_id"]),
                     )
-                    conn.execute(
+                    self._execute(conn,
                         """
                         UPDATE learning_application_log
                         SET status='reinforced'

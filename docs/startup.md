@@ -86,7 +86,7 @@ python scripts/discover_factors.py --n-candidates 1000 --top-k 50 --auto-registe
 # Token 验证
 python scripts/validate_ctrader_token.py
 
-# 回填历史成交到 state.db 的 ctrader_deals
+# 回填历史成交到 PostgreSQL state_v1.ctrader_deals
 python scripts/backfill_ctrader_deals.py --days 30
 ```
 
@@ -115,7 +115,7 @@ python scripts/refresh_external_data.py --source cot --force
 
 统一规则:
 
-- `SQLite` 只用于 `state.db` / `experiments.db`
+- `PostgreSQL state_v1` 用于运行时状态；`SQLite` 仅保留 `experiments.db` 和显式临时/迁移源库
 - `DuckDB` 只用于行情、外部研究数据、tick、L2、归因、事件库
 - 业务代码必须走 `backend/core/db.py` 的统一连接入口
 

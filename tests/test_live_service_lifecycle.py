@@ -69,6 +69,11 @@ def _reset_loop_state():
     live_service._reset_session_state_for_new_day()
 
 
+def _patch_live_state_conn(monkeypatch, conn_factory):
+    monkeypatch.setattr(live_service, "_get_state_pg_conn", conn_factory)
+    monkeypatch.setattr(live_service, "_get_state_read_conn", conn_factory)
+
+
 def test_prime_live_loop_state_sets_loop_and_session_fields():
     live_service._live_state_update(
         session_pnl=88.0,
@@ -94,6 +99,14 @@ def test_prime_live_loop_state_sets_loop_and_session_fields():
     assert live_service._live_state_get("session_pnl") == 0.0
     assert live_service._live_state_get("session_trades") == 0
     assert live_service._live_state_get("session_max_drawdown_pct") == 0.0
+
+
+def test_floor_api_volume_to_step_skips_untradeable_partial_reduce():
+    meta = {"api_min_volume": 100, "api_step_volume": 100}
+
+    assert live_service._floor_api_volume_to_step(50.0, meta) == 0.0
+    assert live_service._floor_api_volume_to_step(150.0, meta) == 100.0
+    assert live_service._floor_api_volume_to_step(200.0, meta) == 200.0
 
 
 def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
@@ -223,6 +236,11 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
     assert [item["event_type"] for item in calls["orders"]] == ["submitted", "filled"]
     assert calls["positions"][0]["event_type"] == "opened"
     assert calls["upserts"][0][0]["entry_decision_id"] == "dec_open"
+    protection_plan = calls["upserts"][0][1]["meta"]["entry_protection_plan"]
+    assert protection_plan["schema_version"] == live_service._ENTRY_PROTECTION_PLAN_SCHEMA
+    assert protection_plan["status"] == "pending"
+    assert protection_plan["target_stop_loss"] == 4012.5
+    assert protection_plan["target_take_profit"] == 3994.5
     assert calls["attr"][0] == 268
 
 
@@ -334,7 +352,7 @@ def test_upsert_recovery_position_state_preserves_valid_volume_on_zero_snapshot(
     finally:
         conn.close()
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
     monkeypatch.setattr(live_service, "_lookup_entry_decision_id", lambda position_id: "dec_open")
 
     live_service._upsert_recovery_position_state(
@@ -387,7 +405,7 @@ def test_pending_close_intent_survives_memory_loss_via_recovery_meta(monkeypatch
     finally:
         conn.close()
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
 
     live_service._remember_close_reason(271, "holding_timeout")
     live_service._remember_close_verdict(271, SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"}))
@@ -415,7 +433,7 @@ def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
     finally:
         conn.close()
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
     live_service._live_state_update(
         session_pnl=-18.5,
         session_trades=2,
@@ -466,7 +484,7 @@ def test_close_pnl_fallback_reads_recovery_when_memory_cache_missing(monkeypatch
     finally:
         conn.close()
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
     live_service._pos_open_prices.pop(272, None)
     live_service._pos_open_api_volume.pop(272, None)
 
@@ -530,7 +548,7 @@ def test_recovery_bootstrap_reconciles_persisted_positions_after_confirmed_broke
     bridge = _Bridge()
     logs = []
     live_service._live_state_update(positions=[{"position_id": 301, "volume": 0.0}], positions_updated_at=time.time())
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
     monkeypatch.setattr(live_service, "_LEDGER", None)
     monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", lambda *args, **kwargs: {})
 
@@ -647,7 +665,7 @@ def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
     monkeypatch.setattr(live_service, "_LEDGER", ledger)
 
     conn = _conn()
@@ -719,7 +737,7 @@ def test_build_close_position_risk_context_marks_timeout(monkeypatch, tmp_path):
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
 
     open_ts = time.time() - 3900.0
     ledger.log_decision(
@@ -757,7 +775,7 @@ def test_classify_close_source_infers_supervisor_tighten_stopout(monkeypatch, tm
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
 
     close_ts = time.time()
     decision_id = ledger.log_decision(
@@ -798,7 +816,7 @@ def test_classify_close_source_infers_legacy_awe_trailing_stopout_from_trace(mon
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
 
     close_ts = time.time()
     ledger.log_position_supervisor_trace(
@@ -843,7 +861,7 @@ def test_holding_summary_for_position_reports_watch_status(monkeypatch, tmp_path
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
 
     open_ts = time.time() - 3000.0
     ledger.log_decision(
@@ -881,7 +899,7 @@ def test_position_path_metrics_tracks_mfe_giveback_and_time_in_profit(monkeypatc
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(live_service, "_get_state_conn", _conn)
+    _patch_live_state_conn(monkeypatch, _conn)
 
     open_ts = time.time() - 1200.0
     ledger.log_decision(
@@ -921,6 +939,33 @@ def test_position_path_metrics_tracks_mfe_giveback_and_time_in_profit(monkeypatc
     assert second["profit_capture_ratio"] == pytest.approx(0.25)
     assert second["time_in_profit"] == pytest.approx(600.0)
     assert second["thesis_status"] == "weakening"
+
+
+def test_position_path_metrics_keeps_flat_new_position_intact(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _patch_live_state_conn(monkeypatch, _conn)
+
+    open_ts = time.time() - 120.0
+    metrics = live_service._position_path_metrics_for_position(
+        {"position_id": 9003, "symbol": "XAUUSD+", "open_time": open_ts, "profit": 0.0},
+        cfg=SimpleNamespace(timeframe="M5", risk_max_holding_bars=288),
+        now_ts=open_ts + 120.0,
+        persist=True,
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+
+    assert metrics["mfe"] == 0.0
+    assert metrics["mae"] == 0.0
+    assert metrics["holding_efficiency"] == 0.0
+    assert metrics["thesis_status"] == "intact"
 
 
 def test_awe_trailing_builds_candidate_without_direct_broker_amend():

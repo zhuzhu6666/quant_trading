@@ -12,12 +12,37 @@ from typing import Any
 
 from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite
+from backend.core.db import (
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_pg_enabled,
+)
 
 
 _CARD_CACHE_TTL_SEC = 60.0
 _CARD_CACHE_LOCK = threading.Lock()
 _CARD_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _use_pg(db_path: str | Path) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params: Any = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
 
 
 def clear_factor_card_cache(db_path: str | Path | None = None) -> None:
@@ -117,8 +142,9 @@ class FactorCardService:
 
     @contextmanager
     def _conn(self):
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
+        if not _use_pg(self.db_path):
+            conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
@@ -126,7 +152,8 @@ class FactorCardService:
 
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
-            conn.executescript(STATE_DB_DDL)
+            if not _conn_is_pg(conn):
+                conn.executescript(STATE_DB_DDL)
             conn.commit()
 
     def list_cards(
@@ -148,10 +175,11 @@ class FactorCardService:
             if cached and cached[0] > now_ts:
                 return deepcopy(cached[1][:limit])
 
-        ids = self._factor_ids()
+        with self._conn() as conn:
+            ids = self._factor_ids(conn=conn)
+            built = [self._build_card(name, conn=conn) for name in ids]
         items = []
-        for name in ids:
-            card = self._build_card(name)
+        for card in built:
             if source and card["source"] != source:
                 continue
             if lifecycle_status and card["lifecycle_status"] != lifecycle_status:
@@ -171,32 +199,35 @@ class FactorCardService:
             _CARD_CACHE[cache_key] = (now_ts + _CARD_CACHE_TTL_SEC, deepcopy(items))
         return items[:limit]
 
-    def _factor_ids(self) -> list[str]:
+    def _factor_ids(self, conn=None) -> list[str]:
         adapter = RegistryAdapter.shared()
         names = set(factor_registry.list()) | set(adapter._meta.keys())
-        with self._conn() as conn:
-            for table, column in (
-                ("factor_health", "factor"),
-                ("decision_factor_snapshot", "factor"),
-                ("factor_contribution_review", "factor"),
-            ):
-                rows = conn.execute(f"SELECT DISTINCT {column} AS value FROM {table}").fetchall()
-                names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
-            rows = conn.execute(
-                """
-                SELECT DISTINCT scope_key AS value
-                FROM policy_suggestion
-                WHERE scope_type='factor'
-                UNION
-                SELECT DISTINCT scope_key AS value
-                FROM learning_application_log
-                WHERE scope_type='factor'
-                """
-            ).fetchall()
+        if conn is None:
+            with self._conn() as owned:
+                return self._factor_ids(conn=owned)
+        for table, column in (
+            ("factor_health", "factor"),
+            ("decision_factor_snapshot", "factor"),
+            ("factor_contribution_review", "factor"),
+        ):
+            rows = _execute(conn, f"SELECT DISTINCT {column} AS value FROM {table}").fetchall()
             names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
+        rows = _execute(
+            conn,
+            """
+            SELECT DISTINCT scope_key AS value
+            FROM policy_suggestion
+            WHERE scope_type='factor'
+            UNION
+            SELECT DISTINCT scope_key AS value
+            FROM learning_application_log
+            WHERE scope_type='factor'
+            """
+        ).fetchall()
+        names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
         return sorted(name for name in names if name)
 
-    def _build_card(self, factor_id: str) -> dict[str, Any]:
+    def _build_card(self, factor_id: str, *, conn=None) -> dict[str, Any]:
         adapter = RegistryAdapter.shared()
         meta = adapter.get_meta(factor_id)
         func = factor_registry.get(factor_id)
@@ -215,8 +246,8 @@ class FactorCardService:
         parameters = self._infer_parameters(factor_id, description, family)
         formula_version = str(meta.get("formula_version") or self._default_formula_version(source, factor_id))
         parameter_version = str(meta.get("parameter_version") or self._default_parameter_version(source))
-        evidence = self._evidence_summary(factor_id, description)
-        governance = self._governance_state(factor_id, evidence=evidence)
+        evidence = self._evidence_summary(factor_id, description, conn=conn)
+        governance = self._governance_state(factor_id, evidence=evidence, conn=conn)
         failure_modes = list(evidence.get("recent_responsibility_labels") or [])
         if not failure_modes and evidence.get("last_primary_responsibility") == "parameter":
             failure_modes = ["factor_logic_ok_but_param_suspect"]
@@ -262,45 +293,51 @@ class FactorCardService:
             "updated_at_ts": updated_at_ts,
         }
 
-    def _evidence_summary(self, factor_id: str, description: str) -> dict[str, Any]:
-        with self._conn() as conn:
-            health_row = conn.execute(
-                """
-                SELECT score, updated_at
-                FROM factor_health
-                WHERE factor=?
-                """,
-                (factor_id,),
-            ).fetchone()
-            snapshot_row = conn.execute(
-                """
-                SELECT AVG(shadow_score) AS avg_shadow_score,
-                       AVG(contribution_score) AS avg_contribution_score,
-                       COUNT(*) AS sample_count
-                FROM decision_factor_snapshot
-                WHERE factor=?
-                """,
-                (factor_id,),
-            ).fetchone()
-            review_rows = conn.execute(
-                """
-                SELECT notes
-                FROM factor_contribution_review
-                WHERE factor=?
-                ORDER BY id DESC
-                LIMIT 12
-                """,
-                (factor_id,),
-            ).fetchall()
-            review_updated_row = conn.execute(
-                """
-                SELECT MAX(r.created_at) AS updated_at
-                FROM factor_contribution_review f
-                JOIN trade_outcome_review r ON r.review_id = f.review_id
-                WHERE f.factor=?
-                """,
-                (factor_id,),
-            ).fetchone()
+    def _evidence_summary(self, factor_id: str, description: str, *, conn=None) -> dict[str, Any]:
+        if conn is None:
+            with self._conn() as owned:
+                return self._evidence_summary(factor_id, description, conn=owned)
+        health_row = _execute(
+            conn,
+            """
+            SELECT score, updated_at
+            FROM factor_health
+            WHERE factor=?
+            """,
+            (factor_id,),
+        ).fetchone()
+        snapshot_row = _execute(
+            conn,
+            """
+            SELECT AVG(shadow_score) AS avg_shadow_score,
+                   AVG(contribution_score) AS avg_contribution_score,
+                   COUNT(*) AS sample_count
+            FROM decision_factor_snapshot
+            WHERE factor=?
+            """,
+            (factor_id,),
+        ).fetchone()
+        review_rows = _execute(
+            conn,
+            """
+            SELECT notes
+            FROM factor_contribution_review
+            WHERE factor=?
+            ORDER BY id DESC
+            LIMIT 12
+            """,
+            (factor_id,),
+        ).fetchall()
+        review_updated_row = _execute(
+            conn,
+            """
+            SELECT MAX(r.created_at) AS updated_at
+            FROM factor_contribution_review f
+            JOIN trade_outcome_review r ON r.review_id = f.review_id
+            WHERE f.factor=?
+            """,
+            (factor_id,),
+        ).fetchone()
         labels: list[str] = []
         last_primary = ""
         for row in review_rows:
@@ -327,58 +364,65 @@ class FactorCardService:
             "updated_at": self._format_ts(updated_at_ts),
         }
 
-    def _governance_state(self, factor_id: str, *, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
-        with self._conn() as conn:
-            suggestion = conn.execute(
-                """
-                SELECT action, status, created_at
-                FROM policy_suggestion
-                WHERE scope_type='factor' AND scope_key=?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (factor_id,),
-            ).fetchone()
-            app = conn.execute(
-                """
-                SELECT action, status, created_at
-                FROM learning_application_log
-                WHERE scope_type='factor' AND scope_key=?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (factor_id,),
-            ).fetchone()
-            effect = conn.execute(
-                """
-                SELECT status, updated_at
-                FROM learning_application_effect
-                WHERE scope_type='factor' AND scope_key=?
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                (factor_id,),
-            ).fetchone()
-            active_template = conn.execute(
-                """
-                SELECT template_id, template_version, regime_key, updated_at
-                FROM parameter_template_active
-                WHERE factor_id=?
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                (factor_id,),
-            ).fetchone()
-            latest_candidate = conn.execute(
-                """
-                SELECT candidate_id, status, updated_at, validation_summary_json
-                FROM parameter_template_release_candidate
-                WHERE factor_id=?
-                ORDER BY updated_at DESC, created_at DESC
-                LIMIT 1
-                """,
-                (factor_id,),
-            ).fetchone()
+    def _governance_state(self, factor_id: str, *, evidence: dict[str, Any] | None = None, conn=None) -> dict[str, Any]:
+        if conn is None:
+            with self._conn() as owned:
+                return self._governance_state(factor_id, evidence=evidence, conn=owned)
+        suggestion = _execute(
+            conn,
+            """
+            SELECT action, status, created_at
+            FROM policy_suggestion
+            WHERE scope_type='factor' AND scope_key=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (factor_id,),
+        ).fetchone()
+        app = _execute(
+            conn,
+            """
+            SELECT action, status, created_at
+            FROM learning_application_log
+            WHERE scope_type='factor' AND scope_key=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (factor_id,),
+        ).fetchone()
+        effect = _execute(
+            conn,
+            """
+            SELECT status, updated_at
+            FROM learning_application_effect
+            WHERE scope_type='factor' AND scope_key=?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (factor_id,),
+        ).fetchone()
+        active_template = _execute(
+            conn,
+            """
+            SELECT template_id, template_version, regime_key, updated_at
+            FROM parameter_template_active
+            WHERE factor_id=?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (factor_id,),
+        ).fetchone()
+        latest_candidate = _execute(
+            conn,
+            """
+            SELECT candidate_id, status, updated_at, validation_summary_json
+            FROM parameter_template_release_candidate
+            WHERE factor_id=?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (factor_id,),
+        ).fetchone()
         weight_state = "active"
         app_action = str(app["action"] or "") if app else ""
         effect_status = str(effect["status"] or "") if effect else ""

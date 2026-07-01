@@ -66,6 +66,20 @@ def test_close_position_rejects_zero_volume_before_send(monkeypatch):
     assert send_calls == []
 
 
+def test_close_position_rejects_volume_below_symbol_step_before_send(monkeypatch):
+    bridge = _bridge(monkeypatch)
+    bridge._symbol_meta = {"api_min_volume": 100, "api_step_volume": 100}
+    send_calls = []
+    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: send_calls.append(req))
+
+    result = bridge.close_position(269, volume=50.0)
+
+    assert result.success is False
+    assert result.error_code == "invalid_close_volume_step"
+    assert "minVolume=100" in result.comment
+    assert send_calls == []
+
+
 def test_close_position_accepts_execution_event(monkeypatch):
     bridge = _bridge(monkeypatch)
     sent = []

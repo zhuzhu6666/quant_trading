@@ -21,17 +21,32 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.core.db import STATE_DB, STATE_DB_DDL
+from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
-def _connect(db_path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.executescript(STATE_DB_DDL)
+def _use_pg(db_path: str | Path) -> bool:
+    return is_state_db_path(db_path)
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("?", "%s") if conn.__class__.__module__.split(".", 1)[0] == "psycopg" else sql
+
+
+def _execute(conn, sql: str, params: tuple | list | None = None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), tuple(params))
+
+
+def _connect(db_path: str | Path):
+    conn = get_state_pg_conn() if _use_pg(db_path) else connect_sqlite(db_path)
+    if not _use_pg(db_path):
+        conn.row_factory = sqlite3.Row
+        conn.executescript(STATE_DB_DDL)
     return conn
 
 
@@ -41,7 +56,8 @@ def _dump(value: Any) -> str:
 
 def _missing_open_rows(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
     return list(
-        conn.execute(
+        _execute(
+            conn,
             """
             SELECT
                 c.position_id,
@@ -66,7 +82,8 @@ def _missing_open_rows(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row
 
 
 def _deal_context(conn: sqlite3.Connection, position_id: int) -> dict:
-    open_deal = conn.execute(
+    open_deal = _execute(
+        conn,
         """
         SELECT *
         FROM ctrader_deals
@@ -76,7 +93,8 @@ def _deal_context(conn: sqlite3.Connection, position_id: int) -> dict:
         """,
         (position_id,),
     ).fetchone()
-    close_deal = conn.execute(
+    close_deal = _execute(
+        conn,
         """
         SELECT *
         FROM ctrader_deals
@@ -86,7 +104,8 @@ def _deal_context(conn: sqlite3.Connection, position_id: int) -> dict:
         """,
         (position_id,),
     ).fetchone()
-    recovery = conn.execute(
+    recovery = _execute(
+        conn,
         "SELECT * FROM recovery_position_state WHERE position_id=?",
         (position_id,),
     ).fetchone()
@@ -185,7 +204,8 @@ def repair(
             if not apply:
                 continue
 
-            conn.execute(
+            _execute(
+                conn,
                 """
                 INSERT INTO decision_ledger
                 (decision_id, trade_id, position_id, event_type, symbol, timeframe,
@@ -206,7 +226,8 @@ def repair(
                 ),
             )
             for event_type, status in (("submitted", "submitted"), ("filled", "filled")):
-                conn.execute(
+                _execute(
+                    conn,
                     """
                     INSERT INTO order_lifecycle_event
                     (event_id, decision_id, trade_id, order_id, broker_order_id,
@@ -227,7 +248,8 @@ def repair(
                         _dump(payload),
                     ),
                 )
-            conn.execute(
+            _execute(
+                conn,
                 """
                 INSERT INTO position_lifecycle_event
                 (event_id, position_id, trade_id, symbol, event_type, event_ts,
@@ -245,7 +267,8 @@ def repair(
                     _dump(payload),
                 ),
             )
-            conn.execute(
+            _execute(
+                conn,
                 """
                 UPDATE recovery_position_state
                 SET entry_decision_id=CASE
@@ -274,7 +297,7 @@ def repair(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Repair missing open ledger rows from cTrader deals.")
-    parser.add_argument("--db", default=str(STATE_DB), help="Path to state.db")
+    parser.add_argument("--db", default=str(STATE_DB), help="State DB path; defaults to PostgreSQL state when enabled")
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--apply", action="store_true", help="Write repairs. Omit for dry-run.")
     parser.add_argument(

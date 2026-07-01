@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import Any
 
 from backend.core.auth import RequireUser
-from backend.core.db import get_state_conn
+from backend.core.db import get_state_pg_conn
 from backend.risk import VaRCalculator, KellyCriterion, StressTest, ConcentrationChecker
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.review_contract import normalize_trade_review_contract
@@ -21,6 +21,14 @@ _kelly = KellyCriterion()
 _stress = StressTest()
 _conc = ConcentrationChecker(max_single_weight=0.40, max_sector_weight=0.60)
 _CANDIDATE_ID_RE = re.compile(r"(ptrc_[0-9a-f]{16})")
+
+
+def _state_conn(*, read_only: bool = True):
+    return get_state_pg_conn(read_only=read_only)
+
+
+def _state_sql(sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s")
 
 
 def _loads_json(raw: str | None, default: Any) -> Any:
@@ -80,12 +88,10 @@ def _advisory_only_components() -> set[str]:
 
 def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
     limit = max(1, min(int(limit or 50), 200))
-    from backend.core.db import STATE_DB, connect_sqlite
-    conn = connect_sqlite(STATE_DB, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
         rows = conn.execute(
-            """
+            _state_sql("""
             SELECT decision_id, event_type, symbol, timeframe, decision_ts,
                    action_reason, action_json, risk_state_json
             FROM decision_ledger
@@ -93,7 +99,7 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
                OR action_json LIKE '%risk_verdict%'
             ORDER BY decision_ts DESC, created_at DESC
             LIMIT ?
-            """,
+            """),
             (limit,),
         ).fetchall()
     finally:
@@ -185,10 +191,7 @@ def _safe_int(value: Any) -> int | None:
 
 
 def _db_path_from_conn(conn: sqlite3.Connection) -> str | None:
-    try:
-        row = conn.execute("PRAGMA database_list").fetchone()
-    except Exception:
-        return None
+    return None
 
 
 def _latest_symbol_context(conn: sqlite3.Connection, *, position_id: str, trade_id: str) -> dict[str, str]:
@@ -196,13 +199,13 @@ def _latest_symbol_context(conn: sqlite3.Connection, *, position_id: str, trade_
         return {"symbol": "", "timeframe": ""}
     try:
         row = conn.execute(
-            """
+            _state_sql("""
             SELECT symbol, timeframe
             FROM decision_ledger
             WHERE position_id = ? OR trade_id = ?
             ORDER BY decision_ts DESC, created_at DESC
             LIMIT 1
-            """,
+            """),
             (position_id, trade_id),
         ).fetchone()
     except sqlite3.OperationalError:
@@ -220,13 +223,13 @@ def _top_factor_hint_for_review(conn: sqlite3.Connection, review_id: str) -> dic
         return {}
     try:
         rows = conn.execute(
-            """
+            _state_sql("""
             SELECT factor, net_contribution, notes
             FROM factor_contribution_review
             WHERE review_id = ?
             ORDER BY ABS(net_contribution) DESC, id ASC
             LIMIT 5
-            """,
+            """),
             (review_id,),
         ).fetchall()
     except sqlite3.OperationalError:
@@ -980,14 +983,14 @@ def _latest_template_candidate_for_factor(conn: sqlite3.Connection, factor_id: s
         return {}
     try:
         row = conn.execute(
-            """
+            _state_sql("""
             SELECT candidate_id, factor_id, template_id, regime_key, status,
                    validation_summary_json, validation_report_path, created_at, updated_at
             FROM parameter_template_release_candidate
             WHERE factor_id=?
             ORDER BY updated_at DESC, created_at DESC
             LIMIT 1
-            """,
+            """),
             (factor_id,),
         ).fetchone()
     except sqlite3.OperationalError:
@@ -1075,13 +1078,13 @@ def _latest_parameter_template_lifecycle_for_recommendation(
         return {}
     try:
         rows = conn.execute(
-            """
+            _state_sql("""
             SELECT id, timestamp, event, factor, source, description, score, status, reason
             FROM lifecycle_events
             WHERE source='parameter_template' AND factor=?
             ORDER BY timestamp DESC, id DESC
             LIMIT 40
-            """,
+            """),
             (factor_key,),
         ).fetchall()
     except sqlite3.OperationalError:
@@ -1322,13 +1325,11 @@ def _build_trade_trace_parameter_governance(
 
 def _recent_trade_trace_index(limit: int = 20) -> dict[str, Any]:
     limit = max(1, min(int(limit or 20), 100))
-    from backend.core.db import STATE_DB, connect_sqlite
-    conn = connect_sqlite(STATE_DB, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
         try:
             rows = conn.execute(
-                """
+                _state_sql("""
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        entry_quality, hold_quality, exit_quality, regime_fit_score,
                        execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
@@ -1336,7 +1337,7 @@ def _recent_trade_trace_index(limit: int = 20) -> dict[str, Any]:
                 FROM trade_outcome_review
                 ORDER BY created_at DESC
                 LIMIT ?
-                """,
+                """),
                 (limit,),
             ).fetchall()
         except sqlite3.OperationalError:
@@ -1456,19 +1457,19 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
     if not resolved_position_id and not resolved_decision_id:
         raise ValueError("position_id or decision_id is required")
 
-    from backend.core.db import STATE_DB, connect_sqlite
-    conn = connect_sqlite(STATE_DB, read_only=True)
-    conn.row_factory = sqlite3.Row
+    conn = _state_conn(read_only=True)
     try:
         anchor = None
         if resolved_decision_id:
             anchor = conn.execute(
-                """
-                SELECT decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts
+                _state_sql("""
+                SELECT decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts,
+                       regime_id, regime_confidence, portfolio_state_json, risk_state_json,
+                       policy_version, factor_set_version, action_score, action_reason, action_json, created_at
                 FROM decision_ledger
                 WHERE decision_id = ?
                 LIMIT 1
-                """,
+                """),
                 (resolved_decision_id,),
             ).fetchone()
             if anchor and not resolved_position_id:
@@ -1477,14 +1478,14 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
         ledger_rows = []
         if resolved_position_id:
             ledger_rows = conn.execute(
-                """
+                _state_sql("""
                 SELECT decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts,
                        regime_id, regime_confidence, portfolio_state_json, risk_state_json,
                        policy_version, factor_set_version, action_score, action_reason, action_json, created_at
                 FROM decision_ledger
                 WHERE position_id = ? OR trade_id = ?
                 ORDER BY decision_ts ASC, created_at ASC
-                """,
+                """),
                 (resolved_position_id, resolved_position_id),
             ).fetchall()
         elif anchor:
@@ -1508,44 +1509,44 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
         pos_int = _safe_int(resolved_position_id)
         if pos_int is not None:
             position_events = conn.execute(
-                """
+                _state_sql("""
                 SELECT event_id, position_id, trade_id, symbol, event_type, event_ts,
                        net_volume, avg_price, unrealized_pnl, realized_pnl, details_json
                 FROM position_lifecycle_event
                 WHERE position_id = ?
                 ORDER BY event_ts ASC, event_id ASC
-                """,
+                """),
                 (str(pos_int),),
             ).fetchall()
             recovery_state = conn.execute(
-                """
+                _state_sql("""
                 SELECT position_id, broker, symbol, direction, open_price, volume, first_seen_at,
                        last_seen_at, status, strategy_name, entry_decision_id, context_integrity,
                        recovery_meta_json, closed_at, close_reason, close_pnl
                 FROM recovery_position_state
                 WHERE position_id = ?
                 LIMIT 1
-                """,
+                """),
                 (pos_int,),
             ).fetchone()
 
         order_events = []
         if trade_id:
             order_events = conn.execute(
-                """
+                _state_sql("""
                 SELECT event_id, decision_id, trade_id, order_id, broker_order_id, event_type,
                        event_ts, price, volume, status, details_json
                 FROM order_lifecycle_event
                 WHERE trade_id = ?
                 ORDER BY event_ts ASC, event_id ASC
-                """,
+                """),
                 (trade_id,),
             ).fetchall()
 
         review_row = None
         if resolved_position_id:
             review_row = conn.execute(
-                """
+                _state_sql("""
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        entry_quality, hold_quality, exit_quality, regime_fit_score,
                        execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
@@ -1554,12 +1555,12 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
                 WHERE position_id = ? OR trade_id = ?
                 ORDER BY created_at DESC
                 LIMIT 1
-                """,
+                """),
                 (resolved_position_id, resolved_position_id),
             ).fetchone()
         if review_row is None and resolved_decision_id:
             review_row = conn.execute(
-                """
+                _state_sql("""
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        entry_quality, hold_quality, exit_quality, regime_fit_score,
                        execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
@@ -1568,20 +1569,20 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
                 WHERE entry_decision_id = ? OR exit_decision_id = ?
                 ORDER BY created_at DESC
                 LIMIT 1
-                """,
+                """),
                 (resolved_decision_id, resolved_decision_id),
             ).fetchone()
 
         factor_rows = []
         if review_row is not None:
             factor_rows = conn.execute(
-                """
+                _state_sql("""
                 SELECT id, review_id, trade_id, factor, entry_contribution, hold_contribution,
                        exit_contribution, net_contribution, confidence, notes
                 FROM factor_contribution_review
                 WHERE review_id = ?
                 ORDER BY ABS(net_contribution) DESC, id ASC
-                """,
+                """),
                 (review_row["review_id"],),
             ).fetchall()
 

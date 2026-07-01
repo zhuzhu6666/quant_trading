@@ -125,7 +125,7 @@ cd /home/ubuntu/quant_trading
 
 目的：
 
-- 确认 SQLite / DuckDB 没有被错误引擎打开
+- 确认 PostgreSQL state 主库、SQLite 冷备和 DuckDB 没有被错误引擎打开
 - 确认关键表和关键字段存在
 - 自动修复已知历史 schema 漂移
 
@@ -137,12 +137,11 @@ cd /home/ubuntu/quant_trading
 
 ```bash
 python - <<'PY'
-import sqlite3, time
-conn = sqlite3.connect('file:data/state.db?mode=ro', uri=True)
-conn.row_factory = sqlite3.Row
+from backend.core.db import get_state_pg_conn
+conn = get_state_pg_conn(read_only=True)
 for table in ('evolution_run', 'evolution_decision', 'runtime_config_snapshot'):
     print(f'[{table}]')
-    for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT 5"):
+    for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1 DESC LIMIT 5"):
         print(dict(row))
 conn.close()
 PY
@@ -159,7 +158,7 @@ PY
 
 ```bash
 python scripts/phase_a_health_check.py
-python scripts/phase_c_supervisor_check.py --db data/state.db --limit 30
+python scripts/phase_c_supervisor_check.py --limit 30
 ```
 
 判断原则：

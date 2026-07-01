@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from backend.core.db import STATE_DB, connect_sqlite
+from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.model_permissions import validate_model_artifact
 
 
@@ -77,14 +77,26 @@ class LLMAdvisoryService:
         self._ensure_table()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = connect_sqlite(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)
+        if not self._use_pg():
+            conn.row_factory = sqlite3.Row
         return conn
+
+    def _use_pg(self) -> bool:
+        return is_state_db_path(self.db_path)
+
+    def _sql(self, sql: str) -> str:
+        return sql.replace("?", "%s") if self._use_pg() else sql
+
+    def _execute(self, conn, sql: str, params: tuple | list | None = None):
+        if params is None:
+            return conn.execute(self._sql(sql))
+        return conn.execute(self._sql(sql), tuple(params))
 
     def _ensure_table(self) -> None:
         conn = self._conn()
         try:
-            conn.execute(
+            self._execute(conn,
                 """
                 CREATE TABLE IF NOT EXISTS llm_advisory_audit (
                     audit_id TEXT PRIMARY KEY,
@@ -102,13 +114,13 @@ class LLMAdvisoryService:
                 )
                 """
             )
-            conn.execute(
+            self._execute(conn,
                 """
                 CREATE INDEX IF NOT EXISTS idx_llm_advisory_audit_created
                 ON llm_advisory_audit(created_at)
                 """
             )
-            conn.execute(
+            self._execute(conn,
                 """
                 CREATE INDEX IF NOT EXISTS idx_llm_advisory_audit_target
                 ON llm_advisory_audit(target_type, target_id, created_at)
@@ -303,7 +315,7 @@ class LLMAdvisoryService:
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         conn = self._conn()
         try:
-            rows = conn.execute(
+            rows = self._execute(conn,
                 f"""
                 SELECT *
                 FROM llm_advisory_audit
@@ -420,7 +432,7 @@ class LLMAdvisoryService:
         audit_id = f"llm:{task_type or 'task'}:{int(now * 1000)}"
         conn = self._conn()
         try:
-            conn.execute(
+            self._execute(conn,
                 """
                 INSERT INTO llm_advisory_audit
                 (audit_id, provider, model, task_type, target_type, target_id, status,

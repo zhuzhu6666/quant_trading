@@ -62,7 +62,7 @@ python main.py --mode paper --timeframe M15 --use-router
 ```bash
 python -m pytest tests/test_autonomous_learning.py tests/test_position_supervisor_governance.py tests/test_supervisor_counterfactual.py tests/test_live_service_lifecycle.py tests/risk/test_policy_service.py tests/test_runtime_config.py -q
 python scripts/phase_a_health_check.py
-python scripts/phase_c_supervisor_check.py --db data/state.db --limit 30
+python scripts/phase_c_supervisor_check.py --limit 30
 ```
 
 Full `tests` can be slower on Windows; prefer targeted suites for learning/live changes.

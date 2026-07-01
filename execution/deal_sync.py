@@ -2,7 +2,7 @@
 
 职责:
   1. 从 cTrader get_deals() 拉原始成交记录
-  2. 写入 state.db ctrader_deals 表 (原始数据锚点)
+  2. 写入 PostgreSQL state_v1.ctrader_deals 表 (原始数据锚点)
   3. 按 position_id 匹配平仓成交, 提取真实 PnL (gross_profit + swap - commission)
   4. 供 live_service.py 平仓检测后调用
 
@@ -27,6 +27,20 @@ logger = logging.getLogger(__name__)
 
 _DEAL_WINDOW_SEC = 3600  # 每次拉最近 1 小时成交（足够覆盖平仓检测间隔）
 _MAX_ROWS = 100          # 每批最多 100 条
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+
+
+def _sql(conn, sql: str) -> str:
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+
+
+def _execute(conn, sql: str, params=None):
+    if params is None:
+        return conn.execute(_sql(conn, sql))
+    return conn.execute(_sql(conn, sql), params)
 
 
 def fetch_deals_since(
@@ -66,10 +80,10 @@ def store_deals(
     conn: sqlite3.Connection,
     deals: list[dict],
 ) -> int:
-    """将成交记录写入 state.db ctrader_deals 表 (INSERT OR IGNORE, 幂等).
+    """将成交记录幂等写入 state store 的 ctrader_deals 表.
 
     Args:
-        conn: state.db 连接.
+        conn: PostgreSQL state store 连接.
         deals: get_deals() 返回的 list[dict].
 
     Returns:
@@ -86,8 +100,8 @@ def store_deals(
         if cd and (cd.get("balance", 0) != 0 or cd.get("gross_profit", 0) != 0):
             _is_close = 1
         try:
-            conn.execute("""
-                INSERT OR IGNORE INTO ctrader_deals
+            _execute(conn, """
+                INSERT INTO ctrader_deals
                 (deal_id, position_id, order_id, symbol_id,
                  volume, filled_volume, exec_price, trade_side,
                  deal_status, exec_timestamp, commission,
@@ -100,6 +114,7 @@ def store_deals(
                         ?, ?, ?,
                         ?, ?, ?,
                         ?, ?)
+                ON CONFLICT(deal_id) DO NOTHING
             """, [
                 d["deal_id"],
                 d.get("position_id", 0),
@@ -137,13 +152,14 @@ def find_close_deal(
     """按 position_id 查找已存储的平仓成交记录.
 
     Args:
-        conn: state.db 连接.
+        conn: PostgreSQL state store 连接.
         position_id: cTrader 仓位 ID.
 
     Returns:
         close_detail dict 或 None (找不到 / 只有开仓腿).
     """
-    row = conn.execute(
+    row = _execute(
+        conn,
         """
         SELECT *
         FROM ctrader_deals
@@ -187,13 +203,13 @@ def sync_close_deal(
     """一站式: 为单个平仓 position_id 获取真实 PnL.
 
     流程:
-      1. 先查 state.db 有没有存过该 position_id 的平仓成交
+      1. 先查 PostgreSQL state store 有没有存过该 position_id 的平仓成交
       2. 如果有 → 直接返回
       3. 如果没有 → 拉最近成交写入 DB, 再查
 
     Args:
         bridge: CTraderBridge 实例 (已连接).
-        conn: state.db 连接.
+        conn: PostgreSQL state store 连接.
         position_id: 刚消失的仓位 ID.
 
     Returns:
@@ -232,7 +248,7 @@ def sync_close_deals_batch(
 
     Args:
         bridge: CTraderBridge 实例.
-        conn: state.db 连接.
+        conn: PostgreSQL state store 连接.
         position_ids: 刚消失的仓位 ID 集合.
 
     Returns:

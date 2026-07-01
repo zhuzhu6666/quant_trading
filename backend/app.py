@@ -76,6 +76,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _lg.warning(f"[lifespan] parameter template runtime sync failed (non-fatal): {e}")
 
+    try:
+        from backend.core.db import STATE_DB
+        from backend.services.evolution_ledger import persist_runtime_config_snapshot
+        from backend.services.position_supervisor_templates import latest_applied_position_supervisor_template_id
+        from config.runtime_config import patch as rc_patch
+        from config.runtime_config import shared as rc_shared
+
+        active_template_id = latest_applied_position_supervisor_template_id(db_path=STATE_DB)
+        current_template_id = str(getattr(rc_shared(), "position_supervisor_template_id", "") or "")
+        if active_template_id and active_template_id != current_template_id:
+            rc_patch({"position_supervisor_template_id": active_template_id})
+            persist_runtime_config_snapshot(
+                rc_shared(),
+                source="position_supervisor_template_restore",
+                db_path=STATE_DB,
+            )
+            _lg.info(f"[lifespan] restored position supervisor template: {active_template_id}")
+    except Exception as e:
+        _lg.warning(f"[lifespan] position supervisor template restore failed (non-fatal): {e}")
+
     get_job_manager().bind_loop(asyncio.get_running_loop())
 
     # Restore shadow/discovered factors from lifecycle log
@@ -136,17 +156,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _lg.warning(f"[lifespan] db-health warmup failed (non-fatal): {e}")
 
-    # PostgreSQL audit dual-write is migration-only.  It must never block the
-    # SQLite source-of-truth write path or live trading if the sink is absent.
-    try:
-        from backend.services.state_dual_write import start_state_dual_write_worker
-
-        if start_state_dual_write_worker():
-            _lg.info("[lifespan] state dual-write worker started")
-        else:
-            _lg.info("[lifespan] state dual-write worker disabled")
-    except Exception as e:
-        _lg.warning(f"[lifespan] state dual-write worker start failed (non-fatal): {e}")
+    _lg.info("[lifespan] PostgreSQL state store active; legacy state dual-write worker not started")
 
     yield
 
@@ -162,13 +172,6 @@ async def lifespan(app: FastAPI):
         stop_autonomous_learning()
     except Exception as e:
         _lg.warning(f"[lifespan] autonomous learning stop failed: {e}")
-
-    try:
-        from backend.services.state_dual_write import stop_state_dual_write_worker
-
-        stop_state_dual_write_worker()
-    except Exception as e:
-        _lg.warning(f"[lifespan] state dual-write worker stop failed: {e}")
 
     try:
         if hasattr(app.state, "_evolution_scheduler"):
