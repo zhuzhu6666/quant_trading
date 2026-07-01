@@ -440,7 +440,7 @@ def evaluate_factors(
 
 
 def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
-    """把 evaluate_factors 结果落盘: state.db (主) + json/txt (缓存)。"""
+    """把 evaluate_factors 结果落盘: PostgreSQL state_v1 (主) + json/txt (缓存)。"""
     import json
     from pathlib import Path as _P
 

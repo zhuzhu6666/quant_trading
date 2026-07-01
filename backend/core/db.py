@@ -1,7 +1,7 @@
 """backend/core/db.py — 统一数据库路径常量 + 连接管理。
 
 所有数据库路径集中定义，不再硬编码。
-DuckDB 保留时序数据，SQLite 收纳运行时状态。
+DuckDB 保留时序数据，PostgreSQL state_v1 承载运行时状态。
 """
 
 from __future__ import annotations
