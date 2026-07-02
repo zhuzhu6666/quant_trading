@@ -1,5 +1,0 @@
-<view class="tile">
-  <view class="tile-label">{{label}}</view>
-  <view class="tile-value tone-{{tone}}">{{value}}</view>
-  <view wx:if="{{hint}}" class="tile-hint">{{hint}}</view>
-</view>

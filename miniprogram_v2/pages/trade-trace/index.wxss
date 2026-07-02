@@ -1,9 +1,0 @@
-.hero-top {
-  align-items: flex-start;
-  gap: 16rpx;
-}
-
-.hero-copy {
-  flex: 1;
-  min-width: 0;
-}

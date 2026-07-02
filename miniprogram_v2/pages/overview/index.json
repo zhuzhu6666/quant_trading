@@ -1,8 +1,7 @@
 {
-  "navigationBarTitleText": "总览",
+  "navigationBarTitleText": "Quant 状态",
+  "enablePullDownRefresh": true,
   "usingComponents": {
-    "metric-tile": "/components/metric-tile/index",
-    "status-pill": "/components/status-pill/index",
-    "section-card": "/components/section-card/index"
+    "status-pill": "/components/status-pill/index"
   }
 }

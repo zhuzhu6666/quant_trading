@@ -12,7 +12,7 @@ Page({
   onLoad() {
     this._unsub = sessionStore.subscribe((state) => {
       if (state.isAuthenticated) {
-        wx.switchTab({ url: '/pages/overview/index' });
+        wx.reLaunch({ url: '/pages/overview/index' });
       }
     });
     this.checkAuth();
@@ -29,7 +29,7 @@ Page({
   checkAuth() {
     const state = sessionStore.getState();
     if (state.isAuthenticated) {
-      wx.switchTab({ url: '/pages/overview/index' });
+      wx.reLaunch({ url: '/pages/overview/index' });
     }
   },
 
@@ -59,6 +59,6 @@ Page({
     if (app && app.afterLogin) {
       await app.afterLogin();
     }
-    wx.switchTab({ url: '/pages/overview/index' });
+    wx.reLaunch({ url: '/pages/overview/index' });
   },
 });

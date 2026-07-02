@@ -1,7 +1,0 @@
-{
-  "navigationBarTitleText": "交易",
-  "usingComponents": {
-    "status-pill": "/components/status-pill/index",
-    "section-card": "/components/section-card/index"
-  }
-}

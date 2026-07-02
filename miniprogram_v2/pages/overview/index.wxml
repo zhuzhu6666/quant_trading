@@ -1,193 +1,106 @@
-<view class="app-shell">
-  <view class="page-stack">
-    <view class="hero">
-      <view class="row-between">
+<view class="mini-shell">
+  <view class="mini-stack">
+    <view class="mini-hero">
+      <view class="row-between hero-top">
         <view>
-          <view class="hero-kicker">Overview</view>
-          <view class="hero-title">系统驾驶舱</view>
-          <view class="hero-subtitle">看清系统是否在运行、是否在交易、是否在学习。</view>
+          <view class="hero-kicker">移动状态</view>
+          <view class="hero-title">Quant Agent</view>
         </view>
         <status-pill label="{{wsLabel}}" tone="{{wsTone}}" />
       </view>
-      <view class="hero-metrics">
-        <view class="hero-metric">
-          <view class="hero-metric-label">权益</view>
-          <view class="hero-metric-value">{{equity}}</view>
-        </view>
-        <view class="hero-metric">
-          <view class="hero-metric-label">持仓 PnL</view>
-          <view class="hero-metric-value {{livePnlTone === 'positive' ? 'accent-pos' : livePnlTone === 'negative' ? 'accent-neg' : ''}}">{{livePnl}}</view>
-        </view>
-        <view class="hero-metric">
-          <view class="hero-metric-label">持仓</view>
-          <view class="hero-metric-value">{{positions}}</view>
-          <view class="small muted">{{positionSummary}}</view>
-        </view>
+      <view class="hero-subtitle">完整控制台已迁移至 Web，小程序只保留关键运行状态。</view>
+      <view class="status-banner status-banner-{{overallTone}} hero-status">
+        <view class="summary-label">{{overallLabel}}</view>
+        <view class="summary-text">{{overallText}}</view>
       </view>
-      <view class="status-banner status-banner-{{systemNowTone}}" style="margin-top: 16rpx;">
-        <view class="small muted">系统现在一句话</view>
-        <view class="section-note">{{systemNowSentence}}</view>
-        <view class="row-wrap" style="margin-top: 10rpx;">
-          <view class="tag">交易循环：{{systemNowLoopText}}</view>
-          <view class="tag">{{systemNowPositionText}}</view>
-          <view class="tag">学习/治理：{{systemNowLearningText}}</view>
-          <view class="tag">接管状态：{{systemNowNeedHumanText}}</view>
+    </view>
+
+    <view class="primary-grid">
+      <view class="signal-card">
+        <view class="card-label">账户权益</view>
+        <view class="card-value">{{equity}}</view>
+        <view class="card-hint">余额 {{balance}}</view>
+      </view>
+      <view class="signal-card">
+        <view class="card-label">持仓盈亏</view>
+        <view class="card-value {{livePnlTone === 'positive' ? 'accent-pos' : livePnlTone === 'negative' ? 'accent-neg' : ''}}">{{livePnl}}</view>
+        <view class="card-hint">{{positionSummary}}</view>
+      </view>
+      <view class="signal-card">
+        <view class="card-label">会话收益</view>
+        <view class="card-value {{realizedPnlTone === 'positive' ? 'accent-pos' : realizedPnlTone === 'negative' ? 'accent-neg' : ''}}">{{realizedPnl}}</view>
+        <view class="card-hint">已实现收益</view>
+      </view>
+      <view class="signal-card">
+        <view class="card-label">持仓数</view>
+        <view class="card-value">{{positions}}</view>
+        <view class="card-hint">当前开放仓位</view>
+      </view>
+    </view>
+
+    <view class="status-card">
+      <view class="section-head">
+        <view class="section-title">交易循环</view>
+        <status-pill label="{{loopLabel}}" tone="{{loopTone}}" />
+      </view>
+      <view class="detail-list">
+        <view class="detail-row">
+          <view class="detail-label">经纪商</view>
+          <view class="detail-value">{{broker}}</view>
+        </view>
+        <view class="detail-row">
+          <view class="detail-label">策略</view>
+          <view class="detail-value">{{strategy}}</view>
+        </view>
+        <view wx:if="{{xauVisible}}" class="detail-row">
+          <view class="detail-label">XAU 现价</view>
+          <view class="detail-value">{{xauPrice}}</view>
+        </view>
+        <view class="detail-row">
+          <view class="detail-label">更新时间</view>
+          <view class="detail-value">{{updatedAt}}</view>
         </view>
       </view>
     </view>
 
-    <view class="grid-2">
-      <metric-tile label="权益" value="{{equity}}" hint="账户当前净值" />
-      <metric-tile label="持仓 PnL" value="{{livePnl}}" tone="{{livePnlTone}}" hint="当前开放仓位实时盈亏" />
-      <metric-tile label="持仓数" value="{{positions}}" hint="当前活跃仓位笔数" />
-      <metric-tile label="回撤" value="{{drawdown}}" hint="当日最大回撤，值越小越稳健" />
-      <metric-tile label="最近同步" value="{{updatedAt}}" hint="后端最近一次上报时间" />
+    <view class="status-card">
+      <view class="section-head">
+        <view class="section-title">风控状态</view>
+        <status-pill label="{{circuitLabel}}" tone="{{circuitTone}}" />
+      </view>
+      <view class="risk-grid">
+        <view class="risk-item">
+          <view class="card-label">回撤</view>
+          <view class="risk-value">{{drawdown}}</view>
+        </view>
+        <view class="risk-item">
+          <view class="card-label">连续亏损</view>
+          <view class="risk-value">{{consecutiveLoss}}</view>
+        </view>
+        <view class="risk-item">
+          <view class="card-label">数据库</view>
+          <view class="risk-value">{{dbLabel}}</view>
+        </view>
+      </view>
     </view>
 
-    <section-card title="系统收益曲线" subtitle="初始资金 500，来自所有历史系统平仓">
-      <view class="realized-head">
-        <view class="realized-main">
-          <view class="small muted">当前系统权益</view>
-          <view class="value-md {{realizedPnlTone === 'positive' ? 'accent-pos' : realizedPnlTone === 'negative' ? 'accent-neg' : ''}}">{{realizedCurveLatest}}</view>
-          <view class="small muted">累计盈利 {{realizedCurveProfit}}</view>
-        </view>
-        <view class="realized-stats">
-          <view class="tag">初始 {{realizedCurveInitialCapital}}</view>
-          <view class="tag">主图：系统权益</view>
-          <view class="tag">历史平仓 {{realizedCurveTrades}}</view>
-          <view class="tag">胜率 {{realizedCurveWinRate}}</view>
+    <view wx:if="{{hasPositions}}" class="status-card">
+      <view class="section-title">当前持仓</view>
+      <view class="position-list">
+        <view wx:for="{{positionsList}}" wx:key="id" class="position-row">
+          <view>
+            <view class="position-main">{{item.symbol}} · {{item.direction}}</view>
+            <view class="position-sub">量 {{item.volume}} · 开仓 {{item.openPrice}}</view>
+          </view>
+          <view class="position-pnl {{item.tone === 'positive' ? 'accent-pos' : item.tone === 'negative' ? 'accent-neg' : ''}}">{{item.pnl}}</view>
         </view>
       </view>
-      <view class="section-note">{{realizedCurveSummary}}</view>
-      <navigator wx:if="{{!realizedCurveEmpty}}" class="pnl-tv-card" url="/pages/pnl-chart/index" hover-class="pnl-tv-card-hover">
-        <view>
-          <view class="pnl-tv-title">打开专业收益图</view>
-          <view class="pnl-tv-sub">所有历史平仓 · 系统权益曲线</view>
-        </view>
-        <view class="pnl-tv-action">进入</view>
-      </navigator>
-      <view wx:else class="empty">暂无历史平仓记录</view>
-      <view wx:if="{{realizedRecentTrades.length}}" class="realized-recent">
-        <view wx:for="{{realizedRecentTrades}}" wx:key="id" class="realized-trade-row">
-          <view class="small muted">{{item.timeText}}</view>
-          <view class="small {{item.tone === 'positive' ? 'accent-pos' : item.tone === 'negative' ? 'accent-neg' : ''}}">{{item.pnlText}}</view>
-          <view class="small pnl-row-values">累计 {{item.cumulativeText}} · 权益 {{item.equityText}}</view>
-        </view>
-      </view>
-    </section-card>
-
-    <view class="grid-1-2">
-      <section-card title="系统状态" subtitle="运行与治理入口">
-        <view class="stack-16">
-          <view class="status-banner status-banner-{{loopTone}}">
-            <view class="small muted">交易循环</view>
-            <view class="row-between">
-              <view class="value-md">{{loopLabel}}</view>
-              <status-pill label="{{loopTone === 'positive' ? '在线' : '待机'}}" tone="{{loopTone}}" />
-            </view>
-            <view class="section-note">实时链路 {{wsLabel}}，最近同步 {{updatedAt}}</view>
-          </view>
-          <view class="btn-row">
-            <button class="btn-primary {{loopRunning || startBusy || stopBusy ? 'btn-disabled' : ''}}" bindtap="onStart" loading="{{startBusy}}" disabled="{{loopRunning || startBusy || stopBusy}}">启动</button>
-            <button class="btn-stop {{!loopRunning || stopBusy || startBusy ? 'btn-disabled' : ''}}" bindtap="onStop" loading="{{stopBusy}}" disabled="{{!loopRunning || stopBusy || startBusy}}">停止</button>
-          </view>
-        </view>
-      </section-card>
-
-      <section-card title="学习概览" subtitle="规则进化是否在形成新经验">
-        <view class="status-banner status-banner-{{governanceTone}}">
-          <view class="small muted">治理状态</view>
-          <view class="row-between">
-            <view class="value-md">{{governanceLabel}}</view>
-            <status-pill label="{{governanceLabel}}" tone="{{governanceTone}}" />
-          </view>
-          <view wx:if="{{learningSummaryStatus === 'error'}}" class="section-note">学习摘要拉取失败，当前待治理/已批等数字可能不是实时值。</view>
-          <view class="section-note">{{governanceHeadlineSummary}}</view>
-          <view class="section-note">已应用 {{learningApplications}} 次，最新复盘会在治理后进入下一轮权重。</view>
-          <view class="section-note">{{templateOpsSummary}}</view>
-        </view>
-        <view wx:if="{{learningSummaryHint}}" class="section-note" style="margin-top: 12rpx;">{{learningSummaryHint}}</view>
-        <view class="grid-3">
-          <metric-tile label="待治理" value="{{learningSummary.proposed || 0}}" hint="待系统规则治理的候选" />
-          <metric-tile label="已批" value="{{learningSummary.approved || 0}}" hint="已通过审批" />
-          <metric-tile label="已回滚" value="{{learningSummary.rolled_back || 0}}" hint="发布后被回滚" />
-        </view>
-        <view wx:if="{{pendingTemplateCandidateCount || pendingTemplateRecommendationCount}}" class="soft-panel stack-12" style="margin-top: 16rpx;">
-          <view class="row-between">
-            <view class="small">参数治理待办</view>
-            <view class="small muted">候选 {{pendingTemplateCandidateCount}} · 推荐 {{pendingTemplateRecommendationCount}}</view>
-          </view>
-          <view wx:if="{{governanceTodoCard}}" class="soft-panel stack-12">
-            <view class="row-between">
-              <view class="small">当前主待办</view>
-              <button class="btn-primary" size="mini" bindtap="openGovernanceTodo">{{governanceTodoCard.actionLabel}}</button>
-            </view>
-            <view class="section-note">{{governanceTodoCard.title}}</view>
-            <view class="row-wrap">
-              <view wx:if="{{governanceTodoCard.priorityLabel}}" class="tag">{{governanceTodoCard.priorityLabel}}</view>
-              <view wx:if="{{governanceTodoCard.stageTag}}" class="tag">{{governanceTodoCard.stageTag}}</view>
-              <view wx:if="{{governanceTodoCard.targetTypeText}}" class="tag">{{governanceTodoCard.targetTypeText}}</view>
-            </view>
-            <view wx:if="{{governanceTodoCard.summary}}" class="section-note">{{governanceTodoCard.summary}}</view>
-            <view wx:if="{{governanceTodoCard.queueHint}}" class="small muted">{{governanceTodoCard.queueHint}}</view>
-          </view>
-          <view class="row-wrap">
-            <view class="tag">待审候选 {{pendingTemplateCandidateCount}}</view>
-            <view class="tag">在线轻调 {{onlineLightRecommendationCount}}</view>
-            <view class="tag">离线深调 {{offlineDeepRecommendationCount}}</view>
-          </view>
-          <view wx:if="{{pendingCandidateHint}}" class="section-note">待审候选：{{pendingCandidateHint}}</view>
-          <view wx:if="{{pendingOnlineRecommendationHint}}" class="section-note">可直接推进：{{pendingOnlineRecommendationHint}}</view>
-          <view wx:if="{{pendingOfflineRecommendationHint}}" class="section-note">需先离线验证：{{pendingOfflineRecommendationHint}}</view>
-          <view class="btn-row-compact">
-            <button wx:if="{{pendingTemplateCandidateCount}}" class="btn-primary" size="mini" bindtap="openPendingCandidate">打开待审候选</button>
-            <button wx:if="{{onlineLightRecommendationCount}}" class="btn-secondary" size="mini" bindtap="openPendingRecommendation">打开在线推荐</button>
-            <button wx:if="{{offlineDeepRecommendationCount}}" class="btn-secondary" size="mini" bindtap="openOfflineRecommendation">打开离线推荐</button>
-          </view>
-        </view>
-        <view class="btn-row-compact" style="margin-top: 16rpx;">
-          <button wx:if="{{learningSummaryRaw.latest_parameter_template_candidate || learningSummaryRaw.latest_parameter_template_recommendation}}" class="btn-primary" bindtap="openLatestGovernance">打开参数治理</button>
-          <button class="btn-secondary" bindtap="goLearning">学习页</button>
-          <button class="btn-secondary" bindtap="goTrading">交易页</button>
-        </view>
-      </section-card>
     </view>
 
-    <section-card title="闭环进度" subtitle="因子到开仓，再到复盘与经验回流">
-      <view class="progress-strip">
-        <view wx:for="{{closureSteps}}" wx:key="id" class="progress-step progress-step-{{item.tone}}">
-          <view class="progress-index">{{item.index}}</view>
-          <view class="progress-title">{{item.title}}</view>
-          <view class="progress-note">{{item.note}}</view>
-        </view>
-      </view>
-      <view wx:if="{{progressDetailRows.length}}" class="progress-detail-list">
-        <view wx:for="{{progressDetailRows}}" wx:key="id" class="progress-detail-item">
-          <view class="progress-detail-title">{{item.title}}</view>
-          <view class="progress-detail-text">{{item.text}}</view>
-        </view>
-      </view>
-    </section-card>
-
-    <section-card title="最新复盘" subtitle="最近一笔平仓后系统的判断">
-      <view wx:if="{{latestReview}}" class="stack-12">
-        <view class="row-between">
-          <view class="value-md">{{latestReview.outcome_label}}</view>
-          <view class="{{latestReview.pnl >= 0 ? 'accent-pos' : 'accent-neg'}} value-md">{{latestReview.pnl}}</view>
-        </view>
-        <view class="soft-panel section-note">{{latestReview.summary_text}}</view>
-        <view class="caption-grid">
-          <view class="caption-card">
-            <view class="caption-label">仓位编号</view>
-            <view class="caption-value">{{latestReview.position_id || '--'}}</view>
-          </view>
-          <view class="caption-card">
-            <view class="caption-label">结果标签</view>
-            <view class="caption-value">{{latestReview.outcome_label || '--'}}</view>
-          </view>
-        </view>
-      </view>
-      <view wx:else class="empty">还没有平仓复盘数据</view>
-    </section-card>
+    <view class="action-card">
+      <button class="btn-primary" loading="{{refreshing}}" bindtap="onRefreshTap">刷新状态</button>
+      <button class="btn-secondary" bindtap="onCopyWebUrl">复制 Web 地址</button>
+      <button class="btn-plain" bindtap="onLogout">退出登录</button>
+    </view>
   </view>
 </view>

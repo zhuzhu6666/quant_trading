@@ -33,4 +33,5 @@ export async function login(username, password) {
 
 export function logout() {
   clearToken();
+  sessionStore.setState({ token: '', user: null, isAuthenticated: false, busy: false });
 }

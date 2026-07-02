@@ -1,18 +1,28 @@
 # Quant Agent Mini Program V2
 
-This is the new WeChat mini-program frontend for the self-evolving trading system.
+This mini-program is now the lightweight mobile status surface for the trading system.
+The full console has moved to the Web frontend at:
+
+`https://www.zhuzhu666.icu`
 
 ## Scope
 
-This version replaces the old `miniprogram/` UI as the primary mini-program surface.
+The mini-program intentionally keeps only:
 
-Core views:
+1. `pages/login` - authentication
+2. `pages/overview` - compact read-only status page
 
-1. `pages/overview` - global operating picture
-2. `pages/trading` - live trading and risk state
-3. `pages/learning` - rule-learning, suggestions, reviews, applications
-4. `pages/factors` - factor governance view
-5. `pages/ops` - scheduler, evolution, health checks
+The overview page shows the essential live state only:
+
+- WebSocket / polling status
+- trading loop state
+- account equity and balance
+- open-position count and unrealized PnL
+- realized session PnL
+- circuit breaker, drawdown, and consecutive-loss status
+- latest known XAU price when available
+
+Trading operations, learning governance, factor details, charts, and operations health are handled by the Web frontend.
 
 ## Open in WeChat DevTools
 
@@ -27,23 +37,22 @@ Project config:
 
 ## Backend dependencies
 
-This mini-program expects the current FastAPI backend to expose:
+This mini-program only depends on the lightweight live/auth surface:
 
-- `/api/live/*`
-- `/api/v4/*`
-- `/api/factor-health/latest`
-- `/api/control/*`
-- `/api/system/db-health`
-- `/api/learning/*`
+- `/api/auth/*`
+- `/api/live/account`
+- `/api/live/positions`
+- `/api/live/strategy-status`
+- `/api/live/session-stats`
+- `/api/live/loop-status`
+- `/api/live/realized-pnl-series`
+- `/api/risk/summary`
+- `/ws/state`
 
 ## Status
 
-This is the clean rebuild line.
-The old `miniprogram/` directory should be treated as deprecated.
+Current status as of 2026-07-02:
 
-Current status as of 2026-06-25:
-
-- iOS-style bright visual rebuild is the active UI line.
-- Overview / Trading / Learning / Factors / Ops are all wired to the current backend.
-- Learning UI now distinguishes review summaries, actionable suggestions, lifecycle events, and application-effect tracking.
-- Remaining work is mostly backend-linked semantics polish, not another structural frontend rewrite.
+- Web frontend is the complete console.
+- Mini-program is a compact mobile status card.
+- No tabBar, charts, trading controls, learning pages, factor pages, or ops pages are registered.

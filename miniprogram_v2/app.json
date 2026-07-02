@@ -1,13 +1,7 @@
 {
   "pages": [
     "pages/login/index",
-    "pages/overview/index",
-    "pages/pnl-chart/index",
-    "pages/trading/index",
-    "pages/learning/index",
-    "pages/trade-trace/index",
-    "pages/factors/index",
-    "pages/ops/index"
+    "pages/overview/index"
   ],
   "window": {
     "navigationBarTitleText": "Quant Agent",
@@ -15,44 +9,6 @@
     "navigationBarTextStyle": "black",
     "backgroundColor": "#F2F4F8",
     "backgroundTextStyle": "dark"
-  },
-  "tabBar": {
-    "color": "#8E8E93",
-    "selectedColor": "#007AFF",
-    "backgroundColor": "#FFFFFF",
-    "borderStyle": "white",
-    "list": [
-      {
-        "pagePath": "pages/overview/index",
-        "text": "总览",
-        "iconPath": "assets/images/tab_overview_gray.png",
-        "selectedIconPath": "assets/images/tab_overview_blue.png"
-      },
-      {
-        "pagePath": "pages/trading/index",
-        "text": "交易",
-        "iconPath": "assets/images/tab_trade_gray.png",
-        "selectedIconPath": "assets/images/tab_trade_blue.png"
-      },
-      {
-        "pagePath": "pages/learning/index",
-        "text": "学习",
-        "iconPath": "assets/images/tab_learning_gray.png",
-        "selectedIconPath": "assets/images/tab_learning_blue.png"
-      },
-      {
-        "pagePath": "pages/factors/index",
-        "text": "因子",
-        "iconPath": "assets/images/tab_factor_gray.png",
-        "selectedIconPath": "assets/images/tab_factor_blue.png"
-      },
-      {
-        "pagePath": "pages/ops/index",
-        "text": "运维",
-        "iconPath": "assets/images/tab_ops_gray.png",
-        "selectedIconPath": "assets/images/tab_ops_blue.png"
-      }
-    ]
   },
   "networkTimeout": {
     "request": 15000,
