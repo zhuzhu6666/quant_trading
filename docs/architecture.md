@@ -544,6 +544,14 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - `recovered / partial` 样本必须降权
 - `supervisor_execution_trace` 是 `autonomous_learning_sample.sample_type`；只有结合 review / counterfactual 成熟后，才允许升级为强训练候选
 
+2026-07-02 起，开仓质量学习和数据健康检查进入主链路：
+
+- `shadow_open_decision` 可以在匹配到 `trade_outcome_review` 后成熟为 `open_outcome`
+- 新开仓 ledger 必须记录同向簇、bar、execution、market micro、事件、数据质量和决策质量上下文
+- 高置信 matured counterfactual 可以以低权重进入 `counterfactual_training`
+- 同向簇治理会把 `same_direction_ge_1/2/3` 的坏结果统计写入 `experience_pattern_stats`，必要时生成 `policy_suggestion(scope_type='entry_cluster')`
+- `/api/learning/dataset/quality-health` 是检查 evidence contract 与 open context 覆盖的主入口
+
 ---
 
 ## 7. 三个最容易混淆的角色
@@ -680,6 +688,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 适合的模型：
 
+- open quality classifier
 - path scoring model
 - survival / duration model
 - exit quality model
@@ -689,6 +698,11 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 - `position_supervisor`
 - `RiskPolicyService` 的审计上下文和建议输入
+
+当前已实现的影子模型：
+
+- `open_quality_lightgbm`: 评估开仓时机是否优于规则基线，仅写 shadow audit
+- `position_quality_lightgbm`: 评估持仓质量，仅写 shadow audit
 
 #### 2. 接在因子治理层
 
@@ -702,7 +716,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 适合的模型：
 
 - logistic regression
-- xgboost / lightgbm
+- lightgbm
 - ranking model
 - regime classifier
 - anomaly detector
@@ -712,6 +726,10 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 因子治理工作流
 - 参数模板候选
 - 治理审批前的量化证据
+
+当前已实现的影子模型：
+
+- `factor_governance_lightgbm`: 生成因子弱化/治理建议，仍需 governor 和权限门控
 
 #### 3. 接在元模型层
 
@@ -723,6 +741,12 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 识别系统是否进入恢复期、防守期或异常期
 
 它是未来“元模型”中的定量核心，但仍然只有建议权，没有执行特权。
+
+当前已实现的影子模型：
+
+- `meta_model_lightgbm`: 汇总市场、风险、持仓、学习和模型状态，输出全局姿态 shadow report
+
+所有 LightGBM 模型评估必须使用时间顺序 holdout，并在 artifact metrics 中保留 `split=time_ordered`，同时对照当前规则和 majority baseline。模型只要未持续证明优于基线，就不能从 shadow/advisory 升级到治理影响。
 
 ### 大语言模型应该接的层
 

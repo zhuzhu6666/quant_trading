@@ -20,10 +20,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_LIMIT = 100
 _DEFAULT_DELAY_SEC = 180.0
 _backfill_thread: threading.Thread | None = None
+_backfill_stop_event = threading.Event()
+
+
+def get_state_conn():
+    return get_state_pg_conn()
 
 
 def _connect_state():
-    return get_state_pg_conn()
+    return get_state_conn()
 
 
 def _conn_is_pg(conn) -> bool:
@@ -31,7 +36,7 @@ def _conn_is_pg(conn) -> bool:
 
 
 def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s")
+    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
 
 
 def _execute(conn, sql: str, params: Any = None):
@@ -243,7 +248,7 @@ def fetch_missing_positions(
         SELECT
             position_id,
             MAX(exec_timestamp) AS close_ts,
-            SUM(COALESCE(gross_profit, 0) + COALESCE(swap, 0) - COALESCE(close_commission, 0)) AS net_pnl,
+            SUM(COALESCE(gross_profit, 0) + COALESCE(swap, 0) + COALESCE(close_commission, 0)) AS net_pnl,
             MAX(entry_price) AS entry_price,
             MAX(exec_price) AS exec_price,
             MAX(balance) AS balance,
@@ -770,7 +775,7 @@ def run_learning_backfill(
             "require_decision": not allow_partial,
         }
         if inserted:
-            logger.info("[learning_backfill] inserted %d missing reviews", len(inserted))
+            logger.info("[learning_backfill] inserted %s missing reviews", len(inserted))
         return result
     finally:
         conn.close()
@@ -786,9 +791,11 @@ def schedule_learning_backfill(
     global _backfill_thread
     if _backfill_thread is not None and _backfill_thread.is_alive():
         return False
+    _backfill_stop_event.clear()
 
     def _worker() -> None:
-        time.sleep(max(0.0, delay_sec))
+        if _backfill_stop_event.wait(max(0.0, delay_sec)):
+            return
         try:
             result = run_learning_backfill(
                 limit=limit,
@@ -806,3 +813,7 @@ def schedule_learning_backfill(
     )
     _backfill_thread.start()
     return True
+
+
+def stop_learning_backfill() -> None:
+    _backfill_stop_event.set()

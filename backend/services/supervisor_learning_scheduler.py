@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import threading
 import time
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
@@ -13,10 +15,20 @@ from backend.services.supervisor_counterfactual import evaluate_counterfactuals
 
 _scheduler_thread: threading.Thread | None = None
 _stop_event = threading.Event()
+_DEFAULT_ADVISORY_TZ = "Asia/Shanghai"
+
+
+def _advisory_tz() -> ZoneInfo:
+    name = os.getenv("QUANT_ADVISORY_TZ", _DEFAULT_ADVISORY_TZ)
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        logger.warning("[supervisor_learning] invalid QUANT_ADVISORY_TZ={}, fallback={}", name, _DEFAULT_ADVISORY_TZ)
+        return ZoneInfo(_DEFAULT_ADVISORY_TZ)
 
 
 def _local_days_for_advisory() -> list[str]:
-    today = datetime.now().date()
+    today = datetime.now(_advisory_tz()).date()
     yesterday = today - timedelta(days=1)
     return [today.isoformat(), yesterday.isoformat()]
 
@@ -38,7 +50,7 @@ def run_supervisor_learning_cycle(
             try:
                 advisories.append(build_position_supervisor_advisories(day=day, db_path=db_path, materialize=True))
             except ValueError as exc:
-                logger.debug("[supervisor_learning] advisory skipped day=%s: %s", day, exc)
+                logger.debug("[supervisor_learning] advisory skipped day={}: {}", day, exc)
     return {
         "schema_version": "supervisor_learning_cycle.v1",
         "counterfactual_count": int(counterfactual.get("count") or 0),
@@ -64,9 +76,9 @@ def schedule_supervisor_learning(
         while not _stop_event.is_set():
             try:
                 result = run_supervisor_learning_cycle(limit=limit)
-                logger.info("[supervisor_learning] scheduled run completed: %s", result)
+                logger.info("[supervisor_learning] scheduled run completed: {}", result)
             except Exception as exc:
-                logger.warning("[supervisor_learning] scheduled run failed: %s", exc)
+                logger.warning("[supervisor_learning] scheduled run failed: {}", exc)
             if _stop_event.wait(max(60.0, interval_sec)):
                 return
 

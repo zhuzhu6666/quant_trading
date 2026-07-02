@@ -231,6 +231,7 @@ def start_evolution_run(
     summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ensure_evolution_ledger_tables(db_path)
+    expire_stale_evolution_runs(db_path=db_path)
     snapshot = persist_runtime_config_snapshot(config, source=f"evolution_run:{run_type}", db_path=db_path, run_id=run_id) if config is not None else current_runtime_config_snapshot(db_path=db_path)
     rid = str(run_id or _new_id("evorun"))
     now = time.time()
@@ -287,6 +288,63 @@ def finish_evolution_run(
             (str(status or "completed"), _dumps(summary or {}), time.time(), str(run_id or "")),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def expire_stale_evolution_runs(
+    *,
+    db_path: str | Path = STATE_DB,
+    max_age_sec: float = 3600,
+    run_type_max_age_sec: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Mark interrupted running evolution runs as expired.
+
+    This only changes the run status ledger. It does not mutate samples,
+    decisions, runtime config, or any trading state.
+    """
+    ensure_evolution_ledger_tables(db_path)
+    now = time.time()
+    run_type_max_age_sec = dict(run_type_max_age_sec or {})
+    conn = _connect(db_path)
+    if not _use_pg(db_path):
+        conn.row_factory = __import__("sqlite3").Row
+    try:
+        rows = conn.execute(
+            _p(db_path, """
+            SELECT run_id, run_type, started_at, summary_json
+            FROM evolution_run
+            WHERE status='running' AND started_at > 0
+            """)
+        ).fetchall()
+        expired = []
+        for row in rows:
+            run_type = str(row["run_type"] or "")
+            max_age = float(run_type_max_age_sec.get(run_type, max_age_sec))
+            age_sec = max(0.0, now - float(row["started_at"] or 0.0))
+            if age_sec < max_age:
+                continue
+            summary = _loads(row["summary_json"], {})
+            summary["expired_by"] = "expire_stale_evolution_runs"
+            summary["expired_at"] = now
+            summary["age_sec"] = round(age_sec, 3)
+            conn.execute(
+                _p(db_path, """
+                UPDATE evolution_run
+                SET status='expired', summary_json=?, ended_at=?
+                WHERE run_id=? AND status='running'
+                """),
+                (_dumps(summary), now, str(row["run_id"] or "")),
+            )
+            expired.append(
+                {
+                    "run_id": str(row["run_id"] or ""),
+                    "run_type": run_type,
+                    "age_sec": round(age_sec, 3),
+                }
+            )
+        conn.commit()
+        return {"expired_count": len(expired), "items": expired}
     finally:
         conn.close()
 
@@ -376,6 +434,7 @@ def record_evolution_decision(
 
 def list_evolution_runs(*, db_path: str | Path = STATE_DB, limit: int = 100) -> dict[str, Any]:
     ensure_evolution_ledger_tables(db_path)
+    expire_stale_evolution_runs(db_path=db_path)
     conn = _connect(db_path, read_only=True)
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row

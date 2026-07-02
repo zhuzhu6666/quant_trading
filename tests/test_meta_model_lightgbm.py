@@ -181,6 +181,20 @@ def test_meta_model_lightgbm_trains_or_reports_missing_dependency(tmp_path):
         return
 
     assert result["model_type"] == MODEL_TYPE
+    assert result["metrics"]["holdout"]["rule_accuracy"] is not None
+    assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None
+    assert "model_lift_vs_rule" in result["metrics"]["holdout"]
+    assert "rule_lift_vs_majority" in result["metrics"]["holdout"]
+    assert result["metrics"]["governance_readiness"]["status"] in {
+        "model_shadow_candidate",
+        "rule_sidecar_candidate",
+        "blocked_by_baseline",
+    }
+    assert result["metrics"]["governance_readiness"]["recommended_source"] in {
+        "model_shadow_candidate",
+        "rule_sidecar_candidate",
+        "simple_baseline_observer",
+    }
     assert result["capabilities"]["live_trading"] is False
     assert result["capabilities"]["can_change_risk_limits"] is False
     shadow = service.score_samples(

@@ -32,6 +32,7 @@
 - 近期开发动作、验证项、技术债：写入 `TODO.md`
 - 因子数据事实来源、PIT 外部数据、discovery 默认门禁：优先写入 `docs/architecture.md` / `CLAUDE.md`
 - 持仓监督、学习证据、参数模板这类稳定接口：写入对应 contract 文档
+- 模型清单、训练准入、open outcome 和数据质量健康：优先写入 `learning-evidence-contract.md`
 - 涉及三端开发、发布、同步规则：写入 `docs/development-workflow.md`
 - 不再把同主题内容拆成多份并行主文档
 

@@ -21,13 +21,28 @@ _kelly = KellyCriterion()
 _stress = StressTest()
 _conc = ConcentrationChecker(max_single_weight=0.40, max_sector_weight=0.60)
 _CANDIDATE_ID_RE = re.compile(r"(ptrc_[0-9a-f]{16})")
+_STATE_SQL_DIALECT = "postgres"
 
 
-def _state_conn(*, read_only: bool = True):
+def get_state_conn(*, read_only: bool = True):
     return get_state_pg_conn(read_only=read_only)
 
 
+def _state_conn(*, read_only: bool = True):
+    global _STATE_SQL_DIALECT
+    try:
+        conn = get_state_conn(read_only=read_only)
+    except TypeError:
+        # Older tests and local tooling monkeypatch get_state_conn with a
+        # zero-argument SQLite factory.
+        conn = get_state_conn()
+    _STATE_SQL_DIALECT = "sqlite" if isinstance(conn, sqlite3.Connection) else "postgres"
+    return conn
+
+
 def _state_sql(sql: str) -> str:
+    if _STATE_SQL_DIALECT == "sqlite":
+        return sql
     return sql.replace("%", "%%").replace("?", "%s")
 
 
@@ -148,8 +163,7 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
     limit = max(1, min(int(limit or 50), 200))
     conn = _state_conn(read_only=True)
     try:
-        rows = conn.execute(
-            _state_sql("""
+        query = """
             SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
                    action_reason, action_json, risk_state_json
             FROM decision_ledger
@@ -157,9 +171,28 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
                OR action_json LIKE '%risk_verdict%'
             ORDER BY decision_ts DESC, created_at DESC
             LIMIT ?
-            """),
-            (limit,),
-        ).fetchall()
+            """
+        try:
+            rows = conn.execute(_state_sql(query), (limit,)).fetchall()
+        except Exception as exc:
+            if "position_id" not in str(exc).lower():
+                raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            rows = conn.execute(
+                _state_sql("""
+                SELECT decision_id, '' AS position_id, event_type, symbol, timeframe, decision_ts,
+                       action_reason, action_json, risk_state_json
+                FROM decision_ledger
+                WHERE risk_state_json LIKE '%policy_verdict%'
+                   OR action_json LIKE '%risk_verdict%'
+                ORDER BY decision_ts DESC, created_at DESC
+                LIMIT ?
+                """),
+                (limit,),
+            ).fetchall()
         parsed: list[tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any], int, str]] = []
         position_ids: set[str] = set()
         for row in rows:

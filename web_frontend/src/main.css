@@ -1002,6 +1002,15 @@ body {
   color: #2563eb;
 }
 
+.models-dashboard .dashboard-header {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.96) 0%, rgba(240, 248, 246, 0.96) 48%, rgba(247, 249, 252, 0.96) 100%);
+}
+
+.models-dashboard .eyebrow {
+  color: #0f766e;
+}
+
 .learning-split {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1027,6 +1036,54 @@ body {
 
 .panel.wide-panel {
   grid-column: 1 / -1;
+}
+
+.model-card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.model-family-card {
+  min-height: 142px;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fbfcfe 0%, #f6f9fb 100%);
+  padding: 12px;
+  display: grid;
+  align-content: space-between;
+}
+
+.model-family-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.model-family-head strong,
+.model-family-head span {
+  display: block;
+}
+
+.model-family-head strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.model-family-head span,
+.model-family-detail {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.model-family-metric {
+  margin-top: 16px;
+  color: var(--ink);
+  font-size: 24px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
 }
 
 .summary-note {
@@ -1210,7 +1267,8 @@ td.status-mute {
   .stat-grid,
   .dashboard-grid,
   .action-grid,
-  .action-grid-compact {
+  .action-grid-compact,
+  .model-card-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1232,7 +1290,8 @@ td.status-mute {
   .stat-grid,
   .dashboard-grid,
   .action-grid,
-  .performance-row {
+  .performance-row,
+  .model-card-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1714,8 +1773,15 @@ tbody tr:hover {
 }
 
 @media (max-width: 640px) {
+  html,
+  body,
+  #root {
+    width: 100%;
+    overflow-x: hidden;
+  }
+
   .app-shell {
-    padding: 10px 10px 22px;
+    padding: 8px 8px calc(24px + env(safe-area-inset-bottom));
   }
 
   .app-topbar {
@@ -1732,6 +1798,11 @@ tbody tr:hover {
     justify-content: space-between;
   }
 
+  .icon-btn {
+    min-width: 76px;
+    justify-content: center;
+  }
+
   .session-chip {
     max-width: calc(100vw - 132px);
     overflow: hidden;
@@ -1740,45 +1811,107 @@ tbody tr:hover {
   }
 
   .app-nav {
-    margin: 8px -2px 10px;
-    padding-bottom: 6px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin: 8px 0 10px;
+    padding: 0;
+    overflow: visible;
   }
 
   .nav-link {
-    min-width: 78px;
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 46px;
+    padding: 6px 4px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 3px;
     justify-content: center;
+    justify-items: center;
+    font-size: 12px;
   }
 
   .dashboard-header {
-    padding: 14px;
+    gap: 12px;
+    padding: 12px;
   }
 
   .dashboard-header h1 {
-    font-size: 20px;
+    font-size: 19px;
+    line-height: 1.22;
   }
 
   .dashboard-header p {
-    font-size: 13px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .header-status {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .header-status .status-pill,
+  .header-status .header-refresh {
+    width: 100%;
+    justify-content: center;
+    min-height: 38px;
+    padding-left: 8px;
+    padding-right: 8px;
+    text-align: center;
+    white-space: normal;
+  }
+
+  .header-status .header-refresh {
+    grid-column: 1 / -1;
   }
 
   .stat-grid {
     grid-template-columns: 1fr;
+    gap: 8px;
   }
 
   .stat-tile {
-    min-height: 104px;
-  }
-
-  .stat-value {
-    font-size: 23px;
-  }
-
-  .panel {
+    min-height: 96px;
     padding: 12px;
   }
 
+  .stat-value {
+    font-size: 22px;
+  }
+
+  .panel {
+    padding: 11px;
+  }
+
+  .dashboard .panel h2 {
+    margin-bottom: 10px;
+    font-size: 14px;
+  }
+
   .field-row {
-    min-height: 42px;
+    min-height: 38px;
+    grid-template-columns: minmax(88px, 34%) minmax(0, 1fr);
+    gap: 8px;
+    padding: 6px 0;
+  }
+
+  .field-row span,
+  .field-row strong {
+    min-width: 0;
+  }
+
+  .compact-list {
+    gap: 6px;
+  }
+
+  .data-badge {
+    border-radius: 8px;
+    min-height: 30px;
   }
 
   .performance-row > div {
@@ -1794,13 +1927,219 @@ tbody tr:hover {
   }
 
   .table-wrap {
-    margin-left: -2px;
-    margin-right: -2px;
+    margin-left: 0;
+    margin-right: 0;
+    overflow: visible;
+    border: 0;
+    background: transparent;
   }
 
-  th,
-  td {
-    padding: 9px;
+  .mobile-card-table,
+  .mobile-card-table thead,
+  .mobile-card-table tbody,
+  .mobile-card-table tr,
+  .mobile-card-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .mobile-card-table {
+    min-width: 0 !important;
+    max-width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .mobile-card-table colgroup,
+  .mobile-card-table thead {
+    display: none;
+  }
+
+  .mobile-card-table tbody {
+    display: grid;
+    gap: 8px;
+  }
+
+  .mobile-card-table tr {
+    border: 1px solid rgba(148, 163, 184, 0.34);
+    border-radius: 8px;
+    background: #fff;
+    padding: 8px;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.045);
+  }
+
+  .mobile-card-table td {
+    min-height: 31px;
+    border: 0;
+    padding: 5px 0;
+    display: grid;
+    grid-template-columns: minmax(88px, 34%) minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+    font-size: 13px;
+    line-height: 1.42;
+    text-align: right;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  .mobile-card-table td::before {
+    content: "";
+    color: var(--ink-soft);
+    font-size: 12px;
+    font-weight: 700;
+    text-align: left;
+  }
+
+  .mobile-card-table td.empty-state-small {
+    display: block;
+    min-height: 44px;
+    padding: 12px;
+    text-align: center;
+    background: var(--surface-soft);
+    border-radius: 8px;
+  }
+
+  .mobile-card-table td.empty-state-small::before {
+    display: none;
+  }
+
+  .mobile-card-table .status-pill {
+    justify-self: end;
+    text-align: center;
+  }
+
+  .factor-ticks-table td:nth-child(1)::before { content: "时间"; }
+  .factor-ticks-table td:nth-child(2)::before { content: "Tick"; }
+  .factor-ticks-table td:nth-child(3)::before { content: "战术分"; }
+  .factor-ticks-table td:nth-child(4)::before { content: "宏观分"; }
+  .factor-ticks-table td:nth-child(5)::before { content: "活跃因子"; }
+  .factor-ticks-table td:nth-child(6)::before { content: "弃权"; }
+  .factor-ticks-table td:nth-child(7)::before { content: "闸门原因"; }
+
+  .positions-table td:nth-child(1)::before { content: "品种"; }
+  .positions-table td:nth-child(2)::before { content: "方向"; }
+  .positions-table td:nth-child(3)::before { content: "数量"; }
+  .positions-table td:nth-child(4)::before { content: "开仓价"; }
+  .positions-table td:nth-child(5)::before { content: "当前价"; }
+  .positions-table td:nth-child(6)::before { content: "浮盈"; }
+  .positions-table td:nth-child(7)::before { content: "止损"; }
+  .positions-table td:nth-child(8)::before { content: "止盈"; }
+  .positions-table td:nth-child(9)::before { content: "持仓ID"; }
+  .positions-table td:nth-child(10)::before { content: "来源"; }
+  .positions-table td:nth-child(11)::before { content: "开仓时间"; }
+
+  .pnl-deals-table td:nth-child(1)::before { content: "时间"; }
+  .pnl-deals-table td:nth-child(2)::before { content: "持仓ID"; }
+  .pnl-deals-table td:nth-child(3)::before { content: "成交ID"; }
+  .pnl-deals-table td:nth-child(4)::before { content: "方向"; }
+  .pnl-deals-table td:nth-child(5)::before { content: "品种"; }
+  .pnl-deals-table td:nth-child(6)::before { content: "累计盈亏"; }
+  .pnl-deals-table td:nth-child(7)::before { content: "单笔盈亏"; }
+  .pnl-deals-table td:nth-child(8)::before { content: "来源"; }
+
+  .policy-table td:nth-child(1)::before { content: "时间"; }
+  .policy-table td:nth-child(2)::before { content: "裁决"; }
+  .policy-table td:nth-child(3)::before { content: "动作"; }
+  .policy-table td:nth-child(4)::before { content: "方向"; }
+  .policy-table td:nth-child(5)::before { content: "结果"; }
+  .policy-table td:nth-child(6)::before { content: "原因"; }
+
+  .trade-traces-table td:nth-child(1)::before { content: "时间"; }
+  .trade-traces-table td:nth-child(2)::before { content: "仓位"; }
+  .trade-traces-table td:nth-child(3)::before { content: "入场裁决"; }
+  .trade-traces-table td:nth-child(4)::before { content: "离场裁决"; }
+  .trade-traces-table td:nth-child(5)::before { content: "结果"; }
+  .trade-traces-table td:nth-child(6)::before { content: "关闭原因"; }
+  .trade-traces-table td:nth-child(7)::before { content: "责任"; }
+  .trade-traces-table td:nth-child(8)::before { content: "摘要"; }
+
+  .ops-db-table td:nth-child(1)::before { content: "数据库"; }
+  .ops-db-table td:nth-child(2)::before { content: "文件"; }
+  .ops-db-table td:nth-child(3)::before { content: "类型"; }
+  .ops-db-table td:nth-child(4)::before { content: "状态"; }
+  .ops-db-table td:nth-child(5)::before { content: "行数"; }
+  .ops-db-table td:nth-child(6)::before { content: "更新时间"; }
+  .ops-db-table td:nth-child(7)::before { content: "异常"; }
+
+  .suggestions-table td:nth-child(1)::before { content: "时间"; }
+  .suggestions-table td:nth-child(2)::before { content: "范围"; }
+  .suggestions-table td:nth-child(3)::before { content: "动作"; }
+  .suggestions-table td:nth-child(4)::before { content: "置信度"; }
+  .suggestions-table td:nth-child(5)::before { content: "状态"; }
+  .suggestions-table td:nth-child(6)::before { content: "原因"; }
+
+  .reviews-table td:nth-child(1)::before { content: "时间"; }
+  .reviews-table td:nth-child(2)::before { content: "仓位"; }
+  .reviews-table td:nth-child(3)::before { content: "结果"; }
+  .reviews-table td:nth-child(4)::before { content: "盈亏"; }
+  .reviews-table td:nth-child(5)::before { content: "摘要"; }
+
+  .samples-table td:nth-child(1)::before { content: "时间"; }
+  .samples-table td:nth-child(2)::before { content: "类型"; }
+  .samples-table td:nth-child(3)::before { content: "标签"; }
+  .samples-table td:nth-child(4)::before { content: "完整性"; }
+  .samples-table td:nth-child(5)::before { content: "权重"; }
+
+  .applications-table td:nth-child(1)::before { content: "时间"; }
+  .applications-table td:nth-child(2)::before { content: "范围"; }
+  .applications-table td:nth-child(3)::before { content: "动作"; }
+  .applications-table td:nth-child(4)::before { content: "状态"; }
+  .applications-table td:nth-child(5)::before { content: "效果"; }
+
+  .lifecycle-table td:nth-child(1)::before { content: "时间"; }
+  .lifecycle-table td:nth-child(2)::before { content: "事件"; }
+  .lifecycle-table td:nth-child(3)::before { content: "因子"; }
+  .lifecycle-table td:nth-child(4)::before { content: "状态"; }
+
+  .model-features-table td:nth-child(1)::before { content: "特征"; }
+  .model-features-table td:nth-child(2)::before { content: "权重"; }
+  .model-features-table td:nth-child(3)::before { content: "方向"; }
+
+  .model-advisory-table td:nth-child(1)::before { content: "时间"; }
+  .model-advisory-table td:nth-child(2)::before { content: "姿态"; }
+  .model-advisory-table td:nth-child(3)::before { content: "状态"; }
+  .model-advisory-table td:nth-child(4)::before { content: "摘要"; }
+
+  .model-shadow-table td:nth-child(1)::before { content: "更新时间"; }
+  .model-shadow-table td:nth-child(2)::before { content: "模型"; }
+  .model-shadow-table td:nth-child(3)::before { content: "状态"; }
+  .model-shadow-table td:nth-child(4)::before { content: "门控"; }
+  .model-shadow-table td:nth-child(5)::before { content: "备注"; }
+
+  .model-canary-table td:nth-child(1)::before { content: "时间"; }
+  .model-canary-table td:nth-child(2)::before { content: "候选"; }
+  .model-canary-table td:nth-child(3)::before { content: "决策"; }
+  .model-canary-table td:nth-child(4)::before { content: "准确率"; }
+  .model-canary-table td:nth-child(5)::before { content: "原因"; }
+
+  .model-audits-table td:nth-child(1)::before { content: "时间"; }
+  .model-audits-table td:nth-child(2)::before { content: "类型"; }
+  .model-audits-table td:nth-child(3)::before { content: "目标"; }
+  .model-audits-table td:nth-child(4)::before { content: "输出"; }
+  .model-audits-table td:nth-child(5)::before { content: "分数"; }
+
+  .model-permission-table td:nth-child(1)::before { content: "时间"; }
+  .model-permission-table td:nth-child(2)::before { content: "来源"; }
+  .model-permission-table td:nth-child(3)::before { content: "状态"; }
+  .model-permission-table td:nth-child(4)::before { content: "模型"; }
+  .model-permission-table td:nth-child(5)::before { content: "摘要"; }
+
+  .ops-db-table td:nth-child(3),
+  .ops-db-table td:nth-child(4),
+  .ops-db-table td:nth-child(5),
+  .ops-db-table td:nth-child(6) {
+    white-space: normal;
+  }
+
+  .issue-summary {
+    white-space: normal;
+    text-overflow: clip;
+  }
+
+  .learning-split {
+    grid-template-columns: 1fr;
+    gap: 14px;
   }
 
   .mini-chart,

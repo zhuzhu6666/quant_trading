@@ -33,9 +33,11 @@ from backend.services.supervisor_counterfactual import (
 )
 from backend.services.autonomous_learning import (
     backfill_position_supervisor_traces,
+    entry_context_quality_report,
     list_autonomous_learning_samples,
     mature_position_supervisor_traces,
     run_autonomous_learning_cycle,
+    validate_evidence_contract_health,
 )
 from backend.services.evolution_ledger import (
     get_evolution_run,
@@ -70,6 +72,7 @@ from research.meta_model_sidecar import MetaModelSidecar
 from research.meta_model_lightgbm import MetaModelLightGBMService
 from research.llm_advisory import LLMAdvisoryService
 from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
+from research.open_quality_lightgbm import OpenQualityLightGBMService
 from research.position_quality_lightgbm import PositionQualityLightGBMService
 from risk.policy_service import RiskPolicyService
 
@@ -1445,6 +1448,28 @@ class PositionQualityLightGBMTrainRequest(BaseModel):
 
 
 class PositionQualityLightGBMShadowRequest(BaseModel):
+    db_path: str | None = None
+    artifact_dir: str | None = None
+    artifact_path: str | None = None
+    limit: int = 100
+    mode: str = "shadow"
+
+
+class OpenQualityLightGBMTrainRequest(BaseModel):
+    db_path: str | None = None
+    artifact_dir: str | None = None
+    registry_db_path: str | None = None
+    symbol: str = "XAUUSD+"
+    timeframe: str = "M5"
+    limit: int = 2000
+    holdout_ratio: float = 0.25
+    min_samples: int = 30
+    register_model: bool = True
+    run_shadow: bool = True
+    shadow_limit: int = 100
+
+
+class OpenQualityLightGBMShadowRequest(BaseModel):
     db_path: str | None = None
     artifact_dir: str | None = None
     artifact_path: str | None = None
@@ -3149,6 +3174,18 @@ def get_learning_dataset_readiness(
     )
 
 
+@router.get("/dataset/quality-health")
+def get_learning_dataset_quality_health(
+    _user: RequireUser,
+    limit: int = Query(default=1000, ge=1, le=50000),
+) -> dict:
+    return {
+        "schema_version": "learning_dataset_quality_health.v1",
+        "evidence_contract": validate_evidence_contract_health(db_path=STATE_DB, limit=limit),
+        "entry_context": entry_context_quality_report(db_path=STATE_DB, limit=min(limit, 5000)),
+    }
+
+
 @router.post("/dataset/validate")
 def validate_learning_dataset(_user: RequireUser, req: DatasetValidateRequest) -> dict:
     if not req.dataset_ref:
@@ -3483,6 +3520,56 @@ def list_position_quality_lightgbm_audits(
     db_path: str | None = Query(default=None),
 ) -> dict:
     service = PositionQualityLightGBMService(
+        db_path=db_path or STATE_DB,
+    )
+    return service.list_audits(limit=limit, position_id=position_id)
+
+
+@router.post("/model/open-quality-lightgbm/train")
+def train_open_quality_lightgbm(_user: RequireUser, req: OpenQualityLightGBMTrainRequest) -> dict:
+    service = OpenQualityLightGBMService(
+        db_path=req.db_path or STATE_DB,
+        artifact_dir=req.artifact_dir,
+    )
+    result = service.train(
+        limit=max(1, int(req.limit)),
+        holdout_ratio=max(0.0, min(float(req.holdout_ratio), 0.8)),
+        min_samples=max(1, int(req.min_samples)),
+        register=bool(req.register_model),
+        registry_db_path=req.registry_db_path,
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+    )
+    if result.get("ok") and req.run_shadow:
+        result["shadow"] = service.score_samples(
+            artifact_path=result.get("artifact_path"),
+            limit=max(1, int(req.shadow_limit)),
+            mode="shadow_after_train",
+        )
+    return result
+
+
+@router.post("/model/open-quality-lightgbm/shadow-run")
+def run_open_quality_lightgbm_shadow(_user: RequireUser, req: OpenQualityLightGBMShadowRequest) -> dict:
+    service = OpenQualityLightGBMService(
+        db_path=req.db_path or STATE_DB,
+        artifact_dir=req.artifact_dir,
+    )
+    return service.score_samples(
+        artifact_path=req.artifact_path,
+        limit=max(1, int(req.limit)),
+        mode=req.mode or "shadow",
+    )
+
+
+@router.get("/model/open-quality-lightgbm/audits")
+def list_open_quality_lightgbm_audits(
+    _user: RequireUser,
+    limit: int = Query(default=100, ge=1, le=1000),
+    position_id: str | None = Query(default=None),
+    db_path: str | None = Query(default=None),
+) -> dict:
+    service = OpenQualityLightGBMService(
         db_path=db_path or STATE_DB,
     )
     return service.list_audits(limit=limit, position_id=position_id)

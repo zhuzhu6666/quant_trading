@@ -216,6 +216,39 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
             ON position_supervisor_trace(action, outcome, event_ts)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS experience_pattern_stats (
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                sample_count INTEGER DEFAULT 0,
+                win_count INTEGER DEFAULT 0,
+                bad_loss_count INTEGER DEFAULT 0,
+                avg_reward REAL DEFAULT 0.0,
+                last_outcome_label TEXT DEFAULT '',
+                recommended_action TEXT DEFAULT '',
+                updated_at REAL NOT NULL DEFAULT 0.0,
+                PRIMARY KEY (scope_type, scope_key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_suggestion (
+                suggestion_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                confidence REAL DEFAULT 0.0,
+                reason TEXT DEFAULT '',
+                evidence_json TEXT DEFAULT '{}',
+                status TEXT DEFAULT 'proposed',
+                reviewed_at REAL DEFAULT 0.0,
+                review_note TEXT DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -415,7 +448,46 @@ def _risk_rejection_label(action_json: dict[str, Any]) -> tuple[str, float]:
     return "matured", 1.0
 
 
-def _sample_from_decision(row: Any, sample_type: str) -> dict[str, Any]:
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _review_for_open_decision(conn: Any, row: Any) -> Any | None:
+    decision_id = str(_row_value(row, "decision_id", "") or "")
+    position_id = str(_row_value(row, "position_id", "") or "")
+    if not decision_id and not position_id:
+        return None
+    return _execute(
+        conn,
+        """
+        SELECT *
+        FROM trade_outcome_review
+        WHERE (? <> '' AND entry_decision_id=?)
+           OR (? <> '' AND position_id=?)
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (decision_id, decision_id, position_id, position_id),
+    ).fetchone()
+
+
+def _review_integrity_for_training(review_json: dict[str, Any]) -> tuple[str, float]:
+    integrity = _sample_integrity_level(
+        review_json.get("attribution_integrity")
+        or review_json.get("context_integrity")
+        or "missing"
+    )
+    if integrity == "missing":
+        return integrity, 0.0
+    if integrity in {"partial", "recovered"}:
+        return integrity, 0.5
+    return integrity, 1.0
+
+
+def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | None = None) -> dict[str, Any]:
     action_json = _loads(row["action_json"], {})
     risk_state = _loads(row["risk_state_json"], {})
     portfolio = _loads(row["portfolio_state_json"], {})
@@ -443,6 +515,25 @@ def _sample_from_decision(row: Any, sample_type: str) -> dict[str, Any]:
         if str(row["event_type"] or "") == "open":
             label["label"] = "opened"
             train_weight = 0.7
+            if outcome_review is not None:
+                review_json = _loads(outcome_review["review_json"], {})
+                integrity, train_weight = _review_integrity_for_training(review_json)
+                label_status = "matured"
+                label.update(
+                    {
+                        "label": "open_outcome",
+                        "review_id": str(outcome_review["review_id"] or ""),
+                        "outcome_label": str(outcome_review["outcome_label"] or ""),
+                        "pnl": float(outcome_review["pnl"] or 0.0),
+                        "mae": float(outcome_review["mae"] or 0.0),
+                        "mfe": float(outcome_review["mfe"] or 0.0),
+                        "close_reason": str(review_json.get("close_reason") or ""),
+                        "primary_responsibility": str(review_json.get("primary_responsibility") or ""),
+                        "responsibility_labels": list(review_json.get("responsibility_labels", []) or []),
+                        "failure_tags": _loads(outcome_review["failure_tags_json"], []),
+                        "close_ts": float(review_json.get("close_ts") or outcome_review["created_at"] or 0.0),
+                    }
+                )
         else:
             label["label"] = "not_opened"
             train_weight = 0.35
@@ -462,7 +553,11 @@ def _sample_from_decision(row: Any, sample_type: str) -> dict[str, Any]:
         "timeframe": str(row["timeframe"] or ""),
         "event_ts": float(row["decision_ts"] or row["created_at"] or 0.0),
         "label_status": label_status,
-        "integrity": "full" if risk_verdict or action_json else "partial",
+        "integrity": (
+            _review_integrity_for_training(_loads(outcome_review["review_json"], {}))[0]
+            if sample_type == "shadow_open_decision" and outcome_review is not None
+            else ("full" if risk_verdict or action_json else "partial")
+        ),
         "train_weight": train_weight,
         "causal_level": "intervention_observed",
         "features": {
@@ -472,16 +567,34 @@ def _sample_from_decision(row: Any, sample_type: str) -> dict[str, Any]:
             "regime_id": str(row["regime_id"] or ""),
             "regime_confidence": float(row["regime_confidence"] or 0.0),
             "action_score": float(row["action_score"] or 0.0),
+            "entry_cluster": action_json.get("entry_cluster") or {},
+            "portfolio_exposure": action_json.get("portfolio_exposure") or {},
+            "market_micro_context": action_json.get("market_micro_context") or {},
+            "bar_context": action_json.get("bar_context") or {},
+            "event_context": action_json.get("event_context") or action_json.get("event_sizing") or {},
+            "execution_context": action_json.get("execution_context") or {},
+            "data_quality_context": action_json.get("data_quality_context") or {},
+            "decision_quality_context": action_json.get("decision_quality_context") or {},
         },
         "verdict": {
             "risk_verdict": risk_verdict,
             "event_type": str(row["event_type"] or ""),
+            "outcome_review_id": (
+                str(outcome_review["review_id"] or "")
+                if sample_type == "shadow_open_decision" and outcome_review is not None
+                else ""
+            ),
         },
         "label": label,
         "trace": {
             "decision_id": str(row["decision_id"] or ""),
             "position_id": str(row["position_id"] or ""),
             "trade_id": str(row["trade_id"] or ""),
+            "review_id": (
+                str(outcome_review["review_id"] or "")
+                if sample_type == "shadow_open_decision" and outcome_review is not None
+                else ""
+            ),
         },
     }
 
@@ -1007,7 +1120,18 @@ def materialize_autonomous_learning_samples(
         for row in decisions:
             event_type = str(row["event_type"] or "")
             if event_type in {"open", "skip"}:
-                if _upsert_sample(conn, {**_sample_from_decision(row, "shadow_open_decision"), **sample_context}):
+                outcome_review = _review_for_open_decision(conn, row) if event_type == "open" else None
+                if _upsert_sample(
+                    conn,
+                    {
+                        **_sample_from_decision(
+                            row,
+                            "shadow_open_decision",
+                            outcome_review=outcome_review,
+                        ),
+                        **sample_context,
+                    },
+                ):
                     counts["shadow_open_decision"] += 1
             if event_type == "skip":
                 action_json = _loads(row["action_json"], {})
@@ -1051,6 +1175,19 @@ def materialize_autonomous_learning_samples(
                 counts["entry_supervisor_feedback"] += 1
 
         if state_table_exists(conn, "supervisor_counterfactual_review"):
+            _execute(
+                conn,
+                """
+                DELETE FROM autonomous_learning_sample
+                WHERE sample_type='post_close_counterfactual'
+                  AND source_table='supervisor_counterfactual_review'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM supervisor_counterfactual_review cf
+                      WHERE cf.counterfactual_id=autonomous_learning_sample.source_id
+                  )
+                """,
+            )
             cfs = _execute(
                 conn,
                 """
@@ -1087,6 +1224,202 @@ def materialize_autonomous_learning_samples(
         )
         finish_evolution_run(str(run.get("run_id") or ""), status="completed", summary=payload, db_path=db_path)
         return payload
+    finally:
+        conn.close()
+
+
+def _entry_cluster_bucket_from_features(features: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    action = features.get("action") or {}
+    cluster = features.get("entry_cluster") or action.get("entry_cluster") or {}
+    same_count = int(float(action.get("same_direction_open_count") or cluster.get("same_direction_open_count_before") or 0))
+    depth = int(float(cluster.get("pyramid_depth") or max(0, same_count)))
+    recent = cluster.get("recent_same_direction_entries") or action.get("recent_same_direction_entries") or {}
+    if same_count >= 3 or depth >= 3:
+        return "same_direction_ge_3", {"same_direction_open_count": same_count, "pyramid_depth": depth, "recent_same_direction_entries": recent}
+    if same_count >= 2 or depth >= 2:
+        return "same_direction_ge_2", {"same_direction_open_count": same_count, "pyramid_depth": depth, "recent_same_direction_entries": recent}
+    if same_count >= 1 or depth >= 1:
+        return "same_direction_ge_1", {"same_direction_open_count": same_count, "pyramid_depth": depth, "recent_same_direction_entries": recent}
+    return "", {"same_direction_open_count": same_count, "pyramid_depth": depth, "recent_same_direction_entries": recent}
+
+
+def materialize_entry_cluster_governance_suggestions(
+    *,
+    db_path: str | Path = STATE_DB,
+    limit: int = 1000,
+    min_samples: int = 3,
+    min_bad_rate: float = 0.5,
+) -> dict[str, Any]:
+    """Suggest advisory controls when same-direction entry clusters underperform."""
+    ensure_autonomous_learning_tables(db_path)
+    run = start_evolution_run(run_type="entry_cluster_governance", trigger_source="open_outcome_samples", db_path=db_path)
+    conn = _connect(db_path)
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    suggestions = 0
+    stats_upserted = 0
+    skipped = 0
+    try:
+        rows = _execute(
+            conn,
+            """
+            SELECT *
+            FROM autonomous_learning_sample
+            WHERE sample_type='shadow_open_decision'
+              AND label_status='matured'
+            ORDER BY event_ts DESC, created_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        for row in rows:
+            label = _loads(row["label_json"], {})
+            if str(label.get("label") or "") != "open_outcome":
+                continue
+            features = _loads(row["features_json"], {})
+            bucket, cluster = _entry_cluster_bucket_from_features(features)
+            if not bucket:
+                continue
+            pnl = float(label.get("pnl") or 0.0)
+            outcome = str(label.get("outcome_label") or "")
+            failure_tags = [str(item) for item in label.get("failure_tags") or []]
+            bad = outcome == "bad_loss" or "entry_cluster_risk" in failure_tags or pnl < 0
+            buckets.setdefault(bucket, []).append(
+                {
+                    "sample_id": str(row["sample_id"] or ""),
+                    "decision_id": str(row["decision_id"] or ""),
+                    "position_id": str(row["position_id"] or ""),
+                    "pnl": pnl,
+                    "outcome_label": outcome,
+                    "bad": bad,
+                    "cluster": cluster,
+                }
+            )
+
+        now = time.time()
+        for bucket, items in sorted(buckets.items()):
+            sample_count = len(items)
+            bad_count = sum(1 for item in items if item["bad"])
+            win_count = sum(1 for item in items if item["pnl"] > 0)
+            pnl_sum = sum(float(item["pnl"]) for item in items)
+            avg_reward = sum(max(-1.0, min(1.0, float(item["pnl"]) / 50.0)) for item in items) / max(sample_count, 1)
+            bad_rate = bad_count / max(sample_count, 1)
+            action = "watch"
+            if sample_count >= int(min_samples) and bad_rate >= float(min_bad_rate):
+                action = "increase_same_direction_cooldown"
+            elif sample_count >= int(min_samples) and avg_reward <= -0.05:
+                action = "raise_pyramid_entry_threshold"
+            _execute(
+                conn,
+                """
+                INSERT INTO experience_pattern_stats
+                (scope_type, scope_key, sample_count, win_count, bad_loss_count,
+                 avg_reward, last_outcome_label, recommended_action, updated_at)
+                VALUES ('entry_cluster', ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+                    sample_count=excluded.sample_count,
+                    win_count=excluded.win_count,
+                    bad_loss_count=excluded.bad_loss_count,
+                    avg_reward=excluded.avg_reward,
+                    last_outcome_label=excluded.last_outcome_label,
+                    recommended_action=excluded.recommended_action,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    bucket,
+                    sample_count,
+                    win_count,
+                    bad_count,
+                    round(avg_reward, 6),
+                    str(items[0].get("outcome_label") or ""),
+                    action,
+                    now,
+                ),
+            )
+            stats_upserted += 1
+            if action == "watch":
+                skipped += 1
+                continue
+            existing = _execute(
+                conn,
+                """
+                SELECT suggestion_id
+                FROM policy_suggestion
+                WHERE scope_type='entry_cluster'
+                  AND scope_key=?
+                  AND action=?
+                  AND status IN ('proposed', 'approved', 'applied')
+                LIMIT 1
+                """,
+                (bucket, action),
+            ).fetchone()
+            if existing:
+                skipped += 1
+                continue
+            suggestion_id = "psg_entry_cluster_" + hashlib.sha1(f"{bucket}:{action}".encode("utf-8")).hexdigest()[:16]
+            confidence = min(0.92, 0.45 + 0.06 * sample_count + 0.20 * bad_rate)
+            evidence = {
+                "schema_version": "entry_cluster_governance_evidence.v1",
+                "bucket": bucket,
+                "sample_count": sample_count,
+                "bad_count": bad_count,
+                "bad_rate": round(bad_rate, 6),
+                "win_count": win_count,
+                "pnl_sum": round(pnl_sum, 6),
+                "avg_reward": round(avg_reward, 6),
+                "sample_ids": [item["sample_id"] for item in items[:20]],
+                "position_ids": [item["position_id"] for item in items[:20]],
+                "recommended_controls": {
+                    "increase_same_direction_cooldown": action == "increase_same_direction_cooldown",
+                    "raise_pyramid_entry_threshold": action == "raise_pyramid_entry_threshold",
+                    "advisory_only": True,
+                },
+            }
+            _execute(
+                conn,
+                """
+                INSERT INTO policy_suggestion
+                (suggestion_id, scope_type, scope_key, action, confidence,
+                 reason, evidence_json, status, created_at)
+                VALUES (?, 'entry_cluster', ?, ?, ?, ?, ?, 'proposed', ?)
+                ON CONFLICT(suggestion_id) DO NOTHING
+                """,
+                (
+                    suggestion_id,
+                    bucket,
+                    action,
+                    round(confidence, 6),
+                    f"{bucket} open outcomes show bad_rate={bad_rate:.2f} across {sample_count} samples",
+                    _dumps(evidence),
+                    now,
+                ),
+            )
+            suggestions += 1
+        payload = {
+            "schema_version": "entry_cluster_governance.v1",
+            "evolution_run_id": str(run.get("run_id") or ""),
+            "bucket_count": len(buckets),
+            "stats_upserted": stats_upserted,
+            "suggestions": suggestions,
+            "skipped": skipped,
+            "limit": int(limit),
+        }
+        _insert_evolution_event(conn, "entry_cluster_governance", payload)
+        conn.commit()
+        record_evolution_decision(
+            run_id=str(run.get("run_id") or ""),
+            decision_type="entry_cluster_governance",
+            scope_type="entry_cluster",
+            action="materialize_governance_suggestions",
+            status="completed",
+            result=payload,
+            db_path=db_path,
+        )
+        finish_evolution_run(str(run.get("run_id") or ""), status="completed", summary=payload, db_path=db_path)
+        return payload
+    except Exception as exc:
+        conn.rollback()
+        finish_evolution_run(str(run.get("run_id") or ""), status="failed", summary={"error": str(exc)[:500]}, db_path=db_path)
+        raise
     finally:
         conn.close()
 
@@ -1264,6 +1597,110 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
             )
         )
         return {"schema_version": "evidence_contract_health.v1", "counts": counts, "examples": examples}
+    finally:
+        conn.close()
+
+
+def entry_context_quality_report(*, db_path: str | Path = STATE_DB, limit: int = 500) -> dict[str, Any]:
+    ensure_autonomous_learning_tables(db_path)
+    conn = _connect(db_path, read_only=True)
+    fields = [
+        "entry_cluster",
+        "market_micro_context",
+        "bar_context",
+        "execution_context",
+        "decision_quality_context",
+        "event_context",
+        "data_quality_context",
+        "market_session",
+    ]
+    coverage = {field: 0 for field in fields}
+    missing_examples: list[dict[str, Any]] = []
+    open_count = 0
+    sample_counts = {
+        "matured_open_outcome": 0,
+        "model_ready_open_outcome": 0,
+        "with_supervised_training": 0,
+    }
+    try:
+        if state_table_exists(conn, "decision_ledger"):
+            rows = _execute(
+                conn,
+                """
+                SELECT decision_id, position_id, symbol, decision_ts, action_json
+                FROM decision_ledger
+                WHERE event_type='open'
+                ORDER BY decision_ts DESC, created_at DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+            open_count = len(rows)
+            for row in rows:
+                action_json = _loads(row["action_json"], {})
+                missing: list[str] = []
+                for field in fields:
+                    present = bool(action_json.get(field))
+                    if field == "entry_cluster":
+                        present = present or "same_direction_open_count" in action_json
+                    if present:
+                        coverage[field] += 1
+                    else:
+                        missing.append(field)
+                if missing and len(missing_examples) < 10:
+                    missing_examples.append(
+                        {
+                            "decision_id": str(row["decision_id"] or ""),
+                            "position_id": str(row["position_id"] or ""),
+                            "symbol": str(row["symbol"] or ""),
+                            "decision_ts": float(row["decision_ts"] or 0.0),
+                            "missing": missing,
+                        }
+                    )
+        sample_rows = _execute(
+            conn,
+            """
+            SELECT label_json, evidence_contract_json
+            FROM autonomous_learning_sample
+            WHERE sample_type='shadow_open_decision'
+              AND label_status='matured'
+            ORDER BY event_ts DESC, created_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        for row in sample_rows:
+            label = _loads(row["label_json"], {})
+            if str(label.get("label") or "") != "open_outcome":
+                continue
+            sample_counts["matured_open_outcome"] += 1
+            contract = _loads(row["evidence_contract_json"], {})
+            allowed = set(contract.get("allowed_uses") or [])
+            if bool(contract.get("model_ready")):
+                sample_counts["model_ready_open_outcome"] += 1
+            if "supervised_training" in allowed:
+                sample_counts["with_supervised_training"] += 1
+        ratios = {
+            field: round(coverage[field] / max(open_count, 1), 6) if open_count else 0.0
+            for field in fields
+        }
+        missing_total = sum(open_count - coverage[field] for field in fields)
+        status = "ok"
+        if open_count and any(ratios[field] < 0.95 for field in ("entry_cluster", "bar_context", "execution_context", "market_micro_context")):
+            status = "degraded"
+        if open_count == 0:
+            status = "warming"
+        return {
+            "schema_version": "entry_context_quality.v1",
+            "status": status,
+            "limit": int(limit),
+            "open_decisions": open_count,
+            "coverage": coverage,
+            "coverage_ratio": ratios,
+            "missing_total": missing_total,
+            "samples": sample_counts,
+            "missing_examples": missing_examples,
+        }
     finally:
         conn.close()
 
@@ -2386,6 +2823,7 @@ def run_autonomous_learning_cycle(
     review_integrity_backfill = backfill_trade_review_integrity_markers(db_path=db_path, limit=sample_limit)
     close_source_backfill = backfill_trade_review_close_sources(db_path=db_path, limit=sample_limit)
     samples = materialize_autonomous_learning_samples(db_path=db_path, limit=sample_limit)
+    entry_cluster_governance = materialize_entry_cluster_governance_suggestions(db_path=db_path, limit=sample_limit)
     contract_repair = repair_evidence_contracts(db_path=db_path, limit=max(sample_limit, sample_limit * 4))
     gov = RuleEvolutionGovernor(str(db_path))
     governance = {
@@ -2408,6 +2846,7 @@ def run_autonomous_learning_cycle(
             "review_integrity_backfill": review_integrity_backfill,
             "close_source_backfill": close_source_backfill,
             "samples": samples,
+            "entry_cluster_governance": entry_cluster_governance,
             "evidence_contract_repair": contract_repair,
             "governance": governance,
             "parameter_template_recommendations": recommendations,
@@ -2433,6 +2872,31 @@ def schedule_autonomous_learning(
         return False
     _stop_event.clear()
 
+    def _log_summary(result: dict) -> dict:
+        samples = result.get("samples") or {}
+        entry_cluster_governance = result.get("entry_cluster_governance") or {}
+        governance = result.get("governance") or {}
+        recommendations = result.get("parameter_template_recommendations") or {}
+        demo_apply = result.get("demo_autonomy") or {}
+        return {
+            "schema_version": result.get("schema_version"),
+            "counterfactual_count": (result.get("counterfactuals") or {}).get("count"),
+            "trace_matured": (result.get("trace_maturation") or {}).get("matured"),
+            "trace_pending": (result.get("trace_maturation") or {}).get("pending"),
+            "samples_total_changed": samples.get("total_changed"),
+            "sample_counts": samples.get("counts"),
+            "entry_cluster_suggestions": entry_cluster_governance.get("suggestions"),
+            "entry_cluster_bucket_count": entry_cluster_governance.get("bucket_count"),
+            "contract_repaired": (result.get("evidence_contract_repair") or {}).get("repaired"),
+            "governance": {
+                "review_pending": governance.get("review_pending"),
+                "reconcile_active": governance.get("reconcile_active"),
+                "reconcile_application_effects": governance.get("reconcile_application_effects"),
+            },
+            "parameter_template_counts": recommendations.get("counts"),
+            "demo_autonomy_mode": demo_apply.get("mode"),
+        }
+
     def _worker() -> None:
         if _stop_event.wait(max(0.0, delay_sec)):
             return
@@ -2443,9 +2907,9 @@ def schedule_autonomous_learning(
                     recommendation_limit=recommendation_limit,
                     submit_offline_deep=submit_offline_deep,
                 )
-                logger.info("[autonomous_learning] scheduled run completed: %s", result)
+                logger.info("[autonomous_learning] scheduled run completed: {}", _log_summary(result))
             except Exception as exc:
-                logger.warning("[autonomous_learning] scheduled run failed: %s", exc)
+                logger.warning("[autonomous_learning] scheduled run failed: {}", exc)
             if _stop_event.wait(max(60.0, interval_sec)):
                 return
 

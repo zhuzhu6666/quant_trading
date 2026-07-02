@@ -195,6 +195,70 @@ python scripts/phase_c_supervisor_check.py --limit 30
 - `runtime_config_snapshot` 应能看到 startup、parameter template sync、supervisor template switch 等配置版本；
 - pending 样本不能直接进入强监督训练，先查 `evidence_contract_json.allowed_uses`。
 
+### Phase H.1 学习 worker 隔离
+
+重训练、自进化、特征工程等高 CPU 任务可以从 `quant-backend.service` 拆到独立 worker，避免和 live API / 交易 loop 抢同一个进程资源。
+
+推荐配置：
+
+```bash
+sudo cp /home/ubuntu/quant_trading/deployment/quant-learning-worker.service /etc/systemd/system/quant-learning-worker.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now quant-learning-worker.service
+```
+
+主 backend 侧建议增加环境变量覆盖：
+
+```ini
+Environment=QUANT_BACKEND_HEAVY_JOBS=0
+Environment=QUANT_BACKEND_LEARNING_SCHEDULERS=0
+```
+
+worker 默认使用：
+
+```ini
+CPUAffinity=2 3
+Environment=QUANT_LEARNING_WORKER_CPU_AFFINITY=2,3
+```
+
+这样 worker 可以吃满 2 个核心，主 backend 仍保留数据同步、健康检查、cTrader 和交易接口。
+
+当前 worker / backend 分工：
+
+- `quant-backend.service`: API、WebSocket、cTrader 连接、live loop、轻量健康检查、数据同步入口
+- `quant-learning-worker.service`: 学习调度、反事实成熟化、自治学习周期、特征工程、盘外模型重训练
+- PostgreSQL `state_v1`: live runtime state 与学习审计主库
+- SQLite `data/state.db`: 冷备/迁移源，不再作为 live 主库
+
+学习 worker 当前固定使用 `CPUAffinity=2 3`，可以让重训练任务吃满 2 个核心；不要再把高 CPU 学习任务放回 backend 进程。
+
+常用检查：
+
+```bash
+systemctl is-active quant-backend.service quant-learning-worker.service
+systemctl status quant-backend.service quant-learning-worker.service --no-pager -l
+journalctl -u quant-learning-worker.service --since "30 min ago" --no-pager
+```
+
+学习健康与模型接口：
+
+```text
+GET  /api/learning/dataset/quality-health
+POST /api/learning/model/open-quality-lightgbm/train
+POST /api/learning/model/open-quality-lightgbm/shadow-run
+GET  /api/learning/model/open-quality-lightgbm/audits
+GET  /api/learning/model/position-quality-lightgbm/audits
+GET  /api/learning/model/factor-governance-lightgbm/audits
+GET  /api/learning/model/meta-lightgbm/shadow-report
+```
+
+判断原则：
+
+- `evidence_contract.bad_total` 应长期为 0；
+- 新开仓应带齐 `entry_cluster / bar_context / execution_context / market_micro_context / decision_quality_context / event_context / data_quality_context`；
+- 历史开仓缺少实时上下文时保持 degraded 即可，不能伪造；
+- `open_quality_lightgbm` 只能 shadow/advisory，不能下单、平仓或改硬风控。
+
 ## 6. 改代码前检查
 
 在服务器改代码前，先确认：

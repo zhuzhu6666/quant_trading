@@ -7,6 +7,7 @@ Usage:
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -35,6 +36,11 @@ def _init_observability() -> None:
         _lg.info("[lifespan] Metrics installed into RuntimeState")
     except Exception as e:
         _lg.warning(f"[lifespan] Metrics.install_into_runtime_state failed (non-fatal): {e}")
+
+
+def _env_enabled(name: str, default: str = "1") -> bool:
+    value = str(os.getenv(name, default) or "").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
 
 
 @asynccontextmanager
@@ -124,29 +130,32 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _lg.warning(f"[lifespan] cTrader warmup failed (non-fatal): {e}")
 
-    # Delayed learning backfill: repair restart gaps using ctrader_deals + decision_ledger.
-    try:
-        from backend.services.learning_backfill import schedule_learning_backfill
-        if schedule_learning_backfill(delay_sec=180.0, limit=100, allow_partial=False, rebuild_learning=True):
-            _lg.info("[lifespan] learning backfill scheduled")
-    except Exception as e:
-        _lg.warning(f"[lifespan] learning backfill schedule failed (non-fatal): {e}")
+    if _env_enabled("QUANT_BACKEND_LEARNING_SCHEDULERS", "0"):
+        # Delayed learning backfill: repair restart gaps using ctrader_deals + decision_ledger.
+        try:
+            from backend.services.learning_backfill import schedule_learning_backfill
+            if schedule_learning_backfill(delay_sec=180.0, limit=100, allow_partial=False, rebuild_learning=True):
+                _lg.info("[lifespan] learning backfill scheduled")
+        except Exception as e:
+            _lg.warning(f"[lifespan] learning backfill schedule failed (non-fatal): {e}")
 
-    # Supervisor counterfactual/advisory materialization.
-    try:
-        from backend.services.supervisor_learning_scheduler import schedule_supervisor_learning
-        if schedule_supervisor_learning(delay_sec=300.0, interval_sec=1800.0, limit=200):
-            _lg.info("[lifespan] supervisor learning scheduled")
-    except Exception as e:
-        _lg.warning(f"[lifespan] supervisor learning schedule failed (non-fatal): {e}")
+        # Supervisor counterfactual/advisory materialization.
+        try:
+            from backend.services.supervisor_learning_scheduler import schedule_supervisor_learning
+            if schedule_supervisor_learning(delay_sec=300.0, interval_sec=1800.0, limit=200):
+                _lg.info("[lifespan] supervisor learning scheduled")
+        except Exception as e:
+            _lg.warning(f"[lifespan] supervisor learning schedule failed (non-fatal): {e}")
 
-    # Autonomous learning factory: samples + governed suggestion materialization only.
-    try:
-        from backend.services.autonomous_learning import schedule_autonomous_learning
-        if schedule_autonomous_learning(delay_sec=420.0, interval_sec=1800.0, sample_limit=500, recommendation_limit=20):
-            _lg.info("[lifespan] autonomous learning scheduled")
-    except Exception as e:
-        _lg.warning(f"[lifespan] autonomous learning schedule failed (non-fatal): {e}")
+        # Autonomous learning factory: samples + governed suggestion materialization only.
+        try:
+            from backend.services.autonomous_learning import schedule_autonomous_learning
+            if schedule_autonomous_learning(delay_sec=420.0, interval_sec=1800.0, sample_limit=500, recommendation_limit=20):
+                _lg.info("[lifespan] autonomous learning scheduled")
+        except Exception as e:
+            _lg.warning(f"[lifespan] autonomous learning schedule failed (non-fatal): {e}")
+    else:
+        _lg.info("[lifespan] backend learning schedulers disabled by QUANT_BACKEND_LEARNING_SCHEDULERS")
 
     # Background warm-up db-health cache (避免首次请求阻塞线程池 20s)
     try:
@@ -162,6 +171,12 @@ async def lifespan(app: FastAPI):
 
     # Stop scheduler on shutdown
     try:
+        from backend.services.learning_backfill import stop_learning_backfill
+        stop_learning_backfill()
+    except Exception as e:
+        _lg.warning(f"[lifespan] learning backfill stop failed: {e}")
+
+    try:
         from backend.services.supervisor_learning_scheduler import stop_supervisor_learning
         stop_supervisor_learning()
     except Exception as e:
@@ -174,9 +189,8 @@ async def lifespan(app: FastAPI):
         _lg.warning(f"[lifespan] autonomous learning stop failed: {e}")
 
     try:
-        if hasattr(app.state, "_evolution_scheduler"):
-            app.state._evolution_scheduler.stop()
-            _lg.info("[lifespan] InProcessScheduler stopped")
+        from backend.services.live_service import _stop_live_scheduler
+        _stop_live_scheduler()
     except Exception as e:
         _lg.warning(f"[lifespan] InProcessScheduler stop failed: {e}")
 

@@ -44,3 +44,33 @@ def test_build_failure_taxonomy_marks_timing_and_regime_cases():
     assert "holding_too_long" in result["responsibility_labels"]
     assert "regime_changed_during_hold" in result["responsibility_labels"]
     assert "factor_logic_ok_but_param_suspect" in result["responsibility_labels"]
+
+
+def test_build_failure_taxonomy_marks_granular_entry_failures():
+    result = build_failure_taxonomy(
+        {
+            "entry_quality": 0.31,
+            "exit_quality": 0.55,
+            "action_score": 0.22,
+            "direction": "buy",
+            "pnl": -11.0,
+            "mae": -14.0,
+            "mfe": 2.0,
+            "bar_context": {"bar_close_location": 0.91},
+            "event_context": {"event_near": True, "event_multiplier": 0.75},
+            "decision_quality_context": {
+                "factor_conflict_ratio": 0.52,
+                "positive_contribution_abs": 0.2,
+                "negative_contribution_abs": 0.6,
+            },
+            "context_integrity": "full",
+        }
+    )
+
+    labels = result["responsibility_labels"]
+    assert "entry_chase" in labels
+    assert "weak_signal_overtraded" in labels
+    assert "conflicting_factor_entry" in labels
+    assert "macro_event_overridden" in labels
+    assert "low_reward_to_risk_entry" in labels
+    assert result["primary_responsibility"] == "timing"

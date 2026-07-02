@@ -421,6 +421,54 @@ export async function getModelPermissionAudits(limit = 10): Promise<LearningPayl
   return getJson<LearningPayload>(`/api/learning/model/permissions/audits?limit=${encodeURIComponent(String(limit))}`);
 }
 
+export async function getLearningDatasetReadiness(): Promise<LearningPayload> {
+  return getJson<LearningPayload>("/api/learning/dataset/readiness");
+}
+
+export async function getLearningDatasetQualityHealth(limit = 1000): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/dataset/quality-health?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getModelShadowQueue(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/shadow-queue?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getModelCanaryReviews(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/canary-review?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getModelInferenceAudits(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/inference?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getMetaModelAdvisories(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/meta/advisories?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getMetaLightgbmAudits(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/meta-lightgbm/audits?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getPositionQualityLightgbmAudits(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/position-quality-lightgbm/audits?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getOpenQualityLightgbmAudits(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/open-quality-lightgbm/audits?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getFactorGovernanceLightgbmAudits(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/factor-governance-lightgbm/audits?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getFactorGovernanceLightgbmAdvisories(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/factor-governance-lightgbm/advisories?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getOffmarketHighLoadAudits(limit = 30): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/model/offmarket-high-load/audits?limit=${encodeURIComponent(String(limit))}`);
+}
+
 export async function getStateSnapshot(): Promise<StateSnapshot> {
   return getJson<StateSnapshot>("/api/state");
 }

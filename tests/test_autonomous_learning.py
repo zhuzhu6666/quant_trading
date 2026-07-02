@@ -1,7 +1,9 @@
 import json
 import sqlite3
+import time
 
 from backend.services import autonomous_learning as al
+from backend.services.evolution_ledger import expire_stale_evolution_runs, start_evolution_run
 
 
 def _create_sample_db(path):
@@ -105,6 +107,29 @@ def _create_sample_db(path):
             json.dumps({"n_positions": 1}),
             json.dumps({"policy_verdict": risk_verdict}),
             json.dumps({"skip_stage": "risk_policy", "risk_verdict": risk_verdict}),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_ledger
+        (decision_id, trade_id, position_id, event_type, symbol, timeframe,
+         decision_ts, action_reason, action_score, portfolio_state_json,
+         risk_state_json, action_json, created_at)
+        VALUES ('dec_open', 'p1', 'p1', 'open', 'XAUUSD+', 'M5',
+                90.0, 'executed', -0.62, '{"n_positions": 0}',
+                '{"policy_verdict": {"allowed": true}}', ?, 90.0)
+        """,
+        (
+            json.dumps(
+                {
+                    "direction": -1,
+                    "score": -0.62,
+                    "entry_cluster": {"same_direction_open_count_before": 2},
+                    "same_direction_open_count": 2,
+                    "recent_same_direction_entries": {"15m": 2},
+                    "portfolio_exposure": {"same_direction_open_count_after": 3},
+                }
+            ),
         ),
     )
     conn.execute(
@@ -215,6 +240,11 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
     assert "supervisor_execution_trace" in sample_types
     assert "trade_review_outcome" in sample_types
     assert "post_close_counterfactual" in sample_types
+    open_sample = [row for row in rows if row[0] == "shadow_open_decision" and row[1] == "matured"][0]
+    assert open_sample[1] == "matured"
+    open_contract = json.loads(open_sample[4])
+    assert open_contract["model_ready"] is True
+    assert "supervised_training" in open_contract["allowed_uses"]
     supervisor_trace = [row for row in rows if row[0] == "supervisor_execution_trace"][0]
     assert supervisor_trace[1] == "pending"
     trace_contract = json.loads(supervisor_trace[4])
@@ -228,8 +258,73 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
     assert recovered_review[2] == "recovered"
     assert recovered_review[3] == 0.5
     assert json.loads(recovered_review[4])["schema_version"] == "learning_evidence_contract.v1"
+    counterfactual_sample = [row for row in rows if row[0] == "post_close_counterfactual"][0]
+    counterfactual_contract = json.loads(counterfactual_sample[4])
+    assert counterfactual_contract["model_ready"] is True
+    assert "counterfactual_training" in counterfactual_contract["allowed_uses"]
+    assert "supervised_training" in counterfactual_contract["allowed_uses"]
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO autonomous_learning_sample
+            (sample_id, sample_type, source_table, source_id, label_status,
+             integrity, train_weight, features_json, verdict_json, label_json,
+             trace_json, created_at, updated_at, evidence_contract_json,
+             config_version, config_hash, evolution_run_id)
+            VALUES ('stale_cf_sample', 'post_close_counterfactual',
+                    'supervisor_counterfactual_review', 'missing_cf', 'matured',
+                    'full', 1.0, '{}', '{}', '{}', '{}', 1.0, 1.0, '{}',
+                    1, 'hash', 'run')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        stale_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM autonomous_learning_sample s
+            LEFT JOIN supervisor_counterfactual_review cf ON cf.counterfactual_id=s.source_id
+            WHERE s.sample_type='post_close_counterfactual'
+              AND cf.counterfactual_id IS NULL
+            """
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert stale_count == 0
     assert ("autonomous_learning_samples",) in events
     assert ("autonomous_learning_samples", "completed") in runs
+
+
+def test_expire_stale_evolution_runs_marks_only_old_running_rows(tmp_path):
+    db_path = tmp_path / "state.db"
+    stale = start_evolution_run(run_type="autonomous_learning_samples", db_path=db_path)
+    fresh = start_evolution_run(run_type="demo_autonomy_apply", db_path=db_path)
+    old_ts = time.time() - 7200
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("UPDATE evolution_run SET started_at=? WHERE run_id=?", (old_ts, stale["run_id"]))
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = expire_stale_evolution_runs(db_path=db_path, max_age_sec=3600)
+
+    assert result["expired_count"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = dict(conn.execute("SELECT run_id, status FROM evolution_run").fetchall())
+    finally:
+        conn.close()
+    assert rows[stale["run_id"]] == "expired"
+    assert rows[fresh["run_id"]] == "running"
 
 
 def test_materialize_autonomous_learning_orders_decisions_by_event_time(tmp_path):
@@ -333,6 +428,84 @@ def test_repair_evidence_contracts_removes_pending_supervised_training(tmp_path)
     finally:
         conn.close()
     assert decision == ("repair_evidence_contracts", "completed")
+
+
+def test_entry_cluster_governance_materializes_policy_suggestion(tmp_path):
+    db_path = tmp_path / "state.db"
+    al.ensure_autonomous_learning_tables(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        now = time.time()
+        contract = {
+            "schema_version": "learning_evidence_contract.v1",
+            "allowed_uses": ["audit", "explainability", "supervised_training"],
+            "model_ready": True,
+        }
+        for idx in range(3):
+            features = {
+                "action": {"same_direction_open_count": 2},
+                "entry_cluster": {
+                    "same_direction_open_count_before": 2,
+                    "pyramid_depth": 2,
+                    "recent_same_direction_entries": {"within_5m": idx + 1},
+                },
+            }
+            label = {
+                "label": "open_outcome",
+                "outcome_label": "bad_loss",
+                "pnl": -8.0 - idx,
+                "failure_tags": ["entry_cluster_risk"],
+            }
+            conn.execute(
+                """
+                INSERT INTO autonomous_learning_sample
+                (sample_id, sample_type, source_table, source_id, decision_id,
+                 label_status, integrity, train_weight, event_ts, features_json,
+                 verdict_json, label_json, trace_json, evidence_contract_json,
+                 created_at, updated_at)
+                VALUES (?, 'shadow_open_decision', 'decision_ledger', ?, ?,
+                        'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"open_cluster_{idx}",
+                    f"dec_cluster_{idx}",
+                    f"dec_cluster_{idx}",
+                    now + idx,
+                    json.dumps(features),
+                    json.dumps(label),
+                    json.dumps({"decision_id": f"dec_cluster_{idx}", "position_id": f"p{idx}"}),
+                    json.dumps(contract),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = al.materialize_entry_cluster_governance_suggestions(db_path=db_path, min_samples=3, min_bad_rate=0.5)
+
+    assert result["suggestions"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        stats = conn.execute(
+            """
+            SELECT sample_count, bad_loss_count, recommended_action
+            FROM experience_pattern_stats
+            WHERE scope_type='entry_cluster' AND scope_key='same_direction_ge_2'
+            """
+        ).fetchone()
+        suggestion = conn.execute(
+            """
+            SELECT scope_type, scope_key, action, status
+            FROM policy_suggestion
+            WHERE scope_type='entry_cluster'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert stats == (3, 3, "increase_same_direction_cooldown")
+    assert suggestion == ("entry_cluster", "same_direction_ge_2", "increase_same_direction_cooldown", "proposed")
 
 
 def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
@@ -839,6 +1012,11 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     )
     monkeypatch.setattr(
         al,
+        "materialize_entry_cluster_governance_suggestions",
+        lambda **kwargs: calls.append("entry_cluster_governance") or {"suggestions": 1},
+    )
+    monkeypatch.setattr(
+        al,
         "repair_evidence_contracts",
         lambda **kwargs: calls.append("repair_contracts") or {"repaired": 1},
     )
@@ -859,6 +1037,7 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert result["counterfactuals"] == {"count": 1}
     assert result["trace_maturation"]["matured"] == 1
     assert result["close_source_backfill"]["updated"] == 1
+    assert result["entry_cluster_governance"]["suggestions"] == 1
     assert result["evidence_contract_repair"]["repaired"] == 1
     assert calls[:5] == [
         "counterfactual",
@@ -867,5 +1046,6 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
         "backfill_close_sources",
         "materialize_samples",
     ]
-    assert calls[5] == "repair_contracts"
+    assert calls[5] == "entry_cluster_governance"
+    assert calls[6] == "repair_contracts"
     assert calls[-1] == "demo_apply"

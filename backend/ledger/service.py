@@ -5,7 +5,9 @@ import logging
 import sqlite3
 import time
 import uuid
+from copy import deepcopy
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,127 @@ logger = logging.getLogger(__name__)
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, default=str)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    mapping = {
+        "M1": 60,
+        "M5": 300,
+        "M15": 900,
+        "M30": 1800,
+        "H1": 3600,
+        "H4": 14400,
+        "D1": 86400,
+    }
+    return mapping.get(str(timeframe or "").upper(), 0)
+
+
+def _classify_trading_session(hour_utc: int) -> str:
+    if 0 <= hour_utc < 7:
+        return "asia"
+    if 7 <= hour_utc < 13:
+        return "europe"
+    if 13 <= hour_utc < 21:
+        return "us"
+    return "rollover"
+
+
+def _normalize_temporal_context(existing: Any, *, decision_ts: float, timeframe: str) -> dict:
+    base = dict(existing or {}) if isinstance(existing, dict) else {}
+    original_ts = _safe_float(base.get("decision_ts"), 0.0)
+    ts = _safe_float(decision_ts, 0.0)
+    if ts <= 0:
+        return base
+    try:
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    except Exception:
+        return base
+
+    drift = original_ts - ts if original_ts > 0 else 0.0
+    if original_ts > 0 and abs(drift) > 1e-6:
+        base.setdefault("runtime_decision_ts", original_ts)
+        base["market_runtime_drift_seconds"] = round(drift, 6)
+        if "seconds_since_last_trade" in base:
+            adjusted = _safe_float(base.get("seconds_since_last_trade"), 0.0) - drift
+            base["seconds_since_last_trade"] = round(max(0.0, adjusted), 3)
+        tf_for_adjust = _timeframe_seconds(str(base.get("timeframe") or timeframe))
+        if tf_for_adjust > 0 and "seconds_since_last_trade" in base:
+            base["bars_since_last_trade"] = round(
+                _safe_float(base.get("seconds_since_last_trade"), 0.0) / tf_for_adjust,
+                3,
+            )
+
+    tf = str(base.get("timeframe") or timeframe or "")
+    tf_seconds = _timeframe_seconds(tf)
+    base.update(
+        {
+            "decision_ts": ts,
+            "time_basis": "market_epoch_seconds_utc",
+            "timeframe": tf,
+            "timeframe_seconds": tf_seconds,
+            "hour_utc": int(dt.hour),
+            "minute_utc": int(dt.minute),
+            "weekday_utc": int(dt.weekday()),
+            "session_label": _classify_trading_session(int(dt.hour)),
+            "is_weekend_utc": bool(dt.weekday() >= 5),
+        }
+    )
+    return base
+
+
+def _normalize_audit_payload_temporal(payload: Any, *, decision_ts: float, timeframe: str) -> None:
+    if not isinstance(payload, dict):
+        return
+    if isinstance(payload.get("temporal_context"), dict):
+        payload["temporal_context"] = _normalize_temporal_context(
+            payload.get("temporal_context"),
+            decision_ts=decision_ts,
+            timeframe=timeframe,
+        )
+    state = payload.get("state")
+    if isinstance(state, dict) and isinstance(state.get("temporal_context"), dict):
+        state["temporal_context"] = _normalize_temporal_context(
+            state.get("temporal_context"),
+            decision_ts=decision_ts,
+            timeframe=timeframe,
+        )
+
+
+def _normalize_decision_time_payloads(
+    *,
+    risk_state: dict | None,
+    action_json: dict | None,
+    decision_ts: float,
+    timeframe: str,
+) -> tuple[dict | None, dict | None]:
+    """Ensure nested audit contexts use the same market decision time as the ledger row."""
+    normalized_risk = deepcopy(risk_state) if isinstance(risk_state, dict) else risk_state
+    normalized_action = deepcopy(action_json) if isinstance(action_json, dict) else action_json
+    for container in (normalized_risk, normalized_action):
+        if not isinstance(container, dict):
+            continue
+        for key in ("policy_verdict", "risk_verdict"):
+            verdict = container.get(key)
+            if isinstance(verdict, dict):
+                _normalize_audit_payload_temporal(
+                    verdict.get("audit_payload"),
+                    decision_ts=decision_ts,
+                    timeframe=timeframe,
+                )
+        if isinstance(container.get("temporal_context"), dict):
+            container["temporal_context"] = _normalize_temporal_context(
+                container.get("temporal_context"),
+                decision_ts=decision_ts,
+                timeframe=timeframe,
+            )
+    return normalized_risk, normalized_action
 
 
 class DecisionLedger:
@@ -94,6 +217,13 @@ class DecisionLedger:
     ) -> str:
         now = time.time()
         decision_id = self.new_id("dec")
+        normalized_decision_ts = float(decision_ts or now)
+        normalized_risk_state, normalized_action_json = _normalize_decision_time_payloads(
+            risk_state=risk_state,
+            action_json=action_json,
+            decision_ts=normalized_decision_ts,
+            timeframe=str(timeframe or ""),
+        )
         decision_payload = {
             "decision_id": decision_id,
             "trade_id": str(trade_id or ""),
@@ -101,16 +231,16 @@ class DecisionLedger:
             "event_type": str(event_type),
             "symbol": str(symbol or ""),
             "timeframe": str(timeframe or ""),
-            "decision_ts": float(decision_ts or now),
+            "decision_ts": normalized_decision_ts,
             "regime_id": str(regime_id or ""),
             "regime_confidence": float(regime_confidence or 0.0),
             "portfolio_state_json": _json_dumps(portfolio_state),
-            "risk_state_json": _json_dumps(risk_state),
+            "risk_state_json": _json_dumps(normalized_risk_state),
             "policy_version": str(policy_version or ""),
             "factor_set_version": str(factor_set_version or ""),
             "action_score": float(action_score or 0.0),
             "action_reason": str(action_reason or ""),
-            "action_json": _json_dumps(action_json),
+            "action_json": _json_dumps(normalized_action_json),
             "created_at": now,
         }
         factor_payloads: list[dict[str, Any]] = []

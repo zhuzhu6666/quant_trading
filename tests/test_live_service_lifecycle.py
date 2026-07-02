@@ -74,7 +74,9 @@ def _patch_live_state_conn(monkeypatch, conn_factory):
     monkeypatch.setattr(live_service, "_get_state_read_conn", conn_factory)
 
 
-def test_prime_live_loop_state_sets_loop_and_session_fields():
+def test_prime_live_loop_state_sets_loop_and_resets_session_when_no_snapshot(monkeypatch):
+    monkeypatch.setattr(live_service, "_restore_session_state_for_day", lambda trade_date=None: False)
+
     live_service._live_state_update(
         session_pnl=88.0,
         session_trades=3,
@@ -101,12 +103,109 @@ def test_prime_live_loop_state_sets_loop_and_session_fields():
     assert live_service._live_state_get("session_max_drawdown_pct") == 0.0
 
 
+def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
+    reset_called = False
+
+    def _restore(trade_date=None):
+        live_service._live_state_update(
+            session_pnl=2.75,
+            session_trades=29,
+            session_winning=8,
+            session_losing=21,
+            session_consecutive_loss=1,
+        )
+        return True
+
+    def _reset():
+        nonlocal reset_called
+        reset_called = True
+
+    monkeypatch.setattr(live_service, "_restore_session_state_for_day", _restore)
+    monkeypatch.setattr(live_service, "_reset_session_state_for_new_day", _reset)
+
+    live_service._prime_live_loop_state(
+        broker="ctrader",
+        strategy_name="test_strategy",
+        started_at=123.0,
+        account={"ok": True, "broker": "ctrader", "balance": 1000.0, "equity": 1000.0},
+    )
+
+    assert reset_called is False
+    assert live_service._live_state_get("loop_running") is True
+    assert live_service._live_state_get("session_pnl") == pytest.approx(2.75)
+    assert live_service._live_state_get("session_trades") == 29
+
+
 def test_floor_api_volume_to_step_skips_untradeable_partial_reduce():
     meta = {"api_min_volume": 100, "api_step_volume": 100}
 
     assert live_service._floor_api_volume_to_step(50.0, meta) == 0.0
     assert live_service._floor_api_volume_to_step(150.0, meta) == 100.0
     assert live_service._floor_api_volume_to_step(200.0, meta) == 200.0
+
+
+def test_untradeable_min_position_reduce_upgrades_to_close_when_thesis_broken():
+    should_close, reason = live_service._should_full_close_untradeable_reduce(
+        current_volume=100.0,
+        raw_reduce_volume=50.0,
+        reduce_volume=0.0,
+        min_volume=100.0,
+        verdict={
+            "summary_reason": "profit_giveback_after_mfe",
+            "evidence": {
+                "thesis_status": "broken",
+                "giveback_ratio": 1.0,
+                "current_pnl": -1.08,
+                "trigger_tags": ["profit_giveback_after_mfe"],
+            },
+            "recommended_controls": {"reduce_fraction": 0.5},
+        },
+    )
+
+    assert should_close is True
+    assert reason == "minimum_position_thesis_broken"
+
+
+def test_untradeable_min_position_reduce_stays_skipped_without_strong_risk_evidence():
+    should_close, reason = live_service._should_full_close_untradeable_reduce(
+        current_volume=100.0,
+        raw_reduce_volume=50.0,
+        reduce_volume=0.0,
+        min_volume=100.0,
+        verdict={
+            "summary_reason": "profit_giveback_after_mfe",
+            "evidence": {
+                "thesis_status": "weakening",
+                "giveback_ratio": 0.75,
+                "current_pnl": 8.0,
+                "trigger_tags": ["profit_giveback_after_mfe"],
+            },
+            "recommended_controls": {"reduce_fraction": 0.5},
+        },
+    )
+
+    assert should_close is False
+    assert reason == "risk_evidence_not_strong_enough"
+
+
+def test_untradeable_reduce_does_not_upgrade_above_minimum_position():
+    should_close, reason = live_service._should_full_close_untradeable_reduce(
+        current_volume=150.0,
+        raw_reduce_volume=75.0,
+        reduce_volume=0.0,
+        min_volume=100.0,
+        verdict={
+            "evidence": {
+                "thesis_status": "broken",
+                "giveback_ratio": 1.0,
+                "current_pnl": -1.0,
+            },
+            "recommended_controls": {"reduce_fraction": 0.5},
+        },
+    )
+
+    assert should_close is False
+    assert reason == "not_minimum_position"
 
 
 def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
@@ -654,6 +753,51 @@ def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
     assert "l2_depth" in ctx["runtime_health"]["system_health"]["critical_components"]
     assert ctx["runtime_health"]["account_cache_age_seconds"] >= 10.0
     assert ctx["runtime_health"]["positions_cache_age_seconds"] >= 30.0
+
+
+def test_open_trade_risk_context_separates_market_and_runtime_time(monkeypatch):
+    class _Bridge:
+        is_connected = True
+
+    market_ts = 1_782_979_200.0
+    evaluated_at = market_ts + 900.0
+    monkeypatch.setattr(live_service.time, "time", lambda: evaluated_at)
+    live_service._live_state_update(
+        loop_running=True,
+        session_last_trade_ts=evaluated_at - 600.0,
+        loop_started_at=evaluated_at - 3600.0,
+    )
+
+    ctx = live_service._build_open_trade_risk_context(
+        cfg=SimpleNamespace(
+            timeframe="M5",
+            var_enabled=False,
+            risk_loss_cooldown_after_losses=2,
+            risk_loss_cooldown_bars=3,
+            risk_block_on_disk_critical=True,
+            risk_require_l2_depth=False,
+            max_position_count=3,
+            max_position_api_volume=1000.0,
+            pyramid_enabled=True,
+        ),
+        bridge=_Bridge(),
+        acct={"balance": 10000, "equity": 10000},
+        positions=[],
+        requested_api_volume=100.0,
+        signal_score=0.6,
+        decision_ts=market_ts,
+    )
+
+    temporal = ctx["temporal_context"]
+    assert temporal["decision_ts"] == pytest.approx(market_ts)
+    assert temporal["evaluated_at"] == pytest.approx(evaluated_at)
+    assert temporal["time_basis"] == "market_epoch_seconds_utc"
+    assert temporal["runtime_basis"] == "system_epoch_seconds_utc"
+    assert temporal["hour_utc"] == 8
+    assert temporal["session_label"] == "europe"
+    assert temporal["seconds_since_last_trade"] == pytest.approx(600.0)
+    assert temporal["bars_since_last_trade"] == pytest.approx(2.0)
+    assert temporal["loop_uptime_seconds"] == pytest.approx(3600.0)
 
 
 def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):

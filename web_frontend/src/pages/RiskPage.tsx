@@ -195,7 +195,7 @@ export function RiskPage() {
           </div>
 
           <div className="table-wrap table-spaced">
-            <table>
+            <table className="mobile-card-table policy-table">
               <thead>
                 <tr>
                   <th>时间</th>
@@ -251,7 +251,7 @@ export function RiskPage() {
 
         <MetricCard title="交易证据链" className="wide-panel">
           <div className="table-wrap">
-            <table>
+            <table className="mobile-card-table trade-traces-table">
               <thead>
                 <tr>
                   <th>时间</th>

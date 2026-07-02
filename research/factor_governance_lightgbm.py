@@ -72,17 +72,25 @@ def _dependency_error() -> str:
     return ""
 
 
-def _sample_from_row(row: Any) -> dict[str, Any]:
-    item = dict(row)
+def _current_row_label(item: dict[str, Any]) -> int:
     outcome = str(item.get("outcome_label") or "").lower()
     pnl = _safe_float(item.get("pnl"))
     net = _safe_float(item.get("net_contribution"))
-    confidence = _safe_float(item.get("confidence"))
     label = 1 if net > 0 and pnl >= 0 else 0
     if outcome in {"good_win", "small_win", "win", "good_loss"} and net >= 0:
         label = 1
     if outcome in {"bad_loss", "loss"} and net <= 0:
         label = 0
+    return label
+
+
+def _sample_from_row(row: Any, *, label: int | None = None, label_source: str = "current_factor_outcome") -> dict[str, Any]:
+    item = dict(row)
+    outcome = str(item.get("outcome_label") or "").lower()
+    pnl = _safe_float(item.get("pnl"))
+    net = _safe_float(item.get("net_contribution"))
+    confidence = _safe_float(item.get("confidence"))
+    target_label = _current_row_label(item) if label is None else int(label)
     features = {
         "entry_contribution": _safe_float(item.get("entry_contribution")),
         "hold_contribution": _safe_float(item.get("hold_contribution")),
@@ -109,7 +117,8 @@ def _sample_from_row(row: Any) -> dict[str, Any]:
         "created_at": _safe_float(item.get("created_at")),
         "pnl": pnl,
         "outcome_label": outcome,
-        "label": label,
+        "label": target_label,
+        "label_source": label_source,
         "features": {name: features.get(name, 0.0) for name in FEATURE_NAMES},
     }
 
@@ -194,19 +203,45 @@ class FactorGovernanceLightGBMService:
         try:
             rows = self._execute(conn,
                 """
-                SELECT f.review_id, f.trade_id, f.factor, f.entry_contribution,
-                       f.hold_contribution, f.exit_contribution, f.net_contribution,
-                       f.confidence, r.position_id, r.entry_quality, r.hold_quality,
-                       r.exit_quality, r.regime_fit_score, r.execution_quality,
-                       r.pnl, r.mae, r.mfe, r.outcome_label, r.created_at
-                FROM factor_contribution_review f
-                JOIN trade_outcome_review r ON r.review_id = f.review_id
-                ORDER BY r.created_at ASC, f.id ASC
-                LIMIT ?
+                SELECT *
+                FROM (
+                    SELECT f.id, f.review_id, f.trade_id, f.factor, f.entry_contribution,
+                           f.hold_contribution, f.exit_contribution, f.net_contribution,
+                           f.confidence, r.position_id, r.entry_quality, r.hold_quality,
+                           r.exit_quality, r.regime_fit_score, r.execution_quality,
+                           r.pnl, r.mae, r.mfe, r.outcome_label, r.created_at
+                    FROM factor_contribution_review f
+                    JOIN trade_outcome_review r ON r.review_id = f.review_id
+                    ORDER BY r.created_at DESC, f.id DESC
+                    LIMIT ?
+                ) recent_factors
+                ORDER BY created_at ASC, id ASC
                 """,
                 (int(limit),),
             ).fetchall()
-            return [_sample_from_row(row) for row in rows]
+            row_items = [dict(row) for row in rows]
+            by_factor: dict[str, list[dict[str, Any]]] = {}
+            for item in row_items:
+                by_factor.setdefault(str(item.get("factor") or ""), []).append(item)
+            next_label_by_key: dict[tuple[str, str], int] = {}
+            for factor_rows in by_factor.values():
+                ordered = sorted(factor_rows, key=lambda item: (_safe_float(item.get("created_at")), int(item.get("id") or 0)))
+                for idx, item in enumerate(ordered[:-1]):
+                    future = ordered[idx + 1]
+                    next_label_by_key[(str(item.get("review_id") or ""), str(item.get("factor") or ""))] = _current_row_label(future)
+            samples = []
+            for item in row_items:
+                key = (str(item.get("review_id") or ""), str(item.get("factor") or ""))
+                if key not in next_label_by_key:
+                    continue
+                samples.append(
+                    _sample_from_row(
+                        item,
+                        label=next_label_by_key[key],
+                        label_source="next_same_factor_outcome",
+                    )
+                )
+            return samples
         finally:
             conn.close()
 
@@ -235,7 +270,7 @@ class FactorGovernanceLightGBMService:
         import joblib
         import lightgbm as lgb
         import pandas as pd
-        from sklearn.metrics import accuracy_score, roc_auc_score
+        from sklearn.metrics import accuracy_score, balanced_accuracy_score, recall_score, roc_auc_score
 
         samples = self.load_samples(limit=limit)
         if len(samples) < int(min_samples):
@@ -275,6 +310,7 @@ class FactorGovernanceLightGBMService:
             min_child_samples=max(1, min(20, len(train_samples) // 4)),
             subsample=0.9,
             colsample_bytree=0.9,
+            class_weight="balanced",
             random_state=42,
             n_jobs=1,
             verbosity=-1,
@@ -285,6 +321,9 @@ class FactorGovernanceLightGBMService:
 
         def _metrics(y_true: list[int], probs: Any) -> dict[str, Any]:
             preds = [1 if float(x) >= 0.5 else 0 for x in probs]
+            positive_rate = sum(y_true) / max(len(y_true), 1)
+            majority_label = 1 if positive_rate >= 0.5 else 0
+            majority_preds = [majority_label] * len(y_true)
             auc = None
             if len(set(y_true)) > 1:
                 try:
@@ -294,8 +333,14 @@ class FactorGovernanceLightGBMService:
             return {
                 "count": len(y_true),
                 "accuracy": round(float(accuracy_score(y_true, preds)), 6) if y_true else None,
+                "balanced_accuracy": round(float(balanced_accuracy_score(y_true, preds)), 6) if y_true else None,
+                "majority_baseline_accuracy": round(float(accuracy_score(y_true, majority_preds)), 6) if y_true else None,
                 "auc": auc,
-                "positive_rate": round(sum(y_true) / max(len(y_true), 1), 6),
+                "positive_rate": round(positive_rate, 6),
+                "prediction_positive_rate": round(sum(preds) / max(len(preds), 1), 6),
+                "negative_recall": round(float(recall_score(y_true, preds, pos_label=0, zero_division=0)), 6),
+                "positive_recall": round(float(recall_score(y_true, preds, pos_label=1, zero_division=0)), 6),
+                "majority_class": majority_label,
             }
 
         feature_importance = [
@@ -310,6 +355,11 @@ class FactorGovernanceLightGBMService:
             "holdout": _metrics(y_holdout, holdout_prob),
             "sample_count": len(samples),
             "feature_count": len(FEATURE_NAMES),
+            "split": "time_ordered",
+            "holdout_ratio": float(holdout_ratio),
+            "train_count": len(train_samples),
+            "holdout_count": len(holdout_samples),
+            "label_distribution": {"negative": labels.count(0), "positive": labels.count(1)},
             "safe_for_live_trading": False,
         }
         now = time.time()
@@ -327,12 +377,12 @@ class FactorGovernanceLightGBMService:
             "model_file": str(model_path),
             "model_file_sha256": _sha256(model_path),
             "feature_names": FEATURE_NAMES,
-            "label": "positive_factor_contribution",
+            "label": "next_same_factor_positive_contribution",
             "sample_window": {"limit": int(limit), "sample_count": len(samples)},
             "metrics": metrics,
             "explainability": {
                 "feature_importance": feature_importance,
-                "summary": "LightGBM shadow-only factor governance model. Scores are advisory and logged.",
+                "summary": "LightGBM shadow-only factor governance model. Labels use the next same-factor outcome, not the current row, to avoid same-row leakage. Scores are advisory and logged.",
             },
             "capabilities": {
                 "live_trading": False,
@@ -504,6 +554,7 @@ class FactorGovernanceLightGBMService:
             "label": sample["label"],
             "pnl": sample["pnl"],
             "outcome_label": sample["outcome_label"],
+            "label_source": sample.get("label_source", ""),
         }
         inference_id = f"{MODEL_TYPE}:{sample['sample_id']}:{int(now * 1000)}"
         conn = self._conn()

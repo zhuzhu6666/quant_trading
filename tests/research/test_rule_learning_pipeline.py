@@ -343,6 +343,121 @@ def test_feature_provider_exports_explainable_skip_decision_samples(tmp_path):
     assert [item["sample_id"] for item in items] == [f"decision:{decision_id}"]
 
 
+def test_ledger_normalizes_nested_policy_temporal_context_to_market_time(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    ledger = DecisionLedger(db_path)
+    market_ts = 1_782_979_200.0
+    runtime_ts = market_ts + 900.0
+
+    decision_id = ledger.log_decision(
+        event_type="skip",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=market_ts,
+        risk_state={
+            "policy_verdict": {
+                "allowed": False,
+                "reason": "daily_trade_limit",
+                "audit_payload": {
+                    "temporal_context": {
+                        "decision_ts": runtime_ts,
+                        "timeframe": "M5",
+                        "seconds_since_last_trade": 1200.0,
+                    },
+                    "state": {
+                        "temporal_context": {
+                            "decision_ts": runtime_ts,
+                            "timeframe": "M5",
+                        }
+                    },
+                },
+            }
+        },
+        action_json={
+            "risk_verdict": {
+                "audit_payload": {
+                    "temporal_context": {
+                        "decision_ts": runtime_ts,
+                        "timeframe": "M5",
+                    }
+                }
+            }
+        },
+    )
+
+    row = _rows(
+        db_path,
+        "SELECT risk_state_json, action_json FROM decision_ledger WHERE decision_id=?",
+        (decision_id,),
+    )[0]
+    risk_state = json.loads(row["risk_state_json"])
+    action = json.loads(row["action_json"])
+    top_tc = risk_state["policy_verdict"]["audit_payload"]["temporal_context"]
+    state_tc = risk_state["policy_verdict"]["audit_payload"]["state"]["temporal_context"]
+    action_tc = action["risk_verdict"]["audit_payload"]["temporal_context"]
+
+    assert top_tc["decision_ts"] == pytest.approx(market_ts)
+    assert top_tc["runtime_decision_ts"] == pytest.approx(runtime_ts)
+    assert top_tc["market_runtime_drift_seconds"] == pytest.approx(900.0)
+    assert top_tc["seconds_since_last_trade"] == pytest.approx(300.0)
+    assert top_tc["bars_since_last_trade"] == pytest.approx(1.0)
+    assert top_tc["hour_utc"] == 8
+    assert top_tc["session_label"] == "europe"
+    assert state_tc["decision_ts"] == pytest.approx(market_ts)
+    assert action_tc["decision_ts"] == pytest.approx(market_ts)
+
+
+def test_feature_provider_ignores_drifting_audit_temporal_context(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    ledger = DecisionLedger(db_path)
+    market_ts = 1_782_979_200.0
+    runtime_ts = market_ts + 900.0
+    decision_id = ledger.log_decision(
+        event_type="skip",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=market_ts,
+        action_score=0.5,
+        action_reason="risk",
+        action_json={"gate_passed": False, "gate_reason": "risk"},
+    )
+    dirty_risk_state = {
+        "policy_verdict": {
+            "allowed": False,
+            "reason": "risk",
+            "audit_payload": {
+                "temporal_context": {
+                    "decision_ts": runtime_ts,
+                    "timeframe": "M5",
+                    "hour_utc": 9,
+                    "session_label": "wrong_runtime_session",
+                    "seconds_since_last_trade": 1200.0,
+                }
+            },
+        }
+    }
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE decision_ledger SET risk_state_json=? WHERE decision_id=?",
+            (json.dumps(dirty_risk_state), decision_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    features = LearningFeatureProvider(db_path).build_decision_features(decision_id)
+    temporal = features["temporal_context"]
+
+    assert temporal["decision_ts"] == pytest.approx(market_ts)
+    assert temporal["hour_utc"] == 8
+    assert temporal["session_label"] == "europe"
+    assert "seconds_since_last_trade" not in temporal
+    assert temporal["temporal_context_source"] == "decision_ledger"
+    assert temporal["discarded_audit_decision_ts"] == pytest.approx(runtime_ts)
+    assert temporal["audit_market_time_drift_seconds"] == pytest.approx(900.0)
+
+
 def test_feature_provider_exports_execution_failure_decision_samples(tmp_path):
     db_path = str(tmp_path / "state.db")
     ledger = DecisionLedger(db_path)
@@ -977,6 +1092,97 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
     )
     assert api_pipeline["ok"] is True
     assert api_pipeline["stage"] == "complete"
+
+
+def test_lightgbm_promotion_gate_requires_baseline_lift_and_safe_capabilities(tmp_path):
+    artifact_path = tmp_path / "meta_model_lightgbm.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "model_type": "meta_model_lightgbm",
+                "model_version": "1.1",
+                "metrics": {
+                    "sample_count": 260,
+                    "feature_count": 8,
+                    "holdout": {
+                        "count": 65,
+                        "accuracy": 0.23,
+                        "balanced_accuracy": 0.27,
+                        "majority_baseline_accuracy": 0.54,
+                        "majority_baseline_balanced_accuracy": 0.33,
+                    },
+                    "governance_readiness": {
+                        "status": "blocked_by_baseline",
+                        "recommended_source": "simple_baseline_observer",
+                        "model_ready_for_governance": False,
+                        "baseline_margin": 0.02,
+                    },
+                },
+                "capabilities": {
+                    "live_trading": False,
+                    "advisory_only": True,
+                    "shadow_only": True,
+                    "can_place_orders": False,
+                    "can_close_positions": False,
+                    "can_change_risk_limits": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gate = ModelPromotionGate().evaluate(
+        model_type="meta_model_lightgbm",
+        artifact_path=artifact_path,
+        min_samples=20,
+        min_holdout_samples=5,
+        min_oos_acc=0.0,
+        min_features=1,
+    )
+
+    assert gate["ok"] is False
+    assert gate["decision"] == "needs_more_data"
+    codes = {issue["code"] for issue in gate["issues"]}
+    assert "does_not_beat_majority_baseline" in codes
+    assert "governance_readiness_blocked" in codes
+
+    thin_lift_path = tmp_path / "factor_governance_lightgbm.json"
+    thin_lift_path.write_text(
+        json.dumps(
+            {
+                "model_type": "factor_governance_lightgbm",
+                "model_version": "1.0",
+                "metrics": {
+                    "sample_count": 200,
+                    "feature_count": 5,
+                    "holdout": {
+                        "count": 50,
+                        "accuracy": 0.505,
+                        "majority_baseline_accuracy": 0.5,
+                    },
+                },
+                "capabilities": {
+                    "live_trading": False,
+                    "advisory_only": True,
+                    "shadow_only": True,
+                    "can_place_orders": False,
+                    "can_close_positions": False,
+                    "can_change_risk_limits": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    thin_gate = ModelPromotionGate().evaluate(
+        model_type="factor_governance_lightgbm",
+        artifact_path=thin_lift_path,
+        min_samples=20,
+        min_holdout_samples=5,
+        min_oos_acc=0.0,
+        min_features=1,
+    )
+    assert thin_gate["ok"] is False
+    assert "does_not_beat_majority_baseline" in {issue["code"] for issue in thin_gate["issues"]}
 
 
 def test_dataset_readiness_validates_contract_and_thresholds(tmp_path):

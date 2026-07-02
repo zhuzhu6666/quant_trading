@@ -7,6 +7,12 @@ from typing import Any
 
 from research.offline_trainer import MODEL_TYPE
 
+LIGHTGBM_MODEL_TYPES = {
+    "meta_model_lightgbm",
+    "position_quality_lightgbm",
+    "factor_governance_lightgbm",
+}
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -67,6 +73,13 @@ class ModelPromotionGate:
                     symbol=symbol,
                     timeframe=timeframe,
                 )
+                if registry_version is None:
+                    registry_version = registry.best_version(
+                        model_type,
+                        metric="holdout_accuracy",
+                        symbol=symbol,
+                        timeframe=timeframe,
+                    )
             if registry_version is None:
                 return {
                     "ok": False,
@@ -113,29 +126,53 @@ class ModelPromotionGate:
         readiness = artifact.get("readiness") or {}
         capabilities = artifact.get("capabilities") or {}
         promotion = artifact.get("promotion") or {}
+        governance_readiness = metrics.get("governance_readiness") or {}
         artifact_hash = _sha256(path)
+        is_lightgbm_artifact = artifact_model_type in LIGHTGBM_MODEL_TYPES
+        has_dataset_contract = bool(validation or readiness)
+        majority_baseline_accuracy = holdout.get("majority_baseline_accuracy")
+        majority_baseline_balanced_accuracy = holdout.get("majority_baseline_balanced_accuracy")
+        balanced_accuracy = holdout.get("balanced_accuracy")
+        baseline_margin = _safe_float(governance_readiness.get("baseline_margin"), 0.01 if is_lightgbm_artifact else 0.0)
 
         checks.update(
             {
                 "artifact_sha256": artifact_hash,
                 "model_type_matches": artifact_model_type == model_type,
-                "dataset_validation_valid": bool(validation.get("valid")),
-                "snapshot_ready": bool(readiness.get("ready")),
+                "dataset_validation_valid": bool(validation.get("valid")) if validation else None,
+                "snapshot_ready": bool(readiness.get("ready")) if readiness else None,
                 "sample_count": int(metrics.get("sample_count") or 0),
                 "holdout_count": int(holdout.get("count") or 0),
                 "oos_acc": holdout.get("accuracy"),
                 "feature_count": int(metrics.get("feature_count") or 0),
                 "declares_live_trading": bool(capabilities.get("live_trading")),
                 "declares_live_eligible": bool(promotion.get("eligible_for_live")),
+                "advisory_only": bool(capabilities.get("advisory_only")),
+                "shadow_only": bool(capabilities.get("shadow_only")),
+                "can_place_orders": bool(capabilities.get("can_place_orders")),
+                "can_close_positions": bool(capabilities.get("can_close_positions")),
+                "can_change_risk_limits": bool(capabilities.get("can_change_risk_limits")),
+                "majority_baseline_accuracy": majority_baseline_accuracy,
+                "majority_baseline_balanced_accuracy": majority_baseline_balanced_accuracy,
+                "balanced_accuracy": balanced_accuracy,
+                "governance_readiness_status": governance_readiness.get("status"),
+                "governance_recommended_source": governance_readiness.get("recommended_source"),
+                "model_ready_for_governance": governance_readiness.get("model_ready_for_governance"),
             }
         )
 
         if not checks["model_type_matches"]:
             issues.append({"code": "model_type_mismatch", "expected": model_type, "actual": artifact_model_type})
-        if not checks["dataset_validation_valid"]:
+        if validation and not checks["dataset_validation_valid"]:
             issues.append({"code": "dataset_validation_failed", "message": "artifact was not built from a valid dataset snapshot"})
-        if require_snapshot_ready and not checks["snapshot_ready"]:
+        elif not validation and not is_lightgbm_artifact:
+            issues.append({"code": "dataset_validation_missing", "message": "artifact does not declare dataset validation"})
+        if require_snapshot_ready and readiness and not checks["snapshot_ready"]:
             issues.append({"code": "snapshot_not_ready", "message": "dataset readiness did not pass at artifact build time"})
+        elif require_snapshot_ready and not readiness and not is_lightgbm_artifact:
+            issues.append({"code": "snapshot_readiness_missing", "message": "artifact does not declare dataset readiness"})
+        if is_lightgbm_artifact and not has_dataset_contract:
+            warnings.append({"code": "dataset_snapshot_contract_missing", "message": "LightGBM artifact lacks legacy dataset_validation/readiness fields; evidence contract checks are enforced by its builder"})
         if checks["sample_count"] < int(min_samples):
             issues.append({"code": "insufficient_samples", "required": int(min_samples), "actual": checks["sample_count"]})
         if checks["holdout_count"] < int(min_holdout_samples):
@@ -150,6 +187,46 @@ class ModelPromotionGate:
             issues.append({"code": "live_trading_not_allowed", "message": "offline artifacts cannot bypass live execution gates"})
         if checks["declares_live_eligible"]:
             warnings.append({"code": "live_eligibility_ignored", "message": "gate only grants shadow candidacy, not live eligibility"})
+        if is_lightgbm_artifact:
+            if not checks["advisory_only"] or not checks["shadow_only"]:
+                issues.append({"code": "shadow_advisory_contract_missing", "message": "LightGBM governance artifacts must declare advisory_only and shadow_only"})
+            forbidden = [key for key in ("can_place_orders", "can_close_positions", "can_change_risk_limits") if checks[key]]
+            if forbidden:
+                issues.append({"code": "unsafe_model_capability", "fields": forbidden})
+            if majority_baseline_accuracy is not None:
+                required_acc = _safe_float(majority_baseline_accuracy) + baseline_margin
+                if _safe_float(checks["oos_acc"]) < required_acc:
+                    issues.append(
+                        {
+                            "code": "does_not_beat_majority_baseline",
+                            "required": round(required_acc, 6),
+                            "actual": _safe_float(checks["oos_acc"]),
+                            "baseline": _safe_float(majority_baseline_accuracy),
+                            "margin": baseline_margin,
+                        }
+                    )
+            if majority_baseline_balanced_accuracy is not None and balanced_accuracy is not None:
+                if _safe_float(balanced_accuracy) < _safe_float(majority_baseline_balanced_accuracy) + baseline_margin:
+                    issues.append(
+                        {
+                            "code": "balanced_accuracy_below_baseline",
+                            "required": round(_safe_float(majority_baseline_balanced_accuracy) + baseline_margin, 6),
+                            "actual": _safe_float(balanced_accuracy),
+                        }
+                    )
+            if governance_readiness:
+                ready = bool(governance_readiness.get("model_ready_for_governance"))
+                recommended = str(governance_readiness.get("recommended_source") or "")
+                status = str(governance_readiness.get("status") or "")
+                if not ready or recommended != "model_shadow_candidate" or status != "model_shadow_candidate":
+                    issues.append(
+                        {
+                            "code": "governance_readiness_blocked",
+                            "status": status,
+                            "recommended_source": recommended,
+                            "model_ready_for_governance": ready,
+                        }
+                    )
 
         decision = "shadow_candidate" if not issues else "needs_more_data"
         ok = not issues

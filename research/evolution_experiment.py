@@ -1,6 +1,6 @@
 """research/evolution_experiment.py — 进化实验注册器.
 
-封装 experiments.db 的读写, 让每次 GP 搜索、ML 重训、参数调优都有科研记忆.
+封装 experiments.db 的读写, 让每次 GP 搜索、模型影子训练、参数调优都有科研记忆.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class ExperimentRecord:
     """单次实验记录."""
     run_id: str
-    experiment_type: str                    # gp_search / ml_retrain / param_tune / feature_eng
+    experiment_type: str                    # gp_search / model_shadow_train / param_tune / feature_eng
     params_json: dict = field(default_factory=dict)
     metrics_in_sample: dict = field(default_factory=dict)
     metrics_oos: dict = field(default_factory=dict)

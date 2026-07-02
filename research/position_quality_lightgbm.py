@@ -206,13 +206,17 @@ class PositionQualityLightGBMService:
         try:
             rows = self._execute(conn,
                 """
-                SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                       entry_quality, hold_quality, exit_quality, regime_fit_score,
-                       execution_quality, pnl, mae, mfe, outcome_label,
-                       failure_tags_json, summary_text, review_json, created_at
-                FROM trade_outcome_review
+                SELECT *
+                FROM (
+                    SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+                           entry_quality, hold_quality, exit_quality, regime_fit_score,
+                           execution_quality, pnl, mae, mfe, outcome_label,
+                           failure_tags_json, summary_text, review_json, created_at
+                    FROM trade_outcome_review
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                ) recent_reviews
                 ORDER BY created_at ASC
-                LIMIT ?
                 """,
                 (int(limit),),
             ).fetchall()
@@ -245,7 +249,7 @@ class PositionQualityLightGBMService:
         import joblib
         import lightgbm as lgb
         import pandas as pd
-        from sklearn.metrics import accuracy_score, roc_auc_score
+        from sklearn.metrics import accuracy_score, balanced_accuracy_score, recall_score, roc_auc_score
 
         samples = self.load_samples(limit=limit)
         if len(samples) < int(min_samples):
@@ -285,6 +289,7 @@ class PositionQualityLightGBMService:
             min_child_samples=max(1, min(20, len(train_samples) // 4)),
             subsample=0.9,
             colsample_bytree=0.9,
+            class_weight="balanced",
             random_state=42,
             n_jobs=1,
             verbosity=-1,
@@ -295,6 +300,9 @@ class PositionQualityLightGBMService:
 
         def _metrics(y_true: list[int], probs: Any) -> dict[str, Any]:
             preds = [1 if float(x) >= 0.5 else 0 for x in probs]
+            positive_rate = sum(y_true) / max(len(y_true), 1)
+            majority_label = 1 if positive_rate >= 0.5 else 0
+            majority_preds = [majority_label] * len(y_true)
             auc = None
             if len(set(y_true)) > 1:
                 try:
@@ -304,8 +312,14 @@ class PositionQualityLightGBMService:
             return {
                 "count": len(y_true),
                 "accuracy": round(float(accuracy_score(y_true, preds)), 6) if y_true else None,
+                "balanced_accuracy": round(float(balanced_accuracy_score(y_true, preds)), 6) if y_true else None,
+                "majority_baseline_accuracy": round(float(accuracy_score(y_true, majority_preds)), 6) if y_true else None,
                 "auc": auc,
-                "positive_rate": round(sum(y_true) / max(len(y_true), 1), 6),
+                "positive_rate": round(positive_rate, 6),
+                "prediction_positive_rate": round(sum(preds) / max(len(preds), 1), 6),
+                "negative_recall": round(float(recall_score(y_true, preds, pos_label=0, zero_division=0)), 6),
+                "positive_recall": round(float(recall_score(y_true, preds, pos_label=1, zero_division=0)), 6),
+                "majority_class": majority_label,
             }
 
         feature_importance = [
@@ -320,6 +334,11 @@ class PositionQualityLightGBMService:
             "holdout": _metrics(y_holdout, holdout_prob),
             "sample_count": len(samples),
             "feature_count": len(FEATURE_NAMES),
+            "split": "time_ordered",
+            "holdout_ratio": float(holdout_ratio),
+            "train_count": len(train_samples),
+            "holdout_count": len(holdout_samples),
+            "label_distribution": {"negative": labels.count(0), "positive": labels.count(1)},
             "safe_for_live_trading": False,
         }
         now = time.time()
@@ -342,7 +361,7 @@ class PositionQualityLightGBMService:
             "metrics": metrics,
             "explainability": {
                 "feature_importance": feature_importance,
-                "summary": "LightGBM shadow-only position quality model. Scores are advisory and logged.",
+                "summary": "LightGBM shadow-only position quality model. Scores are advisory and logged. Holdout metrics include majority baseline and class recall to expose imbalance.",
             },
             "capabilities": {
                 "live_trading": False,

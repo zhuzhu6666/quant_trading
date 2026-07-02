@@ -214,7 +214,7 @@ export function LearningPage() {
 
         <MetricCard title="最近策略建议" className="wide-panel">
           <div className="table-wrap">
-            <table>
+            <table className="mobile-card-table suggestions-table">
               <thead>
                 <tr>
                   <th>时间</th>
@@ -253,7 +253,7 @@ export function LearningPage() {
             <div>
               <div className="mini-section-title">最近交易复盘</div>
               <div className="table-wrap">
-                <table>
+                <table className="mobile-card-table reviews-table">
                   <thead>
                     <tr>
                       <th>时间</th>
@@ -284,7 +284,7 @@ export function LearningPage() {
             <div>
               <div className="mini-section-title">自主学习样本</div>
               <div className="table-wrap">
-                <table>
+                <table className="mobile-card-table samples-table">
                   <thead>
                     <tr>
                       <th>时间</th>
@@ -320,7 +320,7 @@ export function LearningPage() {
             <div>
               <div className="mini-section-title">最近应用</div>
               <div className="table-wrap">
-                <table>
+                <table className="mobile-card-table applications-table">
                   <thead>
                     <tr>
                       <th>时间</th>
@@ -351,7 +351,7 @@ export function LearningPage() {
             <div>
               <div className="mini-section-title">生命周期</div>
               <div className="table-wrap">
-                <table>
+                <table className="mobile-card-table lifecycle-table">
                   <thead>
                     <tr>
                       <th>时间</th>

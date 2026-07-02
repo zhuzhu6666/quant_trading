@@ -1,14 +1,12 @@
-"""Factor Takeover v4 API — weight history + attribution stats + ML retrain.
+"""Factor Takeover v4 API — weight history + attribution stats.
 
 Endpoints:
   GET /api/v4/weights      — last 50 entries from factor_weight_history.jsonl
   GET /api/v4/stats        — attribution summary per-factor + pipeline health
-  POST /api/v4/ml/retrain  — manually trigger ML direction predictor retrain
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
@@ -21,7 +19,6 @@ from fastapi import APIRouter
 
 from backend.core.auth import RequireUser
 from backend.core.db import get_state_pg_conn
-from backend.services.live_service import _scheduled_ml_retrain
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v4", tags=["factor-v4"])
@@ -203,14 +200,6 @@ def get_attribution_stats(_user: RequireUser) -> dict:
     }
 
     return {"status": "ok", "per_factor": per_factor, "summary": summary}
-
-
-@router.post("/ml/retrain")
-async def trigger_ml_retrain(_user: RequireUser) -> dict:
-    """手动触发 ML 方向预测器重训（后台运行，立即返回）。"""
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, _scheduled_ml_retrain)
-    return {"status": "started"}
 
 
 @router.get("/recent-ticks")

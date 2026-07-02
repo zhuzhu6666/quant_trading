@@ -337,7 +337,7 @@ export function OpsPage() {
 
         <MetricCard title="数据库清单" className="wide-panel">
           <div className="table-wrap ops-db-wrap">
-            <table className="ops-db-table">
+            <table className="mobile-card-table ops-db-table">
               <colgroup>
                 <col className="ops-db-name" />
                 <col className="ops-db-file" />

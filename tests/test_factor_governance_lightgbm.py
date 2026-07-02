@@ -114,6 +114,10 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
     _create_factor_reviews(db_path)
 
     service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
+    samples = service.load_samples(limit=20)
+    assert len(samples) == 8
+    assert {sample["label_source"] for sample in samples} == {"next_same_factor_outcome"}
+
     result = service.train(limit=20, min_samples=6, register=False)
 
     if not result["ok"]:
@@ -121,6 +125,8 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
         return
 
     assert result["model_type"] == MODEL_TYPE
+    assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None
+    assert result["metrics"]["holdout"]["balanced_accuracy"] is not None
     assert result["capabilities"]["live_trading"] is False
     assert result["capabilities"]["can_change_factor_weights"] is False
     shadow = service.score_samples(
@@ -130,9 +136,9 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
         min_weakness_score=0.1,
     )
     assert shadow["ok"] is True
-    assert shadow["count"] == 10
+    assert shadow["count"] == len(samples)
     audits = service.list_audits(limit=20)
-    assert audits["count"] == 10
+    assert audits["count"] == len(samples)
     assert audits["items"][0]["result"]["capabilities"]["shadow_only"] is True
     rows = sqlite3.connect(str(db_path)).execute(
         "SELECT scope_type, action, status FROM policy_suggestion"

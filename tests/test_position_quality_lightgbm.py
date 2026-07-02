@@ -84,6 +84,9 @@ def test_position_quality_lightgbm_trains_or_reports_missing_dependency(tmp_path
         return
 
     assert result["model_type"] == MODEL_TYPE
+    assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None
+    assert result["metrics"]["holdout"]["balanced_accuracy"] is not None
+    assert result["metrics"]["holdout"]["negative_recall"] is not None
     assert result["capabilities"]["live_trading"] is False
     shadow = service.score_samples(artifact_path=result["artifact_path"], limit=8)
     assert shadow["ok"] is True

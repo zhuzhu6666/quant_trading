@@ -151,7 +151,7 @@ export function PnlPage() {
 
         <MetricCard title="最近成交明细" className="wide-panel">
           <div className="table-wrap">
-            <table>
+            <table className="mobile-card-table pnl-deals-table">
               <thead>
                 <tr>
                   <th>时间</th>

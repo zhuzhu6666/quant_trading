@@ -391,7 +391,7 @@ export function TradingPage() {
 
       <MetricCard title="最近因子信号 Tick" className="wide-panel">
         <div className="table-wrap">
-          <table>
+          <table className="mobile-card-table factor-ticks-table">
             <thead>
               <tr>
                 <th>时间</th>
@@ -427,7 +427,7 @@ export function TradingPage() {
 
       <MetricCard title="持仓表" className="wide-panel">
         <div className="table-wrap">
-          <table>
+          <table className="mobile-card-table positions-table">
             <thead>
               <tr>
                 <th>品种</th>

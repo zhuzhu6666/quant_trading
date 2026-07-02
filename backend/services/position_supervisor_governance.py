@@ -73,7 +73,7 @@ def _direction_from_review(payload: dict[str, Any]) -> int:
     real_pnl = payload.get("real_pnl") or {}
     entry_price = _safe_float(real_pnl.get("entry_price") or payload.get("entry_price"))
     close_price = _safe_float(payload.get("close_price") or real_pnl.get("exec_price"))
-    pnl = _safe_float(real_pnl.get("gross") or real_pnl.get("net") or payload.get("pnl"))
+    pnl = _safe_float(real_pnl.get("net") or real_pnl.get("gross") or payload.get("pnl"))
     price_delta = close_price - entry_price
     if abs(price_delta) < 1e-9 or abs(pnl) < 1e-9:
         return 1

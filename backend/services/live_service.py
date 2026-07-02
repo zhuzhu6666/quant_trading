@@ -333,6 +333,62 @@ def _floor_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
     return floored if floored >= min_vol else 0.0
 
 
+def _should_full_close_untradeable_reduce(
+    *,
+    current_volume: float,
+    raw_reduce_volume: float,
+    reduce_volume: float,
+    min_volume: float,
+    verdict: dict[str, Any],
+) -> tuple[bool, str]:
+    """Escalate minimum-size reduce intents only when the risk evidence is strong."""
+    current_volume = float(current_volume or 0.0)
+    raw_reduce_volume = float(raw_reduce_volume or 0.0)
+    reduce_volume = float(reduce_volume or 0.0)
+    min_volume = float(min_volume or 0.0)
+    if min_volume <= 0 or current_volume <= 0 or raw_reduce_volume <= 0:
+        return False, "missing_reduce_volume"
+    if current_volume > min_volume + 1e-9:
+        return False, "not_minimum_position"
+    if reduce_volume > 0:
+        return False, "reduce_volume_tradeable"
+
+    evidence = dict((verdict or {}).get("evidence") or {})
+    controls = dict((verdict or {}).get("recommended_controls") or {})
+    summary_reason = str((verdict or {}).get("summary_reason") or "")
+    thesis_status = str(evidence.get("thesis_status") or "").lower()
+    trigger_tags = evidence.get("trigger_tags") or []
+    if isinstance(trigger_tags, str):
+        trigger_tags = [trigger_tags]
+    trigger_tags = {str(tag) for tag in trigger_tags}
+
+    try:
+        giveback_ratio = float(evidence.get("giveback_ratio", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        giveback_ratio = 0.0
+    try:
+        current_pnl = float(evidence.get("current_pnl", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        current_pnl = 0.0
+    try:
+        reduce_fraction = float(controls.get("reduce_fraction", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        reduce_fraction = 0.0
+
+    if thesis_status == "broken":
+        return True, "minimum_position_thesis_broken"
+    if giveback_ratio >= 1.0 and current_pnl <= 0:
+        return True, "minimum_position_full_giveback"
+    if (
+        summary_reason == "profit_giveback_after_mfe"
+        and "profit_giveback_after_mfe" in trigger_tags
+        and current_pnl <= 0
+        and reduce_fraction > 0
+    ):
+        return True, "minimum_position_profit_giveback"
+    return False, "risk_evidence_not_strong_enough"
+
+
 def _event_sizing_context(event_sizing: Any, bar_time: float) -> dict[str, Any]:
     if event_sizing is None:
         return {"enabled": False, "multiplier": 1.0}
@@ -698,6 +754,7 @@ def _build_open_trade_risk_context(
     current_price: float = 0.0,
     atr_price: float = 0.0,
     event_sizing_context: dict[str, Any] | None = None,
+    decision_ts: float | None = None,
 ) -> dict:
     risk_snapshot = _live_state_get("risk", {}, clone=True) or {}
     loop_running = bool(_live_state_get("loop_running", True))
@@ -747,7 +804,8 @@ def _build_open_trade_risk_context(
         system_health_snapshot = {}
     timeframe = str(getattr(cfg, "timeframe", "M5") or "M5")
     temporal_context = _temporal_context_for_trade(
-        decision_ts=now,
+        decision_ts=float(decision_ts or now),
+        evaluated_at_ts=now,
         timeframe=timeframe,
         session_last_trade_ts=float(_live_state_get("session_last_trade_ts", 0.0) or 0.0),
         loop_started_at=float(_live_state_get("loop_started_at", 0.0) or 0.0),
@@ -873,6 +931,276 @@ def _position_open_timestamp(pos: Any) -> float:
     return 0.0
 
 
+def _position_id_value(pos: Any) -> int:
+    try:
+        return int(_payload_get(pos, "position_id", None) or _payload_get(pos, "ticket", None) or 0)
+    except Exception:
+        return 0
+
+
+def _same_symbol_position(symbol: str, pos: Any) -> bool:
+    wanted = str(symbol or "XAUUSD").replace("+", "").upper()
+    actual = _position_symbol_value(pos, default=wanted).replace("+", "").upper()
+    return actual == wanted
+
+
+def _build_entry_cluster_context(
+    *,
+    positions_before: list[Any] | None,
+    direction: int,
+    symbol: str,
+    now_ts: float,
+    new_position_id: int = 0,
+    new_api_volume: float = 0.0,
+) -> dict[str, Any]:
+    direction = 1 if int(direction or 0) > 0 else -1 if int(direction or 0) < 0 else 0
+    rows: list[dict[str, Any]] = []
+    same_rows: list[dict[str, Any]] = []
+    opposite_rows: list[dict[str, Any]] = []
+    net_api_volume = 0.0
+    for pos in positions_before or []:
+        if not _same_symbol_position(symbol, pos):
+            continue
+        pos_direction = _direction_from_position_payload(pos)
+        api_volume = _position_api_volume(pos)
+        open_ts = _position_open_timestamp(pos)
+        item = {
+            "position_id": _position_id_value(pos),
+            "direction": pos_direction,
+            "api_volume": api_volume,
+            "open_price": _position_open_price(pos),
+            "open_ts": open_ts,
+            "age_seconds": max(0.0, float(now_ts) - open_ts) if open_ts > 0 else 0.0,
+        }
+        rows.append(item)
+        net_api_volume += api_volume * (1 if pos_direction > 0 else -1 if pos_direction < 0 else 0)
+        if direction != 0 and pos_direction == direction:
+            same_rows.append(item)
+        elif direction != 0 and pos_direction == -direction:
+            opposite_rows.append(item)
+
+    same_ages = [float(item["age_seconds"]) for item in same_rows if float(item.get("age_seconds") or 0.0) > 0]
+    same_api_volume = sum(float(item.get("api_volume") or 0.0) for item in same_rows)
+    opposite_api_volume = sum(float(item.get("api_volume") or 0.0) for item in opposite_rows)
+    recent_same = {
+        "5m": sum(1 for age in same_ages if age <= 300.0),
+        "15m": sum(1 for age in same_ages if age <= 900.0),
+        "30m": sum(1 for age in same_ages if age <= 1800.0),
+    }
+    after_same_count = len(same_rows) + (1 if direction != 0 and new_position_id > 0 else 0)
+    after_same_volume = same_api_volume + (float(new_api_volume or 0.0) if direction != 0 else 0.0)
+    return {
+        "schema_version": "entry_cluster_context.v1",
+        "symbol": str(symbol or ""),
+        "direction": direction,
+        "open_position_count_before": len(rows),
+        "open_position_count_after": len(rows) + (1 if new_position_id > 0 else 0),
+        "same_direction_open_count_before": len(same_rows),
+        "same_direction_open_count_after": after_same_count,
+        "opposite_direction_open_count_before": len(opposite_rows),
+        "same_direction_api_volume_before": same_api_volume,
+        "same_direction_api_volume_after": after_same_volume,
+        "opposite_direction_api_volume_before": opposite_api_volume,
+        "net_direction_api_volume_before": net_api_volume,
+        "net_direction_api_volume_after": net_api_volume + float(new_api_volume or 0.0) * direction,
+        "seconds_since_last_same_direction_open": min(same_ages) if same_ages else 0.0,
+        "recent_same_direction_entries": recent_same,
+        "same_direction_position_ids": [item["position_id"] for item in same_rows if item["position_id"]],
+        "new_position_id": int(new_position_id or 0),
+        "position_slot_index": after_same_count,
+        "is_pyramid": bool(len(same_rows) > 0 and direction != 0),
+        "pyramid_depth": max(0, after_same_count - 1),
+    }
+
+
+def _market_micro_context_snapshot(
+    *,
+    bridge: Any,
+    current_price: float,
+    fill_price: float = 0.0,
+    direction: int = 0,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    now_ts = float(now_ts or time.time())
+    quote = _live_state_get("spot_quote", None, clone=True) or {}
+    if bridge is not None and hasattr(bridge, "get_spot_quote"):
+        try:
+            fresh_quote = bridge.get_spot_quote() or {}
+            if fresh_quote:
+                quote = fresh_quote
+                _live_state_update(spot_quote=fresh_quote)
+        except Exception:
+            pass
+    bid = float((quote or {}).get("bid") or 0.0)
+    ask = float((quote or {}).get("ask") or 0.0)
+    mid = float((quote or {}).get("mid") or 0.0)
+    spread = float((ask - bid) if ask > 0 and bid > 0 else 0.0)
+    signal_price = float(current_price or 0.0)
+    actual_fill = float(fill_price or 0.0)
+    direction = 1 if int(direction or 0) > 0 else -1 if int(direction or 0) < 0 else 0
+    raw_delta = actual_fill - signal_price if actual_fill > 0 and signal_price > 0 else 0.0
+    adverse_delta = raw_delta * direction if direction else 0.0
+    return {
+        "schema_version": "market_micro_context.v1",
+        "bid": bid,
+        "ask": ask,
+        "mid": mid,
+        "spread": spread,
+        "quote_ts": float((quote or {}).get("ts") or 0.0),
+        "quote_age_seconds": _quote_age_seconds(quote, now_ts=now_ts),
+        "quote_fresh": _quote_is_fresh(quote, now_ts=now_ts),
+        "signal_price": signal_price,
+        "fill_price": actual_fill,
+        "fill_delta_points": raw_delta,
+        "adverse_slippage_points": adverse_delta,
+    }
+
+
+def _bar_context_snapshot(bar: dict[str, Any] | None) -> dict[str, Any]:
+    item = dict(bar or {})
+    high = float(item.get("high") or 0.0)
+    low = float(item.get("low") or 0.0)
+    open_price = float(item.get("open") or 0.0)
+    close = float(item.get("close") or 0.0)
+    span = high - low
+    body = abs(close - open_price)
+    return {
+        "schema_version": "entry_bar_context.v1",
+        "bar_ts": float(item.get("time") or 0.0),
+        "timeframe": str(item.get("timeframe") or ""),
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": float(item.get("volume") or 0.0),
+        "range_points": span if span > 0 else 0.0,
+        "body_points": body,
+        "body_ratio": body / span if span > 0 else 0.0,
+        "close_location": (close - low) / span if span > 0 else 0.0,
+        "upper_wick_ratio": (high - max(open_price, close)) / span if span > 0 else 0.0,
+        "lower_wick_ratio": (min(open_price, close) - low) / span if span > 0 else 0.0,
+        "complete": bool(item.get("complete", False)),
+    }
+
+
+def _decision_quality_context(composite: Any) -> dict[str, Any]:
+    signals = getattr(composite, "factor_signals", {}) or {}
+    weights = getattr(composite, "active_weights", {}) or {}
+    contributions = []
+    for factor, signal in signals.items():
+        if signal is None:
+            continue
+        weight = float(weights.get(factor, 0.0) or 0.0)
+        contribution = float(signal or 0.0) * weight
+        contributions.append((str(factor), contribution, float(signal or 0.0), weight))
+    top_abs = sorted(contributions, key=lambda item: abs(item[1]), reverse=True)[:8]
+    pos_abs = sum(abs(item[1]) for item in contributions if item[1] > 0)
+    neg_abs = sum(abs(item[1]) for item in contributions if item[1] < 0)
+    total_abs = pos_abs + neg_abs
+    return {
+        "schema_version": "decision_quality_context.v1",
+        "score": float(getattr(composite, "score", 0.0) or 0.0),
+        "tactical_score": float(getattr(composite, "tactical_score", 0.0) or 0.0),
+        "macro_score": float(getattr(composite, "macro_score", 0.0) or 0.0),
+        "n_active_factors": int(getattr(composite, "n_active_factors", 0) or 0),
+        "n_abstain_factors": int(getattr(composite, "n_abstain_factors", 0) or 0),
+        "positive_contribution_abs": pos_abs,
+        "negative_contribution_abs": neg_abs,
+        "factor_conflict_ratio": min(pos_abs, neg_abs) / total_abs if total_abs > 0 else 0.0,
+        "top_contributors": [
+            {"factor": factor, "contribution_score": contribution, "signal": signal, "weight": weight}
+            for factor, contribution, signal, weight in top_abs
+        ],
+    }
+
+
+def _open_learning_context_payload(
+    *,
+    bridge: Any,
+    bar: dict[str, Any],
+    positions_before: list[Any] | None,
+    composite: Any,
+    symbol: str,
+    pid: int,
+    actual_api_volume: float,
+    requested_volume: float,
+    base_requested_volume: float,
+    current_price: float,
+    fill_price: float,
+    sl_price: float,
+    tp_price: float,
+    sl_dist: float,
+    tp_dist: float,
+    event_sizing_context: dict[str, Any] | None,
+    risk_verdict: Any = None,
+    market_session: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now_ts = time.time()
+    direction = int(getattr(composite, "direction", 0) or 0)
+    entry_cluster = _build_entry_cluster_context(
+        positions_before=positions_before,
+        direction=direction,
+        symbol=symbol,
+        now_ts=now_ts,
+        new_position_id=int(pid or 0),
+        new_api_volume=float(actual_api_volume or 0.0),
+    )
+    market_micro = _market_micro_context_snapshot(
+        bridge=bridge,
+        current_price=float(current_price or 0.0),
+        fill_price=float(fill_price or 0.0),
+        direction=direction,
+        now_ts=now_ts,
+    )
+    risk_payload = risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else (risk_verdict or {})
+    runtime_health = (((risk_payload or {}).get("audit_payload") or {}).get("state") or {}).get("runtime_health") or {}
+    portfolio_exposure = {
+        "schema_version": "portfolio_exposure_context.v1",
+        "open_position_count_before": entry_cluster["open_position_count_before"],
+        "open_position_count_after": entry_cluster["open_position_count_after"],
+        "same_direction_open_count_before": entry_cluster["same_direction_open_count_before"],
+        "same_direction_open_count_after": entry_cluster["same_direction_open_count_after"],
+        "same_direction_api_volume_before": entry_cluster["same_direction_api_volume_before"],
+        "same_direction_api_volume_after": entry_cluster["same_direction_api_volume_after"],
+        "total_api_volume_before": _tracked_total_api_volume(positions_before or []),
+        "total_api_volume_after": _tracked_total_api_volume(positions_before or []) + float(actual_api_volume or 0.0),
+    }
+    execution_context = {
+        "schema_version": "entry_execution_context.v1",
+        "requested_volume": float(requested_volume or 0.0),
+        "base_requested_volume": float(base_requested_volume or 0.0),
+        "actual_api_volume": float(actual_api_volume or 0.0),
+        "signal_price": float(current_price or 0.0),
+        "fill_price": float(fill_price or 0.0),
+        "sl": float(sl_price or 0.0),
+        "tp": float(tp_price or 0.0),
+        "sl_distance_points": float(sl_dist or 0.0),
+        "tp_distance_points": float(tp_dist or 0.0),
+        "entry_protection_expected": bool(sl_price or tp_price),
+    }
+    return {
+        "entry_cluster": entry_cluster,
+        "same_direction_open_count": entry_cluster["same_direction_open_count_before"],
+        "recent_same_direction_entries": entry_cluster["recent_same_direction_entries"],
+        "portfolio_exposure": portfolio_exposure,
+        "market_micro_context": market_micro,
+        "spread": market_micro.get("spread", 0.0),
+        "bid": market_micro.get("bid", 0.0),
+        "ask": market_micro.get("ask", 0.0),
+        "bar_context": _bar_context_snapshot(bar),
+        "execution_context": execution_context,
+        "decision_quality_context": _decision_quality_context(composite),
+        "event_context": event_sizing_context or {},
+        "data_quality_context": {
+            "schema_version": "entry_data_quality_context.v1",
+            "quote_fresh": market_micro.get("quote_fresh"),
+            "quote_age_seconds": market_micro.get("quote_age_seconds"),
+            "runtime_health": runtime_health,
+        },
+        "market_session": market_session or _live_state_get("market_session", {}, clone=True) or {},
+    }
+
+
 def _classify_trading_session(hour_utc: int) -> str:
     if 0 <= hour_utc < 7:
         return "asia"
@@ -900,16 +1228,21 @@ def _temporal_context_for_trade(
     *,
     decision_ts: float,
     timeframe: str,
+    evaluated_at_ts: float | None = None,
     session_last_trade_ts: float = 0.0,
     loop_started_at: float = 0.0,
 ) -> dict:
     ts = float(decision_ts or time.time())
+    evaluated_at = float(evaluated_at_ts or time.time())
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     tf_seconds = _timeframe_seconds(timeframe)
-    last_trade_gap = max(0.0, ts - session_last_trade_ts) if session_last_trade_ts > 0 else 0.0
-    loop_uptime = max(0.0, ts - loop_started_at) if loop_started_at > 0 else 0.0
+    last_trade_gap = max(0.0, evaluated_at - session_last_trade_ts) if session_last_trade_ts > 0 else 0.0
+    loop_uptime = max(0.0, evaluated_at - loop_started_at) if loop_started_at > 0 else 0.0
     return {
         "decision_ts": ts,
+        "time_basis": "market_epoch_seconds_utc",
+        "evaluated_at": evaluated_at,
+        "runtime_basis": "system_epoch_seconds_utc",
         "timeframe": str(timeframe or ""),
         "timeframe_seconds": tf_seconds,
         "hour_utc": int(dt.hour),
@@ -2245,26 +2578,155 @@ def _run_position_supervision(
                             acct=acct,
                         )
                 else:
-                    _log_supervisor_trace(
-                        position=position,
+                    invalid_reduce_execution = {
+                        "current_volume": current_volume,
+                        "reduce_fraction": reduce_fraction,
+                        "raw_reduce_volume": raw_reduce_volume,
+                        "reduce_volume": reduce_volume,
+                        "min_volume": min_volume,
+                        "step_volume": step_volume,
+                    }
+                    upgrade_to_close, upgrade_reason = _should_full_close_untradeable_reduce(
+                        current_volume=current_volume,
+                        raw_reduce_volume=raw_reduce_volume,
+                        reduce_volume=reduce_volume,
+                        min_volume=min_volume,
                         verdict=verdict,
-                        cfg=cfg,
-                        tick=tick,
-                        stage="execution_skipped",
-                        outcome="skipped",
-                        decision_id=decision_id,
-                        risk_action=risk_action,
-                        risk_verdict=risk_verdict,
+                    )
+                    if upgrade_to_close:
+                        close_reason = str(
+                            controls.get("close_reason")
+                            or verdict.get("summary_reason")
+                            or "minimum_position_reduce_full_close"
+                        )
+                        close_context = _build_close_position_risk_context(
+                            position_id=pid,
+                            close_reason=close_reason,
+                            mode="live",
+                            broker="ctrader",
+                            symbol=str(position.get("symbol") or "XAUUSD+"),
+                            position=position,
+                            cfg=cfg,
+                            decision_ts=float(verdict.get("decision_ts") or time.time()),
+                        )
+                        close_context.update(
+                            {
+                                "supervisor_action": "reduce_to_close",
+                                "supervisor_confidence": verdict.get("confidence"),
+                                "supervisor_reason": verdict.get("summary_reason"),
+                                "supervisor_evidence": verdict.get("evidence") or {},
+                                "supervisor_decision_ts": verdict.get("decision_ts"),
+                                "recommended_controls": {
+                                    **controls,
+                                    "original_action": "reduce",
+                                    "fallback_action": "close",
+                                    "fallback_reason": upgrade_reason,
+                                },
+                            }
+                        )
+                        close_verdict = _RISK_POLICY.evaluate("close_position", close_context).to_dict()
+                        fallback_execution = {
+                            **invalid_reduce_execution,
+                            "fallback_action": "close",
+                            "fallback_reason": upgrade_reason,
+                            "applied_controls": controls,
+                        }
+                        if not close_verdict.get("allowed", False):
+                            _log_supervisor_trace(
+                                position=position,
+                                verdict=verdict,
+                                cfg=cfg,
+                                tick=tick,
+                                stage="risk_rejected",
+                                outcome="blocked",
+                                decision_id=decision_id,
+                                risk_action="close_position",
+                                risk_verdict=close_verdict,
+                                execution_status="blocked",
+                                execution_reason=str(close_verdict.get("reason") or "fallback_close_blocked"),
+                                execution=fallback_execution,
+                                acct=acct,
+                            )
+                            _remember_supervisor_state(position, verdict, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                            continue
+                        result = bridge.close_position(pid)
+                        if getattr(result, "success", False):
+                            _remember_close_reason(pid, close_reason)
+                            _remember_close_verdict(
+                                pid,
+                                type(
+                                    "SupervisorFallbackCloseVerdictProxy",
+                                    (),
+                                    {
+                                        "to_dict": lambda _self: close_verdict,
+                                    },
+                                )(),
+                            )
+                            _remember_supervisor_state(position, verdict, action_applied="close", broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
+                            _remember_supervisor_reentry_block(
+                                position=position,
+                                action="close",
+                                reason=close_reason,
+                                cfg=cfg,
+                                current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                                tick=tick,
+                            )
+                            _log_supervisor_trace(
+                                position=position,
+                                verdict=verdict,
+                                cfg=cfg,
+                                tick=tick,
+                                stage="executed",
+                                outcome="applied",
+                                decision_id=decision_id,
+                                risk_action="close_position",
+                                risk_verdict=close_verdict,
+                                execution_status="applied",
+                                execution_reason="minimum_position_reduce_full_close_success",
+                                execution=fallback_execution,
+                                acct=acct,
+                            )
+                            if _result_is_position_not_found(result):
+                                _retire_broker_missing_position(
+                                    bridge,
+                                    pid,
+                                    broker="ctrader",
+                                    strategy_name=str(_loop_strategy_name or "factor_v4"),
+                                    reason=close_reason,
+                                    log=log,
+                                )
+                            log(f"tick {tick}: supervisor reduce->close sent pos={pid} reason={upgrade_reason}")
+                        else:
+                            reason = str(getattr(result, "comment", "") or getattr(result, "error", "") or "fallback_close_failed")
+                            _log_supervisor_trace(
+                                position=position,
+                                verdict=verdict,
+                                cfg=cfg,
+                                tick=tick,
+                                stage="execution_failed",
+                                outcome="failed",
+                                decision_id=decision_id,
+                                risk_action="close_position",
+                                risk_verdict=close_verdict,
+                                execution_status="failed",
+                                execution_reason=reason,
+                                execution=fallback_execution,
+                                acct=acct,
+                            )
+                    else:
+                        _log_supervisor_trace(
+                            position=position,
+                            verdict=verdict,
+                            cfg=cfg,
+                            tick=tick,
+                            stage="execution_skipped",
+                            outcome="skipped",
+                            decision_id=decision_id,
+                            risk_action=risk_action,
+                            risk_verdict=risk_verdict,
                             execution_status="skipped",
                             execution_reason="invalid_reduce_volume",
-                            execution={
-                                "current_volume": current_volume,
-                                "reduce_fraction": reduce_fraction,
-                                "raw_reduce_volume": raw_reduce_volume,
-                                "reduce_volume": reduce_volume,
-                                "min_volume": min_volume,
-                                "step_volume": step_volume,
-                            },
+                            execution={**invalid_reduce_execution, "fallback_skip_reason": upgrade_reason},
                             acct=acct,
                         )
             elif action == "close":
@@ -3752,7 +4214,9 @@ def _prime_live_loop_state(
         account=account,
         account_updated_at=time.time(),
     )
-    _reset_session_state_for_new_day()
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not _restore_session_state_for_day(today_str):
+        _reset_session_state_for_new_day()
 
 
 
@@ -4760,11 +5224,6 @@ def _scheduled_awe_adapt():
 
 
 # ═══════════════════════════════════════════════════════════
-# Phase 2: ML 预测管道
-# ═══════════════════════════════════════════════════════════
-
-
-# ═══════════════════════════════════════════════════════════
 # Phase 3: 特征工程自动化
 # ═══════════════════════════════════════════════════════════
 
@@ -4836,63 +5295,9 @@ def _scheduled_feature_engineering():
         logger.warning(f"[fe] failed: {e}", exc_info=True)
 
 
-def _scheduled_ml_retrain():
-    """每周日凌晨 5 点: ML 因子自动重训。
-
-    1. 加载最近 30,000 bars
-    2. 训练 XGBoost 方向预测器
-    3. 若通过 OOS 验证 → 注册为因子
-    4. 记录到 evolution_story
-    """
-    try:
-        from alpha.ml.direction_predictor import train_direction_predictor
-        result = train_direction_predictor(
-            symbol="XAUUSD+", timeframe="M5", n_bars=30000,
-        )
-        if result:
-            from monitor.evolution_story.report import EvolutionStory
-            story = EvolutionStory.shared() if hasattr(EvolutionStory, "shared") else None
-            if story:
-                story.append(
-                    event_type="ml_retrain",
-                    payload=result,
-                )
-            logger.info("[ml_retrain] done: status={}, oos_acc={:.4f}",
-                        result.get("status"), result.get("oos_acc", 0))
-        else:
-            logger.info("[ml_retrain] no model trained (insufficient data)")
-    except Exception as e:
-        logger.warning("[ml_retrain] failed: {}", e)
-
-
-def _scheduled_ml_drift_check():
-    """每 6 小时: ML 因子概念漂移检测。
-
-    检查 xgb_dir 因子的滚动准确率,
-    若连续低于基线 95% → 触发自动重训。
-    """
-    try:
-        from alpha.ml.drift_detector import get_detector
-        from alpha.ml.direction_predictor import FACTOR_NAME
-
-        detector = get_detector(FACTOR_NAME)
-        report = detector.check(FACTOR_NAME)
-        if report.drift_detected:
-            logger.warning(
-                "[ml_drift] %s drift detected: acc=%.4f score=%.2f needs_retrain=%s",
-                FACTOR_NAME, report.rolling_accuracy,
-                report.drift_score, report.needs_retrain,
-            )
-            if report.needs_retrain:
-                logger.info("[ml_drift] triggering auto-retrain for %s", FACTOR_NAME)
-                _scheduled_ml_retrain()
-                detector.reset()
-        else:
-            logger.debug("[ml_drift] %s OK: acc=%.4f n=%d",
-                         FACTOR_NAME, report.rolling_accuracy,
-                         report.n_observations)
-    except Exception as e:
-        logger.warning("[ml_drift] failed: %s", e)
+def _env_enabled(name: str, default: str = "1") -> bool:
+    value = str(os.getenv(name, default) or "").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
 
 
 def _ensure_offmarket_high_load_audit_table(conn) -> None:
@@ -5086,15 +5491,32 @@ def _scheduled_offmarket_position_quality_lightgbm() -> dict[str, Any]:
 def _start_live_scheduler():
     """注册并启动自进化 Scheduler (11 job). 幂等: 已运行时跳过."""
     from backend.runtime.scheduler import InProcessScheduler
-    from backend.runtime.evolution_kernel import EvolutionKernel
     sched = InProcessScheduler()
     if getattr(sched, "_started", False):
         return
+    run_heavy_jobs = _env_enabled("QUANT_BACKEND_HEAVY_JOBS", "0")
 
-    # ★ 初始化 EvolutionKernel (注册中枢 + quality gate + governor)
-    kernel = EvolutionKernel.shared()
-    kernel.set_pipeline(_factor_pipeline)
-    kernel.start()  # registers evolution_hourly + awe_adapt + system_health
+    if run_heavy_jobs:
+        # ★ 初始化 EvolutionKernel (注册中枢 + quality gate + governor)
+        from backend.runtime.evolution_kernel import EvolutionKernel
+
+        kernel = EvolutionKernel.shared()
+        kernel.set_pipeline(_factor_pipeline)
+        kernel.start()  # registers evolution_hourly + awe_adapt + system_health
+    else:
+        try:
+            from monitor.system_health import shared as _sh_shared
+            from monitor.alerter import Alerter
+
+            _sys_health = _sh_shared()
+            _sys_health.set_alerter(Alerter({
+                "log_file": "logs/alerts.log",
+                "min_level": "WARNING",
+            }).send)
+            sched.add_job("system_health", "* * * * *", _sys_health.run)
+            logger.info("[live] heavy scheduler jobs disabled; system_health remains in backend")
+        except Exception as e:
+            logger.warning("[live] system_health registration failed while heavy jobs disabled: {}", e)
 
     # ── 数据同步 (每 5 分钟) ──
     from data.live_sync.health import SyncHealth
@@ -5332,18 +5754,17 @@ def _start_live_scheduler():
         except Exception as e:
             logger.warning("[fred_sync] error: {}", e)
     sched.add_job("fred_sync", "20 5 * * *", _scheduled_fred_sync)
-    # ★ awe_adapt / evolution_hourly / system_health 已由 EvolutionKernel 注册
-    # Phase 2: ML 因子自动重训 (每周日凌晨 5:00)
-    sched.add_job("ml_retrain", "0 5 * * 0", _scheduled_ml_retrain)
-    # Phase 3: 特征工程 (每天凌晨 3:00)
-    sched.add_job("feature_eng", "0 3 * * *", _scheduled_feature_engineering)
-    # Phase 2: ML 因子漂移检测 (每 6 小时)
-    sched.add_job("ml_drift_check", "0 */6 * * *", _scheduled_ml_drift_check)
-    # Phase F1.1: 停盘确认窗口 LightGBM 旁路训练 (每小时检查, 非窗口只写 skip 审计)
-    sched.add_job("offmarket_position_quality_lightgbm", "20 * * * *", _scheduled_offmarket_position_quality_lightgbm)
+    if run_heavy_jobs:
+        # ★ awe_adapt / evolution_hourly / system_health 已由 EvolutionKernel 注册
+        # Phase 3: 特征工程 (每天凌晨 3:00)
+        sched.add_job("feature_eng", "0 3 * * *", _scheduled_feature_engineering)
+        # Phase F1.1: 停盘确认窗口 LightGBM 旁路训练 (每小时检查, 非窗口只写 skip 审计)
+        sched.add_job("offmarket_position_quality_lightgbm", "20 * * * *", _scheduled_offmarket_position_quality_lightgbm)
+    else:
+        logger.info("[live] heavy jobs delegated; set QUANT_BACKEND_HEAVY_JOBS=1 to run them in backend")
     # ★ system_health 已由 EvolutionKernel 注册
     sched.start()
-    logger.info("[live] InProcessScheduler started with 12 jobs")
+    logger.info("[live] InProcessScheduler started; heavy_jobs={}", run_heavy_jobs)
 
     # ── 后台: 首次启动数据补充 (用主 bridge, 不开第二连接) ──
     def _initial_ctrader_data_pull(timeframes=None, n_bars: int = 5000, phase: str = "startup"):
@@ -5430,12 +5851,15 @@ def _start_live_scheduler():
         deferred_jobs = [
             (300.0, "cot_sync"),
             (360.0, "etf_sync"),
-            (480.0, "evolution_hourly"),
-            (720.0, "awe_adapt"),
-            (960.0, "ml_drift_check"),
-            (1200.0, "feature_eng"),
-            (1500.0, "ml_retrain"),
         ]
+        if run_heavy_jobs:
+            deferred_jobs.extend(
+                [
+                    (480.0, "evolution_hourly"),
+                    (720.0, "awe_adapt"),
+                    (1200.0, "feature_eng"),
+                ]
+            )
         for name in immediate_jobs:
             _run_job(name)
         started_at = time.monotonic()
@@ -6742,6 +7166,12 @@ def _record_filled_position_open_context(
     composite,
     gate_result,
     risk_verdict=None,
+    market_session: dict[str, Any] | None = None,
+    base_requested_volume: float | None = None,
+    event_sizing_context: dict[str, Any] | None = None,
+    sl_dist: float = 0.0,
+    tp_dist: float = 0.0,
+    bridge: Any = None,
 ) -> str:
     """Persist open context after a market fill, even if SL/TP amend fails."""
     entry_decision_id = ""
@@ -6768,6 +7198,26 @@ def _record_filled_position_open_context(
 
     if _LEDGER:
         try:
+            learning_context = _open_learning_context_payload(
+                bridge=bridge,
+                bar=bar,
+                positions_before=pos,
+                composite=composite,
+                symbol="XAUUSD+",
+                pid=int(pid),
+                actual_api_volume=float(actual_api_volume or 0.0),
+                requested_volume=float(requested_volume or 0.0),
+                base_requested_volume=float(base_requested_volume if base_requested_volume is not None else requested_volume or 0.0),
+                current_price=float(current_price or 0.0),
+                fill_price=float(fill_price or 0.0),
+                sl_price=float(sl_price or 0.0),
+                tp_price=float(tp_price or 0.0),
+                sl_dist=float(sl_dist or 0.0),
+                tp_dist=float(tp_dist or 0.0),
+                event_sizing_context=event_sizing_context or {},
+                risk_verdict=risk_verdict,
+                market_session=market_session,
+            )
             entry_decision_id = _LEDGER.log_composite_decision(
                 event_type="open",
                 composite=composite,
@@ -6798,6 +7248,7 @@ def _record_filled_position_open_context(
                     "sl": round(sl_price, 2),
                     "tp": round(tp_price, 2),
                     "tick": tick,
+                    **learning_context,
                     **(
                         {"risk_verdict": risk_verdict.to_dict()}
                         if risk_verdict is not None
@@ -6877,6 +7328,28 @@ def _record_filled_position_open_context(
                 "tp": round(tp_price, 2),
                 "entry_protection_plan": entry_protection_plan,
                 "trade_attribution": trade_attribution_payload,
+                **(
+                    _open_learning_context_payload(
+                        bridge=bridge,
+                        bar=bar,
+                        positions_before=pos,
+                        composite=composite,
+                        symbol="XAUUSD+",
+                        pid=int(pid),
+                        actual_api_volume=float(actual_api_volume or 0.0),
+                        requested_volume=float(requested_volume or 0.0),
+                        base_requested_volume=float(base_requested_volume if base_requested_volume is not None else requested_volume or 0.0),
+                        current_price=float(current_price or 0.0),
+                        fill_price=float(fill_price or 0.0),
+                        sl_price=float(sl_price or 0.0),
+                        tp_price=float(tp_price or 0.0),
+                        sl_dist=float(sl_dist or 0.0),
+                        tp_dist=float(tp_dist or 0.0),
+                        event_sizing_context=event_sizing_context or {},
+                        risk_verdict=risk_verdict,
+                        market_session=market_session,
+                    )
+                ),
             },
         )
     except Exception as recovery_err:
@@ -7323,6 +7796,7 @@ def _process_tick_factor_pipeline(
             current_price=float(current_price or 0.0),
             atr_price=float(atr_price or 0.0),
             event_sizing_context=event_sizing_context,
+            decision_ts=float(bar.get("time", time.time()) or time.time()),
         )
         risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
         market_session = _live_state_get("market_session", {}, clone=True) or {}
@@ -7342,6 +7816,26 @@ def _process_tick_factor_pipeline(
             })()
             if _LEDGER:
                 try:
+                    learning_context = _open_learning_context_payload(
+                        bridge=bridge,
+                        bar=bar,
+                        positions_before=pos,
+                        composite=composite,
+                        symbol="XAUUSD+",
+                        pid=0,
+                        actual_api_volume=0.0,
+                        requested_volume=float(volume or 0.0),
+                        base_requested_volume=float(base_volume or 0.0),
+                        current_price=float(current_price or 0.0),
+                        fill_price=0.0,
+                        sl_price=float(sl_price or 0.0),
+                        tp_price=float(tp_price or 0.0),
+                        sl_dist=float(sl_dist or 0.0),
+                        tp_dist=float(tp_dist or 0.0),
+                        event_sizing_context=event_sizing_context,
+                        risk_verdict=risk_verdict,
+                        market_session=market_session,
+                    )
                     _LEDGER.log_composite_decision(
                         event_type="skip",
                         composite=composite,
@@ -7362,6 +7856,7 @@ def _process_tick_factor_pipeline(
                             "market_session": market_session,
                             "risk_verdict": risk_verdict.to_dict(),
                             "event_sizing": event_sizing_context,
+                            **learning_context,
                         },
                     )
                 except Exception as _ledger_err:
@@ -7511,6 +8006,26 @@ def _process_tick_factor_pipeline(
                                     _pos_open_api_volume[pid] = float(actual_api_volume)
                                     log(f"tick {tick}: attribution recorded open pos={pid}")
                                     entry_decision_id = ""
+                                    learning_context = _open_learning_context_payload(
+                                        bridge=bridge,
+                                        bar=bar,
+                                        positions_before=pos,
+                                        composite=composite,
+                                        symbol="XAUUSD+",
+                                        pid=int(pid),
+                                        actual_api_volume=float(actual_api_volume or 0.0),
+                                        requested_volume=float(volume or 0.0),
+                                        base_requested_volume=float(base_volume or 0.0),
+                                        current_price=float(current_price or 0.0),
+                                        fill_price=float(fill_price or 0.0),
+                                        sl_price=float(sl_price or 0.0),
+                                        tp_price=float(tp_price or 0.0),
+                                        sl_dist=float(sl_dist or 0.0),
+                                        tp_dist=float(tp_dist or 0.0),
+                                        event_sizing_context=event_sizing_context,
+                                        risk_verdict=risk_verdict,
+                                        market_session=market_session,
+                                    )
                                     if _LEDGER:
                                         try:
                                             entry_decision_id = _LEDGER.log_composite_decision(
@@ -7541,6 +8056,7 @@ def _process_tick_factor_pipeline(
                                                     "tp": round(tp_price, 2),
                                                     "tick": tick,
                                                     "risk_verdict": risk_verdict.to_dict(),
+                                                    **learning_context,
                                                 },
                                             )
                                             _pos_entry_decisions[int(pid)] = entry_decision_id
@@ -7615,6 +8131,7 @@ def _process_tick_factor_pipeline(
                                                 },
                                                 "event_sizing": event_sizing_context,
                                                 "trade_attribution": trade_attr.to_jsonable(),
+                                                **learning_context,
                                             },
                                         )
                                     except Exception as _recovery_open_err:
@@ -7675,6 +8192,12 @@ def _process_tick_factor_pipeline(
                                     composite=composite,
                                     gate_result=gate_result,
                                     risk_verdict=risk_verdict,
+                                    market_session=market_session,
+                                    base_requested_volume=base_volume,
+                                    event_sizing_context=event_sizing_context,
+                                    sl_dist=sl_dist,
+                                    tp_dist=tp_dist,
+                                    bridge=bridge,
                                 )
                                 _update_entry_protection_plan_status(
                                     int(pid),

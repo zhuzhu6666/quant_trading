@@ -58,6 +58,6 @@ def test_close_deal_with_zero_gross_profit_still_recovers_real_pnl(tmp_path):
         conn.close()
 
     assert result[7001]["source"] == "ctrader_deals"
-    assert result[7001]["net"] == pytest.approx(0.18)
+    assert result[7001]["net"] == pytest.approx(-0.18)
     assert result[7001]["exec_timestamp"] == pytest.approx(1_782_756_091.236)
     assert result[7001]["closed_volume"] == 100

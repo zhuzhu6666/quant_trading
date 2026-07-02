@@ -70,11 +70,19 @@ def build_evidence_contract(
     allowed_uses = ["audit", "explainability"]
     if integrity in {"full", "recovered", "partial"} and label_status == "matured":
         allowed_uses.append("weak_supervision")
+    high_confidence_counterfactual = (
+        integrity in {"full", "recovered"}
+        and causal_level == "counterfactual"
+        and label_status == "matured"
+        and quality_score >= 0.7
+    )
+    if integrity in {"full", "recovered"} and causal_level == "counterfactual" and label_status == "matured":
+        allowed_uses.append("counterfactual_training")
     if (
         integrity in {"full", "recovered"}
         and causal_level in {"replay_validated", "intervention_observed"}
         and label_status == "matured"
-    ):
+    ) or high_confidence_counterfactual:
         allowed_uses.append("supervised_training")
     if integrity == "full" and causal_level == "intervention_observed" and label_status == "matured":
         allowed_uses.append("strong_governance")

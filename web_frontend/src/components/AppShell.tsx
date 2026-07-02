@@ -1,5 +1,5 @@
 import { Link, Navigate, useLocation } from "react-router-dom";
-import { LogOut, LayoutDashboard, BarChart3, Activity, ShieldAlert, Settings2, BrainCircuit } from "lucide-react";
+import { LogOut, LayoutDashboard, BarChart3, Activity, ShieldAlert, Settings2, BrainCircuit, Microscope } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 
 const navItems = [
@@ -8,6 +8,7 @@ const navItems = [
   { to: "/pnl", label: "盈亏", icon: BarChart3 },
   { to: "/risk", label: "风控", icon: ShieldAlert },
   { to: "/learning", label: "学习", icon: BrainCircuit },
+  { to: "/models", label: "模型", icon: Microscope },
   { to: "/ops", label: "运维", icon: Settings2 },
 ];
 

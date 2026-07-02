@@ -26,6 +26,7 @@ def scheduler_status(_user: RequireUser) -> dict:
                 "error_count": j.error_count,
                 "last_error": j.last_error or "",
                 "next_run_time": j.next_run_time,
+                "last_run_time": j.last_run_time,
             } for j in (sched.list_jobs() if hasattr(sched, "list_jobs") else [])]
         except Exception:
             pass

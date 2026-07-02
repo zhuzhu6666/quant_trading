@@ -35,11 +35,15 @@ def _net_from_close_row(row) -> float:
     gross = float(row["gross_profit"] or 0.0)
     swap = float(row["swap"] or 0.0)
     close_commission = float(row["close_commission"] or 0.0)
-    return gross + swap - close_commission
+    return gross + swap + close_commission
 
 
 def _connect_state():
     return get_state_pg_conn(read_only=True)
+
+
+def _conn_is_pg(conn) -> bool:
+    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
 
 
 def _state_sql(sql: str) -> str:
@@ -48,8 +52,8 @@ def _state_sql(sql: str) -> str:
 
 def _execute(conn, sql: str, params: list | tuple | None = None):
     if params is None:
-        return conn.execute(_state_sql(sql))
-    return conn.execute(_state_sql(sql), tuple(params))
+        return conn.execute(_state_sql(sql) if _conn_is_pg(conn) else sql)
+    return conn.execute(_state_sql(sql) if _conn_is_pg(conn) else sql, tuple(params))
 
 
 def _fetch_ctrader_close_points(conn, *, from_ts: float | None, to_ts: float) -> list[dict]:

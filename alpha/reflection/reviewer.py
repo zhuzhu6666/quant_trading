@@ -32,6 +32,17 @@ def _safe_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _loads(raw: object, default: object) -> object:
+    if raw is None:
+        return default
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(str(raw))
+    except Exception:
+        return default
+
+
 class TradeReviewer:
     """Rule-based post-trade reviewer."""
 
@@ -151,6 +162,8 @@ class TradeReviewer:
             regime_id = str(entry["regime_id"] or "") if entry else ""
             entry_ts = float(entry["decision_ts"] or 0.0) if entry else 0.0
             timeframe = str(entry["timeframe"] or "") if entry else ""
+            entry_action = _loads(entry["action_json"], {}) if entry else {}
+            entry_risk_state = _loads(entry["risk_state_json"], {}) if entry else {}
             entry_factors = list(
                 self._execute(conn,
                     """
@@ -212,6 +225,48 @@ class TradeReviewer:
             failure_tags.append("unavoidable_noise")
         if attribution_integrity == "missing" and "attribution_missing" not in failure_tags:
             failure_tags.append("attribution_missing")
+        entry_cluster = entry_action.get("entry_cluster") if isinstance(entry_action, dict) else {}
+        same_direction_open_count = _safe_int(
+            (entry_action or {}).get("same_direction_open_count")
+            if isinstance(entry_action, dict)
+            else 0
+        )
+        recent_same_direction_entries = (
+            (entry_action or {}).get("recent_same_direction_entries")
+            if isinstance(entry_action, dict)
+            else {}
+        ) or {}
+        event_context = (
+            (entry_action or {}).get("event_context")
+            or (entry_action or {}).get("event_sizing")
+            if isinstance(entry_action, dict)
+            else {}
+        ) or {}
+        market_micro_context = (
+            (entry_action or {}).get("market_micro_context")
+            if isinstance(entry_action, dict)
+            else {}
+        ) or {}
+        execution_context = (
+            (entry_action or {}).get("execution_context")
+            if isinstance(entry_action, dict)
+            else {}
+        ) or {}
+        data_quality_context = (
+            (entry_action or {}).get("data_quality_context")
+            if isinstance(entry_action, dict)
+            else {}
+        ) or {}
+        adverse_slippage = _safe_float((market_micro_context or {}).get("adverse_slippage_points"))
+        if pnl <= 0 and same_direction_open_count >= 2 and "entry_cluster_risk" not in failure_tags:
+            failure_tags.append("entry_cluster_risk")
+        if pnl <= 0 and bool((event_context or {}).get("event_near")) and "event_window_bad_entry" not in failure_tags:
+            failure_tags.append("event_window_bad_entry")
+        if pnl <= 0 and adverse_slippage > 0 and "execution_slippage" not in failure_tags:
+            failure_tags.append("execution_slippage")
+        if pnl <= 0 and data_quality_context and not bool(data_quality_context.get("quote_fresh", True)):
+            if "data_quality_issue" not in failure_tags:
+                failure_tags.append("data_quality_issue")
 
         entry_quality = _clamp(0.55 + (0.25 if pnl > 0 else -0.30) * min(abs(entry_score), 1.0))
         hold_quality = _clamp(0.55 if pnl > 0 else 0.40)
@@ -277,6 +332,20 @@ class TradeReviewer:
             "regime_shift": path_metrics["regime_shift"],
             "regime_shift_at_exit": path_metrics["regime_shift"],
             "entry_score": entry_score,
+            "entry_action": entry_action if isinstance(entry_action, dict) else {},
+            "entry_risk_state": entry_risk_state if isinstance(entry_risk_state, dict) else {},
+            "direction": _safe_int((entry_action or {}).get("direction") if isinstance(entry_action, dict) else 0),
+            "same_direction_open_count": same_direction_open_count,
+            "recent_same_direction_entries": recent_same_direction_entries,
+            "entry_cluster": entry_cluster or {},
+            "portfolio_exposure": (entry_action or {}).get("portfolio_exposure", {}) if isinstance(entry_action, dict) else {},
+            "market_micro_context": market_micro_context or {},
+            "spread": _safe_float((entry_action or {}).get("spread") if isinstance(entry_action, dict) else 0.0),
+            "bar_context": (entry_action or {}).get("bar_context", {}) if isinstance(entry_action, dict) else {},
+            "event_context": event_context or {},
+            "execution_context": execution_context or {},
+            "data_quality_context": data_quality_context or {},
+            "decision_quality_context": (entry_action or {}).get("decision_quality_context", {}) if isinstance(entry_action, dict) else {},
             "top_weight_factor": top_weight_factor,
             "top_weight": top_weight,
             "top_factor": top_factor,

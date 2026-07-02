@@ -105,10 +105,10 @@ def test_realized_pnl_series_uses_ctrader_close_deals(tmp_path):
     assert result["summary"]["trades"] == 2
     assert result["summary"]["wins"] == 1
     assert result["summary"]["losses"] == 1
-    assert result["points"][0]["pnl"] == pytest.approx(1.43)
-    assert result["points"][0]["cumulative"] == pytest.approx(1.43)
-    assert result["points"][1]["pnl"] == pytest.approx(-1.82)
-    assert result["points"][1]["cumulative"] == pytest.approx(-0.39)
+    assert result["points"][0]["pnl"] == pytest.approx(1.07)
+    assert result["points"][0]["cumulative"] == pytest.approx(1.07)
+    assert result["points"][1]["pnl"] == pytest.approx(-2.18)
+    assert result["points"][1]["cumulative"] == pytest.approx(-1.11)
 
 
 def test_realized_pnl_series_falls_back_without_double_counting(tmp_path):
@@ -175,7 +175,7 @@ def test_realized_pnl_series_falls_back_without_double_counting(tmp_path):
 
     assert [point["position_id"] for point in result["points"]] == [3001, 3002]
     assert [point["source"] for point in result["points"]] == ["ctrader_deals", "recovery_position_state"]
-    assert result["summary"]["realized_pnl"] == pytest.approx(-0.27)
+    assert result["summary"]["realized_pnl"] == pytest.approx(-0.63)
 
 
 def test_realized_pnl_series_today_scope_uses_requested_timezone(tmp_path):

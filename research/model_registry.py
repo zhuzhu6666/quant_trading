@@ -1,6 +1,6 @@
 """research/model_registry.py — ML 模型版本注册器.
 
-跟踪每个模型 (xgb_dir, PCA, regime_classifier) 的版本: 训练参数、性能指标、artifact 路径。
+跟踪每个模型 (meta_model_lightgbm, position_quality_lightgbm 等) 的版本: 训练参数、性能指标、artifact 路径。
 支持版本回滚: list_versions() → load_version().
 
 用法:
@@ -8,8 +8,8 @@
 
     # 训练后注册新版本
     version = reg.register(
-        model_type="xgb_dir",
-        artifact_path="data/ml_models/xgb_dir_XAUUSD+_M5.pkl",
+        model_type="example_model",
+        artifact_path="data/model_artifacts/example_model/example_model.json",
         params={"n_estimators": 200, "max_depth": 4},
         metrics={"oos_acc": 0.685, "oos_sharpe": 1.2},
         symbol="XAUUSD+",
@@ -17,9 +17,9 @@
     )
 
     # 查看历史
-    versions = reg.list_versions("xgb_dir", symbol="XAUUSD+")
-    best = reg.best_version("xgb_dir", metric="oos_acc")
-    rollback = reg.load_version("xgb_dir", version=best)
+    versions = reg.list_versions("example_model", symbol="XAUUSD+")
+    best = reg.best_version("example_model", metric="oos_acc")
+    rollback = reg.load_version("example_model", version=best)
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class ModelVersion:
     """单个模型版本记录."""
     id: int = 0
-    model_type: str = ""            # xgb_dir / pca / regime_classifier
+    model_type: str = ""            # meta_model_lightgbm / position_quality_lightgbm / etc.
     symbol: str = "XAUUSD+"
     timeframe: str = "M5"
     version: int = 0                 # 自增版本号

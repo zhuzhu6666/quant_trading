@@ -43,6 +43,7 @@ data/charts/factor_attribution.json
 data/trades_reconcile_report*.json
 data/parameter_template_validation_reports/
 data/model_artifacts/
+data/model_eval_reports/
 data/cot/
 data/external_raw/
 data/sec_gld/

@@ -58,6 +58,13 @@ def _json_int(conn, column: str, path: str) -> str:
     return f"CAST({text_expr} AS INTEGER)"
 
 
+def _json_real(conn, column: str, path: str) -> str:
+    text_expr = _json_text(conn, column, path)
+    if _conn_is_pg(conn):
+        return f"CAST(NULLIF({text_expr}, '') AS DOUBLE PRECISION)"
+    return f"CAST({text_expr} AS REAL)"
+
+
 def _string_agg(conn, column: str) -> str:
     return f"string_agg({column}, ',')" if _conn_is_pg(conn) else f"GROUP_CONCAT({column})"
 
@@ -168,6 +175,9 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
         r_review_real_deal_id = _json_text(conn, "r.review_json", "real_pnl.deal_id")
         r_review_real_deal_id_int = _json_int(conn, "r.review_json", "real_pnl.deal_id")
         p_experience_id = _json_text(conn, "p.evidence_json", "experience_id")
+        risk_audit_decision_ts = _json_real(conn, "risk_state_json", "policy_verdict.audit_payload.temporal_context.decision_ts")
+        action_audit_decision_ts = _json_real(conn, "action_json", "risk_verdict.audit_payload.temporal_context.decision_ts")
+        audit_decision_ts = f"COALESCE({risk_audit_decision_ts}, {action_audit_decision_ts}, 0)"
         missing_close_source_total = _scalar(
             conn,
             f"""
@@ -237,12 +247,23 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
             FROM policy_suggestion p
             WHERE {p_experience_id} IS NOT NULL
               AND {p_experience_id} != ''
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM experience_memory e
-                  WHERE e.experience_id = {p_experience_id}
-              )
+                AND NOT EXISTS (
+                      SELECT 1
+                      FROM experience_memory e
+                      WHERE e.experience_id = {p_experience_id}
+                  )
             """,
+        )
+        decision_temporal_context_mismatch_total = _scalar(
+            conn,
+            f"""
+            SELECT COUNT(*)
+            FROM decision_ledger
+            WHERE decision_ts >= ?
+              AND {audit_decision_ts} > 0
+              AND ABS(COALESCE(decision_ts, 0) - {audit_decision_ts}) > 5.0
+            """,
+            (since,),
         )
         counts.update(
             {
@@ -257,6 +278,7 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
                 "duplicate_review_deal": duplicate_review_deal_total,
                 "experience_event_time_mismatch": experience_event_time_mismatch_total,
                 "policy_suggestion_dangling_experience": policy_suggestion_dangling_experience_total,
+                "decision_temporal_context_mismatch_recent": decision_temporal_context_mismatch_total,
             }
         )
 
@@ -387,6 +409,21 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
             """,
             (int(limit),),
         )
+        decision_temporal_context_mismatches = _rows(
+            conn,
+            f"""
+            SELECT decision_id, event_type, decision_ts,
+                   {audit_decision_ts} AS audit_decision_ts,
+                   ABS(COALESCE(decision_ts, 0) - {audit_decision_ts}) AS drift_seconds
+            FROM decision_ledger
+            WHERE decision_ts >= ?
+              AND {audit_decision_ts} > 0
+              AND ABS(COALESCE(decision_ts, 0) - {audit_decision_ts}) > 5.0
+            ORDER BY drift_seconds DESC
+            LIMIT ?
+            """,
+            (since, int(limit)),
+        )
 
         issues = []
         if counts["amend_failed_recent"] > 0:
@@ -479,6 +516,15 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
                 "code": "policy_suggestion_dangling_experience",
                 "message": f"{policy_suggestion_dangling_experience_total} policy suggestions reference missing experience rows",
             })
+        if decision_temporal_context_mismatch_total > 0:
+            issues.append({
+                "severity": "error",
+                "code": "decision_temporal_context_mismatch",
+                "message": (
+                    f"{decision_temporal_context_mismatch_total} recent decision ledger rows have nested audit "
+                    "temporal_context.decision_ts drifting from the market decision_ts"
+                ),
+            })
 
         status = "healthy"
         if any(item["severity"] == "error" for item in issues):
@@ -500,6 +546,7 @@ def run_check(*, db_path: str | Path = STATE_DB, hours: float = 24.0, limit: int
                 "review_broker_time_mismatches": review_broker_time_mismatches,
                 "duplicate_review_deals": duplicate_review_deals,
                 "experience_event_time_mismatches": experience_event_time_mismatches,
+                "decision_temporal_context_mismatches": decision_temporal_context_mismatches,
                 "recent_failures": recent_failures,
                 "active_recovery_without_entry": active_recovery_without_entry,
             },

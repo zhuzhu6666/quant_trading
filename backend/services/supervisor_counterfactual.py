@@ -124,14 +124,89 @@ def _load_future_bars(symbol: str, timeframe: str, close_ts: float, max_minutes:
     try:
         from data.store import DataStore
 
-        return DataStore().load_bars(
+        bars = DataStore().load_bars(
             symbol or "XAUUSD+",
             timeframe or "M5",
             start=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(close_ts)),
             end=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(close_ts + max_minutes * 60 + 300)),
         )
+        return _bars_with_epoch(bars)
     except Exception:
         return None
+
+
+def _bars_with_epoch(bars):
+    if bars is None or getattr(bars, "empty", True):
+        return bars
+    bars = bars.copy()
+    if "time" not in bars.columns:
+        bars["_epoch_time"] = 0.0
+        return bars
+    try:
+        import pandas as pd
+
+        if pd.api.types.is_numeric_dtype(bars["time"]):
+            bars["_epoch_time"] = bars["time"].apply(_safe_float)
+        else:
+            time_values = pd.to_datetime(bars["time"], utc=True, errors="coerce")
+            numeric_ts = time_values.astype("int64").astype(float)
+            positive_ts = numeric_ts[numeric_ts > 0]
+            scale = 1_000_000_000.0 if not positive_ts.empty and positive_ts.median() > 1_000_000_000_000 else 1.0
+            bars["_epoch_time"] = numeric_ts / scale
+    except Exception:
+        bars["_epoch_time"] = bars["time"].apply(_safe_float)
+    return bars
+
+
+def _load_future_bar_cache(candidates: list[dict[str, Any]], max_minutes: int) -> dict[tuple[str, str], Any]:
+    if not candidates:
+        return {}
+    try:
+        from data.store import DataStore
+
+        store = DataStore()
+    except Exception:
+        return {}
+    grouped: dict[tuple[str, str], list[float]] = {}
+    for item in candidates:
+        symbol = str(item.get("symbol") or "XAUUSD+")
+        timeframe = str(item.get("timeframe") or "M5")
+        close_ts = _safe_float(item.get("close_ts"))
+        if close_ts > 0:
+            grouped.setdefault((symbol, timeframe), []).append(close_ts)
+    cache: dict[tuple[str, str], Any] = {}
+    for (symbol, timeframe), close_times in grouped.items():
+        start_ts = min(close_times)
+        end_ts = max(close_times) + int(max_minutes) * 60 + 300
+        try:
+            bars = store.load_bars(
+                symbol,
+                timeframe,
+                start=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(start_ts)),
+                end=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(end_ts)),
+            )
+        except Exception:
+            continue
+        if bars is not None and not getattr(bars, "empty", True):
+            cache[(symbol, timeframe)] = _bars_with_epoch(bars)
+    return cache
+
+
+def _slice_future_bars(bar_cache: dict[tuple[str, str], Any], symbol: str, timeframe: str, close_ts: float, max_minutes: int):
+    bars = bar_cache.get((symbol or "XAUUSD+", timeframe or "M5"))
+    if bars is None or getattr(bars, "empty", True):
+        return None
+    if "_epoch_time" not in bars.columns:
+        bars = _bars_with_epoch(bars)
+    end_ts = float(close_ts) + int(max_minutes) * 60 + 300
+    window = bars[(bars["_epoch_time"] >= float(close_ts)) & (bars["_epoch_time"] <= end_ts)]
+    return window.copy() if window is not None and not getattr(window, "empty", True) else None
+
+
+def _future_loader_is_patched() -> bool:
+    return getattr(_load_future_bars, "__module__", "") != __name__ or getattr(
+        _load_future_bars, "__name__", ""
+    ) != "_load_future_bars"
 
 
 def _pnl_from_price(*, direction: int, entry_price: float, price: float, unit: float) -> float:
@@ -177,20 +252,9 @@ def _horizon_metrics(
 ) -> list[dict[str, Any]]:
     if bars is None or getattr(bars, "empty", True):
         return []
-    if "time" in bars.columns:
-        try:
-            import pandas as pd
-
-            bars = bars.copy()
-            if pd.api.types.is_numeric_dtype(bars["time"]):
-                bars["_epoch_time"] = bars["time"].apply(_safe_float)
-            else:
-                time_values = pd.to_datetime(bars["time"], utc=True, errors="coerce")
-                bars["_epoch_time"] = (time_values.astype("int64") / 1_000_000_000).astype(float)
-        except Exception:
-            bars = bars.copy()
-            bars["_epoch_time"] = bars["time"].apply(_safe_float)
-    else:
+    if "_epoch_time" not in bars.columns:
+        bars = _bars_with_epoch(bars)
+    if "_epoch_time" not in bars.columns:
         bars = bars.copy()
         bars["_epoch_time"] = float(close_ts)
     out = []
@@ -358,7 +422,7 @@ def evaluate_counterfactuals(
         ).fetchall()
         if _conn_is_pg(conn):
             conn.commit()
-        items = []
+        candidates = []
         for row in rows:
             review = _loads(row["review_json"], {})
             close_reason = str(review.get("close_reason") or "")
@@ -387,12 +451,48 @@ def evaluate_counterfactuals(
             unit = abs(close_pnl / ((close_price - entry_price) * direction)) if abs(close_price - entry_price) > 1e-9 else 1.0
             if not math.isfinite(unit) or unit <= 0:
                 unit = 1.0
-            bars = _load_future_bars(
-                str(review.get("symbol") or "XAUUSD+"),
-                str(review.get("timeframe") or "M5"),
-                close_ts,
-                max(horizons_minutes),
+            candidates.append(
+                {
+                    "row": row,
+                    "review": review,
+                    "position_id": position_id,
+                    "close_ts": close_ts,
+                    "close_reason": close_reason,
+                    "supervisor": supervisor,
+                    "supervisor_event": supervisor_event,
+                    "opened": opened,
+                    "direction": direction,
+                    "entry_price": entry_price,
+                    "close_price": close_price,
+                    "close_pnl": close_pnl,
+                    "unit": unit,
+                    "symbol": str(review.get("symbol") or "XAUUSD+"),
+                    "timeframe": str(review.get("timeframe") or "M5"),
+                }
             )
+
+        max_horizon = max(horizons_minutes)
+        bar_cache = _load_future_bar_cache(candidates, max_horizon)
+        items = []
+        for candidate in candidates:
+            row = candidate["row"]
+            review = candidate["review"]
+            position_id = candidate["position_id"]
+            close_ts = candidate["close_ts"]
+            close_reason = candidate["close_reason"]
+            supervisor = candidate["supervisor"]
+            supervisor_event = candidate["supervisor_event"]
+            opened = candidate["opened"]
+            direction = candidate["direction"]
+            entry_price = candidate["entry_price"]
+            close_price = candidate["close_price"]
+            close_pnl = candidate["close_pnl"]
+            unit = candidate["unit"]
+            symbol = candidate["symbol"]
+            timeframe = candidate["timeframe"]
+            bars = _slice_future_bars(bar_cache, symbol, timeframe, close_ts, max_horizon)
+            if bars is None and _future_loader_is_patched():
+                bars = _load_future_bars(symbol, timeframe, close_ts, max_horizon)
             horizon_items = _horizon_metrics(
                 bars=bars,
                 direction=direction,
@@ -483,6 +583,8 @@ def evaluate_counterfactuals(
             "materialized": bool(materialize),
             "items": items,
             "count": len(items),
+            "candidate_count": len(candidates),
+            "bar_cache_groups": len(bar_cache),
         }
     finally:
         conn.close()

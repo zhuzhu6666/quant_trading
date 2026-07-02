@@ -18,7 +18,7 @@ class TestExperimentRegistry:
 
     def test_finish_run_updates_status(self):
         reg = self._make_reg()
-        run_id = reg.start_run("ml_retrain")
+        run_id = reg.start_run("model_shadow_train")
         ok = reg.finish_run(run_id, accepted=True, metrics_oos={"sharpe": 1.5})
         assert ok
         record = reg.get_run(run_id)
@@ -35,7 +35,7 @@ class TestExperimentRegistry:
     def test_list_runs_filters_by_type(self):
         reg = self._make_reg()
         reg.start_run("gp_search")
-        reg.start_run("ml_retrain")
+        reg.start_run("model_shadow_train")
         reg.start_run("gp_search")
         gp_runs = reg.list_runs(experiment_type="gp_search")
         assert len(gp_runs) >= 2

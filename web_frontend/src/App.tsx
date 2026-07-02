@@ -10,6 +10,7 @@ import { PnlPage } from "@/pages/PnlPage";
 import { RiskPage } from "@/pages/RiskPage";
 import { OpsPage } from "@/pages/OpsPage";
 import { LearningPage } from "@/pages/LearningPage";
+import { ModelsPage } from "@/pages/ModelsPage";
 import { useState } from "react";
 
 export function App() {
@@ -89,6 +90,18 @@ export function App() {
               <ErrorBoundary>
                 <AppShell>
                   <LearningPage />
+                </AppShell>
+              </ErrorBoundary>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/models"
+          element={
+            <ProtectedRoute>
+              <ErrorBoundary>
+                <AppShell>
+                  <ModelsPage />
                 </AppShell>
               </ErrorBoundary>
             </ProtectedRoute>

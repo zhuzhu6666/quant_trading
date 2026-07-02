@@ -1,5 +1,6 @@
-"""alpha/ml — ML/AI 预测管道 (Phase 2)。
+"""Legacy ML package.
 
-生产因子: 每一个 ML 模型输出注册为 factor_registry 中的因子，
-和其他因子一样走归一化→组合→归因→自适应。
+The old Phase 2 xgb_dir direction predictor has been decommissioned. Current
+learning models live under research/ and remain shadow/advisory-only unless a
+separate governed promotion path explicitly enables them.
 """

@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -265,11 +266,15 @@ class MetaModelLightGBMService:
         try:
             rows = _execute(conn,
                 """
-                SELECT review_id, trade_id, position_id, pnl, mae, mfe,
-                       outcome_label, review_json, created_at
-                FROM trade_outcome_review
+                SELECT *
+                FROM (
+                    SELECT review_id, trade_id, position_id, pnl, mae, mfe,
+                           outcome_label, review_json, created_at
+                    FROM trade_outcome_review
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                ) recent_reviews
                 ORDER BY created_at ASC
-                LIMIT ?
                 """,
                 (int(limit),),
             ).fetchall()
@@ -327,7 +332,8 @@ class MetaModelLightGBMService:
         end_ts: float,
         window_items: list[dict[str, Any]],
     ) -> dict[str, float]:
-        start_ts = min([_safe_float(item.get("created_at"), end_ts) for item in window_items] or [end_ts])
+        history_start_ts = min([_safe_float(item.get("created_at"), end_ts) for item in window_items] or [end_ts])
+        start_ts = min(history_start_ts, float(end_ts) - 3600.0)
         features = {
             "risk_blocked_count": 0.0,
             "risk_allowed_count": 0.0,
@@ -513,7 +519,7 @@ class MetaModelLightGBMService:
         import joblib
         import lightgbm as lgb
         import pandas as pd
-        from sklearn.metrics import accuracy_score
+        from sklearn.metrics import accuracy_score, balanced_accuracy_score
 
         samples = self.load_samples(limit=limit, window=window, horizon=horizon)
         if len(samples) < int(min_samples):
@@ -554,6 +560,7 @@ class MetaModelLightGBMService:
             min_child_samples=max(1, min(20, len(train_samples) // 4)),
             subsample=0.9,
             colsample_bytree=0.9,
+            class_weight="balanced",
             random_state=42,
             n_jobs=1,
             verbosity=-1,
@@ -561,6 +568,25 @@ class MetaModelLightGBMService:
         model.fit(x_train, y_train)
         train_pred = list(model.predict(x_train))
         holdout_pred = list(model.predict(x_holdout))
+        rule_holdout_pred = []
+        for sample in holdout_samples:
+            rule_decision = self._rule_decision_from_features(sample["features"])
+            rule_posture = str(rule_decision.get("posture") or "observe")
+            rule_holdout_pred.append(POSTURE_LABELS.index(rule_posture) if rule_posture in POSTURE_LABELS else POSTURE_LABELS.index("observe"))
+        majority_label = Counter(y_holdout).most_common(1)[0][0]
+        majority_holdout_pred = [majority_label] * len(y_holdout)
+
+        def _label_distribution(values: list[int]) -> dict[str, int]:
+            counts = Counter(int(value) for value in values)
+            return {POSTURE_LABELS[idx]: int(counts.get(idx, 0)) for idx in range(len(POSTURE_LABELS))}
+
+        def _holdout_metrics(preds: list[int]) -> dict[str, Any]:
+            return {
+                "accuracy": round(float(accuracy_score(y_holdout, preds)), 6) if y_holdout else None,
+                "balanced_accuracy": round(float(balanced_accuracy_score(y_holdout, preds)), 6) if y_holdout else None,
+                "prediction_distribution": _label_distribution(preds),
+            }
+
         feature_importance = [
             {"feature": name, "importance": int(value)}
             for name, value in sorted(
@@ -569,9 +595,71 @@ class MetaModelLightGBMService:
             )
         ]
         label_distribution = {POSTURE_LABELS[i]: labels.count(i) for i in range(len(POSTURE_LABELS))}
+        holdout_model = _holdout_metrics([int(value) for value in holdout_pred])
+        holdout_rule = _holdout_metrics(rule_holdout_pred)
+        holdout_majority = _holdout_metrics(majority_holdout_pred)
+        model_accuracy = float(holdout_model["accuracy"] or 0.0)
+        rule_accuracy = float(holdout_rule["accuracy"] or 0.0)
+        majority_accuracy = float(holdout_majority["accuracy"] or 0.0)
+        model_balanced_accuracy = float(holdout_model["balanced_accuracy"] or 0.0)
+        rule_balanced_accuracy = float(holdout_rule["balanced_accuracy"] or 0.0)
+        majority_balanced_accuracy = float(holdout_majority["balanced_accuracy"] or 0.0)
+        baseline_margin = 0.02
+        model_beats_baseline = (
+            model_accuracy >= majority_accuracy + baseline_margin
+            and model_balanced_accuracy >= majority_balanced_accuracy
+        )
+        rule_beats_baseline = (
+            rule_accuracy >= majority_accuracy + baseline_margin
+            and rule_balanced_accuracy >= majority_balanced_accuracy
+        )
+        if model_beats_baseline and model_accuracy >= rule_accuracy:
+            recommended_source = "model_shadow_candidate"
+            readiness_status = "model_shadow_candidate"
+            degradation_reason = ""
+        elif rule_beats_baseline:
+            recommended_source = "rule_sidecar_candidate"
+            readiness_status = "rule_sidecar_candidate"
+            degradation_reason = ""
+        else:
+            recommended_source = "simple_baseline_observer"
+            readiness_status = "blocked_by_baseline"
+            degradation_reason = "holdout_model_and_rule_do_not_beat_majority_baseline"
         metrics = {
             "train": {"count": len(y_train), "accuracy": round(float(accuracy_score(y_train, train_pred)), 6)},
-            "holdout": {"count": len(y_holdout), "accuracy": round(float(accuracy_score(y_holdout, holdout_pred)), 6)},
+            "split": "time_ordered",
+            "holdout_ratio": float(holdout_ratio),
+            "train_count": len(train_samples),
+            "holdout_count": len(holdout_samples),
+            "holdout": {
+                "count": len(y_holdout),
+                **holdout_model,
+                "rule_accuracy": holdout_rule["accuracy"],
+                "rule_balanced_accuracy": holdout_rule["balanced_accuracy"],
+                "rule_prediction_distribution": holdout_rule["prediction_distribution"],
+                "majority_baseline_accuracy": holdout_majority["accuracy"],
+                "majority_baseline_balanced_accuracy": holdout_majority["balanced_accuracy"],
+                "majority_baseline_distribution": holdout_majority["prediction_distribution"],
+                "model_lift_vs_rule": round(float((holdout_model["accuracy"] or 0.0) - (holdout_rule["accuracy"] or 0.0)), 6),
+                "model_lift_vs_majority": round(float((holdout_model["accuracy"] or 0.0) - (holdout_majority["accuracy"] or 0.0)), 6),
+                "rule_lift_vs_majority": round(rule_accuracy - majority_accuracy, 6),
+            },
+            "governance_readiness": {
+                "status": readiness_status,
+                "model_ready_for_governance": bool(model_beats_baseline),
+                "rule_ready_for_governance": bool(rule_beats_baseline),
+                "baseline_margin": baseline_margin,
+                "recommended_source": recommended_source,
+                "degradation_reason": degradation_reason,
+                "checks": {
+                    "model_accuracy": round(model_accuracy, 6),
+                    "model_balanced_accuracy": round(model_balanced_accuracy, 6),
+                    "rule_accuracy": round(rule_accuracy, 6),
+                    "rule_balanced_accuracy": round(rule_balanced_accuracy, 6),
+                    "majority_baseline_accuracy": round(majority_accuracy, 6),
+                    "majority_baseline_balanced_accuracy": round(majority_balanced_accuracy, 6),
+                },
+            },
             "sample_count": len(samples),
             "feature_count": len(FEATURE_NAMES),
             "label_distribution": label_distribution,
@@ -655,6 +743,9 @@ class MetaModelLightGBMService:
                     "sample_count": len(samples),
                     "feature_count": len(FEATURE_NAMES),
                     "holdout_accuracy": metrics["holdout"]["accuracy"],
+                    "majority_baseline_accuracy": metrics["holdout"]["majority_baseline_accuracy"],
+                    "governance_readiness_status": metrics["governance_readiness"]["status"],
+                    "recommended_source": metrics["governance_readiness"]["recommended_source"],
                     "safe_for_live_trading": False,
                 },
                 symbol=symbol,
@@ -1073,6 +1164,24 @@ class MetaModelLightGBMService:
                 },
             },
             "learning": {
+                "rolling": {
+                    "trade_count": _safe_int(features.get("rolling_trade_count")),
+                    "pnl_sum": _safe_float(features.get("rolling_pnl_sum")),
+                    "pnl_avg": _safe_float(features.get("rolling_pnl_avg")),
+                    "loss_rate": _safe_float(features.get("rolling_loss_rate")),
+                    "bad_loss_rate": _safe_float(features.get("rolling_bad_loss_rate")),
+                    "win_rate": _safe_float(features.get("rolling_win_rate")),
+                    "mfe_mae_ratio": _safe_float(features.get("rolling_mfe_mae_ratio")),
+                    "thesis_broken_rate": _safe_float(features.get("rolling_thesis_broken_rate")),
+                    "broker_close_rate": _safe_float(features.get("rolling_broker_close_rate")),
+                    "profit_capture_avg": _safe_float(features.get("rolling_profit_capture_avg")),
+                    "giveback_avg": _safe_float(features.get("rolling_giveback_avg")),
+                },
+                "counterfactual": {
+                    "premature_rate": _safe_float(features.get("counterfactual_premature_rate")),
+                    "protection_tight_rate": _safe_float(features.get("counterfactual_protection_tight_rate")),
+                    "correct_stop_rate": _safe_float(features.get("counterfactual_correct_stop_rate")),
+                },
                 "position_quality_shadow": {
                     "weak_rate": _safe_float(features.get("position_quality_weak_rate")),
                 },
