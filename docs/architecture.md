@@ -331,6 +331,15 @@
 - `market_space_context`
 - `multi_timeframe_context`
 
+2026-07-02 起，事件窗口上下文必须保留可学习字段：
+
+- `event_type / event / event_importance`
+- `hours_until_event / minutes_until_event`
+- `is_post_event / window_bucket`
+- `multiplier / tier_multiplier`
+
+这些字段用于解释“交易发生在什么事件窗口里”，并作为后续事件窗口治理和模型训练的输入。历史样本如果没有真实事件距离，不允许补造。
+
 ### Layer 3: 因子执行层
 
 职责：
@@ -488,6 +497,11 @@ Phase E / E3 的在线/离线边界见 [parameter-tuning-boundary.md](parameter-
 RiskPolicyService.evaluate(action, context) -> RiskVerdict
 ```
 
+2026-07-02 起，动态仓位控制遵守两条执行边界：
+
+- Kelly / risk-budget sizing 可以把开仓 API volume 动态算到 100/200/300 等 broker step 档位，但必须同时受 `dynamic_sizing_max_api_volume`、账户风险预算和最大仓位限制约束
+- 事件窗口缩放如果把 volume 压到 broker 最小下单量以下，系统必须跳过本次开仓并写入 sizing 阻断 trace，不能再被最小单量逻辑抬回 100
+
 ### Layer 9: 执行路由层
 
 职责：
@@ -548,8 +562,11 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 - `shadow_open_decision` 可以在匹配到 `trade_outcome_review` 后成熟为 `open_outcome`
 - 新开仓 ledger 必须记录同向簇、bar、execution、market micro、事件、数据质量和决策质量上下文
+- 事件上下文必须记录 causal event、event type、距离事件时间、pre/post 状态、window bucket 和 event multiplier
+- 动态仓位 trace 必须记录 base/final/event-adjusted API volume 与 sizing 阻断原因
 - 高置信 matured counterfactual 可以以低权重进入 `counterfactual_training`
 - 同向簇治理会把 `same_direction_ge_1/2/3` 的坏结果统计写入 `experience_pattern_stats`，必要时生成 `policy_suggestion(scope_type='entry_cluster')`
+- 事件窗口治理会把 `event_type:window_bucket` 的坏结果统计写入 `experience_pattern_stats`，必要时生成 `policy_suggestion(scope_type='event_window')`
 - `/api/learning/dataset/quality-health` 是检查 evidence contract 与 open context 覆盖的主入口
 
 ---

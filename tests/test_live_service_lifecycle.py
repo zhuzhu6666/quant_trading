@@ -144,6 +144,81 @@ def test_floor_api_volume_to_step_skips_untradeable_partial_reduce():
     assert live_service._floor_api_volume_to_step(200.0, meta) == 200.0
 
 
+def test_kelly_sizing_outputs_api_volume_tiers():
+    live_service._live_state_update(risk={"kelly": {"kelly_fraction": 1.0}})
+    cfg = SimpleNamespace(
+        kelly_enabled=True,
+        kelly_fraction=1.0,
+        kelly_risk_per_trade_pct=0.02,
+        kelly_max_pct=0.25,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=300.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+    meta = {"api_min_volume": 100, "api_step_volume": 100}
+
+    result = live_service._risk_kelly_sizing(
+        cfg, 1, current_price=4000.0, sl_price=3990.0,
+        bridge_meta=meta, acct={"equity": 1000.0},
+    )
+
+    assert result["volume"] == 200.0
+    assert result["trace"]["raw_api_volume"] == pytest.approx(200.0)
+    assert result["trace"]["base_api_volume"] == 200.0
+
+
+def test_kelly_sizing_respects_initial_dynamic_cap():
+    live_service._live_state_update(risk={"kelly": {"kelly_fraction": 1.0}})
+    cfg = SimpleNamespace(
+        kelly_enabled=True,
+        kelly_fraction=1.0,
+        kelly_risk_per_trade_pct=0.10,
+        kelly_max_pct=0.25,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=300.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+    meta = {"api_min_volume": 100, "api_step_volume": 100}
+
+    result = live_service._risk_kelly_sizing(
+        cfg, 1, current_price=4000.0, sl_price=3990.0,
+        bridge_meta=meta, acct={"equity": 1000.0},
+    )
+
+    assert result["volume"] == 300.0
+    assert result["trace"]["capped_raw_api_volume"] == 300.0
+
+
+def test_event_sizing_below_min_skips_instead_of_lifting_to_min():
+    meta = {"api_min_volume": 100, "api_step_volume": 100}
+
+    result = live_service._apply_entry_event_sizing(
+        base_volume=100.0,
+        event_multiplier=0.2,
+        bridge_meta=meta,
+        sizing_trace={"base_api_volume": 100.0},
+    )
+
+    assert result["volume"] == 0.0
+    assert result["blocked_reason"].startswith("event_sizing_below_min")
+    assert result["trace"]["final_api_volume"] == 0.0
+
+
+def test_event_sizing_floors_tradeable_reduced_tier():
+    meta = {"api_min_volume": 100, "api_step_volume": 100}
+
+    result = live_service._apply_entry_event_sizing(
+        base_volume=300.0,
+        event_multiplier=0.5,
+        bridge_meta=meta,
+    )
+
+    assert result["volume"] == 100.0
+    assert result["blocked_reason"] == ""
+
+
 def test_untradeable_min_position_reduce_upgrades_to_close_when_thesis_broken():
     should_close, reason = live_service._should_full_close_untradeable_reduce(
         current_volume=100.0,

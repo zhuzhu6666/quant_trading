@@ -141,3 +141,6 @@ runtime:
   kelly_fraction: 0.5
   kelly_max_pct: 0.25
   kelly_risk_per_trade_pct: 0.01
+  dynamic_sizing_enabled: true
+  dynamic_sizing_max_api_volume: 300.0
+  dynamic_sizing_api_units_per_display_unit: 100.0

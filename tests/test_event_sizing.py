@@ -165,6 +165,22 @@ class TestMultipleEvents:
         bar_time = (fomc - timedelta(hours=20)).timestamp()
         assert es.get_multiplier(bar_time) == pytest.approx(0.5)
 
+    def test_context_identifies_causal_event_and_window_bucket(self):
+        medium = _event_dt("2024-06-15", 13, 30)
+        nfp = _event_dt("2024-06-15", 19, 0)
+        es = _make_sizer([
+            EventRecord(dt=medium, event_type="Average Hourly Earnings m/m", importance=2),
+            EventRecord(dt=nfp, event_type="NFP", importance=3, description="Non-Farm Employment Change"),
+        ])
+
+        ctx = es.get_context((nfp - timedelta(hours=2)).timestamp())
+
+        assert ctx["multiplier"] == pytest.approx(0.2)
+        assert ctx["event_type"] == "NFP"
+        assert ctx["event"] == "Non-Farm Employment Change"
+        assert ctx["event_importance"] == 3
+        assert ctx["window_bucket"] == "pre_0_4h"
+
     def test_past_event_lookback(self):
         """事件后 3 分钟在 post-event 窗口内 (5 min) → 还有 multiplier"""
         evt = _event_dt("2024-06-15", 19, 0)

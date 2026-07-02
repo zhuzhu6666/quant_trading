@@ -57,6 +57,7 @@ def test_record_session_trade_updates_loss_streak_and_pnl():
     assert live_service._live_state_get("session_winning") == 1
     assert live_service._live_state_get("session_consecutive_loss") == 0
     assert live_service._live_state_get("session_pnl") == pytest.approx(7.5)
+    assert live_service._live_state_get("session_trade_pnls", clone=True) == [-12.5, 20.0]
 
 
 def test_breaker_resets_on_new_day():

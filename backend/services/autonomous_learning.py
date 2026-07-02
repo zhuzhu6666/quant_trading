@@ -573,6 +573,7 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
             "bar_context": action_json.get("bar_context") or {},
             "event_context": action_json.get("event_context") or action_json.get("event_sizing") or {},
             "execution_context": action_json.get("execution_context") or {},
+            "sizing_trace": action_json.get("sizing_trace") or {},
             "data_quality_context": action_json.get("data_quality_context") or {},
             "decision_quality_context": action_json.get("decision_quality_context") or {},
         },
@@ -1135,7 +1136,7 @@ def materialize_autonomous_learning_samples(
                     counts["shadow_open_decision"] += 1
             if event_type == "skip":
                 action_json = _loads(row["action_json"], {})
-                if str(action_json.get("skip_stage") or "") in {"risk_policy", "market_session"}:
+                if str(action_json.get("skip_stage") or "") in {"risk_policy", "market_session", "sizing"}:
                     if _upsert_sample(conn, {**_sample_from_decision(row, "risk_rejection"), **sample_context}):
                         counts["risk_rejection"] += 1
             if event_type.startswith("supervisor_"):
@@ -1409,6 +1410,223 @@ def materialize_entry_cluster_governance_suggestions(
             run_id=str(run.get("run_id") or ""),
             decision_type="entry_cluster_governance",
             scope_type="entry_cluster",
+            action="materialize_governance_suggestions",
+            status="completed",
+            result=payload,
+            db_path=db_path,
+        )
+        finish_evolution_run(str(run.get("run_id") or ""), status="completed", summary=payload, db_path=db_path)
+        return payload
+    except Exception as exc:
+        conn.rollback()
+        finish_evolution_run(str(run.get("run_id") or ""), status="failed", summary={"error": str(exc)[:500]}, db_path=db_path)
+        raise
+    finally:
+        conn.close()
+
+
+def _event_window_bucket_from_features(features: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    event = features.get("event_context") or (features.get("action") or {}).get("event_sizing") or {}
+    multiplier = float(event.get("multiplier") or 1.0)
+    event_type = str(event.get("event_type") or event.get("event") or "").strip()
+    window_bucket = str(event.get("window_bucket") or "").strip()
+    if not window_bucket:
+        hours_until = event.get("hours_until_event")
+        try:
+            h = float(hours_until)
+        except Exception:
+            h = 999999.0
+        if h < 0:
+            window_bucket = "post_event"
+        elif h <= 4.0:
+            window_bucket = "pre_0_4h"
+        elif h <= 24.0:
+            window_bucket = "pre_4_24h"
+        elif h <= 72.0:
+            window_bucket = "pre_24_72h"
+    if multiplier >= 1.0 or not event_type or not window_bucket:
+        return "", {}
+    bucket = f"{event_type}:{window_bucket}"
+    return bucket, {
+        "event_type": event_type,
+        "event": str(event.get("event") or event_type),
+        "event_importance": int(float(event.get("event_importance") or 0)),
+        "window_bucket": window_bucket,
+        "multiplier": multiplier,
+        "hours_until_event": event.get("hours_until_event"),
+        "minutes_until_event": event.get("minutes_until_event"),
+        "tier_max_hours_before": event.get("tier_max_hours_before"),
+    }
+
+
+def materialize_event_window_governance_suggestions(
+    *,
+    db_path: str | Path = STATE_DB,
+    limit: int = 1000,
+    min_samples: int = 3,
+    min_bad_rate: float = 0.5,
+) -> dict[str, Any]:
+    """Suggest advisory event-window sizing controls when event windows underperform."""
+    ensure_autonomous_learning_tables(db_path)
+    run = start_evolution_run(run_type="event_window_governance", trigger_source="open_outcome_samples", db_path=db_path)
+    conn = _connect(db_path)
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    suggestions = 0
+    stats_upserted = 0
+    skipped = 0
+    try:
+        rows = _execute(
+            conn,
+            """
+            SELECT *
+            FROM autonomous_learning_sample
+            WHERE sample_type='shadow_open_decision'
+              AND label_status='matured'
+            ORDER BY event_ts DESC, created_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        for row in rows:
+            label = _loads(row["label_json"], {})
+            if str(label.get("label") or "") != "open_outcome":
+                continue
+            features = _loads(row["features_json"], {})
+            bucket, event_window = _event_window_bucket_from_features(features)
+            if not bucket:
+                continue
+            pnl = float(label.get("pnl") or 0.0)
+            outcome = str(label.get("outcome_label") or "")
+            failure_tags = [str(item) for item in label.get("failure_tags") or []]
+            bad = outcome == "bad_loss" or "event_window_bad_entry" in failure_tags or pnl < 0
+            buckets.setdefault(bucket, []).append(
+                {
+                    "sample_id": str(row["sample_id"] or ""),
+                    "decision_id": str(row["decision_id"] or ""),
+                    "position_id": str(row["position_id"] or ""),
+                    "pnl": pnl,
+                    "outcome_label": outcome,
+                    "bad": bad,
+                    "event_window": event_window,
+                }
+            )
+
+        now = time.time()
+        for bucket, items in sorted(buckets.items()):
+            sample_count = len(items)
+            bad_count = sum(1 for item in items if item["bad"])
+            win_count = sum(1 for item in items if item["pnl"] > 0)
+            pnl_sum = sum(float(item["pnl"]) for item in items)
+            avg_reward = sum(max(-1.0, min(1.0, float(item["pnl"]) / 50.0)) for item in items) / max(sample_count, 1)
+            bad_rate = bad_count / max(sample_count, 1)
+            action = "watch"
+            if sample_count >= int(min_samples) and bad_rate >= float(min_bad_rate):
+                action = "tighten_event_window_sizing"
+            elif sample_count >= int(min_samples) and avg_reward <= -0.05:
+                action = "extend_event_post_window_review"
+            _execute(
+                conn,
+                """
+                INSERT INTO experience_pattern_stats
+                (scope_type, scope_key, sample_count, win_count, bad_loss_count,
+                 avg_reward, last_outcome_label, recommended_action, updated_at)
+                VALUES ('event_window', ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+                    sample_count=excluded.sample_count,
+                    win_count=excluded.win_count,
+                    bad_loss_count=excluded.bad_loss_count,
+                    avg_reward=excluded.avg_reward,
+                    last_outcome_label=excluded.last_outcome_label,
+                    recommended_action=excluded.recommended_action,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    bucket,
+                    sample_count,
+                    win_count,
+                    bad_count,
+                    round(avg_reward, 6),
+                    str(items[0].get("outcome_label") or ""),
+                    action,
+                    now,
+                ),
+            )
+            stats_upserted += 1
+            if action == "watch":
+                skipped += 1
+                continue
+            existing = _execute(
+                conn,
+                """
+                SELECT suggestion_id
+                FROM policy_suggestion
+                WHERE scope_type='event_window'
+                  AND scope_key=?
+                  AND action=?
+                  AND status IN ('proposed', 'approved', 'applied')
+                LIMIT 1
+                """,
+                (bucket, action),
+            ).fetchone()
+            if existing:
+                skipped += 1
+                continue
+            suggestion_id = "psg_event_window_" + hashlib.sha1(f"{bucket}:{action}".encode("utf-8")).hexdigest()[:16]
+            confidence = min(0.92, 0.45 + 0.06 * sample_count + 0.20 * bad_rate)
+            event_window = dict(items[0].get("event_window") or {})
+            evidence = {
+                "schema_version": "event_window_governance_evidence.v1",
+                "bucket": bucket,
+                "event_window": event_window,
+                "sample_count": sample_count,
+                "bad_count": bad_count,
+                "bad_rate": round(bad_rate, 6),
+                "win_count": win_count,
+                "pnl_sum": round(pnl_sum, 6),
+                "avg_reward": round(avg_reward, 6),
+                "sample_ids": [item["sample_id"] for item in items[:20]],
+                "position_ids": [item["position_id"] for item in items[:20]],
+                "recommended_controls": {
+                    "tighten_event_window_sizing": action == "tighten_event_window_sizing",
+                    "extend_event_post_window_review": action == "extend_event_post_window_review",
+                    "advisory_only": True,
+                },
+            }
+            _execute(
+                conn,
+                """
+                INSERT INTO policy_suggestion
+                (suggestion_id, scope_type, scope_key, action, confidence,
+                 reason, evidence_json, status, created_at)
+                VALUES (?, 'event_window', ?, ?, ?, ?, ?, 'proposed', ?)
+                ON CONFLICT(suggestion_id) DO NOTHING
+                """,
+                (
+                    suggestion_id,
+                    bucket,
+                    action,
+                    round(confidence, 6),
+                    f"{bucket} open outcomes show bad_rate={bad_rate:.2f} across {sample_count} samples",
+                    _dumps(evidence),
+                    now,
+                ),
+            )
+            suggestions += 1
+        payload = {
+            "schema_version": "event_window_governance.v1",
+            "evolution_run_id": str(run.get("run_id") or ""),
+            "bucket_count": len(buckets),
+            "stats_upserted": stats_upserted,
+            "suggestions": suggestions,
+            "skipped": skipped,
+            "limit": int(limit),
+        }
+        _insert_evolution_event(conn, "event_window_governance", payload)
+        conn.commit()
+        record_evolution_decision(
+            run_id=str(run.get("run_id") or ""),
+            decision_type="event_window_governance",
+            scope_type="event_window",
             action="materialize_governance_suggestions",
             status="completed",
             result=payload,
@@ -2824,6 +3042,7 @@ def run_autonomous_learning_cycle(
     close_source_backfill = backfill_trade_review_close_sources(db_path=db_path, limit=sample_limit)
     samples = materialize_autonomous_learning_samples(db_path=db_path, limit=sample_limit)
     entry_cluster_governance = materialize_entry_cluster_governance_suggestions(db_path=db_path, limit=sample_limit)
+    event_window_governance = materialize_event_window_governance_suggestions(db_path=db_path, limit=sample_limit)
     contract_repair = repair_evidence_contracts(db_path=db_path, limit=max(sample_limit, sample_limit * 4))
     gov = RuleEvolutionGovernor(str(db_path))
     governance = {
@@ -2847,6 +3066,7 @@ def run_autonomous_learning_cycle(
             "close_source_backfill": close_source_backfill,
             "samples": samples,
             "entry_cluster_governance": entry_cluster_governance,
+            "event_window_governance": event_window_governance,
             "evidence_contract_repair": contract_repair,
             "governance": governance,
             "parameter_template_recommendations": recommendations,
@@ -2875,6 +3095,7 @@ def schedule_autonomous_learning(
     def _log_summary(result: dict) -> dict:
         samples = result.get("samples") or {}
         entry_cluster_governance = result.get("entry_cluster_governance") or {}
+        event_window_governance = result.get("event_window_governance") or {}
         governance = result.get("governance") or {}
         recommendations = result.get("parameter_template_recommendations") or {}
         demo_apply = result.get("demo_autonomy") or {}
@@ -2887,6 +3108,8 @@ def schedule_autonomous_learning(
             "sample_counts": samples.get("counts"),
             "entry_cluster_suggestions": entry_cluster_governance.get("suggestions"),
             "entry_cluster_bucket_count": entry_cluster_governance.get("bucket_count"),
+            "event_window_suggestions": event_window_governance.get("suggestions"),
+            "event_window_bucket_count": event_window_governance.get("bucket_count"),
             "contract_repaired": (result.get("evidence_contract_repair") or {}).get("repaired"),
             "governance": {
                 "review_pending": governance.get("review_pending"),

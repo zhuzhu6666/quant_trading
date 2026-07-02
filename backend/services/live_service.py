@@ -266,53 +266,126 @@ def _risk_kelly_volume(
     cfg, direction: int, current_price: float, sl_price: float,
     bridge_meta: dict, acct: dict,
 ) -> float:
-    """根据 Kelly 分数计算 API 原生开仓量。
+    """根据 Kelly 分数计算 API 原生开仓量。"""
+    return _risk_kelly_sizing(
+        cfg, direction, current_price, sl_price, bridge_meta, acct,
+    )["volume"]
+
+
+def _risk_kelly_sizing(
+    cfg, direction: int, current_price: float, sl_price: float,
+    bridge_meta: dict, acct: dict,
+) -> dict[str, Any]:
+    """根据 Kelly 分数计算 API 原生开仓量，并返回可审计 trace。
 
     返回值使用 cTrader API volume unit；XAUUSD 常见最小开仓量约为 100 API units。
     """
-    _min_vol = float(bridge_meta.get('api_min_volume') or 1.0)
-    _step_vol = float(bridge_meta.get('api_step_volume') or 1.0)
+    _meta = bridge_meta or {}
+    _min_vol = float(_meta.get('api_min_volume') or 1.0)
+    _step_vol = float(_meta.get('api_step_volume') or 1.0)
+    default_vol = _ceil_api_volume_to_step(_min_vol, _meta)
+    max_position_api = float(getattr(cfg, "max_position_api_volume", 0.0) or 0.0)
+    dynamic_cap = float(getattr(cfg, "dynamic_sizing_max_api_volume", 0.0) or 0.0)
+    max_order_api = dynamic_cap if dynamic_cap > 0 else max_position_api
+    if max_position_api > 0:
+        max_order_api = min(max_order_api, max_position_api) if max_order_api > 0 else max_position_api
+    api_units_per_display_unit = float(
+        getattr(cfg, "dynamic_sizing_api_units_per_display_unit", 100.0) or 100.0
+    )
+    trace: dict[str, Any] = {
+        "schema_version": "position_sizing_trace.v1",
+        "method": "kelly_dynamic" if getattr(cfg, "kelly_enabled", False) else "min_volume",
+        "enabled": bool(getattr(cfg, "dynamic_sizing_enabled", True)),
+        "direction": int(direction or 0),
+        "api_min_volume": _min_vol,
+        "api_step_volume": _step_vol,
+        "api_units_per_display_unit": api_units_per_display_unit,
+        "max_position_api_volume": max_position_api,
+        "max_order_api_volume": max_order_api,
+    }
 
-    def _to_step(v: float) -> float:
-        if _step_vol <= 0:
-            return max(_min_vol, v)
-        return max(_min_vol, round(v / _step_vol) * _step_vol)
-
-    default_vol = _to_step(_min_vol)
     if not getattr(cfg, 'kelly_enabled', False):
-        return default_vol
+        trace.update({"reason": "kelly_disabled", "raw_api_volume": default_vol})
+        return {"volume": default_vol, "trace": trace}
+    if not bool(getattr(cfg, "dynamic_sizing_enabled", True)):
+        trace.update({"reason": "dynamic_sizing_disabled", "raw_api_volume": default_vol})
+        return {"volume": default_vol, "trace": trace}
 
     kelly_data = _live_state_get("risk", {}, clone=True).get("kelly", {})
     kelly_f = kelly_data.get("kelly_fraction", 0) or 0
     if kelly_f <= 0:
-        return default_vol
+        trace.update({"reason": "kelly_fraction_non_positive", "kelly_fraction": float(kelly_f or 0.0)})
+        return {"volume": default_vol, "trace": trace}
 
     equity = float(acct.get("equity", 0) or 0)
     if equity <= 0:
-        return default_vol
+        trace.update({"reason": "missing_equity", "equity": equity, "kelly_fraction": float(kelly_f or 0.0)})
+        return {"volume": default_vol, "trace": trace}
 
     # Kelly 乘数 (半凯利/四分之一凯利)
     kelly_mult = getattr(cfg, 'kelly_fraction', 0.5)
     f_star = kelly_f * kelly_mult
 
     # 每笔风险敞口 = equity × risk_pct
-    risk_pct = getattr(cfg, 'kelly_risk_per_trade_pct', 0.01)
+    risk_pct_raw = float(getattr(cfg, 'kelly_risk_per_trade_pct', 0.01) or 0.0)
+    risk_pct = risk_pct_raw / 100.0 if risk_pct_raw > 1.0 else risk_pct_raw
     risk_capital = equity * risk_pct
+    risk_budget = risk_capital * f_star
 
     # SL 距离 (价格单位)
     sl_dist = abs(current_price - sl_price)
     sl_dist = max(sl_dist, current_price * 0.001)  # 至少 0.1% 价格波动
 
-    # XAUUSD 合约乘数: 100 oz
-    contract_mult = 100.0
-    raw_api_volume = f_star * risk_capital / (sl_dist * contract_mult) if sl_dist > 0 else 0
+    raw_display_units = risk_budget / sl_dist if sl_dist > 0 else 0.0
+    raw_api_volume = raw_display_units * api_units_per_display_unit
 
     # 资金占比上限 (API volume)
     max_pct = getattr(cfg, 'kelly_max_pct', 0.25)
-    max_api_volume_calc = equity * max_pct / (sl_dist * contract_mult) if sl_dist > 0 else default_vol * 10 / 100.0
+    max_api_volume_calc = (
+        (equity * max_pct / sl_dist) * api_units_per_display_unit
+        if sl_dist > 0
+        else default_vol
+    )
 
-    vol_api = max(_min_vol, min(max_api_volume_calc * 100.0, raw_api_volume * 100.0, default_vol * 5))
-    return _to_step(vol_api)
+    capped_raw = min(raw_api_volume, max_api_volume_calc)
+    if max_order_api > 0:
+        capped_raw = min(capped_raw, max_order_api)
+    tiered_volume = _floor_api_volume_to_step(capped_raw, _meta)
+    volume = max(default_vol, tiered_volume)
+    if max_order_api > 0:
+        volume = min(volume, _floor_api_volume_to_step(max_order_api, _meta) or default_vol)
+    trace.update(
+        {
+            "reason": "ok",
+            "equity": equity,
+            "kelly_fraction": float(kelly_f or 0.0),
+            "kelly_multiplier": float(kelly_mult or 0.0),
+            "effective_kelly_fraction": float(f_star or 0.0),
+            "risk_per_trade_pct": risk_pct,
+            "risk_capital": risk_capital,
+            "risk_budget": risk_budget,
+            "sl_distance": sl_dist,
+            "raw_display_units": raw_display_units,
+            "raw_api_volume": raw_api_volume,
+            "max_api_volume_by_capital": max_api_volume_calc,
+            "capped_raw_api_volume": capped_raw,
+            "tiered_base_api_volume": tiered_volume,
+            "base_api_volume": volume,
+        }
+    )
+    return {"volume": volume, "trace": trace}
+
+
+def _ceil_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
+    min_vol = float((bridge_meta or {}).get("api_min_volume") or 1.0)
+    step_vol = float((bridge_meta or {}).get("api_step_volume") or 1.0)
+    raw = max(0.0, float(volume or 0.0))
+    if step_vol <= 0:
+        return max(min_vol, raw)
+    steps = int((raw + step_vol - 1e-9) // step_vol)
+    if steps * step_vol < raw:
+        steps += 1
+    return max(min_vol, steps * step_vol)
 
 
 def _round_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
@@ -331,6 +404,46 @@ def _floor_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
         return raw if raw >= min_vol else 0.0
     floored = (raw // step_vol) * step_vol
     return floored if floored >= min_vol else 0.0
+
+
+def _apply_entry_event_sizing(
+    *,
+    base_volume: float,
+    event_multiplier: float,
+    bridge_meta: dict,
+    sizing_trace: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply event sizing without silently lifting reduced orders back to min volume."""
+    trace = dict(sizing_trace or {})
+    min_vol = float((bridge_meta or {}).get("api_min_volume") or 1.0)
+    multiplier = float(event_multiplier or 1.0)
+    base = float(base_volume or 0.0)
+    raw_after_event = base * multiplier
+    if multiplier < 1.0:
+        final_volume = _floor_api_volume_to_step(raw_after_event, bridge_meta)
+        blocked_reason = ""
+        if final_volume <= 0:
+            blocked_reason = (
+                f"event_sizing_below_min: {base:.0f}*{multiplier:.2f}="
+                f"{raw_after_event:.0f}<{min_vol:.0f}"
+            )
+    else:
+        final_volume = base
+        blocked_reason = ""
+    trace.update(
+        {
+            "event_multiplier": multiplier,
+            "event_raw_api_volume": raw_after_event,
+            "event_adjusted_api_volume": final_volume,
+            "final_api_volume": final_volume,
+            "blocked_reason": blocked_reason,
+        }
+    )
+    return {
+        "volume": final_volume,
+        "blocked_reason": blocked_reason,
+        "trace": trace,
+    }
 
 
 def _should_full_close_untradeable_reduce(
@@ -392,6 +505,19 @@ def _should_full_close_untradeable_reduce(
 def _event_sizing_context(event_sizing: Any, bar_time: float) -> dict[str, Any]:
     if event_sizing is None:
         return {"enabled": False, "multiplier": 1.0}
+    if hasattr(event_sizing, "get_context"):
+        try:
+            ctx = dict(event_sizing.get_context(bar_time) or {})
+            multiplier = float(ctx.get("multiplier", 1.0) or 1.0)
+            ctx["enabled"] = bool(getattr(event_sizing, "enabled", ctx.get("enabled", False)))
+            ctx["multiplier"] = max(0.0, min(1.0, multiplier))
+            try:
+                ctx["stats"] = event_sizing.stats()
+            except Exception:
+                ctx.setdefault("stats", {})
+            return ctx
+        except Exception:
+            pass
     try:
         multiplier = float(event_sizing.get_multiplier(bar_time))
     except Exception:
@@ -1132,6 +1258,7 @@ def _open_learning_context_payload(
     sl_dist: float,
     tp_dist: float,
     event_sizing_context: dict[str, Any] | None,
+    sizing_trace: dict[str, Any] | None = None,
     risk_verdict: Any = None,
     market_session: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1189,6 +1316,7 @@ def _open_learning_context_payload(
         "ask": market_micro.get("ask", 0.0),
         "bar_context": _bar_context_snapshot(bar),
         "execution_context": execution_context,
+        "sizing_trace": sizing_trace or {},
         "decision_quality_context": _decision_quality_context(composite),
         "event_context": event_sizing_context or {},
         "data_quality_context": {
@@ -2913,6 +3041,7 @@ _live_state: dict = {
     "session_trades": 0,
     "session_winning": 0,
     "session_losing": 0,
+    "session_trade_pnls": [],
     "session_consecutive_loss": 0,
     "session_max_drawdown_pct": 0.0,
     "session_peak_equity": 0.0,
@@ -3291,6 +3420,7 @@ def _session_state_snapshot(trade_date: str | None = None) -> dict:
         "session_trades": int(_live_state_get("session_trades", 0) or 0),
         "session_winning": int(_live_state_get("session_winning", 0) or 0),
         "session_losing": int(_live_state_get("session_losing", 0) or 0),
+        "session_trade_pnls": list(_live_state_get("session_trade_pnls", [], clone=True) or [])[-200:],
         "session_consecutive_loss": int(_live_state_get("session_consecutive_loss", 0) or 0),
         "session_max_drawdown_pct": float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0),
         "session_peak_equity": float(_live_state_get("session_peak_equity", 0.0) or 0.0),
@@ -3322,6 +3452,7 @@ def _restore_session_state_for_day(trade_date: str | None = None) -> bool:
         session_trades=int(state.get("session_trades", 0) or 0),
         session_winning=int(state.get("session_winning", 0) or 0),
         session_losing=int(state.get("session_losing", 0) or 0),
+        session_trade_pnls=list(state.get("session_trade_pnls") or [])[-200:],
         session_consecutive_loss=int(state.get("session_consecutive_loss", 0) or 0),
         session_max_drawdown_pct=float(state.get("session_max_drawdown_pct", 0.0) or 0.0),
         session_peak_equity=float(state.get("session_peak_equity", 0.0) or 0.0),
@@ -4095,6 +4226,7 @@ def _reset_session_state_for_new_day() -> None:
         session_trades=0,
         session_winning=0,
         session_losing=0,
+        session_trade_pnls=[],
         session_consecutive_loss=0,
         session_max_drawdown_pct=0.0,
         session_start_balance=start_balance,
@@ -4135,6 +4267,9 @@ def _record_session_trade(total_pnl: float) -> dict:
         losing = int(_live_state.get("session_losing", 0))
         consecutive_loss = int(_live_state.get("session_consecutive_loss", 0))
         session_pnl = float(_live_state.get("session_pnl", 0.0)) + float(total_pnl)
+        trade_pnls = list(_live_state.get("session_trade_pnls", []) or [])
+        trade_pnls.append(float(total_pnl))
+        trade_pnls = trade_pnls[-200:]
         if total_pnl > 0:
             winning += 1
             consecutive_loss = 0
@@ -4145,6 +4280,7 @@ def _record_session_trade(total_pnl: float) -> dict:
             session_trades=trades,
             session_winning=winning,
             session_losing=losing,
+            session_trade_pnls=trade_pnls,
             session_consecutive_loss=consecutive_loss,
             session_pnl=session_pnl,
             session_last_trade_ts=time.time(),
@@ -4154,6 +4290,7 @@ def _record_session_trade(total_pnl: float) -> dict:
         "session_trades": trades,
         "session_winning": winning,
         "session_losing": losing,
+        "session_trade_pnls": trade_pnls,
         "session_consecutive_loss": consecutive_loss,
         "session_pnl": session_pnl,
         "session_last_trade_ts": float(_live_state.get("session_last_trade_ts", 0.0) or 0.0),
@@ -6677,18 +6814,29 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             else:
                 _set_risk_metric("var", _var_calc.get_status(eq_hist))
 
-            # 3. Kelly — 从 session_winning/session_losing 计算
+            # 3. Kelly — 优先使用真实逐笔 PnL，缺失时才回退到旧的 session 统计
             from backend.risk.kelly import KellyCriterion as _KellyCalc
             _kelly_calc = _KellyCalc()
             sw = int(_live_state_get("session_winning", 0))
             sl = int(_live_state_get("session_losing", 0))
             total = sw + sl
-            if total > 0:
+            trade_pnls = [
+                float(x)
+                for x in (_live_state_get("session_trade_pnls", [], clone=True) or [])
+                if float(x or 0.0) != 0.0
+            ]
+            wins = [x for x in trade_pnls if x > 0]
+            losses = [-x for x in trade_pnls if x < 0]
+            if wins or losses:
+                kelly_total = len(wins) + len(losses)
+                win_rate = len(wins) / kelly_total if kelly_total > 0 else 0.0
+                avg_win = sum(wins) / len(wins) if wins else 0.0
+                avg_loss = sum(losses) / len(losses) if losses else 0.01
+                _set_risk_metric("kelly", _kelly_calc.calculate(win_rate, avg_win, max(avg_loss, 0.01)))
+            elif total > 0:
                 win_rate = sw / total
-                # 没有单笔盈亏明细, 用 session_pnl 估算平均盈亏
                 session_pnl = float(_live_state_get("session_pnl", 0.0))
                 if sw > 0 and sl > 0 and session_pnl != 0:
-                    # 简单估算: 假设盈亏各半, avg_win = avg_loss 的粗略分割
                     avg_win = (session_pnl / total) * (1 + win_rate)
                     avg_loss = abs((session_pnl / total) * (1 - win_rate)) if win_rate < 1 else 0.01
                     avg_loss = max(avg_loss, 0.01)  # 避免除零
@@ -7169,6 +7317,7 @@ def _record_filled_position_open_context(
     market_session: dict[str, Any] | None = None,
     base_requested_volume: float | None = None,
     event_sizing_context: dict[str, Any] | None = None,
+    sizing_trace: dict[str, Any] | None = None,
     sl_dist: float = 0.0,
     tp_dist: float = 0.0,
     bridge: Any = None,
@@ -7215,6 +7364,7 @@ def _record_filled_position_open_context(
                 sl_dist=float(sl_dist or 0.0),
                 tp_dist=float(tp_dist or 0.0),
                 event_sizing_context=event_sizing_context or {},
+                sizing_trace=sizing_trace or {},
                 risk_verdict=risk_verdict,
                 market_session=market_session,
             )
@@ -7243,6 +7393,7 @@ def _record_filled_position_open_context(
                     "position_id": pid,
                     "volume": actual_api_volume,
                     "requested_volume": requested_volume,
+                    "sizing_trace": sizing_trace or {},
                     "price": round(current_price, 2),
                     "fill_price": round(fill_price, 2),
                     "sl": round(sl_price, 2),
@@ -7769,19 +7920,28 @@ def _process_tick_factor_pipeline(
 
         # ── 风控: Kelly 仓位 ──
         acct_clean = _live_state_get("account", {}, clone=True) or {}
-        volume = _risk_kelly_volume(cfg, composite.direction, current_price,
-                                    sl_price, _meta, acct_clean)
-        base_volume = float(volume)
+        sizing_result = _risk_kelly_sizing(
+            cfg, composite.direction, current_price, sl_price, _meta, acct_clean,
+        )
+        base_volume = float(sizing_result.get("volume") or 0.0)
+        sizing_trace = dict(sizing_result.get("trace") or {})
         event_sizing_context = _event_sizing_context(
             pipeline.get("event_sizing"),
             float(bar.get("time", time.time()) or time.time()),
         )
         event_multiplier = float(event_sizing_context.get("multiplier", 1.0) or 1.0)
-        if event_multiplier < 1.0:
-            volume = _round_api_volume_to_step(base_volume * event_multiplier, _meta)
+        event_sizing_result = _apply_entry_event_sizing(
+            base_volume=base_volume,
+            event_multiplier=event_multiplier,
+            bridge_meta=_meta,
+            sizing_trace=sizing_trace,
+        )
+        volume = float(event_sizing_result.get("volume") or 0.0)
+        sizing_trace = dict(event_sizing_result.get("trace") or {})
+        sizing_block_reason = str(event_sizing_result.get("blocked_reason") or "")
         log(f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
             f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)} "
-            f"event_mult={event_multiplier:.2f})")
+            f"event_mult={event_multiplier:.2f} base_api_volume={base_volume:.0f})")
 
         # ── Phase B: 统一风控裁决 ──
         risk_context = _build_open_trade_risk_context(
@@ -7806,8 +7966,8 @@ def _process_tick_factor_pipeline(
                 f"market_session:{market_session.get('status') or 'unknown'}:"
                 f"{market_session.get('reason') or 'unknown'}"
             )
-        order_blocked = bool(market_block_reason) or not risk_verdict.allowed
-        block_reason = market_block_reason or risk_verdict.reason
+        order_blocked = bool(sizing_block_reason) or bool(market_block_reason) or not risk_verdict.allowed
+        block_reason = sizing_block_reason or market_block_reason or risk_verdict.reason
 
         if order_blocked:
             log(f"tick {tick}: v4 {direction_name} SKIP ({block_reason})")
@@ -7833,6 +7993,7 @@ def _process_tick_factor_pipeline(
                         sl_dist=float(sl_dist or 0.0),
                         tp_dist=float(tp_dist or 0.0),
                         event_sizing_context=event_sizing_context,
+                        sizing_trace=sizing_trace,
                         risk_verdict=risk_verdict,
                         market_session=market_session,
                     )
@@ -7852,7 +8013,14 @@ def _process_tick_factor_pipeline(
                         action_reason=block_reason,
                         action_json={
                             "tick": tick,
-                            "skip_stage": "market_session" if market_block_reason else "risk_policy",
+                            "skip_stage": (
+                                "sizing"
+                                if sizing_block_reason
+                                else "market_session"
+                                if market_block_reason
+                                else "risk_policy"
+                            ),
+                            "sizing_trace": sizing_trace,
                             "market_session": market_session,
                             "risk_verdict": risk_verdict.to_dict(),
                             "event_sizing": event_sizing_context,
@@ -8023,6 +8191,7 @@ def _process_tick_factor_pipeline(
                                         sl_dist=float(sl_dist or 0.0),
                                         tp_dist=float(tp_dist or 0.0),
                                         event_sizing_context=event_sizing_context,
+                                        sizing_trace=sizing_trace,
                                         risk_verdict=risk_verdict,
                                         market_session=market_session,
                                     )
@@ -8051,6 +8220,7 @@ def _process_tick_factor_pipeline(
                                                     "requested_volume": volume,
                                                     "base_requested_volume": base_volume,
                                                     "event_sizing": event_sizing_context,
+                                                    "sizing_trace": sizing_trace,
                                                     "price": round(current_price, 2),
                                                     "sl": round(sl_price, 2),
                                                     "tp": round(tp_price, 2),
@@ -8099,6 +8269,7 @@ def _process_tick_factor_pipeline(
                                                     "sl": round(sl_price, 2),
                                                     "tp": round(tp_price, 2),
                                                     "event_sizing": event_sizing_context,
+                                                    "sizing_trace": sizing_trace,
                                                 },
                                                 event_ts=time.time(),
                                             )
@@ -8130,6 +8301,7 @@ def _process_tick_factor_pipeline(
                                                     "applied_take_profit": round(tp_price, 2),
                                                 },
                                                 "event_sizing": event_sizing_context,
+                                                "sizing_trace": sizing_trace,
                                                 "trade_attribution": trade_attr.to_jsonable(),
                                                 **learning_context,
                                             },
@@ -8158,6 +8330,7 @@ def _process_tick_factor_pipeline(
                                                 "requested_volume": volume,
                                                 "base_requested_volume": base_volume,
                                                 "event_sizing": event_sizing_context,
+                                                "sizing_trace": sizing_trace,
                                                 "price": round(current_price, 2),
                                                 "sl": round(sl_price, 2),
                                                 "tp": round(tp_price, 2),
@@ -8195,6 +8368,7 @@ def _process_tick_factor_pipeline(
                                     market_session=market_session,
                                     base_requested_volume=base_volume,
                                     event_sizing_context=event_sizing_context,
+                                    sizing_trace=sizing_trace,
                                     sl_dist=sl_dist,
                                     tp_dist=tp_dist,
                                     bridge=bridge,
@@ -8270,6 +8444,12 @@ def _process_tick_factor_pipeline(
                                 composite=composite,
                                 gate_result=gate_result,
                                 risk_verdict=risk_verdict,
+                                base_requested_volume=base_volume,
+                                event_sizing_context=event_sizing_context,
+                                sizing_trace=sizing_trace,
+                                sl_dist=sl_dist,
+                                tp_dist=tp_dist,
+                                bridge=bridge,
                             )
                             _update_entry_protection_plan_status(
                                 int(pid),

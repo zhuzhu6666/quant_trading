@@ -19,7 +19,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from backend.core.db import connect_duckdb
 
@@ -168,7 +168,34 @@ class EventSizing:
         except (OSError, ValueError, OverflowError):
             return 1.0
 
+        context = self.get_context(bar_time)
+        return float(context.get("multiplier", 1.0) or 1.0)
+
+    @staticmethod
+    def _window_bucket(hours_until: float, tier: EventTier | None) -> str:
+        if hours_until < 0:
+            return "post_0_5m"
+        if tier is None:
+            return ""
+        if tier.max_hours_before <= 4.0:
+            return "pre_0_4h"
+        if tier.max_hours_before <= 24.0:
+            return "pre_4_24h"
+        return "pre_24_72h"
+
+    def get_context(self, bar_time: float) -> dict[str, Any]:
+        """Return the multiplier plus the event/tier that caused it."""
+        if not self.enabled or not self._events:
+            return {"enabled": self.enabled, "multiplier": 1.0, "event_near": False}
+
+        try:
+            bar_dt = datetime.fromtimestamp(bar_time, tz=timezone.utc)
+        except (OSError, ValueError, OverflowError):
+            return {"enabled": self.enabled, "multiplier": 1.0, "event_near": False}
+
         min_mult = 1.0
+        causal: dict[str, Any] = {}
+        nearest: dict[str, Any] = {}
         for event in self._events:
             delta = event.dt - bar_dt
             hours_until = delta.total_seconds() / 3600.0
@@ -181,13 +208,38 @@ class EventSizing:
             if hours_until > 72.0:
                 continue
 
+            candidate = {
+                "event_type": event.event_type,
+                "event": event.description or event.event_type,
+                "event_importance": int(event.importance),
+                "event_ts": event.dt.timestamp(),
+                "hours_until_event": hours_until,
+                "minutes_until_event": hours_until * 60.0,
+                "is_post_event": hours_until < 0,
+            }
+            if not nearest or abs(hours_until) < abs(float(nearest.get("hours_until_event", 999999.0))):
+                nearest = dict(candidate)
+
             tier_list = self.tiers.get(event.importance, [])
             for tier in tier_list:
                 if hours_until <= tier.max_hours_before:
-                    min_mult = min(min_mult, tier.multiplier)
+                    if tier.multiplier < min_mult:
+                        min_mult = tier.multiplier
+                        causal = {
+                            **candidate,
+                            "tier_max_hours_before": float(tier.max_hours_before),
+                            "tier_multiplier": float(tier.multiplier),
+                            "window_bucket": self._window_bucket(hours_until, tier),
+                        }
                     break
 
-        return min_mult
+        event_payload = causal or nearest
+        return {
+            "enabled": self.enabled,
+            "multiplier": min_mult,
+            "event_near": bool(event_payload),
+            **event_payload,
+        }
 
     def is_event_near(
         self, bar_time: float, hours_threshold: float = 72.0

@@ -76,6 +76,8 @@ def test_from_yaml_uses_defaults_for_missing_keys() -> None:
     assert cfg.shadow_vote_weight == 0.15  # 默认值
     assert cfg.canary_min_oos_bars == 80
     assert cfg.ctrader_send_orders is False
+    assert cfg.dynamic_sizing_enabled is True
+    assert cfg.dynamic_sizing_max_api_volume == 300.0
 
 
 def test_unknown_keys_go_to_extra() -> None:

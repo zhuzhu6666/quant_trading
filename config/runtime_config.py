@@ -315,6 +315,9 @@ class RuntimeConfig:
     kelly_fraction: float = 0.5                  # 半凯利 = 0.5, 四分之一 = 0.25
     kelly_max_pct: float = 0.25                  # 最大资本占比上限
     kelly_risk_per_trade_pct: float = 0.01       # 每笔风险 = equity × 1%
+    dynamic_sizing_enabled: bool = True          # 是否启用实盘阶梯式动态仓位
+    dynamic_sizing_max_api_volume: float = 300.0 # 初期单笔动态仓位上限(API volume)
+    dynamic_sizing_api_units_per_display_unit: float = 100.0  # XAUUSD: 100 API volume ~= 1 oz PnL
 
     # --- 5.3 压力测试 ---
     stress_test_enabled: bool = False            # 是否启用压力测试

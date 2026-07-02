@@ -1,6 +1,6 @@
 # Learning Evidence Contract
 
-状态：第一版已落地，2026-06-29；训练准入语义已收紧，2026-06-30；开仓质量、反事实训练契约和数据健康检查已补齐，2026-07-02
+状态：第一版已落地，2026-06-29；训练准入语义已收紧，2026-06-30；开仓质量、反事实训练契约、数据健康检查、动态仓位 trace 与事件窗口治理已补齐，2026-07-02
 
 目标：让规则系统产生的数据、训练样本、模型产出都具备同一种可解释、可追溯、可被机器识别的证据语义。
 
@@ -71,11 +71,12 @@
 - `bar_context`: 入场 K 线实体、区间、收盘位置
 - `execution_context`: requested/executed volume、entry/sl/tp、保护距离
 - `decision_quality_context`: action score、因子冲突、正负贡献、活跃/弃权因子数量
-- `event_context`: 事件窗口、event multiplier
+- `event_context`: 事件窗口、event multiplier、causal event、event type、importance、距离事件的分钟/小时数、pre/post 状态、window bucket、tier multiplier
+- `sizing_trace`: dynamic sizing 的 base/final API volume、event-adjusted volume、broker step/min/max、block reason
 - `data_quality_context`: quote/bar/context freshness
 - `market_session`: 市场会话状态
 
-历史样本不得伪造不可恢复的实时上下文。旧 open decision 可以回填同向簇和组合暴露，但 `bar_context / execution_context / market_micro_context` 等只能从真实新单开始自然积累。
+历史样本不得伪造不可恢复的实时上下文。旧 open decision 可以回填同向簇和组合暴露，但 `bar_context / execution_context / market_micro_context / event_context / sizing_trace` 等只能从真实新单开始自然积累；缺少事件距离或窗口桶的旧样本不得事后猜测补造。
 
 同向簇治理由 `materialize_entry_cluster_governance_suggestions` 消费 matured open outcome 样本：
 
@@ -83,6 +84,14 @@
 - 写入 `experience_pattern_stats(scope_type='entry_cluster')`
 - 当坏结果比例或平均 reward 达到阈值时，生成 `policy_suggestion(scope_type='entry_cluster')`
 - 当前建议仍为 governance/advisory，不能直接越过风控下单
+
+事件窗口治理由 `materialize_event_window_governance_suggestions` 消费 matured open outcome 样本：
+
+- 按 `event_type:window_bucket` 归因，例如 `NFP:pre_0_4h`、`FOMC:post_0_15m`
+- 写入 `experience_pattern_stats(scope_type='event_window')`
+- 当事件窗口内坏结果比例过高时，生成 `policy_suggestion(scope_type='event_window', action='tighten_event_window_sizing')`
+- 当事件后窗口平均 reward 显著偏负时，生成 `policy_suggestion(scope_type='event_window', action='extend_event_post_window_review')`
+- 当前建议仍为 governance/advisory，不能直接改写事件分层、放大仓位或绕过 `RiskPolicyService`
 
 ## Model Output
 
