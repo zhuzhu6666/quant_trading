@@ -411,6 +411,8 @@ def _humanize_template_candidate_status(value: str) -> str:
         return "已发布"
     if key == "rolled_back":
         return "已回滚"
+    if key == "superseded":
+        return "已被新建议替代"
     return "状态未知"
 
 
@@ -638,11 +640,15 @@ def _parameter_governance_jump_snapshot(
                 if suggestion_status == "approved"
                 else "看回滚建议"
                 if suggestion_status == "rolled_back"
+                else "看替代记录"
+                if suggestion_status == "superseded"
                 else "看治理建议"
             ),
             "summary": (
                 f"推荐 {recommendation_id or '--'} 已生成建议 {suggestion_id}，当前正等待审批。"
                 if suggestion_status == "proposed"
+                else f"建议 {suggestion_id} 已被更新证据替代，不再进入应用链路。"
+                if suggestion_status == "superseded"
                 else f"推荐 {recommendation_id or '--'} 已生成建议 {suggestion_id}，可继续查看其后续状态。"
             ),
             "candidate_id": candidate_id,
@@ -761,7 +767,7 @@ def _parameter_governance_todo_queue_snapshot(
             "type": "suggestion",
             "type_label": "治理建议",
             "target_id": suggestion_id,
-            "title": f"{suggestion_id or '--'} · {'待审批' if suggestion_status == 'proposed' else '已批准' if suggestion_status == 'approved' else '已回滚' if suggestion_status == 'rolled_back' else '建议处理中'}",
+            "title": f"{suggestion_id or '--'} · {'待审批' if suggestion_status == 'proposed' else '已批准' if suggestion_status == 'approved' else '已回滚' if suggestion_status == 'rolled_back' else '已被新建议替代' if suggestion_status == 'superseded' else '建议处理中'}",
             "reason": "推荐已经生成正式治理建议，当前卡点是 governor 审批。" if suggestion_status == "proposed" else "推荐已经沉淀为 suggestion，可继续沿建议状态回看治理链。",
             "button_text": "去审建议" if suggestion_status == "proposed" else "看已批建议" if suggestion_status == "approved" else "看治理建议",
             "summary": f"推荐 {recommendation_id} 已经物化成 suggestion {suggestion_id or '--'}。" if recommendation_id else f"当前建议对象为 {suggestion_id or '--'}。",

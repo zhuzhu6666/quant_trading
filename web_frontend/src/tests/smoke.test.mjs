@@ -36,4 +36,12 @@ assert.match(formatSource, /normalizeCurrency/);
 assert.match(formatSource, /\^\[A-Z\]\{3\}\$/);
 assert.match(formatSource, /catch \{/);
 
+const apiSource = fs.readFileSync(path.join(process.cwd(), "src/api/client.ts"), "utf8");
+assert.match(apiSource, /confirmed\s*\?\s*\{\s*"X-Confirm":\s*"start-live"\s*\}/);
+assert.match(apiSource, /confirmed\s*\?\s*\{\s*"X-Confirm":\s*"emergency"\s*\}/);
+
+const tradingSource = fs.readFileSync(path.join(process.cwd(), "src/pages/TradingPage.tsx"), "utf8");
+assert.match(tradingSource, /startTrading\("ctrader",\s*strategy\s*\|\|\s*"live",\s*true\)/);
+assert.match(tradingSource, /emergencyClose\(true\)/);
+
 console.log("web_frontend smoke test: ok");

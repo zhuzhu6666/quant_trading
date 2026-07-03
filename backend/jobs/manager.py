@@ -4,6 +4,7 @@ import inspect
 import json
 import threading
 import traceback
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -32,13 +33,16 @@ class JobManager:
 
     PERSIST_PATH = Path("data/charts/jobs.jsonl")
     MAX_PERSISTED = 200
+    _instances: "weakref.WeakSet[JobManager]" = weakref.WeakSet()
 
     def __init__(self) -> None:
         self._jobs: dict[str, JobState] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._owns_loop = False
         self._lock = threading.Lock()
+        self._instances.add(self)
         self._ensure_loop()
         self._load_persisted()
 
@@ -53,12 +57,18 @@ class JobManager:
                 try:
                     loop.run_forever()
                 finally:
+                    try:
+                        loop.run_until_complete(loop.shutdown_asyncgens())
+                        loop.run_until_complete(loop.shutdown_default_executor())
+                    except Exception:
+                        pass
                     loop.close()
 
             t = threading.Thread(target=runner, name="JobManagerLoop", daemon=True)
             t.start()
             self._thread = t
             self._loop = loop
+            self._owns_loop = True
 
     def _load_persisted(self) -> None:
         """从 PostgreSQL state store 加载持久化 jobs。降级到 JSONL。"""
@@ -185,6 +195,7 @@ class JobManager:
         If not called, JobManager runs its own background loop."""
         with self._lock:
             self._loop = loop
+            self._owns_loop = False
 
     def submit(
         self,
@@ -271,6 +282,47 @@ class JobManager:
         task.cancel()
         return True
 
+    def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Stop the owned background loop and its default executor.
+
+        FastAPI may bind a manager to an application loop; that loop is owned
+        by the framework, so this only stops loops created by JobManager itself.
+        """
+        loop = self._loop
+        thread = self._thread
+        if loop is None or not self._owns_loop:
+            return
+        for task in list(self._tasks.values()):
+            try:
+                if not task.done():
+                    task.cancel()
+            except Exception:
+                pass
+
+        async def _cancel_pending() -> None:
+            current = asyncio.current_task()
+            pending = [task for task in asyncio.all_tasks(loop) if task is not current and not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        if loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(_cancel_pending(), loop)
+                future.result(timeout=timeout)
+            except Exception:
+                pass
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        self._loop = None
+        self._thread = None
+        self._owns_loop = False
+
 
 class _FutureShim:
     """Adapter so cancel() can target both asyncio.Task and concurrent.futures.Future.
@@ -303,3 +355,11 @@ def get_job_manager() -> JobManager:
             if _manager is None:
                 _manager = JobManager()
     return _manager
+
+
+def shutdown_job_managers_for_tests() -> None:
+    """Shutdown every JobManager loop created in this process."""
+    global _manager
+    for manager in list(JobManager._instances):
+        manager.shutdown()
+    _manager = None

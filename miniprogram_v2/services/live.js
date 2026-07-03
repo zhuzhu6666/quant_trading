@@ -253,15 +253,25 @@ export async function refreshLiveSnapshot(options = {}) {
   return liveStore.getState();
 }
 
-export async function startTradingLoop() {
-  return post('/api/live/start', { broker: 'ctrader', strategy_name: 'factor_v4' });
+export async function startTradingLoop(options = {}) {
+  if (!options.confirmed) {
+    throw new Error('startTradingLoop requires explicit confirmation');
+  }
+  return post(
+    '/api/live/start',
+    { broker: 'ctrader', strategy_name: 'factor_v4' },
+    { headers: { 'X-Confirm': 'start-live' } }
+  );
 }
 
 export async function stopTradingLoop() {
   return post('/api/live/stop', {});
 }
 
-export async function emergencyCloseAll(symbol = null) {
+export async function emergencyCloseAll(symbol = null, options = {}) {
+  if (!options.confirmed) {
+    throw new Error('emergencyCloseAll requires explicit confirmation');
+  }
   return post(
     '/api/live/emergency-close',
     { broker: 'ctrader', symbol },

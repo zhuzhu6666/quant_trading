@@ -208,13 +208,25 @@ class TradeReviewer:
                 failure_tags.append("lucky_win")
         else:
             conviction = abs(entry_score)
-            outcome_label = "bad_loss" if conviction >= 0.55 else "good_loss"
+            has_entry_context = entry is not None
+            has_attribution = bool(contributions)
+            conflict = has_attribution and pos_mc > 0 and neg_mc < 0
+            weak_entry = has_entry_context and conviction < 0.55
+            avoidable_entry = weak_entry and (conflict or (has_attribution and positive_share < 0.45))
+            outcome_label = "bad_loss" if conviction >= 0.55 or avoidable_entry else "good_loss"
             if outcome_label == "bad_loss":
                 failure_tags.append("bad_loss")
             else:
                 failure_tags.append("good_loss")
-            if pos_mc > 0 and neg_mc < 0:
+                failure_tags.append("clean_good_loss" if not conflict else "conflict_entry_loss")
+            if weak_entry:
+                failure_tags.append("weak_entry_loss")
+            if avoidable_entry:
+                failure_tags.append("avoidable_loss")
+            if conflict:
                 failure_tags.append("factor_conflict")
+                if "conflict_entry_loss" not in failure_tags:
+                    failure_tags.append("conflict_entry_loss")
             if worst_factor:
                 if worst_factor == top_weight_factor and abs(top_weight) >= 0.05:
                     failure_tags.append("overweight_noise_factor")
@@ -271,7 +283,11 @@ class TradeReviewer:
         entry_quality = _clamp(0.55 + (0.25 if pnl > 0 else -0.30) * min(abs(entry_score), 1.0))
         hold_quality = _clamp(0.55 if pnl > 0 else 0.40)
         exit_quality = _clamp(0.55 if real_pnl else 0.45)
-        regime_fit_score = _clamp(0.70 if pnl > 0 else 0.35 + (0.10 if "good_loss" in failure_tags else 0.0))
+        regime_fit_score = _clamp(
+            0.70
+            if pnl > 0
+            else 0.35 + (0.10 if "clean_good_loss" in failure_tags else 0.0) - (0.05 if "avoidable_loss" in failure_tags else 0.0)
+        )
         execution_quality = _clamp(0.60 if real_pnl else 0.45)
         close_ts = float(close_ts or time.time())
         holding_seconds = max(0.0, close_ts - entry_ts) if entry_ts > 0 else 0.0

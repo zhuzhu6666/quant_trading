@@ -4,7 +4,7 @@ import sqlite3
 import pytest
 from datetime import datetime, timezone, timedelta
 
-from execution.event_sizing import EventSizing, EventRecord, EventTier
+from execution.event_sizing import DEFAULT_TIERS, EVENT_SIZING_SCHEMA_VERSION, EventSizing, EventRecord, EventTier
 
 
 # ── 辅助: 构造带预加载事件的 EventSizing ──
@@ -15,9 +15,12 @@ def _make_sizer(events: list[EventRecord],
     es = EventSizing(enabled=False)
     es.enabled = True
     es._events = events
-    es._min_multiplier = 0.2
-    if tiers:
-        es.tiers = tiers
+    es.tiers = tiers or DEFAULT_TIERS
+    es._min_multiplier = min(
+        tier.multiplier
+        for tier_list in es.tiers.values()
+        for tier in tier_list
+    )
     return es
 
 
@@ -92,23 +95,23 @@ class TestHighImportance:
         bar_time = (evt - timedelta(hours=100)).timestamp()
         assert es.get_multiplier(bar_time) == 1.0
 
-    def test_2h_before_returns_0_2(self):
+    def test_10m_before_returns_0_5(self):
+        evt = _event_dt("2024-06-15", 19, 0)
+        es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
+        bar_time = (evt - timedelta(minutes=10)).timestamp()
+        assert es.get_multiplier(bar_time) == pytest.approx(0.5)
+
+    def test_45m_before_returns_0_8(self):
+        evt = _event_dt("2024-06-15", 19, 0)
+        es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
+        bar_time = (evt - timedelta(minutes=45)).timestamp()
+        assert es.get_multiplier(bar_time) == pytest.approx(0.8)
+
+    def test_2h_before_returns_1_0(self):
         evt = _event_dt("2024-06-15", 19, 0)
         es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
         bar_time = (evt - timedelta(hours=2)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.2)
-
-    def test_12h_before_returns_0_5(self):
-        evt = _event_dt("2024-06-15", 19, 0)
-        es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
-        bar_time = (evt - timedelta(hours=12)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.5)
-
-    def test_48h_before_returns_0_8(self):
-        evt = _event_dt("2024-06-15", 19, 0)
-        es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
-        bar_time = (evt - timedelta(hours=48)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.8)
+        assert es.get_multiplier(bar_time) == pytest.approx(1.0)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -118,20 +121,20 @@ class TestHighImportance:
 class TestMediumImportance:
     """PCE 13:30 UTC, importance=2"""
 
-    def test_2h_before_returns_0_5(self):
+    def test_2h_before_returns_1_0(self):
         evt = _event_dt("2024-06-28", 13, 30)
         es = _make_sizer([EventRecord(dt=evt, event_type="PCE", importance=2)])
         bar_time = (evt - timedelta(hours=2)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.5)
+        assert es.get_multiplier(bar_time) == pytest.approx(1.0)
 
-    def test_12h_before_returns_0_8(self):
+    def test_12h_before_returns_1_0(self):
         evt = _event_dt("2024-06-28", 13, 30)
         es = _make_sizer([EventRecord(dt=evt, event_type="PCE", importance=2)])
         bar_time = (evt - timedelta(hours=12)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.8)
+        assert es.get_multiplier(bar_time) == pytest.approx(1.0)
 
     def test_30h_before_returns_1_0(self):
-        """MEDIUM 没有 72h 层级, 30h 超出 24h → 1.0"""
+        """MEDIUM 只保留短观察窗口, 30h 超出窗口 → 1.0"""
         evt = _event_dt("2024-06-28", 13, 30)
         es = _make_sizer([EventRecord(dt=evt, event_type="PCE", importance=2)])
         bar_time = (evt - timedelta(hours=30)).timestamp()
@@ -150,9 +153,9 @@ class TestMultipleEvents:
             EventRecord(dt=fomc, event_type="FOMC", importance=3),
             EventRecord(dt=nfp, event_type="NFP", importance=3),
         ])
-        # FOMC 前 2h → 0.2x (NFP 还有 ~23h → 0.5x, 但 0.2 更小)
-        bar_time = (fomc - timedelta(hours=2)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.2)
+        # FOMC 前 10m → 0.5x (NFP 还在窗口外)
+        bar_time = (fomc - timedelta(minutes=10)).timestamp()
+        assert es.get_multiplier(bar_time) == pytest.approx(0.5)
 
     def test_two_close_events_take_min(self):
         fomc = _event_dt("2024-06-15", 19, 0)
@@ -161,9 +164,9 @@ class TestMultipleEvents:
             EventRecord(dt=fomc, event_type="FOMC", importance=3),
             EventRecord(dt=nfp, event_type="NFP", importance=3),
         ])
-        # FOMC 前 20h → 0.5x; NFP 前 17h → 0.5x; min = 0.5x
+        # FOMC 前 20h、NFP 前约 38.5h 都在短窗口外 → 1.0
         bar_time = (fomc - timedelta(hours=20)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.5)
+        assert es.get_multiplier(bar_time) == pytest.approx(1.0)
 
     def test_context_identifies_causal_event_and_window_bucket(self):
         medium = _event_dt("2024-06-15", 13, 30)
@@ -173,20 +176,21 @@ class TestMultipleEvents:
             EventRecord(dt=nfp, event_type="NFP", importance=3, description="Non-Farm Employment Change"),
         ])
 
-        ctx = es.get_context((nfp - timedelta(hours=2)).timestamp())
+        ctx = es.get_context((nfp - timedelta(minutes=10)).timestamp())
 
-        assert ctx["multiplier"] == pytest.approx(0.2)
+        assert ctx["multiplier"] == pytest.approx(0.5)
+        assert ctx["schema_version"] == EVENT_SIZING_SCHEMA_VERSION
         assert ctx["event_type"] == "NFP"
         assert ctx["event"] == "Non-Farm Employment Change"
         assert ctx["event_importance"] == 3
-        assert ctx["window_bucket"] == "pre_0_4h"
+        assert ctx["window_bucket"] == "pre_0_15m"
 
     def test_past_event_lookback(self):
         """事件后 3 分钟在 post-event 窗口内 (5 min) → 还有 multiplier"""
         evt = _event_dt("2024-06-15", 19, 0)
         es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
         bar_time = (evt + timedelta(minutes=3)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.2)
+        assert es.get_multiplier(bar_time) == pytest.approx(0.5)
 
     def test_past_event_outside_lookback(self):
         """事件后 10 分钟超出 post-event 窗口 (5 min) → 恢复 1.0"""
@@ -201,23 +205,23 @@ class TestMultipleEvents:
 # ═══════════════════════════════════════════════════════════
 
 class TestBoundaryValues:
-    def test_exactly_4h_high_returns_0_2(self):
+    def test_exactly_15m_high_returns_0_5(self):
         evt = _event_dt("2024-06-15", 19, 0)
         es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
-        bar_time = (evt - timedelta(hours=4)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.2)
-
-    def test_3h59m_high_returns_0_2(self):
-        evt = _event_dt("2024-06-15", 19, 0)
-        es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
-        bar_time = (evt - timedelta(hours=3, minutes=59)).timestamp()
-        assert es.get_multiplier(bar_time) == pytest.approx(0.2)
-
-    def test_4h01m_high_returns_0_5(self):
-        evt = _event_dt("2024-06-15", 19, 0)
-        es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
-        bar_time = (evt - timedelta(hours=4, minutes=1)).timestamp()
+        bar_time = (evt - timedelta(minutes=15)).timestamp()
         assert es.get_multiplier(bar_time) == pytest.approx(0.5)
+
+    def test_14m_high_returns_0_5(self):
+        evt = _event_dt("2024-06-15", 19, 0)
+        es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
+        bar_time = (evt - timedelta(minutes=14)).timestamp()
+        assert es.get_multiplier(bar_time) == pytest.approx(0.5)
+
+    def test_16m_high_returns_0_8(self):
+        evt = _event_dt("2024-06-15", 19, 0)
+        es = _make_sizer([EventRecord(dt=evt, event_type="FOMC", importance=3)])
+        bar_time = (evt - timedelta(minutes=16)).timestamp()
+        assert es.get_multiplier(bar_time) == pytest.approx(0.8)
 
     def test_invalid_timestamp_returns_1_0(self):
         evt = _event_dt("2024-06-15", 19, 0)
@@ -325,8 +329,10 @@ class TestStats:
         es = EventSizing(db_path=str(db))
         s = es.stats()
         assert s["enabled"] is True
+        assert s["schema_version"] == EVENT_SIZING_SCHEMA_VERSION
         assert s["total_events"] == 2
-        assert s["min_multiplier"] == pytest.approx(0.2)
+        assert s["min_multiplier"] == pytest.approx(0.5)
+        assert s["max_pre_window_hours"] == pytest.approx(1.0)
 
 
 class TestLiveServiceAuditContext:

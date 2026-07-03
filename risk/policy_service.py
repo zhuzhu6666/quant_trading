@@ -121,6 +121,82 @@ class RiskPolicyService:
                 },
             )
 
+        entry_cluster_policy = context.get("entry_cluster_learning_policy") or {}
+        entry_cluster = context.get("entry_cluster") or {}
+        if bool(entry_cluster_policy.get("active", False)):
+            same_count = int(
+                entry_cluster.get("same_direction_open_count_before")
+                or context.get("same_direction_open_count")
+                or 0
+            )
+            min_same_count = int(entry_cluster_policy.get("min_same_direction_open_count") or 0)
+            seconds_since = float(entry_cluster.get("seconds_since_last_same_direction_open") or 0.0)
+            cooldown_seconds = float(context.get("same_direction_cooldown_seconds") or 0.0)
+            if min_same_count > 0 and same_count >= min_same_count and 0.0 < seconds_since < cooldown_seconds:
+                return RiskVerdict(
+                    allowed=False,
+                    reason="learning_same_direction_cooldown",
+                    severity="warn",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "autonomous_learning",
+                        "blocked_by": "entry_cluster_learning_policy",
+                        "same_direction_open_count": same_count,
+                        "min_same_direction_open_count": min_same_count,
+                        "seconds_since_last_same_direction_open": round(seconds_since, 3),
+                        "cooldown_seconds": round(cooldown_seconds, 3),
+                        "controls": entry_cluster_policy.get("controls") or [],
+                        "trade": context.get("trade") or {},
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                )
+
+        entry_quality_gate = context.get("entry_quality_gate") or {}
+        if bool(entry_quality_gate.get("active", False)) and not bool(entry_quality_gate.get("allowed", True)):
+            return RiskVerdict(
+                allowed=False,
+                reason=str(entry_quality_gate.get("reason") or "learning_entry_quality_gate"),
+                severity="warn",
+                audit_payload={
+                    "action": "open_trade",
+                    "source": str(entry_quality_gate.get("source") or "entry_quality_gate"),
+                    "blocked_by": "entry_quality_gate",
+                    "entry_quality_gate": entry_quality_gate,
+                    "trade": context.get("trade") or {},
+                    "temporal_context": context.get("temporal_context") or {},
+                },
+            )
+
+        event_window_policy = context.get("event_window_learning_policy") or {}
+        event_sizing = context.get("event_sizing") or {}
+        if bool(event_window_policy.get("active", False)):
+            event_name = str(event_sizing.get("event_type") or event_sizing.get("event") or "").strip()
+            window_bucket = str(event_sizing.get("window_bucket") or "").strip()
+            schema_version = str(event_sizing.get("schema_version") or "").strip()
+            current_key = f"{event_name}:{window_bucket}" if event_name and window_bucket else ""
+            matching_controls = [
+                item
+                for item in (event_window_policy.get("controls") or [])
+                if str(item.get("scope_key") or "") == current_key
+                and str(item.get("action") or "") in {"tighten_event_window_sizing", "extend_event_post_window_review"}
+            ]
+            if matching_controls and schema_version == "event_sizing.short_window.v2":
+                return RiskVerdict(
+                    allowed=False,
+                    reason="learning_event_window_control",
+                    severity="warn",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "autonomous_learning",
+                        "blocked_by": "event_window_learning_policy",
+                        "event_window_key": current_key,
+                        "event_sizing": event_sizing,
+                        "controls": matching_controls,
+                        "trade": context.get("trade") or {},
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                )
+
         risk_snapshot = context.get("risk_snapshot") or {}
         var_cfg = context.get("var") or {}
         if bool(var_cfg.get("enabled", False)):
@@ -137,6 +213,39 @@ class RiskPolicyService:
                         "source": "var_gate",
                         "var_pct": var_pct,
                         "threshold_pct": threshold_pct,
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                )
+
+        event_block_reason = str(event_sizing.get("blocked_reason") or "")
+        if event_block_reason:
+            try:
+                event_importance = int(event_sizing.get("event_importance") or 0)
+            except (TypeError, ValueError):
+                event_importance = 0
+            try:
+                minutes_until_event = float(event_sizing.get("minutes_until_event"))
+            except (TypeError, ValueError):
+                minutes_until_event = 999999.0
+            window_bucket = str(event_sizing.get("window_bucket") or "")
+            is_post_event = bool(event_sizing.get("is_post_event", False))
+            is_hard_event_window = (
+                event_importance >= 3
+                and (
+                    -5.0 <= minutes_until_event <= 15.0
+                    or is_post_event
+                    or window_bucket in {"pre_0_15m", "post_0_5m"}
+                )
+            )
+            if is_hard_event_window:
+                return RiskVerdict(
+                    allowed=False,
+                    reason=f"event_hard_window: {event_block_reason}",
+                    severity="warn",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "event_sizing",
+                        "event_sizing": event_sizing,
                         "temporal_context": context.get("temporal_context") or {},
                     },
                 )
@@ -206,6 +315,7 @@ class RiskPolicyService:
                 "requested_api_volume": requested_api_volume,
                 "max_position_count": max_position_count,
                 "max_position_api_volume": max_api_volume,
+                "event_sizing": event_sizing,
                 "state": state.extra,
                 "temporal_context": context.get("temporal_context") or {},
             },
@@ -288,6 +398,184 @@ class RiskPolicyService:
             },
         )
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _position_field(position: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in position and position.get(key) not in (None, ""):
+                return position.get(key)
+        return None
+
+    def _position_direction(self, position: dict[str, Any], context: dict[str, Any]) -> int:
+        raw = self._position_field(position, "direction", "side", "trade_side", "type")
+        if raw is None:
+            raw = context.get("direction") or context.get("side")
+        text = str(raw or "").strip().lower()
+        if text in {"buy", "long", "1", "true"}:
+            return 1
+        if text in {"sell", "short", "-1"}:
+            return -1
+        numeric = self._safe_float(raw)
+        if numeric > 0:
+            return 1
+        if numeric < 0:
+            return -1
+        return 0
+
+    def _evaluate_tp_extension_guard(
+        self,
+        action: str,
+        context: dict[str, Any],
+        recommended_controls: dict[str, Any],
+    ) -> RiskVerdict | None:
+        if action != "tighten_position":
+            return None
+        position = context.get("position") or {}
+        if not isinstance(position, dict):
+            position = {}
+        target_tp = self._safe_float(recommended_controls.get("target_take_profit"))
+        if target_tp <= 0:
+            return None
+        current_tp = self._safe_float(
+            self._position_field(position, "tp", "take_profit", "takeProfit", "current_take_profit")
+        )
+        if current_tp <= 0:
+            return None
+        entry_price = self._safe_float(
+            self._position_field(position, "entry_price", "price_open", "open_price", "entry", "openPrice")
+        )
+        direction = self._position_direction(position, context)
+        audit_base = {
+            "action": action,
+            "source": "tp_extension_guard",
+            "position_id": context.get("position_id", ""),
+            "target_take_profit": target_tp,
+            "current_take_profit": current_tp,
+            "entry_price": entry_price,
+            "direction": direction,
+            "recommended_controls": recommended_controls,
+        }
+        if direction == 0 or entry_price <= 0:
+            return RiskVerdict(
+                allowed=False,
+                reason="tp_extension_context_missing",
+                severity="error",
+                required_mode=str(context.get("mode") or "live"),
+                audit_payload=audit_base,
+            )
+
+        epsilon = max(abs(entry_price) * 1e-7, 1e-6)
+        if direction > 0:
+            is_extension = target_tp > current_tp + epsilon
+            correct_direction = target_tp > entry_price + epsilon
+        else:
+            is_extension = target_tp < current_tp - epsilon
+            correct_direction = target_tp < entry_price - epsilon
+        if not is_extension:
+            return None
+        if not correct_direction:
+            return RiskVerdict(
+                allowed=False,
+                reason="invalid_tp_extension_direction",
+                severity="error",
+                required_mode=str(context.get("mode") or "live"),
+                audit_payload=audit_base,
+            )
+
+        target_sl = self._safe_float(recommended_controls.get("target_stop_loss"))
+        current_sl = self._safe_float(self._position_field(position, "sl", "stop_loss", "stopLoss", "current_stop_loss"))
+        effective_sl = target_sl if target_sl > 0 else current_sl
+        if effective_sl <= 0:
+            return RiskVerdict(
+                allowed=False,
+                reason="tp_extension_requires_stop_loss",
+                severity="error",
+                required_mode=str(context.get("mode") or "live"),
+                audit_payload={**audit_base, "target_stop_loss": target_sl, "current_stop_loss": current_sl},
+            )
+        profit_locked = effective_sl >= entry_price - epsilon if direction > 0 else effective_sl <= entry_price + epsilon
+        if not profit_locked:
+            return RiskVerdict(
+                allowed=False,
+                reason="tp_extension_requires_profit_lock",
+                severity="error",
+                required_mode=str(context.get("mode") or "live"),
+                audit_payload={
+                    **audit_base,
+                    "target_stop_loss": target_sl,
+                    "current_stop_loss": current_sl,
+                    "effective_stop_loss": effective_sl,
+                },
+            )
+
+        current_distance = abs(current_tp - entry_price)
+        target_distance = abs(target_tp - entry_price)
+        if current_distance <= epsilon:
+            return RiskVerdict(
+                allowed=False,
+                reason="tp_extension_invalid_current_distance",
+                severity="error",
+                required_mode=str(context.get("mode") or "live"),
+                audit_payload=audit_base,
+            )
+        max_extension_factor = self._safe_float(
+            recommended_controls.get("max_tp_extension_factor")
+            or context.get("max_tp_extension_factor")
+            or (context.get("tp_extension_policy") or {}).get("max_tp_extension_factor"),
+            0.35,
+        )
+        max_extension_factor = min(1.0, max(0.0, max_extension_factor))
+        extension_factor = (target_distance / current_distance) - 1.0
+        if extension_factor > max_extension_factor + 1e-9:
+            return RiskVerdict(
+                allowed=False,
+                reason="tp_extension_exceeds_max_factor",
+                severity="error",
+                required_mode=str(context.get("mode") or "live"),
+                audit_payload={
+                    **audit_base,
+                    "current_distance": current_distance,
+                    "target_distance": target_distance,
+                    "extension_factor": round(extension_factor, 6),
+                    "max_tp_extension_factor": max_extension_factor,
+                },
+            )
+
+        extension_count = int(
+            self._safe_float(
+                context.get("tp_extension_count")
+                or position.get("tp_extension_count")
+                or recommended_controls.get("tp_extension_count")
+            )
+        )
+        max_extensions = int(
+            self._safe_float(
+                recommended_controls.get("max_tp_extensions_per_position")
+                or context.get("max_tp_extensions_per_position")
+                or (context.get("tp_extension_policy") or {}).get("max_tp_extensions_per_position"),
+                2.0,
+            )
+        )
+        if extension_count >= max_extensions:
+            return RiskVerdict(
+                allowed=False,
+                reason="tp_extension_count_exceeded",
+                severity="error",
+                required_mode=str(context.get("mode") or "live"),
+                audit_payload={
+                    **audit_base,
+                    "tp_extension_count": extension_count,
+                    "max_tp_extensions_per_position": max_extensions,
+                },
+            )
+        return None
+
     def _evaluate_position_adjustment(self, action: str, context: dict[str, Any]) -> RiskVerdict:
         runtime_gate = self._evaluate_runtime_gate(action, context)
         if runtime_gate is not None and not runtime_gate.allowed:
@@ -296,6 +584,9 @@ class RiskPolicyService:
         temporal_context = context.get("temporal_context") or {}
         supervisor_action = str(context.get("supervisor_action") or action)
         recommended_controls = context.get("recommended_controls") or {}
+        tp_extension_guard = self._evaluate_tp_extension_guard(action, context, recommended_controls)
+        if tp_extension_guard is not None:
+            return tp_extension_guard
         return RiskVerdict(
             allowed=True,
             reason="risk_reducing_action",

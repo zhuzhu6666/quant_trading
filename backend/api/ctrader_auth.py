@@ -8,6 +8,9 @@
 import hashlib
 import json
 import os
+import secrets
+import threading
+import time
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -22,6 +25,38 @@ router = APIRouter(prefix="/api/ctrader", tags=["ctrader-auth"])
 _ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 _CTRADER_AUTH_URL = "https://openapi.ctrader.com/apps/auth"
 _CTRADER_TOKEN_URL = "https://openapi.ctrader.com/apps/token"
+_OAUTH_STATE_TTL_SECONDS = 10 * 60
+_OAUTH_STATES: dict[str, float] = {}
+_OAUTH_STATES_LOCK = threading.Lock()
+
+
+def _state_digest(state: str) -> str:
+    return hashlib.sha256(state.encode("utf-8")).hexdigest()
+
+
+def _new_oauth_state() -> str:
+    state = secrets.token_urlsafe(32)
+    expires_at = time.time() + _OAUTH_STATE_TTL_SECONDS
+    digest = _state_digest(state)
+    with _OAUTH_STATES_LOCK:
+        now = time.time()
+        for key, expiry in list(_OAUTH_STATES.items()):
+            if expiry <= now:
+                _OAUTH_STATES.pop(key, None)
+        _OAUTH_STATES[digest] = expires_at
+    return state
+
+
+def _consume_oauth_state(state: str) -> None:
+    if not state:
+        raise HTTPException(400, "missing oauth state")
+    digest = _state_digest(state)
+    with _OAUTH_STATES_LOCK:
+        expires_at = _OAUTH_STATES.pop(digest, None)
+    if expires_at is None:
+        raise HTTPException(400, "invalid oauth state")
+    if expires_at <= time.time():
+        raise HTTPException(400, "expired oauth state")
 
 
 def _read_env() -> dict[str, str]:
@@ -69,21 +104,24 @@ def get_auth_url(_user: RequireUser) -> AuthUrlResponse:
         raise HTTPException(400, "CTRADER_CLIENT_ID not set")
 
     redirect_uri = "https://www.zhuzhu666.icu/api/ctrader/callback"
+    state = _new_oauth_state()
     params = urllib.parse.urlencode({
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": "trading",  # accounts=只读, trading=可交易
+        "state": state,
     })
     return AuthUrlResponse(url=f"{_CTRADER_AUTH_URL}?{params}")
 
 
 @router.get("/callback")
-def oauth_callback(code: str = Query(...)) -> dict:
+def oauth_callback(code: str = Query(...), state: str = Query(...)) -> dict:
     """cTrader OAuth 回调 — 用 code 换 token 并存到 .env.
 
     免鉴权: cTrader 重定向是浏览器直接跳转, 不带 JWT header。
     """
+    _consume_oauth_state(state)
     env = _read_env()
 
     client_id = env.get("CTRADER_CLIENT_ID", "")
@@ -131,7 +169,6 @@ def oauth_callback(code: str = Query(...)) -> dict:
 
     return {
         "ok": True,
-        "access_token": access_token[:20] + "...",
         "expires_in": expires_in,
         "msg": "Token saved to .env. Restart quant-backend to apply.",
     }
@@ -150,11 +187,10 @@ def token_status(_user: RequireUser) -> dict:
             remaining = float(expires) - now
             return {
                 "has_token": bool(token),
-                "token_preview": token[:15] + "..." if token else "",
                 "expires_at": expires,
                 "remaining_hours": round(remaining / 3600, 1),
                 "expired": remaining < 0,
             }
         except ValueError:
             pass
-    return {"has_token": bool(token), "token_preview": token[:15] + "..." if token else "", "expires_at": None}
+    return {"has_token": bool(token), "expires_at": None}

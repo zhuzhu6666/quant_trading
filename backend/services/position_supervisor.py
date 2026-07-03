@@ -34,18 +34,58 @@ def _tightened_sl(
     current_price: float,
     current_sl: float,
     profit_capture_ratio: float,
+    sl_policy: dict[str, Any] | None = None,
 ) -> float:
     if entry_price <= 0 or current_price <= 0:
         return 0.0
+    sl_policy = sl_policy or {}
+    breakeven_lock_ratio = _safe_float(sl_policy.get("breakeven_lock_ratio"), 0.25)
+    profit_lock_multiplier = _safe_float(sl_policy.get("profit_lock_multiplier"), 0.60)
+    lock_ratio = max(breakeven_lock_ratio, profit_capture_ratio * profit_lock_multiplier)
     if direction >= 0:
         breakeven = entry_price
-        lock_price = entry_price + max(0.0, (current_price - entry_price) * max(0.25, profit_capture_ratio * 0.6))
+        lock_price = entry_price + max(0.0, (current_price - entry_price) * lock_ratio)
         target = max(current_sl, breakeven, lock_price)
     else:
         breakeven = entry_price
-        lock_price = entry_price - max(0.0, (entry_price - current_price) * max(0.25, profit_capture_ratio * 0.6))
+        lock_price = entry_price - max(0.0, (entry_price - current_price) * lock_ratio)
         target = min(current_sl if current_sl > 0 else breakeven, breakeven, lock_price)
     return round(target, 2)
+
+
+def _extended_tp(
+    *,
+    direction: int,
+    entry_price: float,
+    current_tp: float,
+    tp_policy: dict[str, Any] | None = None,
+) -> float:
+    if entry_price <= 0 or current_tp <= 0:
+        return current_tp
+    tp_policy = tp_policy or {}
+    extension_factor = _safe_float(tp_policy.get("extension_factor"), 0.0)
+    max_extension_factor = _safe_float(tp_policy.get("max_extension_factor"), 0.0)
+    extension_factor = _clamp(extension_factor, 0.0, max(0.0, max_extension_factor))
+    if extension_factor <= 0:
+        return current_tp
+    distance = abs(current_tp - entry_price)
+    if distance <= 0:
+        return current_tp
+    if direction >= 0:
+        return round(current_tp + distance * extension_factor, 2)
+    return round(current_tp - distance * extension_factor, 2)
+
+
+def _target_changed(current: float, target: float, *, direction: int, target_kind: str, min_delta: float) -> bool:
+    if target <= 0:
+        return False
+    if current <= 0:
+        return True
+    if target_kind == "sl":
+        return target > current + min_delta if direction >= 0 else target < current - min_delta
+    if target_kind == "tp":
+        return target > current + min_delta if direction >= 0 else target < current - min_delta
+    return abs(target - current) >= min_delta
 
 
 def _target_progress(
@@ -83,6 +123,8 @@ def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any
         return "当前市场状态与入场时不再一致，系统怀疑这笔仓位的适用环境已经发生切换。"
     if reason == "near_take_profit_capture":
         return "仓位已经非常接近原始止盈目标，系统建议直接兑现利润，避免临门回吐。"
+    if reason == "near_take_profit_protect":
+        return "仓位已经接近原始止盈目标，但持仓证据仍然较强，系统建议先收紧保护并按模板决定是否延展止盈。"
     if reason == "near_stop_loss_preemptive_exit":
         return "仓位已经非常接近止损，且持仓证据偏弱，系统建议提前止损离场，不再等到被动打掉。"
     if action == "reduce":
@@ -99,6 +141,9 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         or position_context.get("template")
     )
     thresholds = template.get("thresholds") or {}
+    sl_policy = template.get("sl_policy") or {}
+    tp_policy = template.get("tp_policy") or {}
+    capture_policy = template.get("capture_policy") or {}
     position = position_context.get("position") or {}
     risk = position_context.get("risk") or {}
     temporal = position_context.get("temporal_context") or {}
@@ -161,11 +206,32 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         target_kind="sl",
     )
 
+    near_tp_action = str(tp_policy.get("near_take_profit_action") or "close")
+    tp_extension_enabled = bool(tp_policy.get("extension_enabled", False))
+    tp_extension_progress_threshold = _safe_float(tp_policy.get("extension_progress_threshold"), 0.80)
+    tp_extension_efficiency_threshold = _safe_float(tp_policy.get("extension_efficiency_threshold"), 0.70)
+    tp_extension_profit_capture_min = _safe_float(tp_policy.get("extension_profit_capture_min"), 0.65)
+    can_extend_tp = (
+        current_pnl > 0
+        and current_tp > 0
+        and tp_extension_enabled
+        and take_profit_progress >= tp_extension_progress_threshold
+        and holding_efficiency >= tp_extension_efficiency_threshold
+        and profit_capture_ratio >= tp_extension_profit_capture_min
+        and thesis_status in {"intact", "strong", "healthy"}
+        and regime_shift in {"none", "", "aligned"}
+    )
+
     if max_holding_seconds > 0 and holding_seconds >= max_holding_seconds:
         trigger_tags.append("holding_timeout_exceeded")
         action = "close"
         summary_reason = "holding_timeout_exceeded"
         severity = "warn"
+    elif current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold and near_tp_action == "protect":
+        trigger_tags.append("near_take_profit")
+        action = "tighten"
+        summary_reason = "near_take_profit_protect"
+        severity = "info"
     elif current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold:
         trigger_tags.append("near_take_profit")
         action = "close"
@@ -250,9 +316,17 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             current_price=current_price,
             current_sl=current_sl,
             profit_capture_ratio=profit_capture_ratio,
+            sl_policy=sl_policy,
         )
+        if can_extend_tp:
+            recommended_controls["target_take_profit"] = _extended_tp(
+                direction=direction,
+                entry_price=entry_price,
+                current_tp=current_tp,
+                tp_policy=tp_policy,
+            )
         recommended_controls["close_reason"] = "supervisor_tighten"
-        recommended_controls["protection_mode"] = "tightened_stop"
+        recommended_controls["protection_mode"] = "dynamic_tpsl" if can_extend_tp else "tightened_stop"
     elif action == "reduce":
         recommended_controls["reduce_fraction"] = 0.5
         recommended_controls["close_reason"] = "supervisor_reduce"
@@ -264,6 +338,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
                 current_price=current_price,
                 current_sl=current_sl,
                 profit_capture_ratio=max(profit_capture_ratio, 0.5),
+                sl_policy=sl_policy,
             )
     elif action == "close":
         recommended_controls["close_reason"] = summary_reason
@@ -292,7 +367,37 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "trigger_tags": trigger_tags,
         "supervisor_template_id": str(template.get("template_id") or ""),
         "supervisor_template_version": str(template.get("template_version") or ""),
+        "tp_extension_candidate": bool(can_extend_tp),
+        "near_take_profit_action": near_tp_action,
     }
+    min_delta = _safe_float(sl_policy.get("min_stop_tighten_points"), 0.01)
+    protection_candidates: list[dict[str, Any]] = []
+    target_sl = _safe_float(recommended_controls.get("target_stop_loss"))
+    target_tp = _safe_float(recommended_controls.get("target_take_profit"))
+    if action in {"tighten", "reduce"} and (
+        _target_changed(current_sl, target_sl, direction=direction, target_kind="sl", min_delta=min_delta)
+        or _target_changed(current_tp, target_tp, direction=direction, target_kind="tp", min_delta=min_delta)
+    ):
+        protection_candidates.append(
+            {
+                "schema_version": "position_supervisor_protection_candidate.v1",
+                "source": "supervisor_dynamic_tpsl",
+                "action": "dynamic_tpsl" if target_tp != current_tp and target_tp > 0 else "tighten_sl",
+                "risk_action": "tighten_position",
+                "priority": 30 if action == "tighten" else 35,
+                "target_stop_loss": round(target_sl, 2) if target_sl > 0 else 0.0,
+                "target_take_profit": round(target_tp, 2) if target_tp > 0 else 0.0,
+                "current_stop_loss": round(current_sl, 2) if current_sl > 0 else 0.0,
+                "current_take_profit": round(current_tp, 2) if current_tp > 0 else 0.0,
+                "close_reason": recommended_controls.get("close_reason") or action,
+                "protection_mode": recommended_controls.get("protection_mode") or "dynamic_tpsl",
+                "reason": summary_reason,
+                "confidence": confidence,
+                "ttl_seconds": 90,
+                "template_id": str(template.get("template_id") or ""),
+                "template_version": str(template.get("template_version") or ""),
+            }
+        )
     human_summary = humanize_supervisor_reason(action, summary_reason, evidence)
     return {
         "position_id": position_id,
@@ -306,12 +411,17 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "human_summary": human_summary,
         "evidence": evidence,
         "recommended_controls": recommended_controls,
+        "protection_candidates": protection_candidates,
         "supervisor_template": {
             "schema_version": str(template.get("schema_version") or ""),
             "template_id": str(template.get("template_id") or ""),
             "template_version": str(template.get("template_version") or ""),
             "template_role": str(template.get("template_role") or ""),
             "thresholds": thresholds,
+            "sl_policy": sl_policy,
+            "tp_policy": tp_policy,
+            "capture_policy": capture_policy,
+            "learning_bounds": template.get("learning_bounds") or {},
         },
         "requires_risk_verdict": action in {"tighten", "reduce", "close"},
         "action_label": {

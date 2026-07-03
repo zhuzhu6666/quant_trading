@@ -8,6 +8,8 @@ from backend.services.position_supervisor_governance import (
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
+    PROFIT_PROTECTION_TEMPLATE_ID,
+    list_position_supervisor_templates,
 )
 
 
@@ -165,3 +167,134 @@ def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp
     assert rows
     assert rows[0][0] == "position_supervisor_template"
     assert rows[0][2] == "proposed"
+
+
+def test_position_supervisor_advisories_materialize_mfe_capture_failure_template(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        base_ts = 1782439300.0
+        for idx in range(2):
+            position_id = f"cap_{idx}"
+            review = {
+                "position_id": position_id,
+                "entry_ts": base_ts + idx - 90,
+                "close_ts": base_ts + idx,
+                "holding_seconds": 90.0,
+                "mfe": 2.0 + idx,
+                "mae": 1.0,
+                "giveback_ratio": 0.96,
+                "profit_capture_ratio": 0.02,
+                "holding_efficiency": 0.1,
+                "time_decay_score": 0.4,
+                "thesis_status": "weakening",
+                "thesis_status_at_exit": "weakening",
+                "regime_shift": "none",
+                "close_price": 2999.0,
+                "close_reason": "broker_close",
+                "close_reason_source": "supervisor_tighten_stopout",
+                "inferred_close_supervisor": {
+                    "event_type": "supervisor_tighten",
+                    "action": "tighten",
+                    "action_reason": "profit_giveback_after_mfe",
+                },
+                "real_pnl": {"gross": -1.0, "net": -1.0, "entry_price": 3000.0},
+            }
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, pnl, mae, mfe, outcome_label,
+                 failure_tags_json, summary_text, review_json, created_at)
+                VALUES (?, ?, ?, -1.0, 1.0, ?, 'bad_loss',
+                        '[]', 'capture failed', ?, ?)
+                """,
+                (f"cap_rev_{idx}", position_id, position_id, 2.0 + idx, json.dumps(review), base_ts + idx),
+            )
+            conn.execute(
+                """
+                INSERT INTO position_lifecycle_event
+                (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
+                VALUES (?, ?, ?, 'XAUUSD+', 'opened', ?, ?)
+                """,
+                (f"cap_open_{idx}", position_id, position_id, base_ts + idx - 90, json.dumps({"sl": 2980.0, "tp": 3040.0})),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = build_position_supervisor_advisories(
+        day="2026-06-26",
+        db_path=db_path,
+        materialize=True,
+    )
+
+    capture_summary = result["replay_summary"]["capture_failure_summary"]
+    assert capture_summary["capture_failed_count"] == 2
+    items = {item["action"]: item for item in result["items"]}
+    assert items["tighten_mfe_capture_protection"]["scope_key"] == PROFIT_PROTECTION_TEMPLATE_ID
+    generated = items["switch_position_supervisor_template"]
+    assert generated["scope_key"].startswith("position_supervisor:auto_tpsl.")
+    assert generated["evidence"]["candidate_template"]["tp_policy"]["extension_enabled"] is True
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT scope_key, action, status
+            FROM policy_suggestion
+            WHERE action='tighten_mfe_capture_protection'
+            """
+        ).fetchone()
+        generated_row = conn.execute(
+            """
+            SELECT scope_key, action, status, evidence_json
+            FROM policy_suggestion
+            WHERE action='switch_position_supervisor_template'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == (PROFIT_PROTECTION_TEMPLATE_ID, "tighten_mfe_capture_protection", "proposed")
+    assert generated_row[0] == generated["scope_key"]
+    assert json.loads(generated_row[3])["candidate_template"]["template_id"] == generated["scope_key"]
+
+    templates = {item["template_id"]: item for item in list_position_supervisor_templates(db_path=db_path)}
+    assert generated["scope_key"] in templates
+    assert templates[generated["scope_key"]]["source"] == "generated_from_supervisor_learning"
+
+
+def test_position_supervisor_advisories_skip_unexecutable_stop_legality(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO position_lifecycle_event
+            (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
+            VALUES ('amend_bad_1', '1001', '1001', 'XAUUSD+', 'amend_failed', ?, '{}')
+            """,
+            (1782439200.0,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = build_position_supervisor_advisories(
+        day="2026-06-26",
+        db_path=db_path,
+        materialize=True,
+    )
+
+    actions = {item["action"] for item in result["items"]}
+    skipped_actions = {item["action"] for item in result["skipped"]}
+    assert "fix_stop_legality" not in actions
+    assert "fix_stop_legality" in skipped_actions
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT action FROM policy_suggestion").fetchall()
+    finally:
+        conn.close()
+    assert "fix_stop_legality" not in {row[0] for row in rows}

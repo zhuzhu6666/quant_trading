@@ -522,12 +522,13 @@ def test_event_window_governance_materializes_policy_suggestion(tmp_path):
         for idx in range(3):
             features = {
                 "event_context": {
+                    "schema_version": al.EVENT_WINDOW_CONTEXT_SCHEMA_VERSION,
                     "event_type": "NFP",
                     "event": "Non-Farm Employment Change",
                     "event_importance": 3,
-                    "window_bucket": "pre_0_4h",
-                    "multiplier": 0.2,
-                    "hours_until_event": 1.5 + idx * 0.1,
+                    "window_bucket": "pre_0_15m",
+                    "multiplier": 0.5,
+                    "hours_until_event": 0.10 + idx * 0.01,
                 }
             }
             label = {
@@ -572,7 +573,7 @@ def test_event_window_governance_materializes_policy_suggestion(tmp_path):
             """
             SELECT sample_count, bad_loss_count, recommended_action
             FROM experience_pattern_stats
-            WHERE scope_type='event_window' AND scope_key='NFP:pre_0_4h'
+            WHERE scope_type='event_window' AND scope_key='NFP:pre_0_15m'
             """
         ).fetchone()
         suggestion = conn.execute(
@@ -585,7 +586,141 @@ def test_event_window_governance_materializes_policy_suggestion(tmp_path):
     finally:
         conn.close()
     assert stats == (3, 3, "tighten_event_window_sizing")
-    assert suggestion == ("event_window", "NFP:pre_0_4h", "tighten_event_window_sizing", "proposed")
+    assert suggestion == ("event_window", "NFP:pre_0_15m", "tighten_event_window_sizing", "proposed")
+
+
+def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
+    db_path = tmp_path / "state.db"
+    al.ensure_autonomous_learning_tables(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        now = time.time()
+        contract = {
+            "schema_version": "learning_evidence_contract.v1",
+            "allowed_uses": ["audit", "explainability", "supervised_training"],
+            "model_ready": True,
+        }
+        for idx in range(3):
+            review = {
+                "entry_score": 0.43 + idx * 0.01,
+                "worst_factor": "real_yield_chg",
+                "failure_tags": [
+                    "weak_signal_overtraded",
+                    "factor_conflict",
+                    "conflicting_factor_entry",
+                ],
+            }
+            label = {
+                "outcome_label": "bad_loss",
+                "pnl": -4.0 - idx,
+                "failure_tags": review["failure_tags"],
+            }
+            conn.execute(
+                """
+                INSERT INTO autonomous_learning_sample
+                (sample_id, sample_type, source_table, source_id, decision_id,
+                 label_status, integrity, train_weight, event_ts, features_json,
+                 verdict_json, label_json, trace_json, evidence_contract_json,
+                 created_at, updated_at)
+                VALUES (?, 'trade_review_outcome', 'trade_outcome_review', ?, ?,
+                        'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"review_entry_quality_{idx}",
+                    f"review_entry_quality_{idx}",
+                    f"dec_entry_quality_{idx}",
+                    now + idx,
+                    json.dumps({"review": review}),
+                    json.dumps(label),
+                    json.dumps({"review_id": f"review_entry_quality_{idx}", "position_id": f"eq{idx}"}),
+                    json.dumps(contract),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = al.materialize_entry_quality_governance_suggestions(db_path=db_path, min_samples=3, min_bad_rate=0.5)
+
+    assert result["suggestions"] == 3
+    conn = sqlite3.connect(str(db_path))
+    try:
+        suggestions = conn.execute(
+            """
+            SELECT scope_type, scope_key, action, status
+            FROM policy_suggestion
+            WHERE scope_type='entry_quality'
+            ORDER BY scope_key, action
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    assert ("entry_quality", "weak_signal", "raise_weak_signal_threshold", "proposed") in suggestions
+    assert ("entry_quality", "factor_conflict", "require_factor_agreement", "proposed") in suggestions
+    assert ("entry_quality", "real_yield_chg", "suppress_recent_worst_factor", "proposed") in suggestions
+
+
+def test_event_window_governance_ignores_legacy_gradient_samples(tmp_path):
+    db_path = tmp_path / "state.db"
+    al.ensure_autonomous_learning_tables(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        now = time.time()
+        contract = {
+            "schema_version": "learning_evidence_contract.v1",
+            "allowed_uses": ["audit", "explainability", "supervised_training"],
+            "model_ready": True,
+        }
+        for idx in range(3):
+            features = {
+                "event_context": {
+                    "event_type": "NFP",
+                    "event": "Non-Farm Employment Change",
+                    "event_importance": 3,
+                    "window_bucket": "pre_0_4h",
+                    "multiplier": 0.2,
+                    "hours_until_event": 1.5 + idx * 0.1,
+                }
+            }
+            label = {
+                "label": "open_outcome",
+                "outcome_label": "bad_loss",
+                "pnl": -7.0 - idx,
+                "failure_tags": ["event_window_bad_entry"],
+            }
+            conn.execute(
+                """
+                INSERT INTO autonomous_learning_sample
+                (sample_id, sample_type, source_table, source_id, decision_id,
+                 label_status, integrity, train_weight, event_ts, features_json,
+                 verdict_json, label_json, trace_json, evidence_contract_json,
+                 created_at, updated_at)
+                VALUES (?, 'shadow_open_decision', 'decision_ledger', ?, ?,
+                        'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"legacy_event_{idx}",
+                    f"legacy_dec_event_{idx}",
+                    f"legacy_dec_event_{idx}",
+                    now + idx,
+                    json.dumps(features),
+                    json.dumps(label),
+                    json.dumps({"decision_id": f"legacy_dec_event_{idx}", "position_id": f"lep{idx}"}),
+                    json.dumps(contract),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = al.materialize_event_window_governance_suggestions(db_path=db_path, min_samples=3, min_bad_rate=0.5)
+
+    assert result["bucket_count"] == 0
+    assert result["suggestions"] == 0
 
 
 def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
@@ -938,7 +1073,7 @@ def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypa
     assert len(calls) == 1
 
 
-def test_demo_autonomy_auto_approves_policy_suggestions(monkeypatch, tmp_path):
+def test_demo_autonomy_delegates_policy_review_to_governor(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
@@ -980,6 +1115,26 @@ def test_demo_autonomy_auto_approves_policy_suggestions(monkeypatch, tmp_path):
             updated_at REAL NOT NULL DEFAULT 0.0,
             created_at REAL NOT NULL DEFAULT 0.0
         );
+        CREATE TABLE experience_pattern_stats (
+            scope_type TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            sample_count INTEGER DEFAULT 0,
+            win_count INTEGER DEFAULT 0,
+            bad_loss_count INTEGER DEFAULT 0,
+            avg_reward REAL DEFAULT 0.0,
+            last_outcome_label TEXT DEFAULT '',
+            recommended_action TEXT DEFAULT '',
+            updated_at REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (scope_type, scope_key)
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO experience_pattern_stats
+        (scope_type, scope_key, sample_count, win_count, bad_loss_count, avg_reward,
+         last_outcome_label, recommended_action, updated_at)
+        VALUES ('factor', 'ema_slope', 4, 0, 3, -0.35, 'bad_loss', 'downweight', 1.0)
         """
     )
     conn.execute(
@@ -1025,10 +1180,10 @@ def test_demo_autonomy_auto_approves_policy_suggestions(monkeypatch, tmp_path):
     finally:
         conn.close()
     assert status == "approved"
-    assert "demo_autonomous" in note
-    assert "demo_autonomy_auto_approve" in events
+    assert "approved by governor" in note
+    assert "demo_autonomy_governor_review" in events
     assert "demo_autonomy_apply" in events
-    assert ("demo_auto_approve", "factor", "downweight", "approved") in decisions
+    assert ("demo_auto_approve", "factor", "downweight", "approved") not in decisions
 
 
 def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):
@@ -1092,6 +1247,11 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     )
     monkeypatch.setattr(
         al,
+        "materialize_entry_quality_governance_suggestions",
+        lambda **kwargs: calls.append("entry_quality_governance") or {"suggestions": 1},
+    )
+    monkeypatch.setattr(
+        al,
         "materialize_entry_cluster_governance_suggestions",
         lambda **kwargs: calls.append("entry_cluster_governance") or {"suggestions": 1},
     )
@@ -1122,6 +1282,7 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert result["counterfactuals"] == {"count": 1}
     assert result["trace_maturation"]["matured"] == 1
     assert result["close_source_backfill"]["updated"] == 1
+    assert result["entry_quality_governance"]["suggestions"] == 1
     assert result["entry_cluster_governance"]["suggestions"] == 1
     assert result["event_window_governance"]["suggestions"] == 1
     assert result["evidence_contract_repair"]["repaired"] == 1
@@ -1132,7 +1293,8 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
         "backfill_close_sources",
         "materialize_samples",
     ]
-    assert calls[5] == "entry_cluster_governance"
-    assert calls[6] == "event_window_governance"
-    assert calls[7] == "repair_contracts"
+    assert calls[5] == "entry_quality_governance"
+    assert calls[6] == "entry_cluster_governance"
+    assert calls[7] == "event_window_governance"
+    assert calls[8] == "repair_contracts"
     assert calls[-1] == "demo_apply"

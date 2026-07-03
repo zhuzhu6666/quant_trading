@@ -44,6 +44,7 @@ DUCKDB_EVENTS  = DATA_DIR / "events.duckdb"          # 经济事件日历
 # PostgreSQL — 运行时状态；data/state.db 仅作为迁移冷备/源库
 # ═══════════════════════════════════════════
 STATE_DB       = DATA_DIR / "state.db"               # 旧 SQLite 状态冷备/迁移源
+_DEFAULT_STATE_DB = STATE_DB.resolve()
 EXPERIMENTS_DB = DATA_DIR / "experiments.db"         # 实验记录(独立)
 
 # 兼容旧路径 (逐步迁移后删除)
@@ -154,7 +155,7 @@ def _configure_sqlite_connection(conn: sqlite3.Connection, *, read_only: bool = 
 def connect_sqlite(db_path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     """Open a SQLite connection and reject DuckDB files early."""
     path = _normalize_db_path(db_path)
-    if is_state_db_path(path):
+    if path.resolve() == _DEFAULT_STATE_DB:
         raise RuntimeError("data/state.db has migrated to PostgreSQL; use get_state_pg_conn() for runtime state")
     if is_duckdb_path(path):
         raise ValueError(f"Refusing to open DuckDB file with sqlite3: {path}")
@@ -982,6 +983,20 @@ def get_state_pg_conn(*, read_only: bool = False):
     if not state_pg_enabled():
         raise RuntimeError("PostgreSQL state backend is not enabled")
     return connect_state_store(state_pg_dsn(), read_only=read_only, schema=STATE_SCHEMA)
+
+
+def get_state_conn(*, read_only: bool = False):
+    """Compatibility alias for the runtime state connection helper.
+
+    New business code should prefer ``get_state_pg_conn`` to make the
+    PostgreSQL contract explicit. A few offline tests and cold-backup tools
+    still monkeypatch this name to point at an isolated SQLite fixture.
+    """
+    if _normalize_db_path(STATE_DB).resolve() != _DEFAULT_STATE_DB:
+        conn = connect_sqlite(STATE_DB, read_only=read_only)
+        conn.row_factory = sqlite3.Row
+        return conn
+    return get_state_pg_conn(read_only=read_only)
 
 
 # ═══════════════════════════════════════════

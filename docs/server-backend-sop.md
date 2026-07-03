@@ -152,7 +152,7 @@ cd /home/ubuntu/quant_trading
 
 目的：
 
-- 确认 PostgreSQL state 主库、SQLite 冷备和 DuckDB 没有被错误引擎打开
+- 确认 PostgreSQL state 主库和 DuckDB 没有被错误引擎打开
 - 确认关键表和关键字段存在
 - 自动修复已知历史 schema 漂移
 
@@ -228,7 +228,7 @@ Environment=QUANT_LEARNING_WORKER_CPU_AFFINITY=2,3
 - `quant-backend.service`: API、WebSocket、cTrader 连接、live loop、轻量健康检查、数据同步入口
 - `quant-learning-worker.service`: 学习调度、反事实成熟化、自治学习周期、特征工程、盘外模型重训练
 - PostgreSQL `state_v1`: live runtime state 与学习审计主库
-- SQLite `data/state.db`: 冷备/迁移源，不再作为 live 主库
+- SQLite `data/state.db`: 已删除；不再保留本地冷备，运行态状态只查 PostgreSQL
 
 学习 worker 当前固定使用 `CPUAffinity=2 3`，可以让重训练任务吃满 2 个核心；不要再把高 CPU 学习任务放回 backend 进程。
 
@@ -238,6 +238,7 @@ Environment=QUANT_LEARNING_WORKER_CPU_AFFINITY=2,3
 systemctl is-active quant-backend.service quant-learning-worker.service
 systemctl status quant-backend.service quant-learning-worker.service --no-pager -l
 journalctl -u quant-learning-worker.service --since "30 min ago" --no-pager
+.venv/bin/python scripts/state_query.py --sql "select status, count(*) from policy_suggestion group by status order by status"
 ```
 
 学习健康与模型接口：

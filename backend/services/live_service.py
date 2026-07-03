@@ -52,6 +52,12 @@ _DECISION_LOG_PENDING_LOCK = threading.Lock()
 _DECISION_LOG_LAST_DRAIN = 0.0
 _RUNTIME_KV_PENDING_PATH = Path("data/charts/runtime_kv.pending.jsonl")
 _RUNTIME_KV_PENDING_LOCK = threading.Lock()
+_ENTRY_CLUSTER_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
+_ENTRY_CLUSTER_POLICY_CACHE_LOCK = threading.Lock()
+_EVENT_WINDOW_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
+_EVENT_WINDOW_POLICY_CACHE_LOCK = threading.Lock()
+_ENTRY_QUALITY_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
+_ENTRY_QUALITY_POLICY_CACHE_LOCK = threading.Lock()
 
 
 def _append_decision_log_pending(payload: dict[str, Any], error: str = "") -> None:
@@ -416,7 +422,10 @@ def _apply_entry_event_sizing(
     """Apply event sizing without silently lifting reduced orders back to min volume."""
     trace = dict(sizing_trace or {})
     min_vol = float((bridge_meta or {}).get("api_min_volume") or 1.0)
-    multiplier = float(event_multiplier or 1.0)
+    try:
+        multiplier = float(event_multiplier)
+    except (TypeError, ValueError):
+        multiplier = 1.0
     base = float(base_volume or 0.0)
     raw_after_event = base * multiplier
     if multiplier < 1.0:
@@ -880,6 +889,7 @@ def _build_open_trade_risk_context(
     current_price: float = 0.0,
     atr_price: float = 0.0,
     event_sizing_context: dict[str, Any] | None = None,
+    decision_quality_context: dict[str, Any] | None = None,
     decision_ts: float | None = None,
 ) -> dict:
     risk_snapshot = _live_state_get("risk", {}, clone=True) or {}
@@ -944,6 +954,26 @@ def _build_open_trade_risk_context(
         cfg=cfg,
     )
     supervisor_reentry_block = pending_supervisor_block or active_supervisor_block
+    entry_cluster_context = _build_entry_cluster_context(
+        positions_before=positions or [],
+        direction=direction,
+        symbol=symbol,
+        now_ts=now,
+        new_position_id=0,
+        new_api_volume=0.0,
+    )
+    timeframe_seconds = float(temporal_context.get("timeframe_seconds", 0.0) or 0.0)
+    same_direction_cooldown_seconds = max(
+        60.0,
+        float(int(getattr(cfg, "risk_cooldown_bars", 3) or 3)) * (timeframe_seconds or 300.0),
+    )
+
+    decision_quality = dict(decision_quality_context or {})
+    entry_quality_gate = _entry_quality_gate_from_learning_policy(
+        policy=_active_entry_quality_learning_policy(now_ts=now),
+        decision_quality=decision_quality,
+        signal_score=float(signal_score or 0.0),
+    )
 
     return {
         "trade": {
@@ -972,6 +1002,11 @@ def _build_open_trade_risk_context(
         "requested_api_volume": float(requested_api_volume or 0.0),
         "max_position_api_volume": float(getattr(cfg, "max_position_api_volume", 1000.0) or 0.0),
         "event_sizing": dict(event_sizing_context or {"enabled": False, "multiplier": 1.0}),
+        "event_window_learning_policy": _active_event_window_learning_policy(now_ts=now),
+        "entry_quality_gate": entry_quality_gate,
+        "entry_cluster": entry_cluster_context,
+        "entry_cluster_learning_policy": _active_entry_cluster_learning_policy(now_ts=now),
+        "same_direction_cooldown_seconds": same_direction_cooldown_seconds,
         "pyramid_enabled": bool(getattr(cfg, "pyramid_enabled", True)),
         "max_abs_entry_score": _max_abs_entry_score_for_positions(positions or []),
         "signal_score": float(signal_score or 0.0),
@@ -991,6 +1026,224 @@ def _build_open_trade_risk_context(
         "temporal_context": temporal_context,
         "supervisor_reentry_block": supervisor_reentry_block or {},
     }
+
+
+def _active_entry_cluster_learning_policy(*, now_ts: float | None = None) -> dict[str, Any]:
+    now = time.time() if now_ts is None else float(now_ts)
+    with _ENTRY_CLUSTER_POLICY_CACHE_LOCK:
+        cached = _ENTRY_CLUSTER_POLICY_CACHE.get("value") or {}
+        if float(_ENTRY_CLUSTER_POLICY_CACHE.get("expires_at") or 0.0) > now:
+            return copy.deepcopy(cached)
+
+    controls: list[dict[str, Any]] = []
+    try:
+        from backend.core.db import get_state_pg_conn
+
+        conn = get_state_pg_conn(read_only=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT suggestion_id, scope_key, action, confidence, reason,
+                       evidence_json, reviewed_at, created_at
+                FROM policy_suggestion
+                WHERE scope_type='entry_cluster'
+                  AND status IN ('approved', 'applied')
+                  AND action IN ('increase_same_direction_cooldown', 'raise_pyramid_entry_threshold')
+                ORDER BY reviewed_at DESC, created_at DESC
+                LIMIT 20
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        for row in rows:
+            item = dict(row)
+            evidence = item.get("evidence_json") or {}
+            if isinstance(evidence, str):
+                try:
+                    evidence = json.loads(evidence or "{}")
+                except Exception:
+                    evidence = {}
+            scope_key = str(item.get("scope_key") or "")
+            threshold = 1
+            if scope_key.endswith("_ge_3"):
+                threshold = 3
+            elif scope_key.endswith("_ge_2"):
+                threshold = 2
+            elif scope_key.endswith("_ge_1"):
+                threshold = 1
+            controls.append(
+                {
+                    "suggestion_id": str(item.get("suggestion_id") or ""),
+                    "scope_key": scope_key,
+                    "action": str(item.get("action") or ""),
+                    "confidence": float(item.get("confidence") or 0.0),
+                    "reason": str(item.get("reason") or ""),
+                    "min_same_direction_open_count": threshold,
+                    "evidence": {
+                        "sample_count": (evidence or {}).get("sample_count"),
+                        "bad_rate": (evidence or {}).get("bad_rate"),
+                        "avg_reward": (evidence or {}).get("avg_reward"),
+                    },
+                }
+            )
+    except Exception as exc:
+        logger.warning("[live] entry_cluster learning policy unavailable: {}", exc)
+
+    value = {
+        "active": bool(controls),
+        "controls": controls,
+        "min_same_direction_open_count": min(
+            [int(item.get("min_same_direction_open_count") or 999) for item in controls] or [0]
+        ),
+        "source": "policy_suggestion",
+        "loaded_at": now,
+    }
+    with _ENTRY_CLUSTER_POLICY_CACHE_LOCK:
+        _ENTRY_CLUSTER_POLICY_CACHE["value"] = copy.deepcopy(value)
+        _ENTRY_CLUSTER_POLICY_CACHE["expires_at"] = now + 60.0
+    return value
+
+
+def _active_entry_quality_learning_policy(*, now_ts: float | None = None) -> dict[str, Any]:
+    now = time.time() if now_ts is None else float(now_ts)
+    with _ENTRY_QUALITY_POLICY_CACHE_LOCK:
+        cached = _ENTRY_QUALITY_POLICY_CACHE.get("value") or {}
+        if float(_ENTRY_QUALITY_POLICY_CACHE.get("expires_at") or 0.0) > now:
+            return copy.deepcopy(cached)
+
+    controls: list[dict[str, Any]] = []
+    try:
+        from backend.core.db import get_state_pg_conn
+
+        conn = get_state_pg_conn(read_only=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT suggestion_id, scope_key, action, confidence, reason,
+                       evidence_json, reviewed_at, created_at
+                FROM policy_suggestion
+                WHERE scope_type='entry_quality'
+                  AND status IN ('approved', 'applied')
+                  AND action IN (
+                      'raise_weak_signal_threshold',
+                      'require_factor_agreement',
+                      'suppress_recent_worst_factor'
+                  )
+                ORDER BY reviewed_at DESC, created_at DESC
+                LIMIT 50
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        for row in rows:
+            item = dict(row)
+            evidence = item.get("evidence_json") or {}
+            if isinstance(evidence, str):
+                try:
+                    evidence = json.loads(evidence or "{}")
+                except Exception:
+                    evidence = {}
+            controls_payload = (evidence or {}).get("recommended_controls") or {}
+            controls.append(
+                {
+                    "suggestion_id": str(item.get("suggestion_id") or ""),
+                    "scope_key": str(item.get("scope_key") or ""),
+                    "action": str(item.get("action") or ""),
+                    "confidence": float(item.get("confidence") or 0.0),
+                    "reason": str(item.get("reason") or ""),
+                    "min_abs_signal_score": float(controls_payload.get("min_abs_signal_score") or 0.0),
+                    "max_factor_conflict_ratio": float(controls_payload.get("max_factor_conflict_ratio") or 0.0),
+                    "strong_signal_override": float(controls_payload.get("strong_signal_override") or 0.0),
+                    "suppressed_factor": str(controls_payload.get("suppressed_factor") or item.get("scope_key") or ""),
+                    "evidence": {
+                        "sample_count": (evidence or {}).get("sample_count"),
+                        "bad_rate": (evidence or {}).get("bad_rate"),
+                        "avg_reward": (evidence or {}).get("avg_reward"),
+                        "worst_factor": (evidence or {}).get("worst_factor"),
+                    },
+                }
+            )
+    except Exception as exc:
+        logger.warning("[live] entry_quality learning policy unavailable: {}", exc)
+
+    value = {
+        "active": bool(controls),
+        "controls": controls,
+        "source": "policy_suggestion",
+        "loaded_at": now,
+    }
+    with _ENTRY_QUALITY_POLICY_CACHE_LOCK:
+        _ENTRY_QUALITY_POLICY_CACHE["value"] = copy.deepcopy(value)
+        _ENTRY_QUALITY_POLICY_CACHE["expires_at"] = now + 60.0
+    return value
+
+
+def _active_event_window_learning_policy(*, now_ts: float | None = None) -> dict[str, Any]:
+    now = time.time() if now_ts is None else float(now_ts)
+    with _EVENT_WINDOW_POLICY_CACHE_LOCK:
+        cached = _EVENT_WINDOW_POLICY_CACHE.get("value") or {}
+        if float(_EVENT_WINDOW_POLICY_CACHE.get("expires_at") or 0.0) > now:
+            return copy.deepcopy(cached)
+
+    controls: list[dict[str, Any]] = []
+    try:
+        from backend.core.db import get_state_pg_conn
+
+        conn = get_state_pg_conn(read_only=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT suggestion_id, scope_key, action, confidence, reason,
+                       evidence_json, reviewed_at, created_at
+                FROM policy_suggestion
+                WHERE scope_type='event_window'
+                  AND status IN ('approved', 'applied')
+                  AND action IN ('tighten_event_window_sizing', 'extend_event_post_window_review')
+                ORDER BY reviewed_at DESC, created_at DESC
+                LIMIT 50
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        for row in rows:
+            item = dict(row)
+            evidence = item.get("evidence_json") or {}
+            if isinstance(evidence, str):
+                try:
+                    evidence = json.loads(evidence or "{}")
+                except Exception:
+                    evidence = {}
+            scope_key = str(item.get("scope_key") or "")
+            event_name, _, window_bucket = scope_key.rpartition(":")
+            controls.append(
+                {
+                    "suggestion_id": str(item.get("suggestion_id") or ""),
+                    "scope_key": scope_key,
+                    "event_name": event_name,
+                    "window_bucket": window_bucket,
+                    "action": str(item.get("action") or ""),
+                    "confidence": float(item.get("confidence") or 0.0),
+                    "reason": str(item.get("reason") or ""),
+                    "evidence": {
+                        "sample_count": (evidence or {}).get("sample_count"),
+                        "bad_rate": (evidence or {}).get("bad_rate"),
+                        "avg_reward": (evidence or {}).get("avg_reward"),
+                    },
+                }
+            )
+    except Exception as exc:
+        logger.warning("[live] event_window learning policy unavailable: {}", exc)
+
+    value = {
+        "active": bool(controls),
+        "controls": controls,
+        "source": "policy_suggestion",
+        "loaded_at": now,
+    }
+    with _EVENT_WINDOW_POLICY_CACHE_LOCK:
+        _EVENT_WINDOW_POLICY_CACHE["value"] = copy.deepcopy(value)
+        _EVENT_WINDOW_POLICY_CACHE["expires_at"] = now + 60.0
+    return value
 
 
 def _risk_state_with_verdict(verdict) -> dict:
@@ -1238,6 +1491,91 @@ def _decision_quality_context(composite: Any) -> dict[str, Any]:
             for factor, contribution, signal, weight in top_abs
         ],
     }
+
+
+def _entry_quality_gate_from_learning_policy(
+    *,
+    policy: dict[str, Any],
+    decision_quality: dict[str, Any],
+    signal_score: float,
+) -> dict[str, Any]:
+    if not bool((policy or {}).get("active", False)):
+        return {"active": False, "allowed": True, "reason": "inactive", "source": "entry_quality_gate"}
+
+    abs_signal = abs(float(signal_score or 0.0))
+    conflict_ratio = float((decision_quality or {}).get("factor_conflict_ratio", 0.0) or 0.0)
+    top_contributors = (decision_quality or {}).get("top_contributors") or []
+    controls = list((policy or {}).get("controls") or [])
+    base = {
+        "active": True,
+        "allowed": True,
+        "reason": "passed",
+        "source": "entry_quality_gate",
+        "control_count": len(controls),
+        "metrics": {
+            "signal_score_abs": round(abs_signal, 6),
+            "factor_conflict_ratio": round(conflict_ratio, 6),
+        },
+    }
+    for control in controls:
+        action = str(control.get("action") or "")
+        threshold = float(control.get("min_abs_signal_score") or 0.0)
+        strong_override = float(control.get("strong_signal_override") or 1.0)
+        if action == "raise_weak_signal_threshold" and threshold > 0 and abs_signal < threshold:
+            return {
+                **base,
+                "allowed": False,
+                "reason": "learning_weak_signal_threshold",
+                "suggestion_id": str(control.get("suggestion_id") or ""),
+                "scope_key": str(control.get("scope_key") or ""),
+                "action": action,
+                "thresholds": {
+                    "min_abs_signal_score": threshold,
+                    "strong_signal_override": strong_override,
+                },
+            }
+        max_conflict = float(control.get("max_factor_conflict_ratio") or 0.0)
+        if (
+            action == "require_factor_agreement"
+            and max_conflict > 0
+            and conflict_ratio >= max_conflict
+            and abs_signal < strong_override
+        ):
+            return {
+                **base,
+                "allowed": False,
+                "reason": "learning_factor_conflict_control",
+                "suggestion_id": str(control.get("suggestion_id") or ""),
+                "scope_key": str(control.get("scope_key") or ""),
+                "action": action,
+                "thresholds": {
+                    "max_factor_conflict_ratio": max_conflict,
+                    "strong_signal_override": strong_override,
+                },
+            }
+        suppressed_factor = str(control.get("suppressed_factor") or control.get("scope_key") or "")
+        if action == "suppress_recent_worst_factor" and suppressed_factor and abs_signal < strong_override:
+            matched = [
+                item
+                for item in top_contributors
+                if str(item.get("factor") or "") == suppressed_factor
+                and float(item.get("contribution_score") or 0.0) < 0
+            ]
+            if matched:
+                return {
+                    **base,
+                    "allowed": False,
+                    "reason": "learning_recent_worst_factor_control",
+                    "suggestion_id": str(control.get("suggestion_id") or ""),
+                    "scope_key": str(control.get("scope_key") or ""),
+                    "action": action,
+                    "thresholds": {"strong_signal_override": strong_override},
+                    "evidence": {
+                        "matched_factor_count": len(matched),
+                        "suppressed_factor": suppressed_factor,
+                    },
+                }
+    return base
 
 
 def _open_learning_context_payload(
@@ -1990,6 +2328,7 @@ def _supervisor_risk_context(
             "supervisor_decision_ts": verdict.get("decision_ts"),
             "recommended_controls": verdict.get("recommended_controls") or {},
             "position_id": str(position.get("position_id") or position.get("ticket") or ""),
+            "position": dict(position or {}),
         }
     )
     return close_context
@@ -2156,6 +2495,7 @@ def _runtime_config_anchor() -> dict[str, Any]:
 
 
 def _candidate_verdict(candidate: ProtectionCandidate) -> dict[str, Any]:
+    supervisor_template = candidate.evidence.get("supervisor_template") or {}
     return {
         "position_id": str(candidate.position_id),
         "decision_ts": time.time(),
@@ -2174,11 +2514,14 @@ def _candidate_verdict(candidate: ProtectionCandidate) -> dict[str, Any]:
         },
         "recommended_controls": candidate.controls or {},
         "supervisor_template": {
-            "schema_version": "",
-            "template_id": "",
-            "template_version": "",
-            "template_role": "",
-            "thresholds": {},
+            "schema_version": str(supervisor_template.get("schema_version") or ""),
+            "template_id": str(supervisor_template.get("template_id") or ""),
+            "template_version": str(supervisor_template.get("template_version") or ""),
+            "template_role": str(supervisor_template.get("template_role") or ""),
+            "thresholds": supervisor_template.get("thresholds") or {},
+            "sl_policy": supervisor_template.get("sl_policy") or {},
+            "tp_policy": supervisor_template.get("tp_policy") or {},
+            "capture_policy": supervisor_template.get("capture_policy") or {},
         },
         "requires_risk_verdict": True,
         "action_label": "收紧保护" if candidate.action == "tighten" else candidate.action,
@@ -2275,6 +2618,22 @@ def _supervisor_tighten_sl_plan(position: dict[str, Any], target_sl: float, quot
     plan["reason"] = "ok"
     plan["planned_sl"] = planned_sl
     return plan
+
+
+def _target_tp_is_extension(position: dict[str, Any], target_tp: float) -> bool:
+    target_tp = float(target_tp or 0.0)
+    if target_tp <= 0:
+        return False
+    current_tp = _float_payload_value(position, "tp", "take_profit", "takeProfit")
+    if current_tp <= 0:
+        return True
+    direction = _direction_from_position(position)
+    min_delta = 0.01
+    if direction > 0:
+        return target_tp > current_tp + min_delta
+    if direction < 0:
+        return target_tp < current_tp - min_delta
+    return abs(target_tp - current_tp) >= min_delta
 
 
 def _log_supervisor_position_event(
@@ -2516,6 +2875,8 @@ def _run_position_supervision(
             if action == "tighten":
                 target_sl = float(controls.get("target_stop_loss", 0.0) or 0.0)
                 current_tp = float(position.get("tp", 0.0) or 0.0)
+                target_tp = float(controls.get("target_take_profit", 0.0) or 0.0)
+                planned_tp = target_tp if _target_tp_is_extension(position, target_tp) else current_tp
                 quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
                 sl_plan = _supervisor_tighten_sl_plan(position, target_sl, quote=quote)
                 if not sl_plan["allowed"]:
@@ -2552,9 +2913,9 @@ def _run_position_supervision(
                     continue
                 planned_sl = float(sl_plan.get("planned_sl") or 0.0)
                 if planned_sl > 0:
-                    amend_res = bridge.amend_position_sltp(pid, sl=planned_sl, tp=current_tp)
+                    amend_res = bridge.amend_position_sltp(pid, sl=planned_sl, tp=planned_tp)
                     if getattr(amend_res, "success", False):
-                        _track_local_sl_tp(pid, sl=planned_sl, tp=current_tp)
+                        _track_local_sl_tp(pid, sl=planned_sl, tp=planned_tp)
                         _log_supervisor_position_event(
                             position=position,
                             event_type="tightened",
@@ -2566,6 +2927,8 @@ def _run_position_supervision(
                                     **controls,
                                     "target_stop_loss_original": target_sl,
                                     "target_stop_loss_sent": planned_sl,
+                                    "target_take_profit_original": target_tp,
+                                    "target_take_profit_sent": planned_tp,
                                     "sl_plan": sl_plan,
                                 },
                             },
@@ -2591,10 +2954,17 @@ def _run_position_supervision(
                             risk_verdict=risk_verdict,
                             execution_status="applied",
                             execution_reason="amend_position_sltp_success",
-                            execution={"target_stop_loss_sent": planned_sl, "sl_plan": sl_plan, "applied_controls": controls},
+                            execution={
+                                "target_stop_loss_sent": planned_sl,
+                                "target_take_profit_sent": planned_tp,
+                                "target_take_profit_changed": planned_tp != current_tp,
+                                "sl_plan": sl_plan,
+                                "applied_controls": controls,
+                            },
                             acct=acct,
                         )
-                        log(f"tick {tick}: supervisor tighten pos={pid} sl->{planned_sl:.2f}")
+                        tp_suffix = f" tp->{planned_tp:.2f}" if planned_tp != current_tp else ""
+                        log(f"tick {tick}: supervisor tighten pos={pid} sl->{planned_sl:.2f}{tp_suffix}")
                     else:
                         comment = str(getattr(amend_res, "comment", "") or getattr(amend_res, "error", "") or "amend_failed")
                         _log_supervisor_position_event(
@@ -3036,6 +3406,7 @@ _live_state: dict = {
     "positions_updated_at": None,
     "spot_price": None,      # cTrader spot event
     "spot_quote": None,
+    "spot_quote_changed_at": 0.0,
     "market_session": None,
     "session_pnl": 0.0,
     "session_trades": 0,
@@ -4522,11 +4893,27 @@ def _install_ctrader_live_listener(bridge) -> None:
                     global _latest_price, _latest_price_updated_at
                     _latest_price = price
                     _latest_price_updated_at = float(payload.get("ts") or now_ts)
+                    previous_quote = _live_state_get("spot_quote", None, clone=True) or {}
+                    previous_changed_at = float(_live_state_get("spot_quote_changed_at", 0.0) or 0.0)
+                    bid = float(payload.get("bid") or 0.0)
+                    ask = float(payload.get("ask") or 0.0)
+                    previous_values = (
+                        float((previous_quote or {}).get("bid") or 0.0),
+                        float((previous_quote or {}).get("ask") or 0.0),
+                        float((previous_quote or {}).get("mid") or 0.0),
+                    )
+                    current_values = (bid, ask, price)
+                    quote_changed = bool(
+                        previous_quote
+                        and any(abs(current_values[idx] - previous_values[idx]) > 1e-9 for idx in range(3))
+                    )
+                    quote_changed_at = float(payload.get("ts") or now_ts) if quote_changed else previous_changed_at
                     quote = {
-                        "bid": float(payload.get("bid") or 0.0),
-                        "ask": float(payload.get("ask") or 0.0),
+                        "bid": bid,
+                        "ask": ask,
                         "mid": price,
                         "ts": float(payload.get("ts") or now_ts),
+                        "changed_at": quote_changed_at,
                         "source": "spot",
                     }
                     positions = _live_state_get("positions", [], clone=True) or []
@@ -4541,6 +4928,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                     _live_state_update(
                         spot_price=price,
                         spot_quote=quote,
+                        spot_quote_changed_at=quote_changed_at,
                         positions=patched_positions or positions,
                     )
                 return
@@ -4798,19 +5186,43 @@ def _quote_is_fresh(quote: dict | None, *, now_ts: float | None = None) -> bool:
 
 def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str, Any]:
     quote = {}
+    now_ts = time.time()
     if bridge is not None and hasattr(bridge, "get_spot_quote"):
         try:
             quote = bridge.get_spot_quote() or {}
         except Exception:
             quote = {}
+    quote_changed_at = float((quote or {}).get("changed_at") or _live_state_get("spot_quote_changed_at", 0.0) or 0.0)
+    if quote:
+        quote = {**quote, "changed_at": quote_changed_at}
     positions = _live_state_get("positions", [], clone=True) or []
     if isinstance(positions, dict):
         positions = positions.get("positions", []) or []
+    account_updated_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
+    positions_updated_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
+    account_api_ok = bool(account_updated_at > 0 and now_ts - account_updated_at <= 180.0)
+    positions_api_ok = bool(positions_updated_at > 0 and now_ts - positions_updated_at <= 180.0)
+    broker_connected = bool(getattr(bridge, "is_connected", False)) if bridge is not None else None
+    latest_market_data_ts = 0.0
+    try:
+        from data.live_sync.health import SyncHealth
+
+        bar_ts_by_tf = dict((SyncHealth.shared().record.last_bar_ts_by_tf or {}))
+        latest_market_data_ts = float(bar_ts_by_tf.get("M1") or bar_ts_by_tf.get("M5") or 0.0)
+    except Exception:
+        latest_market_data_ts = 0.0
     state = evaluate_market_session(
         symbol="XAUUSD+",
+        now_ts=now_ts,
         latest_quote_ts=float((quote or {}).get("ts") or 0.0),
+        latest_quote_change_ts=quote_changed_at,
+        latest_market_data_ts=latest_market_data_ts,
         broker_error=broker_error,
         has_open_positions=bool(positions),
+        api_available=bool(broker_connected or account_api_ok or positions_api_ok),
+        broker_connected=broker_connected,
+        account_api_ok=account_api_ok,
+        positions_api_ok=positions_api_ok,
     ).to_dict()
     _live_state_update(
         market_session=state,
@@ -7100,9 +7512,13 @@ import json as _json
 def _should_send_orders(broker: str) -> bool:
     """True = 真发单; False = dry-run (记 log, 不下单)."""
     if broker == "ctrader":
-        from config.runtime_config import shared as cfg
-        runtime_cfg = cfg()
-        return bool(runtime_cfg.ctrader_send_orders and not runtime_cfg.factor_dry_run)
+        from backend.services.execution_semantics import current_execution_semantics
+
+        semantics = current_execution_semantics()
+        if semantics.blocking_reason:
+            logger.warning("[live] send-orders blocked by execution semantics: {}", semantics.blocking_reason)
+            return False
+        return bool(semantics.effective_send_orders)
     return False
 
 
@@ -7614,7 +8030,7 @@ def _process_tick_factor_pipeline(
     from alpha.portfolio_compositor import CompositeSignal
 
     # 4. 发单 (仅非 dry_run 且门通过)
-    send = cfg is not None and cfg.ctrader_send_orders and not cfg.factor_dry_run
+    send = _should_send_orders(broker)
 
     signal_str = ""
     if composite.direction != 0:
@@ -7929,16 +8345,34 @@ def _process_tick_factor_pipeline(
             pipeline.get("event_sizing"),
             float(bar.get("time", time.time()) or time.time()),
         )
-        event_multiplier = float(event_sizing_context.get("multiplier", 1.0) or 1.0)
+        try:
+            event_multiplier = float(event_sizing_context.get("multiplier", 1.0))
+        except (TypeError, ValueError):
+            event_multiplier = 1.0
         event_sizing_result = _apply_entry_event_sizing(
             base_volume=base_volume,
             event_multiplier=event_multiplier,
             bridge_meta=_meta,
             sizing_trace=sizing_trace,
         )
-        volume = float(event_sizing_result.get("volume") or 0.0)
+        adjusted_volume = float(event_sizing_result.get("volume") or 0.0)
         sizing_trace = dict(event_sizing_result.get("trace") or {})
         sizing_block_reason = str(event_sizing_result.get("blocked_reason") or "")
+        # Event sizing now feeds the unified RiskPolicy. If a fractional event
+        # reduction falls below broker minimum, RiskPolicy decides whether the
+        # window is hard enough to block or whether the min/base order can pass.
+        volume = adjusted_volume
+        if sizing_block_reason and base_volume > 0:
+            volume = base_volume
+            sizing_trace["event_policy_candidate_api_volume"] = volume
+        event_sizing_context = {
+            **event_sizing_context,
+            "base_api_volume": base_volume,
+            "raw_api_volume": float(sizing_trace.get("event_raw_api_volume", base_volume) or 0.0),
+            "adjusted_api_volume": adjusted_volume,
+            "effective_requested_api_volume": volume,
+            "blocked_reason": sizing_block_reason,
+        }
         log(f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
             f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)} "
             f"event_mult={event_multiplier:.2f} base_api_volume={base_volume:.0f})")
@@ -7956,6 +8390,7 @@ def _process_tick_factor_pipeline(
             current_price=float(current_price or 0.0),
             atr_price=float(atr_price or 0.0),
             event_sizing_context=event_sizing_context,
+            decision_quality_context=_decision_quality_context(composite),
             decision_ts=float(bar.get("time", time.time()) or time.time()),
         )
         risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
@@ -7966,8 +8401,8 @@ def _process_tick_factor_pipeline(
                 f"market_session:{market_session.get('status') or 'unknown'}:"
                 f"{market_session.get('reason') or 'unknown'}"
             )
-        order_blocked = bool(sizing_block_reason) or bool(market_block_reason) or not risk_verdict.allowed
-        block_reason = sizing_block_reason or market_block_reason or risk_verdict.reason
+        order_blocked = bool(market_block_reason) or not risk_verdict.allowed
+        block_reason = market_block_reason or risk_verdict.reason
 
         if order_blocked:
             log(f"tick {tick}: v4 {direction_name} SKIP ({block_reason})")
@@ -8014,9 +8449,7 @@ def _process_tick_factor_pipeline(
                         action_json={
                             "tick": tick,
                             "skip_stage": (
-                                "sizing"
-                                if sizing_block_reason
-                                else "market_session"
+                                "market_session"
                                 if market_block_reason
                                 else "risk_policy"
                             ),
@@ -8870,6 +9303,7 @@ def _execute_trailing_candidate(
             "loop_running": bool(_live_state_get("loop_running", True)),
             "bridge_connected": bool(getattr(bridge, "is_connected", False)),
             "protection_source": candidate.source,
+            "position": dict(position or {}),
         }
     )
     risk_verdict = _RISK_POLICY.evaluate(candidate.risk_action, risk_context).to_dict()
@@ -8908,6 +9342,7 @@ def _execute_trailing_candidate(
     quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
     sl_plan = _supervisor_tighten_sl_plan(position, target_sl, quote=quote)
     planned_sl = float(sl_plan.get("planned_sl") or 0.0)
+    tp_extension_only = target_tp > 0 and _target_tp_is_extension(position, target_tp)
     if candidate.source == _ENTRY_PROTECTION_REPAIR_SOURCE and not sl_plan["allowed"] and position_sl > 0:
         planned_sl = position_sl
         sl_plan = {
@@ -8915,6 +9350,14 @@ def _execute_trailing_candidate(
             "allowed": True,
             "planned_sl": planned_sl,
             "reason": "preserve_existing_stop_loss_for_tp_repair",
+        }
+    elif tp_extension_only and not sl_plan["allowed"] and position_sl > 0:
+        planned_sl = position_sl
+        sl_plan = {
+            **sl_plan,
+            "allowed": True,
+            "planned_sl": planned_sl,
+            "reason": "preserve_existing_stop_loss_for_tp_extension",
         }
     if not sl_plan["allowed"]:
         _log_supervisor_position_event(

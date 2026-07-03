@@ -161,6 +161,32 @@ def test_open_trade_blocks_loss_cooldown_when_gap_too_short():
     assert verdict.audit_payload["temporal_context"]["timeframe"] == "M5"
 
 
+def test_open_trade_allows_after_loss_cooldown_even_at_hard_loss_threshold():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "account": {"balance": 10000, "equity": 10000},
+            "session": {"consecutive_losses": 8},
+            "loss_cooldown_after_losses": 2,
+            "loss_cooldown_bars": 3,
+            "temporal_context": {
+                "timeframe": "M5",
+                "timeframe_seconds": 300,
+                "seconds_since_last_trade": 1800.0,
+                "bars_since_last_trade": 6.0,
+            },
+            "total_api_volume": 0,
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.reason == "ok"
+
+
 def test_open_trade_blocks_position_count():
     service = _service()
 
@@ -189,6 +215,145 @@ def test_open_trade_blocks_api_volume():
     assert verdict.allowed is False
     assert verdict.reason == "API量上限: 950+100>1000"
     assert verdict.max_size == 50
+
+
+def test_open_trade_blocks_event_below_min_only_in_high_hard_window():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "total_api_volume": 0,
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+            "event_sizing": {
+                "enabled": True,
+                "event_importance": 3,
+                "minutes_until_event": 10.0,
+                "window_bucket": "pre_0_15m",
+                "base_api_volume": 100.0,
+                "raw_api_volume": 50.0,
+                "adjusted_api_volume": 0.0,
+                "effective_requested_api_volume": 100.0,
+                "blocked_reason": "event_sizing_below_min: 100*0.50=50<100",
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason.startswith("event_hard_window:")
+    assert verdict.audit_payload["source"] == "event_sizing"
+
+
+def test_open_trade_allows_event_below_min_outside_high_hard_window():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "account": {"balance": 10000, "equity": 10000},
+            "session": {"pnl": 0, "start_balance": 10000},
+            "total_api_volume": 0,
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+            "event_sizing": {
+                "enabled": True,
+                "event_importance": 3,
+                "minutes_until_event": 45.0,
+                "window_bucket": "pre_30_60m",
+                "base_api_volume": 100.0,
+                "raw_api_volume": 80.0,
+                "adjusted_api_volume": 0.0,
+                "effective_requested_api_volume": 100.0,
+                "blocked_reason": "event_sizing_below_min: 100*0.80=80<100",
+            },
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.audit_payload["event_sizing"]["window_bucket"] == "pre_30_60m"
+
+
+def test_open_trade_blocks_approved_event_window_learning_policy():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "account": {"balance": 10000, "equity": 10000},
+            "session": {"pnl": 0, "start_balance": 10000},
+            "total_api_volume": 0,
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+            "event_sizing": {
+                "schema_version": "event_sizing.short_window.v2",
+                "enabled": True,
+                "event_type": "NFP",
+                "event": "Non-Farm Employment Change",
+                "event_importance": 3,
+                "minutes_until_event": 10.0,
+                "window_bucket": "pre_0_15m",
+                "multiplier": 0.5,
+            },
+            "event_window_learning_policy": {
+                "active": True,
+                "controls": [
+                    {
+                        "scope_key": "NFP:pre_0_15m",
+                        "action": "tighten_event_window_sizing",
+                        "suggestion_id": "psg_event_window_nfp",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "learning_event_window_control"
+    assert verdict.audit_payload["blocked_by"] == "event_window_learning_policy"
+
+
+def test_open_trade_blocks_approved_entry_quality_weak_signal_policy():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "entry_quality_gate": {
+                "active": True,
+                "allowed": False,
+                "reason": "learning_weak_signal_threshold",
+                "source": "entry_quality_gate",
+                "suggestion_id": "psg_entry_quality_weak",
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "learning_weak_signal_threshold"
+    assert verdict.audit_payload["blocked_by"] == "entry_quality_gate"
+    assert verdict.audit_payload["entry_quality_gate"]["suggestion_id"] == "psg_entry_quality_weak"
+
+
+def test_open_trade_blocks_approved_entry_quality_factor_conflict_policy():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "entry_quality_gate": {
+                "active": True,
+                "allowed": False,
+                "reason": "learning_factor_conflict_control",
+                "source": "entry_quality_gate",
+                "suggestion_id": "psg_entry_quality_conflict",
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "learning_factor_conflict_control"
+    assert verdict.audit_payload["entry_quality_gate"]["suggestion_id"] == "psg_entry_quality_conflict"
 
 
 def test_open_trade_blocks_pyramid_weaker_signal():
@@ -352,6 +517,114 @@ def test_switch_parameter_template_uses_weight_governor_thresholds():
     assert verdict.reason == "drawdown_approaching_limit"
     assert verdict.required_mode == "governed"
     assert verdict.audit_payload["action"] == "switch_parameter_template"
+
+
+def test_tighten_position_allows_bounded_tp_extension_with_profit_lock():
+    service = _service()
+
+    verdict = service.evaluate(
+        "tighten_position",
+        {
+            "loop_running": True,
+            "bridge_connected": True,
+            "position_id": "p1",
+            "position": {
+                "direction": "buy",
+                "entry_price": 4000.0,
+                "sl": 4002.0,
+                "tp": 4030.0,
+            },
+            "recommended_controls": {
+                "target_stop_loss": 4010.0,
+                "target_take_profit": 4038.0,
+                "max_tp_extension_factor": 0.35,
+            },
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.reason == "risk_reducing_action"
+
+
+def test_tighten_position_blocks_tp_extension_without_profit_lock():
+    service = _service()
+
+    verdict = service.evaluate(
+        "tighten_position",
+        {
+            "loop_running": True,
+            "bridge_connected": True,
+            "position_id": "p1",
+            "position": {
+                "direction": "buy",
+                "entry_price": 4000.0,
+                "sl": 3990.0,
+                "tp": 4030.0,
+            },
+            "recommended_controls": {
+                "target_take_profit": 4038.0,
+                "max_tp_extension_factor": 0.35,
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "tp_extension_requires_profit_lock"
+    assert verdict.audit_payload["source"] == "tp_extension_guard"
+
+
+def test_tighten_position_blocks_oversized_tp_extension():
+    service = _service()
+
+    verdict = service.evaluate(
+        "tighten_position",
+        {
+            "loop_running": True,
+            "bridge_connected": True,
+            "position_id": "p1",
+            "position": {
+                "direction": "buy",
+                "entry_price": 4000.0,
+                "sl": 4010.0,
+                "tp": 4030.0,
+            },
+            "recommended_controls": {
+                "target_take_profit": 4050.0,
+                "max_tp_extension_factor": 0.35,
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "tp_extension_exceeds_max_factor"
+
+
+def test_tighten_position_blocks_tp_extension_after_position_limit():
+    service = _service()
+
+    verdict = service.evaluate(
+        "tighten_position",
+        {
+            "loop_running": True,
+            "bridge_connected": True,
+            "position_id": "p1",
+            "tp_extension_count": 2,
+            "position": {
+                "direction": "buy",
+                "entry_price": 4000.0,
+                "sl": 4010.0,
+                "tp": 4030.0,
+            },
+            "recommended_controls": {
+                "target_take_profit": 4038.0,
+                "max_tp_extension_factor": 0.35,
+                "max_tp_extensions_per_position": 2,
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "tp_extension_count_exceeded"
 
 
 def test_promote_and_register_factor_use_governor_thresholds():

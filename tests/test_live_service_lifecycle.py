@@ -1313,6 +1313,92 @@ def test_supervisor_tighten_trace_keeps_decision_id(monkeypatch):
     assert events[0]["event_type"] == "tightened"
 
 
+def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):
+    amend_calls = []
+    traces = []
+
+    class _Ledger:
+        def log_decision(self, **kwargs):
+            return "dec_supervisor_dynamic_tpsl"
+
+        def log_position_supervisor_trace(self, **kwargs):
+            traces.append(kwargs)
+            return "trace_dynamic_tpsl"
+
+        def log_position_event(self, **kwargs):
+            pass
+
+    class _Policy:
+        def evaluate(self, action, context):
+            return SimpleNamespace(
+                allowed=True,
+                reason="risk_reducing_action",
+                to_dict=lambda: {"allowed": True, "reason": "risk_reducing_action"},
+            )
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"bid": 4028.0, "ask": 4028.1, "mid": 4028.05}
+
+        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
+            amend_calls.append((pid, sl, tp))
+            return SimpleNamespace(success=True, position_id=pid, sl=sl, tp=tp)
+
+    verdict = {
+        "position_id": "705",
+        "decision_ts": time.time(),
+        "action": "tighten",
+        "confidence": 0.82,
+        "summary_reason": "near_take_profit_protect",
+        "evidence": {"take_profit_progress": 0.93, "tp_extension_candidate": True},
+        "recommended_controls": {
+            "target_stop_loss": 4018.0,
+            "target_take_profit": 4038.0,
+            "close_reason": "supervisor_tighten",
+            "protection_mode": "dynamic_tpsl",
+        },
+        "supervisor_template": {
+            "template_id": "position_supervisor:profit_protection.v1",
+            "template_version": "profit_protection.v1",
+        },
+    }
+
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_evaluate_position_supervisor_for_position", lambda *args, **kwargs: verdict)
+    monkeypatch.setattr(live_service, "_supervisor_recently_applied", lambda *args, **kwargs: False)
+    monkeypatch.setattr(live_service, "_remember_supervisor_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(live_service, "_remember_supervisor_reentry_block", lambda *args, **kwargs: None)
+
+    handled = live_service._run_position_supervision(
+        _Bridge(),
+        [
+            {
+                "position_id": 705,
+                "symbol": "XAUUSD+",
+                "direction": 1,
+                "entry_price": 4000.0,
+                "current_price": 4028.0,
+                "sl": 3990.0,
+                "tp": 4030.0,
+                "volume": 100.0,
+            }
+        ],
+        cfg=SimpleNamespace(timeframe="M5"),
+        acct={"balance": 10000.0, "equity": 10000.0},
+        tick=5,
+        log=lambda msg: None,
+    )
+
+    assert handled == {705}
+    assert amend_calls == [(705, 4018.0, 4038.0)]
+    applied = [item for item in traces if item["outcome"] == "applied"][0]
+    assert applied["execution"]["target_take_profit_sent"] == 4038.0
+    assert applied["execution"]["target_take_profit_changed"] is True
+
+
 def test_protection_cycle_supersedes_trailing_when_supervisor_handles_position(monkeypatch):
     superseded = []
     candidate = live_service.ProtectionCandidate(

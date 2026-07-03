@@ -1201,6 +1201,7 @@ def test_parameter_template_offline_validation_runs_backtest_and_returns_plan(tm
     assert "candidate_summary" in result["walk_forward"]
     assert result["release_candidate"]["status"] == "pending_review"
     assert result["release_candidate"]["validation_summary"]["recommendation_source"]["recommendation_id"] == "ptr_test_bb_width"
+    assert result["release_candidate"]["validation_summary"]["template_snapshot"]["template_id"] == offline_template["template_id"]
     assert Path(result["report_path"]).exists()
     assert events[0][0] == "planning"
 
@@ -1419,6 +1420,83 @@ def test_parameter_template_release_candidate_review_release_and_rollback(tmp_pa
         "rolled_back",
     ]
     assert all(row["source"] == "parameter_template" for row in events[-4:])
+
+
+def test_parameter_template_release_candidate_deploy_materializes_snapshot(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    rc.reset_for_tests()
+    _seed_factor_card_state(db_path)
+
+    template_service = ParameterTemplateService(db_path)
+    validation_service = ParameterTemplateValidationService(db_path)
+    template_service.activate_template(
+        factor_id="rsi_14",
+        template_id="rsi_14:default.v1:default",
+        regime_key="",
+        note="seed default active",
+    )
+    snapshot = {
+        "factor_id": "rsi_14",
+        "regime_key": "",
+        "factor_family": "momentum_oscillator",
+        "template_version": "candidate_snapshot.v1",
+        "template_role": "conservative",
+        "formula_version": "registry_builtin.v1",
+        "base_parameter_version": "default.v1",
+        "parameters": {"length": 18, "upper_band": 72, "lower_band": 28},
+        "applicable_regimes": ["range"],
+        "avoid_regimes": ["strong_trend"],
+        "holding_profile_hint": {"style": "short_swing", "min_bars": 2, "max_bars": 10},
+        "evidence": {"note": "legacy release candidate snapshot"},
+    }
+    template_id = "rsi_14:candidate_snapshot.v1:default"
+    assert template_service.get_template(template_id=template_id) is None
+
+    now = time.time()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO parameter_template_release_candidate
+            (candidate_id, factor_id, template_id, regime_key, status,
+             boundary_json, validation_summary_json, validation_report_path,
+             created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?)
+            """,
+            (
+                "ptrc_legacy_snapshot",
+                "rsi_14",
+                template_id,
+                "",
+                json.dumps(
+                    {
+                        "recommended_scope": "offline_deep",
+                        "reasons": ["parameter_delta_too_large"],
+                        "target_template": {**snapshot, "template_id": template_id},
+                    }
+                ),
+                json.dumps({"walk_forward_passed": True, "candidate_avg_ic": 0.11}),
+                str(tmp_path / "legacy_report.json"),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    deployed = validation_service.deploy_release_candidate(
+        candidate_id="ptrc_legacy_snapshot",
+        note="deploy legacy snapshot",
+    )
+    materialized = template_service.get_template(template_id=template_id)
+
+    assert deployed["ok"] is True
+    assert deployed["release_result"]["new_template_id"] == template_id
+    assert materialized is not None
+    assert materialized["source"] == "offline_validation_candidate"
+    assert materialized["parameters"]["length"] == 18
 
 
 def test_parameter_template_release_candidate_api_endpoints_work(tmp_path, monkeypatch):

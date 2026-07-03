@@ -13,6 +13,7 @@ from threading import Thread
 from fastapi import APIRouter, HTTPException
 
 from backend.core.auth import RequireUser
+from backend.services.mutation_audit import record_api_mutation
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/data", tags=["data"])
@@ -158,11 +159,19 @@ def trigger_refresh(_user: RequireUser, req: RefreshRequest = RefreshRequest()):
     t = Thread(target=_run_script_bg, args=(job_id, *args), daemon=True)
     t.start()
 
-    return {
+    result = {
         "job_id": job_id,
         "status": "started",
         "message": "刷新已启动，GET /api/data/external-refresh/{job_id} 查进度",
     }
+    record_api_mutation(
+        user=_user,
+        endpoint="/api/data/external-refresh",
+        action="external_refresh",
+        status="applied",
+        result={"source": req.source, "force": req.force, **result},
+    )
+    return result
 
 
 @alias_router.post("/refresh")

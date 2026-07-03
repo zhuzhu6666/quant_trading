@@ -40,7 +40,7 @@
 - `PostgreSQL state_v1` 负责运行时状态、学习、恢复、审计主状态库
   - `QUANT_STATE_BACKEND=postgres`
   - `QUANT_STATE_PG_DSN`
-  - `data/state.db` 仅作为迁移冷备/回滚源保留，不再作为 live 主写入口
+  - `data/state.db` 已删除，不再保留本地 SQLite state 冷备，也不再作为 live 主写入口
 - `SQLite` 仅保留显式临时/实验库
   - `data/experiments.db`
 - `DuckDB` 只负责市场/分析型库
@@ -1089,7 +1089,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 ### 数据
 
 - PostgreSQL `state_v1`
-- `data/state.db` 仅作为迁移冷备/回滚源
+- `data/state.db` 已删除，不再保留本地 SQLite state 冷备
 - `data/experiments.db`
 - `data/*.duckdb`
 

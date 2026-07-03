@@ -4,13 +4,11 @@ Wire-in: any route can add `Depends(get_current_user)` to require a valid JWT.
 v2: password validated via SHA256 in backend/api/auth.py._verify_password().
 The token just proves the user has been through the login flow.
 
-SEC-1 fix (audit 2026-06-21): document current state accurately.
-JWT secret must be set via QUANT_JWT_SECRET env var (otherwise auto-generated per-startup).
-Password hash should be set via QUANT_PASSWORD_HASH env var (otherwise uses hardcoded default)."""
+SEC-2 fix (audit 2026-07-02): fail closed when auth secrets are missing.
+JWT secret must be set via QUANT_JWT_SECRET env var."""
 
 import logging
 import os as _os
-import secrets
 import time
 from typing import Annotated
 
@@ -21,31 +19,37 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_SECONDS = 24 * 3600
 
 _JWT_SECRET: str | None = None
-_JWT_SECRET_WARNED = False
 _logger = logging.getLogger(__name__)
 
 
-def _get_jwt_secret() -> str:
-    """惰性加载 JWT_SECRET, 避免模块导入时 KeyError 炸整个 app。
+class AuthConfigError(RuntimeError):
+    """Raised when required authentication environment is missing."""
 
-    若环境变量未设置, 生成一个 dev 级临时密钥
-    (每次启动变化, 前端需要重新登录)。
-    """
-    global _JWT_SECRET, _JWT_SECRET_WARNED
+
+def _required_env(name: str) -> str:
+    value = (_os.environ.get(name) or "").strip()
+    if not value:
+        raise AuthConfigError(f"{name} is required")
+    return value
+
+
+def _get_jwt_secret() -> str:
+    """Load JWT secret from QUANT_JWT_SECRET, failing closed if absent."""
+    global _JWT_SECRET
     if _JWT_SECRET is None:
-        _JWT_SECRET = _os.environ.get("QUANT_JWT_SECRET")
-        if not _JWT_SECRET:
-            _JWT_SECRET = secrets.token_hex(32)
-            if not _JWT_SECRET_WARNED:
-                _logger.warning(
-                    "QUANT_JWT_SECRET not set; using ephemeral dev JWT secret for this process"
-                )
-                _JWT_SECRET_WARNED = True
+        _JWT_SECRET = _required_env("QUANT_JWT_SECRET")
     return _JWT_SECRET
 
 
+def validate_auth_config() -> None:
+    """Validate required auth environment at startup/login time."""
+    _get_jwt_secret()
+    _required_env("QUANT_AUTH_USER")
+    _required_env("QUANT_PASSWORD_HASH")
+
+
 def create_token(user: str) -> str:
-    """Issue a HS256 JWT for the given user. v1: any user is accepted."""
+    """Issue a HS256 JWT for the authenticated user."""
     now = int(time.time())
     payload = {
         "sub": user,
@@ -81,6 +85,12 @@ def require_user(
     token = authorization.split(" ", 1)[1].strip()
     try:
         payload = jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    except AuthConfigError as e:
+        _logger.error("auth configuration error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "auth_not_configured", "msg": str(e)},
+        )
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -93,7 +103,14 @@ def require_user(
             detail={"error": "invalid_token", "msg": str(e)[:200]},
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return payload.get("sub", "zhu")
+    subject = payload.get("sub")
+    if not isinstance(subject, str) or not subject.strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "invalid_token", "msg": "JWT subject is missing"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return subject
 
 
 # (audit 2026-06-08: pre-built Annotated alias for ergonomic use in route

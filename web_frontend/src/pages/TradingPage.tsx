@@ -246,7 +246,7 @@ export function TradingPage() {
     setStartError(null);
     setStartBusy(true);
     try {
-      await startTrading("ctrader", strategy || "live");
+      await startTrading("ctrader", strategy || "live", true);
       await refreshAll();
     } catch (exc) {
       setStartError(exc instanceof Error ? exc.message : "启动失败");
@@ -272,7 +272,7 @@ export function TradingPage() {
     setCloseError(null);
     setCloseBusy(true);
     try {
-      await emergencyClose();
+      await emergencyClose(true);
       await refreshAll();
     } catch (exc) {
       setCloseError(exc instanceof Error ? exc.message : "紧急平仓失败");

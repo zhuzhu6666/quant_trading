@@ -31,6 +31,10 @@ from research.features.evidence_contract import build_evidence_contract
 _scheduler_thread: threading.Thread | None = None
 _stop_event = threading.Event()
 
+EVENT_WINDOW_CONTEXT_SCHEMA_VERSION = "event_sizing.short_window.v2"
+EVENT_WINDOW_ALLOWED_BUCKETS = {"post_0_5m", "pre_0_15m", "pre_15_30m", "pre_30_60m"}
+EVENT_WINDOW_MIN_VALID_MULTIPLIER = 0.5
+
 
 def _loads(raw: Any, default: Any) -> Any:
     if raw is None:
@@ -864,19 +868,56 @@ def _supervisor_label_from_counterfactual(label: str) -> tuple[str, str, str, fl
     key = str(label or "").strip()
     if key in {"protection_too_tight", "premature_tighten", "noise_stopout"}:
         return "matured", "over_protected", "less_tighten", 0.85
+    if key in {"sl_too_tight", "tp_too_near", "missed_extension"}:
+        return "matured", key, "less_tighten", 0.85
     if key == "correct_stop":
         return "matured", "correct_action", "close", 0.9
     if key in {"entry_failure_or_correct_stop"}:
         return "matured", "correct_action", "hold", 0.65
-    if key in {"missed_protection"}:
-        return "matured", "missed_protection", "tighten", 0.8
+    if key in {"missed_protection", "sl_too_loose", "tp_too_far", "mfe_capture_failed"}:
+        return "matured", key, "tighten", 0.8
+    if key in {"profit_protected"}:
+        return "matured", "profit_protected", "keep", 0.8
     return "pending", "inconclusive", "hold", 0.2
+
+
+def _dynamic_tpsl_labels(base: dict[str, Any], cf_label: str) -> list[str]:
+    features = base.get("features") or {}
+    verdict = features.get("verdict") or {}
+    evidence = verdict.get("evidence") or features.get("supervisor_evidence") or {}
+    execution = features.get("execution") or {}
+    controls = verdict.get("recommended_controls") or {}
+    action = str(features.get("action") or verdict.get("action") or "")
+    protection_mode = str(controls.get("protection_mode") or "")
+    labels: set[str] = set()
+    if str(cf_label) in {"protection_too_tight", "premature_tighten", "noise_stopout"}:
+        if action in {"tighten", "dynamic_tpsl"} or "stop" in protection_mode:
+            labels.add("sl_too_tight")
+        else:
+            labels.add("over_protected")
+    if str(cf_label) == "correct_stop" and (
+        float((execution or {}).get("target_stop_loss_sent") or 0.0) > 0
+        or float((controls or {}).get("target_stop_loss") or 0.0) > 0
+    ):
+        labels.add("profit_protected")
+    giveback = float((evidence or {}).get("giveback_ratio") or 0.0)
+    capture = float((evidence or {}).get("profit_capture_ratio") or 0.0)
+    take_profit_progress = float((evidence or {}).get("take_profit_progress") or 0.0)
+    if giveback >= 0.70 and capture <= 0.20:
+        labels.add("mfe_capture_failed")
+        labels.add("sl_too_loose")
+    if take_profit_progress >= 0.92 and str(cf_label) in {"protection_too_tight", "premature_tighten"}:
+        labels.add("tp_too_near")
+    if bool((evidence or {}).get("tp_extension_candidate")) and str(cf_label) == "correct_stop":
+        labels.add("profit_protected")
+    return sorted(labels)
 
 
 def _matured_sample_from_supervisor_trace(row: Any, cf_row: Any | None, *, run_context: dict[str, Any]) -> dict[str, Any]:
     base = _sample_from_supervisor_trace(row)
     cf_label = str(cf_row["label"] or "") if cf_row is not None else ""
     label_status, unified_label, recommended_action, weight = _supervisor_label_from_counterfactual(cf_label)
+    protection_labels = _dynamic_tpsl_labels(base, cf_label)
     confidence = float(cf_row["confidence"] or 0.0) if cf_row is not None else 0.0
     integrity = str(row["trace_integrity"] or base["integrity"] or "partial")
     if integrity == "missing":
@@ -894,6 +935,7 @@ def _matured_sample_from_supervisor_trace(row: Any, cf_row: Any | None, *, run_c
                 "recommended_action": recommended_action,
                 "counterfactual_label": cf_label,
                 "counterfactual_confidence": confidence,
+                "protection_labels": protection_labels,
                 "source": "supervisor_counterfactual_review" if cf_row is not None else "pending_future_evidence",
             },
             "verdict": {
@@ -901,6 +943,7 @@ def _matured_sample_from_supervisor_trace(row: Any, cf_row: Any | None, *, run_c
                 "learning_label": unified_label,
                 "recommended_action": recommended_action,
                 "counterfactual_label": cf_label,
+                "protection_labels": protection_labels,
             },
             "trace": {
                 **(base.get("trace") or {}),
@@ -1426,8 +1469,18 @@ def materialize_entry_cluster_governance_suggestions(
 
 
 def _event_window_bucket_from_features(features: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    if not isinstance(features, dict):
+        return "", {}
     event = features.get("event_context") or (features.get("action") or {}).get("event_sizing") or {}
-    multiplier = float(event.get("multiplier") or 1.0)
+    if not isinstance(event, dict):
+        return "", {}
+    schema_version = str(event.get("schema_version") or "").strip()
+    if schema_version != EVENT_WINDOW_CONTEXT_SCHEMA_VERSION:
+        return "", {}
+    try:
+        multiplier = float(event.get("multiplier") or 1.0)
+    except (TypeError, ValueError):
+        return "", {}
     event_type = str(event.get("event_type") or event.get("event") or "").strip()
     window_bucket = str(event.get("window_bucket") or "").strip()
     if not window_bucket:
@@ -1436,18 +1489,24 @@ def _event_window_bucket_from_features(features: dict[str, Any]) -> tuple[str, d
             h = float(hours_until)
         except Exception:
             h = 999999.0
-        if h < 0:
-            window_bucket = "post_event"
-        elif h <= 4.0:
-            window_bucket = "pre_0_4h"
-        elif h <= 24.0:
-            window_bucket = "pre_4_24h"
-        elif h <= 72.0:
-            window_bucket = "pre_24_72h"
-    if multiplier >= 1.0 or not event_type or not window_bucket:
+        if -(5.0 / 60.0) <= h < 0:
+            window_bucket = "post_0_5m"
+        elif 0 <= h <= 0.25:
+            window_bucket = "pre_0_15m"
+        elif h <= 0.5:
+            window_bucket = "pre_15_30m"
+        elif h <= 1.0:
+            window_bucket = "pre_30_60m"
+    if (
+        multiplier >= 1.0
+        or multiplier < EVENT_WINDOW_MIN_VALID_MULTIPLIER
+        or not event_type
+        or window_bucket not in EVENT_WINDOW_ALLOWED_BUCKETS
+    ):
         return "", {}
     bucket = f"{event_type}:{window_bucket}"
     return bucket, {
+        "schema_version": schema_version,
         "event_type": event_type,
         "event": str(event.get("event") or event_type),
         "event_importance": int(float(event.get("event_importance") or 0)),
@@ -1627,6 +1686,214 @@ def materialize_event_window_governance_suggestions(
             run_id=str(run.get("run_id") or ""),
             decision_type="event_window_governance",
             scope_type="event_window",
+            action="materialize_governance_suggestions",
+            status="completed",
+            result=payload,
+            db_path=db_path,
+        )
+        finish_evolution_run(str(run.get("run_id") or ""), status="completed", summary=payload, db_path=db_path)
+        return payload
+    except Exception as exc:
+        conn.rollback()
+        finish_evolution_run(str(run.get("run_id") or ""), status="failed", summary={"error": str(exc)[:500]}, db_path=db_path)
+        raise
+    finally:
+        conn.close()
+
+
+def materialize_entry_quality_governance_suggestions(
+    *,
+    db_path: str | Path = STATE_DB,
+    limit: int = 1000,
+    min_samples: int = 5,
+    min_bad_rate: float = 0.6,
+) -> dict[str, Any]:
+    """Suggest entry-quality controls when reviews show weak entries or factor conflict."""
+    ensure_autonomous_learning_tables(db_path)
+    run = start_evolution_run(run_type="entry_quality_governance", trigger_source="trade_review_outcomes", db_path=db_path)
+    conn = _connect(db_path)
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    suggestions = 0
+    stats_upserted = 0
+    skipped = 0
+    try:
+        rows = _execute(
+            conn,
+            """
+            SELECT *
+            FROM autonomous_learning_sample
+            WHERE sample_type='trade_review_outcome'
+              AND label_status='matured'
+              AND integrity IN ('full', 'partial', 'recovered')
+            ORDER BY event_ts DESC, created_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        for row in rows:
+            label = _loads(row["label_json"], {})
+            features = _loads(row["features_json"], {})
+            review = features.get("review") or {}
+            failure_tags = {str(item) for item in (label.get("failure_tags") or review.get("failure_tags") or [])}
+            pnl = float(label.get("pnl") or 0.0)
+            entry_score = abs(float(review.get("entry_score") or 0.0))
+            worst_factor = str(review.get("worst_factor") or "").strip()
+            bad = pnl < 0 or str(label.get("outcome_label") or "") == "bad_loss"
+            base_item = {
+                "sample_id": str(row["sample_id"] or ""),
+                "review_id": str(row["source_id"] or ""),
+                "position_id": str(row["position_id"] or ""),
+                "pnl": pnl,
+                "bad": bad,
+                "entry_score": entry_score,
+                "worst_factor": worst_factor,
+                "failure_tags": sorted(failure_tags),
+            }
+            if bad and failure_tags.intersection({"weak_signal_overtraded", "weak_entry_loss", "avoidable_loss"}):
+                buckets.setdefault("weak_signal", []).append(dict(base_item))
+            if bad and failure_tags.intersection({"factor_conflict", "conflicting_factor_entry", "conflict_entry_loss"}):
+                buckets.setdefault("factor_conflict", []).append(dict(base_item))
+                if worst_factor:
+                    buckets.setdefault(f"worst_factor:{worst_factor}", []).append(dict(base_item))
+
+        now = time.time()
+        for bucket, items in sorted(buckets.items()):
+            sample_count = len(items)
+            bad_count = sum(1 for item in items if item["bad"])
+            win_count = sum(1 for item in items if item["pnl"] > 0)
+            pnl_sum = sum(float(item["pnl"]) for item in items)
+            avg_reward = sum(max(-1.0, min(1.0, float(item["pnl"]) / 50.0)) for item in items) / max(sample_count, 1)
+            bad_rate = bad_count / max(sample_count, 1)
+            avg_entry_score = sum(float(item["entry_score"]) for item in items) / max(sample_count, 1)
+            action = "watch"
+            scope_key = bucket
+            recommended_controls: dict[str, Any] = {"advisory_only": False}
+            if sample_count >= int(min_samples) and bad_rate >= float(min_bad_rate):
+                if bucket == "weak_signal":
+                    action = "raise_weak_signal_threshold"
+                    recommended_controls.update(
+                        {
+                            "min_abs_signal_score": round(max(0.50, min(0.68, avg_entry_score + 0.08)), 4),
+                            "strong_signal_override": 0.75,
+                        }
+                    )
+                elif bucket == "factor_conflict":
+                    action = "require_factor_agreement"
+                    recommended_controls.update(
+                        {
+                            "max_factor_conflict_ratio": 0.35,
+                            "strong_signal_override": 0.78,
+                        }
+                    )
+                elif bucket.startswith("worst_factor:"):
+                    scope_key = bucket.split(":", 1)[1]
+                    action = "suppress_recent_worst_factor"
+                    recommended_controls.update(
+                        {
+                            "suppressed_factor": scope_key,
+                            "strong_signal_override": 0.78,
+                        }
+                    )
+            _execute(
+                conn,
+                """
+                INSERT INTO experience_pattern_stats
+                (scope_type, scope_key, sample_count, win_count, bad_loss_count,
+                 avg_reward, last_outcome_label, recommended_action, updated_at)
+                VALUES ('entry_quality', ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+                    sample_count=excluded.sample_count,
+                    win_count=excluded.win_count,
+                    bad_loss_count=excluded.bad_loss_count,
+                    avg_reward=excluded.avg_reward,
+                    last_outcome_label=excluded.last_outcome_label,
+                    recommended_action=excluded.recommended_action,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    scope_key,
+                    sample_count,
+                    win_count,
+                    bad_count,
+                    round(avg_reward, 6),
+                    "bad_loss" if bad_count else "",
+                    action,
+                    now,
+                ),
+            )
+            stats_upserted += 1
+            if action == "watch":
+                skipped += 1
+                continue
+            existing = _execute(
+                conn,
+                """
+                SELECT suggestion_id
+                FROM policy_suggestion
+                WHERE scope_type='entry_quality'
+                  AND scope_key=?
+                  AND action=?
+                  AND status IN ('proposed', 'approved', 'applied')
+                LIMIT 1
+                """,
+                (scope_key, action),
+            ).fetchone()
+            if existing:
+                skipped += 1
+                continue
+            suggestion_id = "psg_entry_quality_" + hashlib.sha1(f"{scope_key}:{action}".encode("utf-8")).hexdigest()[:16]
+            confidence = min(0.94, 0.48 + 0.05 * sample_count + 0.20 * bad_rate)
+            evidence = {
+                "schema_version": "entry_quality_governance_evidence.v1",
+                "bucket": bucket,
+                "scope_key": scope_key,
+                "sample_count": sample_count,
+                "bad_count": bad_count,
+                "bad_rate": round(bad_rate, 6),
+                "win_count": win_count,
+                "pnl_sum": round(pnl_sum, 6),
+                "avg_reward": round(avg_reward, 6),
+                "avg_entry_score": round(avg_entry_score, 6),
+                "worst_factor": scope_key if bucket.startswith("worst_factor:") else "",
+                "sample_ids": [item["sample_id"] for item in items[:20]],
+                "position_ids": [item["position_id"] for item in items[:20]],
+                "recommended_controls": recommended_controls,
+            }
+            _execute(
+                conn,
+                """
+                INSERT INTO policy_suggestion
+                (suggestion_id, scope_type, scope_key, action, confidence,
+                 reason, evidence_json, status, created_at)
+                VALUES (?, 'entry_quality', ?, ?, ?, ?, ?, 'proposed', ?)
+                ON CONFLICT(suggestion_id) DO NOTHING
+                """,
+                (
+                    suggestion_id,
+                    scope_key,
+                    action,
+                    round(confidence, 6),
+                    f"{scope_key} entry outcomes show bad_rate={bad_rate:.2f} across {sample_count} samples",
+                    _dumps(evidence),
+                    now,
+                ),
+            )
+            suggestions += 1
+        payload = {
+            "schema_version": "entry_quality_governance.v1",
+            "evolution_run_id": str(run.get("run_id") or ""),
+            "bucket_count": len(buckets),
+            "stats_upserted": stats_upserted,
+            "suggestions": suggestions,
+            "skipped": skipped,
+            "limit": int(limit),
+        }
+        _insert_evolution_event(conn, "entry_quality_governance", payload)
+        conn.commit()
+        record_evolution_decision(
+            run_id=str(run.get("run_id") or ""),
+            decision_type="entry_quality_governance",
+            scope_type="entry_quality",
             action="materialize_governance_suggestions",
             status="completed",
             result=payload,
@@ -2412,7 +2679,14 @@ def _approve_demo_policy_suggestions(
     db_path: str | Path = STATE_DB,
     run_id: str = "",
 ) -> dict[str, Any]:
-    allowed_scopes = {"factor", "parameter_template", "position_supervisor_template"}
+    allowed_scopes = {
+        "factor",
+        "parameter_template",
+        "position_supervisor_template",
+        "entry_cluster",
+        "event_window",
+        "entry_quality",
+    }
     allowed_actions = {
         "boost_small",
         "downweight",
@@ -2420,8 +2694,14 @@ def _approve_demo_policy_suggestions(
         "relax_thesis_break",
         "tighten_profit_protection",
         "increase_min_hold_window",
-        "fix_stop_legality",
         "switch_position_supervisor_template",
+        "increase_same_direction_cooldown",
+        "raise_pyramid_entry_threshold",
+        "tighten_event_window_sizing",
+        "extend_event_post_window_review",
+        "raise_weak_signal_threshold",
+        "require_factor_agreement",
+        "suppress_recent_worst_factor",
     }
     rows = _execute(
         conn,
@@ -2434,7 +2714,7 @@ def _approve_demo_policy_suggestions(
         """,
         (int(limit),),
     ).fetchall()
-    approved = []
+    candidate_ids = []
     skipped = []
     now = time.time()
     for row in rows:
@@ -2442,51 +2722,108 @@ def _approve_demo_policy_suggestions(
         action = str(row["action"] or "")
         suggestion_id = str(row["suggestion_id"] or "")
         if scope_type not in allowed_scopes or action not in allowed_actions:
-            skipped.append({"suggestion_id": suggestion_id, "reason": "not_demo_autonomy_whitelisted"})
+            _execute(
+                conn,
+                """
+                UPDATE policy_suggestion
+                SET status='rejected', reviewed_at=?, review_note=?
+                WHERE suggestion_id=? AND status='proposed'
+                """,
+                (
+                    now,
+                    "system rejected by demo_autonomous: no autonomous execution rule",
+                    suggestion_id,
+                ),
+            )
+            conn.commit()
+            record_evolution_decision(
+                run_id=run_id,
+                decision_type="demo_auto_reject",
+                scope_type=scope_type,
+                scope_key=str(row["scope_key"] or ""),
+                action=action,
+                status="rejected",
+                evidence=_loads(row["evidence_json"], {}),
+                before={"status": "proposed", "suggestion_id": suggestion_id},
+                after={"status": "rejected", "suggestion_id": suggestion_id},
+                result={"experiment_id": experiment_id, "reason": "not_demo_autonomy_whitelisted"},
+                db_path=db_path,
+            )
+            skipped.append({"suggestion_id": suggestion_id, "reason": "system_rejected_not_whitelisted"})
             continue
         evidence = _loads(row["evidence_json"], {})
         if scope_type == "position_supervisor_template":
             has_replay = bool(evidence.get("replay_summary") or evidence.get("replay") or evidence.get("day"))
             has_counterfactual = bool(evidence.get("counterfactual_summary") or evidence.get("counterfactual"))
             if not (has_replay and has_counterfactual):
-                skipped.append({"suggestion_id": suggestion_id, "reason": "missing_supervisor_switch_evidence"})
+                _execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET status='rejected', reviewed_at=?, review_note=?
+                    WHERE suggestion_id=? AND status='proposed'
+                    """,
+                    (
+                        now,
+                        "system rejected by demo_autonomous: missing supervisor evidence",
+                        suggestion_id,
+                    ),
+                )
+                conn.commit()
+                record_evolution_decision(
+                    run_id=run_id,
+                    decision_type="demo_auto_reject",
+                    scope_type=scope_type,
+                    scope_key=str(row["scope_key"] or ""),
+                    action=action,
+                    status="rejected",
+                    evidence=evidence,
+                    before={"status": "proposed", "suggestion_id": suggestion_id},
+                    after={"status": "rejected", "suggestion_id": suggestion_id},
+                    result={"experiment_id": experiment_id, "reason": "missing_supervisor_switch_evidence"},
+                    db_path=db_path,
+                )
+                skipped.append({"suggestion_id": suggestion_id, "reason": "system_rejected_missing_supervisor_evidence"})
                 continue
-        _execute(
+        candidate_ids.append(suggestion_id)
+    conn.commit()
+
+    review_result = {"approved": 0, "rejected": 0, "unchanged": 0, "superseded": 0}
+    conflict_result = {"winners": 0, "superseded": 0, "items": []}
+    if candidate_ids:
+        from research.learning.governor import RuleEvolutionGovernor
+
+        governor = RuleEvolutionGovernor(str(db_path))
+        review_result = governor.review_pending()
+        conflict_result = governor.resolve_conflicts()
+
+    approved = []
+    if candidate_ids:
+        placeholders = ",".join("?" for _ in candidate_ids)
+        reviewed_rows = _execute(
             conn,
-            """
-            UPDATE policy_suggestion
-            SET status='approved', reviewed_at=?, review_note=?
-            WHERE suggestion_id=? AND status='proposed'
+            f"""
+            SELECT suggestion_id, scope_type, scope_key, action, status, review_note
+            FROM policy_suggestion
+            WHERE suggestion_id IN ({placeholders})
             """,
-            (
-                now,
-                f"auto-approved by demo_autonomous experiment {experiment_id}",
-                suggestion_id,
-            ),
-        )
-        conn.commit()
-        record_evolution_decision(
-            run_id=run_id,
-            decision_type="demo_auto_approve",
-            scope_type=scope_type,
-            scope_key=str(row["scope_key"] or ""),
-            action=action,
-            status="approved",
-            evidence=evidence,
-            before={"status": "proposed", "suggestion_id": suggestion_id},
-            after={"status": "approved", "suggestion_id": suggestion_id},
-            result={"experiment_id": experiment_id},
-            db_path=db_path,
-        )
-        approved.append(
-            {
-                "suggestion_id": suggestion_id,
-                "scope_type": scope_type,
-                "scope_key": str(row["scope_key"] or ""),
-                "action": action,
+            tuple(candidate_ids),
+        ).fetchall()
+        for reviewed in reviewed_rows:
+            status = str(reviewed["status"] or "")
+            item = {
+                "suggestion_id": str(reviewed["suggestion_id"] or ""),
+                "scope_type": str(reviewed["scope_type"] or ""),
+                "scope_key": str(reviewed["scope_key"] or ""),
+                "action": str(reviewed["action"] or ""),
+                "status": status,
+                "review_note": str(reviewed["review_note"] or ""),
             }
-        )
-    return {"approved": approved, "skipped": skipped}
+            if status == "approved":
+                approved.append(item)
+            elif status in {"rejected", "superseded"}:
+                skipped.append({**item, "reason": status})
+    return {"approved": approved, "skipped": skipped, "review": review_result, "conflicts": conflict_result}
 
 
 def _sync_factor_weights_for_demo(*, experiment_id: str) -> dict[str, Any]:
@@ -2593,6 +2930,15 @@ def _auto_release_parameter_template_candidates(
         regime_key = str(candidate.get("regime_key") or "")
         template_id = str(candidate.get("template_id") or "")
         if template_id and not template_service.get_template(template_id=template_id):
+            try:
+                service.ensure_candidate_template_materialized(
+                    candidate,
+                    template_service=template_service,
+                )
+            except Exception as exc:
+                skipped.append({"candidate_id": candidate_id, "reason": f"template_materialize_failed:{exc}"})
+                continue
+        if template_id and not template_service.get_template(template_id=template_id):
             if status in {"pending_review", "approved"}:
                 try:
                     service.review_release_candidate(
@@ -2648,7 +2994,26 @@ def _auto_apply_position_supervisor_template_suggestions(
     from config.runtime_config import shared as runtime_config
     from risk.policy_service import RiskPolicyService
     from backend.services.evolution_ledger import persist_runtime_config_snapshot
+    from research.learning.governor import RuleEvolutionGovernor
 
+    def _template_switch_priority(row) -> tuple[int, float, float]:
+        action = str(row["action"] or "")
+        target_template_id = str(row["scope_key"] or "")
+        priority = {
+            "tighten_mfe_capture_protection": 100,
+            "tighten_profit_protection": 80,
+            "relax_thesis_break": 50,
+            "increase_min_hold_window": 45,
+        }.get(action, 10)
+        if target_template_id == "position_supervisor:profit_protection.v1":
+            priority += 10
+        return (
+            priority,
+            float(row["confidence"] or 0.0),
+            float(row["created_at"] or 0.0),
+        )
+
+    RuleEvolutionGovernor(str(db_path)).resolve_conflicts()
     valid_templates = {str(item.get("template_id") or "") for item in list_position_supervisor_templates()}
     previous_template_id = str(getattr(runtime_config(), "position_supervisor_template_id", "") or "position_supervisor:default.v1")
     conn = _connect(db_path)
@@ -2667,13 +3032,71 @@ def _auto_apply_position_supervisor_template_suggestions(
             """,
             (int(limit),),
         ).fetchall()
-        for row in rows:
+        active_auto_tpsl = "auto_tpsl" in previous_template_id
+        if active_auto_tpsl:
+            kept_rows = []
+            for row in rows:
+                suggestion_id = str(row["suggestion_id"] or "")
+                target_template_id = str(row["scope_key"] or "")
+                if target_template_id == previous_template_id:
+                    kept_rows.append(row)
+                    continue
+                _execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET status='superseded', reviewed_at=?, review_note=?
+                    WHERE suggestion_id=? AND status='approved'
+                    """,
+                    (
+                        time.time(),
+                        f"superseded by active auto_tpsl template {previous_template_id}",
+                        suggestion_id,
+                    ),
+                )
+                skipped.append({"suggestion_id": suggestion_id, "reason": "superseded_by_active_auto_tpsl"})
+            conn.commit()
+            rows = kept_rows
+        switch_claimed = False
+        for row in sorted(rows, key=_template_switch_priority, reverse=True):
             suggestion_id = str(row["suggestion_id"] or "")
             target_template_id = str(row["scope_key"] or "")
+            if switch_claimed:
+                _execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET status='superseded', reviewed_at=?, review_note=?
+                    WHERE suggestion_id=? AND status='approved'
+                    """,
+                    (
+                        time.time(),
+                        "superseded by higher priority position supervisor template switch in same cycle",
+                        suggestion_id,
+                    ),
+                )
+                conn.commit()
+                skipped.append({"suggestion_id": suggestion_id, "reason": "lower_priority_template_switch"})
+                continue
             if target_template_id == previous_template_id:
                 skipped.append({"suggestion_id": suggestion_id, "reason": "already_active"})
+                switch_claimed = True
                 continue
             if target_template_id not in valid_templates:
+                _execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET status='rejected', reviewed_at=?, review_note=?
+                    WHERE suggestion_id=? AND status='approved'
+                    """,
+                    (
+                        time.time(),
+                        "system rejected by demo_autonomous: invalid position supervisor template",
+                        suggestion_id,
+                    ),
+                )
+                conn.commit()
                 skipped.append({"suggestion_id": suggestion_id, "reason": "invalid_template"})
                 continue
             evidence = _loads(row["evidence_json"], {})
@@ -2825,6 +3248,7 @@ def _auto_apply_position_supervisor_template_suggestions(
                 }
             )
             previous_template_id = target_template_id
+            switch_claimed = True
         conn.commit()
         return {"applied": applied, "skipped": skipped}
     finally:
@@ -2856,8 +3280,8 @@ def _auto_rollback_position_supervisor_template(
                 JOIN learning_application_effect e ON e.application_id = l.application_id
                 WHERE l.scope_type='position_supervisor_template'
                   AND l.action='switch_position_supervisor_template'
-                  AND l.status IN ('applied', 'observing')
-                  AND e.status='observing'
+                  AND l.status IN ('applied', 'observing', 'ineffective')
+                  AND e.status IN ('observing', 'ineffective')
                 ORDER BY l.created_at DESC
                 LIMIT 20
                 """
@@ -2978,13 +3402,16 @@ def apply_demo_autonomy(
         )
         _insert_evolution_event(
             conn,
-            "demo_autonomy_auto_approve",
+            "demo_autonomy_governor_review",
             {"experiment_id": experiment_id, **approvals},
         )
         conn.commit()
     finally:
         conn.close()
 
+    from research.learning.governor import RuleEvolutionGovernor
+
+    governance_conflicts = RuleEvolutionGovernor(str(db_path)).resolve_conflicts()
     factor_weights = _sync_factor_weights_for_demo(experiment_id=experiment_id)
     parameter_suggestions = _auto_apply_parameter_template_suggestions(
         db_path=db_path,
@@ -3010,6 +3437,7 @@ def apply_demo_autonomy(
         "mode": "demo_autonomous",
         "experiment_id": experiment_id,
         "approvals": approvals,
+        "governance_conflicts": governance_conflicts,
         "factor_weights": factor_weights,
         "parameter_suggestions": parameter_suggestions,
         "parameter_candidates": parameter_candidates,
@@ -3041,6 +3469,7 @@ def run_autonomous_learning_cycle(
     review_integrity_backfill = backfill_trade_review_integrity_markers(db_path=db_path, limit=sample_limit)
     close_source_backfill = backfill_trade_review_close_sources(db_path=db_path, limit=sample_limit)
     samples = materialize_autonomous_learning_samples(db_path=db_path, limit=sample_limit)
+    entry_quality_governance = materialize_entry_quality_governance_suggestions(db_path=db_path, limit=sample_limit)
     entry_cluster_governance = materialize_entry_cluster_governance_suggestions(db_path=db_path, limit=sample_limit)
     event_window_governance = materialize_event_window_governance_suggestions(db_path=db_path, limit=sample_limit)
     contract_repair = repair_evidence_contracts(db_path=db_path, limit=max(sample_limit, sample_limit * 4))
@@ -3065,6 +3494,7 @@ def run_autonomous_learning_cycle(
             "review_integrity_backfill": review_integrity_backfill,
             "close_source_backfill": close_source_backfill,
             "samples": samples,
+            "entry_quality_governance": entry_quality_governance,
             "entry_cluster_governance": entry_cluster_governance,
             "event_window_governance": event_window_governance,
             "evidence_contract_repair": contract_repair,
@@ -3094,6 +3524,7 @@ def schedule_autonomous_learning(
 
     def _log_summary(result: dict) -> dict:
         samples = result.get("samples") or {}
+        entry_quality_governance = result.get("entry_quality_governance") or {}
         entry_cluster_governance = result.get("entry_cluster_governance") or {}
         event_window_governance = result.get("event_window_governance") or {}
         governance = result.get("governance") or {}
@@ -3106,6 +3537,8 @@ def schedule_autonomous_learning(
             "trace_pending": (result.get("trace_maturation") or {}).get("pending"),
             "samples_total_changed": samples.get("total_changed"),
             "sample_counts": samples.get("counts"),
+            "entry_quality_suggestions": entry_quality_governance.get("suggestions"),
+            "entry_quality_bucket_count": entry_quality_governance.get("bucket_count"),
             "entry_cluster_suggestions": entry_cluster_governance.get("suggestions"),
             "entry_cluster_bucket_count": entry_cluster_governance.get("bucket_count"),
             "event_window_suggestions": event_window_governance.get("suggestions"),

@@ -14,6 +14,7 @@ from backend.services.position_supervisor import evaluate_position_supervisor
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
+    PROFIT_PROTECTION_TEMPLATE_ID,
     get_position_supervisor_template,
     list_position_supervisor_templates,
 )
@@ -228,6 +229,11 @@ def replay_position_supervisor_templates(
         templates = list_position_supervisor_templates()
         template_summaries: dict[str, dict[str, Any]] = {}
         samples: list[dict[str, Any]] = []
+        capture_failure_count = 0
+        mfe_then_loss_count = 0
+        capture_failure_giveback_sum = 0.0
+        capture_failure_capture_sum = 0.0
+        capture_failure_examples: list[dict[str, Any]] = []
         for template in templates:
             template_id = str(template.get("template_id") or "")
             template_summaries[template_id] = {
@@ -243,6 +249,29 @@ def replay_position_supervisor_templates(
         for row in rows:
             context = _review_to_supervisor_context(conn, row)
             review_payload = _loads(row["review_json"], {})
+            pnl = _safe_float(row["pnl"])
+            mfe = _safe_float(row["mfe"] if row["mfe"] is not None else review_payload.get("mfe"))
+            mae = _safe_float(row["mae"] if row["mae"] is not None else review_payload.get("mae"))
+            giveback_ratio = _safe_float(review_payload.get("giveback_ratio"))
+            profit_capture_ratio = _safe_float(review_payload.get("profit_capture_ratio"))
+            if pnl < 0 and mfe > 0:
+                mfe_then_loss_count += 1
+                if giveback_ratio >= 0.75 and profit_capture_ratio <= 0.15:
+                    capture_failure_count += 1
+                    capture_failure_giveback_sum += giveback_ratio
+                    capture_failure_capture_sum += profit_capture_ratio
+                    if len(capture_failure_examples) < 5:
+                        capture_failure_examples.append(
+                            {
+                                "review_id": str(row["review_id"] or ""),
+                                "position_id": str(row["position_id"] or ""),
+                                "pnl": pnl,
+                                "mfe": mfe,
+                                "giveback_ratio": giveback_ratio,
+                                "profit_capture_ratio": profit_capture_ratio,
+                                "close_reason": str(review_payload.get("close_reason") or ""),
+                            }
+                        )
             sample_actions: dict[str, Any] = {}
             for template in templates:
                 template_id = str(template.get("template_id") or "")
@@ -266,13 +295,14 @@ def replay_position_supervisor_templates(
                 {
                     "review_id": str(row["review_id"] or ""),
                     "position_id": str(row["position_id"] or ""),
-                    "pnl": _safe_float(row["pnl"]),
-                    "mfe": _safe_float(row["mfe"]),
-                    "mae": _safe_float(row["mae"]),
+                    "pnl": pnl,
+                    "mfe": mfe,
+                    "mae": mae,
                     "close_reason": str(review_payload.get("close_reason") or ""),
                     "holding_seconds": _safe_float(review_payload.get("holding_seconds")),
                     "holding_efficiency": _safe_float(review_payload.get("holding_efficiency")),
-                    "profit_capture_ratio": _safe_float(review_payload.get("profit_capture_ratio")),
+                    "profit_capture_ratio": profit_capture_ratio,
+                    "giveback_ratio": giveback_ratio,
                     "template_actions": sample_actions,
                 }
             )
@@ -281,6 +311,8 @@ def replay_position_supervisor_templates(
             summary["avg_confidence"] = round(float(summary.pop("confidence_sum", 0.0)) / total, 4)
         default_close = int(template_summaries.get(DEFAULT_TEMPLATE_ID, {}).get("small_loss_close_count") or 0)
         conservative_close = int(template_summaries.get(CONSERVATIVE_TEMPLATE_ID, {}).get("small_loss_close_count") or 0)
+        avg_failed_giveback = capture_failure_giveback_sum / capture_failure_count if capture_failure_count else 0.0
+        avg_failed_capture = capture_failure_capture_sum / capture_failure_count if capture_failure_count else 0.0
         return {
             "schema_version": "position_supervisor_replay.v1",
             "day": day,
@@ -288,9 +320,17 @@ def replay_position_supervisor_templates(
             "sample_count": len(rows),
             "amend_issues": _amend_issue_count(conn, day=day),
             "templates": list(template_summaries.values()),
+            "capture_failure_summary": {
+                "mfe_then_loss_count": mfe_then_loss_count,
+                "capture_failed_count": capture_failure_count,
+                "avg_failed_giveback_ratio": round(avg_failed_giveback, 6),
+                "avg_failed_profit_capture_ratio": round(avg_failed_capture, 6),
+                "examples": capture_failure_examples,
+            },
             "comparison": {
                 "default_template_id": DEFAULT_TEMPLATE_ID,
                 "candidate_template_id": CONSERVATIVE_TEMPLATE_ID,
+                "profit_protection_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
                 "small_loss_close_delta": conservative_close - default_close,
                 "small_loss_closes_reduced": max(0, default_close - conservative_close),
             },
@@ -309,6 +349,8 @@ def build_position_supervisor_advisories(
     replay = replay_position_supervisor_templates(day=day, db_path=db_path)
     default_summary = next((x for x in replay["templates"] if x["template_id"] == DEFAULT_TEMPLATE_ID), {})
     candidate_summary = next((x for x in replay["templates"] if x["template_id"] == CONSERVATIVE_TEMPLATE_ID), {})
+    profit_summary = next((x for x in replay["templates"] if x["template_id"] == PROFIT_PROTECTION_TEMPLATE_ID), {})
+    capture_failure_summary = replay.get("capture_failure_summary") or {}
     amend_issues = replay.get("amend_issues") or {}
     conn = _connect(db_path, read_only=True)
     try:
@@ -319,11 +361,70 @@ def build_position_supervisor_advisories(
         "sample_count": replay.get("sample_count"),
         "comparison": replay.get("comparison"),
         "amend_issues": amend_issues,
+        "capture_failure_summary": capture_failure_summary,
     }
     suggestions: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
 
-    def _add(action: str, confidence: float, reason: str, evidence: dict[str, Any]) -> None:
-        suggestion_id = "psv_" + hashlib.sha1(f"{day}:{action}:{reason}".encode("utf-8")).hexdigest()[:16]
+    def _generated_tpsl_template() -> dict[str, Any] | None:
+        capture_failed_count = int(capture_failure_summary.get("capture_failed_count") or 0)
+        avg_giveback = _safe_float(capture_failure_summary.get("avg_failed_giveback_ratio"))
+        avg_capture = _safe_float(capture_failure_summary.get("avg_failed_profit_capture_ratio"))
+        if capture_failed_count <= 0:
+            return None
+        base = get_position_supervisor_template(PROFIT_PROTECTION_TEMPLATE_ID)
+        suffix = hashlib.sha1(
+            f"{day}:{capture_failed_count}:{avg_giveback:.4f}:{avg_capture:.4f}".encode("utf-8")
+        ).hexdigest()[:10]
+        thresholds = dict(base.get("thresholds") or {})
+        sl_policy = dict(base.get("sl_policy") or {})
+        tp_policy = dict(base.get("tp_policy") or {})
+        capture_policy = dict(base.get("capture_policy") or {})
+        severity = min(1.0, max(0.0, avg_giveback))
+        thresholds["giveback_tighten_threshold"] = round(max(0.16, min(0.30, 0.26 - 0.06 * severity)), 4)
+        thresholds["giveback_reduce_threshold"] = round(max(0.42, min(0.62, 0.58 - 0.10 * severity)), 4)
+        thresholds["profit_capture_min_threshold"] = round(max(0.36, min(0.56, 0.44 + 0.08 * (1.0 - avg_capture))), 4)
+        thresholds["near_take_profit_progress"] = round(max(0.82, min(0.92, 0.90 - 0.04 * severity)), 4)
+        sl_policy["profit_lock_multiplier"] = round(max(0.62, min(0.88, 0.68 + 0.14 * severity)), 4)
+        sl_policy["breakeven_lock_ratio"] = round(max(0.28, min(0.45, 0.32 + 0.08 * severity)), 4)
+        tp_policy["near_take_profit_action"] = "protect"
+        tp_policy["extension_enabled"] = True
+        tp_policy["extension_factor"] = round(max(0.12, min(0.32, 0.24 - 0.08 * severity)), 4)
+        tp_policy["extension_profit_capture_min"] = round(max(0.38, min(0.58, 0.46 + 0.08 * (1.0 - avg_capture))), 4)
+        capture_policy["mfe_capture_failure_threshold"] = round(max(0.16, min(0.28, 0.20 + 0.04 * severity)), 4)
+        return {
+            **base,
+            "template_id": f"position_supervisor:auto_tpsl.{suffix}.v1",
+            "template_version": f"auto_tpsl.{suffix}.v1",
+            "template_role": "generated_dynamic_tpsl_capture_repair",
+            "status": "candidate",
+            "source": "generated_from_supervisor_learning",
+            "base_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+            "description": "Generated dynamic TP/SL supervisor template from MFE capture failure evidence.",
+            "thresholds": thresholds,
+            "sl_policy": sl_policy,
+            "tp_policy": tp_policy,
+            "capture_policy": capture_policy,
+            "generation_evidence": {
+                "day": day,
+                "capture_failed_count": capture_failed_count,
+                "avg_failed_giveback_ratio": round(avg_giveback, 6),
+                "avg_failed_profit_capture_ratio": round(avg_capture, 6),
+                "source": "position_supervisor_advisory",
+            },
+        }
+
+    def _add(
+        action: str,
+        confidence: float,
+        reason: str,
+        evidence: dict[str, Any],
+        *,
+        target_template_id: str = CONSERVATIVE_TEMPLATE_ID,
+    ) -> None:
+        suggestion_id = "psv_" + hashlib.sha1(
+            f"{day}:{action}:{target_template_id}:{reason}".encode("utf-8")
+        ).hexdigest()[:16]
         evidence = {
             **evidence,
             "replay_summary": replay_summary,
@@ -333,7 +434,7 @@ def build_position_supervisor_advisories(
             {
                 "suggestion_id": suggestion_id,
                 "scope_type": "position_supervisor_template",
-                "scope_key": CONSERVATIVE_TEMPLATE_ID if action != "fix_stop_legality" else "supervisor_tighten_sltp",
+                "scope_key": target_template_id,
                 "action": action,
                 "confidence": round(confidence, 4),
                 "reason": reason,
@@ -342,6 +443,42 @@ def build_position_supervisor_advisories(
                 "advisory_only": True,
                 "approval_path": "governor_review_then_offline_replay",
             }
+        )
+
+    capture_failed_count = int(capture_failure_summary.get("capture_failed_count") or 0)
+    mfe_then_loss_count = int(capture_failure_summary.get("mfe_then_loss_count") or 0)
+    if capture_failed_count >= 2 or (
+        capture_failed_count >= 1 and _safe_float(capture_failure_summary.get("avg_failed_giveback_ratio")) >= 0.85
+    ):
+        generated_template = _generated_tpsl_template()
+        if generated_template:
+            _add(
+                "switch_position_supervisor_template",
+                min(0.86, 0.70 + 0.03 * capture_failed_count),
+                "generated dynamic TP/SL template from MFE capture failure replay",
+                {
+                    "day": day,
+                    "candidate_template_id": generated_template["template_id"],
+                    "candidate_template": generated_template,
+                    "base_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+                    "generation_reason": "mfe_capture_failure",
+                    "capture_failure_examples": capture_failure_summary.get("examples") or [],
+                },
+                target_template_id=generated_template["template_id"],
+            )
+        _add(
+            "tighten_mfe_capture_protection",
+            min(0.82, 0.66 + 0.03 * capture_failed_count),
+            "closed losses had positive MFE but very low profit capture and high giveback",
+            {
+                "day": day,
+                "mfe_then_loss_count": mfe_then_loss_count,
+                "capture_failed_count": capture_failed_count,
+                "candidate_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+                "candidate_actions": profit_summary.get("actions") or {},
+                "capture_failure_examples": capture_failure_summary.get("examples") or [],
+            },
+            target_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
         )
 
     if int(replay["comparison"].get("small_loss_closes_reduced") or 0) > 0:
@@ -364,8 +501,10 @@ def build_position_supervisor_advisories(
             {
                 "day": day,
                 "default_actions": default_summary.get("actions") or {},
-                "candidate_actions": candidate_summary.get("actions") or {},
+                "candidate_actions": profit_summary.get("actions") or {},
+                "candidate_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
             },
+            target_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
         )
     if int(default_summary.get("thesis_broken_close_count") or 0) >= 3:
         _add(
@@ -379,11 +518,12 @@ def build_position_supervisor_advisories(
             },
         )
     if int(amend_issues.get("amend_failed", 0) or 0) > 0 or int(amend_issues.get("amend_skipped", 0) or 0) > 0:
-        _add(
-            "fix_stop_legality",
-            0.82,
-            "supervisor protection amendments had broker-side skip/failure evidence",
-            {"day": day, "amend_issues": amend_issues},
+        skipped.append(
+            {
+                "action": "fix_stop_legality",
+                "reason": "no autonomous executor; amend legality remains execution diagnostics",
+                "evidence": {"day": day, "amend_issues": amend_issues},
+            }
         )
 
     if materialize and suggestions:
@@ -431,4 +571,5 @@ def build_position_supervisor_advisories(
             "counterfactual_summary": counterfactual_summary,
         },
         "items": suggestions,
+        "skipped": skipped,
     }

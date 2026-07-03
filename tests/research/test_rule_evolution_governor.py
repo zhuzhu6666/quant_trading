@@ -407,6 +407,107 @@ def test_reconcile_application_effects_reinforces_positive_application(tmp_path)
     assert reinforced_rows[0]["action"] == "boost_small"
 
 
+def test_reconcile_application_effects_observes_position_supervisor_template(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+
+    app_id = gov.log_application(
+        scope_type="position_supervisor_template",
+        scope_key="position_supervisor:profit_protection.v1",
+        action="switch_position_supervisor_template",
+        bias_multiplier=1.0,
+        old_weight=0.0,
+        new_weight=0.0,
+        suggestion_ids=["psv1"],
+        cycle_ts=200.0,
+        details={
+            "previous_template_id": "position_supervisor:default.v1",
+            "target_template_id": "position_supervisor:profit_protection.v1",
+        },
+    )
+
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason, status, created_at)
+            VALUES ('psv1', 'position_supervisor_template', 'position_supervisor:profit_protection.v1',
+                    'switch_position_supervisor_template', 0.7, 'test', 'approved', 100.0)
+            """
+        )
+        samples = (
+            (100.0, "pre_1", 4.0, 4.2, 0.10, 0.70),
+            (120.0, "pre_2", 3.0, 3.5, 0.12, 0.65),
+            (140.0, "pre_3", 2.5, 3.0, 0.15, 0.60),
+            (220.0, "post_1", -2.0, 3.0, 0.96, 0.02),
+            (240.0, "post_2", -2.5, 2.8, 0.94, 0.03),
+            (260.0, "post_3", -1.8, 2.6, 0.92, 0.04),
+        )
+        for ts, review_id, pnl, mfe, giveback, capture in samples:
+            review_payload = {
+                "real_pnl": {"net": pnl},
+                "close_reason": "broker_close",
+                "close_reason_source": "supervisor_tighten_stopout",
+                "context_integrity": "full",
+                "mfe": mfe,
+                "giveback_ratio": giveback,
+                "profit_capture_ratio": capture,
+                "inferred_close_supervisor": {
+                    "event_type": "supervisor_tighten",
+                    "action": "tighten",
+                    "action_reason": "profit_giveback_after_mfe",
+                },
+            }
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
+                 failure_tags_json, summary_text, review_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, '[]', '', ?, ?)
+                """,
+                (
+                    review_id,
+                    f"trade_{review_id}",
+                    f"pos_{review_id}",
+                    f"dec_{review_id}",
+                    pnl,
+                    "bad_loss" if pnl < 0 else "good_win",
+                    json.dumps(review_payload),
+                    ts,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = gov.reconcile_application_effects(min_trades=3, observe_trades=3, baseline_min_trades=2)
+    assert result["observed"] == 1
+    assert result["rolled_back"] == 1
+
+    conn = _connect(db_path)
+    try:
+        effect_row = conn.execute(
+            """
+            SELECT status, observed_trade_count, baseline_trade_count, delta_avg_reward
+            FROM learning_application_effect
+            WHERE application_id=?
+            """,
+            (app_id,),
+        ).fetchone()
+        suggestion_row = conn.execute(
+            "SELECT status FROM policy_suggestion WHERE suggestion_id='psv1'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert effect_row["status"] == "ineffective"
+    assert int(effect_row["observed_trade_count"]) == 3
+    assert int(effect_row["baseline_trade_count"]) == 3
+    assert float(effect_row["delta_avg_reward"]) < 0
+    assert suggestion_row["status"] == "rolled_back"
+
+
 def test_reconcile_application_effects_waits_when_baseline_too_thin(tmp_path):
     db_path = str(tmp_path / "state.db")
     gov = RuleEvolutionGovernor(db_path)
@@ -729,3 +830,138 @@ def test_reconcile_parameter_template_effects_rolls_back_active_template(tmp_pat
     assert active["template_id"] == old_template["template_id"]
     assert logs[0]["status"] == "rolled_back"
     assert logs[0]["new_template_id"] == old_template["template_id"]
+
+
+def test_conflict_resolver_supersedes_factor_boost_when_entry_quality_suppresses_same_factor(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason, evidence_json, status, created_at)
+            VALUES
+            ('boost1', 'factor', 'ema_slope', 'boost_small', 0.9, 'test', '{}', 'approved', 100.0),
+            ('suppress1', 'entry_quality', 'ema_slope', 'suppress_recent_worst_factor', 0.7, 'test',
+             '{"suppressed_factor":"ema_slope"}', 'approved', 90.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = gov.resolve_conflicts()
+
+    assert result["superseded"] == 1
+    conn = _connect(db_path)
+    try:
+        rows = {
+            row["suggestion_id"]: row["status"]
+            for row in conn.execute("SELECT suggestion_id, status FROM policy_suggestion").fetchall()
+        }
+    finally:
+        conn.close()
+    assert rows["boost1"] == "superseded"
+    assert rows["suppress1"] == "approved"
+
+
+def test_conflict_resolver_template_switch_blocks_same_factor_weight_change(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason, evidence_json, status, created_at)
+            VALUES
+            ('weight1', 'factor', 'rsi_14', 'downweight', 0.9, 'test', '{}', 'approved', 100.0),
+            ('tpl1', 'parameter_template', 'rsi_14:range', 'switch_parameter_template', 0.6, 'test',
+             '{"factor_id":"rsi_14","regime_key":"range","target_template_id":"tpl_new"}', 'approved', 80.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    gov.resolve_conflicts()
+
+    conn = _connect(db_path)
+    try:
+        rows = {
+            row["suggestion_id"]: row["status"]
+            for row in conn.execute("SELECT suggestion_id, status FROM policy_suggestion").fetchall()
+        }
+    finally:
+        conn.close()
+    assert rows["weight1"] == "superseded"
+    assert rows["tpl1"] == "approved"
+
+
+def test_governor_approves_online_light_parameter_template_switch(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason, evidence_json, status, created_at)
+            VALUES
+            ('tpl_switch', 'parameter_template', 'rsi_14:range', 'switch_parameter_template', 0.7, 'test',
+             '{"factor_id":"rsi_14","regime_key":"range","target_template_id":"tpl_new","boundary":{"recommended_scope":"online_light"}}',
+             'proposed', 100.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = gov.review_pending()
+
+    assert result["approved"] == 1
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='tpl_switch'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "approved"
+    assert "online_light" in row["review_note"]
+
+
+def test_conflict_resolver_keeps_auto_tpsl_over_stale_supervisor_template(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason, evidence_json, status, created_at)
+            VALUES
+            ('old_profit', 'position_supervisor_template', 'position_supervisor:profit_protection.v1',
+             'switch_position_supervisor_template', 0.95, 'test', '{}', 'approved', 200.0),
+            ('auto_tpsl', 'position_supervisor_template', 'position_supervisor:auto_tpsl.v2',
+             'switch_position_supervisor_template', 0.7, 'test',
+             '{"target_template_id":"position_supervisor:auto_tpsl.v2"}', 'approved', 100.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    gov.resolve_conflicts()
+
+    conn = _connect(db_path)
+    try:
+        rows = {
+            row["suggestion_id"]: row["status"]
+            for row in conn.execute("SELECT suggestion_id, status FROM policy_suggestion").fetchall()
+        }
+    finally:
+        conn.close()
+    assert rows["old_profit"] == "superseded"
+    assert rows["auto_tpsl"] == "approved"

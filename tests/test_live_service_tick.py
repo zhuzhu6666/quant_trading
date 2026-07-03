@@ -16,17 +16,21 @@ import pytest
 from unittest.mock import MagicMock
 
 from backend.services import live_service
+from backend.services import config_service
+from config import runtime_config as rc
 
 
 @pytest.fixture(autouse=True)
 def _reset_state():
     """Reset module-level state between tests."""
+    rc.reset_for_tests()
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
     live_service._live_state["market_session"] = None
     live_service._live_state["spot_quote"] = None
     live_service._pos_open_api_volume.clear()
+    rc.reset_for_tests()
     yield
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
@@ -70,6 +74,35 @@ def test_resolve_position_api_volume_prefers_refreshed_position():
     refreshed = [{"position_id": 12345, "volume": 130.0}]
     vol = live_service._resolve_position_api_volume(12345, refreshed, 100.0)
     assert vol == 130.0
+
+
+def test_entry_quality_learning_gate_interprets_factor_context_before_risk():
+    gate = live_service._entry_quality_gate_from_learning_policy(
+        policy={
+            "active": True,
+            "controls": [
+                {
+                    "suggestion_id": "psg_real_yield",
+                    "scope_key": "real_yield_chg",
+                    "action": "suppress_recent_worst_factor",
+                    "suppressed_factor": "real_yield_chg",
+                    "strong_signal_override": 0.78,
+                }
+            ],
+        },
+        decision_quality={
+            "factor_conflict_ratio": 0.25,
+            "top_contributors": [
+                {"factor": "real_yield_chg", "contribution_score": -0.11},
+            ],
+        },
+        signal_score=0.62,
+    )
+
+    assert gate["allowed"] is False
+    assert gate["reason"] == "learning_recent_worst_factor_control"
+    assert gate["source"] == "entry_quality_gate"
+    assert gate["suggestion_id"] == "psg_real_yield"
 
 
 def test_supervisor_tighten_sl_plan_clips_long_stop_below_current_price():
@@ -191,6 +224,59 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
     assert updates[0][1]["applied_tp"] == 3996.81
 
 
+def test_pending_open_attach_blocks_until_position_is_confirmed():
+    live_service._pending_open_attach_until.clear()
+
+    live_service._remember_pending_open_attach(12345)
+
+    assert live_service._active_pending_open_attach_ids(set()) == [12345]
+    assert live_service._active_pending_open_attach_ids({12345}) == []
+
+
+def test_entry_protection_failed_status_increments_attempt_and_remains_repairable(monkeypatch):
+    meta = {
+        "entry_protection_plan": {
+            "schema_version": live_service._ENTRY_PROTECTION_PLAN_SCHEMA,
+            "status": "pending",
+            "direction": 1,
+            "target_stop_loss": 3980.0,
+            "target_take_profit": 4050.0,
+            "attempts": 0,
+            "last_attempt_ts": 0.0,
+        }
+    }
+    merged = []
+    monkeypatch.setattr(live_service, "_load_recovery_position_row", lambda pid: {"recovery_meta": meta})
+    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda pid, next_meta: merged.append((pid, next_meta)))
+
+    live_service._update_entry_protection_plan_status(
+        12345,
+        status="failed",
+        error="amend_failed",
+        attempted=True,
+    )
+
+    updated_plan = merged[0][1]["entry_protection_plan"]
+    assert updated_plan["status"] == "failed"
+    assert updated_plan["attempts"] == 1
+    assert updated_plan["last_error"] == "amend_failed"
+    updated_plan["last_attempt_ts"] = 0.0
+
+    monkeypatch.setattr(
+        live_service,
+        "_load_recovery_position_row",
+        lambda pid: {"recovery_meta": {"entry_protection_plan": updated_plan}},
+    )
+    candidates = live_service._entry_protection_repair_candidates(
+        [{"position_id": 12345, "direction": 1, "sl": 0.0, "tp": 0.0}],
+        current_price=4000.0,
+        tick=13,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].source == live_service._ENTRY_PROTECTION_REPAIR_SOURCE
+
+
 # ── _local_positions ─────────────────────────────────────
 
 
@@ -254,3 +340,15 @@ def test_process_tick_dry_run_does_not_call_amend(monkeypatch):
 
     bridge.market_buy.assert_not_called()
     bridge.market_sell.assert_not_called()
+
+
+def test_should_send_orders_respects_system_mode(monkeypatch, tmp_path):
+    path = tmp_path / "settings.yaml"
+    path.write_text("system:\n  mode: backtest\nctrader:\n  send_orders: true\n", encoding="utf-8")
+    monkeypatch.setattr(config_service, "SETTINGS_PATH", path)
+    rc.replace(rc.RuntimeConfig(ctrader_send_orders=True, factor_dry_run=False))
+
+    assert live_service._should_send_orders("ctrader") is False
+
+    path.write_text("system:\n  mode: live\nctrader:\n  send_orders: true\n", encoding="utf-8")
+    assert live_service._should_send_orders("ctrader") is True

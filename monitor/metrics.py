@@ -49,9 +49,10 @@ class Metrics:
     _lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._enabled: bool = _PROM_AVAILABLE
+        self._enabled: bool = True
+        self._fallback_samples: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
         if not _PROM_AVAILABLE:
-            logger.warning("prometheus_client not installed, metrics endpoint will be a no-op")
+            logger.warning("prometheus_client not installed, using lightweight text metrics fallback")
             return
         self._registry = CollectorRegistry()
         # 最小指标集
@@ -122,9 +123,24 @@ class Metrics:
 
     def render(self) -> Tuple[bytes, str]:
         """返回 (body, content_type) 给 /metrics 端点。"""
-        if not self._enabled:
-            return (b'# metrics disabled (prometheus_client not installed)\n', CONTENT_TYPE_LATEST)
+        if not _PROM_AVAILABLE:
+            lines = ["# metrics fallback (prometheus_client not installed)"]
+            for (name, labels), value in sorted(self._fallback_samples.items()):
+                if labels:
+                    label_text = ",".join(f'{k}="{v}"' for k, v in labels)
+                    lines.append(f"{name}{{{label_text}}} {float(value)}")
+                else:
+                    lines.append(f"{name} {float(value)}")
+            return ("\n".join(lines).encode("utf-8") + b"\n", CONTENT_TYPE_LATEST)
         return generate_latest(self._registry), CONTENT_TYPE_LATEST  # type: ignore
+
+    def _fallback_set(self, name: str, labels: dict[str, Any], value: float) -> None:
+        key = (name, tuple((str(k), str(v)) for k, v in labels.items()))
+        self._fallback_samples[key] = float(value)
+
+    def _fallback_inc(self, name: str, labels: dict[str, Any], value: float = 1.0) -> None:
+        key = (name, tuple((str(k), str(v)) for k, v in labels.items()))
+        self._fallback_samples[key] = float(self._fallback_samples.get(key, 0.0)) + float(value)
 
     # ----- 便捷 API -----
     def emit(self, name: str, fields: Dict[str, Any]) -> None:
@@ -137,7 +153,21 @@ class Metrics:
         - factor_health_score: {factor, status, value}
         - factor_lifecycle_events_total: {event, source, value=1(默认)}
         """
-        if not self._enabled:
+        if not _PROM_AVAILABLE:
+            if name == "factor_count":
+                self._fallback_set(name, {"source": fields["source"]}, float(fields.get("value", 1)))
+            elif name == "loop_status":
+                self._fallback_set(name, {"kind": fields["kind"]}, float(fields.get("value", 1)))
+            elif name == "data_sync_last_bar_age_seconds":
+                self._fallback_set(name, {"symbol": fields["symbol"], "timeframe": fields["timeframe"]}, float(fields["value"]))
+            elif name == "factor_health_score":
+                self._fallback_set(name, {"factor": fields["factor"], "status": fields["status"]}, float(fields["value"]))
+            elif name == "factor_lifecycle_events_total":
+                self._fallback_inc(name, {"event": fields["event"], "source": fields.get("source", "unknown")}, float(fields.get("value", 1)))
+            elif name in {"canary_rollback_total", "risk_rebalance_events_total", "gp_elite_added_total"}:
+                self._fallback_inc(name, {}, float(fields.get("value", 1)))
+            else:
+                logger.debug("Metrics.emit unknown name=%s", name)
             return
         try:
             if name == "factor_count":

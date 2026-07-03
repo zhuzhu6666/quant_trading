@@ -27,10 +27,11 @@ def get_metrics(_user: RequireUser) -> Response:
 def get_metrics_health(_user: RequireUser) -> dict:
     """指标注册状态(JSON),给前端调试用。"""
     m = Metrics.shared()
+    registry = getattr(m, "_registry", None)
     return {
         "enabled": m.enabled,
         "registry_collectors": (
-            [str(k) for k in m._registry._collector_to_names.keys()] if m.enabled else []
+            [str(k) for k in registry._collector_to_names.keys()] if registry is not None else []
         ),
         "prometheus_content_type": CONTENT_TYPE_LATEST,
     }

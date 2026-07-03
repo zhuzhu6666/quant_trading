@@ -6,8 +6,10 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
+from research.learning.governance_conflicts import GovernanceConflictResolver
 
 
 class RuleEvolutionGovernor:
@@ -22,7 +24,7 @@ class RuleEvolutionGovernor:
         return is_state_db_path(self.db_path)
 
     def _sql(self, sql: str) -> str:
-        return sql.replace("?", "%s") if self._use_pg() else sql
+        return sql.replace("%", "%%").replace("?", "%s") if self._use_pg() else sql
 
     def _execute(self, conn, sql: str, params: tuple | list | None = None):
         if params is None:
@@ -79,6 +81,46 @@ class RuleEvolutionGovernor:
         return reward * reward_scale
 
     @staticmethod
+    def _has_supervisor_feedback(item: dict) -> bool:
+        review = item.get("review") or {}
+        inferred = review.get("inferred_close_supervisor") or {}
+        close_source = str(review.get("close_reason_source") or "")
+        close_reason = str(review.get("close_reason") or "")
+        action = str(inferred.get("action") or "")
+        event_type = str(inferred.get("event_type") or "")
+        return bool(
+            close_source.startswith("supervisor")
+            or close_reason.startswith("supervisor")
+            or event_type.startswith("supervisor_")
+            or action in {"tighten", "reduce", "close"}
+        )
+
+    @classmethod
+    def _supervisor_reward_from_review(cls, item: dict) -> float:
+        reward = cls._reward_from_review(item)
+        review = item.get("review") or {}
+        pnl = float(item.get("pnl", 0.0) or 0.0)
+        try:
+            mfe = float(review.get("mfe", item.get("mfe", 0.0)) or 0.0)
+        except Exception:
+            mfe = 0.0
+        try:
+            giveback_ratio = float(review.get("giveback_ratio", 0.0) or 0.0)
+        except Exception:
+            giveback_ratio = 0.0
+        try:
+            profit_capture_ratio = float(review.get("profit_capture_ratio", 0.0) or 0.0)
+        except Exception:
+            profit_capture_ratio = 0.0
+        if mfe > 0 and pnl < 0 and giveback_ratio >= 0.75 and profit_capture_ratio <= 0.15:
+            reward -= 0.25
+        elif mfe > 0 and pnl > 0 and profit_capture_ratio >= 0.45:
+            reward += 0.15
+        elif mfe > 0 and giveback_ratio >= 0.85 and profit_capture_ratio <= 0.20:
+            reward -= 0.12
+        return max(-1.0, min(1.0, reward))
+
+    @staticmethod
     def _parse_application_row(row: sqlite3.Row) -> dict:
         item = dict(row)
         try:
@@ -103,6 +145,20 @@ class RuleEvolutionGovernor:
         except Exception:
             item["review"] = {}
         return item
+
+    @staticmethod
+    def _parse_evidence(row: sqlite3.Row) -> dict:
+        try:
+            value = row["evidence_json"]
+        except Exception:
+            value = "{}"
+        if isinstance(value, dict):
+            return value
+        try:
+            parsed = json.loads(value or "{}")
+        except Exception:
+            parsed = {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def list_suggestions(self, *, status: str | None = None, limit: int = 100) -> list[dict]:
         sql = """
@@ -147,6 +203,7 @@ class RuleEvolutionGovernor:
                 scope_key = str(row["scope_key"] or "")
                 action = str(row["action"] or "watch")
                 confidence = float(row["confidence"] or 0.0)
+                evidence = self._parse_evidence(row)
                 stats = self._execute(conn,
                     """
                     SELECT * FROM experience_pattern_stats
@@ -155,13 +212,50 @@ class RuleEvolutionGovernor:
                     (scope_type, scope_key),
                 ).fetchone()
                 if not stats:
-                    unchanged += 1
+                    status = "proposed"
+                    note = ""
+                    if action == "fix_stop_legality":
+                        status = "rejected"
+                        note = "rejected by governor: no autonomous executor for broker stop legality advisory"
+                    elif scope_type == "position_supervisor_template":
+                        has_replay = bool(evidence.get("replay_summary") or evidence.get("replay") or evidence.get("day"))
+                        has_counterfactual = bool(evidence.get("counterfactual_summary") or evidence.get("counterfactual"))
+                        if has_replay and has_counterfactual and confidence >= 0.60:
+                            status = "approved"
+                            note = "approved by governor: replay and counterfactual evidence present"
+                    elif scope_type == "parameter_template" and action == "switch_parameter_template":
+                        boundary = evidence.get("boundary") or {}
+                        recommended_scope = str(
+                            boundary.get("recommended_scope") or evidence.get("recommended_scope") or ""
+                        )
+                        has_target = bool(evidence.get("target_template_id"))
+                        has_factor = bool(evidence.get("factor_id") or scope_key.split(":", 1)[0])
+                        if has_target and has_factor and recommended_scope == "online_light" and confidence >= 0.55:
+                            status = "approved"
+                            note = "approved by governor: online_light parameter template switch evidence present"
+                    if status == "proposed":
+                        status = "rejected"
+                        note = "rejected by governor: no autonomous evidence rule available"
+
+                    if status == "approved":
+                        approved += 1
+                    else:
+                        rejected += 1
+                    self._execute(conn,
+                        """
+                        UPDATE policy_suggestion
+                        SET status=?, reviewed_at=?, review_note=?
+                        WHERE suggestion_id=?
+                        """,
+                        (status, now, note, row["suggestion_id"]),
+                    )
                     continue
 
                 sample_count = int(stats["sample_count"] or 0)
                 win_count = int(stats["win_count"] or 0)
                 bad_loss_count = int(stats["bad_loss_count"] or 0)
                 avg_reward = float(stats["avg_reward"] or 0.0)
+                bad_rate = bad_loss_count / max(sample_count, 1)
                 note = ""
                 status = "proposed"
 
@@ -179,9 +273,46 @@ class RuleEvolutionGovernor:
                     elif sample_count >= 4 and avg_reward <= 0.05:
                         status = "rejected"
                         note = f"rejected by governor: positive evidence too weak avg_reward={avg_reward:.3f}"
+                elif scope_type == "entry_cluster" and action in {"increase_same_direction_cooldown", "raise_pyramid_entry_threshold"}:
+                    if sample_count >= 10 and bad_rate >= 0.50 and confidence >= 0.55:
+                        status = "approved"
+                        note = f"approved by governor: samples={sample_count}, bad_rate={bad_rate:.3f}"
+                    elif sample_count >= 10 and bad_rate < 0.45 and avg_reward >= 0.02:
+                        status = "rejected"
+                        note = f"rejected by governor: cluster evidence recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
+                elif scope_type == "event_window" and action in {"tighten_event_window_sizing", "extend_event_post_window_review"}:
+                    if sample_count >= 10 and (bad_rate >= 0.50 or avg_reward <= -0.05) and confidence >= 0.55:
+                        status = "approved"
+                        note = f"approved by governor: samples={sample_count}, bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
+                    elif sample_count >= 10 and bad_rate < 0.45 and avg_reward >= 0.02:
+                        status = "rejected"
+                        note = f"rejected by governor: event-window evidence recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
+                elif scope_type == "entry_quality" and action in {
+                    "raise_weak_signal_threshold",
+                    "require_factor_agreement",
+                    "suppress_recent_worst_factor",
+                }:
+                    if sample_count >= 5 and (bad_rate >= 0.60 or avg_reward <= -0.05) and confidence >= 0.55:
+                        status = "approved"
+                        note = f"approved by governor: samples={sample_count}, bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
+                    elif sample_count >= 10 and bad_rate < 0.45 and avg_reward >= 0.02:
+                        status = "rejected"
+                        note = f"rejected by governor: entry-quality evidence recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
+                elif scope_type == "parameter_template" and action == "switch_parameter_template":
+                    boundary = evidence.get("boundary") or {}
+                    recommended_scope = str(boundary.get("recommended_scope") or evidence.get("recommended_scope") or "")
+                    has_target = bool(evidence.get("target_template_id"))
+                    has_factor = bool(evidence.get("factor_id") or scope_key.split(":", 1)[0])
+                    if has_target and has_factor and recommended_scope == "online_light" and confidence >= 0.55:
+                        status = "approved"
+                        note = "approved by governor: online_light parameter template switch evidence present"
                 elif action == "watch":
                     status = "rejected"
                     note = f"observation-only factor kept in stats, not promoted to executable suggestion (samples={sample_count})"
+
+                if status == "proposed":
+                    status = "rejected"
+                    note = f"rejected by governor: autonomous evidence thresholds not met for {scope_type}/{action}"
 
                 if status == "proposed" and now - float(row["created_at"] or 0.0) > 14 * 86400:
                     status = "rejected"
@@ -203,7 +334,49 @@ class RuleEvolutionGovernor:
                     """,
                     (status, now, note, row["suggestion_id"]),
                 )
-        return {"approved": approved, "rejected": rejected, "unchanged": unchanged}
+        conflict_result = self.resolve_conflicts()
+        return {
+            "approved": approved,
+            "rejected": rejected,
+            "unchanged": unchanged,
+            "superseded": int(conflict_result.get("superseded", 0) or 0),
+        }
+
+    def resolve_conflicts(self) -> dict[str, Any]:
+        """Mark stale/conflicting active policy suggestions as superseded."""
+        resolver = GovernanceConflictResolver()
+        with self._conn() as conn:
+            rows = self._execute(
+                conn,
+                """
+                SELECT suggestion_id, scope_type, scope_key, action, confidence,
+                       evidence_json, status, reviewed_at, created_at
+                FROM policy_suggestion
+                WHERE status IN ('proposed', 'approved', 'applied')
+                ORDER BY created_at ASC
+                """,
+            ).fetchall()
+            result = resolver.resolve([dict(row) for row in rows])
+            now = time.time()
+            for item in result.get("superseded", []):
+                self._execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET status='superseded', reviewed_at=?, review_note=?
+                    WHERE suggestion_id=? AND status IN ('proposed', 'approved', 'applied')
+                    """,
+                    (
+                        now,
+                        str(item.get("reason") or "superseded by governance conflict resolver"),
+                        str(item.get("suggestion_id") or ""),
+                    ),
+                )
+        return {
+            "winners": len(result.get("winners", [])),
+            "superseded": len(result.get("superseded", [])),
+            "items": result.get("superseded", []),
+        }
 
     def reconcile_active(self) -> dict[str, int]:
         """Rollback approved suggestions if later evidence flips against them."""
@@ -230,7 +403,10 @@ class RuleEvolutionGovernor:
                     kept += 1
                     continue
                 sample_count = int(stats["sample_count"] or 0)
+                bad_loss_count = int(stats["bad_loss_count"] or 0)
                 avg_reward = float(stats["avg_reward"] or 0.0)
+                bad_rate = bad_loss_count / max(sample_count, 1)
+                scope_type = str(row["scope_type"] or "")
                 action = str(row["action"] or "watch")
                 should_rollback = False
                 note = ""
@@ -240,6 +416,22 @@ class RuleEvolutionGovernor:
                 elif action == "boost_small" and sample_count >= 5 and avg_reward <= -0.08:
                     should_rollback = True
                     note = f"rolled back: factor deteriorated avg_reward={avg_reward:.3f}"
+                elif scope_type == "entry_cluster" and action in {"increase_same_direction_cooldown", "raise_pyramid_entry_threshold"}:
+                    if sample_count >= 20 and bad_rate < 0.40 and avg_reward >= 0.03:
+                        should_rollback = True
+                        note = f"rolled back: entry cluster recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
+                elif scope_type == "event_window" and action in {"tighten_event_window_sizing", "extend_event_post_window_review"}:
+                    if sample_count >= 20 and bad_rate < 0.40 and avg_reward >= 0.03:
+                        should_rollback = True
+                        note = f"rolled back: event window recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
+                elif scope_type == "entry_quality" and action in {
+                    "raise_weak_signal_threshold",
+                    "require_factor_agreement",
+                    "suppress_recent_worst_factor",
+                }:
+                    if sample_count >= 20 and bad_rate < 0.40 and avg_reward >= 0.03:
+                        should_rollback = True
+                        note = f"rolled back: entry quality recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
 
                 if should_rollback:
                     self._execute(conn,
@@ -256,7 +448,7 @@ class RuleEvolutionGovernor:
         return {"rolled_back": rolled_back, "kept": kept}
 
     def set_status(self, suggestion_id: str, status: str, note: str = "") -> bool:
-        if status not in {"approved", "rejected", "rolled_back", "proposed"}:
+        if status not in {"approved", "rejected", "rolled_back", "proposed", "superseded"}:
             raise ValueError(f"unsupported status: {status}")
         with self._conn() as conn:
             cur = self._execute(conn,
@@ -474,56 +666,104 @@ class RuleEvolutionGovernor:
             for row in rows:
                 app = self._parse_application_row(row)
                 scope_type = str(app.get("scope_type") or "")
-                if scope_type not in {"factor", "parameter_template"}:
+                if scope_type not in {"factor", "parameter_template", "position_supervisor_template"}:
                     continue
-                factor = (
-                    str(app.get("scope_key") or "")
-                    if scope_type == "factor"
-                    else str((app.get("details") or {}).get("factor_id") or str(app.get("scope_key") or "").split(":", 1)[0])
-                )
-                if not factor:
-                    continue
+                scope_key_for_effect = str(app.get("scope_key") or "")
+                if scope_type == "position_supervisor_template":
+                    if not scope_key_for_effect:
+                        continue
+                    review_limit = max(int(observe_trades) * 5, int(observe_trades))
+                    post_rows = self._execute(conn,
+                        """
+                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
+                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                        FROM trade_outcome_review r
+                        WHERE r.created_at > ?
+                          AND (
+                              r.review_json LIKE '%inferred_close_supervisor%'
+                              OR r.review_json LIKE '%supervisor_%'
+                          )
+                        ORDER BY r.created_at ASC
+                        LIMIT ?
+                        """,
+                        (float(app.get("cycle_ts") or 0.0), review_limit),
+                    ).fetchall()
+                    post_reviews = [
+                        r for r in (self._parse_review_row(row) for row in post_rows)
+                        if self._has_supervisor_feedback(r)
+                    ][: int(observe_trades)]
 
-                post_rows = self._execute(conn,
-                    """
-                    SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                           r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
-                    FROM trade_outcome_review r
-                    WHERE r.created_at > ?
-                      AND EXISTS (
-                          SELECT 1
-                          FROM decision_factor_snapshot dfs
-                          WHERE dfs.decision_id = r.entry_decision_id
-                            AND dfs.factor = ?
-                      )
-                    ORDER BY r.created_at ASC
-                    LIMIT ?
-                    """,
-                    (float(app.get("cycle_ts") or 0.0), factor, int(observe_trades)),
-                ).fetchall()
-                post_reviews = [self._parse_review_row(r) for r in post_rows]
+                    pre_rows = self._execute(conn,
+                        """
+                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
+                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                        FROM trade_outcome_review r
+                        WHERE r.created_at <= ?
+                          AND (
+                              r.review_json LIKE '%inferred_close_supervisor%'
+                              OR r.review_json LIKE '%supervisor_%'
+                          )
+                        ORDER BY r.created_at DESC
+                        LIMIT ?
+                        """,
+                        (float(app.get("cycle_ts") or 0.0), review_limit),
+                    ).fetchall()
+                    pre_reviews = [
+                        r for r in (self._parse_review_row(row) for row in pre_rows)
+                        if self._has_supervisor_feedback(r)
+                    ][: int(observe_trades)]
+                    reward_from_review = self._supervisor_reward_from_review
+                else:
+                    factor = (
+                        str(app.get("scope_key") or "")
+                        if scope_type == "factor"
+                        else str((app.get("details") or {}).get("factor_id") or scope_key_for_effect.split(":", 1)[0])
+                    )
+                    if not factor:
+                        continue
+                    scope_key_for_effect = scope_key_for_effect or factor
 
-                pre_rows = self._execute(conn,
-                    """
-                    SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                           r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
-                    FROM trade_outcome_review r
-                    WHERE r.created_at <= ?
-                      AND EXISTS (
-                          SELECT 1
-                          FROM decision_factor_snapshot dfs
-                          WHERE dfs.decision_id = r.entry_decision_id
-                            AND dfs.factor = ?
-                      )
-                    ORDER BY r.created_at DESC
-                    LIMIT ?
-                    """,
-                    (float(app.get("cycle_ts") or 0.0), factor, int(observe_trades)),
-                ).fetchall()
-                pre_reviews = [self._parse_review_row(r) for r in pre_rows]
+                    post_rows = self._execute(conn,
+                        """
+                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
+                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                        FROM trade_outcome_review r
+                        WHERE r.created_at > ?
+                          AND EXISTS (
+                              SELECT 1
+                              FROM decision_factor_snapshot dfs
+                              WHERE dfs.decision_id = r.entry_decision_id
+                                AND dfs.factor = ?
+                          )
+                        ORDER BY r.created_at ASC
+                        LIMIT ?
+                        """,
+                        (float(app.get("cycle_ts") or 0.0), factor, int(observe_trades)),
+                    ).fetchall()
+                    post_reviews = [self._parse_review_row(r) for r in post_rows]
 
-                post_rewards = [self._reward_from_review(r) for r in post_reviews]
-                pre_rewards = [self._reward_from_review(r) for r in pre_reviews]
+                    pre_rows = self._execute(conn,
+                        """
+                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
+                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                        FROM trade_outcome_review r
+                        WHERE r.created_at <= ?
+                          AND EXISTS (
+                              SELECT 1
+                              FROM decision_factor_snapshot dfs
+                              WHERE dfs.decision_id = r.entry_decision_id
+                                AND dfs.factor = ?
+                          )
+                        ORDER BY r.created_at DESC
+                        LIMIT ?
+                        """,
+                        (float(app.get("cycle_ts") or 0.0), factor, int(observe_trades)),
+                    ).fetchall()
+                    pre_reviews = [self._parse_review_row(r) for r in pre_rows]
+                    reward_from_review = self._reward_from_review
+
+                post_rewards = [reward_from_review(r) for r in post_reviews]
+                pre_rewards = [reward_from_review(r) for r in pre_reviews]
                 post_avg = sum(post_rewards) / len(post_rewards) if post_rewards else 0.0
                 pre_avg = sum(pre_rewards) / len(pre_rewards) if pre_rewards else 0.0
                 delta = post_avg - pre_avg
@@ -533,7 +773,7 @@ class RuleEvolutionGovernor:
                 decision = {
                     "application_id": app["application_id"],
                     "scope_type": scope_type,
-                    "scope_key": factor,
+                    "scope_key": scope_key_for_effect,
                     "action": app["action"],
                     "post_review_ids": [r["review_id"] for r in post_reviews],
                     "baseline_review_ids": [r["review_id"] for r in pre_reviews],
@@ -584,7 +824,7 @@ class RuleEvolutionGovernor:
                     (
                         app["application_id"],
                         scope_type,
-                        str(app.get("scope_key") or factor),
+                        scope_key_for_effect,
                         app["action"],
                         next_status,
                         len(post_reviews),
@@ -733,7 +973,7 @@ class RuleEvolutionGovernor:
                         (
                             suggestion_id,
                             scope_type,
-                            str(app.get("scope_key") or factor),
+                            scope_key_for_effect,
                             app["action"],
                             min(0.75, 0.35 + max(0.0, delta)),
                             f"auto reinforced by application effect delta={delta:.3f}",

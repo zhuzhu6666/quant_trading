@@ -19,7 +19,7 @@ from backend.runtime.runtime_state import RuntimeState
 # 保留模块级 logger 名称(老代码用 loguru,新代码用 stdlib logging,统一用 name 区分)
 _stdlib_logger = logging.getLogger(__name__)
 
-BAR_TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+BAR_TIMEFRAMES = ["M5", "M15"]
 
 
 def get_status() -> dict:
@@ -74,10 +74,12 @@ async def _do_one_sync(state: RuntimeState, health) -> None:
 
         cfg = rcc()
         symbol = list(cfg.enabled_symbols)[0] if hasattr(cfg, 'enabled_symbols') and cfg.enabled_symbols else "XAUUSD+"
+        configured_timeframes = getattr(cfg, "bar_timeframes", None)
+        timeframes = list(configured_timeframes or BAR_TIMEFRAMES)
         store = DataStore()
         results = {}
         last_bar_ts_by_tf = {}
-        for tf in BAR_TIMEFRAMES:
+        for tf in timeframes:
             puller = CTraderPuller()
             r = puller.pull_history(symbol=symbol, timeframe=tf, n=50)
             inserted = 0

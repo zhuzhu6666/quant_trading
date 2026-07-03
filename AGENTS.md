@@ -82,6 +82,11 @@
 - 经济事件日历独立保存：
   - `data/events.duckdb`
   - 风控事件缩放模块 `execution/event_sizing.py` 直接读取该库
+- 运行时状态与学习审计主库是 PostgreSQL `state_v1`：
+  - `data/state.db` 活跃路径不再保留，也不再保留本地 SQLite 冷备
+  - 排查运行态状态禁止用 `sqlite3 data/state.db` 或手写 `sqlite3.connect("data/state.db")`
+  - 只读查询统一用 `.venv/bin/python scripts/state_query.py --sql "..."`
+  - 业务代码统一用 `backend.core.db.get_state_pg_conn()` / `get_state_conn()`，不要新增生产路径写入 SQLite state
 - tick 数据在服务器上按月库保存：
   - `data/ticks_monthly/ticks_YYYY_MM.duckdb`
   - `data/ticks.duckdb` 是指向当前月份库的兼容链接

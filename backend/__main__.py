@@ -1,4 +1,4 @@
-"""Allows `python -m backend` to launch the FastAPI server."""
+"""Allows the backend module to launch the FastAPI server."""
 from backend.main import main
 
 if __name__ == "__main__":

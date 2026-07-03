@@ -101,11 +101,47 @@ class BackendReadinessService:
         factor_data = self._factor_data_status()
         governance_freshness = self._governance_freshness_status()
         runtime_weight_integrity = self._runtime_weight_integrity_status()
+        execution_semantics = self._execution_semantics_status()
+        startup_status = self._startup_status()
+        config_runtime_drift = self._config_runtime_drift_status()
+        audit_health = self._audit_health_status()
+        background_jobs = self._background_jobs_status()
+        is_runtime_state_db = _use_pg(self.db_path)
         blockers = []
         blockers.extend(system_health.get("blocking_components") or [])
-        if not model_status.get("permission_ok", True):
+        execution_blockers = list(execution_semantics.get("blocking_components") or [])
+        if is_runtime_state_db:
+            blockers.extend(execution_blockers)
+        startup_blockers = list(startup_status.get("blocking_components") or [])
+        if is_runtime_state_db and execution_semantics.get("effective_send_orders"):
+            blockers.extend(startup_blockers)
+        model_permission_blocked = not model_status.get("permission_ok", True)
+        if is_runtime_state_db and model_permission_blocked:
             blockers.append({"component": "model_permissions", "status": "blocked"})
         ready_for_frontend = not blockers
+        known_observations = []
+        known_observations.extend(system_health.get("known_observations") or [])
+        if not is_runtime_state_db:
+            known_observations.extend(
+                {
+                    **item,
+                    "classification": "execution_semantics_offline_context",
+                }
+                for item in execution_blockers
+            )
+        known_observations.extend(startup_status.get("known_observations") or [])
+        if not is_runtime_state_db or not execution_semantics.get("effective_send_orders"):
+            known_observations.extend(
+                {
+                    **item,
+                    "classification": "startup_degraded_non_live",
+                }
+                for item in startup_blockers
+            )
+        if not is_runtime_state_db and model_permission_blocked:
+            known_observations.append({"component": "model_permissions", "status": "blocked", "classification": "offline_context"})
+        known_observations.extend(config_runtime_drift.get("known_observations") or [])
+        known_observations.extend(audit_health.get("known_observations") or [])
         return {
             "ok": True,
             "schema_version": "backend_readiness.v1",
@@ -125,6 +161,12 @@ class BackendReadinessService:
             "factor_data": factor_data,
             "governance_freshness": governance_freshness,
             "runtime_weight_integrity": runtime_weight_integrity,
+            "execution_semantics": execution_semantics,
+            "startup": startup_status,
+            "config_runtime_drift": config_runtime_drift,
+            "mutation_policy": self._mutation_policy_status(),
+            "audit_health": audit_health,
+            "background_jobs": background_jobs,
             "frontend_contract": {
                 "preferred_entry": "/api/ops/backend-readiness",
                 "model_shadow_report": "/api/learning/model/meta-lightgbm/shadow-report",
@@ -134,7 +176,7 @@ class BackendReadinessService:
                 "must_not_call_live_mutation_from_model_pages": True,
             },
             "blockers": blockers,
-            "known_observations": system_health.get("known_observations") or [],
+            "known_observations": known_observations,
         }
 
     @staticmethod
@@ -153,6 +195,115 @@ class BackendReadinessService:
             "managed_by": "systemd",
             "port": 8000,
             "status": "running",
+        }
+
+    @staticmethod
+    def _execution_semantics_status() -> dict[str, Any]:
+        try:
+            from backend.services.execution_semantics import current_execution_semantics
+
+            semantics = current_execution_semantics().to_dict()
+        except Exception as exc:
+            semantics = {
+                "system_mode": "unknown",
+                "ctrader_send_orders": False,
+                "factor_dry_run": True,
+                "effective_send_orders": False,
+                "blocking_reason": f"{type(exc).__name__}: {exc}",
+            }
+        blocking_reason = str(semantics.get("blocking_reason") or "")
+        return {
+            **semantics,
+            "blocking_components": (
+                [{"component": "execution_semantics", "status": "critical", "reason": blocking_reason}]
+                if blocking_reason
+                else []
+            ),
+        }
+
+    @staticmethod
+    def _startup_status() -> dict[str, Any]:
+        try:
+            from backend.services.startup_status import startup_issues
+
+            issues = startup_issues()
+        except Exception:
+            issues = []
+        return {
+            "issues": issues,
+            "blocking_components": [
+                {"component": item.get("component"), "status": item.get("status"), "message": item.get("message")}
+                for item in issues
+                if item.get("blocking")
+            ],
+            "known_observations": [
+                {
+                    "component": item.get("component"),
+                    "status": item.get("status"),
+                    "classification": "startup_degraded",
+                    "message": item.get("message"),
+                }
+                for item in issues
+                if not item.get("blocking")
+            ],
+        }
+
+    @staticmethod
+    def _config_runtime_drift_status() -> dict[str, Any]:
+        try:
+            from backend.services.config_service import config_runtime_drift
+
+            drift = config_runtime_drift()
+        except Exception as exc:
+            drift = {
+                "drift": True,
+                "changed_keys": [],
+                "changed_key_count": 0,
+                "semantic_drift": True,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        observations = []
+        if drift.get("semantic_drift"):
+            observations.append({"component": "config_runtime_drift", "status": "degraded", "reason": "semantic_drift"})
+        return {**drift, "blocking_components": [], "known_observations": observations}
+
+    @staticmethod
+    def _mutation_policy_status() -> dict[str, Any]:
+        try:
+            from backend.services.mutation_audit import mutation_policy_contract
+
+            return {"schema_version": "mutation_policy.v1", "classes": mutation_policy_contract()}
+        except Exception as exc:
+            return {"schema_version": "mutation_policy.v1", "classes": {}, "error": str(exc)}
+
+    @staticmethod
+    def _audit_health_status() -> dict[str, Any]:
+        try:
+            from backend.services.mutation_audit import audit_health
+
+            health = audit_health()
+        except Exception as exc:
+            health = {"ok": False, "last_error": str(exc)}
+        observations = []
+        if not health.get("ok", True):
+            observations.append({"component": "mutation_audit", "status": "critical", "reason": health.get("last_error", "")})
+        return {**health, "blocking_components": [], "known_observations": observations}
+
+    @staticmethod
+    def _background_jobs_status() -> dict[str, Any]:
+        try:
+            from backend.jobs import get_job_manager
+
+            jobs = [job.to_dict() for job in get_job_manager().list()]
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "running": 0, "failed_recent": 0, "jobs": []}
+        running = [job for job in jobs if str(job.get("status") or "").lower() in {"running", "pending"}]
+        failed = [job for job in jobs if str(job.get("status") or "").lower() in {"failed", "error"}]
+        return {
+            "ok": True,
+            "running": len(running),
+            "failed_recent": len(failed),
+            "jobs": jobs[-20:],
         }
 
     def _model_status(self) -> dict[str, Any]:

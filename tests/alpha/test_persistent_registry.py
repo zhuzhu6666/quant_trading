@@ -68,6 +68,13 @@ def test_restore_from_log_replays_lifecycle_and_only_restores_active_dsl(tmp_pat
     conn.close()
     monkeypatch.setattr(db, "STATE_DB", state_db)
 
+    def _test_state_conn(read_only=True):
+        conn = sqlite3.connect(state_db)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(db, "get_state_pg_conn", _test_state_conn)
+
     adapter = _Adapter()
 
     restored = persistent_registry.restore_from_log(verbose=False, adapter=adapter)

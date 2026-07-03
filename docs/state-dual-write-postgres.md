@@ -9,8 +9,8 @@ Runtime state has been migrated from `data/state.db` to local PostgreSQL schema
 
 - PostgreSQL is now the source of truth for live runtime state, recovery state,
   decision ledger, supervisor traces, learning state, and frontend state reads.
-- `data/state.db` is retained only as the migration cold backup and rollback
-  source.
+- `data/state.db` has been removed. No local SQLite state cold backup is
+  retained; runtime state checks must use PostgreSQL `state_v1`.
 - Historical `audit_*` dual-write tables are retained as audit/migration
   evidence. They are not the main state schema.
 
@@ -29,7 +29,7 @@ state writes do not use the SQLite outbox path.
 
 ## Migration Artifacts
 
-The migration cold backup directory is:
+The historical migration artifact directory is:
 
 ```text
 data/migration_backups/pg_migration_20260701_162925/
@@ -37,15 +37,16 @@ data/migration_backups/pg_migration_20260701_162925/
 
 It contains:
 
-- `state.db`: SQLite cold backup before PostgreSQL cutover.
 - `postgres_before_state_v1.sql`: PostgreSQL dump before creating `state_v1`.
 - `sqlite_state_manifest.json`: source table/column/index/count manifest.
+- No local SQLite `state.db` artifact is retained after cutover.
 
-The full migration and parity commands are:
+The one-off migration and parity commands require an explicit external SQLite
+backup if a restore is ever needed:
 
 ```bash
-python scripts/migrate_state_sqlite_to_pg.py --drop-schema --backup-dir data/migration_backups/pg_migration_20260701_162925
-python scripts/verify_state_pg_parity.py --strict
+python scripts/migrate_state_sqlite_to_pg.py --sqlite-db /path/to/external/state.db --drop-schema --backup-dir data/migration_backups/pg_migration_20260701_162925
+python scripts/verify_state_pg_parity.py --sqlite-db /path/to/external/state.db --strict
 ```
 
 The strict parity check passed for all 47 migrated tables before the safe-start
@@ -55,6 +56,13 @@ runtime flag was changed in PostgreSQL.
 
 - Use `backend.core.db.get_state_pg_conn()` for runtime state access.
 - Do not add new production code that writes `data/state.db`.
+- Do not inspect live status with `sqlite3 data/state.db` or ad hoc
+  `sqlite3.connect("data/state.db")`; that file has been removed by design.
+  Use `.venv/bin/python scripts/state_query.py --sql "..."` for read-only
+  runtime checks against PostgreSQL `state_v1`.
+- Only `scripts/migrate_state_sqlite_to_pg.py` and
+  `scripts/verify_state_pg_parity.py` may open a SQLite backup, and only when
+  an external backup path is passed explicitly via `--sqlite-db`.
 - DuckDB market databases remain separate and are not part of this migration.
 - `experiments.db` remains separate unless explicitly migrated later.
 - When starting after migration, keep `live.loop.desired_state.enabled=false`

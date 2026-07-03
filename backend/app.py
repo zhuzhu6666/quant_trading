@@ -1,7 +1,7 @@
 """FastAPI app factory — API-only backend (frontend removed, WeChat mini-program replaces it).
 
 Usage:
-  python -m backend            # uvicorn on :8000
+  ./.venv/bin/python -m backend # uvicorn on :8000
   uvicorn backend.app:app      # direct
 """
 
@@ -47,23 +47,47 @@ def _env_enabled(name: str, default: str = "1") -> bool:
 async def lifespan(app: FastAPI):
     from loguru import logger as _lg
     setup_logging()
+    from backend.services.startup_status import clear_startup_issues, record_startup_issue
+
+    clear_startup_issues()
+
+    try:
+        from backend.core.auth import validate_auth_config
+        validate_auth_config()
+        _lg.info("[lifespan] auth configuration validated")
+    except Exception as e:
+        _lg.error(f"[lifespan] auth configuration invalid: {e}")
+        raise
 
     # Load RuntimeConfig from settings.yaml so live execution honors ctrader.send_orders.
+    execution_semantics = None
     try:
         from config.runtime_config import RuntimeConfig, replace as rc_replace
         from backend.services.config_service import get_config
-        yaml_cfg = get_config()["parsed"]
+        from backend.services.execution_semantics import validate_execution_semantics
+
+        config_payload = get_config()
+        if config_payload.get("parse_error"):
+            raise ValueError(f"settings_parse_error: {config_payload.get('parse_error')}")
+        yaml_cfg = config_payload["parsed"]
         rc = RuntimeConfig.from_yaml(yaml_cfg)
+        execution_semantics = validate_execution_semantics(yaml_cfg, rc)
         rc_replace(rc)
         try:
             from backend.services.evolution_ledger import persist_runtime_config_snapshot
 
             persist_runtime_config_snapshot(rc, source="backend_lifespan_startup")
         except Exception as snap_exc:
+            if execution_semantics.effective_send_orders:
+                record_startup_issue("runtime_config_snapshot", "critical", str(snap_exc), blocking=True)
+                raise
+            record_startup_issue("runtime_config_snapshot", "degraded", str(snap_exc), blocking=False)
             _lg.warning(f"[lifespan] RuntimeConfig snapshot failed (non-fatal): {snap_exc}")
         _lg.info("[lifespan] RuntimeConfig loaded from config/settings.yaml")
     except Exception as e:
-        _lg.warning(f"[lifespan] RuntimeConfig load failed (non-fatal): {e}")
+        record_startup_issue("runtime_config", "critical", str(e), blocking=True)
+        _lg.error(f"[lifespan] RuntimeConfig load failed: {e}")
+        raise
 
     _init_observability()
 
@@ -73,7 +97,12 @@ async def lifespan(app: FastAPI):
         init_all()
         _lg.info("[lifespan] databases initialized")
     except Exception as e:
-        _lg.warning(f"[lifespan] db init failed (non-fatal): {e}")
+        effective_send_orders = bool(execution_semantics and execution_semantics.effective_send_orders)
+        record_startup_issue("state_db", "critical" if effective_send_orders else "degraded", str(e), blocking=effective_send_orders)
+        if effective_send_orders:
+            _lg.error(f"[lifespan] db init failed while effective send-orders is enabled: {e}")
+            raise
+        _lg.warning(f"[lifespan] db init failed (dry-run degraded): {e}")
 
     try:
         from backend.services.parameter_templates import ParameterTemplateService

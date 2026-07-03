@@ -2666,8 +2666,8 @@ v2 增强记录：
   - `57 passed`
 - `python scripts/phase_a_health_check.py`
   - `healthy`
-- `python scripts/phase_c_supervisor_check.py --db data/state.db --limit 30`
-  - 正常输出 supervisor 覆盖样本
+- `python scripts/phase_c_supervisor_check.py --limit 30`
+  - 使用 PostgreSQL `state_v1` 主状态库输出 supervisor 覆盖样本；`data/state.db` 仅作迁移/冷备检查
 - `curl http://127.0.0.1:8000/api/health`
   - `db=connected`
 - `PRAGMA integrity_check`

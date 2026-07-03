@@ -32,10 +32,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Sequence
 
-import duckdb
 import numpy as np
 import pandas as pd
 from loguru import logger
+
+import duckdb
+from backend.core.db import connect_duckdb
 
 # ---------------------------------------------------------------------------
 # Constants (kept here so the detector is self-contained and easy to tune)
@@ -200,7 +202,7 @@ def _bb_width(close: np.ndarray, period: int = BB_PERIOD,
 
 def _open(db_path: str) -> duckdb.DuckDBPyConnection:
     """Read-only connection to DuckDB market data."""
-    return duckdb.connect(db_path, read_only=True)
+    return connect_duckdb(db_path, read_only=True)
 
 
 def _safe_scalar(conn: duckdb.DuckDBPyConnection, sql: str, params: Iterable = ()) -> float | None:

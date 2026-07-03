@@ -161,11 +161,6 @@ class RiskGovernor:
             return GovernorVerdict(False, "drawdown_too_high",
                                    f"drawdown {state.drawdown_pct:.1f}% >= {cfg['max_drawdown_pct']:.0f}%")
 
-        # 连续亏损超限
-        if state.consecutive_losses >= cfg["max_consecutive_losses"]:
-            return GovernorVerdict(False, "consecutive_losses",
-                                   f"{state.consecutive_losses} >= {cfg['max_consecutive_losses']}")
-
         # 连续亏损后的短冷静期
         cooldown_after_losses = int(state.extra.get("loss_cooldown_after_losses", cfg.get("loss_cooldown_after_losses", 0)) or 0)
         cooldown_bars = int(state.extra.get("loss_cooldown_bars", cfg.get("loss_cooldown_bars", 0)) or 0)
@@ -186,6 +181,15 @@ class RiskGovernor:
                     "loss_cooldown_active",
                     f"wait {remaining_seconds:.0f}s (~{remaining_bars:.1f} bars) after {state.consecutive_losses} losses",
                 )
+
+        # 连续亏损超限。若配置了冷静期，冷静期结束后允许系统重新试探；
+        # 未配置冷静期时保留旧的硬拦截行为。
+        if (
+            state.consecutive_losses >= cfg["max_consecutive_losses"]
+            and not (cooldown_after_losses > 0 and cooldown_bars > 0 and timeframe_seconds > 0)
+        ):
+            return GovernorVerdict(False, "consecutive_losses",
+                                   f"{state.consecutive_losses} >= {cfg['max_consecutive_losses']}")
 
         # 日亏损超限
         if state.daily_loss_pct >= cfg["max_daily_loss_pct"]:

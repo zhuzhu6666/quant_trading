@@ -4,7 +4,7 @@ import time
 
 from backend.api import risk as risk_api
 from backend.services.position_supervisor import evaluate_position_supervisor
-from backend.services.position_supervisor_templates import CONSERVATIVE_TEMPLATE_ID
+from backend.services.position_supervisor_templates import CONSERVATIVE_TEMPLATE_ID, PROFIT_PROTECTION_TEMPLATE_ID
 
 
 def test_position_supervisor_recommends_reduce_after_large_giveback():
@@ -173,6 +173,43 @@ def test_position_supervisor_captures_when_near_take_profit():
     assert verdict["summary_reason"] == "near_take_profit_capture"
     assert "near_take_profit" in verdict["evidence"]["trigger_tags"]
     assert verdict["evidence"]["take_profit_progress"] >= 0.9
+
+
+def test_profit_protection_template_outputs_dynamic_tpsl_candidate_near_take_profit():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "9005b",
+                "direction": 1,
+                "entry_price": 4000.0,
+                "current_price": 4028.0,
+                "volume": 100.0,
+                "unrealized_pnl": 28.0,
+                "sl": 3990.0,
+                "tp": 4030.0,
+            },
+            "risk": {
+                "mfe": 29.0,
+                "mae": 0.2,
+                "giveback_ratio": 0.05,
+                "profit_capture_ratio": 0.78,
+                "holding_efficiency": 0.86,
+                "time_decay_score": 0.9,
+                "thesis_status": "intact",
+                "regime_shift": "none",
+            },
+            "temporal_context": {"decision_ts": time.time(), "holding_seconds": 240.0},
+            "position_supervisor_template": PROFIT_PROTECTION_TEMPLATE_ID,
+        }
+    )
+
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "near_take_profit_protect"
+    assert verdict["recommended_controls"]["protection_mode"] == "dynamic_tpsl"
+    assert verdict["recommended_controls"]["target_stop_loss"] > 4000.0
+    assert verdict["recommended_controls"]["target_take_profit"] > 4030.0
+    assert verdict["protection_candidates"][0]["source"] == "supervisor_dynamic_tpsl"
+    assert verdict["protection_candidates"][0]["target_take_profit"] == verdict["recommended_controls"]["target_take_profit"]
 
 
 def test_position_supervisor_preempts_when_near_stop_loss_and_weak():

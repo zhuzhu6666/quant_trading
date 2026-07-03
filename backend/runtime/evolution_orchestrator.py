@@ -26,7 +26,10 @@ from strategy import mab_router as _mab_router
 
 logger = logging.getLogger(__name__)
 
-from backend.core.db import get_state_pg_conn
+from backend.core.db import connect_sqlite, get_state_pg_conn
+
+
+_CANARY_DB = None
 
 
 def _state_conn(*, read_only: bool = False):
@@ -665,17 +668,31 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
     approved_biases: dict[str, dict] = {}
     try:
         cutoff = _time.time() - max_age_days * 86400
-        conn = _state_conn(read_only=True)
-        rows = conn.execute(
-            """
-            SELECT suggestion_id, scope_key, action, confidence, status, created_at
-            FROM policy_suggestion
-            WHERE scope_type='factor' AND created_at>=%s
-              AND status IN ('proposed', 'approved')
-            ORDER BY created_at DESC
-            """,
-            (cutoff,),
-        ).fetchall()
+        if _CANARY_DB is not None:
+            conn = connect_sqlite(_CANARY_DB, read_only=True)
+            conn.row_factory = __import__("sqlite3").Row
+            rows = conn.execute(
+                """
+                SELECT suggestion_id, scope_key, action, confidence, status, created_at
+                FROM policy_suggestion
+                WHERE scope_type='factor' AND created_at>=?
+                  AND status IN ('proposed', 'approved')
+                ORDER BY created_at DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+        else:
+            conn = _state_conn(read_only=True)
+            rows = conn.execute(
+                """
+                SELECT suggestion_id, scope_key, action, confidence, status, created_at
+                FROM policy_suggestion
+                WHERE scope_type='factor' AND created_at>=%s
+                  AND status IN ('proposed', 'approved')
+                ORDER BY created_at DESC
+                """,
+                (cutoff,),
+            ).fetchall()
         conn.close()
 
         for row in rows:

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 import re
 
 from backend.core.auth import RequireUser
+from backend.services.mutation_audit import confirm_header_valid, record_api_mutation
 from backend.services.live_service import (
     _should_send_orders,
     emergency_close,
@@ -87,9 +88,43 @@ def realized_pnl_series_endpoint(
 
 
 @router.post("/start")
-def start(_user: RequireUser, req: StartRequest) -> dict:
+def start(
+    _user: RequireUser,
+    req: StartRequest,
+    x_confirm: str | None = Header(default=None),
+) -> dict:
     """Start the in-process live loop thread via start_loop."""
-    return start_loop(req.broker, strategy_name=req.strategy_name)
+    before = loop_status()
+    if not confirm_header_valid(x_confirm, "start-live"):
+        record_api_mutation(
+            user=_user,
+            endpoint="/api/live/start",
+            action="start_live_loop",
+            status="blocked",
+            before=before,
+            after=before,
+            result={"broker": req.broker, "strategy_name": req.strategy_name},
+            reason="missing_x_confirm",
+            required_confirm="start-live",
+            confirm_ok=False,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "missing_x_confirm", "msg": "send X-Confirm: start-live header"},
+        )
+    result = start_loop(req.broker, strategy_name=req.strategy_name)
+    record_api_mutation(
+        user=_user,
+        endpoint="/api/live/start",
+        action="start_live_loop",
+        status="applied" if result.get("ok") else "blocked",
+        before=before,
+        after=loop_status(),
+        result=result,
+        required_confirm="start-live",
+        confirm_ok=True,
+    )
+    return result
 
 
 @router.post("/stop")
@@ -105,11 +140,31 @@ def emergency(
     x_confirm: str | None = Header(default=None),
 ) -> dict:
     if x_confirm != "emergency":
+        record_api_mutation(
+            user=_user,
+            endpoint="/api/live/emergency-close",
+            action="emergency_close",
+            status="blocked",
+            result={"broker": req.broker, "symbol": req.symbol, "reason": "missing_x_confirm"},
+            reason="missing_x_confirm",
+            required_confirm="emergency",
+            confirm_ok=False,
+        )
         raise HTTPException(
             status_code=403,
             detail={"error": "missing_x_confirm", "msg": "send X-Confirm: emergency header"},
         )
-    return emergency_close(req.broker, req.symbol)
+    result = emergency_close(req.broker, req.symbol)
+    record_api_mutation(
+        user=_user,
+        endpoint="/api/live/emergency-close",
+        action="emergency_close",
+        status="applied" if result.get("ok", True) else "blocked",
+        result=result,
+        required_confirm="emergency",
+        confirm_ok=True,
+    )
+    return result
 
 
 @router.get("/strategy-status")

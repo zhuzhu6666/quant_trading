@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -115,7 +116,7 @@ def table_digest_pg(conn, schema: str, table: str, columns: list[str], order_col
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sqlite-db", default=str(STATE_DB))
+    parser.add_argument("--sqlite-db", default="", help="Explicit external SQLite backup path for one-off parity checks")
     parser.add_argument("--pg-dsn", default="")
     parser.add_argument("--schema", default=STATE_SCHEMA)
     parser.add_argument("--strict", action="store_true")
@@ -124,7 +125,14 @@ def main() -> int:
     dsn = args.pg_dsn or state_pg_dsn()
     if not dsn:
         raise SystemExit("PostgreSQL DSN missing")
-    sqlite_conn = sqlite3.connect(f"file:{Path(args.sqlite_db)}?mode=ro", uri=True)
+    if not args.sqlite_db:
+        raise SystemExit("SQLite cold backup is not retained locally; pass --sqlite-db explicitly if restoring from an external backup")
+    sqlite_path = Path(args.sqlite_db)
+    if not sqlite_path.exists():
+        raise SystemExit(f"SQLite db not found: {sqlite_path}")
+    if not os.access(sqlite_path, os.R_OK):
+        raise SystemExit(f"SQLite cold backup is not readable: {sqlite_path}; restore read permission only for parity checks")
+    sqlite_conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     sqlite_conn.row_factory = sqlite3.Row
     failures: list[str] = []
     try:

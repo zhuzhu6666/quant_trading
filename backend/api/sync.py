@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from backend.jobs import get_job_manager
 from backend.services.sync_service import get_status, run_sync_once
+from backend.services.mutation_audit import record_api_mutation
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
@@ -30,16 +31,40 @@ def once(_user: RequireUser, req: OnceRequest) -> dict:
     params = req.model_dump()
     fn = lambda cb: run_sync_once(params, cb)
     js = mgr.submit("sync", params, fn)
-    return {"job_id": js.id, "status": js.status}
+    result = {"job_id": js.id, "status": js.status}
+    record_api_mutation(
+        user=_user,
+        endpoint="/api/sync/once",
+        action="sync_once",
+        status="applied",
+        result=result,
+    )
+    return result
 
 
 @router.post("/daemon/start")
 def daemon_start(_user: RequireUser, req: DaemonStartRequest) -> dict:
     """已弃用 — 活盘用 scheduler 代替 daemon"""
-    return {"ok": False, "msg": "daemon 已弃用, 改用 scheduler 自动同步"}
+    result = {"ok": False, "msg": "daemon 已弃用, 改用 scheduler 自动同步"}
+    record_api_mutation(
+        user=_user,
+        endpoint="/api/sync/daemon/start",
+        action="sync_daemon_start",
+        status="blocked",
+        result=result,
+    )
+    return result
 
 
 @router.post("/daemon/stop")
 def daemon_stop(_user: RequireUser) -> dict:
     """已弃用"""
-    return {"ok": False, "msg": "daemon 已弃用"}
+    result = {"ok": False, "msg": "daemon 已弃用"}
+    record_api_mutation(
+        user=_user,
+        endpoint="/api/sync/daemon/stop",
+        action="sync_daemon_stop",
+        status="blocked",
+        result=result,
+    )
+    return result

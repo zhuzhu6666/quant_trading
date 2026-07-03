@@ -12,6 +12,7 @@ def test_xauusd_session_uses_utc_schedule_not_local_time():
         symbol="XAUUSD+",
         now_ts=_ts(2026, 6, 26, 16, 40),
         latest_quote_ts=_ts(2026, 6, 26, 16, 39),
+        latest_quote_change_ts=_ts(2026, 6, 26, 16, 39),
     )
 
     assert state.status == "open_confirmed"
@@ -76,6 +77,82 @@ def test_quote_stale_blocks_opening_without_releasing_connection():
     assert state.can_keep_market_connection is True
 
 
+def test_api_alive_quote_stale_is_classified_separately_from_network_down():
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        now_ts=_ts(2026, 6, 26, 16, 40),
+        latest_quote_ts=_ts(2026, 6, 26, 16, 20),
+        api_available=True,
+        broker_connected=True,
+        account_api_ok=True,
+        positions_api_ok=True,
+    )
+
+    assert state.status == "broker_connected_quote_stale"
+    assert state.can_open_positions is False
+    assert state.can_keep_market_connection is True
+    assert state.market_closed_confidence == "medium"
+    assert "api_alive_while_quote_stale" in state.evidence
+
+
+def test_api_alive_repeated_quote_timestamp_waits_for_real_price_motion():
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        now_ts=_ts(2026, 6, 26, 16, 40),
+        latest_quote_ts=_ts(2026, 6, 26, 16, 39),
+        api_available=True,
+        broker_connected=True,
+        account_api_ok=True,
+        positions_api_ok=True,
+        has_open_positions=False,
+    )
+
+    assert state.status == "open_pending_quote_movement"
+    assert state.can_open_positions is False
+    assert state.can_keep_market_connection is True
+    assert state.market_closed_confidence == "low"
+    assert "api_alive_without_quote_motion" in state.evidence
+
+
+def test_api_alive_quote_motion_confirms_open_session():
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        now_ts=_ts(2026, 6, 26, 16, 40),
+        latest_quote_ts=_ts(2026, 6, 26, 16, 39),
+        latest_quote_change_ts=_ts(2026, 6, 26, 16, 39),
+        api_available=True,
+        broker_connected=True,
+        account_api_ok=True,
+        positions_api_ok=True,
+        has_open_positions=False,
+    )
+
+    assert state.status == "open_confirmed"
+    assert state.can_open_positions is True
+    assert state.market_closed_confidence == "none"
+
+
+def test_api_alive_fresh_quote_but_stale_market_data_blocks_opening():
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        now_ts=_ts(2026, 6, 26, 16, 40),
+        latest_quote_ts=_ts(2026, 6, 26, 16, 39),
+        latest_quote_change_ts=_ts(2026, 6, 26, 16, 39),
+        latest_market_data_ts=_ts(2026, 6, 26, 16, 20),
+        api_available=True,
+        broker_connected=True,
+        account_api_ok=True,
+        positions_api_ok=True,
+        has_open_positions=False,
+    )
+
+    assert state.status == "broker_connected_market_data_stale"
+    assert state.can_open_positions is False
+    assert state.can_keep_market_connection is True
+    assert state.market_closed_confidence == "medium"
+    assert "api_alive_while_market_data_stale" in state.evidence
+
+
 def test_scheduled_open_requires_fresh_quote_before_opening():
     state = evaluate_market_session(
         symbol="XAUUSD+",
@@ -92,6 +169,7 @@ def test_pre_close_window_blocks_new_opening_even_with_fresh_quote():
         symbol="XAUUSD+",
         now_ts=_ts(2026, 6, 26, 21, 40),
         latest_quote_ts=_ts(2026, 6, 26, 21, 39),
+        latest_quote_change_ts=_ts(2026, 6, 26, 21, 39),
     )
 
     assert state.status == "pre_close_risk"

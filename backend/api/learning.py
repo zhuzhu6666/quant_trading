@@ -8,13 +8,14 @@ import threading
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 import re
 
 from backend.core.auth import RequireUser
-from backend.core.db import STATE_DB, get_state_pg_conn
+import backend.core.db as core_db
 from backend.jobs import get_job_manager
+from backend.services.mutation_audit import confirm_header_valid, record_api_mutation
 from backend.services.factor_cards import FactorCardService
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.parameter_template_validation import (
@@ -78,24 +79,100 @@ from risk.policy_service import RiskPolicyService
 
 router = APIRouter(prefix="/api/learning", tags=["learning"])
 
+STATE_DB = None
 _CANDIDATE_ID_RE = re.compile(r"(ptrc_[0-9a-f]{16})")
 _LEARNING_CACHE_TTL_SEC = 30.0
 _LEARNING_CACHE_LOCK = threading.Lock()
 
 
 def _state_conn(*, read_only: bool = True):
-    return get_state_pg_conn(read_only=read_only)
+    if STATE_DB is not None and not core_db.is_state_db_path(STATE_DB):
+        conn = core_db.connect_sqlite(STATE_DB, read_only=read_only)
+        conn.row_factory = sqlite3.Row
+        return conn
+    try:
+        return core_db.get_state_conn(read_only=read_only)
+    except TypeError:
+        return core_db.get_state_conn()
 
 
-def _state_sql(sql: str) -> str:
+def _state_db_path():
+    return STATE_DB or core_db.STATE_DB
+
+
+def _state_conn_for_path(db_path, *, read_only: bool = True):
+    if core_db.is_state_db_path(db_path):
+        return _state_conn(read_only=read_only)
+    conn = core_db.connect_sqlite(db_path, read_only=read_only)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _state_sql(conn, sql: str) -> str:
+    if conn.__class__.__module__.split(".", 1)[0] != "psycopg":
+        return sql
     return sql.replace("%", "%%").replace("?", "%s")
 
 
 def _execute(conn, sql: str, params: Any = None):
-    sql = _state_sql(sql)
+    sql = _state_sql(conn, sql)
     if params is None:
         return conn.execute(sql)
     return conn.execute(sql, params)
+
+
+def _require_governance_confirm(
+    *,
+    user: str,
+    endpoint: str,
+    action: str,
+    x_confirm: str | None,
+    before: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+) -> None:
+    if user is None and not isinstance(x_confirm, str):
+        return
+    if confirm_header_valid(x_confirm, "governance-change"):
+        return
+    record_api_mutation(
+        user=user,
+        endpoint=endpoint,
+        action=action,
+        status="blocked",
+        before=before or {},
+        after=before or {},
+        result=result or {},
+        reason="missing_x_confirm",
+        required_confirm="governance-change",
+        confirm_ok=False,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={"error": "missing_x_confirm", "msg": "send X-Confirm: governance-change header"},
+    )
+
+
+def _audit_governance_mutation(
+    *,
+    user: str,
+    endpoint: str,
+    action: str,
+    status: str,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+) -> None:
+    record_api_mutation(
+        user=user,
+        endpoint=endpoint,
+        action=action,
+        status=status,
+        before=before or {},
+        after=after or {},
+        result=result or {},
+        required_confirm="governance-change",
+        confirm_ok=True,
+    )
 _LEARNING_CACHE: dict[str, tuple[float, Any]] = {}
 _LEARNING_COMPUTE_LOCKS: dict[str, threading.Lock] = {}
 _LEARNING_LAST_GOOD: dict[str, tuple[float, Any]] = {}
@@ -204,6 +281,8 @@ def _humanize_template_candidate_status(value: str) -> str:
         return "已发布"
     if key == "rolled_back":
         return "已回滚"
+    if key == "superseded":
+        return "已被新建议替代"
     return "状态未知"
 
 
@@ -1060,6 +1139,11 @@ def _suggestion_review_result_display(status: str) -> dict[str, str]:
             "result_label": "已拒绝建议",
             "result_summary": "这条治理建议已拒绝，当前保留证据继续观察。",
         }
+    if key == "superseded":
+        return {
+            "result_label": "已替代建议",
+            "result_summary": "这条治理建议已被更新证据替代，不再进入应用链路。",
+        }
     return {
         "result_label": "建议已处理",
         "result_summary": "这条治理建议的审批状态已更新。",
@@ -1705,7 +1789,18 @@ def get_suggestions(
 
 
 @router.post("/review")
-def review_suggestion(_user: RequireUser, req: ReviewRequest) -> dict:
+def review_suggestion(
+    _user: RequireUser,
+    req: ReviewRequest,
+    x_confirm: str | None = Header(default=None),
+) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/review",
+        action="review_suggestion",
+        x_confirm=x_confirm,
+        result={"suggestion_id": req.suggestion_id, "status": req.status},
+    )
     gov = RuleEvolutionGovernor()
     try:
         ok = gov.set_status(req.suggestion_id, req.status, req.note)
@@ -1722,16 +1817,33 @@ def review_suggestion(_user: RequireUser, req: ReviewRequest) -> dict:
         "lifecycle:",
         "offline_candidates:",
     )
-    return {
+    payload = {
         "ok": True,
         "suggestion_id": req.suggestion_id,
         "status": req.status,
         **_suggestion_review_result_display(req.status),
     }
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/review",
+        action="review_suggestion",
+        status="applied",
+        result=payload,
+    )
+    return payload
 
 
 @router.post("/govern/run")
-def run_governance(_user: RequireUser) -> dict:
+def run_governance(
+    _user: RequireUser,
+    x_confirm: str | None = Header(default=None),
+) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/govern/run",
+        action="run_governance",
+        x_confirm=x_confirm,
+    )
     gov = RuleEvolutionGovernor()
     before = gov.list_suggestions(limit=500)
     before_summary = {
@@ -1739,6 +1851,7 @@ def run_governance(_user: RequireUser) -> dict:
         "approved": sum(1 for item in before if item.get("status") == "approved"),
         "rejected": sum(1 for item in before if item.get("status") == "rejected"),
         "rolled_back": sum(1 for item in before if item.get("status") == "rolled_back"),
+        "superseded": sum(1 for item in before if item.get("status") == "superseded"),
     }
     review_result = gov.review_pending()
     reconcile_result = gov.reconcile_active()
@@ -1749,10 +1862,12 @@ def run_governance(_user: RequireUser) -> dict:
         "approved": sum(1 for item in after if item.get("status") == "approved"),
         "rejected": sum(1 for item in after if item.get("status") == "rejected"),
         "rolled_back": sum(1 for item in after if item.get("status") == "rolled_back"),
+        "superseded": sum(1 for item in after if item.get("status") == "superseded"),
     }
     auto_actions = (
         int(review_result.get("approved", 0))
         + int(review_result.get("rejected", 0))
+        + int(review_result.get("superseded", 0))
         + int(reconcile_result.get("rolled_back", 0))
         + int(effect_result.get("rolled_back", 0))
         + int(effect_result.get("reinforced", 0))
@@ -1779,6 +1894,7 @@ def run_governance(_user: RequireUser) -> dict:
         f"本轮治理自动处理 {auto_actions} 条建议："
         f"批准 {review_result.get('approved', 0)}，"
         f"拒绝 {review_result.get('rejected', 0)}，"
+        f"替代 {review_result.get('superseded', 0)}，"
         f"回滚 {reconcile_result.get('rolled_back', 0) + effect_result.get('rolled_back', 0)}，"
         f"增强 {effect_result.get('reinforced', 0)}。"
     )
@@ -1796,7 +1912,7 @@ def run_governance(_user: RequireUser) -> dict:
         "lifecycle:",
         "offline_candidates:",
     )
-    return {
+    payload = {
         "review_pending": review_result,
         "reconcile_active": reconcile_result,
         "reconcile_application_effects": effect_result,
@@ -1809,6 +1925,16 @@ def run_governance(_user: RequireUser) -> dict:
         "weights_synced": weights_synced,
         "risk_verdict": weight_risk_verdict,
     }
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/govern/run",
+        action="run_governance",
+        status="applied",
+        before=before_summary,
+        after=after_summary,
+        result={"auto_actions": auto_actions, "weights_synced": weights_synced},
+    )
+    return payload
 
 
 @router.get("/summary")
@@ -1824,7 +1950,7 @@ def get_learning_summary(_user: RequireUser) -> dict:
 
         conn = None
         try:
-            template_service = ParameterTemplateService(str(STATE_DB), ensure_schema=False)
+            template_service = ParameterTemplateService(str(_state_db_path()), ensure_schema=False)
             conn = _state_conn(read_only=True)
             suggestions = _execute(
                 conn,
@@ -2213,14 +2339,22 @@ def materialize_position_supervisor_advisories(
 def apply_position_supervisor_template_switch(
     _user: RequireUser,
     req: PositionSupervisorTemplateApplySwitchRequest,
+    x_confirm: str | None = Header(default=None),
 ) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/position-supervisor/templates/apply-switch",
+        action="apply_position_supervisor_template_switch",
+        x_confirm=x_confirm,
+        result={"suggestion_id": req.suggestion_id},
+    )
     suggestion_id = str(req.suggestion_id or "").strip()
     if not suggestion_id:
         raise HTTPException(status_code=400, detail="suggestion_id_required")
     evo_run = start_evolution_run(
         run_type="position_supervisor_template_switch",
         trigger_source="learning_api",
-        db_path=STATE_DB,
+        db_path=_state_db_path(),
         summary={"suggestion_id": suggestion_id, "note": req.note},
     )
     conn = _state_conn(read_only=False)
@@ -2282,15 +2416,24 @@ def apply_position_supervisor_template_switch(
                 before={"template_id": previous_template_id},
                 after={"template_id": scope_key},
                 result=payload,
-                db_path=STATE_DB,
+                db_path=_state_db_path(),
             )
-            finish_evolution_run(str(evo_run.get("run_id") or ""), status="blocked", summary=payload, db_path=STATE_DB)
+            finish_evolution_run(str(evo_run.get("run_id") or ""), status="blocked", summary=payload, db_path=_state_db_path())
+            _audit_governance_mutation(
+                user=_user,
+                endpoint="/api/learning/position-supervisor/templates/apply-switch",
+                action="apply_position_supervisor_template_switch",
+                status="blocked",
+                before={"template_id": previous_template_id},
+                after={"template_id": scope_key},
+                result=payload,
+            )
             return payload
         patch_runtime_config({"position_supervisor_template_id": scope_key})
         snapshot = persist_runtime_config_snapshot(
             runtime_config(),
             source="learning_api.position_supervisor_template_switch",
-            db_path=STATE_DB,
+            db_path=_state_db_path(),
             run_id=str(evo_run.get("run_id") or ""),
         )
         now_ts = time.time()
@@ -2401,9 +2544,18 @@ def apply_position_supervisor_template_switch(
             rollback={"previous_template_id": previous_template_id},
             config_version=int(snapshot.get("config_version") or 0),
             config_hash=str(snapshot.get("config_hash") or ""),
-            db_path=STATE_DB,
+            db_path=_state_db_path(),
         )
-        finish_evolution_run(str(evo_run.get("run_id") or ""), status="completed", summary=payload, db_path=STATE_DB)
+        finish_evolution_run(str(evo_run.get("run_id") or ""), status="completed", summary=payload, db_path=_state_db_path())
+        _audit_governance_mutation(
+            user=_user,
+            endpoint="/api/learning/position-supervisor/templates/apply-switch",
+            action="apply_position_supervisor_template_switch",
+            status="applied",
+            before={"template_id": previous_template_id},
+            after={"template_id": scope_key},
+            result=payload,
+        )
         return payload
     except HTTPException:
         raise
@@ -2419,7 +2571,7 @@ def run_position_supervisor_counterfactual(
     req: SupervisorCounterfactualRunRequest,
 ) -> dict:
     payload = evaluate_counterfactuals(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         limit=max(1, int(req.limit)),
         horizons_minutes=req.horizons_minutes,
         materialize=bool(req.materialize),
@@ -2438,7 +2590,7 @@ def get_position_supervisor_counterfactual(
     db_path: str | None = Query(default=None),
 ) -> dict:
     return list_counterfactuals(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
         limit=limit,
         position_id=position_id,
         label=label,
@@ -2451,7 +2603,7 @@ def backfill_position_supervisor_trace_api(
     req: PositionSupervisorTraceMaterializeRequest,
 ) -> dict:
     payload = backfill_position_supervisor_traces(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         limit=max(1, int(req.limit)),
     )
     _learning_cache_invalidate("autonomous:samples", "evolution:")
@@ -2464,7 +2616,7 @@ def materialize_position_supervisor_trace_labels_api(
     req: PositionSupervisorTraceMaterializeRequest,
 ) -> dict:
     payload = mature_position_supervisor_traces(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         limit=max(1, int(req.limit)),
     )
     _learning_cache_invalidate("autonomous:samples", "evolution:")
@@ -2480,12 +2632,12 @@ def get_learning_evolution_runs(
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
-    return _learning_cache_set(cache_key, list_evolution_runs(db_path=STATE_DB, limit=limit))
+    return _learning_cache_set(cache_key, list_evolution_runs(db_path=_state_db_path(), limit=limit))
 
 
 @router.get("/evolution/runs/{run_id}")
 def get_learning_evolution_run(_user: RequireUser, run_id: str) -> dict:
-    payload = get_evolution_run(run_id, db_path=STATE_DB)
+    payload = get_evolution_run(run_id, db_path=_state_db_path())
     if not payload:
         raise HTTPException(status_code=404, detail="evolution_run_not_found")
     return payload
@@ -2494,7 +2646,7 @@ def get_learning_evolution_run(_user: RequireUser, run_id: str) -> dict:
 @router.post("/autonomous/run")
 def run_learning_autonomous_cycle(_user: RequireUser, req: AutonomousLearningRunRequest) -> dict:
     payload = run_autonomous_learning_cycle(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         sample_limit=max(1, int(req.sample_limit)),
         recommendation_limit=max(1, int(req.recommendation_limit)),
         submit_offline_deep=bool(req.submit_offline_deep),
@@ -2521,7 +2673,7 @@ def get_learning_autonomous_samples(
     db_path: str | None = Query(default=None),
 ) -> dict:
     return list_autonomous_learning_samples(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
         limit=limit,
         sample_type=sample_type,
         label_status=label_status,
@@ -2565,7 +2717,8 @@ def get_parameter_template_recommendations(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
-    cache_key = f"recommendations:{factor_id or '*'}:{int(limit)}"
+    service = ParameterTemplateService()
+    cache_key = f"recommendations:{service.db_path}:{factor_id or '*'}:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
@@ -2573,10 +2726,9 @@ def get_parameter_template_recommendations(
         cached = _learning_cache_get(cache_key)
         if cached is not None:
             return cached
-        service = ParameterTemplateService()
         items = service.list_recommendations(factor_id=factor_id, limit=limit)
         validation_service = ParameterTemplateValidationService(service.db_path)
-        conn = _state_conn(read_only=True)
+        conn = _state_conn_for_path(service.db_path, read_only=True)
         try:
             enriched = []
             for item in items:
@@ -2761,7 +2913,20 @@ def materialize_parameter_template_recommendation(
 def apply_parameter_template_switch(
     _user: RequireUser,
     req: ParameterTemplateApplySwitchRequest,
+    x_confirm: str | None = Header(default=None),
 ) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/parameter-templates/apply-switch",
+        action="apply_parameter_template_switch",
+        x_confirm=x_confirm,
+        result={
+            "factor_id": req.factor_id,
+            "template_id": req.template_id,
+            "regime_key": req.regime_key,
+            "suggestion_id": req.suggestion_id,
+        },
+    )
     service = ParameterTemplateService()
     try:
         result = service.activate_template(
@@ -2783,14 +2948,30 @@ def apply_parameter_template_switch(
         "offline_candidates:",
     )
     if result.get("blocked"):
-        return {
+        payload = {
             **result,
             **_offline_candidate_action_result_display(action="release", blocked=True),
         }
-    return {
+        _audit_governance_mutation(
+            user=_user,
+            endpoint="/api/learning/parameter-templates/apply-switch",
+            action="apply_parameter_template_switch",
+            status="blocked",
+            result=payload,
+        )
+        return payload
+    payload = {
         **result,
         **_offline_candidate_action_result_display(action="release"),
     }
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/parameter-templates/apply-switch",
+        action="apply_parameter_template_switch",
+        status="applied",
+        result=payload,
+    )
+    return payload
 
 
 @router.post("/parameter-templates/boundary-check")
@@ -2855,17 +3036,17 @@ def list_parameter_template_offline_candidates(
 ) -> dict:
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
     status = status if isinstance(status, str) and status else None
-    cache_key = f"offline_candidates:{factor_id or '*'}:{status or '*'}:{int(limit)}"
+    service = ParameterTemplateValidationService()
+    cache_key = f"offline_candidates:{service.db_path}:{factor_id or '*'}:{status or '*'}:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
-    service = ParameterTemplateValidationService()
     items = service.list_release_candidates(
         factor_id=factor_id,
         status=status,
         limit=limit,
     )
-    conn = _state_conn(read_only=True)
+    conn = _state_conn_for_path(service.db_path, read_only=True)
     try:
         enriched = []
         for item in items:
@@ -2889,7 +3070,15 @@ def list_parameter_template_offline_candidates(
 def review_parameter_template_offline_candidate(
     _user: RequireUser,
     req: ParameterTemplateOfflineCandidateReviewRequest,
+    x_confirm: str | None = Header(default=None),
 ) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/parameter-templates/offline-candidates/review",
+        action="review_parameter_template_offline_candidate",
+        x_confirm=x_confirm,
+        result={"candidate_id": req.candidate_id, "status": req.status},
+    )
     service = ParameterTemplateValidationService()
     try:
         item = service.review_release_candidate(
@@ -2908,7 +3097,7 @@ def review_parameter_template_offline_candidate(
         "lifecycle:",
         "offline_candidates:",
     )
-    return {
+    payload = {
         "ok": True,
         "item": item,
         **_offline_candidate_action_result_display(
@@ -2916,13 +3105,29 @@ def review_parameter_template_offline_candidate(
             status=req.status,
         ),
     }
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/parameter-templates/offline-candidates/review",
+        action="review_parameter_template_offline_candidate",
+        status="applied",
+        result=payload,
+    )
+    return payload
 
 
 @router.post("/parameter-templates/offline-candidates/release")
 def release_parameter_template_offline_candidate(
     _user: RequireUser,
     req: ParameterTemplateOfflineCandidateActionRequest,
+    x_confirm: str | None = Header(default=None),
 ) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/parameter-templates/offline-candidates/release",
+        action="release_parameter_template_offline_candidate",
+        x_confirm=x_confirm,
+        result={"candidate_id": req.candidate_id},
+    )
     service = ParameterTemplateValidationService()
     try:
         result = service.deploy_release_candidate(
@@ -2945,21 +3150,45 @@ def release_parameter_template_offline_candidate(
         "offline_candidates:",
     )
     if result.get("blocked"):
-        return {
+        payload = {
             **result,
             **_offline_candidate_action_result_display(action="rollback", blocked=True),
         }
-    return {
+        _audit_governance_mutation(
+            user=_user,
+            endpoint="/api/learning/parameter-templates/offline-candidates/release",
+            action="release_parameter_template_offline_candidate",
+            status="blocked",
+            result=payload,
+        )
+        return payload
+    payload = {
         **result,
         **_offline_candidate_action_result_display(action="release"),
     }
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/parameter-templates/offline-candidates/release",
+        action="release_parameter_template_offline_candidate",
+        status="applied",
+        result=payload,
+    )
+    return payload
 
 
 @router.post("/parameter-templates/offline-candidates/rollback")
 def rollback_parameter_template_offline_candidate(
     _user: RequireUser,
     req: ParameterTemplateOfflineCandidateActionRequest,
+    x_confirm: str | None = Header(default=None),
 ) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/parameter-templates/offline-candidates/rollback",
+        action="rollback_parameter_template_offline_candidate",
+        x_confirm=x_confirm,
+        result={"candidate_id": req.candidate_id},
+    )
     service = ParameterTemplateValidationService()
     try:
         result = service.rollback_release_candidate(
@@ -2978,14 +3207,30 @@ def rollback_parameter_template_offline_candidate(
         "offline_candidates:",
     )
     if result.get("blocked"):
-        return {
+        payload = {
             **result,
             **_offline_candidate_action_result_display(action="rollback", blocked=True),
         }
-    return {
+        _audit_governance_mutation(
+            user=_user,
+            endpoint="/api/learning/parameter-templates/offline-candidates/rollback",
+            action="rollback_parameter_template_offline_candidate",
+            status="blocked",
+            result=payload,
+        )
+        return payload
+    payload = {
         **result,
         **_offline_candidate_action_result_display(action="rollback"),
     }
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/parameter-templates/offline-candidates/rollback",
+        action="rollback_parameter_template_offline_candidate",
+        status="applied",
+        result=payload,
+    )
+    return payload
 
 
 @router.get("/applications")
@@ -3181,8 +3426,8 @@ def get_learning_dataset_quality_health(
 ) -> dict:
     return {
         "schema_version": "learning_dataset_quality_health.v1",
-        "evidence_contract": validate_evidence_contract_health(db_path=STATE_DB, limit=limit),
-        "entry_context": entry_context_quality_report(db_path=STATE_DB, limit=min(limit, 5000)),
+        "evidence_contract": validate_evidence_contract_health(db_path=_state_db_path(), limit=limit),
+        "entry_context": entry_context_quality_report(db_path=_state_db_path(), limit=min(limit, 5000)),
     }
 
 
@@ -3289,10 +3534,29 @@ def list_learning_model_shadow_candidates(
 
 
 @router.post("/model/shadow-queue/status")
-def update_learning_model_shadow_candidate(_user: RequireUser, req: ModelShadowStatusRequest) -> dict:
+def update_learning_model_shadow_candidate(
+    _user: RequireUser,
+    req: ModelShadowStatusRequest,
+    x_confirm: str | None = Header(default=None),
+) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/model/shadow-queue/status",
+        action="update_model_shadow_queue_status",
+        x_confirm=x_confirm,
+        result={"candidate_id": req.candidate_id, "status": req.status},
+    )
     if not req.candidate_id:
         raise HTTPException(status_code=400, detail="candidate_id is required")
-    return ModelShadowQueue(req.registry_db_path).update_status(req.candidate_id, req.status, req.note)
+    result = ModelShadowQueue(req.registry_db_path).update_status(req.candidate_id, req.status, req.note)
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/model/shadow-queue/status",
+        action="update_model_shadow_queue_status",
+        status="applied" if result.get("ok", True) else "blocked",
+        result=result,
+    )
+    return result
 
 
 @router.post("/model/shadow-run")
@@ -3315,7 +3579,18 @@ def run_learning_model_shadow_validation(_user: RequireUser, req: ModelShadowRun
 
 
 @router.post("/model/canary-review")
-def review_learning_model_canary(_user: RequireUser, req: ModelCanaryReviewRequest) -> dict:
+def review_learning_model_canary(
+    _user: RequireUser,
+    req: ModelCanaryReviewRequest,
+    x_confirm: str | None = Header(default=None),
+) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/model/canary-review",
+        action="review_model_canary",
+        x_confirm=x_confirm,
+        result={"candidate_id": req.candidate_id},
+    )
     if not req.candidate_id:
         raise HTTPException(status_code=400, detail="candidate_id is required")
     candidate = ModelShadowQueue(req.registry_db_path).get_candidate(req.candidate_id)
@@ -3329,7 +3604,15 @@ def review_learning_model_canary(_user: RequireUser, req: ModelCanaryReviewReque
         },
     )
     if not verdict.get("allowed", False):
-        return _blocked_by_risk(verdict)
+        result = _blocked_by_risk(verdict)
+        _audit_governance_mutation(
+            user=_user,
+            endpoint="/api/learning/model/canary-review",
+            action="review_model_canary",
+            status="blocked",
+            result=result,
+        )
+        return result
     result = ModelCanaryReviewer(req.registry_db_path).review_candidate(
         req.candidate_id,
         report_path=req.report_path,
@@ -3340,6 +3623,13 @@ def review_learning_model_canary(_user: RequireUser, req: ModelCanaryReviewReque
         note=req.note,
     )
     result["risk_verdict"] = verdict
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/model/canary-review",
+        action="review_model_canary",
+        status="applied" if result.get("ok", True) else "blocked",
+        result=result,
+    )
     return result
 
 
@@ -3387,12 +3677,12 @@ def list_learning_model_inference_audits(
 
 @router.post("/model/meta/context")
 def build_learning_meta_model_context(_user: RequireUser, req: MetaModelContextRequest) -> dict:
-    return MetaModelSidecar(req.db_path or STATE_DB).build_context(req.context)
+    return MetaModelSidecar(req.db_path or _state_db_path()).build_context(req.context)
 
 
 @router.post("/model/meta/advisory-run")
 def run_learning_meta_model_advisory(_user: RequireUser, req: MetaModelAdvisoryRunRequest) -> dict:
-    return MetaModelSidecar(req.db_path or STATE_DB).run(
+    return MetaModelSidecar(req.db_path or _state_db_path()).run(
         context=req.context,
         materialize=bool(req.materialize),
     )
@@ -3404,14 +3694,14 @@ def list_learning_meta_model_advisories(
     limit: int = Query(default=50, ge=1, le=500),
     db_path: str | None = Query(default=None),
 ) -> dict:
-    return MetaModelSidecar(db_path or STATE_DB).list_advisories(limit=limit)
+    return MetaModelSidecar(db_path or _state_db_path()).list_advisories(limit=limit)
 
 
 @router.post("/model/llm/advisory-run")
 def run_learning_llm_advisory(_user: RequireUser, req: LLMAdvisoryRunRequest) -> dict:
     max_output_tokens = max(1, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "32768") or 32768))
     return LLMAdvisoryService(
-        req.db_path or STATE_DB,
+        req.db_path or _state_db_path(),
         provider=req.provider,
         model=req.model,
         base_url=req.base_url,
@@ -3436,7 +3726,7 @@ def list_learning_llm_advisory_audits(
     status: str | None = Query(default=None),
     db_path: str | None = Query(default=None),
 ) -> dict:
-    return LLMAdvisoryService(db_path or STATE_DB).list_audits(
+    return LLMAdvisoryService(db_path or _state_db_path()).list_audits(
         limit=limit,
         task_type=task_type,
         target_type=target_type,
@@ -3453,7 +3743,7 @@ def validate_learning_model_permissions(_user: RequireUser, req: ModelPermission
     return validate_model_artifact(
         target,
         model_type=req.model_type,
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         context={"operation": "api_validate_model_permissions"},
         require_shadow=bool(req.require_shadow),
     )
@@ -3468,7 +3758,7 @@ def list_learning_model_permission_audits(
     db_path: str | None = Query(default=None),
 ) -> dict:
     return list_model_permission_audits(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
         limit=limit,
         model_type=model_type,
         status=status,
@@ -3478,7 +3768,7 @@ def list_learning_model_permission_audits(
 @router.post("/model/position-quality-lightgbm/train")
 def train_position_quality_lightgbm(_user: RequireUser, req: PositionQualityLightGBMTrainRequest) -> dict:
     service = PositionQualityLightGBMService(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     result = service.train(
@@ -3502,7 +3792,7 @@ def train_position_quality_lightgbm(_user: RequireUser, req: PositionQualityLigh
 @router.post("/model/position-quality-lightgbm/shadow-run")
 def run_position_quality_lightgbm_shadow(_user: RequireUser, req: PositionQualityLightGBMShadowRequest) -> dict:
     service = PositionQualityLightGBMService(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     return service.score_samples(
@@ -3520,7 +3810,7 @@ def list_position_quality_lightgbm_audits(
     db_path: str | None = Query(default=None),
 ) -> dict:
     service = PositionQualityLightGBMService(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
     )
     return service.list_audits(limit=limit, position_id=position_id)
 
@@ -3528,7 +3818,7 @@ def list_position_quality_lightgbm_audits(
 @router.post("/model/open-quality-lightgbm/train")
 def train_open_quality_lightgbm(_user: RequireUser, req: OpenQualityLightGBMTrainRequest) -> dict:
     service = OpenQualityLightGBMService(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     result = service.train(
@@ -3552,7 +3842,7 @@ def train_open_quality_lightgbm(_user: RequireUser, req: OpenQualityLightGBMTrai
 @router.post("/model/open-quality-lightgbm/shadow-run")
 def run_open_quality_lightgbm_shadow(_user: RequireUser, req: OpenQualityLightGBMShadowRequest) -> dict:
     service = OpenQualityLightGBMService(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     return service.score_samples(
@@ -3570,7 +3860,7 @@ def list_open_quality_lightgbm_audits(
     db_path: str | None = Query(default=None),
 ) -> dict:
     service = OpenQualityLightGBMService(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
     )
     return service.list_audits(limit=limit, position_id=position_id)
 
@@ -3578,7 +3868,7 @@ def list_open_quality_lightgbm_audits(
 @router.post("/model/factor-governance-lightgbm/train")
 def train_factor_governance_lightgbm(_user: RequireUser, req: FactorGovernanceLightGBMTrainRequest) -> dict:
     service = FactorGovernanceLightGBMService(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     result = service.train(
@@ -3604,7 +3894,7 @@ def train_factor_governance_lightgbm(_user: RequireUser, req: FactorGovernanceLi
 @router.post("/model/factor-governance-lightgbm/shadow-run")
 def run_factor_governance_lightgbm_shadow(_user: RequireUser, req: FactorGovernanceLightGBMShadowRequest) -> dict:
     service = FactorGovernanceLightGBMService(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     return service.score_samples(
@@ -3624,7 +3914,7 @@ def list_factor_governance_lightgbm_audits(
     db_path: str | None = Query(default=None),
 ) -> dict:
     service = FactorGovernanceLightGBMService(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
     )
     return service.list_audits(limit=limit, factor=factor)
 
@@ -3639,7 +3929,7 @@ def list_factor_governance_lightgbm_advisories(
     db_path: str | None = Query(default=None),
 ) -> dict:
     service = FactorGovernanceLightGBMService(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
     )
     audits = service.list_audits(limit=limit, factor=factor)
     payload = service.build_advisories(
@@ -3655,7 +3945,7 @@ def list_factor_governance_lightgbm_advisories(
 @router.post("/model/meta-lightgbm/train")
 def train_meta_model_lightgbm(_user: RequireUser, req: MetaModelLightGBMTrainRequest) -> dict:
     service = MetaModelLightGBMService(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     result = service.train(
@@ -3684,7 +3974,7 @@ def train_meta_model_lightgbm(_user: RequireUser, req: MetaModelLightGBMTrainReq
 @router.post("/model/meta-lightgbm/shadow-run")
 def run_meta_model_lightgbm_shadow(_user: RequireUser, req: MetaModelLightGBMShadowRequest) -> dict:
     service = MetaModelLightGBMService(
-        db_path=req.db_path or STATE_DB,
+        db_path=req.db_path or _state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     return service.score_samples(
@@ -3706,7 +3996,7 @@ def list_meta_model_lightgbm_audits(
     artifact_dir: str | None = Query(default=None),
 ) -> dict:
     service = MetaModelLightGBMService(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
         artifact_dir=artifact_dir,
     )
     return service.list_audits(limit=limit, posture=posture)
@@ -3722,7 +4012,7 @@ def build_meta_model_lightgbm_shadow_report(
     artifact_dir: str | None = Query(default=None),
 ) -> dict:
     service = MetaModelLightGBMService(
-        db_path=db_path or STATE_DB,
+        db_path=db_path or _state_db_path(),
         artifact_dir=artifact_dir,
     )
     return service.build_shadow_report(
@@ -3737,11 +4027,11 @@ def snapshot_meta_model_lightgbm_shadow_report(
     _user: RequireUser,
     req: MetaModelLightGBMSnapshotRequest,
 ) -> dict:
-    report = MetaModelLightGBMService(db_path=req.db_path or STATE_DB).build_shadow_report(
+    report = MetaModelLightGBMService(db_path=req.db_path or _state_db_path()).build_shadow_report(
         limit=max(1, int(req.limit)),
         include_samples=bool(req.include_samples),
     )
-    return MetaGovernanceService(req.db_path or STATE_DB).create_shadow_report_snapshot(
+    return MetaGovernanceService(req.db_path or _state_db_path()).create_shadow_report_snapshot(
         report=report,
         limit=max(1, int(req.limit)),
         include_samples=bool(req.include_samples),
@@ -3755,25 +4045,40 @@ def list_meta_model_lightgbm_shadow_report_snapshots(
     limit: int = Query(default=20, ge=1, le=200),
     db_path: str | None = Query(default=None),
 ) -> dict:
-    return MetaGovernanceService(db_path or STATE_DB).list_shadow_report_snapshots(limit=limit)
+    return MetaGovernanceService(db_path or _state_db_path()).list_shadow_report_snapshots(limit=limit)
 
 
 @router.post("/model/meta-lightgbm/governance-suggestion")
 def materialize_meta_model_lightgbm_governance_suggestion(
     _user: RequireUser,
     req: MetaModelLightGBMGovernanceRequest,
+    x_confirm: str | None = Header(default=None),
 ) -> dict:
-    report = MetaModelLightGBMService(db_path=req.db_path or STATE_DB).build_shadow_report(
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/learning/model/meta-lightgbm/governance-suggestion",
+        action="materialize_meta_governance_suggestion",
+        x_confirm=x_confirm,
+        result={"limit": req.limit, "snapshot": req.snapshot, "source": req.source},
+    )
+    report = MetaModelLightGBMService(db_path=req.db_path or _state_db_path()).build_shadow_report(
         limit=max(1, int(req.limit)),
         include_samples=False,
     )
-    result = MetaGovernanceService(req.db_path or STATE_DB).materialize_meta_governance_suggestion(
+    result = MetaGovernanceService(req.db_path or _state_db_path()).materialize_meta_governance_suggestion(
         report=report,
         limit=max(1, int(req.limit)),
         snapshot=bool(req.snapshot),
         source=req.source or "manual",
     )
     _learning_cache_invalidate("suggestions:", "summary")
+    _audit_governance_mutation(
+        user=_user,
+        endpoint="/api/learning/model/meta-lightgbm/governance-suggestion",
+        action="materialize_meta_governance_suggestion",
+        status="applied" if result.get("ok", True) else "blocked",
+        result=result,
+    )
     return result
 
 

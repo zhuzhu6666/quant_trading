@@ -1,7 +1,7 @@
 """execution/event_sizing.py — 事件感知动态仓位
 
 根据事件日历（importance ≥ 2）和 bar 时间戳计算仓位乘数。
-距重大事件越近，乘数越小（最保守 0.2x）。
+只在高影响事件临近的一小时内降仓，避免把日内交易长时间锁死。
 
 Events 表结构: (date TEXT, type TEXT, description TEXT, importance INTEGER)
   importance=3 → HIGH: FOMC, NFP, CPI
@@ -9,7 +9,7 @@ Events 表结构: (date TEXT, type TEXT, description TEXT, importance INTEGER)
 
 用法:
     es = EventSizing(db_path="data/events.duckdb")
-    mult = es.get_multiplier(bar_time_epoch)  # 0.2 .. 1.0
+    mult = es.get_multiplier(bar_time_epoch)  # 0.5 .. 1.0
     volume *= mult
 """
 from __future__ import annotations
@@ -24,6 +24,8 @@ from typing import Any, Optional
 from backend.core.db import connect_duckdb
 
 logger = logging.getLogger(__name__)
+
+EVENT_SIZING_SCHEMA_VERSION = "event_sizing.short_window.v2"
 
 
 @dataclass
@@ -53,15 +55,18 @@ DEFAULT_EVENT_TIMES: dict[str, str] = {
 # 默认乘数层级
 DEFAULT_TIERS: dict[int, list[EventTier]] = {
     3: [  # HIGH: FOMC, NFP, CPI
-        EventTier(max_hours_before=4.0,  multiplier=0.2),
-        EventTier(max_hours_before=24.0, multiplier=0.5),
-        EventTier(max_hours_before=72.0, multiplier=0.8),
+        EventTier(max_hours_before=0.25, multiplier=0.5),
+        EventTier(max_hours_before=1.0, multiplier=0.8),
     ],
-    2: [  # MEDIUM: PCE
-        EventTier(max_hours_before=4.0,  multiplier=0.5),
-        EventTier(max_hours_before=24.0, multiplier=0.8),
+    2: [  # MEDIUM: PCE / Fed speakers; record context without reducing min-size trades
+        EventTier(max_hours_before=0.5, multiplier=1.0),
     ],
 }
+
+
+def _is_legacy_sqlite_events_path(db_path: str) -> bool:
+    suffix = Path(db_path).suffix.lower()
+    return suffix in {".db", ".sqlite", ".sqlite3"}
 
 
 class EventSizing:
@@ -69,7 +74,7 @@ class EventSizing:
     事件感知仓位乘数。
 
     从 events 表加载 importance≥2 的事件，根据 bar 时间戳
-    与最近事件的距离返回仓位乘数 [0.2, 1.0]。
+    与最近事件的距离返回仓位乘数 [0.5, 1.0]。
 
     None/disabled 时所有调用返回 1.0，向后兼容。
     """
@@ -119,6 +124,8 @@ class EventSizing:
                 finally:
                     conn.close()
             except ValueError:
+                if not _is_legacy_sqlite_events_path(db_path):
+                    raise
                 conn = sqlite3.connect(str(db_path))
                 try:
                     rows = conn.execute(
@@ -169,7 +176,10 @@ class EventSizing:
             return 1.0
 
         context = self.get_context(bar_time)
-        return float(context.get("multiplier", 1.0) or 1.0)
+        try:
+            return float(context.get("multiplier", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
 
     @staticmethod
     def _window_bucket(hours_until: float, tier: EventTier | None) -> str:
@@ -177,11 +187,13 @@ class EventSizing:
             return "post_0_5m"
         if tier is None:
             return ""
-        if tier.max_hours_before <= 4.0:
-            return "pre_0_4h"
-        if tier.max_hours_before <= 24.0:
-            return "pre_4_24h"
-        return "pre_24_72h"
+        if tier.max_hours_before <= 0.25:
+            return "pre_0_15m"
+        if tier.max_hours_before <= 0.5:
+            return "pre_15_30m"
+        if tier.max_hours_before <= 1.0:
+            return "pre_30_60m"
+        return f"pre_0_{tier.max_hours_before:g}h"
 
     def get_context(self, bar_time: float) -> dict[str, Any]:
         """Return the multiplier plus the event/tier that caused it."""
@@ -196,6 +208,10 @@ class EventSizing:
         min_mult = 1.0
         causal: dict[str, Any] = {}
         nearest: dict[str, Any] = {}
+        max_pre_window = max(
+            (tier.max_hours_before for tiers in self.tiers.values() for tier in tiers),
+            default=0.0,
+        )
         for event in self._events:
             delta = event.dt - bar_dt
             hours_until = delta.total_seconds() / 3600.0
@@ -205,7 +221,7 @@ class EventSizing:
             # 缩短为 5 分钟 — 仅覆盖 bar 时间和事件时间的小范围错位.
             if hours_until < -(5.0 / 60.0):  # 5 min post-event
                 continue
-            if hours_until > 72.0:
+            if max_pre_window > 0 and hours_until > max_pre_window:
                 continue
 
             candidate = {
@@ -235,6 +251,7 @@ class EventSizing:
 
         event_payload = causal or nearest
         return {
+            "schema_version": EVENT_SIZING_SCHEMA_VERSION,
             "enabled": self.enabled,
             "multiplier": min_mult,
             "event_near": bool(event_payload),
@@ -268,8 +285,13 @@ class EventSizing:
     def stats(self) -> dict:
         """摘要信息"""
         return {
+            "schema_version": EVENT_SIZING_SCHEMA_VERSION,
             "enabled": self.enabled,
             "total_events": len(self._events),
             "min_multiplier": self._min_multiplier,
+            "max_pre_window_hours": max(
+                (tier.max_hours_before for tiers in self.tiers.values() for tier in tiers),
+                default=0.0,
+            ),
         }
 

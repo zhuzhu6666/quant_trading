@@ -7,6 +7,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -193,7 +194,7 @@ def snapshot_report(sqlite_conn: sqlite3.Connection, tables: list[str], schema: 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sqlite-db", default=str(STATE_DB))
+    parser.add_argument("--sqlite-db", default="", help="Explicit external SQLite backup path for one-off migration")
     parser.add_argument("--pg-dsn", default="")
     parser.add_argument("--schema", default=STATE_SCHEMA)
     parser.add_argument("--backup-dir", default="")
@@ -201,9 +202,13 @@ def main() -> int:
     parser.add_argument("--drop-schema", action="store_true")
     args = parser.parse_args()
 
+    if not args.sqlite_db:
+        raise SystemExit("SQLite cold backup is not retained locally; pass --sqlite-db explicitly if restoring from an external backup")
     sqlite_path = Path(args.sqlite_db)
     if not sqlite_path.exists():
         raise SystemExit(f"SQLite db not found: {sqlite_path}")
+    if not os.access(sqlite_path, os.R_OK):
+        raise SystemExit(f"SQLite cold backup is not readable: {sqlite_path}; restore read permission only for migration")
     dsn = args.pg_dsn or state_pg_dsn()
     if not dsn:
         raise SystemExit("PostgreSQL DSN missing; pass --pg-dsn or configure QUANT_STATE_PG_DSN")

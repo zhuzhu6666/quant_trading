@@ -54,6 +54,22 @@ class TestRiskGovernor:
         assert not v.allowed
         assert v.reason == "loss_cooldown_active"
 
+    def test_consecutive_losses_releases_after_configured_cooldown(self, gov):
+        """配置冷静期时，达到硬阈值后也应在冷静期结束释放。"""
+        v = gov.allow_trade(
+            GovernorState(
+                consecutive_losses=8,
+                timeframe_seconds=300,
+                seconds_since_last_trade=1800.0,
+                extra={
+                    "loss_cooldown_after_losses": 2,
+                    "loss_cooldown_bars": 3,
+                },
+            )
+        )
+        assert v.allowed
+        assert v.reason == "ok"
+
     def test_daily_loss_blocks_trade(self, gov):
         """日亏损超 5% → 禁止交易."""
         v = gov.allow_trade(GovernorState(daily_loss_pct=6.0))

@@ -136,7 +136,7 @@ data/archive/                             # 已归档的旧运行库，例如 le
 
 因子数据统一入口是 `data.factor_frame.FactorFrameBuilder`。live、factor health、evolution 不应各自手写 external/events join；新增外部因子时先落到 `data/external_data.duckdb` / `data/events.duckdb` 的 PIT 标准列，再由 builder 暴露给因子函数。
 
-运行时状态与学习审计主库已迁移到本机 PostgreSQL 的 `state_v1` schema。`data/state.db` 仅作为迁移冷备/回滚源保留，不再作为 live 主写入口。服务器本地 `.env` 使用 `QUANT_STATE_BACKEND=postgres` 与 `QUANT_STATE_PG_DSN` 控制主库连接；历史 PostgreSQL audit 双写表保留为迁移留痕，不再替代主状态 schema。详见 [state-dual-write-postgres.md](state-dual-write-postgres.md)。
+运行时状态与学习审计主库已迁移到本机 PostgreSQL 的 `state_v1` schema。`data/state.db` 已删除，不再保留本地 SQLite state 冷备，也不再作为 live 主写入口。服务器本地 `.env` 使用 `QUANT_STATE_BACKEND=postgres` 与 `QUANT_STATE_PG_DSN` 控制主库连接；历史 PostgreSQL audit 双写表保留为迁移留痕，不再替代主状态 schema。详见 [state-dual-write-postgres.md](state-dual-write-postgres.md)。
 
 当前 systemd 约定：
 

@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 
 from backend.core.auth import RequireUser
 from backend.jobs import get_job_manager
+from backend.services.mutation_audit import record_api_mutation
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -26,5 +27,20 @@ def get_job(_user: RequireUser, job_id: str) -> dict:
 def cancel_job(_user: RequireUser, job_id: str) -> dict:
     ok = get_job_manager().cancel(job_id)
     if not ok:
+        record_api_mutation(
+            user=_user,
+            endpoint="/api/jobs/{job_id}/cancel",
+            action="cancel_job",
+            status="blocked",
+            result={"job_id": job_id, "reason": "job not running or not found"},
+        )
         raise HTTPException(status_code=400, detail="job not running or not found")
-    return {"ok": True, "job_id": job_id}
+    result = {"ok": True, "job_id": job_id}
+    record_api_mutation(
+        user=_user,
+        endpoint="/api/jobs/{job_id}/cancel",
+        action="cancel_job",
+        status="applied",
+        result=result,
+    )
+    return result

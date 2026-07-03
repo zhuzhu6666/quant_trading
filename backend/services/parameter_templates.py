@@ -29,7 +29,7 @@ _RECOMMENDATION_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _use_pg(db_path: str | Path) -> bool:
-    return is_state_db_path(db_path)
+    return Path(db_path).resolve() == Path(STATE_DB).resolve()
 
 
 def _conn_is_pg(conn) -> bool:

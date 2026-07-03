@@ -4,7 +4,7 @@ XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4 + Phase H autono
 
 ## Current Entry Points
 
-- Backend API: `python -m backend`
+- Backend API: `./.venv/bin/python -m backend`
 - Frontend: `miniprogram_v2` in WeChat DevTools; `web_frontend` is the planned full Web console
 - Current docs: [docs/README.md](docs/README.md)
 - Workspace rules: [AGENTS.md](AGENTS.md)
@@ -48,8 +48,8 @@ Runtime state and learning audit state use PostgreSQL `state_v1` as the source o
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
-python -m backend
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m backend
 ```
 
 Optional CLI flows:

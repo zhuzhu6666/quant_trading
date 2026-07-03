@@ -17,8 +17,12 @@ _HASH = hashlib.sha256(_PW.encode()).hexdigest()
 @pytest.fixture(autouse=True)
 def _set_test_password(monkeypatch):
     """Override the password hash so the login test can use a known password."""
+    monkeypatch.setenv("QUANT_JWT_SECRET", "test-jwt-secret-2026-do-not-use-in-prod")
     monkeypatch.setenv("QUANT_PASSWORD_HASH", _HASH)
     monkeypatch.setenv("QUANT_AUTH_USER", "zhu")
+    import backend.core.auth as auth_core
+
+    auth_core._JWT_SECRET = None
     from backend.api.auth import _LOGIN_ATTEMPTS
 
     _LOGIN_ATTEMPTS.clear()
@@ -41,6 +45,25 @@ def test_login_returns_jwt():
     assert payload["sub"] == "zhu"
     assert "iat" in payload
     assert "exp" in payload
+
+
+def test_login_requires_auth_environment(monkeypatch):
+    import backend.core.auth as auth_core
+
+    monkeypatch.delenv("QUANT_JWT_SECRET", raising=False)
+    auth_core._JWT_SECRET = None
+    r = client.post("/api/auth/login", json={"username": "zhu", "password": _PW})
+
+    assert r.status_code == 500
+    assert r.json()["detail"]["error"] == "auth_not_configured"
+
+
+def test_login_requires_password_hash(monkeypatch):
+    monkeypatch.delenv("QUANT_PASSWORD_HASH", raising=False)
+    r = client.post("/api/auth/login", json={"username": "zhu", "password": _PW})
+
+    assert r.status_code == 500
+    assert r.json()["detail"]["error"] == "auth_not_configured"
 
 
 def test_login_uses_env_overrides(monkeypatch):
@@ -108,6 +131,17 @@ def test_me_strict_expired_token_401():
     assert r.status_code == 401
     body = r.json()
     assert "token_expired" in str(body)
+
+
+def test_me_strict_missing_subject_401():
+    now = int(time.time())
+    payload = {"iat": now, "exp": now + 60}
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    r = client.get("/api/auth/me-strict", headers={"Authorization": f"Bearer {token}"})
+
+    assert r.status_code == 401
+    assert r.json()["detail"]["error"] == "invalid_token"
 
 
 def test_get_current_user_no_header_raises_401():

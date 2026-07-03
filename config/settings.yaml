@@ -3,7 +3,7 @@
 # =============================================================================
 
 system:
-  mode: backtest             # backtest | paper | live
+  mode: live                 # backtest | paper | live
   clock: realtime            # realtime | simulated
   log_level: INFO
   log_dir: logs/
@@ -23,7 +23,7 @@ ctrader:
   proxy_rdns: true                          # 走代理时是否由代理端解析域名
   rate_limit_per_sec: 5                     # 跟 SDK 默认对齐, 防 broker 限速
   request_timeout_sec: 10
-  send_orders: true                         # 真发单
+  send_orders: true                         # 真发单；必须 system.mode=live 且经确认后开启
 
   
 commission:
@@ -56,12 +56,10 @@ event_sizing:
     PCE: "13:30"
   tiers:                        # importance → [{max_hours_before, multiplier}]
     3:  # HIGH: FOMC, NFP, CPI
-      - {max_hours_before: 4,  multiplier: 0.2}
-      - {max_hours_before: 24, multiplier: 0.5}
-      - {max_hours_before: 72, multiplier: 0.8}
-    2:  # MEDIUM: PCE
-      - {max_hours_before: 4,  multiplier: 0.5}
-      - {max_hours_before: 24, multiplier: 0.8}
+      - {max_hours_before: 0.25, multiplier: 0.5}  # 15 min
+      - {max_hours_before: 1,    multiplier: 0.8}  # 60 min
+    2:  # MEDIUM: PCE/Fed speakers; observe only
+      - {max_hours_before: 0.5,  multiplier: 1.0}  # 30 min
 
 execution:
   default_type: market         # market | limit | stop

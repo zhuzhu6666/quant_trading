@@ -473,19 +473,27 @@ export async function getStateSnapshot(): Promise<StateSnapshot> {
   return getJson<StateSnapshot>("/api/state");
 }
 
-export async function startTrading(broker = "ctrader", strategy_name = "factor_v4"): Promise<Record<string, unknown>> {
-  return postJson("/api/live/start", { broker, strategy_name });
+export async function startTrading(
+  broker = "ctrader",
+  strategy_name = "factor_v4",
+  confirmed = false,
+): Promise<Record<string, unknown>> {
+  return postJson(
+    "/api/live/start",
+    { broker, strategy_name },
+    confirmed ? { "X-Confirm": "start-live" } : undefined,
+  );
 }
 
 export async function stopTrading(): Promise<Record<string, unknown>> {
   return postJson("/api/live/stop", {});
 }
 
-export async function emergencyClose(): Promise<Record<string, unknown>> {
+export async function emergencyClose(confirmed = false): Promise<Record<string, unknown>> {
   return apiRequest<Record<string, unknown>>("/api/live/emergency-close", {
     method: "POST",
     headers: {
-      "X-Confirm": "emergency",
+      ...(confirmed ? { "X-Confirm": "emergency" } : {}),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ broker: "ctrader", symbol: null }),

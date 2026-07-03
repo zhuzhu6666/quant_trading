@@ -1,4 +1,4 @@
-"""Uvicorn entry: `python -m backend` starts FastAPI on :8000."""
+"""Uvicorn entry used by `./.venv/bin/python -m backend`."""
 import argparse
 import uvicorn
 

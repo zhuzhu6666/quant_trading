@@ -12,11 +12,27 @@
 
 ## 当前开发启动
 
-在仓库根目录启动后端:
+Linux 服务器后端必须使用仓库内独立虚拟环境，避免污染 Codex/Hermes 等共享运行环境:
+
+```bash
+cd /home/ubuntu/quant_trading
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m backend
+```
+
+本地 Windows 临时调试时，在仓库根目录启动后端:
 
 ```bash
 cd C:\Users\zhu\quant_trading
-python -m backend
+.\.venv\Scripts\python.exe -m backend
+```
+
+后端启动前必须配置认证环境变量；缺失时服务会 fail closed:
+
+```env
+QUANT_JWT_SECRET=至少 32 字节随机字符串
+QUANT_AUTH_USER=登录用户名
+QUANT_PASSWORD_HASH=登录密码的 SHA256 十六进制摘要
 ```
 
 默认监听:
@@ -27,13 +43,13 @@ python -m backend
 等价命令:
 
 ```bash
-uvicorn backend.app:app --host 0.0.0.0 --port 8000
+./.venv/bin/uvicorn backend.app:app --host 0.0.0.0 --port 8000
 ```
 
 需要热重载时:
 
 ```bash
-python -m backend --reload
+./.venv/bin/python -m backend --reload
 ```
 
 ---

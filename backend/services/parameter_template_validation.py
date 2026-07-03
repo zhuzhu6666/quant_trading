@@ -5,6 +5,7 @@ import math
 import sqlite3
 import time
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ from research.learning.governor import RuleEvolutionGovernor
 
 
 def _use_pg(db_path: str | Path) -> bool:
-    return is_state_db_path(db_path)
+    return Path(db_path).resolve() == Path(STATE_DB).resolve()
 
 
 def _conn_is_pg(conn) -> bool:
@@ -112,6 +113,66 @@ class ParameterTemplateValidationService:
     def _new_id(prefix: str) -> str:
         return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
+    def _template_service(self) -> ParameterTemplateService:
+        try:
+            return ParameterTemplateService(str(self.db_path))
+        except TypeError:
+            return ParameterTemplateService()
+
+    @staticmethod
+    def _candidate_template_snapshot(candidate: dict[str, Any]) -> dict[str, Any] | None:
+        factor_id = str(candidate.get("factor_id") or "")
+        template_id = str(candidate.get("template_id") or "")
+        regime_key = str(candidate.get("regime_key") or "")
+        summary = dict(candidate.get("validation_summary") or {})
+        boundary = dict(candidate.get("boundary") or {})
+        for raw in (
+            summary.get("template_snapshot"),
+            boundary.get("target_template"),
+        ):
+            if not isinstance(raw, dict):
+                continue
+            if not (raw.get("template_id") or raw.get("template_version") or raw.get("parameters")):
+                continue
+            snapshot = deepcopy(raw)
+            snapshot_template_id = str(snapshot.get("template_id") or "")
+            if template_id and snapshot_template_id and snapshot_template_id != template_id:
+                continue
+            if template_id:
+                snapshot["template_id"] = template_id
+            if factor_id:
+                snapshot["factor_id"] = factor_id
+            snapshot.setdefault("regime_key", regime_key)
+            if (
+                str(snapshot.get("template_id") or "")
+                and str(snapshot.get("factor_id") or "")
+                and str(snapshot.get("template_version") or "")
+            ):
+                return snapshot
+        return None
+
+    def ensure_candidate_template_materialized(
+        self,
+        candidate: dict[str, Any],
+        *,
+        template_service: ParameterTemplateService | None = None,
+    ) -> dict[str, Any] | None:
+        template_id = str(candidate.get("template_id") or "")
+        if not template_id:
+            return None
+        template_service = template_service or self._template_service()
+        existing = template_service.get_template(template_id=template_id)
+        if existing:
+            return existing
+        snapshot = self._candidate_template_snapshot(candidate)
+        if not snapshot:
+            return None
+        return template_service.upsert_template(
+            snapshot,
+            source="offline_validation_candidate",
+            activate=False,
+        )
+
     def list_release_candidates(
         self,
         *,
@@ -144,14 +205,35 @@ class ParameterTemplateValidationService:
         finally:
             conn.close()
         items = [self._parse_release_candidate_row(row) for row in rows]
+        # Group by dedup key, then pick the entry with the highest status priority
+        # Priority: pending_review > approved > deployed > rolled_back > rejected
+        STATUS_PRIORITY = {
+            "pending_review": 0,
+            "approved": 1,
+            "deployed": 2,
+            "rolled_back": 3,
+            "rejected": 4,
+        }
+        groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+        for item in items:
+            key = self._release_candidate_dedupe_key(item)
+            groups.setdefault(key, []).append(item)
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str, str]] = set()
+        # Iterate in original SQL order (created_at DESC) so first-encountered key wins priority tie
         for item in items:
             key = self._release_candidate_dedupe_key(item)
             if key in seen:
                 continue
             seen.add(key)
-            deduped.append(item)
+            group = groups[key]
+            if len(group) > 1:
+                # Sort within group: status priority ASC, then created_at DESC
+                group.sort(key=lambda x: (
+                    STATUS_PRIORITY.get(x.get("status", ""), 99),
+                    -(x.get("created_at", 0) or 0),
+                ))
+            deduped.append(group[0])
             if len(deduped) >= int(limit):
                 break
         return deduped
@@ -184,6 +266,7 @@ class ParameterTemplateValidationService:
         walk_forward: dict[str, Any],
         validation_report_path: str,
         recommendation_context: dict[str, Any] | None = None,
+        template_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         existing = self._find_existing_release_candidate(
             factor_id=factor_id,
@@ -192,6 +275,71 @@ class ParameterTemplateValidationService:
             recommendation_context=recommendation_context,
         )
         if existing:
+            existing_status = str(existing.get("status") or "")
+            if existing_status == "rejected":
+                # Rejected candidate gets a fresh chance with new validation data.
+                # Update it back to pending_review instead of creating a new entry.
+                now = time.time()
+                summary = {
+                    "walk_forward_passed": bool(walk_forward.get("passed")),
+                    "candidate_avg_ic": float((walk_forward.get("candidate_summary") or {}).get("avg_ic") or 0.0),
+                    "baseline_avg_ic": float((walk_forward.get("baseline_summary") or {}).get("avg_ic") or 0.0),
+                    "candidate_avg_directional_accuracy": float(
+                        (walk_forward.get("candidate_summary") or {}).get("avg_directional_accuracy") or 0.0
+                    ),
+                    "baseline_avg_directional_accuracy": float(
+                        (walk_forward.get("baseline_summary") or {}).get("avg_directional_accuracy") or 0.0
+                    ),
+                    "fold_count": int((walk_forward.get("config") or {}).get("n_folds") or 0),
+                    "recommendation_source": dict(recommendation_context or {}),
+                }
+                snapshot = self._candidate_template_snapshot(
+                    {
+                        "factor_id": factor_id,
+                        "template_id": template_id,
+                        "regime_key": regime_key,
+                        "boundary": boundary,
+                        "validation_summary": {"template_snapshot": template_snapshot or {}},
+                    }
+                )
+                if snapshot:
+                    summary["template_snapshot"] = snapshot
+                    self.ensure_candidate_template_materialized(
+                        {
+                            "factor_id": factor_id,
+                            "template_id": template_id,
+                            "regime_key": regime_key,
+                            "boundary": boundary,
+                            "validation_summary": summary,
+                        }
+                    )
+                self._update_release_candidate(
+                    candidate_id=existing["candidate_id"],
+                    status="pending_review",
+                    validation_summary=summary,
+                    updated_at=time.time(),
+                )
+                self._log_lifecycle_event(
+                    factor_id=factor_id,
+                    event="parameter_template_candidate_updated",
+                    status="pending_review",
+                    description=f"re-registered rejected candidate {existing['candidate_id']} as pending_review",
+                    reason=(
+                        f"offline_deep_validation_passed:{(recommendation_context or {}).get('recommendation_id', '')}"
+                        if recommendation_context else
+                        "offline_deep_validation_passed"
+                    ),
+                    score=float(summary.get("candidate_avg_ic") or 0.0),
+                )
+                self._clear_governance_caches()
+                return {
+                    **existing,
+                    "status": "pending_review",
+                    "validation_summary": summary,
+                    "updated_at": now,
+                    "boundary": boundary,
+                    "validation_report_path": validation_report_path,
+                }
             return existing
         now = time.time()
         candidate_id = self._new_id("ptrc")
@@ -208,6 +356,26 @@ class ParameterTemplateValidationService:
             "fold_count": int((walk_forward.get("config") or {}).get("n_folds") or 0),
             "recommendation_source": dict(recommendation_context or {}),
         }
+        snapshot = self._candidate_template_snapshot(
+            {
+                "factor_id": factor_id,
+                "template_id": template_id,
+                "regime_key": regime_key,
+                "boundary": boundary,
+                "validation_summary": {"template_snapshot": template_snapshot or {}},
+            }
+        )
+        if snapshot:
+            summary["template_snapshot"] = snapshot
+            self.ensure_candidate_template_materialized(
+                {
+                    "factor_id": factor_id,
+                    "template_id": template_id,
+                    "regime_key": regime_key,
+                    "boundary": boundary,
+                    "validation_summary": summary,
+                }
+            )
         conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
         try:
             _execute(
@@ -337,7 +505,7 @@ class ParameterTemplateValidationService:
         """
         Reject approved release candidates whose target template cannot be resolved anymore.
         """
-        template_service = ParameterTemplateService(str(self.db_path))
+        template_service = self._template_service()
         custom_note = (
             str(note).strip()
             or "target template missing/orphan candidate: reviewed/reject because template not resolvable"
@@ -367,6 +535,8 @@ class ParameterTemplateValidationService:
                 continue
             candidate = self.get_release_candidate(candidate_id)
             if not candidate:
+                continue
+            if self.ensure_candidate_template_materialized(candidate, template_service=template_service):
                 continue
             if candidate.get("status") != "approved":
                 continue
@@ -398,14 +568,19 @@ class ParameterTemplateValidationService:
             raise ValueError(f"candidate not found: {candidate_id}")
         if candidate["status"] not in {"approved", "deployed"}:
             raise ValueError(f"candidate not approved for release: {candidate['status']}")
-        template_service = ParameterTemplateService(str(self.db_path))
+        template_service = self._template_service()
         factor_id = str(candidate.get("factor_id") or "")
         regime_key = str(candidate.get("regime_key") or "")
         template_id = str(candidate.get("template_id") or "")
         if not template_service.get_template(template_id=template_id):
-            raise ValueError(
-                f"candidate template missing/orphan candidate: {template_id}, please regenerate candidate first"
+            materialized = self.ensure_candidate_template_materialized(
+                candidate,
+                template_service=template_service,
             )
+            if not materialized:
+                raise ValueError(
+                    f"candidate template missing/orphan candidate: {template_id}, please regenerate candidate first"
+                )
         active_before = template_service.get_active_template(factor_id=factor_id, regime_key=regime_key)
         old_template_id = str((active_before or {}).get("template_id") or "")
         suggestion = template_service.create_switch_suggestion(
@@ -814,7 +989,7 @@ def run_parameter_template_offline_validation(
     progress_cb: ProgressCB,
 ) -> dict[str, Any]:
     service = ParameterTemplateService()
-    validation_service = ParameterTemplateValidationService()
+    validation_service = ParameterTemplateValidationService(service.db_path)
     factor_id = str(params.get("factor_id") or "")
     template_id = str(params.get("template_id") or "")
     regime_key = str(params.get("regime_key") or "")
@@ -870,6 +1045,7 @@ def run_parameter_template_offline_validation(
         "template_id": template_id,
         "regime_key": regime_key,
         "boundary": boundary,
+        "template_snapshot": target_template,
         "recommendation_context": dict(params.get("recommendation_context") or {}),
         "backtest": backtest_result,
         "walk_forward": walk_forward,
@@ -890,6 +1066,7 @@ def run_parameter_template_offline_validation(
         walk_forward=walk_forward,
         validation_report_path=report_path,
         recommendation_context=dict(params.get("recommendation_context") or {}),
+        template_snapshot=target_template,
     )
     plan[3]["status"] = "completed"
     return {
