@@ -90,6 +90,23 @@ def _advisory_only_components() -> set[str]:
     return advisory
 
 
+def _market_closed_for_freshness(now: float, latest_market_data_ts: float | None = None) -> tuple[bool, str]:
+    """Return whether stale market data is expected because the instrument is closed."""
+    try:
+        from backend.services.market_session import evaluate_market_session
+
+        session = evaluate_market_session(
+            symbol="XAUUSD+",
+            now_ts=now,
+            latest_market_data_ts=latest_market_data_ts,
+        )
+        if session.status in {"closed_confirmed", "closed_pending_confirmation", "closed_pending_positions"}:
+            return True, f"{session.status}:{session.reason}"
+    except Exception as exc:
+        logger.debug("[system_health] market session freshness check failed: {}", exc)
+    return False, ""
+
+
 # ── 健康检查器 ───────────────────────────────────────────────────
 
 
@@ -249,6 +266,8 @@ class SystemHealth:
     ) -> None:
         """检查 bars / ticks / L2 数据新鲜度."""
         now = time.time()
+        market_closed = False
+        market_closed_detail = ""
 
         try:
             from backend.core.db import DUCKDB_BARS
@@ -260,10 +279,16 @@ class SystemHealth:
                 ).fetchone()[0]
                 if m1_ts:
                     age = now - m1_ts
+                    market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m1_ts))
                     if age < THRESHOLDS["m1_max_age"]:
                         components["bar_m1"] = ComponentStatus(
                             name="M1 Bar", status="ok", score=1.0,
                             detail=f"{age/60:.0f} min ago", ts=now,
+                        )
+                    elif market_closed:
+                        components["bar_m1"] = ComponentStatus(
+                            name="M1 Bar", status="ok", score=1.0,
+                            detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
                         )
                     elif age < THRESHOLDS["m1_warn_age"]:
                         components["bar_m1"] = ComponentStatus(
@@ -288,10 +313,17 @@ class SystemHealth:
                 ).fetchone()[0]
                 if m5_ts:
                     age = now - m5_ts
+                    if not market_closed:
+                        market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m5_ts))
                     if age < THRESHOLDS["m5_max_age"]:
                         components["bar_m5"] = ComponentStatus(
                             name="M5 Bar", status="ok", score=1.0,
                             detail=f"{age/60:.0f} min ago", ts=now,
+                        )
+                    elif market_closed:
+                        components["bar_m5"] = ComponentStatus(
+                            name="M5 Bar", status="ok", score=1.0,
+                            detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
                         )
                     elif age < THRESHOLDS["m5_warn_age"]:
                         components["bar_m5"] = ComponentStatus(
@@ -330,6 +362,11 @@ class SystemHealth:
                         name="Tick 数据", status="ok", score=1.0,
                         detail=f"{age/60:.0f} min ago", ts=now,
                     )
+                elif market_closed:
+                    components["tick_data"] = ComponentStatus(
+                        name="Tick 数据", status="ok", score=1.0,
+                        detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
+                    )
                 elif age < THRESHOLDS["tick_warn_age"]:
                     components["tick_data"] = ComponentStatus(
                         name="Tick 数据", status="degraded", score=0.5,
@@ -366,6 +403,11 @@ class SystemHealth:
                     components["l2_depth"] = ComponentStatus(
                         name="L2 订单簿", status="ok", score=1.0,
                         detail=f"{l2_cnt:,} rows, last {age:.0f}s ago", ts=now,
+                    )
+                elif market_closed:
+                    components["l2_depth"] = ComponentStatus(
+                        name="L2 订单簿", status="ok", score=1.0,
+                        detail=f"market closed; {l2_cnt:,} rows, last {age:.0f}s ago ({market_closed_detail})", ts=now,
                     )
                 elif age < THRESHOLDS["l2_warn_age"]:
                     components["l2_depth"] = ComponentStatus(

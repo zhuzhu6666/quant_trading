@@ -91,6 +91,58 @@ function distributionSummary(record: unknown): string {
   return entries.length ? entries.join(" · ") : "--";
 }
 
+function ModelMiniMetric({
+  label,
+  value,
+  detail,
+  tone = "mute",
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+  tone?: Tone;
+}) {
+  return (
+    <div className={`model-mini-metric model-mini-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      {detail ? <small>{detail}</small> : null}
+    </div>
+  );
+}
+
+function ModelEventItem({
+  title,
+  meta,
+  status,
+  tone,
+  detail,
+  score,
+}: {
+  title: string;
+  meta: string;
+  status?: string;
+  tone?: Tone;
+  detail?: string;
+  score?: string;
+}) {
+  return (
+    <div className="model-event-item">
+      <div className="model-event-main">
+        <div>
+          <strong>{title}</strong>
+          <span>{meta}</span>
+        </div>
+        <div className="model-event-side">
+          {score ? <b>{score}</b> : null}
+          {status ? <StatusPill status={status} tone={tone || statusTone(status)} /> : null}
+        </div>
+      </div>
+      {detail ? <p>{detail}</p> : null}
+    </div>
+  );
+}
+
 export function ModelsPage() {
   const readinessQuery = useQuery({
     queryKey: ["backend-readiness", "models-page"],
@@ -342,287 +394,212 @@ export function ModelsPage() {
       </div>
 
       <div className="dashboard-grid">
-        <MetricCard title="模型门控与准备度">
-          <div className="field-list">
-            <Field label="治理模式" value={advisoryOnly ? "影子/顾问，不可下单" : "治理候选"} tone={advisoryOnly ? "warn" : "ok"} />
-            <Field label="准入门控" value={translateDisplayValue(gateDecision)} tone={statusTone(gateDecision)} />
-            <Field label="基线保护" value={translateDisplayValue(governanceReadinessStatus)} tone={statusTone(governanceReadinessStatus)} />
-            <Field label="推荐来源" value={translateDisplayValue(recommendedSource)} />
-            <Field label="样本准备" value={`${formatDecimal(modelReady, 0)} ready / ${formatDecimal(needsAttention, 0)} attention`} />
-            <Field label="开仓样本" value={`${formatDecimal(entryModelReady, 0)} ready / ${formatDecimal(entryOpenDecisions, 0)} 决策`} tone={entryModelReady > 0 ? "ok" : "mute"} />
-            <Field label="契约异常" value={formatDecimal(evidenceBadTotal, 0)} tone={evidenceBadTotal > 0 ? "bad" : "ok"} />
-            <Field label="盘外训练" value={translateDisplayValue(highLoadProfile)} tone={statusTone(highLoadProfile)} />
-            <Field label="实时权限" value={pickBoolean(capabilities, ["can_place_orders"], false) ? "允许下单" : "禁止下单"} tone={pickBoolean(capabilities, ["can_place_orders"], false) ? "bad" : "ok"} />
-            <Field label="风险权限" value={pickBoolean(capabilities, ["can_change_risk_limits"], false) ? "允许改风控" : "禁止改风控"} tone={pickBoolean(capabilities, ["can_change_risk_limits"], false) ? "bad" : "ok"} />
-            <Field label="退化原因" value={degradationReason ? translateDisplayValue(degradationReason) : "--"} />
+        <MetricCard title="模型运行控制台" className="wide-panel model-control-panel">
+          <div className="model-mini-grid">
+            <ModelMiniMetric label="治理模式" value={advisoryOnly ? "影子顾问" : "治理候选"} detail={translateDisplayValue(gateDecision)} tone={advisoryOnly ? "warn" : "ok"} />
+            <ModelMiniMetric label="Meta 准确率" value={formatPct(accuracy)} detail={`${formatDecimal(evaluatedCount, 0)} 样本 · ${formatDecimal(auditCount, 0)} 审计`} tone={numberTone(accuracy - 0.5)} />
+            <ModelMiniMetric label="Holdout" value={holdoutAccuracy > 0 ? formatPct(holdoutAccuracy) : "--"} detail={`规则 ${formatPct(holdoutRuleAccuracy)} · 基线 ${formatPct(holdoutMajorityAccuracy)}`} tone={holdoutAccuracy >= 0.55 ? "ok" : "mute"} />
+            <ModelMiniMetric label="样本准备" value={`${formatDecimal(modelReady, 0)}/${formatDecimal(sampleTotal || modelReady + needsAttention, 0)}`} detail={`${formatDecimal(needsAttention, 0)} 需处理`} tone={needsAttention > 0 ? "warn" : modelReady > 0 ? "ok" : "mute"} />
+            <ModelMiniMetric label="开仓上下文" value={formatPct(Math.min(entryBarCoverage, entryExecutionCoverage, entryMicroCoverage))} detail={`${formatDecimal(entryOpenDecisions, 0)} 决策`} tone={entryContextStatus === "ok" ? "ok" : entryContextStatus === "warming" ? "mute" : "warn"} />
+            <ModelMiniMetric label="契约异常" value={formatDecimal(evidenceBadTotal, 0)} detail={`${formatDecimal(pickNumber(evidenceCounts, ["checked"], 0), 0)} 已检查`} tone={evidenceBadTotal > 0 ? "bad" : "ok"} />
           </div>
-        </MetricCard>
 
-        <MetricCard title="Meta LightGBM 影子报告">
-          <div className="field-list">
-            <Field label="影子准确率" value={`${formatPct(accuracy)} · ${formatDecimal(evaluatedCount, 0)} 样本`} tone={accuracy >= 0.55 ? "ok" : "warn"} />
-            <Field label="Holdout" value={holdoutAccuracy > 0 ? formatPct(holdoutAccuracy) : "--"} tone={holdoutAccuracy >= 0.55 ? "ok" : "mute"} />
-            <Field
-              label="Holdout 对照"
-              value={`模型 ${formatPct(holdoutAccuracy)} · 规则 ${formatPct(holdoutRuleAccuracy)} · 基线 ${formatPct(holdoutMajorityAccuracy)}`}
-            />
-            <Field label="规则对基线提升" value={formatPct(ruleLiftVsMajority)} tone={numberTone(ruleLiftVsMajority)} />
-            <Field label="规则一致率" value={ruleAgreement > 0 ? formatPct(ruleAgreement) : "--"} tone={ruleAgreement >= 0.55 ? "ok" : "mute"} />
-            <Field label="预测分布" value={distributionSummary(pick(metaReport, ["posture_distribution"]))} />
-            <Field label="标签分布" value={distributionSummary(pick(metaReport, ["label_distribution"]))} />
-            <Field label="模型文件" value={shortText(pickString(artifactSummary, ["artifact_path"], "--"), "--", 72)} />
-          </div>
-        </MetricCard>
+          <div className="model-control-grid">
+            <section className="model-control-section">
+              <div className="learning-section-head">
+                <h3>门控与权限</h3>
+                <StatusPill status={translateDisplayValue(governanceReadinessStatus || gateDecision)} tone={statusTone(governanceReadinessStatus || gateDecision)} />
+              </div>
+              <div className="field-list model-compact-fields">
+                <Field label="基线保护" value={translateDisplayValue(governanceReadinessStatus)} tone={statusTone(governanceReadinessStatus)} />
+                <Field label="推荐来源" value={translateDisplayValue(recommendedSource)} />
+                <Field label="实时权限" value={pickBoolean(capabilities, ["can_place_orders"], false) ? "允许下单" : "禁止下单"} tone={pickBoolean(capabilities, ["can_place_orders"], false) ? "bad" : "ok"} />
+                <Field label="风险权限" value={pickBoolean(capabilities, ["can_change_risk_limits"], false) ? "允许改风控" : "禁止改风控"} tone={pickBoolean(capabilities, ["can_change_risk_limits"], false) ? "bad" : "ok"} />
+                <Field label="退化原因" value={degradationReason ? translateDisplayValue(degradationReason) : "--"} />
+              </div>
+            </section>
 
-        <MetricCard title="数据质量健康" className="wide-panel">
-          <div className="learning-split">
-            <div>
-              <div className="mini-section-title">开仓上下文覆盖</div>
-              <div className="field-list">
-                <Field label="状态" value={translateDisplayValue(entryContextStatus)} tone={statusTone(entryContextStatus)} />
+            <section className="model-control-section">
+              <div className="learning-section-head">
+                <h3>影子报告</h3>
+                <StatusPill status={accuracy >= 0.55 ? "可观察" : "继续积累"} tone={accuracy >= 0.55 ? "ok" : "warn"} />
+              </div>
+              <div className="field-list model-compact-fields">
+                <Field label="规则提升" value={formatPct(ruleLiftVsMajority)} tone={numberTone(ruleLiftVsMajority)} />
+                <Field label="规则一致率" value={ruleAgreement > 0 ? formatPct(ruleAgreement) : "--"} tone={ruleAgreement >= 0.55 ? "ok" : "mute"} />
+                <Field label="预测分布" value={distributionSummary(pick(metaReport, ["posture_distribution"]))} />
+                <Field label="标签分布" value={distributionSummary(pick(metaReport, ["label_distribution"]))} />
+                <Field label="模型文件" value={shortText(pickString(artifactSummary, ["artifact_path"], "--"), "--", 58)} />
+              </div>
+            </section>
+
+            <section className="model-control-section">
+              <div className="learning-section-head">
+                <h3>数据质量</h3>
+                <StatusPill status={translateDisplayValue(entryContextStatus)} tone={statusTone(entryContextStatus)} />
+              </div>
+              <div className="field-list model-compact-fields">
                 <Field label="同向簇" value={formatPct(pickNumber(entryCoverageRatio, ["entry_cluster"], 0))} />
-                <Field label="K线" value={formatPct(entryBarCoverage)} tone={entryBarCoverage >= 0.95 ? "ok" : "warn"} />
-                <Field label="执行" value={formatPct(entryExecutionCoverage)} tone={entryExecutionCoverage >= 0.95 ? "ok" : "warn"} />
+                <Field label="K线 / 执行" value={`${formatPct(entryBarCoverage)} / ${formatPct(entryExecutionCoverage)}`} tone={entryBarCoverage >= 0.95 && entryExecutionCoverage >= 0.95 ? "ok" : "warn"} />
                 <Field label="微观行情" value={formatPct(entryMicroCoverage)} tone={entryMicroCoverage >= 0.95 ? "ok" : "warn"} />
                 <Field label="决策质量" value={formatPct(pickNumber(entryCoverageRatio, ["decision_quality_context"], 0))} />
+                <Field label="盘外训练" value={translateDisplayValue(highLoadProfile)} tone={statusTone(highLoadProfile)} />
               </div>
-            </div>
-            <div>
-              <div className="mini-section-title">训练契约</div>
-              <div className="field-list">
-                <Field label="检查样本" value={formatDecimal(pickNumber(evidenceCounts, ["checked"], 0), 0)} />
-                <Field label="坏契约" value={formatDecimal(evidenceBadTotal, 0)} tone={evidenceBadTotal > 0 ? "bad" : "ok"} />
-                <Field label="非成熟训练" value={formatDecimal(pickNumber(evidenceCounts, ["non_matured_allows_supervised_training"], 0), 0)} />
-                <Field label="ready 无训练权" value={formatDecimal(pickNumber(evidenceCounts, ["model_ready_without_supervised_training"], 0), 0)} />
-                <Field label="open outcome ready" value={formatDecimal(entryModelReady, 0)} tone={entryModelReady > 0 ? "ok" : "mute"} />
-              </div>
-            </div>
+            </section>
           </div>
         </MetricCard>
 
-        <MetricCard title="模型族能力" className="wide-panel">
-          <div className="model-card-grid">
-            {modelCards.map((model) => (
-              <div className="model-family-card" key={model.name}>
-                <div className="model-family-head">
-                  <div>
-                    <strong>{model.name}</strong>
-                    <span>{model.role}</span>
-                  </div>
-                  <StatusPill status={model.status} tone={statusTone(model.status)} />
+        <MetricCard title="模型工作台" className="wide-panel model-workbench-panel">
+          <div className="model-workbench-grid">
+            <div className="model-workbench-column model-family-column">
+              <section className="model-workbench-section">
+                <div className="mini-section-title">模型族能力</div>
+                <div className="model-card-grid model-card-grid-compact">
+                  {modelCards.map((model) => (
+                    <div className="model-family-card" key={model.name}>
+                      <div className="model-family-head">
+                        <div>
+                          <strong>{model.name}</strong>
+                          <span>{model.role}</span>
+                        </div>
+                        <StatusPill status={model.status} tone={statusTone(model.status)} />
+                      </div>
+                      <div className="model-family-metric">{model.metric}</div>
+                      <div className="model-family-detail">{model.detail}</div>
+                    </div>
+                  ))}
                 </div>
-                <div className="model-family-metric">{model.metric}</div>
-                <div className="model-family-detail">{model.detail}</div>
-              </div>
-            ))}
-          </div>
-        </MetricCard>
-
-        <MetricCard title="学习信号与解释" className="wide-panel">
-          <div className="learning-split">
-            <div>
-              <div className="mini-section-title">Meta 重要特征</div>
-              <div className="table-wrap">
-                <table className="mobile-card-table model-features-table">
-                  <thead>
-                    <tr>
-                      <th>特征</th>
-                      <th>权重</th>
-                      <th>方向</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {!topFeatures.length ? <tr><td colSpan={3} className="empty-state-small">暂无特征解释</td></tr> : null}
-                    {topFeatures.slice(0, 8).map((raw, index) => {
-                      const item = asRecord(raw);
-                      const value = pickNumber(item, ["importance", "gain", "value", "weight"], 0);
-                      return (
-                        <tr key={keyFor(item, index, ["feature", "name"])}>
-                          <td>{pickString(item, ["feature", "name"], "--")}</td>
-                          <td>{formatDecimal(value, 4)}</td>
-                          <td>{value > 0 ? "增强" : value < 0 ? "抑制" : "中性"}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              </section>
             </div>
-            <div>
-              <div className="mini-section-title">Meta 顾问记录</div>
-              <div className="table-wrap">
-                <table className="mobile-card-table model-advisory-table">
-                  <thead>
-                    <tr>
-                      <th>时间</th>
-                      <th>姿态</th>
-                      <th>状态</th>
-                      <th>摘要</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {!metaAdvisories.length ? <tr><td colSpan={4} className="empty-state-small">暂无顾问记录</td></tr> : null}
+
+            <div className="model-signal-zone">
+              <section className="model-workbench-section">
+                <div className="mini-section-title">Meta 重要特征</div>
+                <div className="model-feature-list">
+                  {!topFeatures.length ? <div className="empty-state-small">暂无特征解释</div> : null}
+                  {topFeatures.slice(0, 10).map((raw, index) => {
+                    const item = asRecord(raw);
+                    const value = pickNumber(item, ["importance", "gain", "value", "weight"], 0);
+                    const width = `${Math.max(8, Math.min(100, Math.abs(value) * 100))}%`;
+                    return (
+                      <div className="model-feature-row" key={keyFor(item, index, ["feature", "name"])}>
+                        <div>
+                          <strong>{pickString(item, ["feature", "name"], "--")}</strong>
+                          <span>{value > 0 ? "增强" : value < 0 ? "抑制" : "中性"}</span>
+                        </div>
+                        <b>{formatDecimal(value, 4)}</b>
+                        <i style={{ width }} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <div className="model-signal-side">
+                <section className="model-workbench-section">
+                  <div className="mini-section-title">Meta 顾问记录</div>
+                  <div className="model-event-list">
+                    {!metaAdvisories.length ? <div className="empty-state-small">暂无顾问记录</div> : null}
                     {metaAdvisories.slice(0, 6).map((raw, index) => {
                       const item = asRecord(raw);
                       const status = pickString(item, ["status", "decision", "posture"], "--");
                       return (
-                        <tr key={keyFor(item, index, ["advisory_id", "decision_id", "id"])}>
-                          <td>{formatTime(pick(item, ["created_at", "ts"]))}</td>
-                          <td>{translateDisplayValue(pickString(item, ["posture", "target_posture"], "--"))}</td>
-                          <td><StatusPill status={status} tone={statusTone(status)} /></td>
-                          <td>{shortText(pickString(item, ["summary", "reason", "rationale"], "--"))}</td>
-                        </tr>
+                        <ModelEventItem
+                          key={keyFor(item, index, ["advisory_id", "decision_id", "id"])}
+                          title={translateDisplayValue(pickString(item, ["posture", "target_posture"], "--"))}
+                          meta={formatTime(pick(item, ["created_at", "ts"]))}
+                          status={status}
+                          detail={shortText(pickString(item, ["summary", "reason", "rationale"], "--"), "--", 140)}
+                        />
                       );
                     })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </MetricCard>
+                  </div>
+                </section>
 
-        <MetricCard title="影子队列与 Canary" className="wide-panel">
-          <div className="learning-split">
-            <div>
-              <div className="mini-section-title">影子候选</div>
-              <div className="table-wrap">
-                <table className="mobile-card-table model-shadow-table">
-                  <thead>
-                    <tr>
-                      <th>更新时间</th>
-                      <th>模型</th>
-                      <th>状态</th>
-                      <th>门控</th>
-                      <th>备注</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {!shadowQueue.length ? <tr><td colSpan={5} className="empty-state-small">暂无影子候选</td></tr> : null}
+                <section className="model-workbench-section">
+                  <div className="mini-section-title">影子队列与 Canary</div>
+                  <div className="model-event-list">
+                    {!shadowQueue.length && !canaryReviews.length ? <div className="empty-state-small">暂无影子候选 · 暂无 Canary 审查</div> : null}
                     {shadowQueue.slice(0, 8).map((raw, index) => {
                       const item = asRecord(raw);
                       const status = pickString(item, ["status"], "--");
                       const gate = pickString(item, ["gate_decision", "gate.decision"], "--");
                       return (
-                        <tr key={keyFor(item, index, ["candidate_id"])}>
-                          <td>{formatTime(pick(item, ["updated_at", "created_at"]))}</td>
-                          <td>{pickString(item, ["model_type"], "--")}</td>
-                          <td><StatusPill status={status} tone={statusTone(status)} /></td>
-                          <td>{translateDisplayValue(gate)}</td>
-                          <td>{shortText(pickString(item, ["note", "candidate_id"], "--"))}</td>
-                        </tr>
+                        <ModelEventItem
+                          key={keyFor(item, index, ["candidate_id"])}
+                          title={pickString(item, ["model_type"], "--")}
+                          meta={`${formatTime(pick(item, ["updated_at", "created_at"]))} · 门控 ${translateDisplayValue(gate)}`}
+                          status={status}
+                          detail={shortText(pickString(item, ["note", "candidate_id"], "--"), "--", 140)}
+                        />
                       );
                     })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            <div>
-              <div className="mini-section-title">Canary 审查</div>
-              <div className="table-wrap">
-                <table className="mobile-card-table model-canary-table">
-                  <thead>
-                    <tr>
-                      <th>时间</th>
-                      <th>候选</th>
-                      <th>决策</th>
-                      <th>准确率</th>
-                      <th>原因</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {!canaryReviews.length ? <tr><td colSpan={5} className="empty-state-small">暂无 Canary 审查</td></tr> : null}
                     {canaryReviews.slice(0, 8).map((raw, index) => {
                       const item = asRecord(raw);
                       const decision = pickString(item, ["decision", "status"], "--");
                       return (
-                        <tr key={keyFor(item, index, ["review_id", "candidate_id"])}>
-                          <td>{formatTime(pick(item, ["created_at", "updated_at"]))}</td>
-                          <td>{shortText(pickString(item, ["candidate_id"], "--"), "--", 32)}</td>
-                          <td><StatusPill status={decision} tone={statusTone(decision)} /></td>
-                          <td>{formatPct(pickNumber(item, ["accuracy", "metrics.accuracy"], 0))}</td>
-                          <td>{shortText(pickString(item, ["reason", "note", "summary"], "--"))}</td>
-                        </tr>
+                        <ModelEventItem
+                          key={keyFor(item, index, ["review_id", "candidate_id"])}
+                          title={shortText(pickString(item, ["candidate_id"], "--"), "--", 44)}
+                          meta={formatTime(pick(item, ["created_at", "updated_at"]))}
+                          status={decision}
+                          score={formatPct(pickNumber(item, ["accuracy", "metrics.accuracy"], 0))}
+                          detail={shortText(pickString(item, ["reason", "note", "summary"], "--"), "--", 140)}
+                        />
                       );
                     })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </MetricCard>
+                  </div>
+                </section>
 
-        <MetricCard title="模型审计流水" className="wide-panel">
-          <div className="learning-split">
-            <div>
-              <div className="mini-section-title">Meta / 仓位 / 因子影子审计</div>
-              <div className="table-wrap">
-                <table className="mobile-card-table model-audits-table">
-                  <thead>
-                    <tr>
-                      <th>时间</th>
-                      <th>类型</th>
-                      <th>目标</th>
-                      <th>输出</th>
-                      <th>分数</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...metaAudits.slice(0, 3), ...openAudits.slice(0, 3), ...positionAudits.slice(0, 3), ...factorAudits.slice(0, 3)].length ? null : (
-                      <tr><td colSpan={5} className="empty-state-small">暂无模型审计</td></tr>
-                    )}
-                    {[...metaAudits.slice(0, 3), ...openAudits.slice(0, 3), ...positionAudits.slice(0, 3), ...factorAudits.slice(0, 3)].map((raw, index) => {
-                      const item = asRecord(raw);
-                      const modelType = pickString(item, ["model_type", "type"], "shadow_model");
-                      const score = pickNumber(item, ["posture_score", "score", "quality_score", "weakness_score", "confidence"], 0);
-                      return (
-                        <tr key={keyFor(item, index, ["inference_id", "audit_id", "id", "position_id", "factor"])}>
-                          <td>{formatTime(pick(item, ["created_at", "event_ts", "updated_at"]))}</td>
-                          <td>{translateDisplayValue(modelType)}</td>
-                          <td>{shortText(pickString(item, ["position_id", "factor", "sample_id", "target_position_id"], "--"), "--", 36)}</td>
-                          <td>{translateDisplayValue(pickString(item, ["posture", "label", "decision", "status"], "--"))}</td>
-                          <td>{formatDecimal(score, 4)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            <div>
-              <div className="mini-section-title">权限与推理审计</div>
-              <div className="table-wrap">
-                <table className="mobile-card-table model-permission-table">
-                  <thead>
-                    <tr>
-                      <th>时间</th>
-                      <th>来源</th>
-                      <th>状态</th>
-                      <th>模型</th>
-                      <th>摘要</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                <section className="model-workbench-section">
+                  <div className="mini-section-title">权限与推理审计</div>
+                  <div className="model-event-list model-audit-list">
                     {[...permissionAudits.slice(0, 5), ...inferenceAudits.slice(0, 5)].length ? null : (
-                      <tr><td colSpan={5} className="empty-state-small">暂无权限或推理审计</td></tr>
+                      <div className="empty-state-small">暂无权限或推理审计</div>
                     )}
                     {[...permissionAudits.slice(0, 5), ...inferenceAudits.slice(0, 5)].map((raw, index) => {
                       const item = asRecord(raw);
                       const status = pickString(item, ["status", "decision", "allowed"], "--");
                       const source = index < Math.min(permissionAudits.length, 5) ? "权限" : "推理";
                       return (
-                        <tr key={keyFor(item, index, ["audit_id", "inference_id", "candidate_id", "id"])}>
-                          <td>{formatTime(pick(item, ["created_at", "event_ts", "updated_at"]))}</td>
-                          <td>{source}</td>
-                          <td><StatusPill status={status} tone={statusTone(status)} /></td>
-                          <td>{shortText(pickString(item, ["model_type", "candidate_id"], "--"), "--", 36)}</td>
-                          <td>{shortText(pickString(item, ["reason", "error", "note"], objectSummary(pickRecord(item, ["result", "verdict"]))))}</td>
-                        </tr>
+                        <ModelEventItem
+                          key={keyFor(item, index, ["audit_id", "inference_id", "candidate_id", "id"])}
+                          title={`${source} · ${shortText(pickString(item, ["model_type", "candidate_id"], "--"), "--", 48)}`}
+                          meta={formatTime(pick(item, ["created_at", "event_ts", "updated_at"]))}
+                          status={status}
+                          detail={shortText(pickString(item, ["reason", "error", "note"], objectSummary(pickRecord(item, ["result", "verdict"]))), "--", 150)}
+                        />
                       );
                     })}
-                  </tbody>
-                </table>
+                  </div>
+                </section>
               </div>
             </div>
+
+            <section className="model-workbench-section model-audit-zone">
+              <div className="mini-section-title">Meta / 仓位 / 因子影子审计</div>
+              <div className="model-event-list model-audit-list">
+                {[...metaAudits.slice(0, 3), ...openAudits.slice(0, 3), ...positionAudits.slice(0, 3), ...factorAudits.slice(0, 3)].length ? null : (
+                  <div className="empty-state-small">暂无模型审计</div>
+                )}
+                {[...metaAudits.slice(0, 3), ...openAudits.slice(0, 3), ...positionAudits.slice(0, 3), ...factorAudits.slice(0, 3)].map((raw, index) => {
+                  const item = asRecord(raw);
+                  const modelType = pickString(item, ["model_type", "type"], "shadow_model");
+                  const score = pickNumber(item, ["posture_score", "score", "quality_score", "weakness_score", "confidence"], 0);
+                  const output = translateDisplayValue(pickString(item, ["posture", "label", "decision", "status"], "--"));
+                  return (
+                    <ModelEventItem
+                      key={keyFor(item, index, ["inference_id", "audit_id", "id", "position_id", "factor"])}
+                      title={translateDisplayValue(modelType)}
+                      meta={`${formatTime(pick(item, ["created_at", "event_ts", "updated_at"]))} · ${shortText(pickString(item, ["position_id", "factor", "sample_id", "target_position_id"], "--"), "--", 52)}`}
+                      status={output}
+                      tone={statusTone(output)}
+                      score={formatDecimal(score, 4)}
+                    />
+                  );
+                })}
+              </div>
+            </section>
           </div>
         </MetricCard>
 

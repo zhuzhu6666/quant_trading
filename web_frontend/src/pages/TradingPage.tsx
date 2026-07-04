@@ -321,73 +321,87 @@ export function TradingPage() {
         <StatTile icon={ShieldAlert} label="浮动盈亏" value={formatMoney(unrealized, currency)} detail={`会话 ${formatMoney(sessionPnl, currency)}`} tone={unrealized > 0 ? "ok" : unrealized < 0 ? "bad" : "mute"} />
       </div>
 
-      <div className="dashboard-grid">
-        <MetricCard title="循环摘要">
-          <div className="field-list">
-            <Field label="状态" value={loopRunning ? "运行中" : "未运行"} tone={loopRunning ? "ok" : "warn"} />
-            <Field label="经纪商" value={broker} />
-            <Field label="策略" value={strategy} />
-            <Field label="执行模式" value={translateDisplayValue(loopMode)} />
-            <Field label="PID" value={loopPid || "--"} />
-            <Field label="启动时间" value={loopStarted} />
-            <Field label="状态说明" value={reason} tone={toneFromStatus(reason)} />
-          </div>
-        </MetricCard>
+      <MetricCard title="运行总览" className="wide-panel trading-status-overview">
+        <div className="trading-status-grid">
+          <section className="trading-status-section" aria-label="循环摘要">
+            <div className="trading-status-head">
+              <h3>循环摘要</h3>
+              <StatusPill status={loopRunning ? "运行中" : "未运行"} tone={loopRunning ? "ok" : "warn"} />
+            </div>
+            <div className="field-list trading-compact-fields">
+              <Field label="经纪商" value={broker} />
+              <Field label="策略" value={strategy} />
+              <Field label="执行模式" value={translateDisplayValue(loopMode)} />
+              <Field label="PID" value={loopPid || "--"} />
+              <Field label="启动时间" value={loopStarted} />
+              <Field label="状态说明" value={reason} tone={toneFromStatus(reason)} />
+            </div>
+          </section>
 
-        <MetricCard title="策略信号">
-          <div className="field-list">
-            <Field label="实单发送" value={pickBoolean(strategyStatus, ["send_orders"], false) ? "开启" : "关闭"} tone={pickBoolean(strategyStatus, ["send_orders"], false) ? "ok" : "warn"} />
-            <Field label="执行模式" value={translateDisplayValue(pickString(strategyStatus, ["execution_mode", "mode"], loopMode))} />
-            <Field label="当前方向" value={translateDisplayValue(signalDirection)} />
-            <Field label="综合分" value={formatDecimal(signalScore, 4)} />
-            <Field label="闸门" value={gatePassed ? "通过" : "未通过"} tone={gatePassed ? "ok" : "warn"} />
-            <Field label="闸门原因" value={translateDisplayValue(gateReason)} />
-          </div>
-        </MetricCard>
+          <section className="trading-status-section" aria-label="策略信号">
+            <div className="trading-status-head">
+              <h3>策略信号</h3>
+              <StatusPill status={gatePassed ? "通过" : "未通过"} tone={gatePassed ? "ok" : "warn"} />
+            </div>
+            <div className="field-list trading-compact-fields">
+              <Field label="实单发送" value={pickBoolean(strategyStatus, ["send_orders"], false) ? "开启" : "关闭"} tone={pickBoolean(strategyStatus, ["send_orders"], false) ? "ok" : "warn"} />
+              <Field label="执行模式" value={translateDisplayValue(pickString(strategyStatus, ["execution_mode", "mode"], loopMode))} />
+              <Field label="当前方向" value={translateDisplayValue(signalDirection)} />
+              <Field label="综合分" value={formatDecimal(signalScore, 4)} />
+              <Field label="闸门原因" value={translateDisplayValue(gateReason)} />
+            </div>
+          </section>
 
-        <MetricCard title="因子管道">
-          <div className="field-list">
-            <Field label="管道状态" value={engineWarm ? "已预热" : "预热中"} tone={engineWarm ? "ok" : "warn"} />
-            <Field label="缓冲区" value={formatDecimal(bufferSize, 0)} />
-            <Field label="活跃因子" value={formatDecimal(pickNumber(lastComposite, ["n_active"], 0), 0)} />
-            <Field label="弃权因子" value={formatDecimal(pickNumber(lastComposite, ["n_abstain"], 0), 0)} />
-            <Field label="归因样本" value={formatDecimal(attributedTrades, 0)} />
-            <Field label="AWE 置信" value={formatDecimal(aweConviction * 100, 1) + "%"} />
-            <Field label="归因胜率" value={overallWinRate ? `${formatDecimal(overallWinRate * 100, 1)}%` : "--"} />
-          </div>
-          <div className="compact-list">
-            {topContributors.slice(0, 6).map((raw, index) => {
-              const item = asRecord(raw);
-              const factor = pickString(item, ["factor", "name"], String(index + 1));
-              const value = pickNumber(item, ["pnl", "contribution", "score", "gross"], 0);
-              return <span className="data-badge" key={`${factor}-${index}`}>{factor}: {formatDecimal(value, 2)}</span>;
-            })}
-          </div>
-        </MetricCard>
+          <section className="trading-status-section" aria-label="因子管道">
+            <div className="trading-status-head">
+              <h3>因子管道</h3>
+              <StatusPill status={engineWarm ? "已预热" : "预热中"} tone={engineWarm ? "ok" : "warn"} />
+            </div>
+            <div className="field-list trading-compact-fields">
+              <Field label="缓冲区" value={formatDecimal(bufferSize, 0)} />
+              <Field label="活跃因子" value={formatDecimal(pickNumber(lastComposite, ["n_active"], 0), 0)} />
+              <Field label="弃权因子" value={formatDecimal(pickNumber(lastComposite, ["n_abstain"], 0), 0)} />
+              <Field label="归因样本" value={formatDecimal(attributedTrades, 0)} />
+              <Field label="AWE 置信" value={formatDecimal(aweConviction * 100, 1) + "%"} />
+              <Field label="归因胜率" value={overallWinRate ? `${formatDecimal(overallWinRate * 100, 1)}%` : "--"} />
+            </div>
+            <div className="compact-list trading-inline-badges">
+              {topContributors.slice(0, 4).map((raw, index) => {
+                const item = asRecord(raw);
+                const factor = pickString(item, ["factor", "name"], String(index + 1));
+                const value = pickNumber(item, ["pnl", "contribution", "score", "gross"], 0);
+                return <span className="data-badge" key={`${factor}-${index}`}>{factor}: {formatDecimal(value, 2)}</span>;
+              })}
+            </div>
+          </section>
 
-        <MetricCard title="风控与执行">
-          <div className="field-list">
-            <Field label="熔断器" value={circuitBreaker ? "触发" : "未触发"} tone={circuitBreaker ? "bad" : "ok"} />
-            <Field label="连续亏损" value={formatDecimal(consecutiveLoss, 0)} tone={consecutiveLoss >= 3 ? "warn" : "mute"} />
-            <Field label="风险值" value={formatDecimal(totalRisk, 4)} />
-            <Field label="执行尝试" value={formatDecimal(attempts, 0)} />
-            <Field label="下单成功" value={formatDecimal(successes, 0)} tone={successes > 0 ? "ok" : "mute"} />
-            <Field label="失败" value={formatDecimal(failures, 0)} tone={failures > 0 ? "bad" : "ok"} />
-            <Field label="最近执行" value={translateDisplayValue(pickString(liveExecutionSummary, ["last_reason", "last_reason_text", "lastReason"], "--"))} />
-          </div>
-          <div className="compact-list">
-            {executionEvents.slice(0, 4).map((raw, index) => {
-              const item = asRecord(raw);
-              const stage = pickString(item, ["stage"], "--");
-              return (
-                <span className={`data-badge ${stage === "success" ? "data-badge-ok" : stage === "failure" ? "data-badge-bad" : "data-badge-warn"}`} key={`${pickString(item, ["time"], String(index))}-${index}`}>
-                  {translateDisplayValue(stage)} · {translateDisplayValue(formatDirection(pick(item, ["direction"])))}
-                </span>
-              );
-            })}
-          </div>
-        </MetricCard>
-      </div>
+          <section className="trading-status-section" aria-label="风控与执行">
+            <div className="trading-status-head">
+              <h3>风控与执行</h3>
+              <StatusPill status={circuitBreaker ? "已触发" : "未触发"} tone={circuitBreaker ? "bad" : "ok"} />
+            </div>
+            <div className="field-list trading-compact-fields">
+              <Field label="连续亏损" value={formatDecimal(consecutiveLoss, 0)} tone={consecutiveLoss >= 3 ? "warn" : "mute"} />
+              <Field label="风险值" value={formatDecimal(totalRisk, 4)} />
+              <Field label="执行尝试" value={formatDecimal(attempts, 0)} />
+              <Field label="下单成功" value={formatDecimal(successes, 0)} tone={successes > 0 ? "ok" : "mute"} />
+              <Field label="失败" value={formatDecimal(failures, 0)} tone={failures > 0 ? "bad" : "ok"} />
+              <Field label="最近执行" value={translateDisplayValue(pickString(liveExecutionSummary, ["last_reason", "last_reason_text", "lastReason"], "--"))} />
+            </div>
+            <div className="compact-list trading-inline-badges">
+              {executionEvents.slice(0, 3).map((raw, index) => {
+                const item = asRecord(raw);
+                const stage = pickString(item, ["stage"], "--");
+                return (
+                  <span className={`data-badge ${stage === "success" ? "data-badge-ok" : stage === "failure" ? "data-badge-bad" : "data-badge-warn"}`} key={`${pickString(item, ["time"], String(index))}-${index}`}>
+                    {translateDisplayValue(stage)} · {translateDisplayValue(formatDirection(pick(item, ["direction"])))}
+                  </span>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      </MetricCard>
 
       <MetricCard title="最近因子信号 Tick" className="wide-panel">
         <div className="table-wrap">

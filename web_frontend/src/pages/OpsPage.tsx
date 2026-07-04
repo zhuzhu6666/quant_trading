@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Cpu, Database, RefreshCw, Server } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import {
   getBackendReadiness,
   getCtraderTokenStatus,
@@ -12,7 +12,7 @@ import {
   getSystemDbHealth,
 } from "@/api/client";
 import { MetricCard } from "@/components/Card";
-import { Field, StatTile, toneFromStatus } from "@/components/DashboardBits";
+import { Field, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { formatTime } from "@/lib/format";
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
@@ -78,6 +78,26 @@ function summarizeIssues(raw: string): { short: string; full: string; count: num
     full,
     count,
   };
+}
+
+function OpsMiniMetric({
+  label,
+  value,
+  detail,
+  tone = "mute",
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+  tone?: Tone;
+}) {
+  return (
+    <div className={`ops-mini-metric ops-mini-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      {detail ? <small>{detail}</small> : null}
+    </div>
+  );
 }
 
 export function OpsPage() {
@@ -232,158 +252,129 @@ export function OpsPage() {
         </div>
       </div>
 
-      <div className="stat-grid">
-        <StatTile icon={Server} label="后端健康" value={translateDisplayValue(backendHealth)} detail={`cTrader ${translateDisplayValue(ctraderStatus)}`} tone={toneFromStatus(backendHealth)} />
-        <StatTile icon={Database} label="数据库" value={translateDisplayValue(dbStatus)} detail={`新鲜 ${dbFreshCount} / 过期 ${dbStale} / 缺失 ${dbMissing}`} tone={dbFresh} />
-        <StatTile icon={Activity} label="后端就绪" value={backendReady ? "已就绪" : "受限"} detail={`实时 ${translateDisplayValue(liveReadinessState)} · 阻断项 ${blockers.length}`} tone={backendReady ? "ok" : blockers.length ? "bad" : "warn"} />
-        <StatTile icon={Cpu} label="高负载" value={cpuHigh || memoryHigh ? "有提示" : "正常"} detail={`CPU ${cpuHigh ? "高" : "正常"} · MEM ${memoryHigh ? "高" : "正常"}`} tone={cpuHigh || memoryHigh ? "warn" : "ok"} />
-      </div>
+      <div className="dashboard-grid ops-dashboard-grid">
+        <MetricCard title="运维控制台" className="wide-panel ops-control-panel">
+          <div className="ops-mini-grid">
+            <OpsMiniMetric label="后端健康" value={translateDisplayValue(backendHealth)} detail={`cTrader ${translateDisplayValue(ctraderStatus)}`} tone={toneFromStatus(backendHealth)} />
+            <OpsMiniMetric label="数据库" value={translateDisplayValue(dbStatus)} detail={`新鲜 ${dbFreshCount} · 过期 ${dbStale} · 缺失 ${dbMissing}`} tone={dbFresh} />
+            <OpsMiniMetric label="前端就绪" value={backendReady ? "已就绪" : "受限"} detail={`阻断项 ${blockers.length} · ${translateDisplayValue(liveReadinessState)}`} tone={backendReady ? "ok" : blockers.length ? "bad" : "warn"} />
+            <OpsMiniMetric label="高负载" value={cpuHigh || memoryHigh ? "有提示" : "正常"} detail={`CPU ${cpuHigh ? "高" : "正常"} · MEM ${memoryHigh ? "高" : "正常"}`} tone={cpuHigh || memoryHigh ? "warn" : "ok"} />
+            <OpsMiniMetric label="告警恢复" value={alertRules ? `${alertRules} 规则` : "无规则"} detail={`失败 ${recoveryFailures} · 守护 ${recoveryRunning ? "运行" : "待命"}`} tone={recoveryFailures ? "bad" : recoveryRunning ? "warn" : "ok"} />
+            <OpsMiniMetric label="外部数据" value={`${externalSources.length} 源`} detail={`异常/过期 ${externalStale} · TF ${syncTfCount}`} tone={externalStale ? "warn" : "ok"} />
+          </div>
 
-      <div className="dashboard-grid">
-        <MetricCard title="服务状态">
-          <div className="field-list">
-            <Field label="健康探针" value={backendHealth} tone={toneFromStatus(backendHealth)} />
-            <Field label="cTrader" value={ctraderStatus} tone={toneFromStatus(ctraderStatus)} />
-            <Field label="交易循环" value={loopRunning ? "运行中" : "未运行"} tone={loopRunning ? "ok" : "warn"} />
-            <Field label="主库连接" value={healthDbStatus} tone={toneFromStatus(healthDbStatus)} />
-            <Field label="最近健康时间" value={formatTime(healthTime)} />
-            <Field label="请求异常" value={hasError ? "有" : "无"} tone={hasError ? "bad" : "ok"} />
+          <div className="ops-control-grid">
+            <section className="ops-control-section">
+              <div className="learning-section-head">
+                <h3>服务链路</h3>
+                <StatusPill status={serviceStatus} tone={toneFromStatus(serviceStatus)} />
+              </div>
+              <div className="field-list ops-compact-fields">
+                <Field label="健康探针" value={backendHealth} tone={toneFromStatus(backendHealth)} />
+                <Field label="cTrader" value={ctraderStatus} tone={toneFromStatus(ctraderStatus)} />
+                <Field label="交易循环" value={loopRunning ? "运行中" : "未运行"} tone={loopRunning ? "ok" : "warn"} />
+                <Field label="主库连接" value={healthDbStatus} tone={toneFromStatus(healthDbStatus)} />
+                <Field label="最近健康" value={formatTime(healthTime)} />
+                <Field label="请求异常" value={hasError ? "有" : "无"} tone={hasError ? "bad" : "ok"} />
+              </div>
+            </section>
+
+            <section className="ops-control-section">
+              <div className="learning-section-head">
+                <h3>就绪与权限</h3>
+                <StatusPill status={backendReady ? "前端就绪" : "前端受限"} tone={backendReady ? "ok" : "warn"} />
+              </div>
+              <div className="field-list ops-compact-fields">
+                <Field label="合约版本" value={backendSchema} />
+                <Field label="更新时间" value={formatTime(readinessUpdated)} />
+                <Field label="实时状态" value={liveReadinessState} tone={toneFromStatus(liveReadinessState)} />
+                <Field label="模型权限" value={modelEligible ? "允许" : "受限"} tone={modelEligible ? "ok" : "warn"} />
+                <Field label="因子更新" value={factorDataLast} />
+              </div>
+              <div className="compact-list ops-inline-badges">
+                {blockers.length ? (
+                  blockers.slice(0, 8).map((blocker, index) => (
+                    <span className="data-badge data-badge-bad" key={`${readableObjectLabel(blocker)}-${index}`}>{readableObjectLabel(blocker)}</span>
+                  ))
+                ) : (
+                  <span className="data-badge data-badge-ok">无阻断项</span>
+                )}
+              </div>
+            </section>
+
+            <section className="ops-control-section">
+              <div className="learning-section-head">
+                <h3>告警与恢复</h3>
+                <StatusPill status={alertStatus} tone={toneFromStatus(alertStatus)} />
+              </div>
+              <div className="field-list ops-compact-fields">
+                <Field label="活跃规则" value={alertRules} />
+                <Field label="恢复守护" value={recoveryRunning ? "运行中" : "待命"} tone={recoveryRunning ? "warn" : "ok"} />
+                <Field label="循环健康" value={loopHealthy ? "正常" : "异常"} tone={loopHealthy ? "ok" : "bad"} />
+                <Field label="调度健康" value={schedulerHealthy ? "正常" : "异常"} tone={schedulerHealthy ? "ok" : "bad"} />
+                <Field label="失败次数" value={recoveryFailures} tone={recoveryFailures ? "bad" : "ok"} />
+              </div>
+            </section>
+
+            <section className="ops-control-section">
+              <div className="learning-section-head">
+                <h3>同步与外部</h3>
+                <StatusPill status={syncStatus} tone={toneFromStatus(syncStatus)} />
+              </div>
+              <div className="field-list ops-compact-fields">
+                <Field label="最近同步" value={formatTime(syncLast)} />
+                <Field label="周期数" value={syncTfCount} />
+                <Field label="cTrader Token" value={tokenOk ? "有效" : "异常"} tone={tokenOk ? "ok" : "bad"} />
+                <Field label="Token 剩余" value={tokenHours ? `${Math.round(tokenHours)} 小时` : "--"} />
+                <Field label="外部异常" value={externalStale} tone={externalStale ? "warn" : "ok"} />
+              </div>
+              <div className="compact-list ops-inline-badges">
+                {externalSources.slice(0, 8).map((raw, index) => {
+                  const item = asRecord(raw);
+                  const sourceName = pickString(item, ["source", "table"], String(index + 1));
+                  const status = pickString(item, ["status"], "--");
+                  const stale = pickBoolean(item, ["stale"], false);
+                  return (
+                    <span className={`data-badge ${stale ? "data-badge-warn" : toneFromStatus(status) === "bad" ? "data-badge-bad" : "data-badge-ok"}`} key={`${sourceName}-${index}`}>
+                      {sourceName} · {translateDisplayValue(status)}
+                    </span>
+                  );
+                })}
+              </div>
+            </section>
           </div>
         </MetricCard>
 
-        <MetricCard title="后端就绪">
-          <div className="field-list">
-            <Field label="合约版本" value={backendSchema} />
-            <Field label="更新时间" value={formatTime(readinessUpdated)} />
-            <Field label="服务状态" value={serviceStatus} tone={toneFromStatus(serviceStatus)} />
-            <Field label="实时状态" value={liveReadinessState} tone={toneFromStatus(liveReadinessState)} />
-            <Field label="模型权限" value={modelEligible ? "允许" : "受限"} tone={modelEligible ? "ok" : "warn"} />
-            <Field label="高 CPU" value={cpuHigh ? "是" : "否"} tone={cpuHigh ? "warn" : "ok"} />
-            <Field label="高内存" value={memoryHigh ? "是" : "否"} tone={memoryHigh ? "warn" : "ok"} />
-            <Field label="因子最近更新" value={factorDataLast} />
+        <MetricCard title="数据库资产" className="wide-panel ops-db-panel">
+          <div className="ops-db-summary">
+            <OpsMiniMetric label="数据库总数" value={String(dbTotal || dbList.length)} detail={`检查 ${formatTime(dbChecked)}`} tone={dbFresh} />
+            <OpsMiniMetric label="新鲜" value={String(dbFreshCount)} detail={translateDisplayValue(dbStatus)} tone="ok" />
+            <OpsMiniMetric label="过期" value={String(dbStale)} detail="需要关注 freshness" tone={dbStale ? "warn" : "ok"} />
+            <OpsMiniMetric label="缺失" value={String(dbMissing)} detail="文件或注册缺失" tone={dbMissing ? "bad" : "ok"} />
+            <OpsMiniMetric label="异常数据库" value={String(dbProblemCount)} detail="缺失/过期/错误" tone={dbProblemCount ? "bad" : "ok"} />
           </div>
-          <div className="compact-list">
-            {blockers.length ? (
-              blockers.slice(0, 10).map((blocker, index) => (
-                <span className="data-badge data-badge-bad" key={`${readableObjectLabel(blocker)}-${index}`}>{readableObjectLabel(blocker)}</span>
-              ))
-            ) : (
-              <span className="data-badge data-badge-ok">无阻断项</span>
-            )}
+
+          <div className="ops-db-card-grid">
+            {!dbList.length ? <div className="empty-state-small">暂未返回数据库清单</div> : null}
+            {dbList.map((db) => (
+              <article className="ops-db-card" key={`${db.name}-${db.file}`}>
+                <div className="ops-db-card-head">
+                  <div>
+                    <strong>{db.name}</strong>
+                    <span>{db.file}</span>
+                  </div>
+                  <StatusPill status={db.exists ? db.freshness : "missing"} tone={db.exists ? toneFromStatus(db.freshness) : "bad"} />
+                </div>
+                <div className="ops-db-card-meta">
+                  <span>{translateDisplayValue(db.type)}</span>
+                  <span>{db.totalRows} 行</span>
+                  <span>{formatTime(db.latestTs)}</span>
+                </div>
+                {db.issues.full ? <p title={db.issues.full}>{db.issues.short}</p> : <p className="ops-db-ok">无异常</p>}
+              </article>
+            ))}
           </div>
         </MetricCard>
-
-        <MetricCard title="告警与恢复">
-          <div className="field-list">
-            <Field label="告警状态" value={alertStatus} tone={toneFromStatus(alertStatus)} />
-            <Field label="活跃规则" value={alertRules} />
-            <Field label="恢复守护" value={recoveryRunning ? "运行中" : "待命"} tone={recoveryRunning ? "warn" : "ok"} />
-            <Field label="循环健康" value={loopHealthy ? "正常" : "异常"} tone={loopHealthy ? "ok" : "bad"} />
-            <Field label="调度健康" value={schedulerHealthy ? "正常" : "异常"} tone={schedulerHealthy ? "ok" : "bad"} />
-            <Field label="失败次数" value={recoveryFailures} tone={recoveryFailures ? "bad" : "ok"} />
-          </div>
-        </MetricCard>
-
-        <MetricCard title="同步与外部数据">
-          <div className="field-list">
-            <Field label="同步状态" value={syncStatus} tone={toneFromStatus(syncStatus)} />
-            <Field label="最近同步" value={formatTime(syncLast)} />
-            <Field label="周期数" value={syncTfCount} />
-            <Field label="cTrader Token" value={tokenOk ? "有效" : "异常"} tone={tokenOk ? "ok" : "bad"} />
-            <Field label="Token 剩余" value={tokenHours ? `${Math.round(tokenHours)} 小时` : "--"} />
-            <Field label="外部数据源" value={`${externalSources.length} 个`} />
-            <Field label="外部过期/异常" value={externalStale} tone={externalStale ? "warn" : "ok"} />
-          </div>
-          <div className="compact-list">
-            {externalSources.slice(0, 8).map((raw, index) => {
-              const item = asRecord(raw);
-              const sourceName = pickString(item, ["source", "table"], String(index + 1));
-              const status = pickString(item, ["status"], "--");
-              const stale = pickBoolean(item, ["stale"], false);
-              return (
-                <span className={`data-badge ${stale ? "data-badge-warn" : toneFromStatus(status) === "bad" ? "data-badge-bad" : "data-badge-ok"}`} key={`${sourceName}-${index}`}>
-                  {sourceName} · {translateDisplayValue(status)}
-                </span>
-              );
-            })}
-          </div>
-        </MetricCard>
-
-        <MetricCard title="数据库健康" className="wide-panel">
-          <div className="performance-row">
-            <div>
-              <span>数据库总数</span>
-              <strong>{dbTotal || dbList.length}</strong>
-            </div>
-            <div>
-              <span>新鲜</span>
-              <strong>{dbFreshCount}</strong>
-            </div>
-            <div>
-              <span>过期</span>
-              <strong>{dbStale}</strong>
-            </div>
-            <div>
-              <span>缺失</span>
-              <strong>{dbMissing}</strong>
-            </div>
-          </div>
-          <div className="field-list field-list-spaced">
-            <Field label="数据库健康" value={dbStatus} tone={dbFresh} />
-            <Field label="检查时间" value={formatTime(dbChecked)} />
-            <Field label="异常数据库" value={dbProblemCount} tone={dbProblemCount ? "bad" : "ok"} />
-          </div>
-        </MetricCard>
-
-        <MetricCard title="数据库清单" className="wide-panel">
-          <div className="table-wrap ops-db-wrap">
-            <table className="mobile-card-table ops-db-table">
-              <colgroup>
-                <col className="ops-db-name" />
-                <col className="ops-db-file" />
-                <col className="ops-db-type" />
-                <col className="ops-db-status" />
-                <col className="ops-db-rows" />
-                <col className="ops-db-time" />
-                <col className="ops-db-issues" />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th>数据库</th>
-                  <th>文件</th>
-                  <th>类型</th>
-                  <th>状态</th>
-                  <th>行数</th>
-                  <th>更新时间</th>
-                  <th>异常</th>
-                </tr>
-              </thead>
-              <tbody>
-                {dbList.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="empty-state-small">暂未返回数据库清单</td>
-                  </tr>
-                ) : null}
-                {dbList.map((db) => (
-                  <tr key={`${db.name}-${db.file}`}>
-                    <td>{db.name}</td>
-                    <td>{db.file}</td>
-                    <td>{db.type}</td>
-                    <td><StatusPill status={db.exists ? db.freshness : "missing"} tone={db.exists ? toneFromStatus(db.freshness) : "bad"} /></td>
-                    <td>{db.totalRows}</td>
-                    <td>{formatTime(db.latestTs)}</td>
-                    <td>
-                      {db.issues.full ? (
-                        <span className="issue-summary" title={db.issues.full}>{db.issues.short}</span>
-                      ) : "--"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </MetricCard>
-
       </div>
 
       {hasError ? (

@@ -269,6 +269,36 @@ export type BackendReadinessPayload = {
   [key: string]: unknown;
 };
 
+export type SystemLoadPayload = {
+  ok?: boolean;
+  ts?: number;
+  cpu?: {
+    percent?: number;
+    load1?: number;
+    load5?: number;
+    load15?: number;
+    cores?: number;
+  };
+  memory?: {
+    total_bytes?: number;
+    available_bytes?: number;
+    used_bytes?: number;
+    percent?: number;
+  };
+  disk?: {
+    path?: string;
+    total_bytes?: number;
+    free_bytes?: number;
+    used_bytes?: number;
+    percent?: number;
+  };
+  process?: {
+    pid?: number;
+    rss_bytes?: number;
+  };
+  [key: string]: unknown;
+};
+
 export type LearningPayload = Record<string, unknown>;
 
 export type StateSnapshot = Record<string, unknown> & {
@@ -355,8 +385,16 @@ export async function getSystemDbHealth(): Promise<DbHealthPayload> {
   return getJson<DbHealthPayload>("/api/system/db-health");
 }
 
+export async function getSystemLoad(): Promise<SystemLoadPayload> {
+  return getJson<SystemLoadPayload>("/api/system/load");
+}
+
 export async function getBackendReadiness(): Promise<BackendReadinessPayload> {
   return getJson<BackendReadinessPayload>("/api/ops/backend-readiness");
+}
+
+export async function getLogTail(lines = 30): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>(`/api/logs/tail?lines=${encodeURIComponent(String(lines))}`);
 }
 
 export async function getOpsAlerts(): Promise<Record<string, unknown>> {

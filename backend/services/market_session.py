@@ -214,6 +214,9 @@ def evaluate_market_session(
     quote_motion_stale = quote_change_age is None or quote_change_age >= float(quote_stale_seconds)
     market_data_stale = market_data_age is not None and market_data_age >= float(market_data_stale_seconds)
     close_confirmed_by_quote = quote_age is not None and quote_age >= float(closed_confirm_seconds)
+    close_confirmed_by_market_data = (
+        market_data_age is not None and market_data_age >= float(closed_confirm_seconds)
+    )
     api_alive = bool(api_available or broker_connected or account_api_ok or positions_api_ok)
     evidence = []
     if broker_connected is True:
@@ -268,7 +271,7 @@ def evaluate_market_session(
         )
 
     if not in_schedule:
-        confirmed = close_confirmed_by_quote or (override_active and api_alive)
+        confirmed = close_confirmed_by_quote or close_confirmed_by_market_data or (override_active and api_alive)
         status = (
             "closed_pending_positions"
             if confirmed and has_open_positions
@@ -299,6 +302,8 @@ def evaluate_market_session(
                 else "quote_stale_after_trading_hour_override"
                 if confirmed and override_active
                 else "quote_stale_after_schedule_close"
+                if close_confirmed_by_quote
+                else "market_data_stale_after_schedule_close"
                 if confirmed
                 else str(override.get("source") or "schedule_only")
             ),

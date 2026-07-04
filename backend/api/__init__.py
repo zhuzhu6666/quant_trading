@@ -5,7 +5,7 @@ from backend.api import (
     ab_test, auth, backtest, calibrator, config, control, discover,
     external_data, factor_health, factor_v4, health, jobs, learning, live, logs,
     market, metrics, paper, reports, risk, ops, experiments, shadow, state, strategies, sync, tuning,
-    ctrader_auth, db_health,
+    ctrader_auth, db_health, system_load,
 )
 
 ALL_ROUTERS: list[APIRouter] = [
@@ -39,4 +39,5 @@ ALL_ROUTERS: list[APIRouter] = [
     state.router,
     ctrader_auth.router,
     db_health.router,
+    system_load.router,
 ]

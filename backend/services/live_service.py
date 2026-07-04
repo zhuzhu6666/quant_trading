@@ -5165,7 +5165,6 @@ def warmup_ctrader(timeout_sec: float = 0.0) -> None:
         time.sleep(0.2)
 
 
-_last_market_connection_release_ts: float = 0.0
 _last_spot_subscription_attempt_ts: float = 0.0
 _SPOT_QUOTE_STALE_SECONDS = 300.0
 
@@ -5229,35 +5228,6 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
         spot_quote=quote or _live_state_get("spot_quote", None, clone=True),
     )
     return state
-
-
-def _release_market_connection_if_safe(session: dict[str, Any], log=None) -> bool:
-    global _ctrader_bridge, _ctrader_connect_thread, _last_market_connection_release_ts
-    if session.get("can_keep_market_connection", True):
-        return False
-    if str(session.get("status") or "") != "closed_confirmed":
-        return False
-    now_ts = time.time()
-    if now_ts - _last_market_connection_release_ts < 300:
-        return False
-    with _ctrader_lock:
-        bridge = _ctrader_bridge
-        if bridge is None:
-            _last_market_connection_release_ts = now_ts
-            return False
-        try:
-            bridge.disconnect()
-        except Exception as exc:
-            logger.debug("[market_session] disconnect during closed session failed: %s", exc)
-        _ctrader_bridge = None
-        _ctrader_connect_thread = None
-        _last_market_connection_release_ts = now_ts
-    msg = f"market closed confirmed; released cTrader market connection reason={session.get('reason')}"
-    if log:
-        log(msg)
-    else:
-        logger.info(msg)
-    return True
 
 
 def _ensure_spot_subscription(
@@ -6156,6 +6126,20 @@ def _start_live_scheduler():
                     logger.debug("[data_sync] all fresh ({}), tick age={:.0f}m, skip pull", bar_status, tick_age / 60)
                 health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
                 return
+
+            try:
+                session = _market_session_snapshot(None)
+                session_status = str((session or {}).get("status") or "")
+                if session_status in {"closed_confirmed", "closed_pending_confirmation", "closed_pending_positions"}:
+                    logger.info(
+                        "[data_sync] bars stale but market is closed (status={}, reason={}); skip bar pull",
+                        session_status,
+                        (session or {}).get("reason") or "",
+                    )
+                    health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
+                    return
+            except Exception as exc:
+                logger.debug("[data_sync] market session check failed before pull: {}", exc)
 
             # 4. 回补 bars (用主 bridge 直接拉, 不再开第二连接)
             total_bars = 0
@@ -7110,12 +7094,16 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         try:
             market_session = _market_session_snapshot(None)
             if str(market_session.get("status") or "") == "closed_confirmed":
-                _set_loop_diagnostic(tick, "market_closed", bridge_ready=False)
-                _release_market_connection_if_safe(market_session, log=log)
+                bridge, err, warming = _get_ctrader()
+                bridge_ready = bool(bridge is not None and not warming and bridge.is_connected)
+                if err:
+                    _market_session_snapshot(None, broker_error=err)
+                _set_loop_diagnostic(tick, "market_closed", bridge_ready=bridge_ready)
                 log(
                     f"tick {tick}: market closed confirmed "
                     f"({market_session.get('reason')}), open-market work paused; "
-                    f"high_load_allowed={market_session.get('high_load_allowed')}"
+                    f"high_load_allowed={market_session.get('high_load_allowed')}; "
+                    f"cTrader={'ready' if bridge_ready else ('warming' if warming else 'disconnected')}"
                 )
                 stop_flag.wait(300)
                 continue
@@ -7130,12 +7118,12 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             bridge_ready = bridge is not None and not warming and bridge.is_connected
             market_session = _market_session_snapshot(bridge)
             if str(market_session.get("status") or "") == "closed_confirmed":
-                _set_loop_diagnostic(tick, "market_closed", bridge_ready=False)
-                _release_market_connection_if_safe(market_session, log=log)
+                _set_loop_diagnostic(tick, "market_closed", bridge_ready=bridge_ready)
                 log(
                     f"tick {tick}: market closed confirmed after broker check "
                     f"({market_session.get('reason')}), open-market work paused; "
-                    f"high_load_allowed={market_session.get('high_load_allowed')}"
+                    f"high_load_allowed={market_session.get('high_load_allowed')}; "
+                    f"cTrader={'ready' if bridge_ready else ('warming' if warming else 'disconnected')}"
                 )
                 stop_flag.wait(300)
                 continue

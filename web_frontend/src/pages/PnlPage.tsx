@@ -116,6 +116,14 @@ export function PnlPage() {
           {seriesQuery.isError ? (
             <p className="error-text">接口异常：{seriesQuery.error instanceof Error ? seriesQuery.error.message : "请求失败"}</p>
           ) : null}
+          <div className="pnl-window-summary" aria-label="窗口摘要">
+            <Field label="币种" value={currency} />
+            <Field label="最佳单笔" value={formatMoney(bestTrade, currency)} tone={bestTrade > 0 ? "ok" : "mute"} />
+            <Field label="最差单笔" value={formatMoney(worstTrade, currency)} tone={worstTrade < 0 ? "bad" : "mute"} />
+            <Field label="平均单笔" value={formatMoney(avgTrade, currency)} tone={numberTone(avgTrade)} />
+            <Field label="首条成交" value={firstTs ? formatTime(firstTs) : "--"} />
+            <Field label="末条成交" value={lastTs ? formatTime(lastTs) : "--"} />
+          </div>
           <div className="chart-card chart-card-strong">
             <div className="mini-chart">
               {hasData ? (
@@ -135,17 +143,6 @@ export function PnlPage() {
               <span>来源：{pickString(seriesQuery.data, ["source", "provider", "origin"], "realized-pnl-series")}</span>
               <span>{firstTs ? `${formatTime(firstTs)} 到 ${formatTime(lastTs)}` : "等待成交点"}</span>
             </div>
-          </div>
-        </MetricCard>
-
-        <MetricCard title="窗口摘要">
-          <div className="field-list">
-            <Field label="币种" value={currency} />
-            <Field label="最佳单笔" value={formatMoney(bestTrade, currency)} tone={bestTrade > 0 ? "ok" : "mute"} />
-            <Field label="最差单笔" value={formatMoney(worstTrade, currency)} tone={worstTrade < 0 ? "bad" : "mute"} />
-            <Field label="平均单笔" value={formatMoney(avgTrade, currency)} tone={numberTone(avgTrade)} />
-            <Field label="首条成交" value={firstTs ? formatTime(firstTs) : "--"} />
-            <Field label="末条成交" value={lastTs ? formatTime(lastTs) : "--"} />
           </div>
         </MetricCard>
 

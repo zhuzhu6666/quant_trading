@@ -50,6 +50,22 @@ def test_xauusd_closed_confirmed_allows_high_load_when_quote_stale_and_flat():
     assert state.confirmation_source == "quote_stale_after_schedule_close"
 
 
+def test_xauusd_closed_confirmed_allows_high_load_when_market_data_stale_without_quote():
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        now_ts=_ts(2026, 6, 27, 2, 0),
+        latest_market_data_ts=_ts(2026, 6, 26, 21, 59),
+        has_open_positions=False,
+    )
+
+    assert state.status == "closed_confirmed"
+    assert state.can_open_positions is False
+    assert state.can_keep_market_connection is False
+    assert state.high_load_allowed is True
+    assert state.high_load_profile == "full"
+    assert state.confirmation_source == "market_data_stale_after_schedule_close"
+
+
 def test_xauusd_closed_keeps_connection_when_positions_exist():
     state = evaluate_market_session(
         symbol="XAUUSD+",
