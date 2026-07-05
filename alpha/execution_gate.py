@@ -6,7 +6,7 @@
 """
 
 import logging
-from collections import deque
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -62,6 +62,19 @@ def _get_gvz_change(date_str: str) -> float | None:
         return daily_change_pct(series, date_str)
     except Exception:
         return None
+
+
+def _event_bucket_is_release_window(value: Any) -> bool | None:
+    """Return whether a signed event bucket means the release window is active."""
+    if value is None:
+        return None
+    try:
+        bucket = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(bucket):
+        return None
+    return abs(bucket) < 1e-9
 
 
 # ═══════════════════════════════════════════════════════════
@@ -142,7 +155,7 @@ class ExecutionGate:
             )
 
         # 3. 事件过滤器
-        event_result = self._event_filter(composite.direction, bar)
+        event_result = self._event_filter(composite.direction, bar, factor_values)
         if not event_result.passed:
             return event_result
 
@@ -151,8 +164,13 @@ class ExecutionGate:
 
         return GateResult(True, "passed")
 
-    def _event_filter(self, direction: int, bar: dict[str, Any]) -> GateResult:
-        """事件过滤器: NFP skip / FOMC boost / GVZ gate。"""
+    def _event_filter(
+        self,
+        direction: int,
+        bar: dict[str, Any],
+        factor_values: dict[str, float | None] | None = None,
+    ) -> GateResult:
+        """事件闸门: NFP skip / GVZ gate。"""
         cfg_enable_nfp = self._config.get(
             "strategy_enable_nfp_skip",
             self._config.get("risk_enable_nfp_skip", False),
@@ -169,9 +187,16 @@ class ExecutionGate:
         bar_ts = bar.get("time", 0)
         bar_date = datetime.fromtimestamp(bar_ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
-        # NFP skip: NFP 发布日不开仓
-        if cfg_enable_nfp and _is_nfp_date(bar_date):
-            return GateResult(False, "nfp_skip")
+        # NFP skip: prefer point-in-time event buckets; fall back to the legacy
+        # first-Friday calendar only when event data is unavailable.
+        if cfg_enable_nfp:
+            nfp_bucket = None
+            if factor_values is not None and "hours_to_nfp" in factor_values:
+                nfp_bucket = _event_bucket_is_release_window(factor_values.get("hours_to_nfp"))
+            if nfp_bucket is True:
+                return GateResult(False, "nfp_skip:event_bucket")
+            if nfp_bucket is None and _is_nfp_date(bar_date):
+                return GateResult(False, "nfp_skip:calendar_fallback")
 
         # GVZ gate: GVZ 暴跌时不开仓 (波动率异常)
         if cfg_enable_gvz:

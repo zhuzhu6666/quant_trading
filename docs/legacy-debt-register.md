@@ -1,0 +1,183 @@
+# Legacy Debt Register
+
+> Status: active
+> Last verified: 2026-07-06
+> Scope: known legacy concepts, deprecated paths, migration state, and cleanup rules.
+
+本文登记历史残留。目的不是列 TODO，而是防止旧概念在新实现里反复复活。
+
+## 1. 使用规则
+
+每条旧债至少包含：
+
+- `状态`: active / migrating / fixed / deprecated
+- `旧理解`: 历史上怎么理解
+- `当前口径`: 现在应如何理解
+- `影响面`: 代码、配置、测试、文档、前端、运行态
+- `收口方式`: 保留兼容、迁移、删除或观察
+
+状态含义：
+
+| 状态 | 含义 |
+|---|---|
+| `active` | 仍可能影响系统，需要继续处理 |
+| `migrating` | 已有新路径，但旧路径还在兼容 |
+| `fixed` | 已完成修复，只保留追溯 |
+| `deprecated` | 明确废弃，不应新增依赖 |
+
+## 2. 因子系统旧债
+
+### BB 作为过滤器
+
+- 状态: `fixed`
+- 旧理解: `bb_width` 是硬过滤器或特殊过滤条件。
+- 当前口径: `bb_width` 是 volatility context 因子，不参与方向评分，不接入 ExecutionGate 硬过滤。
+- 影响面: `PortfolioCompositor`、readiness、AWE、前端因子投票、旧测试注释。
+- 收口方式: 保留旧字段兼容账本；新展示使用 `role=context` 和 `used_in_score=false`。
+
+### 固定 70/30 战术/宏观投票
+
+- 状态: `fixed`
+- 旧理解: 组合分数固定按 tactical 70%、macro 30% 混合。
+- 当前口径: 只在两类 alpha 都存在时按配置混合；只有一类 alpha 时权重归一为 1。
+- 影响面: `PortfolioCompositor`、测试、账本解释。
+- 收口方式: 保留 `tactical_score/macro_score` 兼容字段，新增 `alpha_score` 真实表达方向分。
+
+### 事件和日历因子表达方向
+
+- 状态: `fixed`
+- 旧理解: FOMC/NFP/hour/day 可以直接映射看多或看空。
+- 当前口径: 事件、日历、时段是 context/gate/sizing 语义，不直接投方向票。
+- 影响面: 因子角色、事件 sizing、前端投票、学习归因。
+- 收口方式: 方向评分只读 alpha；事件风险通过 gate/sizing/context policy 生效。
+
+### 低频因子重复污染归一化历史
+
+- 状态: `migrating`
+- 旧理解: 所有因子每根 bar 都同样写入 normalizer 历史。
+- 当前口径: 低频因子按 cadence 和 history_sample_policy 采样，值未变化时不重复污染 rank/zscore。
+- 影响面: `SignalNormalizer`、外部因子、回测/live 对齐。
+- 收口方式: 保留默认 `bar/every_bar` 兼容；宏观/COT/ETF/事件使用低频策略。
+
+### shadow/discovered/live 混用
+
+- 状态: `migrating`
+- 旧理解: 搜索出来的因子容易被直接注册或进入主链。
+- 当前口径: shadow 永不直接交易；discovered 必须经证据门槛和治理晋升；live 才进入主链路。
+- 影响面: discovery、registry、runtime selection、AWE、readiness、Catalog。
+- 收口方式: `runtime_factor_selection` 返回 selected/excluded/reason；治理动作由 Orchestrator 执行。
+
+## 3. 自治治理旧债
+
+### policy_suggestion 作为人工审批队列
+
+- 状态: `migrating`
+- 旧理解: `policy_suggestion` 默认等待人工审批。
+- 当前口径: 它是自治建议和执行审计表，状态应归一到自治语义。
+- 影响面: learning API、evolution orchestrator、前端治理页面。
+- 收口方式: 使用 normalized status：`proposed/auto_approved/applied/rolled_back/blocked_by_risk/superseded`。
+
+### 自治配置直接 patch 内存
+
+- 状态: `fixed`
+- 旧理解: 自动治理可以直接修改 RuntimeConfig 内存。
+- 当前口径: 自治配置必须写 DB overlay 和 runtime_config_snapshot，重启可恢复。
+- 影响面: AWE、参数模板、FactorGovernanceOrchestrator、startup。
+- 收口方式: 统一使用 `RuntimeConfigMutationService` / `RuntimeConfigOverlayService`。
+
+### 回滚临场推断
+
+- 状态: `fixed`
+- 旧理解: 回滚时根据当前状态推断应该恢复什么。
+- 当前口径: 回滚只能使用当时 decision 的 `rollback_json.runtime_config`。
+- 影响面: Orchestrator、learning_application_effect、RiskPolicyService。
+- 收口方式: 负后验触发回滚前先过 `rollback_factor_action` 风控。
+
+## 4. 数据和运行态旧债
+
+### SQLite state.db 作为运行态主库
+
+- 状态: `deprecated`
+- 旧理解: `data/state.db` 可作为 live 状态库或排障入口。
+- 当前口径: PostgreSQL `state_v1` 是运行态状态与学习审计主库。
+- 影响面: 脚本、排障、测试、迁移说明。
+- 收口方式: 生产路径不新增 SQLite state；只读查询用 `scripts/state_query.py` 或 PG 连接入口；状态库说明收敛到 `docs/state-postgres-store.md`；旧 `state-dual-write-postgres.md` 文件名和 `scripts/state_dual_write_status.py` 占位脚本已清理。
+
+### 独立 L2 collector
+
+- 状态: `deprecated`
+- 旧理解: 用独立 Open API 连接采集 L2。
+- 当前口径: L2 由 backend 内 cTrader 主连接采集。
+- 影响面: systemd、scripts、运行 SOP。
+- 收口方式: 不恢复 `quant-l2-collector.service` 和旧脚本。
+
+### 旧 Web Console / H5 web-view 路线
+
+- 状态: `deprecated`
+- 旧理解: 小程序通过 web-view 或旧 H5 console 承载复杂展示。
+- 当前口径: 新 Web 前端承接完整操作台，小程序保留轻量状态。
+- 影响面: `miniprogram_v2`、`web_frontend`、Caddy、前端规划。
+- 收口方式: 新复杂能力优先 Web，不要求小程序配置 web-view 业务域名。
+
+### 临时前端 API smoke 脚本
+
+- 状态: `deprecated`
+- 旧理解: 用 `scripts/check_*.py`、`scripts/quick_check.py`、`scripts/cross_validate.py`、`scripts/start_and_check.py`、`scripts/test_fe*.py` 直接登录本地后端检查旧 `/api/state` 字段。
+- 当前口径: 前端/API 验证应走正式测试、`/api/ops/backend-readiness`、`/api/live/*` 和 Web 前端 contract，不保留硬编码口令的临时脚本。
+- 影响面: scripts、凭据安全、旧 `/api/state` 理解。
+- 收口方式: 已删除这些临时脚本；后续新增 smoke 脚本必须读取环境变量或使用正式测试 fixture，不得写入明文口令。
+
+### scripts 目录内历史回测输出
+
+- 状态: `deprecated`
+- 旧理解: `scripts/data/charts/backtest_v4_result.json` 和 `backtest_v4_trades.jsonl` 可以跟源码一起保留，作为历史示例结果。
+- 当前口径: scripts 目录只保留可执行维护脚本；回测输出、交易明细和模型报告属于运行产物，应进入 ignored `data/charts/`、报告目录或外部归档。
+- 影响面: scripts、文档审计、下一版性能基线设计。
+- 收口方式: 已删除 scripts 下历史回测输出；后续性能基线必须由可复现脚本生成，不读取静态旧结果。
+
+### scripts/debug 临时探针
+
+- 状态: `migrating`
+- 旧理解: debug 目录可长期保留一次性导入、GitHub 搜索、Windows 启动和本地 cTrader 验证脚本。
+- 当前口径: debug 目录不是稳定运维入口；一次性探针、硬编码 Windows 路径和联网搜索脚本会污染下一版架构判断。
+- 影响面: scripts、Windows 本地旧工作区、Dukascopy 采集、cTrader 验证。
+- 收口方式: 已删除无引用的一次性 debug 脚本；Dukascopy 增量拉取入口已迁到 `scripts/maintenance/pull_dukascopy_incremental.py`，debug 目录不再作为正式运行入口。
+
+### 旧 cloud_deploy / docker-compose 打包路线
+
+- 状态: `deprecated`
+- 旧理解: `scripts/pack_for_cloud.py` 可以把 DuckDB 数据和 `docker-compose.yml` 打包上传云服务器。
+- 当前口径: 当前后端运行以服务器 systemd、Caddy、PostgreSQL state、DuckDB 月库为准；仓库没有维护 `docker-compose.yml` 作为部署事实源。
+- 影响面: 部署文档、数据打包、服务器 SOP。
+- 收口方式: 已删除 `scripts/pack_for_cloud.py`；后续如要容器化，必须重新设计并写入正式部署文档，不能复用旧 cloud_deploy 脚本。
+
+### legacy AWE trailing 保护候选
+
+- 状态: `migrating`
+- 旧理解: AWE trailing 可以作为独立持仓保护执行器直接驱动止损。
+- 当前口径: 它只构造 legacy trailing 保护候选，并由统一持仓保护仲裁处理；不能绕过 `PositionSupervisor`、holding timeout 或 `RiskPolicyService`。
+- 影响面: `backend/services/live_service.py`、`backend/services/live_position_lifecycle.py`、持仓保护 trace、历史 close reason、测试兼容。
+- 收口方式: 暂保留，因为 live 保护链和测试仍覆盖它；下一版如要移除，必须先用 supervisor 模板/保护候选完全替代，并迁移历史 close reason 映射。
+
+### legacy parameter sweep
+
+- 状态: `migrating`
+- 旧理解: 旧参数网格扫描可以直接 patch runtime config。
+- 当前口径: `_scheduled_param_tune()` 仅 observation-only；运行参数切换必须走 parameter template、governance、risk policy 和 runtime overlay。
+- 影响面: `backend/services/live_service.py`、参数模板、evolution closure tests。
+- 收口方式: 暂保留测试防回归；下一版可删除旧 sweep 函数，但必须先确认没有 scheduler/API 调用，并保留“不得直接 patch RuntimeConfig”的测试语义。
+
+## 5. 新旧债登记模板
+
+复制下面模板新增条目：
+
+```text
+### 标题
+
+- 状态: active | migrating | fixed | deprecated
+- 旧理解:
+- 当前口径:
+- 影响面:
+- 收口方式:
+- 验证方式:
+```

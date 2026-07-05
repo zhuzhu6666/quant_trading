@@ -127,6 +127,17 @@ class BackendReadinessService:
         model_permission_blocked = not model_status.get("permission_ok", True)
         if is_runtime_state_db and model_permission_blocked:
             blockers.append({"component": "model_permissions", "status": "blocked"})
+        overlay_status = dict((stability.get("runtime_config_overlay") or {}))
+        overlay_suspicious = bool(overlay_status.get("suspicious"))
+        if is_runtime_state_db and overlay_suspicious and execution_semantics.get("effective_send_orders"):
+            blockers.append(
+                {
+                    "component": "runtime_config_overlay",
+                    "status": "critical",
+                    "reason": "suspicious_active_overlay",
+                    "suspicious_factors": overlay_status.get("suspicious_factors") or [],
+                }
+            )
         ready_for_frontend = not blockers
         known_observations = []
         known_observations.extend(system_health.get("known_observations") or [])
@@ -149,6 +160,16 @@ class BackendReadinessService:
             )
         if not is_runtime_state_db and model_permission_blocked:
             known_observations.append({"component": "model_permissions", "status": "blocked", "classification": "offline_context"})
+        if overlay_suspicious and not execution_semantics.get("effective_send_orders"):
+            known_observations.append(
+                {
+                    "component": "runtime_config_overlay",
+                    "status": "suspicious",
+                    "classification": "startup_degraded_non_live",
+                    "reason": "suspicious_active_overlay",
+                    "suspicious_factors": overlay_status.get("suspicious_factors") or [],
+                }
+            )
         known_observations.extend(config_runtime_drift.get("known_observations") or [])
         known_observations.extend(audit_health.get("known_observations") or [])
         payload = {
@@ -411,27 +432,132 @@ class BackendReadinessService:
                 demo_auto_apply = False
             automatic_execution_enabled = autonomy_mode == "demo_autonomous" and demo_auto_apply
             counts = {}
+            normalized_counts = {}
             if _table_exists(conn, "policy_suggestion"):
                 rows = _execute(
                     conn,
                     """
-                    SELECT status, COUNT(*) AS n
+                    SELECT status, action, reason, review_note, evidence_json
                     FROM policy_suggestion
-                    GROUP BY status
                     """
                 ).fetchall()
-                counts = {str(row["status"] or "unknown"): int(row["n"] or 0) for row in rows}
+                from backend.services.policy_suggestion_status import count_policy_suggestion_statuses
+
+                counted = count_policy_suggestion_statuses([dict(row) for row in rows])
+                counts = counted["raw"]
+                normalized_counts = counted["normalized"]
             snapshots = MetaGovernanceService(self.db_path).list_shadow_report_snapshots(limit=5)
             return {
                 "policy_suggestion_counts": counts,
+                "policy_suggestion_counts_raw": counts,
+                "policy_suggestion_counts_normalized": normalized_counts,
                 "pending_review_count": int(counts.get("proposed", 0)) + int(counts.get("pending_review", 0)),
+                "autonomous_pending_count": int(normalized_counts.get("proposed", 0)),
                 "meta_shadow_report_snapshots": snapshots,
                 "automatic_execution_enabled": automatic_execution_enabled,
                 "autonomy_mode": autonomy_mode,
                 "autonomy_demo_auto_apply": demo_auto_apply,
+                "factor_governance_runtime": self._factor_governance_runtime_status(),
             }
         finally:
             conn.close()
+
+    def _factor_governance_runtime_status(self) -> dict[str, Any]:
+        try:
+            from config.runtime_config import shared as runtime_config
+
+            cfg = runtime_config()
+            enabled = bool(getattr(cfg, "factor_governance_enabled", True))
+            cron = str(getattr(cfg, "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
+            stale_after_sec = float(getattr(cfg, "factor_governance_stale_after_sec", 7200.0) or 7200.0)
+        except Exception:
+            enabled = True
+            cron = "*/15 * * * *"
+            stale_after_sec = 7200.0
+
+        conn = _connect_state(self.db_path)
+        now = time.time()
+        try:
+            latest_run: dict[str, Any] = {}
+            latest_snapshot: dict[str, Any] = {}
+            if _table_exists(conn, "evolution_run"):
+                row = _execute(
+                    conn,
+                    """
+                    SELECT run_id, status, trigger_source, started_at, ended_at, summary_json
+                    FROM evolution_run
+                    WHERE run_type='factor_governance_autonomous'
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """,
+                ).fetchone()
+                if row:
+                    started_at = _safe_float(row["started_at"])
+                    ended_at = _safe_float(row["ended_at"])
+                    latest_run = {
+                        "run_id": str(row["run_id"] or ""),
+                        "status": str(row["status"] or ""),
+                        "trigger_source": str(row["trigger_source"] or ""),
+                        "started_at": started_at,
+                        "ended_at": ended_at,
+                        "age_seconds": round(max(0.0, now - (ended_at or started_at)), 3) if (ended_at or started_at) else None,
+                        "summary": _loads(row["summary_json"], {}),
+                    }
+            if _table_exists(conn, "factor_catalog_snapshot"):
+                row = _execute(
+                    conn,
+                    """
+                    SELECT snapshot_id, run_id, source, catalog_hash, created_at
+                    FROM factor_catalog_snapshot
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                ).fetchone()
+                if row:
+                    created_at = _safe_float(row["created_at"])
+                    latest_snapshot = {
+                        "snapshot_id": str(row["snapshot_id"] or ""),
+                        "run_id": str(row["run_id"] or ""),
+                        "source": str(row["source"] or ""),
+                        "catalog_hash": str(row["catalog_hash"] or ""),
+                        "created_at": created_at,
+                        "age_seconds": round(max(0.0, now - created_at), 3) if created_at else None,
+                    }
+        finally:
+            conn.close()
+
+        if not enabled:
+            status = "disabled"
+            ok = True
+            stale = False
+        elif not latest_run:
+            status = "missing_run"
+            ok = False
+            stale = True
+        elif str(latest_run.get("status") or "").lower() == "failed":
+            status = "failed"
+            ok = False
+            stale = bool((latest_run.get("age_seconds") or 0.0) > stale_after_sec)
+        elif not latest_snapshot:
+            status = "missing_catalog_snapshot"
+            ok = False
+            stale = True
+        else:
+            run_age = float(latest_run.get("age_seconds") or 0.0)
+            snapshot_age = float(latest_snapshot.get("age_seconds") or 0.0)
+            stale = run_age > stale_after_sec or snapshot_age > stale_after_sec
+            status = "stale" if stale else "fresh"
+            ok = not stale
+        return {
+            "ok": ok,
+            "status": status,
+            "enabled": enabled,
+            "cron": cron,
+            "stale": stale,
+            "stale_after_seconds": stale_after_sec,
+            "latest_run": latest_run,
+            "latest_catalog_snapshot": latest_snapshot,
+        }
 
     def _factor_data_status(self) -> dict[str, Any]:
         state_counts: dict[str, Any] = {}
@@ -497,6 +623,9 @@ class BackendReadinessService:
             "position_quality_shadow_audit",
             "shadow_factor_perf",
             "factor_health",
+            "lifecycle_events",
+            "evolution_decision",
+            "factor_catalog_snapshot",
         ]
         now = time.time()
         freshness: dict[str, Any] = {}
@@ -512,6 +641,8 @@ class BackendReadinessService:
                     ts_col = "created_at"
                 elif "updated_at" in cols:
                     ts_col = "updated_at"
+                elif "timestamp" in cols:
+                    ts_col = "timestamp"
                 else:
                     freshness[table] = {"status": "no_timestamp"}
                     continue
@@ -537,6 +668,7 @@ class BackendReadinessService:
             "timings": timing_snapshot("backend_readiness."),
             "l2_writer": self._runtime_kv_get("live.l2_writer.health", {}),
             "runtime_config_snapshot": self._runtime_config_snapshot_status(),
+            "runtime_config_overlay": self._runtime_config_overlay_status(),
             "freshness_watchdog": self._freshness_watchdog_status(
                 governance_freshness=governance_freshness,
                 model_status=model_status,
@@ -593,6 +725,14 @@ class BackendReadinessService:
             "age_seconds": round(age_sec, 3) if age_sec is not None else None,
         }
 
+    def _runtime_config_overlay_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+
+            return RuntimeConfigOverlayService(self.db_path).status()
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     @staticmethod
     def _freshness_watchdog_status(
         *,
@@ -632,12 +772,19 @@ class BackendReadinessService:
             cfg = runtime_config()
             weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
             signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
-            missing_weight = sorted(set(signal_cfg) - set(weights))
+            from alpha.portfolio_compositor import resolve_factor_role
+
+            alpha_signal_names = {
+                name for name, item in signal_cfg.items()
+                if resolve_factor_role(name, item if isinstance(item, dict) else None) == "alpha"
+            }
+            missing_weight = sorted(alpha_signal_names - set(weights))
             orphan_weight = sorted(set(weights) - set(signal_cfg))
             return {
                 "ok": bool(weights),
                 "weight_count": len(weights),
                 "signal_config_count": len(signal_cfg),
+                "alpha_signal_config_count": len(alpha_signal_names),
                 "signal_without_weight": missing_weight[:50],
                 "weight_without_signal_config": orphan_weight[:50],
             }

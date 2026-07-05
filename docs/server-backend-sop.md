@@ -1,6 +1,7 @@
 # Server Backend SOP
 
-> Last updated: 2026-07-01
+> Status: active
+> Last verified: 2026-07-06
 > Scope: Linux server backend daily operations.
 
 这份文档只服务一个目标：

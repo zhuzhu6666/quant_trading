@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 
 from alpha.registry import factor_registry
+from alpha.runtime_factor_selection import runtime_factor_ids
+from alpha.technical_indicators import adx_wilder
 from data.factor_frame import FactorFrameBuilder
 
 logger = logging.getLogger(__name__)
@@ -70,10 +72,15 @@ class StreamingFactorEngine:
         self._buffer: deque[dict] = deque(maxlen=max_buffer)
         self._factor_cache: dict[str, float | None] = {}
         self._available_factors: list[str] = list(factor_registry.list())
-        self._requested_factor_ids = list(factor_ids) if factor_ids is not None else None
         self._incremental_state: dict[str, float] = {}
         self._warm: bool = False
         self._factor_runtime_config: dict[str, dict] = dict(factor_runtime_config or {})
+        self._factor_ids_explicit = factor_ids is not None
+        self._requested_factor_ids = (
+            list(factor_ids)
+            if factor_ids is not None
+            else runtime_factor_ids(self._factor_runtime_config)
+        )
         self._factor_frame_builder = factor_frame_builder or FactorFrameBuilder(cache_ttl_sec=300)
         # Ensure restored shadow factors do not enter the live voting/calculation path.
         self.refresh_factor_list()
@@ -201,9 +208,19 @@ class StreamingFactorEngine:
             self._available_factors = voting
         except Exception:
             self._available_factors = list(all_factors)
+        self._prune_factor_cache()
 
     def set_factor_runtime_config(self, config: dict[str, dict] | None) -> None:
         self._factor_runtime_config = dict(config or {})
+        if not self._factor_ids_explicit:
+            self._requested_factor_ids = runtime_factor_ids(self._factor_runtime_config)
+        self.refresh_factor_list()
+
+    def _prune_factor_cache(self) -> None:
+        active = set(self._available_factors)
+        for name in list(self._factor_cache):
+            if name not in active:
+                self._factor_cache.pop(name, None)
 
     # ── 重置 ─────────────────────────────────────────────
 
@@ -367,29 +384,8 @@ class StreamingFactorEngine:
 
     @staticmethod
     def _factor_adx(df: pd.DataFrame, *, length: int = 14):
-        high, low, close = df["high"].values, df["low"].values, df["close"].values
-        n = len(close)
-        tr = np.zeros(n)
-        plus_dm = np.zeros(n)
-        minus_dm = np.zeros(n)
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
-            up = high[i] - high[i - 1]
-            down = low[i - 1] - low[i]
-            plus_dm[i] = up if up > down and up > 0 else 0
-            minus_dm[i] = down if down > up and down > 0 else 0
-        atr = pd.Series(tr).ewm(span=length, min_periods=length).mean().values
-        smooth_plus = pd.Series(plus_dm).ewm(span=length).mean().values
-        smooth_minus = pd.Series(minus_dm).ewm(span=length).mean().values
-        di_plus = np.divide(smooth_plus * 100, atr, out=np.zeros_like(atr), where=atr != 0)
-        di_minus = np.divide(smooth_minus * 100, atr, out=np.zeros_like(atr), where=atr != 0)
-        dx = np.divide(
-            np.abs(di_plus - di_minus) * 100,
-            di_plus + di_minus,
-            out=np.zeros_like(atr),
-            where=(di_plus + di_minus) != 0,
-        )
-        return pd.Series(dx).ewm(span=length).mean().values
+        adx, _, _ = adx_wilder(df["high"].values, df["low"].values, df["close"].values, period=length)
+        return adx
 
     @staticmethod
     def _factor_stoch_k(df: pd.DataFrame, *, k_length: int = 14):
@@ -461,59 +457,15 @@ class StreamingFactorEngine:
         atr_length: int = 10,
         multiplier: float = 3.0,
     ):
-        high, low, close = df["high"].values, df["low"].values, df["close"].values
-        n = len(close)
-        out = np.full(n, np.nan)
-        if n < atr_length + 2:
-            return out
+        from alpha.registry import _supertrend_strength_array
 
-        tr = np.zeros(n)
-        for i in range(1, n):
-            tr[i] = max(
-                high[i] - low[i],
-                abs(high[i] - close[i - 1]),
-                abs(low[i] - close[i - 1]),
-            )
-        atr = pd.Series(tr).ewm(span=atr_length, min_periods=atr_length).mean().values
-        hl2 = (high + low) / 2.0
-        upper = hl2 + multiplier * atr
-        lower = hl2 - multiplier * atr
-
-        final_upper = np.nan
-        final_lower = np.nan
-        direction = np.nan
-        for i in range(atr_length, n):
-            if i == atr_length:
-                final_upper = upper[i]
-                final_lower = lower[i]
-                direction = 1.0 if close[i] > hl2[i] else -1.0
-                out[i] = 0.0
-                continue
-
-            fu = upper[i]
-            fl = lower[i]
-            if not np.isnan(final_upper) and fu < final_upper:
-                fu = final_upper
-            if not np.isnan(final_lower) and fl > final_lower:
-                fl = final_lower
-            final_upper = fu
-            final_lower = fl
-
-            prev_dir = direction
-            if close[i] > fu:
-                direction = 1.0
-            elif close[i] < fl:
-                direction = -1.0
-            else:
-                direction = prev_dir
-
-            if direction > 0:
-                out[i] = (close[i] - final_lower) / atr[i] if atr[i] > 0 else 0.0
-            else:
-                out[i] = (final_upper - close[i]) / atr[i] if atr[i] > 0 else 0.0
-            out[i] = out[i] * direction
-
-        return out
+        return _supertrend_strength_array(
+            df["high"].values,
+            df["low"].values,
+            df["close"].values,
+            period=atr_length,
+            multiplier=multiplier,
+        )
 
     @staticmethod
     def _factor_keltner_width(

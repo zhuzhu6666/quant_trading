@@ -505,7 +505,7 @@ def test_update_weight_blocks_when_drawdown_near_limit():
     assert verdict.audit_payload["source"] == "RiskGovernor"
 
 
-def test_switch_parameter_template_uses_weight_governor_thresholds():
+def test_switch_parameter_template_uses_template_switch_governor_thresholds():
     service = _service()
 
     verdict = service.evaluate(
@@ -517,6 +517,32 @@ def test_switch_parameter_template_uses_weight_governor_thresholds():
     assert verdict.reason == "drawdown_approaching_limit"
     assert verdict.required_mode == "governed"
     assert verdict.audit_payload["action"] == "switch_parameter_template"
+
+
+def test_factor_disable_has_independent_governor_freeze():
+    service = _service()
+    service.governor.set_override("force_factor_disable_freeze", True)
+
+    verdict = service.evaluate(
+        "disable_factor_live",
+        {"session": {"drawdown_pct": 0.0}, "required_mode": "autonomous_governance"},
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "force_factor_disable_freeze"
+    assert verdict.required_mode == "autonomous_governance"
+
+
+def test_factor_rollback_is_not_blocked_by_weight_freeze():
+    service = _service()
+    service.governor.set_override("force_weight_freeze", True)
+
+    verdict = service.evaluate(
+        "rollback_factor_action",
+        {"session": {"drawdown_pct": 12.0}, "required_mode": "autonomous_governance"},
+    )
+
+    assert verdict.allowed is True
 
 
 def test_tighten_position_allows_bounded_tp_extension_with_profit_lock():

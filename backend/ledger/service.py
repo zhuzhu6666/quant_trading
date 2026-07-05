@@ -339,15 +339,20 @@ class DecisionLedger:
         signals = getattr(composite, "factor_signals", {}) or {}
         values = getattr(composite, "factor_values", {}) or {}
         weights = getattr(composite, "active_weights", {}) or {}
+        roles = getattr(composite, "factor_roles", {}) or {}
         for factor in sorted(set(signals.keys()) | set(values.keys()) | set(weights.keys())):
             signal = signals.get(factor)
             weight = float(weights.get(factor, 0.0) or 0.0)
+            role = str(roles.get(factor) or "alpha")
+            used_in_score = role == "alpha" and abs(weight) > 0
             factor_snapshots.append(
                 {
                     "factor": factor,
                     "raw_value": values.get(factor, 0.0) or 0.0,
                     "normalized_value": signal if signal is not None else 0.0,
-                    "direction": 1.0 if (signal or 0.0) > 0 else -1.0 if (signal or 0.0) < 0 else 0.0,
+                    "direction": (
+                        1.0 if (signal or 0.0) > 0 else -1.0 if (signal or 0.0) < 0 else 0.0
+                    ) if used_in_score else 0.0,
                     "base_weight": weight,
                     "policy_weight": weight,
                     "gated": bool(signal is None),
@@ -361,10 +366,19 @@ class DecisionLedger:
         action_payload = {
             "direction": getattr(composite, "direction", 0),
             "score": getattr(composite, "score", 0.0),
+            "composer_version": getattr(composite, "composer_version", ""),
+            "alpha_score": getattr(composite, "alpha_score", getattr(composite, "score", 0.0)),
             "tactical_score": getattr(composite, "tactical_score", 0.0),
             "macro_score": getattr(composite, "macro_score", 0.0),
             "n_active_factors": getattr(composite, "n_active_factors", 0),
+            "n_active_alpha_factors": getattr(composite, "n_active_alpha_factors", 0),
+            "effective_alpha_factor_count": getattr(composite, "effective_alpha_factor_count", getattr(composite, "n_active_alpha_factors", 0)),
             "n_abstain_factors": getattr(composite, "n_abstain_factors", 0),
+            "factor_roles": roles,
+            "context_signals": getattr(composite, "context_signals", {}) or {},
+            "context_state": getattr(composite, "context_state", {}) or {},
+            "context_policy": getattr(composite, "context_policy", {}) or {},
+            "redundancy_groups": getattr(composite, "redundancy_groups", {}) or {},
             "tags_breakdown": getattr(composite, "tags_breakdown", {}) or {},
             "gate_passed": gate_passed,
             "gate_reason": gate_reason,

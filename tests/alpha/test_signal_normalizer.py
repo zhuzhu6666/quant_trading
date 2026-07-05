@@ -97,6 +97,18 @@ class TestNormalizeRank:
         result = _normalize_rank(99.0, history, window=100, min_samples=30, direction=1)
         assert result is not None and result > 0
 
+    def test_constant_history_is_neutral(self):
+        """forward-filled low-frequency values should not become extreme votes."""
+        history = deque([5.0] * 50, maxlen=100)
+        assert _normalize_rank(5.0, history, window=100, min_samples=30, direction=1) == 0.0
+        assert _normalize_rank(5.0, history, window=100, min_samples=30, direction=-1) == 0.0
+
+    def test_ties_use_average_rank(self):
+        """Equal values map near the middle of their tied bucket."""
+        history = deque([1.0, 1.0, 2.0, 2.0], maxlen=100)
+        result = _normalize_rank(1.0, history, window=100, min_samples=4, direction=1)
+        assert result == pytest.approx(-0.5)
+
 
 class TestNormalizeDiscrete:
 

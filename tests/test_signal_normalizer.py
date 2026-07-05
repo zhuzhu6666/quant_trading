@@ -167,3 +167,31 @@ def test_warmup_fills_history():
     result = norm.normalize({"rsi_14": 55.0})
     assert result["rsi_14"] is not None
     assert -1.0 <= result["rsi_14"] <= 1.0
+
+
+def test_low_frequency_factor_history_samples_only_on_value_change():
+    config = {
+        "cot_mm_net": {
+            "mode": "rank_mapping",
+            "window": 100,
+            "min_samples": 2,
+            "direction": 1,
+        },
+    }
+    norm = SignalNormalizer(config)
+
+    for _ in range(5):
+        norm.normalize({"cot_mm_net": 123.0})
+    assert len(norm._histories["cot_mm_net"]) == 1
+
+    norm.normalize({"cot_mm_net": 124.0})
+    assert len(norm._histories["cot_mm_net"]) == 2
+
+
+def test_bar_factor_history_samples_every_bar():
+    norm = SignalNormalizer({
+        "rsi_14": {"mode": "zscore_tanh", "window": 100, "min_samples": 2},
+    })
+    for _ in range(5):
+        norm.normalize({"rsi_14": 50.0})
+    assert len(norm._histories["rsi_14"]) == 5

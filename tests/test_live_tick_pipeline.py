@@ -54,29 +54,44 @@ def test_factor_snapshot_helpers_preserve_vote_and_summary_payloads():
         score=0.123456,
         tactical_score=0.2,
         macro_score=-0.1,
+        alpha_score=0.123456,
         n_active_factors=3,
+        n_active_alpha_factors=2,
+        effective_alpha_factor_count=2,
         n_abstain_factors=1,
+        composer_version="factor_roles.v2",
+        context_state={"volatility_state": "normal"},
+        redundancy_groups={"trend": ["trend", "mean"]},
     )
     gate = SimpleNamespace(passed=True, reason="ok")
 
     votes = build_factor_votes(
         {"trend": 0.123456, "noise": "bad", "mean": -0.25},
         {"trend": 9.87654, "noise": 1.0},
+        {"trend": "alpha", "noise": "context", "mean": "alpha"},
+        {"trend": 0.5, "noise": 0.0, "mean": 0.2},
     )
     summary = build_factor_snapshot_summary(composite, gate, now=123.0)
 
     assert votes == {
-        "trend": {"signal": 0.1235, "raw": 9.8765, "direction": 1},
-        "noise": {"signal": 0.0, "raw": 1.0, "direction": 0},
-        "mean": {"signal": -0.25, "raw": None, "direction": -1},
+        "trend": {"signal": 0.1235, "raw": 9.8765, "direction": 1, "role": "alpha", "used_in_score": True},
+        "noise": {"signal": 0.0, "raw": 1.0, "direction": 0, "role": "context", "used_in_score": False},
+        "mean": {"signal": -0.25, "raw": None, "direction": -1, "role": "alpha", "used_in_score": True},
     }
     assert summary == {
         "direction": 1,
         "score": 0.1235,
         "tactical_score": 0.2,
         "macro_score": -0.1,
+        "alpha_score": 0.1235,
         "n_active": 3,
+        "n_active_alpha": 2,
+        "effective_alpha_factor_count": 2,
         "n_abstain": 1,
+        "composer_version": "factor_roles.v2",
+        "context_state": {"volatility_state": "normal"},
+        "context_policy": {},
+        "redundancy_groups": {"trend": ["trend", "mean"]},
         "gate_passed": True,
         "gate_reason": "ok",
         "ts": 123.0,

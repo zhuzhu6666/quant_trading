@@ -177,7 +177,23 @@ class FactorCardService:
 
         with self._conn() as conn:
             ids = self._factor_ids(conn=conn)
-            built = [self._build_card(name, conn=conn) for name in ids]
+            catalog_by_factor: dict[str, dict[str, Any]] = {}
+            try:
+                from backend.services.factor_catalog import build_factor_catalog
+
+                catalog_items = build_factor_catalog(self.db_path)
+                catalog_by_factor = {
+                    str(item.get("factor_id") or ""): item
+                    for item in catalog_items
+                    if str(item.get("factor_id") or "")
+                }
+                ids = sorted(set(ids) | set(catalog_by_factor))
+            except Exception:
+                catalog_by_factor = {}
+            built = [
+                self._build_card(name, conn=conn, catalog_item=catalog_by_factor.get(name))
+                for name in ids
+            ]
         items = []
         for card in built:
             if source and card["source"] != source:
@@ -227,8 +243,9 @@ class FactorCardService:
         names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
         return sorted(name for name in names if name)
 
-    def _build_card(self, factor_id: str, *, conn=None) -> dict[str, Any]:
+    def _build_card(self, factor_id: str, *, conn=None, catalog_item: dict[str, Any] | None = None) -> dict[str, Any]:
         adapter = RegistryAdapter.shared()
+        catalog_item = catalog_item or {}
         meta = adapter.get_meta(factor_id)
         func = factor_registry.get(factor_id)
         description = str(
@@ -236,9 +253,10 @@ class FactorCardService:
             or getattr(func, "_factor_desc", "")
             or factor_id
         )
-        source = str(meta.get("source") or ("builtin" if func else "unknown"))
+        source = str(catalog_item.get("source") or meta.get("source") or ("builtin" if func else "unknown"))
         lifecycle = str(
-            adapter._lifecycle_statuses.get(factor_id)
+            catalog_item.get("lifecycle_status")
+            or adapter._lifecycle_statuses.get(factor_id)
             or ("ACTIVE" if func else "UNKNOWN")
         )
         family = self._infer_family(factor_id, description, source)
@@ -262,6 +280,11 @@ class FactorCardService:
             "display_name": description,
             "factor_family": family,
             "source": source,
+            "role": str(catalog_item.get("role") or ""),
+            "enabled": bool(catalog_item.get("enabled", True)),
+            "eligible_for_live": bool(catalog_item.get("eligible_for_live", False)),
+            "used_in_score": bool(catalog_item.get("used_in_score", False)),
+            "weight": _round(catalog_item.get("weight", 0.0)),
             "lifecycle_status": lifecycle,
             "formula_version": formula_version,
             "parameter_version": parameter_version,
@@ -277,6 +300,11 @@ class FactorCardService:
                 "latest_suggestion_action": governance["latest_suggestion_action"],
                 "latest_application_action": governance["latest_application_action"],
                 "application_effect_status": governance["application_effect_status"],
+                "autonomy_status": str(catalog_item.get("governance_status") or governance["review_status"]),
+                "autonomy_action": str(catalog_item.get("governance_action") or governance["latest_suggestion_action"]),
+                "rollback_state": str(catalog_item.get("rollback_state") or ""),
+                "latest_catalog_snapshot_id": str(catalog_item.get("latest_catalog_snapshot_id") or ""),
+                "latest_catalog_snapshot_run_id": str(catalog_item.get("latest_catalog_snapshot_run_id") or ""),
                 "latest_template_candidate_trace": governance["latest_template_candidate_trace"],
                 "latest_template_recommendation": governance["latest_template_recommendation"],
             },
@@ -284,6 +312,9 @@ class FactorCardService:
                 "description": description,
                 "health_score": evidence["health_score"],
                 "shadow_score": evidence["shadow_score"],
+                "factor_governance_shadow": dict(catalog_item.get("factor_governance_shadow") or {}),
+                "model_weakness_score": _round(catalog_item.get("model_weakness_score", 0.0)),
+                "model_positive_score": _round(catalog_item.get("model_positive_score", 0.0)),
                 "avg_contribution_score": evidence["avg_contribution_score"],
                 "last_primary_responsibility": evidence["last_primary_responsibility"],
                 "recent_responsibility_labels": evidence["recent_responsibility_labels"],

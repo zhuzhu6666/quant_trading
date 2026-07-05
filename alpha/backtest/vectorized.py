@@ -204,12 +204,15 @@ class FactorBacktester:
         compositor_cfg: dict[str, dict] = {}
         for name in all_names:
             sc = signal_cfg.get(name, {})
+            if not isinstance(sc, dict):
+                sc = {}
             wc = weight_cfg.get(name, 1.0)
             weight = wc if isinstance(wc, (int, float)) else wc.get("weight", 1.0)
             compositor_cfg[name] = {
                 "weight": weight,
                 "tags": sc.get("tags", []),
                 "mode": sc.get("mode", "rank_mapping"),
+                "role": sc.get("role", "alpha"),
                 "enabled": sc.get("enabled", True),
             }
         compositor_cfg["_tactical_alpha"] = tactical_alpha

@@ -13,14 +13,14 @@ TACTICAL_CONFIG = {
     "rsi_14":        {"weight": 1.0, "tags": ["技术", "均值回归"], "enabled": True, "mode": "zscore_tanh"},
     "di_spread":     {"weight": 1.75, "tags": ["技术", "趋势"], "enabled": True, "mode": "zscore_tanh"},
     "engulfing":     {"weight": 1.0, "tags": ["形态", "反转"], "enabled": True, "mode": "discrete"},
-    "bb_width":      {"weight": 0.0, "tags": ["技术", "波动率"], "enabled": True, "mode": "zscore_tanh"},
+    "bb_width":      {"weight": 0.4, "tags": ["技术", "波动率"], "enabled": True, "mode": "zscore_tanh", "role": "context"},
 }
 
 MACRO_CONFIG = {
     "dxy_corr_20":       {"weight": 0.8, "tags": ["宏观", "美元"], "enabled": True, "mode": "rank_mapping"},
     "cot_mm_net":        {"weight": 0.8, "tags": ["COT", "投机"], "enabled": True, "mode": "rank_mapping"},
     "cb_total_chg_3m":   {"weight": 0.8, "tags": ["央行", "购金"], "enabled": True, "mode": "rank_mapping"},
-    "hours_to_fomc":     {"weight": 0.3, "tags": ["事件", "FOMC"], "enabled": True, "mode": "discrete"},
+    "hours_to_fomc":     {"weight": 0.3, "tags": ["事件", "FOMC"], "enabled": True, "mode": "discrete", "role": "gate"},
 }
 
 FULL_CONFIG = {**TACTICAL_CONFIG, **MACRO_CONFIG,
@@ -81,15 +81,15 @@ class TestCompose:
         result = c.compose(signals, signals)
         # tactical: (0.5*1.0 + 0.8*1.75) / (1.0 + 1.75) = (0.5 + 1.4) / 2.75 = 1.9 / 2.75 ≈ 0.691
         # macro: no active factors → 0.0
-        # combined: 0.7 * 0.691 + 0.3 * 0.0 ≈ 0.484
-        # direction: combined >= 0.4 → 1
+        # V2 dynamic layer weights: tactical-only score is not diluted by macro.
         assert result.n_active_factors == 2
         assert result.n_abstain_factors == 2
-        assert result.tactical_weight == 0.7
-        assert result.macro_weight == pytest.approx(0.3)
-        assert 0.48 <= result.tactical_score <= 0.70
+        assert result.n_active_alpha_factors == 2
+        assert result.tactical_weight == 1.0
+        assert result.macro_weight == pytest.approx(0.0)
+        assert result.tactical_score == pytest.approx(1.9 / 2.75, rel=1e-3)
         assert result.macro_score == 0.0
-        assert result.score > 0
+        assert result.score == pytest.approx(result.tactical_score, rel=1e-6)
         assert result.direction == 1
 
     def test_macro_only_signals(self):
@@ -103,10 +103,12 @@ class TestCompose:
         result = c.compose(signals, signals)
         # macro: (0.3*0.8 + 0.6*0.8) / (0.8 + 0.8) = (0.24 + 0.48) / 1.6 = 0.45
         # tactical: 0
-        # combined: 0.7*0 + 0.3*0.45 = 0.135
-        # direction: 0.135 < 0.4 → 0
+        # V2 dynamic layer weights: macro-only score is not diluted by tactical.
         assert result.macro_score != 0.0
-        assert result.direction == 0  # below threshold
+        assert result.tactical_weight == 0.0
+        assert result.macro_weight == 1.0
+        assert result.score == pytest.approx(result.macro_score, rel=1e-6)
+        assert result.direction == 1
 
     def test_combined_tactical_and_macro(self):
         """两层均有信号时正确混合。"""
@@ -200,19 +202,49 @@ class TestDefaultGPConfig:
         # n_active_factors 是信号级计数（非 None），disable 不影响
         assert result.n_active_factors == 1
 
-    def test_zero_weight_filter_only(self):
-        """weight=0 的因子在 tags_breakdown 中但 scores=0。"""
+    def test_bb_width_is_context_not_filter_or_directional_alpha(self):
+        """bb_width 是上下文因子, 不做硬过滤也不投多空方向。"""
         c = PortfolioCompositor(FULL_CONFIG)
-        signals = {"bb_width": 1.0}  # weight=0, 只做过滤器
+        signals = {"bb_width": 1.0}
         result = c.compose(signals, signals)
-        # weight=0 → 分子贡献 0，分母不计数
-        assert result.n_active_factors == 1 if FULL_CONFIG["bb_width"]["weight"] > 0 else 1
-        # Actually wait — bb_width weight=0.0, but it still gets included because
-        # the check is on sig being None, not on weight.
-        # The factor signal is NOT None, so it gets counted.
-        # But in compose, weight=0 makes it contribute 0 to numerator and 0 to denominator.
-        # Actually, looking at the code: t_den = sum(abs(w) for _, w in tactical.values())
-        # bb_width weight=0.0 contributes 0 to both numerator and denominator.
-        # So it's effectively excluded from the score but counted in n_active_factors. 
-        # That's fine — it's a filter-only factor.
+        assert result.composer_version == "factor_roles.v2"
+        assert result.factor_roles["bb_width"] == "context"
+        assert result.context_signals == {"bb_width": 1.0}
+        assert result.active_weights["bb_width"] == 0.0
+        assert result.n_active_factors == 1
+        assert result.n_active_alpha_factors == 0
         assert result.score == 0.0
+        assert result.direction == 0
+
+    def test_gate_factor_does_not_contribute_to_direction(self):
+        c = PortfolioCompositor(FULL_CONFIG)
+        result = c.compose({"hours_to_fomc": 1.0}, {"hours_to_fomc": 0.0})
+        assert result.factor_roles["hours_to_fomc"] == "gate"
+        assert result.active_weights["hours_to_fomc"] == 0.0
+        assert result.score == 0.0
+        assert result.direction == 0
+
+    def test_context_state_and_redundancy_groups_are_reported(self):
+        config = {
+            **FULL_CONFIG,
+            "rsi_14": {**FULL_CONFIG["rsi_14"], "redundancy_group": "osc"},
+            "stoch_k": {"weight": 1.0, "tags": ["技术", "动量"], "enabled": True, "redundancy_group": "osc"},
+        }
+        c = PortfolioCompositor(config)
+        result = c.compose(
+            {
+                "rsi_14": 0.5,
+                "stoch_k": 0.4,
+                "bb_width": 0.8,
+                "adx": 0.6,
+                "hours_to_nfp": 1.0,
+                "hour_utc": 0.7,
+            },
+            {"hour_utc": 14},
+        )
+        assert result.context_state["volatility_state"] == "high"
+        assert result.context_state["trend_strength_state"] == "strong"
+        assert result.context_state["event_window_state"] == "active"
+        assert result.context_state["session_state"] == "us"
+        assert result.redundancy_groups == {"osc": ["rsi_14", "stoch_k"]}
+        assert result.effective_alpha_factor_count == result.n_active_alpha_factors == 2

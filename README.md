@@ -1,27 +1,34 @@
 # Quant Trading System
 
-XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4 + Phase H autonomous foundation: 因子引擎、执行闸门、cTrader demo、持仓监督、归因复盘、规则驱动学习、模型数据管道、开仓质量影子模型和统一进化账本已经合并为一条可审计、可回放的闭环。
+> Status: active
+> Last verified: 2026-07-06
+> Scope: top-level project entry points and current operating shape.
+
+XAUUSD+ 量化交易系统。当前主线是 Factor Takeover v4 + 因子自治治理 V3: 因子引擎、执行闸门、cTrader demo、持仓监督、归因复盘、规则驱动学习、模型数据管道、Factor Catalog、自治治理编排、RuntimeConfig overlay 和统一进化账本已经合并为一条可审计、可回放、可回滚的闭环。
 
 ## Current Entry Points
 
 - Backend API: `./.venv/bin/python -m backend`
-- Frontend: `miniprogram_v2` in WeChat DevTools; `web_frontend` is the planned full Web console
+- Frontend: `web_frontend` is the full operator console; `miniprogram_v2` is the lightweight mobile status surface
 - Current docs: [docs/README.md](docs/README.md)
 - Workspace rules: [AGENTS.md](AGENTS.md)
-- Current status and TODO: [TODO.md](TODO.md)
+- Current work board: [TODO.md](TODO.md)
 - Architecture: [docs/architecture.md](docs/architecture.md)
+- Current runtime map: [docs/system-operation-map.md](docs/system-operation-map.md)
 - Startup guide: [docs/startup.md](docs/startup.md)
 
 ## Current Workflow
 
 当前默认工作流已经收紧为：
 
-- 本地 Windows 负责前端：`miniprogram_v2` 和计划中的 `web_frontend`
+- 本地 Windows 负责前端：`web_frontend` 和轻量状态小程序 `miniprogram_v2`
 - Linux 服务器负责后端、策略、执行、日志和实盘验证
 
 具体规则见 [AGENTS.md](AGENTS.md) 和 [docs/development-workflow.md](docs/development-workflow.md)。
 
 ## Architecture
+
+For the code-verified current runtime order, read [docs/system-operation-map.md](docs/system-operation-map.md) first. The short map is:
 
 ```text
 Market data
@@ -35,7 +42,8 @@ Market data
   -> DecisionLedger / lifecycle events
   -> Trade review / attribution recovery / experience memory
   -> supervisor trace / counterfactual / policy suggestion
-  -> evolution_run / evolution_decision / runtime_config_snapshot
+  -> Factor Catalog / FactorGovernanceOrchestrator
+  -> runtime_config_overlay / evolution_decision / runtime_config_snapshot
   -> learning dataset / model pipeline / shadow model audits
 ```
 
@@ -81,6 +89,13 @@ Full `tests` can be slower on Windows; prefer targeted suites for learning/live 
 - `POST /api/learning/model/open-quality-lightgbm/train`
 - `POST /api/learning/model/open-quality-lightgbm/shadow-run`
 - `GET /api/learning/model/open-quality-lightgbm/audits`
+- `POST /api/learning/model/position-quality-lightgbm/train`
+- `POST /api/learning/model/position-quality-lightgbm/shadow-run`
+- `POST /api/learning/model/factor-governance-lightgbm/train`
+- `POST /api/learning/model/factor-governance-lightgbm/shadow-run`
+- `POST /api/learning/model/meta-lightgbm/train`
+- `POST /api/learning/model/meta-lightgbm/shadow-run`
+- `GET /api/learning/model/permissions/audits`
 
 Current model policy:
 

@@ -1,6 +1,8 @@
 # PostgreSQL State Store
 
-Last updated: 2026-07-01
+> Status: active
+> Last verified: 2026-07-06
+> Scope: PostgreSQL `state_v1` runtime state source of truth and legacy SQLite boundary.
 
 ## Current Status
 

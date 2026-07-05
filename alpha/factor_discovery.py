@@ -28,6 +28,7 @@ import pandas as pd
 from alpha.factor_dsl import parse_dsl, evaluate_dsl
 from alpha.factor_score_evaluator import FactorScoreEvaluator, ExpressionScore
 from alpha.factor_search import FactorSearch, SearchResult, generate_random_expressions
+from alpha.ic_tracker import safe_corrcoef
 from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW, SOURCE_DISCOVERED
 
 logger = logging.getLogger(__name__)
@@ -187,7 +188,7 @@ class FactorDiscovery:
                 redundant = False
                 for name, ev in existing_values.items():
                     try:
-                        c = float(np.corrcoef(vals, ev)[0, 1])
+                        c = safe_corrcoef(vals, ev)
                         if abs(c) > threshold:
                             redundant = True
                             break
@@ -201,7 +202,7 @@ class FactorDiscovery:
                     if prev_vals is None:
                         continue
                     try:
-                        c = float(np.corrcoef(vals, prev_vals)[0, 1])
+                        c = safe_corrcoef(vals, prev_vals)
                         if abs(c) > threshold:
                             redundant = True
                             break

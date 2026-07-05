@@ -167,6 +167,59 @@ def test_precomputed_macro_derived_columns_are_point_in_time(tmp_path):
     assert out.iloc[1]["real_yield_chg_5d"] == 5.0
 
 
+def test_external_loader_reuses_derived_source_bundle_for_moving_bar_windows(tmp_path):
+    external = tmp_path / "external.duckdb"
+    events = tmp_path / "events.duckdb"
+    ensure_external_schema(external)
+    con = connect_duckdb(external)
+    try:
+        rows = []
+        for i in range(8):
+            release = pd.Timestamp(f"2026-01-{i + 2:02d} 00:00:00").timestamp()
+            rows.append(("DFII10", f"2026-01-{i + 1:02d}", i / 100.0, release, 1, "test"))
+        con.executemany(
+            """
+            INSERT INTO macro_daily (series, date, value, release_at, fetched_at, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    finally:
+        con.close()
+    connect_duckdb(events).execute("CREATE TABLE events(date VARCHAR, type VARCHAR, description VARCHAR, importance INTEGER)").close()
+
+    class CountingLoader(ExternalDataLoader):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.macro_derived_calls = 0
+
+        def _compute_macro_derived(self, macro):
+            self.macro_derived_calls += 1
+            return super()._compute_macro_derived(macro)
+
+    ExternalDataLoader._LOAD_CACHE.clear()
+    ExternalDataLoader._SOURCE_BUNDLE_CACHE.clear()
+    loader = CountingLoader(external, events)
+    first = loader.align_to_bars(_bars("2026-01-07 00:00:00", "2026-01-07 01:00:00"))
+    second = loader.align_to_bars(_bars("2026-01-07 01:00:00", "2026-01-07 02:00:00"))
+
+    assert loader.macro_derived_calls == 1
+    assert first.iloc[-1]["real_yield_10y"] == second.iloc[0]["real_yield_10y"]
+
+    loader.align_to_bars(
+        _bars("2026-01-07 01:00:00", "2026-01-07 02:00:00"),
+        as_of="2026-01-05 00:00:00",
+    )
+    assert loader.macro_derived_calls == 2
+
+    for day in range(1, ExternalDataLoader._SOURCE_BUNDLE_CACHE_MAX + 3):
+        loader.align_to_bars(
+            _bars("2026-01-07 01:00:00", "2026-01-07 02:00:00"),
+            as_of=f"2026-02-{day:02d} 00:00:00",
+        )
+    assert len(ExternalDataLoader._SOURCE_BUNDLE_CACHE) <= ExternalDataLoader._SOURCE_BUNDLE_CACHE_MAX
+
+
 def test_fred_without_key_is_skip_not_failure(monkeypatch):
     import scripts.refresh_external_data as refresh
 

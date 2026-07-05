@@ -15,7 +15,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from backend.core.auth import RequireUser
 from backend.core.db import get_state_pg_conn
@@ -95,6 +95,31 @@ def get_weight_history(_user: RequireUser) -> list[dict]:
 
     return [{"factor": k, "new": v} for k, v in
             sorted(weights.items(), key=lambda x: -x[1])]
+
+
+@router.get("/catalog")
+def get_factor_catalog(
+    _user: RequireUser,
+    snapshot: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Unified factor governance catalog for frontend/readiness inspection."""
+    from backend.services.factor_catalog import build_factor_catalog, latest_factor_catalog_snapshot
+
+    if str(snapshot or "").strip().lower() == "latest":
+        latest = latest_factor_catalog_snapshot()
+        return {
+            "schema_version": "factor_catalog.v3",
+            "snapshot_mode": "latest",
+            **latest,
+        }
+
+    items = build_factor_catalog()
+    return {
+        "schema_version": "factor_catalog.v3",
+        "snapshot_mode": "live",
+        "count": len(items),
+        "items": items,
+    }
 
 
 @router.get("/stats")

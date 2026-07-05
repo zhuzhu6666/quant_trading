@@ -1,24 +1,27 @@
 # Parameter Tuning Boundary
 
-> Last updated: 2026-06-25
-> Scope: Phase E / E3 在线轻调与离线深调边界。
+> Status: active
+> Last verified: 2026-07-06
+> Scope: online_light/offline_deep boundary for autonomous parameter template governance.
 
 本文把 parameter template 相关变更拆成两类：
 
 - `online_light`
 - `offline_deep`
 
-目标不是让系统立刻自动切所有模板，而是先把“什么允许在线切、什么必须先离线验证”明确写死。
+目标是把“什么允许自治在线切、什么必须先离线验证”明确写死。
 
 ---
 
 ## 1. `online_light`
 
-允许在线进入治理链并由风控统一审计，但仍然不绕过：
+允许在线进入自治治理链并由风控统一裁决，但仍然不绕过：
 
 - `policy_suggestion`
-- `Governor`
+- `FactorGovernanceOrchestrator` / governance audit
 - `RiskPolicyService.evaluate("switch_parameter_template", ...)`
+- `RuntimeConfigOverlayService`
+- `runtime_config_snapshot`
 
 首批要求：
 
@@ -62,7 +65,7 @@
 `offline_deep` 的含义是：
 
 - 可以生成建议
-- 可以入审批链
+- 可以进入自治审计链
 - 但不应直接当作“在线轻调”执行
 - 应先补回测 / walk-forward / 灰度验证证据
 
@@ -107,18 +110,18 @@
 - 生成 `purged walk-forward` 报告
 - 把验证结果登记成 `pending_review` 的 gray-release candidate
 
-`offline-candidates` 会列出这些待审 gray-release 候选，供后续审批链和前端继续接入。
+`offline-candidates` 会列出这些 gray-release 候选，供自治治理、人工覆盖和前端审计继续接入。
 
 学习页当前已开始展示：
 
 - 参数模板建议的边界结论（在线轻调 / 离线深调）
 - 边界原因的人话解释
-- 建议应走的审批路径
+- 建议应走的治理路径
 - 从 factor card 参数可疑证据长出的模板推荐项
 - 部分离线候选已可回看 recommendation 来源 trace
 - lifecycle 时间线里的参数模板候选事件也已可回看 recommendation trace
 
-当前 gray-release candidate 已支持三段式动作：
+当前 gray-release candidate 已支持三段式动作；在 demo autonomous 下，合格动作可由自治治理推进，人工操作只作为覆盖入口：
 
 - `review`：把候选标记为 `approved / rejected`
 - `release`：仅对 `approved` 候选执行正式模板切换，底层仍复用 `switch_parameter_template` 风控裁决

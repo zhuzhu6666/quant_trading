@@ -1,10 +1,12 @@
 # Quant Trading — 启动指南
 
-> 最后更新: 2026-07-01
-> 当前形态: FastAPI API-only 后端 + 微信小程序 V2；新 Web 操作台进入规划阶段。旧 Vite/Web Console 构建产物不再维护。
+> Status: active
+> Last verified: 2026-07-06
+> Scope: backend, Web frontend, mini-program, and common operational startup commands.
+> 当前形态: FastAPI 后端 + Web 完整操作台 + 微信小程序轻量状态面。旧 Vite/Web Console 构建产物不再维护。
 
 > 2026-06-26 工作流更新:
-> - 本地 Windows 默认负责前端：`miniprogram_v2`，以及建立后的 `web_frontend`
+> - 本地 Windows 默认负责前端：`web_frontend`，以及轻量状态面 `miniprogram_v2`
 > - 后端、策略、执行、日志排查默认都在 Linux 服务器完成
 > - 本文保留本地启动命令，主要用于临时调试，不再作为实盘后端的主工作流
 
@@ -62,24 +64,45 @@ QUANT_PASSWORD_HASH=登录密码的 SHA256 十六进制摘要
 ./.venv/bin/python -m backend --reload
 ```
 
+### 学习 / 自治治理 worker
+
+重训练、自主进化、因子自治治理和特征工程默认由独立 worker 承担，避免和 live API / cTrader 交易循环抢 CPU：
+
+```bash
+sudo cp /home/ubuntu/quant_trading/deployment/quant-learning-worker.service /etc/systemd/system/quant-learning-worker.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now quant-learning-worker.service
+```
+
+本地调试或一次性验证：
+
+```bash
+./.venv/bin/python scripts/learning_worker.py --run-once
+```
+
+worker 启动时同样会读取 `settings.yaml` base config，恢复 PostgreSQL `runtime_config_overlay`，并写 `learning_worker_startup` snapshot。常驻模式会调度 hourly evolution、默认每 15 分钟的 `factor_governance_autonomous`、AWE、feature engineering 和盘外模型任务。
+
 ---
 
 ## 小程序前端
 
-当前已维护的移动端前端是微信小程序 V2:
+当前已维护的移动端前端是微信小程序 V2，定位为轻量状态面:
 
 ```text
 C:\Users\zhu\quant_trading\miniprogram_v2
 ```
 
-用微信开发者工具直接打开该目录。小程序依赖当前 FastAPI 后端提供:
+用微信开发者工具直接打开该目录。小程序只依赖当前 FastAPI 后端的轻量 live/auth surface:
 
-- `/api/live/*`
-- `/api/v4/*`
-- `/api/factor-health/latest`
-- `/api/control/*`
-- `/api/system/db-health`
-- `/api/learning/*`
+- `/api/auth/*`
+- `/api/live/account`
+- `/api/live/positions`
+- `/api/live/strategy-status`
+- `/api/live/session-stats`
+- `/api/live/loop-status`
+- `/api/live/realized-pnl-series`
+- `/api/risk/summary`
+- `/ws/state`
 
 更多说明见 `miniprogram_v2/README.md`。
 
@@ -87,7 +110,7 @@ C:\Users\zhu\quant_trading\miniprogram_v2
 
 ## Web 前端
 
-Web 前端目标是接替小程序的完整操作台能力，目录约定为：
+Web 前端承接完整操作台能力，目录为：
 
 ```text
 web_frontend/
@@ -113,7 +136,7 @@ https://www.zhuzhu666.icu -> Caddy -> FastAPI / Web static
 - FastAPI 后端只监听 `127.0.0.1:8000`
 - `/api/*` 与 `/ws/state` 由 Caddy 反代到 FastAPI
 
-规划见 [web-frontend-upgrade-plan.md](web-frontend-upgrade-plan.md)。
+前端职责边界见 [web-frontend-upgrade-plan.md](web-frontend-upgrade-plan.md)。
 
 ---
 

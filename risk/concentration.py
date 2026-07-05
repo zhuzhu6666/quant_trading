@@ -10,6 +10,8 @@ from typing import Any
 
 from loguru import logger
 
+from alpha.portfolio_compositor import resolve_factor_role
+
 
 @dataclass
 class ExposureReport:
@@ -80,6 +82,7 @@ class FactorExposureMonitor:
         factor_signals: dict[str, float],
         factor_tags: dict[str, list[str]],
         factor_weights: dict[str, float],
+        factor_roles: dict[str, str] | None = None,
     ) -> ExposureReport:
         """
         Evaluate concentration risk for the current bar.
@@ -111,9 +114,19 @@ class FactorExposureMonitor:
                 healthy=True,
             )
 
+        roles = factor_roles or {}
+        alpha_signals = {
+            name: signal for name, signal in factor_signals.items()
+            if resolve_factor_role(name, {"role": roles.get(name)}) == "alpha"
+        }
+        alpha_weights = {
+            name: weight for name, weight in factor_weights.items()
+            if resolve_factor_role(name, {"role": roles.get(name)}) == "alpha"
+        }
+
         # --- 1. aggregate weights by type ---------------------------------
         type_exposures: dict[str, float] = {}
-        for name, weight in factor_weights.items():
+        for name, weight in alpha_weights.items():
             if weight == 0.0:
                 continue  # exclude zero-weight factors
 
@@ -143,7 +156,7 @@ class FactorExposureMonitor:
                 )
 
         # --- 3. check single-factor limits --------------------------------
-        for name, weight in factor_weights.items():
+        for name, weight in alpha_weights.items():
             if weight > self.max_single_weight:
                 logger.warning(
                     "Single factor {!r} weight {:.2f} exceeds max {:.2f}",
@@ -154,10 +167,10 @@ class FactorExposureMonitor:
 
         # --- 4. consensus risk --------------------------------------------
         positives = sum(
-            1 for s in factor_signals.values() if s > 0
+            1 for s in alpha_signals.values() if s > 0
         )
         negatives = sum(
-            1 for s in factor_signals.values() if s < 0
+            1 for s in alpha_signals.values() if s < 0
         )
         total_nonzero = positives + negatives
 
@@ -191,7 +204,7 @@ class FactorExposureMonitor:
             and not consensus_risk
             and all(
                 w <= self.max_single_weight
-                for w in factor_weights.values()
+                for w in alpha_weights.values()
             )
         )
 
@@ -202,7 +215,7 @@ class FactorExposureMonitor:
             consensus_risk=consensus_risk,
             consensus_all_long=consensus_all_long,
             consensus_all_short=consensus_all_short,
-            total_factors=len(factor_signals),
+            total_factors=len(alpha_signals),
             healthy=healthy,
         )
 

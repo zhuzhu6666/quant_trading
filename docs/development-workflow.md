@@ -1,18 +1,20 @@
 # Development Workflow
 
-> Last updated: 2026-07-01
-> Scope: local frontend (mini-program + planned Web console) + Linux server backend workflow.
+> Status: active
+> Last verified: 2026-07-06
+> Scope: local frontend (Web console + mini-program status surface) + Linux server backend workflow.
 
 本文用来固化当前项目的唯一推荐协作方式，目标只有一个：
 避免 Windows 本地副本和 Linux 服务器运行代码长期分叉。
 
 ## 1. 核心原则
 
-1. 本地 Windows 负责前端：微信小程序，以及建立后的 Web 操作台。
+1. 本地 Windows 负责前端：Web 操作台和微信小程序轻量状态面。
 2. Linux 服务器是后端、策略、执行、配置、日志的唯一真实工作区。
 3. 实盘相关代码不再采用“本地修改后再手工同步服务器”的方式。
 4. 后端问题以服务器复现、服务器修改、服务器验证为准。
 5. 小程序问题以本地微信开发者工具验证为准；Web 问题以本地浏览器和 Playwright 验证为准。
+6. 系统级改动先查文档事实源、旧债登记和影响面清单，再动代码。
 
 ## 2. 角色边界
 
@@ -21,7 +23,7 @@
 本地只负责这些内容：
 
 - `miniprogram_v2`
-- `web_frontend`（建立后）
+- `web_frontend`
 - 前端交互、展示、登录态跳转
 - 小程序页面验证
 - Web 页面验证
@@ -136,12 +138,13 @@ data/archive/                             # 已归档的旧运行库，例如 le
 
 因子数据统一入口是 `data.factor_frame.FactorFrameBuilder`。live、factor health、evolution 不应各自手写 external/events join；新增外部因子时先落到 `data/external_data.duckdb` / `data/events.duckdb` 的 PIT 标准列，再由 builder 暴露给因子函数。
 
-运行时状态与学习审计主库已迁移到本机 PostgreSQL 的 `state_v1` schema。`data/state.db` 已删除，不再保留本地 SQLite state 冷备，也不再作为 live 主写入口。服务器本地 `.env` 使用 `QUANT_STATE_BACKEND=postgres` 与 `QUANT_STATE_PG_DSN` 控制主库连接；历史 PostgreSQL audit 双写表保留为迁移留痕，不再替代主状态 schema。详见 [state-dual-write-postgres.md](state-dual-write-postgres.md)。
+运行时状态与学习审计主库已迁移到本机 PostgreSQL 的 `state_v1` schema。`data/state.db` 已删除，不再保留本地 SQLite state 冷备，也不再作为 live 主写入口。服务器本地 `.env` 使用 `QUANT_STATE_BACKEND=postgres` 与 `QUANT_STATE_PG_DSN` 控制主库连接；历史 PostgreSQL audit 双写表保留为迁移留痕，不再替代主状态 schema。详见 [state-postgres-store.md](state-postgres-store.md)。
 
 当前 systemd 约定：
 
 ```text
 quant-backend.service             # 后端主服务
+quant-learning-worker.service     # 学习、进化、因子自治治理、特征工程和盘外训练 worker
 caddy.service                     # 当前公网 TLS / 反代入口
 quant-dukascopy-tick-pull.timer   # 每小时拉取已结束小时的 Dukascopy tick
 quant-tick-retention.timer        # 每周清理 365 天外 tick
@@ -205,11 +208,15 @@ L2 depth 当前通过 `quant-backend.service` 内的 cTrader 主 bridge 订阅�
 
 ```text
 SSH 到服务器
+  -> 查 docs/system-source-of-truth.md
+  -> 查 docs/legacy-debt-register.md
+  -> 按 docs/change-impact-checklist.md 扫影响面
   -> 在服务器上改代码
   -> 在服务器上跑最小验证
   -> 看日志
   -> 必要时重启服务
   -> 再做接口验证
+  -> 如事实源/契约/旧债变化，同步更新文档
   -> 确认后提交
 ```
 

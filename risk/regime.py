@@ -38,6 +38,12 @@ from loguru import logger
 
 import duckdb
 from backend.core.db import connect_duckdb
+from alpha.technical_indicators import (
+    adx_wilder as _shared_adx_wilder,
+    atr_wilder as _shared_atr_wilder,
+    true_range as _shared_true_range,
+    wilder_smooth as _shared_wilder_smooth,
+)
 
 # ---------------------------------------------------------------------------
 # Constants (kept here so the detector is self-contained and easy to tune)
@@ -103,13 +109,7 @@ def _ema(series: np.ndarray, period: int) -> np.ndarray:
 
 def _true_range(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
     """Vectorised True Range."""
-    prev_close = np.empty_like(close)
-    prev_close[0] = np.nan
-    prev_close[1:] = close[:-1]
-    tr1 = high - low
-    tr2 = np.abs(high - prev_close)
-    tr3 = np.abs(low - prev_close)
-    return np.nanmax(np.stack([tr1, tr2, tr3], axis=0), axis=0)
+    return _shared_true_range(high, low, close)
 
 
 def _wilder_smooth(series: np.ndarray, period: int) -> np.ndarray:
@@ -119,24 +119,13 @@ def _wilder_smooth(series: np.ndarray, period: int) -> np.ndarray:
     the first ``period`` valid values. Returns an array the same length
     as ``series``; entries before the seed are NaN.
     """
-    out = np.full_like(series, np.nan, dtype="float64")
-    if len(series) < period:
-        return out
-    seed = np.nanmean(series[:period])
-    out[period - 1] = seed
-    for i in range(period, len(series)):
-        out[i] = out[i - 1] + (series[i] - out[i - 1]) / period
-    # NOTE: this inner loop is unavoidable for Wilder smoothing because
-    # it is recursive by definition. All other calcs in this module stay
-    # vectorised; only the smoothing seed loop uses Python.
-    return out
+    return _shared_wilder_smooth(series, period)
 
 
 def _atr(high: np.ndarray, low: np.ndarray, close: np.ndarray,
          period: int = ATR_PERIOD) -> np.ndarray:
     """ATR (Wilder) over ``high/low/close`` arrays."""
-    tr = _true_range(high, low, close)
-    return _wilder_smooth(tr, period)
+    return _shared_atr_wilder(high, low, close, period)
 
 
 def _adx(high: np.ndarray, low: np.ndarray, close: np.ndarray,
@@ -146,35 +135,7 @@ def _adx(high: np.ndarray, low: np.ndarray, close: np.ndarray,
     Returns three arrays the same length as the input; the first
     ``2 * period - 1`` entries of each are NaN.
     """
-    n = len(close)
-    if n < 2 * period:
-        nan = np.full(n, np.nan, dtype="float64")
-        return nan, nan, nan
-
-    # Directional movement
-    up_move = np.diff(high, prepend=high[0])
-    down_move = -np.diff(low, prepend=low[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-
-    tr = _true_range(high, low, close)
-
-    # Wilder smoothing
-    atr = _wilder_smooth(tr, period)
-    smooth_plus = _wilder_smooth(plus_dm, period)
-    smooth_minus = _wilder_smooth(minus_dm, period)
-
-    # DI: replace any zero ATR with NaN to avoid div-by-zero
-    safe_atr = np.where(atr == 0, np.nan, atr)
-    plus_di = 100.0 * smooth_plus / safe_atr
-    minus_di = 100.0 * smooth_minus / safe_atr
-
-    dx_num = np.abs(plus_di - minus_di)
-    dx_den = plus_di + minus_di
-    dx = np.where(dx_den == 0, 0.0, 100.0 * dx_num / np.where(dx_den == 0, np.nan, dx_den))
-    adx = _wilder_smooth(dx, period)
-
-    return adx, plus_di, minus_di
+    return _shared_adx_wilder(high, low, close, period)
 
 
 def _bollinger(close: np.ndarray, period: int = BB_PERIOD,

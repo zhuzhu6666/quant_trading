@@ -4022,7 +4022,12 @@ _PRICE_STUCK_WARNED: dict[str, float] = {}  # {(broker,tf): last_price}
 
 
 def _scheduled_param_tune():
-    """每日参数自动优化: 轻量网格扫描, 最优参数自动写入 RuntimeConfig。"""
+    """Daily legacy parameter sweep.
+
+    This job is observation-only now. Runtime parameter changes must flow
+    through parameter templates and governance, not a direct RuntimeConfig
+    patch from a legacy grid search.
+    """
     import sys
     from pathlib import Path
     _root = Path(__file__).resolve().parent.parent.parent
@@ -4060,10 +4065,8 @@ def _scheduled_param_tune():
         logger.warning("[param_tune] no valid result, keeping current params")
         return
 
-    from config.runtime_config import patch as rc_patch
-    rc_patch(best.params)
     logger.info(
-        f"[param_tune] applied: rsi={best.params.get('strategy_rsi_period')} "
+        f"[param_tune] candidate: rsi={best.params.get('strategy_rsi_period')} "
         f"sl={best.params.get('strategy_sl_atr')} tp={best.params.get('strategy_tp_atr')} "
         f"PnL={best.net_pnl:.1f} WR={best.win_rate:.0f}% Sharpe={best.sharpe:.2f}"
     )
@@ -4074,9 +4077,9 @@ def _scheduled_param_tune():
     try:
         from monitor.evolution_story import EvolutionStory
         EvolutionStory.shared().append(
-            event_type="param_tune_complete",
+            event_type="param_tune_candidate",
             payload={"best_params": best.params, "pnl": round(best.net_pnl, 2),
-                  "sharpe": round(best.sharpe, 2), "n_combos": len(combos)}
+                  "sharpe": round(best.sharpe, 2), "n_combos": len(combos), "applied": False}
         )
     except Exception as _e:
         logger.debug("[param_tune] EvolutionStory.append failed: %s", _e)
@@ -4106,7 +4109,6 @@ def _scheduled_awe_adapt():
             logger.debug("[awe_adapt] skip: AWE not initialized")
             return
 
-        from config.runtime_config import patch as _rc_patch
         from config.runtime_config import shared as _rc
         cfg = _rc()
 
@@ -4143,7 +4145,16 @@ def _scheduled_awe_adapt():
         use_blend = bool(awe._blend_baselines)
         if not use_blend and fv_dict and fwd_ret is not None and len(fwd_ret) > 50:
             try:
-                f_names = [n for n in fv_dict if n in cfg.factor_portfolio_weights]
+                from alpha.portfolio_compositor import resolve_factor_role
+
+                alpha_names = {
+                    n for n, sc in (cfg.factor_signal_config or {}).items()
+                    if resolve_factor_role(n, sc if isinstance(sc, dict) else None) == "alpha"
+                }
+                f_names = [
+                    n for n in fv_dict
+                    if n in cfg.factor_portfolio_weights and (not alpha_names or n in alpha_names)
+                ]
                 if len(f_names) >= 3:
                     factor_mat = _np.column_stack([
                         fv_dict[n][:len(fwd_ret)] for n in f_names
@@ -4188,7 +4199,16 @@ def _scheduled_awe_adapt():
                         sorted(missing)[:20],
                     )
                     return
-                _rc_patch({"factor_portfolio_weights": merged})
+                from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+
+                RuntimeConfigMutationService().apply_patch(
+                    {"factor_portfolio_weights": merged},
+                    source="awe_decision_policy_update_weight",
+                    run_id=f"awe_adapt_{int(time.time())}",
+                    actor="system:awe_adapt",
+                    action="update_weight",
+                    reason="AWE weight patch merged by DecisionPolicy",
+                )
                 logger.info(
                     "[awe_adapt] weights pushed via DecisionPolicy (%d changed, %d total)",
                     len(partial),
@@ -5223,7 +5243,12 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                     gate_result = fp["gate"].filter(composite, last_fv, last_bar)
                     fp["gate"].tick()
                     _set_factor_snapshot(
-                        _tick_build_factor_votes(signals, last_fv),
+                        _tick_build_factor_votes(
+                            signals,
+                            last_fv,
+                            getattr(composite, "factor_roles", {}),
+                            getattr(composite, "active_weights", {}),
+                        ),
                         _tick_build_factor_snapshot_summary(composite, gate_result, now=time.time()),
                     )
                     dir_name = {1: "LONG", -1: "SHORT"}.get(composite.direction, "FLAT")
@@ -5318,17 +5343,27 @@ def _merge_portfolio_configs(
     """合并 factor_signal_config (含 tags/mode) 和 factor_portfolio_weights (含 weight)
     为 PortfolioCompositor 所需的格式: {name: {weight, tags, mode, enabled, ...}}"""
     merged = {}
-    all_names = set(signal_config) | set(weight_config)
+    try:
+        from alpha.runtime_factor_selection import active_discovered_factor_ids
+
+        discovered_names = set(active_discovered_factor_ids(signal_config))
+    except Exception:
+        discovered_names = set()
+    all_names = set(signal_config) | set(weight_config) | discovered_names
     for name in all_names:
         sc = signal_config.get(name, {})
-        wc = weight_config.get(name, 1.0)
+        if not isinstance(sc, dict):
+            sc = {}
+        default_weight = 0.3 if name in discovered_names and name not in weight_config else 1.0
+        wc = weight_config.get(name, default_weight)
         weight = wc if isinstance(wc, (int, float)) else wc.get("weight", 1.0)
         merged[name] = {
             "weight": weight,
-            "tags": sc.get("tags", []),
+            "tags": sc.get("tags", ["GP发现"] if name in discovered_names else []),
             "mode": sc.get("mode", "rank_mapping"),
+            "role": sc.get("role", "alpha"),
             "enabled": sc.get("enabled", True),
-            "source": sc.get("source", "builtin"),
+            "source": sc.get("source", "discovered" if name in discovered_names else "builtin"),
         }
     merged["_tactical_alpha"] = tactical_alpha
     merged["_signal_threshold"] = signal_threshold
@@ -6344,7 +6379,7 @@ def _record_amended_open_attribution(
         actual_api_volume=float(actual_api_volume),
         composite=composite,
     )
-    trade_attr = TradeAttribution(**trade_attribution_payload)
+    trade_attr = TradeAttribution.from_jsonable(trade_attribution_payload)
     attr_engine.record_open(pid, trade_attr)
     _pos_open_prices[pid] = current_price
     _pos_open_api_volume[pid] = float(actual_api_volume)
@@ -6790,14 +6825,32 @@ def _process_tick_factor_pipeline(
 
     signals = normalizer.normalize(factor_values)
     composite = compositor.compose(signals, factor_values, timestamp=bar.get("time", time.time()))
+    try:
+        from backend.services.context_policy import ContextPolicyService
+
+        context_policy = (
+            ContextPolicyService().evaluate(getattr(composite, "context_state", {}) or {}, cfg).to_dict()
+            if bool(getattr(cfg, "context_policy_enabled", True))
+            else {"signal_threshold_delta": 0.0, "position_multiplier": 1.0, "reason": "disabled", "applied": False}
+        )
+        setattr(composite, "context_policy", context_policy)
+        base_threshold = float(getattr(cfg, "factor_signal_threshold", 0.3) or 0.3)
+        gate._threshold = max(0.0, min(1.0, base_threshold + float(context_policy.get("signal_threshold_delta") or 0.0)))
+    except Exception:
+        setattr(composite, "context_policy", {})
     gate_result = gate.filter(composite, factor_values, bar)
     gate.tick()
     # ★ 保存因子投票快照到 _live_state, 前端「因子投票」面板读取
     try:
-        _set_factor_snapshot(
-            _tick_build_factor_votes(signals, factor_values),
-            _tick_build_factor_snapshot_summary(composite, gate_result, now=time.time()),
-        )
+            _set_factor_snapshot(
+                _tick_build_factor_votes(
+                    signals,
+                    factor_values,
+                    getattr(composite, "factor_roles", {}),
+                    getattr(composite, "active_weights", {}),
+                ),
+                _tick_build_factor_snapshot_summary(composite, gate_result, now=time.time()),
+            )
     except Exception as _e:
         log(f"tick {tick}: factor votes save failed (non-fatal): {_e}")
     # ── 决策审计: signal ──
@@ -7019,6 +7072,20 @@ def _process_tick_factor_pipeline(
         volume = float(effective_sizing["volume"])
         sizing_trace = dict(effective_sizing["sizing_trace"])
         event_sizing_context = dict(effective_sizing["event_sizing_context"])
+        context_policy = dict(getattr(composite, "context_policy", {}) or {})
+        try:
+            context_mult = float(context_policy.get("position_multiplier", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            context_mult = 1.0
+        if context_policy and abs(context_mult - 1.0) > 1e-9:
+            context_raw_volume = volume * context_mult
+            context_volume = _floor_api_volume_to_step(context_raw_volume, _meta)
+            volume = context_volume if context_volume > 0 else volume
+            sizing_trace["context_policy"] = {
+                **context_policy,
+                "raw_api_volume": context_raw_volume,
+                "adjusted_api_volume": volume,
+            }
         log(f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
             f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)} "
             f"event_mult={event_multiplier:.2f} base_api_volume={base_volume:.0f})")

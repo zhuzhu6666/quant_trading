@@ -1,9 +1,10 @@
 # Parameter Template Contract
 
-> Last updated: 2026-06-25
-> Scope: Phase E / E2 参数模板系统的第一版 contract。
+> Status: active
+> Last verified: 2026-07-06
+> Scope: parameter template schema, runtime application boundary, and autonomous governance entry.
 
-本文定义 `parameter_template.v1`。目标是先把“参数”从零散字段变成可版本化、可枚举、可审计的模板对象，再逐步接入审批与实际切换。
+本文定义 `parameter_template.v1`。参数模板已经从只读派生对象进入运行时治理链路；当前主路径是自治建议、风控裁决、overlay/snapshot 写入和后验回滚。人工入口只作为覆盖和审计，不是日常必要步骤。
 
 ---
 
@@ -20,7 +21,7 @@ Phase D 已经能识别：
 - 该因子的默认参数版本是什么
 - 有没有更保守或更激进的模板
 - 哪些 regime 更适合哪套模板
-- 切换模板时该走什么审批和风控动作
+- 切换模板时该走什么自治治理、风控裁决和回滚动作
 
 ---
 
@@ -90,7 +91,7 @@ E2 第一版先固定三类模板角色：
 - `aggressive`:
   - 更偏敏捷、响应更快、通常更适合趋势或 breakout 环境
 
-这三类先作为只读模板输出，不要求本轮立即接入 live 自动切换。
+这三类已经可以作为运行时参数模板治理对象；是否自动切换取决于 `online_light/offline_deep` 边界、RiskPolicyService verdict、runtime overlay 写入和后验观察。
 
 ---
 
@@ -118,23 +119,26 @@ E2 第一版先固定三类模板角色：
 
 ## 6. 风控与治理入口
 
-后续任何高影响模板切换，都应进入统一动作：
+任何高影响模板切换，都必须进入统一动作：
 
 `RiskPolicyService.evaluate("switch_parameter_template", context)`
 
-E2 第一版只要求：
+当前要求：
 
 - 动作名正式入位
 - 能留下统一审计上下文
-- 先不要求自动落地到 live 因子执行链
+- `online_light` 可以由自治治理主路径自动应用
+- `offline_deep` 只自动提交验证，不能未验证直接上线
+- 所有应用必须写入 `runtime_config_overlay` 和 `runtime_config_snapshot`
+- 后验变差时必须支持基于当时 rollback JSON 的自动回滚
 
 ---
 
 ## 7. 后续演进
 
-E2 之后继续补：
+后续继续补：
 
-1. 模板持久化与审批记录
+1. 更多重点因子的手工模板元数据
 2. regime-aware 模板推荐策略
-3. 模板切换回测 / 灰度 / 回滚链路
-4. live 因子执行层的真实模板加载
+3. 更强的 replay / walk-forward 验证
+4. 模板切换后的后验效果解释和回滚报告

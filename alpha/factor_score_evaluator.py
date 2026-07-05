@@ -22,6 +22,7 @@ import pandas as pd
 
 from alpha.factor_dsl import parse_dsl, evaluate_dsl, FactorNode
 from alpha.factor_health import FactorHealth, FactorHealthStatus
+from alpha.ic_tracker import safe_corrcoef
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ class FactorScoreEvaluator:
             if len(sub_v) < 10:
                 continue
             try:
-                ic = float(np.corrcoef(sub_v, sub_r)[0, 1])
+                ic = safe_corrcoef(sub_v, sub_r, min_samples=10)
                 if np.isfinite(ic):
                     ics.append(ic)
             except Exception:

@@ -52,10 +52,28 @@ def _bootstrap_runtime() -> None:
         logger.warning("[learning_worker] db init failed: {}", exc)
 
     try:
-        from backend.services.config_service import get_config
-        from config.runtime_config import RuntimeConfig, replace as rc_replace
+        from backend.services.runtime_config_startup import (
+            load_yaml_runtime_config,
+            restore_runtime_config_on_startup,
+        )
 
-        rc_replace(RuntimeConfig.from_yaml(get_config()["parsed"]))
+        base_cfg, _yaml_cfg = load_yaml_runtime_config()
+        try:
+            restored = restore_runtime_config_on_startup(
+                base_cfg,
+                snapshot_source="learning_worker_startup",
+            )
+            overlay = restored.get("overlay") or {}
+            if overlay.get("restored"):
+                logger.info(
+                    "[learning_worker] RuntimeConfig autonomous overlay restored hash={}",
+                    overlay.get("overlay_hash", ""),
+                )
+        except Exception as restore_exc:
+            from config import runtime_config as _runtime_config
+
+            _runtime_config.replace(base_cfg)
+            logger.warning("[learning_worker] RuntimeConfig overlay restore failed, using YAML base: {}", restore_exc)
         logger.info("[learning_worker] RuntimeConfig loaded")
     except Exception as exc:
         logger.warning("[learning_worker] RuntimeConfig load failed: {}", exc)
@@ -68,7 +86,9 @@ def _add_job(scheduler, name: str, cron_expr: str, fn: Callable[[], object]) -> 
 
 def _register_heavy_jobs(*, include_system_health: bool) -> None:
     from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
+    from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
     from backend.runtime.scheduler import InProcessScheduler
+    from config.runtime_config import shared as _runtime_shared
     from backend.services.live_service import (
         _scheduled_awe_adapt,
         _scheduled_feature_engineering,
@@ -77,6 +97,13 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
 
     scheduler = InProcessScheduler()
     _add_job(scheduler, "evolution_hourly", "0 * * * *", scheduled_evolution_cycle)
+    governance_cron = str(getattr(_runtime_shared(), "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
+    _add_job(
+        scheduler,
+        "factor_governance_autonomous",
+        governance_cron,
+        run_autonomous_factor_governance_cycle,
+    )
     _add_job(scheduler, "awe_adapt", "*/30 * * * *", _scheduled_awe_adapt)
     _add_job(scheduler, "feature_eng", "0 3 * * *", _scheduled_feature_engineering)
     _add_job(
@@ -130,6 +157,7 @@ def _stop_schedulers() -> None:
 
 def _run_once() -> None:
     from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
+    from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
     from backend.services.autonomous_learning import run_autonomous_learning_cycle
     from backend.services.supervisor_learning_scheduler import run_supervisor_learning_cycle
 
@@ -140,6 +168,8 @@ def _run_once() -> None:
     logger.info("[learning_worker] run-once evolution cycle")
     report = scheduled_evolution_cycle()
     logger.info("[learning_worker] evolution result: {}", report.to_dict() if hasattr(report, "to_dict") else report)
+    logger.info("[learning_worker] run-once factor governance")
+    logger.info("[learning_worker] factor governance result: {}", run_autonomous_factor_governance_cycle())
 
 
 def main() -> int:

@@ -61,7 +61,15 @@ class RiskPolicyService:
         if action == "update_weight":
             return self._evaluate_governor_action(action, context, "allow_weight_update")
         if action == "switch_parameter_template":
-            return self._evaluate_governor_action(action, context, "allow_weight_update")
+            return self._evaluate_governor_action(action, context, "allow_template_switch")
+        if action == "disable_factor_live":
+            return self._evaluate_governor_action(action, context, "allow_factor_disable")
+        if action == "retire_factor":
+            return self._evaluate_governor_action(action, context, "allow_factor_retire")
+        if action == "enable_context_policy":
+            return self._evaluate_governor_action(action, context, "allow_context_policy")
+        if action == "rollback_factor_action":
+            return self._evaluate_governor_action(action, context, "allow_factor_rollback")
         if action == "switch_position_supervisor_template":
             return self._evaluate_position_supervisor_template_switch(context)
         if action == "promote_factor":

@@ -1,9 +1,10 @@
 # Quant Trading Architecture
 
-> Last updated: 2026-06-30
+> Status: active
+> Last verified: 2026-07-06
 > Scope: current system, target full architecture, and the delivery roadmap we will follow.
 
-本文现在是项目的主蓝图。后续讨论中形成的新架构结论，优先更新这里；`TODO.md` 只负责承接近期执行项和验证项。
+本文现在是项目的长期架构蓝图。当前代码真实运行顺序、服务分工、tick 链路和 API 入口优先看 [system-operation-map.md](system-operation-map.md)；后续讨论中形成的新架构结论，优先更新这里；`TODO.md` 只负责承接近期执行项和验证项。
 
 ---
 
@@ -20,10 +21,11 @@
   -> cTrader demo 执行
   -> 决策账本 / 订单与仓位生命周期
   -> 平仓复盘 / 经验沉淀
-  -> 规则治理 / 离线模型流水线
+  -> 因子自治治理 / 离线模型流水线
+  -> RuntimeConfig overlay / snapshot / rollback
 ```
 
-当前维护中的前端是 `miniprogram_v2`，后端是 FastAPI 服务，执行通道是 cTrader demo。
+当前维护中的完整操作台是 `web_frontend`，`miniprogram_v2` 是轻量状态面；后端是 FastAPI 服务，执行通道是 cTrader demo。
 
 一句话概括当前状态：
 
@@ -36,6 +38,10 @@
 2026-07-04 后端内部优化补充：
 
 **第一阶段不转 Rust、不重写交易链路，先补稳定性观测、读接口缓存和低风险模块抽取。** 当前已增加统一 TTL cache / last-good fallback / timings 工具，`/api/ops/backend-readiness` 暴露 `stability` 只读诊断，cTrader L2 writer 继续保持异步批量写入并补充 queue/batch latency 指标，live tick 与 position supervision 外层开始记录耗时。`live_runtime_state`、`live_ctrader_runtime`、`live_loop_shell`、`live_position_lifecycle`、`live_supervision_actions`、`live_tick_pipeline`、`live_risk_sizing`、`live_scheduler_jobs`、`live_data_sync_helpers` 和 `live_data_sync_job` 已承接低风险 helper / 注入式 job / payload 编排。`live_service.py` 保留 facade、broker IO、risk verdict、ledger 写入和最终执行动作；本阶段 live 维护性收口完成后，主要函数规模为：`_process_tick_factor_pipeline` 约 595 行、`_run_loop` 约 346 行、`_run_position_supervision` 约 214 行、`_record_amended_open_success_context` 约 125 行、`_execute_trailing_candidate` 约 109 行、`_record_filled_position_open_context` / `_handle_closed_positions_after_tick` 各约 80 行、`_update_trailing_stops` 约 48 行。后续优化优先用 timings 定位真实热点，再决定是否做局部 Rust PoC。
+
+2026-07-06 因子自治治理补充：
+
+**因子系统已经完成 V2/V3 语义升级。** 方向评分只使用 `role=alpha` 的方向因子；`bb_width/adx/atr_ratio/keltner_width` 等状态因子回到 `context`，不再作为硬过滤器或多空投票。`Factor Catalog` 成为因子治理视图，`FactorGovernanceOrchestrator` 成为自治决策中枢；自治配置写入 PostgreSQL `runtime_config_overlay`，并同步写 `runtime_config_snapshot`。系统已经具备 Catalog snapshot、低频采样、后验 rollback、冗余检测、context policy、参数模板自动切换入口和 readiness overlay 诊断。当前重点不是再加因子数量，而是观察自治动作的长期后验、补数字孪生/replay 和 V15 运行内核设计。
 
 ### 1.1 数据库治理基线
 
@@ -101,6 +107,11 @@
 - 学习证据契约：`learning_evidence_contract.v1 -> dataset/readiness/validator/train/shadow/inference audit`
 - supervisor 模板治理：`position_supervisor_template -> policy_suggestion -> switch_position_supervisor_template`
 - 统一进化账本：`evolution_run / evolution_decision / runtime_config_snapshot`
+- 自治配置恢复：`runtime_config_overlay -> RuntimeConfigStartupService -> runtime_config_snapshot`
+- 因子治理中枢：`Factor Catalog / FactorGovernanceOrchestrator / factor_catalog_snapshot`
+- 因子角色语义：`alpha/context/gate/sizing`，方向评分只读 alpha
+- Context 策略：context 因子只影响阈值和仓位，不直接改变多空方向
+- 冗余治理：高相关 alpha 进入 redundancy group，权重由 DecisionPolicy 执行 cap
 - supervisor trace 成熟化：`position_supervisor_trace -> supervisor_counterfactual_review -> autonomous_learning_sample(sample_type=supervisor_execution_trace)`
 - 离线模型流水线：dataset、readiness、validator、train、promotion gate、shadow、canary、advisory inference
 - 风控统一裁决第一阶段：`RiskPolicyService.evaluate(action, context) -> RiskVerdict`
@@ -120,9 +131,9 @@
 
 它仍然不是：
 
-- 一个能完全自动调参和治理因子的系统；
 - 一个有成熟元模型统一调度全局状态的系统；
 - 一个多品种、全组合、全上下文的完全体。
+- 一个机构级 release / replay / disaster recovery 平台。
 
 但在 demo autonomous 范围内，它已经可以自动推进低风险治理动作：
 
@@ -130,6 +141,7 @@
 - 自动审批白名单内、证据充分、可回滚的建议；
 - 自动应用 `online_light` 参数模板和符合门禁的 supervisor 模板切换；
 - 自动把应用和回滚写入 `evolution_decision`，并保留 `previous_template_id` / config snapshot。
+- 通过 `FactorGovernanceOrchestrator` 推进因子发现、影子验证、降权、禁用、退役和回滚审计。
 
 ### 2.3 因子数据与发现治理
 
@@ -147,6 +159,22 @@
 - `scripts/discover_factors.py`、discover service、discover API 默认 `auto_register=False`；
 - 显式 `--auto-register` 前必须先通过多 forward、去重和风控门槛；
 - restore 只恢复 DSL 因子；PCA/model artifact 明确跳过。
+
+2026-07-06 起，因子组合语义固定为：
+
+- `alpha`: 方向因子，参与多空评分。
+- `context`: 状态因子，归一化、记录、展示，但不直接投方向票。
+- `gate`: 闸门语义，只影响是否允许交易。
+- `sizing`: 仓位语义，只影响下单量。
+
+关键约束：
+
+- `PortfolioCompositor` 的方向评分只使用 enabled、weight > 0、role=alpha 的因子。
+- `bb_width` 是 volatility context，不进入 ExecutionGate 做硬过滤。
+- `adx/atr_ratio/keltner_width` 是状态或波动上下文，不直接贡献 `score`。
+- 事件、日历、session 类因子不能伪装成方向票。
+- AWE、DecisionPolicy、readiness、concentration、frontend 展示都应按 role 过滤。
+- 自动治理动作必须经过 `RiskPolicyService`，配置写入必须走 overlay/snapshot。
 
 ---
 
@@ -174,20 +202,24 @@
 - `close_reason_source`: `supervisor_direct_close / supervisor_tighten_stopout / supervisor_reduce_partial_or_stopout / external_broker_close / restart_replay`
 - `inferred_close_supervisor`: close 前最近一次 supervisor verdict
 
-### 3.3 因子治理层仍然偏弱
+### 3.3 因子治理层已入位，但仍需长期后验证据
 
-当前系统会：
+当前系统已经具备：
 
-- 记录因子贡献
-- 调整权重
-- 通过规则建议做保守治理
+- 因子角色语义
+- Factor Catalog 统一视图
+- FactorGovernanceOrchestrator 自治周期
+- 低频因子采样策略
+- 冗余检测与 group cap
+- context policy 对阈值/仓位的保守影响
+- runtime overlay 持久化和后验回滚
 
-但还没形成真正的“因子教练层”：
+当前重点转为：
 
-- 哪个因子适合哪类市场
-- 哪个因子是公式问题，哪个是参数问题
-- 参数该在线轻调，还是离线深调
-- 何时拆版本、切模板、灰度上线、替换旧参数
+- 观察自动降权、禁用、退役和回滚的长期效果
+- 补数字孪生/replay，避免只靠 live 后验样本
+- 强化冗余组 leader 选择和弱势成员处理
+- 将 V15 运行内核、release discipline 和自治健康分正式设计出来
 
 ### 3.4 元模型还没有正式入位
 
@@ -211,7 +243,7 @@
 
 - 因子层发现机会
 - 归因层解释交易过程
-- 因子治理层优化因子和参数
+- 因子治理层自治优化因子、权重、模板和生命周期
 - 元模型层统筹全局状态
 
 但这些层都不能绕过风控。
@@ -460,7 +492,7 @@ Phase E / E3 的在线/离线边界见 [parameter-tuning-boundary.md](parameter-
 - 汇总因子、仓位、风险、执行、学习、模型状态
 - 判断当前应该偏进攻还是偏防守
 - 建议风险预算倍数、交易频率、可信因子族
-- 决定哪些候选建议应该进入人审或 Governor
+- 决定哪些候选建议应该进入自治治理、人工覆盖审计或继续 shadow 观察
 
 它不能：
 
@@ -690,7 +722,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 证据归纳
 - 失败模式总结
 - 治理建议草案
-- 人审辅助
+- 人工覆盖审计辅助
 - 运维/风控/因子状态的人话说明
 
 它更像系统里的**语义理解器和治理助理**。
@@ -746,7 +778,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 - 因子治理工作流
 - 参数模板候选
-- 治理审批前的量化证据
+- 自治治理或人工覆盖前的量化证据
 
 当前已实现的影子模型：
 
@@ -804,7 +836,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 汇总风控、归因、因子治理、数学模型建议
 - 生成系统状态说明
 - 生成 rollout / rollback 理由
-- 支持治理审批覆盖和运维排障
+- 支持自治治理解释、人工覆盖审计和运维排障
 
 它在这里更像：
 
@@ -847,7 +879,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
        <- LLM: 治理建议归纳 / 审查说明
   -> 元模型层
        <- 数学模型: 全局状态评分 / 风险预算建议
-       <- LLM: 全局解释 / 治理摘要 / 人审辅助
+       <- LLM: 全局解释 / 治理摘要 / 人工覆盖审计辅助
   -> RiskPolicyService
   -> 执行层
 ```
@@ -920,7 +952,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - 不再只会死等止盈止损
 - 对“曾经盈利但后来回吐”的仓位能给出可解释动作
 - 每次平仓都知道是 stop、timeout、giveback、regime shift，还是 thesis failure
-- supervisor 模板切换必须走 `policy_suggestion` 审批和 `RiskPolicyService.evaluate("switch_position_supervisor_template", ...)`
+- supervisor 模板切换必须走可审计治理建议和 `RiskPolicyService.evaluate("switch_position_supervisor_template", ...)`
 
 ### Phase D: 归因升级与责任分离
 
@@ -1052,6 +1084,8 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 4. 补 supervisor template / parameter template 的效果阈值和自动 rollback 策略
 5. 样本和治理稳定后，再推进 Phase I 多品种扩展
 
+2026-07-06 起，下一次大版本升级方向正式定为 V15 Autonomous Runtime Platform。设计入口见 [planning/v15-autonomous-runtime-platform.md](planning/v15-autonomous-runtime-platform.md)。
+
 2026-07-04 起，freshness watchdog 和配置事实源查询面先作为只读诊断暴露；它们只用于运维观察和前端展示，不参与交易裁决，也不扩大模型权限。
 
 原因很简单：
@@ -1106,6 +1140,8 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - [TODO.md](../TODO.md)
 - [development-workflow.md](development-workflow.md)
 - [startup.md](startup.md)
+- [system-source-of-truth.md](system-source-of-truth.md)
+- [planning/v15-autonomous-runtime-platform.md](planning/v15-autonomous-runtime-platform.md)
 
 ---
 
@@ -1115,8 +1151,9 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 下一阶段真正的突破点，不是急着让模型接管实盘，而是把下面三件事继续做稳：
 
-1. 进化账本的长期连续性
-2. supervisor / 参数模板自动治理的效果观察与回滚
+1. 进化账本和 runtime overlay 的长期连续性
+2. supervisor / 参数模板 / 因子自治治理的效果观察与回滚
 3. 模型和 shadow 审计的新鲜度与准入门禁
+4. V15 数字孪生 replay、自治健康分和 release discipline
 
-这三层稳定后，模型更深参与和多品种扩展才有足够稳的地基。
+这些层稳定后，模型更深参与和多品种扩展才有足够稳的地基。

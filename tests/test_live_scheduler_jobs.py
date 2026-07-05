@@ -73,7 +73,7 @@ def test_register_external_sync_jobs_keeps_legacy_names_and_crons(tmp_path):
 
 
 def test_dukascopy_tick_job_runs_incremental_script_and_logs_last_line(tmp_path):
-    script = tmp_path / "scripts" / "debug" / "_pull_dukascopy_incremental.py"
+    script = tmp_path / "scripts" / "maintenance" / "pull_dukascopy_incremental.py"
     script.parent.mkdir(parents=True)
     script.write_text("# test\n", encoding="utf-8")
     calls = []

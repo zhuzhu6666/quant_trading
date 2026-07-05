@@ -1,11 +1,12 @@
-# Web Frontend Upgrade Plan
+# Web Frontend Console Contract
 
-> Last updated: 2026-07-01
-> Scope: move the full operator console from the WeChat mini-program to a browser Web frontend.
+> Status: active
+> Last verified: 2026-07-06
+> Scope: current browser Web frontend role and remaining console expansion path.
 
 ## 1. 背景
 
-当前小程序已经承载了总览、交易、学习、因子、运维、收益图等完整展示能力，调试成本开始偏高。后续前端分工调整为：
+当前前端分工已经调整为：
 
 ```text
 Web 端 = 完整操作台
@@ -19,7 +20,7 @@ Web 端 = 完整操作台
 https://www.zhuzhu666.icu -> Caddy -> 127.0.0.1:8000
 ```
 
-`/api/*` 和 `/ws/state` 继续由 FastAPI 提供。Web 前端上线后，可由 Caddy 托管静态构建产物并继续反代 API。
+`/api/*` 和 `/ws/state` 继续由 FastAPI 提供。Web 前端由 `web_frontend/` 源码维护，生产入口通过 Caddy 与后端同域承接。
 
 ## 2. 目标边界
 
@@ -41,15 +42,15 @@ Web 端负责完整展示和调试：
 - 最近更新时间
 - 必要时保留极少数紧急入口，并加二次确认
 
-## 3. 推荐技术栈
+## 3. 技术栈
 
-建议新建：
+源码目录：
 
 ```text
 web_frontend/
 ```
 
-推荐组合：
+当前组合：
 
 - Vite + React + TypeScript
 - TanStack Query
@@ -60,9 +61,9 @@ web_frontend/
 
 旧 `backend/static` Web Console 构建产物已删除。新的 Web 前端只从 `web_frontend/` 建立源码入口。
 
-## 4. MVP 范围
+## 4. 当前核心范围
 
-第一阶段只做可用操作台骨架：
+核心路由：
 
 - `/login`
 - `/overview`
@@ -71,7 +72,7 @@ web_frontend/
 - `/risk`
 - `/ops`
 
-首批接口：
+核心接口：
 
 ```text
 POST /api/auth/login
@@ -88,7 +89,7 @@ GET  /api/ops/backend-readiness
 WS   /ws/state
 ```
 
-控制类接口先只做隐藏入口或二次确认：
+控制类接口必须保留二次确认：
 
 ```text
 POST /api/live/start
@@ -96,15 +97,13 @@ POST /api/live/stop
 POST /api/live/emergency-close
 ```
 
-## 5. 迁移顺序
+## 5. 后续扩展顺序
 
-1. 建立 `web_frontend` 项目骨架、登录态、API client、布局和路由。
-2. 迁移总览和交易状态，优先复用现有 `/api/live/*` 与 `/ws/state`。
-3. 迁移 PnL 图表和持仓表，让 Web 先解决当前最难调试的展示问题。
-4. 迁移 risk / ops 页面，补齐服务健康、数据库健康和 trade trace。
-5. 迁移 factors 页面，展示 `/api/v4/*` 和 `/api/factor-health/latest`。
-6. 最后迁移 learning，因为 `/api/learning/*` 面宽、状态多、治理风险最高。
-7. Web 稳定后，瘦身 `miniprogram_v2`，保留轻量状态页面。
+1. 保持 overview/trading/pnl/risk/ops 作为完整控制台骨架。
+2. 因子治理页优先消费 `/api/v4/catalog` 和 Factor Cards 后端语义，不在前端重新推断 role。
+3. Learning/governance 页面优先消费后端 governance/status/progress 展示字段，前端只做渲染。
+4. Readiness、overlay、catalog snapshot、governance run、rollback 状态进入运维页面。
+5. 小程序继续保持轻量状态面，不恢复复杂图表、治理详情或旧 web-view 路线。
 
 ## 6. 部署建议
 
@@ -130,7 +129,7 @@ www.zhuzhu666.icu {
 }
 ```
 
-旧 `/mobile/*` 和 `/vendor/*` 小程序 H5/web-view 静态入口已清理；新的 Web 端上线时再按本节形态增加静态托管。
+旧 `/mobile/*` 和 `/vendor/*` 小程序 H5/web-view 静态入口已清理；不要恢复旧 web-view/H5 路线。
 
 ## 7. 验收标准
 

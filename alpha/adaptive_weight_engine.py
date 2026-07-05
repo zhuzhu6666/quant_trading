@@ -17,6 +17,7 @@ from typing import Any, Optional
 import numpy as np
 
 from alpha.ic_tracker import ICTracker
+from alpha.portfolio_compositor import resolve_factor_role
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,10 @@ class AdaptiveWeightEngine:
         for name, stats in all_stats.items():
             cfg_entry = factor_configs.get(name)
             if cfg_entry is None:
+                continue
+            if isinstance(cfg_entry, dict) and cfg_entry.get("enabled") is False:
+                continue
+            if resolve_factor_role(name, cfg_entry if isinstance(cfg_entry, dict) else None) != "alpha":
                 continue
 
             # 最低交易笔数门槛
@@ -358,8 +363,9 @@ class AdaptiveWeightEngine:
                 merged[name]["weight"] = p["weight"]
 
         total_weight = sum(
-            c.get("weight", 0) for c in merged.values()
+            c.get("weight", 0) for name, c in merged.items()
             if c.get("enabled", True) and c.get("weight", 0) > 0
+            and resolve_factor_role(name, c) == "alpha"
         )
         if total_weight <= 0:
             return patches
@@ -369,6 +375,8 @@ class AdaptiveWeightEngine:
         type_factors: dict[str, list] = defaultdict(list)
         for name, c in merged.items():
             if not c.get("enabled", True) or c.get("weight", 0) <= 0:
+                continue
+            if resolve_factor_role(name, c) != "alpha":
                 continue
             for tag in c.get("tags", []):
                 type_weights[tag] += c["weight"]

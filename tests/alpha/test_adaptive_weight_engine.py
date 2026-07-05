@@ -147,6 +147,35 @@ class TestAdapt:
             abs(p["weight"] - 1.0) >= 0.01 for p in patches.values()
         )
 
+    def test_context_factor_is_not_adapted(self):
+        """context/gate/sizing 因子不参与 AWE 方向权重调整。"""
+        a = AdaptiveWeightEngine(SAMPLE_AWE_CONFIG)
+        configs = {
+            "bb_width": {"weight": 0.4, "tags": ["技术", "波动率"], "enabled": True, "role": "context"},
+            "rsi_14": {"weight": 1.0, "tags": ["技术"], "enabled": True, "role": "alpha"},
+        }
+        a.initialize(configs)
+        attr = AttributionEngine()
+        attr._per_factor["bb_width"] = _make_stats("bb_width", n_trades=30, win_rate=0.9, seed=8)
+        with patch.object(a, "_check_ic_and_health", return_value=True):
+            with patch.object(a, "_enforce_diversity", side_effect=lambda p, *args: p):
+                patches = a.adapt(attr, configs)
+        assert "bb_width" not in patches
+
+    def test_disabled_alpha_factor_is_not_adapted(self):
+        """enabled=False 的 alpha 因子不应生成权重 patch。"""
+        a = AdaptiveWeightEngine(SAMPLE_AWE_CONFIG)
+        configs = {
+            "rsi_14": {"weight": 1.0, "tags": ["技术"], "enabled": False, "role": "alpha"},
+        }
+        a.initialize(configs)
+        attr = AttributionEngine()
+        attr._per_factor["rsi_14"] = _make_stats("rsi_14", n_trades=30, win_rate=0.9, seed=9)
+        with patch.object(a, "_check_ic_and_health", return_value=True):
+            with patch.object(a, "_enforce_diversity", side_effect=lambda p, *args: p):
+                patches = a.adapt(attr, configs)
+        assert patches == {}
+
 
 class TestDiversityConstraint:
 
@@ -156,7 +185,7 @@ class TestDiversityConstraint:
         configs = {
             "rsi_14":    {"weight": 1.0, "tags": ["技术", "均值回归"], "enabled": True},
             "di_spread": {"weight": 1.75, "tags": ["技术", "趋势"], "enabled": True},
-            "adx":       {"weight": 0.5, "tags": ["技术", "趋势"], "enabled": True},
+            "adx":       {"weight": 0.5, "tags": ["技术", "趋势"], "enabled": True, "role": "context"},
             "dxy_corr_20": {"weight": 0.8, "tags": ["宏观", "美元"], "enabled": True},
         }
         a.initialize(configs)
@@ -177,10 +206,13 @@ class TestDiversityConstraint:
             if n in merged:
                 merged[n]["weight"] = p["weight"]
 
-        total = sum(c["weight"] for c in merged.values() if c.get("enabled", True))
+        total = sum(
+            c["weight"] for n, c in merged.items()
+            if c.get("enabled", True) and c.get("role", "alpha") == "alpha"
+        )
         tech_weight = sum(
             c["weight"] for n, c in merged.items()
-            if "技术" in c.get("tags", []) and c.get("enabled", True)
+            if "技术" in c.get("tags", []) and c.get("enabled", True) and c.get("role", "alpha") == "alpha"
         )
         if total > 0:
             assert tech_weight / total <= 0.45, f"tech={tech_weight/total:.2%} > 40%"

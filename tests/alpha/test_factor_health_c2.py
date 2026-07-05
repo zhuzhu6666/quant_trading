@@ -1,5 +1,7 @@
 """Test FactorHealth independence real corr matrix (C2)."""
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -40,6 +42,20 @@ def test_export_vals_filters_nan():
     tracker.update("test_f", vals, rets)
     exported = tracker.export_vals("test_f")
     assert len(exported) == 3  # NaN pairs are skipped
+
+
+def test_rolling_ic_constant_series_returns_zero_without_runtime_warning():
+    tracker = ICTracker(window=100)
+    vals = np.ones(60, dtype=np.float64)
+    rets = np.linspace(-0.01, 0.01, 60, dtype=np.float64)
+    tracker.update("constant_factor", vals, rets)
+
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter("always")
+        ic = tracker.rolling_ic("constant_factor")
+
+    assert ic == 0.0
+    assert not any(isinstance(record.message, RuntimeWarning) for record in records)
 
 
 def test_independence_perfectly_correlated():
@@ -110,6 +126,22 @@ def test_independence_defaults_to_50_when_no_active():
     health = FactorHealth(tracker, active_factor_names=[])
     status = health.evaluate("factor_a")
     assert status.components["independence"] == 50.0
+
+
+def test_independence_constant_peer_does_not_emit_runtime_warning():
+    rng = np.random.default_rng(42)
+    rets = rng.normal(0, 0.01, 200)
+    tracker = ICTracker(window=500)
+    tracker.update("factor_a", rng.normal(0, 1, 200), rets)
+    tracker.update("constant_peer", np.ones(200, dtype=np.float64), rets)
+
+    health = FactorHealth(tracker, active_factor_names=["factor_a", "constant_peer"])
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter("always")
+        status = health.evaluate("factor_a")
+
+    assert 0 <= status.components["independence"] <= 100
+    assert not any(isinstance(record.message, RuntimeWarning) for record in records)
 
 
 def test_independence_few_observations_returns_50():

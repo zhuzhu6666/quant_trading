@@ -11,6 +11,8 @@ import logging
 import numpy as np
 import pandas as pd
 
+from alpha.technical_indicators import adx_wilder, atr_wilder
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,42 +76,9 @@ def factor_macd_hist(df):
 
 @factor_registry.register("adx", "ADX(14) 趋势强度")
 def factor_adx(df):
-    """Average Directional Index
-
-    KNOWN ISSUE (audit 2026-06-06 v4 增量审计):
-    本因子用 EMA(span=14) 平滑, 跟 risk/regime.py 的 Wilder smoothing
-    实现不同。两个 ADX 数值不对齐, regime 触发条件 (ADX>25/20) 跟
-    strategy 投票条件 (用 factor_adx) 可能不一致, 造成 regime filter
-    跟 strategy 决策脱节。
-    修法: 抽 _wilder_smooth helper 放到 alpha/_wilder.py, factor_adx
-    + factor_di_spread 跟 regime.py 共用。或: 统一改 regime.py 用 EMA。
-    拆解方案见 docs/audits/refactor-1-mab-4-engines.md, 当前 P2 优先级, 待 verify-2 跑出实际 baseline
-    漂移再决定是否做。
-    """
-    high, low, close = df["high"].values, df["low"].values, df["close"].values
-    n = len(close)
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i-1]),
-                    abs(low[i] - close[i-1]))
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        plus_dm[i] = up if up > down and up > 0 else 0
-        minus_dm[i] = down if down > up and down > 0 else 0
-
-    atr = pd.Series(tr).ewm(span=14, min_periods=14).mean().values
-    smooth_plus = pd.Series(plus_dm).ewm(span=14).mean().values
-    smooth_minus = pd.Series(minus_dm).ewm(span=14).mean().values
-
-    di_plus = np.divide(smooth_plus * 100, atr, out=np.zeros_like(atr), where=atr != 0)
-    di_minus = np.divide(smooth_minus * 100, atr, out=np.zeros_like(atr), where=atr != 0)
-    dx = np.divide(np.abs(di_plus - di_minus) * 100, di_plus + di_minus,
-                   out=np.zeros_like(atr), where=(di_plus + di_minus) != 0)
-    return pd.Series(dx).ewm(span=14).mean().values
+    """Average Directional Index using the shared Wilder implementation."""
+    adx, _, _ = adx_wilder(df["high"].values, df["low"].values, df["close"].values, period=14)
+    return adx
 
 
 @factor_registry.register("bb_width", "布林带宽度(20,2)")
@@ -125,27 +94,9 @@ def factor_bb_width(df):
 
 @factor_registry.register("di_spread", "ADX方向差 (DI+ - DI-)")
 def factor_di_spread(df):
-    """DI+ minus DI-
-
-    KNOWN ISSUE (audit 2026-06-06 v4 增量审计): 跟 factor_adx 一样用
-    EMA(span=14), 跟 risk/regime.py 的 Wilder smoothing 不对齐, 数值
-    范围和触发点偏差。详见 factor_adx 注释 + docs/audits/refactor-1-mab-4-engines.md 拆解。
-    """
-    high, low, close = df["high"].values, df["low"].values, df["close"].values
-    n = len(close)
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        plus_dm[i] = up if up > down and up > 0 else 0
-        minus_dm[i] = down if down > up and down > 0 else 0
-    atr = pd.Series(tr).ewm(span=14, min_periods=14).mean().values
-    sp = pd.Series(plus_dm).ewm(span=14).mean().values
-    sm = pd.Series(minus_dm).ewm(span=14).mean().values
-    return np.divide((sp - sm) * 100, atr, out=np.zeros_like(atr), where=atr != 0)
+    """DI+ minus DI- using the shared Wilder implementation."""
+    _, plus_di, minus_di = adx_wilder(df["high"].values, df["low"].values, df["close"].values, period=14)
+    return plus_di - minus_di
 
 
 @factor_registry.register("stoch_k", "Stochastic %K (14,3,3)")
@@ -164,12 +115,8 @@ def factor_stoch_k(df):
 @factor_registry.register("atr_ratio", "ATR(14)/Close")
 def factor_atr_ratio(df):
     """ATR占价格比例"""
-    high, low, close = df["high"].values, df["low"].values, df["close"].values
-    n = len(close)
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr = pd.Series(tr).ewm(span=14, min_periods=14).mean().values
+    close = df["close"].values
+    atr = atr_wilder(df["high"].values, df["low"].values, close, period=14)
     return np.divide(atr, close, out=np.zeros_like(close), where=close != 0)
 
 
@@ -208,55 +155,77 @@ def factor_supertrend_str(df, period: int = 10, multiplier: float = 3.0):
     正值 = 价格在上轨上方, 趋势强; 负值 = 价格在下轨下方, 跌势强。
     0 = 价格在通道内, 趋势不明。
     """
-    high, low, close = df["high"].values, df["low"].values, df["close"].values
+    return _supertrend_strength_array(
+        df["high"].values,
+        df["low"].values,
+        df["close"].values,
+        period=period,
+        multiplier=multiplier,
+    )
+
+
+def _supertrend_strength_array(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    *,
+    period: int = 10,
+    multiplier: float = 3.0,
+) -> np.ndarray:
+    """Return signed SuperTrend distance in ATR units."""
+    high = np.asarray(high, dtype=float)
+    low = np.asarray(low, dtype=float)
+    close = np.asarray(close, dtype=float)
     n = len(close)
     out = np.full(n, np.nan)
     if n < period + 2:
         return out
 
-    # ATR (Wilder 风格)
     tr = np.zeros(n)
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
     atr = pd.Series(tr).ewm(span=period, min_periods=period).mean().values
 
     hl2 = (high + low) / 2.0
-    upper = hl2 + multiplier * atr
-    lower = hl2 - multiplier * atr
+    basic_upper = hl2 + multiplier * atr
+    basic_lower = hl2 - multiplier * atr
 
-    final_upper = np.nan
-    final_lower = np.nan
-    direction = np.nan
+    final_upper = np.full(n, np.nan)
+    final_lower = np.full(n, np.nan)
+    direction = 0.0
 
     for i in range(period, n):
-        if i == period:
-            final_upper = upper[i]
-            final_lower = lower[i]
-            direction = 1.0 if close[i] > hl2[i] else -1.0
-            out[i] = 0.0  # 起点 0, 之后才能算偏离
+        if not np.isfinite(atr[i]) or atr[i] <= 0:
             continue
-        fu = upper[i]
-        fl = lower[i]
-        if not np.isnan(final_upper) and fu < final_upper:
-            fu = final_upper
-        if not np.isnan(final_lower) and fl > final_lower:
-            fl = final_lower
-        final_upper = fu
-        final_lower = fl
+        if i == period or not np.isfinite(final_upper[i - 1]) or not np.isfinite(final_lower[i - 1]):
+            final_upper[i] = basic_upper[i]
+            final_lower[i] = basic_lower[i]
+            direction = 1.0 if close[i] >= close[i - 1] else -1.0
+            out[i] = 0.0
+            continue
 
-        prev_dir = direction
-        if close[i] > fu:
+        prev_upper = final_upper[i - 1]
+        prev_lower = final_lower[i - 1]
+        final_upper[i] = (
+            basic_upper[i]
+            if basic_upper[i] < prev_upper or close[i - 1] > prev_upper
+            else prev_upper
+        )
+        final_lower[i] = (
+            basic_lower[i]
+            if basic_lower[i] > prev_lower or close[i - 1] < prev_lower
+            else prev_lower
+        )
+
+        if direction <= 0 and close[i] > final_upper[i]:
             direction = 1.0
-        elif close[i] < fl:
+        elif direction >= 0 and close[i] < final_lower[i]:
             direction = -1.0
-        else:
-            direction = prev_dir
-        # 强度: 偏离通道距离 / ATR (单位 ATR 倍数, 范围 -N ~ +N)
+
         if direction > 0:
-            out[i] = (close[i] - final_lower) / atr[i] if atr[i] > 0 else 0.0
+            out[i] = max(0.0, (close[i] - final_lower[i]) / atr[i])
         else:
-            out[i] = (final_upper - close[i]) / atr[i] if atr[i] > 0 else 0.0
-        out[i] = out[i] * direction  # 加方向
+            out[i] = -max(0.0, (final_upper[i] - close[i]) / atr[i])
 
     return out
 
@@ -430,6 +399,81 @@ def _is_low_frequency_frame(df: pd.DataFrame, min_hours: float = 20.0) -> bool:
     return bool(median_hours >= min_hours)
 
 
+def _rolling_corr_by_day(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    period: int,
+) -> np.ndarray:
+    """Compute a daily rolling correlation without intraday lookahead."""
+    n = len(df)
+    out = np.full(n, np.nan)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return out
+
+    daily_x: list[float] = []
+    daily_y: list[float] = []
+    current_day = None
+    x = df[x_col].values
+    y = df[y_col].values
+    for i, ts in enumerate(df.index):
+        day = pd.Timestamp(ts).normalize()
+        if current_day is None or day != current_day:
+            current_day = day
+            daily_x.append(float(x[i]))
+            daily_y.append(float(y[i]))
+        else:
+            daily_x[-1] = float(x[i])
+            daily_y[-1] = float(y[i])
+
+        if len(daily_x) < period:
+            continue
+        x_win = np.asarray(daily_x[-period:], dtype=float)
+        y_win = np.asarray(daily_y[-period:], dtype=float)
+        if np.isnan(x_win).any() or np.isnan(y_win).any():
+            continue
+        if x_win.std() < 1e-12 or y_win.std() < 1e-12:
+            continue
+        out[i] = float(np.corrcoef(x_win, y_win)[0, 1])
+    return out
+
+
+def _rolling_ratio_change_by_day(
+    df: pd.DataFrame,
+    numerator_col: str,
+    denominator_col: str,
+    lookback: int,
+) -> np.ndarray:
+    """Compute a daily ratio change without treating M5 bars as days."""
+    n = len(df)
+    out = np.full(n, np.nan)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return out
+
+    daily_ratio: list[float] = []
+    current_day = None
+    numerator = df[numerator_col].values
+    denominator = df[denominator_col].values
+    for i, ts in enumerate(df.index):
+        day = pd.Timestamp(ts).normalize()
+        denom = float(denominator[i])
+        ratio = float(numerator[i]) / denom if denom != 0 else np.nan
+        if current_day is None or day != current_day:
+            current_day = day
+            daily_ratio.append(ratio)
+        else:
+            daily_ratio[-1] = ratio
+
+        if len(daily_ratio) <= lookback:
+            continue
+        prev = daily_ratio[-lookback - 1]
+        cur = daily_ratio[-1]
+        if np.isnan(cur) or np.isnan(prev) or prev == 0:
+            continue
+        out[i] = (cur - prev) / prev
+    return out
+
+
 @factor_registry.register("dxy_corr_20", "20-bar rolling DXY (DTWEXBGS) 相关性")
 def factor_dxy_corr_20(df, period: int = 20):
     """20-bar close 跟 DXY 的滚动相关系数。
@@ -438,8 +482,13 @@ def factor_dxy_corr_20(df, period: int = 20):
     corr 绝对值突降 = 脱钩 (regime shift 信号)。
     需要 df 包含 'dxy' 列 (由 external_loader 注入)。
     """
+    standard = _standard_col(df, "dxy_corr_20")
+    if standard is not None:
+        return standard
     if not _has_external(df, ["close", "dxy"]):
         return np.full(len(df), np.nan)
+    if not _is_low_frequency_frame(df):
+        return _rolling_corr_by_day(df, "close", "dxy", period)
     close = df["close"].values
     dxy = df["dxy"].values
     n = len(close)
@@ -463,8 +512,16 @@ def factor_slv_gld_ratio(df, lookback: int = 5):
     比率上升 = 白银相对强 (工业/风险偏好回归), 对黄金是中性偏弱信号。
     比率下降 = 白银相对弱 (避险/降息预期), 对黄金是中性偏强信号。
     """
+    standard = _standard_col(df, "slv_gld_ratio_5d")
+    if standard is not None:
+        return standard
+    standard = _standard_col(df, "slv_gld_ratio")
+    if standard is not None:
+        return standard
     if not _has_external(df, ["SLV", "GLD"]):
         return np.full(len(df), np.nan)
+    if not _is_low_frequency_frame(df):
+        return _rolling_ratio_change_by_day(df, "SLV", "GLD", lookback)
     slv = df["SLV"].values
     gld = df["GLD"].values
     n = len(df)
@@ -502,15 +559,12 @@ def factor_real_yield_chg(df, lookback: int = 5):
     return out
 
 
-@factor_registry.register("hours_to_fomc", "距下次 FOMC 的日历天数 (0=事件日)")
+@factor_registry.register("hours_to_fomc", "FOMC 事件时间桶 (0=发布窗口)")
 def factor_hours_to_fomc(df):
-    """距离下次 FOMC 决议的日历天数。
+    """FOMC 事件接近度上下文。
 
-    0 = 当天就是 FOMC 日 (高波动窗口)
-    正数 = 距下次 FOMC 还有多少天 (降序, 0 → +N)
-    NaN = 已知事件数据范围外
-
-    假设: 决议日 ± 1 天内黄金波动率显著放大, 趋势策略应 skip (现有 R5 配置)
+    值来自点时事件日历的签名小时桶: 负数=事件前, 0=发布窗口,
+    正数=事件后, NaN=已知事件窗口外。它描述事件状态, 不表达多空方向。
     """
     standard = _standard_col(df, "hours_to_fomc")
     if standard is not None:
@@ -518,9 +572,9 @@ def factor_hours_to_fomc(df):
     return _compute_event_distance(df, "evt_fomc")
 
 
-@factor_registry.register("hours_to_nfp", "距下次 NFP 的日历天数 (0=事件日)")
+@factor_registry.register("hours_to_nfp", "NFP 事件时间桶 (0=发布窗口)")
 def factor_hours_to_nfp(df):
-    """距离下次 NFP 发布的天数。NFP 偏离预期 → 黄金 1-3% 跳空窗口。"""
+    """NFP 事件接近度上下文, 只供 gate/sizing/学习使用。"""
     standard = _standard_col(df, "hours_to_nfp")
     if standard is not None:
         return standard
@@ -767,7 +821,12 @@ def factor_cb_china_3m_zscore(df, lookback: int = 60):
     数据 freq = 月度, 但对齐到日度后会有大量重复值 (forward fill)。
     z-score 跨月度窗口的滚动能避免月内重复影响。
     """
+    standard = _standard_col(df, "cb_china_3m_zscore")
+    if standard is not None:
+        return standard
     if not _has_external(df, ["cb_china_chg_3m"]):
+        return np.full(len(df), np.nan)
+    if not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     s = pd.Series(df["cb_china_chg_3m"].values)
     roll = s.rolling(lookback, min_periods=10)
@@ -920,5 +979,9 @@ def factor_cot_extreme_signal(df):
     mm_z = (mm_s - mm_roll.mean()) / mm_roll.std()
     pm_z = (pm_s - pm_roll.mean()) / pm_roll.std()
 
-    # 反向化 pm_z (商业极空 = 负向信号, 但应该视为看多 signal)
-    return (mm_z - pm_z).values
+    raw = (mm_z - pm_z).values
+    out = np.zeros(len(df), dtype=float)
+    out[raw > 1.5] = -1.0
+    out[raw < -1.5] = 1.0
+    out[np.isnan(raw)] = np.nan
+    return out

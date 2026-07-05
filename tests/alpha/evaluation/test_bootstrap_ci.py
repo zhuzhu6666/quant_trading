@@ -1,6 +1,9 @@
 """tests/alpha/evaluation/test_bootstrap_ci.py — Tests for BootstrapCI."""
+import warnings
+
 import numpy as np
 import pytest
+from scipy.stats import ConstantInputWarning
 
 from alpha.evaluation.bootstrap_ci import BootstrapCI, CIResult
 
@@ -172,9 +175,12 @@ class TestBootstrapCI:
         signal = np.array([1.0, np.nan, 3.0, 4.0, np.nan])
         returns = np.array([0.1, 0.2, np.nan, 0.4, 0.5])
         # After dropna: (1.0, 0.1) and (4.0, 0.4) remain
-        result = b.ci_ic(signal, returns)
+        with warnings.catch_warnings(record=True) as records:
+            warnings.simplefilter("always")
+            result = b.ci_ic(signal, returns)
         # Only 2 points left, so IC should be 1.0 (perfectly aligned)
         assert not np.isnan(result.point_estimate)
+        assert not any(isinstance(record.message, ConstantInputWarning) for record in records)
 
     def test_ci_ic_preserves_paired_structure(self):
         """Paired bootstrap should preserve the joint distribution."""

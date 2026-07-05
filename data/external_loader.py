@@ -50,7 +50,9 @@ class ExternalDataLoader:
     """外部数据 (宏观 + 事件 + ETF + 央行) 对齐到 bar 级别"""
 
     _CACHE_TTL_SEC = 300.0
+    _SOURCE_BUNDLE_CACHE_MAX = 16
     _LOAD_CACHE: dict[tuple[str, str, int, int], tuple[float, pd.DataFrame]] = {}
+    _SOURCE_BUNDLE_CACHE: dict[tuple[object, ...], tuple[float, dict[str, pd.DataFrame]]] = {}
 
     def __init__(
         self,
@@ -87,6 +89,67 @@ class ExternalDataLoader:
         key = cls._cache_key(name, path)
         cls._LOAD_CACHE[key] = (_time.time(), frame.copy())
         return frame
+
+    def _source_bundle_key(self, as_of_epoch: float | None) -> tuple[object, ...]:
+        return (
+            self._cache_key("external", self.db_path),
+            self._cache_key("events", self.events_db_path),
+            None if as_of_epoch is None else float(as_of_epoch),
+        )
+
+    def _get_source_bundle(self, as_of_epoch: float | None) -> dict[str, pd.DataFrame]:
+        key = self._source_bundle_key(as_of_epoch)
+        now = _time.time()
+        self._prune_source_bundle_cache(now)
+        cached = self._SOURCE_BUNDLE_CACHE.get(key)
+        if cached is not None:
+            created_at, bundle = cached
+            if now - created_at <= self._CACHE_TTL_SEC:
+                return {name: frame.copy() for name, frame in bundle.items()}
+            self._SOURCE_BUNDLE_CACHE.pop(key, None)
+
+        macro = self._limit_as_of(self._load_macro(), as_of_epoch)
+        etf = self._limit_as_of(self._load_etf(), as_of_epoch)
+        etf_holdings_raw = self._limit_as_of(self._load_etf_holdings(), as_of_epoch)
+        cb_raw = self._limit_as_of(self._load_cb_gold(), as_of_epoch)
+        cot_gold = self._limit_as_of(self._load_cot_gold(), as_of_epoch)
+        events = self._load_events()
+
+        macro = macro.rename(
+            columns={
+                "DFII10": "real_yield_10y",
+                "DTWEXBGS": "dxy",
+                "GVZCLS": "gvz",
+                "VIXCLS": "vix",
+            }
+        )
+        bundle = {
+            "macro": self._compute_macro_derived(macro),
+            "etf": self._compute_etf_price_derived(etf),
+            "etf_holdings": self._compute_etf_derived(etf_holdings_raw),
+            "cb_gold": self._compute_cb_derived(cb_raw),
+            "cot_gold": cot_gold,
+            "events": events,
+        }
+        self._SOURCE_BUNDLE_CACHE[key] = (now, {name: frame.copy() for name, frame in bundle.items()})
+        self._prune_source_bundle_cache(now)
+        return bundle
+
+    @classmethod
+    def _prune_source_bundle_cache(cls, now: float | None = None) -> None:
+        current = _time.time() if now is None else float(now)
+        expired = [
+            key
+            for key, (created_at, _) in cls._SOURCE_BUNDLE_CACHE.items()
+            if current - created_at > cls._CACHE_TTL_SEC
+        ]
+        for key in expired:
+            cls._SOURCE_BUNDLE_CACHE.pop(key, None)
+        overflow = len(cls._SOURCE_BUNDLE_CACHE) - cls._SOURCE_BUNDLE_CACHE_MAX
+        if overflow > 0:
+            oldest = sorted(cls._SOURCE_BUNDLE_CACHE.items(), key=lambda item: item[1][0])
+            for key, _ in oldest[:overflow]:
+                cls._SOURCE_BUNDLE_CACHE.pop(key, None)
 
     @staticmethod
     def _release_index(values) -> pd.DatetimeIndex:
@@ -307,6 +370,21 @@ class ExternalDataLoader:
                 )
         return out
 
+    def _compute_etf_price_derived(self, etf: pd.DataFrame) -> pd.DataFrame:
+        """Compute ETF price-derived columns on the daily release timeline."""
+        if etf.empty:
+            return pd.DataFrame()
+        out = etf.copy()
+        if "SLV" in out.columns and "GLD" in out.columns:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = np.where(out["GLD"].to_numpy(dtype=float) != 0,
+                                 out["SLV"].to_numpy(dtype=float) / out["GLD"].to_numpy(dtype=float),
+                                 np.nan)
+            ratio_s = pd.Series(ratio, index=out.index)
+            out["slv_gld_ratio_5d"] = ratio_s.pct_change(5)
+            out["slv_gld_ratio"] = out["slv_gld_ratio_5d"]
+        return out
+
     def _compute_macro_derived(self, macro: pd.DataFrame) -> pd.DataFrame:
         """从日级宏观数据计算标准派生列，再 forward-fill 到 bar 级别。"""
         if macro.empty:
@@ -343,6 +421,11 @@ class ExternalDataLoader:
                 out[f"cb_{country}_chg_6m"] = out[chg_col].rolling(6, min_periods=1).sum()
                 # 12 月累计 (年度)
                 out[f"cb_{country}_chg_12m"] = out[chg_col].rolling(12, min_periods=1).sum()
+        if "cb_china_chg_3m" in out.columns:
+            roll = out["cb_china_chg_3m"].rolling(60, min_periods=10)
+            out["cb_china_3m_zscore"] = (
+                (out["cb_china_chg_3m"] - roll.mean()) / roll.std()
+            )
         return out
 
     def _compute_event_hour_buckets(
@@ -418,24 +501,13 @@ class ExternalDataLoader:
             raise ValueError("bar_df must have DatetimeIndex")
 
         as_of_epoch = self._as_epoch(as_of)
-        macro = self._limit_as_of(self._load_macro(), as_of_epoch)
-        etf = self._limit_as_of(self._load_etf(), as_of_epoch)
-        etf_holdings_raw = self._limit_as_of(self._load_etf_holdings(), as_of_epoch)
-        etf_holdings = self._compute_etf_derived(etf_holdings_raw)
-        cb_raw = self._limit_as_of(self._load_cb_gold(), as_of_epoch)
-        cb_gold = self._compute_cb_derived(cb_raw)
-        cot_gold = self._limit_as_of(self._load_cot_gold(), as_of_epoch)
-        events = self._load_events()
-
-        # 列重命名, 标准化
-        col_map = {
-            "DFII10": "real_yield_10y",
-            "DTWEXBGS": "dxy",
-            "GVZCLS": "gvz",
-            "VIXCLS": "vix",
-        }
-        macro = macro.rename(columns=col_map)
-        macro = self._compute_macro_derived(macro)
+        sources = self._get_source_bundle(as_of_epoch)
+        macro = sources["macro"]
+        etf = sources["etf"]
+        etf_holdings = sources["etf_holdings"]
+        cb_gold = sources["cb_gold"]
+        cot_gold = sources["cot_gold"]
+        events = sources["events"]
 
         # 事件 0/1 化
         evt_cols = {}

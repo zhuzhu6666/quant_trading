@@ -289,7 +289,7 @@ supervisor.action = close
 - `tighten / reduce / close` 必须先形成 supervisor verdict，再交给 `RiskPolicyService`
 - 风控拒绝时只写审计，不执行 broker 修改
 - broker amend / close 失败时必须写入 lifecycle，不得把 action 记成成功
-- supervisor 模板切换必须来自已审批的 `policy_suggestion`
+- supervisor 模板切换必须来自可审计治理建议；demo autonomous 下可自动批准/应用，人工入口只作为覆盖和追责
 
 ### 6.4 风控上下文扩展要求
 
@@ -460,21 +460,22 @@ legacy trace 只用于补齐历史审计和弱监督，不应直接进入强治�
 supervisor review / counterfactual
   -> build_position_supervisor_advisories
   -> policy_suggestion(scope_type=position_supervisor_template)
-  -> 人审 / Governor 审批
+  -> autonomous governance / manual override audit
   -> RiskPolicyService.evaluate("switch_position_supervisor_template", ...)
   -> RuntimeConfig.position_supervisor_template_id
+  -> runtime_config_overlay / runtime_config_snapshot
   -> learning_application_log / learning_application_effect
 ```
 
 约束：
 
-- `proposed` 建议不能切 live 模板
-- 只有 `approved` 建议可以申请切换
+- `proposed` 建议不能直接切 live 模板
+- 只有 `auto_approved` / `approved` 且通过风控的建议可以申请切换
 - 模板 ID 必须来自内置模板列表
 - 自动部署只允许 `RuntimeConfig.autonomy_mode=demo_autonomous`
 - 自动部署必须同时具备 replay summary 和 counterfactual summary
 - 切换必须保留 `previous_template_id`，便于回滚审计
-- 切换必须写入 `runtime_config_snapshot / evolution_decision / learning_application_log / learning_application_effect`
+- 切换必须写入 `runtime_config_overlay / runtime_config_snapshot / evolution_decision / learning_application_log / learning_application_effect`
 
 ---
 
@@ -502,7 +503,7 @@ supervisor review / counterfactual
 - 与 `RiskPolicyService` 的边界清楚
 - ledger / trace 写入要求清楚
 - review / learning 能回答“谁平的、该不该平、系统是否学到了”
-- 模板切换必须有审批和风控裁决
+- 模板切换必须有自治审计、可回滚配置快照和风控裁决
 
 ---
 

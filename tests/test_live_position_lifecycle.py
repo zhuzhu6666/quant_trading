@@ -840,14 +840,41 @@ def test_build_trade_attribution_payload_from_composite_matches_live_shape():
         "factor_signals": {"trend": 0.5, "macro": -0.25, "empty": None},
         "factor_values": {"trend": 1.2},
         "active_weights": {"trend": 0.7},
+        "factor_roles": {},
+        "context_signals": {},
         "composite_score": 0.4,
+        "alpha_score": 0.4,
         "tactical_score": 0.3,
         "macro_score": 0.1,
         "tags_breakdown": {"trend": ["momentum"]},
-        "total_signal_abs": 0.75,
+        "total_signal_abs": 0.5,
         "api_volume": 200.0,
         "attribution_integrity": "full",
     }
+
+
+def test_trade_attribution_total_signal_abs_uses_scored_alpha_only():
+    composite = SimpleNamespace(
+        factor_signals={"trend": 0.5, "bb_width": 1.0, "disabled": -0.9},
+        factor_values={},
+        active_weights={"trend": 0.7, "bb_width": 0.0, "disabled": 0.0},
+        factor_roles={"trend": "alpha", "bb_width": "context", "disabled": "alpha"},
+        score=0.4,
+        tactical_score=0.4,
+        macro_score=0.0,
+        tags_breakdown={},
+    )
+
+    payload = build_trade_attribution_payload_from_composite(
+        position_id=102,
+        open_ts=123.4,
+        open_price=4001.5,
+        direction=1,
+        actual_api_volume=200.0,
+        composite=composite,
+    )
+
+    assert payload["total_signal_abs"] == 0.5
 
 
 def test_entry_quality_gate_from_learning_policy_handles_inactive_and_passed():

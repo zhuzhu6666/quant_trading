@@ -87,6 +87,30 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS runtime_config_overlay (
+                overlay_id TEXT PRIMARY KEY,
+                overlay_json TEXT NOT NULL DEFAULT '{}',
+                overlay_hash TEXT DEFAULT '',
+                source TEXT DEFAULT '',
+                run_id TEXT DEFAULT '',
+                updated_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS factor_catalog_snapshot (
+                snapshot_id TEXT PRIMARY KEY,
+                run_id TEXT DEFAULT '',
+                catalog_hash TEXT DEFAULT '',
+                catalog_json TEXT NOT NULL DEFAULT '[]',
+                source TEXT DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS evolution_run (
                 run_id TEXT PRIMARY KEY,
                 run_type TEXT NOT NULL,
@@ -123,6 +147,7 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runtime_config_snapshot_hash ON runtime_config_snapshot(config_hash, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_factor_catalog_snapshot_created ON factor_catalog_snapshot(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evolution_run_type ON evolution_run(run_type, status, started_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evolution_decision_run ON evolution_decision(run_id, decision_type, created_at)")
         conn.commit()

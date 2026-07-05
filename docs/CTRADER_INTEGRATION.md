@@ -1,6 +1,8 @@
 # cTrader 接入说明
 
-> 最后清理: 2026-06-29
+> Status: active
+> Last verified: 2026-07-06
+> Scope: cTrader demo execution channel, deal sync, and L2 research collection boundary.
 > 当前状态: cTrader demo 是唯一执行通道；L2 研究采集并入主连接，历史 MT5 并行路线已归档。
 
 ---
@@ -163,4 +165,4 @@ writer 每次批量写入前会按事件时间选择目标月库；如果跨月�
 - MT5 不再是当前主链路要求。
 - 涉及 MT5 的历史描述只能作为迁移背景，不能作为开发依据。
 
-如需恢复或重做多 broker 抽象，应先重新审计 `execution/base.py`、`execution/ctrader_bridge.py` 和 `TODO.md` 里的多品种/价格换算技术债。
+如需恢复或重做多 broker 抽象，应先重新审计 `execution/base.py`、`execution/ctrader_bridge.py` 和 [legacy-debt-register.md](legacy-debt-register.md) 里的多品种/价格换算技术债。

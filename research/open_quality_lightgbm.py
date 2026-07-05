@@ -43,7 +43,9 @@ FEATURE_NAMES = [
     "negative_contribution_abs",
     "tactical_score",
     "macro_score",
+    "alpha_score",
     "n_active_factors",
+    "n_active_alpha_factors",
     "n_abstain_factors",
 ]
 
@@ -149,7 +151,9 @@ def _features_from_sample(row: Any) -> dict[str, float]:
         "negative_contribution_abs": _safe_float(decision_quality.get("negative_contribution_abs")),
         "tactical_score": _safe_float(action.get("tactical_score"), _safe_float(decision_quality.get("tactical_score"))),
         "macro_score": _safe_float(action.get("macro_score"), _safe_float(decision_quality.get("macro_score"))),
+        "alpha_score": _safe_float(action.get("alpha_score"), _safe_float(decision_quality.get("alpha_score"), action_score)),
         "n_active_factors": _safe_float(action.get("n_active_factors"), _safe_float(decision_quality.get("n_active_factors"))),
+        "n_active_alpha_factors": _safe_float(action.get("n_active_alpha_factors"), _safe_float(decision_quality.get("n_active_alpha_factors"))),
         "n_abstain_factors": _safe_float(action.get("n_abstain_factors"), _safe_float(decision_quality.get("n_abstain_factors"))),
     }
     return {name: out.get(name, 0.0) for name in FEATURE_NAMES}

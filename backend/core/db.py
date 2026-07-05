@@ -41,9 +41,9 @@ DUCKDB_TRADES  = DATA_DIR / "trades.duckdb"          # 交易记录(归因用)
 DUCKDB_EVENTS  = DATA_DIR / "events.duckdb"          # 经济事件日历
 
 # ═══════════════════════════════════════════
-# PostgreSQL — 运行时状态；data/state.db 仅作为迁移冷备/源库
+# PostgreSQL — 运行时状态；STATE_DB 仅作为“默认 state store”哨兵路径
 # ═══════════════════════════════════════════
-STATE_DB       = DATA_DIR / "state.db"               # 旧 SQLite 状态冷备/迁移源
+STATE_DB       = DATA_DIR / "state.db"               # 运行态使用此哨兵路径切到 PostgreSQL
 _DEFAULT_STATE_DB = STATE_DB.resolve()
 EXPERIMENTS_DB = DATA_DIR / "experiments.db"         # 实验记录(独立)
 
@@ -611,6 +611,24 @@ CREATE TABLE IF NOT EXISTS runtime_config_snapshot (
     source TEXT DEFAULT '',
     config_json TEXT NOT NULL DEFAULT '{}',
     run_id TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS runtime_config_overlay (
+    overlay_id TEXT PRIMARY KEY,
+    overlay_json TEXT NOT NULL DEFAULT '{}',
+    overlay_hash TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    run_id TEXT DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS factor_catalog_snapshot (
+    snapshot_id TEXT PRIMARY KEY,
+    run_id TEXT DEFAULT '',
+    catalog_hash TEXT DEFAULT '',
+    catalog_json TEXT NOT NULL DEFAULT '[]',
+    source TEXT DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 

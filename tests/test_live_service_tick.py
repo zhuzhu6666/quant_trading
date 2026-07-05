@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 
 from backend.services import live_service
 from backend.services import config_service
+from alpha.registry import factor_registry
+from alpha.registry_adapter import RegistryAdapter
 from config import runtime_config as rc
 
 
@@ -74,6 +76,55 @@ def test_resolve_position_api_volume_prefers_refreshed_position():
     refreshed = [{"position_id": 12345, "volume": 130.0}]
     vol = live_service._resolve_position_api_volume(12345, refreshed, 100.0)
     assert vol == 130.0
+
+
+def test_merge_portfolio_configs_includes_active_discovered_factor(monkeypatch):
+    discovered = "_test_live_discovered_factor"
+    shadow = "_test_live_shadow_factor"
+
+    def _one(df):
+        import numpy as np
+
+        return np.full(len(df), 1.0)
+
+    factor_registry._factors[discovered] = _one
+    factor_registry._factors[shadow] = _one
+
+    class _Adapter:
+        def __init__(self):
+            self._meta = {
+                discovered: {"source": "discovered"},
+                shadow: {"source": "shadow"},
+            }
+
+        def list_by_source(self, source):
+            return [name for name, meta in self._meta.items() if meta["source"] == source]
+
+        def dead_names(self):
+            return []
+
+        def get_meta(self, name):
+            return dict(self._meta.get(name, {"source": "builtin"}))
+
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+
+    try:
+        merged = live_service._merge_portfolio_configs(
+            {"rsi_14": {"mode": "zscore_tanh", "tags": ["技术"]}},
+            {"rsi_14": 1.0},
+            0.7,
+            0.3,
+        )
+    finally:
+        factor_registry._factors.pop(discovered, None)
+        factor_registry._factors.pop(shadow, None)
+
+    assert discovered in merged
+    assert shadow not in merged
+    assert merged[discovered]["weight"] == 0.3
+    assert merged[discovered]["source"] == "discovered"
+    assert merged[discovered]["tags"] == ["GP发现"]
+    assert merged[discovered]["role"] == "alpha"
 
 
 def test_entry_quality_learning_gate_interprets_factor_context_before_risk():

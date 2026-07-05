@@ -1,6 +1,8 @@
 # Workspace Rules
 
-> Last updated: 2026-07-01
+> Status: active
+> Last updated: 2026-07-06
+> Scope: workspace collaboration rules and backend/frontend ownership boundaries.
 
 这个仓库从现在开始按下面的规则协作：
 
@@ -9,7 +11,7 @@
 本地默认只做这些内容：
 
 - `miniprogram_v2`
-- `web_frontend`（新 Web 操作台，规划/开发中）
+- `web_frontend`
 - 小程序页面、交互、展示
 - Web 前端页面、交互、展示
 - 微信开发者工具验证
@@ -57,7 +59,7 @@
 - 本地 Windows 和 Linux 服务器统一使用 `main` 分支。
 - 本地 Windows 已启用 sparse checkout，默认只保留：
   - `miniprogram_v2/`
-  - `web_frontend/`（建立后纳入）
+  - `web_frontend/`
   - `docs/`
   - `AGENTS.md`
   - `README.md`
@@ -106,10 +108,10 @@
 - 不再按 `web-view` / nginx 静态 H5 / `lightweight-charts` 方案理解。
 - 当前小程序没有 `web-view` 业务域名配置权限，因此不要再要求配置 `www.zhuzhu666.icu` 为 web-view 业务域名。
 
-## 3.4 Web 前端升级约定
+## 3.4 Web 前端约定
 
-- 新 Web 前端用于接替小程序的完整操作台能力，目录约定为 `web_frontend/`。
-- 小程序最终只保留简洁状态界面；复杂图表、交易明细、风控、学习治理、因子治理、运维调试放到 Web 端。
+- Web 前端承接完整操作台能力，目录为 `web_frontend/`。
+- 小程序只保留简洁状态界面；复杂图表、交易明细、风控、学习治理、因子治理、运维调试放到 Web 端。
 - 当前公网入口由服务器 Caddy 承接：
   - `https://www.zhuzhu666.icu`
   - Caddy 反代到本机 `127.0.0.1:8000`
@@ -124,9 +126,21 @@
   -> 最后重启验证
 ```
 
-## 5. 详细规则
+## 5. 系统级改动前的文档治理
+
+涉及后端、交易、风控、因子、学习、自主治理、RuntimeConfig、数据库或 API contract 的改动，默认先按下面顺序确认影响面：
+
+1. 先看 [docs/system-source-of-truth.md](docs/system-source-of-truth.md)，确认当前事实源和权力边界。
+2. 再看 [docs/legacy-debt-register.md](docs/legacy-debt-register.md)，确认有没有历史残留或废弃口径。
+3. 再按 [docs/change-impact-checklist.md](docs/change-impact-checklist.md) 扫 live、shadow、learning、readiness、frontend contract 和回滚影响。
+4. 改动完成后，如果事实源、链路、契约或旧债状态变化，同步更新对应文档。
+
+历史 planning 文档和旧代码注释只能作为背景，不能单独作为实现依据。
+
+## 6. 详细规则
 
 完整说明见：
 
+- [docs/documentation-governance.md](docs/documentation-governance.md)
 - [docs/development-workflow.md](docs/development-workflow.md)
 - [docs/server-backend-sop.md](docs/server-backend-sop.md)

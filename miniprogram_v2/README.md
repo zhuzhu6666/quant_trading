@@ -1,5 +1,9 @@
 # Quant Agent Mini Program V2
 
+> Status: active
+> Last verified: 2026-07-06
+> Scope: lightweight mobile status surface.
+
 This mini-program is now the lightweight mobile status surface for the trading system.
 The full console has moved to the Web frontend at:
 

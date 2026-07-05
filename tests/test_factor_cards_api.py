@@ -322,6 +322,53 @@ def test_learning_factor_cards_endpoint_returns_filtered_items(tmp_path, monkeyp
     assert result["items"][0]["governance_state"]["application_effect_status"] == "observing"
 
 
+def test_factor_card_surfaces_catalog_governance_shadow_evidence(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE factor_governance_shadow_audit (
+                inference_id TEXT PRIMARY KEY,
+                model_type TEXT NOT NULL,
+                model_version TEXT DEFAULT '',
+                artifact_path TEXT DEFAULT '',
+                review_id TEXT DEFAULT '',
+                trade_id TEXT DEFAULT '',
+                position_id TEXT DEFAULT '',
+                factor TEXT DEFAULT '',
+                mode TEXT DEFAULT 'shadow',
+                positive_score REAL DEFAULT 0.0,
+                weakness_score REAL DEFAULT 0.0,
+                prediction INTEGER DEFAULT 0,
+                payload_json TEXT DEFAULT '{}',
+                result_json TEXT DEFAULT '{}',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_governance_shadow_audit
+            (inference_id, model_type, model_version, factor, mode,
+             positive_score, weakness_score, prediction, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("fg_card_1", "factor_governance_lightgbm", "1.0", "rsi_14", "shadow", 0.1, 0.82, 0, 2_000_000.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    card = FactorCardService(db_path).list_cards(factor_id="rsi_14", limit=5)[0]
+
+    assert card["role"] == "alpha"
+    assert card["evidence_summary"]["model_weakness_score"] == 0.82
+    assert card["evidence_summary"]["factor_governance_shadow"]["latest_inference_id"] == "fg_card_1"
+
+
 def test_parameter_template_service_derives_default_and_regime_aware_variants(tmp_path):
     db_path = str(tmp_path / "state.db")
     reset_shared()

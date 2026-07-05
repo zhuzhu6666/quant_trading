@@ -1,5 +1,9 @@
 # 多品种独立 Pipeline 设计文档
 
+> Status: draft
+> Last verified: 2026-07-06
+> Scope: future multi-symbol architecture notes; not current live behavior.
+
 ## 现状
 
 当前系统硬编码 `XAUUSD+` M5 为唯一交易品种:

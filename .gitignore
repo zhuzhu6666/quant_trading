@@ -60,6 +60,10 @@ data/migration_backups/
 tick_vault_data/
 state.db
 runtime/
+!backend/runtime/
+!backend/runtime/factor_governance_orchestrator.py
+!tests/backend/runtime/
+!tests/backend/runtime/test_factor_governance_orchestrator.py
 sync_local_*.patch
 settings.yaml
 /live_service.py

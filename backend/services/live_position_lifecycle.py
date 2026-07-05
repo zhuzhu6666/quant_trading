@@ -496,13 +496,14 @@ def build_bar_context_snapshot(bar: dict[str, Any] | None) -> dict[str, Any]:
 def build_decision_quality_context(composite: Any) -> dict[str, Any]:
     signals = getattr(composite, "factor_signals", {}) or {}
     weights = getattr(composite, "active_weights", {}) or {}
+    roles = getattr(composite, "factor_roles", {}) or {}
     contributions = []
     for factor, signal in signals.items():
         if signal is None:
             continue
         weight = float(weights.get(factor, 0.0) or 0.0)
         contribution = float(signal or 0.0) * weight
-        contributions.append((str(factor), contribution, float(signal or 0.0), weight))
+        contributions.append((str(factor), contribution, float(signal or 0.0), weight, str(roles.get(factor) or "alpha")))
     top_abs = sorted(contributions, key=lambda item: abs(item[1]), reverse=True)[:8]
     pos_abs = sum(abs(item[1]) for item in contributions if item[1] > 0)
     neg_abs = sum(abs(item[1]) for item in contributions if item[1] < 0)
@@ -510,16 +511,25 @@ def build_decision_quality_context(composite: Any) -> dict[str, Any]:
     return {
         "schema_version": "decision_quality_context.v1",
         "score": float(getattr(composite, "score", 0.0) or 0.0),
+        "composer_version": str(getattr(composite, "composer_version", "") or ""),
+        "alpha_score": float(getattr(composite, "alpha_score", getattr(composite, "score", 0.0)) or 0.0),
         "tactical_score": float(getattr(composite, "tactical_score", 0.0) or 0.0),
         "macro_score": float(getattr(composite, "macro_score", 0.0) or 0.0),
         "n_active_factors": int(getattr(composite, "n_active_factors", 0) or 0),
+        "n_active_alpha_factors": int(getattr(composite, "n_active_alpha_factors", 0) or 0),
+        "effective_alpha_factor_count": int(getattr(composite, "effective_alpha_factor_count", getattr(composite, "n_active_alpha_factors", 0)) or 0),
         "n_abstain_factors": int(getattr(composite, "n_abstain_factors", 0) or 0),
+        "factor_roles": dict(roles or {}),
+        "context_signals": dict(getattr(composite, "context_signals", {}) or {}),
+        "context_state": dict(getattr(composite, "context_state", {}) or {}),
+        "context_policy": dict(getattr(composite, "context_policy", {}) or {}),
+        "redundancy_groups": dict(getattr(composite, "redundancy_groups", {}) or {}),
         "positive_contribution_abs": pos_abs,
         "negative_contribution_abs": neg_abs,
         "factor_conflict_ratio": min(pos_abs, neg_abs) / total_abs if total_abs > 0 else 0.0,
         "top_contributors": [
-            {"factor": factor, "contribution_score": contribution, "signal": signal, "weight": weight}
-            for factor, contribution, signal, weight in top_abs
+            {"factor": factor, "contribution_score": contribution, "signal": signal, "weight": weight, "role": role}
+            for factor, contribution, signal, weight, role in top_abs
         ],
     }
 
@@ -868,7 +878,14 @@ def build_trade_attribution_payload_from_composite(
     composite: Any,
 ) -> dict[str, Any]:
     factor_signals = dict(getattr(composite, "factor_signals", {}) or {})
-    total_signal_abs = sum(abs(float(signal or 0.0)) for signal in factor_signals.values())
+    factor_roles = dict(getattr(composite, "factor_roles", {}) or {})
+    active_weights = dict(getattr(composite, "active_weights", {}) or {})
+    total_signal_abs = sum(
+        abs(float(signal or 0.0))
+        for factor, signal in factor_signals.items()
+        if str(factor_roles.get(factor) or "alpha") == "alpha"
+        and abs(float(active_weights.get(factor, 0.0) or 0.0)) > 0
+    )
     return {
         "position_id": int(position_id),
         "open_ts": float(open_ts),
@@ -876,8 +893,11 @@ def build_trade_attribution_payload_from_composite(
         "direction": int(direction),
         "factor_signals": factor_signals,
         "factor_values": dict(getattr(composite, "factor_values", {}) or {}),
-        "active_weights": dict(getattr(composite, "active_weights", {}) or {}),
+        "active_weights": active_weights,
+        "factor_roles": factor_roles,
+        "context_signals": dict(getattr(composite, "context_signals", {}) or {}),
         "composite_score": float(getattr(composite, "score", 0.0) or 0.0),
+        "alpha_score": float(getattr(composite, "alpha_score", getattr(composite, "score", 0.0)) or 0.0),
         "tactical_score": float(getattr(composite, "tactical_score", 0.0) or 0.0),
         "macro_score": float(getattr(composite, "macro_score", 0.0) or 0.0),
         "tags_breakdown": dict(getattr(composite, "tags_breakdown", {}) or {}),

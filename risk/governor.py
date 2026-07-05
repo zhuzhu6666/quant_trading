@@ -238,6 +238,36 @@ class RiskGovernor:
 
         return GovernorVerdict(True, "ok")
 
+    def allow_template_switch(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许在线参数模板切换吗?"""
+        if self._overrides.get("force_template_switch_freeze"):
+            return GovernorVerdict(False, "force_template_switch_freeze")
+        return self.allow_weight_update(state)
+
+    def allow_factor_disable(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许禁用 live 因子吗?"""
+        if self._overrides.get("force_factor_disable_freeze"):
+            return GovernorVerdict(False, "force_factor_disable_freeze")
+        return GovernorVerdict(True, "ok")
+
+    def allow_factor_retire(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许退役因子吗?"""
+        if self._overrides.get("force_factor_retire_freeze"):
+            return GovernorVerdict(False, "force_factor_retire_freeze")
+        return GovernorVerdict(True, "ok")
+
+    def allow_factor_rollback(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许回滚自治因子动作吗?"""
+        if self._overrides.get("force_factor_rollback_freeze"):
+            return GovernorVerdict(False, "force_factor_rollback_freeze")
+        return GovernorVerdict(True, "ok")
+
+    def allow_context_policy(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许启用/调整 context 策略吗?"""
+        if self._overrides.get("force_context_policy_freeze"):
+            return GovernorVerdict(False, "force_context_policy_freeze")
+        return GovernorVerdict(True, "ok")
+
     def allow_promotion(self, state: GovernorState | None = None) -> GovernorVerdict:
         """允许因子晋升吗?"""
         if self._overrides.get("force_promotion_freeze"):

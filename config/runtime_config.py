@@ -148,11 +148,11 @@ class RuntimeConfig:
         "rsi_14":         {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "均值回归"]},
         "di_spread":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "趋势"]},
         "stoch_k":        {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "动量"]},
-        "adx":            {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "趋势"]},
-        "atr_ratio":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "波动率"]},
+        "adx":            {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "趋势强度"]},
+        "atr_ratio":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "波动率"]},
         "ema_slope":       {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "tags": ["技术", "趋势"]},
         "supertrend_str":  {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "tags": ["技术", "趋势"]},
-        "keltner_width":   {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "波动率"]},
+        "keltner_width":   {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "波动率"]},
         "obv_slope":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["量价"]},
         "vol_ma_ratio":    {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["量价"]},
         "macd_hist":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "动量"]},
@@ -183,10 +183,11 @@ class RuntimeConfig:
         "engulfing":               {"mode": "discrete", "value_map": {"-1": -1.0, "0": 0.0, "1": 1.0},    "tags": ["形态", "反转"]},
         "pin_bar":                 {"mode": "discrete", "value_map": {"-1": -0.8, "0": 0.0, "1": 0.8},    "tags": ["形态", "反转"]},
         "inside_bar":              {"mode": "discrete", "value_map": {"0": 0.0, "1": -0.3},                "tags": ["形态", "整理"]},
-        "hour_utc":                {"mode": "discrete", "value_map": "hour_weights",                       "tags": ["日历", "时段"]},
-        "day_of_week":             {"mode": "discrete", "value_map": "day_weights",                       "tags": ["日历", "周内"]},
-        "hours_to_fomc":           {"mode": "discrete", "value_map": "fomc_weights",                      "tags": ["事件", "FOMC"]},
-        "hours_to_nfp":            {"mode": "discrete", "value_map": "nfp_weights",                       "tags": ["事件", "NFP"]},
+        "bb_width":                {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "波动率", "布林带"]},
+        "hour_utc":                {"mode": "discrete", "value_map": "hour_weights", "role": "context",   "tags": ["日历", "时段"]},
+        "day_of_week":             {"mode": "discrete", "value_map": "day_weights", "role": "context",    "tags": ["日历", "周内"]},
+        "hours_to_fomc":           {"mode": "discrete", "value_map": "fomc_weights", "role": "gate",      "tags": ["事件", "FOMC"]},
+        "hours_to_nfp":            {"mode": "discrete", "value_map": "nfp_weights", "role": "gate",       "tags": ["事件", "NFP"]},
     })
 
     # --- Portfolio Compositor 权重配置 ---
@@ -199,7 +200,7 @@ class RuntimeConfig:
         "ema_slope":       0.5,
         "supertrend_str":  0.8,
         "atr_ratio":      0.5,
-        "bb_width":       0.0,   # 只做过滤器
+        "bb_width":       0.0,   # context only; not a BB gate and not directional alpha
         "macd_hist":      0.5,   # 普通因子, 正常参与组合
         "keltner_width":   0.3,
         "obv_slope":       0.5,
@@ -230,7 +231,7 @@ class RuntimeConfig:
         "cot_pm_net":               0.4,
         "cot_extreme_signal":       1.5,
 
-        # 事件/日历（Macro Layer，低权重）
+        # 事件/日历（context/gate, 保留权重键用于兼容旧 API/AWE 读表）
         "hours_to_fomc":  0.3,
         "hours_to_nfp":   0.3,
         "hour_utc":       0.1,
@@ -240,7 +241,7 @@ class RuntimeConfig:
     # --- 组合参数 ---
     factor_tactical_alpha: float = 0.7      # 战术层权重
     factor_signal_threshold: float = 0.3    # 开仓信号阈值
-    filter_bb_enabled: bool = True
+    filter_bb_enabled: bool = False  # deprecated: bb_width is context, not a hard gate
 
     # --- 金字塔/仓位控制 ---
     pyramid_enabled: bool = True             # 金字塔加仓规则: 新信号需强于已有持仓才加仓
@@ -265,6 +266,27 @@ class RuntimeConfig:
     awe_resurrect_dsr_p: float = 0.05
     awe_resurrect_cooldown_days: int = 7
     awe_max_type_weight_pct: float = 0.40
+
+    # --- Factor Governance V3: 全自主自治 ---
+    factor_governance_enabled: bool = True
+    factor_governance_cron: str = "*/15 * * * *"
+    factor_governance_shadow_min_oos_bars: int = 100
+    factor_governance_shadow_min_valid: int = 80
+    factor_governance_shadow_min_hit_rate: float = 0.50
+    factor_governance_shadow_max_drawdown: float = 0.05
+    factor_governance_new_factor_weight: float = 0.30
+    factor_governance_max_promotions_per_cycle: int = 1
+    factor_governance_max_disables_per_cycle: int = 1
+    factor_governance_max_retires_per_cycle: int = 1
+    factor_governance_model_min_samples: int = 3
+    factor_governance_model_weakness_threshold: float = 0.65
+    factor_governance_model_disable_threshold: float = 0.85
+    factor_governance_rollback_min_trades: int = 3
+    factor_governance_rollback_delta_threshold: float = -0.15
+    factor_redundancy_min_samples: int = 200
+    factor_redundancy_corr_threshold: float = 0.85
+    factor_redundancy_max_group_weight: float = 0.35
+    context_policy_enabled: bool = True
 
     # --- Phase 4: 执行算法配置 ---
     algo_enabled: bool = False               # 是否启用算法执行 (>0.05 API volume 自动拆单)

@@ -183,7 +183,12 @@ class BootstrapCI:
 
         def _spearman_ic(sig: np.ndarray, ret: np.ndarray) -> float:
             """Compute Spearman rank IC from paired arrays."""
-            return float(scipy_stats.spearmanr(sig, ret)[0])
+            if len(sig) < 2 or len(ret) < 2:
+                return 0.0
+            if float(np.ptp(sig)) < 1e-12 or float(np.ptp(ret)) < 1e-12:
+                return 0.0
+            ic = float(scipy_stats.spearmanr(sig, ret)[0])
+            return 0.0 if np.isnan(ic) else ic
 
         point_estimate = _spearman_ic(signal, forward_returns)
 

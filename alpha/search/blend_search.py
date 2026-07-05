@@ -12,6 +12,8 @@ from typing import Optional
 
 import numpy as np
 
+from alpha.ic_tracker import safe_corrcoef
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,7 +165,10 @@ class BlendSearch:
             if guess == "equal":
                 w0 = np.ones(n) / n
             else:
-                abs_ic = np.abs(np.corrcoef(factor_returns.T, target)[:n, n])
+                abs_ic = np.array([
+                    abs(safe_corrcoef(factor_returns[:, i], target, min_samples=30))
+                    for i in range(n)
+                ], dtype=float)
                 w0 = abs_ic / (abs_ic.sum() + 1e-10)
                 # Clamp to bounds
                 w0 = np.clip(w0, 0.0, max_single_weight)

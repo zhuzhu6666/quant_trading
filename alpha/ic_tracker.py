@@ -16,6 +16,26 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def safe_corrcoef(a: np.ndarray, b: np.ndarray, *, min_samples: int = 2) -> float:
+    """Pearson correlation with explicit guards for constant/non-finite series."""
+    left = np.asarray(a, dtype=np.float64).ravel()
+    right = np.asarray(b, dtype=np.float64).ravel()
+    n = min(len(left), len(right))
+    if n < min_samples:
+        return 0.0
+    left = left[:n]
+    right = right[:n]
+    mask = np.isfinite(left) & np.isfinite(right)
+    if int(mask.sum()) < min_samples:
+        return 0.0
+    left = left[mask]
+    right = right[mask]
+    if float(np.ptp(left)) < 1e-12 or float(np.ptp(right)) < 1e-12:
+        return 0.0
+    corr = float(np.corrcoef(left, right)[0, 1])
+    return corr if np.isfinite(corr) else 0.0
+
+
 class ICTracker:
     """
     滚动IC追踪器
@@ -75,7 +95,7 @@ class ICTracker:
         mask = ~(np.isnan(vals) | np.isnan(rets) | np.isinf(vals) | np.isinf(rets))
         if mask.sum() < 10:
             return 0.0
-        return float(np.corrcoef(vals[mask], rets[mask])[0, 1])
+        return safe_corrcoef(vals[mask], rets[mask], min_samples=10)
 
     def status(self, name: str) -> dict:
         """因子状态报告"""

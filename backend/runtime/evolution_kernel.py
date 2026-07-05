@@ -84,7 +84,7 @@ class EvolutionKernel:
     # ── Job 注册 ────────────────────────────────────────────────────
 
     def _register_jobs(self) -> None:
-        """注册演化相关的 cron jobs (evolution_hourly, awe_adapt, system_health).
+        """注册演化相关的 cron jobs (evolution_hourly, factor_governance, awe_adapt, system_health).
 
         注意: InProcessScheduler 是单例, 此处注册的 job 与
         live_service._start_live_scheduler 中的数据 job 共享同一调度器.
@@ -96,6 +96,16 @@ class EvolutionKernel:
         # 每小时: 完整自进化循环 (GP + OOS + Canary + 退役 + 权重)
         from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
         sched.add_job("evolution_hourly", "0 * * * *", scheduled_evolution_cycle)
+
+        # 15 分钟: 因子 V3 自治治理 (发现晋升、降权、禁用、退役、审计)
+        try:
+            from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
+            from config.runtime_config import shared as _runtime_shared
+
+            cron = str(getattr(_runtime_shared(), "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
+            sched.add_job("factor_governance_autonomous", cron, run_autonomous_factor_governance_cycle)
+        except Exception as e:
+            logger.warning("[EvolutionKernel] factor_governance registration failed: %s", e)
 
         # 30 分钟: AWE 权重自适应
         try:

@@ -62,27 +62,35 @@ async def lifespan(app: FastAPI):
     # Load RuntimeConfig from settings.yaml so live execution honors ctrader.send_orders.
     execution_semantics = None
     try:
-        from config.runtime_config import RuntimeConfig, replace as rc_replace
-        from backend.services.config_service import get_config
         from backend.services.execution_semantics import validate_execution_semantics
+        from backend.services.runtime_config_startup import (
+            load_yaml_runtime_config,
+            restore_runtime_config_on_startup,
+        )
 
-        config_payload = get_config()
-        if config_payload.get("parse_error"):
-            raise ValueError(f"settings_parse_error: {config_payload.get('parse_error')}")
-        yaml_cfg = config_payload["parsed"]
-        rc = RuntimeConfig.from_yaml(yaml_cfg)
+        rc, yaml_cfg = load_yaml_runtime_config()
         execution_semantics = validate_execution_semantics(yaml_cfg, rc)
-        rc_replace(rc)
         try:
-            from backend.services.evolution_ledger import persist_runtime_config_snapshot
-
-            persist_runtime_config_snapshot(rc, source="backend_lifespan_startup")
-        except Exception as snap_exc:
+            startup_restore = restore_runtime_config_on_startup(
+                rc,
+                snapshot_source="backend_lifespan_startup",
+            )
+            overlay_restore = startup_restore.get("overlay") or {}
+            rc = startup_restore["config"]
+            if overlay_restore.get("restored"):
+                _lg.info(
+                    "[lifespan] RuntimeConfig autonomous overlay restored hash=%s",
+                    overlay_restore.get("overlay_hash", ""),
+                )
+        except Exception as overlay_exc:
             if execution_semantics.effective_send_orders:
-                record_startup_issue("runtime_config_snapshot", "critical", str(snap_exc), blocking=True)
+                record_startup_issue("runtime_config_overlay", "critical", str(overlay_exc), blocking=True)
                 raise
-            record_startup_issue("runtime_config_snapshot", "degraded", str(snap_exc), blocking=False)
-            _lg.warning(f"[lifespan] RuntimeConfig snapshot failed (non-fatal): {snap_exc}")
+            record_startup_issue("runtime_config_overlay", "degraded", str(overlay_exc), blocking=False)
+            _lg.warning(f"[lifespan] RuntimeConfig autonomous overlay restore failed (non-fatal): {overlay_exc}")
+            from config import runtime_config as _runtime_config
+
+            _runtime_config.replace(rc)
         _lg.info("[lifespan] RuntimeConfig loaded from config/settings.yaml")
     except Exception as e:
         record_startup_issue("runtime_config", "critical", str(e), blocking=True)

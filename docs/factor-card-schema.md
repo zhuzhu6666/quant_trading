@@ -1,9 +1,10 @@
 # Factor Card Schema
 
-> Last updated: 2026-06-25
-> Scope: Phase E / E1 因子解释卡片标准化 contract。
+> Status: active
+> Last verified: 2026-07-06
+> Scope: factor card schema for governance, attribution, frontend display, and Catalog alignment.
 
-本文定义“因子解释卡片”的统一 schema。目标不是立刻把所有因子都补全，而是先固定后续治理、归因、前端展示和审批链共用的字段边界。
+本文定义“因子解释卡片”的统一 schema。目标是固定治理、归因、前端展示和 Factor Catalog 共用的字段边界。
 
 ---
 
@@ -240,12 +241,12 @@ factor card 就是这个统一对象。
 
 ---
 
-## 6. Phase E 后续依赖
+## 6. 当前依赖
 
 `factor_card.v1` 会直接服务后续三类工作：
 
-1. E2 参数模板系统
-2. E4 因子治理审批工作流
+1. 参数模板系统
+2. 因子自治治理与人工覆盖审计工作流
 3. 前端 / 运维的人话解释卡片
 
 后续如果 schema 变更，应通过 `schema_version` 升级，而不是静默改字段含义。

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import types
 from dataclasses import dataclass
 
 import numpy as np
@@ -75,6 +77,16 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
     rc.reset_for_tests()
     rc.patch({"awe_min_trades": 1, "factor_portfolio_weights": {"foo": 1.0, "bar": 2.0}})
 
+    class _MutationService:
+        def apply_patch(self, patch, **kwargs):
+            rc.patch(patch)
+            return {"ok": True, "status": "applied", "version": 1}
+
+    monkeypatch.setattr(
+        "backend.services.runtime_config_mutation.RuntimeConfigMutationService",
+        lambda: _MutationService(),
+    )
+
     monkeypatch.setattr(
         live_service,
         "_factor_pipeline",
@@ -84,6 +96,36 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
     live_service._scheduled_awe_adapt()
 
     assert rc.shared().factor_portfolio_weights == {"foo": 0.0, "bar": 2.0}
+
+
+def test_legacy_param_tune_no_longer_patches_runtime_config(monkeypatch):
+    rc.reset_for_tests()
+    rc.patch({"strategy_sl_atr": 1.5, "strategy_tp_atr": 2.5, "strategy_cooldown_bars": 3})
+
+    result = types.SimpleNamespace(
+        error=False,
+        n_trades=10,
+        sharpe=1.2,
+        params={
+            "strategy_rsi_period": 7,
+            "strategy_sl_atr": 3.0,
+            "strategy_tp_atr": 4.0,
+            "strategy_votes_needed": 2.0,
+            "strategy_cooldown_bars": 1,
+        },
+        net_pnl=12.3,
+        win_rate=55.0,
+    )
+    module = types.SimpleNamespace(run_single_backtest=lambda *args, **kwargs: result)
+    monkeypatch.setitem(sys.modules, "scripts.tune_strategy_params", module)
+    monkeypatch.setattr(live_service, "_save_param_tune_state", lambda: None)
+
+    live_service._scheduled_param_tune()
+
+    cfg = rc.shared()
+    assert cfg.strategy_sl_atr == 1.5
+    assert cfg.strategy_tp_atr == 2.5
+    assert cfg.strategy_cooldown_bars == 3
 
 
 def test_canary_intermediate_stage_does_not_execute_promotion(monkeypatch):
@@ -268,6 +310,8 @@ def test_collect_learning_suggestions_separates_proposed_and_approved(tmp_path, 
             ("a1", "foo", "downweight", 0.9, "proposed", 9_999_999_000),
             ("a2", "foo", "downweight", 0.8, "approved", 9_999_999_100),
             ("a3", "bar", "boost_small", 0.5, "approved", 9_999_999_200),
+            ("a4", "baz", "boost_small", 0.6, "auto_approved", 9_999_999_300),
+            ("a5", "baz", "downweight", 0.6, "pending_review", 9_999_999_400),
         ],
     )
     conn.commit()
@@ -279,8 +323,11 @@ def test_collect_learning_suggestions_separates_proposed_and_approved(tmp_path, 
     assert summary["foo"]["proposed"] == 1
     assert summary["foo"]["approved"] == 1
     assert summary["bar"]["approved"] == 1
+    assert summary["baz"]["proposed"] == 1
+    assert summary["baz"]["approved"] == 1
     assert biases["foo"]["multiplier"] < 1.0
     assert biases["bar"]["multiplier"] > 1.0
+    assert biases["baz"]["multiplier"] > 1.0
     assert biases["foo"]["suggestion_ids"] == ["a2"]
 
 

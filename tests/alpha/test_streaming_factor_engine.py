@@ -11,6 +11,7 @@ import pytest
 
 from alpha.streaming_factor_engine import StreamingFactorEngine
 from alpha.registry import factor_registry
+from alpha.registry_adapter import RegistryAdapter
 
 
 # ── 测试辅助 ──────────────────────────────────────────────
@@ -292,6 +293,193 @@ class TestRefreshFactorList:
             assert new_name in engine._available_factors
         finally:
             factor_registry._factors.pop(new_name, None)
+
+    def test_runtime_config_limits_calculated_factor_set(self):
+        """有 runtime config 时只计算配置中启用的因子。"""
+        engine = StreamingFactorEngine(
+            factor_runtime_config={
+                "rsi_14": {"enabled": True},
+                "adx": {"enabled": False},
+            }
+        )
+        assert engine._available_factors == ["rsi_14"]
+
+        result = {}
+        for bar in _make_bars(55):
+            result = engine.append_bar(bar)
+        assert set(result) == {"rsi_14"}
+
+    def test_disabled_external_factor_does_not_trigger_enrichment(self):
+        """禁用的外部因子不应让流式引擎进入外部数据对齐路径。"""
+
+        class _NoExternalBuilder:
+            @staticmethod
+            def enrich_bars(_bars):
+                raise AssertionError("external enrichment should not be called")
+
+        engine = StreamingFactorEngine(
+            factor_runtime_config={
+                "rsi_14": {"enabled": True},
+                "hours_to_nfp": {"enabled": False},
+            },
+            factor_frame_builder=_NoExternalBuilder(),
+        )
+
+        for bar in _make_bars(55):
+            result = engine.append_bar(bar)
+        assert set(result) == {"rsi_14"}
+
+    def test_runtime_config_update_prunes_stale_factor_cache(self):
+        """热更新减少因子集合时, 旧快照不能继续暴露给前端/账本。"""
+        engine = StreamingFactorEngine(
+            factor_runtime_config={
+                "rsi_14": {"enabled": True},
+                "macd_hist": {"enabled": True},
+            }
+        )
+        for bar in _make_bars(60):
+            result = engine.append_bar(bar)
+        assert set(result) == {"rsi_14", "macd_hist"}
+
+        engine.set_factor_runtime_config({"rsi_14": {"enabled": True}})
+        assert engine._available_factors == ["rsi_14"]
+        assert set(engine.get_snapshot()) <= {"rsi_14"}
+
+    def test_runtime_config_keeps_active_discovered_factor_in_main_path(self, monkeypatch):
+        """晋升为 discovered 的搜索因子应进入主因子计算链路。"""
+        discovered = "_test_discovered_factor"
+        shadow = "_test_shadow_factor"
+
+        def _one(df):
+            return np.full(len(df), 1.0)
+
+        factor_registry._factors[discovered] = _one
+        factor_registry._factors[shadow] = _one
+
+        class _Adapter:
+            def __init__(self):
+                self._meta = {
+                    discovered: {"source": "discovered"},
+                    shadow: {"source": "shadow"},
+                }
+
+            def list_by_source(self, source):
+                return [name for name, meta in self._meta.items() if meta["source"] == source]
+
+            def dead_names(self):
+                return []
+
+            def get_meta(self, name):
+                return dict(self._meta.get(name, {"source": "builtin"}))
+
+        monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+
+        try:
+            engine = StreamingFactorEngine(factor_runtime_config={"rsi_14": {"enabled": True}})
+            assert engine._available_factors == ["rsi_14", discovered]
+
+            result = {}
+            for bar in _make_bars(55):
+                result = engine.append_bar(bar)
+            assert set(result) == {"rsi_14", discovered}
+            assert shadow not in result
+        finally:
+            factor_registry._factors.pop(discovered, None)
+            factor_registry._factors.pop(shadow, None)
+
+    def test_runtime_config_can_disable_discovered_factor(self, monkeypatch):
+        """显式 enabled=False 应能关闭 discovered 因子。"""
+        discovered = "_test_disabled_discovered_factor"
+
+        def _one(df):
+            return np.full(len(df), 1.0)
+
+        factor_registry._factors[discovered] = _one
+
+        class _Adapter:
+            def list_by_source(self, source):
+                return [discovered] if source == "discovered" else []
+
+            def dead_names(self):
+                return []
+
+            def get_meta(self, name):
+                return {"source": "discovered"} if name == discovered else {"source": "builtin"}
+
+        monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+
+        try:
+            engine = StreamingFactorEngine(
+                factor_runtime_config={
+                    "rsi_14": {"enabled": True},
+                    discovered: {"enabled": False},
+                }
+            )
+            assert engine._available_factors == ["rsi_14"]
+        finally:
+            factor_registry._factors.pop(discovered, None)
+
+    def test_dead_discovered_factor_is_removed_from_runtime_selection(self, monkeypatch):
+        """DEAD 因子即使还残留在 runtime config 中也不能进入主链路。"""
+        dead = "_test_dead_discovered_factor"
+
+        def _one(df):
+            return np.full(len(df), 1.0)
+
+        factor_registry._factors[dead] = _one
+
+        class _Adapter:
+            def list_by_source(self, source):
+                return [dead] if source == "discovered" else []
+
+            def dead_names(self):
+                return [dead]
+
+            def get_meta(self, name):
+                return {"source": "discovered"} if name == dead else {"source": "builtin"}
+
+        monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+
+        try:
+            engine = StreamingFactorEngine(
+                factor_runtime_config={
+                    "rsi_14": {"enabled": True},
+                    dead: {"enabled": True},
+                }
+            )
+            assert engine._available_factors == ["rsi_14"]
+        finally:
+            factor_registry._factors.pop(dead, None)
+
+    def test_explicit_factor_ids_do_not_auto_include_discovered_factor(self, monkeypatch):
+        """研究/测试显式传 factor_ids 时保持精确集合。"""
+        discovered = "_test_explicit_ids_discovered_factor"
+
+        def _one(df):
+            return np.full(len(df), 1.0)
+
+        factor_registry._factors[discovered] = _one
+
+        class _Adapter:
+            def list_by_source(self, source):
+                return [discovered] if source == "discovered" else []
+
+            def dead_names(self):
+                return []
+
+            def get_meta(self, name):
+                return {"source": "discovered"} if name == discovered else {"source": "builtin"}
+
+        monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+
+        try:
+            engine = StreamingFactorEngine(
+                factor_runtime_config={"rsi_14": {"enabled": True}},
+                factor_ids=["rsi_14"],
+            )
+            assert engine._available_factors == ["rsi_14"]
+        finally:
+            factor_registry._factors.pop(discovered, None)
 
 
 class TestReset:

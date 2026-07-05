@@ -1,6 +1,10 @@
 # Web Frontend (React + Vite)
 
-用于替代旧小程序部分操作台能力的本地前端控制台。
+> Status: active
+> Last verified: 2026-07-06
+> Scope: full browser operator console.
+
+完整浏览器操作台，用于承接交易状态、PnL、风控、运维、学习治理和因子治理等复杂视图。小程序只保留轻量状态面。
 
 ## 启动方式
 

@@ -37,7 +37,7 @@ def make_dukascopy_tick_job(
     runner: Runner = subprocess.run,
     python_executable: str | None = None,
 ):
-    script = repo_root / "scripts" / "debug" / "_pull_dukascopy_incremental.py"
+    script = repo_root / "scripts" / "maintenance" / "pull_dukascopy_incremental.py"
 
     def _scheduled_dukascopy_tick():
         """运行 Dukascopy tick 增量拉取脚本."""

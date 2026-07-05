@@ -31,6 +31,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from alpha.portfolio_compositor import resolve_factor_role
+
 logger = logging.getLogger(__name__)
 
 # ── 默认配置 ────────────────────────────────────────────────────────
@@ -42,6 +44,7 @@ DEFAULT_REGIME_BOOST = 1.10        # Regime 匹配 → weight × 1.1
 DEFAULT_MIN_WEIGHT = 0.01
 DEFAULT_MAX_WEIGHT = 0.50
 DEFAULT_DIVERSITY_MAX_PCT = 0.40
+DEFAULT_REDUNDANCY_MAX_GROUP_WEIGHT = 0.35
 
 
 @dataclass
@@ -87,6 +90,7 @@ class DecisionPolicy:
         min_weight: float = DEFAULT_MIN_WEIGHT,
         max_weight: float = DEFAULT_MAX_WEIGHT,
         diversity_max_pct: float = DEFAULT_DIVERSITY_MAX_PCT,
+        redundancy_max_group_weight: float = DEFAULT_REDUNDANCY_MAX_GROUP_WEIGHT,
     ):
         self._awe_blend = awe_blend
         self._wp_blend = wp_blend
@@ -95,6 +99,7 @@ class DecisionPolicy:
         self._min_weight = min_weight
         self._max_weight = max_weight
         self._diversity_max_pct = diversity_max_pct
+        self._redundancy_max_group_weight = redundancy_max_group_weight
 
     # ── 主入口 ──────────────────────────────────────────────────────
 
@@ -135,6 +140,8 @@ class DecisionPolicy:
         decisions: dict[str, WeightDecision] = {}
 
         for factor in sorted(all_factors):
+            if not self._eligible_alpha(factor, factor_configs.get(factor, {})):
+                continue
             old_w = current_weights.get(factor, 0.0)
             awe_info = (awe_patches or {}).get(factor)
             wp_w = (weight_policy_weights or {}).get(factor)
@@ -185,6 +192,7 @@ class DecisionPolicy:
 
         # 8. 多样性约束 (委托 AWE 实现)
         decisions = self._enforce_diversity(decisions, factor_configs)
+        decisions = self._enforce_redundancy_cap(decisions, factor_configs)
 
         return decisions
 
@@ -203,6 +211,8 @@ class DecisionPolicy:
 
         # AWE patches (最快来源)
         for name, pinfo in (awe_patches or {}).items():
+            if not self._eligible_alpha(name, factor_configs.get(name, {})):
+                continue
             old_w = current_weights.get(name, 0.0)
             new_w = pinfo.get("weight", old_w)
             decisions[name] = WeightDecision(
@@ -218,6 +228,8 @@ class DecisionPolicy:
         for name, wp_w in (weight_policy_weights or {}).items():
             if name in decisions:
                 continue
+            if not self._eligible_alpha(name, factor_configs.get(name, {})):
+                continue
             old_w = current_weights.get(name, 0.0)
             if abs(wp_w - old_w) >= 0.005:
                 decisions[name] = WeightDecision(
@@ -232,10 +244,19 @@ class DecisionPolicy:
         # 多样性约束
         if decisions:
             decisions = self._enforce_diversity(decisions, factor_configs)
+            decisions = self._enforce_redundancy_cap(decisions, factor_configs)
 
         return decisions
 
     # ── 内部方法 ────────────────────────────────────────────────────
+
+    def _eligible_alpha(self, factor: str, factor_cfg: dict[str, Any] | None) -> bool:
+        cfg = factor_cfg if isinstance(factor_cfg, dict) else {}
+        if cfg.get("enabled") is False:
+            return False
+        if str(cfg.get("lifecycle_status") or "").upper() == "DEAD":
+            return False
+        return resolve_factor_role(factor, cfg) == "alpha"
 
     def _blend(
         self,
@@ -369,6 +390,8 @@ class DecisionPolicy:
         # 对首超限类型进行压降
         for tag, pct in over_limit_types.items():
             non_tag_weight = total_weight - type_weights[tag]
+            if non_tag_weight <= 0:
+                continue
             target_type_weight = max_pct * non_tag_weight / (1.0 - max_pct)
             scale = target_type_weight / type_weights[tag] if type_weights[tag] > 0 else 1.0
 
@@ -380,6 +403,38 @@ class DecisionPolicy:
                     decisions[name].reason += f" | diversity({tag}): {pct:.0%}>{max_pct:.0%}"
                     decisions[name].source_scores["diversity"] = scale
 
+        return decisions
+
+    def _enforce_redundancy_cap(
+        self,
+        decisions: dict[str, WeightDecision],
+        factor_configs: dict[str, dict],
+    ) -> dict[str, WeightDecision]:
+        """Cap total weight inside explicitly declared redundancy groups."""
+        cap = float(self._redundancy_max_group_weight)
+        if cap <= 0:
+            return decisions
+
+        groups: dict[str, list[str]] = {}
+        for name in decisions:
+            cfg = factor_configs.get(name, {})
+            if not isinstance(cfg, dict):
+                continue
+            group = str(cfg.get("redundancy_group") or "").strip()
+            if group:
+                groups.setdefault(group, []).append(name)
+
+        for group, names in groups.items():
+            total = sum(max(0.0, decisions[name].new_weight) for name in names)
+            if total <= cap or total <= 0:
+                continue
+            scale = cap / total
+            for name in names:
+                old_w = decisions[name].new_weight
+                new_w = max(0.0, old_w * scale)
+                decisions[name].new_weight = round(new_w, 4)
+                decisions[name].reason += f" | redundancy({group}): {total:.3f}>{cap:.3f}"
+                decisions[name].source_scores["redundancy_cap"] = scale
         return decisions
 
     def _build_reason(

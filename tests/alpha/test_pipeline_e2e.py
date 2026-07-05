@@ -69,26 +69,26 @@ FACTOR_SIGNAL_CONFIG = {
     "rsi_14":         {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["tech", "meanrev"]},
     "di_spread":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["tech", "trend"]},
     "stoch_k":        {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["tech", "momentum"]},
-    "adx":            {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["tech", "trend"]},
-    "atr_ratio":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["tech", "volatility"]},
+    "adx":            {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["tech", "trend_strength"]},
+    "atr_ratio":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["tech", "volatility"]},
     "ema_slope":      {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "tags": ["tech", "trend"]},
-    "bb_width":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["tech", "volatility"]},
+    "bb_width":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["tech", "volatility"]},
     "macd_hist":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["tech", "momentum"]},
     "obv_slope":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["volume"]},
-    "day_of_week":    {"mode": "discrete", "value_map": "day_weights", "tags": ["calendar"]},
+    "day_of_week":    {"mode": "discrete", "value_map": "day_weights", "role": "context", "tags": ["calendar"]},
 }
 
 FACTOR_PORTFOLIO_CONFIG = {
     "rsi_14":         {"weight": 1.0, "tags": ["tech", "meanrev"], "enabled": True},
     "di_spread":      {"weight": 1.5, "tags": ["tech", "trend"], "enabled": True},
     "stoch_k":        {"weight": 0.8, "tags": ["tech", "momentum"], "enabled": True},
-    "adx":            {"weight": 0.6, "tags": ["tech", "trend"], "enabled": True},
-    "atr_ratio":      {"weight": 0.5, "tags": ["tech", "volatility"], "enabled": True},
+    "adx":            {"weight": 0.6, "role": "context", "tags": ["tech", "trend_strength"], "enabled": True},
+    "atr_ratio":      {"weight": 0.5, "role": "context", "tags": ["tech", "volatility"], "enabled": True},
     "ema_slope":      {"weight": 1.2, "tags": ["tech", "trend"], "enabled": True},
-    "bb_width":       {"weight": 0.4, "tags": ["tech", "volatility"], "enabled": True},
+    "bb_width":       {"weight": 0.4, "role": "context", "tags": ["tech", "volatility"], "enabled": True},
     "macd_hist":      {"weight": 1.0, "tags": ["tech", "momentum"], "enabled": True},
     "obv_slope":      {"weight": 0.7, "tags": ["volume"], "enabled": True},
-    "day_of_week":    {"weight": 0.3, "tags": ["calendar"], "enabled": True},
+    "day_of_week":    {"weight": 0.3, "role": "context", "tags": ["calendar"], "enabled": True},
 }
 
 AWE_CONFIG = {
@@ -115,7 +115,12 @@ def _warm_sfe_and_normalizer(bars, signal_config):
     so its z-score buffers build variance.  This helper does a single
     pass: for each bar, append to SFE then normalize current snapshot.
     """
-    sfe = StreamingFactorEngine(max_buffer=200)
+    factor_ids = list(signal_config)
+    sfe = StreamingFactorEngine(
+        max_buffer=200,
+        factor_runtime_config=signal_config,
+        factor_ids=factor_ids,
+    )
     normalizer = SignalNormalizer(signal_config)
     for bar in bars:
         sfe.append_bar(bar)
@@ -139,7 +144,7 @@ def test_pipeline_data_contracts():
     # ── Stage 1+2: SFE + SignalNormalizer ──
     sfe, normalizer, snapshot, signals = _warm_sfe_and_normalizer(bars, FACTOR_SIGNAL_CONFIG)
     assert sfe.is_warm, "SFE should be warm after 50+ bars"
-    assert len(snapshot) >= 39, f"Expected >=39 factors, got {len(snapshot)}"
+    assert set(snapshot) == set(FACTOR_SIGNAL_CONFIG)
     non_none = {k: v for k, v in snapshot.items() if v is not None}
     assert len(non_none) > 5, f"Expected >5 non-None factors, got {len(non_none)}"
 

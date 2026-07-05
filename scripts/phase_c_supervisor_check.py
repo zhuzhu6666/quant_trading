@@ -2,7 +2,7 @@
 
 Usage:
   python scripts/phase_c_supervisor_check.py
-  python scripts/phase_c_supervisor_check.py --db data/state.db --limit 20
+  python scripts/phase_c_supervisor_check.py --limit 20
   python scripts/phase_c_supervisor_check.py --api-base https://www.zhuzhu666.icu --username zhu --password ****
   python scripts/phase_c_supervisor_check.py --direct-broker
 """

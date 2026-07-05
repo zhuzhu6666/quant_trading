@@ -671,24 +671,36 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
         if _CANARY_DB is not None:
             conn = connect_sqlite(_CANARY_DB, read_only=True)
             conn.row_factory = __import__("sqlite3").Row
+            cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(policy_suggestion)").fetchall()}
+            reason_expr = "reason" if "reason" in cols else "'' AS reason"
+            evidence_expr = "evidence_json" if "evidence_json" in cols else "'{}' AS evidence_json"
+            review_expr = "review_note" if "review_note" in cols else "'' AS review_note"
             rows = conn.execute(
-                """
-                SELECT suggestion_id, scope_key, action, confidence, status, created_at
+                f"""
+                SELECT suggestion_id, scope_key, action, confidence, status,
+                       {reason_expr}, {evidence_expr}, {review_expr}, created_at
                 FROM policy_suggestion
                 WHERE scope_type='factor' AND created_at>=?
-                  AND status IN ('proposed', 'approved')
+                  AND status IN ('proposed', 'pending_review', 'approved', 'auto_approved', 'applied')
                 ORDER BY created_at DESC
                 """,
                 (cutoff,),
             ).fetchall()
         else:
             conn = _state_conn(read_only=True)
+            from backend.core.db import state_table_columns
+
+            cols = set(state_table_columns(conn, "policy_suggestion"))
+            reason_expr = "reason" if "reason" in cols else "'' AS reason"
+            evidence_expr = "evidence_json" if "evidence_json" in cols else "'{}' AS evidence_json"
+            review_expr = "review_note" if "review_note" in cols else "'' AS review_note"
             rows = conn.execute(
-                """
-                SELECT suggestion_id, scope_key, action, confidence, status, created_at
+                f"""
+                SELECT suggestion_id, scope_key, action, confidence, status,
+                       {reason_expr}, {evidence_expr}, {review_expr}, created_at
                 FROM policy_suggestion
                 WHERE scope_type='factor' AND created_at>=%s
-                  AND status IN ('proposed', 'approved')
+                  AND status IN ('proposed', 'pending_review', 'approved', 'auto_approved', 'applied')
                 ORDER BY created_at DESC
                 """,
                 (cutoff,),
@@ -701,12 +713,15 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
                 continue
             action = str(row["action"] or "watch")
             confidence = float(row["confidence"] or 0.0)
-            status = str(row["status"] or "proposed")
+            from backend.services.policy_suggestion_status import normalize_policy_suggestion_status
+
+            status = normalize_policy_suggestion_status(dict(row))
+            approved_like = status in {"auto_approved", "applied", "legacy_approved"}
             item = summary.setdefault(
                 factor,
                 {"proposed": 0, "approved": 0, "latest_action": action, "latest_confidence": confidence},
             )
-            if status == "approved":
+            if approved_like:
                 item["approved"] += 1
             else:
                 item["proposed"] += 1
@@ -714,7 +729,7 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
             if item["latest_action"] == action and item["latest_confidence"] == confidence:
                 pass
 
-            if status != "approved":
+            if not approved_like:
                 continue
             if action not in {"downweight", "boost_small"}:
                 continue

@@ -128,3 +128,26 @@ class TestFilter:
         result = g.filter(composite, {}, bar)
         assert result.passed is False
         assert "nfp" in result.reason
+
+    def test_nfp_factor_bucket_overrides_calendar_fallback(self):
+        """有点时事件因子时, 不让旧首周五日历覆盖真实事件窗口。"""
+        config = {**GATE_CONFIG, "strategy_enable_nfp_skip": True}
+        g = ExecutionGate(config)
+        composite = _make_composite(direction=1, score=0.6)
+        from datetime import datetime
+        bar = _make_bar()
+        bar["time"] = datetime(2026, 6, 5, 12, 0).timestamp()
+        result = g.filter(composite, {"hours_to_nfp": 24.0}, bar)
+        assert result.passed is True
+
+    def test_nfp_factor_bucket_can_skip_shifted_event_window(self):
+        """真实事件窗口不在首周五兜底日期时, 因子桶仍能触发 skip。"""
+        config = {**GATE_CONFIG, "strategy_enable_nfp_skip": True}
+        g = ExecutionGate(config)
+        composite = _make_composite(direction=1, score=0.6)
+        from datetime import datetime
+        bar = _make_bar()
+        bar["time"] = datetime(2026, 6, 4, 12, 0).timestamp()
+        result = g.filter(composite, {"hours_to_nfp": 0.0}, bar)
+        assert result.passed is False
+        assert result.reason == "nfp_skip:event_bucket"

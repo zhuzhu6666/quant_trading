@@ -23,7 +23,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from alpha.ic_tracker import ICTracker
+from alpha.ic_tracker import ICTracker, safe_corrcoef
 
 logger = logging.getLogger(__name__)
 
@@ -236,9 +236,8 @@ class FactorHealth:
                         continue
                     # 对齐长度, 算 Pearson 相关
                     min_len = min(len(my_vals), len(other_vals))
-                    corr_mat = np.corrcoef(my_vals[:min_len], other_vals[:min_len])
-                    corr = abs(corr_mat[0, 1])
-                    if not np.isnan(corr):
+                    corr = abs(safe_corrcoef(my_vals[:min_len], other_vals[:min_len]))
+                    if np.isfinite(corr):
                         other_corrs.append(corr)
                 if other_corrs:
                     avg_corr = float(np.mean(other_corrs))
@@ -289,7 +288,7 @@ class FactorHealth:
             if len(sub_v) < 10:
                 continue
             try:
-                ic = float(np.corrcoef(sub_v, sub_r)[0, 1])
+                ic = safe_corrcoef(sub_v, sub_r, min_samples=10)
                 if np.isfinite(ic):
                     ics.append(ic)
             except Exception:

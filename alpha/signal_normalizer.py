@@ -17,31 +17,31 @@ from typing import Any
 
 import numpy as np
 
+from alpha.factor_cadence import infer_factor_cadence
+
 logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════
-# 黄金时段权重 (hour_utc)
+# 时段上下文强度 (hour_utc). These values are not directional votes.
 # ═══════════════════════════════════════════════════════════
 HOUR_WEIGHTS: dict[range, float] = {
-    range(14, 21): 0.0,   # 亚洲盘 → 中性
-    range(0, 4):   0.3,   # 伦敦开盘 → 轻微看多（流动性注入）
-    range(8, 13):  0.5,   # 纽约盘上午 → 信号放大
-    range(13, 15): 0.0,   # 午间低谷 → 中性
-    range(15, 18): 0.3,   # 纽约收盘 → 轻微
-    range(19, 24): 0.0,   # 低流动性 → 中性
+    range(0, 7):   0.1,   # Asia: lower activity context
+    range(7, 13):  0.5,   # Europe: active liquidity context
+    range(13, 21): 0.7,   # US: highest activity context
+    range(21, 24): 0.0,   # Rollover: low activity context
 }
 
 
 # ═══════════════════════════════════════════════════════════
-# 周内效应权重 (day_of_week: 0=Mon ... 4=Fri)
+# 周内上下文强度 (day_of_week: 0=Mon ... 4=Fri). Not directional.
 # ═══════════════════════════════════════════════════════════
 DAY_WEIGHTS: dict[int, float] = {
     0: 0.0,    # Mon: 中性
     1: 0.0,    # Tue: 中性
-    2: 0.1,    # Wed: 轻微正向（FOMC 常在周三）
-    3: -0.1,   # Thu: 反转日
-    4: -0.2,   # Fri: 周末平仓效应
+    2: 0.1,    # Wed: event/calendar context
+    3: 0.1,    # Thu: event/calendar context
+    4: 0.2,    # Fri: weekend liquidity context
 }
 
 
@@ -84,9 +84,18 @@ def _normalize_rank(
     """
     if len(history) < min_samples:
         return None
-    arr = np.array(list(history)[-window:])
-    # 百分位排名
-    rank = np.searchsorted(np.sort(arr), value) / len(arr)
+    arr = np.array(list(history)[-window:], dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) < min_samples:
+        return None
+    if not math.isfinite(float(value)):
+        return None
+    if arr.std() < 1e-10:
+        return 0.0
+    # 百分位排名。ties 用平均秩，避免常数/重复值被 searchsorted 映射成极端信号。
+    less = float(np.sum(arr < value))
+    equal = float(np.sum(arr == value))
+    rank = (less + 0.5 * equal) / len(arr)
     signal = 2.0 * rank - 1.0  # [0, 1] → [-1, +1]
     return float(np.clip(signal * direction, -1.0, 1.0))
 
@@ -134,11 +143,11 @@ def _resolve_value_map_ref(ref: str) -> dict:
         for d, w in DAY_WEIGHTS.items():
             result[str(d)] = w
     elif ref == "fomc_weights":
-        # FOMC 前后: 24h 前轻微看多, 48h 后回归中性
-        result = {"-48": 0.0, "-24": 0.2, "0": 0.3, "24": 0.1, "48": 0.0}
+        # Event proximity intensity; direction is handled by alpha factors.
+        result = {"-48": 0.0, "-24": 0.5, "0": 1.0, "24": 0.5, "48": 0.0}
     elif ref == "nfp_weights":
-        # NFP 前后: 24h 前不开仓, 24h 后中性
-        result = {"-24": 0.0, "0": 0.0, "24": 0.1}
+        # Event proximity intensity; gate/sizing decide how to use it.
+        result = {"-24": 0.5, "0": 1.0, "24": 0.5}
     _VALUE_MAP_REFS[ref] = result
     return result
 
@@ -161,6 +170,7 @@ class SignalNormalizer:
     def __init__(self, config: dict[str, dict]):
         self._configs: dict[str, dict] = config or {}
         self._histories: dict[str, deque[float]] = {}
+        self._last_history_values: dict[str, float] = {}
 
     def normalize(
         self, factor_values: dict[str, float | None]
@@ -187,11 +197,10 @@ class SignalNormalizer:
                 cfg = self._default_gp_config(name)
                 self._configs[name] = cfg
 
-            # 更新历史窗口
-            if name not in self._histories:
-                maxlen = cfg.get("window", 100)
-                self._histories[name] = deque(maxlen=maxlen)
-            self._histories[name].append(raw_value)
+            # 更新历史窗口。低频因子只在值变化时采样，避免 M5/M15 重复值污染 rank/zscore。
+            self._ensure_history(name, cfg)
+            if self._should_sample_history(name, raw_value, cfg):
+                self._histories[name].append(float(raw_value))
 
             # 按模式归一化
             mode = cfg.get("mode", "rank_mapping")
@@ -237,12 +246,34 @@ class SignalNormalizer:
                     continue
                 if name not in self._histories:
                     cfg = self._configs.get(name) or self._default_gp_config(name)
-                    maxlen = cfg.get("window", 100)
-                    self._histories[name] = deque(maxlen=maxlen)
-                self._histories[name].append(value)
+                    self._ensure_history(name, cfg)
+                else:
+                    cfg = self._configs.get(name) or self._default_gp_config(name)
+                if self._should_sample_history(name, value, cfg):
+                    self._histories[name].append(float(value))
 
     def update_configs(self, config: dict[str, dict] | None) -> None:
         self._configs = dict(config or {})
+
+    def _ensure_history(self, name: str, cfg: dict) -> None:
+        if name not in self._histories:
+            maxlen = cfg.get("window", 100)
+            self._histories[name] = deque(maxlen=maxlen)
+
+    def _should_sample_history(self, name: str, raw_value: float, cfg: dict) -> bool:
+        _cadence, sample_policy = infer_factor_cadence(name, cfg)
+        if sample_policy == "every_bar":
+            return True
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(value):
+            return False
+        previous = self._last_history_values.get(name)
+        changed = previous is None or abs(previous - value) > 1e-12
+        self._last_history_values[name] = value
+        return changed
 
     def _default_gp_config(self, name: str) -> dict:
         """GP 发现因子的默认配置, 尝试从 GPClassifier 获取标签."""
@@ -263,4 +294,7 @@ class SignalNormalizer:
             "direction": 1,
             "tags": tags or ["GP发现"],
             "source": "gp",
+            "role": "alpha",
+            "cadence": "bar",
+            "history_sample_policy": "every_bar",
         }

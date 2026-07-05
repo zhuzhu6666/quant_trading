@@ -22,16 +22,30 @@ def build_factor_bar(last_bar: Any, df_new: Any, timeframe: str) -> dict[str, An
     }
 
 
-def build_factor_votes(signals: Mapping[str, Any], factor_values: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def build_factor_votes(
+    signals: Mapping[str, Any],
+    factor_values: Mapping[str, Any],
+    factor_roles: Mapping[str, Any] | None = None,
+    active_weights: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
     votes: dict[str, dict[str, Any]] = {}
+    roles = factor_roles or {}
+    weights = active_weights or {}
     for name, sig in (signals or {}).items():
         raw_val = factor_values.get(name)
         signal_value = sig if isinstance(sig, (int, float)) else 0.0
         raw_value = raw_val if isinstance(raw_val, (int, float)) else None
+        role = str(roles.get(name) or "alpha")
+        try:
+            used_in_score = role == "alpha" and abs(float(weights.get(name, 0.0) or 0.0)) > 0
+        except (TypeError, ValueError):
+            used_in_score = False
         votes[str(name)] = {
             "signal": round(signal_value, 4),
             "raw": round(raw_value, 4) if raw_value is not None else None,
-            "direction": 1 if signal_value > 0 else -1 if signal_value < 0 else 0,
+            "direction": (1 if signal_value > 0 else -1 if signal_value < 0 else 0) if used_in_score else 0,
+            "role": role,
+            "used_in_score": used_in_score,
         }
     return votes
 
@@ -42,8 +56,19 @@ def build_factor_snapshot_summary(composite: Any, gate_result: Any, *, now: floa
         "score": round(composite.score, 4),
         "tactical_score": round(composite.tactical_score, 4),
         "macro_score": round(composite.macro_score, 4),
+        "alpha_score": round(getattr(composite, "alpha_score", composite.score), 4),
         "n_active": composite.n_active_factors,
+        "n_active_alpha": int(getattr(composite, "n_active_alpha_factors", composite.n_active_factors) or 0),
+        "effective_alpha_factor_count": int(getattr(
+            composite,
+            "effective_alpha_factor_count",
+            getattr(composite, "n_active_alpha_factors", composite.n_active_factors),
+        ) or 0),
         "n_abstain": composite.n_abstain_factors,
+        "composer_version": str(getattr(composite, "composer_version", "")),
+        "context_state": dict(getattr(composite, "context_state", {}) or {}),
+        "context_policy": dict(getattr(composite, "context_policy", {}) or {}),
+        "redundancy_groups": dict(getattr(composite, "redundancy_groups", {}) or {}),
         "gate_passed": gate_result.passed,
         "gate_reason": gate_result.reason,
         "ts": now,

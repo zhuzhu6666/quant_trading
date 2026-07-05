@@ -349,8 +349,8 @@ class ParameterTemplateService:
         return signal_config
 
     def sync_runtime_config(self) -> int:
-        from config.runtime_config import patch as _rc_patch, shared as _rc_shared
-        from backend.services.evolution_ledger import persist_runtime_config_snapshot
+        from config.runtime_config import shared as _rc_shared
+        from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 
         runtime_cfg = _rc_shared()
         signal_config = self.build_runtime_signal_config()
@@ -365,21 +365,18 @@ class ParameterTemplateService:
         }
         merged_extra = dict(getattr(runtime_cfg, "extra", {}) or {})
         merged_extra["active_parameter_templates"] = active_payload
-        version = _rc_patch(
+        result = RuntimeConfigMutationService(self.db_path).apply_patch(
             {
                 "factor_signal_config": signal_config,
                 "extra": merged_extra,
-            }
+            },
+            source="parameter_template_sync_runtime_config",
+            run_id=f"parameter_template_sync_{int(time.time())}",
+            actor="system:parameter_template_service",
+            action="sync_runtime_parameter_templates",
+            reason="sync active parameter templates into runtime config",
         )
-        try:
-            persist_runtime_config_snapshot(
-                _rc_shared(),
-                source="parameter_template_sync_runtime_config",
-                db_path=self.db_path,
-            )
-        except Exception:
-            pass
-        return version
+        return int(result.get("version") or 0)
 
     def upsert_template(
         self,
