@@ -20,6 +20,16 @@ cd /home/ubuntu/quant_trading
 ./.venv/bin/python -m backend
 ```
 
+### cTrader / protobuf 依赖边界
+
+当前执行通道使用 `ctrader-open-api==0.9.2`，该 SDK 在 metadata 中固定依赖 `protobuf==3.20.1`。Python 3.12 下这个 protobuf 版本会在测试中触发第三方 `utcfromtimestamp()` 弃用提示，项目通过 `pytest.ini` 精准过滤 `google.protobuf.internal.well_known_types` 里的这条 warning；不要为了消除 warning 单独升级 protobuf。
+
+只有在同时验证下面链路后，才允许升级 `ctrader-open-api` 或 protobuf：
+
+- cTrader connect / auth probe
+- protobuf message parse / enum payload
+- close / reduce / amend_position_sltp 执行链路
+
 本地 Windows 临时调试时，在仓库根目录启动后端:
 
 ```bash

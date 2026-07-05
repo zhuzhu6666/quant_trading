@@ -295,7 +295,11 @@ class CTraderBridge(BaseBrokerBridge):
         self._l2_writer_started = False
         self._l2_dropped_rows: int = 0
         self._l2_written_rows: int = 0
+        self._l2_write_batches: int = 0
         self._l2_last_write_ts: float = 0.0
+        self._l2_last_batch_rows: int = 0
+        self._l2_last_batch_elapsed_ms: float = 0.0
+        self._l2_max_batch_elapsed_ms: float = 0.0
         self._l2_last_error: str = ""
         self._l2_drop_log_ts: float = 0.0
         self._l2_health_persist_ts: float = 0.0
@@ -1182,6 +1186,12 @@ class CTraderBridge(BaseBrokerBridge):
             queue_size = int(self._l2_writer_queue.qsize())
         except Exception:
             queue_size = -1
+        queue_capacity = int(getattr(self._l2_writer_queue, "maxsize", 0) or 0)
+        queue_utilization = (
+            round(max(0.0, float(queue_size)) / float(queue_capacity), 6)
+            if queue_size >= 0 and queue_capacity > 0
+            else None
+        )
         _persist_runtime_kv(
             "live.l2_writer.health",
             {
@@ -1189,13 +1199,47 @@ class CTraderBridge(BaseBrokerBridge):
                 "persist_enabled": bool(self.l2_persist_enabled),
                 "db_path": str(self._l2_db_path or ""),
                 "queue_size": queue_size,
+                "queue_capacity": queue_capacity,
+                "queue_utilization": queue_utilization,
                 "dropped_rows": int(self._l2_dropped_rows),
                 "written_rows": int(self._l2_written_rows),
+                "write_batches": int(self._l2_write_batches),
+                "last_batch_rows": int(self._l2_last_batch_rows),
+                "last_batch_elapsed_ms": round(float(self._l2_last_batch_elapsed_ms or 0.0), 3),
+                "max_batch_elapsed_ms": round(float(self._l2_max_batch_elapsed_ms or 0.0), 3),
                 "last_write_ts": float(self._l2_last_write_ts or 0.0),
                 "last_error": str(self._l2_last_error or ""),
                 "updated_at": now,
             },
         )
+
+    def l2_writer_health(self) -> dict[str, Any]:
+        try:
+            queue_size = int(self._l2_writer_queue.qsize())
+        except Exception:
+            queue_size = -1
+        queue_capacity = int(getattr(self._l2_writer_queue, "maxsize", 0) or 0)
+        queue_utilization = (
+            round(max(0.0, float(queue_size)) / float(queue_capacity), 6)
+            if queue_size >= 0 and queue_capacity > 0
+            else None
+        )
+        return {
+            "status": "running" if self._l2_writer_thread and self._l2_writer_thread.is_alive() else "stopped",
+            "persist_enabled": bool(self.l2_persist_enabled),
+            "db_path": str(self._l2_db_path or ""),
+            "queue_size": queue_size,
+            "queue_capacity": queue_capacity,
+            "queue_utilization": queue_utilization,
+            "dropped_rows": int(self._l2_dropped_rows),
+            "written_rows": int(self._l2_written_rows),
+            "write_batches": int(self._l2_write_batches),
+            "last_batch_rows": int(self._l2_last_batch_rows),
+            "last_batch_elapsed_ms": round(float(self._l2_last_batch_elapsed_ms or 0.0), 3),
+            "max_batch_elapsed_ms": round(float(self._l2_max_batch_elapsed_ms or 0.0), 3),
+            "last_write_ts": float(self._l2_last_write_ts or 0.0),
+            "last_error": str(self._l2_last_error or ""),
+        }
 
     def _enqueue_l2_row(self, kind: str, row: tuple) -> None:
         if not self.l2_persist_enabled:
@@ -1232,6 +1276,8 @@ class CTraderBridge(BaseBrokerBridge):
             if pending < self.l2_write_batch_size and now - last_flush < self.l2_write_flush_interval_sec:
                 continue
             try:
+                batch_started = time.perf_counter()
+                total_rows_written = 0
                 buckets: dict[Path, dict[str, list]] = {}
                 for kind, row in changes:
                     bucket = buckets.setdefault(
@@ -1296,9 +1342,26 @@ class CTraderBridge(BaseBrokerBridge):
                                 snapshot_rows,
                             )
                         conn.execute("COMMIT")
+                        total_rows_written += rows_written
                         self._l2_written_rows += rows_written
-                        self._l2_last_write_ts = now
-                        self._l2_last_error = ""
+                elapsed_ms = (time.perf_counter() - batch_started) * 1000.0
+                if total_rows_written > 0:
+                    self._l2_write_batches += 1
+                    self._l2_last_batch_rows = total_rows_written
+                    self._l2_last_batch_elapsed_ms = elapsed_ms
+                    self._l2_max_batch_elapsed_ms = max(self._l2_max_batch_elapsed_ms, elapsed_ms)
+                    self._l2_last_write_ts = time.time()
+                    try:
+                        from backend.services.stability import record_timing
+
+                        record_timing(
+                            "ctrader.l2_writer.batch",
+                            elapsed_ms / 1000.0,
+                            extra={"rows": total_rows_written, "buckets": len(buckets)},
+                        )
+                    except Exception:
+                        pass
+                    self._l2_last_error = ""
                 changes.clear()
                 snapshots.clear()
                 last_flush = now

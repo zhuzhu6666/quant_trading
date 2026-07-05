@@ -1,9 +1,11 @@
 """Ops API endpoints: alerts, auto-recovery, weekly reports, experiments."""
 from fastapi import APIRouter
+import time
 from typing import Any
 
 from backend.core.auth import RequireUser
 from backend.services.backend_readiness import BackendReadinessService
+from backend.services.stability import TimedCache, measure
 from monitor.auto_recovery import AutoRecovery
 from research.report_generator import WeeklyReport
 from research.experiment_tracker import ExperimentTracker
@@ -13,6 +15,7 @@ router = APIRouter(prefix="/api/ops", tags=["ops"])
 # Singletons (lazy init)
 _auto_recovery: AutoRecovery | None = None
 _report_gen: WeeklyReport | None = None
+_READINESS_CACHE = TimedCache()
 
 
 def _get_auto_recovery() -> AutoRecovery:
@@ -73,7 +76,42 @@ def get_recovery_history(_user: RequireUser) -> dict[str, Any]:
 @router.get("/backend-readiness")
 def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
     """前端交接用的后端统一状态合约。"""
-    return BackendReadinessService().build()
+    def _compute() -> dict[str, Any]:
+        with measure("api.ops.backend_readiness"):
+            payload = BackendReadinessService().build()
+            return payload
+
+    cache_key = "backend-readiness"
+    payload = _READINESS_CACHE.get(cache_key)
+    if payload is not None:
+        payload.setdefault("cache", {})
+        payload["cache"].update({"source": "cache", "ttl_sec": 10.0})
+        return payload
+
+    with _READINESS_CACHE.compute_lock(cache_key):
+        payload = _READINESS_CACHE.get(cache_key)
+        if payload is not None:
+            payload.setdefault("cache", {})
+            payload["cache"].update({"source": "cache", "ttl_sec": 10.0})
+            return payload
+        try:
+            payload = _compute()
+            payload.setdefault("cache", {})
+            payload["cache"].update({"source": "computed", "ttl_sec": 10.0})
+            return _READINESS_CACHE.set(cache_key, payload, ttl_sec=10.0)
+        except Exception:
+            fallback = _READINESS_CACHE.last_good(cache_key)
+            if not fallback:
+                raise
+            created_at, payload = fallback
+            payload.setdefault("cache", {})
+            payload["cache"].update({
+                "source": "stale",
+                "ttl_sec": 10.0,
+                "stale_reason": "compute_error",
+                "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
+            })
+            return payload
 
 
 # ── Weekly Reports ──

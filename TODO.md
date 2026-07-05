@@ -105,6 +105,57 @@
 - EventSizing 已接入 live open path，读取 `data/events.duckdb`，并把 multiplier / 事件上下文写入审计上下文
 - `/api/ops/backend-readiness` 已增加 `factor_data`、`governance_freshness`、`runtime_weight_integrity`
 
+### 2026-07-04 后端内部稳定性优化第一阶段
+
+本轮按“稳定性优先，不转 Rust，不改变交易行为”的原则，已先落地可回滚的观测与缓存地基：
+
+- 新增 `backend.services.stability`，统一提供进程内 TTL cache、last-good fallback 和耗时采样
+- `/api/ops/backend-readiness` 增加短 TTL 缓存，避免运维页轮询重复聚合模型、DuckDB、state 和 readiness
+- `BackendReadinessService` 增加 `stability` 只读诊断字段：
+  - 子模块耗时采样
+  - `live.l2_writer.health`
+  - `runtime_config_snapshot` 状态
+  - freshness watchdog 汇总
+  - rollback policy 观测边界
+- `/api/learning/factor-cards` 接入 learning cache、compute lock 和 last-good fallback；治理 mutation 会联动失效 `factor_cards:` 缓存
+- cTrader L2 writer 继续保持异步批量写入，并补充 queue capacity/utilization、batch rows、batch latency、write batches 等诊断字段
+- live tick 和 position supervision 外层已增加耗时采样，不改变风控裁决和交易动作
+- 新增 `backend.services.live_runtime_state`，把 live state 默认结构、线程安全 get/set/update 和短 TTL cache helper 从 `live_service.py` 安全抽出；旧 `_live_state` 与 `_live_state_get/update` 入口保持兼容
+- 新增 `backend.services.live_ctrader_runtime`，把 cTrader 长连接、跨进程 lock、后台 connect、retry/backoff 状态机从 `live_service.py` 安全抽出；旧 `_get_ctrader()`、`_ctrader_bridge` 等 facade/镜像保持兼容
+- 新增 `backend.services.live_loop_shell`，先抽出 live loop status 响应组织、停止展示状态更新、open risk context 的 runtime health / sync health / system health 只读诊断采集、factor warmup DataFrame -> bar payload / warmup feed 选择、factor pipeline gate/AWE 配置、enabled symbols 默认值、pipeline 去重、hot reload 应用、多品种 pipeline 装配、cross-asset 启用条件、spot/depth 订阅策略与 market-closed 日志 helper；旧 `loop_status()`、`_mark_loop_stopped_for_display()` facade 保持兼容，tick 主循环未移动
+- 新增 `backend.services.live_position_lifecycle`，先抽出 pending close reason/verdict 的记忆、恢复和清理 helper、pending open attach TTL helper、position payload/symbol/float/direction/side/volume/open price/open time/snapshot/PNL 估算 helper、risk state policy verdict 组装、open trade risk context payload、filled open ledger/recovery payload、持仓 API volume / entry score 统计、trade attribution payload 组装与恢复、entry cluster context 纯统计、market/bar/decision quality/open learning 子 payload 与最终 payload 组装、entry quality gate 与 temporal context 纯判定/组装、close evidence 选择 / close source 分类 / ledger 与 trace row 归一化纯规则、close risk context payload 的持仓超时字段组装、restart replay close payload、recovered close 缺失 open ledger 修复 payload、recovery row/meta/closed payload、recovery missing/lookback 与 live position 移除过滤规则、holding timeout 判定/verdict/result trace payload、holding summary 展示字段组装、position supervisor context inputs/context/risk/runtime risk evaluation/close inputs payload 组装、positions 展示 enrichment 编排、regime hint 提取、position path metrics inputs/update/result/recovery meta 组装、supervisor/protection recovery meta/state upsert payload、recovery upsert 默认值与 cooldown 判定、protection cycle supersede/result 规则、legacy AWE trailing 档位/state/candidate payload、protection candidate verdict/risk context extraction/execution plan/result/superseded/execution trace/position event details payload 与 supervisor ledger/trace payload 组装、entry protection plan payload/status 组装、supervisor tighten SL / TP extension 输入与 execution/result payload、TP-only protection SL preserve 纯计算，以及 supervisor reentry block 的 key/cooldown/payload/active view 组装；旧 facade、恢复元数据、ledger/trace 查询和风险 fallback 保持兼容
+- 新增 `backend.services.live_supervision_actions`，先承接 position supervisor 的 `reduce` 执行动作，包括 partial close、最小仓位 reduce 跳过、reduce->full close fallback、risk verdict/trace/ledger/reentry block 写入；`live_service.py` 仍注入 bridge/risk/ledger 依赖并保持旧执行语义
+- 新增 `backend.services.live_tick_pipeline`，先承接 `_process_tick_factor_pipeline` 前半段的纯计算 helper：factor bar 构造、factor vote/snapshot payload、signal 日志后缀、positions 归一化、position id 收集、close detection defer 判定、spot price guard、open order preflight、order success fill/position/protection 解析、event sizing/market-risk block，以及 close/open/skip/amend_failed/order_failed 决策审计 meta 与 ledger/review payload 组装；`live_service.py` 内部 helper 已承接 open/close 记录、amend 成功/失败、trailing protection 执行分支编排，剩余目标函数已收口：`_record_filled_position_open_context` 约 80 行、`_handle_closed_positions_after_tick` 约 80 行、`_update_trailing_stops` 约 48 行、`_execute_trailing_candidate` 约 109 行、`_record_amended_open_success_context` 约 125 行，`_process_tick_factor_pipeline` 保持约 595 行；broker IO、风控裁决、ledger 写入和下单执行仍留在 `live_service.py`
+- 新增 `backend.services.live_scheduler_jobs`，先抽出 Dukascopy tick、events、COT、ETF、FRED 外部同步 job 的注册和脚本执行 helper，并承接 startup catch-up 立即/延迟补跑编排；旧 job name、cron、延迟和 `_start_live_scheduler()` 启动路径保持兼容
+- 新增 `backend.services.live_data_sync_helpers`，先抽出 bar freshness、tick advisory freshness 和 DataFrame→DataStore bars 的纯 helper；DuckDB 查询、cTrader bridge 和 DataStore 写入仍留在原 `data_sync` job 内
+- 新增 `backend.services.live_data_sync_job`，把 `data_sync` IO 编排抽成注入式 job builder；生产路径仍使用原 `_DATA_SYNC_LOCK`、`_get_ctrader()`、`_market_session_snapshot()`、PostgreSQL/DuckDB/DataStore 事实源
+- `backend.services.live_scheduler_jobs` 继续承接 initial cTrader data pull helper 和 fast/deferred 启动调度；旧 `_get_ctrader()`、DataStore 写入、`init-ctrader-fast` 线程名和 30s deferred timer 保持兼容
+- 新增 `backend.services.live_risk_sizing`，承接 API volume step 对齐、Kelly sizing 纯公式、entry event sizing multiplier 计算、event sizing context 归一化、保护价 SL/TP 纯计算，以及最小仓位 reduce 是否升级 full close 的纯判定；旧 `_risk_kelly_sizing()`、`_risk_kelly_volume()`、`_ceil/_round/_floor_api_volume_to_step()`、`_apply_entry_event_sizing()`、`_event_sizing_context()`、`_protection_prices_from_reference()`、`_should_full_close_untradeable_reduce()` facade 保持兼容，live risk state 读取、event_sizing 对象调用和实际执行动作仍留在 `live_service.py`
+- `/api/learning/parameter-templates*`、`recommendations`、`offline-candidates`、`applications`、`lifecycle` 等重读接口接入统一 compute lock、timing 和 last-good fallback
+- 测试/依赖卫生已补一刀：`pytest.ini` 只精准过滤 `google.protobuf.internal.well_known_types` 在 Python 3.12 下触发的 `utcfromtimestamp()` 第三方弃用 warning；`ctrader-open-api==0.9.2` 传递固定 `protobuf==3.20.1`，本轮不升级 protobuf，避免影响 cTrader connect / protobuf parse / close-reduce-amend 执行链路
+
+验证结果：
+
+- `./.venv/bin/python -m pytest tests/test_stability.py tests/test_backend_readiness_contract.py tests/test_backend_model_handoff.py tests/test_ctrader_close_position.py -q`
+- `./.venv/bin/python -m pytest tests/test_live_service_lifecycle.py tests/test_backend_live_api.py tests/test_factor_cards_api.py -q`
+- `./.venv/bin/python -m pytest tests/test_live_runtime_state.py tests/test_learning_cache.py tests/test_live_service_lifecycle.py tests/test_live_service_account_refresh.py tests/test_live_service_tick.py tests/test_live_service_circuit.py tests/test_factor_cards_api.py -q`
+- `./.venv/bin/python -m pytest tests/test_live_ctrader_runtime.py tests/test_live_service_lifecycle.py tests/test_live_service_account_refresh.py tests/test_live_service_tick.py tests/test_backend_live_api.py -q`
+- `./.venv/bin/python -m pytest tests/test_live_loop_shell.py tests/test_live_service_lifecycle.py tests/test_backend_live_api.py -q`
+- `./.venv/bin/python -m pytest tests/test_live_loop_shell.py tests/test_live_service_lifecycle.py tests/test_live_service_tick.py -q`（覆盖 loop status、runtime health、factor warmup feed、pipeline config/hot reload、多品种 pipeline/cross-asset、spot/depth 订阅和 market-closed 日志 helper 与 live facade）
+- `./.venv/bin/python -m pytest tests/test_live_position_lifecycle.py tests/test_live_service_lifecycle.py tests/test_ctrader_close_position.py -q`（覆盖 pending close、pending open attach TTL、position payload/PNL 估算、risk state policy verdict 组装、filled open ledger/recovery payload、trade attribution 恢复、positions 展示 enrichment、regime hint 提取、entry cluster context、market/bar/decision quality/open learning 子 payload、entry quality gate、temporal context、close source 分类、close risk context payload、recovered close open ledger 修复 payload、holding summary、position supervisor context/risk payload、path metrics meta、supervisor/protection recovery meta/cooldown、protection candidate verdict/execution plan/result payload、entry protection plan/status payload、supervisor tighten SL/TP 计算与 supervisor reentry block payload/view）
+- `./.venv/bin/python -m pytest tests/test_live_scheduler_jobs.py tests/test_scheduler.py tests/test_live_service_lifecycle.py -q`（覆盖外部 sync job 注册、startup catch-up job 顺序、heavy jobs 开关和延迟串行补跑）
+- `./.venv/bin/python -m pytest tests/test_live_data_sync_helpers.py tests/test_live_scheduler_jobs.py tests/test_scheduler.py tests/test_live_service_lifecycle.py -q`
+- `./.venv/bin/python -m pytest tests/test_live_scheduler_jobs.py tests/test_live_data_sync_job.py tests/test_live_data_sync_helpers.py tests/test_scheduler.py tests/test_live_service_lifecycle.py -q`（覆盖 data_sync job builder、initial cTrader pull、fast/deferred 调度）
+- `./.venv/bin/python -m pytest tests/test_live_risk_sizing.py tests/test_live_service_lifecycle.py tests/test_event_sizing.py tests/test_live_service_tick.py tests/test_backend_live_api.py -q`（覆盖 Kelly sizing、API volume step、event sizing multiplier 兼容和 live facade）
+- `./.venv/bin/python -m pytest tests/test_live_tick_pipeline.py tests/test_live_service_tick.py tests/test_live_service_lifecycle.py -q`（覆盖 tick pipeline 前半段纯 helper、spot price guard、open order preflight、order success fill/position/protection helper、event sizing/market block、close/open/skip/amend_failed/order_failed payload 组装与 live facade 接入）
+
+后续继续项：
+
+- `backend/services/live_service.py` 下一阶段收口已把 `_run_position_supervision` 压到约 214 行、`_run_loop` 压到约 346 行；`live_supervision_actions` 承接 tighten/reduce/close 执行动作，`live_loop_shell` 承接 spot quote 覆盖 bar 的纯 helper，`live_service.py` 继续保留 loop 生命周期、risk verdict 和 broker IO 编排
+- live 主链维护性收口已完成本阶段目标：tick/loop/supervision 不再继续大拆，剩余中等函数已压到约 50-125 行区间；下一步优先 checkpoint，而不是继续无限拆分
+- 把 remaining 模型/数据集重读接口统一迁到 cache/timing/last-good 模式
+- 用新增 timings 观察真实 p95 后，再决定是否做局部 Rust PoC
+
 ### 当前唯一进行中主线
 
 `Phase H：自治数据工厂与分级自动治理（第一版地基已落地，继续观察和补二层自治）`

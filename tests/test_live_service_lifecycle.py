@@ -418,6 +418,277 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
     assert calls["attr"][0] == 268
 
 
+def test_record_amend_failure_after_fill_records_context_status_and_ledger(monkeypatch):
+    calls = {"open_context": [], "status": [], "decisions": [], "orders": []}
+
+    class _Ledger:
+        def log_composite_decision(self, **kwargs):
+            calls["decisions"].append(kwargs)
+            return "dec_amend_failed"
+
+        def log_order_event(self, **kwargs):
+            calls["orders"].append(kwargs)
+
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(
+        live_service,
+        "_record_filled_position_open_context",
+        lambda **kwargs: calls["open_context"].append(kwargs),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_update_entry_protection_plan_status",
+        lambda *args, **kwargs: calls["status"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_live_state_get",
+        lambda key, *args, **kwargs: {"risk": "state"} if key == "risk" else 0,
+    )
+
+    logs: list[str] = []
+    composite = SimpleNamespace(direction=1)
+    gate = SimpleNamespace(passed=True, reason="passed")
+
+    live_service._record_amend_failure_after_fill(
+        attr_engine=SimpleNamespace(),
+        bridge=SimpleNamespace(),
+        broker="ctrader",
+        cfg=SimpleNamespace(timeframe="M5"),
+        bar={"time": 123.0},
+        tick=9,
+        pid=268,
+        actual_api_volume=120.0,
+        requested_volume=100.0,
+        base_requested_volume=90.0,
+        fill_price=4008.5,
+        current_price=4008.4,
+        sl_price=3998.0,
+        tp_price=4028.0,
+        sl_dist=10.0,
+        tp_dist=20.0,
+        acct={"balance": 10000, "equity": 10001},
+        pos=[],
+        composite=composite,
+        gate_result=gate,
+        risk_verdict=SimpleNamespace(to_dict=lambda: {"allowed": True}),
+        market_session={"status": "open"},
+        event_sizing_context={"multiplier": 1.0},
+        sizing_trace={"source": "test"},
+        status_error="bad stops",
+        ledger_action_reason="bad stops",
+        ledger_comment="bad stops",
+        failure_log="tick 9: v4 LONG AMEND FAILED pos=268: bad stops",
+        log=logs.append,
+    )
+
+    assert logs == ["tick 9: v4 LONG AMEND FAILED pos=268: bad stops"]
+    assert calls["open_context"][0]["pid"] == 268
+    assert calls["open_context"][0]["market_session"] == {"status": "open"}
+    assert calls["status"] == [((268,), {"status": "failed", "error": "bad stops", "attempted": True})]
+    assert calls["decisions"][0]["event_type"] == "amend_failed"
+    assert calls["decisions"][0]["action_reason"] == "bad stops"
+    assert calls["orders"][0]["decision_id"] == "dec_amend_failed"
+    assert calls["orders"][0]["event_type"] == "amend_failed"
+
+
+def test_record_amended_open_success_records_all_contexts(monkeypatch):
+    calls = {
+        "track": [],
+        "status": [],
+        "quality": [],
+        "attr": [],
+        "decisions": [],
+        "orders": [],
+        "positions": [],
+        "upserts": [],
+        "decision_logs": [],
+    }
+
+    class _Ledger:
+        def log_composite_decision(self, **kwargs):
+            calls["decisions"].append(kwargs)
+            return "dec_open_amended"
+
+        def log_order_event(self, **kwargs):
+            calls["orders"].append(kwargs)
+
+        def log_position_event(self, **kwargs):
+            calls["positions"].append(kwargs)
+
+    class _Attr:
+        def record_open(self, pid, trade_attr):
+            calls["attr"].append((pid, trade_attr))
+
+    class _ExecQuality:
+        def record(self, trade):
+            calls["quality"].append(trade)
+
+    composite = SimpleNamespace(
+        direction=1,
+        score=0.82,
+        tactical_score=0.7,
+        macro_score=0.1,
+        factor_signals={"rsi": 0.5},
+        factor_values={"rsi": 42.0},
+        active_weights={"rsi": 1.0},
+        tags_breakdown={},
+        n_active_factors=1,
+        n_abstain_factors=0,
+    )
+    risk_verdict = SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"})
+
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(live_service, "_DECISION_LOG", object())
+    monkeypatch.setattr(live_service, "_DECISION_LOG_RUN_ID", 88)
+    monkeypatch.setattr(live_service, "_exec_quality", _ExecQuality())
+    monkeypatch.setattr(live_service, "_track_local_sl_tp", lambda *args, **kwargs: calls["track"].append((args, kwargs)))
+    monkeypatch.setattr(
+        live_service,
+        "_update_entry_protection_plan_status",
+        lambda *args, **kwargs: calls["status"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_open_learning_context_payload",
+        lambda **kwargs: {"learning": "ctx", "sizing_trace": kwargs.get("sizing_trace") or {}},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_live_state_get",
+        lambda key, *args, **kwargs: {"risk": "state"} if key == "risk" else 3.5 if key == "session_pnl" else None,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_upsert_recovery_position_state",
+        lambda raw, **kwargs: calls["upserts"].append((raw, kwargs)),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_safe_decision_log",
+        lambda log_store, **kwargs: calls["decision_logs"].append((log_store, kwargs)),
+    )
+
+    logs: list[str] = []
+    live_service._record_amended_open_success_context(
+        attr_engine=_Attr(),
+        bridge=SimpleNamespace(),
+        broker="ctrader",
+        cfg=SimpleNamespace(timeframe="M5"),
+        bar={"time": 1783209600.0},
+        tick=10,
+        pid=268,
+        actual_api_volume=120.0,
+        requested_volume=100.0,
+        base_requested_volume=90.0,
+        fill_price=4008.5,
+        current_price=4008.4,
+        sl_price=3998.0,
+        tp_price=4028.0,
+        sl_dist=10.0,
+        tp_dist=20.0,
+        acct={"balance": 10000, "equity": 10001},
+        pos=[],
+        composite=composite,
+        gate_result=SimpleNamespace(passed=True, reason="passed"),
+        risk_verdict=risk_verdict,
+        market_session={"status": "open"},
+        event_sizing_context={"multiplier": 1.2},
+        sizing_trace={"source": "event"},
+        entry_protection_plan={"schema_version": "entry_protection_plan.v1", "status": "pending"},
+        direction_name="LONG",
+        log=logs.append,
+    )
+
+    assert calls["track"][0][1] == {"sl": 3998.0, "tp": 4028.0}
+    assert calls["status"][0] == ((268,), {"status": "applied", "attempted": True, "applied_sl": 3998.0, "applied_tp": 4028.0})
+    assert calls["quality"][0].order_id == 268
+    assert calls["attr"][0][0] == 268
+    assert "ORDER+AMEND OK" in logs[0]
+    assert calls["decisions"][0]["event_type"] == "open"
+    assert calls["decisions"][0]["portfolio_state"]["session_pnl"] == 3.5
+    assert [item["event_type"] for item in calls["orders"]] == ["submitted", "filled"]
+    assert calls["orders"][0]["decision_id"] == "dec_open_amended"
+    assert calls["positions"][0]["event_type"] == "opened"
+    assert calls["upserts"][0][0]["entry_decision_id"] == "dec_open_amended"
+    assert calls["upserts"][0][1]["meta"]["entry_protection_plan"]["status"] == "applied"
+    assert calls["upserts"][0][1]["meta"]["entry_protection_plan"]["applied_stop_loss"] == 3998.0
+    assert calls["decision_logs"][0][1]["run_id"] == 88
+    assert calls["decision_logs"][0][1]["bar_date"] == "2026-07-05"
+    assert '"position_id": 268' in calls["decision_logs"][0][1]["meta"]
+
+
+def test_delegate_timeout_supervisor_close_logs_timeout_trace(monkeypatch):
+    traces: list[dict] = []
+    monkeypatch.setattr(
+        live_service,
+        "_build_close_position_risk_context",
+        lambda **kwargs: {
+            **kwargs,
+            "holding_seconds": 7200.0,
+            "max_holding_seconds": 3600.0,
+        },
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_log_supervisor_trace",
+        lambda **kwargs: traces.append(kwargs),
+    )
+
+    delegated = live_service._delegate_timeout_supervisor_close(
+        position={"position_id": 268, "symbol": "XAUUSD+"},
+        verdict={"action": "close", "summary_reason": "holding_timeout_exceeded"},
+        cfg=SimpleNamespace(),
+        tick=11,
+        acct={"equity": 10000.0},
+    )
+
+    assert delegated is True
+    assert traces[0]["stage"] == "timeout_delegated"
+    assert traces[0]["execution_status"] == "delegated"
+    assert traces[0]["execution_reason"] == "main_timeout_path"
+    assert traces[0]["execution"]["timeout_context"]["position_id"] == 268
+
+
+def test_run_live_loop_tick_body_returns_wait_when_market_closed(monkeypatch):
+    diagnostics: list[tuple] = []
+    logs: list[str] = []
+
+    monkeypatch.setattr(
+        live_service,
+        "_market_session_snapshot",
+        lambda *_args, **_kwargs: {
+            "status": "closed_confirmed",
+            "reason": "weekend",
+            "high_load_allowed": False,
+        },
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_get_ctrader",
+        lambda: (SimpleNamespace(is_connected=False), None, True),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_set_loop_diagnostic",
+        lambda *args, **kwargs: diagnostics.append((args, kwargs)),
+    )
+
+    result = live_service._run_live_loop_tick_body(
+        broker="ctrader",
+        bridge_cfg=SimpleNamespace(risk_require_l2_depth=False, l2_collection_enabled=True),
+        timeframe="M5",
+        tick=12,
+        recovery_bootstrapped=False,
+        stop_requested=lambda: False,
+        log=logs.append,
+    )
+
+    assert result == {"recovery_bootstrapped": False, "wait_seconds": 300.0, "break_loop": False}
+    assert diagnostics[0][0][:2] == (12, "market_closed")
+    assert "market closed confirmed (weekend)" in logs[0]
+
+
 def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     calls = []
     close_calls = []
@@ -1525,3 +1796,107 @@ def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(mo
     assert protection_states[0]["source"] == "legacy_awe_trailing"
     assert protection_states[0]["action_applied"] == "tighten"
     assert traces[0]["decision_id"] == "dec_legacy_awe"
+
+
+def test_trailing_candidate_risk_rejected_logs_trace_without_amend(monkeypatch):
+    traces: list[dict] = []
+    events: list[dict] = []
+
+    class _Policy:
+        def evaluate(self, action, context):
+            return SimpleNamespace(to_dict=lambda: {"allowed": False, "reason": "blocked"})
+
+    class _Bridge:
+        is_connected = True
+
+        def amend_position_sltp(self, *args, **kwargs):
+            raise AssertionError("risk rejected candidate must not amend")
+
+    candidate = live_service.ProtectionCandidate(
+        source="legacy_awe_trailing",
+        action="tighten",
+        priority=50,
+        position_id=704,
+        risk_action="tighten_position",
+        controls={"target_stop_loss": 4005.0, "target_take_profit": 4030.0},
+        evidence={"confidence": 0.4},
+        reason="legacy_awe_trailing",
+        position={"position_id": 704, "symbol": "XAUUSD+", "direction": 1, "current_price": 4010.0},
+    )
+
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec_blocked")
+    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: traces.append(kwargs))
+    monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: events.append(kwargs))
+
+    handled = live_service._execute_trailing_candidate(
+        candidate,
+        bridge=_Bridge(),
+        cfg=SimpleNamespace(timeframe="M5"),
+        tick=6,
+        log=lambda msg: None,
+        acct={},
+    )
+
+    assert handled is True
+    assert traces[0]["stage"] == "risk_rejected"
+    assert traces[0]["execution_status"] == "blocked"
+    assert events == []
+
+
+def test_trailing_candidate_amend_failed_logs_event_and_trace(monkeypatch):
+    traces: list[dict] = []
+    events: list[dict] = []
+    logs: list[str] = []
+
+    class _Policy:
+        def evaluate(self, action, context):
+            return SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"})
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05}
+
+        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
+            return SimpleNamespace(success=False, comment="bad_stops")
+
+    candidate = live_service.ProtectionCandidate(
+        source="legacy_awe_trailing",
+        action="tighten",
+        priority=50,
+        position_id=704,
+        risk_action="tighten_position",
+        controls={"target_stop_loss": 4005.0, "target_take_profit": 4030.0},
+        evidence={"confidence": 0.4},
+        reason="legacy_awe_trailing",
+        position={
+            "position_id": 704,
+            "symbol": "XAUUSD+",
+            "direction": 1,
+            "current_price": 4010.0,
+            "sl": 3990.0,
+            "tp": 4030.0,
+        },
+    )
+
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec_failed")
+    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: traces.append(kwargs))
+    monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: events.append(kwargs))
+
+    handled = live_service._execute_trailing_candidate(
+        candidate,
+        bridge=_Bridge(),
+        cfg=SimpleNamespace(timeframe="M5"),
+        tick=7,
+        log=logs.append,
+        acct={},
+    )
+
+    assert handled is True
+    assert events[0]["event_type"] == "amend_failed"
+    assert traces[0]["stage"] == "execution_failed"
+    assert traces[0]["execution_reason"] == "bad_stops"
+    assert "AMEND FAILED" in logs[0]

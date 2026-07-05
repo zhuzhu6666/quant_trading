@@ -18,6 +18,7 @@ from backend.core.db import (
     state_table_exists,
 )
 from backend.services.meta_governance import MetaGovernanceService
+from backend.services.stability import measure, record_timing, timing_snapshot
 from research.meta_model_lightgbm import MetaModelLightGBMService
 
 
@@ -92,20 +93,28 @@ class BackendReadinessService:
         self.db_path = Path(db_path)
 
     def build(self) -> dict[str, Any]:
-        live_status = self._live_status()
+        build_started = time.perf_counter()
+        live_status = self._timed_component("live_status", self._live_status)
         market_session = dict(live_status.get("market_session") or {})
-        system_health = self._system_health()
-        model_status = self._model_status()
-        high_load = self._high_load_status(market_session)
-        governance = self._governance_status()
-        factor_data = self._factor_data_status()
-        governance_freshness = self._governance_freshness_status()
-        runtime_weight_integrity = self._runtime_weight_integrity_status()
-        execution_semantics = self._execution_semantics_status()
-        startup_status = self._startup_status()
-        config_runtime_drift = self._config_runtime_drift_status()
-        audit_health = self._audit_health_status()
-        background_jobs = self._background_jobs_status()
+        system_health = self._timed_component("system_health", self._system_health)
+        model_status = self._timed_component("model_status", self._model_status)
+        high_load = self._timed_component("high_load", lambda: self._high_load_status(market_session))
+        governance = self._timed_component("governance", self._governance_status)
+        factor_data = self._timed_component("factor_data", self._factor_data_status)
+        governance_freshness = self._timed_component("governance_freshness", self._governance_freshness_status)
+        runtime_weight_integrity = self._timed_component("runtime_weight_integrity", self._runtime_weight_integrity_status)
+        execution_semantics = self._timed_component("execution_semantics", self._execution_semantics_status)
+        startup_status = self._timed_component("startup_status", self._startup_status)
+        config_runtime_drift = self._timed_component("config_runtime_drift", self._config_runtime_drift_status)
+        audit_health = self._timed_component("audit_health", self._audit_health_status)
+        background_jobs = self._timed_component("background_jobs", self._background_jobs_status)
+        stability = self._timed_component(
+            "stability",
+            lambda: self._stability_status(
+                governance_freshness=governance_freshness,
+                model_status=model_status,
+            ),
+        )
         is_runtime_state_db = _use_pg(self.db_path)
         blockers = []
         blockers.extend(system_health.get("blocking_components") or [])
@@ -142,7 +151,7 @@ class BackendReadinessService:
             known_observations.append({"component": "model_permissions", "status": "blocked", "classification": "offline_context"})
         known_observations.extend(config_runtime_drift.get("known_observations") or [])
         known_observations.extend(audit_health.get("known_observations") or [])
-        return {
+        payload = {
             "ok": True,
             "schema_version": "backend_readiness.v1",
             "generated_at": time.time(),
@@ -167,6 +176,7 @@ class BackendReadinessService:
             "mutation_policy": self._mutation_policy_status(),
             "audit_health": audit_health,
             "background_jobs": background_jobs,
+            "stability": stability,
             "frontend_contract": {
                 "preferred_entry": "/api/ops/backend-readiness",
                 "model_shadow_report": "/api/learning/model/meta-lightgbm/shadow-report",
@@ -178,6 +188,13 @@ class BackendReadinessService:
             "blockers": blockers,
             "known_observations": known_observations,
         }
+        record_timing("backend_readiness.build", time.perf_counter() - build_started, extra={"ready": ready_for_frontend})
+        return payload
+
+    @staticmethod
+    def _timed_component(name: str, func):
+        with measure(f"backend_readiness.{name}"):
+            return func()
 
     @staticmethod
     def _live_status() -> dict[str, Any]:
@@ -508,6 +525,104 @@ class BackendReadinessService:
         finally:
             conn.close()
         return {"tables": freshness}
+
+    def _stability_status(
+        self,
+        *,
+        governance_freshness: dict[str, Any],
+        model_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "backend_stability.v1",
+            "timings": timing_snapshot("backend_readiness."),
+            "l2_writer": self._runtime_kv_get("live.l2_writer.health", {}),
+            "runtime_config_snapshot": self._runtime_config_snapshot_status(),
+            "freshness_watchdog": self._freshness_watchdog_status(
+                governance_freshness=governance_freshness,
+                model_status=model_status,
+            ),
+            "rollback_policy": {
+                "schema_version": "rollback_policy_observation.v1",
+                "hard_risk_limits_mutable": False,
+                "model_live_permission_mutable": False,
+                "requires_governed_scope": True,
+                "requires_rollback_payload": True,
+                "allowed_low_risk_scopes": [
+                    "position_supervisor_template",
+                    "parameter_template_online_light",
+                ],
+            },
+        }
+
+    def _runtime_kv_get(self, key: str, default: Any = None) -> Any:
+        conn = _connect_state(self.db_path)
+        try:
+            if not _table_exists(conn, "runtime_kv"):
+                return default
+            row = _execute(
+                conn,
+                "SELECT value_json, updated_at FROM runtime_kv WHERE key=? LIMIT 1",
+                (key,),
+            ).fetchone()
+            if not row:
+                return default
+            payload = _loads(row["value_json"], default)
+            if isinstance(payload, dict):
+                payload.setdefault("runtime_kv_updated_at", _safe_float(row["updated_at"]))
+            return payload
+        finally:
+            conn.close()
+
+    def _runtime_config_snapshot_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.evolution_ledger import current_runtime_config_snapshot
+
+            snapshot = current_runtime_config_snapshot(db_path=self.db_path, create_if_missing=False)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if not snapshot or not str(snapshot.get("config_hash") or ""):
+            return {"ok": False, "status": "missing_snapshot"}
+        created_at = _safe_float(snapshot.get("created_at"))
+        age_sec = max(0.0, time.time() - created_at) if created_at > 0 else None
+        return {
+            "ok": True,
+            "status": "available",
+            "config_hash": str(snapshot.get("config_hash") or ""),
+            "source": str(snapshot.get("source") or ""),
+            "created_at": created_at,
+            "age_seconds": round(age_sec, 3) if age_sec is not None else None,
+        }
+
+    @staticmethod
+    def _freshness_watchdog_status(
+        *,
+        governance_freshness: dict[str, Any],
+        model_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        tables = dict(governance_freshness.get("tables") or {})
+        stale_tables = [
+            name for name, item in tables.items()
+            if str((item or {}).get("status") or "") != "fresh"
+        ]
+        max_age = 0.0
+        for item in tables.values():
+            age = item.get("age_seconds") if isinstance(item, dict) else None
+            if isinstance(age, (int, float)):
+                max_age = max(max_age, float(age))
+        meta_report = (((model_status.get("meta_lightgbm") or {}).get("report") or {}))
+        evaluated_count = int(meta_report.get("evaluated_count") or 0)
+        status = "ok" if not stale_tables else "degraded"
+        if evaluated_count <= 0:
+            status = "degraded"
+        return {
+            "status": status,
+            "stale_table_count": len(stale_tables),
+            "stale_tables": stale_tables,
+            "max_table_age_seconds": round(max_age, 3),
+            "meta_shadow_evaluated_count": evaluated_count,
+            "blocks_live_model_permission": True,
+            "advisory_only": True,
+        }
 
     @staticmethod
     def _runtime_weight_integrity_status() -> dict[str, Any]:

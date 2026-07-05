@@ -1,0 +1,601 @@
+from types import SimpleNamespace
+
+import pandas as pd
+
+from backend.services.live_loop_shell import (
+    adaptive_weight_config,
+    apply_spot_quote_to_latest_bar,
+    apply_factor_pipeline_config_update,
+    bridge_readiness_label,
+    build_extra_symbol_factor_pipelines,
+    build_warmup_feed,
+    cache_age_seconds,
+    collect_open_risk_runtime_health,
+    cross_asset_symbols_for_config,
+    dataframe_to_factor_bars,
+    depth_subscription_followup_message,
+    depth_subscription_required,
+    enabled_symbols_from_config,
+    execution_gate_config,
+    loop_status_snapshot,
+    mark_loop_stopped_for_display,
+    market_closed_log_message,
+    subscribe_spot_depth_once,
+    system_health_snapshot_from_report,
+    unique_factor_pipelines,
+)
+
+
+class _Thread:
+    ident = 42
+
+    def __init__(self, alive: bool):
+        self._alive = alive
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+
+def _state_get_factory(state: dict):
+    def _get(key, default=None, **_kwargs):
+        return state.get(key, default)
+
+    return _get
+
+
+def test_loop_status_snapshot_explicit_stopped_preserves_cached_fields():
+    status = loop_status_snapshot(
+        state_get=_state_get_factory(
+            {
+                "loop_running": False,
+                "broker": "ctrader",
+                "loop_started_at": 123.0,
+                "loop_strategy": "cached_strategy",
+            }
+        ),
+        thread=_Thread(True),
+        broker="legacy_broker",
+        started_at=999.0,
+        strategy_name="legacy_strategy",
+    )
+
+    assert status == {
+        "running": False,
+        "pid": None,
+        "broker": "ctrader",
+        "started_at": 123.0,
+        "strategy_name": "cached_strategy",
+    }
+
+
+def test_loop_status_snapshot_cached_running_wins_over_thread():
+    status = loop_status_snapshot(
+        state_get=_state_get_factory(
+            {
+                "loop_running": True,
+                "broker": "ctrader",
+                "loop_started_at": 321.0,
+                "loop_strategy": "cached_strategy",
+            }
+        ),
+        thread=_Thread(False),
+        broker=None,
+        started_at=None,
+        strategy_name="legacy_strategy",
+    )
+
+    assert status == {
+        "running": True,
+        "pid": None,
+        "broker": "ctrader",
+        "started_at": 321.0,
+        "strategy_name": "cached_strategy",
+    }
+
+
+def test_loop_status_snapshot_falls_back_to_thread_state():
+    status = loop_status_snapshot(
+        state_get=_state_get_factory({"loop_running": None}),
+        thread=_Thread(True),
+        broker="ctrader",
+        started_at=456.0,
+        strategy_name="thread_strategy",
+    )
+
+    assert status == {
+        "running": True,
+        "pid": 42,
+        "broker": "ctrader",
+        "started_at": 456.0,
+        "strategy_name": "thread_strategy",
+    }
+
+
+def test_mark_loop_stopped_for_display_only_clears_loop_display_fields():
+    state = {
+        "loop_running": True,
+        "loop_strategy": "carry",
+        "broker": "ctrader",
+        "account": {"balance": 999.0},
+    }
+
+    def _update(**kwargs):
+        state.update(kwargs)
+
+    mark_loop_stopped_for_display(state_update=_update)
+
+    assert state["loop_running"] is False
+    assert state["loop_strategy"] is None
+    assert state["broker"] == "ctrader"
+    assert state["account"]["balance"] == 999.0
+
+
+def test_cache_age_seconds_uses_zero_for_missing_timestamp():
+    assert cache_age_seconds(now_ts=100.0, updated_at=90.0) == 10.0
+    assert cache_age_seconds(now_ts=100.0, updated_at=0.0) == 0.0
+    assert cache_age_seconds(now_ts=100.0, updated_at=120.0) == 0.0
+
+
+def test_system_health_snapshot_from_report_preserves_live_shape():
+    report = SimpleNamespace(
+        overall="degraded",
+        overall_score=72.5,
+        components={
+            "disk": SimpleNamespace(status="critical"),
+            "cpu": SimpleNamespace(status="degraded"),
+            "network": SimpleNamespace(status="ok"),
+        },
+    )
+
+    assert system_health_snapshot_from_report(report) == {
+        "overall": "degraded",
+        "overall_score": 72.5,
+        "component_status": {
+            "disk": "critical",
+            "cpu": "degraded",
+            "network": "ok",
+        },
+        "critical_components": ["disk"],
+        "degraded_components": ["cpu"],
+    }
+
+
+def test_collect_open_risk_runtime_health_falls_back_when_collectors_unavailable():
+    def _raise():
+        raise RuntimeError("unavailable")
+
+    payload = collect_open_risk_runtime_health(
+        timeframe="M5",
+        now_ts=100.0,
+        account_updated_at=70.0,
+        positions_updated_at=0.0,
+        sync_health_provider=_raise,
+        system_report_provider=_raise,
+    )
+
+    assert payload == {
+        "data_lag_seconds": 0.0,
+        "runtime_health": {
+            "account_cache_age_seconds": 30.0,
+            "positions_cache_age_seconds": 0.0,
+            "sync_health": {},
+            "system_health": {},
+        },
+    }
+
+
+def test_collect_open_risk_runtime_health_uses_injected_collectors():
+    class _SyncHealth:
+        def snapshot(self):
+            return {"ok": True}
+
+        def last_bar_age_seconds(self, timeframe):
+            assert timeframe == "M15"
+            return 12.5
+
+    payload = collect_open_risk_runtime_health(
+        timeframe="M15",
+        now_ts=100.0,
+        account_updated_at=80.0,
+        positions_updated_at=75.0,
+        sync_health_provider=lambda: _SyncHealth(),
+        system_report_provider=lambda: SimpleNamespace(
+            overall="ok",
+            overall_score=99.0,
+            components={"disk": SimpleNamespace(status="ok")},
+        ),
+    )
+
+    assert payload == {
+        "data_lag_seconds": 12.5,
+        "runtime_health": {
+            "account_cache_age_seconds": 20.0,
+            "positions_cache_age_seconds": 25.0,
+            "sync_health": {"ok": True},
+            "system_health": {
+                "overall": "ok",
+                "overall_score": 99.0,
+                "component_status": {"disk": "ok"},
+                "critical_components": [],
+                "degraded_components": [],
+            },
+        },
+    }
+
+
+def test_dataframe_to_factor_bars_matches_live_warmup_shape():
+    df = pd.DataFrame(
+        [
+            {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 9.0},
+            {"open": 2.0, "high": 3.0, "low": 1.5, "close": 2.5, "volume": 10.0},
+        ],
+        index=pd.to_datetime(["2026-07-05T00:00:00Z", "2026-07-05T00:05:00Z"]),
+    )
+
+    assert dataframe_to_factor_bars(df, timeframe="M5") == [
+        {
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 9.0,
+            "time": 1783209600.0,
+            "timeframe": "M5",
+            "complete": True,
+        },
+        {
+            "open": 2.0,
+            "high": 3.0,
+            "low": 1.5,
+            "close": 2.5,
+            "volume": 10.0,
+            "time": 1783209900.0,
+            "timeframe": "M5",
+            "complete": True,
+        },
+    ]
+
+
+def test_build_warmup_feed_applies_min_and_runtime_limits():
+    df = pd.DataFrame(
+        [{"open": i, "high": i + 1, "low": i - 1, "close": i + 0.5} for i in range(10)],
+        index=pd.date_range("2026-07-05T00:00:00Z", periods=10, freq="5min"),
+    )
+
+    feed = build_warmup_feed(df, timeframe="M5", min_warmup=6, warmup_limit=4)
+    capped = build_warmup_feed(df, timeframe="M5", min_warmup=6, warmup_limit=99)
+
+    assert feed["total_bars"] == 10
+    assert feed["warmup_limit"] == 6
+    assert len(feed["warmup_df"]) == 6
+    assert len(feed["warmup_bars"]) == 6
+    assert feed["warmup_bars"][0]["open"] == 4.0
+    assert capped["warmup_limit"] == 10
+    assert len(capped["warmup_bars"]) == 10
+
+
+def test_execution_gate_and_awe_configs_preserve_runtime_fields():
+    cfg = SimpleNamespace(
+        factor_signal_threshold=0.33,
+        strategy_cooldown_bars=4,
+        risk_enable_nfp_skip=True,
+        risk_enable_gvz_gate=False,
+        risk_gvz_drop_pct=-1.5,
+        awe_sensitivity=0.1,
+        awe_anchor_pull=0.2,
+        awe_max_single_change=0.3,
+        awe_weight_min=0.01,
+        awe_weight_max=0.5,
+        awe_min_trades=10,
+        awe_ic_floor=0.02,
+        awe_health_floor=0.4,
+        awe_disable_min_trades=3,
+        awe_max_type_weight_pct=0.7,
+    )
+
+    assert execution_gate_config(cfg) == {
+        "signal_threshold": 0.33,
+        "cooldown_bars": 4,
+        "risk_enable_nfp_skip": True,
+        "risk_enable_gvz_gate": False,
+        "risk_gvz_drop_pct": -1.5,
+    }
+    assert adaptive_weight_config(cfg) == {
+        "awe_sensitivity": 0.1,
+        "awe_anchor_pull": 0.2,
+        "awe_max_single_change": 0.3,
+        "awe_weight_min": 0.01,
+        "awe_weight_max": 0.5,
+        "awe_min_trades": 10,
+        "awe_ic_floor": 0.02,
+        "awe_health_floor": 0.4,
+        "awe_disable_min_trades": 3,
+        "awe_max_type_weight_pct": 0.7,
+    }
+
+
+def test_enabled_symbols_from_config_defaults_to_xauusd():
+    assert enabled_symbols_from_config(SimpleNamespace(enabled_symbols=["XAUUSD+", "EURUSD"])) == [
+        "XAUUSD+",
+        "EURUSD",
+    ]
+    assert enabled_symbols_from_config(SimpleNamespace(enabled_symbols=[])) == ["XAUUSD+"]
+    assert enabled_symbols_from_config(SimpleNamespace()) == ["XAUUSD+"]
+
+
+def test_unique_factor_pipelines_deduplicates_primary_and_symbol_map():
+    primary = {"name": "main"}
+    secondary = {"name": "secondary"}
+
+    assert unique_factor_pipelines(primary, {"XAUUSD+": primary, "EURUSD": secondary}) == [
+        primary,
+        secondary,
+    ]
+
+
+def test_apply_factor_pipeline_config_update_calls_supported_components():
+    calls = []
+
+    class _Engine:
+        def set_factor_runtime_config(self, cfg):
+            calls.append(("engine", cfg))
+
+    class _Normalizer:
+        def update_configs(self, cfg):
+            calls.append(("normalizer", cfg))
+
+    class _Compositor:
+        def reload_configs(self, cfg):
+            calls.append(("compositor", cfg))
+
+    cfg = SimpleNamespace(factor_signal_config={"trend": {"enabled": True}})
+    updated = apply_factor_pipeline_config_update(
+        pipelines=[
+            {"engine": _Engine(), "normalizer": _Normalizer(), "compositor": _Compositor()},
+            {"engine": object(), "normalizer": None, "compositor": None},
+        ],
+        cfg=cfg,
+        merged_config={"merged": True},
+    )
+
+    assert updated == 2
+    assert calls == [
+        ("engine", {"trend": {"enabled": True}}),
+        ("normalizer", {"trend": {"enabled": True}}),
+        ("compositor", {"merged": True}),
+    ]
+
+
+def test_build_extra_symbol_factor_pipelines_reuses_primary_and_shared_components():
+    calls = []
+
+    class _Engine:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            calls.append(("engine", kwargs))
+
+    class _Normalizer:
+        def __init__(self, cfg):
+            self.cfg = cfg
+            calls.append(("normalizer", cfg))
+
+    class _Compositor:
+        def __init__(self, cfg):
+            self.cfg = cfg
+            calls.append(("compositor", cfg))
+
+    class _Gate:
+        def __init__(self, cfg):
+            self.cfg = cfg
+            calls.append(("gate", cfg))
+
+    cfg = SimpleNamespace(
+        factor_signal_config={"factor": True},
+        factor_portfolio_weights={"factor": 1.0},
+        factor_tactical_alpha=0.2,
+        factor_signal_threshold=0.4,
+        strategy_cooldown_bars=3,
+    )
+    primary = {"engine": "primary"}
+    shared = {
+        "attribution": object(),
+        "awe": object(),
+        "ic_tracker": object(),
+        "event_sizing": object(),
+    }
+
+    pipelines = build_extra_symbol_factor_pipelines(
+        symbols=["XAUUSD+", "EURUSD"],
+        primary_symbol="XAUUSD+",
+        primary_pipeline=primary,
+        cfg=cfg,
+        shared_components=shared,
+        streaming_engine_cls=_Engine,
+        normalizer_cls=_Normalizer,
+        compositor_cls=_Compositor,
+        gate_cls=_Gate,
+        merge_portfolio_configs=lambda *args: {"merged_args": args},
+    )
+
+    assert pipelines["XAUUSD+"] is primary
+    assert pipelines["EURUSD"]["attribution"] is shared["attribution"]
+    assert pipelines["EURUSD"]["awe"] is shared["awe"]
+    assert pipelines["EURUSD"]["ic_tracker"] is shared["ic_tracker"]
+    assert pipelines["EURUSD"]["event_sizing"] is shared["event_sizing"]
+    assert calls[0] == ("engine", {"max_buffer": 200, "factor_runtime_config": {"factor": True}})
+    assert calls[-1] == (
+        "gate",
+        {
+            "signal_threshold": 0.4,
+            "cooldown_bars": 3,
+            "risk_enable_nfp_skip": False,
+            "risk_enable_gvz_gate": False,
+            "risk_gvz_drop_pct": -2.0,
+        },
+    )
+
+
+def test_cross_asset_symbols_for_config_requires_multiple_symbols_and_flag():
+    assert cross_asset_symbols_for_config(
+        SimpleNamespace(enabled_symbols=["XAUUSD+"], cross_asset_covariance_enabled=True)
+    ) == []
+    assert cross_asset_symbols_for_config(
+        SimpleNamespace(enabled_symbols=["XAUUSD+", "EURUSD"], cross_asset_covariance_enabled=False)
+    ) == []
+    assert cross_asset_symbols_for_config(
+        SimpleNamespace(enabled_symbols=["XAUUSD+", "EURUSD"], cross_asset_covariance_enabled=True)
+    ) == ["XAUUSD+", "EURUSD"]
+
+
+def test_depth_subscription_helpers_preserve_l2_policy_messages():
+    assert depth_subscription_required(require_l2_depth=True, l2_collection_enabled=False) is True
+    assert depth_subscription_required(require_l2_depth=False, l2_collection_enabled=True) is True
+    assert depth_subscription_required(require_l2_depth=False, l2_collection_enabled=False) is False
+    assert depth_subscription_followup_message(
+        require_l2_depth=True,
+        l2_collection_enabled=True,
+    ) == ""
+    assert depth_subscription_followup_message(
+        require_l2_depth=False,
+        l2_collection_enabled=True,
+    ) == "L2 depth collected for research; risk_require_l2_depth=false so it is not a trading gate"
+    assert depth_subscription_followup_message(
+        require_l2_depth=False,
+        l2_collection_enabled=False,
+    ) == "L2 depth subscription skipped: risk_require_l2_depth=false and l2_collection_enabled=false"
+
+
+def test_market_closed_log_message_preserves_live_text_shape():
+    market_session = {"reason": "weekend", "high_load_allowed": False}
+
+    assert bridge_readiness_label(bridge_ready=True, warming=False) == "ready"
+    assert bridge_readiness_label(bridge_ready=False, warming=True) == "warming"
+    assert bridge_readiness_label(bridge_ready=False, warming=False) == "disconnected"
+    assert market_closed_log_message(
+        tick=3,
+        market_session=market_session,
+        bridge_ready=False,
+        warming=True,
+    ) == (
+        "tick 3: market closed confirmed (weekend), open-market work paused; "
+        "high_load_allowed=False; cTrader=warming"
+    )
+    assert market_closed_log_message(
+        tick=4,
+        market_session=market_session,
+        bridge_ready=True,
+        warming=False,
+        after_broker_check=True,
+    ) == (
+        "tick 4: market closed confirmed after broker check (weekend), "
+        "open-market work paused; high_load_allowed=False; cTrader=ready"
+    )
+
+
+class _SpotDepthBridge:
+    def __init__(self, *, connected: bool):
+        self.is_connected = connected
+        self.spot_subscriptions = 0
+        self.depth_subscriptions = 0
+
+    def subscribe_spots(self):
+        self.spot_subscriptions += 1
+
+    def subscribe_depth(self):
+        self.depth_subscriptions += 1
+
+
+def test_subscribe_spot_depth_once_skips_when_bridge_error():
+    bridge = _SpotDepthBridge(connected=True)
+    logs: list[str] = []
+
+    subscribe_spot_depth_once(
+        get_ctrader=lambda: (bridge, "missing credentials", False),
+        wait_ctrader_ready=lambda *_args, **_kwargs: "",
+        require_l2_depth=False,
+        l2_collection_enabled=True,
+        log=logs.append,
+    )
+
+    assert bridge.spot_subscriptions == 0
+    assert bridge.depth_subscriptions == 0
+    assert logs == ["subscribe_spots skipped: missing credentials"]
+
+
+def test_subscribe_spot_depth_once_waits_then_subscribes_depth_for_research():
+    bridge = _SpotDepthBridge(connected=False)
+    logs: list[str] = []
+    waits: list[tuple[object, float]] = []
+
+    def wait_ready(wait_bridge, *, timeout_sec):
+        waits.append((wait_bridge, timeout_sec))
+        bridge.is_connected = True
+        return ""
+
+    subscribe_spot_depth_once(
+        get_ctrader=lambda: (bridge, "", True),
+        wait_ctrader_ready=wait_ready,
+        require_l2_depth=False,
+        l2_collection_enabled=True,
+        log=logs.append,
+        timeout_sec=7.5,
+    )
+
+    assert waits == [(bridge, 7.5)]
+    assert bridge.spot_subscriptions == 1
+    assert bridge.depth_subscriptions == 1
+    assert logs == [
+        "subscribed to spot/depth events for real-time price and L2 research",
+        "L2 depth collected for research; risk_require_l2_depth=false so it is not a trading gate",
+    ]
+
+
+def test_subscribe_spot_depth_once_skips_when_ready_wait_fails():
+    bridge = _SpotDepthBridge(connected=False)
+    logs: list[str] = []
+
+    subscribe_spot_depth_once(
+        get_ctrader=lambda: (bridge, "", True),
+        wait_ctrader_ready=lambda *_args, **_kwargs: "warming timeout",
+        require_l2_depth=True,
+        l2_collection_enabled=True,
+        log=logs.append,
+    )
+
+    assert bridge.spot_subscriptions == 0
+    assert bridge.depth_subscriptions == 0
+    assert logs == ["subscribe_spots skipped: warming timeout"]
+
+
+def test_apply_spot_quote_to_latest_bar_updates_close_high_low_when_reasonable():
+    df = pd.DataFrame(
+        [{"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0}],
+        index=pd.to_datetime(["2026-07-05T00:00:00Z"]),
+    )
+
+    result = apply_spot_quote_to_latest_bar(
+        df_new=df,
+        quote={"mid": 102.0},
+        quote_is_fresh=lambda quote: True,
+    )
+
+    assert result == {"spot": 102.0, "last_close": 100.0, "applied": True, "too_far": False}
+    assert df.iloc[-1]["close"] == 102.0
+    assert df.iloc[-1]["high"] == 102.0
+    assert df.iloc[-1]["low"] == 99.0
+
+
+def test_apply_spot_quote_to_latest_bar_marks_too_far_without_mutating():
+    df = pd.DataFrame(
+        [{"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0}],
+        index=pd.to_datetime(["2026-07-05T00:00:00Z"]),
+    )
+
+    result = apply_spot_quote_to_latest_bar(
+        df_new=df,
+        quote={"mid": 140.0},
+        quote_is_fresh=lambda quote: True,
+    )
+
+    assert result == {"spot": 140.0, "last_close": 100.0, "applied": False, "too_far": True}
+    assert df.iloc[-1]["close"] == 100.0

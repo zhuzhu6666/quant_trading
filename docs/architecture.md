@@ -33,6 +33,10 @@
 
 **系统已经具备 demo autonomous 下的自动样本物化、supervisor trace 永久记录、反事实成熟化、自动审批/应用/回滚账本和 RuntimeConfig 快照。当前重点是观察真实效果、补 freshness watchdog，并把配置/进化状态查询面继续收口成单一事实源。**
 
+2026-07-04 后端内部优化补充：
+
+**第一阶段不转 Rust、不重写交易链路，先补稳定性观测、读接口缓存和低风险模块抽取。** 当前已增加统一 TTL cache / last-good fallback / timings 工具，`/api/ops/backend-readiness` 暴露 `stability` 只读诊断，cTrader L2 writer 继续保持异步批量写入并补充 queue/batch latency 指标，live tick 与 position supervision 外层开始记录耗时。`live_runtime_state`、`live_ctrader_runtime`、`live_loop_shell`、`live_position_lifecycle`、`live_supervision_actions`、`live_tick_pipeline`、`live_risk_sizing`、`live_scheduler_jobs`、`live_data_sync_helpers` 和 `live_data_sync_job` 已承接低风险 helper / 注入式 job / payload 编排。`live_service.py` 保留 facade、broker IO、risk verdict、ledger 写入和最终执行动作；本阶段 live 维护性收口完成后，主要函数规模为：`_process_tick_factor_pipeline` 约 595 行、`_run_loop` 约 346 行、`_run_position_supervision` 约 214 行、`_record_amended_open_success_context` 约 125 行、`_execute_trailing_candidate` 约 109 行、`_record_filled_position_open_context` / `_handle_closed_positions_after_tick` 各约 80 行、`_update_trailing_stops` 约 48 行。后续优化优先用 timings 定位真实热点，再决定是否做局部 Rust PoC。
+
 ### 1.1 数据库治理基线
 
 2026-06-26 起，数据库层不再只是“路径统一”，而是正式进入治理模式：
@@ -1021,6 +1025,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - `evolution_run / evolution_decision / runtime_config_snapshot`
 - demo autonomous 自动审批、自动应用、自动 rollback 账本
 - strict evidence contract training gate
+- `/api/ops/backend-readiness.stability` 只读诊断：timings、L2 writer health、runtime config snapshot、freshness watchdog、rollback policy 边界
 
 不允许自动化：
 
@@ -1046,6 +1051,8 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 3. 补 shadow/model freshness watchdog
 4. 补 supervisor template / parameter template 的效果阈值和自动 rollback 策略
 5. 样本和治理稳定后，再推进 Phase I 多品种扩展
+
+2026-07-04 起，freshness watchdog 和配置事实源查询面先作为只读诊断暴露；它们只用于运维观察和前端展示，不参与交易裁决，也不扩大模型权限。
 
 原因很简单：
 

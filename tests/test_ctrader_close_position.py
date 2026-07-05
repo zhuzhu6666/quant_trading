@@ -165,3 +165,25 @@ def test_execution_event_keeps_partial_close_remaining_position():
     assert len(positions) == 1
     assert positions[0].position_id == 270
     assert positions[0].volume == pytest.approx(50.0)
+
+
+def test_l2_writer_health_exposes_queue_and_batch_metrics(monkeypatch):
+    bridge = _bridge(monkeypatch)
+    bridge._l2_written_rows = 123
+    bridge._l2_write_batches = 4
+    bridge._l2_last_batch_rows = 25
+    bridge._l2_last_batch_elapsed_ms = 7.25
+    bridge._l2_max_batch_elapsed_ms = 12.5
+    bridge._l2_last_error = "last"
+
+    health = bridge.l2_writer_health()
+
+    assert health["status"] == "stopped"
+    assert health["queue_capacity"] == 200000
+    assert health["queue_utilization"] == 0.0
+    assert health["written_rows"] == 123
+    assert health["write_batches"] == 4
+    assert health["last_batch_rows"] == 25
+    assert health["last_batch_elapsed_ms"] == pytest.approx(7.25)
+    assert health["max_batch_elapsed_ms"] == pytest.approx(12.5)
+    assert health["last_error"] == "last"

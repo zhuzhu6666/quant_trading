@@ -17,6 +17,7 @@ import backend.core.db as core_db
 from backend.jobs import get_job_manager
 from backend.services.mutation_audit import confirm_header_valid, record_api_mutation
 from backend.services.factor_cards import FactorCardService
+from backend.services.stability import measure
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.parameter_template_validation import (
     ParameterTemplateValidationService,
@@ -176,6 +177,18 @@ def _audit_governance_mutation(
 _LEARNING_CACHE: dict[str, tuple[float, Any]] = {}
 _LEARNING_COMPUTE_LOCKS: dict[str, threading.Lock] = {}
 _LEARNING_LAST_GOOD: dict[str, tuple[float, Any]] = {}
+_FACTOR_CARD_INVALIDATION_TRIGGERS = {
+    "summary",
+    "parameter_templates:",
+    "recommendations:",
+    "suggestions:",
+    "applications:",
+    "reviews:",
+    "lifecycle:",
+    "offline_candidates:",
+    "position_supervisor_advisories:",
+    "evolution:",
+}
 
 
 def _learning_cache_get(key: str) -> Any | None:
@@ -219,9 +232,13 @@ def _learning_cache_invalidate(*prefixes: str) -> None:
         if not prefixes:
             _LEARNING_CACHE.clear()
             return
+        expanded = set(prefixes)
+        if any(prefix in _FACTOR_CARD_INVALIDATION_TRIGGERS for prefix in expanded):
+            expanded.add("factor_cards:")
+            expanded.add("parameter_templates:")
         keys = list(_LEARNING_CACHE.keys())
         for key in keys:
-            if any(key.startswith(prefix) for prefix in prefixes):
+            if any(key.startswith(prefix) for prefix in expanded):
                 _LEARNING_CACHE.pop(key, None)
 
 
@@ -232,6 +249,37 @@ def _learning_compute_lock(key: str) -> threading.Lock:
             lock = threading.Lock()
             _LEARNING_COMPUTE_LOCKS[key] = lock
         return lock
+
+
+def _learning_cached_read(cache_key: str, compute, *, timing_name: str = "") -> dict:
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    with _learning_compute_lock(cache_key):
+        cached = _learning_cache_get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            if timing_name:
+                with measure(timing_name):
+                    payload = compute()
+            else:
+                payload = compute()
+            _learning_last_good_set(cache_key, payload)
+            return _learning_cache_set(cache_key, payload)
+        except Exception:
+            fallback = _learning_last_good_get(cache_key)
+            if fallback:
+                created_at, payload = fallback
+                if isinstance(payload, dict):
+                    return {
+                        **payload,
+                        "stale": True,
+                        "stale_reason": "compute_error",
+                        "stale_at": time.time(),
+                        "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
+                    }
+            raise
 
 
 def _is_sqlite_lock_error(exc: Exception) -> bool:
@@ -2264,16 +2312,45 @@ def get_factor_cards(
     )
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
     factor_family = factor_family if isinstance(factor_family, str) and factor_family else None
-    service = FactorCardService()
-    return {
-        "items": service.list_cards(
-            limit=limit,
-            source=source,
-            lifecycle_status=lifecycle_status,
-            factor_id=factor_id,
-            factor_family=factor_family,
-        )
-    }
+    cache_key = (
+        f"factor_cards:{int(limit)}:{source or '*'}:{lifecycle_status or '*'}:"
+        f"{factor_id or '*'}:{factor_family or '*'}"
+    )
+    cached = _learning_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    with _learning_compute_lock(cache_key):
+        cached = _learning_cache_get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            with measure("api.learning.factor_cards"):
+                service = FactorCardService()
+                payload = {
+                    "items": service.list_cards(
+                        limit=limit,
+                        source=source,
+                        lifecycle_status=lifecycle_status,
+                        factor_id=factor_id,
+                        factor_family=factor_family,
+                    )
+                }
+            _learning_last_good_set(cache_key, payload)
+            return _learning_cache_set(cache_key, payload)
+        except Exception:
+            fallback = _learning_last_good_get(cache_key)
+            if fallback:
+                created_at, payload = fallback
+                if isinstance(payload, dict):
+                    payload = {
+                        **payload,
+                        "stale": True,
+                        "stale_reason": "compute_error",
+                        "stale_at": time.time(),
+                        "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
+                    }
+                    return payload
+            raise
 
 
 @router.get("/position-supervisor/templates")
@@ -2691,13 +2768,18 @@ def get_parameter_templates(
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
     regime = regime if isinstance(regime, str) and regime else None
     service = ParameterTemplateService()
-    return {
-        "items": service.list_templates(
-            factor_id=factor_id,
-            regime=regime,
-            limit=limit,
-        )
-    }
+    cache_key = f"parameter_templates:list:{service.db_path}:{factor_id or '*'}:{regime or '*'}:{int(limit)}"
+    return _learning_cached_read(
+        cache_key,
+        lambda: {
+            "items": service.list_templates(
+                factor_id=factor_id,
+                regime=regime,
+                limit=limit,
+            )
+        },
+        timing_name="api.learning.parameter_templates",
+    )
 
 
 @router.get("/parameter-templates/active")
@@ -2707,7 +2789,12 @@ def get_active_parameter_templates(
 ) -> dict:
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
     service = ParameterTemplateService()
-    return {"items": service.list_active_templates(factor_id=factor_id)}
+    cache_key = f"parameter_templates:active:{service.db_path}:{factor_id or '*'}"
+    return _learning_cached_read(
+        cache_key,
+        lambda: {"items": service.list_active_templates(factor_id=factor_id)},
+        timing_name="api.learning.parameter_templates_active",
+    )
 
 
 @router.get("/parameter-templates/recommendations")
@@ -2719,13 +2806,7 @@ def get_parameter_template_recommendations(
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
     service = ParameterTemplateService()
     cache_key = f"recommendations:{service.db_path}:{factor_id or '*'}:{int(limit)}"
-    cached = _learning_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    with _learning_compute_lock(cache_key):
-        cached = _learning_cache_get(cache_key)
-        if cached is not None:
-            return cached
+    def _compute() -> dict:
         items = service.list_recommendations(factor_id=factor_id, limit=limit)
         validation_service = ParameterTemplateValidationService(service.db_path)
         conn = _state_conn_for_path(service.db_path, read_only=True)
@@ -2733,10 +2814,10 @@ def get_parameter_template_recommendations(
             enriched = []
             for item in items:
                 recommendation_id = str(item.get("recommendation_id") or "")
-                factor_id = str(item.get("factor_id") or "")
+                item_factor_id = str(item.get("factor_id") or "")
                 suggestion = _latest_template_suggestion_for_recommendation(conn, recommendation_id)
                 candidate = {}
-                candidates = validation_service.list_release_candidates(factor_id=factor_id, limit=20)
+                candidates = validation_service.list_release_candidates(factor_id=item_factor_id, limit=20)
                 for candidate_item in candidates:
                     trace = dict(((candidate_item.get("validation_summary") or {}).get("recommendation_source") or {}))
                     if str(trace.get("recommendation_id") or "") == recommendation_id:
@@ -2744,7 +2825,7 @@ def get_parameter_template_recommendations(
                         break
                 lifecycle = _latest_parameter_template_lifecycle_for_recommendation(
                     conn,
-                    factor_id=factor_id,
+                    factor_id=item_factor_id,
                     recommendation_id=recommendation_id,
                     candidate_id=str(candidate.get("candidate_id") or ""),
                 )
@@ -2765,13 +2846,19 @@ def get_parameter_template_recommendations(
                         "lifecycle_event": lifecycle,
                         "trace_locator": _latest_factor_trace_locator(
                             conn,
-                            factor_id,
+                            item_factor_id,
                         ),
                     }
                 )
-            return _learning_cache_set(cache_key, {"items": enriched})
+            return {"items": enriched}
         finally:
             conn.close()
+
+    return _learning_cached_read(
+        cache_key,
+        _compute,
+        timing_name="api.learning.parameter_template_recommendations",
+    )
 
 
 @router.get("/parameter-templates/switch-logs")
@@ -2782,7 +2869,12 @@ def get_parameter_template_switch_logs(
 ) -> dict:
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
     service = ParameterTemplateService()
-    return {"items": service.list_switch_logs(factor_id=factor_id, limit=limit)}
+    cache_key = f"parameter_templates:switch_logs:{service.db_path}:{factor_id or '*'}:{int(limit)}"
+    return _learning_cached_read(
+        cache_key,
+        lambda: {"items": service.list_switch_logs(factor_id=factor_id, limit=limit)},
+        timing_name="api.learning.parameter_template_switch_logs",
+    )
 
 
 @router.post("/parameter-templates/upsert")
@@ -3038,32 +3130,36 @@ def list_parameter_template_offline_candidates(
     status = status if isinstance(status, str) and status else None
     service = ParameterTemplateValidationService()
     cache_key = f"offline_candidates:{service.db_path}:{factor_id or '*'}:{status or '*'}:{int(limit)}"
-    cached = _learning_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    items = service.list_release_candidates(
-        factor_id=factor_id,
-        status=status,
-        limit=limit,
+    def _compute() -> dict:
+        items = service.list_release_candidates(
+            factor_id=factor_id,
+            status=status,
+            limit=limit,
+        )
+        conn = _state_conn_for_path(service.db_path, read_only=True)
+        try:
+            enriched = []
+            for item in items:
+                governance = _parameter_template_candidate_governance_snapshot(item)
+                enriched.append(
+                    {
+                        **item,
+                        "governance": governance,
+                        "trace_locator": _latest_factor_trace_locator(
+                            conn,
+                            str(item.get("factor_id") or ""),
+                        ),
+                    }
+                )
+            return {"items": enriched}
+        finally:
+            conn.close()
+
+    return _learning_cached_read(
+        cache_key,
+        _compute,
+        timing_name="api.learning.offline_candidates",
     )
-    conn = _state_conn_for_path(service.db_path, read_only=True)
-    try:
-        enriched = []
-        for item in items:
-            governance = _parameter_template_candidate_governance_snapshot(item)
-            enriched.append(
-                {
-                    **item,
-                    "governance": governance,
-                    "trace_locator": _latest_factor_trace_locator(
-                        conn,
-                        str(item.get("factor_id") or ""),
-                    ),
-                }
-            )
-        return _learning_cache_set(cache_key, {"items": enriched})
-    finally:
-        conn.close()
 
 
 @router.post("/parameter-templates/offline-candidates/review")
@@ -3239,41 +3335,41 @@ def get_applications(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict:
     cache_key = f"applications:{int(limit)}"
-    cached = _learning_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    conn = _state_conn(read_only=True)
-    try:
-        rows = _execute(
-            conn,
-            """
-            SELECT l.application_id, l.cycle_ts, l.scope_type, l.scope_key, l.action, l.bias_multiplier,
-                   l.old_weight, l.new_weight, l.suggestion_ids_json, l.status, l.details_json, l.created_at,
-                   e.observed_trade_count, e.baseline_trade_count, e.post_avg_reward, e.baseline_avg_reward,
-                   e.delta_avg_reward, e.post_win_rate, e.baseline_win_rate, e.last_review_at
-            FROM learning_application_log l
-            LEFT JOIN learning_application_effect e
-              ON e.application_id = l.application_id
-            ORDER BY l.created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            try:
-                item["suggestion_ids"] = json.loads(item.pop("suggestion_ids_json") or "[]")
-            except Exception:
-                item["suggestion_ids"] = []
-            try:
-                item["details"] = json.loads(item.pop("details_json") or "{}")
-            except Exception:
-                item["details"] = {}
-            items.append(item)
-        return _learning_cache_set(cache_key, {"items": items})
-    finally:
-        conn.close()
+    def _compute() -> dict:
+        conn = _state_conn(read_only=True)
+        try:
+            rows = _execute(
+                conn,
+                """
+                SELECT l.application_id, l.cycle_ts, l.scope_type, l.scope_key, l.action, l.bias_multiplier,
+                       l.old_weight, l.new_weight, l.suggestion_ids_json, l.status, l.details_json, l.created_at,
+                       e.observed_trade_count, e.baseline_trade_count, e.post_avg_reward, e.baseline_avg_reward,
+                       e.delta_avg_reward, e.post_win_rate, e.baseline_win_rate, e.last_review_at
+                FROM learning_application_log l
+                LEFT JOIN learning_application_effect e
+                  ON e.application_id = l.application_id
+                ORDER BY l.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["suggestion_ids"] = json.loads(item.pop("suggestion_ids_json") or "[]")
+                except Exception:
+                    item["suggestion_ids"] = []
+                try:
+                    item["details"] = json.loads(item.pop("details_json") or "{}")
+                except Exception:
+                    item["details"] = {}
+                items.append(item)
+            return {"items": items}
+        finally:
+            conn.close()
+
+    return _learning_cached_read(cache_key, _compute, timing_name="api.learning.applications")
 
 
 @router.get("/lifecycle")
@@ -3282,59 +3378,59 @@ def get_lifecycle(
     limit: int = Query(default=60, ge=1, le=500),
 ) -> dict:
     cache_key = f"lifecycle:{int(limit)}"
-    cached = _learning_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    conn = _state_conn(read_only=True)
-    try:
-        rows = _execute(
-            conn,
-            """
-            SELECT id, timestamp, event, factor, source, description, score, status, reason
-            FROM lifecycle_events
-            ORDER BY timestamp DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            candidate_trace = {}
-            if str(item.get("source") or "") == "parameter_template":
-                text = f"{item.get('description') or ''} {item.get('reason') or ''}"
-                match = _CANDIDATE_ID_RE.search(text)
-                if match:
-                    candidate_trace = _candidate_trace_by_id(conn, match.group(1))
-                if candidate_trace:
-                    candidate_trace["trace_locator"] = _latest_factor_trace_locator(
-                        conn,
-                        str(item.get("factor") or ""),
-                    )
-            governance = (
-                _parameter_template_lifecycle_governance_snapshot(item, candidate_trace)
-                if str(item.get("source") or "") == "parameter_template"
-                else {}
-            )
-            items.append(
-                {
-                    "id": item.get("id"),
-                    "ts": float(item.get("timestamp") or 0.0),
-                    "event": str(item.get("event") or ""),
-                    "factor": str(item.get("factor") or ""),
-                    "source": str(item.get("source") or ""),
-                    "description": str(item.get("description") or ""),
-                    "score": float(item.get("score") or 0.0),
-                    "status": str(item.get("status") or ""),
-                    "reason": str(item.get("reason") or item.get("description") or ""),
-                    "governance": governance,
-                    "metrics": {"candidate_trace": candidate_trace} if candidate_trace else {},
-                    "kind": "factor_lifecycle",
-                }
-            )
-        return _learning_cache_set(cache_key, {"items": items})
-    finally:
-        conn.close()
+    def _compute() -> dict:
+        conn = _state_conn(read_only=True)
+        try:
+            rows = _execute(
+                conn,
+                """
+                SELECT id, timestamp, event, factor, source, description, score, status, reason
+                FROM lifecycle_events
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                candidate_trace = {}
+                if str(item.get("source") or "") == "parameter_template":
+                    text = f"{item.get('description') or ''} {item.get('reason') or ''}"
+                    match = _CANDIDATE_ID_RE.search(text)
+                    if match:
+                        candidate_trace = _candidate_trace_by_id(conn, match.group(1))
+                    if candidate_trace:
+                        candidate_trace["trace_locator"] = _latest_factor_trace_locator(
+                            conn,
+                            str(item.get("factor") or ""),
+                        )
+                governance = (
+                    _parameter_template_lifecycle_governance_snapshot(item, candidate_trace)
+                    if str(item.get("source") or "") == "parameter_template"
+                    else {}
+                )
+                items.append(
+                    {
+                        "id": item.get("id"),
+                        "ts": float(item.get("timestamp") or 0.0),
+                        "event": str(item.get("event") or ""),
+                        "factor": str(item.get("factor") or ""),
+                        "source": str(item.get("source") or ""),
+                        "description": str(item.get("description") or ""),
+                        "score": float(item.get("score") or 0.0),
+                        "status": str(item.get("status") or ""),
+                        "reason": str(item.get("reason") or item.get("description") or ""),
+                        "governance": governance,
+                        "metrics": {"candidate_trace": candidate_trace} if candidate_trace else {},
+                        "kind": "factor_lifecycle",
+                    }
+                )
+            return {"items": items}
+        finally:
+            conn.close()
+
+    return _learning_cached_read(cache_key, _compute, timing_name="api.learning.lifecycle")
 
 
 @router.get("/dataset")

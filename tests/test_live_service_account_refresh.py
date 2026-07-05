@@ -223,7 +223,7 @@ class _SyncThread:
 # and asserts the call ordering — if anyone moves kickoff back inside the
 # else, this test fails.
 def test_kickoff_runs_even_when_fetch_bars_returns_none():
-    """Regression: in _run_loop's cTrader branch, kickoff_account_refresh
+    """Regression: in the live tick body cTrader branch, kickoff_account_refresh
     must be called BEFORE _fetch_bars_with_retry. Otherwise the cTrader
     demo (which returns 0 history bars) will skip the kickoff forever.
     """
@@ -231,30 +231,13 @@ def test_kickoff_runs_even_when_fetch_bars_returns_none():
     src_path = str(_Path(__file__).resolve().parent.parent / "backend" / "services" / "live_service.py")
     src = open(src_path, encoding="utf-8").read()
     lines = src.splitlines()
-    # Locate _run_loop function start
-    run_loop_start = next(i for i, ln in enumerate(lines) if "def _run_loop" in ln)
-    # Within _run_loop, find the cTrader branch in the main while loop
-    # (i.e. after the "while not stop_flag.is_set():" line, not the warmup block)
-    main_loop_idx = next(
-        i for i, ln in enumerate(lines[run_loop_start:], start=run_loop_start)
-        if "while not stop_flag.is_set" in ln
+    # Locate the extracted tick body used by _run_loop's main while loop.
+    main_loop_idx = next(i for i, ln in enumerate(lines) if "def _run_live_loop_tick_body" in ln)
+    helper_end = next(
+        i for i, ln in enumerate(lines[main_loop_idx + 1:], start=main_loop_idx + 1)
+        if ln.startswith("def _update_live_loop_risk_metrics")
     )
-    ctrader_start = None
-    for i in range(main_loop_idx, len(lines)):
-        stripped = lines[i].strip()
-        # The main loop now has an unconditional cTrader try block starting with _get_ctrader()
-        if stripped.startswith('bridge, err, warming = _get_ctrader()'):
-            ctrader_start = i
-            break
-    assert ctrader_start is not None, "could not find cTrader try block in _run_loop main loop"
-    # Find the end of this block (next line that's not indented under the try)
-    # The try: is at 8 spaces, content at 12 spaces
-    end = ctrader_start + 1
-    while end < len(lines):
-        if lines[end].strip() and not lines[end].startswith("            "):
-            break
-        end += 1
-    branch_text = "\n".join(lines[ctrader_start:end])
+    branch_text = "\n".join(lines[main_loop_idx:helper_end])
     kickoff_pos = branch_text.find("kickoff_account_refresh")
     # cTrader reads from local DataStore now
     warmup_pos = branch_text.find("_warmup_from_local_db")
@@ -262,6 +245,6 @@ def test_kickoff_runs_even_when_fetch_bars_returns_none():
     assert warmup_pos > 0, "_warmup_from_local_db not found in cTrader main-loop block"
     assert kickoff_pos < warmup_pos, (
         "REGRESSION: kickoff_account_refresh is AFTER _warmup_from_local_db in "
-        "_run_loop's cTrader main loop. It must be BEFORE so the cache writer still "
+        "the cTrader live tick body. It must be BEFORE so the cache writer still "
         "runs when warmup returns None."
     )
