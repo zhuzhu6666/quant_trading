@@ -421,6 +421,11 @@ export async function getFactorV4Stats(): Promise<Record<string, unknown>> {
   return getJson<Record<string, unknown>>("/api/v4/stats");
 }
 
+export async function getFactorCatalog(snapshot = false): Promise<Record<string, unknown>> {
+  const query = snapshot ? "?snapshot=latest" : "";
+  return getJson<Record<string, unknown>>(`/api/v4/catalog${query}`);
+}
+
 export async function getFactorV4RecentTicks(): Promise<unknown[]> {
   return getJson<unknown[]>("/api/v4/recent-ticks");
 }
@@ -439,6 +444,18 @@ export async function getLearningApplications(limit = 20): Promise<LearningPaylo
 
 export async function getLearningLifecycle(limit = 30): Promise<LearningPayload> {
   return getJson<LearningPayload>(`/api/learning/lifecycle?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getEvolutionRuns(limit = 10): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/evolution/runs?limit=${encodeURIComponent(String(limit))}`);
+}
+
+export async function getParameterTemplatesActive(): Promise<LearningPayload> {
+  return getJson<LearningPayload>("/api/learning/parameter-templates/active");
+}
+
+export async function getParameterTemplateSwitchLogs(limit = 20): Promise<LearningPayload> {
+  return getJson<LearningPayload>(`/api/learning/parameter-templates/switch-logs?limit=${encodeURIComponent(String(limit))}`);
 }
 
 export async function getLearningReviews(limit = 10): Promise<LearningPayload> {
@@ -509,6 +526,94 @@ export async function getOffmarketHighLoadAudits(limit = 30): Promise<LearningPa
 
 export async function getStateSnapshot(): Promise<StateSnapshot> {
   return getJson<StateSnapshot>("/api/state");
+}
+
+export async function getReplayLatest(): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>("/api/ops/replay/latest");
+}
+
+export async function getReplayBarDecisions(limit = 30): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({
+    lookback_days: "7",
+    limit: String(limit),
+    offset: "0",
+  });
+  return getJson<Record<string, unknown>>(`/api/ops/replay/bar-decisions?${params.toString()}`);
+}
+
+export async function runReplayBarEvidence(decisionId = ""): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({
+    lookback_days: "1",
+    limit: "1",
+    warmup_bars: "40",
+    post_bars: "24",
+  });
+  if (decisionId) {
+    params.set("decision_id", decisionId);
+    params.set("lookback_days", "7");
+  }
+  return postJson<Record<string, unknown>>(`/api/ops/replay/bar-preview?${params.toString()}`);
+}
+
+export async function getIncidentControl(): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>("/api/ops/incident-control");
+}
+
+export async function setIncidentControl(mode: string, reason: string): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/incident-control", {
+    mode,
+    reason,
+    confirm_thaw: mode === "normal",
+  });
+}
+
+export async function getIncidentPlaybookLatest(): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>("/api/ops/incident-playbook/latest");
+}
+
+export async function runIncidentPlaybook(scenario = "governance_failure", severity = "medium"): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/incident-playbook/run", {
+    scenario,
+    severity,
+    created_by: "web:v15_cockpit",
+  });
+}
+
+export async function getAutonomyScopeApprovalLatest(): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>("/api/ops/autonomy-health/scope-approvals/latest");
+}
+
+export async function getAutonomyScopeEnforcementLatest(): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>("/api/ops/autonomy-health/scope-enforcements/latest");
+}
+
+export async function enforceAutonomyScope(): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/autonomy-health/scope-enforcements", {
+    actor: "web:v15_cockpit",
+    reason: "web_v15_cockpit_tightening_review",
+  });
+}
+
+export async function getV15Phase0(): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>("/api/ops/v15/phase0");
+}
+
+export async function getReleaseLatest(): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>("/api/ops/release/latest");
+}
+
+export async function startReleaseRun(): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/release/start", {
+    release_class: "daily_autonomous_mutation",
+    summary: { source: "web_v15_cockpit" },
+    tests: [],
+    rollback_ref: {},
+    created_by: "web:v15_cockpit",
+  });
+}
+
+export async function getReleaseApprovals(runId: string): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>(`/api/ops/release/${encodeURIComponent(runId)}/approvals`);
 }
 
 export async function startTrading(

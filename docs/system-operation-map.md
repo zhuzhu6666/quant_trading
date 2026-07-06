@@ -37,6 +37,7 @@ Caddy + web_frontend + miniprogram_v2
   -> ledger / review / attribution / learning
   -> FactorGovernanceOrchestrator
   -> runtime_config_overlay + runtime_config_snapshot
+  -> replay_report + autonomy_health readiness + autonomy_scope_approval_event + release_run + release_approval_event + incident_playbook_run/event + v15_phase0 gate
   -> 下一轮交易
 ```
 
@@ -78,6 +79,7 @@ flowchart TD
         Gate["ExecutionGate"]
         Sizing["Kelly + event + context sizing"]
         RiskPolicy["RiskPolicyService / RiskGovernor"]
+        IncidentControl["runtime incident control"]
         Execution["open / amend / reduce / close"]
     end
 
@@ -89,6 +91,13 @@ flowchart TD
         TradeReview["trade_outcome_review"]
         FactorReview["factor_contribution_review"]
         Counterfactual["supervisor_counterfactual_review"]
+        ReplayReport["replay_report"]
+        AutonomyScopeApproval["autonomy_scope_approval_event"]
+        ReleaseRun["release_run"]
+        ReleaseApproval["release_approval_event"]
+        IncidentPlaybook["incident_playbook_run"]
+        IncidentPlaybookEvent["incident_playbook_event"]
+        Phase0Gate["v15_phase0 completion"]
     end
 
     subgraph WORKER["quant-learning-worker.service"]
@@ -122,6 +131,7 @@ flowchart TD
         Overlay["runtime_config_overlay"]
         Snapshot["runtime_config_snapshot"]
         ParamTemplates["parameter templates"]
+        AutonomyHealth["autonomy health"]
     end
 
     subgraph UI["展示与操作入口"]
@@ -147,6 +157,7 @@ flowchart TD
 
     API --> LiveLoop
     LiveLoop --> FactorEngine --> Normalizer --> Compositor --> ContextPolicy --> Gate --> Sizing --> RiskPolicy --> Execution --> Bridge
+    Overlay --> IncidentControl --> RiskPolicy
     RiskPolicy --> StatePG
     Execution --> DecisionLedger
     Compositor --> FactorSnapshot
@@ -155,6 +166,8 @@ flowchart TD
     PositionSupervisor --> RiskPolicy
 
     Lifecycle --> TradeReview
+    DecisionLedger --> ReplayReport
+    FactorSnapshot --> ReplayReport
     DecisionLedger --> LearningBackfill
     SupervisorTrace --> LearningBackfill
     TradeReview --> LearningBackfill
@@ -191,6 +204,20 @@ flowchart TD
     Overlay --> WORKER
     Snapshot --> FactorGov
     CatalogSnapshot --> Catalog
+    ReplayReport --> AutonomyHealth
+    AppLog --> AutonomyHealth
+    CatalogSnapshot --> AutonomyHealth
+    Snapshot --> ReleaseRun
+    ReplayReport --> ReleaseRun
+    IncidentControl --> ReleaseRun
+    Readiness --> ReleaseRun
+    IncidentPlaybook --> IncidentPlaybookEvent
+    Readiness --> IncidentPlaybookEvent
+    ReplayReport --> IncidentPlaybookEvent
+    ReleaseRun --> IncidentPlaybookEvent
+    Readiness --> Phase0Gate
+    ReplayReport --> Phase0Gate
+    ReleaseRun --> Phase0Gate
 
     API --> Caddy --> Web
     API --> MiniProgram
@@ -336,7 +363,7 @@ GET  /api/learning/model/permissions/audits
 
 `backend-readiness` 会汇总 governance、model permission、shadow audit freshness、dataset quality 等状态；Web 前端应展示这些状态，不要自己重新判断模型是否可用。
 
-当前按智能单元总账口径统计：规则/策略执行单元 27 个，影子/建议模型与模型护栏单元 9 个，诊断汇总单元 1 个，合计纳入总账 37 个。数量和边界以 `rule-driven-intelligence-inventory.md` 为准。
+当前按智能单元总账口径统计：规则/策略执行单元 28 个，影子/建议模型与模型护栏单元 9 个，诊断汇总单元 7 个，合计纳入总账 44 个。数量和边界以 `rule-driven-intelligence-inventory.md` 为准。
 
 ## 6. Live Loop 主链路
 
@@ -451,6 +478,65 @@ StreamingFactorEngine.refresh_factor_list()
 - `DecisionPolicy` 仍是权重写入的权威路径。
 - API 手工 patch 仍存在于 `/api/config/runtime`，但不应替代自治主循环。
 
+## 8.1 V15 Phase 0 Replay And Autonomy Health
+
+V15 Phase 0 已新增两个只读/审计入口：
+
+- `backend.services.replay_harness.ReplayHarnessService`：读取 `decision_ledger`、`decision_factor_snapshot`、gate payload 和 `RiskPolicyService` 已写入的 `policy_verdict`，生成 `replay_report`，并写 `data/replay_reports/*.json` artifact。v1 目标是检查 factor/gate/risk verdict 是否有可回放锚点和内部对齐误差，不重放 broker 执行，也不改 runtime config。
+- P1 已新增 `run_bar_replay_evidence()` / `POST /api/ops/replay/bar-run`：围绕 decision timestamp 读取历史 bar window，输出 `bar_replay_metrics.v1`，包括 `aligned_decision_count`、`bar_window_coverage`、`bar_window_hash` 和缺口样例；随后通过 `FactorFrameBuilder.enrich_bars()` 输出 `factor_frame_replay_metrics.v1`、`factor_frame_coverage` 和 `factor_frame_hash`；再通过只读 `ExecutionGate.filter()` 和 `RiskPolicyService.evaluate("open_trade")` 输出 `execution_gate_recompute_metrics.v1` 与 `risk_policy_recompute_metrics.v1`，记录 coverage、agreement/disagreement 和 input gap；最后读取 `order_lifecycle_event`、`position_lifecycle_event`、`position_supervisor_trace`、`ctrader_deals` 和 `supervisor_counterfactual_review` 输出 `order_lifecycle_replay_metrics.v1`、`position_lifecycle_replay_metrics.v1`、`supervisor_action_replay_metrics.v1`、`order_outcome_causality_metrics.v1`、`broker_fill_slippage_metrics.v1`、`supervisor_counterfactual_replay_metrics.v1`、`risk_policy_subaction_replay_metrics.v1`。`list_bar_preview_decisions()` / `GET /api/ops/replay/bar-decisions` 提供可选历史单；`run_bar_window_preview()` / `POST /api/ops/replay/bar-preview` 是 Web 快速预览入口，支持默认最近真实交易或按 `decision_id` 精确选择历史决策，并只读输出 `trade_outcome_learning_preview.v1`（盈亏、平仓原因、学习样本状态）。它们不直接改交易、权重或 runtime config，也不重放 broker，不喂 circuit breaker，不写学习样本。
+- `backend.services.autonomy_health.AutonomyHealthService`：汇总治理动作成功率、rollback/risk block、后验 reward delta、overlay/snapshot、Catalog freshness、replay freshness、shadow freshness、evidence integrity 和 live loop stability，输出 `score` 与 `posture=full/constrained/shadow_only/frozen`；P1 已写 `autonomy_health_snapshot` 并在 readiness 暴露 `autonomy_health_trend.v1`，通过 `autonomy_scope_approval_event` 记录 health scope recommendation 审批审计，并通过 `autonomy_scope_enforcement_event` 记录显式收紧执行。approval 仍 `applied=false`；enforcement 只能调用 incident-control 服务把 runtime incident mode 收紧，不能放宽权限。
+
+readiness 现在通过 `/api/ops/backend-readiness` 暴露 `v15`、`replay` 和 `autonomy_health` 字段；手动 replay 入口是 `POST /api/ops/replay/run` 和 `POST /api/ops/replay/bar-run`，Web 历史选择入口是 `GET /api/ops/replay/bar-decisions`，快速预览入口是 `POST /api/ops/replay/bar-preview`，最近报告入口是 `GET /api/ops/replay/latest`。
+
+Web `/v15` cockpit 读取这些只读证据和受控动作入口来展示 Runtime、Replay、Risk、Learning、Incidents、Release 状态；前端只触发后端 API，不重新实现 `RiskPolicyService`、`DecisionPolicy` 或 runtime overlay/snapshot 判断。
+
+## 8.2 V15 Incident Controls
+
+V15 已新增 runtime incident controls v1：
+
+- 配置字段：`runtime_incident_mode=normal|shadow_only|no_new_risk|only_close|frozen`。
+- 设置入口：`POST /api/ops/incident-control`，先调用 `RiskPolicyService.evaluate("set_incident_control")`，通过后由 `RuntimeConfigMutationService` 写入 `runtime_config_overlay` 和 `runtime_config_snapshot`。
+- 裁决入口：`RiskPolicyService.evaluate(...)` 对 open/governance/model/live-control 动作统一读取 incident mode 并拦截，不要求调用方各自实现判断。
+- `no_new_risk` 阻断开新风险，允许 close/reduce/tighten/rollback；`only_close` 只允许 close；`frozen` 允许 close 和 rollback；`shadow_only` 允许风险降低动作和 shadow/canary 审计动作。
+
+该能力是 release/incident control 的初版；release approval trail v1 已作为只读审批事件流落地，incident playbook plan automation v1 和 event binding v1 已作为只读计划/事件账本落地。
+
+## 8.2.1 V15 Incident Playbook Plan
+
+P1 已新增 incident playbook plan automation v1：
+
+- 表：`incident_playbook_run`。
+- 事件表：`incident_playbook_event`。
+- 服务：`backend.services.incident_controls.RuntimeIncidentControlService.build_playbook()`。
+- 事件服务：`RuntimeIncidentControlService.record_playbook_event()` / `playbook_events()`。
+- 入口：`GET /api/ops/incident-playbook/latest`、`POST /api/ops/incident-playbook/run`、`GET/POST /api/ops/incident-playbook/{playbook_id}/events`。
+- 记录内容：scenario、severity、current/target incident mode、playbook steps、`RiskPolicyService.evaluate("set_incident_control")` 预检、release ref、边界声明。
+- 事件内容：event_type、actor、status、evidence refs、notes、audit-only boundary，用来把 readiness、replay、release、operator note 等证据绑定到 playbook。
+
+该 playbook 只生成和持久化应急计划/事件，不直接应用 incident mode，不写 runtime overlay/snapshot，不改订单或仓位。真正切换 incident mode 仍必须走 `/api/ops/incident-control`，并由 `RiskPolicyService`、`RuntimeConfigMutationService` 和 runtime overlay/snapshot 控制。
+
+## 8.3 V15 Release Run Ledger
+
+V15 已新增 release run ledger v1 和 approval trail v1：
+
+- 表：`release_run`、`release_approval_event`。
+- 服务：`backend.services.release_control.ReleaseControlService`。
+- 入口：`GET /api/ops/release/latest`、`POST /api/ops/release/start`、`POST /api/ops/release/{run_id}/finish`、`GET/POST /api/ops/release/{run_id}/approvals`。
+- 记录内容：release class、status、summary、checklist、`runtime_config_snapshot.config_hash`、最近 `replay_report`、incident mode、readiness/autonomy posture、tests、rollback ref、approval actor/decision/reason/evidence refs。
+
+该账本和审批事件流只做 release 证据汇总和审计，不直接修改 release status、runtime config、factor weight、position control 或 broker 状态；真实风险/配置动作仍由 `RiskPolicyService`、`DecisionPolicy` 和 runtime overlay/snapshot 写入口控制。
+
+## 8.4 V15 Phase 0 Completion Gate
+
+V15 Phase 0 已新增只读完成门：
+
+- 服务：`backend.services.v15_phase0.V15Phase0CompletionService`。
+- 入口：`GET /api/ops/v15/phase0`。
+- readiness 字段：`v15.phase0` 和顶层 `v15_phase0`。
+- 输出：`implementation_complete`、`operationally_ready`、`gates`、`blockers`、`evidence_gaps`。
+
+该 gate 用来区分“代码能力已落地”和“现场证据已齐全”。缺少最新 replay 或 release run 会进入 `operational_status=needs_evidence`，但不代表 Phase 0 代码能力缺失。
+
 ## 9. Factor Catalog 是因子事实视图
 
 `backend.services.factor_catalog.build_factor_catalog()` 汇总：
@@ -484,6 +570,15 @@ GET /api/v4/catalog?snapshot=latest
 | runtime base config | `config/settings.yaml` |
 | runtime autonomous overlay | PostgreSQL `runtime_config_overlay` |
 | runtime rollback point | PostgreSQL `runtime_config_snapshot` |
+| runtime incident control | `runtime_incident_mode` in RuntimeConfig overlay/snapshot |
+| autonomy scope approval | PostgreSQL `autonomy_scope_approval_event` |
+| autonomy scope enforcement | PostgreSQL `autonomy_scope_enforcement_event` |
+| incident playbook plan | PostgreSQL `incident_playbook_run` |
+| incident playbook event trail | PostgreSQL `incident_playbook_event` |
+| replay evidence | PostgreSQL `replay_report` + `data/replay_reports/*.json` |
+| release run ledger | PostgreSQL `release_run` |
+| release approval trail | PostgreSQL `release_approval_event` |
+| V15 Phase 0 completion | `/api/ops/v15/phase0` + readiness `v15.phase0` |
 | bars | `data/bars_monthly/bars_YYYY_MM.duckdb`，`data/bars.duckdb` 为当前月兼容链接 |
 | ticks | `data/ticks_monthly/ticks_YYYY_MM.duckdb`，`data/ticks.duckdb` 为当前月兼容链接 |
 | L2 | `data/l2_monthly/l2_YYYY_MM.duckdb`，由 backend 内 cTrader 主连接采集 |
@@ -499,6 +594,20 @@ GET /api/v4/catalog?snapshot=latest
 |---|---|
 | `GET /api/health` | 最小存活检查 |
 | `GET /api/ops/backend-readiness` | Web 前端统一后端状态合约，带 10 秒 cache 和 last-good fallback |
+| `GET /api/ops/autonomy-health/scope-approvals/latest` / `POST /api/ops/autonomy-health/scope-approvals` | 查看/记录 V15 autonomy health scope approval audit event |
+| `GET /api/ops/autonomy-health/scope-enforcements/latest` / `POST /api/ops/autonomy-health/scope-enforcements` | 查看/执行 V15 autonomy health tightening-only enforcement event；执行走 incident-control、RiskPolicyService 和 overlay/snapshot |
+| `GET /api/ops/replay/latest` | 最近一次 V15 replay report metadata |
+| `POST /api/ops/replay/run` | 手动触发 factor/gate/risk replay harness v1 |
+| `POST /api/ops/replay/bar-run` | 手动触发 P1 decision/bar-window/factor-frame replay evidence |
+| `GET /api/ops/replay/bar-decisions` | Web 快速回放候选历史单，带盈亏和学习状态摘要 |
+| `POST /api/ops/replay/bar-preview` | Web 快速生成 1 个决策窗口，展示 K线、实际盈亏、平仓归因和学习样本状态；不持久化 replay_report |
+| `GET /api/ops/incident-control` / `POST /api/ops/incident-control` | 查看/设置 V15 runtime incident mode |
+| `GET /api/ops/incident-playbook/latest` / `POST /api/ops/incident-playbook/run` | 查看/生成 V15 incident playbook plan |
+| `GET /api/ops/incident-playbook/{playbook_id}/events` / `POST /api/ops/incident-playbook/{playbook_id}/events` | 查看/记录 V15 incident playbook evidence event trail |
+| `GET /api/ops/v15/phase0` | V15 Phase 0 completion/evidence gate |
+| `GET /api/ops/release/latest` | 最近一次 V15 release run ledger |
+| `POST /api/ops/release/start` / `POST /api/ops/release/{run_id}/finish` | 开始/收尾 V15 release run ledger |
+| `GET /api/ops/release/{run_id}/approvals` / `POST /api/ops/release/{run_id}/approvals` | 查看/记录 V15 release approval audit event |
 | `GET /api/live/*` | account、positions、loop status、strategy status、PnL 等 live 状态 |
 | `GET /api/v4/catalog` | 因子治理实时 Catalog |
 | `GET /api/v4/catalog?snapshot=latest` | 最近一次治理 Catalog snapshot |
@@ -509,8 +618,9 @@ GET /api/v4/catalog?snapshot=latest
 | `GET /api/risk/*` | 风控、trace、summary |
 | `PATCH /api/config/runtime` | 受控 runtime patch，保留为人工/接口覆盖入口 |
 | `/ws/state` | 实时状态推送 |
+| Web `/v15` | V15 cockpit：Runtime、Factors、Governance、Replay、Risk、Learning、Incidents、Release 汇总与受控操作入口 |
 
-Web 前端应优先读 `/api/ops/backend-readiness` 和 `/api/v4/catalog`，再进入专项页面读取 learning/risk/live 细节。
+Web 前端应优先读 `/api/ops/backend-readiness`、`/api/ops/v15/phase0` 和 `/api/v4/catalog`，再进入专项页面读取 learning/risk/live/replay/release 细节。
 
 ## 12. 不能再按旧理解解释的点
 

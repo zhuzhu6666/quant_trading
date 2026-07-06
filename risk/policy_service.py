@@ -13,6 +13,35 @@ from typing import Any
 from risk.governor import GovernorState, RiskGovernor
 
 
+INCIDENT_MODES = {"normal", "shadow_only", "no_new_risk", "only_close", "frozen"}
+INCIDENT_MODE_RANK = {
+    "normal": 0,
+    "shadow_only": 1,
+    "no_new_risk": 2,
+    "only_close": 3,
+    "frozen": 4,
+}
+INCIDENT_CONTROLLED_ACTIONS = {
+    "open_trade",
+    "tighten_position",
+    "reduce_position",
+    "close_position",
+    "update_weight",
+    "switch_parameter_template",
+    "disable_factor_live",
+    "retire_factor",
+    "enable_context_policy",
+    "rollback_factor_action",
+    "switch_position_supervisor_template",
+    "promote_factor",
+    "register_factor",
+    "start_shadow_model",
+    "start_canary_model",
+}
+RISK_REDUCING_ACTIONS = {"close_position", "reduce_position", "tighten_position", "rollback_factor_action"}
+SHADOW_ONLY_ACTIONS = {"start_shadow_model", "start_canary_model"}
+
+
 @dataclass
 class RiskVerdict:
     allowed: bool
@@ -50,6 +79,11 @@ class RiskPolicyService:
 
     def evaluate(self, action: str, context: dict[str, Any] | None = None) -> RiskVerdict:
         context = context or {}
+        if action == "set_incident_control":
+            return self._evaluate_incident_control_change(context)
+        incident_gate = self._evaluate_incident_runtime_mode(action, context)
+        if incident_gate is not None and not incident_gate.allowed:
+            return incident_gate
         if action == "open_trade":
             return self._evaluate_open_trade(context)
         if action == "tighten_position":
@@ -85,6 +119,101 @@ class RiskPolicyService:
             reason="unsupported_action",
             severity="error",
             audit_payload={"action": action},
+        )
+
+    @staticmethod
+    def _current_incident_mode(context: dict[str, Any]) -> str:
+        raw = context.get("runtime_incident_mode")
+        if raw is None:
+            incident_control = context.get("incident_control") or {}
+            if isinstance(incident_control, dict):
+                raw = incident_control.get("mode")
+        if raw is None:
+            try:
+                from config.runtime_config import shared as runtime_config
+
+                raw = getattr(runtime_config(), "runtime_incident_mode", "normal")
+            except Exception:
+                raw = "normal"
+        mode = str(raw or "normal").strip().lower()
+        return mode if mode in INCIDENT_MODES else "normal"
+
+    def _evaluate_incident_runtime_mode(self, action: str, context: dict[str, Any]) -> RiskVerdict | None:
+        if action not in INCIDENT_CONTROLLED_ACTIONS:
+            return None
+        mode = self._current_incident_mode(context)
+        if mode == "normal":
+            return None
+        allowed = False
+        if mode == "shadow_only":
+            allowed = action in RISK_REDUCING_ACTIONS or action in SHADOW_ONLY_ACTIONS
+        elif mode == "no_new_risk":
+            allowed = action in RISK_REDUCING_ACTIONS or action == "start_shadow_model"
+        elif mode == "only_close":
+            allowed = action == "close_position"
+        elif mode == "frozen":
+            allowed = action in {"close_position", "rollback_factor_action"}
+        if allowed:
+            return None
+        return RiskVerdict(
+            allowed=False,
+            reason=f"incident_{mode}",
+            severity="error",
+            required_mode=str(context.get("required_mode") or context.get("mode") or "incident_control"),
+            audit_payload={
+                "action": action,
+                "source": "runtime_incident_control",
+                "runtime_incident_mode": mode,
+                "allowed_risk_reducing_actions": sorted(RISK_REDUCING_ACTIONS),
+                "shadow_only_actions": sorted(SHADOW_ONLY_ACTIONS),
+            },
+        )
+
+    def _evaluate_incident_control_change(self, context: dict[str, Any]) -> RiskVerdict:
+        target = str(context.get("target_mode") or context.get("mode") or "").strip().lower()
+        current = str(context.get("current_mode") or self._current_incident_mode(context)).strip().lower()
+        if target not in INCIDENT_MODES:
+            return RiskVerdict(
+                allowed=False,
+                reason="invalid_incident_mode",
+                severity="error",
+                required_mode="operator_control",
+                audit_payload={
+                    "action": "set_incident_control",
+                    "source": "risk_policy",
+                    "target_mode": target,
+                    "valid_modes": sorted(INCIDENT_MODES),
+                },
+            )
+        if current not in INCIDENT_MODES:
+            current = "normal"
+        relaxing = INCIDENT_MODE_RANK[target] < INCIDENT_MODE_RANK[current]
+        if relaxing and not bool(context.get("confirm_thaw", False)):
+            return RiskVerdict(
+                allowed=False,
+                reason="incident_control_relax_requires_confirm",
+                severity="error",
+                required_mode="operator_control",
+                audit_payload={
+                    "action": "set_incident_control",
+                    "source": "risk_policy",
+                    "current_mode": current,
+                    "target_mode": target,
+                    "relaxing": True,
+                },
+            )
+        return RiskVerdict(
+            allowed=True,
+            reason="ok",
+            required_mode="operator_control",
+            audit_payload={
+                "action": "set_incident_control",
+                "source": "risk_policy",
+                "current_mode": current,
+                "target_mode": target,
+                "relaxing": relaxing,
+                "reason": context.get("reason", ""),
+            },
         )
 
     def _evaluate_open_trade(self, context: dict[str, Any]) -> RiskVerdict:

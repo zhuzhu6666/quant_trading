@@ -663,6 +663,120 @@ CREATE TABLE IF NOT EXISTS evolution_decision (
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS replay_report (
+    replay_run_id TEXT PRIMARY KEY,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    input_dataset_hash TEXT DEFAULT '',
+    runtime_config_hash TEXT DEFAULT '',
+    code_version TEXT DEFAULT '',
+    decision_count INTEGER DEFAULT 0,
+    matched_live_count INTEGER DEFAULT 0,
+    mismatch_count INTEGER DEFAULT 0,
+    metric_summary_json TEXT NOT NULL DEFAULT '{}',
+    replay_error TEXT DEFAULT '',
+    evidence_grade TEXT DEFAULT '',
+    artifact_path TEXT DEFAULT '',
+    artifact_hash TEXT DEFAULT '',
+    status TEXT DEFAULT 'completed',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_health_snapshot (
+    snapshot_id TEXT PRIMARY KEY,
+    score REAL NOT NULL DEFAULT 0.0,
+    posture TEXT DEFAULT '',
+    blockers_json TEXT NOT NULL DEFAULT '[]',
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    trend_json TEXT NOT NULL DEFAULT '{}',
+    source TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_scope_approval_event (
+    event_id TEXT PRIMARY KEY,
+    snapshot_id TEXT DEFAULT '',
+    posture TEXT DEFAULT '',
+    recommendation_json TEXT NOT NULL DEFAULT '{}',
+    actor TEXT DEFAULT '',
+    decision TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    boundary_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_scope_enforcement_event (
+    event_id TEXT PRIMARY KEY,
+    snapshot_id TEXT DEFAULT '',
+    posture TEXT DEFAULT '',
+    recommendation_json TEXT NOT NULL DEFAULT '{}',
+    current_mode TEXT DEFAULT '',
+    target_mode TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    risk_verdict_json TEXT NOT NULL DEFAULT '{}',
+    mutation_json TEXT NOT NULL DEFAULT '{}',
+    actor TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    boundary_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS release_run (
+    run_id TEXT PRIMARY KEY,
+    release_class TEXT DEFAULT '',
+    status TEXT DEFAULT 'started',
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    checklist_json TEXT NOT NULL DEFAULT '{}',
+    runtime_config_hash TEXT DEFAULT '',
+    replay_run_id TEXT DEFAULT '',
+    replay_artifact_hash TEXT DEFAULT '',
+    incident_mode TEXT DEFAULT '',
+    readiness_posture TEXT DEFAULT '',
+    tests_json TEXT NOT NULL DEFAULT '[]',
+    rollback_ref_json TEXT NOT NULL DEFAULT '{}',
+    created_by TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS release_approval_event (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    action TEXT DEFAULT '',
+    actor TEXT DEFAULT '',
+    decision TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    evidence_refs_json TEXT NOT NULL DEFAULT '{}',
+    boundary_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS incident_playbook_run (
+    playbook_id TEXT PRIMARY KEY,
+    scenario TEXT DEFAULT '',
+    severity TEXT DEFAULT '',
+    current_mode TEXT DEFAULT '',
+    target_mode TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    steps_json TEXT NOT NULL DEFAULT '[]',
+    risk_precheck_json TEXT NOT NULL DEFAULT '{}',
+    release_ref_json TEXT NOT NULL DEFAULT '{}',
+    boundary_json TEXT NOT NULL DEFAULT '{}',
+    created_by TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS incident_playbook_event (
+    event_id TEXT PRIMARY KEY,
+    playbook_id TEXT NOT NULL,
+    event_type TEXT DEFAULT '',
+    actor TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    evidence_refs_json TEXT NOT NULL DEFAULT '{}',
+    notes TEXT DEFAULT '',
+    boundary_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE TABLE IF NOT EXISTS position_supervisor_trace (
     trace_id TEXT PRIMARY KEY,
     decision_id TEXT DEFAULT '',
@@ -934,6 +1048,23 @@ CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_label ON supervisor_cou
 CREATE INDEX IF NOT EXISTS idx_runtime_config_snapshot_hash ON runtime_config_snapshot(config_hash, created_at);
 CREATE INDEX IF NOT EXISTS idx_evolution_run_type ON evolution_run(run_type, status, started_at);
 CREATE INDEX IF NOT EXISTS idx_evolution_decision_run ON evolution_decision(run_id, decision_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_replay_report_created ON replay_report(created_at);
+CREATE INDEX IF NOT EXISTS idx_replay_report_grade ON replay_report(evidence_grade, created_at);
+CREATE INDEX IF NOT EXISTS idx_autonomy_health_snapshot_created ON autonomy_health_snapshot(created_at);
+CREATE INDEX IF NOT EXISTS idx_autonomy_health_snapshot_posture ON autonomy_health_snapshot(posture, created_at);
+CREATE INDEX IF NOT EXISTS idx_autonomy_scope_approval_created ON autonomy_scope_approval_event(created_at);
+CREATE INDEX IF NOT EXISTS idx_autonomy_scope_approval_snapshot ON autonomy_scope_approval_event(snapshot_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_autonomy_scope_enforcement_created ON autonomy_scope_enforcement_event(created_at);
+CREATE INDEX IF NOT EXISTS idx_autonomy_scope_enforcement_snapshot ON autonomy_scope_enforcement_event(snapshot_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_autonomy_scope_enforcement_status ON autonomy_scope_enforcement_event(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_release_run_created ON release_run(created_at);
+CREATE INDEX IF NOT EXISTS idx_release_run_status ON release_run(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_release_approval_run ON release_approval_event(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_release_approval_decision ON release_approval_event(decision, created_at);
+CREATE INDEX IF NOT EXISTS idx_incident_playbook_created ON incident_playbook_run(created_at);
+CREATE INDEX IF NOT EXISTS idx_incident_playbook_scenario ON incident_playbook_run(scenario, created_at);
+CREATE INDEX IF NOT EXISTS idx_incident_playbook_event_playbook ON incident_playbook_event(playbook_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_incident_playbook_event_type ON incident_playbook_event(event_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_autonomous_learning_sample_type ON autonomous_learning_sample(sample_type, label_status, event_ts);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_autonomous_learning_sample_source ON autonomous_learning_sample(sample_type, source_table, source_id);
 CREATE INDEX IF NOT EXISTS idx_model_permission_audit_created ON model_permission_audit(created_at);

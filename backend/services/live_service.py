@@ -6107,7 +6107,7 @@ def _log_closed_position_ledger_after_tick(
     acct: dict,
     total_pnl: float,
     tick: int,
-    close_source: str,
+    close_source: dict[str, Any] | str | None,
     attribution_integrity: str,
     close_verdict: dict,
     factor_contributions: dict,
@@ -6146,8 +6146,8 @@ def _log_closed_position_ledger_after_tick(
         exit_decision_id = _LEDGER.log_decision(**close_ledger_payloads["decision"])
         _LEDGER.log_position_event(**close_ledger_payloads["position_event"])
         return exit_decision_id, context_integrity
-    except Exception as _ledger_err:
-        logger.debug("[live] ledger close failed: %s", _ledger_err)
+    except Exception:
+        logger.exception("[live] ledger close failed for pos {}", cpid)
         return "", context_integrity
 
 
@@ -6163,7 +6163,7 @@ def _run_closed_position_learning_after_tick(
     close_reason: str,
     context_integrity: str,
     attribution_integrity: str,
-    close_source: str,
+    close_source: dict[str, Any] | str | None,
 ) -> None:
     if not (_TRADE_REVIEWER and _EXPERIENCE_BUILDER and _POLICY_SUGGESTER):
         return
@@ -6192,8 +6192,8 @@ def _run_closed_position_learning_after_tick(
                 cpid,
                 review.get("skip_reason", "unknown"),
             )
-    except Exception as _learn_err:
-        logger.debug("[live] post-trade learning failed for pos %s: %s", cpid, _learn_err)
+    except Exception:
+        logger.exception("[live] post-trade learning failed for pos {}", cpid)
 
 
 def _cleanup_closed_position_after_tick(
@@ -6248,7 +6248,7 @@ def _handle_closed_positions_after_tick(
             total_pnl = float(close_payload["total_pnl"])
             close_ts = float(close_payload["close_ts"])
             close_reason = str(close_payload["close_reason"])
-            close_source = str(close_payload["close_source"])
+            close_source = close_payload["close_source"]
             close_verdict = close_payload["close_verdict"]
             attribution_integrity = str(close_payload["attribution_integrity"])
             factor_contributions = close_payload["factor_contributions"]

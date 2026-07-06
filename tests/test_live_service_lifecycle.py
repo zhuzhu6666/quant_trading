@@ -74,6 +74,57 @@ def _patch_live_state_conn(monkeypatch, conn_factory):
     monkeypatch.setattr(live_service, "_get_state_read_conn", conn_factory)
 
 
+def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
+    close_source = {
+        "close_reason_source": "supervisor_tighten_stopout",
+        "inferred_close_supervisor": {"event_type": "supervisor_tighten"},
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        live_service,
+        "_collect_closed_position_attribution",
+        lambda **kwargs: {
+            "close_reason": "broker_close",
+            "close_verdict": {"allowed": True},
+            "close_ts": 1234.0,
+            "attribution_integrity": "full",
+            "factor_contributions": {"trend": -1.0},
+            "close_source": close_source,
+            "total_pnl": -1.0,
+        },
+    )
+    monkeypatch.setattr(live_service, "_write_close_decision_log_after_tick", lambda **kwargs: None)
+    monkeypatch.setattr(live_service, "_lookup_recovery_context_integrity", lambda *args: "full")
+
+    def _capture_ledger(**kwargs):
+        captured["ledger_close_source"] = kwargs["close_source"]
+        return "exit_decision_1", kwargs["context_integrity"]
+
+    def _capture_learning(**kwargs):
+        captured["learning_close_source"] = kwargs["close_source"]
+
+    monkeypatch.setattr(live_service, "_log_closed_position_ledger_after_tick", _capture_ledger)
+    monkeypatch.setattr(live_service, "_run_closed_position_learning_after_tick", _capture_learning)
+    monkeypatch.setattr(live_service, "_cleanup_closed_position_after_tick", lambda **kwargs: None)
+
+    live_service._handle_closed_positions_after_tick(
+        closed_pids={123},
+        real_pnls={123: {"net": -1.0}},
+        attr_engine=None,
+        current_price=3330.0,
+        bar={"time": 1230.0},
+        cfg=SimpleNamespace(timeframe="M5"),
+        acct={},
+        broker="ctrader",
+        tick=7,
+        log=lambda message: None,
+    )
+
+    assert captured["ledger_close_source"] == close_source
+    assert captured["learning_close_source"] == close_source
+
+
 def test_prime_live_loop_state_sets_loop_and_resets_session_when_no_snapshot(monkeypatch):
     monkeypatch.setattr(live_service, "_restore_session_state_for_day", lambda trade_date=None: False)
 

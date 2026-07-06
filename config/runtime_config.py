@@ -117,6 +117,7 @@ class RuntimeConfig:
     position_supervisor_template_id: str = "position_supervisor:default.v1"
     autonomy_mode: str = "demo_autonomous"
     autonomy_demo_auto_apply: bool = True
+    runtime_incident_mode: str = "normal"  # normal | shadow_only | no_new_risk | only_close | frozen
     # 别名兼容 (旧代码仍读 strategy_sl_atr 等, 这里存一份等同值供 RuntimeConfig.patch)
     strategy_sl_atr: float = 1.5
     strategy_tp_atr: float = 2.5

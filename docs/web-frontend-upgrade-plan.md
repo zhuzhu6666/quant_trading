@@ -71,6 +71,9 @@ web_frontend/
 - `/pnl`
 - `/risk`
 - `/ops`
+- `/learning`
+- `/models`
+- `/v15`
 
 核心接口：
 
@@ -86,6 +89,11 @@ GET  /api/live/realized-pnl-series?scope=all
 GET  /api/risk/summary
 GET  /api/system/db-health
 GET  /api/ops/backend-readiness
+GET  /api/ops/v15/phase0
+GET  /api/ops/replay/latest
+GET  /api/ops/incident-control
+GET  /api/ops/release/latest
+GET  /api/v4/catalog
 WS   /ws/state
 ```
 
@@ -103,7 +111,8 @@ POST /api/live/emergency-close
 2. 因子治理页优先消费 `/api/v4/catalog` 和 Factor Cards 后端语义，不在前端重新推断 role。
 3. Learning/governance 页面优先消费后端 governance/status/progress 展示字段，前端只做渲染。
 4. Readiness、overlay、catalog snapshot、governance run、rollback 状态进入运维页面。
-5. 小程序继续保持轻量状态面，不恢复复杂图表、治理详情或旧 web-view 路线。
+5. V15 cockpit 已由 `/v15` 承接 Runtime、Factors、Governance、Replay、Risk、Learning、Incidents、Release 八个工作面；控制按钮保留二次确认并调用后端受控接口。
+6. 小程序继续保持轻量状态面，不恢复复杂图表、治理详情或旧 web-view 路线。
 
 ## 6. 部署建议
 

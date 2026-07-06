@@ -37,8 +37,12 @@ export function ActionButton({
             setConfirming(true);
             return;
           }
-          await onAction();
-          setConfirming(false);
+          try {
+            await onAction();
+            setConfirming(false);
+          } catch {
+            setConfirming(false);
+          }
         }}
       >
         <Icon size={16} />

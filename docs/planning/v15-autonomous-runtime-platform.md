@@ -1,6 +1,6 @@
 # V15 Autonomous Runtime Platform
 
-> Status: draft
+> Status: active
 > Last verified: 2026-07-06
 > Scope: next major-version direction after Factor Takeover v4, Phase H, and factor governance V3.
 
@@ -160,11 +160,30 @@ V15 不做：
 
 ## 5. Initial Milestones
 
-1. V15 readiness contract：定义 runtime、overlay、catalog、worker、replay、autonomy health 的就绪字段。
-2. Replay harness v1：先覆盖 factor pipeline、gate、risk verdict。
-3. Autonomy health v1：只读评分，不参与裁决。
-4. Release checklist v1：冻结、验证、发布、回滚。
-5. Web cockpit v1：展示 runtime、catalog、overlay、governance run、rollback 和 replay。
+1. V15 readiness contract：定义 runtime、overlay、catalog、worker、replay、autonomy health 的就绪字段。`Phase 0 done`: `/api/ops/backend-readiness` 暴露 `v15`、`replay`、`autonomy_health`、`incident_control`、`release`、`phase0`。
+2. Replay harness v1：先覆盖 factor pipeline、gate、risk verdict。`Phase 0 done`: `backend.services.replay_harness` 写 `replay_report`，校验 ledger 中已有 factor/gate/`RiskPolicyService` verdict 锚点。
+3. Autonomy health v1：只读评分，不参与裁决。`Phase 0 done`: `backend.services.autonomy_health` 输出 `score`、`posture`、`blockers` 和候选维度。
+4. Release checklist v1：冻结、验证、发布、回滚。`Phase 0 done`: `docs/v15-release-checklist.md` 已定义 v1 检查清单；`runtime_incident_mode` 和 `/api/ops/incident-control` 已提供 freeze/shadow_only/no_new_risk/only_close/frozen 初版入口；`release_run` 和 `/api/ops/release/*` 已提供 release run ledger v1。
+5. Phase 0 completion gate：`Phase 0 done`: `/api/ops/v15/phase0` 和 readiness `v15.phase0` 输出 `implementation_complete`、`operationally_ready`、`gates`、`evidence_gaps`。
+6. Web cockpit v1：展示 runtime、catalog、overlay、governance run、rollback 和 replay。`Phase 1 done`: Web 前端 `/v15` cockpit 已承接 runtime、factor catalog/snapshot、governance、replay、risk、learning、incident control 和 release 入口。
+
+Phase 0 当前状态：`complete`。
+
+Phase 1 当前状态：`complete`。服务器侧 replay/health/release/incident control plane 已按 P1 收口；Web cockpit 页面已在 `web_frontend/src/pages/V15CockpitPage.tsx` 和 `/v15` 路由落地。
+
+- `P1 replay evidence done`: `ReplayHarnessService.run_bar_replay_evidence()` 和 `POST /api/ops/replay/bar-run` 已生成 decision/bar-window/factor-frame evidence，输出 `bar_replay_metrics.v1`、`factor_frame_replay_metrics.v1`、`bar_window_hash` 和 `factor_frame_hash`。
+- `P1 replay operator explainability done`: `ReplayHarnessService.run_bar_window_preview()` 和 `POST /api/ops/replay/bar-preview` 支持默认最近真实交易或按 `decision_id` 精确选择历史决策；`GET /api/ops/replay/bar-decisions` 提供最近历史候选及盈亏/学习摘要。除 K 线窗口外同步输出 `trade_outcome_learning_preview.v1`，把 `trade_outcome_review`、`position_lifecycle_event` 和 `autonomous_learning_sample` 串成“这单盈利/亏损、平仓原因、是否已有成熟学习样本”的只读证据；这些入口不写 replay_report、不改学习样本、不绕过 `RiskPolicyService` 或 runtime overlay/snapshot。
+- `P1 replay recompute done`: bar-run 已在上述 evidence 之上接入只读 `ExecutionGate.filter()` 和 `RiskPolicyService.evaluate("open_trade")` offline recompute v1，输出 `execution_gate_recompute_metrics.v1`、`risk_policy_recompute_metrics.v1`、coverage、agreement/disagreement 和 input gap 样例；该结果只做审计证据，不授权 live execution。
+- `P1 lifecycle evidence done`: bar-run 已接入 `order_lifecycle_event`、`position_lifecycle_event` 和 `position_supervisor_trace` coverage/alignment evidence v1，输出 `order_lifecycle_replay_metrics.v1`、`position_lifecycle_replay_metrics.v1`、`supervisor_action_replay_metrics.v1`，只验证 ledger/artifact 证据完整性，不重放 broker。
+- `P1 deep replay evidence done`: bar-run 已继续输出 `order_outcome_causality_metrics.v1`、`broker_fill_slippage_metrics.v1`、`supervisor_counterfactual_replay_metrics.v1` 和 `risk_policy_subaction_replay_metrics.v1`，覆盖 order->fill->position opened 因果链、broker fill/reference slippage、`supervisor_counterfactual_review` 对齐，以及 supervisor close/reduce/tighten 子动作的只读 `RiskPolicyService` recompute；这些指标只写 replay artifact/report，不喂 circuit breaker，不执行 broker，不授权 supervisor template 切换。
+- `P1 autonomy health persistence done`: `AutonomyHealthService` 已写 `autonomy_health_snapshot` 审计快照，并在 readiness `autonomy_health.trend` 暴露 `autonomy_health_trend.v1`；scope recommendation 只做收紧建议，`applied=false`，不自动改 runtime 权限。
+- `P1 autonomy scope approval done`: `AutonomyHealthService.record_scope_approval()` 已写 `autonomy_scope_approval_event`，并通过 `GET /api/ops/autonomy-health/scope-approvals/latest`、`POST /api/ops/autonomy-health/scope-approvals` 记录 health scope recommendation 的审批审计；approval event 仍 `applied=false`，不写 runtime overlay/snapshot，不改权重、订单或仓位。
+- `P1 autonomy health enforcement binding done`: `AutonomyHealthService.enforce_scope_recommendation()` 已写 `autonomy_scope_enforcement_event`，并通过 `GET/POST /api/ops/autonomy-health/scope-enforcements` 把 health scope recommendation 显式绑定到 `runtime_incident_mode` 收紧动作；执行只允许 `normal -> no_new_risk/shadow_only/frozen` 等更严格方向，必须调用 `RuntimeIncidentControlService.set_mode()`，从而继续经过 `RiskPolicyService.evaluate("set_incident_control")` 和 runtime overlay/snapshot，不能放宽权限、不能改权重、订单或仓位。
+- `P1 release approval trail done`: `ReleaseControlService` 已写 `release_approval_event` 审批事件流，并通过 `GET/POST /api/ops/release/{run_id}/approvals` 暴露 actor、decision、reason 和 evidence refs；事件只做审计，不改变 release status、runtime overlay/snapshot、权重、仓位或 broker 状态。
+- `P1 incident playbook automation done`: `RuntimeIncidentControlService.build_playbook()` 已写 `incident_playbook_run`，并通过 `GET /api/ops/incident-playbook/latest`、`POST /api/ops/incident-playbook/run` 生成 scenario/severity 到 target incident mode 的自动化计划、步骤和 `RiskPolicyService.evaluate("set_incident_control")` 预检；playbook 本身不应用 incident mode，不写 runtime overlay/snapshot。
+- `P1 incident playbook event binding done`: `RuntimeIncidentControlService.record_playbook_event()` 已写 `incident_playbook_event` 事件流，并通过 `GET/POST /api/ops/incident-playbook/{playbook_id}/events` 把 readiness、replay、release、operator note 等 evidence refs 绑定到 playbook；事件只做审计，不应用 incident mode，不改变 release status、runtime overlay/snapshot、权重、仓位或 broker 状态。
+- `P1 Web cockpit done`: `/v15` cockpit 已读取 `/api/ops/backend-readiness`、`/api/ops/v15/phase0`、`/api/ops/replay/latest`、`/api/ops/replay/bar-decisions`、`/api/ops/replay/bar-preview`、`/api/ops/incident-control`、`/api/ops/incident-playbook/latest`、`/api/ops/autonomy-health/scope-enforcements/latest`、`/api/ops/release/latest`、`/api/v4/catalog`、risk 和 learning/governance API；Replay 页面可选择历史单并展示 K 线窗口、实际盈亏、平仓归因和学习样本状态；控制动作保留 Web 端二次确认，并继续调用后端 `RiskPolicyService`、`DecisionPolicy` 和 runtime overlay/snapshot 边界。
+- P1 剩余项：无阻断项。后续可继续扩展更多 `RiskPolicyService` action matrix、真实告警自动绑定和更深 release 流程自动化，但不阻断 V15 Phase 1 closure。
 
 ## 6. V16 Foundation Contract
 

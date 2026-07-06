@@ -7,6 +7,14 @@ import time
 from typing import Any
 
 
+def _normalize_close_source(close_source: Mapping[str, Any] | str | None) -> dict[str, Any]:
+    if isinstance(close_source, Mapping):
+        return dict(close_source)
+    if close_source:
+        return {"close_reason_source": str(close_source), "inferred_close_supervisor": {}}
+    return {"close_reason_source": "", "inferred_close_supervisor": {}}
+
+
 def build_factor_bar(last_bar: Any, df_new: Any, timeframe: str) -> dict[str, Any]:
     index = getattr(last_bar, "index", ())
     ts_value = getattr(df_new, "index", [None])[-1]
@@ -168,13 +176,14 @@ def build_close_ledger_payloads(
     current_price: float,
     tick: int,
     close_reason: str,
-    close_source: Mapping[str, Any],
+    close_source: Mapping[str, Any] | str | None,
     attribution_integrity: str,
     close_verdict: Mapping[str, Any],
     factor_contributions: Mapping[str, float] | None,
     real_pnl: Mapping[str, Any] | None,
 ) -> dict[str, dict[str, Any]]:
     pid = int(position_id)
+    close_source = _normalize_close_source(close_source)
     close_source_name = str(close_source.get("close_reason_source") or "")
     inferred_supervisor = close_source.get("inferred_close_supervisor") or {}
     action_json = {
@@ -243,8 +252,9 @@ def build_trade_review_payload(
     close_reason: str,
     context_integrity: str,
     attribution_integrity: str,
-    close_source: Mapping[str, Any],
+    close_source: Mapping[str, Any] | str | None,
 ) -> dict[str, Any]:
+    close_source = _normalize_close_source(close_source)
     return {
         "position_id": str(int(position_id)),
         "pnl": float(total_pnl),

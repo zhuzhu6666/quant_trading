@@ -258,6 +258,46 @@ def test_close_payload_helpers_match_live_ledger_and_review_contracts():
     }
 
 
+def test_close_payload_helpers_accept_legacy_string_close_source():
+    ledger_payloads = build_close_ledger_payloads(
+        position_id=269,
+        timeframe="M5",
+        decision_ts=1000.0,
+        close_ts=1001.0,
+        account={},
+        session_pnl=-1.0,
+        risk_state={},
+        total_pnl=-2.5,
+        current_price=3330.0,
+        tick=10,
+        close_reason="broker_close",
+        close_source="external_broker_close",
+        attribution_integrity="full",
+        close_verdict={},
+        factor_contributions={},
+        real_pnl={"net": -2.5},
+    )
+    review_payload = build_trade_review_payload(
+        position_id=269,
+        total_pnl=-2.5,
+        current_price=3330.0,
+        close_ts=1001.0,
+        factor_contributions={},
+        exit_decision_id="decision-2",
+        real_pnl={"net": -2.5},
+        close_reason="broker_close",
+        context_integrity="full",
+        attribution_integrity="full",
+        close_source="external_broker_close",
+    )
+
+    assert ledger_payloads["decision"]["action_json"]["close_reason_source"] == "external_broker_close"
+    assert ledger_payloads["decision"]["action_json"]["inferred_close_supervisor"] == {}
+    assert ledger_payloads["position_event"]["details"]["close_reason_source"] == "external_broker_close"
+    assert review_payload["close_reason_source"] == "external_broker_close"
+    assert review_payload["inferred_close_supervisor"] == {}
+
+
 def test_effective_event_sizing_payload_preserves_policy_candidate_when_below_min():
     result = build_effective_event_sizing_payload(
         base_volume=100.0,

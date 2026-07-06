@@ -20,12 +20,12 @@
 
 | 类别 | 数量 | 含义 |
 |---|---:|---|
-| 规则/策略执行单元 | 27 | 会拦截交易、改阈值/仓位、调权、切模板、禁用/退役/回滚，或生成可执行治理动作 |
+| 规则/策略执行单元 | 28 | 会拦截交易、改阈值/仓位、调权、切模板、禁用/退役/回滚，或生成可执行治理动作 |
 | 影子/建议模型与模型护栏单元 | 9 | LightGBM、shadow/canary、model permissions、LLM/meta advisory，只能输出审计、建议或 shadow 分数 |
-| 诊断汇总单元 | 1 | readiness，把事实源和阻断项汇总给前端和运维 |
-| 合计纳入总账 | 37 | 不是全部都会下游执行；执行权限由 `RiskPolicyService`、`DecisionPolicy`、model permissions 限制 |
+| 诊断汇总单元 | 7 | readiness、replay harness、autonomy health、autonomy scope approval/enforcement、release run ledger/approval trail、incident playbook plan/event trail、V15 Phase 0 gate，把事实源、回放误差、自治状态、发布证据、事故计划/证据事件和完成状态汇总给前端和运维 |
+| 合计纳入总账 | 44 | 不是全部都会下游执行；执行权限由 `RiskPolicyService`、`DecisionPolicy`、model permissions 限制 |
 
-如果按“会直接改变订单/仓位/配置”的严格口径，当前是 18 个左右；如果把每个 `RiskPolicyService.evaluate(action)` 子动作拆开，数量会超过 40。日常治理建议使用上表 37 个总账口径。
+如果按“会直接改变订单/仓位/配置”的严格口径，当前是 19 个左右；如果把每个 `RiskPolicyService.evaluate(action)` 子动作拆开，数量会超过 40。日常治理建议使用上表 44 个总账口径。
 
 ## Runtime Chain
 
@@ -47,6 +47,26 @@ factor/config governance
 shadow/advisory models
   -> permission gate + shadow audit + canary/advisory
   -> catalog/readiness/meta governance
+
+runtime replay / autonomy health
+  -> replay_report + backend-readiness v15 contract
+  -> autonomy_health_snapshot + autonomy_scope_approval_event
+  -> read-only posture, no direct execution authority
+
+incident controls
+  -> runtime_incident_mode overlay/snapshot
+  -> RiskPolicyService incident gate
+
+release controls
+  -> release_run
+  -> release_approval_event
+  -> incident_playbook_run
+  -> incident_playbook_event
+  -> release checklist + replay/snapshot/incident/readiness evidence
+
+phase0 completion gate
+  -> v15_phase0 completion
+  -> implementation_complete + operationally_ready
 ```
 
 硬边界：
@@ -56,6 +76,11 @@ shadow/advisory models
 - context 只能改阈值和仓位，不改多空方向。
 - shadow/advisory 模型不能下单、平仓、改硬风控或绕过配置治理。
 - `policy_suggestion` 是自治建议/执行审计，不再是必须人工审批队列。
+- replay harness v1 只能校验已有 ledger/risk verdict 锚点，不替代 `RiskPolicyService` 做 live 裁决。
+- autonomy health v1 只读展示；health 下降和 scope approval 只能作为后续收紧自治范围的依据，不能放大风险。
+- incident controls 必须先过 `RiskPolicyService`，再经 runtime overlay/snapshot 持久化；不能直接手写 state 表。
+- release run ledger / approval trail / incident playbook plan/event trail 只做审计汇总、应急计划或证据绑定，不直接执行风险、权重、配置或 broker 动作。
+- V15 Phase 0 gate 只读汇总完成状态，不授予任何执行权限。
 
 ## Inventory
 
@@ -100,21 +125,29 @@ shadow/advisory models
 | 25 | 参数模板服务 | `backend/services/parameter_templates.py` | active template、switch suggestion | factor card evidence、recommended scope、confidence、target template | `online_light` 可治理应用；`offline_deep` 先验证 |
 | 26 | 参数模板验证 | `backend/services/parameter_template_validation.py` | validation job/result | replay/counterfactual evidence、metrics、candidate template | 深调不能直接 live；必须先出验证证据 |
 | 27 | 持仓监督模板治理 | `backend/services/supervisor_learning_scheduler.py`、`risk/policy_service.py` | supervisor template switch | approved suggestion、replay evidence、counterfactual evidence | demo autonomous 才能自动切换；必须保留 active template snapshot |
-| 28 | backend readiness | `backend/services/backend_readiness.py` | blockers、observations、freshness | DB table freshness、model permissions、catalog snapshot、dataset health | 诊断汇总，不直接改交易；前端应优先读取 |
+| 28 | backend readiness | `backend/services/backend_readiness.py` | blockers、observations、freshness、V15 contract | DB table freshness、model permissions、catalog snapshot、dataset health、replay、autonomy health | 诊断汇总，不直接改交易；前端应优先读取 |
+| 29 | replay harness | `backend/services/replay_harness.py` | `ReplayReport`、factor/gate/risk 对齐误差、P1 bar/factor-frame/recompute/lifecycle/deep evidence | `replay_report`、`data/replay_reports/*.json`、decision ids、input_dataset_hash、runtime_config_hash、metric_summary、bar_replay_metrics、factor_frame_replay_metrics、execution_gate_recompute_metrics、risk_policy_recompute_metrics、order_lifecycle_replay_metrics、position_lifecycle_replay_metrics、supervisor_action_replay_metrics、order_outcome_causality_metrics、broker_fill_slippage_metrics、supervisor_counterfactual_replay_metrics、risk_policy_subaction_replay_metrics、evidence_grade、artifact_hash | 只读审计；校验 ledger 中已有 `RiskPolicyService` verdict；P1 bar-run 对齐历史 bar window、复建 FactorFrame，通过 `ExecutionGate.filter()` / `RiskPolicyService.evaluate(...)` 做 offline recompute，并验证 order/position/supervisor lifecycle、broker deal/slippage 和 counterfactual evidence，不重放 broker 执行，不喂 circuit breaker |
+| 30 | autonomy health v1 | `backend/services/autonomy_health.py` | score、posture、blockers、trend、scope recommendation、tightening enforcement | `autonomy_health_snapshot`、`autonomy_scope_enforcement_event`、action_success_rate、rollback_rate、blocked_by_risk_rate、post_action_reward_delta、config/replay/catalog/shadow/evidence/live scores | 评分/趋势只读；scope approval 不执行；enforcement 只能通过 incident-control 收紧 `runtime_incident_mode`，不能放宽权限 |
+| 31 | runtime incident controls | `backend/services/incident_controls.py`、`risk/policy_service.py` | normal/shadow_only/no_new_risk/only_close/frozen gate | `runtime_incident_mode`、risk verdict、runtime overlay、snapshot、mutation audit | 阻断新风险或治理动作；close/rollback 等恢复动作仍需经过 `RiskPolicyService` |
+| 32 | release run ledger v1 | `backend/services/release_control.py` | release checklist、start/finish ledger、approval trail | `release_run`、`release_approval_event`、runtime_config_hash、replay_run_id、artifact_hash、incident mode、readiness posture、tests、rollback_ref、approval actor/decision/reason/evidence_refs | 只读证据汇总和发布审批审计；approval event 不改变 release status；不直接改 runtime、权重、仓位或 broker 状态 |
+| 33 | autonomy scope approval v1 | `backend/services/autonomy_health.py` | health scope recommendation approval audit | `autonomy_scope_approval_event`、snapshot_id、posture、recommendation、actor、decision、reason、boundary | 只读审批审计；`applied=false`；不直接改 runtime 权限、权重、订单或仓位 |
+| 34 | V15 Phase 0 completion gate | `backend/services/v15_phase0.py` | implementation_complete、operationally_ready、gates、evidence_gaps | readiness `v15`、replay status、autonomy health、incident control、release latest、snapshot status | 只读完成状态；区分代码能力和现场证据，不替代任何执行入口 |
+| 35 | incident playbook plan/event binding v1 | `backend/services/incident_controls.py` | incident scenario -> target mode plan、RiskPolicy precheck、steps、evidence event trail | `incident_playbook_run`、`incident_playbook_event`、scenario、severity、current_mode、target_mode、risk_precheck、steps、release_ref、event_type、evidence_refs、boundary | 只读计划、事件绑定和审计；不直接应用 incident mode，不写 overlay/snapshot；真正切换仍走 `RiskPolicyService` + runtime overlay/snapshot |
+| 36 | V15 Web cockpit | `web_frontend/src/pages/V15CockpitPage.tsx` | Runtime、Factors、Governance、Replay、Risk、Learning、Incidents、Release 展示和受控操作按钮 | readiness、catalog、replay_report、autonomy health、incident control、release ledger、risk summary、learning/governance summaries | 前端只汇总和触发后端 API；不重新实现风控/权重/overlay 判断 |
 
 ### Shadow, Advisory, And Model Guardrails
 
 | # | 单元 | 代码锚点 | 输出/动作 | 必须记录的数据 | 精度语义 |
 |---:|---|---|---|---|---|
-| 29 | model permissions | `backend/services/model_permissions.py` | allowed/block audit | model type、artifact contract、capabilities、status、reason | artifact 必须 `advisory_only/shadow_only`，禁止 live trading capability |
-| 30 | model promotion gate | `research/model_promotion.py` | shadow/canary/live readiness verdict | model metrics、dataset contract、guardrails、required next stage | live capability blocked；canary 前必须 shadow |
-| 31 | shadow/canary/inference contract | `research/model_shadow_queue.py`、`research/model_shadow_runner.py`、`research/model_canary.py`、`research/model_canary_executor.py`、`research/model_inference_contract.py` | shadow report、canary review/trial、advisory inference | candidate id、artifact hash、validation metrics、trial result | advisory-only；canary 也不能直接控制 live orders |
-| 32 | open quality LightGBM | `research/open_quality_lightgbm.py` | open quality shadow audit | sample id、quality/risk score、prediction label、feature importance | 使用 matured open outcome；阈值当前围绕 0.5 分类 |
-| 33 | position quality LightGBM | `research/position_quality_lightgbm.py` | position quality shadow audit | position id、quality score、prediction label、features | 只评价持仓质量，不直接退出 |
-| 34 | factor governance LightGBM | `research/factor_governance_lightgbm.py` | factor weakness shadow audit / advisory | factor、weakness_score、bucket、features、audit row | weakness 高才作为 Orchestrator 证据之一，不单独写权重 |
-| 35 | meta model LightGBM | `research/meta_model_lightgbm.py` | global posture shadow audit/report | posture score、contract/observe/recover score、weak rates | 只给全局状态，不直接改 risk/gate |
-| 36 | meta governance/sidecar | `backend/services/meta_governance.py`、`research/meta_model_sidecar.py` | meta governance suggestion/advisory ledger | meta shadow report、forbidden actions、permission audit、context snapshot | 可建议 observe/block/review，不可执行交易动作 |
-| 37 | LLM advisory | `research/llm_advisory.py` | advisory audit | task type、target、structured context、result、permission status | 只做解释/建议；结果必须落审计，不进入执行层 |
+| 36 | model permissions | `backend/services/model_permissions.py` | allowed/block audit | model type、artifact contract、capabilities、status、reason | artifact 必须 `advisory_only/shadow_only`，禁止 live trading capability |
+| 37 | model promotion gate | `research/model_promotion.py` | shadow/canary/live readiness verdict | model metrics、dataset contract、guardrails、required next stage | live capability blocked；canary 前必须 shadow |
+| 38 | shadow/canary/inference contract | `research/model_shadow_queue.py`、`research/model_shadow_runner.py`、`research/model_canary.py`、`research/model_canary_executor.py`、`research/model_inference_contract.py` | shadow report、canary review/trial、advisory inference | candidate id、artifact hash、validation metrics、trial result | advisory-only；canary 也不能直接控制 live orders |
+| 39 | open quality LightGBM | `research/open_quality_lightgbm.py` | open quality shadow audit | sample id、quality/risk score、prediction label、feature importance | 使用 matured open outcome；阈值当前围绕 0.5 分类 |
+| 40 | position quality LightGBM | `research/position_quality_lightgbm.py` | position quality shadow audit | position id、quality score、prediction label、features | 只评价持仓质量，不直接退出 |
+| 41 | factor governance LightGBM | `research/factor_governance_lightgbm.py` | factor weakness shadow audit / advisory | factor、weakness_score、bucket、features、audit row | weakness 高才作为 Orchestrator 证据之一，不单独写权重 |
+| 42 | meta model LightGBM | `research/meta_model_lightgbm.py` | global posture shadow audit/report | posture score、contract/observe/recover score、weak rates | 只给全局状态，不直接改 risk/gate |
+| 43 | meta governance/sidecar | `backend/services/meta_governance.py`、`research/meta_model_sidecar.py` | meta governance suggestion/advisory ledger | meta shadow report、forbidden actions、permission audit、context snapshot | 可建议 observe/block/review，不可执行交易动作 |
+| 44 | LLM advisory | `research/llm_advisory.py` | advisory audit | task type、target、structured context、result、permission status | 只做解释/建议；结果必须落审计，不进入执行层 |
 
 ## Required Audit Data By Step
 
@@ -133,6 +166,13 @@ shadow/advisory models
 | 后验回滚 | `learning_application_effect` | observed_trade_count、delta_avg_reward、status | 当前因子治理回滚默认要求 trades >= 3 且 delta <= -0.15 |
 | 配置事实 | `runtime_config_overlay`、`runtime_config_snapshot` | overlay hash、source、updated_at、runtime config JSON | startup 必须 restore overlay 并写 startup snapshot |
 | Catalog 审计 | `factor_catalog_snapshot` | full catalog JSON、hash、run_id、created_at | 实时 Catalog 是服务视图；snapshot 用于审计/回放 |
+| replay evidence | `replay_report` + artifact JSON | replay_run_id、scope、input_dataset_hash、runtime_config_hash、decision/mismatch counts、evidence_grade、artifact_path、artifact_hash、bar_replay_metrics、factor_frame_replay_metrics、order_outcome_causality_metrics、broker_fill_slippage_metrics、supervisor_counterfactual_replay_metrics、risk_policy_subaction_replay_metrics | replay 不能只给收益；必须给 live ledger 对齐误差；P1 bar-run 必须给 bar_window_hash、factor_frame_hash、causality/slippage/counterfactual/subaction hash 和 coverage；artifact 必须可由 metadata 找回并校验 |
+| autonomy health | `/api/ops/backend-readiness.autonomy_health` + `autonomy_health_snapshot` + `autonomy_scope_approval_event` + `autonomy_scope_enforcement_event` | score、posture、blockers、各维度分数、trend、scope recommendation、scope approval/enforcement、updated_at | health 下降不能自动放大交易风险；approval event 不是 runtime 权限写入口；enforcement 只能显式收紧 incident mode，必须走 `RiskPolicyService` + overlay/snapshot |
+| incident controls | `runtime_incident_mode`、`RiskVerdict`、`runtime_config_overlay/snapshot` | mode、current/target、confirm_thaw、risk verdict、mutation result | thaw/放松必须显式确认；执行动作仍由 `RiskPolicyService` 按 mode 裁决 |
+| incident playbook plan/event trail | `incident_playbook_run` / `incident_playbook_event` | scenario、severity、current/target mode、risk_precheck、steps、release_ref、event_type、evidence_refs、boundary | 只写计划/事件账本；`set_incident_control` step 必须声明需要 `RiskPolicyService`，playbook/event 不直接执行 |
+| release run ledger | `release_run`、`release_approval_event` | run_id、release_class、status、checklist、runtime_config_hash、replay_run_id、incident_mode、tests、rollback_ref、approval actor、decision、reason、evidence_refs | 只记录发布证据和审批事件；涉及风险或配置的动作必须回到对应权威入口 |
+| V15 Phase 0 gate | `/api/ops/v15/phase0` / readiness `v15_phase0` | implementation_complete、operationally_ready、gates、blockers、evidence_gaps | 完成状态是诊断事实，不是执行授权 |
+| V15 Web cockpit | `/v15` | Runtime、Factors、Governance、Replay、Risk、Learning、Incidents、Release 汇总状态和受控操作结果 | 只展示事实源和触发后端受控 API；不能在前端推断或绕过策略/风控 |
 | 模型权限 | `model_permission_audit` | artifact hash、capabilities、permission status、reason | live_trading capability 必须 blocked |
 | 影子模型 | `*_shadow_audit`、`model_canary_*` | sample/candidate id、score、prediction、metrics、artifact path/hash | shadow/canary/advisory 不能直接执行交易 |
 | readiness | `/api/ops/backend-readiness` response | blockers、known observations、freshness、last good | 运维展示入口，不替代事实表 |
@@ -157,6 +197,14 @@ shadow/advisory models
 - redundancy: alpha live enabled，样本数默认不少于 200，相关性阈值默认约 0.85。
 - context policy: 只允许改变 threshold/sizing，不允许改变 direction。
 - model permissions: 所有模型 artifact 必须保持 shadow/advisory-only。
+- replay harness: 输出 `replay_report`，至少包含 factor/gate/risk verdict 覆盖率和 mismatch_count；P1 bar-run 还必须包含 `bar_replay_metrics.v1`、`factor_frame_replay_metrics.v1`、`execution_gate_recompute_metrics.v1`、`risk_policy_recompute_metrics.v1`、`order_lifecycle_replay_metrics.v1`、`position_lifecycle_replay_metrics.v1`、`supervisor_action_replay_metrics.v1`、`order_outcome_causality_metrics.v1`、`broker_fill_slippage_metrics.v1`、`supervisor_counterfactual_replay_metrics.v1` 和 `risk_policy_subaction_replay_metrics.v1`。
+- autonomy health v1: `posture` 必须机器可读，取值 `full/constrained/shadow_only/frozen`；trend 必须输出 `autonomy_health_trend.v1`；scope recommendation 必须 `can_tighten_only=true` 且 `applied=false`。
+- autonomy scope approval v1: `autonomy_scope_approval_event` 必须记录 snapshot/recommendation/actor/decision/reason，边界必须 `applied=false`、`can_tighten_only=true`。
+- autonomy scope enforcement v1: `autonomy_scope_enforcement_event` 必须记录 current/target incident mode、risk verdict、mutation result 和 boundary；只能应用更严格 mode，真实执行必须经 `RuntimeIncidentControlService.set_mode()`、`RiskPolicyService` 和 runtime overlay/snapshot。
+- incident controls v1: `runtime_incident_mode` 必须机器可读，取值 `normal/shadow_only/no_new_risk/only_close/frozen`。
+- incident playbook plan/event binding v1: `incident_playbook_run` 必须包含 scenario、severity、target_mode、`RiskPolicyService.evaluate("set_incident_control")` 预检和 `does_not_apply_incident_mode=true` 边界；`incident_playbook_event` 只能绑定 evidence refs 和 notes，必须声明 audit-only。
+- release run ledger v1: `release_run` 必须能追溯 snapshot hash、replay artifact hash、incident mode、tests 和 rollback ref；`release_approval_event` 必须能追溯 actor、decision、reason 和 evidence refs，且不能改变 release status。
+- V15 Phase 0 gate: 必须区分 `implementation_complete` 和 `operationally_ready`。
 
 ## Current Gaps To Watch
 
@@ -166,6 +214,9 @@ shadow/advisory models
 - `RiskPolicyService` 子动作很多，后续应在文档和 API 里导出 action matrix，避免新增动作绕过审计。
 - shadow/advisory 模型数量已经较多，前端需要按“权限边界”展示，而不是按“模型名字”展示。
 - readiness 当前是诊断汇总，不是不可变审计表；关键状态仍应回到事实表或 snapshot。
+- replay harness P1 已有 decision/bar-window/factor-frame evidence、`ExecutionGate` / `RiskPolicyService` offline recompute v1、order/position/supervisor lifecycle coverage v1，以及 broker outcome causality、fill slippage、supervisor counterfactual 和 supervisor risk subaction replay v1；后续可扩展更多 `RiskPolicyService` action matrix。
+- autonomy health 已有 persistence/trend、scope approval trail 和 tightening-only enforcement binding；后续需要观察真实 health 降级时的告警/审批联动质量。
+- release run ledger v1 目前已有发布证据账本、approval trail v1、incident playbook plan v1 和 incident playbook event binding v1；后续需要和真实告警/事件源、freeze/thaw approval event 自动触发更深绑定。
 - 历史样本的 degraded/recovered 语义要继续保守，不能为了训练数量补造无法还原的实时上下文。
 
 ## Update Rule
@@ -176,4 +227,4 @@ shadow/advisory models
 - 新增会写 `policy_suggestion`、`evolution_decision`、`learning_application_log/effect` 的治理单元。
 - 新增 shadow/advisory 模型、canary runner 或模型权限能力。
 - 新增能改变 threshold、position size、factor weight、runtime overlay、position controls 的规则。
-- 修改 evidence contract、train gate、readiness、catalog snapshot 或 runtime overlay 语义。
+- 修改 evidence contract、train gate、readiness、catalog snapshot、replay report、autonomy health、incident controls、release run ledger、V15 Phase 0 gate 或 runtime overlay 语义。

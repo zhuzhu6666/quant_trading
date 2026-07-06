@@ -146,10 +146,56 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS replay_report (
+                replay_run_id TEXT PRIMARY KEY,
+                scope_json TEXT NOT NULL DEFAULT '{}',
+                input_dataset_hash TEXT DEFAULT '',
+                runtime_config_hash TEXT DEFAULT '',
+                code_version TEXT DEFAULT '',
+                decision_count INTEGER DEFAULT 0,
+                matched_live_count INTEGER DEFAULT 0,
+                mismatch_count INTEGER DEFAULT 0,
+                metric_summary_json TEXT NOT NULL DEFAULT '{}',
+                replay_error TEXT DEFAULT '',
+                evidence_grade TEXT DEFAULT '',
+                artifact_path TEXT DEFAULT '',
+                artifact_hash TEXT DEFAULT '',
+                status TEXT DEFAULT 'completed',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS release_run (
+                run_id TEXT PRIMARY KEY,
+                release_class TEXT DEFAULT '',
+                status TEXT DEFAULT 'started',
+                summary_json TEXT NOT NULL DEFAULT '{}',
+                checklist_json TEXT NOT NULL DEFAULT '{}',
+                runtime_config_hash TEXT DEFAULT '',
+                replay_run_id TEXT DEFAULT '',
+                replay_artifact_hash TEXT DEFAULT '',
+                incident_mode TEXT DEFAULT '',
+                readiness_posture TEXT DEFAULT '',
+                tests_json TEXT NOT NULL DEFAULT '[]',
+                rollback_ref_json TEXT NOT NULL DEFAULT '{}',
+                created_by TEXT DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0.0,
+                updated_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runtime_config_snapshot_hash ON runtime_config_snapshot(config_hash, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_factor_catalog_snapshot_created ON factor_catalog_snapshot(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evolution_run_type ON evolution_run(run_type, status, started_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evolution_decision_run ON evolution_decision(run_id, decision_type, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_report_created ON replay_report(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_report_grade ON replay_report(evidence_grade, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_release_run_created ON release_run(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_release_run_status ON release_run(status, created_at)")
         conn.commit()
     finally:
         conn.close()

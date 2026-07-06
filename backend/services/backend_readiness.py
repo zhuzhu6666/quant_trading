@@ -108,9 +108,24 @@ class BackendReadinessService:
         config_runtime_drift = self._timed_component("config_runtime_drift", self._config_runtime_drift_status)
         audit_health = self._timed_component("audit_health", self._audit_health_status)
         background_jobs = self._timed_component("background_jobs", self._background_jobs_status)
+        replay = self._timed_component("replay", self._replay_status)
+        incident_control = self._timed_component("incident_control", self._incident_control_status)
+        release = self._timed_component("release", self._release_status)
         stability = self._timed_component(
             "stability",
             lambda: self._stability_status(
+                governance_freshness=governance_freshness,
+                model_status=model_status,
+            ),
+        )
+        autonomy_health = self._timed_component(
+            "autonomy_health",
+            lambda: self._autonomy_health_status(
+                live_status=live_status,
+                system_health=system_health,
+                governance=governance,
+                stability=stability,
+                replay=replay,
                 governance_freshness=governance_freshness,
                 model_status=model_status,
             ),
@@ -172,6 +187,24 @@ class BackendReadinessService:
             )
         known_observations.extend(config_runtime_drift.get("known_observations") or [])
         known_observations.extend(audit_health.get("known_observations") or [])
+        if str(autonomy_health.get("posture") or "") in {"constrained", "shadow_only", "frozen"}:
+            known_observations.append(
+                {
+                    "component": "autonomy_health",
+                    "status": str(autonomy_health.get("posture") or ""),
+                    "classification": "autonomy_health_read_only",
+                    "blockers": autonomy_health.get("blockers") or [],
+                }
+            )
+        if str(incident_control.get("mode") or "normal") != "normal":
+            known_observations.append(
+                {
+                    "component": "runtime_incident_control",
+                    "status": str(incident_control.get("mode") or ""),
+                    "classification": "operator_incident_control",
+                    "readiness_effect": incident_control.get("readiness_effect") or {},
+                }
+            )
         payload = {
             "ok": True,
             "schema_version": "backend_readiness.v1",
@@ -197,9 +230,52 @@ class BackendReadinessService:
             "mutation_policy": self._mutation_policy_status(),
             "audit_health": audit_health,
             "background_jobs": background_jobs,
+            "replay": replay,
+            "incident_control": incident_control,
+            "release": release,
+            "autonomy_health": autonomy_health,
             "stability": stability,
+            "v15": {
+                "schema_version": "v15_readiness_contract.v1",
+                "runtime": {
+                    "execution_semantics": execution_semantics,
+                    "startup": startup_status,
+                    "live": {
+                        "ctrader": live_status.get("ctrader") or {},
+                        "loop": live_status.get("loop") or {},
+                        "readiness": live_status.get("readiness") or {},
+                    },
+                },
+                "overlay": stability.get("runtime_config_overlay") or {},
+                "snapshot": stability.get("runtime_config_snapshot") or {},
+                "catalog": governance.get("factor_governance_runtime") or {},
+                "worker": {
+                    "background_jobs": background_jobs,
+                    "governance_freshness": governance_freshness,
+                },
+                "replay": replay,
+                "incident_control": incident_control,
+                "release": release,
+                "autonomy_health": autonomy_health,
+                "control_plane_boundaries": {
+                    "runtime_overlay_is_source_of_truth": True,
+                    "runtime_snapshot_required_for_rollback": True,
+                    "risk_policy_service_required": True,
+                    "decision_policy_required_for_weight_writes": True,
+                    "models_shadow_or_advisory_only": True,
+                    "incident_controls_require_risk_policy": True,
+                },
+            },
             "frontend_contract": {
                 "preferred_entry": "/api/ops/backend-readiness",
+                "v15_replay_latest": "/api/ops/replay/latest",
+                "v15_replay_run": "/api/ops/replay/run",
+                "v15_replay_bar_run": "/api/ops/replay/bar-run",
+                "v15_incident_control": "/api/ops/incident-control",
+                "v15_phase0_completion": "/api/ops/v15/phase0",
+                "v15_release_latest": "/api/ops/release/latest",
+                "v15_release_start": "/api/ops/release/start",
+                "v15_release_finish": "/api/ops/release/{run_id}/finish",
                 "model_shadow_report": "/api/learning/model/meta-lightgbm/shadow-report",
                 "model_shadow_report_snapshots": "/api/learning/model/meta-lightgbm/shadow-report/snapshots",
                 "model_governance_materialize": "/api/learning/model/meta-lightgbm/governance-suggestion",
@@ -209,6 +285,9 @@ class BackendReadinessService:
             "blockers": blockers,
             "known_observations": known_observations,
         }
+        phase0 = self._v15_phase0_status(payload)
+        payload["v15"]["phase0"] = phase0
+        payload["v15_phase0"] = phase0
         record_timing("backend_readiness.build", time.perf_counter() - build_started, extra={"ready": ready_for_frontend})
         return payload
 
@@ -732,6 +811,102 @@ class BackendReadinessService:
             return RuntimeConfigOverlayService(self.db_path).status()
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def _replay_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.replay_harness import ReplayHarnessService
+
+            return ReplayHarnessService(self.db_path).status()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "replay_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def _incident_control_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.incident_controls import RuntimeIncidentControlService
+
+            return RuntimeIncidentControlService(self.db_path).status()
+        except Exception as exc:
+            return {
+                "schema_version": "runtime_incident_control.v1",
+                "mode": "unknown",
+                "valid_modes": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def _release_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.release_control import ReleaseControlService
+
+            latest = ReleaseControlService(self.db_path).latest_release()
+            return {
+                "schema_version": "release_readiness.v1",
+                "ok": bool(latest.get("run_id")),
+                "latest_release": latest,
+            }
+        except Exception as exc:
+            return {
+                "schema_version": "release_readiness.v1",
+                "ok": False,
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    @staticmethod
+    def _v15_phase0_status(readiness: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from backend.services.v15_phase0 import V15Phase0CompletionService
+
+            return V15Phase0CompletionService().build(readiness=readiness)
+        except Exception as exc:
+            return {
+                "schema_version": "v15_phase0_completion.v1",
+                "implementation_complete": False,
+                "operationally_ready": False,
+                "status": "error",
+                "blockers": ["phase0_completion_error"],
+                "error": f"{type(exc).__name__}: {exc}",
+                "read_only": True,
+                "updated_at": time.time(),
+            }
+
+    def _autonomy_health_status(
+        self,
+        *,
+        live_status: dict[str, Any],
+        system_health: dict[str, Any],
+        governance: dict[str, Any],
+        stability: dict[str, Any],
+        replay: dict[str, Any],
+        governance_freshness: dict[str, Any],
+        model_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            from backend.services.autonomy_health import AutonomyHealthService
+
+            return AutonomyHealthService(self.db_path).build(
+                live_status=live_status,
+                system_health=system_health,
+                governance=governance,
+                stability=stability,
+                replay_status=replay,
+                governance_freshness=governance_freshness,
+                model_status=model_status,
+            )
+        except Exception as exc:
+            return {
+                "schema_version": "autonomy_health.v1",
+                "score": 0.0,
+                "posture": "frozen",
+                "blockers": ["autonomy_health_error"],
+                "error": f"{type(exc).__name__}: {exc}",
+                "updated_at": time.time(),
+                "read_only": True,
+            }
 
     @staticmethod
     def _freshness_watchdog_status(

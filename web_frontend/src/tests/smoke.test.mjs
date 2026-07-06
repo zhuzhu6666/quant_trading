@@ -15,6 +15,9 @@ const requiredFiles = [
   "src/pages/PnlPage.tsx",
   "src/pages/RiskPage.tsx",
   "src/pages/OpsPage.tsx",
+  "src/pages/LearningPage.tsx",
+  "src/pages/ModelsPage.tsx",
+  "src/pages/V15CockpitPage.tsx",
 ];
 
 let fail = false;
@@ -39,9 +42,18 @@ assert.match(formatSource, /catch \{/);
 const apiSource = fs.readFileSync(path.join(process.cwd(), "src/api/client.ts"), "utf8");
 assert.match(apiSource, /confirmed\s*\?\s*\{\s*"X-Confirm":\s*"start-live"\s*\}/);
 assert.match(apiSource, /confirmed\s*\?\s*\{\s*"X-Confirm":\s*"emergency"\s*\}/);
+assert.match(apiSource, /getReplayLatest/);
+assert.match(apiSource, /getV15Phase0/);
 
 const tradingSource = fs.readFileSync(path.join(process.cwd(), "src/pages/TradingPage.tsx"), "utf8");
 assert.match(tradingSource, /startTrading\("ctrader",\s*strategy\s*\|\|\s*"live",\s*true\)/);
 assert.match(tradingSource, /emergencyClose\(true\)/);
+
+const appSource = fs.readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
+assert.match(appSource, /path="\/v15"/);
+
+const v15Source = fs.readFileSync(path.join(process.cwd(), "src/pages/V15CockpitPage.tsx"), "utf8");
+assert.match(v15Source, /order_outcome_causality_replay/);
+assert.match(v15Source, /supervisor_counterfactual_replay/);
 
 console.log("web_frontend smoke test: ok");

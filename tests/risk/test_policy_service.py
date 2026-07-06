@@ -545,6 +545,55 @@ def test_factor_rollback_is_not_blocked_by_weight_freeze():
     assert verdict.allowed is True
 
 
+def test_incident_control_blocks_new_risk_but_allows_risk_reduction():
+    service = _service()
+
+    blocked = service.evaluate("open_trade", {"runtime_incident_mode": "no_new_risk"})
+    close_allowed = service.evaluate("close_position", {"runtime_incident_mode": "no_new_risk"})
+    rollback_allowed = service.evaluate("rollback_factor_action", {"runtime_incident_mode": "no_new_risk"})
+
+    assert blocked.allowed is False
+    assert blocked.reason == "incident_no_new_risk"
+    assert blocked.audit_payload["source"] == "runtime_incident_control"
+    assert close_allowed.allowed is True
+    assert rollback_allowed.allowed is True
+
+
+def test_incident_control_only_close_blocks_adjustments_and_governance():
+    service = _service()
+
+    tighten = service.evaluate(
+        "tighten_position",
+        {"runtime_incident_mode": "only_close", "loop_running": True, "bridge_connected": True},
+    )
+    update_weight = service.evaluate("update_weight", {"runtime_incident_mode": "only_close"})
+    close_allowed = service.evaluate("close_position", {"runtime_incident_mode": "only_close"})
+
+    assert tighten.allowed is False
+    assert tighten.reason == "incident_only_close"
+    assert update_weight.allowed is False
+    assert update_weight.reason == "incident_only_close"
+    assert close_allowed.allowed is True
+
+
+def test_incident_control_relax_requires_confirm():
+    service = _service()
+
+    blocked = service.evaluate(
+        "set_incident_control",
+        {"current_mode": "frozen", "target_mode": "normal"},
+    )
+    allowed = service.evaluate(
+        "set_incident_control",
+        {"current_mode": "frozen", "target_mode": "normal", "confirm_thaw": True},
+    )
+
+    assert blocked.allowed is False
+    assert blocked.reason == "incident_control_relax_requires_confirm"
+    assert allowed.allowed is True
+    assert allowed.audit_payload["relaxing"] is True
+
+
 def test_tighten_position_allows_bounded_tp_extension_with_profit_lock():
     service = _service()
 

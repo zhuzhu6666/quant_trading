@@ -25,6 +25,8 @@
 - Factor data enters through `FactorFrameBuilder` with point-in-time external/event data.
 - Factor system uses V2 roles: `alpha`, `context`, `gate`, `sizing`.
 - Factor governance uses V3 autonomous governance: Catalog, Orchestrator, DB overlay, snapshots, post-action rollback, redundancy detection, and context policy.
+- V15 Phase 0 is complete: backend readiness exposes V15 runtime/overlay/catalog/worker/replay/autonomy health/incident-control/release/phase0 contract; replay harness v1 writes `replay_report` plus artifact JSON; autonomy health v1 is read-only; release checklist, incident controls v1, release run ledger v1, and Phase 0 completion gate are implemented.
+- V15 Phase 1 is complete: replay harness now has bar + factor-frame replay evidence v1, offline `ExecutionGate` / `RiskPolicyService` recompute metrics v1, order/position/supervisor lifecycle coverage plus order causality / broker slippage / supervisor counterfactual / risk subaction replay v1 through `/api/ops/replay/bar-run`, Web quick replay via `/api/ops/replay/bar-decisions` + `/api/ops/replay/bar-preview` with historical selection, K线、实际盈亏、平仓归因和学习样本状态, autonomy health persistence/trend + scope approval trail v1, tightening-only scope enforcement binding v1, release approval trail v1, incident playbook plan/event binding v1, and Web `/v15` cockpit without bypassing live control boundaries.
 - Models remain shadow/advisory unless a future explicit governance stage changes that boundary.
 
 Latest verified baseline:
@@ -33,20 +35,21 @@ Latest verified baseline:
 - Backend and learning worker were verified active after runtime overlay cleanup.
 - Demo live loop initialized, warmed bars, cTrader ready, and paused open-market work while market was closed.
 - `/api/health` returned healthy during the latest production check.
+- 2026-07-06 close-learning incident fixed: `close_source` is preserved for close ledger/review, backend restarted, 8 failed close facts were backfilled into `decision_ledger.close`, `position_lifecycle_event.closed`, `trade_outcome_review`, controlled `experience_memory`, and `autonomous_learning_sample` with missing-attribution samples kept out of strong training.
 
 ## 2. Current Main Line
 
 Current main line:
 
 ```text
-Documentation governance and system truth cleanup
+V15 autonomous runtime platform closed; observe replay, release, and autonomy health evidence before V16
 ```
 
 Reason:
 
-- Several old documents still describe removed or superseded behavior.
-- Old root AI context and the previous giant TODO were high-risk sources of stale assumptions.
-- Before the next major upgrade, the documentation layer must stop reintroducing old factor, state DB, frontend, and approval semantics.
+- Documentation governance is clean enough to start V15 implementation.
+- V15 Phase 0 now has complete readiness/replay/health/incident-control/release-ledger/phase0-gate code facts and release checklist v1 documentation.
+- V15 Phase 1 closed with bar + factor-frame replay evidence v1, offline `ExecutionGate` / `RiskPolicyService` recompute metrics v1, order/position/supervisor lifecycle coverage plus causality/slippage/counterfactual/subaction replay metrics v1, autonomy health persistence/trend + scope approval trail v1, tightening-only scope enforcement binding v1, release approval trail v1, incident playbook plan/event binding v1, and Web `/v15` cockpit without bypassing `RiskPolicyService`, `DecisionPolicy`, or runtime overlay/snapshot.
 
 ## 3. Immediate Tasks
 
@@ -126,9 +129,10 @@ Goal:
 |---|---|---|---|
 | G1 | Some maintained docs still need normalized `Status / Last verified / Scope` headers | active | docs metadata |
 | G2 | Multi-symbol remains future work | future | `docs/planning/multi-symbol-pipeline.md` |
-| G3 | V15 major upgrade direction needs implementation planning after initial design | pending | `docs/planning/v15-autonomous-runtime-platform.md` |
-| G4 | Digital twin / replay layer needs detailed implementation design | pending | V15 |
-| G5 | Long-term autonomy health score needs thresholds and persistence design | pending | V15 |
+| G3 | V15 Phase 0 and Phase 1 are complete, including Web `/v15` cockpit | done | `docs/planning/v15-autonomous-runtime-platform.md` |
+| G4 | Digital twin / replay layer has bar-window, factor-frame, ExecutionGate, RiskPolicy, order/position/supervisor lifecycle, order causality, broker slippage, supervisor counterfactual, and risk subaction evidence v1 | done | V15 |
+| G5 | Long-term autonomy health has persistence/trend v1, scope approval trail v1, and tightening-only enforcement binding v1; real alert/approval automation quality remains to observe | observe | V15 |
+| G6 | V15 release controls have release approval trail v1 and incident playbook plan/event binding v1; deeper real alert/freeze-thaw binding is future hardening | future-hardening | `docs/v15-release-checklist.md` |
 
 ## 5. Technical Debt Registry
 

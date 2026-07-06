@@ -42,6 +42,7 @@ data/charts/jobs.jsonl
 data/charts/factor_attribution.json
 data/trades_reconcile_report*.json
 data/parameter_template_validation_reports/
+data/replay_reports/
 data/model_artifacts/
 data/model_eval_reports/
 data/cot/

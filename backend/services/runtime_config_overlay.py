@@ -103,6 +103,7 @@ def _sanitize_patch(patch: dict[str, Any]) -> dict[str, Any]:
             str(key).startswith("factor_governance_")
             or str(key).startswith("factor_redundancy_")
             or key == "context_policy_enabled"
+            or key == "runtime_incident_mode"
         ):
             allowed[key] = deepcopy(value)
     return allowed

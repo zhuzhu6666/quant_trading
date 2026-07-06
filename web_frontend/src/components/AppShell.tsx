@@ -1,6 +1,6 @@
 import { Link, Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { LogOut, LayoutDashboard, BarChart3, Activity, ShieldAlert, Settings2, BrainCircuit, Microscope, Cpu } from "lucide-react";
+import { LogOut, LayoutDashboard, BarChart3, Activity, ShieldAlert, Settings2, BrainCircuit, Microscope, Cpu, Rocket } from "lucide-react";
 import { getSystemLoad } from "@/api/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDecimal } from "@/lib/format";
@@ -12,6 +12,7 @@ const navItems = [
   { to: "/risk", label: "风控", icon: ShieldAlert },
   { to: "/learning", label: "学习", icon: BrainCircuit },
   { to: "/models", label: "模型", icon: Microscope },
+  { to: "/v15", label: "V15", icon: Rocket },
   { to: "/ops", label: "运维", icon: Settings2 },
 ];
 

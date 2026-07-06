@@ -5,6 +5,7 @@ import pytest
 from backend.services.context_policy import ContextPolicyService
 from backend.services.factor_catalog import latest_factor_catalog_snapshot, persist_factor_catalog_snapshot
 from backend.services.factor_redundancy import RedundancyDetector
+from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
 from backend.services.runtime_config_startup import restore_runtime_config_on_startup
@@ -185,6 +186,42 @@ def test_runtime_config_mutation_service_uses_overlay_without_temp_db_audit(tmp_
     assert rc.shared().factor_portfolio_weights["rsi_14"] == 0.21
     overlay = RuntimeConfigOverlayService(db_path).latest()["overlay"]
     assert overlay["factor_portfolio_weights"]["rsi_14"] == 0.21
+
+
+def test_incident_control_service_persists_via_overlay_and_requires_confirm_to_thaw(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = RuntimeIncidentControlService(db_path)
+
+    frozen = service.set_mode("frozen", reason="test freeze")
+    assert frozen["ok"] is True
+    assert rc.shared().runtime_incident_mode == "frozen"
+
+    blocked_thaw = service.set_mode("normal", reason="test thaw")
+    assert blocked_thaw["ok"] is False
+    assert blocked_thaw["status"] == "blocked_by_risk"
+    assert rc.shared().runtime_incident_mode == "frozen"
+
+    thawed = service.set_mode("normal", reason="test thaw", confirm_thaw=True)
+    assert thawed["ok"] is True
+    assert rc.shared().runtime_incident_mode == "normal"
+
+    overlay = RuntimeConfigOverlayService(db_path).latest()["overlay"]
+    assert overlay["runtime_incident_mode"] == "normal"
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT source, config_json
+            FROM runtime_config_snapshot
+            ORDER BY config_version DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "v15_incident_control"
+    assert '"runtime_incident_mode": "normal"' in row[1]
 
 
 def test_runtime_config_overlay_status_flags_suspicious_test_factors(tmp_path):
