@@ -5539,6 +5539,118 @@ td > .status-pill {
   margin-bottom: 10px;
 }
 
+.v16-dashboard .dashboard-header {
+  border-left: 4px solid #2563eb;
+}
+
+.v16-grid {
+  align-items: start;
+}
+
+.v16-boundary {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(203, 213, 225, 0.74);
+}
+
+.brain-hypothesis-list,
+.brain-action-plan-list {
+  display: grid;
+  gap: 10px;
+}
+
+.brain-action-plan-list {
+  margin-top: 12px;
+}
+
+.brain-hypothesis,
+.brain-action-plan {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid rgba(203, 213, 225, 0.8);
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 10px;
+}
+
+.brain-hypothesis-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brain-hypothesis-head > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.brain-hypothesis-head strong,
+.brain-hypothesis-head span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.brain-hypothesis-head strong {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.brain-hypothesis-head span,
+.brain-ref-row {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.brain-ref-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.brain-ref-row span {
+  overflow-wrap: anywhere;
+}
+
+.brain-plan-services {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.brain-plan-services span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.25;
+  padding: 4px 8px;
+}
+
+.brain-json-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.brain-json-grid > div {
+  min-width: 0;
+}
+
 @media (max-width: 1080px) {
   .v15-tabbar,
   .v15-mini-grid,
@@ -5564,5 +5676,10 @@ td > .status-pill {
   .v15-list-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .v16-boundary,
+  .brain-json-grid {
+    grid-template-columns: 1fr;
   }
 }

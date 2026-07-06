@@ -114,6 +114,8 @@ class RiskPolicyService:
             return self._evaluate_model_stage(action, context, required_mode="shadow")
         if action == "start_canary_model":
             return self._evaluate_model_stage(action, context, required_mode="canary")
+        if action == "run_replay_job":
+            return self._evaluate_low_impact_replay_job(context)
         return RiskVerdict(
             allowed=False,
             reason="unsupported_action",
@@ -987,5 +989,35 @@ class RiskPolicyService:
                 "candidate_id": context.get("candidate_id", ""),
                 "candidate_status": candidate_status,
                 "capabilities": capabilities,
+            },
+        )
+
+    @staticmethod
+    def _evaluate_low_impact_replay_job(context: dict[str, Any]) -> RiskVerdict:
+        if bool(context.get("mutates_runtime", False)):
+            return RiskVerdict(
+                allowed=False,
+                reason="replay_job_must_be_read_only",
+                severity="error",
+                required_mode="audit",
+                audit_payload={
+                    "action": "run_replay_job",
+                    "source": "risk_policy",
+                    "mutates_runtime": True,
+                },
+            )
+        return RiskVerdict(
+            allowed=True,
+            reason="low_impact_read_only_replay",
+            required_mode="audit",
+            audit_payload={
+                "action": "run_replay_job",
+                "source": "risk_policy",
+                "read_only": True,
+                "plan_id": context.get("plan_id", ""),
+                "eval_id": context.get("eval_id", ""),
+                "evidence_score": context.get("evidence_score", 0.0),
+                "critic_verdict": context.get("critic_verdict", ""),
+                "comparison_verdict": context.get("comparison_verdict", ""),
             },
         )

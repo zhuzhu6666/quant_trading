@@ -276,6 +276,17 @@ class BackendReadinessService:
                 "v15_release_latest": "/api/ops/release/latest",
                 "v15_release_start": "/api/ops/release/start",
                 "v15_release_finish": "/api/ops/release/{run_id}/finish",
+                "v16_brain_state": "/api/ops/brain/state",
+                "v16_brain_memory": "/api/ops/brain/memory",
+                "v16_brain_action_plans": "/api/ops/brain/action-plans",
+                "v16_brain_action_plan_evals": "/api/ops/brain/action-plan-evals",
+                "v16_brain_low_impact_executions": "/api/ops/brain/low-impact-executions",
+                "v16_brain_low_impact_execution_run": "/api/ops/brain/low-impact-executions/run",
+                "v16_brain_medium_impact_governance": "/api/ops/brain/medium-impact-governance",
+                "v16_brain_medium_impact_governance_materialize": "/api/ops/brain/medium-impact-governance/materialize",
+                "v16_brain_live_ready_guardrails": "/api/ops/brain/live-ready-guardrails",
+                "v16_brain_live_ready_guardrail_evaluate": "/api/ops/brain/live-ready-guardrails/evaluate",
+                "v16_brain_live_ready_guardrail_tighten": "/api/ops/brain/live-ready-guardrails/tighten",
                 "model_shadow_report": "/api/learning/model/meta-lightgbm/shadow-report",
                 "model_shadow_report_snapshots": "/api/learning/model/meta-lightgbm/shadow-report/snapshots",
                 "model_governance_materialize": "/api/learning/model/meta-lightgbm/governance-suggestion",
@@ -288,6 +299,45 @@ class BackendReadinessService:
         phase0 = self._v15_phase0_status(payload)
         payload["v15"]["phase0"] = phase0
         payload["v15_phase0"] = phase0
+        brain_state = self._timed_component("brain_state", lambda: self._brain_state_status(payload))
+        payload["brain_state"] = brain_state
+        brain_action_plans = self._timed_component("brain_action_plans", lambda: self._brain_action_plan_status())
+        payload["brain_action_plans"] = brain_action_plans
+        brain_action_plan_evals = self._timed_component("brain_action_plan_evals", lambda: self._brain_action_plan_eval_status())
+        payload["brain_action_plan_evals"] = brain_action_plan_evals
+        brain_low_impact_executions = self._timed_component("brain_low_impact_executions", lambda: self._brain_low_impact_execution_status())
+        payload["brain_low_impact_executions"] = brain_low_impact_executions
+        brain_medium_impact_governance = self._timed_component("brain_medium_impact_governance", lambda: self._brain_medium_impact_governance_status())
+        payload["brain_medium_impact_governance"] = brain_medium_impact_governance
+        brain_live_ready_guardrails = self._timed_component("brain_live_ready_guardrails", lambda: self._brain_live_ready_guardrail_status())
+        payload["brain_live_ready_guardrails"] = brain_live_ready_guardrails
+        payload["v16"] = {
+            "schema_version": "v16_readiness_contract.v1",
+            "phase": "phase5_live_ready_guardrails",
+            "brain_state": brain_state,
+            "action_plans": brain_action_plans,
+            "action_plan_evals": brain_action_plan_evals,
+            "low_impact_executions": brain_low_impact_executions,
+            "medium_impact_governance": brain_medium_impact_governance,
+            "live_ready_guardrails": brain_live_ready_guardrails,
+            "control_plane_boundaries": {
+                "read_only": True,
+                "affects_trading": False,
+                "shadow_action_plans_record_only": True,
+                "shadow_action_evals_record_only": True,
+                "low_impact_execution_requires_risk_policy": True,
+                "low_impact_execution_whitelist_only": True,
+                "medium_impact_governance_suggestions_only": True,
+                "medium_impact_future_apply_requires_decision_policy": True,
+                "live_ready_guardrails_only": True,
+                "live_ready_tightening_only": True,
+                "live_ready_tightening_uses_incident_control": True,
+                "risk_policy_service_required_for_future_actions": True,
+                "decision_policy_required_for_future_weight_writes": True,
+                "runtime_overlay_snapshot_required_for_future_mutations": True,
+                "models_shadow_or_advisory_only": True,
+            },
+        }
         record_timing("backend_readiness.build", time.perf_counter() - build_started, extra={"ready": ready_for_frontend})
         return payload
 
@@ -906,6 +956,123 @@ class BackendReadinessService:
                 "error": f"{type(exc).__name__}: {exc}",
                 "updated_at": time.time(),
                 "read_only": True,
+            }
+
+    def _brain_state_status(self, readiness: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from backend.services.brain_state import BrainStateService
+
+            snapshot = BrainStateService(self.db_path).build(
+                readiness=readiness,
+                persist=True,
+                source="backend_readiness",
+            )
+            return {
+                "ok": True,
+                "schema_version": "brain_state_readiness.v1",
+                "status": "available",
+                "snapshot_id": snapshot.get("snapshot_id"),
+                "strategy_posture": snapshot.get("world_model", {}).get("strategy_posture", "unknown"),
+                "hypothesis_count": len(snapshot.get("hypotheses") or []),
+                "critic_verdict": snapshot.get("critic", {}).get("verdict", "unknown"),
+                "read_only": True,
+                "affects_trading": False,
+                "latest_snapshot": snapshot,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "brain_state_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "read_only": True,
+                "affects_trading": False,
+            }
+
+    def _brain_action_plan_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.brain_action_planner import BrainActionPlannerService
+
+            status = BrainActionPlannerService(self.db_path).status(limit=20)
+            status.setdefault("read_only", True)
+            status.setdefault("affects_trading", False)
+            return status
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "brain_action_plan_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "read_only": True,
+                "affects_trading": False,
+            }
+
+    def _brain_action_plan_eval_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.brain_action_evaluator import BrainActionPlanEvaluatorService
+
+            status = BrainActionPlanEvaluatorService(self.db_path).status(limit=20)
+            status.setdefault("read_only", True)
+            status.setdefault("affects_trading", False)
+            return status
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "brain_action_plan_eval_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "read_only": True,
+                "affects_trading": False,
+            }
+
+    def _brain_low_impact_execution_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.brain_low_impact_executor import BrainLowImpactExecutorService
+
+            status = BrainLowImpactExecutorService(self.db_path).status(limit=20)
+            status.setdefault("low_impact_only", True)
+            return status
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "brain_low_impact_execution_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "low_impact_only": True,
+            }
+
+    def _brain_medium_impact_governance_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
+
+            status = BrainMediumImpactGovernanceService(self.db_path).status(limit=20)
+            status.setdefault("medium_impact_governance", True)
+            return status
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "brain_medium_impact_governance_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "medium_impact_governance": True,
+            }
+
+    def _brain_live_ready_guardrail_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
+
+            status = BrainLiveReadyGuardrailService(self.db_path).status(limit=20)
+            status.setdefault("live_ready_guardrails", True)
+            status.setdefault("tightening_only", True)
+            return status
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "brain_live_ready_guardrail_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "live_ready_guardrails": True,
+                "tightening_only": True,
             }
 
     @staticmethod

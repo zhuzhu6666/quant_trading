@@ -490,6 +490,13 @@ V16 页面：
 - Web 能看到当前系统为什么偏防守/观察/正常。
 - brain 输出不影响交易。
 
+当前状态：`complete`。
+
+- `Phase 1 minimal read-only loop done`: `backend.services.brain_state.BrainStateService` 已新增 `brain_state_snapshot` 审计表和 `/api/ops/brain/state` 入口，并接入 `/api/ops/backend-readiness` 的 `brain_state` / `v16.brain_state` 字段。当前后端版消费 V15 readiness、replay、incident control、autonomy health、governance freshness、release refs 和 brain memory retrieval，输出 `world_model`、observe-only `hypotheses`、`critic`、`evidence_refs` 和只读边界；`read_only=true`、`affects_trading=false`，不执行 action plan，不写 runtime overlay/snapshot，不改因子权重、订单、仓位或学习样本。
+- `Phase 1 memory/counter-evidence done`: `backend.services.brain_memory.BrainMemoryService` 已新增 `brain_memory` 只读记忆索引和 `/api/ops/brain/memory` 入口，从 `experience_memory`、`trade_outcome_review`、`policy_suggestion`、model permission audit 和可选 shadow audit 表检索相似历史、negative memory 和 counter-evidence，并把 memory refs 写回 brain hypotheses、critic 和 evidence refs。negative memory 只能收紧 Critic scope，positive memory 只能作为反证展示，不生成训练标签或执行授权。
+- `Phase 1 Web Brain State done`: Web `/v16` 已新增 V16 大脑状态页面，读取 `/api/ops/brain/state`、`/api/ops/brain/memory` 和 `/api/ops/backend-readiness`，展示 world model、memory retrieval、negative memory、counter-evidence、observe-only hypotheses、Critic 和只读边界；前端只展示后端事实和触发只读刷新，不重算策略/风控，不执行 action plan。
+- Phase 1 剩余项：无阻断项。Phase 2 已在其上开始 shadow action plan ledger；仍应继续观察 brain state/memory source gaps、counter-evidence 质量和 `/v16` 页面可读性。
+
 ### Phase 2: Shadow Brain
 
 目标：
@@ -503,6 +510,13 @@ V16 页面：
 - 至少覆盖因子权重、参数模板、context policy、supervisor 模板。
 - shadow action 与真实后验可比较。
 
+当前状态：`complete`。
+
+- `Phase 2 shadow action plan ledger done`: `backend.services.brain_action_planner.BrainActionPlannerService` 已新增 `brain_action_plan` 审计表和 `/api/ops/brain/action-plans` 入口，并接入 `/api/ops/backend-readiness` 的 `brain_action_plans` / `v16.action_plans` 字段。当前最小闭环从 Phase 1 brain state/hypotheses/memory/Critic 生成四类 record-only plans：factor weight、parameter template、context policy、supervisor template；每条 plan 记录 `critic_verdict`、`required_services`、`validation_refs`、`shadow_eval` contract、future rollback 要求和只读边界。
+- `Phase 2 posterior comparison done`: `backend.services.brain_action_evaluator.BrainActionPlanEvaluatorService` 已新增 `brain_action_plan_eval` 审计表和 `/api/ops/brain/action-plan-evals` 入口，并接入 `/api/ops/backend-readiness` 的 `brain_action_plan_evals` / `v16.action_plan_evals` 字段。Evaluator 读取 `replay_report`、`trade_outcome_review`、`learning_application_effect`、`position_supervisor_trace`，对 shadow plans 输出 coverage、comparison verdict、comparison summary 和 evidence refs；该评价只读/record-only，不改变 plan 状态，不生成学习标签，不触发 governance/live mutation。
+- `Phase 2 Web Shadow Plans/Evals done`: Web `/v16` 已展示 Shadow Action Plans 和 Shadow Evaluations，刷新按钮调用 `/api/ops/brain/state`、`/api/ops/brain/memory`、`/api/ops/brain/action-plans` 和 `/api/ops/brain/action-plan-evals`；前端只显示后端账本和后验比较，不重算策略/风控，不执行 action plan。
+- Phase 2 剩余项：无阻断项。后续进入 Phase 3 前，应观察 posterior comparison 的 source gaps、coverage 分布和 verdict 稳定性；任何低影响执行仍必须新增显式 execution service，并重新经过 `RiskPolicyService`、`DecisionPolicy`（权重相关）、runtime overlay/snapshot 和 rollback evidence。
+
 ### Phase 3: Low-Impact Autonomous Brain
 
 目标：
@@ -514,6 +528,13 @@ V16 页面：
 
 - 所有动作有 evidence score、Critic verdict、RiskPolicy verdict、rollback plan。
 - 后验坏化能自动降级或回滚。
+
+当前状态：`complete`。
+
+- `Phase 3 low-impact executor done`: `backend.services.brain_low_impact_executor.BrainLowImpactExecutorService` 已新增 `brain_low_impact_execution` 审计表、`/api/ops/brain/low-impact-executions` 读取入口和 `/api/ops/brain/low-impact-executions/run` 显式执行入口，并接入 `/api/ops/backend-readiness` 的 `brain_low_impact_executions` / `v16.low_impact_executions` 字段。当前白名单只允许 read-only `run_replay_job`，执行前读取 P2 eval，记录 evidence score、Critic verdict、`RiskPolicyService.evaluate("run_replay_job")` verdict、rollback/downgrade plan；执行后记录 replay result 和 posterior monitor。
+- `Phase 3 controlled downgrade done`: 当 posterior verdict/replay result 坏化且调用方显式设置 `allow_tighten=true` 时，executor 只能通过 `RuntimeIncidentControlService.set_mode("shadow_only")` 收紧自治范围；该路径继续走 `RiskPolicyService.evaluate("set_incident_control")` 和 runtime overlay/snapshot，不直接写配置。
+- `Phase 3 Web Low-Impact Runs done`: Web `/v16` 已展示 P3 Runs / Low-Impact Executions，并提供受控 `运行 P3` 按钮；默认 `allow_tighten=false`，只触发后端白名单 replay job，不在前端计算策略/风控或执行未授权动作。
+- Phase 3 剩余项：无阻断项。进入 Phase 4 前，应观察 replay job 成功率、P3 execution posterior monitor、bad-posterior downgrade 触发质量和 operator UX；任何 factor weight/template/context/supervisor 的实际变更仍属于 Phase 4+，必须重新经过 `DecisionPolicy`、`RiskPolicyService`、runtime snapshot/rollback 和 release evidence。
 
 ### Phase 4: Medium-Impact Governance
 
@@ -527,6 +548,14 @@ V16 页面：
 - replay 和 live 后验都能解释。
 - autonomy health 低时自动收紧权限。
 
+当前状态：`complete`。
+
+- `Phase 4 medium-impact governance done`: `backend.services.brain_medium_impact_governance.BrainMediumImpactGovernanceService` 已新增 `brain_medium_impact_governance` 审计表、`/api/ops/brain/medium-impact-governance` 读取入口和 `/api/ops/brain/medium-impact-governance/materialize` 显式 materialize 入口，并接入 `/api/ops/backend-readiness` 的 `brain_medium_impact_governance` / `v16.medium_impact_governance` 字段。
+- 当前 P4 最小闭环基于 P2 posterior eval 和 P3 execution evidence，生成中等影响 `policy_suggestion` 候选，覆盖 factor weight、parameter template、context policy、supervisor template 的 governance candidate；执行前记录 `RiskPolicyService` verdict，权重类候选记录 `DecisionPolicy` preview，所有候选记录 rollback/release requirements。
+- P4 仍不直接应用权重、切模板、推广模型到 live、写 runtime overlay/snapshot、提交订单或写学习样本。真正应用候选仍属于既有治理写入口和 release discipline，必须重新经过 `RiskPolicyService`、`DecisionPolicy`、runtime snapshot/rollback 和 release evidence。
+- Web `/v16` 已展示 Medium-Impact Governance，并提供受控 `运行 P4` 按钮；按钮只调用后端 materialize API 生成 `policy_suggestion` 和审计账本，不在前端计算策略/风控或执行 runtime mutation。
+- Phase 4 剩余项：无阻断项。进入 Phase 5 前，应观察 P4 suggestion 命中质量、blocked_by_risk/blocked_by_evidence 分布、后验解释稳定性和 release handoff 质量。
+
 ### Phase 5: Live-Ready Brain Guardrails
 
 目标：
@@ -539,6 +568,14 @@ V16 页面：
 - broker/local divergence 可检测。
 - only-close/no-new-risk/autonomy-freeze 可用。
 - incident memory 和 release rollback 可用。
+
+当前状态：`complete`。
+
+- `Phase 5 live-ready guardrails done`: `backend.services.brain_live_ready_guardrail.BrainLiveReadyGuardrailService` 已新增 `brain_live_ready_guardrail` 审计表、`/api/ops/brain/live-ready-guardrails` 读取入口、`/api/ops/brain/live-ready-guardrails/evaluate` 显式评估入口和 `/api/ops/brain/live-ready-guardrails/tighten` 显式收紧入口，并接入 `/api/ops/backend-readiness` 的 `brain_live_ready_guardrails` / `v16.live_ready_guardrails` 字段。
+- P5 评估 live capability lock、broker/local divergence、incident memory、release rollback 和 P3/P4 evidence，输出 action recommendation 与 `RiskPolicyService.evaluate("set_incident_control")` precheck；评估本身只写审计账本，不授权下单、不应用 P4 suggestion、不写学习样本。
+- P5 tighten 只能把 incident mode 调得更严格，并通过 `RuntimeIncidentControlService.set_mode()` 继续走 `RiskPolicyService`、runtime overlay 和 snapshot；服务端拒绝任何放宽 incident mode 的请求，不提供 thaw/normal 入口。
+- Web `/v16` 已展示 Live-Ready Guardrails，并提供受控 `评估 P5`、`no_new_risk`、`only_close`、`freeze` 按钮；按钮只调用后端 API，不在前端计算 live-ready、风控或 divergence。
+- Phase 5 剩余项：无阻断项。进入后续 live-ready expansion 前，应观察 capability lock blockers、broker/local divergence 缺证据比例、incident memory 质量、release rollback ref 覆盖率和 tightening UX；任何交易权限扩大仍必须重新经过 release evidence、RiskPolicy、DecisionPolicy、runtime snapshot/rollback 和实盘人工/运维门禁。
 
 ## 9. Non-Goals
 

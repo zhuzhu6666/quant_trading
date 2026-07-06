@@ -616,6 +616,74 @@ export async function getReleaseApprovals(runId: string): Promise<Record<string,
   return getJson<Record<string, unknown>>(`/api/ops/release/${encodeURIComponent(runId)}/approvals`);
 }
 
+export async function getBrainState(refresh = false): Promise<Record<string, unknown>> {
+  const query = refresh ? "?refresh=true" : "";
+  return getJson<Record<string, unknown>>(`/api/ops/brain/state${query}`);
+}
+
+export async function getBrainMemory(refresh = false, limit = 50): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (refresh) params.set("refresh", "true");
+  return getJson<Record<string, unknown>>(`/api/ops/brain/memory?${params.toString()}`);
+}
+
+export async function getBrainActionPlans(refresh = false, limit = 50): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (refresh) params.set("refresh", "true");
+  return getJson<Record<string, unknown>>(`/api/ops/brain/action-plans?${params.toString()}`);
+}
+
+export async function getBrainActionPlanEvals(refresh = false, limit = 50): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (refresh) params.set("refresh", "true");
+  return getJson<Record<string, unknown>>(`/api/ops/brain/action-plan-evals?${params.toString()}`);
+}
+
+export async function getBrainLowImpactExecutions(limit = 50): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return getJson<Record<string, unknown>>(`/api/ops/brain/low-impact-executions?${params.toString()}`);
+}
+
+export async function runBrainLowImpactExecution(): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/brain/low-impact-executions/run", {
+    limit: 1,
+    allow_tighten: false,
+    replay_lookback_days: 1,
+    replay_limit: 100,
+  });
+}
+
+export async function getBrainMediumImpactGovernance(limit = 50): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return getJson<Record<string, unknown>>(`/api/ops/brain/medium-impact-governance?${params.toString()}`);
+}
+
+export async function materializeBrainMediumImpactGovernance(): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/brain/medium-impact-governance/materialize", {
+    limit: 4,
+    allow_tighten_low_health: false,
+  });
+}
+
+export async function getBrainLiveReadyGuardrails(limit = 50): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return getJson<Record<string, unknown>>(`/api/ops/brain/live-ready-guardrails?${params.toString()}`);
+}
+
+export async function evaluateBrainLiveReadyGuardrail(): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/brain/live-ready-guardrails/evaluate", {
+    source: "web:v16_brain",
+  });
+}
+
+export async function tightenBrainLiveReadyGuardrail(targetMode: string): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/brain/live-ready-guardrails/tighten", {
+    target_mode: targetMode,
+    reason: `web:v16_brain:${targetMode}`,
+    actor: "web:v16_brain",
+  });
+}
+
 export async function startTrading(
   broker = "ctrader",
   strategy_name = "factor_v4",

@@ -7,7 +7,14 @@ from pydantic import BaseModel, Field
 
 from backend.core.auth import RequireUser
 from backend.services.autonomy_health import AutonomyHealthService
+from backend.services.brain_action_evaluator import BrainActionPlanEvaluatorService
+from backend.services.brain_memory import BrainMemoryService
+from backend.services.brain_action_planner import BrainActionPlannerService
 from backend.services.backend_readiness import BackendReadinessService
+from backend.services.brain_state import BrainStateService
+from backend.services.brain_low_impact_executor import BrainLowImpactExecutorService
+from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
+from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
@@ -80,6 +87,28 @@ class ReleaseApprovalEventRequest(BaseModel):
     decision: str = "recorded"
     reason: str = ""
     evidence_refs: dict[str, Any] | list[Any] = Field(default_factory=dict)
+
+
+class BrainLowImpactExecutionRequest(BaseModel):
+    limit: int = 1
+    allow_tighten: bool = False
+    replay_lookback_days: float = 1.0
+    replay_limit: int = 100
+
+
+class BrainMediumImpactGovernanceRequest(BaseModel):
+    limit: int = 4
+    allow_tighten_low_health: bool = False
+
+
+class BrainLiveReadyGuardrailEvaluateRequest(BaseModel):
+    source: str = "api:ops.brain.live_ready_guardrails"
+
+
+class BrainLiveReadyGuardrailTightenRequest(BaseModel):
+    target_mode: str = "no_new_risk"
+    reason: str = ""
+    actor: str = "api:ops.brain.live_ready_guardrails"
 
 
 def _get_auto_recovery() -> AutoRecovery:
@@ -176,6 +205,227 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
                 "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
             })
             return payload
+
+
+@router.get("/brain/state")
+def get_brain_state(_user: RequireUser, refresh: bool = False) -> dict[str, Any]:
+    """Return the V16 Phase 1 read-only brain state snapshot."""
+    service = BrainStateService()
+    if refresh:
+        readiness = BackendReadinessService().build()
+        snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
+        if not snapshot.get("snapshot_id"):
+            snapshot = service.build(
+                readiness=readiness,
+                persist=True,
+                source="api:ops.brain_state",
+            )
+        _READINESS_CACHE.invalidate("backend-readiness")
+    else:
+        snapshot = service.latest_snapshot()
+        if not snapshot.get("snapshot_id"):
+            readiness = BackendReadinessService().build()
+            snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
+            if not snapshot.get("snapshot_id"):
+                snapshot = service.build(
+                    readiness=readiness,
+                    persist=True,
+                    source="api:ops.brain_state",
+                )
+    return {
+        "ok": bool(snapshot.get("ok")),
+        "schema_version": "ops_brain_state.v1",
+        "brain_state": snapshot,
+    }
+
+
+@router.get("/brain/memory")
+def get_brain_memory(_user: RequireUser, refresh: bool = False, limit: int = 50) -> dict[str, Any]:
+    """Return V16 Phase 1 read-only memory retrieval/index metadata."""
+    service = BrainMemoryService()
+    if refresh:
+        readiness = BackendReadinessService().build()
+        snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
+        memory = snapshot.get("memory") or service.retrieve(
+            world_model=snapshot.get("world_model") or {},
+            hypotheses=snapshot.get("hypotheses") or [],
+            limit=max(1, min(int(limit), 50)),
+            persist=True,
+        )
+        _READINESS_CACHE.invalidate("backend-readiness")
+    else:
+        memory = service.latest_indexed(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(memory.get("ok")),
+        "schema_version": "ops_brain_memory.v1",
+        "memory": memory,
+    }
+
+
+@router.get("/brain/action-plans")
+def get_brain_action_plans(_user: RequireUser, refresh: bool = False, limit: int = 50) -> dict[str, Any]:
+    """Return V16 Phase 2 shadow action plans without executing them."""
+    planner = BrainActionPlannerService()
+    limit = max(1, min(int(limit), 200))
+    if refresh:
+        readiness = BackendReadinessService().build()
+        snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
+        if not snapshot.get("snapshot_id"):
+            snapshot = BrainStateService().build(
+                readiness=readiness,
+                persist=True,
+                source="api:ops.brain_action_plans",
+            )
+        action_plans = planner.build_plans(
+            brain_state=snapshot,
+            persist=True,
+            source="api:ops.brain_action_plans",
+        )
+        _READINESS_CACHE.invalidate("backend-readiness")
+    else:
+        action_plans = planner.latest_plans(limit=limit)
+    return {
+        "ok": bool(action_plans.get("ok")),
+        "schema_version": "ops_brain_action_plans.v1",
+        "action_plans": action_plans,
+    }
+
+
+@router.get("/brain/action-plan-evals")
+def get_brain_action_plan_evals(_user: RequireUser, refresh: bool = False, limit: int = 50) -> dict[str, Any]:
+    """Return V16 Phase 2 shadow action-plan posterior comparisons."""
+    evaluator = BrainActionPlanEvaluatorService()
+    limit = max(1, min(int(limit), 200))
+    if refresh:
+        planner = BrainActionPlannerService()
+        latest_plans = planner.latest_plans(limit=limit)
+        if not latest_plans.get("plans"):
+            readiness = BackendReadinessService().build()
+            snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
+            if not snapshot.get("snapshot_id"):
+                snapshot = BrainStateService().build(
+                    readiness=readiness,
+                    persist=True,
+                    source="api:ops.brain_action_plan_evals",
+                )
+            planner.build_plans(
+                brain_state=snapshot,
+                persist=True,
+                source="api:ops.brain_action_plan_evals",
+            )
+        evals = evaluator.evaluate_latest_plans(limit=limit, persist=True)
+        _READINESS_CACHE.invalidate("backend-readiness")
+    else:
+        evals = evaluator.latest_evals(limit=limit)
+    return {
+        "ok": bool(evals.get("ok")),
+        "schema_version": "ops_brain_action_plan_evals.v1",
+        "action_plan_evals": evals,
+    }
+
+
+@router.get("/brain/low-impact-executions")
+def get_brain_low_impact_executions(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+    """Return V16 Phase 3 low-impact execution ledger."""
+    executions = BrainLowImpactExecutorService().latest_executions(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(executions.get("ok")),
+        "schema_version": "ops_brain_low_impact_executions.v1",
+        "low_impact_executions": executions,
+    }
+
+
+@router.post("/brain/low-impact-executions/run")
+def run_brain_low_impact_execution(req: BrainLowImpactExecutionRequest, _user: RequireUser) -> dict[str, Any]:
+    """Run V16 Phase 3 low-impact autonomous actions through backend boundaries."""
+    result = BrainLowImpactExecutorService().execute_latest(
+        limit=max(1, min(int(req.limit), 20)),
+        allow_tighten=bool(req.allow_tighten),
+        replay_lookback_days=max(0.0, min(float(req.replay_lookback_days), 7.0)),
+        replay_limit=max(1, min(int(req.replay_limit), 500)),
+        persist=True,
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_brain_low_impact_execution_run.v1",
+        "execution_run": result,
+    }
+
+
+@router.get("/brain/medium-impact-governance")
+def get_brain_medium_impact_governance(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+    """Return V16 Phase 4 medium-impact governance candidate ledger."""
+    governance = BrainMediumImpactGovernanceService().latest_governance(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(governance.get("ok")),
+        "schema_version": "ops_brain_medium_impact_governance.v1",
+        "medium_impact_governance": governance,
+    }
+
+
+@router.post("/brain/medium-impact-governance/materialize")
+def materialize_brain_medium_impact_governance(req: BrainMediumImpactGovernanceRequest, _user: RequireUser) -> dict[str, Any]:
+    """Materialize V16 Phase 4 medium-impact governance suggestions only."""
+    readiness = BackendReadinessService().build()
+    result = BrainMediumImpactGovernanceService().materialize_latest(
+        limit=max(1, min(int(req.limit), 20)),
+        allow_tighten_low_health=bool(req.allow_tighten_low_health),
+        readiness=readiness,
+        persist=True,
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_brain_medium_impact_governance_materialize.v1",
+        "governance_run": result,
+    }
+
+
+@router.get("/brain/live-ready-guardrails")
+def get_brain_live_ready_guardrails(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+    """Return V16 Phase 5 live-ready guardrail ledger."""
+    guardrails = BrainLiveReadyGuardrailService().latest_guardrails(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(guardrails.get("ok")),
+        "schema_version": "ops_brain_live_ready_guardrails.v1",
+        "live_ready_guardrails": guardrails,
+    }
+
+
+@router.post("/brain/live-ready-guardrails/evaluate")
+def evaluate_brain_live_ready_guardrail(req: BrainLiveReadyGuardrailEvaluateRequest, _user: RequireUser) -> dict[str, Any]:
+    """Evaluate V16 Phase 5 live-ready guardrails without applying runtime mutations."""
+    readiness = BackendReadinessService().build()
+    guardrail = BrainLiveReadyGuardrailService().evaluate(
+        readiness=readiness,
+        persist=True,
+        source=req.source,
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(guardrail.get("guardrail_id")),
+        "schema_version": "ops_brain_live_ready_guardrail_evaluate.v1",
+        "guardrail": guardrail,
+    }
+
+
+@router.post("/brain/live-ready-guardrails/tighten")
+def tighten_brain_live_ready_guardrail(req: BrainLiveReadyGuardrailTightenRequest, _user: RequireUser) -> dict[str, Any]:
+    """Apply a V16 Phase 5 tightening-only guardrail through incident control."""
+    readiness = BackendReadinessService().build()
+    result = BrainLiveReadyGuardrailService().tighten(
+        target_mode=req.target_mode,
+        reason=req.reason,
+        actor=req.actor,
+        readiness=readiness,
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_brain_live_ready_guardrail_tighten.v1",
+        "tighten_run": result,
+    }
 
 
 @router.get("/replay/latest")

@@ -20,12 +20,12 @@
 
 | 类别 | 数量 | 含义 |
 |---|---:|---|
-| 规则/策略执行单元 | 28 | 会拦截交易、改阈值/仓位、调权、切模板、禁用/退役/回滚，或生成可执行治理动作 |
+| 规则/策略执行单元 | 30 | 会拦截交易、改阈值/仓位、调权、切模板、禁用/退役/回滚，或生成/执行受控治理动作；V16 P3 low-impact executor 只允许 read-only replay job 和显式风险收紧，V16 P4 只生成 medium-impact governance suggestions |
 | 影子/建议模型与模型护栏单元 | 9 | LightGBM、shadow/canary、model permissions、LLM/meta advisory，只能输出审计、建议或 shadow 分数 |
-| 诊断汇总单元 | 7 | readiness、replay harness、autonomy health、autonomy scope approval/enforcement、release run ledger/approval trail、incident playbook plan/event trail、V15 Phase 0 gate，把事实源、回放误差、自治状态、发布证据、事故计划/证据事件和完成状态汇总给前端和运维 |
-| 合计纳入总账 | 44 | 不是全部都会下游执行；执行权限由 `RiskPolicyService`、`DecisionPolicy`、model permissions 限制 |
+| 诊断汇总单元 | 12 | readiness、replay harness、autonomy health、autonomy scope approval/enforcement、release run ledger/approval trail、incident playbook plan/event trail、V15 Phase 0 gate、V16 read-only brain state/memory、V16 shadow action planner/evaluator、V16 live-ready guardrails、V16 Web Brain page，把事实源、回放误差、自治状态、发布证据、事故计划/证据事件、完成状态、记忆检索、只读认知状态、影子计划、后验比较和实盘前护栏汇总给前端和运维 |
+| 合计纳入总账 | 51 | 不是全部都会下游执行；执行权限由 `RiskPolicyService`、`DecisionPolicy`、model permissions 限制 |
 
-如果按“会直接改变订单/仓位/配置”的严格口径，当前是 19 个左右；如果把每个 `RiskPolicyService.evaluate(action)` 子动作拆开，数量会超过 40。日常治理建议使用上表 44 个总账口径。
+如果按“会直接改变订单/仓位/配置”的严格口径，当前是 19 个左右；如果把每个 `RiskPolicyService.evaluate(action)` 子动作拆开，数量会超过 40。日常治理建议使用上表 51 个总账口径。
 
 ## Runtime Chain
 
@@ -67,6 +67,30 @@ release controls
 phase0 completion gate
   -> v15_phase0 completion
   -> implementation_complete + operationally_ready
+
+v16 read-only brain state
+  -> brain_state_snapshot + brain_memory
+  -> world model + memory retrieval + observe-only hypotheses + critic scope limit
+
+v16 shadow action planner
+  -> brain_action_plan
+  -> factor weight / parameter template / context policy / supervisor template shadow plans
+
+v16 shadow action evaluator
+  -> brain_action_plan_eval
+  -> replay / trade outcome / learning effect / supervisor trace posterior comparison
+
+v16 low-impact executor
+  -> brain_low_impact_execution
+  -> RiskPolicy-gated read-only replay job + optional incident-control tighten
+
+v16 medium-impact governance
+  -> brain_medium_impact_governance + policy_suggestion
+  -> RiskPolicy verdict + DecisionPolicy preview + rollback/release requirements
+
+v16 live-ready guardrails
+  -> brain_live_ready_guardrail
+  -> capability lock + broker/local divergence + incident memory + release rollback + tightening-only incident-control
 ```
 
 硬边界：
@@ -81,6 +105,7 @@ phase0 completion gate
 - incident controls 必须先过 `RiskPolicyService`，再经 runtime overlay/snapshot 持久化；不能直接手写 state 表。
 - release run ledger / approval trail / incident playbook plan/event trail 只做审计汇总、应急计划或证据绑定，不直接执行风险、权重、配置或 broker 动作。
 - V15 Phase 0 gate 只读汇总完成状态，不授予任何执行权限。
+- V16 read-only brain state/memory 只把 V15 事实源翻译成 world model、memory retrieval、observe-only hypotheses 和 Critic 限制，不执行 action plan，不写 overlay/snapshot，不改权重、仓位、订单或学习样本；negative memory 只能收紧 scope，counter-evidence 只能展示反证。
 
 ## Inventory
 
@@ -134,6 +159,13 @@ phase0 completion gate
 | 34 | V15 Phase 0 completion gate | `backend/services/v15_phase0.py` | implementation_complete、operationally_ready、gates、evidence_gaps | readiness `v15`、replay status、autonomy health、incident control、release latest、snapshot status | 只读完成状态；区分代码能力和现场证据，不替代任何执行入口 |
 | 35 | incident playbook plan/event binding v1 | `backend/services/incident_controls.py` | incident scenario -> target mode plan、RiskPolicy precheck、steps、evidence event trail | `incident_playbook_run`、`incident_playbook_event`、scenario、severity、current_mode、target_mode、risk_precheck、steps、release_ref、event_type、evidence_refs、boundary | 只读计划、事件绑定和审计；不直接应用 incident mode，不写 overlay/snapshot；真正切换仍走 `RiskPolicyService` + runtime overlay/snapshot |
 | 36 | V15 Web cockpit | `web_frontend/src/pages/V15CockpitPage.tsx` | Runtime、Factors、Governance、Replay、Risk、Learning、Incidents、Release 展示和受控操作按钮 | readiness、catalog、replay_report、autonomy health、incident control、release ledger、risk summary、learning/governance summaries | 前端只汇总和触发后端 API；不重新实现风控/权重/overlay 判断 |
+| 45 | V16 read-only brain state/memory | `backend/services/brain_state.py`、`backend/services/brain_memory.py` | `world_model`、memory retrieval、observe-only `hypotheses`、`critic`、`evidence_refs` | `brain_state_snapshot`、`brain_memory`、readiness、replay status、autonomy health、incident control、governance freshness、experience/trade review/policy suggestion/model permission/shadow audit refs、只读 boundary | Phase 1 只读认知层；`affects_trading=false`，不执行 action plan，不改 runtime overlay、权重、订单、仓位或学习样本 |
+| 46 | V16 Web Brain page | `web_frontend/src/pages/V16BrainPage.tsx` | World Model、Memory、Hypotheses、Critic、Evidence 展示和只读刷新 | `/api/ops/brain/state`、`/api/ops/brain/memory`、`/api/ops/backend-readiness` | 前端只展示后端事实和触发只读刷新；不重算策略/风控，不执行 action plan |
+| 47 | V16 shadow action planner | `backend/services/brain_action_planner.py` | factor weight、parameter template、context policy、supervisor template 的 shadow action plans、Critic verdict、required services、validation refs、shadow eval contract | `brain_action_plan`、`brain_state_snapshot`、memory refs、readiness `v16.action_plans`、`/api/ops/brain/action-plans`、只读 boundary | Phase 2 影子计划账本；record-only，不执行、不写 runtime overlay/snapshot、不改权重/模板/订单/仓位或学习样本；future execution 必须重新走 `RiskPolicyService`、`DecisionPolicy` 和 rollback evidence |
+| 48 | V16 shadow action evaluator | `backend/services/brain_action_evaluator.py` | shadow action plans 的 posterior coverage、comparison verdict、evidence refs | `brain_action_plan_eval`、`brain_action_plan`、`replay_report`、`trade_outcome_review`、`learning_application_effect`、`position_supervisor_trace`、readiness `v16.action_plan_evals`、`/api/ops/brain/action-plan-evals` | Phase 2 后验可比性审计；只读/record-only，不执行计划，不改变 plan 状态，不写学习标签，不触发治理或 live mutation |
+| 49 | V16 low-impact executor | `backend/services/brain_low_impact_executor.py`、`risk/policy_service.py` | `run_replay_job` 低影响执行、RiskPolicy verdict、rollback/downgrade plan、posterior monitor、可选 `shadow_only` 收紧 | `brain_low_impact_execution`、`brain_action_plan_eval`、`replay_report`、`runtime_incident_mode`、`runtime_config_overlay/snapshot`（仅显式允许坏化收紧时）、`/api/ops/brain/low-impact-executions/run` | Phase 3 低影响执行；当前只允许 read-only replay job，不能改权重/模板/订单/学习样本；坏化收紧必须显式允许并走 incident-control + `RiskPolicyService` |
+| 50 | V16 medium-impact governance | `backend/services/brain_medium_impact_governance.py` | medium-impact `policy_suggestion` candidates、RiskPolicy verdict、DecisionPolicy preview、rollback/release requirement | `brain_medium_impact_governance`、`policy_suggestion`、`brain_action_plan_eval`、`RiskPolicyService` verdict、`DecisionPolicy` preview、readiness `v16.medium_impact_governance`、`/api/ops/brain/medium-impact-governance/materialize` | Phase 4 中等影响治理候选；只写建议和审计，不应用权重/模板/模型 promotion，不写 runtime overlay/snapshot、订单或学习样本；future apply 仍走受控治理写入口 |
+| 51 | V16 live-ready guardrails | `backend/services/brain_live_ready_guardrail.py` | live capability lock、broker/local divergence、incident memory、release rollback、P3/P4 evidence、tightening-only incident-control request | `brain_live_ready_guardrail`、readiness `v16.live_ready_guardrails`、`/api/ops/brain/live-ready-guardrails/evaluate`、`/api/ops/brain/live-ready-guardrails/tighten`、`RiskPolicyService` verdict、runtime incident overlay/snapshot（仅收紧时） | Phase 5 实盘前护栏；评估不授权下单或应用治理建议；tighten 只能通过 `RuntimeIncidentControlService` 进入更严格 incident mode，不能放宽权限、写学习样本或提交订单 |
 
 ### Shadow, Advisory, And Model Guardrails
 
@@ -173,6 +205,13 @@ phase0 completion gate
 | release run ledger | `release_run`、`release_approval_event` | run_id、release_class、status、checklist、runtime_config_hash、replay_run_id、incident_mode、tests、rollback_ref、approval actor、decision、reason、evidence_refs | 只记录发布证据和审批事件；涉及风险或配置的动作必须回到对应权威入口 |
 | V15 Phase 0 gate | `/api/ops/v15/phase0` / readiness `v15_phase0` | implementation_complete、operationally_ready、gates、blockers、evidence_gaps | 完成状态是诊断事实，不是执行授权 |
 | V15 Web cockpit | `/v15` | Runtime、Factors、Governance、Replay、Risk、Learning、Incidents、Release 汇总状态和受控操作结果 | 只展示事实源和触发后端受控 API；不能在前端推断或绕过策略/风控 |
+| V16 read-only brain state/memory | `brain_state_snapshot`、`brain_memory` / `/api/ops/brain/state`、`/api/ops/brain/memory` / readiness `v16.brain_state` | snapshot_id、world_model、perceptions、memory items、negative_matches、counter_evidence、hypotheses、critic、evidence_refs、boundary、created_at | Phase 1 只读；只能输出 observe-only 认知事实、记忆检索和 Critic 限制，不能执行 action plan 或改变任何 live/governance/learning 状态 |
+| V16 shadow action planner | `brain_action_plan` / `/api/ops/brain/action-plans` / readiness `v16.action_plans` | plan_id、scope、Critic verdict、required services、validation refs、shadow eval contract、future rollback requirement、boundary | Phase 2 shadow-only；只记录计划，不执行、不改 overlay/snapshot/权重/模板/订单/学习样本 |
+| V16 shadow action evaluator | `brain_action_plan_eval` / `/api/ops/brain/action-plan-evals` / readiness `v16.action_plan_evals` | eval_id、plan_id、coverage_score、comparison verdict、comparison summary、evidence refs、boundary | Phase 2 posterior comparison；只读/record-only，不执行计划，不写学习标签，不改变 live/governance/learning 状态 |
+| V16 low-impact executor | `brain_low_impact_execution` / `/api/ops/brain/low-impact-executions/run` / readiness `v16.low_impact_executions` | execution_id、plan/eval refs、evidence score、Critic verdict、RiskPolicy verdict、rollback/downgrade plan、replay result、posterior monitor | Phase 3 low-impact；只执行白名单 read-only replay job；可选坏化收紧走 incident-control，不改变权重/模板/订单/学习样本 |
+| V16 medium-impact governance | `brain_medium_impact_governance` / `policy_suggestion` / `/api/ops/brain/medium-impact-governance/materialize` / readiness `v16.medium_impact_governance` | governance_id、policy_suggestion、RiskPolicy verdict、DecisionPolicy preview、rollback/release requirements、boundary | Phase 4 medium-impact；只生成治理候选，不应用 runtime mutation；future apply must use governed backend paths |
+| V16 live-ready guardrails | `brain_live_ready_guardrail` / `/api/ops/brain/live-ready-guardrails/evaluate` / `/api/ops/brain/live-ready-guardrails/tighten` / readiness `v16.live_ready_guardrails` | guardrail_id、capability lock、divergence status、incident memory、release rollback、recommendation、RiskPolicy precheck、boundary | Phase 5 live-ready；评估只写审计，tighten only uses incident-control/RiskPolicy and never relaxes incident mode |
+| V16 Web Brain page | `/v16` | World Model、Memory、Hypotheses、Critic、Evidence、Shadow Action Plans、Posterior Evaluations、P3 Executions、P4 Governance、P5 Guardrails、Readiness contract | 只展示后端事实；运行按钮只调用后端白名单/建议生成/护栏评估/收紧 API，不能在前端推断或执行动作 |
 | 模型权限 | `model_permission_audit` | artifact hash、capabilities、permission status、reason | live_trading capability 必须 blocked |
 | 影子模型 | `*_shadow_audit`、`model_canary_*` | sample/candidate id、score、prediction、metrics、artifact path/hash | shadow/canary/advisory 不能直接执行交易 |
 | readiness | `/api/ops/backend-readiness` response | blockers、known observations、freshness、last good | 运维展示入口，不替代事实表 |
@@ -205,6 +244,7 @@ phase0 completion gate
 - incident playbook plan/event binding v1: `incident_playbook_run` 必须包含 scenario、severity、target_mode、`RiskPolicyService.evaluate("set_incident_control")` 预检和 `does_not_apply_incident_mode=true` 边界；`incident_playbook_event` 只能绑定 evidence refs 和 notes，必须声明 audit-only。
 - release run ledger v1: `release_run` 必须能追溯 snapshot hash、replay artifact hash、incident mode、tests 和 rollback ref；`release_approval_event` 必须能追溯 actor、decision、reason 和 evidence refs，且不能改变 release status。
 - V15 Phase 0 gate: 必须区分 `implementation_complete` 和 `operationally_ready`。
+- V16 read-only brain state/memory: 必须声明 `read_only=true`、`affects_trading=false`，hypothesis 第一阶段只能 `observe_only`；`brain_memory` 不替代来源事实表，不生成训练标签。
 
 ## Current Gaps To Watch
 
@@ -227,4 +267,4 @@ phase0 completion gate
 - 新增会写 `policy_suggestion`、`evolution_decision`、`learning_application_log/effect` 的治理单元。
 - 新增 shadow/advisory 模型、canary runner 或模型权限能力。
 - 新增能改变 threshold、position size、factor weight、runtime overlay、position controls 的规则。
-- 修改 evidence contract、train gate、readiness、catalog snapshot、replay report、autonomy health、incident controls、release run ledger、V15 Phase 0 gate 或 runtime overlay 语义。
+- 修改 evidence contract、train gate、readiness、catalog snapshot、replay report、autonomy health、incident controls、release run ledger、V15 Phase 0 gate、V16 brain state 或 runtime overlay 语义。

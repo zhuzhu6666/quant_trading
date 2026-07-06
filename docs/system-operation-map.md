@@ -21,7 +21,7 @@ quant-learning-worker.service
   -> 学习调度 / evolution / factor governance / AWE / 特征工程 / 盘外训练
 
 Caddy + web_frontend + miniprogram_v2
-  -> Web 完整操作台 / 小程序轻量状态面 / API 和审计入口
+  -> Web 完整操作台（含 /v15、/v16）/ 小程序轻量状态面 / API 和审计入口
 ```
 
 核心闭环是：
@@ -38,6 +38,7 @@ Caddy + web_frontend + miniprogram_v2
   -> FactorGovernanceOrchestrator
   -> runtime_config_overlay + runtime_config_snapshot
   -> replay_report + autonomy_health readiness + autonomy_scope_approval_event + release_run + release_approval_event + incident_playbook_run/event + v15_phase0 gate
+  -> V16 brain_state_snapshot + brain_memory + brain_action_plan + brain_action_plan_eval + brain_low_impact_execution + brain_medium_impact_governance + brain_live_ready_guardrail world model / memory / hypotheses / critic / shadow plans / posterior comparisons / low-impact runs / governance suggestions / live-ready guardrails
   -> 下一轮交易
 ```
 
@@ -98,6 +99,8 @@ flowchart TD
         IncidentPlaybook["incident_playbook_run"]
         IncidentPlaybookEvent["incident_playbook_event"]
         Phase0Gate["v15_phase0 completion"]
+        BrainState["brain_state_snapshot"]
+        BrainMemory["brain_memory"]
     end
 
     subgraph WORKER["quant-learning-worker.service"]
@@ -218,6 +221,14 @@ flowchart TD
     Readiness --> Phase0Gate
     ReplayReport --> Phase0Gate
     ReleaseRun --> Phase0Gate
+    Readiness --> BrainState
+    ReplayReport --> BrainState
+    AutonomyHealth --> BrainState
+    IncidentControl --> BrainState
+    TradeReview --> BrainMemory
+    PolicySuggestion --> BrainMemory
+    StatePG --> BrainMemory
+    BrainMemory --> BrainState
 
     API --> Caddy --> Web
     API --> MiniProgram
@@ -363,7 +374,7 @@ GET  /api/learning/model/permissions/audits
 
 `backend-readiness` 会汇总 governance、model permission、shadow audit freshness、dataset quality 等状态；Web 前端应展示这些状态，不要自己重新判断模型是否可用。
 
-当前按智能单元总账口径统计：规则/策略执行单元 28 个，影子/建议模型与模型护栏单元 9 个，诊断汇总单元 7 个，合计纳入总账 44 个。数量和边界以 `rule-driven-intelligence-inventory.md` 为准。
+当前按智能单元总账口径统计：规则/策略执行单元 30 个，影子/建议模型与模型护栏单元 9 个，诊断汇总单元 12 个，合计纳入总账 51 个。数量和边界以 `rule-driven-intelligence-inventory.md` 为准。
 
 ## 6. Live Loop 主链路
 
@@ -537,6 +548,24 @@ V15 Phase 0 已新增只读完成门：
 
 该 gate 用来区分“代码能力已落地”和“现场证据已齐全”。缺少最新 replay 或 release run 会进入 `operational_status=needs_evidence`，但不代表 Phase 0 代码能力缺失。
 
+## 8.5 V16 Phase 1 Read-Only Brain State
+
+V16 Phase 1 已新增只读大脑状态最小闭环，Phase 2 已完成最小影子 ActionPlan 和后验可比性闭环，Phase 3 已完成低影响执行最小闭环，Phase 4 已完成中等影响治理候选最小闭环，Phase 5 已完成实盘前护栏最小闭环：
+
+- 表：`brain_state_snapshot`、`brain_memory`、`brain_action_plan`、`brain_action_plan_eval`、`brain_low_impact_execution`、`brain_medium_impact_governance`、`brain_live_ready_guardrail`。
+- 服务：`backend.services.brain_state.BrainStateService`、`backend.services.brain_memory.BrainMemoryService`、`backend.services.brain_action_planner.BrainActionPlannerService`、`backend.services.brain_action_evaluator.BrainActionPlanEvaluatorService`、`backend.services.brain_low_impact_executor.BrainLowImpactExecutorService`、`backend.services.brain_medium_impact_governance.BrainMediumImpactGovernanceService`、`backend.services.brain_live_ready_guardrail.BrainLiveReadyGuardrailService`。
+- 入口：`GET /api/ops/brain/state`、`GET /api/ops/brain/memory`、`GET /api/ops/brain/action-plans`、`GET /api/ops/brain/action-plan-evals`、`GET /api/ops/brain/low-impact-executions`、`POST /api/ops/brain/low-impact-executions/run`、`GET /api/ops/brain/medium-impact-governance`、`POST /api/ops/brain/medium-impact-governance/materialize`、`GET /api/ops/brain/live-ready-guardrails`、`POST /api/ops/brain/live-ready-guardrails/evaluate`、`POST /api/ops/brain/live-ready-guardrails/tighten`。
+- readiness 字段：`brain_state`、`brain_action_plans`、`brain_action_plan_evals`、`brain_low_impact_executions`、`brain_medium_impact_governance`、`brain_live_ready_guardrails`、`v16.brain_state`、`v16.action_plans`、`v16.action_plan_evals`、`v16.low_impact_executions`、`v16.medium_impact_governance` 和 `v16.live_ready_guardrails`。
+- 输出：`world_model`、`perceptions`、`memory`、observe-only `hypotheses`、`critic`、`evidence_refs` 和只读边界。
+- Shadow plans：覆盖 factor weight、parameter template、context policy、supervisor template，记录 Critic verdict、validation refs、required services、shadow eval contract 和 future rollback 要求。
+- Shadow evals：读取 `replay_report`、`trade_outcome_review`、`learning_application_effect`、`position_supervisor_trace`，输出 coverage、comparison verdict 和 evidence refs。
+- Low-impact executions：当前白名单只允许 read-only `run_replay_job`；执行前记录 evidence score、Critic verdict、`RiskPolicyService` verdict、rollback/downgrade plan，执行后写 replay result 和 posterior monitor。坏化后可选收紧到 `shadow_only`，但必须显式允许并走 incident-control/RiskPolicy/overlay。
+- Medium-impact governance：基于 P2/P3 evidence、`RiskPolicyService` verdict 和 `DecisionPolicy` preview 生成 `policy_suggestion` 候选，写 `brain_medium_impact_governance`；不直接应用 factor weight、template、model promotion 或 runtime overlay。
+- Live-ready guardrails：评估 capability lock、broker/local divergence、incident memory、release rollback 和 P3/P4 evidence，写 `brain_live_ready_guardrail`；显式 `tighten` 只能通过 incident-control/RiskPolicy/overlay 进入更严格模式，不能放宽权限。
+- Web：`web_frontend/src/pages/V16BrainPage.tsx` + `/v16` 展示 world model、memory、hypotheses、Critic、evidence refs、shadow action plans/evaluations、P3 executions、P4 governance、P5 guardrails 和边界。
+
+该闭环只把 V15 readiness、replay、incident control、autonomy health、治理新鲜度、经验记忆、交易复盘、policy suggestion、model permission audit 和可选 shadow audit 翻译成认知层审计事实。negative memory 只能收紧 Critic scope，positive memory 只能作为 counter-evidence 展示。Phase 2 action plan/eval 只是账本记录和后验比较。Phase 3 只允许低影响白名单动作。Phase 4 只 materialize 中等影响治理建议。Phase 5 只评估实盘前护栏和执行 tightening-only incident-control；真正应用权重/模板/模型 promotion 仍必须回到 `RiskPolicyService`、`DecisionPolicy`、runtime snapshot/rollback、release evidence 和 V15 control plane。
+
 ## 9. Factor Catalog 是因子事实视图
 
 `backend.services.factor_catalog.build_factor_catalog()` 汇总：
@@ -579,6 +608,13 @@ GET /api/v4/catalog?snapshot=latest
 | release run ledger | PostgreSQL `release_run` |
 | release approval trail | PostgreSQL `release_approval_event` |
 | V15 Phase 0 completion | `/api/ops/v15/phase0` + readiness `v15.phase0` |
+| V16 read-only brain state | PostgreSQL `brain_state_snapshot` + `/api/ops/brain/state` + readiness `v16.brain_state` |
+| V16 memory retrieval | PostgreSQL `brain_memory` + `/api/ops/brain/memory` |
+| V16 shadow action plans | PostgreSQL `brain_action_plan` + `/api/ops/brain/action-plans` + readiness `v16.action_plans` |
+| V16 shadow action evaluations | PostgreSQL `brain_action_plan_eval` + `/api/ops/brain/action-plan-evals` + readiness `v16.action_plan_evals` |
+| V16 low-impact executions | PostgreSQL `brain_low_impact_execution` + `/api/ops/brain/low-impact-executions` + readiness `v16.low_impact_executions` |
+| V16 medium-impact governance | PostgreSQL `brain_medium_impact_governance` + `policy_suggestion` + `/api/ops/brain/medium-impact-governance` + readiness `v16.medium_impact_governance` |
+| V16 live-ready guardrails | PostgreSQL `brain_live_ready_guardrail` + `/api/ops/brain/live-ready-guardrails` + readiness `v16.live_ready_guardrails` |
 | bars | `data/bars_monthly/bars_YYYY_MM.duckdb`，`data/bars.duckdb` 为当前月兼容链接 |
 | ticks | `data/ticks_monthly/ticks_YYYY_MM.duckdb`，`data/ticks.duckdb` 为当前月兼容链接 |
 | L2 | `data/l2_monthly/l2_YYYY_MM.duckdb`，由 backend 内 cTrader 主连接采集 |
@@ -608,6 +644,13 @@ GET /api/v4/catalog?snapshot=latest
 | `GET /api/ops/release/latest` | 最近一次 V15 release run ledger |
 | `POST /api/ops/release/start` / `POST /api/ops/release/{run_id}/finish` | 开始/收尾 V15 release run ledger |
 | `GET /api/ops/release/{run_id}/approvals` / `POST /api/ops/release/{run_id}/approvals` | 查看/记录 V15 release approval audit event |
+| `GET /api/ops/brain/state` | 查看或刷新 V16 Phase 1 只读 brain state；不执行 action plan |
+| `GET /api/ops/brain/memory` | 查看或刷新 V16 Phase 1 只读 memory retrieval/index；不生成学习标签、不授权动作 |
+| `GET /api/ops/brain/action-plans` | 查看或刷新 V16 Phase 2 shadow action plan ledger；只记录计划，不执行、不改 overlay/snapshot/权重/模板/学习样本 |
+| `GET /api/ops/brain/action-plan-evals` | 查看或刷新 V16 Phase 2 shadow action posterior comparisons；只记录 coverage/verdict/evidence refs，不授权执行 |
+| `GET /api/ops/brain/low-impact-executions` / `POST /api/ops/brain/low-impact-executions/run` | 查看或显式运行 V16 Phase 3 低影响白名单动作；当前只允许 read-only replay job，执行前必须有 RiskPolicy verdict |
+| `GET /api/ops/brain/medium-impact-governance` / `POST /api/ops/brain/medium-impact-governance/materialize` | 查看或显式生成 V16 Phase 4 中等影响治理候选；只写 `policy_suggestion` 和审计账本，不应用 runtime mutation |
+| `GET /api/ops/brain/live-ready-guardrails` / `POST /api/ops/brain/live-ready-guardrails/evaluate` / `POST /api/ops/brain/live-ready-guardrails/tighten` | 查看或显式评估 V16 Phase 5 实盘前护栏；tighten 只能通过 incident-control 收紧权限，不能恢复 normal 或放宽 incident mode |
 | `GET /api/live/*` | account、positions、loop status、strategy status、PnL 等 live 状态 |
 | `GET /api/v4/catalog` | 因子治理实时 Catalog |
 | `GET /api/v4/catalog?snapshot=latest` | 最近一次治理 Catalog snapshot |
@@ -619,8 +662,9 @@ GET /api/v4/catalog?snapshot=latest
 | `PATCH /api/config/runtime` | 受控 runtime patch，保留为人工/接口覆盖入口 |
 | `/ws/state` | 实时状态推送 |
 | Web `/v15` | V15 cockpit：Runtime、Factors、Governance、Replay、Risk、Learning、Incidents、Release 汇总与受控操作入口 |
+| Web `/v16` | V16 Brain State：World Model、Memory、Hypotheses、Critic、Evidence、Shadow Action Plans、Posterior Evaluations、P3 Low-Impact Executions、P4 Medium-Impact Governance 和边界展示入口 |
 
-Web 前端应优先读 `/api/ops/backend-readiness`、`/api/ops/v15/phase0` 和 `/api/v4/catalog`，再进入专项页面读取 learning/risk/live/replay/release 细节。
+Web 前端应优先读 `/api/ops/backend-readiness`、`/api/ops/v15/phase0`、`/api/ops/brain/state`、`/api/ops/brain/memory`、`/api/ops/brain/action-plans`、`/api/ops/brain/action-plan-evals`、`/api/ops/brain/low-impact-executions`、`/api/ops/brain/medium-impact-governance` 和 `/api/v4/catalog`，再进入专项页面读取 learning/risk/live/replay/release 细节。
 
 ## 12. 不能再按旧理解解释的点
 

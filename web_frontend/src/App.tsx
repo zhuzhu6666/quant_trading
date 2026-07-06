@@ -12,6 +12,7 @@ import { OpsPage } from "@/pages/OpsPage";
 import { LearningPage } from "@/pages/LearningPage";
 import { ModelsPage } from "@/pages/ModelsPage";
 import { V15CockpitPage } from "@/pages/V15CockpitPage";
+import { V16BrainPage } from "@/pages/V16BrainPage";
 import { useState } from "react";
 
 export function App() {
@@ -115,6 +116,18 @@ export function App() {
               <ErrorBoundary>
                 <AppShell>
                   <V15CockpitPage />
+                </AppShell>
+              </ErrorBoundary>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/v16"
+          element={
+            <ProtectedRoute>
+              <ErrorBoundary>
+                <AppShell>
+                  <V16BrainPage />
                 </AppShell>
               </ErrorBoundary>
             </ProtectedRoute>
