@@ -37,6 +37,7 @@ from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
 from risk.policy_service import RiskPolicyService
+from risk.runtime_policy import RiskLimitSnapshot
 from backend.services.market_session import evaluate_market_session
 from backend.services.live_runtime_state import (
     cache_get_or_refresh as _runtime_cache_get_or_refresh,
@@ -420,30 +421,6 @@ _recovery_zero_confirmations: dict[str, int] = {}
 _AUTO_RESUME_DELAY_SEC = 4.0
 
 
-# ═══════════════════════════════════════════════════════════
-# 风控集成: VaR 闸门 + Kelly 仓位
-# ═══════════════════════════════════════════════════════════
-
-def _risk_var_gate(cfg) -> tuple[bool, str]:
-    """VaR 闸门: 检查当前 VaR 是否超过阈值。
-
-    Returns:
-        (passed, reason)
-        当 cfg.var_enabled=False 或数据不足时, passed=True (不阻挡)。
-    """
-    if not getattr(cfg, 'var_enabled', False):
-        return True, ""
-    var_data = _live_state_get("risk", {}, clone=True).get("var", {})
-    var_pct = var_data.get("var_pct", 0) or 0
-    threshold_pct = getattr(cfg, 'var_cvar_threshold', 0.02) * 100  # 0.02 → 2%
-    if var_pct > threshold_pct:
-        return (
-            False,
-            f"var_gate: VaR={var_pct:.1f}% > {threshold_pct:.1f}%",
-        )
-    return True, ""
-
-
 def _risk_kelly_volume(
     cfg, direction: int, current_price: float, sl_price: float,
     bridge_meta: dict, acct: dict,
@@ -733,6 +710,7 @@ def _build_open_trade_risk_context(
     current_price: float = 0.0,
     atr_price: float = 0.0,
     event_sizing_context: dict[str, Any] | None = None,
+    event_filter_context: dict[str, Any] | None = None,
     decision_quality_context: dict[str, Any] | None = None,
     decision_ts: float | None = None,
 ) -> dict:
@@ -804,6 +782,7 @@ def _build_open_trade_risk_context(
         },
         total_api_volume=_tracked_total_api_volume(positions or []),
         event_sizing_context=event_sizing_context,
+        event_filter_context=event_filter_context,
         event_window_learning_policy=_active_event_window_learning_policy(now_ts=now),
         entry_quality_gate=entry_quality_gate,
         entry_cluster_context=entry_cluster_context,
@@ -817,6 +796,43 @@ def _build_open_trade_risk_context(
         temporal_context=temporal_context,
         supervisor_reentry_block=supervisor_reentry_block,
     )
+
+
+def _event_filter_context_for_risk_policy(
+    *,
+    cfg,
+    direction: int,
+    bar: dict[str, Any],
+    factor_values: dict[str, Any],
+) -> dict[str, Any]:
+    gate_config = _loop_execution_gate_config(cfg)
+    if not (
+        bool(gate_config.get("risk_enable_nfp_skip", False))
+        or bool(gate_config.get("strategy_enable_nfp_skip", False))
+        or bool(gate_config.get("risk_enable_gvz_gate", False))
+        or bool(gate_config.get("strategy_enable_gvz_gate", False))
+    ):
+        return {}
+    try:
+        from alpha.execution_gate import evaluate_event_risk_filter
+
+        verdict = evaluate_event_risk_filter(gate_config, direction, bar, factor_values)
+    except Exception as exc:
+        return {
+            "schema_version": "event_risk_filter.v1",
+            "active": True,
+            "blocked": False,
+            "source": "execution_gate_event_filter",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "schema_version": "event_risk_filter.v1",
+        "active": True,
+        "blocked": not bool(getattr(verdict, "passed", False)),
+        "reason": str(getattr(verdict, "reason", "") or ""),
+        "source": "execution_gate_event_filter",
+        "authority": "RiskPolicyService",
+    }
 
 
 def _active_entry_cluster_learning_policy(*, now_ts: float | None = None) -> dict[str, Any]:
@@ -3176,15 +3192,23 @@ def _reset_session_state_for_new_day() -> None:
     _persist_session_state()
 
 
-def _evaluate_daily_drawdown() -> dict:
+def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> dict:
+    limits = risk_limits or RiskLimitSnapshot.from_runtime_config()
     session_pnl = float(_live_state_get("session_pnl", 0.0) or 0.0)
     start_balance = float(_live_state_get("session_start_balance", 0.0) or 0.0)
     if start_balance <= 0:
-        return {"tripped": False, "dd_pct": 0.0, "reason": "", "session_pnl": session_pnl, "start_balance": 0.0}
+        return {
+            "tripped": False,
+            "dd_pct": 0.0,
+            "reason": "",
+            "session_pnl": session_pnl,
+            "start_balance": 0.0,
+            "risk_limits": limits.to_dict(),
+        }
     dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0.0
     prev_dd = float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0)
     updates = {"session_max_drawdown_pct": max(prev_dd, dd_pct)}
-    tripped = session_pnl < 0 and dd_pct >= 5.0
+    tripped = session_pnl < 0 and dd_pct >= limits.max_daily_loss_pct
     reason = f"daily drawdown {dd_pct:.1f}%" if tripped else ""
     if tripped:
         updates["circuit_breaker"] = True
@@ -3198,6 +3222,7 @@ def _evaluate_daily_drawdown() -> dict:
         "reason": reason,
         "session_pnl": session_pnl,
         "start_balance": start_balance,
+        "risk_limits": limits.to_dict(),
     }
 
 
@@ -7091,6 +7116,12 @@ def _process_tick_factor_pipeline(
             f"event_mult={event_multiplier:.2f} base_api_volume={base_volume:.0f})")
 
         # ── Phase B: 统一风控裁决 ──
+        event_filter_context = _event_filter_context_for_risk_policy(
+            cfg=cfg,
+            direction=int(composite.direction or 0),
+            bar=bar,
+            factor_values=factor_values,
+        )
         risk_context = _build_open_trade_risk_context(
             cfg=cfg,
             bridge=bridge,
@@ -7103,6 +7134,7 @@ def _process_tick_factor_pipeline(
             current_price=float(current_price or 0.0),
             atr_price=float(atr_price or 0.0),
             event_sizing_context=event_sizing_context,
+            event_filter_context=event_filter_context,
             decision_quality_context=_decision_quality_context(composite),
             decision_ts=float(bar.get("time", time.time()) or time.time()),
         )

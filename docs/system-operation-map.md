@@ -32,7 +32,7 @@ Caddy + web_frontend + miniprogram_v2
   -> SignalNormalizer
   -> PortfolioCompositor
   -> ContextPolicyService
-  -> ExecutionGate + RiskPolicyService
+  -> ExecutionGate(signal/cooldown) + RiskPolicyService(risk/event/governance)
   -> cTrader demo 执行
   -> ledger / review / attribution / learning
   -> FactorGovernanceOrchestrator
@@ -79,7 +79,7 @@ flowchart TD
         ContextPolicy["ContextPolicyService"]
         Gate["ExecutionGate"]
         Sizing["Kelly + event + context sizing"]
-        RiskPolicy["RiskPolicyService / RiskGovernor"]
+        RiskPolicy["RiskPolicyService / RiskLimitSnapshot / RiskGovernor"]
         IncidentControl["runtime incident control"]
         Execution["open / amend / reduce / close"]
     end
@@ -354,7 +354,7 @@ allowed_uses: audit / explainability / weak_supervision / counterfactual_trainin
 | 通用 `ModelShadowQueue` | dataset snapshot artifact | shadow report / canary-ready advisory | promotion gate 只给 shadow candidate |
 | LLM advisory | 结构化上下文 | 审计说明、治理解释 | 不进入执行层 |
 
-模型权限由 `model_permissions` 审计：artifact 必须声明 `live_trading=false`、`advisory_only=true`、`shadow_only=true`，并且不能声明下单、平仓、改硬风控、绕过 `RiskPolicyService` 或直接改权重的能力。
+模型权限由 `model_permissions` 审计，并由 `RiskPolicyService` 的 model stage gate 复用：artifact 必须声明 `live_trading=false`、`advisory_only=true`、`shadow_only=true`，并且不能声明下单、平仓、改硬风控、绕过 `RiskPolicyService` 或直接改权重的能力。
 
 关键 API：
 
@@ -416,6 +416,7 @@ StreamingFactorEngine.refresh_factor_list()
        Kelly sizing
        event sizing
        context position_multiplier
+       event risk filter context
        RiskPolicyService.evaluate("open_trade")
        cTrader market_buy / market_sell
        写 open/order_failed/skip ledger
@@ -425,8 +426,9 @@ StreamingFactorEngine.refresh_factor_list()
 
 重点边界：
 
-- `ExecutionGate` 处理信号阈值、冷却、NFP/GVZ 等执行门禁。
-- `RiskPolicyService` 是动作级裁决入口，开仓、模板切换、自治动作和 rollback 都不能绕过它。
+- live `ExecutionGate` 处理信号阈值和策略冷却；NFP/GVZ legacy event filter 只生成 `event_filter` 风控输入，最终阻断由 `RiskPolicyService` 裁决。
+- `RiskPolicyService` 是动作级裁决入口，开仓、模板切换、自治动作和 rollback 都不能绕过它；账户/运行态阈值通过 `RiskLimitSnapshot` 输入 `RiskGovernor`。
+- live loop 的日内 circuit breaker 是执行快停保护，阈值来自 `RiskLimitSnapshot.max_daily_loss_pct`，不是第二套风控事实源。
 - context policy 只改有效阈值和仓位乘数，不改多空方向。
 
 ## 7. 因子评分真实语义

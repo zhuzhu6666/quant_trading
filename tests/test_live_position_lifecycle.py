@@ -618,13 +618,16 @@ def test_build_open_trade_risk_context_payload_preserves_live_shape():
     assert payload["account"] == {"equity": 10000.0}
     assert payload["session"]["pnl"] == -10.0
     assert payload["risk_snapshot"] == {"daily_loss": 1.0}
-    assert payload["var"] == {"enabled": True, "threshold_pct": 3.0}
+    assert payload["risk_limits"]["schema_version"] == "risk_limit_snapshot.v1"
+    assert payload["risk_limits"]["max_daily_loss_pct"] == 5.0
+    assert payload["var"] == {"enabled": True, "threshold_pct": 3.0, "cvar_threshold_pct": 3.0}
     assert payload["open_position_count"] == 1
     assert payload["max_position_count"] == 4
     assert payload["total_api_volume"] == 250.0
     assert payload["requested_api_volume"] == 100.0
     assert payload["max_position_api_volume"] == 1200.0
     assert payload["event_sizing"] == {"enabled": True, "multiplier": 0.5}
+    assert payload["event_filter"] == {}
     assert payload["event_window_learning_policy"] == {"active": True}
     assert payload["entry_quality_gate"] == {"allowed": True}
     assert payload["entry_cluster"] == {"open_position_count_before": 1}
@@ -677,7 +680,9 @@ def test_build_open_trade_risk_context_payload_uses_safe_defaults():
     assert payload["trade"]["symbol"] == "XAUUSD"
     assert payload["account"] == {}
     assert payload["risk_snapshot"] == {}
+    assert payload["risk_limits"]["schema_version"] == "risk_limit_snapshot.v1"
     assert payload["event_sizing"] == {"enabled": False, "multiplier": 1.0}
+    assert payload["event_filter"] == {}
     assert payload["event_window_learning_policy"] == {}
     assert payload["entry_quality_gate"] == {}
     assert payload["entry_cluster_learning_policy"] == {}

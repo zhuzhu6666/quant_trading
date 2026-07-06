@@ -134,6 +134,24 @@ class RiskGovernor:
 
     # ── 裁决方法 ────────────────────────────────────────────────────
 
+    def _effective_config(self, state: GovernorState | None = None) -> dict[str, Any]:
+        cfg = dict(self._cfg)
+        limits = (state.extra or {}).get("risk_limits") if state is not None and isinstance(state.extra, dict) else {}
+        if isinstance(limits, dict):
+            for key in (
+                "max_drawdown_pct",
+                "max_consecutive_losses",
+                "max_daily_loss_pct",
+                "max_daily_trades",
+                "data_lag_max_seconds",
+                "loss_cooldown_after_losses",
+                "loss_cooldown_bars",
+                "circuit_breaker_bypass",
+            ):
+                if key in limits:
+                    cfg[key] = limits[key]
+        return cfg
+
     def allow_trade(self, state: GovernorState | None = None) -> GovernorVerdict:
         """允许开新仓吗?"""
         if self._dry_run_mode or self._overrides.get("force_dry_run"):
@@ -142,7 +160,7 @@ class RiskGovernor:
         if state is None:
             return GovernorVerdict(True, "no_state")
 
-        cfg = self._cfg
+        cfg = self._effective_config(state)
 
         # 熔断
         if state.circuit_broken and not cfg["circuit_breaker_bypass"]:
@@ -229,7 +247,7 @@ class RiskGovernor:
         if state is None:
             return GovernorVerdict(True, "no_state")
 
-        cfg = self._cfg
+        cfg = self._effective_config(state)
 
         # 回撤超限时冻结权重
         if state.drawdown_pct >= cfg["max_drawdown_pct"] * 0.8:  # 80% of max → freeze
@@ -276,7 +294,7 @@ class RiskGovernor:
         if state is None:
             return GovernorVerdict(True, "no_state")
 
-        cfg = self._cfg
+        cfg = self._effective_config(state)
         # 大幅回撤时暂停因子晋升 (进化暂停, 专注回本)
         if state.drawdown_pct >= cfg["max_drawdown_pct"] * 0.7:
             return GovernorVerdict(False, "drawdown_too_high_for_promotion")
@@ -291,7 +309,7 @@ class RiskGovernor:
         if state is None:
             return GovernorVerdict(True, "no_state")
 
-        cfg = self._cfg
+        cfg = self._effective_config(state)
         if state.drawdown_pct >= cfg["max_drawdown_pct"] * 0.6:
             return GovernorVerdict(False, "drawdown_too_high_for_new_factor")
 

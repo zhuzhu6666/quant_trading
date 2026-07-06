@@ -24,6 +24,11 @@ TEMP_SUFFIX = ".tmp"
 _POSITIVE_FLOAT_FIELDS = {
     "risk_sl_atr",
     "risk_tp_atr",
+    "risk_max_drawdown_pct",
+    "risk_max_daily_loss_pct",
+    "risk_data_lag_max_seconds",
+    "risk_var_threshold_pct",
+    "risk_cvar_threshold_pct",
     "strategy_sl_atr",
     "strategy_tp_atr",
     "max_position_volume",
@@ -35,6 +40,8 @@ _POSITIVE_FLOAT_FIELDS = {
 }
 _POSITIVE_INT_FIELDS = {
     "max_position_count",
+    "risk_max_consecutive_losses",
+    "risk_max_daily_trades",
     "sync_interval_sec",
     "l2_write_batch_size",
     "var_window",

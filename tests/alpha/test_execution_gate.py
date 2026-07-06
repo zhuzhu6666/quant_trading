@@ -129,6 +129,21 @@ class TestFilter:
         assert result.passed is False
         assert "nfp" in result.reason
 
+    def test_live_event_filter_authority_delegates_to_risk_policy(self):
+        """live 模式下事件风险只生成 RiskPolicy 输入, ExecutionGate 不单独阻断。"""
+        config = {
+            **GATE_CONFIG,
+            "risk_enable_nfp_skip": True,
+            "event_filter_authority": "risk_policy",
+        }
+        g = ExecutionGate(config)
+        composite = _make_composite(direction=1, score=0.6)
+        from datetime import datetime
+        bar = _make_bar()
+        bar["time"] = datetime(2026, 6, 5, 12, 0).timestamp()
+        result = g.filter(composite, {}, bar)
+        assert result.passed is True
+
     def test_nfp_factor_bucket_overrides_calendar_fallback(self):
         """有点时事件因子时, 不让旧首周五日历覆盖真实事件窗口。"""
         config = {**GATE_CONFIG, "strategy_enable_nfp_skip": True}

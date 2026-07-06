@@ -191,6 +191,7 @@ def execution_gate_config(cfg: Any) -> dict[str, Any]:
     return {
         "signal_threshold": cfg.factor_signal_threshold,
         "cooldown_bars": cfg.strategy_cooldown_bars,
+        "event_filter_authority": "risk_policy",
         "risk_enable_nfp_skip": getattr(cfg, "risk_enable_nfp_skip", False),
         "risk_enable_gvz_gate": getattr(cfg, "risk_enable_gvz_gate", False),
         "risk_gvz_drop_pct": getattr(cfg, "risk_gvz_drop_pct", -2.0),

@@ -60,6 +60,77 @@ def test_open_trade_blocks_var_threshold():
     assert verdict.audit_payload["source"] == "var_gate"
 
 
+def test_open_trade_uses_risk_limit_snapshot_for_governor_thresholds():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "session": {"daily_loss_pct": 4.0},
+            "risk_limits": {"max_daily_loss_pct": 3.0},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "daily_loss_limit"
+    assert verdict.audit_payload["state"]["risk_limits"]["max_daily_loss_pct"] == 3.0
+
+
+def test_open_trade_uses_risk_limit_snapshot_for_var_thresholds():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": {"var": {"var_pct": 1.6}},
+            "var": {"enabled": True},
+            "risk_limits": {"var_threshold_pct": 1.5},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "var_gate: VaR=1.6% > 1.5%"
+
+
+def test_open_trade_blocks_cvar_threshold_from_risk_limits():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": {"var": {"var_pct": 0.5, "cvar_pct": 2.4}},
+            "var": {"enabled": True},
+            "risk_limits": {"var_threshold_pct": 2.0, "cvar_threshold_pct": 2.0},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "cvar_gate: CVaR=2.4% > 2.0%"
+    assert verdict.audit_payload["source"] == "cvar_gate"
+
+
+def test_open_trade_blocks_event_filter_context_from_risk_policy():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "event_filter": {
+                "schema_version": "event_risk_filter.v1",
+                "active": True,
+                "blocked": True,
+                "reason": "nfp_skip:event_bucket",
+                "source": "execution_gate_event_filter",
+                "authority": "RiskPolicyService",
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "nfp_skip:event_bucket"
+    assert verdict.audit_payload["blocked_by"] == "event_risk_filter"
+
+
 def test_open_trade_blocks_when_loop_not_running():
     service = _service()
 
@@ -725,6 +796,27 @@ def test_start_shadow_model_blocks_live_trading_capability():
     assert verdict.allowed is False
     assert verdict.reason == "live_trading_capability_not_allowed"
     assert verdict.required_mode == "shadow"
+
+
+def test_start_shadow_model_reuses_model_permission_guardrail():
+    service = _service()
+
+    verdict = service.evaluate(
+        "start_shadow_model",
+        {
+            "candidate_id": "cand_unsafe",
+            "capabilities": {
+                "live_trading": False,
+                "can_bypass_risk_policy": True,
+                "advisory_only": True,
+                "shadow_only": True,
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "model_permission_violation"
+    assert verdict.audit_payload["source"] == "model_permissions"
 
 
 def test_start_canary_model_blocks_unexpected_candidate_status():

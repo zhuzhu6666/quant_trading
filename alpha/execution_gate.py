@@ -5,6 +5,8 @@
 设计文档: docs/architecture.md
 """
 
+from __future__ import annotations
+
 import logging
 import math
 from dataclasses import dataclass
@@ -75,6 +77,49 @@ def _event_bucket_is_release_window(value: Any) -> bool | None:
     if not math.isfinite(bucket):
         return None
     return abs(bucket) < 1e-9
+
+
+def evaluate_event_risk_filter(
+    config: dict[str, Any],
+    direction: int,
+    bar: dict[str, Any],
+    factor_values: dict[str, float | None] | None = None,
+) -> GateResult:
+    """Evaluate legacy event-risk filters without authorizing live execution."""
+    cfg_enable_nfp = config.get(
+        "strategy_enable_nfp_skip",
+        config.get("risk_enable_nfp_skip", False),
+    )
+    cfg_enable_gvz = config.get(
+        "strategy_enable_gvz_gate",
+        config.get("risk_enable_gvz_gate", False),
+    )
+    cfg_gvz_threshold = config.get(
+        "strategy_gvz_drop_pct",
+        config.get("risk_gvz_drop_pct", -2.0),
+    )
+
+    bar_ts = bar.get("time", 0)
+    bar_date = datetime.fromtimestamp(bar_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    # NFP skip: prefer point-in-time event buckets; fall back to the legacy
+    # first-Friday calendar only when event data is unavailable.
+    if cfg_enable_nfp:
+        nfp_bucket = None
+        if factor_values is not None and "hours_to_nfp" in factor_values:
+            nfp_bucket = _event_bucket_is_release_window(factor_values.get("hours_to_nfp"))
+        if nfp_bucket is True:
+            return GateResult(False, "nfp_skip:event_bucket")
+        if nfp_bucket is None and _is_nfp_date(bar_date):
+            return GateResult(False, "nfp_skip:calendar_fallback")
+
+    # GVZ gate: GVZ 暴跌时不开仓 (波动率异常)
+    if cfg_enable_gvz:
+        gvz_chg = _get_gvz_change(bar_date)
+        if gvz_chg is not None and gvz_chg < cfg_gvz_threshold:
+            return GateResult(False, "gvz_gate")
+
+    return GateResult(True, "passed")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -171,40 +216,9 @@ class ExecutionGate:
         factor_values: dict[str, float | None] | None = None,
     ) -> GateResult:
         """事件闸门: NFP skip / GVZ gate。"""
-        cfg_enable_nfp = self._config.get(
-            "strategy_enable_nfp_skip",
-            self._config.get("risk_enable_nfp_skip", False),
-        )
-        cfg_enable_gvz = self._config.get(
-            "strategy_enable_gvz_gate",
-            self._config.get("risk_enable_gvz_gate", False),
-        )
-        cfg_gvz_threshold = self._config.get(
-            "strategy_gvz_drop_pct",
-            self._config.get("risk_gvz_drop_pct", -2.0),
-        )
-
-        bar_ts = bar.get("time", 0)
-        bar_date = datetime.fromtimestamp(bar_ts, tz=timezone.utc).strftime("%Y-%m-%d")
-
-        # NFP skip: prefer point-in-time event buckets; fall back to the legacy
-        # first-Friday calendar only when event data is unavailable.
-        if cfg_enable_nfp:
-            nfp_bucket = None
-            if factor_values is not None and "hours_to_nfp" in factor_values:
-                nfp_bucket = _event_bucket_is_release_window(factor_values.get("hours_to_nfp"))
-            if nfp_bucket is True:
-                return GateResult(False, "nfp_skip:event_bucket")
-            if nfp_bucket is None and _is_nfp_date(bar_date):
-                return GateResult(False, "nfp_skip:calendar_fallback")
-
-        # GVZ gate: GVZ 暴跌时不开仓 (波动率异常)
-        if cfg_enable_gvz:
-            gvz_chg = _get_gvz_change(bar_date)
-            if gvz_chg is not None and gvz_chg < cfg_gvz_threshold:
-                return GateResult(False, "gvz_gate")
-
-        return GateResult(True, "passed")
+        if str(self._config.get("event_filter_authority") or "").lower() == "risk_policy":
+            return GateResult(True, "passed")
+        return evaluate_event_risk_filter(self._config, direction, bar, factor_values)
 
     def tick(self):
         """每根 bar 调用，减冷却计数。"""

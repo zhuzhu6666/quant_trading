@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from risk.governor import GovernorState, RiskGovernor
+from risk.runtime_policy import RiskLimitSnapshot, RuntimeHealthSnapshot
 
 
 INCIDENT_MODES = {"normal", "shadow_only", "no_new_risk", "only_close", "frozen"}
@@ -306,6 +307,22 @@ class RiskPolicyService:
                 },
             )
 
+        event_filter = context.get("event_filter") or context.get("event_risk_filter") or {}
+        if bool(event_filter.get("active", False)) and bool(event_filter.get("blocked", False)):
+            return RiskVerdict(
+                allowed=False,
+                reason=str(event_filter.get("reason") or "event_risk_filter"),
+                severity="warn",
+                audit_payload={
+                    "action": "open_trade",
+                    "source": str(event_filter.get("source") or "event_risk_filter"),
+                    "blocked_by": "event_risk_filter",
+                    "event_filter": event_filter,
+                    "trade": context.get("trade") or {},
+                    "temporal_context": context.get("temporal_context") or {},
+                },
+            )
+
         event_window_policy = context.get("event_window_learning_policy") or {}
         event_sizing = context.get("event_sizing") or {}
         if bool(event_window_policy.get("active", False)):
@@ -337,11 +354,12 @@ class RiskPolicyService:
                 )
 
         risk_snapshot = context.get("risk_snapshot") or {}
+        risk_limits = RiskLimitSnapshot.from_context(context)
         var_cfg = context.get("var") or {}
         if bool(var_cfg.get("enabled", False)):
             var_data = risk_snapshot.get("var") or {}
             var_pct = float(var_data.get("var_pct", 0.0) or 0.0)
-            threshold_pct = float(var_cfg.get("threshold_pct", 0.0) or 0.0)
+            threshold_pct = float(var_cfg.get("threshold_pct", risk_limits.var_threshold_pct) or 0.0)
             if threshold_pct > 0 and var_pct > threshold_pct:
                 return RiskVerdict(
                     allowed=False,
@@ -352,6 +370,22 @@ class RiskPolicyService:
                         "source": "var_gate",
                         "var_pct": var_pct,
                         "threshold_pct": threshold_pct,
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                )
+            cvar_pct = float(var_data.get("cvar_pct", 0.0) or 0.0)
+            cvar_threshold_pct = float(var_cfg.get("cvar_threshold_pct", risk_limits.cvar_threshold_pct) or 0.0)
+            if cvar_threshold_pct > 0 and cvar_pct > cvar_threshold_pct:
+                return RiskVerdict(
+                    allowed=False,
+                    reason=f"cvar_gate: CVaR={cvar_pct:.1f}% > {cvar_threshold_pct:.1f}%",
+                    severity="error",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "cvar_gate",
+                        "cvar_pct": cvar_pct,
+                        "threshold_pct": cvar_threshold_pct,
+                        "risk_limits": risk_limits.to_dict(),
                         "temporal_context": context.get("temporal_context") or {},
                     },
                 )
@@ -455,12 +489,15 @@ class RiskPolicyService:
                 "max_position_count": max_position_count,
                 "max_position_api_volume": max_api_volume,
                 "event_sizing": event_sizing,
+                "risk_limits": risk_limits.to_dict(),
                 "state": state.extra,
                 "temporal_context": context.get("temporal_context") or {},
             },
         )
 
     def _build_governor_state(self, context: dict[str, Any]) -> GovernorState:
+        risk_limits = RiskLimitSnapshot.from_context(context)
+        runtime_health_snapshot = RuntimeHealthSnapshot.from_context(context)
         account = context.get("account") or {}
         session = context.get("session") or {}
         temporal_context = context.get("temporal_context") or {}
@@ -473,19 +510,24 @@ class RiskPolicyService:
             "open_position_count": int(context.get("open_position_count", 0) or 0),
             "requested_api_volume": float(context.get("requested_api_volume", 0.0) or 0.0),
             "total_api_volume": float(context.get("total_api_volume", 0.0) or 0.0),
+            "risk_limits": risk_limits.to_dict(),
+            "runtime_health_snapshot": runtime_health_snapshot.to_dict(),
         }
         runtime_health = context.get("runtime_health") or {}
         if runtime_health:
             extra["runtime_health"] = runtime_health
         if temporal_context:
             extra["temporal_context"] = temporal_context
-        extra["block_on_disk_critical"] = bool(context.get("block_on_disk_critical", True))
-        extra["require_l2_depth"] = bool(context.get("require_l2_depth", False))
-        loss_cooldown_after_losses = int(context.get("loss_cooldown_after_losses", 0) or 0)
-        loss_cooldown_bars = int(context.get("loss_cooldown_bars", 0) or 0)
-        if loss_cooldown_after_losses > 0 or loss_cooldown_bars > 0:
-            extra["loss_cooldown_after_losses"] = loss_cooldown_after_losses
-            extra["loss_cooldown_bars"] = loss_cooldown_bars
+        extra["block_on_disk_critical"] = bool(
+            context.get("block_on_disk_critical", risk_limits.block_on_disk_critical)
+        )
+        extra["require_l2_depth"] = bool(context.get("require_l2_depth", risk_limits.require_l2_depth))
+        extra["loss_cooldown_after_losses"] = int(
+            context.get("loss_cooldown_after_losses", risk_limits.loss_cooldown_after_losses) or 0
+        )
+        extra["loss_cooldown_bars"] = int(
+            context.get("loss_cooldown_bars", risk_limits.loss_cooldown_bars) or 0
+        )
         return GovernorState(
             balance=float(account.get("balance", 0.0) or 0.0),
             equity=float(account.get("equity", 0.0) or 0.0),
@@ -495,7 +537,7 @@ class RiskPolicyService:
             daily_trades=int(session.get("trades", 0) or 0),
             daily_loss_pct=daily_loss_pct,
             circuit_broken=bool(session.get("circuit_breaker", False)),
-            data_lag_seconds=float(context.get("data_lag_seconds", 0.0) or 0.0),
+            data_lag_seconds=float(context.get("data_lag_seconds", runtime_health_snapshot.data_lag_seconds) or 0.0),
             loop_running=bool(context.get("loop_running", True)),
             bridge_connected=bool(context.get("bridge_connected", True)),
             timeframe_seconds=int(temporal_context.get("timeframe_seconds", 0) or 0),
@@ -949,6 +991,27 @@ class RiskPolicyService:
         required_mode: str,
     ) -> RiskVerdict:
         capabilities = context.get("capabilities") or {}
+        artifact = dict(context.get("artifact") or {})
+        artifact.setdefault("capabilities", capabilities)
+        artifact.setdefault("model_type", context.get("model_type") or action)
+        artifact.setdefault("artifact_path", context.get("artifact_path", ""))
+        try:
+            from backend.services.model_permissions import evaluate_model_permissions
+
+            permission = evaluate_model_permissions(
+                artifact,
+                model_type=str(context.get("model_type") or action),
+                artifact_path=str(context.get("artifact_path") or ""),
+                require_shadow=required_mode == "shadow",
+            )
+        except Exception as exc:
+            permission = {
+                "ok": False,
+                "status": "blocked",
+                "reason": "model_permission_check_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "capabilities": capabilities,
+            }
         live_trading = bool(context.get("live_trading", False) or capabilities.get("live_trading", False))
         if live_trading:
             return RiskVerdict(
@@ -961,6 +1024,21 @@ class RiskPolicyService:
                     "source": "model_guardrail",
                     "candidate_id": context.get("candidate_id", ""),
                     "capabilities": capabilities,
+                    "model_permission": permission,
+                },
+            )
+        if not bool(permission.get("ok", False)):
+            return RiskVerdict(
+                allowed=False,
+                reason=str(permission.get("reason") or "model_permission_violation"),
+                severity="error",
+                required_mode=required_mode,
+                audit_payload={
+                    "action": action,
+                    "source": "model_permissions",
+                    "candidate_id": context.get("candidate_id", ""),
+                    "capabilities": capabilities,
+                    "model_permission": permission,
                 },
             )
         allowed_statuses = set(context.get("allowed_statuses") or [])
@@ -989,6 +1067,7 @@ class RiskPolicyService:
                 "candidate_id": context.get("candidate_id", ""),
                 "candidate_status": candidate_status,
                 "capabilities": capabilities,
+                "model_permission": permission,
             },
         )
 

@@ -296,6 +296,7 @@ def test_execution_gate_and_awe_configs_preserve_runtime_fields():
     assert execution_gate_config(cfg) == {
         "signal_threshold": 0.33,
         "cooldown_bars": 4,
+        "event_filter_authority": "risk_policy",
         "risk_enable_nfp_skip": True,
         "risk_enable_gvz_gate": False,
         "risk_gvz_drop_pct": -1.5,
@@ -428,6 +429,7 @@ def test_build_extra_symbol_factor_pipelines_reuses_primary_and_shared_component
         {
             "signal_threshold": 0.4,
             "cooldown_bars": 3,
+            "event_filter_authority": "risk_policy",
             "risk_enable_nfp_skip": False,
             "risk_enable_gvz_gate": False,
             "risk_gvz_drop_pct": -2.0,

@@ -3,7 +3,10 @@ Execution Router — 智能下单路由（历史/兼容层）
 
 职责：
 1. 接收融合后的Signal → 创建Order
-2. 通过PreTrade风控检查
+2. 通过 paper/legacy PreTrade 风控检查
+
+注意: live 主交易链路不以本 router 作为动作授权口；live open/close/reduce
+必须回到 ``RiskPolicyService.evaluate(...)``。
 3. 调用执行通道（当前历史兼容，不再是当前实盘主链）
 4. 记录成交信息
 

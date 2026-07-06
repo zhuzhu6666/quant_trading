@@ -12,6 +12,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, MutableMapping
 
+from risk.runtime_policy import RiskLimitSnapshot
+
 
 MergeRecoveryMeta = Callable[[int, dict[str, Any]], Any]
 LoadRecoveryRow = Callable[[int], dict[str, Any] | None]
@@ -679,7 +681,9 @@ def build_open_trade_risk_context_payload(
     runtime_health: dict[str, Any],
     temporal_context: dict[str, Any],
     supervisor_reentry_block: dict[str, Any] | None,
+    event_filter_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    risk_limits = RiskLimitSnapshot.from_runtime_config(cfg)
     return {
         "trade": {
             "symbol": str(symbol or "XAUUSD"),
@@ -697,9 +701,11 @@ def build_open_trade_risk_context_payload(
             "circuit_breaker": bool(session_state.get("circuit_breaker", False)),
         },
         "risk_snapshot": risk_snapshot or {},
+        "risk_limits": risk_limits.to_dict(),
         "var": {
             "enabled": bool(getattr(cfg, "var_enabled", False)),
-            "threshold_pct": float(getattr(cfg, "var_cvar_threshold", 0.02) or 0.02) * 100.0,
+            "threshold_pct": risk_limits.var_threshold_pct,
+            "cvar_threshold_pct": risk_limits.cvar_threshold_pct,
         },
         "open_position_count": len(positions or []),
         "max_position_count": int(getattr(cfg, "max_position_count", 3) or 0),
@@ -707,6 +713,7 @@ def build_open_trade_risk_context_payload(
         "requested_api_volume": float(requested_api_volume or 0.0),
         "max_position_api_volume": float(getattr(cfg, "max_position_api_volume", 1000.0) or 0.0),
         "event_sizing": dict(event_sizing_context or {"enabled": False, "multiplier": 1.0}),
+        "event_filter": event_filter_context or {},
         "event_window_learning_policy": event_window_learning_policy or {},
         "entry_quality_gate": entry_quality_gate or {},
         "entry_cluster": entry_cluster_context,
@@ -719,10 +726,10 @@ def build_open_trade_risk_context_payload(
         "bridge_connected": bool(bridge_connected),
         "data_lag_seconds": float(data_lag_seconds or 0.0),
         "runtime_health": runtime_health or {},
-        "loss_cooldown_after_losses": int(getattr(cfg, "risk_loss_cooldown_after_losses", 0) or 0),
-        "loss_cooldown_bars": int(getattr(cfg, "risk_loss_cooldown_bars", 0) or 0),
-        "block_on_disk_critical": bool(getattr(cfg, "risk_block_on_disk_critical", True)),
-        "require_l2_depth": bool(getattr(cfg, "risk_require_l2_depth", False)),
+        "loss_cooldown_after_losses": risk_limits.loss_cooldown_after_losses,
+        "loss_cooldown_bars": risk_limits.loss_cooldown_bars,
+        "block_on_disk_critical": risk_limits.block_on_disk_critical,
+        "require_l2_depth": risk_limits.require_l2_depth,
         "temporal_context": temporal_context,
         "supervisor_reentry_block": supervisor_reentry_block or {},
     }

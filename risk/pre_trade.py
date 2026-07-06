@@ -1,5 +1,9 @@
 """
-Pre-Trade Checks — 开仓前风控
+Pre-Trade Checks — paper/backtest 开仓前风控
+
+Live 主链路的动作授权以 ``RiskPolicyService.evaluate(...)`` 为准。本模块
+保留给 paper/backtest/legacy execution router 使用，不应作为新的 live
+交易前置裁决入口。
 
 在订单执行前检查：
 - 单笔风险是否超限

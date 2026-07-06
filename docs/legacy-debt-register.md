@@ -167,6 +167,15 @@
 - 影响面: `backend/services/live_service.py`、参数模板、evolution closure tests。
 - 收口方式: 暂保留测试防回归；下一版可删除旧 sweep 函数，但必须先确认没有 scheduler/API 调用，并保留“不得直接 patch RuntimeConfig”的测试语义。
 
+### legacy PreTrade/CircuitBreaker live 误用
+
+- 状态: `fixed`
+- 旧理解: `risk/pre_trade.py`、`risk/circuit.py` 或 `execution/router.py` 可以作为 live 主链路的开仓授权/熔断事实源。
+- 当前口径: 当前 live 主链路由 `RiskPolicyService.evaluate(...)` 统一授权；账户/运行态阈值由 `RiskLimitSnapshot` 输入 `RiskGovernor`；live loop 的日内 circuit breaker 只是执行快停保护，阈值同样来自 `RiskLimitSnapshot`。
+- 影响面: `risk/pre_trade.py`、`risk/circuit.py`、`execution/router.py`、`backend/services/live_service.py`、`risk/policy_service.py`、测试、文档。
+- 收口方式: 旧模块已在代码注释中标为 paper/backtest/legacy；live 不新增这些模块的调用；VaR/CVaR、事件风险、模型权限和开仓/改仓/治理动作均回到 `RiskPolicyService`。
+- 验证方式: `tests/risk/test_policy_service.py`、`tests/test_live_service_circuit.py`、`tests/alpha/test_execution_gate.py`、`tests/test_live_loop_shell.py`。
+
 ## 5. 新旧债登记模板
 
 复制下面模板新增条目：

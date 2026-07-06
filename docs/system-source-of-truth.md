@@ -56,8 +56,10 @@
 | 事项 | 权威来源 | 说明 |
 |---|---|---|
 | 动作裁决 | `RiskPolicyService.evaluate(...)` | 风控统一裁决入口 |
+| 风险阈值快照 | `risk.runtime_policy.RiskLimitSnapshot` + `RuntimeConfig` / runtime overlay | 日内亏损、回撤、交易次数、数据延迟、L2、磁盘、VaR/CVaR 等阈值的统一输入口径 |
+| 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk、L2 等运行态统一输入口径 |
 | 下单/改仓/平仓 | cTrader bridge + ledger | broker 执行事实与账本共同追溯 |
-| 信号门槛 | `ExecutionGate` + context policy effect | gate 前应用有效阈值 |
+| 信号门槛 | `ExecutionGate` + context policy effect | gate 前应用有效阈值；live 只负责信号/冷却，不作为事件风险最终裁决口 |
 | 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` | 持仓期间动作建议和 trace |
 | 事件缩放 | `execution/event_sizing.py` + `data/events.duckdb` | 事件窗口风控输入 |
 
@@ -65,6 +67,10 @@
 
 - 风控不产生 alpha，但拥有最高执行裁决权。
 - 因子治理、模板切换、回滚都不能绕过 RiskPolicyService。
+- live 日内熔断可以做执行快停，但阈值必须来自 `RiskLimitSnapshot`，不能在 live loop 内另设事实源。
+- NFP/GVZ/重大事件等事件风险在 live 中只能作为 `RiskPolicyService` 输入；`ExecutionGate` 的事件过滤保留给 backtest/legacy 兼容。
+- `risk/pre_trade.py`、`risk/circuit.py`、`execution/router.py` 属于 paper/backtest/legacy execution router，不是当前 live 主授权口。
+- 模型阶段裁决必须复用 `backend.services.model_permissions`，不能维护第二套模型权限事实。
 - BB 不进入 ExecutionGate 作为硬过滤器。
 
 ## 5. 学习与自治事实源

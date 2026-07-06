@@ -99,6 +99,12 @@ class RuntimeConfig:
     # --- 风控/执行参数 (原 strategy_* 前缀, 现被 Factor Takeover v4 管道使用) ---
     risk_sl_atr: float = 1.5
     risk_tp_atr: float = 2.5
+    risk_max_drawdown_pct: float = 15.0
+    risk_max_consecutive_losses: int = 8
+    risk_max_daily_loss_pct: float = 5.0
+    risk_max_daily_trades: int = 20
+    risk_data_lag_max_seconds: float = 3600.0
+    risk_circuit_breaker_bypass: bool = False
     risk_cooldown_bars: int = 3
     risk_loss_cooldown_after_losses: int = 2
     risk_loss_cooldown_bars: int = 3
@@ -332,6 +338,8 @@ class RuntimeConfig:
     var_alpha: float = 0.95                      # 置信水平
     var_method: str = "historical"               # parametric | historical | monte_carlo
     var_cvar_threshold: float = 0.02             # CVaR > 2% equity → 熔断
+    risk_var_threshold_pct: float = 2.0          # VaR > 2% equity → 阻断新开仓
+    risk_cvar_threshold_pct: float = 2.0         # CVaR > 2% equity → 阻断新开仓
 
     # --- 5.2 Kelly 动态仓位 ---
     kelly_enabled: bool = True                   # 是否启用 Kelly 仓位

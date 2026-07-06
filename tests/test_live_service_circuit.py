@@ -2,6 +2,7 @@
 import pytest
 
 from backend.services import live_service
+from risk.runtime_policy import RiskLimitSnapshot
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +29,18 @@ def test_circuit_breaker_triggers_at_5_percent_drawdown():
     assert result["dd_pct"] == 5.0
     assert live_service._live_state_get("circuit_breaker") is True
     assert "daily drawdown" in live_service._live_state_get("circuit_reason")
+
+
+def test_circuit_breaker_uses_risk_limit_snapshot_threshold():
+    live_service._live_state_update(session_pnl=-40.0, session_start_balance=1000.0)
+
+    result = live_service._evaluate_daily_drawdown(
+        risk_limits=RiskLimitSnapshot(max_daily_loss_pct=4.0)
+    )
+
+    assert result["tripped"] is True
+    assert result["risk_limits"]["max_daily_loss_pct"] == 4.0
+    assert live_service._live_state_get("circuit_breaker") is True
 
 
 def test_circuit_breaker_does_not_trip_below_5_percent():

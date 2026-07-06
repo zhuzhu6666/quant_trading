@@ -1,5 +1,9 @@
 """
-Circuit Breaker — 熔断机制
+Circuit Breaker — paper/backtest 熔断机制
+
+Live 主链路的日内亏损/回撤/运行态授权以 ``RiskPolicyService`` +
+``RiskLimitSnapshot`` 为准。本模块保留给 paper/backtest/legacy execution
+router 使用，不应作为新的 live 风控事实源。
 
 触发条件：
 1. 日内亏损超限 (max_daily_loss_pct，相对日内峰值权益)

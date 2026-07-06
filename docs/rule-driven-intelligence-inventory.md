@@ -115,12 +115,12 @@ v16 live-ready guardrails
 |---:|---|---|---|---|---|
 | 1 | 因子组合评分 | `alpha/portfolio_compositor.py` | `CompositeSignal`、方向、`alpha_score`、`context_state` | `factor_signals`、`factor_values`、`factor_roles`、`active_weights`、`context_signals`、`redundancy_groups` | score 为 `-1..1` 连续值；context 不进方向分；`used_in_score` 必须可还原 |
 | 2 | context policy | `backend/services/context_policy.py` | `signal_threshold_delta`、`position_multiplier` | `context_state`、reason、applied、最终 multiplier | threshold delta clamp 到约 `-0.05..0.15`；仓位乘数默认 clamp `0.5..1.25` |
-| 3 | 执行信号门 | `alpha/execution_gate.py` | pass/block、reason、cooldown | threshold、score、direction、cooldown、NFP/GVZ reason | 只处理执行门禁；不负责 broker 风险 |
+| 3 | 执行信号门 | `alpha/execution_gate.py` | pass/block、reason、cooldown | threshold、score、direction、cooldown；live 下 NFP/GVZ 只形成 `event_filter` 风控输入 | live 只处理信号阈值和策略冷却；事件风险最终由 `RiskPolicyService` 裁决 |
 | 4 | 事件仓位缩放 | `execution/event_sizing.py` | event multiplier、event context | `event_sizing.short_window.v2`、event type、importance、hours/minutes until、window bucket、tier multiplier | multiplier `0..1`；事件后窗口只保留短 post-event 容错 |
 | 5 | Kelly 动态仓位 | `backend/services/live_risk_sizing.py` | base API volume、sizing trace | `position_sizing_trace.v1`、equity、Kelly fraction、SL distance、risk budget、broker min/step/max | volume 按 broker API step 取整；缺 equity/kelly 时退回最小量 |
 | 6 | effective event/context sizing | `backend/services/live_service.py` | final requested API volume | base volume、event adjusted volume、context adjusted volume、blocked reason | 低于最小量时不静默抬回，由后续 risk policy 决定 |
-| 7 | 动作级风险策略 | `risk/policy_service.py` | `RiskVerdict` for open/close/reduce/template/factor/model actions | action、context、allowed、reason、severity、audit payload | 唯一动作裁决入口；新增自治动作必须在这里注册 |
-| 8 | 账户/系统硬风控 | `risk/governor.py` | allow/block | drawdown、daily loss、trade limit、data lag、disk、L2、bridge、circuit breaker | fail closed；`force_dry_run`、断连、严重数据延迟优先阻断 |
+| 7 | 动作级风险策略 | `risk/policy_service.py` | `RiskVerdict` for open/close/reduce/template/factor/model actions | action、context、allowed、reason、severity、audit payload、`risk_limit_snapshot.v1`、`runtime_health_snapshot.v1` | 唯一动作裁决入口；新增自治动作必须在这里注册；事件风险和模型权限都在这里统一裁决 |
+| 8 | 账户/系统硬风控 | `risk/governor.py` + `risk/runtime_policy.py` | allow/block | drawdown、daily loss、trade limit、data lag、disk、L2、bridge、circuit breaker、RiskLimitSnapshot | fail closed；阈值从 `RiskLimitSnapshot` 输入，`force_dry_run`、断连、严重数据延迟优先阻断 |
 | 9 | session/order block | `backend/services/live_tick_pipeline.py`、`backend/services/live_service.py` | market order block、skip stage | market session、risk verdict、event sizing below min、order block reason | 最终发单前把交易时段和 risk verdict 合并成 skip/open |
 | 10 | 持仓监督 | `backend/services/position_supervisor.py` | hold/tighten/reduce/close 建议 | confidence、severity、evidence、template、trigger tags、recommended controls | hold 低置信可观察；close/reduce 需要更高 confidence 并再次过 `RiskPolicyService` |
 | 11 | 保护执行/超时执行 | `backend/services/live_service.py` | amend SL/TP、reduce、close、repair | protection candidate、supersede reason、execution result、close reason | 只执行 supervisor/risk 允许后的控制动作；执行失败必须写 lifecycle |
@@ -172,7 +172,7 @@ v16 live-ready guardrails
 
 | # | 单元 | 代码锚点 | 输出/动作 | 必须记录的数据 | 精度语义 |
 |---:|---|---|---|---|---|
-| 36 | model permissions | `backend/services/model_permissions.py` | allowed/block audit | model type、artifact contract、capabilities、status、reason | artifact 必须 `advisory_only/shadow_only`，禁止 live trading capability |
+| 36 | model permissions | `backend/services/model_permissions.py` + `risk/policy_service.py` | allowed/block audit + model stage RiskVerdict | model type、artifact contract、capabilities、status、reason、RiskPolicy audit payload | artifact 必须 `advisory_only/shadow_only`，禁止 live trading capability；模型进入 shadow/canary 前由 RiskPolicy 复用该权限结论 |
 | 37 | model promotion gate | `research/model_promotion.py` | shadow/canary/live readiness verdict | model metrics、dataset contract、guardrails、required next stage | live capability blocked；canary 前必须 shadow |
 | 38 | shadow/canary/inference contract | `research/model_shadow_queue.py`、`research/model_shadow_runner.py`、`research/model_canary.py`、`research/model_canary_executor.py`、`research/model_inference_contract.py` | shadow report、canary review/trial、advisory inference | candidate id、artifact hash、validation metrics、trial result | advisory-only；canary 也不能直接控制 live orders |
 | 39 | open quality LightGBM | `research/open_quality_lightgbm.py` | open quality shadow audit | sample id、quality/risk score、prediction label、feature importance | 使用 matured open outcome；阈值当前围绕 0.5 分类 |
@@ -253,7 +253,7 @@ v16 live-ready guardrails
 这些不是立即阻断 demo 盘运行的问题，但属于后续大版本治理必须持续盯住的点：
 
 - 部分规则单元的审计粒度仍不一致，例如 live helper 里有些 skip/block reason 还依赖 ledger payload 合并。
-- `RiskPolicyService` 子动作很多，后续应在文档和 API 里导出 action matrix，避免新增动作绕过审计。
+- `RiskPolicyService` 子动作已收敛到统一入口，但 action matrix 仍只在代码和测试中表达；后续可导出只读 API/文档矩阵，避免新增动作绕过审计。
 - shadow/advisory 模型数量已经较多，前端需要按“权限边界”展示，而不是按“模型名字”展示。
 - readiness 当前是诊断汇总，不是不可变审计表；关键状态仍应回到事实表或 snapshot。
 - replay harness P1 已有 decision/bar-window/factor-frame evidence、`ExecutionGate` / `RiskPolicyService` offline recompute v1、order/position/supervisor lifecycle coverage v1，以及 broker outcome causality、fill slippage、supervisor counterfactual 和 supervisor risk subaction replay v1；后续可扩展更多 `RiskPolicyService` action matrix。
