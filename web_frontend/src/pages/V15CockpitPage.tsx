@@ -801,14 +801,14 @@ export function V15CockpitPage() {
     <section className="dashboard v15-dashboard">
       <div className="dashboard-header">
         <div>
-          <div className="eyebrow">V15 自主运行平台</div>
-          <h1>V15 操作台</h1>
+          <div className="eyebrow">Autonomous Runtime Platform</div>
+          <h1>运行中枢</h1>
           <p>统一查看运行态、回放证据、自治健康、事故控制和发布审计。</p>
         </div>
         <div className="header-status">
           <StatusPill status={readyForFrontend ? "后端就绪" : "后端受限"} tone={readyForFrontend ? "ok" : "warn"} />
-          <StatusPill status={`Phase0 ${phase0Complete ? "已完成" : "待补证据"}`} tone={phase0Complete ? "ok" : "warn"} />
-          <StatusPill status="P1 已收口" tone="ok" />
+          <StatusPill status={`基础证据 ${phase0Complete ? "已完成" : "待补"}`} tone={phase0Complete ? "ok" : "warn"} />
+          <StatusPill status="自治链路已收口" tone="ok" />
           <button className="header-refresh" type="button" onClick={refreshAll}>
             <RefreshCw size={15} />
             刷新
@@ -823,7 +823,7 @@ export function V15CockpitPage() {
         <StatTile icon={Rocket} label="发布审计" value={translateDisplayValue(releaseStatus)} detail={operationallyReady ? "现场证据已齐" : "待补现场证据"} tone={toneFromStatus(releaseStatus)} />
       </div>
 
-      <div className="v15-tabbar" role="tablist" aria-label="V15 操作台分区">
+      <div className="v15-tabbar" role="tablist" aria-label="运行中枢分区">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const active = activeTab === tab.key;
@@ -843,7 +843,7 @@ export function V15CockpitPage() {
               <CompactMetric label="就绪状态" value={readyForFrontend ? "就绪" : "受限"} detail={pickString(readiness, ["schema_version"], "--")} tone={boolTone(readyForFrontend)} />
               <CompactMetric label="运行覆盖层" value={safeLabel(pick(v15, ["overlay.status", "snapshot.status"]))} detail={safeLabel(pick(v15, ["snapshot.config_hash", "snapshot.overlay_hash"]))} tone={toneFromStatus(safeLabel(pick(v15, ["overlay.status", "snapshot.status"])))} />
               <CompactMetric label="回滚快照" value={pickBoolean(v15, ["snapshot.ok"], false) ? "正常" : "缺失"} detail={formatTime(pick(v15, ["snapshot.created_at", "snapshot.updated_at"]))} tone={pickBoolean(v15, ["snapshot.ok"], false) ? "ok" : "warn"} />
-              <CompactMetric label="Phase0" value={phase0Complete ? "已完成" : "未完成"} detail={operationallyReady ? "可运行" : "待补证据"} tone={phase0Complete ? "ok" : "warn"} />
+              <CompactMetric label="基础证据" value={phase0Complete ? "已完成" : "未完成"} detail={operationallyReady ? "可运行" : "待补证据"} tone={phase0Complete ? "ok" : "warn"} />
             </div>
             <div className="v15-two-col">
               <div>

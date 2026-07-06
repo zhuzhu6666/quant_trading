@@ -15,6 +15,7 @@ from backend.services.brain_state import BrainStateService
 from backend.services.brain_low_impact_executor import BrainLowImpactExecutorService
 from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
 from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
+from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
@@ -99,6 +100,10 @@ class BrainLowImpactExecutionRequest(BaseModel):
 class BrainMediumImpactGovernanceRequest(BaseModel):
     limit: int = 4
     allow_tighten_low_health: bool = False
+
+
+class BrainGovernanceCandidateSubmitRequest(BaseModel):
+    actor: str = "api:ops.brain.governance_candidate"
 
 
 class BrainLiveReadyGuardrailEvaluateRequest(BaseModel):
@@ -366,7 +371,7 @@ def get_brain_medium_impact_governance(_user: RequireUser, limit: int = 50) -> d
 
 @router.post("/brain/medium-impact-governance/materialize")
 def materialize_brain_medium_impact_governance(req: BrainMediumImpactGovernanceRequest, _user: RequireUser) -> dict[str, Any]:
-    """Materialize V16 Phase 4 medium-impact governance suggestions only."""
+    """Materialize V16 Phase 4 medium-impact governance candidates only."""
     readiness = BackendReadinessService().build()
     result = BrainMediumImpactGovernanceService().materialize_latest(
         limit=max(1, min(int(req.limit), 20)),
@@ -379,6 +384,35 @@ def materialize_brain_medium_impact_governance(req: BrainMediumImpactGovernanceR
         "ok": bool(result.get("ok")),
         "schema_version": "ops_brain_medium_impact_governance_materialize.v1",
         "governance_run": result,
+    }
+
+
+@router.get("/brain/governance-candidates")
+def get_brain_governance_candidates(_user: RequireUser, limit: int = 50, status: str = "") -> dict[str, Any]:
+    """Return isolated V16 governance candidates before policy_suggestion submission."""
+    candidates = BrainGovernanceCandidateService().latest_candidates(
+        limit=max(1, min(int(limit), 200)),
+        status=str(status or ""),
+    )
+    return {
+        "ok": bool(candidates.get("ok")),
+        "schema_version": "ops_brain_governance_candidates.v1",
+        "governance_candidates": candidates,
+    }
+
+
+@router.post("/brain/governance-candidates/{candidate_id}/submit")
+def submit_brain_governance_candidate(candidate_id: str, req: BrainGovernanceCandidateSubmitRequest, _user: RequireUser) -> dict[str, Any]:
+    """Manually bridge a compatible V16 candidate into legacy policy_suggestion review."""
+    result = BrainGovernanceCandidateService().submit_candidate_to_policy_suggestion(
+        candidate_id,
+        actor=str(req.actor or "api:ops.brain.governance_candidate"),
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_brain_governance_candidate_submit.v1",
+        "submit_result": result,
     }
 
 

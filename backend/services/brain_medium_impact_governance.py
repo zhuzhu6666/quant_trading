@@ -6,14 +6,19 @@ from pathlib import Path
 from typing import Any
 
 from alpha.decision_policy import DecisionPolicy
-from backend.core.db import STATE_DB, state_table_exists
+from backend.core.db import STATE_DB, state_table_columns, state_table_exists
 from backend.services.brain_action_evaluator import BrainActionPlanEvaluatorService, ensure_brain_action_plan_eval_table
 from backend.services.brain_action_planner import _connect, _dumps, _execute, _loads, _safe_float
+from backend.services.brain_governance_candidates import (
+    BrainGovernanceCandidateService,
+    ensure_brain_governance_candidate_table,
+)
 from risk.policy_service import RiskPolicyService
 
 
 def ensure_brain_medium_impact_governance_table(db_path: str | Path = STATE_DB) -> None:
     ensure_brain_action_plan_eval_table(db_path)
+    ensure_brain_governance_candidate_table(db_path)
     conn = _connect(db_path)
     try:
         _execute(
@@ -27,6 +32,7 @@ def ensure_brain_medium_impact_governance_table(db_path: str | Path = STATE_DB) 
                 scope_type TEXT DEFAULT '',
                 scope_key TEXT DEFAULT '',
                 status TEXT DEFAULT '',
+                candidate_id TEXT DEFAULT '',
                 suggestion_id TEXT DEFAULT '',
                 evidence_score REAL NOT NULL DEFAULT 0.0,
                 critic_verdict TEXT DEFAULT '',
@@ -42,28 +48,13 @@ def ensure_brain_medium_impact_governance_table(db_path: str | Path = STATE_DB) 
             )
             """,
         )
+        columns = state_table_columns(conn, "brain_medium_impact_governance")
+        if "candidate_id" not in columns:
+            _execute(conn, "ALTER TABLE brain_medium_impact_governance ADD COLUMN candidate_id TEXT DEFAULT ''")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_created ON brain_medium_impact_governance(created_at)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_plan ON brain_medium_impact_governance(plan_id, eval_id)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_scope ON brain_medium_impact_governance(scope_type, status, created_at)")
-        _execute(
-            conn,
-            """
-            CREATE TABLE IF NOT EXISTS policy_suggestion (
-                suggestion_id TEXT PRIMARY KEY,
-                scope_type TEXT NOT NULL,
-                scope_key TEXT NOT NULL,
-                action TEXT NOT NULL,
-                confidence REAL DEFAULT 0.0,
-                reason TEXT DEFAULT '',
-                evidence_json TEXT DEFAULT '{}',
-                status TEXT DEFAULT 'proposed',
-                reviewed_at REAL DEFAULT 0.0,
-                review_note TEXT DEFAULT '',
-                created_at REAL NOT NULL DEFAULT 0.0
-            )
-            """,
-        )
-        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_policy_suggestion_scope ON policy_suggestion(scope_type, scope_key, status)")
+        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_candidate ON brain_medium_impact_governance(candidate_id)")
         conn.commit()
     finally:
         conn.close()
@@ -80,7 +71,10 @@ class BrainMediumImpactGovernanceService:
         return {
             "phase": "v16_phase4_medium_impact_governance",
             "medium_impact_governance": True,
-            "materializes_policy_suggestions_only": True,
+            "materializes_governance_candidates_only": True,
+            "materializes_policy_suggestions_only": False,
+            "does_not_write_policy_suggestion_directly": True,
+            "policy_suggestion_bridge_manual_only": True,
             "does_not_apply_factor_weights": True,
             "does_not_switch_templates": True,
             "does_not_submit_orders": True,
@@ -89,6 +83,7 @@ class BrainMediumImpactGovernanceService:
             "decision_policy_preview_required_for_weight_actions": True,
             "runtime_overlay_snapshot_required_for_future_apply": True,
             "release_evidence_required_for_future_apply": True,
+            "governance_candidate_service_required": True,
         }
 
     def materialize_latest(
@@ -112,11 +107,11 @@ class BrainMediumImpactGovernanceService:
             }
         now = time.time()
         autonomy_guard = self._autonomy_guard(readiness=readiness or {}, allow_tighten_low_health=allow_tighten_low_health)
-        items = [self._materialize_eval(evaluation=item, now=now, autonomy_guard=autonomy_guard) for item in evals[:limit]]
+        items = [self._materialize_eval(evaluation=item, now=now, autonomy_guard=autonomy_guard, persist_candidate=persist) for item in evals[:limit]]
         if persist:
             self._persist(items)
         return {
-            "ok": any(item.get("status") == "suggestion_materialized" for item in items),
+            "ok": any(item.get("status") == "candidate_materialized" for item in items),
             "schema_version": "brain_medium_impact_governance_run.v1",
             "status": "materialized",
             "item_count": len(items),
@@ -137,7 +132,7 @@ class BrainMediumImpactGovernanceService:
                 conn,
                 """
                 SELECT governance_id, plan_id, eval_id, governance_action, scope_type,
-                       scope_key, status, suggestion_id, evidence_score,
+                       scope_key, status, candidate_id, suggestion_id, evidence_score,
                        critic_verdict, comparison_verdict, risk_verdict_json,
                        decision_policy_json, rollback_plan_json, posterior_refs_json,
                        autonomy_guard_json, boundary_json, created_at, updated_at
@@ -176,11 +171,18 @@ class BrainMediumImpactGovernanceService:
             "latest_created_at": max(_safe_float(item.get("created_at")) for item in items),
             "statuses": sorted({str(item.get("status") or "") for item in items}),
             "medium_impact_governance": True,
+            "governance_candidates": BrainGovernanceCandidateService(self.db_path).status(limit=limit),
         }
 
-    def _materialize_eval(self, *, evaluation: dict[str, Any], now: float, autonomy_guard: dict[str, Any]) -> dict[str, Any]:
+    def _materialize_eval(
+        self,
+        *,
+        evaluation: dict[str, Any],
+        now: float,
+        autonomy_guard: dict[str, Any],
+        persist_candidate: bool,
+    ) -> dict[str, Any]:
         plan = self._load_plan(str(evaluation.get("plan_id") or ""))
-        scope = dict(plan.get("scope") or {})
         mapped = self._map_action(evaluation=evaluation, plan=plan)
         evidence_score = _safe_float(evaluation.get("coverage_score"))
         critic_verdict = str(plan.get("critic_verdict") or "")
@@ -203,6 +205,7 @@ class BrainMediumImpactGovernanceService:
             },
         ).to_dict()
         status = "blocked_by_evidence"
+        candidate_id = ""
         suggestion_id = ""
         if critic_verdict == "reject":
             status = "blocked_by_critic"
@@ -211,23 +214,50 @@ class BrainMediumImpactGovernanceService:
         elif not bool(risk_verdict.get("allowed")):
             status = "blocked_by_risk"
         else:
-            suggestion_id = f"brain_p4_{uuid.uuid4().hex[:16]}"
-            self._insert_policy_suggestion(
-                suggestion_id=suggestion_id,
-                mapped=mapped,
+            candidate = BrainGovernanceCandidateService(self.db_path).create_candidate(
+                candidate_id=f"brain_candidate_{uuid.uuid4().hex[:16]}",
+                source_agent="v16_brain",
+                source_kind="brain_medium_impact_governance",
+                source_ref_type="brain_action_plan_eval",
+                source_ref_id=str(evaluation.get("eval_id") or ""),
+                proposal_stage="governance_ready",
+                capability_scope="medium_impact_governance",
+                scope_type=mapped["scope_type"],
+                scope_key=mapped["scope_key"],
+                action=mapped["policy_action"],
                 confidence=max(0.1, min(0.95, evidence_score)),
-                evidence={
-                    "schema_version": "brain_medium_impact_policy_suggestion_evidence.v1",
+                evidence_score=evidence_score,
+                risk_class="medium",
+                max_impact="medium_impact",
+                expected_effect=evaluation.get("comparison") or {},
+                evidence_refs={
                     "plan_id": evaluation.get("plan_id", ""),
                     "eval_id": evaluation.get("eval_id", ""),
-                    "comparison_verdict": comparison_verdict,
-                    "decision_policy_preview": decision_policy,
-                    "risk_verdict": risk_verdict,
-                    "boundary": self.boundary(),
+                    "posterior": evaluation.get("evidence_refs") or {},
                 },
+                counter_evidence_refs=dict(plan.get("counter_evidence_refs") or {}),
+                risk_verdict=risk_verdict,
+                decision_policy=decision_policy,
+                rollback_plan=self._rollback_plan(mapped),
+                lineage={
+                    "schema_version": "brain_medium_impact_candidate_lineage.v1",
+                    "phase": "v16_phase4_medium_impact_governance",
+                    "plan_id": evaluation.get("plan_id", ""),
+                    "eval_id": evaluation.get("eval_id", ""),
+                    "critic_verdict": critic_verdict,
+                    "comparison_verdict": comparison_verdict,
+                    "mapped_action": mapped,
+                    "bridge": {
+                        "policy_suggestion_direct_write": False,
+                        "manual_bridge_required": True,
+                    },
+                },
+                expires_at=now + 14 * 86400,
                 now=now,
+                persist=persist_candidate,
             )
-            status = "suggestion_materialized"
+            candidate_id = str(candidate.get("candidate_id") or "")
+            status = "candidate_materialized"
         return {
             "governance_id": f"brain_p4_gov_{uuid.uuid4().hex[:16]}",
             "schema_version": "brain_medium_impact_governance.v1",
@@ -237,6 +267,7 @@ class BrainMediumImpactGovernanceService:
             "scope_type": mapped["scope_type"],
             "scope_key": mapped["scope_key"],
             "status": status,
+            "candidate_id": candidate_id,
             "suggestion_id": suggestion_id,
             "evidence_score": evidence_score,
             "critic_verdict": critic_verdict,
@@ -309,8 +340,10 @@ class BrainMediumImpactGovernanceService:
     def _rollback_plan(mapped: dict[str, str]) -> dict[str, Any]:
         return {
             "schema_version": "brain_medium_impact_rollback_plan.v1",
-            "policy_suggestion_only": True,
+            "policy_suggestion_only": False,
+            "candidate_lane_only": True,
             "runtime_mutation": False,
+            "future_submit_requires_manual_bridge": True,
             "future_apply_requires_runtime_snapshot": True,
             "future_apply_requires_release_evidence": True,
             "future_apply_requires_rollback_json": True,
@@ -328,42 +361,8 @@ class BrainMediumImpactGovernanceService:
             "allow_tighten_low_health": bool(allow_tighten_low_health),
             "should_tighten": should_tighten,
             "tighten_applied": False,
-            "reason": "p4_materializes_suggestions_only",
+            "reason": "p4_materializes_governance_candidates_only",
         }
-
-    def _insert_policy_suggestion(
-        self,
-        *,
-        suggestion_id: str,
-        mapped: dict[str, str],
-        confidence: float,
-        evidence: dict[str, Any],
-        now: float,
-    ) -> None:
-        conn = _connect(self.db_path)
-        try:
-            _execute(
-                conn,
-                """
-                INSERT INTO policy_suggestion
-                (suggestion_id, scope_type, scope_key, action, confidence,
-                 reason, evidence_json, status, reviewed_at, review_note, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', 0, '', ?)
-                """,
-                (
-                    suggestion_id,
-                    mapped["scope_type"],
-                    mapped["scope_key"],
-                    mapped["policy_action"],
-                    confidence,
-                    "v16_phase4_medium_impact_governance_candidate",
-                    _dumps(evidence),
-                    now,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
 
     def _load_plan(self, plan_id: str) -> dict[str, Any]:
         if not plan_id:
@@ -373,7 +372,7 @@ class BrainMediumImpactGovernanceService:
             row = _execute(
                 conn,
                 """
-                SELECT plan_id, critic_verdict, scope_json
+                SELECT plan_id, critic_verdict, scope_json, validation_refs_json
                 FROM brain_action_plan
                 WHERE plan_id = ?
                 LIMIT 1
@@ -386,6 +385,7 @@ class BrainMediumImpactGovernanceService:
                 "plan_id": str(row["plan_id"] or ""),
                 "critic_verdict": str(row["critic_verdict"] or ""),
                 "scope": _loads(row["scope_json"], {}),
+                "counter_evidence_refs": (_loads(row["validation_refs_json"], {}) or {}).get("counter_evidence_refs", {}),
             }
         finally:
             conn.close()
@@ -400,11 +400,11 @@ class BrainMediumImpactGovernanceService:
                     """
                     INSERT INTO brain_medium_impact_governance
                     (governance_id, plan_id, eval_id, governance_action,
-                     scope_type, scope_key, status, suggestion_id, evidence_score,
+                     scope_type, scope_key, status, candidate_id, suggestion_id, evidence_score,
                      critic_verdict, comparison_verdict, risk_verdict_json,
                      decision_policy_json, rollback_plan_json, posterior_refs_json,
                      autonomy_guard_json, boundary_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item["governance_id"],
@@ -414,6 +414,7 @@ class BrainMediumImpactGovernanceService:
                         item.get("scope_type", ""),
                         item.get("scope_key", ""),
                         item.get("status", ""),
+                        item.get("candidate_id", ""),
                         item.get("suggestion_id", ""),
                         _safe_float(item.get("evidence_score")),
                         item.get("critic_verdict", ""),
@@ -443,6 +444,7 @@ class BrainMediumImpactGovernanceService:
             "scope_type": str(row["scope_type"] or ""),
             "scope_key": str(row["scope_key"] or ""),
             "status": str(row["status"] or ""),
+            "candidate_id": str(row["candidate_id"] or ""),
             "suggestion_id": str(row["suggestion_id"] or ""),
             "evidence_score": _safe_float(row["evidence_score"]),
             "critic_verdict": str(row["critic_verdict"] or ""),

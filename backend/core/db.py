@@ -869,6 +869,7 @@ CREATE TABLE IF NOT EXISTS brain_medium_impact_governance (
     scope_type TEXT DEFAULT '',
     scope_key TEXT DEFAULT '',
     status TEXT DEFAULT '',
+    candidate_id TEXT DEFAULT '',
     suggestion_id TEXT DEFAULT '',
     evidence_score REAL NOT NULL DEFAULT 0.0,
     critic_verdict TEXT DEFAULT '',
@@ -879,6 +880,36 @@ CREATE TABLE IF NOT EXISTS brain_medium_impact_governance (
     posterior_refs_json TEXT NOT NULL DEFAULT '{}',
     autonomy_guard_json TEXT NOT NULL DEFAULT '{}',
     boundary_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS brain_governance_candidate (
+    candidate_id TEXT PRIMARY KEY,
+    source_agent TEXT DEFAULT '',
+    source_kind TEXT DEFAULT '',
+    source_ref_type TEXT DEFAULT '',
+    source_ref_id TEXT DEFAULT '',
+    proposal_stage TEXT DEFAULT 'brain_candidate',
+    capability_scope TEXT DEFAULT '',
+    scope_type TEXT DEFAULT '',
+    scope_key TEXT DEFAULT '',
+    action TEXT DEFAULT '',
+    confidence REAL DEFAULT 0.0,
+    evidence_score REAL DEFAULT 0.0,
+    risk_class TEXT DEFAULT '',
+    max_impact TEXT DEFAULT '',
+    expected_effect_json TEXT NOT NULL DEFAULT '{}',
+    evidence_refs_json TEXT NOT NULL DEFAULT '{}',
+    counter_evidence_refs_json TEXT NOT NULL DEFAULT '{}',
+    risk_verdict_json TEXT NOT NULL DEFAULT '{}',
+    decision_policy_json TEXT NOT NULL DEFAULT '{}',
+    rollback_plan_json TEXT NOT NULL DEFAULT '{}',
+    lineage_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT DEFAULT 'active',
+    submitted_suggestion_id TEXT DEFAULT '',
+    submitted_at REAL DEFAULT 0.0,
+    expires_at REAL DEFAULT 0.0,
     created_at REAL NOT NULL DEFAULT 0.0,
     updated_at REAL NOT NULL DEFAULT 0.0
 );
@@ -1204,6 +1235,11 @@ CREATE INDEX IF NOT EXISTS idx_brain_low_impact_execution_status ON brain_low_im
 CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_created ON brain_medium_impact_governance(created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_plan ON brain_medium_impact_governance(plan_id, eval_id);
 CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_scope ON brain_medium_impact_governance(scope_type, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_candidate ON brain_medium_impact_governance(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_created ON brain_governance_candidate(created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_stage ON brain_governance_candidate(proposal_stage, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_scope ON brain_governance_candidate(scope_type, scope_key, action);
+CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_source ON brain_governance_candidate(source_agent, source_kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_created ON brain_live_ready_guardrail(created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_status ON brain_live_ready_guardrail(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_autonomous_learning_sample_type ON autonomous_learning_sample(sample_type, label_status, event_ts);

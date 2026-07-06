@@ -7,6 +7,7 @@ from backend.services.brain_action_planner import BrainActionPlannerService
 from backend.services.brain_low_impact_executor import BrainLowImpactExecutorService
 from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
 from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
+from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.brain_memory import BrainMemoryService
 from backend.services.brain_state import BrainStateService
 from backend.services.incident_controls import RuntimeIncidentControlService
@@ -132,6 +133,8 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["frontend_contract"]["v16_brain_low_impact_execution_run"] == "/api/ops/brain/low-impact-executions/run"
     assert result["frontend_contract"]["v16_brain_medium_impact_governance"] == "/api/ops/brain/medium-impact-governance"
     assert result["frontend_contract"]["v16_brain_medium_impact_governance_materialize"] == "/api/ops/brain/medium-impact-governance/materialize"
+    assert result["frontend_contract"]["v16_brain_governance_candidates"] == "/api/ops/brain/governance-candidates"
+    assert result["frontend_contract"]["v16_brain_governance_candidate_submit"] == "/api/ops/brain/governance-candidates/{candidate_id}/submit"
     assert result["frontend_contract"]["v16_brain_live_ready_guardrails"] == "/api/ops/brain/live-ready-guardrails"
     assert result["frontend_contract"]["v16_brain_live_ready_guardrail_evaluate"] == "/api/ops/brain/live-ready-guardrails/evaluate"
     assert result["frontend_contract"]["v16_brain_live_ready_guardrail_tighten"] == "/api/ops/brain/live-ready-guardrails/tighten"
@@ -141,7 +144,9 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["v16"]["control_plane_boundaries"]["shadow_action_plans_record_only"] is True
     assert result["v16"]["control_plane_boundaries"]["shadow_action_evals_record_only"] is True
     assert result["v16"]["control_plane_boundaries"]["low_impact_execution_requires_risk_policy"] is True
-    assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_suggestions_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_candidates_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_suggestions_only"] is False
+    assert result["v16"]["control_plane_boundaries"]["medium_impact_policy_suggestion_bridge_manual_only"] is True
     assert result["v16"]["control_plane_boundaries"]["live_ready_guardrails_only"] is True
     assert result["v16"]["control_plane_boundaries"]["live_ready_tightening_only"] is True
     assert result["brain_state"]["ok"] is True
@@ -154,6 +159,8 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["brain_low_impact_executions"]["low_impact_only"] is True
     assert result["brain_medium_impact_governance"]["schema_version"] == "brain_medium_impact_governance_readiness.v1"
     assert result["brain_medium_impact_governance"]["medium_impact_governance"] is True
+    assert result["brain_governance_candidates"]["schema_version"] == "brain_governance_candidate_readiness.v1"
+    assert result["brain_governance_candidates"]["candidate_lane_isolated"] is True
     assert result["brain_live_ready_guardrails"]["schema_version"] == "brain_live_ready_guardrail_readiness.v1"
     assert result["brain_live_ready_guardrails"]["live_ready_guardrails"] is True
 
@@ -426,7 +433,7 @@ def test_brain_low_impact_executor_runs_replay_job_through_risk_policy(tmp_path)
     assert status["low_impact_only"] is True
 
 
-def test_brain_medium_impact_governance_materializes_policy_suggestions_only(tmp_path):
+def test_brain_medium_impact_governance_materializes_governance_candidates_only(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
     conn = connect_sqlite(db_path)
@@ -483,34 +490,124 @@ def test_brain_medium_impact_governance_materializes_policy_suggestions_only(tmp
 
     assert run["schema_version"] == "brain_medium_impact_governance_run.v1"
     assert run["ok"] is True
-    assert any(item["status"] == "suggestion_materialized" for item in run["items"])
-    assert all(item["boundary"]["materializes_policy_suggestions_only"] is True for item in run["items"])
+    assert any(item["status"] == "candidate_materialized" for item in run["items"])
+    assert all(item["boundary"]["materializes_governance_candidates_only"] is True for item in run["items"])
+    assert all(item["boundary"]["does_not_write_policy_suggestion_directly"] is True for item in run["items"])
     assert all(item["rollback_plan"]["runtime_mutation"] is False for item in run["items"])
     update_items = [item for item in run["items"] if item["governance_action"] == "update_weight"]
     assert update_items
     assert update_items[0]["decision_policy"]["required"] is True
     assert update_items[0]["decision_policy"]["applied"] is False
+    assert update_items[0]["candidate_id"].startswith("brain_candidate_")
 
     conn = connect_sqlite(db_path, read_only=True)
     try:
-        suggestion_rows = conn.execute(
-            "SELECT action, status FROM policy_suggestion ORDER BY created_at"
+        candidate_rows = conn.execute(
+            "SELECT action, proposal_stage, status FROM brain_governance_candidate ORDER BY created_at"
         ).fetchall()
+        suggestion_rows = conn.execute("SELECT action, status FROM policy_suggestion ORDER BY created_at").fetchall()
     finally:
         conn.close()
-    assert suggestion_rows
-    assert all(row[1] == "proposed" for row in suggestion_rows)
-    assert "update_weight" in {row[0] for row in suggestion_rows}
+    assert candidate_rows
+    assert all(row[1] == "governance_ready" for row in candidate_rows)
+    assert all(row[2] == "active" for row in candidate_rows)
+    assert "update_weight" in {row[0] for row in candidate_rows}
+    assert suggestion_rows == []
 
     latest = BrainMediumImpactGovernanceService(db_path).latest_governance(limit=10)
     assert latest["schema_version"] == "brain_medium_impact_governance_list.v1"
     assert latest["ok"] is True
     assert latest["items"][0]["boundary"]["does_not_apply_factor_weights"] is True
+    assert latest["items"][0]["candidate_id"]
 
     status = BrainMediumImpactGovernanceService(db_path).status(limit=10)
     assert status["schema_version"] == "brain_medium_impact_governance_readiness.v1"
     assert status["ok"] is True
     assert status["medium_impact_governance"] is True
+    assert status["governance_candidates"]["candidate_lane_isolated"] is True
+
+
+def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    service = BrainGovernanceCandidateService(db_path)
+    blocked = service.create_candidate(
+        candidate_id="candidate_factor_update",
+        source_agent="v16_brain",
+        source_kind="brain_medium_impact_governance",
+        source_ref_type="brain_action_plan_eval",
+        source_ref_id="eval_factor",
+        proposal_stage="governance_ready",
+        capability_scope="medium_impact_governance",
+        scope_type="factor",
+        scope_key="alpha_weight_policy",
+        action="update_weight",
+        confidence=0.7,
+        evidence_score=0.75,
+        risk_class="medium",
+        max_impact="medium_impact",
+        risk_verdict={"allowed": True, "reason": "test"},
+    )
+    blocked_result = service.submit_candidate_to_policy_suggestion(blocked["candidate_id"], actor="test")
+    assert blocked_result["ok"] is False
+    assert blocked_result["reason"] == "unsupported_legacy_governor_surface:factor/update_weight"
+
+    ready = service.create_candidate(
+        candidate_id="candidate_supervisor_ready",
+        source_agent="v16_brain",
+        source_kind="brain_medium_impact_governance",
+        source_ref_type="brain_action_plan_eval",
+        source_ref_id="eval_supervisor",
+        proposal_stage="governance_ready",
+        capability_scope="medium_impact_governance",
+        scope_type="supervisor_template",
+        scope_key="position_supervisor",
+        action="switch_position_supervisor_template",
+        confidence=0.8,
+        evidence_score=0.75,
+        risk_class="medium",
+        max_impact="medium_impact",
+        expected_effect={
+            "replay": {"replay_run_id": "replay_ready", "status": "completed"},
+            "supervisor": {"trace_count": 3, "risk_allowed_coverage": 1.0},
+        },
+        evidence_refs={"posterior": {"replay_report": "replay_ready", "position_supervisor_trace": ["trace_1"]}},
+        risk_verdict={"allowed": True, "reason": "test"},
+        lineage={"mapped_action": {"target_template_id": "position_supervisor:conservative.v1"}},
+    )
+    submit_result = service.submit_candidate_to_policy_suggestion(ready["candidate_id"], actor="test")
+
+    assert submit_result["ok"] is True
+    assert submit_result["status"] == "submitted_to_policy_suggestion"
+    assert submit_result["suggestion_id"].startswith("brain_bridge_")
+
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        suggestion = conn.execute(
+            "SELECT scope_type, scope_key, action, status, evidence_json FROM policy_suggestion WHERE suggestion_id=?",
+            (submit_result["suggestion_id"],),
+        ).fetchone()
+        candidate = conn.execute(
+            "SELECT proposal_stage, status, submitted_suggestion_id FROM brain_governance_candidate WHERE candidate_id='candidate_supervisor_ready'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert suggestion is not None
+    assert suggestion[0] == "position_supervisor_template"
+    assert suggestion[1] == "position_supervisor:conservative.v1"
+    assert suggestion[2] == "switch_position_supervisor_template"
+    assert suggestion[3] == "proposed"
+    assert "candidate_supervisor_ready" in suggestion[4]
+    assert candidate[0] == "submitted_to_policy_suggestion"
+    assert candidate[1] == "submitted"
+    assert candidate[2] == submit_result["suggestion_id"]
 
 
 def test_brain_live_ready_guardrail_locks_when_evidence_is_complete(tmp_path):

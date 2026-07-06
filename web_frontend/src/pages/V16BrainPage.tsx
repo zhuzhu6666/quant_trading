@@ -82,6 +82,116 @@ function riskTone(value: string): Tone {
   return "mute";
 }
 
+function displayStage(value: string): string {
+  const normalized = value.toLowerCase();
+  const labels: Record<string, string> = {
+    phase5_live_ready_guardrails: "实盘护栏",
+    v16_phase1_read_only_brain: "只读认知",
+    v16_phase2_shadow_brain: "影子规划",
+    v16_phase2_shadow_brain_eval: "后验评价",
+    v16_phase3_low_impact_autonomous_brain: "低影响执行",
+    v16_phase4_medium_impact_governance: "治理候选",
+    v16_phase5_live_ready_guardrails: "实盘护栏",
+  };
+  return labels[normalized] || value.replace(/^v\d+_/, "").replaceAll("_", " ");
+}
+
+function displayAction(value: string): string {
+  const labels: Record<string, string> = {
+    shadow_supervisor_template_review: "Supervisor 模板复核",
+    shadow_factor_weight_review: "因子权重复核",
+    shadow_context_policy_review: "Context Policy 复核",
+    shadow_parameter_template_review: "参数模板复核",
+    run_replay_job: "只读回放",
+    update_weight: "权重候选",
+    switch_parameter_template: "参数模板候选",
+    enable_context_policy: "Context Policy 候选",
+    switch_position_supervisor_template: "Supervisor 模板候选",
+    observe: "观察",
+    tighten_to_no_new_risk: "收紧到不增风险",
+    tighten_to_only_close: "收紧到仅平仓",
+    freeze_autonomy: "冻结自治",
+  };
+  return labels[value] || value.replaceAll("_", " ");
+}
+
+function displayValue(value: string): string {
+  const normalized = value.toLowerCase();
+  const labels: Record<string, string> = {
+    aligned: "已对齐",
+    allow: "允许",
+    active: "活跃",
+    block: "阻断",
+    blocked: "已阻断",
+    candidate_materialized: "候选已生成",
+    caution: "谨慎",
+    divergent: "有偏差",
+    frozen: "冻结",
+    governance_ready: "治理就绪",
+    high: "高",
+    live_ready: "实盘就绪",
+    "live-ready": "实盘就绪",
+    locked: "已锁定",
+    low: "低",
+    medium: "中",
+    medium_impact: "中影响",
+    missing: "缺失",
+    negative: "负面",
+    neutral: "中性",
+    no_new_risk: "不增风险",
+    none_shadow_only: "仅影子无影响",
+    normal: "正常",
+    observation_only: "仅观察",
+    ok: "正常",
+    only_close: "仅平仓",
+    pass: "通过",
+    positive: "正面",
+    posterior: "后验",
+    ready: "就绪",
+    reject: "拒绝",
+    shadow: "影子",
+    shadow_recorded: "影子已记录",
+    submitted: "已提交",
+    submitted_to_policy_suggestion: "已提交建议队列",
+    supportive: "支持",
+    suggestion_materialized: "建议已生成",
+    unknown: "未知",
+    warn: "注意",
+  };
+  return labels[normalized] || value.replace(/^v\d+_/, "").replace(/\.v\d+$/, "").replaceAll("_", " ");
+}
+
+function displayContract(value: string): string {
+  const normalized = value.toLowerCase();
+  const labels: Record<string, string> = {
+    backend_readiness: "后端就绪契约",
+    v15_readiness_contract: "运行中枢就绪契约",
+    v16_readiness_contract: "自治大脑就绪契约",
+    brain_state_snapshot: "大脑状态快照",
+    brain_memory_retrieval: "记忆检索契约",
+    brain_action_plan_run: "影子计划契约",
+    brain_action_plan_eval_run: "后验评价契约",
+    brain_low_impact_execution_run: "低影响执行契约",
+    brain_medium_impact_governance_run: "治理候选契约",
+    brain_live_ready_guardrail: "实盘护栏契约",
+  };
+  const base = normalized.replace(/\.\d+$/, "").replace(/\.v\d+$/, "");
+  return labels[base] || value.replace(/^v\d+_/, "").replace(/\.v\d+$/, "").replaceAll("_", " ");
+}
+
+function CompactFacts({ facts }: { facts: Array<{ label: string; value: string; tone?: Tone }> }) {
+  return (
+    <div className="brain-compact-facts">
+      {facts.map((fact) => (
+        <span className={`brain-compact-fact brain-compact-${fact.tone || "mute"}`} key={`${fact.label}-${fact.value}`}>
+          <b>{fact.label}</b>
+          {fact.value}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function CompactMetric({ label, value, detail, tone = "mute" }: { label: string; value: string; detail?: string; tone?: Tone }) {
   return (
     <div className={`v15-compact-metric v15-compact-${tone}`}>
@@ -110,15 +220,15 @@ function MemoryList({ items, empty }: { items: unknown[]; empty: string }) {
         const source = pickString(item, ["source_table"], "memory");
         const sourceId = pickString(item, ["source_id"], "");
         const polarity = pickString(item, ["polarity"], "neutral");
+        const summary = pickString(item, ["text_summary"], source);
+        const meta = `${source} · evidence ${formatDecimal(pickNumber(item, ["evidence_score"], 0), 2)} · similarity ${formatDecimal(pickNumber(item, ["similarity_score"], 0), 2)}`;
         return (
-          <div className="v15-list-row" key={`${source}-${sourceId}-${index}`}>
+          <div className="v15-list-row brain-memory-row" key={`${source}-${sourceId}-${index}`}>
             <div>
-              <strong>{pickString(item, ["text_summary"], source)}</strong>
-              <span>
-                {source} · evidence {formatDecimal(pickNumber(item, ["evidence_score"], 0), 2)} · similarity {formatDecimal(pickNumber(item, ["similarity_score"], 0), 2)}
-              </span>
+              <strong title={summary}>{summary}</strong>
+              <span title={meta}>{meta}</span>
             </div>
-            <StatusPill status={polarity} tone={polarity === "negative" ? "bad" : polarity === "positive" ? "ok" : "mute"} />
+            <StatusPill status={displayValue(polarity)} tone={polarity === "negative" ? "bad" : polarity === "positive" ? "ok" : "mute"} />
           </div>
         );
       })}
@@ -140,7 +250,7 @@ function HypothesisList({ items }: { items: unknown[] }) {
                 <strong>{pickString(item, ["scope"], "scope")}</strong>
                 <span>{pickString(item, ["claim"], "--")}</span>
               </div>
-              <StatusPill status={risk} tone={riskTone(risk)} />
+              <StatusPill status={displayValue(risk)} tone={riskTone(risk)} />
             </div>
             <div className="v15-mini-grid v15-mini-grid-tight">
               <CompactMetric label="置信度" value={`${formatDecimal(scorePct(pickNumber(item, ["confidence"], 0)), 1)}%`} tone="mute" />
@@ -159,7 +269,7 @@ function HypothesisList({ items }: { items: unknown[] }) {
 }
 
 function ActionPlanList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无 shadow action plan</div>;
+  if (!items.length) return <div className="empty-state-small">暂无影子计划</div>;
   return (
     <div className="brain-action-plan-list">
       {items.slice(0, 8).map((raw, index) => {
@@ -170,21 +280,21 @@ function ActionPlanList({ items }: { items: unknown[] }) {
         const risk = pickString(item, ["risk_class"], "unknown");
         const requiredServices = pickArray(item, ["required_services"]).map(String);
         return (
-          <article className="brain-action-plan" key={`${pickString(item, ["plan_id"], "plan")}-${index}`}>
+          <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["plan_id"], "plan")}-${index}`}>
             <div className="brain-hypothesis-head">
               <div>
-                <strong>{pickString(item, ["action_type"], "action_plan")}</strong>
+                <strong>{displayAction(pickString(item, ["action_type"], "action_plan"))}</strong>
                 <span>
                   {pickString(scope, ["scope_type"], "scope")} · {pickString(scope, ["scope_key"], "--")}
                 </span>
               </div>
-              <StatusPill status={status} tone={status === "shadow_recorded" ? "ok" : "warn"} />
+              <StatusPill status={displayValue(status)} tone={status === "shadow_recorded" ? "ok" : "warn"} />
             </div>
-            <div className="v15-mini-grid v15-mini-grid-tight">
-              <CompactMetric label="Critic" value={verdict} tone={verdict === "pass" ? "ok" : verdict === "reject" ? "bad" : "warn"} />
-              <CompactMetric label="风险级别" value={risk} tone={riskTone(risk)} />
-              <CompactMetric label="最大影响" value={pickString(item, ["max_impact"], "none_shadow_only")} tone="ok" />
-            </div>
+            <CompactFacts facts={[
+              { label: "Critic", value: displayValue(verdict), tone: verdict === "pass" ? "ok" : verdict === "reject" ? "bad" : "warn" },
+              { label: "风险", value: displayValue(risk), tone: riskTone(risk) },
+              { label: "影响", value: displayValue(pickString(item, ["max_impact"], "none_shadow_only")), tone: "ok" },
+            ]} />
             <div className="brain-plan-services">
               {requiredServices.slice(0, 4).map((service) => (
                 <span key={service}>{service}</span>
@@ -198,7 +308,7 @@ function ActionPlanList({ items }: { items: unknown[] }) {
 }
 
 function EvaluationList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无 shadow evaluation</div>;
+  if (!items.length) return <div className="empty-state-small">暂无后验评价</div>;
   return (
     <div className="brain-action-plan-list">
       {items.slice(0, 8).map((raw, index) => {
@@ -208,20 +318,20 @@ function EvaluationList({ items }: { items: unknown[] }) {
         const verdict = pickString(item, ["comparison_verdict"], "unknown");
         const coverage = scorePct(pickNumber(item, ["coverage_score"], 0));
         return (
-          <article className="brain-action-plan" key={`${pickString(item, ["eval_id"], "eval")}-${index}`}>
+          <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["eval_id"], "eval")}-${index}`}>
             <div className="brain-hypothesis-head">
               <div>
-                <strong>{pickString(item, ["action_type"], "action_plan_eval")}</strong>
+                <strong>{displayAction(pickString(item, ["action_type"], "action_plan_eval"))}</strong>
                 <span>{pickString(item, ["scope_type"], "scope")} · {pickString(item, ["status"], "needs_evidence")}</span>
               </div>
-              <StatusPill status={verdict} tone={verdict === "supportive" ? "ok" : verdict === "caution" ? "warn" : "mute"} />
+              <StatusPill status={displayValue(verdict)} tone={verdict === "supportive" ? "ok" : verdict === "caution" ? "warn" : "mute"} />
             </div>
-            <div className="v15-mini-grid v15-mini-grid-tight">
-              <CompactMetric label="覆盖率" value={`${formatDecimal(coverage, 1)}%`} tone={coverage >= 50 ? "ok" : "warn"} />
-              <CompactMetric label="Replay" value={pickBoolean(presence, ["replay_report"], false) ? "yes" : "no"} tone={boolTone(pickBoolean(presence, ["replay_report"], false))} />
-              <CompactMetric label="Outcome" value={pickBoolean(presence, ["trade_outcome_review"], false) ? "yes" : "no"} tone={boolTone(pickBoolean(presence, ["trade_outcome_review"], false))} />
-              <CompactMetric label="Supervisor" value={pickBoolean(presence, ["position_supervisor_trace"], false) ? "yes" : "no"} tone={boolTone(pickBoolean(presence, ["position_supervisor_trace"], false))} />
-            </div>
+            <CompactFacts facts={[
+              { label: "覆盖", value: `${formatDecimal(coverage, 1)}%`, tone: coverage >= 50 ? "ok" : "warn" },
+              { label: "Replay", value: pickBoolean(presence, ["replay_report"], false) ? "yes" : "no", tone: boolTone(pickBoolean(presence, ["replay_report"], false)) },
+              { label: "Outcome", value: pickBoolean(presence, ["trade_outcome_review"], false) ? "yes" : "no", tone: boolTone(pickBoolean(presence, ["trade_outcome_review"], false)) },
+              { label: "Supervisor", value: pickBoolean(presence, ["position_supervisor_trace"], false) ? "yes" : "no", tone: boolTone(pickBoolean(presence, ["position_supervisor_trace"], false)) },
+            ]} />
             <div className="brain-ref-row">
               <span>delta {formatDecimal(pickNumber(comparison, ["learning_effects.avg_delta_reward"], 0), 3)}</span>
               <span>avg pnl {formatDecimal(pickNumber(comparison, ["trade_outcomes.avg_pnl"], 0), 2)}</span>
@@ -245,20 +355,20 @@ function ExecutionList({ items }: { items: unknown[] }) {
         const result = asRecord(pick(item, ["result"]));
         const posterior = asRecord(pick(item, ["posterior_monitor"]));
         return (
-          <article className="brain-action-plan" key={`${pickString(item, ["execution_id"], "execution")}-${index}`}>
+          <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["execution_id"], "execution")}-${index}`}>
             <div className="brain-hypothesis-head">
               <div>
-                <strong>{pickString(item, ["execution_action"], "low_impact_action")}</strong>
+                <strong>{displayAction(pickString(item, ["execution_action"], "low_impact_action"))}</strong>
                 <span>{pickString(item, ["action_type"], "action_plan")} · {formatTime(pick(item, ["created_at"]))}</span>
               </div>
-              <StatusPill status={status} tone={status.includes("blocked") ? "bad" : status.includes("downgraded") ? "warn" : "ok"} />
+              <StatusPill status={displayValue(status)} tone={status.includes("blocked") ? "bad" : status.includes("downgraded") ? "warn" : "ok"} />
             </div>
-            <div className="v15-mini-grid v15-mini-grid-tight">
-              <CompactMetric label="证据分" value={`${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`} tone="ok" />
-              <CompactMetric label="RiskPolicy" value={pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"} tone={boolTone(pickBoolean(riskVerdict, ["allowed"], false))} />
-              <CompactMetric label="Critic" value={pickString(item, ["critic_verdict"], "unknown")} tone={pickString(item, ["critic_verdict"], "") === "reject" ? "bad" : "warn"} />
-              <CompactMetric label="后验" value={pickString(item, ["comparison_verdict"], "unknown")} tone={pickString(item, ["comparison_verdict"], "") === "caution" ? "warn" : "ok"} />
-            </div>
+            <CompactFacts facts={[
+              { label: "证据", value: `${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`, tone: "ok" },
+              { label: "RiskPolicy", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
+              { label: "Critic", value: displayValue(pickString(item, ["critic_verdict"], "unknown")), tone: pickString(item, ["critic_verdict"], "") === "reject" ? "bad" : "warn" },
+              { label: "后验", value: displayValue(pickString(item, ["comparison_verdict"], "unknown")), tone: pickString(item, ["comparison_verdict"], "") === "caution" ? "warn" : "ok" },
+            ]} />
             <div className="brain-ref-row">
               <span>{pickString(result, ["replay_run_id"], "no replay")}</span>
               <span>bad posterior {pickBoolean(posterior, ["bad_posterior"], false) ? "yes" : "no"}</span>
@@ -272,7 +382,7 @@ function ExecutionList({ items }: { items: unknown[] }) {
 }
 
 function GovernanceList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无 medium-impact governance</div>;
+  if (!items.length) return <div className="empty-state-small">暂无治理候选</div>;
   return (
     <div className="brain-action-plan-list">
       {items.slice(0, 8).map((raw, index) => {
@@ -281,22 +391,23 @@ function GovernanceList({ items }: { items: unknown[] }) {
         const riskVerdict = asRecord(pick(item, ["risk_verdict"]));
         const decisionPolicy = asRecord(pick(item, ["decision_policy"]));
         return (
-          <article className="brain-action-plan" key={`${pickString(item, ["governance_id"], "governance")}-${index}`}>
+          <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["governance_id"], "governance")}-${index}`}>
             <div className="brain-hypothesis-head">
               <div>
-                <strong>{pickString(item, ["governance_action"], "governance_action")}</strong>
+                <strong>{displayAction(pickString(item, ["governance_action"], "governance_action"))}</strong>
                 <span>{pickString(item, ["scope_type"], "scope")} · {pickString(item, ["scope_key"], "--")}</span>
               </div>
-              <StatusPill status={status} tone={status === "suggestion_materialized" ? "ok" : status.includes("blocked") ? "warn" : "mute"} />
+              <StatusPill status={displayValue(status)} tone={status === "candidate_materialized" ? "ok" : status.includes("blocked") ? "warn" : "mute"} />
             </div>
-            <div className="v15-mini-grid v15-mini-grid-tight">
-              <CompactMetric label="证据分" value={`${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`} tone="ok" />
-              <CompactMetric label="RiskPolicy" value={pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"} tone={boolTone(pickBoolean(riskVerdict, ["allowed"], false))} />
-              <CompactMetric label="DecisionPolicy" value={pickBoolean(decisionPolicy, ["required"], false) ? "preview" : "n/a"} tone="mute" />
-              <CompactMetric label="建议" value={pickString(item, ["suggestion_id"], "--")} tone={pickString(item, ["suggestion_id"], "") ? "ok" : "mute"} />
-            </div>
+            <CompactFacts facts={[
+              { label: "证据", value: `${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`, tone: "ok" },
+              { label: "RiskPolicy", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
+              { label: "DecisionPolicy", value: pickBoolean(decisionPolicy, ["required"], false) ? "preview" : "n/a", tone: "mute" },
+              { label: "候选", value: pickString(item, ["candidate_id"], "--"), tone: pickString(item, ["candidate_id"], "") ? "ok" : "mute" },
+              { label: "建议", value: pickString(item, ["suggestion_id"], "--"), tone: pickString(item, ["suggestion_id"], "") ? "ok" : "mute" },
+            ]} />
             <div className="brain-ref-row">
-              <span>{pickString(item, ["comparison_verdict"], "unknown")}</span>
+              <span>{displayValue(pickString(item, ["comparison_verdict"], "unknown"))}</span>
               <span>{pickString(riskVerdict, ["reason"], "--")}</span>
               <span>runtime mutation {pickBoolean(item, ["rollback_plan.runtime_mutation"], false) ? "yes" : "no"}</span>
             </div>
@@ -322,20 +433,20 @@ function GuardrailList({ items }: { items: unknown[] }) {
         const locked = pickBoolean(lock, ["locked"], false);
         const divergent = pickBoolean(divergence, ["divergence_detected"], false);
         return (
-          <article className="brain-action-plan" key={`${pickString(item, ["guardrail_id"], "guardrail")}-${index}`}>
+          <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["guardrail_id"], "guardrail")}-${index}`}>
             <div className="brain-hypothesis-head">
               <div>
-                <strong>{pickString(recommendation, ["action"], "guardrail")}</strong>
-                <span>{formatTime(pick(item, ["created_at"]))} · {pickString(recommendation, ["target_mode"], "--")}</span>
+                <strong>{displayAction(pickString(recommendation, ["action"], "guardrail"))}</strong>
+                <span>{formatTime(pick(item, ["created_at"]))} · {displayValue(pickString(recommendation, ["target_mode"], "--"))}</span>
               </div>
-              <StatusPill status={status} tone={locked ? "ok" : status.includes("attention") ? "warn" : "mute"} />
+              <StatusPill status={displayValue(status)} tone={locked ? "ok" : status.includes("attention") ? "warn" : "mute"} />
             </div>
-            <div className="v15-mini-grid v15-mini-grid-tight">
-              <CompactMetric label="Capability" value={locked ? "locked" : "blocked"} tone={locked ? "ok" : "warn"} />
-              <CompactMetric label="Divergence" value={pickString(divergence, ["status"], "unknown")} tone={divergent ? "bad" : "ok"} />
-              <CompactMetric label="Incident" value={pickString(incident, ["mode"], "normal")} tone={pickString(incident, ["mode"], "normal") === "normal" ? "ok" : "warn"} />
-              <CompactMetric label="Rollback" value={pickBoolean(rollback, ["rollback_ready"], false) ? "ready" : "missing"} tone={boolTone(pickBoolean(rollback, ["rollback_ready"], false))} />
-            </div>
+            <CompactFacts facts={[
+              { label: "能力", value: displayValue(locked ? "locked" : "blocked"), tone: locked ? "ok" : "warn" },
+              { label: "偏差", value: displayValue(pickString(divergence, ["status"], "unknown")), tone: divergent ? "bad" : "ok" },
+              { label: "事故", value: displayValue(pickString(incident, ["mode"], "normal")), tone: pickString(incident, ["mode"], "normal") === "normal" ? "ok" : "warn" },
+              { label: "回滚", value: displayValue(pickBoolean(rollback, ["rollback_ready"], false) ? "ready" : "missing"), tone: boolTone(pickBoolean(rollback, ["rollback_ready"], false)) },
+            ]} />
             <div className="brain-ref-row">
               <span>broker {pickString(divergence, ["broker_open_count"], "--")}</span>
               <span>local {pickString(divergence, ["local_open_count"], "--")}</span>
@@ -455,12 +566,12 @@ export function V16BrainPage() {
     <section className="dashboard v16-dashboard">
       <div className="dashboard-header">
         <div>
-          <div className="eyebrow">V16 Autonomous Brain</div>
-          <h1>V16 自治大脑</h1>
-          <p>查看世界模型、shadow 计划、posterior 评价、治理建议和实盘前护栏。</p>
+          <div className="eyebrow">Autonomy Brain</div>
+          <h1>自治大脑</h1>
+          <p>查看世界模型、影子计划、后验评价、治理候选和实盘护栏。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={pickString(v16Readiness, ["phase"], "phase5_live_ready_guardrails")} tone="ok" />
+          <StatusPill status={displayStage(pickString(v16Readiness, ["phase"], "phase5_live_ready_guardrails"))} tone="ok" />
           <StatusPill status={readOnly && !affectsTrading ? "交易边界正常" : "边界异常"} tone={readOnly && !affectsTrading ? "ok" : "bad"} />
           <button className="header-refresh" type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>
             <RefreshCw size={15} aria-hidden="true" />
@@ -468,57 +579,57 @@ export function V16BrainPage() {
           </button>
           <button className="header-refresh" type="button" disabled={lowImpactMutation.isPending} onClick={() => lowImpactMutation.mutate()}>
             <Play size={15} aria-hidden="true" />
-            {lowImpactMutation.isPending ? "运行中" : "运行 P3"}
+            {lowImpactMutation.isPending ? "运行中" : "低影响回放"}
           </button>
           <button className="header-refresh" type="button" disabled={mediumImpactMutation.isPending} onClick={() => mediumImpactMutation.mutate()}>
             <ListChecks size={15} aria-hidden="true" />
-            {mediumImpactMutation.isPending ? "生成中" : "运行 P4"}
+            {mediumImpactMutation.isPending ? "生成中" : "生成治理候选"}
           </button>
           <button className="header-refresh" type="button" disabled={liveReadyEvaluateMutation.isPending} onClick={() => liveReadyEvaluateMutation.mutate()}>
             <ShieldCheck size={15} aria-hidden="true" />
-            {liveReadyEvaluateMutation.isPending ? "评估中" : "评估 P5"}
+            {liveReadyEvaluateMutation.isPending ? "评估中" : "护栏评估"}
           </button>
           <button className="header-refresh" type="button" disabled={liveReadyTightenMutation.isPending} onClick={() => liveReadyTightenMutation.mutate("no_new_risk")}>
             <ShieldCheck size={15} aria-hidden="true" />
-            no_new_risk
+            不增风险
           </button>
           <button className="header-refresh" type="button" disabled={liveReadyTightenMutation.isPending} onClick={() => liveReadyTightenMutation.mutate("only_close")}>
             <ShieldCheck size={15} aria-hidden="true" />
-            only_close
+            仅平仓
           </button>
           <button className="header-refresh" type="button" disabled={liveReadyTightenMutation.isPending} onClick={() => liveReadyTightenMutation.mutate("frozen")}>
             <ShieldCheck size={15} aria-hidden="true" />
-            freeze
+            冻结
           </button>
           {refreshMutation.isError ? <span className="error-text small">刷新失败</span> : null}
-          {lowImpactMutation.isError ? <span className="error-text small">P3 失败</span> : null}
-          {mediumImpactMutation.isError ? <span className="error-text small">P4 失败</span> : null}
-          {liveReadyEvaluateMutation.isError ? <span className="error-text small">P5 失败</span> : null}
+          {lowImpactMutation.isError ? <span className="error-text small">低影响回放失败</span> : null}
+          {mediumImpactMutation.isError ? <span className="error-text small">治理候选失败</span> : null}
+          {liveReadyEvaluateMutation.isError ? <span className="error-text small">护栏评估失败</span> : null}
           {liveReadyTightenMutation.isError ? <span className="error-text small">收紧失败</span> : null}
         </div>
       </div>
 
       <div className="stat-grid v15-stat-grid">
-        <StatTile icon={BrainCircuit} label="策略姿态" value={pickString(worldModel, ["strategy_posture"], "unknown")} detail={pickString(worldModel, ["market_regime"], "unknown")} tone={statTone} />
-        <StatTile icon={ShieldCheck} label="Critic" value={criticVerdict} detail={pickString(critic, ["max_allowed_action_scope"], "observe_only")} tone={criticVerdict === "pass" ? "ok" : "warn"} />
+        <StatTile icon={BrainCircuit} label="策略姿态" value={displayValue(pickString(worldModel, ["strategy_posture"], "unknown"))} detail={displayValue(pickString(worldModel, ["market_regime"], "unknown"))} tone={statTone} />
+        <StatTile icon={ShieldCheck} label="Critic" value={displayValue(criticVerdict)} detail={displayValue(pickString(critic, ["max_allowed_action_scope"], "observe_only"))} tone={criticVerdict === "pass" ? "ok" : "warn"} />
         <StatTile icon={Database} label="记忆命中" value={formatDecimal(memoryItems.length, 0)} detail={`负面 ${formatDecimal(negativeMemory.length, 0)} / 反证 ${formatDecimal(counterEvidence.length, 0)}`} tone={negativeMemory.length ? "warn" : "ok"} />
         <StatTile icon={Workflow} label="假设" value={formatDecimal(hypotheses.length, 0)} detail={formatTime(pick(brainState, ["created_at"]))} tone={hypotheses.length ? "ok" : "warn"} />
-        <StatTile icon={ListChecks} label="Action Plans" value={formatDecimal(actionPlans.length, 0)} detail={pickString(actionPlanRun, ["status"], "shadow")} tone={actionPlans.length ? "ok" : "warn"} />
-        <StatTile icon={GitBranch} label="Evaluations" value={formatDecimal(actionPlanEvals.length, 0)} detail={pickString(actionPlanEvalRun, ["status"], "posterior")} tone={actionPlanEvals.length ? "ok" : "warn"} />
-        <StatTile icon={Play} label="P3 Runs" value={formatDecimal(lowImpactExecutions.length, 0)} detail={pickString(lowImpactExecutionRun, ["status"], "low-impact")} tone={lowImpactExecutions.length ? "ok" : "warn"} />
-        <StatTile icon={ListChecks} label="P4 Governance" value={formatDecimal(mediumImpactGovernance.length, 0)} detail={pickString(mediumImpactGovernanceRun, ["status"], "medium-impact")} tone={mediumImpactGovernance.length ? "ok" : "warn"} />
-        <StatTile icon={ShieldCheck} label="P5 Guardrails" value={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "locked" : formatDecimal(liveReadyGuardrails.length, 0)} detail={pickString(liveReadyGuardrailRun, ["status"], pickString(latestGuardrail, ["action_recommendation.target_mode"], "live-ready"))} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
+        <StatTile icon={ListChecks} label="影子计划" value={formatDecimal(actionPlans.length, 0)} detail={displayValue(pickString(actionPlanRun, ["status"], "shadow"))} tone={actionPlans.length ? "ok" : "warn"} />
+        <StatTile icon={GitBranch} label="后验评价" value={formatDecimal(actionPlanEvals.length, 0)} detail={displayValue(pickString(actionPlanEvalRun, ["status"], "posterior"))} tone={actionPlanEvals.length ? "ok" : "warn"} />
+        <StatTile icon={Play} label="低影响执行" value={formatDecimal(lowImpactExecutions.length, 0)} detail={displayValue(pickString(lowImpactExecutionRun, ["status"], "low-impact"))} tone={lowImpactExecutions.length ? "ok" : "warn"} />
+        <StatTile icon={ListChecks} label="治理候选" value={formatDecimal(mediumImpactGovernance.length, 0)} detail={displayValue(pickString(mediumImpactGovernanceRun, ["status"], "medium-impact"))} tone={mediumImpactGovernance.length ? "ok" : "warn"} />
+        <StatTile icon={ShieldCheck} label="实盘护栏" value={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "已锁定" : formatDecimal(liveReadyGuardrails.length, 0)} detail={displayValue(pickString(liveReadyGuardrailRun, ["status"], pickString(latestGuardrail, ["action_recommendation.target_mode"], "live-ready")))} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
       </div>
 
       <div className="dashboard-grid v16-grid">
         <MetricCard title="世界模型" className="wide-panel">
           <div className="v15-mini-grid">
-            <CompactMetric label="市场状态" value={pickString(worldModel, ["market_regime"], "unknown")} tone="mute" />
-            <CompactMetric label="因子姿态" value={pickString(worldModel, ["factor_posture"], "unknown")} tone={toneFromStatus(pickString(worldModel, ["factor_posture"], "unknown"))} />
-            <CompactMetric label="执行姿态" value={pickString(worldModel, ["execution_posture"], "unknown")} tone={toneFromStatus(pickString(worldModel, ["execution_posture"], "unknown"))} />
-            <CompactMetric label="学习姿态" value={pickString(worldModel, ["learning_posture"], "unknown")} tone="mute" />
-            <CompactMetric label="自治姿态" value={pickString(worldModel, ["autonomy_posture"], "unknown")} tone={toneFromStatus(pickString(worldModel, ["autonomy_posture"], "unknown"))} />
-            <CompactMetric label="事故模式" value={pickString(worldModel, ["incident_mode"], "normal")} tone={pickString(worldModel, ["incident_mode"], "normal") === "normal" ? "ok" : "warn"} />
+            <CompactMetric label="市场状态" value={displayValue(pickString(worldModel, ["market_regime"], "unknown"))} tone="mute" />
+            <CompactMetric label="因子姿态" value={displayValue(pickString(worldModel, ["factor_posture"], "unknown"))} tone={toneFromStatus(pickString(worldModel, ["factor_posture"], "unknown"))} />
+            <CompactMetric label="执行姿态" value={displayValue(pickString(worldModel, ["execution_posture"], "unknown"))} tone={toneFromStatus(pickString(worldModel, ["execution_posture"], "unknown"))} />
+            <CompactMetric label="学习姿态" value={displayValue(pickString(worldModel, ["learning_posture"], "unknown"))} tone="mute" />
+            <CompactMetric label="自治姿态" value={displayValue(pickString(worldModel, ["autonomy_posture"], "unknown"))} tone={toneFromStatus(pickString(worldModel, ["autonomy_posture"], "unknown"))} />
+            <CompactMetric label="事故模式" value={displayValue(pickString(worldModel, ["incident_mode"], "normal"))} tone={pickString(worldModel, ["incident_mode"], "normal") === "normal" ? "ok" : "warn"} />
           </div>
           <div className="v16-boundary">
             <Field label="只读" value={readOnly ? "true" : "false"} tone={boolTone(readOnly)} />
@@ -528,65 +639,66 @@ export function V16BrainPage() {
           </div>
         </MetricCard>
 
-        <MetricCard title="Hypotheses">
+        <MetricCard title="假设">
           <HypothesisList items={hypotheses} />
         </MetricCard>
 
-        <MetricCard title="Memory">
-          <SectionHead title="Negative memory" status={`${negativeMemory.length}`} tone={negativeMemory.length ? "warn" : "ok"} />
+        <MetricCard title="记忆">
+          <SectionHead title="负面记忆" status={`${negativeMemory.length}`} tone={negativeMemory.length ? "warn" : "ok"} />
           <MemoryList items={negativeMemory} empty="暂无负面记忆命中" />
-          <SectionHead title="Counter evidence" status={`${counterEvidence.length}`} tone={counterEvidence.length ? "ok" : "mute"} />
+          <SectionHead title="反证" status={`${counterEvidence.length}`} tone={counterEvidence.length ? "ok" : "mute"} />
           <MemoryList items={counterEvidence} empty="暂无反证命中" />
         </MetricCard>
 
-        <MetricCard title="Shadow Action Plans" className="wide-panel">
+        <MetricCard title="影子计划" className="wide-panel">
           <div className="v16-boundary">
             <Field label="只读计划" value={pickBoolean(actionPlanRun, ["read_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(actionPlanRun, ["read_only"], true))} />
             <Field label="影响交易" value={pickBoolean(actionPlanRun, ["affects_trading"], false) ? "true" : "false"} tone={pickBoolean(actionPlanRun, ["affects_trading"], false) ? "bad" : "ok"} />
-            <Field label="Phase" value={pickString(actionPlanRun, ["phase"], "v16_phase2_shadow_brain")} />
-            <Field label="Snapshot" value={pickString(actionPlanRun, ["snapshot_id"], pickString(brainState, ["snapshot_id"], "--"))} />
+            <Field label="阶段" value={displayStage(pickString(actionPlanRun, ["phase"], "v16_phase2_shadow_brain"))} />
+            <Field label="快照" value={pickString(actionPlanRun, ["snapshot_id"], pickString(brainState, ["snapshot_id"], "--"))} />
           </div>
           <ActionPlanList items={actionPlans} />
         </MetricCard>
 
-        <MetricCard title="Shadow Evaluations" className="wide-panel">
+        <MetricCard title="后验评价" className="wide-panel">
           <div className="v16-boundary">
             <Field label="只读评价" value={pickBoolean(actionPlanEvalRun, ["read_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(actionPlanEvalRun, ["read_only"], true))} />
             <Field label="影响交易" value={pickBoolean(actionPlanEvalRun, ["affects_trading"], false) ? "true" : "false"} tone={pickBoolean(actionPlanEvalRun, ["affects_trading"], false) ? "bad" : "ok"} />
-            <Field label="Eval schema" value={pickString(actionPlanEvalRun, ["schema_version"], "--")} />
-            <Field label="Source gaps" value={formatDecimal(pickArray(actionPlanEvalRun, ["source_gaps"]).length, 0)} tone={pickArray(actionPlanEvalRun, ["source_gaps"]).length ? "warn" : "ok"} />
+            <Field label="评价契约" value={displayContract(pickString(actionPlanEvalRun, ["schema_version"], "--"))} />
+            <Field label="证据缺口" value={formatDecimal(pickArray(actionPlanEvalRun, ["source_gaps"]).length, 0)} tone={pickArray(actionPlanEvalRun, ["source_gaps"]).length ? "warn" : "ok"} />
           </div>
           <EvaluationList items={actionPlanEvals} />
         </MetricCard>
 
-        <MetricCard title="Low-Impact Executions" className="wide-panel">
+        <MetricCard title="低影响执行" className="wide-panel">
           <div className="v16-boundary">
             <Field label="白名单" value={pickBoolean(lowImpactExecutionRun, ["boundary.low_impact_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(lowImpactExecutionRun, ["boundary.low_impact_only"], true))} />
             <Field label="RiskPolicy" value={pickBoolean(lowImpactExecutionRun, ["boundary.risk_policy_service_required"], true) ? "required" : "missing"} tone={boolTone(pickBoolean(lowImpactExecutionRun, ["boundary.risk_policy_service_required"], true))} />
-            <Field label="Schema" value={pickString(lowImpactExecutionRun, ["schema_version"], "--")} />
-            <Field label="Latest" value={formatTime(pick(lowImpactExecutionRun, ["latest_created_at"]))} />
+            <Field label="执行契约" value={displayContract(pickString(lowImpactExecutionRun, ["schema_version"], "--"))} />
+            <Field label="最近更新" value={formatTime(pick(lowImpactExecutionRun, ["latest_created_at"]))} />
           </div>
           <ExecutionList items={lowImpactExecutions} />
         </MetricCard>
 
-        <MetricCard title="Medium-Impact Governance" className="wide-panel">
+        <MetricCard title="治理候选" className="wide-panel">
           <div className="v16-boundary">
-            <Field label="只生成建议" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_policy_suggestions_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_policy_suggestions_only"], true))} />
+            <Field label="只生成候选" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_governance_candidates_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_governance_candidates_only"], true))} />
+            <Field label="手动桥接" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.policy_suggestion_bridge_manual_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.policy_suggestion_bridge_manual_only"], true))} />
             <Field label="不改权重" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.does_not_apply_factor_weights"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.does_not_apply_factor_weights"], true))} />
-            <Field label="Schema" value={pickString(mediumImpactGovernanceRun, ["schema_version"], "--")} />
-            <Field label="Latest" value={formatTime(pick(mediumImpactGovernanceRun, ["latest_created_at"]))} />
+            <Field label="治理契约" value={displayContract(pickString(mediumImpactGovernanceRun, ["schema_version"], "--"))} />
+            <Field label="最近更新" value={formatTime(pick(mediumImpactGovernanceRun, ["latest_created_at"]))} />
           </div>
           <GovernanceList items={mediumImpactGovernance} />
         </MetricCard>
 
-        <MetricCard title="Live-Ready Guardrails" className="wide-panel">
+        <MetricCard title="实盘护栏" className="wide-panel">
           <div className="v16-boundary">
-            <Field label="Capability lock" value={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "locked" : "blocked"} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
-            <Field label="Divergence" value={pickString(latestGuardrail, ["broker_local_divergence.status"], pickString(liveReadyGuardrailRun, ["divergence_status"], "--"))} tone={pickString(latestGuardrail, ["broker_local_divergence.status"], "") === "divergent" ? "bad" : "ok"} />
-            <Field label="Incident" value={pickString(latestGuardrail, ["incident_control.mode"], "--")} tone={pickString(latestGuardrail, ["incident_control.mode"], "normal") === "normal" ? "ok" : "warn"} />
-            <Field label="Rollback" value={pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false) ? "ready" : "missing"} tone={boolTone(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false))} />
-            <Field label="建议模式" value={pickString(latestGuardrail, ["action_recommendation.target_mode"], pickString(liveReadyGuardrailRun, ["recommended_mode"], "--"))} />
-            <Field label="Latest" value={formatTime(pick(liveReadyGuardrailRun, ["latest_created_at"]))} />
+            <Field label="能力锁" value={displayValue(pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "locked" : "blocked")} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
+            <Field label="偏差" value={displayValue(pickString(latestGuardrail, ["broker_local_divergence.status"], pickString(liveReadyGuardrailRun, ["divergence_status"], "--")))} tone={pickString(latestGuardrail, ["broker_local_divergence.status"], "") === "divergent" ? "bad" : "ok"} />
+            <Field label="事故" value={displayValue(pickString(latestGuardrail, ["incident_control.mode"], "--"))} tone={pickString(latestGuardrail, ["incident_control.mode"], "normal") === "normal" ? "ok" : "warn"} />
+            <Field label="回滚" value={displayValue(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false) ? "ready" : "missing")} tone={boolTone(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false))} />
+            <Field label="建议模式" value={displayValue(pickString(latestGuardrail, ["action_recommendation.target_mode"], pickString(liveReadyGuardrailRun, ["recommended_mode"], "--")))} />
+            <Field label="最近更新" value={formatTime(pick(liveReadyGuardrailRun, ["latest_created_at"]))} />
           </div>
           <GuardrailList items={liveReadyGuardrails} />
         </MetricCard>
@@ -594,56 +706,56 @@ export function V16BrainPage() {
         <MetricCard title="Critic 与证据" className="wide-panel">
           <div className="v15-two-col">
             <div>
-              <SectionHead title="Critic objections" status={`${pickArray(critic, ["objections"]).length}`} tone={pickArray(critic, ["objections"]).length ? "warn" : "ok"} />
+              <SectionHead title="Critic 异议" status={`${pickArray(critic, ["objections"]).length}`} tone={pickArray(critic, ["objections"]).length ? "warn" : "ok"} />
               <div className="v15-list">
                 {(pickArray(critic, ["objections"]).length ? pickArray(critic, ["objections"]) : ["none"]).map((item, index) => (
                   <div className="v15-list-row" key={`${String(item)}-${index}`}>
                     <div>
                       <strong>{String(item)}</strong>
-                      <span>{pickString(critic, ["max_allowed_action_scope"], "observe_only")}</span>
+                      <span>{displayValue(pickString(critic, ["max_allowed_action_scope"], "observe_only"))}</span>
                     </div>
-                    <StatusPill status={criticVerdict} tone={criticVerdict === "pass" ? "ok" : "warn"} />
+                    <StatusPill status={displayValue(criticVerdict)} tone={criticVerdict === "pass" ? "ok" : "warn"} />
                   </div>
                 ))}
               </div>
             </div>
             <div>
-              <SectionHead title="Source gaps" status={`${sourceGaps.length}`} tone={sourceGaps.length ? "warn" : "ok"} />
-              <MemoryList items={sourceGaps.map((gap) => ({ source_table: "source_gap", source_id: String(gap), text_summary: String(gap), polarity: "neutral" }))} empty="无 source gap" />
+              <SectionHead title="证据缺口" status={`${sourceGaps.length}`} tone={sourceGaps.length ? "warn" : "ok"} />
+              <MemoryList items={sourceGaps.map((gap) => ({ source_table: "source_gap", source_id: String(gap), text_summary: String(gap), polarity: "neutral" }))} empty="无证据缺口" />
             </div>
           </div>
           <div className="brain-json-grid">
             <div>
-              <SectionHead title="Evidence refs" />
+              <SectionHead title="证据引用" />
               <JsonBlock value={evidenceRefs} />
             </div>
             <div>
-              <SectionHead title="Memory query" />
+              <SectionHead title="记忆查询" />
               <JsonBlock value={{ query_terms: pickArray(memory, ["query_terms"]), source_gaps: sourceGaps }} />
             </div>
           </div>
         </MetricCard>
 
-        <MetricCard title="最近 Memory Index" className="wide-panel">
-          <MemoryList items={memoryItems} empty="暂无 indexed memory" />
+        <MetricCard title="最近记忆索引" className="wide-panel">
+          <MemoryList items={memoryItems} empty="暂无索引记忆" />
         </MetricCard>
 
-        <MetricCard title="Readiness Contract">
+        <MetricCard title="契约状态">
           <div className="field-list">
-            <Field label="Backend readiness" value={pickString(readiness, ["schema_version"], "--")} />
-            <Field label="V16 readiness" value={pickString(v16Readiness, ["schema_version"], "--")} />
-            <Field label="Brain snapshot" value={pickString(brainState, ["snapshot_id"], "--")} />
-            <Field label="Memory schema" value={pickString(memory, ["schema_version"], "--")} />
-            <Field label="Action plan schema" value={pickString(actionPlanRun, ["schema_version"], "--")} />
-            <Field label="Action eval schema" value={pickString(actionPlanEvalRun, ["schema_version"], "--")} />
-            <Field label="P3 schema" value={pickString(lowImpactExecutionRun, ["schema_version"], "--")} />
-            <Field label="P4 schema" value={pickString(mediumImpactGovernanceRun, ["schema_version"], "--")} />
+            <Field label="后端就绪" value={displayContract(pickString(readiness, ["schema_version"], "--"))} />
+            <Field label="自治就绪" value={displayContract(pickString(v16Readiness, ["schema_version"], "--"))} />
+            <Field label="大脑快照" value={pickString(brainState, ["snapshot_id"], "--")} />
+            <Field label="记忆检索" value={displayContract(pickString(memory, ["schema_version"], "--"))} />
+            <Field label="影子计划" value={displayContract(pickString(actionPlanRun, ["schema_version"], "--"))} />
+            <Field label="后验评价" value={displayContract(pickString(actionPlanEvalRun, ["schema_version"], "--"))} />
+            <Field label="低影响执行" value={displayContract(pickString(lowImpactExecutionRun, ["schema_version"], "--"))} />
+            <Field label="治理候选" value={displayContract(pickString(mediumImpactGovernanceRun, ["schema_version"], "--"))} />
           </div>
           <div className="brain-ref-row">
             <GitBranch size={15} aria-hidden="true" />
             <span>{pickString(brainState, ["source"], "backend")}</span>
             <Sparkles size={15} aria-hidden="true" />
-            <span>{pickString(brainState, ["phase"], "v16_phase1_read_only_brain")}</span>
+            <span>{displayStage(pickString(brainState, ["phase"], "v16_phase1_read_only_brain"))}</span>
           </div>
         </MetricCard>
       </div>

@@ -550,11 +550,11 @@ V16 页面：
 
 当前状态：`complete`。
 
-- `Phase 4 medium-impact governance done`: `backend.services.brain_medium_impact_governance.BrainMediumImpactGovernanceService` 已新增 `brain_medium_impact_governance` 审计表、`/api/ops/brain/medium-impact-governance` 读取入口和 `/api/ops/brain/medium-impact-governance/materialize` 显式 materialize 入口，并接入 `/api/ops/backend-readiness` 的 `brain_medium_impact_governance` / `v16.medium_impact_governance` 字段。
-- 当前 P4 最小闭环基于 P2 posterior eval 和 P3 execution evidence，生成中等影响 `policy_suggestion` 候选，覆盖 factor weight、parameter template、context policy、supervisor template 的 governance candidate；执行前记录 `RiskPolicyService` verdict，权重类候选记录 `DecisionPolicy` preview，所有候选记录 rollback/release requirements。
-- P4 仍不直接应用权重、切模板、推广模型到 live、写 runtime overlay/snapshot、提交订单或写学习样本。真正应用候选仍属于既有治理写入口和 release discipline，必须重新经过 `RiskPolicyService`、`DecisionPolicy`、runtime snapshot/rollback 和 release evidence。
-- Web `/v16` 已展示 Medium-Impact Governance，并提供受控 `运行 P4` 按钮；按钮只调用后端 materialize API 生成 `policy_suggestion` 和审计账本，不在前端计算策略/风控或执行 runtime mutation。
-- Phase 4 剩余项：无阻断项。进入 Phase 5 前，应观察 P4 suggestion 命中质量、blocked_by_risk/blocked_by_evidence 分布、后验解释稳定性和 release handoff 质量。
+- `Phase 4 medium-impact governance done`: `backend.services.brain_medium_impact_governance.BrainMediumImpactGovernanceService` 已新增 `brain_medium_impact_governance` 审计表、`backend.services.brain_governance_candidates.BrainGovernanceCandidateService` 隔离候选层、`/api/ops/brain/medium-impact-governance` 读取入口、`/api/ops/brain/medium-impact-governance/materialize` 显式 materialize 入口、`/api/ops/brain/governance-candidates` 候选读取入口和 `/api/ops/brain/governance-candidates/{candidate_id}/submit` 手动 bridge 入口，并接入 `/api/ops/backend-readiness` 的 `brain_medium_impact_governance` / `brain_governance_candidates` / `v16.medium_impact_governance` / `v16.governance_candidates` 字段。
+- 当前 P4 最小闭环基于 P2 posterior eval 和 P3 execution evidence，生成中等影响 `brain_governance_candidate` 隔离候选，覆盖 factor weight、parameter template、context policy、supervisor template 的 governance candidate；执行前记录 `RiskPolicyService` verdict，权重类候选记录 `DecisionPolicy` preview，所有候选记录 rollback/release requirements、source lineage 和 manual bridge boundary。
+- P4 仍不直接应用权重、切模板、推广模型到 live、写 runtime overlay/snapshot、提交订单、写学习样本或直接写 `policy_suggestion`。候选如需进入旧自治建议队列，必须通过手动 bridge，且只有 `governance_ready/applyable`、RiskPolicy allowed、payload 被旧 `RuleEvolutionGovernor` 理解时才会写入 `policy_suggestion(status='proposed')`。
+- Web `/v16` 已展示 Medium-Impact Governance Candidate，并提供受控 `生成治理候选` 按钮；按钮只调用后端 materialize API 生成 `brain_governance_candidate` 和审计账本，不在前端计算策略/风控或执行 runtime mutation。
+- Phase 4 剩余项：无阻断项。进入正式运行前，应观察 P4 candidate 命中质量、blocked_by_risk/blocked_by_evidence 分布、bridge rejection reason、后验解释稳定性和 release handoff 质量。
 
 ### Phase 5: Live-Ready Brain Guardrails
 

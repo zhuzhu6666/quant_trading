@@ -12,8 +12,8 @@ const navItems = [
   { to: "/risk", label: "风控", icon: ShieldAlert },
   { to: "/learning", label: "学习", icon: BrainCircuit },
   { to: "/models", label: "模型", icon: Microscope },
-  { to: "/v15", label: "V15", icon: Rocket },
-  { to: "/v16", label: "V16", icon: BrainCircuit },
+  { to: "/v15", label: "运行中枢", icon: Rocket },
+  { to: "/v16", label: "自治大脑", icon: BrainCircuit },
   { to: "/ops", label: "运维", icon: Settings2 },
 ];
 
