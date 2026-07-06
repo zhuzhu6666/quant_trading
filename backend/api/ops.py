@@ -16,6 +16,7 @@ from backend.services.brain_low_impact_executor import BrainLowImpactExecutorSer
 from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
 from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
+from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
@@ -104,6 +105,12 @@ class BrainMediumImpactGovernanceRequest(BaseModel):
 
 class BrainGovernanceCandidateSubmitRequest(BaseModel):
     actor: str = "api:ops.brain.governance_candidate"
+
+
+class BrainGovernanceCandidateReviewRequest(BaseModel):
+    limit: int = 20
+    run_llm: bool = False
+    llm_dry_run: bool = True
 
 
 class BrainLiveReadyGuardrailEvaluateRequest(BaseModel):
@@ -413,6 +420,34 @@ def submit_brain_governance_candidate(candidate_id: str, req: BrainGovernanceCan
         "ok": bool(result.get("ok")),
         "schema_version": "ops_brain_governance_candidate_submit.v1",
         "submit_result": result,
+    }
+
+
+@router.get("/brain/governance-candidate-reviews")
+def get_brain_governance_candidate_reviews(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+    """Return latest V16 governance candidate protocol reviews."""
+    reviews = BrainGovernanceCandidateReviewService().latest_reviews(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(reviews.get("ok")),
+        "schema_version": "ops_brain_governance_candidate_reviews.v1",
+        "candidate_reviews": reviews,
+    }
+
+
+@router.post("/brain/governance-candidates/review")
+def review_brain_governance_candidates(req: BrainGovernanceCandidateReviewRequest, _user: RequireUser) -> dict[str, Any]:
+    """Review candidate evidence, conflicts, bridge readiness, and optional LLM advisory."""
+    result = BrainGovernanceCandidateReviewService().review_latest(
+        limit=max(1, min(int(req.limit), 200)),
+        run_llm=bool(req.run_llm),
+        llm_dry_run=bool(req.llm_dry_run),
+        persist=True,
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_brain_governance_candidate_review_run.v1",
+        "review_run": result,
     }
 
 

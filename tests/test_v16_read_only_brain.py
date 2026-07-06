@@ -8,6 +8,7 @@ from backend.services.brain_low_impact_executor import BrainLowImpactExecutorSer
 from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
 from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
+from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.brain_memory import BrainMemoryService
 from backend.services.brain_state import BrainStateService
 from backend.services.incident_controls import RuntimeIncidentControlService
@@ -135,6 +136,8 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["frontend_contract"]["v16_brain_medium_impact_governance_materialize"] == "/api/ops/brain/medium-impact-governance/materialize"
     assert result["frontend_contract"]["v16_brain_governance_candidates"] == "/api/ops/brain/governance-candidates"
     assert result["frontend_contract"]["v16_brain_governance_candidate_submit"] == "/api/ops/brain/governance-candidates/{candidate_id}/submit"
+    assert result["frontend_contract"]["v16_brain_governance_candidate_reviews"] == "/api/ops/brain/governance-candidate-reviews"
+    assert result["frontend_contract"]["v16_brain_governance_candidate_review_run"] == "/api/ops/brain/governance-candidates/review"
     assert result["frontend_contract"]["v16_brain_live_ready_guardrails"] == "/api/ops/brain/live-ready-guardrails"
     assert result["frontend_contract"]["v16_brain_live_ready_guardrail_evaluate"] == "/api/ops/brain/live-ready-guardrails/evaluate"
     assert result["frontend_contract"]["v16_brain_live_ready_guardrail_tighten"] == "/api/ops/brain/live-ready-guardrails/tighten"
@@ -147,6 +150,8 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_candidates_only"] is True
     assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_suggestions_only"] is False
     assert result["v16"]["control_plane_boundaries"]["medium_impact_policy_suggestion_bridge_manual_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["candidate_review_bridge_preview_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["candidate_review_llm_advisory_only"] is True
     assert result["v16"]["control_plane_boundaries"]["live_ready_guardrails_only"] is True
     assert result["v16"]["control_plane_boundaries"]["live_ready_tightening_only"] is True
     assert result["brain_state"]["ok"] is True
@@ -161,6 +166,8 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["brain_medium_impact_governance"]["medium_impact_governance"] is True
     assert result["brain_governance_candidates"]["schema_version"] == "brain_governance_candidate_readiness.v1"
     assert result["brain_governance_candidates"]["candidate_lane_isolated"] is True
+    assert result["brain_governance_candidate_reviews"]["schema_version"] == "brain_governance_candidate_review_readiness.v1"
+    assert result["brain_governance_candidate_reviews"]["bridge_preview_only"] is True
     assert result["brain_live_ready_guardrails"]["schema_version"] == "brain_live_ready_guardrail_readiness.v1"
     assert result["brain_live_ready_guardrails"]["live_ready_guardrails"] is True
 
@@ -608,6 +615,100 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
     assert candidate[0] == "submitted_to_policy_suggestion"
     assert candidate[1] == "submitted"
     assert candidate[2] == submit_result["suggestion_id"]
+
+
+def test_brain_governance_candidate_review_classifies_bridge_readiness(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    candidate_service = BrainGovernanceCandidateService(db_path)
+    candidate_service.create_candidate(
+        candidate_id="candidate_factor_update",
+        source_agent="v16_brain",
+        source_kind="brain_medium_impact_governance",
+        source_ref_type="brain_action_plan_eval",
+        source_ref_id="eval_factor",
+        proposal_stage="governance_ready",
+        capability_scope="medium_impact_governance",
+        scope_type="factor",
+        scope_key="alpha_weight_policy",
+        action="update_weight",
+        confidence=0.7,
+        evidence_score=0.75,
+        risk_class="medium",
+        max_impact="medium_impact",
+        risk_verdict={"allowed": True, "reason": "test"},
+    )
+    candidate_service.create_candidate(
+        candidate_id="candidate_supervisor_ready",
+        source_agent="v16_brain",
+        source_kind="brain_medium_impact_governance",
+        source_ref_type="brain_action_plan_eval",
+        source_ref_id="eval_supervisor",
+        proposal_stage="governance_ready",
+        capability_scope="medium_impact_governance",
+        scope_type="supervisor_template",
+        scope_key="position_supervisor",
+        action="switch_position_supervisor_template",
+        confidence=0.8,
+        evidence_score=0.75,
+        risk_class="medium",
+        max_impact="medium_impact",
+        expected_effect={
+            "source_presence": {
+                "replay_report": True,
+                "trade_outcome_review": True,
+                "learning_application_effect": True,
+                "position_supervisor_trace": True,
+            },
+            "replay": {"replay_run_id": "replay_ready", "status": "completed"},
+            "supervisor": {"trace_count": 3, "risk_allowed_coverage": 1.0},
+        },
+        evidence_refs={"posterior": {"replay_report": "replay_ready", "position_supervisor_trace": ["trace_1"]}},
+        risk_verdict={"allowed": True, "reason": "test"},
+        lineage={"mapped_action": {"target_template_id": "position_supervisor:conservative.v1"}},
+    )
+
+    class FakeLLM:
+        def __init__(self, db_path):
+            self.db_path = db_path
+
+        def run(self, **kwargs):
+            return {
+                "status": "dry_run",
+                "audit": {
+                    "audit_id": "llm:test",
+                    "target_id": kwargs.get("target_id", ""),
+                    "status": "dry_run",
+                },
+                "parsed": {"summary": "candidate reviewed"},
+                "advisory_only": True,
+            }
+
+    monkeypatch.setattr("backend.services.brain_governance_candidate_review.LLMAdvisoryService", FakeLLM)
+    run = BrainGovernanceCandidateReviewService(db_path).review_latest(limit=10, run_llm=True, llm_dry_run=True)
+
+    assert run["schema_version"] == "brain_governance_candidate_review_run.v1"
+    assert run["ok"] is True
+    reviews = {item["candidate_id"]: item for item in run["items"]}
+    assert reviews["candidate_supervisor_ready"]["review_status"] == "bridge_ready"
+    assert reviews["candidate_supervisor_ready"]["bridge_ready"] is True
+    assert reviews["candidate_supervisor_ready"]["bridge_preview"]["status"] == "bridge_ready"
+    assert reviews["candidate_supervisor_ready"]["llm_advisory"]["audit"]["audit_id"] == "llm:test"
+    assert reviews["candidate_factor_update"]["review_status"] == "not_bridge_compatible"
+    assert reviews["candidate_factor_update"]["bridge_ready"] is False
+
+    latest = BrainGovernanceCandidateReviewService(db_path).latest_reviews(limit=10)
+    assert latest["schema_version"] == "brain_governance_candidate_review_list.v1"
+    assert latest["ok"] is True
+    status = BrainGovernanceCandidateReviewService(db_path).status(limit=10)
+    assert status["schema_version"] == "brain_governance_candidate_review_readiness.v1"
+    assert status["bridge_ready_count"] == 1
 
 
 def test_brain_live_ready_guardrail_locks_when_evidence_is_complete(tmp_path):

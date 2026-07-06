@@ -286,6 +286,8 @@ class BackendReadinessService:
                 "v16_brain_medium_impact_governance_materialize": "/api/ops/brain/medium-impact-governance/materialize",
                 "v16_brain_governance_candidates": "/api/ops/brain/governance-candidates",
                 "v16_brain_governance_candidate_submit": "/api/ops/brain/governance-candidates/{candidate_id}/submit",
+                "v16_brain_governance_candidate_reviews": "/api/ops/brain/governance-candidate-reviews",
+                "v16_brain_governance_candidate_review_run": "/api/ops/brain/governance-candidates/review",
                 "v16_brain_live_ready_guardrails": "/api/ops/brain/live-ready-guardrails",
                 "v16_brain_live_ready_guardrail_evaluate": "/api/ops/brain/live-ready-guardrails/evaluate",
                 "v16_brain_live_ready_guardrail_tighten": "/api/ops/brain/live-ready-guardrails/tighten",
@@ -313,6 +315,8 @@ class BackendReadinessService:
         payload["brain_medium_impact_governance"] = brain_medium_impact_governance
         brain_governance_candidates = self._timed_component("brain_governance_candidates", lambda: self._brain_governance_candidate_status())
         payload["brain_governance_candidates"] = brain_governance_candidates
+        brain_governance_candidate_reviews = self._timed_component("brain_governance_candidate_reviews", lambda: self._brain_governance_candidate_review_status())
+        payload["brain_governance_candidate_reviews"] = brain_governance_candidate_reviews
         brain_live_ready_guardrails = self._timed_component("brain_live_ready_guardrails", lambda: self._brain_live_ready_guardrail_status())
         payload["brain_live_ready_guardrails"] = brain_live_ready_guardrails
         payload["v16"] = {
@@ -324,6 +328,7 @@ class BackendReadinessService:
             "low_impact_executions": brain_low_impact_executions,
             "medium_impact_governance": brain_medium_impact_governance,
             "governance_candidates": brain_governance_candidates,
+            "governance_candidate_reviews": brain_governance_candidate_reviews,
             "live_ready_guardrails": brain_live_ready_guardrails,
             "control_plane_boundaries": {
                 "read_only": True,
@@ -336,6 +341,8 @@ class BackendReadinessService:
                 "medium_impact_governance_suggestions_only": False,
                 "medium_impact_policy_suggestion_bridge_manual_only": True,
                 "medium_impact_policy_suggestion_direct_write": False,
+                "candidate_review_bridge_preview_only": True,
+                "candidate_review_llm_advisory_only": True,
                 "medium_impact_future_apply_requires_decision_policy": True,
                 "live_ready_guardrails_only": True,
                 "live_ready_tightening_only": True,
@@ -1081,6 +1088,24 @@ class BackendReadinessService:
                 "error": f"{type(exc).__name__}: {exc}",
                 "candidate_lane_isolated": True,
                 "policy_suggestion_bridge_manual_only": True,
+            }
+
+    def _brain_governance_candidate_review_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
+
+            status = BrainGovernanceCandidateReviewService(self.db_path).status(limit=50)
+            status.setdefault("review_only", True)
+            status.setdefault("bridge_preview_only", True)
+            return status
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "brain_governance_candidate_review_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "review_only": True,
+                "bridge_preview_only": True,
             }
 
     def _brain_live_ready_guardrail_status(self) -> dict[str, Any]:

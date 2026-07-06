@@ -298,7 +298,7 @@ class BrainGovernanceCandidateService:
     def submit_candidate_to_policy_suggestion(self, candidate_id: str, *, actor: str = "api:ops.brain.governance_candidate") -> dict[str, Any]:
         ensure_brain_governance_candidate_table(self.db_path)
         ensure_policy_suggestion_table(self.db_path)
-        candidate = self._load_candidate(candidate_id)
+        candidate = self.load_candidate(candidate_id)
         if not candidate:
             return {
                 "ok": False,
@@ -367,7 +367,7 @@ class BrainGovernanceCandidateService:
         finally:
             conn.close()
 
-        submitted = self._load_candidate(candidate_id) or candidate
+        submitted = self.load_candidate(candidate_id) or candidate
         return {
             "ok": True,
             "schema_version": "brain_governance_candidate_submit.v1",
@@ -375,6 +375,55 @@ class BrainGovernanceCandidateService:
             "candidate": submitted,
             "suggestion_id": suggestion_id,
             "policy_suggestion": {key: payload[key] for key in ("scope_type", "scope_key", "action", "confidence", "reason")},
+            "boundary": self.boundary(),
+        }
+
+    def preview_policy_suggestion_bridge(self, candidate_id: str, *, actor: str = "api:ops.brain.governance_candidate_review") -> dict[str, Any]:
+        ensure_brain_governance_candidate_table(self.db_path)
+        candidate = self.load_candidate(candidate_id)
+        if not candidate:
+            return {
+                "ok": False,
+                "schema_version": "brain_governance_candidate_bridge_preview.v1",
+                "status": "missing_candidate",
+                "candidate_id": candidate_id,
+                "boundary": self.boundary(),
+            }
+        if candidate.get("submitted_suggestion_id"):
+            return {
+                "ok": True,
+                "schema_version": "brain_governance_candidate_bridge_preview.v1",
+                "status": "already_submitted",
+                "candidate_id": candidate_id,
+                "suggestion_id": candidate.get("submitted_suggestion_id", ""),
+                "bridge_ready": False,
+                "reason": "already_submitted",
+                "boundary": self.boundary(),
+            }
+        if str(candidate.get("status") or "") != "active":
+            return self._blocked_preview(candidate, "candidate_not_active")
+        if str(candidate.get("proposal_stage") or "") not in BRIDGE_READY_STAGES:
+            return self._blocked_preview(candidate, "proposal_stage_not_bridge_ready")
+        risk_verdict = dict(candidate.get("risk_verdict") or {})
+        if not bool(risk_verdict.get("allowed")):
+            return self._blocked_preview(candidate, "risk_policy_not_allowed")
+        payload = self._policy_suggestion_payload(candidate, actor=actor)
+        if not payload.get("ok"):
+            return self._blocked_preview(candidate, str(payload.get("reason") or "not_governor_compatible"), payload=payload)
+        return {
+            "ok": True,
+            "schema_version": "brain_governance_candidate_bridge_preview.v1",
+            "status": "bridge_ready",
+            "candidate_id": candidate_id,
+            "bridge_ready": True,
+            "reason": str(payload.get("reason") or "bridge_payload_ready"),
+            "policy_suggestion": {key: payload[key] for key in ("scope_type", "scope_key", "action", "confidence", "reason")},
+            "evidence_contract": {
+                "schema_version": (payload.get("evidence") or {}).get("schema_version", ""),
+                "has_risk_verdict": bool((payload.get("evidence") or {}).get("risk_verdict")),
+                "has_rollback_plan": bool((payload.get("evidence") or {}).get("rollback_plan")),
+                "manual_only": True,
+            },
             "boundary": self.boundary(),
         }
 
@@ -425,7 +474,7 @@ class BrainGovernanceCandidateService:
         finally:
             conn.close()
 
-    def _load_candidate(self, candidate_id: str) -> dict[str, Any]:
+    def load_candidate(self, candidate_id: str) -> dict[str, Any]:
         conn = _connect(self.db_path, read_only=True)
         try:
             row = _execute(
@@ -596,6 +645,18 @@ class BrainGovernanceCandidateService:
             "status": "blocked",
             "reason": reason,
             "candidate": candidate,
+            "bridge_preview": payload or {},
+            "boundary": self.boundary(),
+        }
+
+    def _blocked_preview(self, candidate: dict[str, Any], reason: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "schema_version": "brain_governance_candidate_bridge_preview.v1",
+            "status": "blocked",
+            "candidate_id": candidate.get("candidate_id", ""),
+            "bridge_ready": False,
+            "reason": reason,
             "bridge_preview": payload or {},
             "boundary": self.boundary(),
         }

@@ -658,10 +658,23 @@ export async function getBrainMediumImpactGovernance(limit = 50): Promise<Record
   return getJson<Record<string, unknown>>(`/api/ops/brain/medium-impact-governance?${params.toString()}`);
 }
 
+export async function getBrainGovernanceCandidateReviews(limit = 50): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return getJson<Record<string, unknown>>(`/api/ops/brain/governance-candidate-reviews?${params.toString()}`);
+}
+
 export async function materializeBrainMediumImpactGovernance(): Promise<Record<string, unknown>> {
   return postJson<Record<string, unknown>>("/api/ops/brain/medium-impact-governance/materialize", {
     limit: 4,
     allow_tighten_low_health: false,
+  });
+}
+
+export async function reviewBrainGovernanceCandidates(): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/brain/governance-candidates/review", {
+    limit: 20,
+    run_llm: false,
+    llm_dry_run: true,
   });
 }
 

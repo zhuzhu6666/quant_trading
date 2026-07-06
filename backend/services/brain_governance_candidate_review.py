@@ -1,0 +1,537 @@
+from __future__ import annotations
+
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from backend.core.db import STATE_DB, state_table_exists
+from backend.services.brain_action_planner import _connect, _dumps, _execute, _loads, _safe_float
+from backend.services.brain_governance_candidates import (
+    BRIDGE_READY_STAGES,
+    BrainGovernanceCandidateService,
+    ensure_brain_governance_candidate_table,
+)
+from research.learning.governance_conflicts import ACTIVE_CONFLICT_STATUSES, control_surface
+from research.llm_advisory import LLMAdvisoryService
+
+
+def ensure_brain_governance_candidate_review_table(db_path: str | Path = STATE_DB) -> None:
+    ensure_brain_governance_candidate_table(db_path)
+    conn = _connect(db_path)
+    try:
+        _execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS brain_governance_candidate_review (
+                review_id TEXT PRIMARY KEY,
+                candidate_id TEXT NOT NULL,
+                review_status TEXT DEFAULT '',
+                bridge_ready INTEGER DEFAULT 0,
+                bridge_reason TEXT DEFAULT '',
+                evidence_gaps_json TEXT NOT NULL DEFAULT '[]',
+                conflict_json TEXT NOT NULL DEFAULT '{}',
+                bridge_preview_json TEXT NOT NULL DEFAULT '{}',
+                source_reliability_json TEXT NOT NULL DEFAULT '{}',
+                llm_advisory_json TEXT NOT NULL DEFAULT '{}',
+                boundary_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """,
+        )
+        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_candidate ON brain_governance_candidate_review(candidate_id, created_at)")
+        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_status ON brain_governance_candidate_review(review_status, created_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class BrainGovernanceCandidateReviewService:
+    """Protocol review for isolated V16 governance candidates."""
+
+    def __init__(self, db_path: str | Path = STATE_DB):
+        self.db_path = db_path
+        self.candidates = BrainGovernanceCandidateService(db_path)
+
+    @staticmethod
+    def boundary() -> dict[str, Any]:
+        return {
+            "schema_version": "brain_governance_candidate_review_boundary.v1",
+            "review_only": True,
+            "does_not_submit_orders": True,
+            "does_not_apply_factor_weights": True,
+            "does_not_switch_templates": True,
+            "does_not_mutate_runtime_overlay": True,
+            "does_not_write_learning_samples": True,
+            "does_not_submit_policy_suggestion": True,
+            "bridge_preview_only": True,
+            "llm_advisory_optional": True,
+            "llm_advisory_only": True,
+            "uses_existing_conflict_surface": True,
+        }
+
+    def review_latest(
+        self,
+        *,
+        limit: int = 20,
+        run_llm: bool = False,
+        llm_dry_run: bool = True,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        ensure_brain_governance_candidate_review_table(self.db_path)
+        limit = max(1, min(int(limit), 200))
+        latest = self.candidates.latest_candidates(limit=limit)
+        candidates = list(latest.get("items") or [])
+        if not candidates:
+            return {
+                "ok": False,
+                "schema_version": "brain_governance_candidate_review_run.v1",
+                "status": "missing_candidates",
+                "items": [],
+                "boundary": self.boundary(),
+            }
+        now = time.time()
+        context = {
+            "policy_suggestions": self._active_policy_suggestions(),
+            "candidates": self.candidates.latest_candidates(limit=200).get("items") or [],
+            "source_reliability": self._source_reliability(),
+        }
+        items = [
+            self._review_candidate(candidate, context=context, now=now, run_llm=run_llm, llm_dry_run=llm_dry_run)
+            for candidate in candidates
+        ]
+        if persist:
+            self._persist(items)
+        return {
+            "ok": True,
+            "schema_version": "brain_governance_candidate_review_run.v1",
+            "status": "reviewed",
+            "item_count": len(items),
+            "items": items,
+            "run_llm": bool(run_llm),
+            "llm_dry_run": bool(llm_dry_run),
+            "boundary": self.boundary(),
+            "created_at": now,
+        }
+
+    def latest_reviews(self, *, limit: int = 50) -> dict[str, Any]:
+        ensure_brain_governance_candidate_review_table(self.db_path)
+        limit = max(1, min(int(limit), 200))
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "brain_governance_candidate_review"):
+                return self._missing_status("missing_table")
+            rows = _execute(
+                conn,
+                """
+                SELECT review_id, candidate_id, review_status, bridge_ready,
+                       bridge_reason, evidence_gaps_json, conflict_json,
+                       bridge_preview_json, source_reliability_json,
+                       llm_advisory_json, boundary_json, created_at
+                FROM brain_governance_candidate_review
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return {
+                "ok": bool(rows),
+                "schema_version": "brain_governance_candidate_review_list.v1",
+                "status": "available" if rows else "missing_reviews",
+                "items": [self._row_to_review(row) for row in rows],
+                "boundary": self.boundary(),
+            }
+        finally:
+            conn.close()
+
+    def status(self, *, limit: int = 50) -> dict[str, Any]:
+        latest = self.latest_reviews(limit=limit)
+        items = list(latest.get("items") or [])
+        if not items:
+            return {
+                "ok": False,
+                "schema_version": "brain_governance_candidate_review_readiness.v1",
+                "status": latest.get("status", "missing_reviews"),
+                "review_count": 0,
+                "review_only": True,
+                "bridge_preview_only": True,
+            }
+        statuses: dict[str, int] = {}
+        bridge_ready = 0
+        for item in items:
+            status = str(item.get("review_status") or "unknown")
+            statuses[status] = statuses.get(status, 0) + 1
+            if bool(item.get("bridge_ready")):
+                bridge_ready += 1
+        return {
+            "ok": True,
+            "schema_version": "brain_governance_candidate_review_readiness.v1",
+            "status": "available",
+            "review_count": len(items),
+            "latest_created_at": max(_safe_float(item.get("created_at")) for item in items),
+            "statuses": dict(sorted(statuses.items())),
+            "bridge_ready_count": bridge_ready,
+            "review_only": True,
+            "bridge_preview_only": True,
+        }
+
+    def _review_candidate(
+        self,
+        candidate: dict[str, Any],
+        *,
+        context: dict[str, Any],
+        now: float,
+        run_llm: bool,
+        llm_dry_run: bool,
+    ) -> dict[str, Any]:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        evidence_gaps = self._evidence_gaps(candidate, now=now)
+        conflict = self._conflict(candidate, context=context)
+        bridge_preview = self.candidates.preview_policy_suggestion_bridge(candidate_id)
+        source_reliability = dict(context.get("source_reliability") or {}).get(
+            str(candidate.get("source_agent") or ""),
+            {},
+        )
+        review_status = self._review_status(
+            candidate=candidate,
+            evidence_gaps=evidence_gaps,
+            conflict=conflict,
+            bridge_preview=bridge_preview,
+            now=now,
+        )
+        llm_advisory = self._llm_advisory(
+            candidate=candidate,
+            review_status=review_status,
+            evidence_gaps=evidence_gaps,
+            conflict=conflict,
+            bridge_preview=bridge_preview,
+            source_reliability=source_reliability,
+            run_llm=run_llm,
+            llm_dry_run=llm_dry_run,
+        )
+        return {
+            "review_id": f"brain_candidate_review_{uuid.uuid4().hex[:16]}",
+            "schema_version": "brain_governance_candidate_review.v1",
+            "candidate_id": candidate_id,
+            "candidate": {
+                "source_agent": candidate.get("source_agent", ""),
+                "source_kind": candidate.get("source_kind", ""),
+                "proposal_stage": candidate.get("proposal_stage", ""),
+                "status": candidate.get("status", ""),
+                "scope_type": candidate.get("scope_type", ""),
+                "scope_key": candidate.get("scope_key", ""),
+                "action": candidate.get("action", ""),
+                "confidence": _safe_float(candidate.get("confidence")),
+                "evidence_score": _safe_float(candidate.get("evidence_score")),
+            },
+            "review_status": review_status,
+            "bridge_ready": review_status == "bridge_ready",
+            "bridge_reason": str(bridge_preview.get("reason") or review_status),
+            "evidence_gaps": evidence_gaps,
+            "conflict": conflict,
+            "bridge_preview": bridge_preview,
+            "source_reliability": source_reliability,
+            "llm_advisory": llm_advisory,
+            "boundary": self.boundary(),
+            "created_at": now,
+        }
+
+    @staticmethod
+    def _evidence_gaps(candidate: dict[str, Any], *, now: float) -> list[str]:
+        gaps: list[str] = []
+        if str(candidate.get("status") or "") != "active":
+            gaps.append("candidate_not_active")
+        if str(candidate.get("proposal_stage") or "") not in BRIDGE_READY_STAGES:
+            gaps.append("proposal_stage_not_bridge_ready")
+        if _safe_float(candidate.get("evidence_score")) < 0.5:
+            gaps.append("evidence_score_below_threshold")
+        expires_at = _safe_float(candidate.get("expires_at"))
+        if expires_at > 0 and expires_at <= now:
+            gaps.append("candidate_expired")
+        if not bool((candidate.get("risk_verdict") or {}).get("allowed")):
+            gaps.append("risk_policy_not_allowed")
+        expected = dict(candidate.get("expected_effect") or {})
+        source_presence = dict(expected.get("source_presence") or {})
+        for source, present in sorted(source_presence.items()):
+            if not present:
+                gaps.append(f"missing_{source}")
+        action = str(candidate.get("action") or "")
+        scope_type = str(candidate.get("scope_type") or "")
+        if scope_type == "supervisor_template" and action == "switch_position_supervisor_template":
+            replay = dict(expected.get("replay") or {})
+            supervisor = dict(expected.get("supervisor") or {})
+            if not replay.get("replay_run_id"):
+                gaps.append("missing_replay_summary")
+            if _safe_float(supervisor.get("trace_count")) <= 0:
+                gaps.append("missing_supervisor_trace")
+        if scope_type == "parameter_template" and action == "switch_parameter_template":
+            mapped = dict((candidate.get("lineage") or {}).get("mapped_action") or {})
+            if not mapped.get("target_template_id"):
+                gaps.append("missing_target_template_id")
+            if str(mapped.get("recommended_scope") or "") != "online_light":
+                gaps.append("missing_online_light_recommended_scope")
+        return sorted(set(gaps))
+
+    def _conflict(self, candidate: dict[str, Any], *, context: dict[str, Any]) -> dict[str, Any]:
+        surface = control_surface(self._candidate_as_row(candidate))
+        policy_conflicts = []
+        for row in list(context.get("policy_suggestions") or []):
+            if control_surface(row) == surface:
+                policy_conflicts.append(
+                    {
+                        "suggestion_id": row.get("suggestion_id", ""),
+                        "status": row.get("status", ""),
+                        "scope_type": row.get("scope_type", ""),
+                        "scope_key": row.get("scope_key", ""),
+                        "action": row.get("action", ""),
+                    }
+                )
+        candidate_conflicts = []
+        candidate_id = str(candidate.get("candidate_id") or "")
+        for item in list(context.get("candidates") or []):
+            if str(item.get("candidate_id") or "") == candidate_id:
+                continue
+            if str(item.get("status") or "") != "active":
+                continue
+            if control_surface(self._candidate_as_row(item)) == surface:
+                candidate_conflicts.append(
+                    {
+                        "candidate_id": item.get("candidate_id", ""),
+                        "proposal_stage": item.get("proposal_stage", ""),
+                        "scope_type": item.get("scope_type", ""),
+                        "scope_key": item.get("scope_key", ""),
+                        "action": item.get("action", ""),
+                    }
+                )
+        return {
+            "schema_version": "brain_candidate_conflict_review.v1",
+            "surface": surface,
+            "active_policy_suggestions": policy_conflicts,
+            "active_candidates": candidate_conflicts,
+            "has_conflict": bool(policy_conflicts or candidate_conflicts),
+            "resolver": "research.learning.governance_conflicts.control_surface",
+        }
+
+    @staticmethod
+    def _candidate_as_row(candidate: dict[str, Any]) -> dict[str, Any]:
+        scope_type = str(candidate.get("scope_type") or "")
+        action = str(candidate.get("action") or "")
+        lineage = dict(candidate.get("lineage") or {})
+        mapped = dict(lineage.get("mapped_action") or {})
+        if scope_type == "supervisor_template" and action == "switch_position_supervisor_template":
+            return {
+                "suggestion_id": candidate.get("candidate_id", ""),
+                "scope_type": "position_supervisor_template",
+                "scope_key": mapped.get("target_template_id") or candidate.get("scope_key", ""),
+                "action": "switch_position_supervisor_template",
+                "confidence": candidate.get("confidence", 0.0),
+                "evidence_json": _dumps({"target_template_id": mapped.get("target_template_id", "")}),
+                "status": "proposed",
+            }
+        return {
+            "suggestion_id": candidate.get("candidate_id", ""),
+            "scope_type": candidate.get("scope_type", ""),
+            "scope_key": candidate.get("scope_key", ""),
+            "action": candidate.get("action", ""),
+            "confidence": candidate.get("confidence", 0.0),
+            "evidence_json": _dumps(candidate.get("evidence_refs", {})),
+            "status": "proposed",
+        }
+
+    @staticmethod
+    def _review_status(
+        *,
+        candidate: dict[str, Any],
+        evidence_gaps: list[str],
+        conflict: dict[str, Any],
+        bridge_preview: dict[str, Any],
+        now: float,
+    ) -> str:
+        if candidate.get("submitted_suggestion_id"):
+            return "submitted"
+        expires_at = _safe_float(candidate.get("expires_at"))
+        if expires_at > 0 and expires_at <= now:
+            return "expired"
+        if bool(conflict.get("has_conflict")):
+            return "conflict_detected"
+        if evidence_gaps:
+            return "needs_evidence"
+        if bool(bridge_preview.get("bridge_ready")):
+            return "bridge_ready"
+        reason = str(bridge_preview.get("reason") or "")
+        if reason.startswith("unsupported_legacy_governor_surface"):
+            return "not_bridge_compatible"
+        return "blocked"
+
+    def _active_policy_suggestions(self) -> list[dict[str, Any]]:
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "policy_suggestion"):
+                return []
+            rows = _execute(
+                conn,
+                """
+                SELECT suggestion_id, scope_type, scope_key, action, confidence,
+                       evidence_json, status, reviewed_at, created_at
+                FROM policy_suggestion
+                WHERE status IN ('proposed', 'approved', 'applied')
+                ORDER BY created_at DESC
+                LIMIT 200
+                """,
+            ).fetchall()
+            return [dict(row) for row in rows if str(row["status"] or "") in ACTIVE_CONFLICT_STATUSES]
+        finally:
+            conn.close()
+
+    def _source_reliability(self) -> dict[str, dict[str, Any]]:
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "brain_governance_candidate"):
+                return {}
+            rows = _execute(
+                conn,
+                """
+                SELECT source_agent, status, COUNT(*) AS cnt
+                FROM brain_governance_candidate
+                GROUP BY source_agent, status
+                """,
+            ).fetchall()
+            result: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                source = str(row["source_agent"] or "unknown")
+                status = str(row["status"] or "unknown")
+                item = result.setdefault(
+                    source,
+                    {
+                        "schema_version": "brain_source_reliability_snapshot.v1",
+                        "source_agent": source,
+                        "candidate_count": 0,
+                        "status_counts": {},
+                    },
+                )
+                count = int(row["cnt"] or 0)
+                item["candidate_count"] += count
+                item["status_counts"][status] = count
+            for item in result.values():
+                count = max(int(item.get("candidate_count") or 0), 1)
+                submitted = int((item.get("status_counts") or {}).get("submitted", 0) or 0)
+                item["submitted_rate"] = round(submitted / count, 6)
+            return result
+        finally:
+            conn.close()
+
+    def _llm_advisory(
+        self,
+        *,
+        candidate: dict[str, Any],
+        review_status: str,
+        evidence_gaps: list[str],
+        conflict: dict[str, Any],
+        bridge_preview: dict[str, Any],
+        source_reliability: dict[str, Any],
+        run_llm: bool,
+        llm_dry_run: bool,
+    ) -> dict[str, Any]:
+        if not run_llm:
+            return {
+                "schema_version": "brain_candidate_llm_advisory.v1",
+                "enabled": False,
+                "advisory_only": True,
+            }
+        context = {
+            "schema_version": "brain_candidate_llm_review_context.v1",
+            "candidate": candidate,
+            "review_status": review_status,
+            "evidence_gaps": evidence_gaps,
+            "conflict": conflict,
+            "bridge_preview": bridge_preview,
+            "source_reliability": source_reliability,
+            "forbidden_actions": [
+                "do_not_submit_orders",
+                "do_not_apply_factor_weights",
+                "do_not_switch_templates",
+                "do_not_bypass_RiskPolicyService",
+                "do_not_submit_policy_suggestion",
+            ],
+        }
+        result = LLMAdvisoryService(self.db_path).run(
+            task_type="governance_review",
+            context=context,
+            target_type="brain_governance_candidate",
+            target_id=str(candidate.get("candidate_id") or ""),
+            dry_run=bool(llm_dry_run),
+            max_tokens=800,
+            temperature=0.1,
+        )
+        return {
+            "schema_version": "brain_candidate_llm_advisory.v1",
+            "enabled": True,
+            "dry_run": bool(llm_dry_run),
+            "status": result.get("status", ""),
+            "audit": result.get("audit", {}),
+            "advisory_only": True,
+            "error": result.get("error", ""),
+            "parsed": result.get("parsed", {}),
+        }
+
+    def _persist(self, items: list[dict[str, Any]]) -> None:
+        ensure_brain_governance_candidate_review_table(self.db_path)
+        conn = _connect(self.db_path)
+        try:
+            for item in items:
+                _execute(
+                    conn,
+                    """
+                    INSERT INTO brain_governance_candidate_review
+                    (review_id, candidate_id, review_status, bridge_ready,
+                     bridge_reason, evidence_gaps_json, conflict_json,
+                     bridge_preview_json, source_reliability_json,
+                     llm_advisory_json, boundary_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item["review_id"],
+                        item.get("candidate_id", ""),
+                        item.get("review_status", ""),
+                        1 if item.get("bridge_ready") else 0,
+                        item.get("bridge_reason", ""),
+                        _dumps(item.get("evidence_gaps", [])),
+                        _dumps(item.get("conflict", {})),
+                        _dumps(item.get("bridge_preview", {})),
+                        _dumps(item.get("source_reliability", {})),
+                        _dumps(item.get("llm_advisory", {})),
+                        _dumps(item.get("boundary", {})),
+                        _safe_float(item.get("created_at")),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _row_to_review(row: Any) -> dict[str, Any]:
+        return {
+            "review_id": str(row["review_id"] or ""),
+            "schema_version": "brain_governance_candidate_review.v1",
+            "candidate_id": str(row["candidate_id"] or ""),
+            "review_status": str(row["review_status"] or ""),
+            "bridge_ready": bool(row["bridge_ready"]),
+            "bridge_reason": str(row["bridge_reason"] or ""),
+            "evidence_gaps": _loads(row["evidence_gaps_json"], []),
+            "conflict": _loads(row["conflict_json"], {}),
+            "bridge_preview": _loads(row["bridge_preview_json"], {}),
+            "source_reliability": _loads(row["source_reliability_json"], {}),
+            "llm_advisory": _loads(row["llm_advisory_json"], {}),
+            "boundary": _loads(row["boundary_json"], BrainGovernanceCandidateReviewService.boundary()),
+            "created_at": _safe_float(row["created_at"]),
+        }
+
+    @staticmethod
+    def _missing_status(status: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "schema_version": "brain_governance_candidate_review_list.v1",
+            "status": status,
+            "items": [],
+            "boundary": BrainGovernanceCandidateReviewService.boundary(),
+        }

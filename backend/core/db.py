@@ -914,6 +914,21 @@ CREATE TABLE IF NOT EXISTS brain_governance_candidate (
     updated_at REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS brain_governance_candidate_review (
+    review_id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    review_status TEXT DEFAULT '',
+    bridge_ready INTEGER DEFAULT 0,
+    bridge_reason TEXT DEFAULT '',
+    evidence_gaps_json TEXT NOT NULL DEFAULT '[]',
+    conflict_json TEXT NOT NULL DEFAULT '{}',
+    bridge_preview_json TEXT NOT NULL DEFAULT '{}',
+    source_reliability_json TEXT NOT NULL DEFAULT '{}',
+    llm_advisory_json TEXT NOT NULL DEFAULT '{}',
+    boundary_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE TABLE IF NOT EXISTS brain_live_ready_guardrail (
     guardrail_id TEXT PRIMARY KEY,
     status TEXT DEFAULT '',
@@ -1240,6 +1255,8 @@ CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_created ON brain_gover
 CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_stage ON brain_governance_candidate(proposal_stage, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_scope ON brain_governance_candidate(scope_type, scope_key, action);
 CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_source ON brain_governance_candidate(source_agent, source_kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_candidate ON brain_governance_candidate_review(candidate_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_status ON brain_governance_candidate_review(review_status, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_created ON brain_live_ready_guardrail(created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_status ON brain_live_ready_guardrail(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_autonomous_learning_sample_type ON autonomous_learning_sample(sample_type, label_status, event_ts);
