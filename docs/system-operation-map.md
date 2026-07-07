@@ -1,7 +1,7 @@
 # Current Runtime Architecture
 
 > Status: active
-> Last verified: 2026-07-06
+> Last verified: 2026-07-07
 > Scope: code-verified runtime map for backend startup, live trading, learning, shadow models, factor scoring, autonomous governance, state stores, and operator entry points.
 > Primary code anchors: `backend/app.py`, `backend/services/live_service.py`, `alpha/portfolio_compositor.py`, `backend/services/autonomous_learning.py`, `research/features/evidence_contract.py`, `research/*_lightgbm.py`, `backend/runtime/factor_governance_orchestrator.py`, `backend/services/factor_catalog.py`, `scripts/learning_worker.py`.
 
@@ -38,7 +38,7 @@ Caddy + web_frontend + miniprogram_v2
   -> FactorGovernanceOrchestrator
   -> runtime_config_overlay + runtime_config_snapshot
   -> replay_report + autonomy_health readiness + autonomy_scope_approval_event + release_run + release_approval_event + incident_playbook_run/event + v15_phase0 gate
-  -> V16 brain_state_snapshot + brain_memory + brain_action_plan + brain_action_plan_eval + brain_low_impact_execution + brain_medium_impact_governance + brain_governance_candidate + brain_live_ready_guardrail world model / memory / hypotheses / critic / shadow plans / posterior comparisons / low-impact runs / isolated governance candidates / live-ready guardrails
+  -> V16 brain_state_snapshot + brain_memory + brain_action_plan + brain_action_plan_eval + brain_low_impact_execution + brain_medium_impact_governance + brain_governance_candidate + brain_live_ready_guardrail + proposal_registry + live_autonomy_unlock_event world model / memory / hypotheses / critic / shadow plans / posterior comparisons / low-impact runs / isolated governance candidates / live-ready guardrails / unified proposal bus with reliability/freshness / governed live-autonomous unlock
   -> 下一轮交易
 ```
 
@@ -77,11 +77,12 @@ flowchart TD
         Normalizer["SignalNormalizer"]
         Compositor["PortfolioCompositor"]
         ContextPolicy["ContextPolicyService"]
+        DecisionFrame["LiveDecisionPipeline / LiveDecisionFrame"]
         Gate["ExecutionGate"]
         Sizing["Kelly + event + context sizing"]
         RiskPolicy["RiskPolicyService / RiskLimitSnapshot / RiskGovernor"]
         IncidentControl["runtime incident control"]
-        Execution["open / amend / reduce / close"]
+        Execution["OpenTradePipeline / amend / reduce / close"]
     end
 
     subgraph LEDGER["交易审计与复盘"]
@@ -101,6 +102,8 @@ flowchart TD
         Phase0Gate["v15_phase0 completion"]
         BrainState["brain_state_snapshot"]
         BrainMemory["brain_memory"]
+        ProposalRegistry["proposal_registry"]
+        LiveAutonomyUnlock["live_autonomy_unlock_event"]
     end
 
     subgraph WORKER["quant-learning-worker.service"]
@@ -135,6 +138,7 @@ flowchart TD
         Snapshot["runtime_config_snapshot"]
         ParamTemplates["parameter templates"]
         AutonomyHealth["autonomy health"]
+        LiveAutonomy["LiveAutonomyService"]
     end
 
     subgraph UI["展示与操作入口"]
@@ -159,7 +163,7 @@ flowchart TD
     StatePG <--> Readiness
 
     API --> LiveLoop
-    LiveLoop --> FactorEngine --> Normalizer --> Compositor --> ContextPolicy --> Gate --> Sizing --> RiskPolicy --> Execution --> Bridge
+    LiveLoop --> FactorEngine --> Normalizer --> Compositor --> ContextPolicy --> DecisionFrame --> Gate --> Sizing --> RiskPolicy --> Execution --> Bridge
     Overlay --> IncidentControl --> RiskPolicy
     RiskPolicy --> StatePG
     Execution --> DecisionLedger
@@ -229,6 +233,18 @@ flowchart TD
     PolicySuggestion --> BrainMemory
     StatePG --> BrainMemory
     BrainMemory --> BrainState
+    PolicySuggestion --> ProposalRegistry
+    EvolutionDecision --> ProposalRegistry
+    AppLog --> ProposalRegistry
+    BrainMemory --> ProposalRegistry
+    BrainState --> ProposalRegistry
+    ProposalRegistry --> LiveAutonomy
+    ReleaseRun --> LiveAutonomy
+    ReplayReport --> LiveAutonomy
+    Readiness --> LiveAutonomy
+    LiveAutonomy --> Overlay
+    LiveAutonomy --> Snapshot
+    LiveAutonomy --> LiveAutonomyUnlock
 
     API --> Caddy --> Web
     API --> MiniProgram
@@ -266,8 +282,8 @@ flowchart TD
 5. 调用 `restore_runtime_config_on_startup()`：读取 DB overlay，应用到内存 `RuntimeConfig`，写 startup `runtime_config_snapshot`。
 6. overlay 恢复失败时，如果有效下单已开启则阻断启动；dry-run 或降级路径只记录 startup issue。
 7. 初始化 PostgreSQL state 与 DuckDB 连接契约。
-8. `ParameterTemplateService().sync_runtime_config()` 把 active 参数模板同步进 runtime config。
-9. 从 DB 恢复 position supervisor active template，必要时写 snapshot。
+8. `ParameterTemplateService().sync_runtime_config()` 把 active 参数模板同步进 runtime config，并保留已有 overlay 键。
+9. position supervisor active template 由 `runtime_config_overlay.position_supervisor_template_id` 恢复；`runtime_config_snapshot` 只做审计和回滚证据，不能作为启动恢复事实源。
 10. 绑定 job manager event loop。
 11. 从 lifecycle log 恢复 shadow/discovered 动态因子。
 12. 预热 `DataStore`。
@@ -398,37 +414,49 @@ GET  /api/learning/model/permissions/audits
   -> _process_tick(...)
 ```
 
-`_process_tick_factor_pipeline()` 是当前开仓决策核心：
+`_process_tick_factor_pipeline()` 现在只编排 live tick 外层；交易信号决策由 `backend.services.live_decision_pipeline.run_live_decision_pipeline()` 产出 `LiveDecisionFrame`：
 
 ```text
-StreamingFactorEngine.refresh_factor_list()
+run_live_decision_pipeline(...)
+  -> StreamingFactorEngine.refresh_factor_list()
   -> engine.append_bar(bar)
   -> SignalNormalizer.normalize(...)
   -> PortfolioCompositor.compose(...)
   -> ContextPolicyService.evaluate(context_state)
-  -> 临时调整 ExecutionGate threshold
+  -> apply context threshold effect to ExecutionGate
   -> ExecutionGate.filter(...)
   -> ExecutionGate.tick(...)
+  -> LiveDecisionFrame
+_process_tick_factor_pipeline(...)
   -> 写 factor vote snapshot / signal ledger
   -> position close 检测与 deal sync
-  -> 如果允许开仓:
-       SL/TP preflight
-       Kelly sizing
-       event sizing
-       context position_multiplier
-       event risk filter context
-       RiskPolicyService.evaluate("open_trade")
-       cTrader market_buy / market_sell
-       写 open/order_failed/skip ledger
-       持仓恢复状态与 SL/TP amend
+  -> _run_open_trade_pipeline(...)
+       prepare candidate:
+         SL/TP preflight
+         Kelly sizing
+         event sizing
+         context position_multiplier
+       risk verdict:
+         event risk filter context
+         RiskPolicyService.evaluate("open_trade")
+         market-session/order block
+       broker execution:
+         cTrader market_buy / market_sell
+         resolve fill / position id / actual API volume
+       post-fill audit:
+         pending recovery state
+         SL/TP amend
+         open/order_failed/skip ledger
   -> position protection cycle
 ```
 
 重点边界：
 
 - live `ExecutionGate` 处理信号阈值和策略冷却；NFP/GVZ legacy event filter 只生成 `event_filter` 风控输入，最终阻断由 `RiskPolicyService` 裁决。
+- `LiveDecisionFrame` 是交易信号决策输出，不读取账户、不做仓位 sizing、不调用 `RiskPolicyService`、不触达 broker。
 - `RiskPolicyService` 是动作级裁决入口，开仓、模板切换、自治动作和 rollback 都不能绕过它；账户/运行态阈值通过 `RiskLimitSnapshot` 输入 `RiskGovernor`。
 - live loop 的日内 circuit breaker 是执行快停保护，阈值来自 `RiskLimitSnapshot.max_daily_loss_pct`，不是第二套风控事实源。
+- demo 真实采样上限由 `RuntimeConfig.demo_learning_max_daily_trades` 进入 `RiskLimitSnapshot.source=runtime_config:demo_learning`；它只在 `autonomy_mode=demo_autonomous` 且高于 `risk_max_daily_trades` 时提高有效日交易上限，其它硬风控仍由 `RiskPolicyService` 裁决。
 - context policy 只改有效阈值和仓位乘数，不改多空方向。
 
 ## 7. 因子评分真实语义
@@ -489,6 +517,7 @@ StreamingFactorEngine.refresh_factor_list()
 
 - 自动治理改 runtime config 走 `RuntimeConfigMutationService` / `RuntimeConfigOverlayService`。
 - `DecisionPolicy` 仍是权重写入的权威路径。
+- position supervisor 模板切换和回滚必须走 `RiskPolicyService.evaluate("switch_position_supervisor_template")` + `RuntimeConfigMutationService`，并写入 `runtime_config_overlay`、`runtime_config_snapshot`、`evolution_decision`、`learning_application_log/effect`。
 - API 手工 patch 仍存在于 `/api/config/runtime`，但不应替代自治主循环。
 
 ## 8.1 V15 Phase 0 Replay And Autonomy Health
@@ -554,8 +583,8 @@ V15 Phase 0 已新增只读完成门：
 
 V16 Phase 1 已新增只读大脑状态最小闭环，Phase 2 已完成最小影子 ActionPlan 和后验可比性闭环，Phase 3 已完成低影响执行最小闭环，Phase 4 已完成中等影响治理候选最小闭环，Phase 5 已完成实盘前护栏最小闭环：
 
-- 表：`brain_state_snapshot`、`brain_memory`、`brain_action_plan`、`brain_action_plan_eval`、`brain_low_impact_execution`、`brain_medium_impact_governance`、`brain_governance_candidate`、`brain_governance_candidate_review`、`brain_live_ready_guardrail`。
-- 服务：`backend.services.brain_state.BrainStateService`、`backend.services.brain_memory.BrainMemoryService`、`backend.services.brain_action_planner.BrainActionPlannerService`、`backend.services.brain_action_evaluator.BrainActionPlanEvaluatorService`、`backend.services.brain_low_impact_executor.BrainLowImpactExecutorService`、`backend.services.brain_medium_impact_governance.BrainMediumImpactGovernanceService`、`backend.services.brain_governance_candidates.BrainGovernanceCandidateService`、`backend.services.brain_governance_candidate_review.BrainGovernanceCandidateReviewService`、`backend.services.brain_live_ready_guardrail.BrainLiveReadyGuardrailService`。
+- 表：`brain_state_snapshot`、`brain_memory`、`brain_action_plan`、`brain_action_plan_eval`、`brain_low_impact_execution`、`brain_medium_impact_governance`、`brain_governance_candidate`、`brain_governance_candidate_review`、`brain_live_ready_guardrail`、`proposal_registry`、`live_autonomy_unlock_event`。
+- 服务：`backend.services.brain_state.BrainStateService`、`backend.services.brain_memory.BrainMemoryService`、`backend.services.brain_action_planner.BrainActionPlannerService`、`backend.services.brain_action_evaluator.BrainActionPlanEvaluatorService`、`backend.services.brain_low_impact_executor.BrainLowImpactExecutorService`、`backend.services.brain_medium_impact_governance.BrainMediumImpactGovernanceService`、`backend.services.brain_governance_candidates.BrainGovernanceCandidateService`、`backend.services.brain_governance_candidate_review.BrainGovernanceCandidateReviewService`、`backend.services.brain_live_ready_guardrail.BrainLiveReadyGuardrailService`、`backend.services.proposal_registry.ProposalRegistryService`、`backend.services.live_autonomy.LiveAutonomyService`。
 - 入口：`GET /api/ops/brain/state`、`GET /api/ops/brain/memory`、`GET /api/ops/brain/action-plans`、`GET /api/ops/brain/action-plan-evals`、`GET /api/ops/brain/low-impact-executions`、`POST /api/ops/brain/low-impact-executions/run`、`GET /api/ops/brain/medium-impact-governance`、`POST /api/ops/brain/medium-impact-governance/materialize`、`GET /api/ops/brain/governance-candidates`、`POST /api/ops/brain/governance-candidates/{candidate_id}/submit`、`GET /api/ops/brain/governance-candidate-reviews`、`POST /api/ops/brain/governance-candidates/review`、`GET /api/ops/brain/live-ready-guardrails`、`POST /api/ops/brain/live-ready-guardrails/evaluate`、`POST /api/ops/brain/live-ready-guardrails/tighten`。
 - readiness 字段：`brain_state`、`brain_action_plans`、`brain_action_plan_evals`、`brain_low_impact_executions`、`brain_medium_impact_governance`、`brain_governance_candidates`、`brain_governance_candidate_reviews`、`brain_live_ready_guardrails`、`v16.brain_state`、`v16.action_plans`、`v16.action_plan_evals`、`v16.low_impact_executions`、`v16.medium_impact_governance`、`v16.governance_candidates`、`v16.governance_candidate_reviews` 和 `v16.live_ready_guardrails`。
 - 输出：`world_model`、`perceptions`、`memory`、observe-only `hypotheses`、`critic`、`evidence_refs` 和只读边界。
@@ -565,7 +594,9 @@ V16 Phase 1 已新增只读大脑状态最小闭环，Phase 2 已完成最小影
 - Medium-impact governance：基于 P2/P3 evidence、`RiskPolicyService` verdict 和 `DecisionPolicy` preview 生成隔离 `brain_governance_candidate` 候选，写 `brain_medium_impact_governance`；不直接写 `policy_suggestion`，不直接应用 factor weight、template、model promotion 或 runtime overlay。候选只有通过手动 bridge 且兼容旧 governor evidence 才能进入 `policy_suggestion(status='proposed')`。
 - Governance candidate review：读取隔离候选池、现有 active `policy_suggestion` 和 source reliability，复用 `research.learning.governance_conflicts.control_surface` 输出冲突面，调用 bridge preview 判断旧 governor 兼容性，并可选复用 `LLMAdvisoryService` 生成 advisory audit；review 不提交候选、不执行 runtime mutation。
 - Live-ready guardrails：评估 capability lock、broker/local divergence、incident memory、release rollback 和 P3/P4 evidence，写 `brain_live_ready_guardrail`；显式 `tighten` 只能通过 incident-control/RiskPolicy/overlay 进入更严格模式，不能放宽权限。
-- Web：`web_frontend/src/pages/V16BrainPage.tsx` + `/v16` 展示 world model、memory、hypotheses、Critic、evidence refs、shadow action plans/evaluations、P3 executions、P4 governance、P5 guardrails 和边界。
+- Proposal Registry：归一化 policy suggestion、brain candidate/action plan、learning application、evolution decision、live autonomy event、shadow/advisory 和 LLM audit，输出 source reliability、evidence freshness、conflict 和 route；review 不授权、不应用、不改来源状态。
+- Live autonomy：评估 readiness、release rollback、replay、broker alignment、proposal conflict、evidence freshness 和 RiskPolicy budget；成功解锁/撤销只通过 `RuntimeConfigMutationService` 写 overlay/snapshot。GET/evaluate 不自动改 incident mode；live 开仓路径若被 `RiskPolicyService` 判定为 `live_autonomy_budget_breach`，会通过 `RuntimeIncidentControlService` 自动请求 `no_new_risk`，并保留 incident/proposal/overlay 审计。
+- Web：`web_frontend/src/pages/V16BrainPage.tsx` + `/v16` 展示 world model、memory、hypotheses、Critic、evidence refs、proposal registry、live autonomy、shadow action plans/evaluations、P3 executions、P4 governance、P5 guardrails 和边界。
 
 该闭环只把 V15 readiness、replay、incident control、autonomy health、治理新鲜度、经验记忆、交易复盘、policy suggestion、model permission audit 和可选 shadow audit 翻译成认知层审计事实。negative memory 只能收紧 Critic scope，positive memory 只能作为 counter-evidence 展示。Phase 2 action plan/eval 只是账本记录和后验比较。Phase 3 只允许低影响白名单动作。Phase 4 只 materialize 中等影响治理候选并隔离在 `brain_governance_candidate`。Phase 5 只评估实盘前护栏和执行 tightening-only incident-control；真正提交/应用权重、模板、模型 promotion 仍必须回到 `RiskPolicyService`、`DecisionPolicy`、runtime snapshot/rollback、release evidence 和 V15 control plane。
 
@@ -656,6 +687,8 @@ GET /api/v4/catalog?snapshot=latest
 | `GET /api/ops/brain/governance-candidates` / `POST /api/ops/brain/governance-candidates/{candidate_id}/submit` | 查看 V16 隔离候选池；手动 submit 仅在 stage、RiskPolicy verdict、旧 governor evidence 兼容时桥接到 `policy_suggestion` review |
 | `GET /api/ops/brain/governance-candidate-reviews` / `POST /api/ops/brain/governance-candidates/review` | 查看或运行 V16 候选审查；输出 bridge preview、证据缺口、冲突面、source reliability 和可选 LLM advisory，只写审计不提交 |
 | `GET /api/ops/brain/live-ready-guardrails` / `POST /api/ops/brain/live-ready-guardrails/evaluate` / `POST /api/ops/brain/live-ready-guardrails/tighten` | 查看或显式评估 V16 Phase 5 实盘前护栏；tighten 只能通过 incident-control 收紧权限，不能恢复 normal 或放宽 incident mode |
+| `GET/POST /api/ops/autonomy/proposals*` | 查看、刷新和记录 Proposal Registry review；包含 source reliability、evidence freshness、conflict 和 route，不能授权或应用 |
+| `GET /api/ops/autonomy/live-status` / `POST /api/ops/autonomy/live-unlock*` | 查看、评估、一次性解锁或撤销 `live_autonomous`；评估包含 evidence freshness、operational posture 和 budget response，mutation 必须走 overlay/snapshot |
 | `GET /api/live/*` | account、positions、loop status、strategy status、PnL 等 live 状态 |
 | `GET /api/v4/catalog` | 因子治理实时 Catalog |
 | `GET /api/v4/catalog?snapshot=latest` | 最近一次治理 Catalog snapshot |

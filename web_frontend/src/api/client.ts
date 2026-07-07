@@ -683,6 +683,66 @@ export async function getBrainLiveReadyGuardrails(limit = 50): Promise<Record<st
   return getJson<Record<string, unknown>>(`/api/ops/brain/live-ready-guardrails?${params.toString()}`);
 }
 
+export async function getAutonomyProposals(
+  refresh = false,
+  limit = 80,
+  status = "",
+): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (refresh) params.set("refresh", "true");
+  if (status) params.set("status", status);
+  return getJson<Record<string, unknown>>(`/api/ops/autonomy/proposals?${params.toString()}`);
+}
+
+export async function refreshAutonomyProposals(limit = 500): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return postJson<Record<string, unknown>>(`/api/ops/autonomy/proposals/refresh?${params.toString()}`, {});
+}
+
+export async function reviewAutonomyProposal(
+  proposalId: string,
+  payload: { decision?: string; route?: string; notes?: string; actor?: string } = {},
+): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>(`/api/ops/autonomy/proposals/${encodeURIComponent(proposalId)}/review`, {
+    actor: payload.actor || "web:meta_governance",
+    decision: payload.decision || "reviewed",
+    route: payload.route || "",
+    notes: payload.notes || "",
+  });
+}
+
+export async function getLiveAutonomyStatus(refreshProposals = false): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams();
+  if (refreshProposals) params.set("refresh_proposals", "true");
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return getJson<Record<string, unknown>>(`/api/ops/autonomy/live-status${suffix}`);
+}
+
+export async function evaluateLiveAutonomyUnlock(
+  reason = "web_meta_governance_evaluate",
+): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/autonomy/live-unlock/evaluate", {
+    actor: "web:meta_governance",
+    reason,
+    confirm: false,
+  });
+}
+
+export async function unlockLiveAutonomy(reason = "web_meta_governance_unlock"): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/autonomy/live-unlock", {
+    actor: "web:meta_governance",
+    reason,
+    confirm: true,
+  });
+}
+
+export async function revokeLiveAutonomy(reason = "web_meta_governance_revoke"): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/ops/autonomy/live-unlock/revoke", {
+    actor: "web:meta_governance",
+    reason,
+  });
+}
+
 export async function evaluateBrainLiveReadyGuardrail(): Promise<Record<string, unknown>> {
   return postJson<Record<string, unknown>>("/api/ops/brain/live-ready-guardrails/evaluate", {
     source: "web:v16_brain",

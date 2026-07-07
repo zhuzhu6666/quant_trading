@@ -2990,10 +2990,9 @@ def _auto_apply_position_supervisor_template_suggestions(
     run_id: str = "",
 ) -> dict[str, Any]:
     from backend.services.position_supervisor_templates import list_position_supervisor_templates
-    from config.runtime_config import patch as patch_runtime_config
     from config.runtime_config import shared as runtime_config
     from risk.policy_service import RiskPolicyService
-    from backend.services.evolution_ledger import persist_runtime_config_snapshot
+    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
     from research.learning.governor import RuleEvolutionGovernor
 
     def _template_switch_priority(row) -> tuple[int, float, float]:
@@ -3130,13 +3129,15 @@ def _auto_apply_position_supervisor_template_suggestions(
                 )
                 skipped.append({"suggestion_id": suggestion_id, "reason": "risk_blocked", "risk_verdict": verdict})
                 continue
-            patch_runtime_config({"position_supervisor_template_id": target_template_id})
-            snapshot = persist_runtime_config_snapshot(
-                runtime_config(),
+            mutation = RuntimeConfigMutationService(db_path).apply_patch(
+                {"position_supervisor_template_id": target_template_id},
                 source="position_supervisor_template_switch",
-                db_path=db_path,
                 run_id=run_id,
+                actor="system:autonomous_learning",
+                action="switch_position_supervisor_template",
+                reason=f"demo_autonomous applied suggestion {suggestion_id}",
             )
+            snapshot = dict(mutation.get("snapshot") or {})
             now_ts = time.time()
             application_id = f"psv_apply_{int(now_ts)}_{suggestion_id[-8:]}"
             details = {
@@ -3148,6 +3149,7 @@ def _auto_apply_position_supervisor_template_suggestions(
                 "target_template_id": target_template_id,
                 "risk_verdict": verdict,
                 "evidence": evidence,
+                "mutation": mutation,
                 "config_version": int(snapshot.get("config_version") or 0),
                 "config_hash": str(snapshot.get("config_hash") or ""),
             }
@@ -3263,9 +3265,8 @@ def _auto_rollback_position_supervisor_template(
     min_observed_trades: int = 3,
     max_delta_avg_reward: float = -0.005,
 ) -> dict[str, Any]:
-    from config.runtime_config import patch as patch_runtime_config
     from config.runtime_config import shared as runtime_config
-    from backend.services.evolution_ledger import persist_runtime_config_snapshot
+    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 
     conn = _connect(db_path)
     rolled_back = []
@@ -3308,13 +3309,15 @@ def _auto_rollback_position_supervisor_template(
             if current_template_id != target_template_id:
                 skipped.append({"application_id": application_id, "reason": "target_not_current", "current_template_id": current_template_id})
                 continue
-            patch_runtime_config({"position_supervisor_template_id": previous_template_id})
-            snapshot = persist_runtime_config_snapshot(
-                runtime_config(),
+            mutation = RuntimeConfigMutationService(db_path).apply_patch(
+                {"position_supervisor_template_id": previous_template_id},
                 source="position_supervisor_template_auto_rollback",
-                db_path=db_path,
                 run_id=run_id,
+                actor="system:autonomous_learning",
+                action="rollback_position_supervisor_template",
+                reason=f"rollback ineffective supervisor template {application_id}",
             )
+            snapshot = dict(mutation.get("snapshot") or {})
             now_ts = time.time()
             rollback = {
                 "schema_version": "position_supervisor_template_rollback.v1",
@@ -3324,6 +3327,7 @@ def _auto_rollback_position_supervisor_template(
                 "rolled_back_from": target_template_id,
                 "observed_trade_count": observed,
                 "delta_avg_reward": delta,
+                "mutation": mutation,
                 "config_version": int(snapshot.get("config_version") or 0),
                 "config_hash": str(snapshot.get("config_hash") or ""),
             }

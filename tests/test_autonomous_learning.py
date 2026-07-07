@@ -2,8 +2,10 @@ import json
 import sqlite3
 import time
 
+from backend.core.db import STATE_DB_DDL
 from backend.services import autonomous_learning as al
 from backend.services.evolution_ledger import expire_stale_evolution_runs, start_evolution_run
+from config import runtime_config as rc
 
 
 def _create_sample_db(path):
@@ -1071,6 +1073,67 @@ def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypa
     second = al.materialize_parameter_template_recommendations(db_path=db_path, limit=10)
     assert second["counts"]["skipped_existing"] == 1
     assert len(calls) == 1
+
+
+def test_auto_apply_position_supervisor_template_persists_runtime_overlay(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, reviewed_at, created_at)
+            VALUES (?, 'position_supervisor_template', ?, 'increase_min_hold_window',
+                    0.82, 'test supervisor switch', ?, 'approved', ?, ?)
+            """,
+            (
+                "psv_auto_overlay",
+                "position_supervisor:conservative.v1",
+                json.dumps(
+                    {
+                        "replay_summary": {"sample_count": 8},
+                        "counterfactual_summary": {"total": 12},
+                    },
+                    ensure_ascii=False,
+                ),
+                time.time(),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        result = al._auto_apply_position_supervisor_template_suggestions(
+            db_path=db_path,
+            experiment_id="demoauto_pytest",
+            run_id="evorun_pytest",
+        )
+
+        assert result["applied"][0]["suggestion_id"] == "psv_auto_overlay"
+        assert rc.shared().position_supervisor_template_id == "position_supervisor:conservative.v1"
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            overlay = conn.execute("SELECT overlay_json FROM runtime_config_overlay").fetchone()
+            suggestion = conn.execute(
+                "SELECT status FROM policy_suggestion WHERE suggestion_id='psv_auto_overlay'"
+            ).fetchone()
+            application = conn.execute("SELECT details_json FROM learning_application_log").fetchone()
+        finally:
+            conn.close()
+        overlay_json = json.loads(overlay["overlay_json"])
+        details_json = json.loads(application["details_json"])
+        assert overlay_json["position_supervisor_template_id"] == "position_supervisor:conservative.v1"
+        assert suggestion["status"] == "applied"
+        assert details_json["mutation"]["status"] == "applied"
+    finally:
+        rc.reset_for_tests()
 
 
 def test_demo_autonomy_delegates_policy_review_to_governor(monkeypatch, tmp_path):

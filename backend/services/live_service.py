@@ -36,8 +36,9 @@ from backend.ledger.service import DecisionLedger
 from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
-from risk.policy_service import RiskPolicyService
+from risk.policy_service import INCIDENT_MODE_RANK, RiskPolicyService
 from risk.runtime_policy import RiskLimitSnapshot
+from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.market_session import evaluate_market_session
 from backend.services.live_runtime_state import (
     cache_get_or_refresh as _runtime_cache_get_or_refresh,
@@ -48,6 +49,10 @@ from backend.services.live_runtime_state import (
 )
 from backend.services.live_ctrader_runtime import CTraderRuntime
 from backend.services.live_data_sync_job import make_data_sync_job as _make_data_sync_job
+from backend.services.live_decision_pipeline import (
+    build_signal_decision_log_payload as _decision_build_signal_decision_log_payload,
+    run_live_decision_pipeline as _decision_run_live_decision_pipeline,
+)
 from backend.services.live_loop_shell import (
     adaptive_weight_config as _loop_adaptive_weight_config,
     apply_spot_quote_to_latest_bar as _loop_apply_spot_quote_to_latest_bar,
@@ -378,6 +383,25 @@ class ProtectionCandidate:
     position: dict[str, Any] = field(default_factory=dict)
     config_version: int = 0
     config_hash: str = ""
+
+
+@dataclass
+class _OpenTradeCandidate:
+    direction_name: str
+    bridge_meta: dict[str, Any]
+    digits: int
+    sl_dist: float
+    tp_dist: float
+    sl_price: float
+    tp_price: float
+    base_volume: float
+    volume: float
+    event_multiplier: float
+    event_sizing_context: dict[str, Any]
+    sizing_trace: dict[str, Any]
+    risk_verdict: Any
+    market_session: dict[str, Any]
+    order_block: dict[str, Any]
 
 _local_positions: dict[int, _LocalSLTP] = {}
 _local_positions_lock = threading.Lock()
@@ -6813,6 +6837,740 @@ def _record_amend_failure_after_fill(
             logger.debug(ledger_debug_message, pid, _ledger_err)
 
 
+def _resolve_open_trade_bridge_meta(bridge: Any) -> dict[str, Any]:
+    meta = getattr(bridge, "_symbol_meta", None) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if not meta.get("api_min_volume") and bridge is not None and hasattr(bridge, "_resolve_symbol_id"):
+        try:
+            bridge._resolve_symbol_id()
+            meta = getattr(bridge, "_symbol_meta", None) or {}
+            if not isinstance(meta, dict):
+                meta = {}
+        except Exception:
+            pass
+    return dict(meta or {})
+
+
+def _apply_context_position_sizing(
+    *,
+    volume: float,
+    sizing_trace: dict[str, Any],
+    composite: Any,
+    bridge_meta: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    context_policy = dict(getattr(composite, "context_policy", {}) or {})
+    try:
+        context_mult = float(context_policy.get("position_multiplier", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        context_mult = 1.0
+    if not context_policy or abs(context_mult - 1.0) <= 1e-9:
+        return float(volume), sizing_trace
+
+    context_raw_volume = float(volume) * context_mult
+    context_volume = _floor_api_volume_to_step(context_raw_volume, bridge_meta)
+    adjusted_volume = context_volume if context_volume > 0 else float(volume)
+    next_trace = dict(sizing_trace)
+    next_trace["context_policy"] = {
+        **context_policy,
+        "raw_api_volume": context_raw_volume,
+        "adjusted_api_volume": adjusted_volume,
+    }
+    return adjusted_volume, next_trace
+
+
+def _prepare_open_trade_candidate(
+    *,
+    bridge: Any,
+    pipeline: dict,
+    cfg: Any,
+    bar: dict[str, Any],
+    factor_values: dict[str, Any],
+    composite: Any,
+    positions: list,
+    current_price: float,
+    atr_price: float,
+    tick: int,
+    log,
+) -> _OpenTradeCandidate:
+    bridge_meta = _resolve_open_trade_bridge_meta(bridge)
+    preflight = _tick_build_open_order_preflight(
+        direction=int(composite.direction or 0),
+        current_price=float(current_price or 0.0),
+        atr_price=float(atr_price or 0.0),
+        strategy_sl_atr=float(getattr(cfg, "strategy_sl_atr", 0.0) or 0.0),
+        strategy_tp_atr=float(getattr(cfg, "strategy_tp_atr", 0.0) or 0.0),
+        bridge_meta=bridge_meta,
+        protection_prices=_protection_prices_from_reference,
+    )
+    direction_name = str(preflight["direction_name"])
+    sl_dist = float(preflight["sl_dist"])
+    tp_dist = float(preflight["tp_dist"])
+    digits = int(preflight["digits"])
+    sl_price = float(preflight["sl_price"])
+    tp_price = float(preflight["tp_price"])
+
+    account_for_risk = _live_state_get("account", {}, clone=True) or {}
+    sizing_result = _risk_kelly_sizing(
+        cfg,
+        composite.direction,
+        current_price,
+        sl_price,
+        bridge_meta,
+        account_for_risk,
+    )
+    base_volume = float(sizing_result.get("volume") or 0.0)
+    sizing_trace = dict(sizing_result.get("trace") or {})
+    event_sizing_context = _event_sizing_context(
+        pipeline.get("event_sizing"),
+        float(bar.get("time", time.time()) or time.time()),
+    )
+    try:
+        event_multiplier = float(event_sizing_context.get("multiplier", 1.0))
+    except (TypeError, ValueError):
+        event_multiplier = 1.0
+    event_sizing_result = _apply_entry_event_sizing(
+        base_volume=base_volume,
+        event_multiplier=event_multiplier,
+        bridge_meta=bridge_meta,
+        sizing_trace=sizing_trace,
+    )
+    adjusted_volume = float(event_sizing_result.get("volume") or 0.0)
+    sizing_trace = dict(event_sizing_result.get("trace") or {})
+    sizing_block_reason = str(event_sizing_result.get("blocked_reason") or "")
+    effective_sizing = _tick_build_effective_event_sizing_payload(
+        base_volume=base_volume,
+        adjusted_volume=adjusted_volume,
+        sizing_trace=sizing_trace,
+        sizing_block_reason=sizing_block_reason,
+        event_sizing_context=event_sizing_context,
+    )
+    volume = float(effective_sizing["volume"])
+    sizing_trace = dict(effective_sizing["sizing_trace"])
+    event_sizing_context = dict(effective_sizing["event_sizing_context"])
+    volume, sizing_trace = _apply_context_position_sizing(
+        volume=volume,
+        sizing_trace=sizing_trace,
+        composite=composite,
+        bridge_meta=bridge_meta,
+    )
+
+    log(
+        f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
+        f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)} "
+        f"event_mult={event_multiplier:.2f} base_api_volume={base_volume:.0f})"
+    )
+
+    event_filter_context = _event_filter_context_for_risk_policy(
+        cfg=cfg,
+        direction=int(composite.direction or 0),
+        bar=bar,
+        factor_values=factor_values,
+    )
+    risk_context = _build_open_trade_risk_context(
+        cfg=cfg,
+        bridge=bridge,
+        acct=account_for_risk,
+        positions=positions,
+        requested_api_volume=volume,
+        signal_score=float(composite.score or 0.0),
+        symbol="XAUUSD",
+        direction=int(composite.direction or 0),
+        current_price=float(current_price or 0.0),
+        atr_price=float(atr_price or 0.0),
+        event_sizing_context=event_sizing_context,
+        event_filter_context=event_filter_context,
+        decision_quality_context=_decision_quality_context(composite),
+        decision_ts=float(bar.get("time", time.time()) or time.time()),
+    )
+    risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
+    market_session = _live_state_get("market_session", {}, clone=True) or {}
+    order_block = _tick_build_market_order_block(
+        market_session=market_session,
+        risk_verdict=risk_verdict,
+    )
+
+    return _OpenTradeCandidate(
+        direction_name=direction_name,
+        bridge_meta=bridge_meta,
+        digits=digits,
+        sl_dist=sl_dist,
+        tp_dist=tp_dist,
+        sl_price=sl_price,
+        tp_price=tp_price,
+        base_volume=base_volume,
+        volume=volume,
+        event_multiplier=event_multiplier,
+        event_sizing_context=event_sizing_context,
+        sizing_trace=sizing_trace,
+        risk_verdict=risk_verdict,
+        market_session=market_session,
+        order_block=order_block,
+    )
+
+
+def _blocked_open_trade_gate_result(block_reason: str):
+    return type("GateResult", (), {
+        "passed": False,
+        "reason": block_reason,
+    })()
+
+
+def _maybe_tighten_incident_for_live_autonomy_budget_breach(risk_verdict: Any, *, tick: int, log) -> dict[str, Any]:
+    verdict = risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else dict(risk_verdict or {})
+    payload = dict(verdict.get("audit_payload") or {})
+    reason = str(verdict.get("reason") or "")
+    if reason != "live_autonomy_budget_breach" and payload.get("source") != "live_autonomy_budget":
+        return {"ok": True, "status": "not_budget_breach"}
+
+    target_mode = str(payload.get("recommended_incident_mode") or "no_new_risk").strip().lower()
+    if target_mode != "no_new_risk":
+        target_mode = "no_new_risk"
+
+    try:
+        service = RuntimeIncidentControlService()
+        current_mode = str((service.status() or {}).get("mode") or "normal").strip().lower()
+        if INCIDENT_MODE_RANK.get(current_mode, 0) >= INCIDENT_MODE_RANK[target_mode]:
+            return {"ok": True, "status": "already_strict", "current_mode": current_mode, "target_mode": target_mode}
+        result = service.set_mode(
+            target_mode,
+            reason="live_autonomy_budget_breach",
+            actor="system:live_autonomy_budget",
+            confirm_thaw=False,
+        )
+        log(f"tick {tick}: live autonomy budget breach incident tighten -> {target_mode} ({result.get('status')})")
+        return dict(result or {})
+    except Exception as exc:
+        logger.warning("[live] live autonomy budget incident tighten failed: %s", exc)
+        return {"ok": False, "status": "incident_tighten_failed", "error": str(exc)[:300]}
+
+
+def _record_open_trade_blocked_by_policy(
+    *,
+    bridge: Any,
+    cfg: Any,
+    bar: dict,
+    account: dict,
+    positions: list,
+    composite: Any,
+    candidate: _OpenTradeCandidate,
+    current_price: float,
+    tick: int,
+    log,
+):
+    block_reason = str(candidate.order_block["block_reason"])
+    log(f"tick {tick}: v4 {candidate.direction_name} SKIP ({block_reason})")
+    _maybe_tighten_incident_for_live_autonomy_budget_breach(candidate.risk_verdict, tick=tick, log=log)
+    gate_result = _blocked_open_trade_gate_result(block_reason)
+    if not _LEDGER:
+        return gate_result
+    try:
+        learning_context = _open_learning_context_payload(
+            bridge=bridge,
+            bar=bar,
+            positions_before=positions,
+            composite=composite,
+            symbol="XAUUSD+",
+            pid=0,
+            actual_api_volume=0.0,
+            requested_volume=float(candidate.volume or 0.0),
+            base_requested_volume=float(candidate.base_volume or 0.0),
+            current_price=float(current_price or 0.0),
+            fill_price=0.0,
+            sl_price=float(candidate.sl_price or 0.0),
+            tp_price=float(candidate.tp_price or 0.0),
+            sl_dist=float(candidate.sl_dist or 0.0),
+            tp_dist=float(candidate.tp_dist or 0.0),
+            event_sizing_context=candidate.event_sizing_context,
+            sizing_trace=candidate.sizing_trace,
+            risk_verdict=candidate.risk_verdict,
+            market_session=candidate.market_session,
+        )
+        _LEDGER.log_composite_decision(
+            **_tick_build_skip_ledger_payload(
+                composite=composite,
+                gate_result=gate_result,
+                cfg=cfg,
+                bar=bar,
+                account=account,
+                positions_before=positions,
+                risk_state=_risk_state_with_verdict(candidate.risk_verdict),
+                risk_verdict=candidate.risk_verdict,
+                block_reason=block_reason,
+                skip_stage=str(candidate.order_block["skip_stage"]),
+                tick=tick,
+                sizing_trace=candidate.sizing_trace,
+                market_session=candidate.market_session,
+                event_sizing_context=candidate.event_sizing_context,
+                learning_context=learning_context,
+                decision_ts_fallback=time.time(),
+            )
+        )
+    except Exception as _ledger_err:
+        logger.debug("[live] ledger risk policy skip failed: %s", _ledger_err)
+    return gate_result
+
+
+def _submit_open_trade_order(bridge: Any, composite: Any, volume: float):
+    if composite.direction == 1:
+        return bridge.market_buy(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
+    if composite.direction == -1:
+        return bridge.market_sell(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
+    return None
+
+
+def _persist_pending_entry_protection_plan(
+    *,
+    broker: str,
+    position_id: int,
+    composite: Any,
+    fill_price: float,
+    current_price: float,
+    actual_api_volume: float,
+    sl_price: float,
+    tp_price: float,
+    entry_protection_plan: dict[str, Any],
+    tick: int,
+) -> None:
+    try:
+        _upsert_recovery_position_state(
+            {
+                "position_id": position_id,
+                "symbol": "XAUUSD+",
+                "direction": composite.direction,
+                "open_price": float(fill_price or current_price),
+                "volume": float(actual_api_volume),
+                "entry_decision_id": _lookup_entry_decision_id(int(position_id)),
+            },
+            broker=broker,
+            strategy_name=str(_loop_strategy_name or "factor_v4"),
+            status="open",
+            meta={
+                "tick": tick,
+                "sl": round(sl_price, 2),
+                "tp": round(tp_price, 2),
+                "entry_protection_plan": entry_protection_plan,
+            },
+        )
+    except Exception as _protection_plan_err:
+        logger.debug(
+            "[live] entry protection plan persist failed for pos %s: %s",
+            position_id,
+            _protection_plan_err,
+        )
+
+
+def _attach_open_trade_protection(
+    *,
+    bridge: Any,
+    attr_engine: Any,
+    broker: str,
+    cfg: Any,
+    bar: dict,
+    tick: int,
+    position_id: int,
+    actual_api_volume: float,
+    requested_volume: float,
+    base_requested_volume: float,
+    fill_price: float,
+    current_price: float,
+    sl_price: float,
+    tp_price: float,
+    sl_dist: float,
+    tp_dist: float,
+    account: dict,
+    positions: list,
+    composite: Any,
+    gate_result: Any,
+    candidate: _OpenTradeCandidate,
+    entry_protection_plan: dict[str, Any],
+    log,
+) -> None:
+    try:
+        amend_res = bridge.amend_position_sltp(
+            position_id=position_id,
+            sl=sl_price,
+            tp=tp_price,
+        )
+        if getattr(amend_res, "success", False):
+            _record_amended_open_success_context(
+                attr_engine=attr_engine,
+                bridge=bridge,
+                broker=broker,
+                cfg=cfg,
+                bar=bar,
+                tick=tick,
+                pid=position_id,
+                actual_api_volume=actual_api_volume,
+                requested_volume=requested_volume,
+                base_requested_volume=base_requested_volume,
+                fill_price=fill_price,
+                current_price=current_price,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                sl_dist=sl_dist,
+                tp_dist=tp_dist,
+                acct=account,
+                pos=positions,
+                composite=composite,
+                gate_result=gate_result,
+                risk_verdict=candidate.risk_verdict,
+                market_session=candidate.market_session,
+                event_sizing_context=candidate.event_sizing_context,
+                sizing_trace=candidate.sizing_trace,
+                entry_protection_plan=entry_protection_plan,
+                direction_name=candidate.direction_name,
+                log=log,
+            )
+            return
+
+        amend_failure_reason = str(
+            getattr(amend_res, "comment", "")
+            or getattr(amend_res, "error", "")
+            or "amend_failed"
+        )
+        _record_amend_failure_after_fill(
+            attr_engine=attr_engine,
+            bridge=bridge,
+            broker=broker,
+            cfg=cfg,
+            bar=bar,
+            tick=tick,
+            pid=position_id,
+            actual_api_volume=actual_api_volume,
+            requested_volume=requested_volume,
+            base_requested_volume=base_requested_volume,
+            fill_price=fill_price,
+            current_price=current_price,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            acct=account,
+            pos=positions,
+            composite=composite,
+            gate_result=gate_result,
+            risk_verdict=candidate.risk_verdict,
+            market_session=candidate.market_session,
+            event_sizing_context=candidate.event_sizing_context,
+            sizing_trace=candidate.sizing_trace,
+            sl_dist=sl_dist,
+            tp_dist=tp_dist,
+            status_error=amend_failure_reason,
+            ledger_action_reason=str(getattr(amend_res, "comment", "amend_failed") or "amend_failed"),
+            ledger_comment=str(getattr(amend_res, "comment", "") or ""),
+            failure_log=(
+                f"tick {tick}: v4 {candidate.direction_name} AMEND FAILED "
+                f"pos={position_id}: {amend_failure_reason}"
+            ),
+            log=log,
+        )
+    except Exception as exc:
+        _record_amend_failure_after_fill(
+            attr_engine=attr_engine,
+            bridge=bridge,
+            broker=broker,
+            cfg=cfg,
+            bar=bar,
+            tick=tick,
+            pid=position_id,
+            actual_api_volume=actual_api_volume,
+            requested_volume=requested_volume,
+            base_requested_volume=base_requested_volume,
+            fill_price=fill_price,
+            current_price=current_price,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            acct=account,
+            pos=positions,
+            composite=composite,
+            gate_result=gate_result,
+            risk_verdict=candidate.risk_verdict,
+            market_session=None,
+            event_sizing_context=candidate.event_sizing_context,
+            sizing_trace=candidate.sizing_trace,
+            sl_dist=sl_dist,
+            tp_dist=tp_dist,
+            status_error=f"amend_exception:{type(exc).__name__}:{str(exc)[:220]}",
+            ledger_action_reason=f"amend_exception:{type(exc).__name__}",
+            ledger_error=str(exc)[:300],
+            ledger_debug_message="[live] ledger amend exception event failed for pos %s: %s",
+            failure_log=f"tick {tick}: v4 {candidate.direction_name} amend exception: {exc}",
+            log=log,
+        )
+
+
+def _record_open_trade_order_failure(
+    *,
+    result: Any,
+    cfg: Any,
+    bar: dict,
+    account: dict,
+    positions: list,
+    composite: Any,
+    gate_result: Any,
+    candidate: _OpenTradeCandidate,
+    current_price: float,
+    tick: int,
+    log,
+) -> None:
+    log(
+        f"tick {tick}: v4 {candidate.direction_name} ORDER FAILED: "
+        f"{getattr(result, 'error_code', '?')} {getattr(result, 'comment', '')}"
+    )
+    if not _LEDGER:
+        return
+    try:
+        order_failed_payloads = _tick_build_order_failed_ledger_payloads(
+            composite=composite,
+            gate_result=gate_result,
+            cfg=cfg,
+            bar=bar,
+            account=account,
+            positions_before=positions,
+            risk_state=_live_state_get("risk", {}, clone=True) or {},
+            requested_volume=float(candidate.volume),
+            current_price=float(current_price),
+            sl_price=float(candidate.sl_price),
+            tp_price=float(candidate.tp_price),
+            tick=tick,
+            error_code=str(getattr(result, "error_code", "") or ""),
+            comment=str(getattr(result, "comment", "") or ""),
+            decision_ts_fallback=time.time(),
+        )
+        failed_decision_id = _LEDGER.log_composite_decision(
+            **order_failed_payloads["decision"]
+        )
+        _LEDGER.log_order_event(
+            decision_id=failed_decision_id,
+            **order_failed_payloads["order_event"],
+        )
+    except Exception as _ledger_err:
+        logger.debug("[live] ledger order failed event failed: %s", _ledger_err)
+
+
+def _handle_open_trade_order_success(
+    *,
+    result: Any,
+    bridge: Any,
+    attr_engine: Any,
+    broker: str,
+    cfg: Any,
+    bar: dict,
+    tick: int,
+    account: dict,
+    positions: list,
+    composite: Any,
+    gate_result: Any,
+    candidate: _OpenTradeCandidate,
+    current_price: float,
+    log,
+) -> None:
+    fill_price = _tick_resolve_order_fill_price(result, current_price=current_price)
+    position_id = _tick_resolve_order_position_id(result, positions_before=positions)
+    if position_id <= 0:
+        log(
+            f"tick {tick}: v4 {candidate.direction_name} ORDER OK (no position_id) "
+            f"vol={candidate.volume}"
+        )
+        return
+
+    refreshed_positions = bridge.get_positions(getattr(bridge, "symbol", "") or "")
+    actual_api_volume = _resolve_position_api_volume(
+        position_id,
+        refreshed_positions,
+        candidate.volume,
+    )
+    protection_prices = _tick_resolve_open_protection_prices(
+        direction=int(composite.direction or 0),
+        fill_price=float(fill_price or 0.0),
+        current_price=float(current_price or 0.0),
+        sl_dist=float(candidate.sl_dist or 0.0),
+        tp_dist=float(candidate.tp_dist or 0.0),
+        digits=int(candidate.digits or 2),
+        position_id=int(position_id),
+        refreshed_positions=refreshed_positions,
+        position_open_price=_position_open_price,
+        protection_prices=_protection_prices_from_reference,
+    )
+    sl_price = float(protection_prices["sl_price"])
+    tp_price = float(protection_prices["tp_price"])
+    _remember_pending_open_attach(int(position_id))
+    entry_protection_plan = _entry_protection_plan_payload(
+        position_id=int(position_id),
+        direction=composite.direction,
+        entry_price=float(fill_price or current_price),
+        target_stop_loss=sl_price,
+        target_take_profit=tp_price,
+        requested_volume=candidate.volume,
+        actual_api_volume=actual_api_volume,
+        tick=tick,
+        status="pending",
+    )
+    _persist_pending_entry_protection_plan(
+        broker=broker,
+        position_id=int(position_id),
+        composite=composite,
+        fill_price=fill_price,
+        current_price=current_price,
+        actual_api_volume=actual_api_volume,
+        sl_price=sl_price,
+        tp_price=tp_price,
+        entry_protection_plan=entry_protection_plan,
+        tick=tick,
+    )
+    _attach_open_trade_protection(
+        bridge=bridge,
+        attr_engine=attr_engine,
+        broker=broker,
+        cfg=cfg,
+        bar=bar,
+        tick=tick,
+        position_id=int(position_id),
+        actual_api_volume=actual_api_volume,
+        requested_volume=candidate.volume,
+        base_requested_volume=candidate.base_volume,
+        fill_price=fill_price,
+        current_price=current_price,
+        sl_price=sl_price,
+        tp_price=tp_price,
+        sl_dist=candidate.sl_dist,
+        tp_dist=candidate.tp_dist,
+        account=account,
+        positions=positions,
+        composite=composite,
+        gate_result=gate_result,
+        candidate=candidate,
+        entry_protection_plan=entry_protection_plan,
+        log=log,
+    )
+
+
+def _submit_open_trade_candidate(
+    *,
+    bridge: Any,
+    attr_engine: Any,
+    broker: str,
+    cfg: Any,
+    bar: dict,
+    tick: int,
+    account: dict,
+    positions: list,
+    composite: Any,
+    gate_result: Any,
+    candidate: _OpenTradeCandidate,
+    current_price: float,
+    log,
+) -> None:
+    try:
+        result = _submit_open_trade_order(bridge, composite, candidate.volume)
+        if result is not None and getattr(result, "success", False):
+            _handle_open_trade_order_success(
+                result=result,
+                bridge=bridge,
+                attr_engine=attr_engine,
+                broker=broker,
+                cfg=cfg,
+                bar=bar,
+                tick=tick,
+                account=account,
+                positions=positions,
+                composite=composite,
+                gate_result=gate_result,
+                candidate=candidate,
+                current_price=current_price,
+                log=log,
+            )
+        elif result is not None and not getattr(result, "success", False):
+            _record_open_trade_order_failure(
+                result=result,
+                cfg=cfg,
+                bar=bar,
+                account=account,
+                positions=positions,
+                composite=composite,
+                gate_result=gate_result,
+                candidate=candidate,
+                current_price=current_price,
+                tick=tick,
+                log=log,
+            )
+    except Exception as exc:
+        log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
+
+
+def _run_open_trade_pipeline(
+    *,
+    bridge: Any,
+    pipeline: dict,
+    broker: str,
+    cfg: Any,
+    bar: dict[str, Any],
+    factor_values: dict[str, Any],
+    composite: Any,
+    gate_result: Any,
+    account: dict,
+    positions: list,
+    attr_engine: Any,
+    current_price: float,
+    atr_price: float,
+    pending_open_attach_ids: list[int],
+    send: bool,
+    tick: int,
+    log,
+):
+    if not (composite.direction != 0 and gate_result.passed and send):
+        return gate_result
+    if pending_open_attach_ids:
+        log(
+            f"tick {tick}: v4 open SKIP (pending_open_attach "
+            f"positions={pending_open_attach_ids})"
+        )
+        return gate_result
+
+    candidate = _prepare_open_trade_candidate(
+        bridge=bridge,
+        pipeline=pipeline,
+        cfg=cfg,
+        bar=bar,
+        factor_values=factor_values,
+        composite=composite,
+        positions=positions,
+        current_price=current_price,
+        atr_price=atr_price,
+        tick=tick,
+        log=log,
+    )
+    if bool(candidate.order_block["order_blocked"]):
+        return _record_open_trade_blocked_by_policy(
+            bridge=bridge,
+            cfg=cfg,
+            bar=bar,
+            account=account,
+            positions=positions,
+            composite=composite,
+            candidate=candidate,
+            current_price=current_price,
+            tick=tick,
+            log=log,
+        )
+
+    _submit_open_trade_candidate(
+        bridge=bridge,
+        attr_engine=attr_engine,
+        broker=broker,
+        cfg=cfg,
+        bar=bar,
+        tick=tick,
+        account=account,
+        positions=positions,
+        composite=composite,
+        gate_result=gate_result,
+        candidate=candidate,
+        current_price=current_price,
+        log=log,
+    )
+    return gate_result
+
+
 def _process_tick_factor_pipeline(
     bridge, pipeline: dict, df_new, last_bar, broker: str,
     tick: int, log,
@@ -6840,73 +7598,59 @@ def _process_tick_factor_pipeline(
     # 1. 构造 bar dict
     bar = _tick_build_factor_bar(last_bar, df_new, _tf)
 
-    # 2. 流式因子计算 → 归一化 → 组合 → 闸门
-    engine.refresh_factor_list()
-    factor_values = engine.append_bar(bar)
-    if not factor_values or not engine.is_warm:
-        log(f"tick {tick}: factor engine not ready (is_warm={engine.is_warm})")
-        gate.tick()
+    # 2. 流式因子计算 → 归一化 → 组合 → context policy → 闸门
+    decision_frame = _decision_run_live_decision_pipeline(
+        engine=engine,
+        normalizer=normalizer,
+        compositor=compositor,
+        gate=gate,
+        bar=bar,
+        cfg=cfg,
+    )
+    if not decision_frame.ready:
+        log(f"tick {tick}: {decision_frame.reason}")
         return
 
-    signals = normalizer.normalize(factor_values)
-    composite = compositor.compose(signals, factor_values, timestamp=bar.get("time", time.time()))
-    try:
-        from backend.services.context_policy import ContextPolicyService
-
-        context_policy = (
-            ContextPolicyService().evaluate(getattr(composite, "context_state", {}) or {}, cfg).to_dict()
-            if bool(getattr(cfg, "context_policy_enabled", True))
-            else {"signal_threshold_delta": 0.0, "position_multiplier": 1.0, "reason": "disabled", "applied": False}
-        )
-        setattr(composite, "context_policy", context_policy)
-        base_threshold = float(getattr(cfg, "factor_signal_threshold", 0.3) or 0.3)
-        gate._threshold = max(0.0, min(1.0, base_threshold + float(context_policy.get("signal_threshold_delta") or 0.0)))
-    except Exception:
-        setattr(composite, "context_policy", {})
-    gate_result = gate.filter(composite, factor_values, bar)
-    gate.tick()
+    factor_values = decision_frame.factor_values
+    signals = decision_frame.signals
+    composite = decision_frame.composite
+    gate_result = decision_frame.gate_result
     # ★ 保存因子投票快照到 _live_state, 前端「因子投票」面板读取
     try:
-            _set_factor_snapshot(
-                _tick_build_factor_votes(
-                    signals,
-                    factor_values,
-                    getattr(composite, "factor_roles", {}),
-                    getattr(composite, "active_weights", {}),
-                ),
-                _tick_build_factor_snapshot_summary(composite, gate_result, now=time.time()),
-            )
+        _set_factor_snapshot(
+            _tick_build_factor_votes(
+                signals,
+                factor_values,
+                getattr(composite, "factor_roles", {}),
+                getattr(composite, "active_weights", {}),
+            ),
+            _tick_build_factor_snapshot_summary(composite, gate_result, now=time.time()),
+        )
     except Exception as _e:
         log(f"tick {tick}: factor votes save failed (non-fatal): {_e}")
     # ── 决策审计: signal ──
     if _DECISION_LOG:
-        bar_ts = bar.get("time", 0)
-        if bar_ts:
-            bar_date = time.strftime("%Y-%m-%d", time.gmtime(bar_ts))
+        decision_log_payload = _decision_build_signal_decision_log_payload(
+            bar=bar,
+            composite=composite,
+            gate_result=gate_result,
+            tick=tick,
+        )
+        if decision_log_payload:
             _safe_decision_log(
                 _DECISION_LOG,
                 run_id=_DECISION_LOG_RUN_ID,
-                ts=bar_ts,
-                bar_date=bar_date,
-                decision_type="signal",
-                strategy="factor_v4",
-                direction=composite.direction,
-                confidence=composite.score,
-                decision=("execute" if gate_result.passed
-                          and composite.direction != 0 else "hold"),
-                meta=_json.dumps({
-                    "gate_reason": gate_result.reason,
-                    "tick": tick,
-                    "tactical_score": composite.tactical_score,
-                    "macro_score": composite.macro_score,
-                    "n_active": composite.n_active_factors,
-                    "n_abstain": composite.n_abstain_factors,
-                }, ensure_ascii=False),
+                ts=decision_log_payload["ts"],
+                bar_date=decision_log_payload["bar_date"],
+                decision_type=decision_log_payload["decision_type"],
+                strategy=decision_log_payload["strategy"],
+                direction=decision_log_payload["direction"],
+                confidence=decision_log_payload["confidence"],
+                decision=decision_log_payload["decision"],
+                meta=_json.dumps(decision_log_payload["meta"], ensure_ascii=False),
             )
-    # 3. 构造 Signal (兼容旧 _send_order 逻辑)
-    from alpha.portfolio_compositor import CompositeSignal
 
-    # 4. 发单 (仅非 dry_run 且门通过)
+    # 3. 发单 (仅非 dry_run 且门通过)
     send = _should_send_orders(broker)
 
     signal_str = _tick_build_signal_log_suffix(composite, gate_result)
@@ -7024,393 +7768,28 @@ def _process_tick_factor_pipeline(
         if price_guard["error"] is not None:
             logger.debug("[live] spot price guard failed for tick %s: %s", tick, price_guard["error"])
 
-    # ── 执行 ──
+    # ── 开仓执行流水线: candidate -> risk verdict -> broker order -> post-fill audit.
     atr_val = factor_values.get("atr_ratio", 0)
     atr_price = atr_val * current_price if atr_val and atr_val > 0 else 0
-    sl_price = 0.0
-    tp_price = 0.0
-    if composite.direction != 0 and gate_result.passed and send and pending_open_attach_ids:
-        log(
-            f"tick {tick}: v4 open SKIP (pending_open_attach "
-            f"positions={pending_open_attach_ids})"
-        )
-
-    if composite.direction != 0 and gate_result.passed and send and not pending_open_attach_ids:
-        # 从 bridge metadata 取小数位 → 舍入 SL/TP 防 cTrader 拒绝
-        _meta = getattr(bridge, '_symbol_meta', None) or {}
-        if not _meta.get('api_min_volume') and bridge is not None and hasattr(bridge, '_resolve_symbol_id'):
-            try:
-                bridge._resolve_symbol_id()
-                _meta = getattr(bridge, '_symbol_meta', None) or {}
-            except Exception:
-                pass
-        preflight = _tick_build_open_order_preflight(
-            direction=int(composite.direction or 0),
-            current_price=float(current_price or 0.0),
-            atr_price=float(atr_price or 0.0),
-            strategy_sl_atr=float(getattr(cfg, "strategy_sl_atr", 0.0) or 0.0),
-            strategy_tp_atr=float(getattr(cfg, "strategy_tp_atr", 0.0) or 0.0),
-            bridge_meta=_meta,
-            protection_prices=_protection_prices_from_reference,
-        )
-        direction_name = str(preflight["direction_name"])
-        sl_dist = float(preflight["sl_dist"])
-        tp_dist = float(preflight["tp_dist"])
-        _digits = int(preflight["digits"])
-        sl_price = float(preflight["sl_price"])
-        tp_price = float(preflight["tp_price"])
-
-        # ── 风控: Kelly 仓位 ──
-        acct_clean = _live_state_get("account", {}, clone=True) or {}
-        sizing_result = _risk_kelly_sizing(
-            cfg, composite.direction, current_price, sl_price, _meta, acct_clean,
-        )
-        base_volume = float(sizing_result.get("volume") or 0.0)
-        sizing_trace = dict(sizing_result.get("trace") or {})
-        event_sizing_context = _event_sizing_context(
-            pipeline.get("event_sizing"),
-            float(bar.get("time", time.time()) or time.time()),
-        )
-        try:
-            event_multiplier = float(event_sizing_context.get("multiplier", 1.0))
-        except (TypeError, ValueError):
-            event_multiplier = 1.0
-        event_sizing_result = _apply_entry_event_sizing(
-            base_volume=base_volume,
-            event_multiplier=event_multiplier,
-            bridge_meta=_meta,
-            sizing_trace=sizing_trace,
-        )
-        adjusted_volume = float(event_sizing_result.get("volume") or 0.0)
-        sizing_trace = dict(event_sizing_result.get("trace") or {})
-        sizing_block_reason = str(event_sizing_result.get("blocked_reason") or "")
-        # Event sizing now feeds the unified RiskPolicy. If a fractional event
-        # reduction falls below broker minimum, RiskPolicy decides whether the
-        # window is hard enough to block or whether the min/base order can pass.
-        effective_sizing = _tick_build_effective_event_sizing_payload(
-            base_volume=base_volume,
-            adjusted_volume=adjusted_volume,
-            sizing_trace=sizing_trace,
-            sizing_block_reason=sizing_block_reason,
-            event_sizing_context=event_sizing_context,
-        )
-        volume = float(effective_sizing["volume"])
-        sizing_trace = dict(effective_sizing["sizing_trace"])
-        event_sizing_context = dict(effective_sizing["event_sizing_context"])
-        context_policy = dict(getattr(composite, "context_policy", {}) or {})
-        try:
-            context_mult = float(context_policy.get("position_multiplier", 1.0) or 1.0)
-        except (TypeError, ValueError):
-            context_mult = 1.0
-        if context_policy and abs(context_mult - 1.0) > 1e-9:
-            context_raw_volume = volume * context_mult
-            context_volume = _floor_api_volume_to_step(context_raw_volume, _meta)
-            volume = context_volume if context_volume > 0 else volume
-            sizing_trace["context_policy"] = {
-                **context_policy,
-                "raw_api_volume": context_raw_volume,
-                "adjusted_api_volume": volume,
-            }
-        log(f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
-            f"(Kelly enabled={getattr(cfg, 'kelly_enabled', False)} "
-            f"event_mult={event_multiplier:.2f} base_api_volume={base_volume:.0f})")
-
-        # ── Phase B: 统一风控裁决 ──
-        event_filter_context = _event_filter_context_for_risk_policy(
-            cfg=cfg,
-            direction=int(composite.direction or 0),
-            bar=bar,
-            factor_values=factor_values,
-        )
-        risk_context = _build_open_trade_risk_context(
-            cfg=cfg,
-            bridge=bridge,
-            acct=acct_clean,
-            positions=pos,
-            requested_api_volume=volume,
-            signal_score=float(composite.score or 0.0),
-            symbol="XAUUSD",
-            direction=int(composite.direction or 0),
-            current_price=float(current_price or 0.0),
-            atr_price=float(atr_price or 0.0),
-            event_sizing_context=event_sizing_context,
-            event_filter_context=event_filter_context,
-            decision_quality_context=_decision_quality_context(composite),
-            decision_ts=float(bar.get("time", time.time()) or time.time()),
-        )
-        risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
-        market_session = _live_state_get("market_session", {}, clone=True) or {}
-        order_block = _tick_build_market_order_block(
-            market_session=market_session,
-            risk_verdict=risk_verdict,
-        )
-        order_blocked = bool(order_block["order_blocked"])
-        block_reason = str(order_block["block_reason"])
-
-        if order_blocked:
-            log(f"tick {tick}: v4 {direction_name} SKIP ({block_reason})")
-            gate_result = type('GateResult', (), {
-                'passed': False, 'reason': block_reason,
-            })()
-            if _LEDGER:
-                try:
-                    learning_context = _open_learning_context_payload(
-                        bridge=bridge,
-                        bar=bar,
-                        positions_before=pos,
-                        composite=composite,
-                        symbol="XAUUSD+",
-                        pid=0,
-                        actual_api_volume=0.0,
-                        requested_volume=float(volume or 0.0),
-                        base_requested_volume=float(base_volume or 0.0),
-                        current_price=float(current_price or 0.0),
-                        fill_price=0.0,
-                        sl_price=float(sl_price or 0.0),
-                        tp_price=float(tp_price or 0.0),
-                        sl_dist=float(sl_dist or 0.0),
-                        tp_dist=float(tp_dist or 0.0),
-                        event_sizing_context=event_sizing_context,
-                        sizing_trace=sizing_trace,
-                        risk_verdict=risk_verdict,
-                        market_session=market_session,
-                    )
-                    _LEDGER.log_composite_decision(
-                        **_tick_build_skip_ledger_payload(
-                            composite=composite,
-                            gate_result=gate_result,
-                            cfg=cfg,
-                            bar=bar,
-                            account=acct,
-                            positions_before=pos,
-                            risk_state=_risk_state_with_verdict(risk_verdict),
-                            risk_verdict=risk_verdict,
-                            block_reason=block_reason,
-                            skip_stage=str(order_block["skip_stage"]),
-                            tick=tick,
-                            sizing_trace=sizing_trace,
-                            market_session=market_session,
-                            event_sizing_context=event_sizing_context,
-                            learning_context=learning_context,
-                            decision_ts_fallback=time.time(),
-                        )
-                    )
-                except Exception as _ledger_err:
-                    logger.debug("[live] ledger risk policy skip failed: %s", _ledger_err)
-        else:
-            try:
-                if composite.direction == 1:
-                    result = bridge.market_buy(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
-                elif composite.direction == -1:
-                    result = bridge.market_sell(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
-                else:
-                    result = None
-
-                if result is not None and getattr(result, "success", False):
-                    fill_price = _tick_resolve_order_fill_price(result, current_price=current_price)
-                    pid = _tick_resolve_order_position_id(result, positions_before=pos)
-                    if pid > 0:
-                        refreshed_positions = bridge.get_positions(getattr(bridge, 'symbol', '') or '')
-                        actual_api_volume = _resolve_position_api_volume(
-                            pid,
-                            refreshed_positions,
-                            volume,
-                        )
-                        protection_prices = _tick_resolve_open_protection_prices(
-                            direction=int(composite.direction or 0),
-                            fill_price=float(fill_price or 0.0),
-                            current_price=float(current_price or 0.0),
-                            sl_dist=float(sl_dist or 0.0),
-                            tp_dist=float(tp_dist or 0.0),
-                            digits=int(_digits or 2),
-                            position_id=int(pid),
-                            refreshed_positions=refreshed_positions,
-                            position_open_price=_position_open_price,
-                            protection_prices=_protection_prices_from_reference,
-                        )
-                        sl_price = float(protection_prices["sl_price"])
-                        tp_price = float(protection_prices["tp_price"])
-                        _remember_pending_open_attach(int(pid))
-                        entry_protection_plan = _entry_protection_plan_payload(
-                            position_id=int(pid),
-                            direction=composite.direction,
-                            entry_price=float(fill_price or current_price),
-                            target_stop_loss=sl_price,
-                            target_take_profit=tp_price,
-                            requested_volume=volume,
-                            actual_api_volume=actual_api_volume,
-                            tick=tick,
-                            status="pending",
-                        )
-                        try:
-                            _upsert_recovery_position_state(
-                                {
-                                    "position_id": pid,
-                                    "symbol": "XAUUSD+",
-                                    "direction": composite.direction,
-                                    "open_price": float(fill_price or current_price),
-                                    "volume": float(actual_api_volume),
-                                    "entry_decision_id": _lookup_entry_decision_id(int(pid)),
-                                },
-                                broker=broker,
-                                strategy_name=str(_loop_strategy_name or "factor_v4"),
-                                status="open",
-                                meta={
-                                    "tick": tick,
-                                    "sl": round(sl_price, 2),
-                                    "tp": round(tp_price, 2),
-                                    "entry_protection_plan": entry_protection_plan,
-                                },
-                            )
-                        except Exception as _protection_plan_err:
-                            logger.debug(
-                                "[live] entry protection plan persist failed for pos %s: %s",
-                                pid,
-                                _protection_plan_err,
-                            )
-                        try:
-                            amend_res = bridge.amend_position_sltp(
-                                position_id=pid, sl=sl_price, tp=tp_price,
-                            )
-                            if getattr(amend_res, "success", False):
-                                _record_amended_open_success_context(
-                                    attr_engine=attr_engine,
-                                    bridge=bridge,
-                                    broker=broker,
-                                    cfg=cfg,
-                                    bar=bar,
-                                    tick=tick,
-                                    pid=pid,
-                                    actual_api_volume=actual_api_volume,
-                                    requested_volume=volume,
-                                    base_requested_volume=base_volume,
-                                    fill_price=fill_price,
-                                    current_price=current_price,
-                                    sl_price=sl_price,
-                                    tp_price=tp_price,
-                                    sl_dist=sl_dist,
-                                    tp_dist=tp_dist,
-                                    acct=acct,
-                                    pos=pos,
-                                    composite=composite,
-                                    gate_result=gate_result,
-                                    risk_verdict=risk_verdict,
-                                    market_session=market_session,
-                                    event_sizing_context=event_sizing_context,
-                                    sizing_trace=sizing_trace,
-                                    entry_protection_plan=entry_protection_plan,
-                                    direction_name=direction_name,
-                                    log=log,
-                                )
-                            else:
-                                amend_failure_reason = str(
-                                    getattr(amend_res, "comment", "")
-                                    or getattr(amend_res, "error", "")
-                                    or "amend_failed"
-                                )
-                                _record_amend_failure_after_fill(
-                                    attr_engine=attr_engine,
-                                    bridge=bridge,
-                                    broker=broker,
-                                    cfg=cfg,
-                                    bar=bar,
-                                    tick=tick,
-                                    pid=pid,
-                                    actual_api_volume=actual_api_volume,
-                                    requested_volume=volume,
-                                    base_requested_volume=base_volume,
-                                    fill_price=fill_price,
-                                    current_price=current_price,
-                                    sl_price=sl_price,
-                                    tp_price=tp_price,
-                                    acct=acct,
-                                    pos=pos,
-                                    composite=composite,
-                                    gate_result=gate_result,
-                                    risk_verdict=risk_verdict,
-                                    market_session=market_session,
-                                    event_sizing_context=event_sizing_context,
-                                    sizing_trace=sizing_trace,
-                                    sl_dist=sl_dist,
-                                    tp_dist=tp_dist,
-                                    status_error=amend_failure_reason,
-                                    ledger_action_reason=str(getattr(amend_res, "comment", "amend_failed") or "amend_failed"),
-                                    ledger_comment=str(getattr(amend_res, "comment", "") or ""),
-                                    failure_log=(
-                                        f"tick {tick}: v4 {direction_name} AMEND FAILED "
-                                        f"pos={pid}: {amend_failure_reason}"
-                                    ),
-                                    log=log,
-                                )
-                        except Exception as e:
-                            _record_amend_failure_after_fill(
-                                attr_engine=attr_engine,
-                                bridge=bridge,
-                                broker=broker,
-                                cfg=cfg,
-                                bar=bar,
-                                tick=tick,
-                                pid=pid,
-                                actual_api_volume=actual_api_volume,
-                                requested_volume=volume,
-                                base_requested_volume=base_volume,
-                                fill_price=fill_price,
-                                current_price=current_price,
-                                sl_price=sl_price,
-                                tp_price=tp_price,
-                                acct=acct,
-                                pos=pos,
-                                composite=composite,
-                                gate_result=gate_result,
-                                risk_verdict=risk_verdict,
-                                market_session=None,
-                                event_sizing_context=event_sizing_context,
-                                sizing_trace=sizing_trace,
-                                sl_dist=sl_dist,
-                                tp_dist=tp_dist,
-                                status_error=f"amend_exception:{type(e).__name__}:{str(e)[:220]}",
-                                ledger_action_reason=f"amend_exception:{type(e).__name__}",
-                                ledger_error=str(e)[:300],
-                                ledger_debug_message="[live] ledger amend exception event failed for pos %s: %s",
-                                failure_log=f"tick {tick}: v4 {direction_name} amend exception: {e}",
-                                log=log,
-                            )
-                    else:
-                        log(f"tick {tick}: v4 {direction_name} ORDER OK (no position_id) "
-                            f"vol={volume}")
-                elif result is not None and not getattr(result, "success", False):
-                    log(f"tick {tick}: v4 {direction_name} ORDER FAILED: "
-                        f"{getattr(result, 'error_code', '?')} {getattr(result, 'comment', '')}")
-                    if _LEDGER:
-                        try:
-                            order_failed_payloads = _tick_build_order_failed_ledger_payloads(
-                                composite=composite,
-                                gate_result=gate_result,
-                                cfg=cfg,
-                                bar=bar,
-                                account=acct,
-                                positions_before=pos,
-                                risk_state=_live_state_get("risk", {}, clone=True) or {},
-                                requested_volume=float(volume),
-                                current_price=float(current_price),
-                                sl_price=float(sl_price),
-                                tp_price=float(tp_price),
-                                tick=tick,
-                                error_code=str(getattr(result, "error_code", "") or ""),
-                                comment=str(getattr(result, "comment", "") or ""),
-                                decision_ts_fallback=time.time(),
-                            )
-                            failed_decision_id = _LEDGER.log_composite_decision(
-                                **order_failed_payloads["decision"]
-                            )
-                            _LEDGER.log_order_event(
-                                decision_id=failed_decision_id,
-                                **order_failed_payloads["order_event"],
-                            )
-                        except Exception as _ledger_err:
-                            logger.debug("[live] ledger order failed event failed: %s", _ledger_err)
-            except Exception as e:
-                log(f"tick {tick}: v4 {direction_name} order exception: {e}")
+    gate_result = _run_open_trade_pipeline(
+        bridge=bridge,
+        pipeline=pipeline,
+        broker=broker,
+        cfg=cfg,
+        bar=bar,
+        factor_values=factor_values,
+        composite=composite,
+        gate_result=gate_result,
+        account=acct,
+        positions=pos,
+        attr_engine=attr_engine,
+        current_price=current_price,
+        atr_price=atr_price,
+        pending_open_attach_ids=pending_open_attach_ids,
+        send=send,
+        tick=tick,
+        log=log,
+    )
 
     # ── 日志 ──
     log(f"tick {tick}: price={current_price:.2f} "

@@ -32,6 +32,15 @@ def _pct_value(value: Any, default_pct: float) -> float:
     return pct
 
 
+def _daily_trade_limit_from_config(cfg: Any | None) -> tuple[int, str]:
+    regular_limit = _safe_int(getattr(cfg, "risk_max_daily_trades", 20), 20)
+    demo_limit = _safe_int(getattr(cfg, "demo_learning_max_daily_trades", regular_limit), regular_limit)
+    autonomy_mode = str(getattr(cfg, "autonomy_mode", "") or "")
+    if autonomy_mode == "demo_autonomous" and demo_limit > regular_limit:
+        return demo_limit, "runtime_config:demo_learning"
+    return regular_limit, "runtime_config"
+
+
 @dataclass(frozen=True)
 class RiskLimitSnapshot:
     schema_version: str = "risk_limit_snapshot.v1"
@@ -59,11 +68,13 @@ class RiskLimitSnapshot:
             except Exception:
                 cfg = None
         legacy_var_threshold = getattr(cfg, "var_cvar_threshold", 0.02) if cfg is not None else 0.02
+        max_daily_trades, source = _daily_trade_limit_from_config(cfg)
         return cls(
+            source=source,
             max_drawdown_pct=_safe_float(getattr(cfg, "risk_max_drawdown_pct", 15.0), 15.0),
             max_consecutive_losses=_safe_int(getattr(cfg, "risk_max_consecutive_losses", 8), 8),
             max_daily_loss_pct=_safe_float(getattr(cfg, "risk_max_daily_loss_pct", 5.0), 5.0),
-            max_daily_trades=_safe_int(getattr(cfg, "risk_max_daily_trades", 20), 20),
+            max_daily_trades=max_daily_trades,
             data_lag_max_seconds=_safe_float(getattr(cfg, "risk_data_lag_max_seconds", 3600.0), 3600.0),
             loss_cooldown_after_losses=_safe_int(getattr(cfg, "risk_loss_cooldown_after_losses", 2), 2),
             loss_cooldown_bars=_safe_int(getattr(cfg, "risk_loss_cooldown_bars", 3), 3),

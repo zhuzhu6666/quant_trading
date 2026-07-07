@@ -1,7 +1,7 @@
 # TODO - Current Status Board
 
 > Status: active
-> Last verified: 2026-07-06
+> Last verified: 2026-07-07
 > Scope: current work queue, blockers, and near-term execution only.
 
 本文只保留当前状态和下一步。历史阶段流水、长测试日志、旧审批路线和已完成实现细节不再放在这里，避免后续开发被旧上下文带偏。
@@ -10,6 +10,7 @@
 
 - [docs/system-source-of-truth.md](docs/system-source-of-truth.md)
 - [docs/architecture.md](docs/architecture.md)
+- [docs/autonomous-governance-architecture.md](docs/autonomous-governance-architecture.md)
 - [docs/change-impact-checklist.md](docs/change-impact-checklist.md)
 - [docs/legacy-debt-register.md](docs/legacy-debt-register.md)
 
@@ -32,8 +33,14 @@
 - V16 Phase 3 low-impact minimum loop is complete: `BrainLowImpactExecutorService` writes `brain_low_impact_execution`, exposes `/api/ops/brain/low-impact-executions` and `/api/ops/brain/low-impact-executions/run`, adds readiness `v16.low_impact_executions`, and Web `/v16` can trigger/display whitelisted low-impact replay jobs. Execution requires `RiskPolicyService.evaluate("run_replay_job")`, records evidence score, Critic verdict, RiskPolicy verdict, rollback/downgrade plan, replay result, and posterior monitor; optional bad-posterior tighten goes through existing incident-control/RiskPolicy/overlay path only when explicitly allowed.
 - V16 Phase 4 medium-impact governance minimum loop is complete: `BrainMediumImpactGovernanceService` writes `brain_medium_impact_governance`, exposes `/api/ops/brain/medium-impact-governance` and `/api/ops/brain/medium-impact-governance/materialize`, adds readiness `v16.medium_impact_governance`, and Web `/v16` can materialize/display medium-impact `policy_suggestion` candidates. P4 records P2/P3 evidence, RiskPolicy verdict, DecisionPolicy preview for weight actions, rollback/release requirements, and never directly applies factor weights, switches templates, submits orders, or writes learning samples.
 - V16 Phase 5 live-ready guardrails minimum loop is complete: `BrainLiveReadyGuardrailService` writes `brain_live_ready_guardrail`, exposes `/api/ops/brain/live-ready-guardrails`, `/api/ops/brain/live-ready-guardrails/evaluate`, and `/api/ops/brain/live-ready-guardrails/tighten`, adds readiness `v16.live_ready_guardrails`, and Web `/v16` can evaluate/display live capability lock, broker/local divergence, incident memory, release rollback, P3/P4 evidence, and tightening-only incident-control actions. P5 never submits orders, applies suggestions, writes learning samples, or relaxes incident mode.
+- Unified Proposal Registry first implementation is complete: `ProposalRegistryService` writes `proposal_registry`, normalizes `policy_suggestion`、`brain_governance_candidate`、`brain_action_plan`、`learning_application_log`、`evolution_decision`、shadow/advisory audit and LLM advisory audit, exposes `/api/ops/autonomy/proposals*`, detects same control-surface conflicts, and review is audit-only. Web `/v16` shows the proposal bus without recomputing risk or authorizing actions.
+- Governed live-autonomy unlock first implementation is complete: `LiveAutonomyService` writes `live_autonomy_unlock_event`, exposes `/api/ops/autonomy/live-status` and `/api/ops/autonomy/live-unlock*`, evaluates readiness/cTrader/live loop/incident/release rollback/replay/broker alignment/proposal conflicts/RiskPolicy budget, and persists `live_autonomous` / revoke back to `live_candidate` only through `RuntimeConfigMutationService` and runtime overlay/snapshot.
+- Live-autonomy budget hardening is complete at the code path level: when a live open is blocked by `RiskPolicyService` with `live_autonomy_budget_breach`, `live_service` automatically requests `runtime_incident_mode=no_new_risk` through `RuntimeIncidentControlService`, preserving stricter existing modes and overlay/snapshot audit.
 - Models remain shadow/advisory unless a future explicit governance stage changes that boundary.
 - Risk control convergence is complete: `RiskLimitSnapshot` / `RuntimeHealthSnapshot` provide the unified risk/runtime input vocabulary, live event filters feed `RiskPolicyService` instead of independently blocking, live daily drawdown quick-stop reads the same risk limit snapshot, model stage gates reuse model permissions, and legacy `PreTradeChecker` / `CircuitBreaker` / `ExecutionRouter` are documented as paper/backtest compatibility.
+- Live open-trade execution is structured as a readable pipeline in `backend/services/live_service.py`: prepare candidate sizing, request `RiskPolicyService.evaluate("open_trade")`, apply market-session/order block, submit broker order, then write post-fill protection/recovery/ledger evidence.
+- Live signal decision is structured as `backend/services/live_decision_pipeline.py`: factor refresh/append, normalization, composition, context policy, and ExecutionGate now produce a `LiveDecisionFrame` before risk/execution; it does not read account state, call RiskPolicy, or touch broker execution.
+- Demo learning sampling uses `RuntimeConfig.demo_learning_max_daily_trades` through `RiskLimitSnapshot.source=runtime_config:demo_learning` to raise the effective daily trade cap only in `autonomy_mode=demo_autonomous`; all opens still pass `RiskPolicyService` and broker execution semantics.
 
 Latest verified baseline:
 
@@ -48,7 +55,7 @@ Latest verified baseline:
 Current main line:
 
 ```text
-V16 Phase 5 live-ready guardrails minimum loop complete; observe guardrail evidence quality before any live-ready expansion
+Proposal Registry + governed live-autonomy unlock first loop complete; continue evidence freshness/budget/readiness hardening before increasing live autonomy permissions
 ```
 
 Reason:
@@ -61,6 +68,8 @@ Reason:
 - V16 Phase 3 first execution loop is low-impact only: `BrainLowImpactExecutorService` can run whitelisted read-only replay jobs from P2 evals after `RiskPolicyService` verdict, and can optionally tighten to `shadow_only` through incident-control if a bad posterior is observed and the caller explicitly allows tightening. It still cannot change factor weights/templates, submit orders, or write learning samples.
 - V16 Phase 4 first governance loop materializes medium-impact `policy_suggestion` candidates only: `BrainMediumImpactGovernanceService` uses P2 evals, `RiskPolicyService`, and `DecisionPolicy` preview to create proposed governance candidates without applying runtime mutations. Future apply still requires the existing governed write/release paths.
 - V16 Phase 5 first live-ready guardrail loop evaluates capability lock, broker/local divergence evidence, incident memory, release rollback evidence, and P3/P4 evidence; explicit tightening can only move incident mode stricter through `RuntimeIncidentControlService` and `RiskPolicyService`.
+- Proposal Registry now gives the brain a unified meta-governance bus without becoming a new executor: it can refresh, show conflicts, recommend routes, and record review, but cannot approve/apply or mutate source rows.
+- `live_autonomous` is now a gated runtime mode, not a direct trading bypass: one-time unlock requires backend evidence and manual confirmation, while `RiskPolicyService` blocks new-risk actions when unlock evidence or account budget fails and keeps risk-reducing actions available.
 
 ## 3. Immediate Tasks
 
@@ -149,6 +158,9 @@ Goal:
 | G9 | V16 Phase 3 low-impact replay execution ledger runs through RiskPolicy and records rollback/downgrade monitor without trading authority | done | `docs/planning/v16-autonomous-intelligence-brain.md` |
 | G10 | V16 Phase 4 medium-impact governance materializes policy suggestions with RiskPolicy/DecisionPolicy evidence but no runtime mutation | done | `docs/planning/v16-autonomous-intelligence-brain.md` |
 | G11 | V16 Phase 5 live-ready guardrails evaluate capability lock/divergence/release/incident evidence and allow tightening-only incident-control actions | done | `docs/planning/v16-autonomous-intelligence-brain.md` |
+| G12 | Unified Proposal Registry normalizes proposal sources and exposes review-only Web/API surface | done | `docs/autonomous-governance-architecture.md` |
+| G13 | `live_autonomous` unlock/revoke is available behind readiness, release, replay, broker alignment, proposal conflict and RiskPolicy budget gates | first-loop-done | `docs/autonomous-governance-architecture.md` |
+| G14 | Post-unlock evidence freshness degradation and budget-breach automatic `no_new_risk` tightening should be observed in live runtime before increasing permissions | observe | live autonomy hardening |
 
 ## 5. Technical Debt Registry
 

@@ -18,6 +18,8 @@ from backend.services.brain_medium_impact_governance import BrainMediumImpactGov
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.incident_controls import RuntimeIncidentControlService
+from backend.services.live_autonomy import LiveAutonomyService
+from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.stability import TimedCache, measure
@@ -123,6 +125,24 @@ class BrainLiveReadyGuardrailTightenRequest(BaseModel):
     actor: str = "api:ops.brain.live_ready_guardrails"
 
 
+class ProposalReviewRequest(BaseModel):
+    actor: str = "api:ops.autonomy.proposals"
+    decision: str = "reviewed"
+    route: str = ""
+    notes: str = ""
+
+
+class LiveAutonomyUnlockRequest(BaseModel):
+    actor: str = "api:ops.autonomy.live_unlock"
+    reason: str = ""
+    confirm: bool = False
+
+
+class LiveAutonomyRevokeRequest(BaseModel):
+    actor: str = "api:ops.autonomy.live_unlock"
+    reason: str = ""
+
+
 def _get_auto_recovery() -> AutoRecovery:
     global _auto_recovery
     if _auto_recovery is None:
@@ -217,6 +237,137 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
                 "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
             })
             return payload
+
+
+@router.get("/autonomy/proposals")
+def get_autonomy_proposals(
+    _user: RequireUser,
+    limit: int = 100,
+    status: str = "",
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Return the unified autonomous proposal registry read model."""
+    proposals = ProposalRegistryService().latest(
+        limit=max(1, min(int(limit), 500)),
+        status=str(status or ""),
+        refresh=bool(refresh),
+    )
+    return {
+        "ok": bool(proposals.get("ok")),
+        "schema_version": "ops_autonomy_proposals.v1",
+        "proposals": proposals,
+    }
+
+
+@router.get("/autonomy/proposals/{proposal_id}")
+def get_autonomy_proposal(proposal_id: str, _user: RequireUser) -> dict[str, Any]:
+    """Return one proposal registry item."""
+    proposal = ProposalRegistryService().get(proposal_id)
+    return {
+        "ok": bool(proposal.get("ok")),
+        "schema_version": "ops_autonomy_proposal.v1",
+        "proposal": proposal,
+    }
+
+
+@router.post("/autonomy/proposals/refresh")
+def refresh_autonomy_proposals(_user: RequireUser, limit: int = 500) -> dict[str, Any]:
+    """Refresh the proposal registry from existing governance ledgers."""
+    result = ProposalRegistryService().refresh(limit=max(1, min(int(limit), 5000)))
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_autonomy_proposals_refresh.v1",
+        "refresh": result,
+    }
+
+
+@router.post("/autonomy/proposals/{proposal_id}/review")
+def review_autonomy_proposal(proposal_id: str, req: ProposalReviewRequest, _user: RequireUser) -> dict[str, Any]:
+    """Record a proposal review without authorizing or applying the source action."""
+    result = ProposalRegistryService().review(
+        proposal_id,
+        actor=str(req.actor or "api:ops.autonomy.proposals"),
+        decision=str(req.decision or "reviewed"),
+        route=str(req.route or ""),
+        notes=str(req.notes or ""),
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_autonomy_proposal_review.v1",
+        "review": result,
+    }
+
+
+@router.get("/autonomy/live-status")
+def get_live_autonomy_status(_user: RequireUser, refresh_proposals: bool = False) -> dict[str, Any]:
+    """Return governed live-autonomy unlock status."""
+    readiness = BackendReadinessService().build()
+    status = LiveAutonomyService().status(
+        readiness=readiness,
+        refresh_proposals=bool(refresh_proposals),
+    )
+    return {
+        "ok": bool(status.get("ok")),
+        "schema_version": "ops_live_autonomy_status.v1",
+        "live_autonomy": status,
+        "readiness_generated_at": readiness.get("generated_at"),
+    }
+
+
+@router.post("/autonomy/live-unlock/evaluate")
+def evaluate_live_autonomy_unlock(req: LiveAutonomyUnlockRequest, _user: RequireUser) -> dict[str, Any]:
+    """Evaluate live-autonomous unlock requirements without changing runtime mode."""
+    readiness = BackendReadinessService().build()
+    evaluation = LiveAutonomyService().evaluate(
+        readiness=readiness,
+        refresh_proposals=True,
+        persist=True,
+        actor=str(req.actor or "api:ops.autonomy.live_unlock"),
+        reason=str(req.reason or ""),
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(evaluation.get("ok")),
+        "schema_version": "ops_live_autonomy_unlock_evaluate.v1",
+        "evaluation": evaluation,
+        "readiness_generated_at": readiness.get("generated_at"),
+    }
+
+
+@router.post("/autonomy/live-unlock")
+def unlock_live_autonomy(req: LiveAutonomyUnlockRequest, _user: RequireUser) -> dict[str, Any]:
+    """Manually unlock live-autonomous mode after evidence gates pass."""
+    readiness = BackendReadinessService().build()
+    result = LiveAutonomyService().unlock(
+        actor=str(req.actor or "api:ops.autonomy.live_unlock"),
+        reason=str(req.reason or ""),
+        confirm=bool(req.confirm),
+        readiness=readiness,
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_live_autonomy_unlock.v1",
+        "unlock": result,
+        "readiness_generated_at": readiness.get("generated_at"),
+    }
+
+
+@router.post("/autonomy/live-unlock/revoke")
+def revoke_live_autonomy(req: LiveAutonomyRevokeRequest, _user: RequireUser) -> dict[str, Any]:
+    """Revoke live-autonomous mode back to live_candidate through runtime overlay."""
+    result = LiveAutonomyService().revoke(
+        actor=str(req.actor or "api:ops.autonomy.live_unlock"),
+        reason=str(req.reason or ""),
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_live_autonomy_revoke.v1",
+        "revoke": result,
+    }
 
 
 @router.get("/brain/state")

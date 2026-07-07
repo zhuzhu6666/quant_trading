@@ -2140,9 +2140,12 @@ def test_apply_position_supervisor_template_switch_requires_approved_suggestion(
         try:
             suggestion = conn.execute("SELECT status FROM policy_suggestion WHERE suggestion_id='psv_test_apply'").fetchone()
             application = conn.execute("SELECT * FROM learning_application_log").fetchone()
+            overlay = conn.execute("SELECT overlay_json FROM runtime_config_overlay").fetchone()
         finally:
             conn.close()
         assert suggestion["status"] == "applied"
         assert application["scope_type"] == "position_supervisor_template"
+        overlay_json = json.loads(overlay["overlay_json"])
+        assert overlay_json["position_supervisor_template_id"] == "position_supervisor:conservative.v1"
     finally:
         rc.reset_for_tests()

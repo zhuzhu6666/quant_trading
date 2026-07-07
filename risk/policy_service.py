@@ -41,6 +41,18 @@ INCIDENT_CONTROLLED_ACTIONS = {
 }
 RISK_REDUCING_ACTIONS = {"close_position", "reduce_position", "tighten_position", "rollback_factor_action"}
 SHADOW_ONLY_ACTIONS = {"start_shadow_model", "start_canary_model"}
+LIVE_AUTONOMY_EXPANSION_ACTIONS = {
+    "open_trade",
+    "update_weight",
+    "switch_parameter_template",
+    "disable_factor_live",
+    "retire_factor",
+    "enable_context_policy",
+    "switch_position_supervisor_template",
+    "promote_factor",
+    "register_factor",
+    "start_canary_model",
+}
 
 
 @dataclass
@@ -85,6 +97,11 @@ class RiskPolicyService:
         incident_gate = self._evaluate_incident_runtime_mode(action, context)
         if incident_gate is not None and not incident_gate.allowed:
             return incident_gate
+        if action == "live_autonomy_budget":
+            return self._evaluate_live_autonomy_budget(context)
+        live_autonomy_gate = self._evaluate_live_autonomy_gate(action, context)
+        if live_autonomy_gate is not None and not live_autonomy_gate.allowed:
+            return live_autonomy_gate
         if action == "open_trade":
             return self._evaluate_open_trade(context)
         if action == "tighten_position":
@@ -218,6 +235,129 @@ class RiskPolicyService:
                 "reason": context.get("reason", ""),
             },
         )
+
+    @staticmethod
+    def _runtime_autonomy_context(context: dict[str, Any]) -> dict[str, Any]:
+        mode = context.get("autonomy_mode")
+        unlocked = context.get("live_autonomy_unlocked")
+        unlock_id = context.get("live_autonomy_unlock_id")
+        if mode is None or unlocked is None or unlock_id is None:
+            try:
+                from config.runtime_config import shared as runtime_config
+
+                cfg = runtime_config()
+                if mode is None:
+                    mode = getattr(cfg, "autonomy_mode", "manual")
+                if unlocked is None:
+                    unlocked = getattr(cfg, "live_autonomy_unlocked", False)
+                if unlock_id is None:
+                    unlock_id = getattr(cfg, "live_autonomy_unlock_id", "")
+            except Exception:
+                mode = mode if mode is not None else "manual"
+                unlocked = unlocked if unlocked is not None else False
+                unlock_id = unlock_id if unlock_id is not None else ""
+        mode = str(mode or "manual").strip().lower()
+        return {
+            "autonomy_mode": mode,
+            "live_autonomy_unlocked": bool(unlocked),
+            "live_autonomy_unlock_id": str(unlock_id or ""),
+        }
+
+    def _evaluate_live_autonomy_gate(self, action: str, context: dict[str, Any]) -> RiskVerdict | None:
+        autonomy = self._runtime_autonomy_context(context)
+        if autonomy["autonomy_mode"] != "live_autonomous":
+            return None
+        if action in RISK_REDUCING_ACTIONS:
+            return None
+        if action in LIVE_AUTONOMY_EXPANSION_ACTIONS and (
+            not autonomy["live_autonomy_unlocked"] or not autonomy["live_autonomy_unlock_id"]
+        ):
+            return RiskVerdict(
+                allowed=False,
+                reason="live_autonomy_not_unlocked",
+                severity="error",
+                required_mode="live_autonomy_unlock",
+                audit_payload={
+                    "action": action,
+                    "source": "live_autonomy_gate",
+                    **autonomy,
+                    "allowed_risk_reducing_actions": sorted(RISK_REDUCING_ACTIONS),
+                },
+            )
+        if action in LIVE_AUTONOMY_EXPANSION_ACTIONS:
+            budget = self._live_autonomy_budget_state(context)
+            if budget["breached"]:
+                return RiskVerdict(
+                    allowed=False,
+                    reason="live_autonomy_budget_breach",
+                    severity="error",
+                    required_mode="no_new_risk",
+                    audit_payload={
+                        "action": action,
+                        "source": "live_autonomy_budget",
+                        **autonomy,
+                        "budget": budget,
+                        "recommended_incident_mode": "no_new_risk",
+                    },
+                )
+        return None
+
+    def _evaluate_live_autonomy_budget(self, context: dict[str, Any]) -> RiskVerdict:
+        budget = self._live_autonomy_budget_state(context)
+        autonomy = self._runtime_autonomy_context(context)
+        return RiskVerdict(
+            allowed=not budget["breached"],
+            reason="ok" if not budget["breached"] else "live_autonomy_budget_breach",
+            severity="info" if not budget["breached"] else "error",
+            required_mode="live_autonomy_budget",
+            audit_payload={
+                "action": "live_autonomy_budget",
+                "source": "risk_policy",
+                **autonomy,
+                "budget": budget,
+                "recommended_incident_mode": "normal" if not budget["breached"] else "no_new_risk",
+            },
+        )
+
+    def _live_autonomy_budget_state(self, context: dict[str, Any]) -> dict[str, Any]:
+        state = self._build_governor_state(context)
+        risk_limits = RiskLimitSnapshot.from_context(context)
+        breaches: list[dict[str, Any]] = []
+        if risk_limits.max_daily_loss_pct > 0 and state.daily_loss_pct >= risk_limits.max_daily_loss_pct:
+            breaches.append({
+                "metric": "daily_loss_pct",
+                "value": state.daily_loss_pct,
+                "limit": risk_limits.max_daily_loss_pct,
+            })
+        if risk_limits.max_drawdown_pct > 0 and state.drawdown_pct >= risk_limits.max_drawdown_pct:
+            breaches.append({
+                "metric": "drawdown_pct",
+                "value": state.drawdown_pct,
+                "limit": risk_limits.max_drawdown_pct,
+            })
+        if risk_limits.max_daily_trades > 0 and state.daily_trades >= risk_limits.max_daily_trades:
+            breaches.append({
+                "metric": "daily_trades",
+                "value": state.daily_trades,
+                "limit": risk_limits.max_daily_trades,
+            })
+        return {
+            "schema_version": "live_autonomy_budget.v1",
+            "breached": bool(breaches),
+            "breaches": breaches,
+            "limits": {
+                "max_daily_loss_pct": risk_limits.max_daily_loss_pct,
+                "max_drawdown_pct": risk_limits.max_drawdown_pct,
+                "max_daily_trades": risk_limits.max_daily_trades,
+            },
+            "state": {
+                "daily_loss_pct": state.daily_loss_pct,
+                "drawdown_pct": state.drawdown_pct,
+                "daily_trades": state.daily_trades,
+                "loop_running": state.loop_running,
+                "bridge_connected": state.bridge_connected,
+            },
+        }
 
     def _evaluate_open_trade(self, context: dict[str, Any]) -> RiskVerdict:
         state = self._build_governor_state(context)

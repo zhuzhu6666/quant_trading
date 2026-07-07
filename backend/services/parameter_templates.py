@@ -809,22 +809,25 @@ class ParameterTemplateService:
         template_version: str = "",
         regime_key: str = "",
     ) -> dict[str, Any] | None:
+        lookup_factor_id = str(factor_id or "")
+        if template_id and not lookup_factor_id and ":" in template_id:
+            lookup_factor_id = template_id.split(":", 1)[0]
         if template_id:
             items = self._list_persisted(template_id=template_id)
             if items:
                 return items[0]
-        if factor_id and template_version:
+        if lookup_factor_id and template_version:
             items = self._list_persisted(
-                factor_id=factor_id,
+                factor_id=lookup_factor_id,
                 template_version=template_version,
                 regime=regime_key,
             )
             if items:
                 return items[0]
-        for item in self.list_templates(factor_id=factor_id or None, regime=regime_key or None, limit=500):
+        for item in self.list_templates(factor_id=lookup_factor_id or None, regime=regime_key or None, limit=500):
             if template_id and item["template_id"] == template_id:
                 return item
-            if factor_id and template_version and item["factor_id"] == factor_id and item["template_version"] == template_version:
+            if lookup_factor_id and template_version and item["factor_id"] == lookup_factor_id and item["template_version"] == template_version:
                 return item
         return None
 

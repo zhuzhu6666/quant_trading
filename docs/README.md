@@ -18,6 +18,7 @@
 - [../README.md](../README.md) - 项目总览与快速入口
 - [../AGENTS.md](../AGENTS.md) - 当前工作区规则与防误操作提醒
 - [system-operation-map.md](system-operation-map.md) - 当前真实运行架构、启动顺序、live tick 链路、worker 自治治理、状态库和 API 入口
+- [autonomous-governance-architecture.md](autonomous-governance-architecture.md) - 自治治理架构、分层模块、权力边界、控制面和复杂度收敛路线
 - [rule-driven-intelligence-inventory.md](rule-driven-intelligence-inventory.md) - 规则驱动智能、影子模型、链路审计数据和精度语义总账
 - [architecture.md](architecture.md) - 当前系统状态、目标完全体、分层定义、完整开发路线
 - [factor-card-schema.md](factor-card-schema.md) - 因子解释卡片与治理展示 schema
@@ -54,6 +55,7 @@
 - 持仓监督、学习证据、参数模板这类稳定接口：写入对应 contract 文档
 - 模型清单、训练准入、open outcome 和数据质量健康：优先写入 `learning-evidence-contract.md`
 - 规则智能数量、执行链路、每步审计数据和精度口径：写入 `docs/rule-driven-intelligence-inventory.md`
+- 多智能体/模型/大脑如何协作、每层模块位置、控制面和权力边界：写入 `docs/autonomous-governance-architecture.md`
 - 涉及三端开发、发布、同步规则：写入 `docs/development-workflow.md`
 - 不再把同主题内容拆成多份并行主文档
 
@@ -61,11 +63,12 @@
 
 1. [../README.md](../README.md)
 2. [system-operation-map.md](system-operation-map.md)
-3. [rule-driven-intelligence-inventory.md](rule-driven-intelligence-inventory.md)
-4. [documentation-governance.md](documentation-governance.md)
-5. [system-source-of-truth.md](system-source-of-truth.md)
-6. [architecture.md](architecture.md)
-7. [change-impact-checklist.md](change-impact-checklist.md)
-8. [legacy-debt-register.md](legacy-debt-register.md)
-9. [development-workflow.md](development-workflow.md)
-10. [server-backend-sop.md](server-backend-sop.md)
+3. [autonomous-governance-architecture.md](autonomous-governance-architecture.md)
+4. [rule-driven-intelligence-inventory.md](rule-driven-intelligence-inventory.md)
+5. [documentation-governance.md](documentation-governance.md)
+6. [system-source-of-truth.md](system-source-of-truth.md)
+7. [architecture.md](architecture.md)
+8. [change-impact-checklist.md](change-impact-checklist.md)
+9. [legacy-debt-register.md](legacy-debt-register.md)
+10. [development-workflow.md](development-workflow.md)
+11. [server-backend-sop.md](server-backend-sop.md)

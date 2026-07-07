@@ -475,7 +475,9 @@ supervisor review / counterfactual
 - 自动部署只允许 `RuntimeConfig.autonomy_mode=demo_autonomous`
 - 自动部署必须同时具备 replay summary 和 counterfactual summary
 - 切换必须保留 `previous_template_id`，便于回滚审计
-- 切换必须写入 `runtime_config_overlay / runtime_config_snapshot / evolution_decision / learning_application_log / learning_application_effect`
+- 切换必须通过 `RuntimeConfigMutationService` 写入 `runtime_config_overlay / runtime_config_snapshot / evolution_decision / learning_application_log / learning_application_effect`
+- 只调用 `config.runtime_config.patch()` 或只写 `runtime_config_snapshot` 属于临时内存变更，重启后不应被视为 active template
+- 生成型 supervisor 模板必须能从 `policy_suggestion.evidence_json` 或已应用的 `learning_application_log.details_json` 恢复；active template ID 指向孤儿模板时应视为治理链路缺口
 
 ---
 

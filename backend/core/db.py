@@ -929,6 +929,51 @@ CREATE TABLE IF NOT EXISTS brain_governance_candidate_review (
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS proposal_registry (
+    proposal_id TEXT PRIMARY KEY,
+    source_agent TEXT DEFAULT '',
+    source_ref_type TEXT DEFAULT '',
+    source_ref_id TEXT DEFAULT '',
+    proposal_type TEXT DEFAULT '',
+    control_surface TEXT DEFAULT '',
+    target_scope TEXT DEFAULT '',
+    impact_level TEXT DEFAULT '',
+    confidence REAL DEFAULT 0.0,
+    evidence_refs_json TEXT NOT NULL DEFAULT '{}',
+    counter_evidence_refs_json TEXT NOT NULL DEFAULT '{}',
+    required_gate_json TEXT NOT NULL DEFAULT '[]',
+    risk_verdict_json TEXT NOT NULL DEFAULT '{}',
+    decision_policy_preview_json TEXT NOT NULL DEFAULT '{}',
+    expected_effect_json TEXT NOT NULL DEFAULT '{}',
+    rollback_plan_json TEXT NOT NULL DEFAULT '{}',
+    source_reliability_json TEXT NOT NULL DEFAULT '{}',
+    evidence_freshness_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT DEFAULT '',
+    authority_state TEXT DEFAULT '',
+    route_recommendation TEXT DEFAULT 'observe',
+    conflict_json TEXT NOT NULL DEFAULT '{}',
+    review_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS live_autonomy_unlock_event (
+    event_id TEXT PRIMARY KEY,
+    action TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    actor TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    autonomy_mode_before TEXT DEFAULT '',
+    autonomy_mode_after TEXT DEFAULT '',
+    readiness_json TEXT NOT NULL DEFAULT '{}',
+    proposal_registry_json TEXT NOT NULL DEFAULT '{}',
+    risk_verdict_json TEXT NOT NULL DEFAULT '{}',
+    blockers_json TEXT NOT NULL DEFAULT '[]',
+    mutation_json TEXT NOT NULL DEFAULT '{}',
+    boundary_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE TABLE IF NOT EXISTS brain_live_ready_guardrail (
     guardrail_id TEXT PRIMARY KEY,
     status TEXT DEFAULT '',
@@ -1257,6 +1302,11 @@ CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_scope ON brain_governa
 CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_source ON brain_governance_candidate(source_agent, source_kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_candidate ON brain_governance_candidate_review(candidate_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_status ON brain_governance_candidate_review(review_status, created_at);
+CREATE INDEX IF NOT EXISTS idx_proposal_registry_updated ON proposal_registry(updated_at);
+CREATE INDEX IF NOT EXISTS idx_proposal_registry_surface ON proposal_registry(control_surface, target_scope, status);
+CREATE INDEX IF NOT EXISTS idx_proposal_registry_source ON proposal_registry(source_agent, source_ref_type, updated_at);
+CREATE INDEX IF NOT EXISTS idx_live_autonomy_unlock_created ON live_autonomy_unlock_event(created_at);
+CREATE INDEX IF NOT EXISTS idx_live_autonomy_unlock_status ON live_autonomy_unlock_event(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_created ON brain_live_ready_guardrail(created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_status ON brain_live_ready_guardrail(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_autonomous_learning_sample_type ON autonomous_learning_sample(sample_type, label_status, event_ts);

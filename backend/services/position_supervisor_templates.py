@@ -227,18 +227,46 @@ def _generated_templates_from_state(db_path: str | Path | None = None) -> list[d
                 """,
             )
         ).fetchall()
+        payloads = [row["evidence_json"] for row in rows]
+        try:
+            application_rows = conn.execute(
+                _sql(
+                    conn,
+                    """
+                    SELECT details_json
+                    FROM learning_application_log
+                    WHERE scope_type='position_supervisor_template'
+                      AND action='switch_position_supervisor_template'
+                      AND status IN ('applied', 'observing', 'reinforced', 'mixed')
+                    ORDER BY created_at DESC
+                    LIMIT 100
+                    """,
+                )
+            ).fetchall()
+            payloads.extend(row["details_json"] for row in application_rows)
+        except Exception:
+            pass
     except Exception:
         return []
     finally:
         conn.close()
 
     result: dict[str, dict[str, Any]] = {}
-    for row in rows:
+    for raw_payload in payloads:
         try:
-            evidence = json.loads(row["evidence_json"] or "{}")
+            payload = json.loads(raw_payload or "{}")
         except Exception:
             continue
-        raw = evidence.get("candidate_template") or evidence.get("template_snapshot") or {}
+        if not isinstance(payload, dict):
+            continue
+        evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+        raw = (
+            payload.get("candidate_template")
+            or payload.get("template_snapshot")
+            or evidence.get("candidate_template")
+            or evidence.get("template_snapshot")
+            or {}
+        )
         if not isinstance(raw, dict):
             continue
         template_id = str(raw.get("template_id") or "")
@@ -287,7 +315,7 @@ def latest_applied_position_supervisor_template_id(*, db_path: str | Path | None
             FROM learning_application_log
             WHERE scope_type='position_supervisor_template'
               AND action='switch_position_supervisor_template'
-              AND status IN ('applied', 'observing')
+              AND status IN ('applied', 'observing', 'reinforced', 'mixed')
             ORDER BY cycle_ts DESC, created_at DESC
             LIMIT 1
             """

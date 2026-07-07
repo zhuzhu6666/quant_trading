@@ -39,6 +39,7 @@ _POSITIVE_FLOAT_FIELDS = {
     "dynamic_sizing_api_units_per_display_unit",
 }
 _POSITIVE_INT_FIELDS = {
+    "demo_learning_max_daily_trades",
     "max_position_count",
     "risk_max_consecutive_losses",
     "risk_max_daily_trades",

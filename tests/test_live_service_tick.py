@@ -156,6 +156,86 @@ def test_entry_quality_learning_gate_interprets_factor_context_before_risk():
     assert gate["suggestion_id"] == "psg_real_yield"
 
 
+def test_live_autonomy_budget_breach_tightens_incident(monkeypatch):
+    calls = []
+
+    class _IncidentControl:
+        def status(self):
+            return {"mode": "normal"}
+
+        def set_mode(self, mode, *, reason, actor, confirm_thaw):
+            calls.append(
+                {
+                    "mode": mode,
+                    "reason": reason,
+                    "actor": actor,
+                    "confirm_thaw": confirm_thaw,
+                }
+            )
+            return {"ok": True, "status": "applied", "target_mode": mode}
+
+    monkeypatch.setattr(live_service, "RuntimeIncidentControlService", lambda: _IncidentControl())
+    logs = []
+    verdict = SimpleNamespace(
+        to_dict=lambda: {
+            "allowed": False,
+            "reason": "live_autonomy_budget_breach",
+            "audit_payload": {
+                "source": "live_autonomy_budget",
+                "recommended_incident_mode": "no_new_risk",
+            },
+        }
+    )
+
+    result = live_service._maybe_tighten_incident_for_live_autonomy_budget_breach(
+        verdict,
+        tick=7,
+        log=logs.append,
+    )
+
+    assert result["status"] == "applied"
+    assert calls == [
+        {
+            "mode": "no_new_risk",
+            "reason": "live_autonomy_budget_breach",
+            "actor": "system:live_autonomy_budget",
+            "confirm_thaw": False,
+        }
+    ]
+    assert "incident tighten" in logs[0]
+
+
+def test_live_autonomy_budget_breach_does_not_relax_stricter_incident(monkeypatch):
+    calls = []
+
+    class _IncidentControl:
+        def status(self):
+            return {"mode": "only_close"}
+
+        def set_mode(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {"ok": True, "status": "applied"}
+
+    monkeypatch.setattr(live_service, "RuntimeIncidentControlService", lambda: _IncidentControl())
+    verdict = SimpleNamespace(
+        to_dict=lambda: {
+            "allowed": False,
+            "reason": "live_autonomy_budget_breach",
+            "audit_payload": {"recommended_incident_mode": "no_new_risk"},
+        }
+    )
+
+    result = live_service._maybe_tighten_incident_for_live_autonomy_budget_breach(
+        verdict,
+        tick=7,
+        log=lambda _: None,
+    )
+
+    assert result["status"] == "already_strict"
+    assert result["current_mode"] == "only_close"
+    assert calls == []
+
+
 def test_supervisor_tighten_sl_plan_clips_long_stop_below_current_price():
     plan = live_service._supervisor_tighten_sl_plan(
         {"direction": 1, "current_price": 4100.0, "sl": 4088.0},
@@ -282,6 +362,57 @@ def test_pending_open_attach_blocks_until_position_is_confirmed():
 
     assert live_service._active_pending_open_attach_ids(set()) == [12345]
     assert live_service._active_pending_open_attach_ids({12345}) == []
+
+
+def test_open_trade_context_sizing_floors_to_broker_step():
+    volume, trace = live_service._apply_context_position_sizing(
+        volume=123.0,
+        sizing_trace={"schema_version": "position_sizing_trace.v1"},
+        composite=SimpleNamespace(
+            context_policy={
+                "applied": True,
+                "position_multiplier": 0.5,
+                "reason": "thin_liquidity",
+            }
+        ),
+        bridge_meta={"api_min_volume": 10.0, "api_step_volume": 10.0},
+    )
+
+    assert volume == 60.0
+    assert trace["context_policy"]["raw_api_volume"] == 61.5
+    assert trace["context_policy"]["adjusted_api_volume"] == 60.0
+    assert trace["context_policy"]["reason"] == "thin_liquidity"
+
+
+def test_open_trade_pipeline_stops_before_broker_order_when_attach_pending():
+    bridge = _fake_bridge()
+    logs: list[str] = []
+    gate_result = SimpleNamespace(passed=True, reason="pass")
+
+    returned_gate = live_service._run_open_trade_pipeline(
+        bridge=bridge,
+        pipeline={},
+        broker="ctrader",
+        cfg=SimpleNamespace(),
+        bar={"time": time.time()},
+        factor_values={},
+        composite=SimpleNamespace(direction=1, score=0.8),
+        gate_result=gate_result,
+        account={"balance": 10000.0, "equity": 10000.0},
+        positions=[],
+        attr_engine=None,
+        current_price=4000.0,
+        atr_price=4.0,
+        pending_open_attach_ids=[12345],
+        send=True,
+        tick=7,
+        log=logs.append,
+    )
+
+    assert returned_gate is gate_result
+    assert any("pending_open_attach" in message for message in logs)
+    bridge.market_buy.assert_not_called()
+    bridge.market_sell.assert_not_called()
 
 
 def test_entry_protection_failed_status_increments_attempt_and_remains_repairable(monkeypatch):

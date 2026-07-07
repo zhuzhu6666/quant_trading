@@ -41,6 +41,7 @@ Source of truth: 可选；当本文不是权威来源时必须填写
 | 总入口 | 读者从哪里开始 | `docs/README.md` |
 | 架构事实 | 系统是什么、边界是什么 | `docs/architecture.md` |
 | 运转地图 | 一眼看懂链路 | `docs/system-operation-map.md` |
+| 自治治理架构 | 多智能体、模型、大脑、控制面和权力边界 | `docs/autonomous-governance-architecture.md` |
 | 智能总账 | 规则智能、影子模型、审计数据和精度口径 | `docs/rule-driven-intelligence-inventory.md` |
 | 事实源索引 | 每类状态以哪里为准 | `docs/system-source-of-truth.md` |
 | 变更检查 | 改代码前后扫影响面 | `docs/change-impact-checklist.md` |
@@ -58,6 +59,7 @@ Source of truth: 可选；当本文不是权威来源时必须填写
 |---|---|
 | 因子、权重、组合、AWE | `architecture.md`, `system-source-of-truth.md`, `legacy-debt-register.md`, `change-impact-checklist.md` |
 | 自治治理、学习、回滚 | `rule-driven-intelligence-inventory.md`, `learning-evidence-contract.md`, `system-source-of-truth.md`, `change-impact-checklist.md` |
+| 多智能体/模型/自治大脑治理边界 | `autonomous-governance-architecture.md`, `system-operation-map.md`, `rule-driven-intelligence-inventory.md`, `system-source-of-truth.md` |
 | RuntimeConfig、overlay、snapshot | `system-source-of-truth.md`, `server-backend-sop.md`, `change-impact-checklist.md` |
 | 风控、执行、仓位监督 | `rule-driven-intelligence-inventory.md`, `position-supervisor-contract.md`, `system-operation-map.md`, `change-impact-checklist.md` |
 | 前端展示契约 | `factor-card-schema.md`, `system-source-of-truth.md`, `development-workflow.md` |

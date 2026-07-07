@@ -1,7 +1,7 @@
 # System Source Of Truth
 
 > Status: active
-> Last verified: 2026-07-06
+> Last verified: 2026-07-07
 > Scope: authoritative sources for runtime state, configuration, governance, data, and frontend contracts.
 
 本文回答一个问题：当文档、注释、接口、数据库和历史理解冲突时，到底以哪里为准。
@@ -24,6 +24,7 @@
 | 配置写入口 | `RuntimeConfigMutationService` / `DecisionPolicy` | 自治配置变更必须走统一写入口 |
 | 启动恢复 | `RuntimeConfigStartupService` | base YAML + DB overlay 后替换内存配置 |
 | incident control | `runtime_incident_mode` + `RuntimeIncidentControlService` + `RiskPolicyService` | V15 freeze/shadow_only/no_new_risk/only_close/frozen 控制入口 |
+| live autonomy unlock | PostgreSQL `live_autonomy_unlock_event` + `LiveAutonomyService` + runtime overlay | `live_autonomous` 一次性人工解锁/撤销账本；写入 `autonomy_mode`、`live_autonomy_unlocked`、`live_autonomy_unlock_id` 必须经 `RuntimeConfigMutationService` |
 
 判断原则：
 
@@ -31,6 +32,8 @@
 - 看到内存配置异常时，先查 overlay 和 snapshot。
 - 可疑测试 overlay 不应被生产启动恢复。
 - incident control 模式变更必须先过 `RiskPolicyService.evaluate("set_incident_control")`，再由 runtime overlay 持久化。
+- position supervisor 模板切换必须先过 `RiskPolicyService.evaluate("switch_position_supervisor_template")`，再由 `RuntimeConfigMutationService` 写入 `runtime_config_overlay` 和 `runtime_config_snapshot`；只写 snapshot 或只改内存不算生效。
+- `autonomy_mode=live_autonomous` 不是风控旁路；解锁必须写 `live_autonomy_unlock_event`，并由 runtime overlay/snapshot 恢复。未解锁或预算触顶时，`RiskPolicyService` 阻断 open/update/promote 等新增风险动作，只允许 close/reduce/tighten/rollback 等降风险动作继续走受控入口；live 开仓路径若收到 `live_autonomy_budget_breach`，必须通过 `RuntimeIncidentControlService` 请求收紧到 `no_new_risk`，不能直接改 overlay。
 
 ## 3. 因子事实源
 
@@ -39,6 +42,7 @@
 | 因子输入帧 | `FactorFrameBuilder` | live、health、evolution 统一 PIT 数据入口 |
 | 因子角色 | `factor_signal_config.role` / registry fallback | `alpha/context/gate/sizing` |
 | 方向评分 | `PortfolioCompositor` | 只使用 enabled、weight > 0、role=alpha 的因子 |
+| live 信号决策编排 | `backend.services.live_decision_pipeline.LiveDecisionFrame` | factor refresh/append、normalizer、compositor、context policy、ExecutionGate 的单 tick 决策输出；不读账户、不触发 RiskPolicy、不下单 |
 | 权重写入 | `DecisionPolicy` | 权重治理唯一写入口 |
 | 因子生命周期 | `RegistryAdapter` / lifecycle event | lifecycle 权威来源 |
 | 因子治理视图 | `Factor Catalog` | 聚合 registry、runtime config、weights、health、shadow、AWE、learning |
@@ -48,6 +52,7 @@
 
 - `bb_width/adx/atr_ratio/keltner_width` 是 context，不是方向投票。
 - context 可以影响状态、阈值、仓位，但不能直接改变多空方向。
+- live 信号决策层只产出 `CompositeSignal`、context policy effect、`GateResult` 和审计 payload；交易授权仍必须进入 `RiskPolicyService`，权重治理仍必须进入 `DecisionPolicy`。
 - shadow 因子不直接交易，必须经治理晋升。
 - disabled/DEAD 因子应被 engine、compositor、AWE、readiness 一致排除。
 
@@ -58,7 +63,7 @@
 | 动作裁决 | `RiskPolicyService.evaluate(...)` | 风控统一裁决入口 |
 | 风险阈值快照 | `risk.runtime_policy.RiskLimitSnapshot` + `RuntimeConfig` / runtime overlay | 日内亏损、回撤、交易次数、数据延迟、L2、磁盘、VaR/CVaR 等阈值的统一输入口径 |
 | 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk、L2 等运行态统一输入口径 |
-| 下单/改仓/平仓 | cTrader bridge + ledger | broker 执行事实与账本共同追溯 |
+| 下单/改仓/平仓 | cTrader bridge + ledger | broker 执行事实与账本共同追溯；live 开仓先经 `_run_open_trade_pipeline()` 生成 candidate/risk verdict/order block，再触达 broker |
 | 信号门槛 | `ExecutionGate` + context policy effect | gate 前应用有效阈值；live 只负责信号/冷却，不作为事件风险最终裁决口 |
 | 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` | 持仓期间动作建议和 trace |
 | 事件缩放 | `execution/event_sizing.py` + `data/events.duckdb` | 事件窗口风控输入 |
@@ -68,7 +73,9 @@
 - 风控不产生 alpha，但拥有最高执行裁决权。
 - 因子治理、模板切换、回滚都不能绕过 RiskPolicyService。
 - live 日内熔断可以做执行快停，但阈值必须来自 `RiskLimitSnapshot`，不能在 live loop 内另设事实源。
+- `autonomy_mode=demo_autonomous` 下的真实 demo 采样可以使用 `RuntimeConfig.demo_learning_max_daily_trades` 作为有效日交易上限；该口径只通过 `RiskLimitSnapshot.source=runtime_config:demo_learning` 输入 `RiskPolicyService`，不绕过断连、stale market、仓位、volume、日亏损或熔断裁决。
 - NFP/GVZ/重大事件等事件风险在 live 中只能作为 `RiskPolicyService` 输入；`ExecutionGate` 的事件过滤保留给 backtest/legacy 兼容。
+- live open-trade pipeline 只编排候选 sizing、`RiskPolicyService.evaluate("open_trade")`、market-session/order block、broker order 和 post-fill audit；它不拥有独立风控事实源。
 - `risk/pre_trade.py`、`risk/circuit.py`、`execution/router.py` 属于 paper/backtest/legacy execution router，不是当前 live 主授权口。
 - 模型阶段裁决必须复用 `backend.services.model_permissions`，不能维护第二套模型权限事实。
 - BB 不进入 ExecutionGate 作为硬过滤器。
@@ -107,11 +114,14 @@
 | V16 governance candidate bridge | PostgreSQL `brain_governance_candidate` + `policy_suggestion` + `backend.services.brain_governance_candidates` + `/api/ops/brain/governance-candidates` / `/api/ops/brain/governance-candidates/{candidate_id}/submit` | V16 候选到旧治理队列的手动桥接入口；只有 `governance_ready/applyable`、RiskPolicy allowed 且 payload 被旧 `RuleEvolutionGovernor` 理解时，才提交 `policy_suggestion(status='proposed')`，之后仍由既有 governor/conflict/risk/release/rollback 链路处理 |
 | V16 governance candidate review | PostgreSQL `brain_governance_candidate_review` + `brain_governance_candidate` + `backend.services.brain_governance_candidate_review` + `/api/ops/brain/governance-candidate-reviews` / `/api/ops/brain/governance-candidates/review` | V16 候选审查事实源；输出 evidence gaps、bridge preview、control-surface conflicts、source reliability 和可选 LLM advisory audit；只写审计，不提交 `policy_suggestion`，不执行 runtime mutation |
 | V16 live-ready guardrails | PostgreSQL `brain_live_ready_guardrail` + `backend.services.brain_live_ready_guardrail` + `/api/ops/brain/live-ready-guardrails` / `/api/ops/brain/live-ready-guardrails/evaluate` / `/api/ops/brain/live-ready-guardrails/tighten` | V16 Phase 5 实盘前护栏审计账本；评估 live capability lock、broker/local divergence、incident memory、release rollback 和 P3/P4 evidence；显式 tightening 只能通过 `RuntimeIncidentControlService` + `RiskPolicyService` 收紧 incident mode，不能放宽权限、下单、提交或应用治理候选、写学习样本 |
-| V16 Web brain page | `web_frontend/src/pages/V16BrainPage.tsx` + `/v16` | V16 操作台展示入口；读取 brain state/memory/action-plans/action-plan-evals/low-impact-executions/medium-impact-governance/governance-candidate-reviews/live-ready-guardrails/readiness API，展示 world model、memory、hypotheses、Critic、shadow action plans/evaluations、P3 executions、P4 governance candidate/review、P5 guardrails 和边界，不在前端重算策略/风控或执行未授权动作 |
+| Proposal Registry | PostgreSQL `proposal_registry` + `backend.services.proposal_registry` + `/api/ops/autonomy/proposals*` | 统一 proposal 读模型，把 `policy_suggestion`、`brain_governance_candidate`、`brain_action_plan`、`learning_application_log`、`evolution_decision`、`live_autonomy_unlock_event`、shadow/advisory audit 和 LLM advisory audit 归一化；只做展示、来源可靠性评分、证据新鲜度标记、冲突检测、review 记录和路由建议，不审批、不应用、不改来源状态 |
+| live autonomy unlock | PostgreSQL `live_autonomy_unlock_event` + `backend.services.live_autonomy` + `/api/ops/autonomy/live-status` / `/api/ops/autonomy/live-unlock*` | `live_autonomous` 一次性人工解锁事实源；评估 readiness/cTrader/live loop/incident/release rollback/replay/broker alignment/proposal conflict/RiskPolicy budget/evidence freshness，成功后经 `RuntimeConfigMutationService` 写 overlay/snapshot，撤销回到 `live_candidate`；预算触顶事件会作为 incident tighten proposal 进入 Proposal Registry，live 开仓被预算门阻断时由 `RuntimeIncidentControlService` 自动请求 `no_new_risk` |
+| Meta Governance Web page | `web_frontend/src/pages/V16BrainPage.tsx` + `/v16` | 元治理大脑展示入口；读取 brain state/memory/action-plans/action-plan-evals/low-impact-executions/medium-impact-governance/governance-candidate-reviews/live-ready-guardrails/proposal-registry/live-autonomy/readiness API，展示 world model、memory、hypotheses、Critic、提案总线、实盘自治状态和边界；按钮只触发受控后端 API，不在前端重算策略/风控或执行未授权动作 |
 | 后验效果 | `learning_application_effect` | 回滚判断事实源 |
 | 应用日志 | `learning_application_log` | 动作应用状态 |
 | 建议/审计状态 | `policy_suggestion` + normalized status | `proposed/auto_approved/applied/rolled_back/blocked_by_risk/superseded` |
 | 智能单元总账 | `docs/rule-driven-intelligence-inventory.md` | 规则智能、影子模型、审计数据和精度口径 |
+| 自治治理架构 | `docs/autonomous-governance-architecture.md` | 多智能体、模型、自治大脑、控制面和权力边界分层；不替代具体事实表 |
 
 判断原则：
 
@@ -139,6 +149,10 @@
 - V16 Phase 4 medium-impact governance 只 materialize `brain_governance_candidate` 候选和 `brain_medium_impact_governance` 审计账本。它不能直接调用 `_update_weights()`、不能激活模板、不能推广模型到 live、不能写 runtime overlay/snapshot，也不能直接写 `policy_suggestion`；权重类候选必须带 `DecisionPolicy` preview。候选若要进入旧自治建议队列，必须通过手动 bridge，并再次满足 `RuleEvolutionGovernor` 可理解 evidence、`RiskPolicyService`、`DecisionPolicy`、release evidence 和 rollback JSON。
 - V16 governance candidate review 只审查候选，不提交候选。`BrainGovernanceCandidateReviewService` 复用现有 `GovernanceConflictResolver` 的 control surface 口径、复用 candidate bridge preview，并可选调用现有 `LLMAdvisoryService` 写 advisory audit；LLM 不能改变 review status、不能授权 bridge 或执行。
 - V16 Phase 5 live-ready guardrails 只评估和审计实盘前护栏。`brain_live_ready_guardrail` 的 capability lock/divergence/rollback/incident memory 结论不是下单授权；`tighten` 入口只能把 incident mode 调得更严格，并由 `RuntimeIncidentControlService` 走 `RiskPolicyService.evaluate("set_incident_control")` 与 runtime overlay/snapshot。P5 不能 thaw、不能恢复 normal、不能应用 P4 suggestion、不能写学习样本或提交订单。
+- Proposal Registry 是元治理总线读模型，不是新执行器。它可以识别同一 `control_surface + target_scope` 的 active conflict、记录 operator review 和推荐 `observe/request_replay/submit_governance/request_review` route，但不能把 proposal 标记为 approved/applied，不能写来源表状态，不能直接调用 broker、`DecisionPolicy` 或 runtime overlay。
+- Proposal Registry 的 `source_reliability` 和 `evidence_freshness` 只是排序/审查辅助信号：低可信和证据过期会让前端/readiness 可见，但不会自己批准、拒绝或应用任何动作。
+- LLM advisory 只能通过 `llm_advisory_audit` 进入 Proposal Registry，`authority_state=advisory_only`；任何 `approved/applied/auto_approved` review 都必须被拒绝。
+- `live_autonomous` 恢复后仍必须持续满足 unlock evidence；`LiveAutonomyService.status()` 会在 replay/release/readiness/unlock event 过期时标记 `operational_posture=degraded` 并建议 `no_new_risk`。解锁不会授予 LLM、shadow model、brain action plan 或前端直接执行权限。
 
 ## 6. 数据事实源
 
@@ -182,7 +196,9 @@
 | V16 governance candidates | `/api/ops/brain/governance-candidates` / `/api/ops/brain/governance-candidates/{candidate_id}/submit` + readiness `v16.governance_candidates` | 查看隔离候选池；手动 submit 仅把兼容候选桥接进旧 `policy_suggestion` review，不应用 runtime mutation |
 | V16 governance candidate reviews | `/api/ops/brain/governance-candidate-reviews` / `/api/ops/brain/governance-candidates/review` + readiness `v16.governance_candidate_reviews` | 查看或显式运行候选审查；只生成 bridge preview、证据缺口、冲突面、source reliability 和可选 LLM advisory audit，不提交候选 |
 | V16 live-ready guardrails | `/api/ops/brain/live-ready-guardrails` / `/api/ops/brain/live-ready-guardrails/evaluate` / `/api/ops/brain/live-ready-guardrails/tighten` + readiness `v16.live_ready_guardrails` | 查看或显式评估 V16 Phase 5 实盘前护栏；收紧入口只能调用 incident-control 进入更严格模式，不能放宽权限 |
-| V16 Web brain page | `/v16` + `web_frontend/src/pages/V16BrainPage.tsx` | Web 展示 V16 只读大脑状态、shadow action plans、posterior evaluations、P3 executions、P4 governance candidate/review 和 P5 guardrails；运行按钮只触发后端白名单/候选生成/候选审查/护栏评估/收紧 API，不在前端推断或执行动作 |
+| Proposal Registry | `/api/ops/autonomy/proposals` / `/api/ops/autonomy/proposals/{proposal_id}` / `/api/ops/autonomy/proposals/refresh` / `/api/ops/autonomy/proposals/{proposal_id}/review` + readiness `v16.proposal_registry` | 查看、刷新和记录统一提案审查；包含 source reliability、evidence freshness、conflict 和 route；review 只能写 registry review，不能授权或应用来源 proposal |
+| live autonomy unlock | `/api/ops/autonomy/live-status` / `/api/ops/autonomy/live-unlock/evaluate` / `/api/ops/autonomy/live-unlock` / `/api/ops/autonomy/live-unlock/revoke` + readiness `v16.live_autonomy` | 查看、评估、一次性人工解锁或撤销 `live_autonomous`；评估包含 evidence freshness、operational posture 和 budget breach response；成功 mutation 必须走 `RuntimeConfigMutationService` 和 overlay/snapshot，失败只写审计 |
+| Meta Governance Web page | `/v16` + `web_frontend/src/pages/V16BrainPage.tsx` | Web 展示元治理大脑、提案总线、实盘自治状态、shadow action plans、posterior evaluations、P3 executions、P4 governance candidate/review 和 P5 guardrails；运行按钮只触发后端白名单/候选生成/候选审查/护栏评估/收紧/提案审查/解锁 API，不在前端推断或执行动作 |
 | 因子治理展示 | `/api/v4/catalog` | 实时 Catalog；支持 latest snapshot |
 | 因子卡片 | `factor-card-schema.md` + Factor Cards API | 前端解释展示 |
 | 前端职责 | `development-workflow.md` | 本地 Windows 负责小程序/Web 展示 |

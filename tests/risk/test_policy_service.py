@@ -76,6 +76,27 @@ def test_open_trade_uses_risk_limit_snapshot_for_governor_thresholds():
     assert verdict.audit_payload["state"]["risk_limits"]["max_daily_loss_pct"] == 3.0
 
 
+def test_open_trade_demo_learning_limit_extends_daily_trade_sampling():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "session": {"trades": 20},
+            "risk_limits": {
+                "source": "runtime_config:demo_learning",
+                "max_daily_trades": 60,
+            },
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.audit_payload["risk_limits"]["source"] == "runtime_config:demo_learning"
+    assert verdict.audit_payload["risk_limits"]["max_daily_trades"] == 60
+
+
 def test_open_trade_uses_risk_limit_snapshot_for_var_thresholds():
     service = _service()
 
@@ -663,6 +684,86 @@ def test_incident_control_relax_requires_confirm():
     assert blocked.reason == "incident_control_relax_requires_confirm"
     assert allowed.allowed is True
     assert allowed.audit_payload["relaxing"] is True
+
+
+def test_live_autonomous_blocks_expansion_until_unlock():
+    service = _service()
+    context = {
+        "autonomy_mode": "live_autonomous",
+        "live_autonomy_unlocked": False,
+        "live_autonomy_unlock_id": "",
+        "session": {"drawdown_pct": 0.0, "trades": 0},
+    }
+
+    for action in ("open_trade", "update_weight", "promote_factor"):
+        verdict = service.evaluate(action, context)
+        assert verdict.allowed is False
+        assert verdict.reason == "live_autonomy_not_unlocked"
+        assert verdict.required_mode == "live_autonomy_unlock"
+
+
+def test_live_autonomous_budget_breach_blocks_new_risk_but_allows_reduction():
+    service = _service()
+    context = {
+        "autonomy_mode": "live_autonomous",
+        "live_autonomy_unlocked": True,
+        "live_autonomy_unlock_id": "unlock1",
+        "session": {"daily_loss_pct": 5.0, "drawdown_pct": 4.0, "trades": 20},
+        "risk_limits": {
+            "max_daily_loss_pct": 5.0,
+            "max_drawdown_pct": 15.0,
+            "max_daily_trades": 20,
+        },
+        "loop_running": True,
+        "bridge_connected": True,
+    }
+
+    for action in ("open_trade", "update_weight", "promote_factor"):
+        verdict = service.evaluate(action, context)
+        assert verdict.allowed is False
+        assert verdict.reason == "live_autonomy_budget_breach"
+        assert verdict.audit_payload["recommended_incident_mode"] == "no_new_risk"
+
+    close_allowed = service.evaluate("close_position", context)
+    reduce_allowed = service.evaluate("reduce_position", {**context, "position_id": "p1"})
+    tighten_allowed = service.evaluate("tighten_position", {**context, "position_id": "p1"})
+    rollback_allowed = service.evaluate("rollback_factor_action", context)
+
+    assert close_allowed.allowed is True
+    assert reduce_allowed.allowed is True
+    assert tighten_allowed.allowed is True
+    assert rollback_allowed.allowed is True
+
+
+def test_live_autonomy_budget_verdict_uses_runtime_limits():
+    service = _service()
+
+    allowed = service.evaluate(
+        "live_autonomy_budget",
+        {
+            "autonomy_mode": "live_autonomous",
+            "live_autonomy_unlocked": True,
+            "live_autonomy_unlock_id": "unlock1",
+            "session": {"daily_loss_pct": 1.0, "drawdown_pct": 2.0, "trades": 3},
+            "risk_limits": {"max_daily_loss_pct": 5.0, "max_drawdown_pct": 15.0, "max_daily_trades": 20},
+        },
+    )
+    blocked = service.evaluate(
+        "live_autonomy_budget",
+        {
+            "autonomy_mode": "live_autonomous",
+            "live_autonomy_unlocked": True,
+            "live_autonomy_unlock_id": "unlock1",
+            "session": {"daily_loss_pct": 1.0, "drawdown_pct": 15.0, "trades": 3},
+            "risk_limits": {"max_daily_loss_pct": 5.0, "max_drawdown_pct": 15.0, "max_daily_trades": 20},
+        },
+    )
+
+    assert allowed.allowed is True
+    assert allowed.audit_payload["budget"]["breached"] is False
+    assert blocked.allowed is False
+    assert blocked.reason == "live_autonomy_budget_breach"
+    assert blocked.audit_payload["budget"]["breaches"][0]["metric"] == "drawdown_pct"
 
 
 def test_tighten_position_allows_bounded_tp_extension_with_profit_lock():

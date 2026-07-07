@@ -44,7 +44,6 @@ from backend.services.autonomous_learning import (
 from backend.services.evolution_ledger import (
     get_evolution_run,
     list_evolution_runs,
-    persist_runtime_config_snapshot,
     record_evolution_decision,
     start_evolution_run,
     finish_evolution_run,
@@ -2458,8 +2457,8 @@ def apply_position_supervisor_template_switch(
         if scope_key not in valid_templates:
             raise HTTPException(status_code=400, detail="invalid_position_supervisor_template")
         try:
-            from config.runtime_config import patch as patch_runtime_config
             from config.runtime_config import shared as runtime_config
+            from backend.services.runtime_config_mutation import RuntimeConfigMutationService
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"runtime_config_unavailable: {exc}")
         previous_template_id = str(getattr(runtime_config(), "position_supervisor_template_id", "") or "position_supervisor:default.v1")
@@ -2506,13 +2505,15 @@ def apply_position_supervisor_template_switch(
                 result=payload,
             )
             return payload
-        patch_runtime_config({"position_supervisor_template_id": scope_key})
-        snapshot = persist_runtime_config_snapshot(
-            runtime_config(),
+        mutation = RuntimeConfigMutationService(_state_db_path()).apply_patch(
+            {"position_supervisor_template_id": scope_key},
             source="learning_api.position_supervisor_template_switch",
-            db_path=_state_db_path(),
             run_id=str(evo_run.get("run_id") or ""),
+            actor=str(_user or "api:learning"),
+            action="apply_position_supervisor_template_switch",
+            reason=req.note or f"apply supervisor template suggestion {suggestion_id}",
         )
+        snapshot = dict(mutation.get("snapshot") or {})
         now_ts = time.time()
         application_id = f"psv_apply_{int(now_ts)}_{suggestion_id[-8:]}"
         details = {
@@ -2523,6 +2524,7 @@ def apply_position_supervisor_template_switch(
             "note": req.note,
             "risk_verdict": verdict,
             "evidence": evidence,
+            "mutation": mutation,
             "config_version": int(snapshot.get("config_version") or 0),
             "config_hash": str(snapshot.get("config_hash") or ""),
         }

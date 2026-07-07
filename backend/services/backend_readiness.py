@@ -18,6 +18,7 @@ from backend.core.db import (
     state_table_exists,
 )
 from backend.services.meta_governance import MetaGovernanceService
+from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.stability import measure, record_timing, timing_snapshot
 from research.meta_model_lightgbm import MetaModelLightGBMService
 
@@ -291,6 +292,12 @@ class BackendReadinessService:
                 "v16_brain_live_ready_guardrails": "/api/ops/brain/live-ready-guardrails",
                 "v16_brain_live_ready_guardrail_evaluate": "/api/ops/brain/live-ready-guardrails/evaluate",
                 "v16_brain_live_ready_guardrail_tighten": "/api/ops/brain/live-ready-guardrails/tighten",
+                "autonomy_proposals": "/api/ops/autonomy/proposals",
+                "autonomy_proposals_refresh": "/api/ops/autonomy/proposals/refresh",
+                "live_autonomy_status": "/api/ops/autonomy/live-status",
+                "live_autonomy_unlock_evaluate": "/api/ops/autonomy/live-unlock/evaluate",
+                "live_autonomy_unlock": "/api/ops/autonomy/live-unlock",
+                "live_autonomy_revoke": "/api/ops/autonomy/live-unlock/revoke",
                 "model_shadow_report": "/api/learning/model/meta-lightgbm/shadow-report",
                 "model_shadow_report_snapshots": "/api/learning/model/meta-lightgbm/shadow-report/snapshots",
                 "model_governance_materialize": "/api/learning/model/meta-lightgbm/governance-suggestion",
@@ -319,6 +326,10 @@ class BackendReadinessService:
         payload["brain_governance_candidate_reviews"] = brain_governance_candidate_reviews
         brain_live_ready_guardrails = self._timed_component("brain_live_ready_guardrails", lambda: self._brain_live_ready_guardrail_status())
         payload["brain_live_ready_guardrails"] = brain_live_ready_guardrails
+        proposal_registry = self._timed_component("proposal_registry", lambda: self._proposal_registry_status())
+        payload["proposal_registry"] = proposal_registry
+        live_autonomy = self._timed_component("live_autonomy", lambda: self._live_autonomy_status(payload))
+        payload["live_autonomy"] = live_autonomy
         payload["v16"] = {
             "schema_version": "v16_readiness_contract.v1",
             "phase": "phase5_live_ready_guardrails",
@@ -330,6 +341,8 @@ class BackendReadinessService:
             "governance_candidates": brain_governance_candidates,
             "governance_candidate_reviews": brain_governance_candidate_reviews,
             "live_ready_guardrails": brain_live_ready_guardrails,
+            "proposal_registry": proposal_registry,
+            "live_autonomy": live_autonomy,
             "control_plane_boundaries": {
                 "read_only": True,
                 "affects_trading": False,
@@ -351,6 +364,8 @@ class BackendReadinessService:
                 "decision_policy_required_for_future_weight_writes": True,
                 "runtime_overlay_snapshot_required_for_future_mutations": True,
                 "models_shadow_or_advisory_only": True,
+                "proposal_registry_review_only": True,
+                "live_autonomy_requires_manual_unlock": True,
             },
         }
         record_timing("backend_readiness.build", time.perf_counter() - build_started, extra={"ready": ready_for_frontend})
@@ -1124,6 +1139,30 @@ class BackendReadinessService:
                 "error": f"{type(exc).__name__}: {exc}",
                 "live_ready_guardrails": True,
                 "tightening_only": True,
+            }
+
+    def _proposal_registry_status(self) -> dict[str, Any]:
+        try:
+            return ProposalRegistryService(self.db_path).status()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "proposal_registry_status.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def _live_autonomy_status(self, readiness: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from backend.services.live_autonomy import LiveAutonomyService
+
+            return LiveAutonomyService(self.db_path).status(readiness=readiness, refresh_proposals=False)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "live_autonomy_status.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
             }
 
     @staticmethod

@@ -25,6 +25,7 @@ def test_runtime_config_overlay_persists_allowed_autonomous_patch_and_restores(t
             },
             "factor_portfolio_weights": {"auto_alpha": 0.22},
             "extra": {"active_parameter_templates": {"rsi_14": "fast_mean_revert"}},
+            "position_supervisor_template_id": "position_supervisor:conservative.v1",
             "risk_per_trade": 0.99,
         },
         source="test_autonomy",
@@ -36,10 +37,12 @@ def test_runtime_config_overlay_persists_allowed_autonomous_patch_and_restores(t
     assert "rsi_14" in live_cfg.factor_signal_config
     assert live_cfg.factor_signal_config["auto_alpha"]["source"] == "discovered"
     assert live_cfg.factor_portfolio_weights["auto_alpha"] == 0.22
+    assert live_cfg.position_supervisor_template_id == "position_supervisor:conservative.v1"
 
     latest = service.latest()
     assert latest["ok"] is True
     assert "risk_per_trade" not in latest["overlay"]
+    assert latest["overlay"]["position_supervisor_template_id"] == "position_supervisor:conservative.v1"
 
     restored = service.restore_on_startup(RuntimeConfig())
     assert restored["restored"] is True
@@ -47,6 +50,7 @@ def test_runtime_config_overlay_persists_allowed_autonomous_patch_and_restores(t
     assert restored_cfg.factor_signal_config["auto_alpha"]["role"] == "alpha"
     assert restored_cfg.factor_portfolio_weights["auto_alpha"] == 0.22
     assert restored_cfg.extra["active_parameter_templates"]["rsi_14"] == "fast_mean_revert"
+    assert restored_cfg.position_supervisor_template_id == "position_supervisor:conservative.v1"
     assert "risk_per_trade" not in restored_cfg.extra
 
 

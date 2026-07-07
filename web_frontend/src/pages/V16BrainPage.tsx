@@ -2,8 +2,10 @@ import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BrainCircuit, Database, GitBranch, ListChecks, Play, RefreshCw, ShieldCheck, Sparkles, Workflow } from "lucide-react";
 import {
+  evaluateLiveAutonomyUnlock,
   evaluateBrainLiveReadyGuardrail,
   getBackendReadiness,
+  getAutonomyProposals,
   getBrainActionPlanEvals,
   getBrainActionPlans,
   getBrainLiveReadyGuardrails,
@@ -12,10 +14,15 @@ import {
   getBrainMediumImpactGovernance,
   getBrainMemory,
   getBrainState,
+  getLiveAutonomyStatus,
   materializeBrainMediumImpactGovernance,
+  refreshAutonomyProposals,
+  reviewAutonomyProposal,
   reviewBrainGovernanceCandidates,
   runBrainLowImpactExecution,
+  revokeLiveAutonomy,
   tightenBrainLiveReadyGuardrail,
+  unlockLiveAutonomy,
 } from "@/api/client";
 import { MetricCard } from "@/components/Card";
 import { Field, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
@@ -132,14 +139,21 @@ function displayValue(value: string): string {
     frozen: "冻结",
     governance_ready: "治理就绪",
     conflict_detected: "冲突待审",
+    degraded: "退化",
+    fresh: "新鲜",
     high: "高",
+    high_unresolved_conflicts: "高危冲突",
     live_ready: "实盘就绪",
     "live-ready": "实盘就绪",
+    live_autonomous: "实盘自治",
+    live_candidate: "实盘候选",
     locked: "已锁定",
     low: "低",
+    manual: "人工模式",
     medium: "中",
     medium_impact: "中影响",
     missing: "缺失",
+    missing_timestamp: "缺时间戳",
     negative: "负面",
     needs_evidence: "缺证据",
     neutral: "中性",
@@ -153,14 +167,24 @@ function displayValue(value: string): string {
     pass: "通过",
     positive: "正面",
     posterior: "后验",
+    proposal_registry: "提案总线",
+    request_review: "请求审查",
+    request_replay: "请求回放",
     ready: "就绪",
     reject: "拒绝",
+    revoked: "已撤销",
     reviewed: "已审查",
     shadow: "影子",
     shadow_recorded: "影子已记录",
+    stale: "过期",
+    stale_evidence: "证据过期",
+    submit_governance: "提交治理",
     submitted: "已提交",
     submitted_to_policy_suggestion: "已提交建议队列",
     supportive: "支持",
+    tighten_incident: "收紧事故模式",
+    unlock_ready: "可解锁",
+    unlocked: "已解锁",
     suggestion_materialized: "建议已生成",
     unknown: "未知",
     warn: "注意",
@@ -183,6 +207,9 @@ function displayContract(value: string): string {
     brain_governance_candidate_review_list: "候选审查契约",
     brain_governance_candidate_review_run: "候选审查契约",
     brain_live_ready_guardrail: "实盘护栏契约",
+    proposal_registry_list: "提案总线契约",
+    proposal_registry_status: "提案总线状态",
+    live_autonomy_status: "实盘自治契约",
   };
   const base = normalized.replace(/\.\d+$/, "").replace(/\.v\d+$/, "");
   return labels[base] || value.replace(/^v\d+_/, "").replace(/\.v\d+$/, "").replaceAll("_", " ");
@@ -507,6 +534,64 @@ function GuardrailList({ items }: { items: unknown[] }) {
   );
 }
 
+function ProposalRegistryList({
+  items,
+  onReview,
+  reviewing,
+}: {
+  items: unknown[];
+  onReview: (proposalId: string, route: string) => void;
+  reviewing: boolean;
+}) {
+  if (!items.length) return <div className="empty-state-small">暂无提案</div>;
+  return (
+    <div className="brain-action-plan-list">
+      {items.slice(0, 10).map((raw, index) => {
+        const item = asRecord(raw);
+        const proposalId = pickString(item, ["proposal_id"], "");
+        const status = pickString(item, ["status"], "unknown");
+        const conflict = asRecord(pick(item, ["conflict"]));
+        const hasConflict = pickBoolean(conflict, ["conflict"], false);
+        const route = pickString(item, ["route_recommendation"], "observe");
+        const reliability = asRecord(pick(item, ["source_reliability"]));
+        const freshness = asRecord(pick(item, ["evidence_freshness"]));
+        const reliabilityBand = pickString(reliability, ["band"], "unknown");
+        const freshnessStatus = pickString(freshness, ["status"], "unknown");
+        return (
+          <article className="brain-action-plan brain-action-plan-compact" key={`${proposalId || "proposal"}-${index}`}>
+            <div className="brain-hypothesis-head">
+              <div>
+                <strong>{displayValue(pickString(item, ["control_surface"], "proposal_registry"))}</strong>
+                <span title={pickString(item, ["target_scope"], "--")}>{pickString(item, ["target_scope"], "--")}</span>
+              </div>
+              <StatusPill status={displayValue(status)} tone={status.includes("blocked") || hasConflict ? "bad" : status === "reviewed" ? "ok" : "warn"} />
+            </div>
+            <CompactFacts facts={[
+              { label: "来源", value: displayValue(pickString(item, ["source_agent"], "unknown")), tone: "mute" },
+              { label: "影响", value: displayValue(pickString(item, ["impact_level"], "observe")), tone: riskTone(pickString(item, ["impact_level"], "observe")) },
+              { label: "可信", value: `${displayValue(reliabilityBand)} ${formatDecimal(scorePct(pickNumber(reliability, ["score"], 0)), 0)}%`, tone: reliabilityBand === "low" ? "warn" : reliabilityBand === "high" ? "ok" : "mute" },
+              { label: "新鲜", value: displayValue(freshnessStatus), tone: freshnessStatus === "fresh" ? "ok" : "warn" },
+              { label: "路由", value: displayValue(route), tone: route === "request_review" ? "warn" : "mute" },
+            ]} />
+            <div className="brain-ref-row brain-ref-row-actions">
+              <span title={proposalId}>{proposalId || "--"}</span>
+              <span>{hasConflict ? displayValue(pickString(conflict, ["severity"], "conflict_detected")) : "无冲突"}</span>
+              <button
+                className="brain-inline-button"
+                type="button"
+                disabled={!proposalId || reviewing}
+                onClick={() => onReview(proposalId, route)}
+              >
+                {reviewing ? "记录中" : "记录审查"}
+              </button>
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 export function V16BrainPage() {
   const queryClient = useQueryClient();
   const readinessQuery = useQuery({ queryKey: ["v16", "readiness"], queryFn: getBackendReadiness, refetchInterval: 15_000, staleTime: 5_000 });
@@ -518,6 +603,8 @@ export function V16BrainPage() {
   const mediumImpactGovernanceQuery = useQuery({ queryKey: ["v16", "brain-medium-impact-governance"], queryFn: () => getBrainMediumImpactGovernance(80), refetchInterval: 30_000, staleTime: 10_000 });
   const candidateReviewsQuery = useQuery({ queryKey: ["v16", "brain-governance-candidate-reviews"], queryFn: () => getBrainGovernanceCandidateReviews(80), refetchInterval: 30_000, staleTime: 10_000 });
   const liveReadyGuardrailsQuery = useQuery({ queryKey: ["v16", "brain-live-ready-guardrails"], queryFn: () => getBrainLiveReadyGuardrails(80), refetchInterval: 30_000, staleTime: 10_000 });
+  const proposalRegistryQuery = useQuery({ queryKey: ["autonomy", "proposal-registry"], queryFn: () => getAutonomyProposals(false, 80), refetchInterval: 30_000, staleTime: 10_000 });
+  const liveAutonomyQuery = useQuery({ queryKey: ["autonomy", "live-status"], queryFn: () => getLiveAutonomyStatus(false), refetchInterval: 20_000, staleTime: 8_000 });
 
   const refreshMutation = useMutation({
     mutationFn: async () => {
@@ -529,9 +616,12 @@ export function V16BrainPage() {
       await getBrainMediumImpactGovernance(80);
       await getBrainGovernanceCandidateReviews(80);
       await getBrainLiveReadyGuardrails(80);
+      await getAutonomyProposals(true, 80);
+      await getLiveAutonomyStatus(true);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["v16"] });
+      void queryClient.invalidateQueries({ queryKey: ["autonomy"] });
     },
   });
 
@@ -566,6 +656,57 @@ export function V16BrainPage() {
   const liveReadyTightenMutation = useMutation({
     mutationFn: tightenBrainLiveReadyGuardrail,
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["v16"] });
+      void queryClient.invalidateQueries({ queryKey: ["autonomy"] });
+    },
+  });
+
+  const proposalRefreshMutation = useMutation({
+    mutationFn: () => refreshAutonomyProposals(500),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["autonomy"] });
+      void queryClient.invalidateQueries({ queryKey: ["v16"] });
+    },
+  });
+
+  const proposalReviewMutation = useMutation({
+    mutationFn: ({ proposalId, route }: { proposalId: string; route: string }) =>
+      reviewAutonomyProposal(proposalId, {
+        decision: "reviewed",
+        route,
+        notes: "web meta governance review",
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["autonomy"] });
+      void queryClient.invalidateQueries({ queryKey: ["v16"] });
+    },
+  });
+
+  const liveUnlockEvaluateMutation = useMutation({
+    mutationFn: () => evaluateLiveAutonomyUnlock(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["autonomy"] });
+      void queryClient.invalidateQueries({ queryKey: ["v16"] });
+    },
+  });
+
+  const liveUnlockMutation = useMutation({
+    mutationFn: async () => {
+      if (!window.confirm("确认一次性解锁实盘自治？")) {
+        return { ok: false, status: "cancelled" };
+      }
+      return unlockLiveAutonomy();
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["autonomy"] });
+      void queryClient.invalidateQueries({ queryKey: ["v16"] });
+    },
+  });
+
+  const liveRevokeMutation = useMutation({
+    mutationFn: () => revokeLiveAutonomy(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["autonomy"] });
       void queryClient.invalidateQueries({ queryKey: ["v16"] });
     },
   });
@@ -612,6 +753,18 @@ export function V16BrainPage() {
   const liveReadyGuardrailRun = Object.keys(directLiveReadyGuardrails).length ? directLiveReadyGuardrails : readinessLiveReadyGuardrails;
   const liveReadyGuardrails = pickArray(liveReadyGuardrailRun, ["items"]);
   const latestGuardrail = asRecord(liveReadyGuardrails[0]);
+  const directProposalRegistry = asRecord(pick(proposalRegistryQuery.data, ["proposals"]));
+  const readinessProposalRegistry = asRecord(pick(v16Readiness, ["proposal_registry"]));
+  const proposalRegistry = Object.keys(directProposalRegistry).length ? directProposalRegistry : readinessProposalRegistry;
+  const proposalItems = pickArray(proposalRegistry, ["items"]);
+  const proposalSummary = asRecord(pick(proposalRegistry, ["summary"]));
+  const directLiveAutonomy = asRecord(pick(liveAutonomyQuery.data, ["live_autonomy"]));
+  const readinessLiveAutonomy = asRecord(pick(v16Readiness, ["live_autonomy"]));
+  const liveAutonomy = Object.keys(directLiveAutonomy).length ? directLiveAutonomy : readinessLiveAutonomy;
+  const liveAutonomyEvaluation = asRecord(pick(liveAutonomy, ["evaluation"]));
+  const liveAutonomyBlockers = pickArray(liveAutonomyEvaluation, ["blockers"]);
+  const liveAutonomyLatestEvent = asRecord(pick(liveAutonomy, ["latest_event"]));
+  const liveAutonomyPosture = asRecord(pick(liveAutonomy, ["operational_posture"]));
 
   const statTone = useMemo<Tone>(() => {
     const posture = pickString(worldModel, ["strategy_posture"], "");
@@ -685,6 +838,8 @@ export function V16BrainPage() {
         <StatTile icon={Play} label="低影响执行" value={formatDecimal(lowImpactExecutions.length, 0)} detail={displayValue(pickString(lowImpactExecutionRun, ["status"], "low-impact"))} tone={lowImpactExecutions.length ? "ok" : "warn"} />
         <StatTile icon={ListChecks} label="治理候选" value={formatDecimal(mediumImpactGovernance.length, 0)} detail={displayValue(pickString(mediumImpactGovernanceRun, ["status"], "medium-impact"))} tone={mediumImpactGovernance.length ? "ok" : "warn"} />
         <StatTile icon={GitBranch} label="候选审查" value={formatDecimal(candidateReviews.length, 0)} detail={displayValue(pickString(candidateReviewRun, ["status"], "review"))} tone={candidateReviews.length ? "ok" : "warn"} />
+        <StatTile icon={ListChecks} label="提案总线" value={formatDecimal(pickNumber(proposalSummary, ["proposal_count"], proposalItems.length), 0)} detail={`冲突 ${formatDecimal(pickNumber(proposalSummary, ["conflict_count"], 0), 0)}`} tone={pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok"} />
+        <StatTile icon={ShieldCheck} label="实盘自治" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], "manual"))} detail={displayValue(pickString(liveAutonomyEvaluation, ["status"], "locked"))} tone={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : liveAutonomyBlockers.length ? "warn" : "mute"} />
         <StatTile icon={ShieldCheck} label="实盘护栏" value={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "已锁定" : formatDecimal(liveReadyGuardrails.length, 0)} detail={displayValue(pickString(liveReadyGuardrailRun, ["status"], pickString(latestGuardrail, ["action_recommendation.target_mode"], "live-ready")))} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
       </div>
 
@@ -703,6 +858,76 @@ export function V16BrainPage() {
             <Field label="影响交易" value={affectsTrading ? "true" : "false"} tone={affectsTrading ? "bad" : "ok"} />
             <Field label="不执行计划" value={pickBoolean(boundary, ["does_not_execute_action_plan"], false) ? "true" : "false"} tone={boolTone(pickBoolean(boundary, ["does_not_execute_action_plan"], false))} />
             <Field label="不写学习样本" value={pickBoolean(boundary, ["does_not_write_learning_samples"], false) ? "true" : "false"} tone={boolTone(pickBoolean(boundary, ["does_not_write_learning_samples"], false))} />
+          </div>
+        </MetricCard>
+
+        <MetricCard title="提案总线" className="wide-panel">
+          <div className="v16-boundary">
+            <Field label="提案" value={formatDecimal(pickNumber(proposalSummary, ["proposal_count"], proposalItems.length), 0)} />
+            <Field label="活跃" value={formatDecimal(pickNumber(proposalSummary, ["active_count"], 0), 0)} />
+            <Field label="冲突" value={formatDecimal(pickNumber(proposalSummary, ["conflict_count"], 0), 0)} tone={pickNumber(proposalSummary, ["conflict_count"], 0) ? "warn" : "ok"} />
+            <Field label="高危未解" value={formatDecimal(pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0), 0)} tone={pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok"} />
+            <Field label="低可信" value={formatDecimal(pickNumber(proposalSummary, ["low_reliability_count"], 0), 0)} tone={pickNumber(proposalSummary, ["low_reliability_count"], 0) ? "warn" : "ok"} />
+            <Field label="证据过期" value={formatDecimal(pickNumber(proposalSummary, ["stale_evidence_count"], 0), 0)} tone={pickNumber(proposalSummary, ["stale_evidence_count"], 0) ? "warn" : "ok"} />
+            <Field label="契约" value={displayContract(pickString(proposalRegistry, ["schema_version"], "--"))} />
+          </div>
+          <div className="brain-card-actions">
+            <button className="header-refresh" type="button" disabled={proposalRefreshMutation.isPending} onClick={() => proposalRefreshMutation.mutate()}>
+              <RefreshCw size={15} aria-hidden="true" />
+              {proposalRefreshMutation.isPending ? "刷新中" : "刷新总线"}
+            </button>
+            {proposalRefreshMutation.isError ? <span className="error-text small">总线刷新失败</span> : null}
+            {proposalReviewMutation.isError ? <span className="error-text small">审查记录失败</span> : null}
+          </div>
+          <ProposalRegistryList
+            items={proposalItems}
+            reviewing={proposalReviewMutation.isPending}
+            onReview={(proposalId, route) => proposalReviewMutation.mutate({ proposalId, route })}
+          />
+        </MetricCard>
+
+        <MetricCard title="实盘自治" className="wide-panel">
+          <div className="v16-boundary">
+            <Field label="模式" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], "manual"))} tone={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : "warn"} />
+            <Field label="解锁" value={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "true" : "false"} tone={boolTone(pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false))} />
+            <Field label="姿态" value={displayValue(pickString(liveAutonomyPosture, ["status"], "locked"))} tone={pickString(liveAutonomyPosture, ["status"], "locked") === "degraded" ? "bad" : "ok"} />
+            <Field label="评估" value={displayValue(pickString(liveAutonomyEvaluation, ["status"], "blocked"))} tone={pickBoolean(liveAutonomyEvaluation, ["ok"], false) ? "ok" : "warn"} />
+            <Field label="阻断项" value={formatDecimal(liveAutonomyBlockers.length, 0)} tone={liveAutonomyBlockers.length ? "warn" : "ok"} />
+            <Field label="建议模式" value={displayValue(pickString(liveAutonomyPosture, ["recommended_incident_mode"], "normal"))} tone={pickString(liveAutonomyPosture, ["recommended_incident_mode"], "normal") === "normal" ? "ok" : "warn"} />
+            <Field label="最近事件" value={displayValue(pickString(liveAutonomyLatestEvent, ["status"], "none"))} />
+          </div>
+          <div className="brain-card-actions">
+            <button className="header-refresh" type="button" disabled={liveUnlockEvaluateMutation.isPending} onClick={() => liveUnlockEvaluateMutation.mutate()}>
+              <ShieldCheck size={15} aria-hidden="true" />
+              {liveUnlockEvaluateMutation.isPending ? "评估中" : "评估解锁"}
+            </button>
+            <button className="header-refresh" type="button" disabled={liveUnlockMutation.isPending || !pickBoolean(liveAutonomyEvaluation, ["ok"], false)} onClick={() => liveUnlockMutation.mutate()}>
+              <ShieldCheck size={15} aria-hidden="true" />
+              {liveUnlockMutation.isPending ? "解锁中" : "一次解锁"}
+            </button>
+            <button className="header-refresh" type="button" disabled={liveRevokeMutation.isPending || !pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false)} onClick={() => liveRevokeMutation.mutate()}>
+              <ShieldCheck size={15} aria-hidden="true" />
+              {liveRevokeMutation.isPending ? "撤销中" : "撤销自治"}
+            </button>
+            {liveUnlockEvaluateMutation.isError ? <span className="error-text small">解锁评估失败</span> : null}
+            {liveUnlockMutation.isError ? <span className="error-text small">解锁失败</span> : null}
+            {liveRevokeMutation.isError ? <span className="error-text small">撤销失败</span> : null}
+          </div>
+          <div className="v15-list compact-v15-list">
+            {(liveAutonomyBlockers.length ? liveAutonomyBlockers : [{ component: "unlock", status: "ok", reason: "ready" }]).slice(0, 6).map((raw, index) => {
+              const item = asRecord(raw);
+              const component = pickString(item, ["component"], "unlock");
+              const status = pickString(item, ["status"], pickString(item, ["reason"], "ok"));
+              return (
+                <div className="v15-list-row" key={`${component}-${status}-${index}`}>
+                  <div>
+                    <strong>{displayValue(component)}</strong>
+                    <span>{displayValue(pickString(item, ["reason"], status))}</span>
+                  </div>
+                  <StatusPill status={displayValue(status)} tone={status === "ok" || status === "ready" ? "ok" : "warn"} />
+                </div>
+              );
+            })}
           </div>
         </MetricCard>
 

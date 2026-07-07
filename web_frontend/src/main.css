@@ -5617,6 +5617,10 @@ td > .status-pill {
   min-width: 0;
 }
 
+.brain-hypothesis-head .status-pill {
+  flex: 0 0 auto;
+}
+
 .brain-hypothesis-head strong,
 .brain-hypothesis-head span {
   min-width: 0;
@@ -5644,7 +5648,43 @@ td > .status-pill {
 }
 
 .brain-ref-row span {
+  min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.brain-ref-row-actions {
+  justify-content: space-between;
+}
+
+.brain-ref-row-actions span {
+  flex: 1 1 140px;
+}
+
+.brain-card-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.brain-inline-button {
+  border: 1px solid rgba(37, 99, 235, 0.24);
+  border-radius: 7px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 900;
+  min-height: 28px;
+  padding: 5px 9px;
+}
+
+.brain-inline-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .brain-plan-services {

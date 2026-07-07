@@ -110,6 +110,13 @@ def test_patch_runtime_config_rejects_invalid_live_risk_bounds(temp_settings_pat
     assert "max_position_api_volume must be > 0" in str(exc.value)
 
 
+def test_patch_runtime_config_rejects_invalid_demo_learning_limit(temp_settings_path):
+    with pytest.raises(ValueError) as exc:
+        config_service.patch_runtime_config({"demo_learning_max_daily_trades": 0})
+
+    assert "demo_learning_max_daily_trades must be a positive integer" in str(exc.value)
+
+
 def test_put_config_rejects_invalid_runtime_bounds(temp_settings_path):
     with pytest.raises(ValueError) as exc:
         config_service.put_config(
