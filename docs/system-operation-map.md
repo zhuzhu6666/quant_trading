@@ -347,6 +347,12 @@ decision_ledger / position_supervisor_trace / trade_outcome_review
 | `factor_contribution_review` | `factor_governance_lightgbm` | 因子贡献弱化 shadow audit |
 | `learning_application_log/effect` | 后验回滚检查 | 判断自治动作是否变差 |
 
+交易复盘现在显式记录 `entry_timing_context.v1`、`decision_freshness_context` 和 `system_issue_context.v1`：
+
+- `entry_ts` 以实际成交 `fill_ts` 优先；信号 K 线时间保留为 `signal_bar_ts`。
+- 若数据时效、决策 K 线或信号到成交延迟污染样本，`trade_review_outcome` / `shadow_open_decision` 降为 partial/低权重，`factor_contribution_review` 只保留审计，不进入高置信因子治理训练。
+- `backfill_trade_review_timing_and_system_markers()` 只从现有 ledger/order/review 事实回填，不伪造 broker 事实。
+
 学习数据精度由 `learning_evidence_contract.v1` 控制。每条样本必须有：
 
 ```text
@@ -409,6 +415,7 @@ GET  /api/learning/model/permissions/audits
   -> 异步 account refresh
   -> 首次 position recovery
   -> 从本地 bars 月库 warmup 最近 bar window
+  -> decision bar freshness repair: 只保留最新已闭合 bar；缺已闭合 bar 时用主 cTrader bridge 即时回补月库并重载
   -> spot quote 注入最新 bar
   -> circuit breaker / daily drawdown 检查
   -> _process_tick(...)
@@ -438,6 +445,7 @@ _process_tick_factor_pipeline(...)
          context position_multiplier
        risk verdict:
          event risk filter context
+         decision_freshness
          RiskPolicyService.evaluate("open_trade")
          market-session/order block
        broker execution:
@@ -453,8 +461,9 @@ _process_tick_factor_pipeline(...)
 重点边界：
 
 - live `ExecutionGate` 处理信号阈值和策略冷却；NFP/GVZ legacy event filter 只生成 `event_filter` 风控输入，最终阻断由 `RiskPolicyService` 裁决。
+- live 决策只使用最新已闭合 K 线。`_run_live_loop_tick_body()` 在因子计算前会过滤当前未闭合 bar，并在缺少应有闭合 bar 时通过主 cTrader bridge 回补 `data/bars_monthly/bars_YYYY_MM.duckdb` 后重载；修复失败只阻断 open_trade，不停止持仓监督和平仓链路。
 - `LiveDecisionFrame` 是交易信号决策输出，不读取账户、不做仓位 sizing、不调用 `RiskPolicyService`、不触达 broker。
-- `RiskPolicyService` 是动作级裁决入口，开仓、模板切换、自治动作和 rollback 都不能绕过它；账户/运行态阈值通过 `RiskLimitSnapshot` 输入 `RiskGovernor`。
+- `RiskPolicyService` 是动作级裁决入口，开仓、模板切换、自治动作和 rollback 都不能绕过它；账户/运行态阈值通过 `RiskLimitSnapshot` 输入 `RiskGovernor`。live 数据层写入 `decision_freshness` 后，`RiskPolicyService.evaluate("open_trade")` 可用 `decision_bar_stale` 阻断新增风险；close/reduce/tighten 仍走降风险路径。
 - live loop 的日内 circuit breaker 是执行快停保护，阈值来自 `RiskLimitSnapshot.max_daily_loss_pct`，不是第二套风控事实源。
 - demo 真实采样上限由 `RuntimeConfig.demo_learning_max_daily_trades` 进入 `RiskLimitSnapshot.source=runtime_config:demo_learning`；它只在 `autonomy_mode=demo_autonomous` 且高于 `risk_max_daily_trades` 时提高有效日交易上限，其它硬风控仍由 `RiskPolicyService` 裁决。
 - context policy 只改有效阈值和仓位乘数，不改多空方向。

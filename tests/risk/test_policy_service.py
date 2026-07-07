@@ -253,6 +253,32 @@ def test_open_trade_blocks_loss_cooldown_when_gap_too_short():
     assert verdict.audit_payload["temporal_context"]["timeframe"] == "M5"
 
 
+def test_open_trade_blocks_stale_decision_bar_freshness():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "decision_freshness": {
+                "schema_version": "decision_bar_freshness.v1",
+                "timeframe": "M5",
+                "latest_bar_ts": 1_783_395_600.0,
+                "expected_closed_bar_ts": 1_783_395_900.0,
+                "fresh": False,
+                "repair_attempted": True,
+                "repair_status": "fetch_empty",
+            },
+            "trade": {"symbol": "XAUUSD+", "direction": -1},
+            "temporal_context": {"timeframe": "M5", "timeframe_seconds": 300},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "decision_bar_stale"
+    assert verdict.audit_payload["blocked_by"] == "decision_bar_freshness"
+    assert verdict.audit_payload["decision_freshness"]["repair_status"] == "fetch_empty"
+
+
 def test_open_trade_allows_after_loss_cooldown_even_at_hard_loss_threshold():
     service = _service()
 

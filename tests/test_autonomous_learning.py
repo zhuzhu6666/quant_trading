@@ -827,6 +827,211 @@ def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(t
     assert decision == ("backfill_review_integrity", "completed")
 
 
+def test_backfill_trade_review_timing_marks_system_contamination(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS order_lifecycle_event (
+                event_id TEXT PRIMARY KEY,
+                decision_id TEXT DEFAULT '',
+                trade_id TEXT DEFAULT '',
+                order_id TEXT DEFAULT '',
+                broker_order_id TEXT DEFAULT '',
+                event_type TEXT NOT NULL,
+                event_ts REAL NOT NULL DEFAULT 0.0,
+                price REAL DEFAULT 0.0,
+                volume REAL DEFAULT 0.0,
+                status TEXT DEFAULT '',
+                details_json TEXT DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS factor_contribution_review (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                review_id TEXT NOT NULL,
+                trade_id TEXT DEFAULT '',
+                factor TEXT NOT NULL,
+                entry_contribution REAL DEFAULT 0.0,
+                hold_contribution REAL DEFAULT 0.0,
+                exit_contribution REAL DEFAULT 0.0,
+                net_contribution REAL DEFAULT 0.0,
+                confidence REAL DEFAULT 0.0,
+                notes TEXT DEFAULT ''
+            );
+            """
+        )
+        risk_verdict = {
+            "allowed": True,
+            "reason": "ok",
+            "audit_payload": {
+                "temporal_context": {
+                    "evaluated_at": 700.0,
+                    "timeframe": "M5",
+                    "timeframe_seconds": 300,
+                },
+                "state": {
+                    "runtime_health_snapshot": {
+                        "data_lag_seconds": 610.0,
+                        "raw": {
+                            "sync_health": {
+                                "fresh": True,
+                                "stale": False,
+                                "degraded": False,
+                            }
+                        },
+                    }
+                },
+            },
+        }
+        action = {
+            "direction": -1,
+            "risk_verdict": risk_verdict,
+            "data_quality_context": {"quote_fresh": True},
+            "market_session": {"market_data_age_seconds": 610.0},
+        }
+        conn.execute(
+            """
+            UPDATE decision_ledger
+            SET decision_ts=90.0, action_json=?, risk_state_json=?
+            WHERE decision_id='dec_open'
+            """,
+            (json.dumps(action), json.dumps({"policy_verdict": risk_verdict})),
+        )
+        review = json.loads(conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0])
+        review["close_ts"] = 900.0
+        conn.execute(
+            """
+            UPDATE trade_outcome_review
+            SET review_json=?, created_at=900.0
+            WHERE review_id='rev1'
+            """,
+            (json.dumps(review),),
+        )
+        conn.execute(
+            """
+            INSERT INTO order_lifecycle_event
+            (event_id, decision_id, trade_id, event_type, event_ts, price, volume, status)
+            VALUES ('sub1', 'dec_open', 'p1', 'submitted', 701.0, 4000.0, 100.0, 'submitted')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO order_lifecycle_event
+            (event_id, decision_id, trade_id, event_type, event_ts, price, volume, status)
+            VALUES ('fill1', 'dec_open', 'p1', 'filled', 702.0, 4000.1, 100.0, 'filled')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_contribution_review
+            (review_id, trade_id, factor, net_contribution, confidence, notes)
+            VALUES ('rev1', 'p1', 'dsl_factor', -0.5, 0.8, '{}')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = al.backfill_trade_review_timing_and_system_markers(db_path=db_path, limit=20)
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    assert result["updated"] >= 1
+    assert result["contaminated"] >= 1
+    assert result["factor_contribution_rows_updated"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        review_raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
+        factor = conn.execute(
+            "SELECT confidence, notes FROM factor_contribution_review WHERE review_id='rev1'"
+        ).fetchone()
+        sample = conn.execute(
+            """
+            SELECT integrity, train_weight, evidence_contract_json
+            FROM autonomous_learning_sample
+            WHERE sample_type='trade_review_outcome' AND source_id='rev1'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    review = json.loads(review_raw)
+    assert review["entry_ts"] == 702.0
+    assert review["holding_seconds"] == 198.0
+    assert review["primary_responsibility"] == "data_quality"
+    assert "signal_execution_delay" in review["responsibility_labels"]
+    notes = json.loads(factor[1])
+    assert factor[0] < 0.8
+    assert notes["system_contaminated"] is True
+    assert sample[0] == "partial"
+    assert sample[1] == 0.25
+    assert "supervised_training" not in json.loads(sample[2])["allowed_uses"]
+
+
+def test_system_contaminated_trade_review_materializes_partial_learning_samples(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
+        review = json.loads(raw)
+        review["system_issue_context"] = {
+            "schema_version": "trade_review_system_issue.v1",
+            "system_contaminated": True,
+            "contaminates_learning": True,
+            "primary_responsibility": "data_quality",
+            "labels": ["market_data_stale", "signal_execution_delay", "data_quality_issue"],
+            "evidence": {"data_lag_seconds": 619.0},
+        }
+        review["responsibility_labels"] = ["market_data_stale", "signal_execution_delay"]
+        review["primary_responsibility"] = "data_quality"
+        conn.execute(
+            """
+            UPDATE trade_outcome_review
+            SET review_json=?, failure_tags_json='["bad_loss","market_data_stale"]'
+            WHERE review_id='rev1'
+            """,
+            (json.dumps(review),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            """
+            SELECT sample_type, integrity, train_weight, evidence_contract_json,
+                   verdict_json, label_json
+            FROM autonomous_learning_sample
+            WHERE source_id IN ('rev1', 'dec_open')
+               OR (sample_type='shadow_open_decision' AND position_id='p1')
+            ORDER BY sample_type
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    by_type = {row[0]: row for row in rows}
+    trade = by_type["trade_review_outcome"]
+    assert trade[1] == "partial"
+    assert trade[2] == 0.25
+    trade_contract = json.loads(trade[3])
+    assert trade_contract["model_ready"] is False
+    assert "supervised_training" not in trade_contract["allowed_uses"]
+    assert json.loads(trade[4])["system_contamination"]["contaminated"] is True
+
+    open_sample = by_type["shadow_open_decision"]
+    assert open_sample[1] == "partial"
+    assert open_sample[2] == 0.25
+    open_contract = json.loads(open_sample[3])
+    assert open_contract["model_ready"] is False
+    assert "supervised_training" not in open_contract["allowed_uses"]
+    assert json.loads(open_sample[5])["system_contamination"]["contaminated"] is True
+
+
 def test_trade_review_minimal_integrity_materializes_as_missing(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)

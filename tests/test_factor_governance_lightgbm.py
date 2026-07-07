@@ -147,3 +147,42 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
     assert rows[0][0] == "factor"
     assert rows[0][1] == "review_factor_weight_or_template"
     assert rows[0][2] == "proposed"
+
+
+def test_factor_governance_lightgbm_skips_system_contaminated_reviews(tmp_path):
+    db_path = tmp_path / "state.db"
+    artifact_dir = tmp_path / "artifacts"
+    _create_factor_reviews(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        system_issue = {
+            "schema_version": "trade_review_system_issue.v1",
+            "system_contaminated": True,
+            "contaminates_learning": True,
+            "labels": ["market_data_stale", "signal_execution_delay"],
+        }
+        conn.execute(
+            """
+            UPDATE trade_outcome_review
+            SET review_json=?
+            WHERE review_id='rev_1'
+            """,
+            (json.dumps({"case": 1, "system_issue_context": system_issue}),),
+        )
+        conn.execute(
+            """
+            UPDATE factor_contribution_review
+            SET notes=?
+            WHERE review_id='rev_1'
+            """,
+            (json.dumps({"system_contaminated": True}),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
+    samples = service.load_samples(limit=20)
+
+    assert len(samples) == 7
+    assert all(sample["review_id"] != "rev_1" for sample in samples)

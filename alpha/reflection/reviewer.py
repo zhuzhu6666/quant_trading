@@ -11,7 +11,11 @@ from pathlib import Path
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
-from backend.services.review_contract import normalize_trade_review_contract
+from backend.services.review_contract import (
+    build_entry_timing_context,
+    extract_decision_freshness_context,
+    normalize_trade_review_contract,
+)
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -41,6 +45,60 @@ def _loads(raw: object, default: object) -> object:
         return json.loads(str(raw))
     except Exception:
         return default
+
+
+def _dict_path(payload: object, *path: str) -> dict:
+    current = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def _first_float(*values: object, default: float = 0.0) -> float:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return float(default)
+
+
+def _event_ts(order_events: list[dict], event_type: str) -> float:
+    for row in order_events:
+        if str(row.get("event_type") or "") == event_type:
+            return _safe_float(row.get("event_ts"))
+    return 0.0
+
+
+def _review_summary(
+    *,
+    position_id: str,
+    pnl: float,
+    outcome_label: str,
+    primary_responsibility: str,
+    system_labels: list[str],
+    top_factor: str,
+    top_weight_factor: str,
+    worst_factor: str,
+) -> str:
+    parts = [
+        f"trade {position_id} closed pnl={pnl:.2f}",
+        f"outcome={outcome_label}",
+    ]
+    if primary_responsibility:
+        parts.append(f"primary_responsibility={primary_responsibility}")
+    if system_labels:
+        parts.append(f"system_issue={','.join(system_labels[:4])}")
+    factor_hint = top_factor or top_weight_factor
+    if factor_hint:
+        parts.append(f"factor_hint={factor_hint}")
+    if worst_factor:
+        parts.append(f"worst_factor={worst_factor}")
+    return "; ".join(parts)
 
 
 class TradeReviewer:
@@ -160,7 +218,7 @@ class TradeReviewer:
             trade_id = str(entry["trade_id"]) if entry and entry["trade_id"] else str(position_id)
             entry_score = float(entry["action_score"] or 0.0) if entry else 0.0
             regime_id = str(entry["regime_id"] or "") if entry else ""
-            entry_ts = float(entry["decision_ts"] or 0.0) if entry else 0.0
+            entry_decision_ts = float(entry["decision_ts"] or 0.0) if entry else 0.0
             timeframe = str(entry["timeframe"] or "") if entry else ""
             entry_action = _loads(entry["action_json"], {}) if entry else {}
             entry_risk_state = _loads(entry["risk_state_json"], {}) if entry else {}
@@ -183,6 +241,18 @@ class TradeReviewer:
                 """,
                 (position_id,),
             ).fetchone()
+            order_events = list(
+                self._execute(conn,
+                    """
+                    SELECT event_type, event_ts, price, volume, status, details_json
+                    FROM order_lifecycle_event
+                    WHERE (? <> '' AND decision_id=?)
+                       OR (? <> '' AND trade_id=?)
+                    ORDER BY event_ts ASC
+                    """,
+                    (entry_decision_id, entry_decision_id, trade_id, trade_id),
+                )
+            ) if entry_decision_id or trade_id else []
 
         top_weight_factor = ""
         top_weight = 0.0
@@ -290,6 +360,28 @@ class TradeReviewer:
         )
         execution_quality = _clamp(0.60 if real_pnl else 0.45)
         close_ts = float(close_ts or time.time())
+        risk_verdict = (
+            entry_action.get("risk_verdict")
+            if isinstance(entry_action, dict)
+            else {}
+        ) or {}
+        entry_temporal = _dict_path(risk_verdict, "audit_payload", "temporal_context")
+        decision_freshness_context = extract_decision_freshness_context(
+            entry_action=entry_action if isinstance(entry_action, dict) else {},
+            entry_risk_state=entry_risk_state if isinstance(entry_risk_state, dict) else {},
+        )
+        submitted_at = _event_ts([dict(row) for row in order_events], "submitted")
+        fill_ts = _event_ts([dict(row) for row in order_events], "filled")
+        entry_timing_context = build_entry_timing_context(
+            signal_bar_ts=entry_decision_ts,
+            decision_evaluated_at=_first_float(entry_temporal.get("evaluated_at"), entry_decision_ts),
+            order_submitted_at=submitted_at,
+            fill_ts=fill_ts,
+            close_ts=close_ts,
+            timeframe=timeframe or entry_temporal.get("timeframe") or "",
+            source="trade_reviewer",
+        )
+        entry_ts = _safe_float(entry_timing_context.get("actual_entry_ts"), entry_decision_ts)
         holding_seconds = max(0.0, close_ts - entry_ts) if entry_ts > 0 else 0.0
         recovery_meta = {}
         if recovery and recovery["recovery_meta_json"]:
@@ -317,12 +409,6 @@ class TradeReviewer:
         if contributions:
             top_factor, top_factor_mc = max(contributions.items(), key=lambda kv: abs(kv[1]))
 
-        summary = (
-            f"trade {position_id} closed pnl={pnl:.2f}; "
-            f"outcome={outcome_label}; "
-            f"primary_factor={top_factor or top_weight_factor or 'n/a'}; "
-            f"worst_factor={worst_factor or 'n/a'}"
-        )
         review_json = {
             "contract_version": "phase_d.v1",
             "position_id": position_id,
@@ -330,10 +416,14 @@ class TradeReviewer:
             "entry_decision_id": entry_decision_id,
             "exit_decision_id": exit_decision_id,
             "entry_ts": entry_ts,
+            "entry_decision_ts": entry_decision_ts,
+            "signal_bar_ts": entry_decision_ts,
             "close_ts": close_ts,
             "holding_seconds": round(holding_seconds, 3),
             "holding_minutes": round(holding_seconds / 60.0, 3),
             "timeframe": timeframe,
+            "entry_timing_context": entry_timing_context,
+            "decision_freshness_context": decision_freshness_context,
             "mfe": round(mfe, 6),
             "mae": round(mae, 6),
             "giveback_ratio": path_metrics["giveback_ratio"],
@@ -361,6 +451,7 @@ class TradeReviewer:
             "event_context": event_context or {},
             "execution_context": execution_context or {},
             "data_quality_context": data_quality_context or {},
+            "market_session": (entry_action or {}).get("market_session", {}) if isinstance(entry_action, dict) else {},
             "decision_quality_context": (entry_action or {}).get("decision_quality_context", {}) if isinstance(entry_action, dict) else {},
             "top_weight_factor": top_weight_factor,
             "top_weight": top_weight,
@@ -401,6 +492,17 @@ class TradeReviewer:
         for label in taxonomy["responsibility_labels"]:
             if label not in failure_tags:
                 failure_tags.append(label)
+        system_issue = review_json.get("system_issue_context") or {}
+        summary = _review_summary(
+            position_id=position_id,
+            pnl=float(pnl),
+            outcome_label=outcome_label,
+            primary_responsibility=str(taxonomy.get("primary_responsibility") or ""),
+            system_labels=list(system_issue.get("labels") or []),
+            top_factor=top_factor,
+            top_weight_factor=top_weight_factor,
+            worst_factor=worst_factor,
+        )
 
         review_id = self._new_id("review")
         with self._conn() as conn:
@@ -477,12 +579,19 @@ class TradeReviewer:
                         0.0,
                         0.0,
                         round(float(mc), 6),
-                        round(_clamp(abs(mc) / max(abs(pnl), 1.0)), 4),
+                        round(
+                            _clamp(abs(mc) / max(abs(pnl), 1.0))
+                            * (0.2 if bool((system_issue or {}).get("contaminates_learning")) else 1.0),
+                            4,
+                        ),
                         json.dumps(
                             {
                                 "source": "rule_review",
                                 "primary_responsibility": taxonomy["primary_responsibility"],
                                 "responsibility_labels": taxonomy["responsibility_labels"],
+                                "system_contaminated": bool((system_issue or {}).get("contaminates_learning")),
+                                "system_issue_labels": list((system_issue or {}).get("labels") or []),
+                                "factor_training_allowed": not bool((system_issue or {}).get("contaminates_learning")),
                                 "factor_role": (
                                     "harmful"
                                     if float(mc) < 0

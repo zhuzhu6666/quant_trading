@@ -376,6 +376,26 @@ class RiskPolicyService:
                 },
             )
 
+        decision_freshness = context.get("decision_freshness") or {}
+        if (
+            isinstance(decision_freshness, dict)
+            and decision_freshness.get("schema_version") == "decision_bar_freshness.v1"
+            and not bool(decision_freshness.get("fresh", True))
+        ):
+            return RiskVerdict(
+                allowed=False,
+                reason="decision_bar_stale",
+                severity="warn",
+                audit_payload={
+                    "action": "open_trade",
+                    "source": "live_decision_bar_freshness",
+                    "blocked_by": "decision_bar_freshness",
+                    "decision_freshness": decision_freshness,
+                    "trade": context.get("trade") or {},
+                    "temporal_context": context.get("temporal_context") or {},
+                },
+            )
+
         supervisor_block = context.get("supervisor_reentry_block") or {}
         if bool(supervisor_block.get("active", False)):
             remaining_seconds = float(supervisor_block.get("remaining_seconds", 0.0) or 0.0)
@@ -632,6 +652,7 @@ class RiskPolicyService:
                 "risk_limits": risk_limits.to_dict(),
                 "state": state.extra,
                 "temporal_context": context.get("temporal_context") or {},
+                "decision_freshness": context.get("decision_freshness") or {},
             },
         )
 

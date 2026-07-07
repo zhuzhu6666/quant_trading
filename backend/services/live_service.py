@@ -40,6 +40,7 @@ from risk.policy_service import INCIDENT_MODE_RANK, RiskPolicyService
 from risk.runtime_policy import RiskLimitSnapshot
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.market_session import evaluate_market_session
+from backend.services.review_contract import build_entry_timing_context
 from backend.services.live_runtime_state import (
     cache_get_or_refresh as _runtime_cache_get_or_refresh,
     default_live_state,
@@ -49,6 +50,10 @@ from backend.services.live_runtime_state import (
 )
 from backend.services.live_ctrader_runtime import CTraderRuntime
 from backend.services.live_data_sync_job import make_data_sync_job as _make_data_sync_job
+from backend.services.live_data_sync_helpers import (
+    classify_decision_bar_freshness as _sync_classify_decision_bar_freshness,
+    dataframe_to_store_bars as _sync_dataframe_to_store_bars,
+)
 from backend.services.live_decision_pipeline import (
     build_signal_decision_log_payload as _decision_build_signal_decision_log_payload,
     run_live_decision_pipeline as _decision_run_live_decision_pipeline,
@@ -784,6 +789,7 @@ def _build_open_trade_risk_context(
         decision_quality=decision_quality,
         signal_score=float(signal_score or 0.0),
     )
+    decision_freshness = _live_state_get("decision_bar_freshness", {}, clone=True) or {}
 
     return _lifecycle_build_open_trade_risk_context_payload(
         cfg=cfg,
@@ -818,6 +824,7 @@ def _build_open_trade_risk_context(
         data_lag_seconds=float(runtime_health_context.get("data_lag_seconds", 0.0) or 0.0),
         runtime_health=runtime_health_context.get("runtime_health", {}) or {},
         temporal_context=temporal_context,
+        decision_freshness=decision_freshness,
         supervisor_reentry_block=supervisor_reentry_block,
     )
 
@@ -1192,7 +1199,22 @@ def _open_learning_context_payload(
         now_ts=now_ts,
     )
     risk_payload = risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else (risk_verdict or {})
-    runtime_health = (((risk_payload or {}).get("audit_payload") or {}).get("state") or {}).get("runtime_health") or {}
+    audit_payload = (risk_payload or {}).get("audit_payload") or {}
+    runtime_health = ((audit_payload.get("state") or {}).get("runtime_health") or {})
+    temporal_context = audit_payload.get("temporal_context") or {}
+    decision_freshness = (
+        audit_payload.get("decision_freshness")
+        or _live_state_get("decision_bar_freshness", {}, clone=True)
+        or {}
+    )
+    entry_timing_context = build_entry_timing_context(
+        signal_bar_ts=(bar or {}).get("time", 0.0),
+        decision_evaluated_at=temporal_context.get("evaluated_at", now_ts),
+        order_submitted_at=now_ts,
+        fill_ts=now_ts,
+        timeframe=temporal_context.get("timeframe") or (bar or {}).get("timeframe") or "",
+        source="live_open_learning_context",
+    )
     return _lifecycle_build_open_learning_context_payload(
         entry_cluster=entry_cluster,
         market_micro=market_micro,
@@ -1212,6 +1234,8 @@ def _open_learning_context_payload(
         event_sizing_context=event_sizing_context,
         runtime_health=runtime_health,
         market_session=market_session or _live_state_get("market_session", {}, clone=True) or {},
+        decision_freshness=decision_freshness,
+        entry_timing_context=entry_timing_context,
     )
 
 
@@ -4830,6 +4854,215 @@ def _fetch_bars_with_retry(bridge, timeframe: str, n_bars: int, max_retries: int
     return None
 
 
+def _df_latest_epoch(df: "pd.DataFrame | None") -> float:
+    if df is None or len(df) == 0:
+        return 0.0
+    try:
+        idx = df.index[-1]
+        return float(idx.timestamp()) if hasattr(idx, "timestamp") else float(idx)
+    except Exception:
+        return 0.0
+
+
+def _closed_decision_bar_frame(
+    df: "pd.DataFrame | None",
+    *,
+    timeframe: str,
+    now_ts: float,
+) -> "pd.DataFrame | None":
+    if df is None or len(df) == 0:
+        return df
+    freshness = _sync_classify_decision_bar_freshness(
+        latest_ts=_df_latest_epoch(df),
+        timeframe=timeframe,
+        now=now_ts,
+    )
+    expected_ts = float(freshness.get("expected_closed_bar_ts", 0.0) or 0.0)
+    if expected_ts <= 0:
+        return df
+    try:
+        keep = []
+        for idx in df.index:
+            ts = float(idx.timestamp()) if hasattr(idx, "timestamp") else float(idx)
+            keep.append(ts <= expected_ts)
+        filtered = df.loc[keep]
+        return filtered if filtered is not None and len(filtered) > 0 else df.iloc[0:0]
+    except Exception:
+        return df
+
+
+def _decision_bar_freshness_snapshot(
+    df: "pd.DataFrame | None",
+    *,
+    timeframe: str,
+    now_ts: float,
+) -> dict[str, Any]:
+    snapshot = _sync_classify_decision_bar_freshness(
+        latest_ts=_df_latest_epoch(df),
+        timeframe=timeframe,
+        now=now_ts,
+    )
+    snapshot.setdefault("source", "live_decision_bar")
+    return snapshot
+
+
+def _record_decision_bar_freshness(snapshot: dict[str, Any]) -> None:
+    try:
+        _live_state_update(decision_bar_freshness=dict(snapshot or {}))
+    except Exception:
+        logger.debug("[live] decision bar freshness snapshot update failed", exc_info=True)
+
+
+def _record_repaired_bar_sync_health(*, timeframe: str, latest_ts: float) -> None:
+    if latest_ts <= 0:
+        return
+    try:
+        from data.live_sync.health import SyncHealth
+
+        SyncHealth.shared().record_success(last_bar_ts_by_tf={str(timeframe or "M5"): float(latest_ts)})
+    except Exception:
+        logger.debug("[live] decision bar repair health update failed", exc_info=True)
+
+
+def _repair_live_decision_bars(
+    *,
+    bridge: Any,
+    symbol: str,
+    timeframe: str,
+    expected_closed_bar_ts: float,
+    tick: int,
+    log,
+) -> dict[str, Any]:
+    result = {
+        "attempted": False,
+        "status": "not_attempted",
+        "inserted_bars": 0,
+        "latest_repaired_bar_ts": 0.0,
+        "error": "",
+    }
+    if bridge is None or not bool(getattr(bridge, "is_connected", False)):
+        result["status"] = "bridge_unavailable"
+        return result
+    if not hasattr(bridge, "fetch_bars"):
+        result["status"] = "bridge_fetch_bars_unavailable"
+        return result
+
+    result["attempted"] = True
+    try:
+        fetched = bridge.fetch_bars(timeframe=timeframe, n_bars=200)
+    except TypeError:
+        try:
+            fetched = bridge.fetch_bars(timeframe, 200)
+        except Exception as exc:
+            result["status"] = "fetch_failed"
+            result["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
+            return result
+    except Exception as exc:
+        result["status"] = "fetch_failed"
+        result["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
+        return result
+
+    if fetched is None or len(fetched) == 0:
+        result["status"] = "fetch_empty"
+        return result
+
+    if expected_closed_bar_ts > 0:
+        try:
+            fetched = fetched.loc[
+                [
+                    (float(idx.timestamp()) if hasattr(idx, "timestamp") else float(idx))
+                    <= float(expected_closed_bar_ts)
+                    for idx in fetched.index
+                ]
+            ]
+        except Exception:
+            pass
+    bars = _sync_dataframe_to_store_bars(fetched)
+    if not bars:
+        result["status"] = "no_closed_bars"
+        return result
+
+    try:
+        from data.store import DataStore
+
+        DataStore().insert_bars(bars, symbol, timeframe)
+    except Exception as exc:
+        result["status"] = "insert_failed"
+        result["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
+        return result
+
+    latest_ts = float(bars[-1].get("time") or 0.0)
+    _record_repaired_bar_sync_health(timeframe=timeframe, latest_ts=latest_ts)
+    result.update(
+        {
+            "status": "inserted",
+            "inserted_bars": len(bars),
+            "latest_repaired_bar_ts": latest_ts,
+        }
+    )
+    try:
+        log(
+            f"tick {tick}: repaired stale decision bars {symbol} {timeframe} "
+            f"inserted={len(bars)} latest_ts={latest_ts:.0f}"
+        )
+    except Exception:
+        pass
+    return result
+
+
+def _ensure_live_decision_bars_fresh(
+    *,
+    bridge: Any,
+    symbol: str,
+    timeframe: str,
+    df_new: "pd.DataFrame",
+    tick: int,
+    log,
+) -> "pd.DataFrame":
+    now_ts = time.time()
+    closed_df = _closed_decision_bar_frame(df_new, timeframe=timeframe, now_ts=now_ts)
+    snapshot = _decision_bar_freshness_snapshot(closed_df, timeframe=timeframe, now_ts=now_ts)
+    if bool(snapshot.get("fresh", False)):
+        snapshot.update({"repair_attempted": False, "repair_status": "fresh", "source": "live_decision_bar"})
+        _record_decision_bar_freshness(snapshot)
+        return closed_df if closed_df is not None and len(closed_df) > 0 else df_new
+
+    repair = _repair_live_decision_bars(
+        bridge=bridge,
+        symbol=symbol,
+        timeframe=timeframe,
+        expected_closed_bar_ts=float(snapshot.get("expected_closed_bar_ts", 0.0) or 0.0),
+        tick=tick,
+        log=log,
+    )
+    repaired_df = _warmup_from_local_db(symbol, timeframe, max(5, len(df_new))) if repair.get("attempted") else None
+    if repaired_df is not None and len(repaired_df) > 0:
+        closed_df = _closed_decision_bar_frame(repaired_df, timeframe=timeframe, now_ts=time.time())
+    final_snapshot = _decision_bar_freshness_snapshot(closed_df, timeframe=timeframe, now_ts=time.time())
+    final_snapshot.update(
+        {
+            "repair_attempted": bool(repair.get("attempted", False)),
+            "repair_status": str(repair.get("status") or ""),
+            "repair_inserted_bars": int(repair.get("inserted_bars") or 0),
+            "repair_latest_bar_ts": float(repair.get("latest_repaired_bar_ts") or 0.0),
+            "repair_error": str(repair.get("error") or ""),
+            "source": "live_decision_bar_repair",
+        }
+    )
+    _record_decision_bar_freshness(final_snapshot)
+    if not bool(final_snapshot.get("fresh", False)):
+        try:
+            log(
+                f"tick {tick}: decision bars stale after repair "
+                f"{symbol} {timeframe} latest={final_snapshot.get('latest_bar_ts', 0):.0f} "
+                f"expected={final_snapshot.get('expected_closed_bar_ts', 0):.0f} "
+                f"status={final_snapshot.get('repair_status')}"
+            )
+        except Exception:
+            pass
+    return closed_df if closed_df is not None else df_new
+
+
 # ★ v9-fix: 备份 bar 缓存 (防 DB 空/broker 无数据时死机)
 def _save_bar_cache(df: "pd.DataFrame") -> None:
     """将 warmup 成功的 bar 缓存到 pickle 文件, 供下次启动 fallback."""
@@ -4939,6 +5172,17 @@ def _run_live_loop_tick_body(
     df_new = _warmup_from_local_db("XAUUSD+", timeframe, 5)
     if df_new is None or len(df_new) == 0:
         log(f"tick {tick}: local DB has no bars (waiting for CTraderPuller)")
+        return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": False}
+    df_new = _ensure_live_decision_bars_fresh(
+        bridge=bridge if bridge_ready else None,
+        symbol="XAUUSD+",
+        timeframe=timeframe,
+        df_new=df_new,
+        tick=tick,
+        log=log,
+    )
+    if df_new is None or len(df_new) == 0:
+        log(f"tick {tick}: no closed decision bars available after repair")
         return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": False}
 
     quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}

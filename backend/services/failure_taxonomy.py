@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.services.review_contract import build_system_issue_context
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -49,6 +51,11 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(payload.get("data_quality_context"), dict)
         else {}
     )
+    system_issue_context = (
+        payload.get("system_issue_context")
+        if isinstance(payload.get("system_issue_context"), dict)
+        else build_system_issue_context(payload)
+    )
     adverse_slippage = _safe_float(market_micro_context.get("adverse_slippage_points"))
     factor_conflict_ratio = _safe_float(decision_quality_context.get("factor_conflict_ratio"))
     negative_contribution_abs = _safe_float(decision_quality_context.get("negative_contribution_abs"))
@@ -82,6 +89,10 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
         labels.append("execution_slippage")
     if pnl <= 0 and data_quality_context and not bool(data_quality_context.get("quote_fresh", True)):
         labels.append("data_quality_issue")
+    if pnl <= 0 and system_issue_context:
+        for label in system_issue_context.get("labels") or []:
+            if label not in labels:
+                labels.append(str(label))
     if pnl <= 0 and (chased_long or chased_short):
         labels.append("entry_chase")
     if pnl <= 0 and abs(action_score) < 0.45 and entry_quality <= 0.5:
@@ -92,7 +103,10 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
         labels.append("low_reward_to_risk_entry")
 
     primary = "unclear"
-    if "entry_cluster_risk" in labels:
+    system_primary = str((system_issue_context or {}).get("primary_responsibility") or "")
+    if system_primary:
+        primary = system_primary
+    elif "entry_cluster_risk" in labels:
         primary = "timing"
     elif "entry_chase" in labels:
         primary = "timing"
@@ -135,4 +149,5 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
         "responsibility_labels": labels,
         "confidence": round(confidence, 3),
         "context_integrity": context_integrity,
+        "system_issue_context": system_issue_context or {},
     }

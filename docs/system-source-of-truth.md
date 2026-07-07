@@ -63,6 +63,7 @@
 | 动作裁决 | `RiskPolicyService.evaluate(...)` | 风控统一裁决入口 |
 | 风险阈值快照 | `risk.runtime_policy.RiskLimitSnapshot` + `RuntimeConfig` / runtime overlay | 日内亏损、回撤、交易次数、数据延迟、L2、磁盘、VaR/CVaR 等阈值的统一输入口径 |
 | 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk、L2 等运行态统一输入口径 |
+| 决策 K 线新鲜度 | `backend.services.live_data_sync_helpers` + `_live_state.decision_bar_freshness` + `RiskPolicyService.evaluate("open_trade")` | live tick 只用最新已闭合 bar；缺应有闭合 bar 时先经主 cTrader bridge 回补月库并重载，修复失败才以 `decision_bar_stale` 阻断开仓 |
 | 下单/改仓/平仓 | cTrader bridge + ledger | broker 执行事实与账本共同追溯；live 开仓先经 `_run_open_trade_pipeline()` 生成 candidate/risk verdict/order block，再触达 broker |
 | 信号门槛 | `ExecutionGate` + context policy effect | gate 前应用有效阈值；live 只负责信号/冷却，不作为事件风险最终裁决口 |
 | 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` | 持仓期间动作建议和 trace |
@@ -75,6 +76,7 @@
 - live 日内熔断可以做执行快停，但阈值必须来自 `RiskLimitSnapshot`，不能在 live loop 内另设事实源。
 - `autonomy_mode=demo_autonomous` 下的真实 demo 采样可以使用 `RuntimeConfig.demo_learning_max_daily_trades` 作为有效日交易上限；该口径只通过 `RiskLimitSnapshot.source=runtime_config:demo_learning` 输入 `RiskPolicyService`，不绕过断连、stale market、仓位、volume、日亏损或熔断裁决。
 - NFP/GVZ/重大事件等事件风险在 live 中只能作为 `RiskPolicyService` 输入；`ExecutionGate` 的事件过滤保留给 backtest/legacy 兼容。
+- live 因子决策不得使用当前未闭合 K 线；`spot_quote` 只能修正执行参考价，不能把旧 bar 信号变成新信号。若 `decision_freshness.schema_version=decision_bar_freshness.v1` 且 `fresh=false`，开仓必须由 `RiskPolicyService` 返回 `decision_bar_stale`，但持仓监督的 close/reduce/tighten 仍可继续。
 - live open-trade pipeline 只编排候选 sizing、`RiskPolicyService.evaluate("open_trade")`、market-session/order block、broker order 和 post-fill audit；它不拥有独立风控事实源。
 - `risk/pre_trade.py`、`risk/circuit.py`、`execution/router.py` 属于 paper/backtest/legacy execution router，不是当前 live 主授权口。
 - 模型阶段裁决必须复用 `backend.services.model_permissions`，不能维护第二套模型权限事实。
@@ -87,6 +89,7 @@
 | 样本证据语义 | `learning-evidence-contract.md` | label、integrity、causal_level、allowed_uses |
 | 学习样本统一表 | PostgreSQL `autonomous_learning_sample` | features、label、trace、evidence_contract、config hash |
 | 样本来源事实 | `decision_ledger` / `position_supervisor_trace` / `trade_outcome_review` / `supervisor_counterfactual_review` / `factor_contribution_review` | 不能从模型输出反推原始事实 |
+| 交易复盘时间与系统污染 | `trade_outcome_review.review_json.entry_timing_context` / `decision_freshness_context` / `system_issue_context` + `order_lifecycle_event` | `entry_ts` 以实际成交时间优先；信号 K 线时间保留为 `signal_bar_ts`。数据时效、信号到成交延迟等系统污染样本只能审计/弱用，不能满权重训练因子或开仓模板 |
 | 数据集就绪 | `/api/learning/dataset/readiness` | trade/decision schema、required fields、ready 样本数 |
 | 数据精度健康 | `/api/learning/dataset/quality-health` | evidence contract 自洽性和 open context 覆盖率 |
 | 模型权限 | `model_permission_audit` / `backend.services.model_permissions` | shadow/advisory guardrails |
@@ -129,6 +132,8 @@
 - `model_ready=true` 还必须配合 `allowed_uses` 包含 `supervised_training`，才可进入强监督训练。
 - `train_weight` 由 `quality_score`、`integrity`、`causal_level`、`label_status` 共同决定。
 - 历史缺失字段只能标 degraded/partial/missing，不能补造实时上下文。
+- 交易复盘必须区分 `signal_bar_ts`、`decision_evaluated_at`、`order_submitted_at`、`fill_ts` 和 `close_ts`；用信号 K 线时间替代实际入场时间会污染持仓学习。
+- `system_issue_context.contaminates_learning=true` 的样本必须降为 `integrity=partial` 或更低权重；`factor_contribution_review` 只能保留审计，不可作为高置信因子治理训练样本。
 - 强治理必须有证据等级、样本数量、风控通过和回滚点。
 - 回滚只能使用当时 decision 的 rollback JSON，不临场猜测。
 - replay v1 校验 ledger 中已有 factor、gate、`RiskPolicyService` verdict 锚点；不能替代 live 风控裁决。
@@ -169,6 +174,7 @@
 判断原则：
 
 - live 实时执行状态以 cTrader 为准。
+- live 决策 K 线以月库中的已闭合 bar 为准；`data_sync` 和 live tick 即时修复都可以通过主 cTrader bridge 回补月库，但不能把未闭合 bar 当成 `complete=true` 的决策输入。
 - 外部研究数据不能替代 broker 实时行情和执行状态。
 - 不新增生产路径写入 SQLite state。
 

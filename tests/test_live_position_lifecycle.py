@@ -539,6 +539,8 @@ def test_build_open_learning_context_payload_preserves_live_shape():
         event_sizing_context={"event": "none"},
         runtime_health={"ready": True},
         market_session={"status": "open"},
+        decision_freshness={"schema_version": "decision_bar_freshness.v1", "fresh": True},
+        entry_timing_context={"schema_version": "entry_timing_context.v1", "signal_to_fill_delay_seconds": 1.0},
     )
 
     assert payload["entry_cluster"] is entry_cluster
@@ -559,8 +561,11 @@ def test_build_open_learning_context_payload_preserves_live_shape():
         "quote_fresh": True,
         "quote_age_seconds": 0.4,
         "runtime_health": {"ready": True},
+        "decision_freshness": {"schema_version": "decision_bar_freshness.v1", "fresh": True},
     }
     assert payload["market_session"] == {"status": "open"}
+    assert payload["decision_freshness"] == {"schema_version": "decision_bar_freshness.v1", "fresh": True}
+    assert payload["entry_timing_context"]["signal_to_fill_delay_seconds"] == 1.0
 
 
 def test_build_open_trade_risk_context_payload_preserves_live_shape():
@@ -606,6 +611,7 @@ def test_build_open_trade_risk_context_payload_preserves_live_shape():
         data_lag_seconds=12.0,
         runtime_health={"sync_health": {"fresh": True}},
         temporal_context={"timeframe": "M5"},
+        decision_freshness={"fresh": True},
         supervisor_reentry_block={"active": True},
     )
 
@@ -640,6 +646,7 @@ def test_build_open_trade_risk_context_payload_preserves_live_shape():
     assert payload["bridge_connected"] is False
     assert payload["data_lag_seconds"] == 12.0
     assert payload["runtime_health"] == {"sync_health": {"fresh": True}}
+    assert payload["decision_freshness"] == {"fresh": True}
     assert payload["loss_cooldown_after_losses"] == 2
     assert payload["loss_cooldown_bars"] == 5
     assert payload["block_on_disk_critical"] is False
@@ -674,6 +681,7 @@ def test_build_open_trade_risk_context_payload_uses_safe_defaults():
         data_lag_seconds=0.0,
         runtime_health={},
         temporal_context={},
+        decision_freshness=None,
         supervisor_reentry_block=None,
     )
 
@@ -686,6 +694,7 @@ def test_build_open_trade_risk_context_payload_uses_safe_defaults():
     assert payload["event_window_learning_policy"] == {}
     assert payload["entry_quality_gate"] == {}
     assert payload["entry_cluster_learning_policy"] == {}
+    assert payload["decision_freshness"] == {}
     assert payload["supervisor_reentry_block"] == {}
 
 

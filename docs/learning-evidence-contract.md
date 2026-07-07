@@ -172,9 +172,18 @@ readiness 状态语义：
 - `event_context`: 事件窗口、event multiplier、causal event、event type、importance、距离事件的分钟/小时数、pre/post 状态、window bucket、tier multiplier
 - `sizing_trace`: dynamic sizing 的 base/final API volume、event-adjusted volume、broker step/min/max、block reason
 - `data_quality_context`: quote/bar/context freshness
+- `decision_freshness_context`: 决策 K 线新鲜度、缺失闭合 bar、data lag 和 sync health
+- `entry_timing_context`: `signal_bar_ts`、`decision_evaluated_at`、`order_submitted_at`、`fill_ts`、`close_ts` 和各阶段 delay
+- `system_issue_context`: 数据时效、决策陈旧、信号到成交延迟等是否污染学习样本
 - `market_session`: 市场会话状态
 
 历史样本不得伪造不可恢复的实时上下文。旧 open decision 可以回填同向簇和组合暴露，但 `bar_context / execution_context / market_micro_context / event_context / sizing_trace` 等只能从真实新单开始自然积累；缺少事件距离或窗口桶的旧样本不得事后猜测补造。
+
+如果 `system_issue_context.contaminates_learning=true`：
+
+- `trade_review_outcome` 和成熟 `shadow_open_decision` 必须降为 `integrity=partial` 或更低、`train_weight<=0.25`。
+- `entry_supervisor_feedback` 不得生成 `downweight_entry_factor`，只能生成数据链路/系统质量复核建议。
+- `factor_contribution_review` 行只能作为 audit/explainability，不能作为高置信因子治理训练样本。
 
 同向簇治理由 `materialize_entry_cluster_governance_suggestions` 消费 matured open outcome 样本：
 

@@ -84,6 +84,19 @@ def _current_row_label(item: dict[str, Any]) -> int:
     return label
 
 
+def _row_system_contaminated(item: dict[str, Any]) -> bool:
+    notes = _loads(item.get("notes"), {})
+    review = _loads(item.get("review_json"), {})
+    system_issue = review.get("system_issue_context") if isinstance(review, dict) else {}
+    return bool(
+        (isinstance(notes, dict) and notes.get("system_contaminated"))
+        or (
+            isinstance(system_issue, dict)
+            and system_issue.get("contaminates_learning")
+        )
+    )
+
+
 def _sample_from_row(row: Any, *, label: int | None = None, label_source: str = "current_factor_outcome") -> dict[str, Any]:
     item = dict(row)
     outcome = str(item.get("outcome_label") or "").lower()
@@ -207,9 +220,9 @@ class FactorGovernanceLightGBMService:
                 FROM (
                     SELECT f.id, f.review_id, f.trade_id, f.factor, f.entry_contribution,
                            f.hold_contribution, f.exit_contribution, f.net_contribution,
-                           f.confidence, r.position_id, r.entry_quality, r.hold_quality,
+                           f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
                            r.exit_quality, r.regime_fit_score, r.execution_quality,
-                           r.pnl, r.mae, r.mfe, r.outcome_label, r.created_at
+                           r.pnl, r.mae, r.mfe, r.outcome_label, r.review_json, r.created_at
                     FROM factor_contribution_review f
                     JOIN trade_outcome_review r ON r.review_id = f.review_id
                     ORDER BY r.created_at DESC, f.id DESC
@@ -220,6 +233,7 @@ class FactorGovernanceLightGBMService:
                 (int(limit),),
             ).fetchall()
             row_items = [dict(row) for row in rows]
+            row_items = [item for item in row_items if not _row_system_contaminated(item)]
             by_factor: dict[str, list[dict[str, Any]]] = {}
             for item in row_items:
                 by_factor.setdefault(str(item.get("factor") or ""), []).append(item)

@@ -26,6 +26,13 @@ from backend.services.evolution_ledger import (
     record_evolution_decision,
     start_evolution_run,
 )
+from backend.services.failure_taxonomy import build_failure_taxonomy
+from backend.services.review_contract import (
+    build_entry_timing_context,
+    extract_decision_freshness_context,
+    normalize_trade_review_contract,
+    review_has_system_contamination,
+)
 from research.features.evidence_contract import build_evidence_contract
 
 _scheduler_thread: threading.Thread | None = None
@@ -486,9 +493,28 @@ def _review_integrity_for_training(review_json: dict[str, Any]) -> tuple[str, fl
     )
     if integrity == "missing":
         return integrity, 0.0
+    if review_has_system_contamination(review_json):
+        return "partial", 0.25
     if integrity in {"partial", "recovered"}:
         return integrity, 0.5
     return integrity, 1.0
+
+
+def _review_system_contamination(review_json: dict[str, Any]) -> dict[str, Any]:
+    system_issue = (
+        review_json.get("system_issue_context")
+        if isinstance(review_json.get("system_issue_context"), dict)
+        else {}
+    )
+    labels = list(system_issue.get("labels") or [])
+    contaminated = bool(system_issue.get("contaminates_learning")) or review_has_system_contamination(review_json)
+    return {
+        "schema_version": "learning_system_contamination.v1",
+        "contaminated": contaminated,
+        "labels": labels,
+        "primary_responsibility": str(system_issue.get("primary_responsibility") or ""),
+        "recommended_use": "ops_quality_audit" if contaminated else "standard_learning",
+    }
 
 
 def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | None = None) -> dict[str, Any]:
@@ -519,8 +545,11 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
         if str(row["event_type"] or "") == "open":
             label["label"] = "opened"
             train_weight = 0.7
+            review_json = {}
+            contamination = _review_system_contamination(review_json)
             if outcome_review is not None:
                 review_json = _loads(outcome_review["review_json"], {})
+                contamination = _review_system_contamination(review_json)
                 integrity, train_weight = _review_integrity_for_training(review_json)
                 label_status = "matured"
                 label.update(
@@ -536,6 +565,7 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
                         "responsibility_labels": list(review_json.get("responsibility_labels", []) or []),
                         "failure_tags": _loads(outcome_review["failure_tags_json"], []),
                         "close_ts": float(review_json.get("close_ts") or outcome_review["created_at"] or 0.0),
+                        "system_contamination": contamination,
                     }
                 )
         else:
@@ -579,6 +609,8 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
             "execution_context": action_json.get("execution_context") or {},
             "sizing_trace": action_json.get("sizing_trace") or {},
             "data_quality_context": action_json.get("data_quality_context") or {},
+            "decision_freshness_context": action_json.get("decision_freshness") or {},
+            "entry_timing_context": action_json.get("entry_timing_context") or {},
             "decision_quality_context": action_json.get("decision_quality_context") or {},
         },
         "verdict": {
@@ -588,6 +620,11 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
                 str(outcome_review["review_id"] or "")
                 if sample_type == "shadow_open_decision" and outcome_review is not None
                 else ""
+            ),
+            "system_contamination": (
+                _review_system_contamination(_loads(outcome_review["review_json"], {}))
+                if sample_type == "shadow_open_decision" and outcome_review is not None
+                else {"schema_version": "learning_system_contamination.v1", "contaminated": False}
             ),
         },
         "label": label,
@@ -606,12 +643,8 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
 
 def _sample_from_review(row: Any) -> dict[str, Any]:
     review = _loads(row["review_json"], {})
-    integrity = _sample_integrity_level(review.get("attribution_integrity") or review.get("context_integrity") or "missing")
-    train_weight = 1.0
-    if integrity == "missing":
-        train_weight = 0.0
-    elif integrity in {"partial", "recovered"}:
-        train_weight = 0.5
+    integrity, train_weight = _review_integrity_for_training(review)
+    contamination = _review_system_contamination(review)
     return {
         "sample_type": "trade_review_outcome",
         "source_table": "trade_outcome_review",
@@ -635,15 +668,20 @@ def _sample_from_review(row: Any) -> dict[str, Any]:
             "mae": float(row["mae"] or 0.0),
             "mfe": float(row["mfe"] or 0.0),
             "review": review,
+            "entry_timing_context": review.get("entry_timing_context") or {},
+            "decision_freshness_context": review.get("decision_freshness_context") or {},
+            "system_issue_context": review.get("system_issue_context") or {},
         },
         "verdict": {
             "close_reason_source": review.get("close_reason_source") or "",
             "inferred_close_supervisor": review.get("inferred_close_supervisor") or {},
+            "system_contamination": contamination,
         },
         "label": {
             "outcome_label": str(row["outcome_label"] or ""),
             "pnl": float(row["pnl"] or 0.0),
             "failure_tags": _loads(row["failure_tags_json"], []),
+            "system_contaminated": contamination["contaminated"],
         },
         "trace": {
             "review_id": str(row["review_id"] or ""),
@@ -718,6 +756,7 @@ def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
     pnl = float(row["pnl"] or review.get("pnl") or 0.0)
     context_integrity = str(review.get("context_integrity") or "full")
     attribution_integrity = str(review.get("attribution_integrity") or "full")
+    contamination = _review_system_contamination(review)
     thesis_broken = bool(
         thesis_status == "broken"
         or reason == "thesis_broken"
@@ -725,7 +764,11 @@ def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
     )
     entry_failure = bool(thesis_broken and pnl <= 0)
     label_status = "matured" if context_integrity == "full" and attribution_integrity != "missing" else "pending"
-    if entry_failure:
+    if contamination["contaminated"]:
+        label = "entry_feedback_system_contaminated"
+        recommended_action = "review_data_pipeline"
+        train_weight = 0.2
+    elif entry_failure:
         label = "entry_thesis_broken"
         recommended_action = "downweight_entry_factor"
         train_weight = 0.82
@@ -739,6 +782,11 @@ def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
         train_weight = 0.35
     if label_status != "matured":
         train_weight *= 0.5
+    sample_integrity = (
+        "partial"
+        if contamination["contaminated"]
+        else ("full" if label_status == "matured" else "partial")
+    )
     review_id = str(row["review_id"] or "")
     return {
         "sample_type": "entry_supervisor_feedback",
@@ -751,7 +799,7 @@ def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
         "timeframe": str(review.get("timeframe") or ""),
         "event_ts": float(review.get("close_ts") or row["created_at"] or 0.0),
         "label_status": label_status,
-        "integrity": "full" if label_status == "matured" else "partial",
+        "integrity": sample_integrity,
         "train_weight": round(max(0.0, min(1.0, train_weight)), 6),
         "causal_level": "post_trade_feedback",
         "features": {
@@ -777,6 +825,7 @@ def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
                 "evidence": evidence,
                 "raw": inferred,
             },
+            "system_contamination": contamination,
         },
         "verdict": {
             "feedback_target": "entry_agent",
@@ -784,6 +833,7 @@ def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
             "entry_failure": entry_failure,
             "thesis_broken": thesis_broken,
             "recommended_action": recommended_action,
+            "system_contamination": contamination,
         },
         "label": {
             "label": label,
@@ -2508,6 +2558,304 @@ def backfill_trade_review_integrity_markers(*, db_path: str | Path = STATE_DB, l
             decision_type="backfill_review_integrity",
             scope_type="trade_outcome_review",
             action="mark_missing_legacy_integrity",
+            status="completed",
+            result=payload,
+            db_path=db_path,
+        )
+        finish_evolution_run(str(run.get("run_id") or ""), status="completed", summary=payload, db_path=db_path)
+        return payload
+    finally:
+        conn.close()
+
+
+def _entry_decision_for_review(conn: Any, review: dict[str, Any], row: Any) -> Any | None:
+    if not state_table_exists(conn, "decision_ledger"):
+        return None
+    entry_decision_id = str(review.get("entry_decision_id") or _row_value(row, "entry_decision_id", "") or "")
+    position_id = str(review.get("position_id") or _row_value(row, "position_id", "") or "")
+    if entry_decision_id:
+        found = _execute(
+            conn,
+            """
+            SELECT *
+            FROM decision_ledger
+            WHERE decision_id=?
+            LIMIT 1
+            """,
+            (entry_decision_id,),
+        ).fetchone()
+        if found is not None:
+            return found
+    if not position_id:
+        return None
+    return _execute(
+        conn,
+        """
+        SELECT *
+        FROM decision_ledger
+        WHERE position_id=? AND event_type='open'
+        ORDER BY decision_ts DESC
+        LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+
+
+def _order_event_times_for_review(conn: Any, *, decision_id: str, trade_id: str) -> dict[str, float]:
+    if not decision_id and not trade_id:
+        return {}
+    if not state_table_exists(conn, "order_lifecycle_event"):
+        return {}
+    rows = _execute(
+        conn,
+        """
+        SELECT event_type, event_ts
+        FROM order_lifecycle_event
+        WHERE (? <> '' AND decision_id=?)
+           OR (? <> '' AND trade_id=?)
+        ORDER BY event_ts ASC
+        """,
+        (decision_id, decision_id, trade_id, trade_id),
+    ).fetchall()
+    out: dict[str, float] = {}
+    for event in rows:
+        event_type = str(_row_value(event, "event_type", "") or "")
+        if event_type and event_type not in out:
+            out[event_type] = float(_row_value(event, "event_ts", 0.0) or 0.0)
+    return out
+
+
+def _summary_from_review(review: dict[str, Any], *, pnl: float, outcome_label: str) -> str:
+    system_issue = review.get("system_issue_context") if isinstance(review.get("system_issue_context"), dict) else {}
+    labels = list((system_issue or {}).get("labels") or [])
+    parts = [
+        f"trade {review.get('position_id') or ''} closed pnl={float(pnl):.2f}",
+        f"outcome={outcome_label}",
+    ]
+    primary = str(review.get("primary_responsibility") or (review.get("failure_taxonomy") or {}).get("primary_responsibility") or "")
+    if primary:
+        parts.append(f"primary_responsibility={primary}")
+    if labels:
+        parts.append(f"system_issue={','.join(labels[:4])}")
+    factor_hint = str(review.get("top_factor") or review.get("top_weight_factor") or "")
+    if factor_hint:
+        parts.append(f"factor_hint={factor_hint}")
+    worst = str(review.get("worst_factor") or "")
+    if worst:
+        parts.append(f"worst_factor={worst}")
+    return "; ".join(parts)
+
+
+def _merge_review_labels(existing: Any, *groups: Any) -> list[str]:
+    labels: list[str] = []
+    for source in (existing, *groups):
+        if isinstance(source, str):
+            source = _loads(source, [])
+        if not isinstance(source, list):
+            continue
+        for label in source:
+            text = str(label or "")
+            if text and text not in labels:
+                labels.append(text)
+    return labels
+
+
+def _update_factor_contribution_system_notes(
+    conn: Any,
+    *,
+    review_id: str,
+    system_issue: dict[str, Any],
+) -> int:
+    if not bool((system_issue or {}).get("contaminates_learning")):
+        return 0
+    if not state_table_exists(conn, "factor_contribution_review"):
+        return 0
+    rows = _execute(
+        conn,
+        """
+        SELECT id, confidence, notes
+        FROM factor_contribution_review
+        WHERE review_id=?
+        """,
+        (review_id,),
+    ).fetchall()
+    updated = 0
+    for item in rows:
+        notes = _loads(_row_value(item, "notes", ""), {})
+        if not isinstance(notes, dict):
+            notes = {}
+        notes["system_contaminated"] = True
+        notes["system_issue_labels"] = list((system_issue or {}).get("labels") or [])
+        notes["factor_training_allowed"] = False
+        current_confidence = float(_row_value(item, "confidence", 0.0) or 0.0)
+        next_confidence = round(max(0.0, min(current_confidence, current_confidence * 0.2)), 6)
+        _execute(
+            conn,
+            """
+            UPDATE factor_contribution_review
+            SET confidence=?, notes=?
+            WHERE id=?
+            """,
+            (next_confidence, _dumps(notes), _row_value(item, "id", 0)),
+        )
+        updated += 1
+    return updated
+
+
+def backfill_trade_review_timing_and_system_markers(
+    *,
+    db_path: str | Path = STATE_DB,
+    limit: int = 10000,
+) -> dict[str, Any]:
+    ensure_autonomous_learning_tables(db_path)
+    run = start_evolution_run(
+        run_type="trade_review_timing_system_backfill",
+        trigger_source="review_contract_health",
+        db_path=db_path,
+    )
+    conn = _connect(db_path)
+    checked = 0
+    updated = 0
+    factor_rows_updated = 0
+    contaminated = 0
+    try:
+        rows = _execute(
+            conn,
+            """
+            SELECT *
+            FROM trade_outcome_review
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        now = time.time()
+        for row in rows:
+            checked += 1
+            review = _loads(_row_value(row, "review_json", "{}"), {})
+            if not isinstance(review, dict):
+                continue
+            before = _dumps(review)
+            entry = _entry_decision_for_review(conn, review, row)
+            entry_action = _loads(_row_value(entry, "action_json", "{}"), {}) if entry is not None else {}
+            entry_risk_state = _loads(_row_value(entry, "risk_state_json", "{}"), {}) if entry is not None else {}
+            entry_decision_id = str(_row_value(entry, "decision_id", "") or review.get("entry_decision_id") or "")
+            trade_id = str(_row_value(entry, "trade_id", "") or review.get("trade_id") or _row_value(row, "trade_id", "") or "")
+            signal_bar_ts = float(
+                _row_value(entry, "decision_ts", 0.0)
+                or review.get("signal_bar_ts")
+                or review.get("entry_decision_ts")
+                or review.get("entry_ts")
+                or 0.0
+            )
+            risk_verdict = entry_action.get("risk_verdict") if isinstance(entry_action, dict) else {}
+            temporal_context = (
+                ((risk_verdict or {}).get("audit_payload") or {}).get("temporal_context") or {}
+                if isinstance(risk_verdict, dict)
+                else {}
+            )
+            order_times = _order_event_times_for_review(
+                conn,
+                decision_id=entry_decision_id,
+                trade_id=trade_id,
+            )
+            close_ts = float(review.get("close_ts") or _row_value(row, "created_at", 0.0) or 0.0)
+            timeframe = str(review.get("timeframe") or _row_value(entry, "timeframe", "") or "")
+            entry_timing = build_entry_timing_context(
+                signal_bar_ts=signal_bar_ts,
+                decision_evaluated_at=temporal_context.get("evaluated_at") or signal_bar_ts,
+                order_submitted_at=order_times.get("submitted", 0.0),
+                fill_ts=order_times.get("filled", 0.0),
+                close_ts=close_ts,
+                timeframe=timeframe,
+                source="trade_review_backfill",
+            )
+            decision_freshness = extract_decision_freshness_context(
+                entry_action=entry_action if isinstance(entry_action, dict) else {},
+                entry_risk_state=entry_risk_state if isinstance(entry_risk_state, dict) else {},
+                review_payload=review,
+            )
+
+            review["entry_decision_id"] = entry_decision_id or str(review.get("entry_decision_id") or "")
+            review["trade_id"] = trade_id or str(review.get("trade_id") or "")
+            review["entry_decision_ts"] = signal_bar_ts
+            review["signal_bar_ts"] = signal_bar_ts
+            review["entry_timing_context"] = entry_timing
+            review["decision_freshness_context"] = decision_freshness
+            actual_entry_ts = float(entry_timing.get("actual_entry_ts") or 0.0)
+            if actual_entry_ts > 0:
+                review["entry_ts"] = actual_entry_ts
+            actual_holding = float(entry_timing.get("actual_holding_seconds") or 0.0)
+            if actual_holding > 0:
+                review["holding_seconds"] = round(actual_holding, 3)
+                review["holding_minutes"] = round(actual_holding / 60.0, 3)
+            review["timing_system_backfill"] = {
+                "schema_version": "trade_review_timing_system_backfill.v1",
+                "backfilled_at": now,
+                "method": "decision_ledger_order_events_runtime_health",
+            }
+            review = normalize_trade_review_contract(
+                review,
+                entry_quality=review.get("entry_quality", _row_value(row, "entry_quality", 0.0)),
+                hold_quality=review.get("hold_quality", _row_value(row, "hold_quality", 0.0)),
+                exit_quality=review.get("exit_quality", _row_value(row, "exit_quality", 0.0)),
+                regime_fit_score=review.get("regime_fit_score", _row_value(row, "regime_fit_score", 0.0)),
+                execution_quality=review.get("execution_quality", _row_value(row, "execution_quality", 0.0)),
+            )
+            taxonomy = build_failure_taxonomy({**review, "pnl": float(_row_value(row, "pnl", 0.0) or 0.0)})
+            review["failure_taxonomy"] = taxonomy
+            review["primary_responsibility"] = taxonomy["primary_responsibility"]
+            review["responsibility_labels"] = list(taxonomy["responsibility_labels"] or [])
+            failure_tags = _merge_review_labels(
+                _row_value(row, "failure_tags_json", "[]"),
+                review.get("failure_tags") or [],
+                taxonomy.get("responsibility_labels") or [],
+            )
+            review["failure_tags"] = failure_tags
+            system_issue = review.get("system_issue_context") if isinstance(review.get("system_issue_context"), dict) else {}
+            if bool((system_issue or {}).get("contaminates_learning")):
+                contaminated += 1
+            summary = _summary_from_review(
+                review,
+                pnl=float(_row_value(row, "pnl", 0.0) or 0.0),
+                outcome_label=str(_row_value(row, "outcome_label", "") or review.get("outcome_label") or ""),
+            )
+            after = _dumps(review)
+            if after == before:
+                continue
+            review_id = str(_row_value(row, "review_id", "") or "")
+            _execute(
+                conn,
+                """
+                UPDATE trade_outcome_review
+                SET failure_tags_json=?, summary_text=?, review_json=?
+                WHERE review_id=?
+                """,
+                (_dumps(failure_tags), summary, after, review_id),
+            )
+            factor_rows_updated += _update_factor_contribution_system_notes(
+                conn,
+                review_id=review_id,
+                system_issue=system_issue,
+            )
+            updated += 1
+
+        payload = {
+            "schema_version": "trade_review_timing_system_backfill.v1",
+            "evolution_run_id": str(run.get("run_id") or ""),
+            "checked": checked,
+            "updated": updated,
+            "contaminated": contaminated,
+            "factor_contribution_rows_updated": factor_rows_updated,
+            "limit": int(limit),
+        }
+        _insert_evolution_event(conn, "trade_review_timing_system_backfill", payload)
+        conn.commit()
+        record_evolution_decision(
+            run_id=str(run.get("run_id") or ""),
+            decision_type="backfill_trade_review_timing_system",
+            scope_type="trade_outcome_review",
+            action="add_timing_and_system_issue_markers",
             status="completed",
             result=payload,
             db_path=db_path,

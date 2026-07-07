@@ -740,6 +740,115 @@ def test_run_live_loop_tick_body_returns_wait_when_market_closed(monkeypatch):
     assert "market closed confirmed (weekend)" in logs[0]
 
 
+def test_closed_decision_bar_frame_drops_current_partial_bar():
+    import pandas as pd
+
+    now_ts = 1_783_396_219.0  # 2026-07-07 11:50:19 Asia/Shanghai
+    df = pd.DataFrame(
+        [
+            {"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1},
+            {"open": 2.0, "high": 2.1, "low": 1.9, "close": 2.0, "volume": 2},
+            {"open": 3.0, "high": 3.1, "low": 2.9, "close": 3.0, "volume": 3},
+        ],
+        index=pd.to_datetime(
+            [
+                "2026-07-07T03:40:00Z",
+                "2026-07-07T03:45:00Z",
+                "2026-07-07T03:50:00Z",
+            ]
+        ),
+    )
+
+    closed = live_service._closed_decision_bar_frame(df, timeframe="M5", now_ts=now_ts)
+
+    assert list(closed.index) == list(pd.to_datetime(["2026-07-07T03:40:00Z", "2026-07-07T03:45:00Z"]))
+
+
+def test_ensure_live_decision_bars_repairs_from_primary_bridge(monkeypatch):
+    import pandas as pd
+
+    now_ts = 1_783_396_219.0  # 2026-07-07 11:50:19 Asia/Shanghai
+    stale_df = pd.DataFrame(
+        [{"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1}],
+        index=pd.to_datetime(["2026-07-07T03:40:00Z"]),
+    )
+    fetched_df = pd.DataFrame(
+        [
+            {"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1},
+            {"open": 2.0, "high": 2.1, "low": 1.9, "close": 2.0, "volume": 2},
+            {"open": 3.0, "high": 3.1, "low": 2.9, "close": 3.0, "volume": 3},
+        ],
+        index=pd.to_datetime(
+            [
+                "2026-07-07T03:40:00Z",
+                "2026-07-07T03:45:00Z",
+                "2026-07-07T03:50:00Z",
+            ]
+        ),
+    )
+    inserted = []
+
+    class _Store:
+        def insert_bars(self, bars, symbol, timeframe):
+            inserted.append((bars, symbol, timeframe))
+
+    class _Bridge:
+        is_connected = True
+
+        def fetch_bars(self, timeframe, n_bars):
+            return fetched_df
+
+    monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
+    monkeypatch.setattr("data.store.DataStore", lambda: _Store())
+    monkeypatch.setattr(live_service, "_warmup_from_local_db", lambda *_args, **_kwargs: fetched_df)
+
+    logs: list[str] = []
+    repaired = live_service._ensure_live_decision_bars_fresh(
+        bridge=_Bridge(),
+        symbol="XAUUSD+",
+        timeframe="M5",
+        df_new=stale_df,
+        tick=99,
+        log=logs.append,
+    )
+
+    assert repaired.index[-1] == pd.Timestamp("2026-07-07T03:45:00Z")
+    assert inserted[0][1:] == ("XAUUSD+", "M5")
+    assert inserted[0][0][-1]["time"] == 1_783_395_900
+    assert all(bar["time"] <= 1_783_395_900 for bar in inserted[0][0])
+    snapshot = live_service._live_state_get("decision_bar_freshness", {}, clone=True)
+    assert snapshot["fresh"] is True
+    assert snapshot["repair_attempted"] is True
+    assert snapshot["repair_status"] == "inserted"
+
+
+def test_ensure_live_decision_bars_does_not_fallback_to_current_partial(monkeypatch):
+    import pandas as pd
+
+    now_ts = 1_783_396_219.0  # 2026-07-07 11:50:19 Asia/Shanghai
+    partial_only = pd.DataFrame(
+        [{"open": 3.0, "high": 3.1, "low": 2.9, "close": 3.0, "volume": 3}],
+        index=pd.to_datetime(["2026-07-07T03:50:00Z"]),
+    )
+
+    monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
+
+    repaired = live_service._ensure_live_decision_bars_fresh(
+        bridge=None,
+        symbol="XAUUSD+",
+        timeframe="M5",
+        df_new=partial_only,
+        tick=100,
+        log=lambda _msg: None,
+    )
+
+    snapshot = live_service._live_state_get("decision_bar_freshness", {}, clone=True)
+    assert len(repaired) == 0
+    assert snapshot["fresh"] is False
+    assert snapshot["latest_bar_ts"] == 0.0
+    assert snapshot["repair_attempted"] is False
+
+
 def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     calls = []
     close_calls = []

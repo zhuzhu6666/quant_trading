@@ -586,13 +586,17 @@ def build_entry_data_quality_context(
     *,
     market_micro: dict[str, Any],
     runtime_health: dict[str, Any] | None,
+    decision_freshness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": "entry_data_quality_context.v1",
         "quote_fresh": market_micro.get("quote_fresh"),
         "quote_age_seconds": market_micro.get("quote_age_seconds"),
         "runtime_health": runtime_health or {},
     }
+    if decision_freshness:
+        payload["decision_freshness"] = dict(decision_freshness or {})
+    return payload
 
 
 def build_open_learning_context_payload(
@@ -615,6 +619,8 @@ def build_open_learning_context_payload(
     event_sizing_context: dict[str, Any] | None,
     runtime_health: dict[str, Any] | None,
     market_session: dict[str, Any] | None,
+    decision_freshness: dict[str, Any] | None = None,
+    entry_timing_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     portfolio_exposure = build_portfolio_exposure_context(
         entry_cluster=entry_cluster,
@@ -649,8 +655,11 @@ def build_open_learning_context_payload(
         "data_quality_context": build_entry_data_quality_context(
             market_micro=market_micro,
             runtime_health=runtime_health,
+            decision_freshness=decision_freshness,
         ),
         "market_session": market_session or {},
+        "decision_freshness": dict(decision_freshness or {}),
+        "entry_timing_context": dict(entry_timing_context or {}),
     }
 
 
@@ -680,6 +689,7 @@ def build_open_trade_risk_context_payload(
     data_lag_seconds: float,
     runtime_health: dict[str, Any],
     temporal_context: dict[str, Any],
+    decision_freshness: dict[str, Any] | None,
     supervisor_reentry_block: dict[str, Any] | None,
     event_filter_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -726,6 +736,7 @@ def build_open_trade_risk_context_payload(
         "bridge_connected": bool(bridge_connected),
         "data_lag_seconds": float(data_lag_seconds or 0.0),
         "runtime_health": runtime_health or {},
+        "decision_freshness": decision_freshness or {},
         "loss_cooldown_after_losses": risk_limits.loss_cooldown_after_losses,
         "loss_cooldown_bars": risk_limits.loss_cooldown_bars,
         "block_on_disk_critical": risk_limits.block_on_disk_critical,

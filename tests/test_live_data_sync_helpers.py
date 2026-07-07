@@ -4,29 +4,52 @@ import pandas as pd
 
 from backend.services.live_data_sync_helpers import (
     BAR_FRESHNESS_THRESHOLDS,
+    classify_decision_bar_freshness,
     classify_bar_freshness,
     classify_tick_freshness,
     dataframe_to_store_bars,
 )
 
 
-def test_classify_bar_freshness_preserves_threshold_order_and_observed_times():
-    now = 1_000_000.0
+def test_classify_bar_freshness_detects_missing_closed_m5_bar():
+    now = 1_783_396_219.0  # 2026-07-07 11:50:19 Asia/Shanghai
     latest = {
-        "M1": now - 30,
-        "M5": now - BAR_FRESHNESS_THRESHOLDS["M5"] - 1,
+        "M1": 1_783_395_840.0,  # 11:44, missing 11:49
+        "M5": 1_783_395_600.0,  # 11:40, missing 11:45
         "M15": 0,
         "H1": "bad",
     }
 
     result = classify_bar_freshness(latest, now=now)
 
-    assert result["fresh_tfs"] == ["M1"]
-    assert result["stale_tfs"] == ["M5", "M15", "M30", "H1", "H4", "D1"]
+    assert result["fresh_tfs"] == []
+    assert result["stale_tfs"] == ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
     assert result["observed_bar_ts_by_tf"] == {
-        "M1": now - 30,
-        "M5": now - BAR_FRESHNESS_THRESHOLDS["M5"] - 1,
+        "M1": 1_783_395_840.0,
+        "M5": 1_783_395_600.0,
     }
+    assert result["expected_bar_ts_by_tf"]["M5"] == 1_783_395_900.0
+    assert result["missing_closed_bars_by_tf"]["M5"] == 1
+
+
+def test_classify_decision_bar_freshness_accepts_latest_closed_bar():
+    now = 1_783_396_219.0
+
+    stale = classify_decision_bar_freshness(
+        latest_ts=1_783_395_600.0,
+        timeframe="M5",
+        now=now,
+    )
+    fresh = classify_decision_bar_freshness(
+        latest_ts=1_783_395_900.0,
+        timeframe="M5",
+        now=now,
+    )
+
+    assert stale["fresh"] is False
+    assert stale["expected_closed_bar_ts"] == 1_783_395_900.0
+    assert stale["missing_closed_bars"] == 1
+    assert fresh["fresh"] is True
 
 
 def test_classify_tick_freshness_treats_missing_ticks_as_stale_advisory():

@@ -74,3 +74,37 @@ def test_build_failure_taxonomy_marks_granular_entry_failures():
     assert "macro_event_overridden" in labels
     assert "low_reward_to_risk_entry" in labels
     assert result["primary_responsibility"] == "timing"
+
+
+def test_build_failure_taxonomy_prioritizes_system_data_contamination():
+    result = build_failure_taxonomy(
+        {
+            "entry_quality": 0.31,
+            "exit_quality": 0.55,
+            "action_score": -0.91,
+            "pnl": -0.27,
+            "mae": -0.48,
+            "mfe": 0.05,
+            "timeframe": "M5",
+            "entry_timing_context": {
+                "schema_version": "entry_timing_context.v1",
+                "timeframe_seconds": 300,
+                "signal_to_decision_delay_seconds": 619.0,
+                "signal_to_fill_delay_seconds": 622.0,
+            },
+            "decision_freshness_context": {
+                "schema_version": "review_decision_freshness_context.v1",
+                "fresh": True,
+                "data_lag_seconds": 619.0,
+            },
+            "data_quality_context": {"quote_fresh": True},
+            "context_integrity": "full",
+        }
+    )
+
+    labels = result["responsibility_labels"]
+    assert result["primary_responsibility"] == "data_quality"
+    assert "market_data_stale" in labels
+    assert "signal_execution_delay" in labels
+    assert "data_quality_issue" in labels
+    assert result["system_issue_context"]["contaminates_learning"] is True

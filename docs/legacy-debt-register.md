@@ -176,6 +176,24 @@
 - 收口方式: 旧模块已在代码注释中标为 paper/backtest/legacy；live 不新增这些模块的调用；VaR/CVaR、事件风险、模型权限和开仓/改仓/治理动作均回到 `RiskPolicyService`。
 - 验证方式: `tests/risk/test_policy_service.py`、`tests/test_live_service_circuit.py`、`tests/alpha/test_execution_gate.py`、`tests/test_live_loop_shell.py`。
 
+### live 决策使用过旧或未闭合 K 线
+
+- 状态: `fixed`
+- 旧理解: live tick 只要本地 bars 月库有最近几根 bar，就可以直接用最后一根作为 `complete=true` 决策输入；spot quote 可以修正执行价格，数据延迟只靠宽泛 `data_lag_max_seconds` 兜底。
+- 当前口径: live 因子决策只能使用最新已闭合 bar。`classify_bar_freshness()` 按 timeframe 推导应有闭合 bar；`_ensure_live_decision_bars_fresh()` 会在因子计算前过滤未闭合 bar，缺 bar 时通过主 cTrader bridge 回补月库并重载。修复失败时只阻断 open_trade，持仓监督和平仓链路继续运行。
+- 影响面: `backend/services/live_data_sync_helpers.py`、`backend/services/live_service.py`、`backend/services/live_position_lifecycle.py`、`risk/policy_service.py`、同步健康、决策审计、学习标签解释。
+- 收口方式: 新增 `decision_bar_freshness.v1` 运行态快照和 `decision_freshness` 风控上下文；`RiskPolicyService.evaluate("open_trade")` 对 `fresh=false` 返回 `decision_bar_stale`，不改变 close/reduce/tighten 降风险动作。
+- 验证方式: `tests/test_live_data_sync_helpers.py`、`tests/test_live_service_lifecycle.py::test_ensure_live_decision_bars_repairs_from_primary_bridge`、`tests/risk/test_policy_service.py::test_open_trade_blocks_stale_decision_bar_freshness`。
+
+### 交易复盘把信号时间当实际入场时间
+
+- 状态: `fixed`
+- 旧理解: `trade_outcome_review.entry_ts` 可以直接使用 open decision 的 K 线时间，亏损归因主要按信号/因子/持仓质量解释。
+- 当前口径: `entry_ts` 以 `order_lifecycle_event.filled` 的实际成交时间优先；信号 K 线时间保留为 `signal_bar_ts`。复盘必须记录 `entry_timing_context`、`decision_freshness_context` 和 `system_issue_context`，先识别数据时效/信号到成交延迟污染，再判断因子或持仓问题。
+- 影响面: `alpha/reflection/reviewer.py`、`backend/services/review_contract.py`、`backend/services/failure_taxonomy.py`、`backend/services/autonomous_learning.py`、`research/factor_governance_lightgbm.py`、学习样本、因子治理训练、复盘 UI 摘要。
+- 收口方式: 系统污染样本降为 partial/低权重；`factor_contribution_review` 标记 `system_contaminated` 并降低 confidence；`backfill_trade_review_timing_and_system_markers()` 只从现有 ledger/order/review 事实回填旧 review。
+- 验证方式: `tests/test_trade_reviewer.py::test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination`、`tests/test_autonomous_learning.py::test_backfill_trade_review_timing_marks_system_contamination`、`tests/test_factor_governance_lightgbm.py::test_factor_governance_lightgbm_skips_system_contaminated_reviews`。
+
 ## 5. 新旧债登记模板
 
 复制下面模板新增条目：
