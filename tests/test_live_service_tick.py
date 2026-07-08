@@ -426,6 +426,30 @@ def test_open_trade_context_sizing_blocks_when_reduction_below_broker_min():
     assert trace["context_policy_candidate_api_volume"] == 100.0
 
 
+def test_open_trade_context_sizing_preserves_demo_nursery_exploration_min_volume():
+    volume, trace = live_service._apply_context_position_sizing(
+        volume=100.0,
+        sizing_trace={
+            "schema_version": "position_sizing_trace.v1",
+            "demo_nursery_exploration": True,
+        },
+        composite=SimpleNamespace(
+            context_policy={
+                "applied": True,
+                "position_multiplier": 0.5,
+                "reason": "low_quality_context",
+            }
+        ),
+        bridge_meta={"api_min_volume": 100.0, "api_step_volume": 100.0},
+    )
+
+    assert volume == 100.0
+    assert trace["context_policy_demo_nursery_min_preserved"] is True
+    assert trace["context_policy"]["raw_api_volume"] == 50.0
+    assert trace["context_policy"]["adjusted_api_volume"] == 100.0
+    assert trace["context_policy"]["blocked_reason"] == ""
+
+
 def test_open_trade_context_sizing_does_not_lift_non_positive_upstream_size():
     volume, trace = live_service._apply_context_position_sizing(
         volume=0.0,

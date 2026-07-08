@@ -80,6 +80,36 @@ def risk_kelly_sizing(
         return {"volume": default_vol, "trace": trace}
 
     kelly_f = (kelly_data or {}).get("kelly_fraction", 0) or 0
+    demo_nursery_exploration = str(getattr(cfg, "autonomy_mode", "") or "") == "demo_nursery"
+    if kelly_f <= 0 and demo_nursery_exploration:
+        if max_order_api > 0 and default_vol > max_order_api:
+            trace.update(
+                {
+                    "reason": "demo_nursery_min_volume_exceeds_cap",
+                    "kelly_fraction": float(kelly_f or 0.0),
+                    "raw_api_volume": default_vol,
+                    "base_api_volume": 0.0,
+                    "final_api_volume": 0.0,
+                    "blocked_reason": "demo_nursery_min_volume_exceeds_cap",
+                    "demo_nursery_exploration": True,
+                    "exploration_api_volume": default_vol,
+                }
+            )
+            return {"volume": 0.0, "trace": trace}
+        trace.update(
+            {
+                "reason": "demo_nursery_min_volume_exploration",
+                "kelly_fraction": float(kelly_f or 0.0),
+                "raw_api_volume": default_vol,
+                "base_api_volume": default_vol,
+                "final_api_volume": default_vol,
+                "blocked_reason": "",
+                "demo_nursery_exploration": True,
+                "exploration_api_volume": default_vol,
+            }
+        )
+        return {"volume": default_vol, "trace": trace}
+
     if kelly_f <= 0:
         trace.update(
             {
@@ -183,6 +213,10 @@ def apply_entry_event_sizing(
     if base <= 0:
         final_volume = 0.0
         blocked_reason = upstream_blocked_reason or "non_positive_base_volume"
+    elif multiplier < 1.0 and bool(trace.get("demo_nursery_exploration")):
+        final_volume = base
+        blocked_reason = upstream_blocked_reason
+        trace["event_sizing_demo_nursery_min_preserved"] = True
     elif multiplier < 1.0:
         final_volume = floor_api_volume_to_step(raw_after_event, bridge_meta)
         blocked_reason = upstream_blocked_reason

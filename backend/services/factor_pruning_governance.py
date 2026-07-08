@@ -171,6 +171,8 @@ class FactorPruningGovernanceService:
         limit: int = 5,
         require_demo_nursery: bool = True,
         actor: str = "system:factor_pruning_governance.demo_nursery_auto_bridge",
+        review_missing: bool = True,
+        preview_before_submit: bool = True,
     ) -> dict[str, Any]:
         ensure_brain_governance_candidate_table(self.db_path)
         limit = max(1, min(int(limit or 5), 20))
@@ -187,11 +189,17 @@ class FactorPruningGovernanceService:
                     "items": [],
                     "boundary": self.boundary(),
                 }
-        rows = self._load_bridge_ready_candidates(limit=max(limit * 10, 50))
+        rows = self._load_bridge_ready_candidates(
+            limit=max(limit * 10, 50),
+            require_existing_bridge_ready_review=not review_missing,
+            sort_current_blend=review_missing,
+        )
         candidate_service = BrainGovernanceCandidateService(self.db_path)
-        from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
+        review_service = None
+        if review_missing:
+            from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 
-        review_service = BrainGovernanceCandidateReviewService(self.db_path)
+            review_service = BrainGovernanceCandidateReviewService(self.db_path)
         items = []
         submitted_seen = 0
         for row in rows:
@@ -213,32 +221,34 @@ class FactorPruningGovernanceService:
                     }
                 )
                 continue
-            preview = candidate_service.preview_policy_suggestion_bridge(candidate_id, actor=actor)
-            if not bool(preview.get("bridge_ready")):
-                items.append(
-                    {
-                        "status": "blocked_bridge_preview",
-                        "candidate_id": candidate_id,
-                        "factor": factor,
-                        "reason": preview.get("reason", ""),
-                    }
-                )
-                continue
-            review = review_service.review_candidate(candidate_id, run_llm=False, llm_dry_run=True, persist=True)
-            review_item = dict(review.get("review") or {})
-            if not bool(review_item.get("bridge_ready")):
-                items.append(
-                    {
-                        "status": "blocked_candidate_review",
-                        "candidate_id": candidate_id,
-                        "factor": factor,
-                        "review_status": review_item.get("review_status", review.get("status", "")),
-                        "evidence_gaps": review_item.get("evidence_gaps") or [],
-                        "source_reliability": review_item.get("source_reliability") or {},
-                        "review_id": review_item.get("review_id", ""),
-                    }
-                )
-                continue
+            if preview_before_submit:
+                preview = candidate_service.preview_policy_suggestion_bridge(candidate_id, actor=actor)
+                if not bool(preview.get("bridge_ready")):
+                    items.append(
+                        {
+                            "status": "blocked_bridge_preview",
+                            "candidate_id": candidate_id,
+                            "factor": factor,
+                            "reason": preview.get("reason", ""),
+                        }
+                    )
+                    continue
+            if review_missing and review_service is not None:
+                review = review_service.review_candidate(candidate_id, run_llm=False, llm_dry_run=True, persist=True)
+                review_item = dict(review.get("review") or {})
+                if not bool(review_item.get("bridge_ready")):
+                    items.append(
+                        {
+                            "status": "blocked_candidate_review",
+                            "candidate_id": candidate_id,
+                            "factor": factor,
+                            "review_status": review_item.get("review_status", review.get("status", "")),
+                            "evidence_gaps": review_item.get("evidence_gaps") or [],
+                            "source_reliability": review_item.get("source_reliability") or {},
+                            "review_id": review_item.get("review_id", ""),
+                        }
+                    )
+                    continue
             submitted = candidate_service.submit_candidate_to_policy_suggestion(candidate_id, actor=actor)
             if str(submitted.get("status") or "") in {"submitted_to_policy_suggestion", "already_submitted"}:
                 submitted_seen += 1
@@ -249,6 +259,7 @@ class FactorPruningGovernanceService:
                     "factor": factor,
                     "suggestion_id": submitted.get("suggestion_id", ""),
                     "policy_suggestion": submitted.get("policy_suggestion", {}),
+                    "reason": submitted.get("reason", ""),
                 }
             )
         return {
@@ -264,6 +275,8 @@ class FactorPruningGovernanceService:
                 **self.boundary(),
                 "writes_policy_suggestion_through_existing_bridge": True,
                 "candidate_review_required_before_bridge": True,
+                "review_missing_before_bridge": bool(review_missing),
+                "preview_before_submit": bool(preview_before_submit),
                 "does_not_apply_factor_weights": True,
             },
         }
@@ -324,22 +337,41 @@ class FactorPruningGovernanceService:
             conn.close()
         return self._sort_current_blend_first(rows)[:limit]
 
-    def _load_bridge_ready_candidates(self, *, limit: int) -> list[Any]:
+    def _load_bridge_ready_candidates(
+        self,
+        *,
+        limit: int,
+        require_existing_bridge_ready_review: bool = False,
+        sort_current_blend: bool = True,
+    ) -> list[Any]:
         query_limit = max(int(limit or 50) * 50, 500)
         conn = _connect(self.db_path, read_only=True)
         try:
             if not state_table_exists(conn, "brain_governance_candidate"):
                 return []
+            if require_existing_bridge_ready_review and not state_table_exists(conn, "brain_governance_candidate_review"):
+                return []
+            review_filter = ""
+            if require_existing_bridge_ready_review:
+                review_filter = """
+                  AND EXISTS (
+                      SELECT 1
+                      FROM brain_governance_candidate_review r
+                      WHERE r.candidate_id = c.candidate_id
+                        AND r.bridge_ready = 1
+                  )
+                """
             rows = _execute(
                 conn,
-                """
-                SELECT candidate_id, scope_key, expected_effect_json
-                FROM brain_governance_candidate
-                WHERE source_agent='factor_pruning_governance'
-                  AND proposal_stage='governance_ready'
-                  AND status='active'
-                  AND action='downweight'
-                  AND COALESCE(submitted_suggestion_id, '') = ''
+                f"""
+                SELECT c.candidate_id, c.scope_key, c.expected_effect_json
+                FROM brain_governance_candidate c
+                WHERE c.source_agent='factor_pruning_governance'
+                  AND c.proposal_stage='governance_ready'
+                  AND c.status='active'
+                  AND c.action='downweight'
+                  AND COALESCE(c.submitted_suggestion_id, '') = ''
+                  {review_filter}
                 ORDER BY evidence_score DESC, updated_at DESC, created_at DESC
                 LIMIT ?
                 """,
@@ -347,6 +379,8 @@ class FactorPruningGovernanceService:
             ).fetchall()
         finally:
             conn.close()
+        if not sort_current_blend:
+            return rows[:limit]
         return self._sort_current_blend_first(rows)[:limit]
 
     def _sort_current_blend_first(self, rows: list[Any]) -> list[Any]:

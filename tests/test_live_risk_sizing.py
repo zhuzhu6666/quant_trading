@@ -93,6 +93,35 @@ def test_risk_kelly_sizing_respects_dynamic_cap_and_fallbacks():
     assert missing_kelly["trace"]["blocked_reason"] == "kelly_fraction_non_positive"
 
 
+def test_demo_nursery_non_positive_kelly_uses_min_volume_exploration():
+    cfg = SimpleNamespace(
+        autonomy_mode="demo_nursery",
+        kelly_enabled=True,
+        kelly_fraction=1.0,
+        kelly_risk_per_trade_pct=0.10,
+        kelly_max_pct=0.25,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=1000.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+
+    result = risk_kelly_sizing(
+        cfg=cfg,
+        direction=1,
+        current_price=4000.0,
+        sl_price=3990.0,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        account={"equity": 1000.0},
+        kelly_data={"kelly_fraction": 0.0},
+    )
+
+    assert result["volume"] == 100.0
+    assert result["trace"]["reason"] == "demo_nursery_min_volume_exploration"
+    assert result["trace"]["demo_nursery_exploration"] is True
+    assert result["trace"]["blocked_reason"] == ""
+
+
 def test_risk_kelly_sizing_can_scale_to_demo_hard_cap_from_equity_budget():
     cfg = SimpleNamespace(
         kelly_enabled=True,
@@ -198,6 +227,22 @@ def test_apply_entry_event_sizing_floors_reduced_volume_without_lifting_to_min()
     assert blocked["trace"]["final_api_volume"] == 0.0
     assert tradeable["volume"] == 100.0
     assert tradeable["blocked_reason"] == ""
+
+
+def test_apply_entry_event_sizing_preserves_demo_nursery_exploration_min_volume():
+    result = apply_entry_event_sizing(
+        base_volume=100.0,
+        event_multiplier=0.2,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        sizing_trace={
+            "base_api_volume": 100.0,
+            "demo_nursery_exploration": True,
+        },
+    )
+
+    assert result["volume"] == 100.0
+    assert result["blocked_reason"] == ""
+    assert result["trace"]["event_sizing_demo_nursery_min_preserved"] is True
 
 
 def test_apply_entry_event_sizing_preserves_non_positive_upstream_block():

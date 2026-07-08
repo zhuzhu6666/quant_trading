@@ -41,7 +41,7 @@ def attach_policy_suggestion_agent_context(
     )
     context = payload.get("agent_context")
     if not isinstance(context, dict) or context.get("schema_version") != "agent_generation_context.v1":
-        payload["agent_context"] = _agent_context(
+        context = _agent_context(
             source_agent=source_agent,
             scope_type=scope_type,
             action=action,
@@ -50,6 +50,10 @@ def attach_policy_suggestion_agent_context(
             impact_level=impact_level,
             db_path=db_path,
         )
+        payload["agent_context"] = context
+    generation_context = payload.get("agent_generation_context")
+    if not isinstance(generation_context, dict) or generation_context.get("schema_version") != "agent_generation_context.v1":
+        payload["agent_generation_context"] = context
     payload.setdefault("agent_context_required", True)
     return payload
 

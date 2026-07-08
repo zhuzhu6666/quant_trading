@@ -37,7 +37,7 @@ demo nursery 自动采样
 - `v16_brain`
 - `autonomous_learning`
 - `factor_governance`
-- `factor_pruning_governance`
+- `factor_pruning_materialize` / `factor_pruning_promote` / `factor_pruning_bridge`
 - `llm_advisory`
 - `lightgbm_shadow_models`
 
@@ -139,7 +139,92 @@ source evidence / candidate
 - 小程序保持简洁状态界面；复杂治理放 Web。
 - 所有按钮只触发后端受控 API。
 
-## 9. Deviation Guard
+## 9. Stable Demo Nursery Self-Evolution Plan
+
+稳定 demo nursery 自进化按阶段推进，不再横向堆新 agent。每个阶段都必须复用现有事实源、审查链和执行边界。
+
+### 9.1 Phase A: Cycle Visibility
+
+目标：
+
+- 用 `AutonomousEvolutionCycleService` 把现有 runtime、evidence、proposal、candidate review、replay、release、effect 和 scorecard 汇总成同一轮周期状态。
+- 暴露 `/api/ops/autonomy/evolution-cycle` 和 readiness `v16.autonomous_evolution_cycle`。
+- 只读，不刷新权重、不提交订单、不写 runtime overlay。
+
+完成标准：
+
+- 每轮能回答：当前卡在哪、下一步该跑 replay、review、bridge、reconcile，还是可进入小步 demo apply window。
+- `replay_missing_or_stale`、proposal conflict、candidate review 缺口、effect monitor 缺口必须机器可读。
+
+### 9.2 Phase B: Evidence Freshness Loop
+
+目标：
+
+- 让 replay/release/effect freshness 成为周期硬门，不靠人工记忆。
+- replay 过期时优先触发低影响 replay job；release 缺失时记录 release run；effect monitor 缺失时先 reconcile。
+- 用 `AutonomousEvolutionNurseryRunner` 复用现有 replay harness、release control、effect tracker、candidate review、Proposal Registry 和 autonomous learning cycle，不另造执行链。
+
+完成标准：
+
+- autonomy health 不再长期卡在 `replay_missing_or_stale`。
+- `AutonomousEvolutionCycle.status` 能稳定进入 `ready_for_guarded_demo_apply` 或给出明确 next action。
+- `/api/ops/autonomy/evolution-cycle/run` 可以触发一轮低频协调；learning worker `autonomous_evolution_nursery` job 默认只修复 freshness/ready 状态，不自动跑 replay，也不自动跑 blocking apply，以避免和后端 bars catch-up/DuckDB 写入及长学习任务抢锁。`apply_demo_autonomy` 和完整 `run_autonomous_learning_cycle` 当前都属于显式维护动作：API 必须设置 `apply_when_ready=true` 且 `confirm_blocking_apply=true`，完整学习重算还必须 `full_learning_cycle=true`。
+- replay freshness 使用轻量 `bar_replay_freshness` nursery evidence；DuckDB bar 读取在锁冲突时走只读 snapshot fallback，不再和 live/月库写入互相卡死。
+- Proposal Registry stale evidence 分为 hard stale、request_replay 和 request_review 队列；只有 hard stale 阻断 guarded demo apply，replay/review stale 作为 next action 工作队列保留。
+- `/api/ops/autonomy/demo-apply-plan` / `demo-apply-step` 将原 blocking apply 链拆成显式单步：factor pruning materialize/promote/bridge、governor review、conflict resolve、factor weight sync、parameter template apply/release、supervisor template apply/rollback。每次只跑一个 step，且 mutating step 必须 `confirm_step=true`；其中 `factor_pruning_materialize` 是可能较重的候选重扫描，只能显式触发，`factor_pruning_promote` 会做反证检查，nursery 常规推进在已有 `governance_ready` 队列时优先推荐 `factor_pruning_bridge`。stepper bridge 只消费已有 `bridge_ready` candidate review，不在 apply step 里补审；较重 step 应用 `run_async=true` 提交后台执行，API 立即返回 `run_id`，执行结果回写 `evolution_run`。
+- `AutonomousEvolutionNurseryRunner` 可在 ready 后通过 `consume_recommended_step=true` 每轮自动消费 1 个推荐小步；learning worker 默认开启该低频消费，但只允许 bridge/review/conflict/rollback 这些治理推进，且优先 review/conflict/rollback 再 bridge，`sync_factor_weights` 仍需要显式维护窗口。
+
+### 9.3 Phase C: Guarded Candidate Bridge
+
+目标：
+
+- 只在 `demo_nursery` 下，把 `bridge_ready` candidate 按限速桥接到 legacy governance/review 队列。
+- 桥接前必须满足 AgentAuthority、CandidateReview、scorecard、briefing、counter-evidence 和 replay freshness。
+
+完成标准：
+
+- 桥接动作只写受控建议，不直接应用权重/模板/订单。
+- 同一 control surface 冲突时只允许 review/observe/request_replay，不允许自动桥接。
+
+### 9.4 Phase D: Small Demo Apply
+
+目标：
+
+- 允许 demo nursery 自动应用低影响或中低影响治理动作，但必须继续走 `RiskPolicyService`、`DecisionPolicy`、`RuntimeConfigMutationService` 和 overlay/snapshot。
+- demo 权限不能太紧：学习门可 observation，底线风控仍硬拦。
+- 默认 nursery run 不执行 blocking apply，只暴露 `guarded_demo_apply_window`；小步 `apply_demo_autonomy(suggestion_limit)` 和完整 counterfactual/materialize/governor 全链都留给显式维护窗口，后续需要拆成可限时、可审计、可恢复的小任务。
+- 第一版 stepper 已提供可限时、可审计的单步入口；后续目标是让旧 `apply_demo_autonomy` 内部也迁移为这些 step 的编排，而不是继续维护一条同步长链。
+
+完成标准：
+
+- 单轮 apply 有频率、影响面、预算和 rollback JSON。
+- 亏损或效果变差不会立刻禁止学习，但会提高证据要求、降低 source reliability 或限制同类动作重复。
+
+### 9.5 Phase E: Effect-Driven Growth
+
+目标：
+
+- 每次 apply 后必须进入 `learning_application_effect`、`experience_memory` 和 `agent_scorecard`。
+- 正反馈可提高审查优先级；负反馈优先作为反证和证据门。
+
+完成标准：
+
+- 连续同类错误触发自动加严：需要更多 replay、更多 counter-evidence、降低 bridge 优先级，必要时 rollback。
+- 系统可以犯新错，但不能在同一条件下无限重复旧错。
+
+### 9.6 Phase F: Live Autonomy Candidate
+
+目标：
+
+- demo nursery 连续稳定后，才考虑 `live_candidate` / `live_autonomous`。
+- live unlock 仍必须人工一次性确认，且证据过期自动 degraded。
+
+完成标准：
+
+- replay/release/readiness/scorecard/proposal conflict/budget 都新鲜。
+- live 开仓预算触顶必须阻断新增风险，并可受控收紧到 `no_new_risk`。
+
+## 10. Deviation Guard
 
 每一步推进必须回答：
 

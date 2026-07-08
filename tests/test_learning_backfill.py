@@ -244,3 +244,50 @@ def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path
     assert template_stat["sample_count"] == 3
     assert live_exp["append_source"] == "live_review"
     assert old_backfill is None
+
+
+def test_learning_backfill_refreshes_trade_lesson_memory_without_new_reviews(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "state.db")
+    _init_db(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+             pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
+             review_json, created_at)
+            VALUES ('review_refresh', 'trade_refresh', 'pos_refresh', '', '',
+                    -8.0, -10.0, 1.0, 'bad_loss', '["weak_entry_signal"]',
+                    'refresh existing lesson', '{"primary_responsibility":"signal_quality"}', 100.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def _get_conn():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    monkeypatch.setattr(learning_backfill, "get_state_conn", _get_conn)
+
+    result = learning_backfill.run_learning_backfill(limit=10, allow_partial=True, rebuild_learning=True)
+
+    assert result["inserted_count"] == 0
+    assert result["lesson_rebuild"]["status"] == "refreshed"
+    assert result["lesson_rebuild"]["upserted"] == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT decision_context_json FROM experience_memory WHERE source_id='review_refresh'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    context = json.loads(row[0] or "{}")
+    assert context["agent_attribution"]["feedback_targets"] == ["autonomous_learning"]

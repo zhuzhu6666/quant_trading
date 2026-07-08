@@ -20,6 +20,7 @@ from backend.core.db import (
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.agent_briefing import AgentBriefingContextService
 from backend.services.agent_scorecard import AgentScorecardService
+from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
 from backend.services.meta_governance import MetaGovernanceService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.stability import measure, record_timing, timing_snapshot
@@ -368,6 +369,11 @@ class BackendReadinessService:
         payload["agent_chain_health"] = agent_chain_health
         live_autonomy = self._timed_component("live_autonomy", lambda: self._live_autonomy_status(payload))
         payload["live_autonomy"] = live_autonomy
+        autonomous_evolution_cycle = self._timed_component(
+            "autonomous_evolution_cycle",
+            lambda: self._autonomous_evolution_cycle_status(payload),
+        )
+        payload["autonomous_evolution_cycle"] = autonomous_evolution_cycle
         payload["v16"] = {
             "schema_version": "v16_readiness_contract.v1",
             "phase": "phase5_live_ready_guardrails",
@@ -390,6 +396,7 @@ class BackendReadinessService:
             "agent_briefing": agent_briefing,
             "agent_chain_health": agent_chain_health,
             "live_autonomy": live_autonomy,
+            "autonomous_evolution_cycle": autonomous_evolution_cycle,
             "control_plane_boundaries": {
                 "read_only": True,
                 "affects_trading": False,
@@ -420,6 +427,7 @@ class BackendReadinessService:
                 "agent_briefing_read_only": True,
                 "agent_trade_feedback_read_only": True,
                 "live_autonomy_requires_manual_unlock": True,
+                "autonomous_evolution_cycle_read_only": True,
             },
         }
         autonomous_blueprint = self._timed_component("autonomous_blueprint", lambda: self._autonomous_blueprint_status(payload))
@@ -1481,6 +1489,21 @@ class BackendReadinessService:
                 "schema_version": "live_autonomy_status.v1",
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def _autonomous_evolution_cycle_status(self, readiness: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return AutonomousEvolutionCycleService(self.db_path).status(
+                readiness=readiness,
+                refresh_proposals=False,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "autonomous_evolution_cycle.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "boundary": AutonomousEvolutionCycleService.boundary(),
             }
 
     @staticmethod

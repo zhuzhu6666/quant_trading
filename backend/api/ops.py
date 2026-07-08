@@ -1,5 +1,5 @@
 """Ops API endpoints: alerts, auto-recovery, weekly reports, experiments."""
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 import time
 from typing import Any
 
@@ -9,6 +9,9 @@ from backend.core.auth import RequireUser
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.agent_briefing import AgentBriefingContextService
 from backend.services.agent_scorecard import AgentScorecardService
+from backend.services.autonomous_demo_apply_stepper import AutonomousDemoApplyStepper
+from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
+from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
 from backend.services.autonomy_health import AutonomyHealthService
 from backend.services.brain_action_evaluator import BrainActionPlanEvaluatorService
 from backend.services.brain_memory import BrainMemoryService
@@ -39,6 +42,7 @@ router = APIRouter(prefix="/api/ops", tags=["ops"])
 _auto_recovery: AutoRecovery | None = None
 _report_gen: WeeklyReport | None = None
 _READINESS_CACHE = TimedCache()
+_BACKEND_READINESS_TTL_SEC = 180.0
 
 
 class IncidentControlRequest(BaseModel):
@@ -142,6 +146,35 @@ class BrainGovernanceCandidateReviewRequest(BaseModel):
     llm_dry_run: bool = True
 
 
+class AutonomousEvolutionNurseryRunRequest(BaseModel):
+    replay_if_stale: bool = True
+    reconcile_effects: bool = True
+    refresh_proposals: bool = True
+    review_candidates: bool = True
+    create_release_evidence: bool = True
+    consume_recommended_step: bool = False
+    apply_when_ready: bool = False
+    confirm_blocking_apply: bool = False
+    full_learning_cycle: bool = False
+    replay_lookback_days: float = 7.0
+    replay_limit: int = 80
+    review_limit: int = 50
+    effect_limit: int = 50
+    sample_limit: int = 500
+    recommendation_limit: int = 20
+    suggestion_limit: int = 20
+    recommended_step_limit: int = 1
+    recommended_step_allowlist: list[str] = Field(default_factory=list)
+
+
+class AutonomousDemoApplyStepRequest(BaseModel):
+    step: str
+    limit: int = 0
+    confirm_step: bool = False
+    actor: str = "api:ops.autonomous_demo_apply_step"
+    run_async: bool = False
+
+
 class BrainLiveReadyGuardrailEvaluateRequest(BaseModel):
     source: str = "api:ops.brain.live_ready_guardrails"
 
@@ -237,20 +270,34 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
     payload = _READINESS_CACHE.get(cache_key)
     if payload is not None:
         payload.setdefault("cache", {})
-        payload["cache"].update({"source": "cache", "ttl_sec": 10.0})
+        payload["cache"].update({"source": "cache", "ttl_sec": _BACKEND_READINESS_TTL_SEC})
         return payload
 
-    with _READINESS_CACHE.compute_lock(cache_key):
+    lock = _READINESS_CACHE.compute_lock(cache_key)
+    if lock.locked():
+        fallback = _READINESS_CACHE.last_good(cache_key)
+        if fallback:
+            created_at, payload = fallback
+            payload.setdefault("cache", {})
+            payload["cache"].update({
+                "source": "stale",
+                "ttl_sec": _BACKEND_READINESS_TTL_SEC,
+                "stale_reason": "compute_in_progress",
+                "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
+            })
+            return payload
+
+    with lock:
         payload = _READINESS_CACHE.get(cache_key)
         if payload is not None:
             payload.setdefault("cache", {})
-            payload["cache"].update({"source": "cache", "ttl_sec": 10.0})
+            payload["cache"].update({"source": "cache", "ttl_sec": _BACKEND_READINESS_TTL_SEC})
             return payload
         try:
             payload = _compute()
             payload.setdefault("cache", {})
-            payload["cache"].update({"source": "computed", "ttl_sec": 10.0})
-            return _READINESS_CACHE.set(cache_key, payload, ttl_sec=10.0)
+            payload["cache"].update({"source": "computed", "ttl_sec": _BACKEND_READINESS_TTL_SEC})
+            return _READINESS_CACHE.set(cache_key, payload, ttl_sec=_BACKEND_READINESS_TTL_SEC)
         except Exception:
             fallback = _READINESS_CACHE.last_good(cache_key)
             if not fallback:
@@ -259,7 +306,7 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
             payload.setdefault("cache", {})
             payload["cache"].update({
                 "source": "stale",
-                "ttl_sec": 10.0,
+                "ttl_sec": _BACKEND_READINESS_TTL_SEC,
                 "stale_reason": "compute_error",
                 "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
             })
@@ -301,9 +348,16 @@ def get_agent_briefing(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
 
 
 @router.get("/agent-trade-attribution")
-def get_agent_trade_attribution(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+def get_agent_trade_attribution(
+    _user: RequireUser,
+    limit: int = 50,
+    include_external_links: bool = False,
+) -> dict[str, Any]:
     """Return read-only trade outcome feedback linked back to source agents."""
-    attribution = AgentScorecardService().latest_trade_attributions(limit=max(1, min(int(limit), 200)))
+    attribution = AgentScorecardService().latest_trade_attributions(
+        limit=max(1, min(int(limit), 200)),
+        include_external_links=bool(include_external_links),
+    )
     return {
         "ok": bool(attribution.get("ok")),
         "schema_version": "ops_agent_trade_attribution.v1",
@@ -319,6 +373,128 @@ def get_agent_chain_health(_user: RequireUser, limit: int = 300) -> dict[str, An
         "ok": bool(health.get("ok")),
         "schema_version": "ops_agent_chain_health.v1",
         "agent_chain_health": health,
+    }
+
+
+@router.get("/autonomy/evolution-cycle")
+def get_autonomous_evolution_cycle(
+    _user: RequireUser,
+    refresh_proposals: bool = False,
+    full_readiness: bool = False,
+) -> dict[str, Any]:
+    """Return the read-only self-evolution cycle state for demo nursery."""
+    readiness = (
+        BackendReadinessService().build()
+        if bool(full_readiness)
+        else AutonomousEvolutionNurseryRunner().build_light_readiness()
+    )
+    cycle = AutonomousEvolutionCycleService().status(
+        readiness=readiness,
+        refresh_proposals=bool(refresh_proposals),
+        include_chain_health=bool(full_readiness),
+    )
+    if refresh_proposals:
+        _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(cycle.get("ok")),
+        "schema_version": "ops_autonomous_evolution_cycle.v1",
+        "cycle": cycle,
+        "readiness_generated_at": readiness.get("generated_at"),
+        "readiness_mode": "full" if bool(full_readiness) else "light",
+    }
+
+
+@router.post("/autonomy/evolution-cycle/run")
+def run_autonomous_evolution_nursery_cycle(req: AutonomousEvolutionNurseryRunRequest, _user: RequireUser) -> dict[str, Any]:
+    """Run one guarded demo-nursery self-evolution coordination cycle."""
+    if bool(req.apply_when_ready) and not bool(req.confirm_blocking_apply):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "blocking_apply_requires_confirmation",
+                "msg": "Set confirm_blocking_apply=true to run the currently blocking demo apply path.",
+                "recommended": "Run with apply_when_ready=false to repair freshness and inspect the guarded apply window.",
+            },
+        )
+    result = AutonomousEvolutionNurseryRunner().run_once(
+        replay_if_stale=bool(req.replay_if_stale),
+        reconcile_effects=bool(req.reconcile_effects),
+        refresh_proposals=bool(req.refresh_proposals),
+        review_candidates=bool(req.review_candidates),
+        create_release_evidence=bool(req.create_release_evidence),
+        consume_recommended_step=bool(req.consume_recommended_step),
+        apply_when_ready=bool(req.apply_when_ready),
+        full_learning_cycle=bool(req.full_learning_cycle),
+        replay_lookback_days=max(0.0, min(float(req.replay_lookback_days), 30.0)),
+        replay_limit=max(1, min(int(req.replay_limit), 1000)),
+        review_limit=max(1, min(int(req.review_limit), 200)),
+        effect_limit=max(1, min(int(req.effect_limit), 200)),
+        sample_limit=max(1, min(int(req.sample_limit), 2000)),
+        recommendation_limit=max(1, min(int(req.recommendation_limit), 100)),
+        suggestion_limit=max(1, min(int(req.suggestion_limit), 100)),
+        recommended_step_limit=max(1, min(int(req.recommended_step_limit), 20)),
+        recommended_step_allowlist=list(req.recommended_step_allowlist or []),
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_autonomous_evolution_nursery_run.v1",
+        "run": result,
+    }
+
+
+@router.get("/autonomy/demo-apply-plan")
+def get_autonomous_demo_apply_plan(_user: RequireUser) -> dict[str, Any]:
+    """Return explicit single-step demo apply plan without mutating state."""
+    plan = AutonomousDemoApplyStepper().plan()
+    return {
+        "ok": bool(plan.get("ok")),
+        "schema_version": "ops_autonomous_demo_apply_plan.v1",
+        "plan": plan,
+    }
+
+
+@router.post("/autonomy/demo-apply-step")
+def run_autonomous_demo_apply_step(
+    req: AutonomousDemoApplyStepRequest,
+    background_tasks: BackgroundTasks,
+    _user: RequireUser,
+) -> dict[str, Any]:
+    """Run one confirmed demo apply step through existing guarded services."""
+    service = AutonomousDemoApplyStepper()
+    if bool(req.run_async):
+        result = service.start_background_step(
+            req.step,
+            limit=int(req.limit or 0) if req.limit else None,
+            confirm_step=bool(req.confirm_step),
+            actor=req.actor,
+        )
+        if str(result.get("status") or "") == "accepted":
+            background_tasks.add_task(
+                service.run_accepted_step,
+                step=str(result.get("step") or req.step),
+                experiment_id=str(result.get("experiment_id") or ""),
+                run_id=str(result.get("run_id") or ""),
+                limit=int(result.get("limit") or req.limit or 1),
+            )
+    else:
+        result = service.run_step(
+            req.step,
+            limit=int(req.limit or 0) if req.limit else None,
+            confirm_step=bool(req.confirm_step),
+            actor=req.actor,
+        )
+    if bool(result.get("ok")):
+        _READINESS_CACHE.invalidate("backend-readiness")
+    status = str(result.get("status") or "")
+    if status == "confirmation_required":
+        raise HTTPException(status_code=409, detail=result)
+    if not bool(result.get("ok")):
+        raise HTTPException(status_code=400, detail=result)
+    return {
+        "ok": True,
+        "schema_version": "ops_autonomous_demo_apply_step.v1",
+        "step_result": result,
     }
 
 

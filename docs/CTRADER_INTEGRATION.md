@@ -141,7 +141,7 @@ writer 每次批量写入前会按事件时间选择目标月库；如果跨月�
 
 因此排查 cTrader 问题时，不能只盯 `live_loop` tick 频率，也要看:
 
-- `journalctl` 里是否在刷 `depth event` / `depth events (5s)`
+- `journalctl` 里是否在刷 `depth event` / `depth events`
 - `py-spy dump` 是否卡在 `factor_cards.py` / `parameter_templates.py`
 - depth 是否又被改回回调内同步写库，或是否有人恢复了历史独立 L2 collector
 

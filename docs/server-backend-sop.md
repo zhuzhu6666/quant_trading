@@ -365,7 +365,7 @@ systemctl status quant-backend.service --no-pager
 
 不要只盯登录、鉴权或 loop 开关，优先同时检查下面三件事：
 
-1. `journalctl` 中是否在高频刷 `depth event` / `depth events (5s)`
+1. `journalctl` 中是否在高频刷 `depth event` / `depth events`
 2. 是否存在学习治理接口被频繁访问，导致 `factor_cards / parameter_templates` 重算
 3. L2 是否被误改成回调内同步写库，或是否恢复了历史独立 L2 collector
 

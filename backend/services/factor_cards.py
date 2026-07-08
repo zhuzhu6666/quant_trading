@@ -23,6 +23,8 @@ from backend.core.db import (
 
 
 _CARD_CACHE_TTL_SEC = 60.0
+_EVIDENCE_SNAPSHOT_LIMIT = 2000
+_CANDIDATE_MIN_LIMIT = 250
 _CARD_CACHE_LOCK = threading.Lock()
 _CARD_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
@@ -166,7 +168,7 @@ class FactorCardService:
         factor_family: str | None = None,
     ) -> list[dict[str, Any]]:
         cache_key = (
-            f"{self.db_path.resolve()}|{source or '*'}|{lifecycle_status or '*'}|"
+            f"{self.db_path.resolve()}|limit:{int(limit)}|{source or '*'}|{lifecycle_status or '*'}|"
             f"{factor_id or '*'}|{factor_family or '*'}"
         )
         now_ts = time.time()
@@ -190,6 +192,11 @@ class FactorCardService:
                 ids = sorted(set(ids) | set(catalog_by_factor))
             except Exception:
                 catalog_by_factor = {}
+            if factor_id:
+                ids = [factor_id]
+            else:
+                candidate_cap = max(_CANDIDATE_MIN_LIMIT, int(limit) * (10 if (source or lifecycle_status or factor_family) else 5))
+                ids = self._rank_candidate_ids(ids, catalog_by_factor, candidate_cap)
             built = [
                 self._build_card(name, conn=conn, catalog_item=catalog_by_factor.get(name))
                 for name in ids
@@ -214,6 +221,33 @@ class FactorCardService:
         with _CARD_CACHE_LOCK:
             _CARD_CACHE[cache_key] = (now_ts + _CARD_CACHE_TTL_SEC, deepcopy(items))
         return items[:limit]
+
+    @staticmethod
+    def _rank_candidate_ids(
+        ids: list[str],
+        catalog_by_factor: dict[str, dict[str, Any]],
+        limit: int,
+    ) -> list[str]:
+        if limit <= 0 or len(ids) <= limit:
+            return ids
+
+        def rank(factor_id: str) -> tuple[int, int, str]:
+            item = catalog_by_factor.get(factor_id) or {}
+            participates = bool(
+                item.get("enabled")
+                or item.get("eligible_for_live")
+                or item.get("used_in_score")
+            )
+            lifecycle = str(item.get("lifecycle_status") or "").upper()
+            active = participates or lifecycle in {"ACTIVE", "SHADOW", "DISCOVERED"}
+            has_catalog = factor_id in catalog_by_factor
+            return (
+                0 if active else 1,
+                0 if has_catalog else 1,
+                factor_id,
+            )
+
+        return sorted(ids, key=rank)[:limit]
 
     def _factor_ids(self, conn=None) -> list[str]:
         adapter = RegistryAdapter.shared()
@@ -343,10 +377,15 @@ class FactorCardService:
             SELECT AVG(shadow_score) AS avg_shadow_score,
                    AVG(contribution_score) AS avg_contribution_score,
                    COUNT(*) AS sample_count
-            FROM decision_factor_snapshot
-            WHERE factor=?
+            FROM (
+                SELECT shadow_score, contribution_score
+                FROM decision_factor_snapshot
+                WHERE factor=?
+                ORDER BY id DESC
+                LIMIT ?
+            ) recent
             """,
-            (factor_id,),
+            (factor_id, _EVIDENCE_SNAPSHOT_LIMIT),
         ).fetchone()
         review_rows = _execute(
             conn,

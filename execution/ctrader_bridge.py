@@ -235,8 +235,9 @@ class CTraderBridge(BaseBrokerBridge):
                  forced_symbol_id: int | None = None,
                  l2_persist_enabled: bool = False,
                  l2_snapshot_interval_sec: float = 5.0,
-                 l2_write_batch_size: int = 1000,
-                 l2_write_flush_interval_sec: float = 1.0):
+                 l2_write_batch_size: int = 5000,
+                 l2_write_flush_interval_sec: float = 5.0,
+                 l2_depth_log_interval_sec: float = 30.0):
         if not HAS_CTRADER:
             raise ImportError("ctrader-open-api 未装; pip install ctrader-open-api")
         self.client_id = client_id
@@ -253,8 +254,9 @@ class CTraderBridge(BaseBrokerBridge):
         self.proxy_rdns = bool(proxy_rdns)
         self.l2_persist_enabled = bool(l2_persist_enabled)
         self.l2_snapshot_interval_sec = max(0.0, float(l2_snapshot_interval_sec or 0.0))
-        self.l2_write_batch_size = max(1, int(l2_write_batch_size or 1000))
-        self.l2_write_flush_interval_sec = max(0.1, float(l2_write_flush_interval_sec or 1.0))
+        self.l2_write_batch_size = max(1, int(l2_write_batch_size or 5000))
+        self.l2_write_flush_interval_sec = max(0.1, float(l2_write_flush_interval_sec or 5.0))
+        self.l2_depth_log_interval_sec = max(0.0, float(l2_depth_log_interval_sec or 30.0))
 
         self._client: "Client | None" = None
         self._reactor = None
@@ -1462,9 +1464,11 @@ class CTraderBridge(BaseBrokerBridge):
             self._depth_log_accum_new += len(new_quotes)
             self._depth_log_accum_deleted += len(deleted_ids)
             now = time.time()
-            if now - self._depth_log_last_ts >= 5.0:
+            depth_log_interval = float(getattr(self, "l2_depth_log_interval_sec", 30.0) or 0.0)
+            if depth_log_interval > 0 and now - self._depth_log_last_ts >= depth_log_interval:
                 logger.info(
-                    "depth events (5s): +%d / -%d, book=%d",
+                    "depth events (%.0fs): +%d / -%d, book=%d",
+                    depth_log_interval,
                     self._depth_log_accum_new,
                     self._depth_log_accum_deleted,
                     len(self._depth_quotes),

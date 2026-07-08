@@ -16,7 +16,7 @@ def test_demo_autonomous_uses_demo_learning_daily_trade_limit():
     assert snapshot.max_daily_trades == 60
 
 
-def test_demo_nursery_uses_demo_learning_daily_trade_limit():
+def test_demo_nursery_uses_unlimited_daily_trade_sampling():
     cfg = SimpleNamespace(
         autonomy_mode="demo_nursery",
         risk_max_daily_trades=20,
@@ -25,8 +25,8 @@ def test_demo_nursery_uses_demo_learning_daily_trade_limit():
 
     snapshot = RiskLimitSnapshot.from_runtime_config(cfg)
 
-    assert snapshot.source == "runtime_config:demo_learning"
-    assert snapshot.max_daily_trades == 60
+    assert snapshot.source == "runtime_config:demo_nursery_unlimited"
+    assert snapshot.max_daily_trades == 0
 
 
 def test_non_demo_mode_keeps_regular_daily_trade_limit():

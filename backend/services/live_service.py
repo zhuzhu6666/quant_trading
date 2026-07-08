@@ -3477,8 +3477,9 @@ def _make_ctrader_bridge(**overrides):
         ).strip().lower() not in {"0", "false", "no", "off"},
         l2_persist_enabled=bool(getattr(runtime_cfg, "l2_collection_enabled", True)),
         l2_snapshot_interval_sec=float(getattr(runtime_cfg, "l2_snapshot_interval_sec", 5.0) or 5.0),
-        l2_write_batch_size=int(getattr(runtime_cfg, "l2_write_batch_size", 1000) or 1000),
-        l2_write_flush_interval_sec=float(getattr(runtime_cfg, "l2_write_flush_interval_sec", 1.0) or 1.0),
+        l2_write_batch_size=int(getattr(runtime_cfg, "l2_write_batch_size", 5000) or 5000),
+        l2_write_flush_interval_sec=float(getattr(runtime_cfg, "l2_write_flush_interval_sec", 5.0) or 5.0),
+        l2_depth_log_interval_sec=float(getattr(runtime_cfg, "l2_depth_log_interval_sec", 30.0) or 30.0),
     )
     kw.update(overrides)
     bridge = CTraderBridge(**kw)
@@ -3498,8 +3499,9 @@ def _apply_l2_runtime_config(bridge) -> None:
     try:
         bridge.l2_persist_enabled = bool(getattr(runtime_cfg, "l2_collection_enabled", True))
         bridge.l2_snapshot_interval_sec = max(0.0, float(getattr(runtime_cfg, "l2_snapshot_interval_sec", 5.0) or 5.0))
-        bridge.l2_write_batch_size = max(1, int(getattr(runtime_cfg, "l2_write_batch_size", 1000) or 1000))
-        bridge.l2_write_flush_interval_sec = max(0.1, float(getattr(runtime_cfg, "l2_write_flush_interval_sec", 1.0) or 1.0))
+        bridge.l2_write_batch_size = max(1, int(getattr(runtime_cfg, "l2_write_batch_size", 5000) or 5000))
+        bridge.l2_write_flush_interval_sec = max(0.1, float(getattr(runtime_cfg, "l2_write_flush_interval_sec", 5.0) or 5.0))
+        bridge.l2_depth_log_interval_sec = max(0.0, float(getattr(runtime_cfg, "l2_depth_log_interval_sec", 30.0) or 30.0))
     except Exception as exc:
         logger.debug("[ctrader] l2 runtime config apply skipped: %s", exc)
 
@@ -7121,6 +7123,13 @@ def _apply_context_position_sizing(
     if input_volume <= 0:
         adjusted_volume = 0.0
         blocked_reason = upstream_blocked_reason or "non_positive_upstream_sizing"
+    elif (
+        context_mult < 1.0
+        and context_raw_volume < min_volume
+        and bool(next_trace.get("demo_nursery_exploration"))
+    ):
+        adjusted_volume = input_volume
+        next_trace["context_policy_demo_nursery_min_preserved"] = True
     elif context_mult < 1.0 and context_raw_volume < min_volume:
         adjusted_volume = 0.0
         blocked_reason = (

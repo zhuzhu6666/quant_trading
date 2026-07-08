@@ -180,6 +180,41 @@ def test_trade_attribution_links_review_to_agents_and_lesson_memory(tmp_path):
     assert "factor_governance" in item["feedback_targets"]
 
 
+def test_trade_attribution_counts_lesson_memory_participants_as_linked(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = _setup_state(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+             pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
+             review_json, created_at)
+            VALUES ('review_lesson_only', 'trade_lesson_only', 'pos_lesson_only', '', '',
+                    -10.0, -12.0, 1.0, 'bad_loss', '["weak_entry_signal"]',
+                    'lesson only', '{"primary_responsibility":"signal_quality"}', ?)
+            """,
+            (now,),
+        )
+        row = conn.execute("SELECT * FROM trade_outcome_review WHERE review_id='review_lesson_only'").fetchone()
+        upsert_trade_lesson_memory(conn, row)
+        conn.commit()
+    finally:
+        conn.close()
+
+    attribution = AgentScorecardService(db_path).latest_trade_attributions(
+        limit=10,
+        include_external_links=False,
+    )
+    item = attribution["items"][0]
+
+    assert attribution["summary"]["linked_review_count"] == 1
+    assert item["review_id"] == "review_lesson_only"
+    assert {p["source_agent"] for p in item["participants"]} == {"autonomous_learning"}
+    assert "autonomous_learning" in item["feedback_targets"]
+
+
 def test_agent_briefing_includes_governance_coverage(tmp_path):
     db_path = tmp_path / "state.db"
     conn = _setup_state(db_path)

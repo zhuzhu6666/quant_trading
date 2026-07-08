@@ -357,6 +357,102 @@ class ReplayHarnessService:
         self._persist_report(report)
         return report
 
+    def run_bar_replay_freshness(
+        self,
+        *,
+        lookback_days: float = 1.0,
+        limit: int = 20,
+        warmup_bars: int = 20,
+        post_bars: int = 1,
+        window_sample_limit: int = 5,
+        replay_run_id: str = "",
+    ) -> dict[str, Any]:
+        """Run a light nursery replay freshness check without full recompute."""
+        ensure_replay_report_table(self.db_path)
+        started_at = time.time()
+        scope = {
+            "schema_version": "replay_scope.v1",
+            "kind": "bar_replay_freshness",
+            "lookback_days": float(lookback_days),
+            "limit": int(limit),
+            "warmup_bars": int(warmup_bars),
+            "post_bars": int(post_bars),
+            "window_sample_limit": int(window_sample_limit),
+            "read_only": True,
+            "risk_policy_boundary": "does_not_recompute_or_mutate_RiskPolicyService",
+            "phase": "demo_nursery_freshness",
+        }
+        run_id = str(replay_run_id or f"bar_freshness_{uuid.uuid4().hex[:16]}")
+        try:
+            rows = self._load_decisions(since_ts=started_at - max(0.0, float(lookback_days)) * 86400.0, limit=limit)
+            samples: list[dict[str, Any]] = []
+            bar_load_errors: list[dict[str, Any]] = []
+            bar_loaded = 0
+            for row in rows[: max(0, min(int(window_sample_limit), 20))]:
+                decision_ts = _safe_float(row.get("decision_ts") or row.get("created_at"))
+                symbol = str(row.get("symbol") or "XAUUSD+")
+                timeframe = str(row.get("timeframe") or "M1")
+                try:
+                    bars = self._load_bar_window(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        decision_ts=decision_ts,
+                        warmup_bars=max(1, int(warmup_bars)),
+                        post_bars=max(0, int(post_bars)),
+                    )
+                    loaded_count = len(bars)
+                    if loaded_count:
+                        bar_loaded += 1
+                    samples.append(
+                        {
+                            "decision_id": str(row.get("decision_id") or ""),
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "bar_count": loaded_count,
+                        }
+                    )
+                except Exception as exc:
+                    bar_load_errors.append(
+                        {
+                            "decision_id": str(row.get("decision_id") or ""),
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    if len(bar_load_errors) >= 5:
+                        break
+            replay_error = ""
+            if bar_load_errors:
+                replay_error = f"bar_window_load_error: {bar_load_errors[0].get('error')}"
+            report = self._build_report(run_id=run_id, scope=scope, rows=rows, created_at=started_at, replay_error=replay_error)
+            metrics = dict(report.get("metric_summary") or {})
+            metrics["nursery_freshness"] = {
+                "schema_version": "replay_nursery_freshness_metrics.v1",
+                "decision_count": len(rows),
+                "sampled_window_count": len(samples),
+                "bar_loaded_window_count": bar_loaded,
+                "bar_load_error_count": len(bar_load_errors),
+                "samples": samples,
+                "bar_load_errors": bar_load_errors,
+                "full_recompute": False,
+            }
+            if rows and not replay_error:
+                report = {
+                    **report,
+                    "metric_summary": metrics,
+                    "evidence_grade": "B" if bar_loaded else "C",
+                    "status": "completed",
+                }
+            else:
+                report = {**report, "metric_summary": metrics}
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            report = self._build_report(run_id=run_id, scope=scope, rows=[], created_at=started_at, replay_error=error)
+        report = self._attach_artifact(report)
+        self._persist_report(report)
+        return report
+
     def run_bar_window_preview(
         self,
         *,

@@ -674,6 +674,8 @@ ledger / lifecycle / trace / replay
 - 让自治大脑可以比较不同来源的建议质量。
 - 让 scorecard 和 briefing 成为候选审查、LLM prompt 和反证要求的共享上下文。
 - 让交易结果通过 `trade_outcome_review -> experience_memory.agent_attribution -> agent_scorecard` 回流到参与过判断的 agent。
+- 让 Proposal Registry 暴露重复提案组和冲突控制面组，先做审查去噪，再进入受控 apply。
+- 让 demo apply stepper 在 `evolution_run` 中记录 selected reason、后验观察表和 rollback refs，方便 nursery 从错误里形成可追踪经验。
 - 让前端按影响级别和控制面展示，而不是按历史版本名展示。
 - 让 live autonomy unlock 能检查高危未解决冲突，而不把冲突判断散落在多个智能体里。
 
@@ -688,10 +690,14 @@ ledger / lifecycle / trace / replay
 - `/api/ops/brain/governance-candidates/{candidate_id}/submit` 和底层 `BrainGovernanceCandidateService.submit_candidate_to_policy_suggestion()` 都必须看到最新单候选 review 且 `bridge_ready=true`；preview 仍只判断材料是否可桥接，避免和 review 流程互相依赖。
 - readiness `candidate_bridge_review_coverage` 持续审计已桥接的 `policy_suggestion` 是否有 `candidate_review_required_before_submit` review 合同；缺新 review 是 degraded，历史旧桥接只标 legacy。
 - readiness `proposal_generation_context_coverage` 持续审计 `policy_suggestion` evidence/lineage 是否携带 `agent_generation_context`；显式 required 缺失会 degraded，历史旧提案只标 legacy，Proposal Registry 不因此审批、拒绝或应用提案。
+- `BrainGovernanceCandidateService` 桥接 `policy_suggestion` 时必须把 `agent_generation_context` 写到 evidence 顶层和 lineage；兼容旧 `agent_context` 读取，但新事实以 `agent_generation_context` 为标准字段。
+- `ProposalRegistryService.repair_missing_generation_context()` 只用于仍需审查/执行的旧缺口，写入的是当前 review context，并显式标记 `repair_current_context`；这不是原始生成上下文，不能作为扩大权限或跳过审查的依据。
 - 原生 `policy_suggestion` 写入路径复用 `attach_policy_suggestion_agent_context()` 补齐 `source_agent`、`authority_verdict`、`agent_context` 和 `agent_context_required`，避免新建议继续退化成 legacy-only 审计样本。
 - 旧 `policy_suggestion` 缺 `source_agent` 时复用 `infer_policy_suggestion_source_agent()`；LightGBM shadow/advisory evidence 统一归因到 `lightgbm_shadow_models`，Proposal Registry、Agent Authority 和 Scorecard 不得把它默认记到 `autonomous_learning`。
 - readiness `autonomous_blueprint` / `v16.autonomous_blueprint` 是最终大纲的只读对齐状态，汇总 demo nursery、多智能体权责、提案/候选上下文、候选审查、记忆反馈、执行边界和 live-ready guardrails；它只暴露 blockers，不执行、不审批、不改 runtime。
 - registry route 是建议路由，不是执行授权；实际执行仍回到 `RiskPolicyService`、`DecisionPolicy`、runtime overlay/snapshot 和 release/replay 证据。
+- registry status 的 `top_duplicate_groups` / `conflict_groups` 是去噪和审查入口，不改变原提案状态、不替代 conflict resolver。
+- demo apply stepper 的 `execution_context.posterior_monitor` / `rollback_refs` 是审计索引，不会自动回滚；后验处理仍由 `learning_application_effect`、trade lesson memory、scorecard 和既有 rollback 链路完成。
 - `live_autonomy_unlock_event` 的 budget breach 可以进入 registry 并路由到 `tighten_incident`；live 开仓路径若被 `RiskPolicyService` 判定为 `live_autonomy_budget_breach`，会通过 `RuntimeIncidentControlService` 自动请求 `no_new_risk`，不会直接写 overlay。
 
 ## 16. Conflict Handling

@@ -27,6 +27,7 @@ from backend.core.db import (
     DUCKDB_EXTERNAL,
     bars_monthly_path,
     connect_duckdb,
+    duckdb_readonly_connection,
     ensure_bars_table,
     refresh_current_bars_link,
 )
@@ -262,11 +263,7 @@ class DuckDBDataStore:
                 break
             if not path.exists():
                 continue
-            try:
-                conn = connect_duckdb(path, read_only=True)
-            except Exception:
-                conn = connect_duckdb(path)
-            try:
+            with duckdb_readonly_connection(path, snapshot_on_lock=True) as conn:
                 query = "SELECT * FROM bars WHERE symbol=? AND timeframe=?"
                 params: list = [symbol, timeframe]
                 if start_ts is not None:
@@ -281,8 +278,6 @@ class DuckDBDataStore:
                 else:
                     query += " ORDER BY time ASC"
                 df_part = conn.execute(query, params).df()
-            finally:
-                conn.close()
             if df_part.empty:
                 continue
             frames.append(df_part)

@@ -112,7 +112,7 @@ class AgentScorecardService:
             "boundary": self.boundary(),
         }
 
-    def latest_trade_attributions(self, *, limit: int = 50) -> dict[str, Any]:
+    def latest_trade_attributions(self, *, limit: int = 50, include_external_links: bool = True) -> dict[str, Any]:
         limit = max(1, min(int(limit), 200))
         conn = _connect(self.db_path, read_only=True)
         try:
@@ -136,7 +136,10 @@ class AgentScorecardService:
                 """,
                 (limit,),
             ).fetchall()
-            items = [self._trade_attribution(conn, row) for row in rows]
+            items = [
+                self._trade_attribution(conn, row, include_external_links=include_external_links)
+                for row in rows
+            ]
         finally:
             conn.close()
         linked = [item for item in items if item["participants"]]
@@ -160,7 +163,7 @@ class AgentScorecardService:
         authority = self.registry.status(db_path=self.db_path, limit=limit)
         proposals = ProposalRegistryService(self.db_path).status(refresh=False)
         scorecard = self.scorecard(limit=limit)
-        attribution = self.latest_trade_attributions(limit=min(50, limit))
+        attribution = self.latest_trade_attributions(limit=min(20, limit), include_external_links=False)
         score_summary = scorecard.get("summary") or {}
         proposal_count = int(proposals.get("proposal_count") or 0)
         source_ledger_count = (
@@ -479,7 +482,7 @@ class AgentScorecardService:
                 if isinstance(verdict, dict) and verdict.get("violations"):
                     metric["contract_violation_count"] += len(verdict.get("violations") or [])
 
-    def _trade_attribution(self, conn: Any, row: Any) -> dict[str, Any]:
+    def _trade_attribution(self, conn: Any, row: Any, *, include_external_links: bool = True) -> dict[str, Any]:
         review_id = _text(row["review_id"])
         trade_id = _text(row["trade_id"])
         position_id = _text(row["position_id"])
@@ -487,11 +490,17 @@ class AgentScorecardService:
         failure_tags = _loads(row["failure_tags_json"], [])
         participants: list[dict[str, Any]] = []
         participants.extend(self._review_declared_agents(review))
-        participants.extend(self._shadow_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
-        participants.extend(self._llm_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
-        participants.extend(self._proposal_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
+        if include_external_links:
+            participants.extend(self._shadow_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
+            participants.extend(self._llm_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
+            participants.extend(self._proposal_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
         participants = self._dedupe_participants(participants)
         lesson = self._trade_lesson(conn, review_id)
+        lesson_attribution = ((lesson or {}).get("context") or {}).get("agent_attribution") or {}
+        if isinstance(lesson_attribution, dict):
+            participants = self._dedupe_participants(
+                participants + list(lesson_attribution.get("participants") or [])
+            )
         feedback_targets = sorted({item["source_agent"] for item in participants} | set((lesson or {}).get("feedback_agents") or []))
         return {
             "review_id": review_id,

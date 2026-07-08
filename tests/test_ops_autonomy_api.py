@@ -41,8 +41,13 @@ def test_ops_agent_scorecard_routes_return_read_models(monkeypatch, auth_client)
         def scorecard(self, *, limit: int):
             return {"ok": True, "schema_version": "agent_scorecard.v1", "items": [], "summary": {"limit": limit}}
 
-        def latest_trade_attributions(self, *, limit: int):
-            return {"ok": True, "schema_version": "agent_trade_attribution.v1", "items": [], "summary": {"limit": limit}}
+        def latest_trade_attributions(self, *, limit: int, include_external_links: bool = False):
+            return {
+                "ok": True,
+                "schema_version": "agent_trade_attribution.v1",
+                "items": [],
+                "summary": {"limit": limit, "include_external_links": include_external_links},
+            }
 
         def chain_health(self, *, limit: int):
             return {"ok": True, "schema_version": "agent_chain_health.v1", "status": "ok", "limit": limit}
@@ -64,6 +69,180 @@ def test_ops_agent_scorecard_routes_return_read_models(monkeypatch, auth_client)
     assert attribution.json()["trade_attribution"]["summary"]["limit"] == 4
     assert health.json()["schema_version"] == "ops_agent_chain_health.v1"
     assert health.json()["agent_chain_health"]["limit"] == 5
+
+
+def test_ops_autonomous_evolution_cycle_uses_light_readiness_by_default(monkeypatch, auth_client):
+    class FakeRunner:
+        def build_light_readiness(self):
+            return {
+                "schema_version": "light_test.v1",
+                "governance": {"autonomy_mode": "demo_nursery"},
+                "autonomy_health": {"posture": "full"},
+            }
+
+    class FakeReadiness:
+        def build(self):
+            raise AssertionError("full readiness should be opt-in for this endpoint")
+
+    class FakeCycle:
+        def status(self, *, readiness, refresh_proposals: bool, include_chain_health: bool):
+            return {
+                "ok": True,
+                "schema_version": "autonomous_evolution_cycle.v1",
+                "status": "ready_for_guarded_demo_apply",
+                "stable_demo_nursery_ready": True,
+                "readiness_schema": readiness.get("schema_version"),
+                "include_chain_health": include_chain_health,
+            }
+
+    monkeypatch.setattr("backend.api.ops.AutonomousEvolutionNurseryRunner", FakeRunner)
+    monkeypatch.setattr("backend.api.ops.BackendReadinessService", FakeReadiness)
+    monkeypatch.setattr("backend.api.ops.AutonomousEvolutionCycleService", FakeCycle)
+
+    response = auth_client.get("/api/ops/autonomy/evolution-cycle")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "ops_autonomous_evolution_cycle.v1"
+    assert payload["readiness_mode"] == "light"
+    assert payload["cycle"]["readiness_schema"] == "light_test.v1"
+    assert payload["cycle"]["include_chain_health"] is False
+
+
+def test_ops_autonomous_evolution_run_requires_confirmation_for_blocking_apply(auth_client):
+    response = auth_client.post(
+        "/api/ops/autonomy/evolution-cycle/run",
+        json={"apply_when_ready": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "blocking_apply_requires_confirmation"
+
+
+def test_ops_autonomous_demo_apply_plan_and_step_routes(monkeypatch, auth_client):
+    calls: dict[str, object] = {}
+
+    class FakeStepper:
+        def plan(self):
+            return {
+                "ok": True,
+                "schema_version": "autonomous_demo_apply_plan.v1",
+                "steps": [{"step": "governor_review"}],
+            }
+
+        def run_step(self, step: str, *, limit, confirm_step: bool, actor: str):
+            calls["step"] = {
+                "step": step,
+                "limit": limit,
+                "confirm_step": confirm_step,
+                "actor": actor,
+            }
+            return {
+                "ok": True,
+                "schema_version": "autonomous_demo_apply_step.v1",
+                "status": "completed",
+                "step": step,
+            }
+
+    monkeypatch.setattr("backend.api.ops.AutonomousDemoApplyStepper", FakeStepper)
+
+    plan_response = auth_client.get("/api/ops/autonomy/demo-apply-plan")
+    step_response = auth_client.post(
+        "/api/ops/autonomy/demo-apply-step",
+        json={"step": "governor_review", "limit": 4, "confirm_step": True, "actor": "test"},
+    )
+
+    assert plan_response.status_code == 200
+    assert plan_response.json()["schema_version"] == "ops_autonomous_demo_apply_plan.v1"
+    assert step_response.status_code == 200
+    assert step_response.json()["schema_version"] == "ops_autonomous_demo_apply_step.v1"
+    assert calls["step"] == {
+        "step": "governor_review",
+        "limit": 4,
+        "confirm_step": True,
+        "actor": "test",
+    }
+
+
+def test_ops_autonomous_demo_apply_step_can_run_async(monkeypatch, auth_client):
+    calls: dict[str, object] = {}
+
+    class FakeStepper:
+        def start_background_step(self, step: str, *, limit, confirm_step: bool, actor: str):
+            calls["start"] = {
+                "step": step,
+                "limit": limit,
+                "confirm_step": confirm_step,
+                "actor": actor,
+            }
+            return {
+                "ok": True,
+                "schema_version": "autonomous_demo_apply_step.v1",
+                "status": "accepted",
+                "step": step,
+                "limit": limit,
+                "experiment_id": "exp_async",
+                "run_id": "run_async",
+            }
+
+        def run_accepted_step(self, *, step: str, experiment_id: str, run_id: str, limit: int):
+            calls["background"] = {
+                "step": step,
+                "experiment_id": experiment_id,
+                "run_id": run_id,
+                "limit": limit,
+            }
+
+    monkeypatch.setattr("backend.api.ops.AutonomousDemoApplyStepper", FakeStepper)
+
+    response = auth_client.post(
+        "/api/ops/autonomy/demo-apply-step",
+        json={
+            "step": "factor_pruning_bridge",
+            "limit": 1,
+            "confirm_step": True,
+            "actor": "test",
+            "run_async": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["step_result"]["status"] == "accepted"
+    assert body["step_result"]["run_id"] == "run_async"
+    assert calls["start"] == {
+        "step": "factor_pruning_bridge",
+        "limit": 1,
+        "confirm_step": True,
+        "actor": "test",
+    }
+    assert calls["background"] == {
+        "step": "factor_pruning_bridge",
+        "experiment_id": "exp_async",
+        "run_id": "run_async",
+        "limit": 1,
+    }
+
+
+def test_ops_autonomous_demo_apply_step_requires_step_confirmation(monkeypatch, auth_client):
+    class FakeStepper:
+        def run_step(self, step: str, *, limit, confirm_step: bool, actor: str):
+            return {
+                "ok": False,
+                "schema_version": "autonomous_demo_apply_step.v1",
+                "status": "confirmation_required",
+                "step": step,
+            }
+
+    monkeypatch.setattr("backend.api.ops.AutonomousDemoApplyStepper", FakeStepper)
+
+    response = auth_client.post(
+        "/api/ops/autonomy/demo-apply-step",
+        json={"step": "governor_review"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["status"] == "confirmation_required"
 
 
 def test_ops_brain_candidate_submit_requires_review_by_default(monkeypatch, auth_client):

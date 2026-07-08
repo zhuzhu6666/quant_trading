@@ -1,142 +1,587 @@
-# =============================================================================
-# Global Settings — 配置文件
-# =============================================================================
-
 system:
-  mode: live                 # backtest | paper | live
-  clock: realtime            # realtime | simulated
+  mode: live
+  clock: realtime
   log_level: INFO
   log_dir: logs/
-
-# cTrader Open API (唯一执行通道, MT5 已移除)
-# Pepperstone demo 走 demo.ctraderapi.com:5035 (ssl)
-# Access token (推荐) 走 env: CTRADER_ACCESS_TOKEN, 不需 password
 ctrader:
   client_id_env: CTRADER_CLIENT_ID
   client_secret_env: CTRADER_CLIENT_SECRET
-  access_token_env: CTRADER_ACCESS_TOKEN    # Pepperstone demo 提供
+  access_token_env: CTRADER_ACCESS_TOKEN
   account_id_env: CTRADER_ACCOUNT_ID
-  host: demo.ctraderapi.com                  # demo=模拟盘, live=实盘 host
+  host: demo.ctraderapi.com
   port: 5035
-  symbol: XAUUSD                            # Pepperstone 是 XAUUSD (无 +)
-  proxy_url: ""                             # 例: socks5://127.0.0.1:7890 或 http://127.0.0.1:7890
-  proxy_rdns: true                          # 走代理时是否由代理端解析域名
-  rate_limit_per_sec: 5                     # 跟 SDK 默认对齐, 防 broker 限速
+  symbol: XAUUSD
+  proxy_url: ''
+  proxy_rdns: true
+  rate_limit_per_sec: 5
   request_timeout_sec: 10
-  send_orders: true                         # 真发单；必须 system.mode=live 且经确认后开启
-
-  
+  send_orders: true
 commission:
-  type: fixed                 # fixed | percentage
-  value: 6.0                  # $6/lot
-
+  type: fixed
+  value: 6.0
 risk:
-  max_daily_loss_pct: 5.0     # 日内最大亏损
-  max_position_lots: 0.5      # 最大持仓(旧名保留, 内部按 API volume 适配)
-  max_trades_per_day: 20      # 日内最大交易次数
-  single_trade_risk_usd: 2.0  # 单笔最大亏损
+  max_daily_loss_pct: 5.0
+  max_position_lots: 0.5
+  max_trades_per_day: 20
+  single_trade_risk_usd: 2.0
   circuit_breaker:
-    consecutive_losses: 5     # 连续亏损N笔→熔断
-    slippage_pct: 0.5         # 滑点超N%→熔断
-    volatility_mult: 3.0      # ATR×N→减仓
-
+    consecutive_losses: 5
+    slippage_pct: 0.5
+    volatility_mult: 3.0
 position:
-  sizing_method: kelly          # risk_fixed | kelly | equal
-  risk_per_trade_pct: 2.0       # 每笔风险占资金%
-  max_position_lots: 0.1        # 最大仓位(旧名保留, 内部按 API volume 适配)
-  max_leverage: 500             # Bybit最大杠杆
-
+  sizing_method: kelly
+  risk_per_trade_pct: 2.0
+  max_position_lots: 0.1
+  max_leverage: 500
 event_sizing:
-  enabled: true                 # 事件感知动态仓位
+  enabled: true
   db_path: data/events.duckdb
-  event_times:                  # 假设发布时间 (UTC)
-    FOMC: "19:00"
-    NFP: "13:30"
-    CPI: "13:30"
-    PCE: "13:30"
-  tiers:                        # importance → [{max_hours_before, multiplier}]
-    3:  # HIGH: FOMC, NFP, CPI
-      - {max_hours_before: 0.25, multiplier: 0.5}  # 15 min
-      - {max_hours_before: 1,    multiplier: 0.8}  # 60 min
-    2:  # MEDIUM: PCE/Fed speakers; observe only
-      - {max_hours_before: 0.5,  multiplier: 1.0}  # 30 min
-
+  event_times:
+    FOMC: '19:00'
+    NFP: '13:30'
+    CPI: '13:30'
+    PCE: '13:30'
+  tiers:
+    3:
+    - max_hours_before: 0.25
+      multiplier: 0.5
+    - max_hours_before: 1
+      multiplier: 0.8
+    2:
+    - max_hours_before: 0.5
+      multiplier: 1.0
 execution:
-  default_type: market         # market | limit | stop
-  slippage_model: fixed        # fixed | percentage | adaptive
-  slippage_value: 0.02         # 2bps
+  default_type: market
+  slippage_model: fixed
+  slippage_value: 0.02
   retry_attempts: 3
   retry_delay_ms: 500
   timeout_seconds: 10
-
 data:
-  store_backend: duckdb           # duckdb | sqlite
+  store_backend: duckdb
   db_path: data/ctrader_data.duckdb
   tick_buffer_size: 10000
-  bar_timeframes: [M5, M15, M30, H1, H4, D1]
+  bar_timeframes:
+  - M5
+  - M15
+  - M30
+  - H1
+  - H4
+  - D1
   warmup_bars: 500
-
 alpha:
-  factor_decay_hours: 24       # IC衰减周期
-  min_ic_threshold: 0.02       # 最低IC阈值
-  rolling_window_days: 20      # IC滚动窗口
-
-# =============================================================================
-# RuntimeConfig (Phase 1.2) — 可热更新字段
-# 运行中任何修改通过 POST /api/control/runtime/reload 推送给所有 loop
-# 缺失字段使用 config/runtime_config.py 中的默认值
-# =============================================================================
+  factor_decay_hours: 24
+  min_ic_threshold: 0.02
+  rolling_window_days: 20
 runtime:
-  # --- 影子因子 ---
   shadow_vote_weight: 0.15
   shadow_top_k: 3
   shadow_recompute_every: 8
   shadow_rank_window: 50
   shadow_min_samples: 30
-
-  # --- 因子健康 ---
+  shadow_top_pct: 0.7
+  shadow_bottom_pct: 0.3
   factor_health_healthy_threshold: 70.0
   factor_health_watch_threshold: 40.0
   factor_health_min_n_obs: 100
   factor_health_ic_active_threshold: 0.02
-
-  # --- Canary ---
-  canary_min_oos_bars: 80
-  canary_min_oos_pnl: 0.0
-  canary_min_unreliable_count: 0
-
-  # --- 退役 ---
+  factor_health_decay_window_q: 4
+  gp_pop_size: 50
+  gp_n_generations: 20
+  gp_elite_frac: 0.1
+  gp_tournament_k: 3
+  gp_mut_prob_subtree: 0.1
+  gp_mut_prob_const: 0.05
+  gp_max_runtime_sec: 600.0
+  discover_n_bars: 8000
+  discover_top_k: 10
+  discover_score_threshold: 50.0
+  discover_n_warmstart: 20
   retire_decaying_days: 7
   retire_grace_hours_severe: 24
   retire_grace_hours_mild: 72
   retire_severe_threshold: 30.0
-
-  # --- 调度 ---
-  scheduler_auto_discover_cron: "0 1 * * *"
-  scheduler_promote_cron: "30 1 * * *"
+  canary_min_oos_bars: 80
+  canary_min_oos_pnl: 0.0
+  canary_min_unreliable_count: 0
+  drift_n_bars: 5000
+  drift_pop: 50
+  drift_gen: 30
+  drift_research_cooldown_sec: 3600
+  retrain_every_n_trades: 200
+  retrain_min_trades_before_first: 100
+  retrain_timeout_sec: 300
+  scheduler_auto_discover_cron: 0 1 * * *
+  scheduler_promote_cron: 30 1 * * *
   scheduler_drift_research_interval_min: 15
-  scheduler_dryrun_cron: "0 2 * * *"
-  scheduler_timezone: "UTC"
-
-  # --- 数据自给 ---
+  scheduler_dryrun_cron: 0 2 * * *
+  scheduler_timezone: UTC
   sync_interval_sec: 300
   sync_recovery_max_attempts: 3
+  ctrader_send_orders: true
+  risk_sl_atr: 1.5
+  risk_tp_atr: 2.5
+  risk_max_drawdown_pct: 15.0
+  risk_max_consecutive_losses: 8
+  risk_max_daily_loss_pct: 5.0
+  risk_max_daily_trades: 20
+  risk_data_lag_max_seconds: 3600.0
+  risk_circuit_breaker_bypass: false
+  risk_cooldown_bars: 3
+  risk_loss_cooldown_after_losses: 2
+  risk_loss_cooldown_bars: 3
+  risk_supervisor_reentry_cooldown_bars: 3
+  risk_supervisor_reentry_block_reduce: true
+  risk_max_holding_bars: 288
+  risk_block_on_disk_critical: true
+  risk_require_l2_depth: false
+  l2_collection_enabled: true
+  l2_snapshot_interval_sec: 5.0
+  l2_write_batch_size: 5000
+  l2_write_flush_interval_sec: 5.0
+  risk_enable_nfp_skip: false
+  risk_enable_gvz_gate: false
+  risk_gvz_drop_pct: -2.0
+  position_supervisor_template_id: position_supervisor:default.v1
+  autonomy_mode: demo_autonomous
+  autonomy_demo_auto_apply: true
+  live_autonomy_unlocked: false
+  live_autonomy_unlock_id: ''
+  demo_learning_max_daily_trades: 60
+  runtime_incident_mode: normal
   strategy_sl_atr: 2.0
   strategy_tp_atr: 3.0
   strategy_cooldown_bars: 3
+  evaluation_embargo_bars: 288
+  evaluation_purge_bars: 288
+  evaluation_bootstrap_n: 1000
+  evaluation_bootstrap_alpha: 0.05
+  evaluation_causal_ortho_decay_threshold: 0.5
+  observability_evolution_story_path: data/charts/evolution_story.jsonl
+  observability_metrics_enabled: true
+  factor_dry_run: false
+  timeframe: M5
+  factor_signal_config:
+    rsi_14:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      tags:
+      - 技术
+      - 均值回归
+    di_spread:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      tags:
+      - 技术
+      - 趋势
+    stoch_k:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      tags:
+      - 技术
+      - 动量
+    adx:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      role: context
+      tags:
+      - 技术
+      - 趋势强度
+    atr_ratio:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      role: context
+      tags:
+      - 技术
+      - 波动率
+    ema_slope:
+      mode: zscore_tanh
+      window: 50
+      min_samples: 30
+      tags:
+      - 技术
+      - 趋势
+    supertrend_str:
+      mode: zscore_tanh
+      window: 50
+      min_samples: 30
+      tags:
+      - 技术
+      - 趋势
+    keltner_width:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      role: context
+      tags:
+      - 技术
+      - 波动率
+    obv_slope:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      tags:
+      - 量价
+    vol_ma_ratio:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      tags:
+      - 量价
+    macd_hist:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      tags:
+      - 技术
+      - 动量
+    dxy_corr_20:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: -1
+      tags:
+      - 宏观
+      - 美元
+    slv_gld_ratio:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 宏观
+      - 金银比
+    real_yield_chg:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: -1
+      tags:
+      - 宏观
+      - 利率
+    real_yield_pct_rank:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: -1
+      tags:
+      - 宏观
+      - 利率
+    gld_tonnes_chg_5d:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 持仓
+      - 黄金
+    gld_tonnes_chg_20d:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 持仓
+      - 黄金
+    gld_tonnes_pct_20d:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 持仓
+      - 黄金
+    gld_tonnes_zscore_60d:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 持仓
+      - 黄金
+      - 极值
+    slv_tonnes_chg_20d:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 持仓
+      - 白银
+    silver_gold_holdings_ratio:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 持仓
+      - 金银比
+    cb_total_chg_3m:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 央行
+      - 购金
+    cb_china_chg_3m:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 央行
+      - 购金
+    cb_russia_chg_3m:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 央行
+      - 购金
+    cb_china_3m_zscore:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - 央行
+      - 购金
+      - 极值
+    cot_mm_net:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - COT
+      - 投机
+    cot_mm_net_pct_oi:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - COT
+      - 投机
+    cot_mm_net_chg_4w:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - COT
+      - 投机
+    cot_mm_net_zscore_52w:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: 1
+      tags:
+      - COT
+      - 投机
+      - 极值
+    cot_pm_net:
+      mode: rank_mapping
+      window: 100
+      min_samples: 30
+      direction: -1
+      tags:
+      - COT
+      - 商业
+    cot_extreme_signal:
+      mode: discrete
+      value_map:
+        '-1': -1.0
+        '0': 0.0
+        '1': 1.0
+      tags:
+      - COT
+      - 反转
+      - 综合
+    engulfing:
+      mode: discrete
+      value_map:
+        '-1': -1.0
+        '0': 0.0
+        '1': 1.0
+      tags:
+      - 形态
+      - 反转
+    pin_bar:
+      mode: discrete
+      value_map:
+        '-1': -0.8
+        '0': 0.0
+        '1': 0.8
+      tags:
+      - 形态
+      - 反转
+    inside_bar:
+      mode: discrete
+      value_map:
+        '0': 0.0
+        '1': -0.3
+      tags:
+      - 形态
+      - 整理
+    bb_width:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 50
+      role: context
+      tags:
+      - 技术
+      - 波动率
+      - 布林带
+    hour_utc:
+      mode: discrete
+      value_map: hour_weights
+      role: context
+      tags:
+      - 日历
+      - 时段
+    day_of_week:
+      mode: discrete
+      value_map: day_weights
+      role: context
+      tags:
+      - 日历
+      - 周内
+    hours_to_fomc:
+      mode: discrete
+      value_map: fomc_weights
+      role: gate
+      tags:
+      - 事件
+      - FOMC
+    hours_to_nfp:
+      mode: discrete
+      value_map: nfp_weights
+      role: gate
+      tags:
+      - 事件
+      - NFP
+  factor_portfolio_weights:
+    di_spread: 1.75
+    rsi_14: 1.0
+    stoch_k: 1.0
+    adx: 0.5
+    ema_slope: 0.5
+    supertrend_str: 0.8
+    atr_ratio: 0.5
+    bb_width: 0.0
+    macd_hist: 0.5
+    keltner_width: 0.3
+    obv_slope: 0.5
+    vol_ma_ratio: 0.3
+    engulfing: 1.0
+    pin_bar: 0.8
+    inside_bar: 0.3
+    dxy_corr_20: 0.8
+    slv_gld_ratio: 0.5
+    real_yield_chg: 0.5
+    real_yield_pct_rank: 0.5
+    gld_tonnes_chg_5d: 0.7
+    gld_tonnes_chg_20d: 0.7
+    gld_tonnes_pct_20d: 0.5
+    gld_tonnes_zscore_60d: 1.0
+    slv_tonnes_chg_20d: 0.4
+    silver_gold_holdings_ratio: 0.3
+    cb_total_chg_3m: 0.8
+    cb_china_chg_3m: 0.6
+    cb_russia_chg_3m: 0.4
+    cb_china_3m_zscore: 0.5
+    cot_mm_net: 0.8
+    cot_mm_net_pct_oi: 0.6
+    cot_mm_net_chg_4w: 0.6
+    cot_mm_net_zscore_52w: 1.2
+    cot_pm_net: 0.4
+    cot_extreme_signal: 1.5
+    hours_to_fomc: 0.3
+    hours_to_nfp: 0.3
+    hour_utc: 0.1
+    day_of_week: 0.1
+  factor_tactical_alpha: 0.7
+  factor_signal_threshold: 0.3
   live_factor_warmup_bars: 150
-  # --- L2 研究采集 ---
-  # cTrader 主链只保留一条 Open API 连接；L2 depth 作为研究支路在同一连接上订阅。
-  # risk_require_l2_depth 仍只表示风控/开仓是否依赖 L2。
-  l2_collection_enabled: true
-  l2_snapshot_interval_sec: 5.0
-  l2_write_batch_size: 1000
-  l2_write_flush_interval_sec: 1.0
-
-  # --- Phase 5: 风控升级 (默认启用) ---
+  filter_bb_enabled: false
+  pyramid_enabled: true
+  max_position_volume: 0.5
+  max_position_api_volume: 1000.0
+  max_position_count: 3
+  awe_sensitivity: 0.5
+  awe_anchor_pull: 0.15
+  awe_max_single_change: 0.15
+  awe_weight_min: 0.1
+  awe_weight_max: 3.0
+  awe_min_trades: 50
+  awe_adapt_interval: 50
+  awe_ic_floor: 0.02
+  awe_health_floor: 40.0
+  awe_disable_min_trades: 20
+  awe_causal_threshold: -0.3
+  awe_dsr_p_threshold: 0.95
+  awe_resurrect_health_threshold: 60.0
+  awe_resurrect_dsr_p: 0.05
+  awe_resurrect_cooldown_days: 7
+  awe_max_type_weight_pct: 0.4
+  factor_governance_enabled: true
+  factor_governance_cron: '*/15 * * * *'
+  factor_governance_shadow_min_oos_bars: 100
+  factor_governance_shadow_min_valid: 80
+  factor_governance_shadow_min_hit_rate: 0.5
+  factor_governance_shadow_max_drawdown: 0.05
+  factor_governance_new_factor_weight: 0.3
+  factor_governance_max_promotions_per_cycle: 1
+  factor_governance_max_disables_per_cycle: 1
+  factor_governance_max_retires_per_cycle: 1
+  factor_governance_model_min_samples: 3
+  factor_governance_model_weakness_threshold: 0.65
+  factor_governance_model_disable_threshold: 0.85
+  factor_governance_rollback_min_trades: 3
+  factor_governance_rollback_delta_threshold: -0.15
+  factor_redundancy_min_samples: 200
+  factor_redundancy_corr_threshold: 0.85
+  factor_redundancy_max_group_weight: 0.35
+  context_policy_enabled: true
+  algo_enabled: false
+  algo_threshold_volume: 0.05
+  algo_default: TWAP
+  algo_duration_minutes: 30
+  algo_pov_participation: 0.1
+  algo_is_urgency: 0.5
+  enabled_symbols:
+  - XAUUSD+
+  multi_symbol_config:
+    XAUUSD+:
+      tactical_alpha: 0.7
+      signal_threshold: 0.35
+      max_position_volume: 0.5
+      max_position_api_volume: 1000.0
+      contract_size: 100
+    EURUSD:
+      tactical_alpha: 0.6
+      signal_threshold: 0.35
+      max_position_volume: 0.5
+      max_position_api_volume: 1000.0
+      contract_size: 100000
+  cross_asset_covariance_enabled: true
+  cross_asset_covariance_window: 60
+  cross_asset_update_interval: 60
   var_enabled: true
+  var_window: 500
+  var_alpha: 0.95
+  var_method: historical
   var_cvar_threshold: 0.02
   risk_var_threshold_pct: 10.0
+  risk_cvar_threshold_pct: 2.0
   kelly_enabled: true
   kelly_fraction: 0.5
   kelly_max_pct: 0.25
@@ -144,3 +589,9 @@ runtime:
   dynamic_sizing_enabled: true
   dynamic_sizing_max_api_volume: 1000.0
   dynamic_sizing_api_units_per_display_unit: 100.0
+  stress_test_enabled: false
+  stress_test_max_survivable_loss_pct: 20.0
+  concentration_enabled: false
+  concentration_max_type_pct: 0.4
+  concentration_alert_type_pct: 0.5
+  extra: {}

@@ -1253,6 +1253,7 @@ CREATE INDEX IF NOT EXISTS idx_decision_ledger_ts ON decision_ledger(decision_ts
 CREATE INDEX IF NOT EXISTS idx_decision_ledger_pos_event ON decision_ledger(position_id, event_type);
 CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_decision ON decision_factor_snapshot(decision_id);
 CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_factor ON decision_factor_snapshot(factor);
+CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_factor_id ON decision_factor_snapshot(factor, id DESC);
 CREATE INDEX IF NOT EXISTS idx_order_lifecycle_trade ON order_lifecycle_event(trade_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_event(position_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
@@ -1305,6 +1306,7 @@ CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_status ON brain_governance
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_updated ON proposal_registry(updated_at);
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_surface ON proposal_registry(control_surface, target_scope, status);
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_source ON proposal_registry(source_agent, source_ref_type, updated_at);
+CREATE INDEX IF NOT EXISTS idx_proposal_registry_source_ref_updated ON proposal_registry(source_ref_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_live_autonomy_unlock_created ON live_autonomy_unlock_event(created_at);
 CREATE INDEX IF NOT EXISTS idx_live_autonomy_unlock_status ON live_autonomy_unlock_event(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_created ON brain_live_ready_guardrail(created_at);

@@ -116,6 +116,7 @@ def ensure_proposal_registry_table(db_path: str | Path = STATE_DB) -> None:
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_updated ON proposal_registry(updated_at)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_surface ON proposal_registry(control_surface, target_scope, status)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_source ON proposal_registry(source_agent, source_ref_type, updated_at)")
+        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_source_ref_updated ON proposal_registry(source_ref_id, updated_at)")
         conn.commit()
     finally:
         conn.close()
@@ -501,14 +502,38 @@ class ProposalRegistryService:
         ensure_proposal_registry_table(self.db_path)
         conn = _connect(self.db_path, read_only=True)
         try:
-            rows = _execute(conn, "SELECT * FROM proposal_registry").fetchall()
-            items = [self._row_to_proposal(row) for row in rows]
+            rows = _execute(
+                conn,
+                """
+                SELECT proposal_id, source_agent, source_ref_type, proposal_type,
+                       control_surface, target_scope, impact_level, source_reliability_json,
+                       evidence_freshness_json, status, route_recommendation,
+                       conflict_json
+                FROM proposal_registry
+                """,
+            ).fetchall()
+            items = [self._row_to_status_item(row) for row in rows]
         finally:
             conn.close()
         active = [item for item in items if _text(item.get("status")).lower() not in TERMINAL_STATUSES]
         actionable = [item for item in active if _is_actionable_proposal(item)]
         conflict_items = [item for item in actionable if bool((item.get("conflict") or {}).get("conflict"))]
         stale_items = [item for item in actionable if bool((item.get("evidence_freshness") or {}).get("stale"))]
+        stale_replay_items = [
+            item for item in stale_items if _text(item.get("route_recommendation")).lower() == "request_replay"
+        ]
+        stale_review_items = [
+            item for item in stale_items if _text(item.get("route_recommendation")).lower() == "request_review"
+        ]
+        stale_tighten_items = [
+            item for item in stale_items if _text(item.get("route_recommendation")).lower() == "tighten_incident"
+        ]
+        hard_stale_items = [
+            item
+            for item in stale_items
+            if _text(item.get("route_recommendation")).lower()
+            not in {"request_replay", "request_review", "tighten_incident", "observe"}
+        ]
         low_reliability_items = [
             item
             for item in actionable
@@ -530,6 +555,35 @@ class ProposalRegistryService:
         counts: dict[str, int] = {}
         for item in items:
             counts[_text(item.get("status"), "unknown")] = counts.get(_text(item.get("status"), "unknown"), 0) + 1
+        duplicate_groups: dict[tuple[str, str, str, str], int] = {}
+        for item in active:
+            key = (
+                _text(item.get("source_agent"), "unknown"),
+                _text(item.get("proposal_type"), "unknown"),
+                _text(item.get("control_surface"), "unknown"),
+                _text(item.get("target_scope"), "unknown"),
+            )
+            duplicate_groups[key] = duplicate_groups.get(key, 0) + 1
+        duplicate_group_items = [
+            {
+                "source_agent": key[0],
+                "proposal_type": key[1],
+                "control_surface": key[2],
+                "target_scope": key[3],
+                "count": count,
+            }
+            for key, count in sorted(duplicate_groups.items(), key=lambda kv: kv[1], reverse=True)
+            if count > 1
+        ]
+        conflict_groups: dict[str, int] = {}
+        for item in conflict_items:
+            conflict = item.get("conflict") or {}
+            surface = _text(conflict.get("control_surface"), _text(item.get("control_surface"), "unknown"))
+            conflict_groups[surface] = conflict_groups.get(surface, 0) + 1
+        conflict_group_items = [
+            {"control_surface": key, "count": count}
+            for key, count in sorted(conflict_groups.items(), key=lambda kv: kv[1], reverse=True)
+        ]
         return {
             "ok": True,
             "schema_version": "proposal_registry_status.v1",
@@ -542,11 +596,35 @@ class ProposalRegistryService:
             "conflict_count": len(conflict_items),
             "high_unresolved_conflict_count": len(high_conflict),
             "stale_evidence_count": len(stale_items),
+            "stale_replay_required_count": len(stale_replay_items),
+            "stale_review_required_count": len(stale_review_items),
+            "stale_tighten_required_count": len(stale_tighten_items),
+            "hard_stale_evidence_count": len(hard_stale_items),
             "low_reliability_count": len(low_reliability_items),
             "raw_conflict_count": len(raw_conflict_items),
             "raw_stale_evidence_count": len(raw_stale_items),
             "raw_low_reliability_count": len(raw_low_reliability_items),
+            "duplicate_group_count": len(duplicate_group_items),
+            "top_duplicate_groups": duplicate_group_items[:10],
+            "conflict_group_count": len(conflict_group_items),
+            "conflict_groups": conflict_group_items[:10],
             "boundary": self.boundary(),
+        }
+
+    def _row_to_status_item(self, row: Any) -> dict[str, Any]:
+        return {
+            "proposal_id": _text(row["proposal_id"]),
+            "source_agent": _text(row["source_agent"]),
+            "source_ref_type": _text(row["source_ref_type"]),
+            "proposal_type": _text(row["proposal_type"]),
+            "control_surface": _text(row["control_surface"]),
+            "target_scope": _text(row["target_scope"]),
+            "impact_level": _text(row["impact_level"]),
+            "source_reliability": _loads(row["source_reliability_json"], {}),
+            "evidence_freshness": _loads(row["evidence_freshness_json"], {}),
+            "status": _text(row["status"]),
+            "route_recommendation": _text(row["route_recommendation"], "observe"),
+            "conflict": _loads(row["conflict_json"], {}),
         }
 
     def generation_context_coverage(self, *, limit: int = 500) -> dict[str, Any]:
@@ -611,6 +689,203 @@ class ProposalRegistryService:
             "items": items[:50],
             "boundary": boundary,
         }
+
+    def repair_missing_generation_context(
+        self,
+        *,
+        limit: int = 200,
+        dry_run: bool = True,
+        actor: str = "system:proposal_generation_context_repair",
+    ) -> dict[str, Any]:
+        """Attach current review context to required policy suggestions missing original context.
+
+        The repair is explicit: it records that the original generation context was
+        missing and stores a current AgentBriefing context for review/apply safety.
+        """
+
+        limit = max(1, min(int(limit), 1000))
+        boundary = {
+            **self.boundary(),
+            "schema_version": "proposal_generation_context_repair_boundary.v1",
+            "repairs_policy_suggestion_evidence_only": True,
+            "does_not_approve_or_apply_proposals": True,
+            "does_not_change_policy_suggestion_status": True,
+            "repair_context_is_current_not_original": True,
+        }
+        conn = _connect(self.db_path, read_only=False)
+        try:
+            if not state_table_exists(conn, "policy_suggestion"):
+                return {
+                    "ok": True,
+                    "schema_version": "proposal_generation_context_repair.v1",
+                    "status": "missing_policy_suggestion",
+                    "dry_run": dry_run,
+                    "repaired_count": 0,
+                    "items": [],
+                    "boundary": boundary,
+                }
+            rows = _execute(
+                conn,
+                """
+                SELECT suggestion_id, scope_type, scope_key, action,
+                       confidence, evidence_json, status, created_at
+                FROM policy_suggestion
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            items = []
+            repaired = 0
+            for row in rows:
+                evidence = _loads(row["evidence_json"], {})
+                if not isinstance(evidence, dict):
+                    evidence = {}
+                context = self._proposal_agent_context(evidence)
+                required = self._proposal_agent_context_required(evidence)
+                if not required or str(context.get("schema_version") or "") == "agent_generation_context.v1":
+                    continue
+                source_agent = infer_policy_suggestion_source_agent(
+                    evidence,
+                    scope_type=_text(row["scope_type"]),
+                    action=_text(row["action"]),
+                )
+                repaired_evidence = self._repaired_generation_context_evidence(
+                    evidence,
+                    source_agent=source_agent,
+                    scope_type=_text(row["scope_type"]),
+                    action=_text(row["action"]),
+                    status=_text(row["status"], "proposed"),
+                    actor=actor,
+                )
+                item = {
+                    "suggestion_id": _text(row["suggestion_id"]),
+                    "source_agent": source_agent,
+                    "scope_type": _text(row["scope_type"]),
+                    "scope_key": _text(row["scope_key"]),
+                    "action": _text(row["action"]),
+                    "status": _text(row["status"]),
+                    "candidate_id": _text(evidence.get("candidate_id")),
+                    "repair_status": "would_repair" if dry_run else "repaired",
+                }
+                items.append(item)
+                if dry_run:
+                    continue
+                _execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET evidence_json=?
+                    WHERE suggestion_id=?
+                    """,
+                    (_dumps(repaired_evidence), _text(row["suggestion_id"])),
+                )
+                repaired += 1
+            if not dry_run:
+                conn.commit()
+            return {
+                "ok": True,
+                "schema_version": "proposal_generation_context_repair.v1",
+                "status": "dry_run" if dry_run else "repaired",
+                "dry_run": dry_run,
+                "candidate_count": len(items),
+                "repaired_count": repaired,
+                "items": items[:50],
+                "boundary": boundary,
+            }
+        finally:
+            conn.close()
+
+    def _repaired_generation_context_evidence(
+        self,
+        evidence: dict[str, Any],
+        *,
+        source_agent: str,
+        scope_type: str,
+        action: str,
+        status: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        from backend.services.agent_scorecard import AgentScorecardService
+
+        impact_level = _impact_level(_control_surface(scope_type, action), status)
+        requested_writes = policy_suggestion_requested_writes(source_agent, evidence)
+        authority = AgentAuthorityRegistryService().evaluate_scope_write(
+            source_agent,
+            scope_type,
+            action,
+            requested_writes=requested_writes,
+            status=status,
+            impact_level=impact_level,
+        )
+        scorecard = AgentScorecardService(self.db_path).scorecard(limit=200)
+        canonical_source = str(authority.get("canonical_source_agent") or source_agent)
+        source_scorecard = next(
+            (
+                item
+                for item in scorecard.get("items", [])
+                if str(item.get("source_agent") or "") in {source_agent, canonical_source}
+            ),
+            {},
+        )
+        trade_feedback = AgentScorecardService(self.db_path).latest_trade_attributions(
+            limit=20,
+            include_external_links=False,
+        )
+        recent_loss_feedback = [
+            item
+            for item in trade_feedback.get("items", [])
+            if source_agent in set(item.get("feedback_targets") or [])
+            or canonical_source in set(item.get("feedback_targets") or [])
+        ][:10]
+        context = {
+            "ok": True,
+            "schema_version": "agent_generation_context.v1",
+            "source_agent": source_agent,
+            "canonical_source_agent": canonical_source,
+            "scope_type": scope_type,
+            "action": action,
+            "requested_writes": requested_writes,
+            "authority_verdict": authority,
+            "scorecard": source_scorecard,
+            "recent_loss_feedback": recent_loss_feedback,
+            "review_rules": {
+                "low_score_requires_extra_evidence": True,
+                "contract_violation_blocks_auto_bridge": True,
+                "negative_feedback_requires_counter_evidence": True,
+                "high_score_changes_priority_only": True,
+                "never_expands_execution_authority": True,
+            },
+            "context_status": "repair_current_context",
+            "repair_notice": {
+                "original_generation_context_missing": True,
+                "repair_source": "ProposalRegistryService.repair_missing_generation_context",
+                "actor": actor,
+                "repaired_at": time.time(),
+            },
+            "generated_at": time.time(),
+            "boundary": {
+                "read_only_context": True,
+                "does_not_apply_policy_suggestion": True,
+                "does_not_expand_authority": True,
+                "repair_context_is_current_not_original": True,
+            },
+        }
+        repaired = dict(evidence)
+        repaired["agent_context_required"] = True
+        repaired["agent_context"] = context
+        repaired["agent_generation_context"] = context
+        lineage = dict(repaired.get("lineage") or {})
+        lineage["agent_generation_context"] = context
+        repaired["lineage"] = lineage
+        repaired["agent_generation_context_repair"] = {
+            "schema_version": "proposal_generation_context_repair.v1",
+            "actor": actor,
+            "original_generation_context_missing": True,
+            "repair_context_is_current_not_original": True,
+            "repaired_at": context["repair_notice"]["repaired_at"],
+        }
+        return repaired
 
     def _collect_source_proposals(self, *, limit: int, now: float) -> list[dict[str, Any]]:
         conn = _connect(self.db_path, read_only=True)

@@ -242,9 +242,117 @@ def test_proposal_registry_status_separates_actionable_from_historical_noise(tmp
     assert status["needs_evidence_count"] == 1
     assert status["conflict_count"] == 1
     assert status["stale_evidence_count"] == 1
+    assert status["stale_review_required_count"] == 1
+    assert status["stale_replay_required_count"] == 0
+    assert status["hard_stale_evidence_count"] == 0
     assert status["low_reliability_count"] == 0
     assert status["raw_stale_evidence_count"] == 3
     assert status["raw_low_reliability_count"] == 2
+
+
+def test_proposal_registry_status_reports_duplicate_and_conflict_groups(tmp_path):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO proposal_registry
+            (proposal_id, source_agent, source_ref_type, proposal_type,
+             control_surface, target_scope, impact_level, source_reliability_json,
+             evidence_freshness_json, status, route_recommendation, conflict_json,
+             created_at, updated_at)
+            VALUES (?, 'factor_pruning_governance', 'brain_governance_candidate',
+                    'factor_weight', 'factor_weight', 'factor:dsl_auto_x',
+                    'medium', '{"band":"medium"}', '{"stale":false}',
+                    'proposed', 'submit_governance', ?, ?, ?)
+            """,
+            [
+                ("proposal:dup_1", json.dumps({"conflict": True, "control_surface": "factor_weight"}), 1.0, 1.0),
+                ("proposal:dup_2", json.dumps({"conflict": False}), 2.0, 2.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = ProposalRegistryService(db_path).status()
+
+    assert status["duplicate_group_count"] == 1
+    assert status["top_duplicate_groups"][0]["source_agent"] == "factor_pruning_governance"
+    assert status["top_duplicate_groups"][0]["count"] == 2
+    assert status["conflict_group_count"] == 1
+    assert status["conflict_groups"][0] == {"control_surface": "factor_weight", "count": 1}
+
+
+def test_proposal_registry_repairs_required_generation_context_with_current_notice(tmp_path):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_suggestion (
+                suggestion_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                confidence REAL DEFAULT 0.0,
+                reason TEXT DEFAULT '',
+                evidence_json TEXT DEFAULT '{}',
+                status TEXT DEFAULT 'proposed',
+                reviewed_at REAL DEFAULT 0.0,
+                review_note TEXT DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             evidence_json, status, created_at)
+            VALUES ('brain_bridge_missing_context', 'factor', 'dsl_auto_x',
+                    'downweight', 0.8, ?, 'approved', ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "schema_version": "brain_governance_candidate_policy_suggestion_evidence.v1",
+                        "source_agent": "factor_pruning_governance",
+                        "candidate_id": "factor_pruning:dsl_auto_x",
+                        "bridge": {"candidate_review_required": True},
+                        "lineage": {"schema_version": "factor_pruning_lineage.v1"},
+                    }
+                ),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    service = ProposalRegistryService(db_path)
+    before = service.generation_context_coverage(limit=10)
+    dry_run = service.repair_missing_generation_context(limit=10, dry_run=True, actor="test")
+    repair = service.repair_missing_generation_context(limit=10, dry_run=False, actor="test")
+    after = service.generation_context_coverage(limit=10)
+
+    assert before["missing_required_context_count"] == 1
+    assert dry_run["candidate_count"] == 1
+    assert repair["repaired_count"] == 1
+    assert after["status"] == "ok"
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT evidence_json FROM policy_suggestion WHERE suggestion_id='brain_bridge_missing_context'"
+        ).fetchone()
+    finally:
+        conn.close()
+    evidence = json.loads(row[0])
+    assert evidence["agent_generation_context"]["schema_version"] == "agent_generation_context.v1"
+    assert evidence["agent_generation_context"]["context_status"] == "repair_current_context"
+    assert evidence["agent_generation_context_repair"]["repair_context_is_current_not_original"] is True
 
 
 def test_policy_suggestion_context_helper_attaches_agent_generation_context(tmp_path):
@@ -263,6 +371,7 @@ def test_policy_suggestion_context_helper_attaches_agent_generation_context(tmp_
     assert payload["agent_context_required"] is True
     assert payload["authority_verdict"]["registered"] is True
     assert payload["agent_context"]["schema_version"] == "agent_generation_context.v1"
+    assert payload["agent_generation_context"]["schema_version"] == "agent_generation_context.v1"
     assert payload["agent_context"]["source_agent"] == "autonomous_learning"
 
 

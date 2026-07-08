@@ -625,10 +625,25 @@ class BrainGovernanceCandidateService:
         mapped = dict(lineage.get("mapped_action") or {})
         expected_effect = dict(candidate.get("expected_effect") or {})
         evidence_refs = dict(candidate.get("evidence_refs") or {})
+        source_agent = str(candidate.get("source_agent") or "")
+        impact_level = str(candidate.get("max_impact") or "")
+        agent_generation_context = dict(lineage.get("agent_generation_context") or lineage.get("agent_context") or {})
+        if not agent_generation_context:
+            agent_generation_context = self._agent_generation_context(
+                source_agent=source_agent,
+                scope_type=scope_type,
+                action=action,
+                requested_writes=["policy_suggestion"],
+                status="proposed",
+                impact_level=impact_level,
+            )
+            lineage = {**lineage, "agent_generation_context": agent_generation_context}
+        elif not isinstance(lineage.get("agent_generation_context"), dict):
+            lineage = {**lineage, "agent_generation_context": agent_generation_context}
         base_evidence = {
             "schema_version": "brain_governance_candidate_policy_suggestion_evidence.v1",
             "candidate_id": candidate.get("candidate_id", ""),
-            "source_agent": candidate.get("source_agent", ""),
+            "source_agent": source_agent,
             "source_kind": candidate.get("source_kind", ""),
             "source_ref_type": candidate.get("source_ref_type", ""),
             "source_ref_id": candidate.get("source_ref_id", ""),
@@ -640,13 +655,15 @@ class BrainGovernanceCandidateService:
             "decision_policy_preview": candidate.get("decision_policy", {}),
             "rollback_plan": candidate.get("rollback_plan", {}),
             "lineage": lineage,
+            "agent_context_required": True,
+            "agent_generation_context": agent_generation_context,
             "authority_verdict": AgentAuthorityRegistryService().evaluate_scope_write(
-                str(candidate.get("source_agent") or ""),
+                source_agent,
                 scope_type,
                 action,
-                requested_writes=[],
+                requested_writes=["policy_suggestion"],
                 status="proposed",
-                impact_level=str(candidate.get("max_impact") or ""),
+                impact_level=impact_level,
             ),
             "bridge": {
                 "actor": actor,

@@ -31,7 +31,7 @@ class AgentBriefingContextService:
         limit = max(1, min(int(limit), 200))
         scorecard_service = AgentScorecardService(self.db_path)
         scorecard = scorecard_service.scorecard(limit=max(limit, 300))
-        trade_feedback = scorecard_service.latest_trade_attributions(limit=limit)
+        trade_feedback = scorecard_service.latest_trade_attributions(limit=limit, include_external_links=False)
         chain_health = scorecard_service.chain_health(limit=max(limit, 300))
         proposals = ProposalRegistryService(self.db_path).status(refresh=False)
         governance_coverage = self._governance_coverage()
@@ -66,6 +66,9 @@ class AgentBriefingContextService:
                 "active_count": proposals.get("active_count", 0),
                 "conflict_count": proposals.get("conflict_count", 0),
                 "stale_evidence_count": proposals.get("stale_evidence_count", 0),
+                "hard_stale_evidence_count": proposals.get("hard_stale_evidence_count", 0),
+                "stale_replay_required_count": proposals.get("stale_replay_required_count", 0),
+                "stale_review_required_count": proposals.get("stale_review_required_count", 0),
                 "low_reliability_count": proposals.get("low_reliability_count", 0),
             },
             "agent_scorecard": {
@@ -119,7 +122,10 @@ class AgentBriefingContextService:
             (item for item in (scorecard.get("items") or []) if str(item.get("source_agent") or "") == canonical),
             {},
         )
-        trade_feedback = scorecard_service.latest_trade_attributions(limit=limit)
+        trade_feedback = scorecard_service.latest_trade_attributions(
+            limit=limit,
+            include_external_links=False,
+        )
         recent_losses = []
         for item in trade_feedback.get("items") or []:
             if float(item.get("pnl") or 0.0) >= 0:

@@ -753,6 +753,44 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
     return rebuilt, suggestions_created
 
 
+def _refresh_trade_lesson_memory(conn: sqlite3.Connection, *, limit: int = 200) -> dict[str, Any]:
+    """Refresh recent lesson memory even when no new trade reviews were inserted."""
+
+    refresh_limit = max(1, min(int(limit or 200), 500))
+    try:
+        rows = _execute(
+            conn,
+            """
+            SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+                   pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
+                   review_json, created_at
+            FROM trade_outcome_review
+            ORDER BY created_at DESC, review_id DESC
+            LIMIT ?
+            """,
+            (refresh_limit,),
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("[learning_backfill] lesson memory refresh skipped: %s", exc)
+        return {
+            "ok": False,
+            "status": "skipped",
+            "upserted": 0,
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+
+    upserted = 0
+    for row in rows:
+        upsert_trade_lesson_memory(conn, row)
+        upserted += 1
+    return {
+        "ok": True,
+        "status": "refreshed" if upserted else "empty",
+        "upserted": upserted,
+        "limit": refresh_limit,
+    }
+
+
 def run_learning_backfill(
     *,
     limit: int = _DEFAULT_LIMIT,
@@ -776,14 +814,28 @@ def run_learning_backfill(
             )
         rebuilt = 0
         suggestions = 0
+        lesson_rebuild = {
+            "ok": True,
+            "status": "skipped",
+            "upserted": 0,
+            "reason": "no_reviews_inserted",
+        }
         if rebuild_learning and inserted:
             rebuilt, suggestions = rebuild_learning_state(conn)
+            lesson_rebuild = {
+                "ok": True,
+                "status": "included_in_rebuild_learning_state",
+                "upserted": rebuilt,
+            }
+        elif rebuild_learning:
+            lesson_rebuild = _refresh_trade_lesson_memory(conn, limit=min(max(1, int(limit)), 200))
         conn.commit()
         result = {
             "inserted_reviews": inserted,
             "inserted_count": len(inserted),
             "rebuild_reviews": rebuilt,
             "rebuild_suggestions": suggestions,
+            "lesson_rebuild": lesson_rebuild,
             "require_decision": not allow_partial,
         }
         if inserted:

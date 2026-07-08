@@ -36,7 +36,9 @@ def _daily_trade_limit_from_config(cfg: Any | None) -> tuple[int, str]:
     regular_limit = _safe_int(getattr(cfg, "risk_max_daily_trades", 20), 20)
     demo_limit = _safe_int(getattr(cfg, "demo_learning_max_daily_trades", regular_limit), regular_limit)
     autonomy_mode = str(getattr(cfg, "autonomy_mode", "") or "")
-    if autonomy_mode in {"demo_autonomous", "demo_nursery"} and demo_limit > regular_limit:
+    if autonomy_mode == "demo_nursery":
+        return 0, "runtime_config:demo_nursery_unlimited"
+    if autonomy_mode == "demo_autonomous" and demo_limit > regular_limit:
         return demo_limit, "runtime_config:demo_learning"
     return regular_limit, "runtime_config"
 

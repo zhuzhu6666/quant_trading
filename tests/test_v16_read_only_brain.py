@@ -661,6 +661,9 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
     assert evidence["bridge"]["candidate_review"]["bridge_ready"] is True
     assert evidence["bridge"]["candidate_review"]["review_id"] == review["review"]["review_id"]
     assert evidence["lineage"]["agent_context"]["schema_version"] == "agent_generation_context.v1"
+    assert evidence["lineage"]["agent_generation_context"]["schema_version"] == "agent_generation_context.v1"
+    assert evidence["agent_generation_context"]["source_agent"] == "v16_brain"
+    assert evidence["agent_context_required"] is True
     assert candidate[0] == "submitted_to_policy_suggestion"
     assert candidate[1] == "submitted"
     assert candidate[2] == submit_result["suggestion_id"]
