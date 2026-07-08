@@ -5,6 +5,7 @@ from backend.core.db import STATE_DB_DDL
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
+    PROFIT_PROTECTION_TEMPLATE_ID,
     get_position_supervisor_template,
     latest_applied_position_supervisor_template_id,
     list_position_supervisor_templates,
@@ -73,6 +74,13 @@ def test_latest_applied_position_supervisor_template_ignores_rolled_back_applica
         conn.close()
 
     assert latest_applied_position_supervisor_template_id(db_path=db_path) == DEFAULT_TEMPLATE_ID
+
+
+def test_profit_protection_template_uses_longer_thesis_break_evidence_window():
+    template = get_position_supervisor_template(PROFIT_PROTECTION_TEMPLATE_ID)
+
+    assert template["thresholds"]["min_thesis_break_seconds"] == 300.0
+    assert template["thresholds"]["broken_holding_efficiency_threshold"] == 0.18
 
 
 def test_generated_template_remains_available_from_learning_application(tmp_path):

@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_supervisor import evaluate_position_supervisor
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
@@ -438,7 +439,20 @@ def build_position_supervisor_advisories(
                 "action": action,
                 "confidence": round(confidence, 4),
                 "reason": reason,
-                "evidence": evidence,
+                "evidence": attach_policy_suggestion_agent_context(
+                    {
+                        **evidence,
+                        "schema_version": "position_supervisor_advisory_evidence.v1",
+                        "advisory_only": True,
+                    },
+                    source_agent="autonomous_learning",
+                    scope_type="position_supervisor_template",
+                    action=action,
+                    requested_writes=["policy_suggestion"],
+                    status="proposed",
+                    impact_level="medium",
+                    db_path=db_path,
+                ),
                 "status": "proposed",
                 "advisory_only": True,
                 "approval_path": "governor_review_then_offline_replay",

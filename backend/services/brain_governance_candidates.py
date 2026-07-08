@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, state_table_exists
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.brain_action_planner import _connect, _dumps, _execute, _loads, _safe_float
 
 
@@ -109,50 +110,14 @@ class BrainGovernanceCandidateService:
 
     @staticmethod
     def source_registry() -> dict[str, Any]:
+        registry = AgentAuthorityRegistryService().list_agents()
         return {
-            "schema_version": "brain_source_registry.v1",
-            "sources": [
-                {
-                    "source_agent": "v16_brain",
-                    "source_kind": "brain_medium_impact_governance",
-                    "capability_scope": "medium_impact_governance",
-                    "allowed_writes": ["brain_governance_candidate", "brain_medium_impact_governance"],
-                    "policy_suggestion_write": "manual_bridge_only",
-                },
-                {
-                    "source_agent": "autonomous_learning",
-                    "source_kind": "rule_evolution_governor",
-                    "capability_scope": "legacy_policy_governance",
-                    "allowed_writes": ["policy_suggestion", "evolution_run"],
-                    "policy_suggestion_write": "native",
-                },
-                {
-                    "source_agent": "factor_governance",
-                    "source_kind": "factor_governance_orchestrator",
-                    "capability_scope": "factor_catalog_runtime_governance",
-                    "allowed_writes": ["policy_suggestion", "factor_catalog", "runtime_config_overlay"],
-                    "policy_suggestion_write": "native_governed",
-                },
-                {
-                    "source_agent": "llm_advisory",
-                    "source_kind": "llm_advisory_service",
-                    "capability_scope": "explanation_review_only",
-                    "allowed_writes": ["llm_advisory_audit"],
-                    "policy_suggestion_write": "never_direct",
-                },
-                {
-                    "source_agent": "lightgbm_shadow_models",
-                    "source_kind": "model_shadow_audit",
-                    "capability_scope": "shadow_or_advisory",
-                    "allowed_writes": [
-                        "open_quality_shadow_audit",
-                        "position_quality_shadow_audit",
-                        "factor_governance_shadow_audit",
-                        "meta_model_shadow_audit",
-                    ],
-                    "policy_suggestion_write": "only_through_existing_governance_services",
-                },
-            ],
+            "schema_version": "brain_source_registry.v2",
+            "registry_version": registry["registry_version"],
+            "sources": registry["sources"],
+            "system_sources": registry["system_sources"],
+            "aliases": registry["aliases"],
+            "boundary": registry["boundary"],
         }
 
     def create_candidate(
@@ -186,6 +151,26 @@ class BrainGovernanceCandidateService:
     ) -> dict[str, Any]:
         ensure_brain_governance_candidate_table(self.db_path)
         created_at = _safe_float(now if now is not None else time.time())
+        agent_context = self._agent_generation_context(
+            source_agent=source_agent,
+            scope_type=scope_type,
+            action=action,
+            requested_writes=["brain_governance_candidate"],
+            status=status,
+            impact_level=max_impact,
+        )
+        authority_verdict = dict(agent_context.get("authority_verdict") or {}) or AgentAuthorityRegistryService().evaluate_scope_write(
+            source_agent,
+            scope_type,
+            action,
+            requested_writes=["brain_governance_candidate"],
+            status=status,
+            impact_level=max_impact,
+        )
+        lineage_payload = dict(lineage or {})
+        lineage_payload.setdefault("authority_verdict", authority_verdict)
+        lineage_payload.setdefault("agent_context", agent_context)
+        lineage_payload.setdefault("agent_context_required", True)
         item = {
             "candidate_id": candidate_id or f"brain_candidate_{uuid.uuid4().hex[:16]}",
             "schema_version": "brain_governance_candidate.v1",
@@ -208,7 +193,7 @@ class BrainGovernanceCandidateService:
             "risk_verdict": risk_verdict or {},
             "decision_policy": decision_policy or {},
             "rollback_plan": rollback_plan or {},
-            "lineage": lineage or {},
+            "lineage": lineage_payload,
             "status": status,
             "submitted_suggestion_id": "",
             "submitted_at": 0.0,
@@ -216,10 +201,53 @@ class BrainGovernanceCandidateService:
             "created_at": created_at,
             "updated_at": created_at,
             "boundary": self.boundary(),
+            "authority_verdict": authority_verdict,
         }
         if persist:
             self._insert_candidate(item)
         return item
+
+    def _agent_generation_context(
+        self,
+        *,
+        source_agent: str,
+        scope_type: str,
+        action: str,
+        requested_writes: list[str],
+        status: str,
+        impact_level: str,
+    ) -> dict[str, Any]:
+        try:
+            from backend.services.agent_briefing import AgentBriefingContextService
+
+            return AgentBriefingContextService(self.db_path).agent_context(
+                source_agent,
+                scope_type=scope_type,
+                action=action,
+                requested_writes=requested_writes,
+                status=status,
+                impact_level=impact_level,
+                limit=20,
+            )
+        except Exception as exc:
+            authority_verdict = AgentAuthorityRegistryService().evaluate_scope_write(
+                source_agent,
+                scope_type,
+                action,
+                requested_writes=requested_writes,
+                status=status,
+                impact_level=impact_level,
+            )
+            return {
+                "ok": False,
+                "schema_version": "agent_generation_context.v1",
+                "source_agent": source_agent,
+                "scope_type": scope_type,
+                "action": action,
+                "authority_verdict": authority_verdict,
+                "error": f"{type(exc).__name__}: {exc}",
+                "boundary": {"pre_generation_context_only": True},
+            }
 
     def latest_candidates(self, *, limit: int = 50, status: str = "") -> dict[str, Any]:
         ensure_brain_governance_candidate_table(self.db_path)
@@ -264,6 +292,82 @@ class BrainGovernanceCandidateService:
         finally:
             conn.close()
 
+    def generation_context_coverage(self, *, limit: int = 200) -> dict[str, Any]:
+        ensure_brain_governance_candidate_table(self.db_path)
+        limit = max(1, min(int(limit), 1000))
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "brain_governance_candidate"):
+                return {
+                    "ok": False,
+                    "schema_version": "candidate_generation_context_coverage.v1",
+                    "status": "missing_table",
+                    "items": [],
+                    "boundary": self.boundary(),
+                }
+            rows = _execute(
+                conn,
+                """
+                SELECT candidate_id, source_agent, proposal_stage, status,
+                       lineage_json, created_at, updated_at
+                FROM brain_governance_candidate
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+        items = [self._generation_context_coverage_item(row) for row in rows]
+        required_missing = [item for item in items if item.get("coverage_status") == "missing_required_agent_context"]
+        legacy_missing = [item for item in items if item.get("coverage_status") == "legacy_missing_agent_context"]
+        covered = [item for item in items if item.get("coverage_status") == "covered"]
+        status = "ok" if not required_missing else "degraded"
+        return {
+            "ok": status == "ok",
+            "schema_version": "candidate_generation_context_coverage.v1",
+            "status": status,
+            "candidate_count": len(items),
+            "covered_count": len(covered),
+            "missing_required_context_count": len(required_missing),
+            "legacy_missing_context_count": len(legacy_missing),
+            "coverage_ratio": round(len(covered) / len(items), 4) if items else 1.0,
+            "violations": required_missing[:25],
+            "items": items[: min(limit, 100)],
+            "boundary": {
+                **self.boundary(),
+                "read_only_generation_context_audit": True,
+                "does_not_create_candidates": True,
+                "does_not_modify_candidates": True,
+            },
+        }
+
+    @staticmethod
+    def _generation_context_coverage_item(row: Any) -> dict[str, Any]:
+        lineage = _loads(row["lineage_json"], {})
+        if not isinstance(lineage, dict):
+            lineage = {}
+        context = lineage.get("agent_context") if isinstance(lineage.get("agent_context"), dict) else {}
+        required = bool(lineage.get("agent_context_required"))
+        covered = str(context.get("schema_version") or "") == "agent_generation_context.v1"
+        if covered:
+            coverage_status = "covered"
+        elif required:
+            coverage_status = "missing_required_agent_context"
+        else:
+            coverage_status = "legacy_missing_agent_context"
+        return {
+            "candidate_id": str(row["candidate_id"] or ""),
+            "source_agent": str(row["source_agent"] or ""),
+            "proposal_stage": str(row["proposal_stage"] or ""),
+            "status": str(row["status"] or ""),
+            "agent_context_required": required,
+            "coverage_status": coverage_status,
+            "agent_context_schema": str(context.get("schema_version") or ""),
+            "created_at": _safe_float(row["created_at"]),
+            "updated_at": _safe_float(row["updated_at"]),
+        }
+
     def status(self, *, limit: int = 50) -> dict[str, Any]:
         latest = self.latest_candidates(limit=limit)
         items = list(latest.get("items") or [])
@@ -275,6 +379,7 @@ class BrainGovernanceCandidateService:
                 "candidate_count": 0,
                 "candidate_lane_isolated": True,
                 "policy_suggestion_bridge_manual_only": True,
+                "source_registry": self.source_registry(),
             }
         stages: dict[str, int] = {}
         statuses: dict[str, int] = {}
@@ -293,6 +398,7 @@ class BrainGovernanceCandidateService:
             "statuses": dict(sorted(statuses.items())),
             "candidate_lane_isolated": True,
             "policy_suggestion_bridge_manual_only": True,
+            "source_registry": self.source_registry(),
         }
 
     def submit_candidate_to_policy_suggestion(self, candidate_id: str, *, actor: str = "api:ops.brain.governance_candidate") -> dict[str, Any]:
@@ -322,10 +428,17 @@ class BrainGovernanceCandidateService:
         risk_verdict = dict(candidate.get("risk_verdict") or {})
         if not bool(risk_verdict.get("allowed")):
             return self._blocked_submit(candidate, "risk_policy_not_allowed")
+        candidate_review = self._latest_bridge_ready_review(candidate_id)
 
-        payload = self._policy_suggestion_payload(candidate, actor=actor)
+        payload = self._policy_suggestion_payload(candidate, actor=actor, candidate_review=candidate_review)
         if not payload.get("ok"):
             return self._blocked_submit(candidate, str(payload.get("reason") or "not_governor_compatible"), payload=payload)
+        if not candidate_review.get("bridge_ready"):
+            return self._blocked_submit(
+                candidate,
+                "missing_bridge_ready_candidate_review",
+                payload={"latest_review": candidate_review, "candidate_review_required_before_submit": True},
+            )
 
         suggestion_id = str(payload["suggestion_id"])
         now = time.time()
@@ -498,7 +611,13 @@ class BrainGovernanceCandidateService:
         finally:
             conn.close()
 
-    def _policy_suggestion_payload(self, candidate: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    def _policy_suggestion_payload(
+        self,
+        candidate: dict[str, Any],
+        *,
+        actor: str,
+        candidate_review: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         scope_type = str(candidate.get("scope_type") or "")
         scope_key = str(candidate.get("scope_key") or "")
         action = str(candidate.get("action") or "")
@@ -521,9 +640,20 @@ class BrainGovernanceCandidateService:
             "decision_policy_preview": candidate.get("decision_policy", {}),
             "rollback_plan": candidate.get("rollback_plan", {}),
             "lineage": lineage,
+            "authority_verdict": AgentAuthorityRegistryService().evaluate_scope_write(
+                str(candidate.get("source_agent") or ""),
+                scope_type,
+                action,
+                requested_writes=[],
+                status="proposed",
+                impact_level=str(candidate.get("max_impact") or ""),
+            ),
             "bridge": {
                 "actor": actor,
                 "manual_only": True,
+                "candidate_review_required": True,
+                "candidate_review_required_before_submit": True,
+                "candidate_review": candidate_review or {},
                 "requires_rule_evolution_governor_review": True,
             },
             "boundary": self.boundary(),
@@ -592,6 +722,36 @@ class BrainGovernanceCandidateService:
             "ok": False,
             "reason": f"unsupported_legacy_governor_surface:{scope_type}/{action}",
         }
+
+    def _latest_bridge_ready_review(self, candidate_id: str) -> dict[str, Any]:
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "brain_governance_candidate_review"):
+                return {}
+            row = _execute(
+                conn,
+                """
+                SELECT review_id, review_status, bridge_ready,
+                       evidence_gaps_json, created_at
+                FROM brain_governance_candidate_review
+                WHERE candidate_id=?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if not row:
+                return {}
+            return {
+                "schema_version": "brain_governance_candidate_review_ref.v1",
+                "review_id": str(row["review_id"] or ""),
+                "review_status": str(row["review_status"] or ""),
+                "bridge_ready": bool(row["bridge_ready"]),
+                "evidence_gaps": _loads(row["evidence_gaps_json"], []),
+                "created_at": _safe_float(row["created_at"]),
+            }
+        finally:
+            conn.close()
 
     @staticmethod
     def _row_to_candidate(row: Any) -> dict[str, Any]:

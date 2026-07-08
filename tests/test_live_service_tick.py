@@ -31,6 +31,7 @@ def _reset_state():
     live_service._live_state["positions"] = []
     live_service._live_state["market_session"] = None
     live_service._live_state["spot_quote"] = None
+    live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._pos_open_api_volume.clear()
     rc.reset_for_tests()
     yield
@@ -39,6 +40,7 @@ def _reset_state():
     live_service._live_state["positions"] = []
     live_service._live_state["market_session"] = None
     live_service._live_state["spot_quote"] = None
+    live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._pos_open_api_volume.clear()
 
 
@@ -384,6 +386,70 @@ def test_open_trade_context_sizing_floors_to_broker_step():
     assert trace["context_policy"]["reason"] == "thin_liquidity"
 
 
+def test_open_trade_context_sizing_rounds_reduction_to_nearest_broker_step():
+    volume, trace = live_service._apply_context_position_sizing(
+        volume=300.0,
+        sizing_trace={"schema_version": "position_sizing_trace.v1"},
+        composite=SimpleNamespace(
+            context_policy={
+                "applied": True,
+                "position_multiplier": 0.57375,
+                "reason": "event_window_near;low_volatility;asia_session",
+            }
+        ),
+        bridge_meta={"api_min_volume": 100.0, "api_step_volume": 100.0},
+    )
+
+    assert volume == 200.0
+    assert trace["context_policy"]["raw_api_volume"] == 172.125
+    assert trace["context_policy"]["adjusted_api_volume"] == 200.0
+
+
+def test_open_trade_context_sizing_blocks_when_reduction_below_broker_min():
+    volume, trace = live_service._apply_context_position_sizing(
+        volume=100.0,
+        sizing_trace={"schema_version": "position_sizing_trace.v1"},
+        composite=SimpleNamespace(
+            context_policy={
+                "applied": True,
+                "position_multiplier": 0.5,
+                "reason": "low_quality_context",
+            }
+        ),
+        bridge_meta={"api_min_volume": 100.0, "api_step_volume": 100.0},
+    )
+
+    assert volume == 0.0
+    assert trace["context_policy"]["raw_api_volume"] == 50.0
+    assert trace["context_policy"]["adjusted_api_volume"] == 0.0
+    assert trace["context_policy"]["blocked_reason"].startswith("context_sizing_below_min")
+    assert trace["context_policy_candidate_api_volume"] == 100.0
+
+
+def test_open_trade_context_sizing_does_not_lift_non_positive_upstream_size():
+    volume, trace = live_service._apply_context_position_sizing(
+        volume=0.0,
+        sizing_trace={
+            "schema_version": "position_sizing_trace.v1",
+            "blocked_reason": "kelly_fraction_non_positive",
+        },
+        composite=SimpleNamespace(
+            context_policy={
+                "applied": True,
+                "position_multiplier": 0.75,
+                "reason": "low_quality_context",
+            }
+        ),
+        bridge_meta={"api_min_volume": 100.0, "api_step_volume": 100.0},
+    )
+
+    assert volume == 0.0
+    assert trace["blocked_reason"] == "kelly_fraction_non_positive"
+    assert trace["context_policy"]["raw_api_volume"] == 0.0
+    assert trace["context_policy"]["adjusted_api_volume"] == 0.0
+    assert trace["context_policy"]["blocked_reason"] == "kelly_fraction_non_positive"
+
+
 def test_open_trade_pipeline_stops_before_broker_order_when_attach_pending():
     bridge = _fake_bridge()
     logs: list[str] = []
@@ -522,6 +588,46 @@ def test_process_tick_dry_run_does_not_call_amend(monkeypatch):
 
     bridge.market_buy.assert_not_called()
     bridge.market_sell.assert_not_called()
+
+
+def test_process_tick_duplicate_decision_bar_skips_open_decision(monkeypatch):
+    """Same closed decision bar should not be fed into the signal/open path twice."""
+    bridge = _fake_bridge()
+    df_new = _make_df()
+    last_bar = df_new.iloc[-1]
+    bar_ts = float(df_new.index[-1].timestamp())
+    live_service._live_state["account"] = {"ok": True, "balance": 10000.0, "equity": 10000.0}
+    live_service._live_state["positions"] = []
+    live_service._live_state["last_processed_decision_bar_ts"] = bar_ts
+    logs: list[str] = []
+
+    def _fail_decision_pipeline(**_kwargs):
+        raise AssertionError("duplicate bar must not run live decision pipeline")
+
+    previous_pipeline = live_service._factor_pipeline
+    live_service._factor_pipeline = {
+        "last_factor_values": {"atr_ratio": 0.001},
+        "attribution": None,
+    }
+    try:
+        monkeypatch.setattr(live_service, "_decision_run_live_decision_pipeline", _fail_decision_pipeline)
+        monkeypatch.setattr(live_service, "_write_live_trade_log_factor", lambda *args, **kwargs: None)
+        monkeypatch.setattr(live_service, "_check_business_alerts", lambda *args, **kwargs: None)
+        live_service._process_tick(
+            bridge,
+            None,
+            df_new,
+            last_bar,
+            "ctrader",
+            tick=2,
+            log=logs.append,
+        )
+    finally:
+        live_service._factor_pipeline = previous_pipeline
+
+    bridge.market_buy.assert_not_called()
+    bridge.market_sell.assert_not_called()
+    assert any("decision bar already processed" in item for item in logs)
 
 
 def test_should_send_orders_respects_system_mode(monkeypatch, tmp_path):

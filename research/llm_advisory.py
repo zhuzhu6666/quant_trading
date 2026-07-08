@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
 
 
@@ -430,6 +431,19 @@ class LLMAdvisoryService:
     ) -> dict[str, Any]:
         now = time.time()
         audit_id = f"llm:{task_type or 'task'}:{int(now * 1000)}"
+        result_payload = dict(result or {})
+        result_payload.setdefault(
+            "authority_verdict",
+            AgentAuthorityRegistryService().evaluate_scope_write(
+                "llm_advisory",
+                target_type or "llm_advisory",
+                task_type or "advisory_review",
+                requested_writes=["llm_advisory_audit"],
+                status=status,
+                impact_level="observe",
+            ),
+        )
+        result_payload.setdefault("source_agent", "llm_advisory")
         conn = self._conn()
         try:
             self._execute(conn,
@@ -449,7 +463,7 @@ class LLMAdvisoryService:
                     str(status or ""),
                     _json_dumps(prompt),
                     _json_dumps(response),
-                    _json_dumps(result),
+                    _json_dumps(result_payload),
                     str(error or ""),
                     now,
                 ),

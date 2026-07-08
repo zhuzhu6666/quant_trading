@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 
 
 MODEL_TYPE = "factor_governance_lightgbm"
@@ -558,6 +560,15 @@ class FactorGovernanceLightGBMService:
             },
             "guardrails": list(artifact.get("guardrails") or []),
         }
+        result["source_agent"] = "lightgbm_shadow_models"
+        result["authority_verdict"] = AgentAuthorityRegistryService().evaluate(
+            "lightgbm_shadow_models",
+            "model_stage",
+            "shadow_model_audit",
+            requested_writes=["factor_governance_shadow_audit"],
+            status=mode,
+            impact_level="shadow",
+        )
         payload = {
             "sample_id": sample["sample_id"],
             "review_id": sample["review_id"],
@@ -569,6 +580,8 @@ class FactorGovernanceLightGBMService:
             "pnl": sample["pnl"],
             "outcome_label": sample["outcome_label"],
             "label_source": sample.get("label_source", ""),
+            "source_agent": "lightgbm_shadow_models",
+            "authority_verdict": result["authority_verdict"],
         }
         inference_id = f"{MODEL_TYPE}:{sample['sample_id']}:{int(now * 1000)}"
         conn = self._conn()
@@ -650,7 +663,8 @@ class FactorGovernanceLightGBMService:
                     "action": "review_factor_weight_or_template",
                     "confidence": round(confidence, 4),
                     "reason": "LightGBM shadow model detected repeated weak factor contribution samples",
-                    "evidence": {
+                    "evidence": attach_policy_suggestion_agent_context(
+                        {
                         "schema_version": "factor_governance_advisory.v1",
                         "model_type": MODEL_TYPE,
                         "sample_count": len(factor_items),
@@ -660,7 +674,15 @@ class FactorGovernanceLightGBMService:
                         "latest_inference_ids": [str(item.get("inference_id") or "") for item in weak_items[:5]],
                         "advisory_only": True,
                         "approval_path": "governor_review_then_offline_replay",
-                    },
+                        },
+                        source_agent="lightgbm_shadow_models",
+                        scope_type="factor",
+                        action="review_factor_weight_or_template",
+                        requested_writes=[],
+                        status="proposed",
+                        impact_level="shadow",
+                        db_path=self.db_path,
+                    ),
                     "status": "proposed",
                     "advisory_only": True,
                 }

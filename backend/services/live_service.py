@@ -5521,6 +5521,7 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             if fp["engine"].is_warm and snapshots:
                 try:
                     last_fv = snapshots[-1]
+                    fp["last_factor_values"] = dict(last_fv or {})
                     last_bar = {
                         "open": float(df["open"].iloc[-1]),
                         "high": float(df["high"].iloc[-1]),
@@ -7104,22 +7105,43 @@ def _apply_context_position_sizing(
     bridge_meta: dict[str, Any],
 ) -> tuple[float, dict[str, Any]]:
     context_policy = dict(getattr(composite, "context_policy", {}) or {})
+    input_volume = float(volume or 0.0)
+    next_trace = dict(sizing_trace)
     try:
         context_mult = float(context_policy.get("position_multiplier", 1.0) or 1.0)
     except (TypeError, ValueError):
         context_mult = 1.0
     if not context_policy or abs(context_mult - 1.0) <= 1e-9:
-        return float(volume), sizing_trace
+        return input_volume, sizing_trace
 
-    context_raw_volume = float(volume) * context_mult
-    context_volume = _floor_api_volume_to_step(context_raw_volume, bridge_meta)
-    adjusted_volume = context_volume if context_volume > 0 else float(volume)
-    next_trace = dict(sizing_trace)
+    upstream_blocked_reason = str(next_trace.get("blocked_reason") or "")
+    context_raw_volume = input_volume * context_mult
+    min_volume = float((bridge_meta or {}).get("api_min_volume") or 1.0)
+    blocked_reason = ""
+    if input_volume <= 0:
+        adjusted_volume = 0.0
+        blocked_reason = upstream_blocked_reason or "non_positive_upstream_sizing"
+    elif context_mult < 1.0 and context_raw_volume < min_volume:
+        adjusted_volume = 0.0
+        blocked_reason = (
+            f"context_sizing_below_min: {input_volume:.0f}*{context_mult:.2f}="
+            f"{context_raw_volume:.0f}<{min_volume:.0f}"
+        )
+    else:
+        if context_mult < 1.0:
+            context_volume = _round_api_volume_to_step(context_raw_volume, bridge_meta)
+        else:
+            context_volume = _floor_api_volume_to_step(context_raw_volume, bridge_meta)
+        adjusted_volume = context_volume if context_volume > 0 else input_volume
     next_trace["context_policy"] = {
         **context_policy,
         "raw_api_volume": context_raw_volume,
         "adjusted_api_volume": adjusted_volume,
+        "blocked_reason": blocked_reason,
     }
+    if blocked_reason:
+        next_trace["blocked_reason"] = blocked_reason
+        next_trace["context_policy_candidate_api_volume"] = input_volume
     return adjusted_volume, next_trace
 
 
@@ -7815,6 +7837,125 @@ def _run_open_trade_pipeline(
     return gate_result
 
 
+def _process_tick_existing_decision_bar(
+    *,
+    bridge,
+    pipeline: dict,
+    cfg: Any,
+    bar: dict[str, Any],
+    last_bar,
+    broker: str,
+    tick: int,
+    log,
+    last_processed_ts: float,
+) -> None:
+    """Run observe/protection work without feeding a duplicate decision bar."""
+    global _prev_position_ids
+
+    acct = _live_state_get("account", {}, clone=True) or {}
+    positions_payload = _live_state_get("positions", [], clone=True) or []
+    _positions_probe = (
+        (positions_payload.get("positions", []) or [])
+        if isinstance(positions_payload, dict)
+        else positions_payload
+    )
+    if _positions_probe and not isinstance(_positions_probe[0], dict):
+        from backend.ws.endpoints import _position_to_dict
+    else:
+        _position_to_dict = None
+    pos = _tick_normalize_live_positions_payload(
+        positions_payload,
+        position_to_dict=_position_to_dict,
+    )
+
+    current_price = float(last_bar["close"])
+    if bridge is not None and hasattr(bridge, "get_spot_quote"):
+        price_guard = _tick_guard_current_price_with_spot_quote(
+            current_price=current_price,
+            get_spot_quote=bridge.get_spot_quote,
+            quote_is_fresh=_quote_is_fresh,
+        )
+        current_price = float(price_guard["current_price"])
+        if price_guard["error"] is not None:
+            logger.debug("[live] spot price guard failed for tick %s: %s", tick, price_guard["error"])
+
+    current_pids = _tick_collect_position_ids(pos)
+    attr_engine = pipeline.get("attribution")
+    positions_snapshot_ready = bool(_live_state_get("positions_updated_at", 0.0))
+    closed_pids, current_pids, close_detection_deferred = _tick_resolve_closed_position_ids(
+        previous_position_ids=_prev_position_ids,
+        current_position_ids=current_pids,
+        positions_snapshot_ready=positions_snapshot_ready,
+    )
+    if close_detection_deferred:
+        log(f"tick {tick}: positions cache not ready, defer close detection")
+    restored_attributions = _restore_attribution_for_positions(attr_engine, pos)
+    if restored_attributions:
+        log(f"tick {tick}: attribution restored open contexts={restored_attributions}")
+
+    real_pnls: dict[int, dict] = {}
+    if closed_pids and bridge is not None:
+        try:
+            from execution.deal_sync import sync_close_deals_batch
+
+            _sconn = _get_state_pg_conn()
+            try:
+                real_pnls = sync_close_deals_batch(bridge, _sconn, closed_pids)
+            finally:
+                _sconn.close()
+        except Exception as _ds_err:
+            log(f"tick {tick}: deal_sync error: {_ds_err}")
+
+    _handle_closed_positions_after_tick(
+        closed_pids=closed_pids,
+        real_pnls=real_pnls,
+        attr_engine=attr_engine,
+        current_price=current_price,
+        bar=bar,
+        cfg=cfg,
+        acct=acct,
+        broker=broker,
+        tick=tick,
+        log=log,
+    )
+    for p in pos:
+        pid = p.get("position_id") or p.get("ticket")
+        if pid is not None and int(pid) not in _pos_open_prices:
+            _pos_open_prices[int(pid)] = float(p.get("open_price", current_price))
+
+    factor_values = dict(pipeline.get("last_factor_values") or {})
+    atr_val = factor_values.get("atr_ratio", 0)
+    atr_price = atr_val * current_price if atr_val and atr_val > 0 else 0
+    if pos and bridge is not None and cfg is not None:
+        _run_position_protection_cycle(
+            bridge,
+            pos,
+            cfg=cfg,
+            acct=acct,
+            pipeline=pipeline,
+            current_price=current_price,
+            atr_price=atr_price,
+            tick=tick,
+            log=log,
+        )
+
+    log(
+        f"tick {tick}: decision bar already processed "
+        f"bar_ts={float(bar.get('time') or 0.0):.0f} last={last_processed_ts:.0f}; skip open decision"
+    )
+    log(f"tick {tick}: price={current_price:.2f} "
+        f"balance={acct.get('balance', 0):.2f} "
+        f"equity={acct.get('equity', 0):.2f} "
+        f"pos={len(pos)} "
+        f"pnl_session={_live_state_get('session_pnl', 0):.2f}")
+    _check_business_alerts(tick, acct, pos, log)
+    _write_live_trade_log_factor(
+        tick, current_price, acct, pos, None, None, _live_state,
+    )
+    _prev_position_ids = current_pids
+    _publish_latest_price(current_price, source="loop_tick")
+
+
 def _process_tick_factor_pipeline(
     bridge, pipeline: dict, df_new, last_bar, broker: str,
     tick: int, log,
@@ -7834,13 +7975,34 @@ def _process_tick_factor_pipeline(
     except Exception:
         cfg = None
 
+    # 1. 构造 bar dict
+    bar = _tick_build_factor_bar(last_bar, df_new, _tf)
+    try:
+        bar_ts = float(bar.get("time") or 0.0)
+    except (TypeError, ValueError):
+        bar_ts = 0.0
+    try:
+        last_processed_ts = float(_live_state_get("last_processed_decision_bar_ts", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        last_processed_ts = 0.0
+    if bar_ts > 0 and last_processed_ts >= bar_ts:
+        _process_tick_existing_decision_bar(
+            bridge=bridge,
+            pipeline=pipeline,
+            cfg=cfg,
+            bar=bar,
+            last_bar=last_bar,
+            broker=broker,
+            tick=tick,
+            log=log,
+            last_processed_ts=last_processed_ts,
+        )
+        return
+
     engine = pipeline["engine"]
     normalizer = pipeline["normalizer"]
     compositor = pipeline["compositor"]
     gate = pipeline["gate"]
-
-    # 1. 构造 bar dict
-    bar = _tick_build_factor_bar(last_bar, df_new, _tf)
 
     # 2. 流式因子计算 → 归一化 → 组合 → context policy → 闸门
     decision_frame = _decision_run_live_decision_pipeline(
@@ -7856,6 +8018,9 @@ def _process_tick_factor_pipeline(
         return
 
     factor_values = decision_frame.factor_values
+    pipeline["last_factor_values"] = dict(factor_values or {})
+    if bar_ts > 0:
+        _live_state_update(last_processed_decision_bar_ts=bar_ts)
     signals = decision_frame.signals
     composite = decision_frame.composite
     gate_result = decision_frame.gate_result

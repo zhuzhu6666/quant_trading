@@ -17,6 +17,9 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_briefing import AgentBriefingContextService
+from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.meta_governance import MetaGovernanceService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.stability import measure, record_timing, timing_snapshot
@@ -104,6 +107,8 @@ class BackendReadinessService:
         factor_data = self._timed_component("factor_data", self._factor_data_status)
         governance_freshness = self._timed_component("governance_freshness", self._governance_freshness_status)
         runtime_weight_integrity = self._timed_component("runtime_weight_integrity", self._runtime_weight_integrity_status)
+        factor_blend_health = self._timed_component("factor_blend_health", self._factor_blend_health_status)
+        factor_pruning_candidates = self._timed_component("factor_pruning_candidates", self._factor_pruning_candidates_status)
         execution_semantics = self._timed_component("execution_semantics", self._execution_semantics_status)
         startup_status = self._timed_component("startup_status", self._startup_status)
         config_runtime_drift = self._timed_component("config_runtime_drift", self._config_runtime_drift_status)
@@ -225,6 +230,8 @@ class BackendReadinessService:
             "factor_data": factor_data,
             "governance_freshness": governance_freshness,
             "runtime_weight_integrity": runtime_weight_integrity,
+            "factor_blend_health": factor_blend_health,
+            "factor_pruning_candidates": factor_pruning_candidates,
             "execution_semantics": execution_semantics,
             "startup": startup_status,
             "config_runtime_drift": config_runtime_drift,
@@ -285,6 +292,11 @@ class BackendReadinessService:
                 "v16_brain_low_impact_execution_run": "/api/ops/brain/low-impact-executions/run",
                 "v16_brain_medium_impact_governance": "/api/ops/brain/medium-impact-governance",
                 "v16_brain_medium_impact_governance_materialize": "/api/ops/brain/medium-impact-governance/materialize",
+                "factor_pruning_governance_materialize": "/api/ops/factor/pruning-governance/materialize",
+                "factor_pruning_governance_promote_ready": "/api/ops/factor/pruning-governance/promote-ready",
+                "factor_pruning_governance_bridge_ready": "/api/ops/factor/pruning-governance/bridge-ready",
+                "factor_governance_effects": "/api/ops/factor/governance-effects",
+                "factor_governance_effects_reconcile": "/api/ops/factor/governance-effects/reconcile",
                 "v16_brain_governance_candidates": "/api/ops/brain/governance-candidates",
                 "v16_brain_governance_candidate_submit": "/api/ops/brain/governance-candidates/{candidate_id}/submit",
                 "v16_brain_governance_candidate_reviews": "/api/ops/brain/governance-candidate-reviews",
@@ -294,6 +306,11 @@ class BackendReadinessService:
                 "v16_brain_live_ready_guardrail_tighten": "/api/ops/brain/live-ready-guardrails/tighten",
                 "autonomy_proposals": "/api/ops/autonomy/proposals",
                 "autonomy_proposals_refresh": "/api/ops/autonomy/proposals/refresh",
+                "agent_authority": "/api/ops/agent-authority",
+                "agent_scorecard": "/api/ops/agent-scorecard",
+                "agent_briefing": "/api/ops/agent-briefing",
+                "agent_trade_attribution": "/api/ops/agent-trade-attribution",
+                "agent_chain_health": "/api/ops/agent-chain-health",
                 "live_autonomy_status": "/api/ops/autonomy/live-status",
                 "live_autonomy_unlock_evaluate": "/api/ops/autonomy/live-unlock/evaluate",
                 "live_autonomy_unlock": "/api/ops/autonomy/live-unlock",
@@ -322,12 +339,33 @@ class BackendReadinessService:
         payload["brain_medium_impact_governance"] = brain_medium_impact_governance
         brain_governance_candidates = self._timed_component("brain_governance_candidates", lambda: self._brain_governance_candidate_status())
         payload["brain_governance_candidates"] = brain_governance_candidates
+        candidate_generation_context_coverage = self._timed_component("candidate_generation_context_coverage", lambda: self._candidate_generation_context_coverage_status())
+        payload["candidate_generation_context_coverage"] = candidate_generation_context_coverage
+        factor_pruning_governance = self._timed_component("factor_pruning_governance", lambda: self._factor_pruning_governance_status())
+        payload["factor_pruning_governance"] = factor_pruning_governance
+        factor_governance_effects = self._timed_component("factor_governance_effects", lambda: self._factor_governance_effect_status())
+        payload["factor_governance_effects"] = factor_governance_effects
         brain_governance_candidate_reviews = self._timed_component("brain_governance_candidate_reviews", lambda: self._brain_governance_candidate_review_status())
         payload["brain_governance_candidate_reviews"] = brain_governance_candidate_reviews
+        candidate_bridge_review_coverage = self._timed_component("candidate_bridge_review_coverage", lambda: self._candidate_bridge_review_coverage_status())
+        payload["candidate_bridge_review_coverage"] = candidate_bridge_review_coverage
         brain_live_ready_guardrails = self._timed_component("brain_live_ready_guardrails", lambda: self._brain_live_ready_guardrail_status())
         payload["brain_live_ready_guardrails"] = brain_live_ready_guardrails
         proposal_registry = self._timed_component("proposal_registry", lambda: self._proposal_registry_status())
         payload["proposal_registry"] = proposal_registry
+        proposal_generation_context_coverage = self._timed_component(
+            "proposal_generation_context_coverage",
+            lambda: self._proposal_generation_context_coverage_status(),
+        )
+        payload["proposal_generation_context_coverage"] = proposal_generation_context_coverage
+        agent_authority = self._timed_component("agent_authority", lambda: self._agent_authority_status())
+        payload["agent_authority"] = agent_authority
+        agent_scorecard = self._timed_component("agent_scorecard", lambda: self._agent_scorecard_status())
+        payload["agent_scorecard"] = agent_scorecard
+        agent_briefing = self._timed_component("agent_briefing", lambda: self._agent_briefing_status())
+        payload["agent_briefing"] = agent_briefing
+        agent_chain_health = self._timed_component("agent_chain_health", lambda: self._agent_chain_health_status())
+        payload["agent_chain_health"] = agent_chain_health
         live_autonomy = self._timed_component("live_autonomy", lambda: self._live_autonomy_status(payload))
         payload["live_autonomy"] = live_autonomy
         payload["v16"] = {
@@ -339,9 +377,18 @@ class BackendReadinessService:
             "low_impact_executions": brain_low_impact_executions,
             "medium_impact_governance": brain_medium_impact_governance,
             "governance_candidates": brain_governance_candidates,
+            "candidate_generation_context_coverage": candidate_generation_context_coverage,
+            "factor_pruning_governance": factor_pruning_governance,
+            "factor_governance_effects": factor_governance_effects,
             "governance_candidate_reviews": brain_governance_candidate_reviews,
+            "candidate_bridge_review_coverage": candidate_bridge_review_coverage,
             "live_ready_guardrails": brain_live_ready_guardrails,
             "proposal_registry": proposal_registry,
+            "proposal_generation_context_coverage": proposal_generation_context_coverage,
+            "agent_authority": agent_authority,
+            "agent_scorecard": agent_scorecard,
+            "agent_briefing": agent_briefing,
+            "agent_chain_health": agent_chain_health,
             "live_autonomy": live_autonomy,
             "control_plane_boundaries": {
                 "read_only": True,
@@ -354,8 +401,10 @@ class BackendReadinessService:
                 "medium_impact_governance_suggestions_only": False,
                 "medium_impact_policy_suggestion_bridge_manual_only": True,
                 "medium_impact_policy_suggestion_direct_write": False,
+                "candidate_generation_context_required": True,
                 "candidate_review_bridge_preview_only": True,
                 "candidate_review_llm_advisory_only": True,
+                "candidate_bridge_requires_review": True,
                 "medium_impact_future_apply_requires_decision_policy": True,
                 "live_ready_guardrails_only": True,
                 "live_ready_tightening_only": True,
@@ -365,9 +414,17 @@ class BackendReadinessService:
                 "runtime_overlay_snapshot_required_for_future_mutations": True,
                 "models_shadow_or_advisory_only": True,
                 "proposal_registry_review_only": True,
+                "proposal_generation_context_required": True,
+                "agent_authority_registry_is_source_of_truth": True,
+                "agent_scorecard_read_only": True,
+                "agent_briefing_read_only": True,
+                "agent_trade_feedback_read_only": True,
                 "live_autonomy_requires_manual_unlock": True,
             },
         }
+        autonomous_blueprint = self._timed_component("autonomous_blueprint", lambda: self._autonomous_blueprint_status(payload))
+        payload["autonomous_blueprint"] = autonomous_blueprint
+        payload["v16"]["autonomous_blueprint"] = autonomous_blueprint
         record_timing("backend_readiness.build", time.perf_counter() - build_started, extra={"ready": ready_for_frontend})
         return payload
 
@@ -589,7 +646,7 @@ class BackendReadinessService:
             except Exception:
                 autonomy_mode = "unknown"
                 demo_auto_apply = False
-            automatic_execution_enabled = autonomy_mode == "demo_autonomous" and demo_auto_apply
+            automatic_execution_enabled = autonomy_mode in {"demo_autonomous", "demo_nursery"} and demo_auto_apply
             counts = {}
             normalized_counts = {}
             if _table_exists(conn, "policy_suggestion"):
@@ -1105,6 +1162,60 @@ class BackendReadinessService:
                 "policy_suggestion_bridge_manual_only": True,
             }
 
+    def _candidate_generation_context_coverage_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
+
+            return BrainGovernanceCandidateService(self.db_path).generation_context_coverage(limit=200)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "candidate_generation_context_coverage.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "boundary": {
+                    "read_only_generation_context_audit": True,
+                    "does_not_create_candidates": True,
+                    "does_not_modify_candidates": True,
+                },
+            }
+
+    def _factor_pruning_governance_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.factor_pruning_governance import FactorPruningGovernanceService
+
+            return FactorPruningGovernanceService(self.db_path).status(limit=50)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "factor_pruning_governance_status.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "boundary": {
+                    "materializes_governance_candidates_only": True,
+                    "does_not_write_policy_suggestion_directly": True,
+                    "does_not_apply_factor_weights": True,
+                },
+            }
+
+    def _factor_governance_effect_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.factor_governance_effect_tracker import FactorGovernanceEffectTrackerService
+
+            return FactorGovernanceEffectTrackerService(self.db_path).status(limit=50)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "factor_governance_effect_tracker.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "boundary": {
+                    "read_status_is_read_only": True,
+                    "reconcile_uses_existing_governor": True,
+                    "does_not_apply_factor_weights": True,
+                },
+            }
+
     def _brain_governance_candidate_review_status(self) -> dict[str, Any]:
         try:
             from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
@@ -1121,6 +1232,24 @@ class BackendReadinessService:
                 "error": f"{type(exc).__name__}: {exc}",
                 "review_only": True,
                 "bridge_preview_only": True,
+            }
+
+    def _candidate_bridge_review_coverage_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
+
+            return BrainGovernanceCandidateReviewService(self.db_path).bridge_review_coverage(limit=200)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "candidate_bridge_review_coverage.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "boundary": {
+                    "read_only_bridge_coverage_audit": True,
+                    "does_not_modify_policy_suggestion": True,
+                    "does_not_submit_candidates": True,
+                },
             }
 
     def _brain_live_ready_guardrail_status(self) -> dict[str, Any]:
@@ -1151,6 +1280,195 @@ class BackendReadinessService:
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
             }
+
+    def _proposal_generation_context_coverage_status(self) -> dict[str, Any]:
+        try:
+            return ProposalRegistryService(self.db_path).generation_context_coverage(limit=500)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "proposal_generation_context_coverage.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "boundary": {
+                    "read_only_generation_context_audit": True,
+                    "does_not_modify_policy_suggestion": True,
+                    "does_not_apply_proposals": True,
+                },
+            }
+
+    def _agent_authority_status(self) -> dict[str, Any]:
+        try:
+            return AgentAuthorityRegistryService().status(db_path=self.db_path)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "agent_authority_status.v1",
+                "status": "error",
+                "registered_agents": 0,
+                "unknown_sources": [],
+                "contract_violations": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def _agent_scorecard_status(self) -> dict[str, Any]:
+        try:
+            scorecard = AgentScorecardService(self.db_path).scorecard(limit=300)
+            return {
+                "ok": bool(scorecard.get("ok")),
+                "schema_version": "agent_scorecard_readiness.v1",
+                "status": "available" if scorecard.get("items") else "empty",
+                "summary": scorecard.get("summary") or {},
+                "top_agents": (scorecard.get("items") or [])[:6],
+                "boundary": scorecard.get("boundary") or AgentScorecardService.boundary(),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "agent_scorecard_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def _agent_briefing_status(self) -> dict[str, Any]:
+        try:
+            briefing = AgentBriefingContextService(self.db_path).build(limit=20)
+            return {
+                "ok": bool(briefing.get("ok")),
+                "schema_version": "agent_briefing_readiness.v1",
+                "status": "available",
+                "chain_health": briefing.get("chain_health") or {},
+                "proposal_flow": briefing.get("proposal_flow") or {},
+                "agent_scorecard": briefing.get("agent_scorecard") or {},
+                "review_rules": briefing.get("review_rules") or {},
+                "boundary": briefing.get("boundary") or AgentBriefingContextService.boundary(),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "agent_briefing_readiness.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def _agent_chain_health_status(self) -> dict[str, Any]:
+        try:
+            return AgentScorecardService(self.db_path).chain_health(limit=300)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "agent_chain_health.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    @staticmethod
+    def _autonomous_blueprint_status(readiness: dict[str, Any]) -> dict[str, Any]:
+        governance = dict(readiness.get("governance") or {})
+        boundaries = dict(((readiness.get("v16") or {}).get("control_plane_boundaries") or {}))
+        agent_authority = dict(readiness.get("agent_authority") or {})
+        proposal_context = dict(readiness.get("proposal_generation_context_coverage") or {})
+        candidate_context = dict(readiness.get("candidate_generation_context_coverage") or {})
+        candidate_review = dict(readiness.get("candidate_bridge_review_coverage") or {})
+        proposal_registry = dict(readiness.get("proposal_registry") or {})
+        chain = dict(readiness.get("agent_chain_health") or {})
+        live_ready = dict(readiness.get("brain_live_ready_guardrails") or {})
+        checks = [
+            {
+                "component": "demo_nursery_learning_scope",
+                "status": "ok" if governance.get("autonomy_mode") in {"demo_nursery", "demo_autonomous"} else "attention",
+                "ok": governance.get("autonomy_mode") in {"demo_nursery", "demo_autonomous"},
+                "autonomy_mode": governance.get("autonomy_mode"),
+                "automatic_execution_enabled": bool(governance.get("automatic_execution_enabled")),
+            },
+            {
+                "component": "agent_authority_contract",
+                "status": agent_authority.get("status", "unknown"),
+                "ok": bool(agent_authority.get("ok")) and not (agent_authority.get("unknown_sources") or []) and not (agent_authority.get("contract_violations") or []),
+                "registered_agents": agent_authority.get("registered_agents", 0),
+            },
+            {
+                "component": "proposal_generation_context",
+                "status": proposal_context.get("status", "unknown"),
+                "ok": proposal_context.get("status") == "ok" and int(proposal_context.get("missing_required_context_count") or 0) == 0,
+                "legacy_missing_context_count": proposal_context.get("legacy_missing_context_count", 0),
+            },
+            {
+                "component": "candidate_generation_context",
+                "status": candidate_context.get("status", "unknown"),
+                "ok": candidate_context.get("status") == "ok" and int(candidate_context.get("missing_required_context_count") or 0) == 0,
+                "legacy_missing_context_count": candidate_context.get("legacy_missing_context_count", 0),
+            },
+            {
+                "component": "candidate_bridge_review",
+                "status": candidate_review.get("status", "unknown"),
+                "ok": candidate_review.get("status") == "ok" and int(candidate_review.get("missing_required_review_count") or 0) == 0,
+                "legacy_unreviewed_count": candidate_review.get("legacy_unreviewed_count", 0),
+            },
+            {
+                "component": "proposal_registry_read_model",
+                "status": "ok" if proposal_registry.get("ok") else "attention",
+                "ok": bool(proposal_registry.get("ok")),
+                "proposal_count": proposal_registry.get("proposal_count", 0),
+                "conflict_count": proposal_registry.get("conflict_count", 0),
+            },
+            {
+                "component": "memory_and_scorecard_feedback",
+                "status": chain.get("status", "unknown"),
+                "ok": chain.get("status") == "ok",
+                "trade_feedback_summary": chain.get("trade_feedback_summary") or {},
+            },
+            {
+                "component": "single_execution_boundary",
+                "status": "ok" if all(
+                    bool(boundaries.get(key))
+                    for key in [
+                        "risk_policy_service_required_for_future_actions",
+                        "decision_policy_required_for_future_weight_writes",
+                        "runtime_overlay_snapshot_required_for_future_mutations",
+                        "proposal_registry_review_only",
+                        "models_shadow_or_advisory_only",
+                    ]
+                ) else "attention",
+                "ok": all(
+                    bool(boundaries.get(key))
+                    for key in [
+                        "risk_policy_service_required_for_future_actions",
+                        "decision_policy_required_for_future_weight_writes",
+                        "runtime_overlay_snapshot_required_for_future_mutations",
+                        "proposal_registry_review_only",
+                        "models_shadow_or_advisory_only",
+                    ]
+                ),
+            },
+            {
+                "component": "live_ready_guardrails",
+                "status": live_ready.get("status", "unknown"),
+                "ok": bool(live_ready.get("live_ready_guardrails")) and bool(live_ready.get("tightening_only", True)),
+            },
+        ]
+        blockers = [item for item in checks if not item.get("ok")]
+        status = "ok" if not blockers else "partial"
+        return {
+            "ok": status == "ok",
+            "schema_version": "autonomous_trading_blueprint_status.v1",
+            "status": status,
+            "checks": checks,
+            "blockers": blockers,
+            "deviation_guard": {
+                "does_not_expand_agent_authority": True,
+                "does_not_bypass_risk_policy": True,
+                "does_not_bypass_decision_policy": True,
+                "does_not_create_second_execution_path": True,
+                "readiness_observable": True,
+            },
+            "boundary": {
+                "read_only_alignment_status": True,
+                "does_not_execute_actions": True,
+                "does_not_modify_runtime": True,
+                "does_not_approve_proposals": True,
+            },
+        }
 
     def _live_autonomy_status(self, readiness: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1222,6 +1540,22 @@ class BackendReadinessService:
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def _factor_blend_health_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.factor_blend_health import FactorBlendHealthService
+
+            return FactorBlendHealthService(self.db_path).build()
+        except Exception as exc:
+            return {"ok": False, "schema_version": "factor_blend_health.v1", "status": "error", "error": str(exc)}
+
+    def _factor_pruning_candidates_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.factor_pruning_candidates import FactorPruningCandidateService
+
+            return FactorPruningCandidateService(self.db_path).build()
+        except Exception as exc:
+            return {"ok": False, "schema_version": "factor_pruning_candidates.v1", "status": "error", "error": str(exc)}
 
     def _high_load_status(self, market_session: dict[str, Any]) -> dict[str, Any]:
         latest = self._latest_offmarket_audit()

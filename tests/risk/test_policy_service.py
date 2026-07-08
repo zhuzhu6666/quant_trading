@@ -130,6 +130,26 @@ def test_open_trade_blocks_cvar_threshold_from_risk_limits():
     assert verdict.audit_payload["source"] == "cvar_gate"
 
 
+def test_open_trade_demo_nursery_observes_var_cvar_and_allows():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "autonomy_mode": "demo_nursery",
+            "risk_snapshot": {"var": {"var_pct": 3.5, "cvar_pct": 4.5}},
+            "var": {"enabled": True, "threshold_pct": 2.0, "cvar_threshold_pct": 2.0},
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.reason == "ok"
+    observations = verdict.audit_payload["demo_nursery_observations"]
+    assert [item["source"] for item in observations] == ["var_gate", "cvar_gate"]
+
+
 def test_open_trade_blocks_event_filter_context_from_risk_policy():
     service = _service()
 
@@ -253,6 +273,70 @@ def test_open_trade_blocks_loss_cooldown_when_gap_too_short():
     assert verdict.audit_payload["temporal_context"]["timeframe"] == "M5"
 
 
+def test_open_trade_demo_nursery_observes_loss_cooldown():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "autonomy_mode": "demo_nursery",
+            "session": {"consecutive_losses": 2},
+            "loss_cooldown_after_losses": 2,
+            "loss_cooldown_bars": 3,
+            "temporal_context": {
+                "timeframe": "M5",
+                "timeframe_seconds": 300,
+                "seconds_since_last_trade": 240.0,
+            },
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.reason == "ok"
+    assert verdict.audit_payload["demo_nursery_observations"][0]["reason"] == "loss_cooldown_active"
+
+
+def test_open_trade_demo_nursery_observes_consecutive_losses_without_cooldown():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "autonomy_mode": "demo_nursery",
+            "session": {"consecutive_losses": 8},
+            "risk_limits": {
+                "max_consecutive_losses": 8,
+                "loss_cooldown_after_losses": 0,
+                "loss_cooldown_bars": 0,
+            },
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.audit_payload["demo_nursery_observations"][0]["reason"] == "consecutive_losses"
+
+
+def test_open_trade_demo_nursery_keeps_daily_loss_hard_block():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "autonomy_mode": "demo_nursery",
+            "session": {"daily_loss_pct": 5.0},
+            "risk_limits": {"max_daily_loss_pct": 5.0},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "daily_loss_limit"
+    assert "demo_nursery_observations" not in verdict.audit_payload
+
+
 def test_open_trade_blocks_stale_decision_bar_freshness():
     service = _service()
 
@@ -277,6 +361,63 @@ def test_open_trade_blocks_stale_decision_bar_freshness():
     assert verdict.reason == "decision_bar_stale"
     assert verdict.audit_payload["blocked_by"] == "decision_bar_freshness"
     assert verdict.audit_payload["decision_freshness"]["repair_status"] == "fetch_empty"
+
+
+def test_open_trade_blocks_stale_decision_signal_age_even_when_bar_is_fresh():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "decision_freshness": {
+                "schema_version": "decision_bar_freshness.v1",
+                "timeframe": "M5",
+                "timeframe_seconds": 300,
+                "latest_bar_ts": 1_783_486_800.0,
+                "expected_closed_bar_ts": 1_783_486_800.0,
+                "age_seconds": 462.3,
+                "fresh": True,
+            },
+            "trade": {"symbol": "XAUUSD+", "direction": 1},
+            "temporal_context": {"timeframe": "M5", "timeframe_seconds": 300},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "decision_signal_age_stale"
+    assert verdict.audit_payload["blocked_by"] == "decision_signal_age"
+    assert verdict.audit_payload["stale_after_seconds"] == 450.0
+
+
+def test_open_trade_demo_nursery_keeps_decision_signal_age_hard_block():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "autonomy_mode": "demo_nursery",
+            "decision_freshness": {
+                "schema_version": "decision_bar_freshness.v1",
+                "timeframe": "M5",
+                "timeframe_seconds": 300,
+                "latest_bar_ts": 1_783_486_800.0,
+                "expected_closed_bar_ts": 1_783_486_800.0,
+                "age_seconds": 500.0,
+                "fresh": True,
+            },
+            "entry_quality_gate": {
+                "active": True,
+                "allowed": False,
+                "reason": "learning_weak_signal_threshold",
+                "source": "entry_quality_gate",
+            },
+            "temporal_context": {"timeframe": "M5", "timeframe_seconds": 300},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "decision_signal_age_stale"
+    assert "demo_nursery_observations" not in verdict.audit_payload
 
 
 def test_open_trade_allows_after_loss_cooldown_even_at_hard_loss_threshold():
@@ -316,6 +457,52 @@ def test_open_trade_blocks_position_count():
     assert verdict.allowed is False
     assert verdict.reason == "仓位上限: 3/3"
     assert verdict.audit_payload["source"] == "position_count"
+
+
+def test_open_trade_blocks_opposite_direction_position():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "open_position_count": 1,
+            "max_position_count": 3,
+            "total_api_volume": 100,
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+            "entry_cluster": {
+                "schema_version": "entry_cluster_context.v1",
+                "symbol": "XAUUSD+",
+                "direction": 1,
+                "opposite_direction_open_count_before": 1,
+                "opposite_direction_api_volume_before": 100.0,
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "opposite_direction_position_open"
+    assert verdict.audit_payload["source"] == "entry_cluster"
+    assert verdict.audit_payload["opposite_direction_open_count"] == 1
+
+
+def test_open_trade_blocks_non_positive_requested_volume():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "open_position_count": 0,
+            "max_position_count": 3,
+            "total_api_volume": 0,
+            "requested_api_volume": 0,
+            "max_position_api_volume": 1000,
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "non_positive_requested_volume"
+    assert verdict.audit_payload["source"] == "api_volume"
 
 
 def test_open_trade_blocks_api_volume():
@@ -429,6 +616,72 @@ def test_open_trade_blocks_approved_event_window_learning_policy():
     assert verdict.allowed is False
     assert verdict.reason == "learning_event_window_control"
     assert verdict.audit_payload["blocked_by"] == "event_window_learning_policy"
+
+
+def test_open_trade_demo_nursery_observes_learning_gates():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "autonomy_mode": "demo_nursery",
+            "entry_cluster": {
+                "same_direction_open_count_before": 2,
+                "seconds_since_last_same_direction_open": 30.0,
+            },
+            "entry_cluster_learning_policy": {
+                "active": True,
+                "min_same_direction_open_count": 2,
+                "controls": [{"action": "increase_same_direction_cooldown"}],
+            },
+            "same_direction_cooldown_seconds": 300.0,
+            "entry_quality_gate": {
+                "active": True,
+                "allowed": False,
+                "reason": "learning_weak_signal_threshold",
+                "source": "entry_quality_gate",
+            },
+            "event_sizing": {
+                "schema_version": "event_sizing.short_window.v2",
+                "event_type": "NFP",
+                "event_importance": 2,
+                "window_bucket": "pre_0_15m",
+            },
+            "event_window_learning_policy": {
+                "active": True,
+                "controls": [{"scope_key": "NFP:pre_0_15m", "action": "tighten_event_window_sizing"}],
+            },
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+        },
+    )
+
+    assert verdict.allowed is True
+    reasons = [item["reason"] for item in verdict.audit_payload["demo_nursery_observations"]]
+    assert reasons == [
+        "learning_same_direction_cooldown",
+        "learning_weak_signal_threshold",
+        "learning_event_window_control",
+    ]
+
+
+def test_open_trade_demo_nursery_keeps_position_limit_hard_after_observation():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "autonomy_mode": "demo_nursery",
+            "risk_snapshot": {"var": {"var_pct": 3.5}},
+            "var": {"enabled": True, "threshold_pct": 2.0},
+            "open_position_count": 3,
+            "max_position_count": 3,
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "仓位上限: 3/3"
+    assert verdict.audit_payload["demo_nursery_observations"][0]["source"] == "var_gate"
 
 
 def test_open_trade_blocks_approved_entry_quality_weak_signal_policy():

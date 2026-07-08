@@ -1,3 +1,4 @@
+import json
 import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
@@ -8,7 +9,10 @@ from backend.services.brain_low_impact_executor import BrainLowImpactExecutorSer
 from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
 from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
-from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
+from backend.services.brain_governance_candidate_review import (
+    BrainGovernanceCandidateReviewService,
+    ensure_brain_governance_candidate_review_table,
+)
 from backend.services.brain_memory import BrainMemoryService
 from backend.services.brain_state import BrainStateService
 from backend.services.incident_controls import RuntimeIncidentControlService
@@ -141,6 +145,11 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["frontend_contract"]["v16_brain_live_ready_guardrails"] == "/api/ops/brain/live-ready-guardrails"
     assert result["frontend_contract"]["v16_brain_live_ready_guardrail_evaluate"] == "/api/ops/brain/live-ready-guardrails/evaluate"
     assert result["frontend_contract"]["v16_brain_live_ready_guardrail_tighten"] == "/api/ops/brain/live-ready-guardrails/tighten"
+    assert result["frontend_contract"]["agent_authority"] == "/api/ops/agent-authority"
+    assert result["frontend_contract"]["agent_scorecard"] == "/api/ops/agent-scorecard"
+    assert result["frontend_contract"]["agent_briefing"] == "/api/ops/agent-briefing"
+    assert result["frontend_contract"]["agent_trade_attribution"] == "/api/ops/agent-trade-attribution"
+    assert result["frontend_contract"]["agent_chain_health"] == "/api/ops/agent-chain-health"
     assert result["v16"]["schema_version"] == "v16_readiness_contract.v1"
     assert result["v16"]["phase"] == "phase5_live_ready_guardrails"
     assert result["v16"]["control_plane_boundaries"]["read_only"] is True
@@ -150,10 +159,17 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_candidates_only"] is True
     assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_suggestions_only"] is False
     assert result["v16"]["control_plane_boundaries"]["medium_impact_policy_suggestion_bridge_manual_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["candidate_generation_context_required"] is True
     assert result["v16"]["control_plane_boundaries"]["candidate_review_bridge_preview_only"] is True
     assert result["v16"]["control_plane_boundaries"]["candidate_review_llm_advisory_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["candidate_bridge_requires_review"] is True
+    assert result["v16"]["control_plane_boundaries"]["proposal_generation_context_required"] is True
     assert result["v16"]["control_plane_boundaries"]["live_ready_guardrails_only"] is True
     assert result["v16"]["control_plane_boundaries"]["live_ready_tightening_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["agent_authority_registry_is_source_of_truth"] is True
+    assert result["v16"]["control_plane_boundaries"]["agent_scorecard_read_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["agent_briefing_read_only"] is True
+    assert result["v16"]["control_plane_boundaries"]["agent_trade_feedback_read_only"] is True
     assert result["brain_state"]["ok"] is True
     assert result["brain_state"]["latest_snapshot"]["affects_trading"] is False
     assert result["brain_action_plans"]["schema_version"] == "brain_action_plan_readiness.v1"
@@ -166,10 +182,28 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["brain_medium_impact_governance"]["medium_impact_governance"] is True
     assert result["brain_governance_candidates"]["schema_version"] == "brain_governance_candidate_readiness.v1"
     assert result["brain_governance_candidates"]["candidate_lane_isolated"] is True
+    assert result["candidate_generation_context_coverage"]["schema_version"] == "candidate_generation_context_coverage.v1"
+    assert result["candidate_generation_context_coverage"]["status"] == "ok"
+    assert result["v16"]["candidate_generation_context_coverage"]["status"] == "ok"
     assert result["brain_governance_candidate_reviews"]["schema_version"] == "brain_governance_candidate_review_readiness.v1"
     assert result["brain_governance_candidate_reviews"]["bridge_preview_only"] is True
+    assert result["candidate_bridge_review_coverage"]["schema_version"] == "candidate_bridge_review_coverage.v1"
+    assert result["candidate_bridge_review_coverage"]["status"] == "ok"
+    assert result["v16"]["candidate_bridge_review_coverage"]["status"] == "ok"
+    assert result["proposal_generation_context_coverage"]["schema_version"] == "proposal_generation_context_coverage.v1"
+    assert result["proposal_generation_context_coverage"]["status"] == "ok"
+    assert result["v16"]["proposal_generation_context_coverage"]["status"] == "ok"
     assert result["brain_live_ready_guardrails"]["schema_version"] == "brain_live_ready_guardrail_readiness.v1"
     assert result["brain_live_ready_guardrails"]["live_ready_guardrails"] is True
+    assert result["agent_authority"]["schema_version"] == "agent_authority_status.v1"
+    assert result["agent_authority"]["registered_agents"] == 6
+    assert result["v16"]["agent_authority"]["status"] == "ok"
+    assert result["agent_scorecard"]["schema_version"] == "agent_scorecard_readiness.v1"
+    assert result["agent_briefing"]["schema_version"] == "agent_briefing_readiness.v1"
+    assert result["agent_chain_health"]["schema_version"] == "agent_chain_health.v1"
+    assert result["autonomous_blueprint"]["schema_version"] == "autonomous_trading_blueprint_status.v1"
+    assert result["autonomous_blueprint"]["deviation_guard"]["does_not_create_second_execution_path"] is True
+    assert result["v16"]["autonomous_blueprint"]["schema_version"] == "autonomous_trading_blueprint_status.v1"
 
 
 def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
@@ -562,6 +596,8 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
         risk_verdict={"allowed": True, "reason": "test"},
     )
     blocked_result = service.submit_candidate_to_policy_suggestion(blocked["candidate_id"], actor="test")
+    assert blocked["lineage"]["agent_context"]["schema_version"] == "agent_generation_context.v1"
+    assert blocked["lineage"]["agent_context"]["source_agent"] == "v16_brain"
     assert blocked_result["ok"] is False
     assert blocked_result["reason"] == "unsupported_legacy_governor_surface:factor/update_weight"
 
@@ -588,6 +624,13 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
         risk_verdict={"allowed": True, "reason": "test"},
         lineage={"mapped_action": {"target_template_id": "position_supervisor:conservative.v1"}},
     )
+    pre_review_submit = service.submit_candidate_to_policy_suggestion(ready["candidate_id"], actor="test")
+    assert pre_review_submit["ok"] is False
+    assert pre_review_submit["reason"] == "missing_bridge_ready_candidate_review"
+
+    review = BrainGovernanceCandidateReviewService(db_path).review_candidate(ready["candidate_id"], persist=True)
+    assert review["review"]["bridge_ready"] is True
+
     submit_result = service.submit_candidate_to_policy_suggestion(ready["candidate_id"], actor="test")
 
     assert submit_result["ok"] is True
@@ -612,6 +655,12 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
     assert suggestion[2] == "switch_position_supervisor_template"
     assert suggestion[3] == "proposed"
     assert "candidate_supervisor_ready" in suggestion[4]
+    evidence = json.loads(suggestion[4])
+    assert evidence["bridge"]["candidate_review_required"] is True
+    assert evidence["bridge"]["candidate_review_required_before_submit"] is True
+    assert evidence["bridge"]["candidate_review"]["bridge_ready"] is True
+    assert evidence["bridge"]["candidate_review"]["review_id"] == review["review"]["review_id"]
+    assert evidence["lineage"]["agent_context"]["schema_version"] == "agent_generation_context.v1"
     assert candidate[0] == "submitted_to_policy_suggestion"
     assert candidate[1] == "submitted"
     assert candidate[2] == submit_result["suggestion_id"]
@@ -709,6 +758,245 @@ def test_brain_governance_candidate_review_classifies_bridge_readiness(monkeypat
     status = BrainGovernanceCandidateReviewService(db_path).status(limit=10)
     assert status["schema_version"] == "brain_governance_candidate_review_readiness.v1"
     assert status["bridge_ready_count"] == 1
+
+
+def test_brain_governance_candidate_review_uses_agent_reliability_gate(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO learning_application_log
+            (application_id, cycle_ts, scope_type, scope_key, action,
+             suggestion_ids_json, status, details_json, created_at)
+            VALUES ('app_bad_v16', ?, 'factor', 'rsi_14', 'downweight',
+                    '[]', 'applied', '{"source_agent":"v16_brain"}', ?)
+            """,
+            (now - 10, now - 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO learning_application_effect
+            (application_id, scope_type, scope_key, action, status,
+             delta_avg_reward, updated_at, created_at)
+            VALUES ('app_bad_v16', 'factor', 'rsi_14', 'downweight',
+                    'ineffective', -0.2, ?, ?)
+            """,
+            (now - 5, now - 5),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    BrainGovernanceCandidateService(db_path).create_candidate(
+        candidate_id="candidate_supervisor_low_source",
+        source_agent="v16_brain",
+        source_kind="brain_medium_impact_governance",
+        source_ref_type="brain_action_plan_eval",
+        source_ref_id="eval_supervisor_low",
+        proposal_stage="governance_ready",
+        capability_scope="medium_impact_governance",
+        scope_type="supervisor_template",
+        scope_key="position_supervisor",
+        action="switch_position_supervisor_template",
+        confidence=0.8,
+        evidence_score=0.9,
+        risk_class="medium",
+        max_impact="medium_impact",
+        expected_effect={
+            "source_presence": {
+                "replay_report": True,
+                "trade_outcome_review": True,
+                "learning_application_effect": True,
+                "position_supervisor_trace": True,
+            },
+            "replay": {"replay_run_id": "replay_ready", "status": "completed"},
+            "supervisor": {"trace_count": 3, "risk_allowed_coverage": 1.0},
+        },
+        evidence_refs={"posterior": {"replay_report": "replay_ready", "position_supervisor_trace": ["trace_1"]}},
+        risk_verdict={"allowed": True, "reason": "test"},
+        lineage={"mapped_action": {"target_template_id": "position_supervisor:conservative.v1"}},
+    )
+
+    run = BrainGovernanceCandidateReviewService(db_path).review_latest(limit=5, run_llm=False)
+    review = next(item for item in run["items"] if item["candidate_id"] == "candidate_supervisor_low_source")
+
+    assert review["review_status"] == "needs_evidence"
+    assert review["bridge_ready"] is False
+    assert "agent_negative_effect_history_requires_counter_evidence" in review["evidence_gaps"]
+    assert review["source_reliability"]["agent_scorecard"]["negative_effect_count"] == 1
+
+
+def test_candidate_bridge_review_coverage_flags_missing_required_review(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             reason, evidence_json, status, created_at)
+            VALUES (?, 'factor', 'dsl_auto_bad', 'downweight', 0.8,
+                    'required review missing', ?, 'proposed', ?)
+            """,
+            (
+                "ps_required_missing",
+                json.dumps(
+                    {
+                        "schema_version": "brain_governance_candidate_policy_suggestion_evidence.v1",
+                        "candidate_id": "candidate_required_missing",
+                        "source_agent": "factor_pruning_governance",
+                        "bridge": {"candidate_review_required": True, "candidate_review_required_before_submit": True},
+                    }
+                ),
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             reason, evidence_json, status, created_at)
+            VALUES (?, 'factor', 'legacy_factor', 'downweight', 0.8,
+                    'legacy bridge before review gate', ?, 'proposed', ?)
+            """,
+            (
+                "ps_legacy_unreviewed",
+                json.dumps(
+                    {
+                        "schema_version": "brain_governance_candidate_policy_suggestion_evidence.v1",
+                        "candidate_id": "candidate_legacy",
+                        "source_agent": "v16_brain",
+                        "bridge": {"manual_only": True},
+                    }
+                ),
+                now - 10,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    coverage = BrainGovernanceCandidateReviewService(db_path).bridge_review_coverage(limit=20)
+
+    assert coverage["schema_version"] == "candidate_bridge_review_coverage.v1"
+    assert coverage["status"] == "degraded"
+    assert coverage["candidate_bridge_count"] == 2
+    assert coverage["missing_required_review_count"] == 1
+    assert coverage["legacy_unreviewed_count"] == 1
+    statuses = {item["suggestion_id"]: item["coverage_status"] for item in coverage["items"]}
+    assert statuses["ps_required_missing"] == "missing_required_review"
+    assert statuses["ps_legacy_unreviewed"] == "legacy_unreviewed"
+
+
+def test_candidate_bridge_review_coverage_accepts_bridge_ready_review(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    ensure_brain_governance_candidate_review_table(db_path)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO brain_governance_candidate_review
+            (review_id, candidate_id, review_status, bridge_ready,
+             bridge_reason, evidence_gaps_json, conflict_json,
+             bridge_preview_json, source_reliability_json,
+             llm_advisory_json, boundary_json, created_at)
+            VALUES ('review_ok', 'candidate_reviewed', 'bridge_ready', 1,
+                    'bridge_ready', '[]', '{}', '{}', '{}', '{}', '{}', ?)
+            """,
+            (now - 5,),
+        )
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             reason, evidence_json, status, created_at)
+            VALUES (?, 'factor', 'dsl_auto_reviewed', 'downweight', 0.8,
+                    'reviewed bridge', ?, 'proposed', ?)
+            """,
+            (
+                "ps_reviewed",
+                json.dumps(
+                    {
+                        "schema_version": "brain_governance_candidate_policy_suggestion_evidence.v1",
+                        "candidate_id": "candidate_reviewed",
+                        "source_agent": "factor_pruning_governance",
+                        "bridge": {"candidate_review_required": True, "candidate_review_required_before_submit": True},
+                    }
+                ),
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    coverage = BrainGovernanceCandidateReviewService(db_path).bridge_review_coverage(limit=20)
+
+    assert coverage["status"] == "ok"
+    assert coverage["candidate_bridge_count"] == 1
+    assert coverage["covered_count"] == 1
+    assert coverage["missing_required_review_count"] == 0
+    assert coverage["items"][0]["coverage_status"] == "covered"
+
+
+def test_candidate_generation_context_coverage_separates_new_and_legacy_candidates(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO brain_governance_candidate
+            (candidate_id, source_agent, source_kind, source_ref_type, source_ref_id,
+             proposal_stage, capability_scope, scope_type, scope_key, action,
+             confidence, evidence_score, risk_class, max_impact,
+             lineage_json, status, created_at, updated_at)
+            VALUES ('legacy_candidate', 'v16_brain', 'brain_medium_impact_governance',
+                    'brain_action_plan_eval', 'eval_legacy', 'governance_ready',
+                    'medium_impact_governance', 'factor', 'rsi_14', 'downweight',
+                    0.7, 0.8, 'medium', 'medium_impact',
+                    '{}', 'active', 1.0, 1.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO brain_governance_candidate
+            (candidate_id, source_agent, source_kind, source_ref_type, source_ref_id,
+             proposal_stage, capability_scope, scope_type, scope_key, action,
+             confidence, evidence_score, risk_class, max_impact,
+             lineage_json, status, created_at, updated_at)
+            VALUES ('bad_new_candidate', 'v16_brain', 'brain_medium_impact_governance',
+                    'brain_action_plan_eval', 'eval_bad', 'governance_ready',
+                    'medium_impact_governance', 'factor', 'adx_14', 'downweight',
+                    0.7, 0.8, 'medium', 'medium_impact',
+                    '{"agent_context_required": true}', 'active', 2.0, 2.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    coverage = BrainGovernanceCandidateService(db_path).generation_context_coverage(limit=20)
+
+    assert coverage["status"] == "degraded"
+    assert coverage["candidate_count"] == 2
+    assert coverage["missing_required_context_count"] == 1
+    assert coverage["legacy_missing_context_count"] == 1
+    statuses = {item["candidate_id"]: item["coverage_status"] for item in coverage["items"]}
+    assert statuses["bad_new_candidate"] == "missing_required_agent_context"
+    assert statuses["legacy_candidate"] == "legacy_missing_agent_context"
 
 
 def test_brain_live_ready_guardrail_locks_when_evidence_is_complete(tmp_path):

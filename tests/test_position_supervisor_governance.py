@@ -161,12 +161,16 @@ def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp
 
     conn = sqlite3.connect(str(db_path))
     try:
-        rows = conn.execute("SELECT scope_type, action, status FROM policy_suggestion").fetchall()
+        rows = conn.execute("SELECT scope_type, action, status, evidence_json FROM policy_suggestion").fetchall()
     finally:
         conn.close()
     assert rows
     assert rows[0][0] == "position_supervisor_template"
     assert rows[0][2] == "proposed"
+    evidence = json.loads(rows[0][3])
+    assert evidence["source_agent"] == "autonomous_learning"
+    assert evidence["schema_version"] == "position_supervisor_advisory_evidence.v1"
+    assert evidence["agent_context"]["schema_version"] == "agent_generation_context.v1"
 
 
 def test_position_supervisor_advisories_materialize_mfe_capture_failure_template(tmp_path):

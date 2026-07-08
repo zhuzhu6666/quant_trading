@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
 
 
@@ -514,6 +515,15 @@ class PositionQualityLightGBMService:
             },
             "guardrails": list(artifact.get("guardrails") or []),
         }
+        result["source_agent"] = "lightgbm_shadow_models"
+        result["authority_verdict"] = AgentAuthorityRegistryService().evaluate(
+            "lightgbm_shadow_models",
+            "model_stage",
+            "shadow_model_audit",
+            requested_writes=["position_quality_shadow_audit"],
+            status=mode,
+            impact_level="shadow",
+        )
         payload = {
             "sample_id": sample["sample_id"],
             "review_id": sample["review_id"],
@@ -523,6 +533,8 @@ class PositionQualityLightGBMService:
             "label": sample["label"],
             "pnl": sample["pnl"],
             "outcome_label": sample["outcome_label"],
+            "source_agent": "lightgbm_shadow_models",
+            "authority_verdict": result["authority_verdict"],
         }
         inference_id = f"{MODEL_TYPE}:{sample['sample_id']}:{int(now * 1000)}"
         conn = self._conn()

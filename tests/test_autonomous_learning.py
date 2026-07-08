@@ -1464,6 +1464,12 @@ def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):
     assert result["mode"] == "manual"
 
 
+def test_demo_autonomous_enabled_accepts_demo_nursery(monkeypatch):
+    monkeypatch.setattr(al, "_autonomy_mode", lambda: "demo_nursery")
+
+    assert al._demo_autonomous_enabled() is True
+
+
 def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     al.ensure_autonomous_learning_tables(db_path)

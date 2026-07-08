@@ -4,6 +4,7 @@ import json
 import time
 
 from backend.services.proposal_registry import ProposalRegistryService, ensure_proposal_registry_table
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.brain_governance_candidates import ensure_brain_governance_candidate_table
 from backend.services.brain_action_planner import ensure_brain_action_plan_table
 from backend.core.db import connect_sqlite
@@ -118,7 +119,9 @@ def test_proposal_registry_normalizes_policy_candidate_and_action_plan(tmp_path)
     assert "brain_action_plan:plan1" in ids
     policy = next(item for item in listing["items"] if item["proposal_id"] == "policy_suggestion:ps1")
     assert policy["control_surface"] == "factor_weight"
+    assert policy["source_agent"] == "autonomous_learning"
     assert "DecisionPolicy" in policy["required_gate"]
+    assert policy["authority_state"] == "requires_control_gate"
     assert policy["source_reliability"]["band"] in {"medium", "high"}
     assert policy["evidence_freshness"]["status"] == "fresh"
 
@@ -162,6 +165,342 @@ def test_proposal_registry_detects_control_surface_conflict(tmp_path):
     assert status["conflict_count"] >= 2
 
 
+def test_proposal_registry_status_separates_actionable_from_historical_noise(tmp_path):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO proposal_registry
+            (proposal_id, source_agent, source_ref_type, proposal_type,
+             control_surface, target_scope, impact_level, source_reliability_json,
+             evidence_freshness_json, status, route_recommendation, conflict_json,
+             created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "policy_suggestion:actionable",
+                    "autonomous_learning",
+                    "policy_suggestion",
+                    "factor_weight",
+                    "factor_weight",
+                    "factor:rsi_14",
+                    "medium",
+                    json.dumps({"band": "medium"}),
+                    json.dumps({"stale": True, "status": "stale"}),
+                    "proposed",
+                    "request_review",
+                    json.dumps({"conflict": True, "severity": "medium"}),
+                    1.0,
+                    1.0,
+                ),
+                (
+                    "shadow_audit:old",
+                    "lightgbm_shadow_models",
+                    "factor_governance_shadow_audit",
+                    "model_advisory",
+                    "model_stage",
+                    "factor_governance_shadow_audit:dsl_auto_old",
+                    "shadow",
+                    json.dumps({"band": "low", "advisory_only": True}),
+                    json.dumps({"stale": True, "status": "stale"}),
+                    "shadow",
+                    "observe",
+                    json.dumps({}),
+                    1.0,
+                    1.0,
+                ),
+                (
+                    "policy_suggestion:needs_evidence",
+                    "autonomous_learning",
+                    "policy_suggestion",
+                    "factor_weight",
+                    "factor_weight",
+                    "factor:macd_hist",
+                    "medium",
+                    json.dumps({"band": "low"}),
+                    json.dumps({"stale": True, "status": "stale"}),
+                    "needs_evidence",
+                    "request_review",
+                    json.dumps({}),
+                    1.0,
+                    1.0,
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = ProposalRegistryService(db_path).status()
+
+    assert status["active_count"] == 3
+    assert status["actionable_count"] == 1
+    assert status["historical_noise_count"] == 2
+    assert status["needs_evidence_count"] == 1
+    assert status["conflict_count"] == 1
+    assert status["stale_evidence_count"] == 1
+    assert status["low_reliability_count"] == 0
+    assert status["raw_stale_evidence_count"] == 3
+    assert status["raw_low_reliability_count"] == 2
+
+
+def test_policy_suggestion_context_helper_attaches_agent_generation_context(tmp_path):
+    payload = attach_policy_suggestion_agent_context(
+        {"sample_count": 3},
+        source_agent="autonomous_learning",
+        scope_type="factor",
+        action="downweight",
+        requested_writes=["policy_suggestion"],
+        status="proposed",
+        impact_level="medium",
+        db_path=tmp_path / "state.db",
+    )
+
+    assert payload["source_agent"] == "autonomous_learning"
+    assert payload["agent_context_required"] is True
+    assert payload["authority_verdict"]["registered"] is True
+    assert payload["agent_context"]["schema_version"] == "agent_generation_context.v1"
+    assert payload["agent_context"]["source_agent"] == "autonomous_learning"
+
+
+def test_proposal_registry_infers_shadow_advisory_source_from_legacy_evidence(tmp_path):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_suggestion (
+                suggestion_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                confidence REAL DEFAULT 0.0,
+                reason TEXT DEFAULT '',
+                evidence_json TEXT DEFAULT '{}',
+                status TEXT DEFAULT 'proposed',
+                reviewed_at REAL DEFAULT 0.0,
+                review_note TEXT DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             reason, evidence_json, status, created_at)
+            VALUES ('ps_shadow', 'factor', 'rsi_14', 'review_factor_weight_or_template',
+                    0.7, 'shadow advisory', ?, 'proposed', ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "schema_version": "factor_governance_advisory.v1",
+                        "model_type": "factor_governance_lightgbm",
+                        "advisory_only": True,
+                    }
+                ),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ProposalRegistryService(db_path).refresh()
+    proposal = ProposalRegistryService(db_path).get("policy_suggestion:ps_shadow")["proposal"]
+
+    assert proposal["source_agent"] == "lightgbm_shadow_models"
+    assert proposal["required_gate"] == ["advisory_only"]
+    assert proposal["authority_state"] == "advisory_only"
+    assert proposal["source_reliability"]["advisory_only"] is True
+
+
+def test_proposal_generation_context_coverage_separates_required_and_legacy(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    ensure_proposal_registry_table(db_path)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_suggestion (
+                suggestion_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                confidence REAL DEFAULT 0.0,
+                reason TEXT DEFAULT '',
+                evidence_json TEXT DEFAULT '{}',
+                status TEXT DEFAULT 'proposed',
+                reviewed_at REAL DEFAULT 0.0,
+                review_note TEXT DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             evidence_json, status, created_at)
+            VALUES (?, 'factor', ?, 'downweight', 0.8, ?, 'proposed', ?)
+            """,
+            [
+                (
+                    "ps_covered",
+                    "dsl_auto_covered",
+                    json.dumps(
+                        {
+                            "source_agent": "factor_pruning_governance",
+                            "lineage": {
+                                "agent_context_required": True,
+                                "agent_context": {"schema_version": "agent_generation_context.v1"},
+                            },
+                        }
+                    ),
+                    now,
+                ),
+                (
+                    "ps_required_missing",
+                    "dsl_auto_required",
+                    json.dumps(
+                        {
+                            "source_agent": "factor_pruning_governance",
+                            "bridge": {"candidate_review_required": True},
+                        }
+                    ),
+                    now - 1,
+                ),
+                (
+                    "ps_legacy",
+                    "legacy_factor",
+                    json.dumps({"source_agent": "autonomous_learning"}),
+                    now - 2,
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    coverage = ProposalRegistryService(db_path).generation_context_coverage(limit=10)
+
+    assert coverage["schema_version"] == "proposal_generation_context_coverage.v1"
+    assert coverage["status"] == "degraded"
+    assert coverage["proposal_count"] == 3
+    assert coverage["covered_count"] == 1
+    assert coverage["missing_required_context_count"] == 1
+    assert coverage["legacy_missing_context_count"] == 1
+    statuses = {item["suggestion_id"]: item["coverage_status"] for item in coverage["items"]}
+    assert statuses["ps_covered"] == "covered"
+    assert statuses["ps_required_missing"] == "missing_required_agent_context"
+    assert statuses["ps_legacy"] == "legacy_missing_agent_context"
+
+
+def test_proposal_registry_reliability_gate_requires_evidence_for_negative_agent_history(tmp_path):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS policy_suggestion (
+                suggestion_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                confidence REAL DEFAULT 0.0,
+                reason TEXT DEFAULT '',
+                evidence_json TEXT DEFAULT '{}',
+                status TEXT DEFAULT 'proposed',
+                reviewed_at REAL DEFAULT 0.0,
+                review_note TEXT DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_application_log (
+                application_id TEXT PRIMARY KEY,
+                cycle_ts REAL NOT NULL DEFAULT 0.0,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                bias_multiplier REAL DEFAULT 1.0,
+                old_weight REAL DEFAULT 0.0,
+                new_weight REAL DEFAULT 0.0,
+                suggestion_ids_json TEXT DEFAULT '[]',
+                status TEXT DEFAULT 'applied',
+                details_json TEXT DEFAULT '{}',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_application_effect (
+                application_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT DEFAULT 'observing',
+                delta_avg_reward REAL DEFAULT 0.0,
+                updated_at REAL NOT NULL DEFAULT 0.0,
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO learning_application_log
+            (application_id, cycle_ts, scope_type, scope_key, action,
+             suggestion_ids_json, status, details_json, created_at)
+            VALUES ('app_bad', ?, 'factor', 'rsi_14', 'downweight',
+                    '[]', 'applied', '{"source_agent":"autonomous_learning"}', ?)
+            """,
+            (now - 10, now - 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO learning_application_effect
+            (application_id, scope_type, scope_key, action, status,
+             delta_avg_reward, updated_at, created_at)
+            VALUES ('app_bad', 'factor', 'rsi_14', 'downweight',
+                    'ineffective', -0.2, ?, ?)
+            """,
+            (now - 5, now - 5),
+        )
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             evidence_json, status, created_at)
+            VALUES ('ps_low_agent', 'factor', 'rsi_14', 'update_weight',
+                    0.8, '{"source_agent":"autonomous_learning"}', 'proposed', ?)
+            """,
+            (now,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ProposalRegistryService(db_path).refresh()
+    item = ProposalRegistryService(db_path).get("policy_suggestion:ps_low_agent")["proposal"]
+
+    gate = item["source_reliability"]["agent_reliability_gate"]
+    assert gate["review_strictness"] == "high"
+    assert "agent_negative_effect_history" in gate["reasons"]
+    assert item["status"] == "needs_evidence"
+    assert item["route_recommendation"] == "request_review"
+
+
 def test_proposal_review_refuses_authorization_and_keeps_llm_advisory_read_only(tmp_path):
     db_path = tmp_path / "state.db"
     ensure_proposal_registry_table(db_path)
@@ -199,6 +538,7 @@ def test_proposal_review_refuses_authorization_and_keeps_llm_advisory_read_only(
     ProposalRegistryService(db_path).refresh()
     item = ProposalRegistryService(db_path).get("llm_advisory_audit:llm1")["proposal"]
     assert item["authority_state"] == "advisory_only"
+    assert item["required_gate"] == ["advisory_only"]
     assert item["source_reliability"]["band"] == "low"
     assert item["source_reliability"]["advisory_only"] is True
     refused = ProposalRegistryService(db_path).review("llm_advisory_audit:llm1", decision="approved")

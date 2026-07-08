@@ -535,8 +535,8 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 
 2026-07-02 起，动态仓位控制遵守两条执行边界：
 
-- Kelly / risk-budget sizing 可以把开仓 API volume 动态算到 100/200/300 等 broker step 档位，但必须同时受 `dynamic_sizing_max_api_volume`、账户风险预算和最大仓位限制约束
-- 事件窗口缩放如果把 volume 压到 broker 最小下单量以下，系统必须跳过本次开仓并写入 sizing 阻断 trace，不能再被最小单量逻辑抬回 100
+- Kelly / risk-budget sizing 可以把开仓 API volume 动态算到 100/200/.../1000 等 broker step 档位；`kelly_risk_per_trade_pct` 是有效 Kelly 风险分数上限，不再与 Kelly 分数二次相乘；最终 volume 必须同时受 `dynamic_sizing_max_api_volume`、broker step/min/max、当前账户 equity 风险预算和最大仓位限制约束
+- Kelly、事件窗口缩放或 context policy 如果把 volume 压到 broker 最小下单量以下，系统必须跳过本次开仓并写入 sizing 阻断 trace，不能再被最小单量逻辑抬回 100
 
 ### Layer 9: 执行路由层
 

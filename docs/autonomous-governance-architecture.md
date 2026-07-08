@@ -43,7 +43,9 @@
 | broker 执行 | cTrader bridge + live execution pipeline | cTrader 是 live broker 状态和成交事实源 |
 | 学习样本 | `autonomous_learning_sample` + evidence contract | 不能从模型输出倒推真实标签 |
 | 模型能力 | `model_permissions` + `RiskPolicyService` model stage gate | shadow/advisory 默认不能 live trading |
-| 统一建议总线 | `ProposalRegistryService` -> `proposal_registry` | 归一化、展示、来源可靠性、证据新鲜度、冲突检测和审查，不审批、不应用 |
+| 智能体权责合同 | `AgentAuthorityRegistryService` -> readiness `agent_authority` | 统一登记 source agent、allowed writes、control surfaces、required gates、authority state 和 forbidden actions；未知来源只能 review-only，LLM 永远 advisory-only |
+| 智能体质量/简报反馈 | `AgentScorecardService` + `AgentBriefingContextService` -> readiness `agent_scorecard` / `agent_briefing` / `agent_chain_health` | 只读统计 agent 提案、候选、应用、效果、合同违规、治理覆盖率和交易复盘反馈，并生成统一战况简报；可收紧证据要求和审查严格度，但不改变权限、不执行动作 |
+| 统一建议总线 | `ProposalRegistryService` -> `proposal_registry` | 归一化、展示、来源可靠性、证据新鲜度、冲突检测和审查；主汇总只统计当前可行动提案，历史/shadow/needs_evidence 噪音保留在 raw 字段；不审批、不应用 |
 | 实盘自治解锁 | `LiveAutonomyService` -> `live_autonomy_unlock_event` + runtime overlay/snapshot | 一次性人工解锁/撤销能力开关，持续输出 operational posture，不下单、不绕过风控 |
 
 ## 2. Governance Topology
@@ -640,7 +642,7 @@ ledger / lifecycle / trace / replay
 - shadow/advisory model audit
 - LLM advisory audit
 
-当前已落地 `ProposalRegistryService` / `proposal_registry` 作为统一读模型。它不迁移旧表、不删除旧队列，也不负责授权；它把旧表和 shadow/advisory audit 显式映射到统一 proposal envelope。新增建议类模块必须至少能表达这些字段：
+当前已落地 `AgentAuthorityRegistryService` 作为智能体权责合同，`AgentScorecardService` 作为只读质量反馈，`AgentBriefingContextService` 作为多智能体共享战况简报，`ProposalRegistryService` / `proposal_registry` 作为统一读模型。Proposal Registry 不迁移旧表、不删除旧队列，也不负责授权；它把旧表和 shadow/advisory audit 显式映射到统一 proposal envelope，并由权责合同生成 `required_gate`、`authority_state` 和边界说明。scorecard/briefing 可以把低可靠来源路由到 `needs_evidence` 或提高 candidate review 严格度，但高分只能提高审查优先级，不能扩大权限、改权重或下单。新增建议类模块必须先登记 source agent 权责，再至少能表达这些字段：
 
 | 字段 | 含义 |
 |---|---|
@@ -668,7 +670,10 @@ ledger / lifecycle / trace / replay
 这个 envelope 的治理意义：
 
 - 让所有智能体从“各说各话”变成“同一语法提交建议”。
+- 让所有智能体先经过同一份权责合同，再进入提案总线。
 - 让自治大脑可以比较不同来源的建议质量。
+- 让 scorecard 和 briefing 成为候选审查、LLM prompt 和反证要求的共享上下文。
+- 让交易结果通过 `trade_outcome_review -> experience_memory.agent_attribution -> agent_scorecard` 回流到参与过判断的 agent。
 - 让前端按影响级别和控制面展示，而不是按历史版本名展示。
 - 让 live autonomy unlock 能检查高危未解决冲突，而不把冲突判断散落在多个智能体里。
 
@@ -676,7 +681,16 @@ ledger / lifecycle / trace / replay
 
 - `review` 只能记录 `review_json`，不能写 `approved/applied/auto_approved`。
 - LLM advisory 永远是 `authority_state=advisory_only`。
-- `source_reliability` 和 `evidence_freshness` 是审查排序和 degraded 判断输入，不是授权。
+- `source_reliability`、`agent_reliability_gate`、`briefing` 和 `evidence_freshness` 是审查排序、证据要求和 degraded 判断输入，不是授权。
+- `agent_generation_context` 必须随 governance candidate lineage 写入，记录生成时的 authority verdict、scorecard、近期负反馈和 review rules；它只服务审查、复盘和反证，不扩大权限。
+- readiness `candidate_generation_context_coverage` 持续审计候选是否带 required context；缺新 context 是 degraded，历史旧候选只标 legacy。
+- `factor_pruning_governance.bridge_ready_candidates` 虽然可在 `demo_nursery` 下限速桥接，但每个候选必须先通过 `BrainGovernanceCandidateReviewService.review_candidate`；低可靠来源、负反馈或合同违规会阻断自动桥接并写入 review 审计。
+- `/api/ops/brain/governance-candidates/{candidate_id}/submit` 和底层 `BrainGovernanceCandidateService.submit_candidate_to_policy_suggestion()` 都必须看到最新单候选 review 且 `bridge_ready=true`；preview 仍只判断材料是否可桥接，避免和 review 流程互相依赖。
+- readiness `candidate_bridge_review_coverage` 持续审计已桥接的 `policy_suggestion` 是否有 `candidate_review_required_before_submit` review 合同；缺新 review 是 degraded，历史旧桥接只标 legacy。
+- readiness `proposal_generation_context_coverage` 持续审计 `policy_suggestion` evidence/lineage 是否携带 `agent_generation_context`；显式 required 缺失会 degraded，历史旧提案只标 legacy，Proposal Registry 不因此审批、拒绝或应用提案。
+- 原生 `policy_suggestion` 写入路径复用 `attach_policy_suggestion_agent_context()` 补齐 `source_agent`、`authority_verdict`、`agent_context` 和 `agent_context_required`，避免新建议继续退化成 legacy-only 审计样本。
+- 旧 `policy_suggestion` 缺 `source_agent` 时复用 `infer_policy_suggestion_source_agent()`；LightGBM shadow/advisory evidence 统一归因到 `lightgbm_shadow_models`，Proposal Registry、Agent Authority 和 Scorecard 不得把它默认记到 `autonomous_learning`。
+- readiness `autonomous_blueprint` / `v16.autonomous_blueprint` 是最终大纲的只读对齐状态，汇总 demo nursery、多智能体权责、提案/候选上下文、候选审查、记忆反馈、执行边界和 live-ready guardrails；它只暴露 blockers，不执行、不审批、不改 runtime。
 - registry route 是建议路由，不是执行授权；实际执行仍回到 `RiskPolicyService`、`DecisionPolicy`、runtime overlay/snapshot 和 release/replay 证据。
 - `live_autonomy_unlock_event` 的 budget breach 可以进入 registry 并路由到 `tighten_incident`；live 开仓路径若被 `RiskPolicyService` 判定为 `live_autonomy_budget_breach`，会通过 `RuntimeIncidentControlService` 自动请求 `no_new_risk`，不会直接写 overlay。
 

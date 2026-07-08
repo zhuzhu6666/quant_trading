@@ -115,6 +115,24 @@ class TestAppendBar:
         snapshot = engine.get_snapshot()
         assert snapshot == last_result
 
+    def test_duplicate_or_older_bar_does_not_pollute_buffer(self):
+        engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
+        bars = [_make_bar(close=4500 + i, t=1_000 + i * 900) for i in range(55)]
+        last_result = {}
+        for bar in bars:
+            last_result = engine.append_bar(bar)
+
+        buffer_size = engine.buffer_size
+        duplicate = dict(bars[-1])
+        duplicate["close"] = 9999.0
+        assert engine.append_bar(duplicate) == last_result
+        assert engine.buffer_size == buffer_size
+
+        older = dict(bars[-2])
+        older["close"] = 8888.0
+        assert engine.append_bar(older) == last_result
+        assert engine.buffer_size == buffer_size
+
     def test_single_factor_failure_does_not_block_others(self):
         """单个因子异常不应影响其他因子."""
         # 模拟一个会崩的因子

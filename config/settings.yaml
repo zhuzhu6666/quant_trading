@@ -124,6 +124,7 @@ runtime:
   strategy_sl_atr: 2.0
   strategy_tp_atr: 3.0
   strategy_cooldown_bars: 3
+  live_factor_warmup_bars: 150
   # --- L2 研究采集 ---
   # cTrader 主链只保留一条 Open API 连接；L2 depth 作为研究支路在同一连接上订阅。
   # risk_require_l2_depth 仍只表示风控/开仓是否依赖 L2。
@@ -135,10 +136,11 @@ runtime:
   # --- Phase 5: 风控升级 (默认启用) ---
   var_enabled: true
   var_cvar_threshold: 0.02
+  risk_var_threshold_pct: 10.0
   kelly_enabled: true
   kelly_fraction: 0.5
   kelly_max_pct: 0.25
-  kelly_risk_per_trade_pct: 0.01
+  kelly_risk_per_trade_pct: 0.06
   dynamic_sizing_enabled: true
-  dynamic_sizing_max_api_volume: 300.0
+  dynamic_sizing_max_api_volume: 1000.0
   dynamic_sizing_api_units_per_display_unit: 100.0

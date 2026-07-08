@@ -325,6 +325,24 @@ def test_effective_event_sizing_payload_preserves_policy_candidate_when_below_mi
     }
 
 
+def test_effective_event_sizing_payload_does_not_lift_non_positive_base_volume():
+    result = build_effective_event_sizing_payload(
+        base_volume=0.0,
+        adjusted_volume=0.0,
+        sizing_trace={
+            "event_raw_api_volume": 0.0,
+            "blocked_reason": "kelly_fraction_non_positive",
+        },
+        sizing_block_reason="kelly_fraction_non_positive",
+        event_sizing_context={"enabled": True, "multiplier": 1.0},
+    )
+
+    assert result["volume"] == 0.0
+    assert "event_policy_candidate_api_volume" not in result["sizing_trace"]
+    assert result["event_sizing_context"]["effective_requested_api_volume"] == 0.0
+    assert result["event_sizing_context"]["blocked_reason"] == "kelly_fraction_non_positive"
+
+
 def test_spot_quote_guard_replaces_price_only_when_fresh_and_close():
     fresh = guard_current_price_with_spot_quote(
         current_price=100.0,

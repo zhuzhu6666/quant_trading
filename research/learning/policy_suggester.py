@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 
 
 class PolicySuggester:
@@ -142,6 +143,16 @@ class PolicySuggester:
                 "failure_tags": experience.get("failure_tags", []),
                 "supervisor_entry_failure": supervisor_entry_failure,
             }
+            payload = attach_policy_suggestion_agent_context(
+                payload,
+                source_agent="autonomous_learning",
+                scope_type="factor",
+                action=action,
+                requested_writes=["policy_suggestion"],
+                status="proposed",
+                impact_level="medium",
+                db_path=self.db_path,
+            )
             existing = conn.execute(
                 f"""
                 SELECT suggestion_id

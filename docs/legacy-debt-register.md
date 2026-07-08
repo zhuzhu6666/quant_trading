@@ -81,7 +81,7 @@
 
 - 状态: `fixed`
 - 旧理解: 自动治理可以直接修改 RuntimeConfig 内存。
-- 当前口径: 自治配置必须写 DB overlay 和 runtime_config_snapshot，重启可恢复。
+- 当前口径: 自治配置必须写 DB overlay 和 runtime_config_snapshot，重启可恢复；长期运行进程通过 `runtime_config.shared()` 低频吸收最新 overlay，避免 writer 进程和 reader 进程配置漂移。
 - 影响面: AWE、参数模板、FactorGovernanceOrchestrator、startup。
 - 收口方式: 统一使用 `RuntimeConfigMutationService` / `RuntimeConfigOverlayService`。
 
@@ -180,9 +180,9 @@
 
 - 状态: `fixed`
 - 旧理解: live tick 只要本地 bars 月库有最近几根 bar，就可以直接用最后一根作为 `complete=true` 决策输入；spot quote 可以修正执行价格，数据延迟只靠宽泛 `data_lag_max_seconds` 兜底。
-- 当前口径: live 因子决策只能使用最新已闭合 bar。`classify_bar_freshness()` 按 timeframe 推导应有闭合 bar；`_ensure_live_decision_bars_fresh()` 会在因子计算前过滤未闭合 bar，缺 bar 时通过主 cTrader bridge 回补月库并重载。修复失败时只阻断 open_trade，持仓监督和平仓链路继续运行。
+- 当前口径: live 因子决策只能使用最新已闭合 bar。`classify_bar_freshness()` 按 timeframe 推导应有闭合 bar；`_ensure_live_decision_bars_fresh()` 会在因子计算前过滤未闭合 bar，缺 bar 时通过主 cTrader bridge 回补月库并重载。修复失败时只阻断 open_trade；同一根已闭合 bar 只允许推进一次 signal/open，重复 tick 只运行持仓观察/保护；即使 bar fresh，`RiskPolicyService` 也会在信号 age 超过 `max(180s, 1.5 * timeframe)` 时以 `decision_signal_age_stale` 阻断开仓，持仓监督和平仓链路继续运行。
 - 影响面: `backend/services/live_data_sync_helpers.py`、`backend/services/live_service.py`、`backend/services/live_position_lifecycle.py`、`risk/policy_service.py`、同步健康、决策审计、学习标签解释。
-- 收口方式: 新增 `decision_bar_freshness.v1` 运行态快照和 `decision_freshness` 风控上下文；`RiskPolicyService.evaluate("open_trade")` 对 `fresh=false` 返回 `decision_bar_stale`，不改变 close/reduce/tighten 降风险动作。
+- 收口方式: 新增 `decision_bar_freshness.v1` 运行态快照、`last_processed_decision_bar_ts` 和 `decision_freshness` 风控上下文；`StreamingFactorEngine` 拒绝重复/倒序 bar；`RiskPolicyService.evaluate("open_trade")` 对 `fresh=false` 返回 `decision_bar_stale`，对过期信号返回 `decision_signal_age_stale`，不改变 close/reduce/tighten 降风险动作。
 - 验证方式: `tests/test_live_data_sync_helpers.py`、`tests/test_live_service_lifecycle.py::test_ensure_live_decision_bars_repairs_from_primary_bridge`、`tests/risk/test_policy_service.py::test_open_trade_blocks_stale_decision_bar_freshness`。
 
 ### 交易复盘把信号时间当实际入场时间

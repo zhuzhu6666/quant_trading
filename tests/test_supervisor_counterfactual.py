@@ -173,3 +173,67 @@ def test_counterfactual_default_horizon_catches_two_hour_recovery(monkeypatch, t
     assert item["label"] == "premature_tighten"
     assert [h["horizon_minutes"] for h in item["horizons"]] == [120]
     assert item["horizons"][0]["first_original_hit"] == "tp"
+
+
+def test_counterfactual_includes_supervisor_reduce_close_with_m1_evidence(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    review = {
+        "position_id": "p1",
+        "trade_id": "p1",
+        "close_ts": 1000.0,
+        "close_price": 100.0,
+        "timeframe": "M5",
+        "close_reason": "supervisor_reduce",
+        "entry_action": {"direction": -1},
+        "real_pnl": {"entry_price": 101.0, "net": -1.0},
+    }
+    conn.execute("UPDATE trade_outcome_review SET review_json=? WHERE review_id='r1'", (json.dumps(review),))
+    conn.execute(
+        """
+        UPDATE decision_ledger
+        SET event_type='supervisor_reduce',
+            action_reason='profit_giveback_after_mfe',
+            action_json=?
+        WHERE decision_id='d1'
+        """,
+        (
+            json.dumps(
+                {
+                    "supervisor_verdict": {
+                        "action": "reduce",
+                        "summary_reason": "profit_giveback_after_mfe",
+                        "evidence": {"trigger_tags": ["profit_giveback_after_mfe"]},
+                    }
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    bars = pd.DataFrame(
+        [
+            {"time": 1060.0, "open": 100.0, "high": 100.1, "low": 98.0, "close": 98.5, "volume": 1},
+            {"time": 1120.0, "open": 98.5, "high": 99.0, "low": 94.9, "close": 95.2, "volume": 1},
+        ]
+    )
+    calls = []
+
+    def _future(symbol, timeframe, close_ts, max_minutes):
+        calls.append((symbol, timeframe, close_ts, max_minutes))
+        return bars
+
+    monkeypatch.setattr(scf, "_load_future_bars", _future)
+
+    result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
+
+    assert result["count"] == 1
+    item = result["items"][0]
+    assert item["close_reason"] == "supervisor_reduce"
+    assert item["supervisor_event_type"] == "supervisor_reduce"
+    assert item["label"] == "protection_too_tight"
+    assert item["evidence"]["bar_timeframe"] == "M1"
+    assert item["evidence"]["trade_timeframe"] == "M5"
+    assert calls[0][1] == "M1"

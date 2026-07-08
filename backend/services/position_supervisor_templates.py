@@ -126,8 +126,8 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         "status": "candidate",
         "description": "Protect positions that already showed useful MFE before profit capture deteriorates.",
         "thresholds": {
-            "min_thesis_break_seconds": 120.0,
-            "broken_holding_efficiency_threshold": 0.24,
+            "min_thesis_break_seconds": 300.0,
+            "broken_holding_efficiency_threshold": 0.18,
             "giveback_reduce_threshold": 0.52,
             "giveback_tighten_threshold": 0.22,
             "profit_capture_min_threshold": 0.42,

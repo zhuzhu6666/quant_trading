@@ -348,6 +348,41 @@ def test_apply_learning_biases_is_small_and_normalized():
     assert applied["bar"]["multiplier"] == 1.04
 
 
+def test_apply_learning_biases_uses_current_runtime_weight_for_snapshot_only_factor():
+    adjusted, applied = evo._apply_learning_biases(
+        {"foo": 0.6, "bar": 0.4},
+        {
+            "dsl_auto_hot": {"multiplier": 0.82, "action": "downweight", "suggestion_ids": ["s_hot"]},
+        },
+        base_weights={"dsl_auto_hot": 0.3},
+    )
+
+    assert "dsl_auto_hot" in adjusted
+    assert abs(sum(adjusted.values()) - 1.0) < 1e-6
+    assert applied["dsl_auto_hot"]["old_weight"] == 0.3
+    assert applied["dsl_auto_hot"]["biased_weight"] == 0.246
+    assert applied["dsl_auto_hot"]["suggestion_ids"] == ["s_hot"]
+
+
+def test_apply_learning_biases_uses_source_weight_when_runtime_weight_missing():
+    adjusted, applied = evo._apply_learning_biases(
+        {"foo": 1.0},
+        {
+            "dsl_auto_hot": {
+                "multiplier": 0.82,
+                "action": "downweight",
+                "suggestion_ids": ["s_hot"],
+                "source_weight": 0.3,
+            },
+        },
+    )
+
+    assert "dsl_auto_hot" in adjusted
+    assert abs(sum(adjusted.values()) - 1.0) < 1e-6
+    assert applied["dsl_auto_hot"]["old_weight"] == 0.3
+    assert applied["dsl_auto_hot"]["biased_weight"] == 0.246
+
+
 def test_evolution_shadow_register_blocked_by_risk_policy(monkeypatch):
     import risk.policy_service as policy_service
 
@@ -360,6 +395,30 @@ def test_evolution_shadow_register_blocked_by_risk_policy(monkeypatch):
 
     assert evo._register_shadow_factors([_Expr()]) == 0
     assert policy.calls[0][0] == "register_factor"
+
+
+def test_evolution_shadow_register_skips_invalid_dsl_before_registration(monkeypatch):
+    import risk.policy_service as policy_service
+
+    adapter = _Adapter()
+    policy = _RiskPolicy(allowed=True)
+    stories = []
+    monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: policy))
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: adapter))
+    monkeypatch.setattr(evo, "_emit_evolution_story", lambda event, payload: stories.append((event, payload)))
+
+    class _BadExpr:
+        name = "dsl_auto_bad"
+        expression = "rank(close"
+
+    class _GoodExpr:
+        name = "dsl_auto_good"
+        expression = "rank(close)"
+
+    assert evo._register_shadow_factors([_BadExpr(), _GoodExpr()]) == 1
+    assert adapter.registered == [("dsl_auto_good", "shadow", "rank(close)")]
+    assert stories[0][0] == "shadow_register_invalid_dsl_skipped"
+    assert stories[0][1]["factor"] == "dsl_auto_bad"
 
 
 def test_shadow_promote_blocked_by_risk_policy(monkeypatch):

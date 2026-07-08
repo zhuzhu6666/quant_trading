@@ -227,7 +227,7 @@ class SystemHealth:
         ]
         degradeds = [
             name for name, c in components.items()
-            if c.status == "degraded" or (c.status == "critical" and name in advisory_only_components)
+            if c.status == "degraded" and name not in advisory_only_components
         ]
         if criticals:
             report.overall = "critical"

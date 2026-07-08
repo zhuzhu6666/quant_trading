@@ -53,6 +53,17 @@ LIVE_AUTONOMY_EXPANSION_ACTIONS = {
     "register_factor",
     "start_canary_model",
 }
+DEMO_NURSERY_SOFT_REASONS = {
+    "loss_cooldown_active",
+    "consecutive_losses",
+    "learning_same_direction_cooldown",
+    "learning_event_window_control",
+}
+DEMO_NURSERY_SOFT_SOURCES = {
+    "var_gate",
+    "cvar_gate",
+    "entry_quality_gate",
+}
 
 
 @dataclass
@@ -263,6 +274,58 @@ class RiskPolicyService:
             "live_autonomy_unlock_id": str(unlock_id or ""),
         }
 
+    @classmethod
+    def _demo_nursery_enabled(cls, context: dict[str, Any]) -> bool:
+        return cls._runtime_autonomy_context(context)["autonomy_mode"] == "demo_nursery"
+
+    @staticmethod
+    def _demo_nursery_observation(verdict: RiskVerdict) -> dict[str, Any]:
+        payload = dict(verdict.audit_payload or {})
+        return {
+            "schema_version": "demo_nursery_observation.v1",
+            "would_block": True,
+            "reason": str(verdict.reason or ""),
+            "severity": str(verdict.severity or ""),
+            "source": str(payload.get("source") or ""),
+            "blocked_by": str(payload.get("blocked_by") or ""),
+            "audit_payload": payload,
+        }
+
+    @staticmethod
+    def _attach_demo_nursery_observations(
+        verdict: RiskVerdict,
+        observations: list[dict[str, Any]],
+    ) -> RiskVerdict:
+        if observations:
+            verdict.audit_payload = dict(verdict.audit_payload or {})
+            verdict.audit_payload["demo_nursery_observations"] = list(observations)
+        return verdict
+
+    @staticmethod
+    def _is_demo_nursery_soft_block(verdict: RiskVerdict) -> bool:
+        reason = str(verdict.reason or "")
+        payload = verdict.audit_payload or {}
+        source = str(payload.get("source") or "")
+        blocked_by = str(payload.get("blocked_by") or "")
+        return (
+            reason in DEMO_NURSERY_SOFT_REASONS
+            or reason.startswith("var_gate:")
+            or reason.startswith("cvar_gate:")
+            or source in DEMO_NURSERY_SOFT_SOURCES
+            or blocked_by in DEMO_NURSERY_SOFT_SOURCES
+        )
+
+    def _observe_or_return_demo_nursery(
+        self,
+        context: dict[str, Any],
+        verdict: RiskVerdict,
+        observations: list[dict[str, Any]],
+    ) -> RiskVerdict | None:
+        if self._demo_nursery_enabled(context) and self._is_demo_nursery_soft_block(verdict):
+            observations.append(self._demo_nursery_observation(verdict))
+            return None
+        return self._attach_demo_nursery_observations(verdict, observations)
+
     def _evaluate_live_autonomy_gate(self, action: str, context: dict[str, Any]) -> RiskVerdict | None:
         autonomy = self._runtime_autonomy_context(context)
         if autonomy["autonomy_mode"] != "live_autonomous":
@@ -361,9 +424,10 @@ class RiskPolicyService:
 
     def _evaluate_open_trade(self, context: dict[str, Any]) -> RiskVerdict:
         state = self._build_governor_state(context)
+        demo_nursery_observations: list[dict[str, Any]] = []
         gov_verdict = self.governor.allow_trade(state)
         if not gov_verdict.allowed:
-            return RiskVerdict(
+            verdict = RiskVerdict(
                 allowed=False,
                 reason=gov_verdict.reason or "governor_block",
                 severity="error",
@@ -375,6 +439,9 @@ class RiskPolicyService:
                     "temporal_context": context.get("temporal_context") or {},
                 },
             )
+            observed = self._observe_or_return_demo_nursery(context, verdict, demo_nursery_observations)
+            if observed is not None:
+                return observed
 
         decision_freshness = context.get("decision_freshness") or {}
         if (
@@ -382,7 +449,7 @@ class RiskPolicyService:
             and decision_freshness.get("schema_version") == "decision_bar_freshness.v1"
             and not bool(decision_freshness.get("fresh", True))
         ):
-            return RiskVerdict(
+            return self._attach_demo_nursery_observations(RiskVerdict(
                 allowed=False,
                 reason="decision_bar_stale",
                 severity="warn",
@@ -394,7 +461,42 @@ class RiskPolicyService:
                     "trade": context.get("trade") or {},
                     "temporal_context": context.get("temporal_context") or {},
                 },
-            )
+            ), demo_nursery_observations)
+
+        if (
+            isinstance(decision_freshness, dict)
+            and decision_freshness.get("schema_version") == "decision_bar_freshness.v1"
+        ):
+            try:
+                signal_age_seconds = float(decision_freshness.get("age_seconds") or 0.0)
+            except (TypeError, ValueError):
+                signal_age_seconds = 0.0
+            temporal_context = context.get("temporal_context") or {}
+            try:
+                timeframe_seconds = float(
+                    decision_freshness.get("timeframe_seconds")
+                    or temporal_context.get("timeframe_seconds")
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                timeframe_seconds = 0.0
+            stale_after_seconds = max(180.0, timeframe_seconds * 1.5) if timeframe_seconds > 0 else 0.0
+            if stale_after_seconds > 0 and signal_age_seconds > stale_after_seconds:
+                return self._attach_demo_nursery_observations(RiskVerdict(
+                    allowed=False,
+                    reason="decision_signal_age_stale",
+                    severity="warn",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "live_decision_signal_age",
+                        "blocked_by": "decision_signal_age",
+                        "decision_freshness": decision_freshness,
+                        "signal_age_seconds": round(signal_age_seconds, 3),
+                        "stale_after_seconds": round(stale_after_seconds, 3),
+                        "trade": context.get("trade") or {},
+                        "temporal_context": temporal_context,
+                    },
+                ), demo_nursery_observations)
 
         supervisor_block = context.get("supervisor_reentry_block") or {}
         if bool(supervisor_block.get("active", False)):
@@ -402,7 +504,7 @@ class RiskPolicyService:
             reason = str(supervisor_block.get("reason") or "position_supervisor")
             action = str(supervisor_block.get("action") or "")
             source = str(supervisor_block.get("source") or "position_supervisor")
-            return RiskVerdict(
+            return self._attach_demo_nursery_observations(RiskVerdict(
                 allowed=False,
                 reason="supervisor_reentry_cooldown",
                 severity="warn",
@@ -419,7 +521,7 @@ class RiskPolicyService:
                     "trade": context.get("trade") or {},
                     "temporal_context": context.get("temporal_context") or {},
                 },
-            )
+            ), demo_nursery_observations)
 
         entry_cluster_policy = context.get("entry_cluster_learning_policy") or {}
         entry_cluster = context.get("entry_cluster") or {}
@@ -433,7 +535,7 @@ class RiskPolicyService:
             seconds_since = float(entry_cluster.get("seconds_since_last_same_direction_open") or 0.0)
             cooldown_seconds = float(context.get("same_direction_cooldown_seconds") or 0.0)
             if min_same_count > 0 and same_count >= min_same_count and 0.0 < seconds_since < cooldown_seconds:
-                return RiskVerdict(
+                verdict = RiskVerdict(
                     allowed=False,
                     reason="learning_same_direction_cooldown",
                     severity="warn",
@@ -450,10 +552,13 @@ class RiskPolicyService:
                         "temporal_context": context.get("temporal_context") or {},
                     },
                 )
+                observed = self._observe_or_return_demo_nursery(context, verdict, demo_nursery_observations)
+                if observed is not None:
+                    return observed
 
         entry_quality_gate = context.get("entry_quality_gate") or {}
         if bool(entry_quality_gate.get("active", False)) and not bool(entry_quality_gate.get("allowed", True)):
-            return RiskVerdict(
+            verdict = RiskVerdict(
                 allowed=False,
                 reason=str(entry_quality_gate.get("reason") or "learning_entry_quality_gate"),
                 severity="warn",
@@ -466,10 +571,13 @@ class RiskPolicyService:
                     "temporal_context": context.get("temporal_context") or {},
                 },
             )
+            observed = self._observe_or_return_demo_nursery(context, verdict, demo_nursery_observations)
+            if observed is not None:
+                return observed
 
         event_filter = context.get("event_filter") or context.get("event_risk_filter") or {}
         if bool(event_filter.get("active", False)) and bool(event_filter.get("blocked", False)):
-            return RiskVerdict(
+            return self._attach_demo_nursery_observations(RiskVerdict(
                 allowed=False,
                 reason=str(event_filter.get("reason") or "event_risk_filter"),
                 severity="warn",
@@ -481,7 +589,7 @@ class RiskPolicyService:
                     "trade": context.get("trade") or {},
                     "temporal_context": context.get("temporal_context") or {},
                 },
-            )
+            ), demo_nursery_observations)
 
         event_window_policy = context.get("event_window_learning_policy") or {}
         event_sizing = context.get("event_sizing") or {}
@@ -497,7 +605,7 @@ class RiskPolicyService:
                 and str(item.get("action") or "") in {"tighten_event_window_sizing", "extend_event_post_window_review"}
             ]
             if matching_controls and schema_version == "event_sizing.short_window.v2":
-                return RiskVerdict(
+                verdict = RiskVerdict(
                     allowed=False,
                     reason="learning_event_window_control",
                     severity="warn",
@@ -512,6 +620,9 @@ class RiskPolicyService:
                         "temporal_context": context.get("temporal_context") or {},
                     },
                 )
+                observed = self._observe_or_return_demo_nursery(context, verdict, demo_nursery_observations)
+                if observed is not None:
+                    return observed
 
         risk_snapshot = context.get("risk_snapshot") or {}
         risk_limits = RiskLimitSnapshot.from_context(context)
@@ -521,7 +632,7 @@ class RiskPolicyService:
             var_pct = float(var_data.get("var_pct", 0.0) or 0.0)
             threshold_pct = float(var_cfg.get("threshold_pct", risk_limits.var_threshold_pct) or 0.0)
             if threshold_pct > 0 and var_pct > threshold_pct:
-                return RiskVerdict(
+                verdict = RiskVerdict(
                     allowed=False,
                     reason=f"var_gate: VaR={var_pct:.1f}% > {threshold_pct:.1f}%",
                     severity="error",
@@ -533,10 +644,13 @@ class RiskPolicyService:
                         "temporal_context": context.get("temporal_context") or {},
                     },
                 )
+                observed = self._observe_or_return_demo_nursery(context, verdict, demo_nursery_observations)
+                if observed is not None:
+                    return observed
             cvar_pct = float(var_data.get("cvar_pct", 0.0) or 0.0)
             cvar_threshold_pct = float(var_cfg.get("cvar_threshold_pct", risk_limits.cvar_threshold_pct) or 0.0)
             if cvar_threshold_pct > 0 and cvar_pct > cvar_threshold_pct:
-                return RiskVerdict(
+                verdict = RiskVerdict(
                     allowed=False,
                     reason=f"cvar_gate: CVaR={cvar_pct:.1f}% > {cvar_threshold_pct:.1f}%",
                     severity="error",
@@ -549,6 +663,9 @@ class RiskPolicyService:
                         "temporal_context": context.get("temporal_context") or {},
                     },
                 )
+                observed = self._observe_or_return_demo_nursery(context, verdict, demo_nursery_observations)
+                if observed is not None:
+                    return observed
 
         event_block_reason = str(event_sizing.get("blocked_reason") or "")
         if event_block_reason:
@@ -571,7 +688,7 @@ class RiskPolicyService:
                 )
             )
             if is_hard_event_window:
-                return RiskVerdict(
+                return self._attach_demo_nursery_observations(RiskVerdict(
                     allowed=False,
                     reason=f"event_hard_window: {event_block_reason}",
                     severity="warn",
@@ -581,12 +698,27 @@ class RiskPolicyService:
                         "event_sizing": event_sizing,
                         "temporal_context": context.get("temporal_context") or {},
                     },
-                )
+                ), demo_nursery_observations)
 
         open_position_count = int(context.get("open_position_count", 0) or 0)
         max_position_count = int(context.get("max_position_count", 0) or 0)
+        entry_cluster = context.get("entry_cluster") or {}
+        opposite_direction_open_count = int(entry_cluster.get("opposite_direction_open_count_before", 0) or 0)
+        if opposite_direction_open_count > 0 and not bool(context.get("allow_opposite_direction_open", False)):
+            return self._attach_demo_nursery_observations(RiskVerdict(
+                allowed=False,
+                reason="opposite_direction_position_open",
+                severity="error",
+                audit_payload={
+                    "action": "open_trade",
+                    "source": "entry_cluster",
+                    "entry_cluster": entry_cluster,
+                    "opposite_direction_open_count": opposite_direction_open_count,
+                    "temporal_context": context.get("temporal_context") or {},
+                },
+            ), demo_nursery_observations)
         if max_position_count > 0 and open_position_count >= max_position_count:
-            return RiskVerdict(
+            return self._attach_demo_nursery_observations(RiskVerdict(
                 allowed=False,
                 reason=f"仓位上限: {open_position_count}/{max_position_count}",
                 severity="error",
@@ -597,14 +729,28 @@ class RiskPolicyService:
                     "max_position_count": max_position_count,
                     "temporal_context": context.get("temporal_context") or {},
                 },
-            )
+            ), demo_nursery_observations)
 
         requested_api_volume = float(context.get("requested_api_volume", 0.0) or 0.0)
+        if "requested_api_volume" in context and requested_api_volume <= 0:
+            return self._attach_demo_nursery_observations(RiskVerdict(
+                allowed=False,
+                reason="non_positive_requested_volume",
+                severity="warn",
+                audit_payload={
+                    "action": "open_trade",
+                    "source": "api_volume",
+                    "requested_api_volume": requested_api_volume,
+                    "event_sizing": event_sizing,
+                    "entry_cluster": entry_cluster,
+                    "temporal_context": context.get("temporal_context") or {},
+                },
+            ), demo_nursery_observations)
         total_api_volume = float(context.get("total_api_volume", 0.0) or 0.0)
         max_api_volume = float(context.get("max_position_api_volume", 0.0) or 0.0)
         remaining_api_volume = max(0.0, max_api_volume - total_api_volume) if max_api_volume > 0 else 0.0
         if max_api_volume > 0 and total_api_volume + requested_api_volume > max_api_volume:
-            return RiskVerdict(
+            return self._attach_demo_nursery_observations(RiskVerdict(
                 allowed=False,
                 reason=f"API量上限: {total_api_volume:.0f}+{requested_api_volume:.0f}>{max_api_volume:.0f}",
                 severity="error",
@@ -617,13 +763,13 @@ class RiskPolicyService:
                     "max_position_api_volume": max_api_volume,
                     "temporal_context": context.get("temporal_context") or {},
                 },
-            )
+            ), demo_nursery_observations)
 
         if bool(context.get("pyramid_enabled", True)) and open_position_count > 0:
             max_entry_score = float(context.get("max_abs_entry_score", 0.0) or 0.0)
             signal_score = abs(float(context.get("signal_score", 0.0) or 0.0))
             if max_entry_score > 0 and max_entry_score >= signal_score:
-                return RiskVerdict(
+                return self._attach_demo_nursery_observations(RiskVerdict(
                     allowed=False,
                     reason=f"金字塔: 需超 {max_entry_score:.4f}",
                     severity="warn",
@@ -634,9 +780,9 @@ class RiskPolicyService:
                     "signal_score": signal_score,
                     "temporal_context": context.get("temporal_context") or {},
                 },
-            )
+            ), demo_nursery_observations)
 
-        return RiskVerdict(
+        return self._attach_demo_nursery_observations(RiskVerdict(
             allowed=True,
             reason="ok",
             max_size=remaining_api_volume,
@@ -654,7 +800,7 @@ class RiskPolicyService:
                 "temporal_context": context.get("temporal_context") or {},
                 "decision_freshness": context.get("decision_freshness") or {},
             },
-        )
+        ), demo_nursery_observations)
 
     def _build_governor_state(self, context: dict[str, Any]) -> GovernorState:
         risk_limits = RiskLimitSnapshot.from_context(context)
@@ -1010,7 +1156,10 @@ class RiskPolicyService:
                 autonomy_mode = str(context.get("autonomy_mode") or "manual")
             boundary = template_meta.get("risk_boundary") or {}
             allowed_modes = set(boundary.get("auto_deploy_modes") or [])
-            if autonomy_mode != "demo_autonomous" or autonomy_mode not in allowed_modes:
+            mode_allowed = autonomy_mode in allowed_modes or (
+                autonomy_mode == "demo_nursery" and "demo_autonomous" in allowed_modes
+            )
+            if not mode_allowed:
                 return RiskVerdict(
                     allowed=False,
                     reason="autonomous_deploy_mode_not_allowed",

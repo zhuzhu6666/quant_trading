@@ -81,20 +81,40 @@ def risk_kelly_sizing(
 
     kelly_f = (kelly_data or {}).get("kelly_fraction", 0) or 0
     if kelly_f <= 0:
-        trace.update({"reason": "kelly_fraction_non_positive", "kelly_fraction": float(kelly_f or 0.0)})
-        return {"volume": default_vol, "trace": trace}
+        trace.update(
+            {
+                "reason": "kelly_fraction_non_positive",
+                "kelly_fraction": float(kelly_f or 0.0),
+                "raw_api_volume": 0.0,
+                "base_api_volume": 0.0,
+                "final_api_volume": 0.0,
+                "blocked_reason": "kelly_fraction_non_positive",
+            }
+        )
+        return {"volume": 0.0, "trace": trace}
 
     equity = float((account or {}).get("equity", 0) or 0)
     if equity <= 0:
-        trace.update({"reason": "missing_equity", "equity": equity, "kelly_fraction": float(kelly_f or 0.0)})
-        return {"volume": default_vol, "trace": trace}
+        trace.update(
+            {
+                "reason": "missing_equity",
+                "equity": equity,
+                "kelly_fraction": float(kelly_f or 0.0),
+                "raw_api_volume": 0.0,
+                "base_api_volume": 0.0,
+                "final_api_volume": 0.0,
+                "blocked_reason": "missing_equity_for_dynamic_sizing",
+            }
+        )
+        return {"volume": 0.0, "trace": trace}
 
     kelly_mult = getattr(cfg, "kelly_fraction", 0.5)
     f_star = kelly_f * kelly_mult
     risk_pct_raw = float(getattr(cfg, "kelly_risk_per_trade_pct", 0.01) or 0.0)
     risk_pct = risk_pct_raw / 100.0 if risk_pct_raw > 1.0 else risk_pct_raw
+    effective_risk_fraction = min(max(0.0, float(f_star or 0.0)), max(0.0, risk_pct))
     risk_capital = equity * risk_pct
-    risk_budget = risk_capital * f_star
+    risk_budget = equity * effective_risk_fraction
     sl_dist = abs(float(current_price or 0.0) - float(sl_price or 0.0))
     sl_dist = max(sl_dist, float(current_price or 0.0) * 0.001)
     raw_display_units = risk_budget / sl_dist if sl_dist > 0 else 0.0
@@ -109,16 +129,24 @@ def risk_kelly_sizing(
     if max_order_api > 0:
         capped_raw = min(capped_raw, max_order_api)
     tiered_volume = floor_api_volume_to_step(capped_raw, meta)
-    volume = max(default_vol, tiered_volume)
+    volume = tiered_volume
     if max_order_api > 0:
-        volume = min(volume, floor_api_volume_to_step(max_order_api, meta) or default_vol)
+        max_order_tier = floor_api_volume_to_step(max_order_api, meta)
+        if max_order_tier > 0 and volume > 0:
+            volume = min(volume, max_order_tier)
+    blocked_reason = ""
+    if volume <= 0:
+        blocked_reason = (
+            f"kelly_sizing_below_min: raw={capped_raw:.2f}<{default_vol:.0f}"
+        )
     trace.update(
         {
-            "reason": "ok",
+            "reason": "ok" if volume > 0 else "kelly_sizing_below_min",
             "equity": equity,
             "kelly_fraction": float(kelly_f or 0.0),
             "kelly_multiplier": float(kelly_mult or 0.0),
             "effective_kelly_fraction": float(f_star or 0.0),
+            "effective_risk_fraction": effective_risk_fraction,
             "risk_per_trade_pct": risk_pct,
             "risk_capital": risk_capital,
             "risk_budget": risk_budget,
@@ -129,6 +157,8 @@ def risk_kelly_sizing(
             "capped_raw_api_volume": capped_raw,
             "tiered_base_api_volume": tiered_volume,
             "base_api_volume": volume,
+            "final_api_volume": volume,
+            "blocked_reason": blocked_reason,
         }
     )
     return {"volume": volume, "trace": trace}
@@ -142,6 +172,7 @@ def apply_entry_event_sizing(
     sizing_trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     trace = dict(sizing_trace or {})
+    upstream_blocked_reason = str(trace.get("blocked_reason") or "")
     min_vol = float((bridge_meta or {}).get("api_min_volume") or 1.0)
     try:
         multiplier = float(event_multiplier)
@@ -149,9 +180,12 @@ def apply_entry_event_sizing(
         multiplier = 1.0
     base = float(base_volume or 0.0)
     raw_after_event = base * multiplier
-    if multiplier < 1.0:
+    if base <= 0:
+        final_volume = 0.0
+        blocked_reason = upstream_blocked_reason or "non_positive_base_volume"
+    elif multiplier < 1.0:
         final_volume = floor_api_volume_to_step(raw_after_event, bridge_meta)
-        blocked_reason = ""
+        blocked_reason = upstream_blocked_reason
         if final_volume <= 0:
             blocked_reason = (
                 f"event_sizing_below_min: {base:.0f}*{multiplier:.2f}="
@@ -159,7 +193,7 @@ def apply_entry_event_sizing(
             )
     else:
         final_volume = base
-        blocked_reason = ""
+        blocked_reason = upstream_blocked_reason
     trace.update(
         {
             "event_multiplier": multiplier,
@@ -213,21 +247,40 @@ def should_full_close_untradeable_reduce(
     except (TypeError, ValueError):
         current_pnl = 0.0
     try:
+        stop_loss_progress = float(evidence.get("stop_loss_progress", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        stop_loss_progress = 0.0
+    try:
         reduce_fraction = float(controls.get("reduce_fraction", 0.0) or 0.0)
     except (TypeError, ValueError):
         reduce_fraction = 0.0
 
-    if thesis_status == "broken":
+    thesis_break_confirmed = bool(evidence.get("thesis_break_confirmed"))
+    try:
+        thesis_broken_confirmations = int(evidence.get("thesis_broken_confirmations") or 0)
+    except (TypeError, ValueError):
+        thesis_broken_confirmations = 0
+    signal_reversal = bool(evidence.get("signal_reversal"))
+    if (
+        thesis_status == "broken"
+        and (
+            thesis_break_confirmed
+            or thesis_broken_confirmations >= 2
+            or signal_reversal
+            or stop_loss_progress >= 0.8
+        )
+    ):
         return True, "minimum_position_thesis_broken"
-    if giveback_ratio >= 1.0 and current_pnl <= 0:
-        return True, "minimum_position_full_giveback"
+    if giveback_ratio >= 1.0 and current_pnl <= 0 and stop_loss_progress >= 0.8:
+        return True, "minimum_position_full_giveback_near_stop"
     if (
         summary_reason == "profit_giveback_after_mfe"
         and "profit_giveback_after_mfe" in trigger_tags
         and current_pnl <= 0
         and reduce_fraction > 0
+        and stop_loss_progress >= 0.8
     ):
-        return True, "minimum_position_profit_giveback"
+        return True, "minimum_position_profit_giveback_near_stop"
     return False, "risk_evidence_not_strong_enough"
 
 

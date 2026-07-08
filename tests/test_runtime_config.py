@@ -77,7 +77,8 @@ def test_from_yaml_uses_defaults_for_missing_keys() -> None:
     assert cfg.canary_min_oos_bars == 80
     assert cfg.ctrader_send_orders is False
     assert cfg.dynamic_sizing_enabled is True
-    assert cfg.dynamic_sizing_max_api_volume == 300.0
+    assert cfg.dynamic_sizing_max_api_volume == 1000.0
+    assert cfg.kelly_risk_per_trade_pct == 0.06
 
 
 def test_unknown_keys_go_to_extra() -> None:

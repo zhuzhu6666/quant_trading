@@ -5567,6 +5567,203 @@ td > .status-pill {
   align-items: start;
 }
 
+.v16-blueprint-summary,
+.v16-agent-strip {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.v16-agent-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.v16-chain-map {
+  align-items: stretch;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
+.v16-chain-step {
+  align-content: start;
+  background: #f8fafc;
+  border: 1px solid rgba(203, 213, 225, 0.86);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-rows: auto 1fr auto;
+  min-height: 132px;
+  min-width: 0;
+  padding: 10px;
+  position: relative;
+}
+
+.v16-chain-step::after {
+  background: rgba(100, 116, 139, 0.34);
+  content: "";
+  height: 1px;
+  position: absolute;
+  right: -8px;
+  top: 28px;
+  width: 8px;
+}
+
+.v16-chain-step:last-child::after {
+  display: none;
+}
+
+.v16-chain-step > div {
+  min-width: 0;
+}
+
+.v16-chain-step strong,
+.v16-chain-step span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.v16-chain-step strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.v16-chain-step span {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 3px;
+}
+
+.v16-chain-icon {
+  align-items: center;
+  border-radius: 7px;
+  display: inline-flex;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+
+.v16-chain-ok {
+  background: #ecfdf5;
+  border-color: rgba(16, 185, 129, 0.34);
+}
+
+.v16-chain-ok .v16-chain-icon {
+  background: #d1fae5;
+  color: #047857;
+}
+
+.v16-chain-warn {
+  background: #fffbeb;
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.v16-chain-warn .v16-chain-icon {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.v16-chain-bad {
+  background: #fef2f2;
+  border-color: rgba(248, 113, 113, 0.42);
+}
+
+.v16-chain-bad .v16-chain-icon {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.v16-chain-mute .v16-chain-icon {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.v16-blueprint-checks,
+.v16-agent-list,
+.v16-coverage-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.v16-blueprint-checks {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.v16-check-row,
+.v16-agent-row,
+.v16-coverage-row {
+  align-items: center;
+  background: #fbfdff;
+  border: 1px solid rgba(203, 213, 225, 0.82);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.v16-check-row,
+.v16-agent-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.v16-check-row svg,
+.v16-agent-row svg {
+  color: #2563eb;
+  flex: 0 0 auto;
+}
+
+.v16-check-row > div,
+.v16-agent-row > div,
+.v16-coverage-row > div {
+  min-width: 0;
+}
+
+.v16-check-row strong,
+.v16-check-row span,
+.v16-agent-row strong,
+.v16-agent-row span,
+.v16-coverage-row strong,
+.v16-coverage-row span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.v16-check-row strong,
+.v16-agent-row strong,
+.v16-coverage-row strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.v16-check-row span,
+.v16-agent-row span,
+.v16-coverage-row span {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
+.v16-agent-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.v16-coverage-row {
+  grid-template-columns: minmax(190px, 0.8fr) minmax(0, 1.4fr);
+}
+
+.v16-boundary-tight {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .v16-boundary {
   display: grid;
   gap: 6px;
@@ -5781,8 +5978,19 @@ td > .status-pill {
   }
 
   .v16-boundary,
+  .v16-boundary-tight,
+  .v16-blueprint-summary,
+  .v16-agent-strip,
+  .v16-chain-map,
+  .v16-blueprint-checks,
+  .v16-agent-list,
+  .v16-coverage-row,
   .brain-action-plan-compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .v16-chain-step:nth-child(2n)::after {
+    display: none;
   }
 }
 
@@ -5810,8 +6018,23 @@ td > .status-pill {
   }
 
   .v16-boundary,
+  .v16-boundary-tight,
+  .v16-blueprint-summary,
+  .v16-agent-strip,
+  .v16-chain-map,
+  .v16-blueprint-checks,
+  .v16-agent-list,
+  .v16-coverage-row,
   .brain-json-grid,
   .brain-action-plan-compact {
     grid-template-columns: 1fr;
+  }
+
+  .v16-chain-step {
+    min-height: 104px;
+  }
+
+  .v16-chain-step::after {
+    display: none;
   }
 }

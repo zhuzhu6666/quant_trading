@@ -145,6 +145,108 @@ def test_position_supervisor_conservative_template_delays_early_thesis_broken_cl
     assert verdict["supervisor_template"]["template_version"] == "conservative.v1"
 
 
+def test_profit_protection_template_delays_young_thesis_broken_full_exit():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "9004b",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 2997.0,
+                "volume": 100.0,
+                "unrealized_pnl": -3.0,
+                "sl": 2988.0,
+                "tp": 3020.0,
+            },
+            "risk": {
+                "mfe": 0.0,
+                "mae": 3.0,
+                "holding_efficiency": 0.0,
+                "time_decay_score": 0.8,
+                "thesis_status": "broken",
+                "regime_shift": "none",
+            },
+            "temporal_context": {"decision_ts": time.time(), "holding_seconds": 190.0},
+            "position_supervisor_template": PROFIT_PROTECTION_TEMPLATE_ID,
+        }
+    )
+
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "thesis_weakening"
+    assert "thesis_broken_delayed" in verdict["evidence"]["trigger_tags"]
+    assert verdict["supervisor_template"]["thresholds"]["min_thesis_break_seconds"] == 300.0
+
+
+def test_profit_protection_template_closes_confirmed_thesis_broken_after_evidence_window():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "9004c",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 2997.0,
+                "volume": 100.0,
+                "unrealized_pnl": -3.0,
+                "sl": 2988.0,
+                "tp": 3020.0,
+            },
+            "risk": {
+                "mfe": 0.0,
+                "mae": 3.0,
+                "holding_efficiency": 0.0,
+                "time_decay_score": 0.8,
+                "thesis_status": "broken",
+                "regime_shift": "none",
+                "thesis_broken_confirmations": 2,
+            },
+            "temporal_context": {"decision_ts": time.time(), "holding_seconds": 360.0},
+            "position_supervisor_template": PROFIT_PROTECTION_TEMPLATE_ID,
+        }
+    )
+
+    assert verdict["action"] == "close"
+    assert verdict["summary_reason"] == "thesis_broken"
+    assert verdict["evidence"]["thesis_break_confirmed"] is True
+    assert verdict["evidence"]["thesis_broken_confirmations"] == 2
+
+
+def test_profit_protection_template_delays_unconfirmed_thesis_broken_after_evidence_window():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "9004d",
+                "direction": 1,
+                "entry_price": 4127.16,
+                "current_price": 4125.045,
+                "volume": 100.0,
+                "unrealized_pnl": -0.56,
+                "sl": 4121.93,
+                "tp": 4135.0,
+            },
+            "risk": {
+                "mfe": 0.03,
+                "mae": 0.56,
+                "giveback_ratio": 1.0,
+                "profit_capture_ratio": 0.0,
+                "time_in_profit": 125.7,
+                "holding_efficiency": 0.158892,
+                "time_decay_score": 0.65,
+                "thesis_status": "broken",
+                "regime_shift": "none",
+            },
+            "temporal_context": {"decision_ts": time.time(), "holding_seconds": 316.45},
+            "position_supervisor_template": PROFIT_PROTECTION_TEMPLATE_ID,
+        }
+    )
+
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "thesis_weakening"
+    assert verdict["evidence"]["thesis_break_ready"] is True
+    assert verdict["evidence"]["thesis_break_confirmed"] is False
+    assert verdict["evidence"]["stop_loss_progress"] < 0.82
+    assert "thesis_broken_unconfirmed" in verdict["evidence"]["trigger_tags"]
+
+
 def test_position_supervisor_captures_when_near_take_profit():
     verdict = evaluate_position_supervisor(
         {

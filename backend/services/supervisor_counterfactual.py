@@ -60,6 +60,10 @@ def _loads(raw: str | None, default: Any) -> Any:
 
 
 def _direction_from_review(review: dict[str, Any]) -> int:
+    entry_action = review.get("entry_action") or {}
+    direction = int(_safe_float(entry_action.get("direction"), 0.0))
+    if direction != 0:
+        return 1 if direction > 0 else -1
     real = review.get("real_pnl") or {}
     entry = _safe_float(real.get("entry_price") or review.get("entry_price"))
     close = _safe_float(review.get("close_price") or real.get("exec_price"))
@@ -426,7 +430,17 @@ def evaluate_counterfactuals(
         for row in rows:
             review = _loads(row["review_json"], {})
             close_reason = str(review.get("close_reason") or "")
-            if close_reason not in {"broker_close", "restart_replay", "thesis_broken"}:
+            if close_reason not in {
+                "broker_close",
+                "restart_replay",
+                "thesis_broken",
+                "supervisor_reduce",
+                "supervisor_tighten",
+                "profit_giveback_after_mfe",
+                "near_stop_loss_preemptive_exit",
+                "time_decay_and_low_efficiency",
+                "holding_timeout_exceeded",
+            }:
                 continue
             position_id = str(row["position_id"] or "")
             close_ts = _safe_float(review.get("close_ts") or row["created_at"])
@@ -467,7 +481,8 @@ def evaluate_counterfactuals(
                     "close_pnl": close_pnl,
                     "unit": unit,
                     "symbol": str(review.get("symbol") or "XAUUSD+"),
-                    "timeframe": str(review.get("timeframe") or "M5"),
+                    "timeframe": str(review.get("counterfactual_timeframe") or "M1"),
+                    "trade_timeframe": str(review.get("timeframe") or "M5"),
                 }
             )
 
@@ -490,6 +505,7 @@ def evaluate_counterfactuals(
             unit = candidate["unit"]
             symbol = candidate["symbol"]
             timeframe = candidate["timeframe"]
+            trade_timeframe = candidate["trade_timeframe"]
             bars = _slice_future_bars(bar_cache, symbol, timeframe, close_ts, max_horizon)
             if bars is None and _future_loader_is_patched():
                 bars = _load_future_bars(symbol, timeframe, close_ts, max_horizon)
@@ -516,6 +532,8 @@ def evaluate_counterfactuals(
                 "supervisor": supervisor,
                 "tags": tags,
                 "advisory_only": True,
+                "bar_timeframe": timeframe,
+                "trade_timeframe": trade_timeframe,
             }
             counterfactual_id = "scf_" + hashlib.sha1(
                 f"{row['review_id']}:{position_id}:{close_ts}".encode("utf-8")

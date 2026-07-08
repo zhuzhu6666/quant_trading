@@ -19,6 +19,24 @@ class MappingVerdictProxy:
         return dict(self._payload)
 
 
+def _resolve_bridge_volume_meta(bridge: Any, position: dict[str, Any]) -> dict[str, Any]:
+    meta = getattr(bridge, "_symbol_meta", None) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if not meta.get("api_min_volume") and bridge is not None and hasattr(bridge, "_resolve_symbol_id"):
+        try:
+            bridge._resolve_symbol_id()
+            meta = getattr(bridge, "_symbol_meta", None) or {}
+            if not isinstance(meta, dict):
+                meta = {}
+        except Exception:
+            meta = {}
+    symbol = str(position.get("symbol") or getattr(bridge, "symbol", "") or "").upper()
+    if not meta.get("api_min_volume") and symbol.startswith("XAUUSD"):
+        meta = {"api_min_volume": 100, "api_step_volume": 100}
+    return dict(meta or {})
+
+
 def execute_supervisor_tighten_action(
     *,
     bridge: Any,
@@ -296,12 +314,12 @@ def execute_supervisor_reduce_action(
     current_volume = float(position.get("volume", position.get("api_volume", 0.0)) or 0.0)
     reduce_fraction = float((controls or {}).get("reduce_fraction", 0.0) or 0.0)
     raw_reduce_volume = current_volume * reduce_fraction
-    bridge_meta = getattr(bridge, "_symbol_meta", None) or {}
+    bridge_meta = _resolve_bridge_volume_meta(bridge, position)
     min_volume = float(bridge_meta.get("api_min_volume") or 1.0)
     step_volume = float(bridge_meta.get("api_step_volume") or 1.0)
     reduce_volume = floor_api_volume_to_step(raw_reduce_volume, bridge_meta)
 
-    if reduce_volume > 0 and current_volume - reduce_volume >= min_volume:
+    if reduce_volume >= min_volume and current_volume - reduce_volume >= min_volume:
         result = bridge.close_position(pid, volume=reduce_volume)
         if getattr(result, "success", False):
             if ledger:

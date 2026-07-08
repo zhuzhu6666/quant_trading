@@ -1,6 +1,23 @@
 import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BrainCircuit, Database, GitBranch, ListChecks, Play, RefreshCw, ShieldCheck, Sparkles, Workflow } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  BookOpenCheck,
+  BrainCircuit,
+  CheckCircle2,
+  Database,
+  GitBranch,
+  ListChecks,
+  Network,
+  Play,
+  RefreshCw,
+  Route,
+  ShieldCheck,
+  Sparkles,
+  UsersRound,
+  Workflow,
+} from "lucide-react";
 import {
   evaluateLiveAutonomyUnlock,
   evaluateBrainLiveReadyGuardrail,
@@ -168,6 +185,7 @@ function displayValue(value: string): string {
     positive: "正面",
     posterior: "后验",
     proposal_registry: "提案总线",
+    partial: "部分对齐",
     request_review: "请求审查",
     request_replay: "请求回放",
     ready: "就绪",
@@ -186,6 +204,26 @@ function displayValue(value: string): string {
     unlock_ready: "可解锁",
     unlocked: "已解锁",
     suggestion_materialized: "建议已生成",
+    demo_autonomous: "Demo 自治",
+    demo_nursery: "Demo 育苗",
+    advisory_only: "只建议",
+    review_only: "只审查",
+    blocked_by_agent_authority: "权限阻断",
+    v16_brain: "V16 大脑",
+    autonomous_learning: "自主学习",
+    factor_governance: "因子治理",
+    factor_pruning_governance: "因子裁剪治理",
+    llm_advisory: "LLM 建议",
+    lightgbm_shadow_models: "LightGBM 影子",
+    demo_nursery_learning_scope: "Demo 育苗范围",
+    agent_authority_contract: "Agent 权责合同",
+    proposal_generation_context: "提案上下文",
+    candidate_generation_context: "候选上下文",
+    candidate_bridge_review: "候选桥接审查",
+    proposal_registry_read_model: "提案读模型",
+    memory_and_scorecard_feedback: "记忆与评分反馈",
+    single_execution_boundary: "单执行边界",
+    live_ready_guardrails: "实盘护栏",
     unknown: "未知",
     warn: "注意",
   };
@@ -210,9 +248,29 @@ function displayContract(value: string): string {
     proposal_registry_list: "提案总线契约",
     proposal_registry_status: "提案总线状态",
     live_autonomy_status: "实盘自治契约",
+    autonomous_trading_blueprint_status: "自治大纲状态契约",
+    agent_authority_status: "Agent 权责状态契约",
+    agent_scorecard_readiness: "Agent 评分契约",
+    agent_briefing_readiness: "Agent 简报契约",
+    agent_chain_health: "Agent 链路健康契约",
+    proposal_generation_context_coverage: "提案上下文覆盖契约",
+    candidate_generation_context_coverage: "候选上下文覆盖契约",
+    candidate_bridge_review_coverage: "候选桥接审查契约",
   };
   const base = normalized.replace(/\.\d+$/, "").replace(/\.v\d+$/, "");
   return labels[base] || value.replace(/^v\d+_/, "").replace(/\.v\d+$/, "").replaceAll("_", " ");
+}
+
+function statusTone(value: string): Tone {
+  const normalized = value.toLowerCase();
+  if (["ok", "ready", "available", "healthy", "pass", "aligned", "locked", "fresh"].includes(normalized)) return "ok";
+  if (["partial", "attention", "degraded", "warn", "warning", "empty", "unknown", "stale"].includes(normalized)) return "warn";
+  if (["bad", "blocked", "failed", "error", "missing", "divergent"].includes(normalized)) return "bad";
+  return "mute";
+}
+
+function countOf(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
 }
 
 function CompactFacts({ facts }: { facts: Array<{ label: string; value: string; tone?: Tone }> }) {
@@ -234,6 +292,202 @@ function CompactMetric({ label, value, detail, tone = "mute" }: { label: string;
       <span>{label}</span>
       <strong>{value}</strong>
       {detail ? <small>{detail}</small> : null}
+    </div>
+  );
+}
+
+function ChainStep({
+  icon: Icon,
+  label,
+  status,
+  detail,
+  tone,
+}: {
+  icon: typeof Network;
+  label: string;
+  status: string;
+  detail?: string;
+  tone?: Tone;
+}) {
+  return (
+    <div className={`v16-chain-step v16-chain-${tone || statusTone(status)}`}>
+      <div className="v16-chain-icon">
+        <Icon size={16} aria-hidden="true" />
+      </div>
+      <div>
+        <strong>{label}</strong>
+        <span>{detail || displayValue(status)}</span>
+      </div>
+      <StatusPill status={displayValue(status)} tone={tone || statusTone(status)} />
+    </div>
+  );
+}
+
+function BlueprintOverview({
+  blueprint,
+  agentAuthority,
+  proposalContext,
+  candidateContext,
+  candidateReview,
+  chainHealth,
+  liveAutonomy,
+}: {
+  blueprint: Record<string, unknown>;
+  agentAuthority: Record<string, unknown>;
+  proposalContext: Record<string, unknown>;
+  candidateContext: Record<string, unknown>;
+  candidateReview: Record<string, unknown>;
+  chainHealth: Record<string, unknown>;
+  liveAutonomy: Record<string, unknown>;
+}) {
+  const checks = pickArray(blueprint, ["checks"]);
+  const blockers = pickArray(blueprint, ["blockers"]);
+  const deviationGuard = asRecord(pick(blueprint, ["deviation_guard"]));
+  const boundary = asRecord(pick(blueprint, ["boundary"]));
+  const chainChecks = pickArray(chainHealth, ["checks"]);
+  return (
+    <>
+      <div className="v16-blueprint-summary">
+        <CompactMetric label="大纲" value={displayValue(pickString(blueprint, ["status"], "unknown"))} detail={`阻断 ${blockers.length}`} tone={pickBoolean(blueprint, ["ok"], false) ? "ok" : "warn"} />
+        <CompactMetric label="Agent" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`${countOf(pick(agentAuthority, ["unknown_sources"]))} 未知 / ${countOf(pick(agentAuthority, ["contract_violations"]))} 违规`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
+        <CompactMetric label="Proposal Context" value={displayValue(pickString(proposalContext, ["status"], "unknown"))} detail={`缺 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(proposalContext, ["status"], "unknown"))} />
+        <CompactMetric label="Candidate Context" value={displayValue(pickString(candidateContext, ["status"], "unknown"))} detail={`缺 ${formatDecimal(pickNumber(candidateContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(candidateContext, ["status"], "unknown"))} />
+        <CompactMetric label="Bridge Review" value={displayValue(pickString(candidateReview, ["status"], "unknown"))} detail={`缺 ${formatDecimal(pickNumber(candidateReview, ["missing_required_review_count"], 0), 0)}`} tone={statusTone(pickString(candidateReview, ["status"], "unknown"))} />
+        <CompactMetric label="Feedback" value={displayValue(pickString(chainHealth, ["status"], "unknown"))} detail={`检查 ${chainChecks.length}`} tone={statusTone(pickString(chainHealth, ["status"], "unknown"))} />
+      </div>
+
+      <div className="v16-chain-map" aria-label="autonomy governance chain">
+        <ChainStep icon={UsersRound} label="Agent" status={pickString(agentAuthority, ["status"], "unknown")} detail={`${formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} registered`} />
+        <ChainStep icon={Route} label="Proposal" status={pickString(proposalContext, ["status"], "unknown")} detail={`${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)} missing`} />
+        <ChainStep icon={ListChecks} label="Candidate" status={pickString(candidateReview, ["status"], "unknown")} detail={`${formatDecimal(pickNumber(candidateReview, ["candidate_bridge_count"], 0), 0)} bridges`} />
+        <ChainStep icon={ShieldCheck} label="Policy Gate" status={pickString(blueprint, ["status"], "unknown")} detail={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "Risk/Decision kept" : "gate attention"} />
+        <ChainStep icon={Activity} label="Execution" status={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "ok" : "attention"} detail={pickString(liveAutonomy, ["autonomy_mode"], "manual")} />
+        <ChainStep icon={BookOpenCheck} label="Memory" status={pickString(chainHealth, ["status"], "unknown")} detail={`lessons ${formatDecimal(pickNumber(chainHealth, ["trade_feedback_summary.lesson_count"], 0), 0)}`} />
+      </div>
+
+      <div className="v16-blueprint-checks">
+        {checks.slice(0, 9).map((raw, index) => {
+          const item = asRecord(raw);
+          const component = pickString(item, ["component"], `check_${index}`);
+          const ok = pickBoolean(item, ["ok"], false);
+          return (
+            <div className="v16-check-row" key={`${component}-${index}`}>
+              {ok ? <CheckCircle2 size={16} aria-hidden="true" /> : <AlertTriangle size={16} aria-hidden="true" />}
+              <div>
+                <strong>{displayValue(component)}</strong>
+                <span>{displayValue(pickString(item, ["status"], ok ? "ok" : "attention"))}</span>
+              </div>
+              <StatusPill status={ok ? "OK" : "Attention"} tone={ok ? "ok" : "warn"} />
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="v16-boundary v16-boundary-tight">
+        <Field label="不扩权" value={pickBoolean(deviationGuard, ["does_not_expand_agent_authority"], false) ? "true" : "false"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_expand_agent_authority"], false))} />
+        <Field label="不绕风控" value={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "true" : "false"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false))} />
+        <Field label="不建第二执行路" value={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "true" : "false"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false))} />
+        <Field label="只读对齐" value={pickBoolean(boundary, ["read_only_alignment_status"], false) ? "true" : "false"} tone={boolTone(pickBoolean(boundary, ["read_only_alignment_status"], false))} />
+      </div>
+    </>
+  );
+}
+
+function AgentAuthorityPanel({
+  agentAuthority,
+  agentScorecard,
+  agentBriefing,
+  chainHealth,
+}: {
+  agentAuthority: Record<string, unknown>;
+  agentScorecard: Record<string, unknown>;
+  agentBriefing: Record<string, unknown>;
+  chainHealth: Record<string, unknown>;
+}) {
+  const unknownSources = pickArray(agentAuthority, ["unknown_sources"]);
+  const contractViolations = pickArray(agentAuthority, ["contract_violations"]);
+  const topAgents = pickArray(agentScorecard, ["top_agents"]);
+  const summary = asRecord(pick(agentScorecard, ["summary"]));
+  const reviewRules = asRecord(pick(agentBriefing, ["review_rules"]));
+  return (
+    <>
+      <div className="v16-agent-strip">
+        <CompactMetric label="登记 Agent" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={displayContract(pickString(agentAuthority, ["schema_version"], "--"))} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
+        <CompactMetric label="未知来源" value={formatDecimal(unknownSources.length, 0)} detail="review only" tone={unknownSources.length ? "warn" : "ok"} />
+        <CompactMetric label="合同违规" value={formatDecimal(contractViolations.length, 0)} detail={displayValue(pickString(chainHealth, ["status"], "unknown"))} tone={contractViolations.length ? "bad" : "ok"} />
+        <CompactMetric label="提案流" value={formatDecimal(pickNumber(summary, ["proposal_count"], 0), 0)} detail={`候选 ${formatDecimal(pickNumber(summary, ["candidate_count"], 0), 0)}`} tone={pickNumber(summary, ["proposal_count"], 0) || pickNumber(summary, ["candidate_count"], 0) ? "ok" : "warn"} />
+      </div>
+
+      <div className="v16-agent-list">
+        {(topAgents.length ? topAgents : [
+          { source_agent: "v16_brain", authority_state: "review_only" },
+          { source_agent: "autonomous_learning", authority_state: "review_only" },
+          { source_agent: "factor_governance", authority_state: "review_only" },
+          { source_agent: "factor_pruning_governance", authority_state: "review_only" },
+          { source_agent: "llm_advisory", authority_state: "advisory_only" },
+          { source_agent: "lightgbm_shadow_models", authority_state: "review_only" },
+        ]).slice(0, 6).map((raw, index) => {
+          const item = asRecord(raw);
+          const sourceAgent = pickString(item, ["source_agent"], `agent_${index}`);
+          const applied = pickNumber(item, ["applied_count"], pickNumber(item, ["application_count"], 0));
+          const proposals = pickNumber(item, ["proposal_count"], 0);
+          const state = pickString(item, ["authority_state"], pickString(item, ["required_gate"], "review_only"));
+          return (
+            <div className="v16-agent-row" key={`${sourceAgent}-${index}`}>
+              <UsersRound size={16} aria-hidden="true" />
+              <div>
+                <strong>{displayValue(sourceAgent)}</strong>
+                <span>{formatDecimal(proposals, 0)} proposals / {formatDecimal(applied, 0)} applied</span>
+              </div>
+              <StatusPill status={displayValue(state)} tone={state === "advisory_only" ? "warn" : state.includes("blocked") ? "bad" : "mute"} />
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="v16-boundary v16-boundary-tight">
+        <Field label="高影响需审查" value={pickBoolean(reviewRules, ["high_impact_requires_review"], true) ? "true" : "false"} tone={boolTone(pickBoolean(reviewRules, ["high_impact_requires_review"], true))} />
+        <Field label="低可靠加严" value={pickBoolean(reviewRules, ["low_reliability_requires_extra_evidence"], true) ? "true" : "false"} tone={boolTone(pickBoolean(reviewRules, ["low_reliability_requires_extra_evidence"], true))} />
+        <Field label="链路" value={displayValue(pickString(chainHealth, ["status"], "unknown"))} tone={statusTone(pickString(chainHealth, ["status"], "unknown"))} />
+        <Field label="契约" value={displayContract(pickString(agentBriefing, ["schema_version"], "--"))} />
+      </div>
+    </>
+  );
+}
+
+function CoveragePanel({
+  proposalContext,
+  candidateContext,
+  candidateReview,
+}: {
+  proposalContext: Record<string, unknown>;
+  candidateContext: Record<string, unknown>;
+  candidateReview: Record<string, unknown>;
+}) {
+  const items = [
+    { key: "proposal", label: "Proposal Context", record: proposalContext, missing: "missing_required_context_count", legacy: "legacy_missing_context_count", total: "policy_suggestion_count" },
+    { key: "candidate", label: "Candidate Context", record: candidateContext, missing: "missing_required_context_count", legacy: "legacy_missing_context_count", total: "candidate_count" },
+    { key: "bridge", label: "Bridge Review", record: candidateReview, missing: "missing_required_review_count", legacy: "legacy_unreviewed_count", total: "candidate_bridge_count" },
+  ];
+  return (
+    <div className="v16-coverage-list">
+      {items.map((item) => {
+        const status = pickString(item.record, ["status"], "unknown");
+        return (
+          <div className="v16-coverage-row" key={item.key}>
+            <div>
+              <strong>{item.label}</strong>
+              <span>{displayContract(pickString(item.record, ["schema_version"], "--"))}</span>
+            </div>
+            <CompactFacts facts={[
+              { label: "状态", value: displayValue(status), tone: statusTone(status) },
+              { label: "总数", value: formatDecimal(pickNumber(item.record, [item.total], 0), 0), tone: "mute" },
+              { label: "缺失", value: formatDecimal(pickNumber(item.record, [item.missing], 0), 0), tone: pickNumber(item.record, [item.missing], 0) ? "bad" : "ok" },
+              { label: "历史", value: formatDecimal(pickNumber(item.record, [item.legacy], 0), 0), tone: pickNumber(item.record, [item.legacy], 0) ? "warn" : "mute" },
+            ]} />
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -765,6 +1019,27 @@ export function V16BrainPage() {
   const liveAutonomyBlockers = pickArray(liveAutonomyEvaluation, ["blockers"]);
   const liveAutonomyLatestEvent = asRecord(pick(liveAutonomy, ["latest_event"]));
   const liveAutonomyPosture = asRecord(pick(liveAutonomy, ["operational_posture"]));
+  const directAutonomousBlueprint = asRecord(pick(readiness, ["autonomous_blueprint"]));
+  const v16AutonomousBlueprint = asRecord(pick(v16Readiness, ["autonomous_blueprint"]));
+  const autonomousBlueprint = Object.keys(directAutonomousBlueprint).length ? directAutonomousBlueprint : v16AutonomousBlueprint;
+  const directAgentAuthority = asRecord(pick(readiness, ["agent_authority"]));
+  const v16AgentAuthority = asRecord(pick(v16Readiness, ["agent_authority"]));
+  const agentAuthority = Object.keys(directAgentAuthority).length ? directAgentAuthority : v16AgentAuthority;
+  const agentScorecard = asRecord(pick(readiness, ["agent_scorecard"]));
+  const agentBriefing = asRecord(pick(readiness, ["agent_briefing"]));
+  const directAgentChainHealth = asRecord(pick(readiness, ["agent_chain_health"]));
+  const v16AgentChainHealth = asRecord(pick(v16Readiness, ["agent_chain_health"]));
+  const agentChainHealth = Object.keys(directAgentChainHealth).length ? directAgentChainHealth : v16AgentChainHealth;
+  const directProposalContext = asRecord(pick(readiness, ["proposal_generation_context_coverage"]));
+  const v16ProposalContext = asRecord(pick(v16Readiness, ["proposal_generation_context_coverage"]));
+  const proposalContextCoverage = Object.keys(directProposalContext).length ? directProposalContext : v16ProposalContext;
+  const directCandidateContext = asRecord(pick(readiness, ["candidate_generation_context_coverage"]));
+  const v16CandidateContext = asRecord(pick(v16Readiness, ["candidate_generation_context_coverage"]));
+  const candidateContextCoverage = Object.keys(directCandidateContext).length ? directCandidateContext : v16CandidateContext;
+  const directCandidateBridgeReview = asRecord(pick(readiness, ["candidate_bridge_review_coverage"]));
+  const v16CandidateBridgeReview = asRecord(pick(v16Readiness, ["candidate_bridge_review_coverage"]));
+  const candidateBridgeReviewCoverage = Object.keys(directCandidateBridgeReview).length ? directCandidateBridgeReview : v16CandidateBridgeReview;
+  const blueprintBlockers = pickArray(autonomousBlueprint, ["blockers"]);
 
   const statTone = useMemo<Tone>(() => {
     const posture = pickString(worldModel, ["strategy_posture"], "");
@@ -781,10 +1056,11 @@ export function V16BrainPage() {
       <div className="dashboard-header">
         <div>
           <div className="eyebrow">Autonomy Brain</div>
-          <h1>自治大脑</h1>
-          <p>查看世界模型、影子计划、后验评价、治理候选和实盘护栏。</p>
+          <h1>自治治理链路</h1>
+          <p>多智能体权责、提案总线、候选审查、记忆反馈和执行边界。</p>
         </div>
         <div className="header-status">
+          <StatusPill status={displayValue(pickString(autonomousBlueprint, ["status"], "unknown"))} tone={pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn"} />
           <StatusPill status={displayStage(pickString(v16Readiness, ["phase"], "phase5_live_ready_guardrails"))} tone="ok" />
           <StatusPill status={readOnly && !affectsTrading ? "交易边界正常" : "边界异常"} tone={readOnly && !affectsTrading ? "ok" : "bad"} />
           <button className="header-refresh" type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>
@@ -829,6 +1105,9 @@ export function V16BrainPage() {
       </div>
 
       <div className="stat-grid v15-stat-grid">
+        <StatTile icon={Network} label="大纲对齐" value={displayValue(pickString(autonomousBlueprint, ["status"], "unknown"))} detail={`阻断 ${formatDecimal(blueprintBlockers.length, 0)} / 检查 ${formatDecimal(pickArray(autonomousBlueprint, ["checks"]).length, 0)}`} tone={pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn"} />
+        <StatTile icon={UsersRound} label="Agent 权责" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`未知 ${formatDecimal(countOf(pick(agentAuthority, ["unknown_sources"])), 0)} / 违规 ${formatDecimal(countOf(pick(agentAuthority, ["contract_violations"])), 0)}`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
+        <StatTile icon={Route} label="上下文覆盖" value={displayValue(pickString(proposalContextCoverage, ["status"], "unknown"))} detail={`候选 ${displayValue(pickString(candidateContextCoverage, ["status"], "unknown"))} / 桥接 ${displayValue(pickString(candidateBridgeReviewCoverage, ["status"], "unknown"))}`} tone={statusTone(pickString(proposalContextCoverage, ["status"], "unknown"))} />
         <StatTile icon={BrainCircuit} label="策略姿态" value={displayValue(pickString(worldModel, ["strategy_posture"], "unknown"))} detail={displayValue(pickString(worldModel, ["market_regime"], "unknown"))} tone={statTone} />
         <StatTile icon={ShieldCheck} label="Critic" value={displayValue(criticVerdict)} detail={displayValue(pickString(critic, ["max_allowed_action_scope"], "observe_only"))} tone={criticVerdict === "pass" ? "ok" : "warn"} />
         <StatTile icon={Database} label="记忆命中" value={formatDecimal(memoryItems.length, 0)} detail={`负面 ${formatDecimal(negativeMemory.length, 0)} / 反证 ${formatDecimal(counterEvidence.length, 0)}`} tone={negativeMemory.length ? "warn" : "ok"} />
@@ -844,6 +1123,35 @@ export function V16BrainPage() {
       </div>
 
       <div className="dashboard-grid v16-grid">
+        <MetricCard title="治理链路总览" className="wide-panel">
+          <BlueprintOverview
+            blueprint={autonomousBlueprint}
+            agentAuthority={agentAuthority}
+            proposalContext={proposalContextCoverage}
+            candidateContext={candidateContextCoverage}
+            candidateReview={candidateBridgeReviewCoverage}
+            chainHealth={agentChainHealth}
+            liveAutonomy={liveAutonomy}
+          />
+        </MetricCard>
+
+        <MetricCard title="Agent 权责合同" className="wide-panel">
+          <AgentAuthorityPanel
+            agentAuthority={agentAuthority}
+            agentScorecard={agentScorecard}
+            agentBriefing={agentBriefing}
+            chainHealth={agentChainHealth}
+          />
+        </MetricCard>
+
+        <MetricCard title="上下文覆盖" className="wide-panel">
+          <CoveragePanel
+            proposalContext={proposalContextCoverage}
+            candidateContext={candidateContextCoverage}
+            candidateReview={candidateBridgeReviewCoverage}
+          />
+        </MetricCard>
+
         <MetricCard title="世界模型" className="wide-panel">
           <div className="v15-mini-grid">
             <CompactMetric label="市场状态" value={displayValue(pickString(worldModel, ["market_regime"], "unknown"))} tone="mute" />

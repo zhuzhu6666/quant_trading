@@ -11,6 +11,8 @@ SYSTEM_CONTAMINATION_LABELS = {
     "signal_execution_delay",
 }
 
+ADVISORY_ONLY_HEALTH_COMPONENTS = {"tick_data"}
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -243,9 +245,14 @@ def build_system_issue_context(review_payload: dict[str, Any] | None) -> dict[st
         evidence["sync_health"] = sync_health
 
     components = _as_dict(system_health.get("component_status"))
-    if str(components.get("tick_data") or "").lower() in {"critical", "degraded"}:
-        _append_label(labels, "market_data_stale")
-        evidence.setdefault("system_health", system_health)
+    advisory_component_status = {
+        name: status
+        for name, status in components.items()
+        if name in ADVISORY_ONLY_HEALTH_COMPONENTS
+        and str(status or "").lower() in {"critical", "degraded"}
+    }
+    if advisory_component_status:
+        evidence["advisory_component_status"] = advisory_component_status
 
     signal_to_decision = _safe_float(timing.get("signal_to_decision_delay_seconds"))
     signal_to_fill = _safe_float(timing.get("signal_to_fill_delay_seconds"))

@@ -141,12 +141,16 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
     assert audits["count"] == len(samples)
     assert audits["items"][0]["result"]["capabilities"]["shadow_only"] is True
     rows = sqlite3.connect(str(db_path)).execute(
-        "SELECT scope_type, action, status FROM policy_suggestion"
+        "SELECT scope_type, action, status, evidence_json FROM policy_suggestion"
     ).fetchall()
     assert rows
     assert rows[0][0] == "factor"
     assert rows[0][1] == "review_factor_weight_or_template"
     assert rows[0][2] == "proposed"
+    evidence = json.loads(rows[0][3])
+    assert evidence["source_agent"] == "lightgbm_shadow_models"
+    assert evidence["agent_context"]["schema_version"] == "agent_generation_context.v1"
+    assert evidence["agent_context"]["authority_verdict"]["advisory_only"] is True
 
 
 def test_factor_governance_lightgbm_skips_system_contaminated_reviews(tmp_path):

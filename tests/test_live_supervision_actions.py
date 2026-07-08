@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from backend.services.live_risk_sizing import floor_api_volume_to_step
 from backend.services.live_supervision_actions import (
     execute_supervisor_close_action,
     execute_supervisor_reduce_action,
@@ -114,6 +115,92 @@ def test_execute_supervisor_reduce_action_invalid_volume_skips_when_not_upgradea
     assert calls["traces"][0]["execution_reason"] == "invalid_reduce_volume"
     assert calls["traces"][0]["execution"]["fallback_skip_reason"] == "not_upgradeable"
     assert calls["logs"] == []
+
+
+def test_execute_supervisor_reduce_action_resolves_meta_before_partial_close():
+    calls = {
+        "traces": [],
+        "supervisor_state": [],
+        "reentry": [],
+        "close_reason": [],
+        "close_verdict": [],
+        "retired": [],
+        "logs": [],
+    }
+
+    class _Bridge:
+        symbol = "XAUUSD"
+        _symbol_meta = {}
+
+        def _resolve_symbol_id(self):
+            calls["resolved"] = True
+            self._symbol_meta = {"api_min_volume": 100.0, "api_step_volume": 100.0}
+
+        def close_position(self, *_args, **_kwargs):
+            raise AssertionError("below-min partial close should not be sent")
+
+    execute_supervisor_reduce_action(
+        bridge=_Bridge(),
+        position={"position_id": 7, "symbol": "XAUUSD", "volume": 200.0},
+        verdict={"summary_reason": "trim_risk"},
+        risk_action="reduce_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-1",
+        cfg=SimpleNamespace(),
+        tick=9,
+        acct=None,
+        controls={"reduce_fraction": 0.25},
+        log=lambda msg: calls["logs"].append(msg),
+        ledger=None,
+        floor_api_volume_to_step=floor_api_volume_to_step,
+        **{k: v for k, v in _deps(calls).items() if k != "floor_api_volume_to_step"},
+    )
+
+    assert calls["resolved"] is True
+    assert calls["traces"][0]["stage"] == "execution_skipped"
+    assert calls["traces"][0]["execution"]["min_volume"] == 100.0
+    assert calls["traces"][0]["execution"]["reduce_volume"] == 0.0
+    assert calls["logs"] == []
+
+
+def test_execute_supervisor_reduce_action_floors_partial_close_to_broker_step():
+    calls = {
+        "traces": [],
+        "supervisor_state": [],
+        "reentry": [],
+        "close_reason": [],
+        "close_verdict": [],
+        "retired": [],
+        "logs": [],
+    }
+
+    class _Bridge:
+        _symbol_meta = {"api_min_volume": 100.0, "api_step_volume": 100.0}
+
+        def close_position(self, pid, volume=None):
+            calls["close_call"] = (pid, volume)
+            return SimpleNamespace(success=True)
+
+    execute_supervisor_reduce_action(
+        bridge=_Bridge(),
+        position={"position_id": 7, "symbol": "XAUUSD", "volume": 250.0},
+        verdict={"summary_reason": "trim_risk"},
+        risk_action="reduce_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-1",
+        cfg=SimpleNamespace(),
+        tick=9,
+        acct=None,
+        controls={"reduce_fraction": 0.5},
+        log=lambda msg: calls["logs"].append(msg),
+        ledger=None,
+        floor_api_volume_to_step=floor_api_volume_to_step,
+        **{k: v for k, v in _deps(calls).items() if k != "floor_api_volume_to_step"},
+    )
+
+    assert calls["close_call"] == (7, 100.0)
+    assert calls["traces"][0]["execution_reason"] == "partial_close_success"
+    assert calls["logs"] == ["tick 9: supervisor reduce pos=7 vol=100"]
 
 
 def test_execute_supervisor_tighten_action_success_records_trace_and_reentry():

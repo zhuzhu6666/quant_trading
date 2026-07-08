@@ -10,6 +10,7 @@ from typing import Any
 
 from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.ledger.service import DecisionLedger
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
 from research.features.evidence_contract import stable_hash
 
@@ -878,6 +879,15 @@ class MetaModelLightGBMService:
                 "input_traceability": sample.get("traceability") or {},
             },
         }
+        result["source_agent"] = "lightgbm_shadow_models"
+        result["authority_verdict"] = AgentAuthorityRegistryService().evaluate(
+            "lightgbm_shadow_models",
+            "model_stage",
+            "shadow_model_audit",
+            requested_writes=["meta_model_shadow_audit"],
+            status=mode,
+            impact_level="shadow",
+        )
         payload = {
             "sample_id": sample["sample_id"],
             "target_review_id": sample["target_review_id"],
@@ -891,6 +901,8 @@ class MetaModelLightGBMService:
                 **(sample.get("traceability") or {}),
                 "features_sha256": stable_hash(sample.get("features") or {}),
             },
+            "source_agent": "lightgbm_shadow_models",
+            "authority_verdict": result["authority_verdict"],
         }
         ledger_decision_id = ""
         if materialize_ledger:

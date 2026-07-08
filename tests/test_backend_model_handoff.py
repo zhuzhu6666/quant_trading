@@ -1,5 +1,8 @@
+import json
 import sqlite3
+from types import SimpleNamespace
 
+from backend.core.db import STATE_DB_DDL
 from backend.services.backend_readiness import BackendReadinessService
 from backend.services.meta_governance import MetaGovernanceService
 
@@ -61,14 +64,18 @@ def test_meta_governance_snapshots_and_materializes_proposed_suggestion(tmp_path
     conn = sqlite3.connect(db_path)
     try:
         suggestion = conn.execute(
-            "SELECT scope_type, scope_key, action, status FROM policy_suggestion"
+            "SELECT scope_type, scope_key, action, status, evidence_json FROM policy_suggestion"
         ).fetchone()
-        assert suggestion == (
+        assert suggestion[:4] == (
             "meta_model",
             "meta_model_lightgbm",
             "block_meta_model_promotion",
             "proposed",
         )
+        evidence = json.loads(suggestion[4])
+        assert evidence["source_agent"] == "lightgbm_shadow_models"
+        assert evidence["schema_version"] == "meta_model_governance_advisory.v1"
+        assert evidence["agent_context"]["authority_verdict"]["advisory_only"] is True
         ledger = conn.execute(
             "SELECT event_type, action_reason FROM decision_ledger"
         ).fetchone()
@@ -123,3 +130,31 @@ def test_backend_readiness_contract(monkeypatch, tmp_path):
     assert result["frontend_contract"]["preferred_entry"] == "/api/ops/backend-readiness"
     assert result["governance"]["automatic_execution_enabled"] is True
     assert result["governance"]["autonomy_mode"] == "demo_autonomous"
+    assert result["factor_blend_health"]["schema_version"] == "factor_blend_health.v1"
+    assert result["factor_blend_health"]["boundary"]["read_only"] is True
+    assert result["factor_pruning_candidates"]["schema_version"] == "factor_pruning_candidates.v1"
+    assert result["factor_pruning_candidates"]["boundary"]["candidate_only"] is True
+    assert result["factor_pruning_candidates"]["boundary"]["writes_policy_suggestion"] is False
+    assert result["factor_pruning_governance"]["schema_version"] == "factor_pruning_governance_status.v1"
+    assert result["factor_pruning_governance"]["boundary"]["materializes_governance_candidates_only"] is True
+    assert result["frontend_contract"]["factor_pruning_governance_materialize"] == "/api/ops/factor/pruning-governance/materialize"
+    assert result["frontend_contract"]["factor_pruning_governance_bridge_ready"] == "/api/ops/factor/pruning-governance/bridge-ready"
+
+
+def test_backend_readiness_treats_demo_nursery_as_automatic_execution(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        "config.runtime_config.shared",
+        lambda: SimpleNamespace(autonomy_mode="demo_nursery", autonomy_demo_auto_apply=True),
+    )
+
+    governance = BackendReadinessService(db_path=db_path)._governance_status()
+
+    assert governance["automatic_execution_enabled"] is True
+    assert governance["autonomy_mode"] == "demo_nursery"

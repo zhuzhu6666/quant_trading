@@ -376,10 +376,17 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
             func = None
             if expression_str:
                 try:
-                    from alpha.factor_dsl import evaluate_dsl
+                    from alpha.factor_dsl import evaluate_dsl, parse_dsl
+
+                    parse_dsl(expression_str)
                     func = lambda df, _expr=expression_str: evaluate_dsl(_expr, df)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("[Evolve] skip invalid DSL expression for %s: %s", name, e)
+                    _emit_evolution_story("shadow_register_invalid_dsl_skipped", {
+                        "factor": name,
+                        "reason": str(e),
+                    })
+                    continue
             try:
                 ok = adapter.register_runtime(
                     name=name, func=func, source=SOURCE_SHADOW,
@@ -734,10 +741,19 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
             if action not in {"downweight", "boost_small"}:
                 continue
 
+            source_weight = 0.0
+            try:
+                evidence = _json.loads(row["evidence_json"] or "{}")
+                expected = evidence.get("expected_effect") or {}
+                source_weight = float(expected.get("current_weight") or expected.get("suggested_target_weight") or 0.0)
+            except Exception:
+                source_weight = 0.0
             bias_info = approved_biases.get(
                 factor,
-                {"multiplier": 1.0, "action": action, "suggestion_ids": []},
+                {"multiplier": 1.0, "action": action, "suggestion_ids": [], "source_weight": source_weight},
             )
+            if source_weight > 0:
+                bias_info["source_weight"] = max(float(bias_info.get("source_weight") or 0.0), source_weight)
             current = float(bias_info.get("multiplier", 1.0))
             if action == "downweight":
                 current *= max(0.80, 1.0 - 0.20 * min(confidence, 1.0))
@@ -755,16 +771,24 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
 def _apply_learning_biases(
     weights: dict[str, float],
     approved_biases: dict[str, dict],
+    base_weights: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict]]:
     """Apply small approved learning biases on top of WeightPolicy output."""
     if not weights or not approved_biases:
         return dict(weights or {}), {}
 
     adjusted = dict(weights)
+    base_weights = dict(base_weights or {})
     applied: dict[str, dict] = {}
     for factor, bias_info in approved_biases.items():
         if factor not in adjusted:
-            continue
+            if factor not in base_weights:
+                source_weight = float((bias_info or {}).get("source_weight") or 0.0)
+                if source_weight <= 0.0:
+                    continue
+                adjusted[factor] = source_weight
+            else:
+                adjusted[factor] = float(base_weights[factor] or 0.0)
         mult = float((bias_info or {}).get("multiplier", 1.0))
         old_w = float(adjusted[factor] or 0.0)
         new_w = max(0.0, old_w * float(mult))
@@ -814,6 +838,7 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
 
         from config.runtime_config import shared as _rc
         cfg = _rc()
+        current_weights = dict(cfg.factor_portfolio_weights)
 
         # 来源 A: WeightPolicy 健康分权重
         from deployment.weight_policy import WeightPolicy
@@ -831,7 +856,7 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
                 "approved_biases": approved_biases,
             })
         if approved_biases:
-            wp_weights, applied_biases = _apply_learning_biases(wp_weights, approved_biases)
+            wp_weights, applied_biases = _apply_learning_biases(wp_weights, approved_biases, base_weights=current_weights)
             logger.info("[Evolve] applied learning biases to %d factors", len(applied_biases))
         else:
             applied_biases = {}
@@ -848,8 +873,6 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
             logger.debug("[Evolve] load shadow perfs: %s", e)
 
         # 来源 C: 当前权重 (已有 AWE 调整过的)
-        current_weights = dict(cfg.factor_portfolio_weights)
-
         # 来源 D: Regime — 沿用现有 MAB router 逻辑
         regime = None
         if df is not None:

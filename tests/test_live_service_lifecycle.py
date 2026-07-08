@@ -280,6 +280,7 @@ def test_untradeable_min_position_reduce_upgrades_to_close_when_thesis_broken():
             "summary_reason": "profit_giveback_after_mfe",
             "evidence": {
                 "thesis_status": "broken",
+                "thesis_break_confirmed": True,
                 "giveback_ratio": 1.0,
                 "current_pnl": -1.08,
                 "trigger_tags": ["profit_giveback_after_mfe"],

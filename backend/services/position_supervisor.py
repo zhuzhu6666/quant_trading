@@ -221,6 +221,35 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         and thesis_status in {"intact", "strong", "healthy"}
         and regime_shift in {"none", "", "aligned"}
     )
+    try:
+        thesis_broken_confirmations = int(
+            risk.get("thesis_broken_confirmations")
+            or risk.get("consecutive_thesis_broken_count")
+            or risk.get("consecutive_thesis_broken")
+            or 0
+        )
+    except (TypeError, ValueError):
+        thesis_broken_confirmations = 0
+    signal_reversal = bool(
+        risk.get("signal_reversal")
+        or risk.get("direction_reversal")
+        or risk.get("entry_signal_reversed")
+    )
+    thesis_break_ready = (
+        thesis_status == "broken"
+        and holding_seconds >= min_thesis_break_seconds
+        and holding_efficiency <= broken_holding_efficiency_threshold
+    )
+    thesis_break_requires_confirmation = min_thesis_break_seconds > 0
+    thesis_break_confirmed = (
+        not thesis_break_requires_confirmation
+        or stop_loss_progress >= near_sl_progress_threshold
+        or regime_shift == "confirmed"
+        or time_decay_score <= time_decay_reduce_threshold
+        or timeout_ratio >= timeout_reduce_ratio
+        or thesis_broken_confirmations >= 2
+        or signal_reversal
+    )
 
     if max_holding_seconds > 0 and holding_seconds >= max_holding_seconds:
         trigger_tags.append("holding_timeout_exceeded")
@@ -251,15 +280,17 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "close"
         summary_reason = "near_stop_loss_preemptive_exit"
         severity = "warn"
-    elif (
-        thesis_status == "broken"
-        and holding_seconds >= min_thesis_break_seconds
-        and holding_efficiency <= broken_holding_efficiency_threshold
-    ):
+    elif thesis_break_ready and thesis_break_confirmed:
         trigger_tags.append("thesis_broken")
         action = "close"
         summary_reason = "thesis_broken"
         severity = "error"
+    elif thesis_break_ready and not thesis_break_confirmed:
+        trigger_tags.append("thesis_broken_delayed")
+        trigger_tags.append("thesis_broken_unconfirmed")
+        action = "tighten"
+        summary_reason = "thesis_weakening"
+        severity = "warn"
     elif regime_shift == "confirmed" and current_pnl <= 0:
         trigger_tags.append("regime_shift_detected")
         action = "close"
@@ -284,6 +315,8 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             summary_reason = "time_decay_and_low_efficiency"
         elif thesis_status == "broken":
             trigger_tags.append("thesis_broken_delayed")
+            if thesis_break_ready and not thesis_break_confirmed:
+                trigger_tags.append("thesis_broken_unconfirmed")
             summary_reason = "thesis_weakening"
         else:
             trigger_tags.append("thesis_weakening")
@@ -355,6 +388,10 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "holding_efficiency": round(holding_efficiency, 6),
         "time_decay_score": round(time_decay_score, 6),
         "thesis_status": thesis_status,
+        "thesis_break_ready": bool(thesis_break_ready),
+        "thesis_break_confirmed": bool(thesis_break_confirmed),
+        "thesis_broken_confirmations": int(thesis_broken_confirmations),
+        "signal_reversal": bool(signal_reversal),
         "regime_shift": regime_shift,
         "current_pnl": round(current_pnl, 6),
         "volume": round(volume, 6),

@@ -11,8 +11,10 @@ from typing import Any
 
 from backend.core.db import get_state_pg_conn, state_table_columns
 from backend.services.failure_taxonomy import build_failure_taxonomy
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_metrics import update_position_path_metrics
 from backend.services.review_contract import normalize_trade_review_contract
+from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
 
 
 logger = logging.getLogger(__name__)
@@ -623,6 +625,7 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
                 now,
             ),
         )
+        upsert_trade_lesson_memory(conn, row)
         rebuilt += 1
 
         if not primary_factor:
@@ -703,6 +706,15 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
                 "experience_id": experience_id,
                 "failure_tags": failure_tags,
             }
+            evidence = attach_policy_suggestion_agent_context(
+                evidence,
+                source_agent="autonomous_learning",
+                scope_type="factor",
+                action=action,
+                requested_writes=["policy_suggestion"],
+                status="proposed",
+                impact_level="medium",
+            )
             if existing:
                 _execute(conn,
                     """

@@ -1,6 +1,119 @@
 from __future__ import annotations
 
 
+def test_ops_agent_authority_route_returns_registry(monkeypatch, auth_client):
+    class FakeAgentAuthorityRegistryService:
+        def list_agents(self):
+            return {
+                "ok": True,
+                "schema_version": "agent_authority_registry.v1",
+                "registry_version": "agent_authority_registry.v1",
+                "registered_agents": 6,
+                "sources": [],
+            }
+
+        def status(self):
+            return {
+                "ok": True,
+                "schema_version": "agent_authority_status.v1",
+                "status": "ok",
+                "registered_agents": 6,
+                "unknown_sources": [],
+                "contract_violations": [],
+            }
+
+    monkeypatch.setattr("backend.api.ops.AgentAuthorityRegistryService", FakeAgentAuthorityRegistryService)
+
+    response = auth_client.get("/api/ops/agent-authority")
+
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == "ops_agent_authority.v1"
+    assert response.json()["agent_authority"]["registered_agents"] == 6
+    assert response.json()["status"]["status"] == "ok"
+
+
+def test_ops_agent_scorecard_routes_return_read_models(monkeypatch, auth_client):
+    class FakeAgentBriefingContextService:
+        def build(self, *, limit: int):
+            return {"ok": True, "schema_version": "agent_briefing_context.v1", "limit": limit}
+
+    class FakeAgentScorecardService:
+        def scorecard(self, *, limit: int):
+            return {"ok": True, "schema_version": "agent_scorecard.v1", "items": [], "summary": {"limit": limit}}
+
+        def latest_trade_attributions(self, *, limit: int):
+            return {"ok": True, "schema_version": "agent_trade_attribution.v1", "items": [], "summary": {"limit": limit}}
+
+        def chain_health(self, *, limit: int):
+            return {"ok": True, "schema_version": "agent_chain_health.v1", "status": "ok", "limit": limit}
+
+    monkeypatch.setattr("backend.api.ops.AgentBriefingContextService", FakeAgentBriefingContextService)
+    monkeypatch.setattr("backend.api.ops.AgentScorecardService", FakeAgentScorecardService)
+
+    scorecard = auth_client.get("/api/ops/agent-scorecard?limit=3")
+    briefing = auth_client.get("/api/ops/agent-briefing?limit=6")
+    attribution = auth_client.get("/api/ops/agent-trade-attribution?limit=4")
+    health = auth_client.get("/api/ops/agent-chain-health?limit=5")
+
+    assert scorecard.status_code == 200
+    assert scorecard.json()["schema_version"] == "ops_agent_scorecard.v1"
+    assert scorecard.json()["scorecard"]["summary"]["limit"] == 3
+    assert briefing.json()["schema_version"] == "ops_agent_briefing.v1"
+    assert briefing.json()["briefing"]["limit"] == 6
+    assert attribution.json()["schema_version"] == "ops_agent_trade_attribution.v1"
+    assert attribution.json()["trade_attribution"]["summary"]["limit"] == 4
+    assert health.json()["schema_version"] == "ops_agent_chain_health.v1"
+    assert health.json()["agent_chain_health"]["limit"] == 5
+
+
+def test_ops_brain_candidate_submit_requires_review_by_default(monkeypatch, auth_client):
+    calls: dict[str, object] = {}
+
+    class FakeReviewService:
+        @staticmethod
+        def boundary():
+            return {"review_only": True}
+
+        def review_candidate(self, candidate_id: str, *, run_llm: bool, llm_dry_run: bool, persist: bool):
+            calls["review"] = {
+                "candidate_id": candidate_id,
+                "run_llm": run_llm,
+                "llm_dry_run": llm_dry_run,
+                "persist": persist,
+            }
+            return {
+                "ok": True,
+                "status": "reviewed",
+                "review": {
+                    "candidate_id": candidate_id,
+                    "review_status": "needs_evidence",
+                    "bridge_ready": False,
+                    "evidence_gaps": ["agent_negative_effect_history_requires_counter_evidence"],
+                },
+            }
+
+    class FakeCandidateService:
+        def submit_candidate_to_policy_suggestion(self, candidate_id: str, *, actor: str):
+            calls["submit"] = {"candidate_id": candidate_id, "actor": actor}
+            return {"ok": True, "status": "submitted_to_policy_suggestion"}
+
+    monkeypatch.setattr("backend.api.ops.BrainGovernanceCandidateReviewService", FakeReviewService)
+    monkeypatch.setattr("backend.api.ops.BrainGovernanceCandidateService", FakeCandidateService)
+
+    response = auth_client.post(
+        "/api/ops/brain/governance-candidates/candidate_bad/submit",
+        json={"actor": "test"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["submit_result"]["status"] == "blocked_candidate_review"
+    assert "agent_negative_effect_history_requires_counter_evidence" in payload["submit_result"]["evidence_gaps"]
+    assert calls["review"]["candidate_id"] == "candidate_bad"
+    assert "submit" not in calls
+
+
 def test_ops_autonomy_proposals_routes_use_registry_service(monkeypatch, auth_client):
     calls: dict[str, object] = {}
 

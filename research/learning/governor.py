@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from research.learning.governance_conflicts import GovernanceConflictResolver
 
 
@@ -160,6 +162,35 @@ class RuleEvolutionGovernor:
             parsed = {}
         return parsed if isinstance(parsed, dict) else {}
 
+    @staticmethod
+    def _factor_pruning_evidence_ready(evidence: dict, *, confidence: float) -> bool:
+        if str(evidence.get("source_agent") or "") != "factor_pruning_governance":
+            return False
+        if str(evidence.get("source_kind") or "") != "factor_pruning_candidate_materializer":
+            return False
+        if confidence < 0.80:
+            return False
+        expected = evidence.get("expected_effect") or {}
+        risk_verdict = evidence.get("risk_verdict") or {}
+        decision_policy = evidence.get("decision_policy_preview") or {}
+        decision = decision_policy.get("decision") or {}
+        reasons = expected.get("reasons") or []
+        reason_codes = {str(item.get("code") or "") for item in reasons if isinstance(item, dict)}
+        current_weight = float(expected.get("current_weight") or decision.get("old_weight") or 0.0)
+        target_weight = float(expected.get("suggested_target_weight") or decision.get("new_weight") or 0.0)
+        legacy_pruning_evidence = {"low_weight_tail", "large_noise_family", "weak_factor_health"} <= reason_codes
+        live_harm_evidence = (
+            {"recent_live_decision_participation", "recent_loss_contribution_pressure"} <= reason_codes
+            and bool(reason_codes & {"loss_win_contribution_sign_flip", "recent_loss_rate_pressure", "weak_factor_health"})
+        )
+        return bool(
+            risk_verdict.get("allowed")
+            and decision_policy.get("required")
+            and decision
+            and target_weight <= current_weight
+            and (legacy_pruning_evidence or live_harm_evidence)
+        )
+
     def list_suggestions(self, *, status: str | None = None, limit: int = 100) -> list[dict]:
         sql = """
             SELECT suggestion_id, scope_type, scope_key, action, confidence, reason,
@@ -233,6 +264,10 @@ class RuleEvolutionGovernor:
                         if has_target and has_factor and recommended_scope == "online_light" and confidence >= 0.55:
                             status = "approved"
                             note = "approved by governor: online_light parameter template switch evidence present"
+                    elif scope_type == "factor" and action == "downweight":
+                        if self._factor_pruning_evidence_ready(evidence, confidence=confidence):
+                            status = "approved"
+                            note = "approved by governor: factor pruning governance evidence present"
                     if status == "proposed":
                         status = "rejected"
                         note = "rejected by governor: no autonomous evidence rule available"
@@ -477,7 +512,21 @@ class RuleEvolutionGovernor:
         ) -> str:
         suggestion_ids = [str(item) for item in (suggestion_ids or []) if str(item)]
         suggestion_ids_json = json.dumps(sorted(set(suggestion_ids)), ensure_ascii=False)
-        details_json = json.dumps(details or {}, ensure_ascii=False, default=str)
+        details_payload = dict(details or {})
+        source_agent = str(details_payload.get("source_agent") or "autonomous_learning")
+        details_payload.setdefault("source_agent", source_agent)
+        details_payload.setdefault(
+            "authority_verdict",
+            AgentAuthorityRegistryService().evaluate_scope_write(
+                source_agent,
+                scope_type,
+                action,
+                requested_writes=["learning_application_log"],
+                status=status,
+                impact_level="medium",
+            ),
+        )
+        details_json = json.dumps(details_payload, ensure_ascii=False, default=str)
         with self._conn() as conn:
             existing = self._execute(conn,
                 """
@@ -567,7 +616,7 @@ class RuleEvolutionGovernor:
                                     "bias_multiplier": bias_multiplier,
                                     "old_weight": old_weight,
                                     "new_weight": new_weight,
-                                    "details": details or {},
+                                    "details": details_payload,
                                 },
                                 ensure_ascii=False,
                                 default=str,
@@ -626,7 +675,7 @@ class RuleEvolutionGovernor:
                             "bias_multiplier": bias_multiplier,
                             "old_weight": old_weight,
                             "new_weight": new_weight,
-                            "details": details or {},
+                            "details": details_payload,
                         },
                         ensure_ascii=False,
                         default=str,
@@ -956,13 +1005,32 @@ class RuleEvolutionGovernor:
                 elif next_status == "effective" and len(post_reviews) >= observe_trades:
                     suggestion_id = self._new_id("psg")
                     evidence = {
+                        "source_agent": "autonomous_learning",
                         "source_application_id": app["application_id"],
                         "sample_count": len(post_reviews),
                         "baseline_sample_count": len(pre_reviews),
                         "post_avg_reward": round(post_avg, 6),
                         "baseline_avg_reward": round(pre_avg, 6),
                         "delta_avg_reward": round(delta, 6),
+                        "authority_verdict": AgentAuthorityRegistryService().evaluate_scope_write(
+                            "autonomous_learning",
+                            scope_type,
+                            app["action"],
+                            requested_writes=["policy_suggestion"],
+                            status="approved",
+                            impact_level="medium",
+                        ),
                     }
+                    evidence = attach_policy_suggestion_agent_context(
+                        evidence,
+                        source_agent="autonomous_learning",
+                        scope_type=scope_type,
+                        action=app["action"],
+                        requested_writes=["policy_suggestion"],
+                        status="approved",
+                        impact_level="medium",
+                        db_path=self.db_path,
+                    )
                     self._execute(conn,
                         """
                         INSERT INTO policy_suggestion

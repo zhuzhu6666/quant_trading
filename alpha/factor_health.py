@@ -360,6 +360,21 @@ def _build_forward_returns(df: "pd.DataFrame", horizon: int = 1) -> "np.ndarray"
     return fwd
 
 
+def _invalid_dsl_reason(name: str, fn: object) -> str:
+    if not (str(name).startswith("dsl_auto_") or str(name).startswith("dsl_")):
+        return ""
+    expression = str(getattr(fn, "_factor_desc", "") or "").strip()
+    if not expression:
+        return ""
+    try:
+        from alpha.factor_dsl import parse_dsl
+
+        parse_dsl(expression)
+    except Exception as exc:
+        return str(exc)
+    return ""
+
+
 def evaluate_factors(
     df: "pd.DataFrame",
     threshold: float = 0.04,
@@ -410,6 +425,20 @@ def evaluate_factors(
             fn = factor_registry.get(name)
             if fn is None:
                 continue
+            invalid_dsl_reason = _invalid_dsl_reason(name, fn)
+            if invalid_dsl_reason:
+                logger.info("evaluate_factors: skip invalid DSL factor %s: %s", name, invalid_dsl_reason)
+                all_status.append(FactorHealthStatus(
+                    factor=name,
+                    score=0.0,
+                    status="DEAD",
+                    n_obs=0,
+                    components={
+                        "invalid_dsl_expression": True,
+                        "invalid_dsl_reason": invalid_dsl_reason[:240],
+                    },
+                ))
+                continue
             vals = fn(df)
             # 必须等长 (跟 ICTracker.update 严格校验一致)
             n = min(len(vals), len(fwd_returns))
@@ -430,7 +459,8 @@ def evaluate_factors(
         "watch": sum(1 for s in all_status if s.status == "WATCH"),
         "decaying": sum(1 for s in all_status if s.status == "DECAYING"),
         "unknown": sum(1 for s in all_status if s.status == "UNKNOWN"),
-        "dead": n_dead_skipped,
+        "dead": n_dead_skipped + sum(1 for s in all_status if s.status == "DEAD"),
+        "invalid_dsl": sum(1 for s in all_status if bool(s.components.get("invalid_dsl_expression"))),
     }
     return {
         **summary,

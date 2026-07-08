@@ -292,8 +292,9 @@ class BrainMemoryService:
             conn,
             """
             SELECT experience_id, trade_id, source_table, source_id, regime_id,
-                   outcome_label, reward_score, failure_tags_json,
-                   recommended_action, evidence_strength, created_at
+                   decision_context_json, outcome_label, reward_score,
+                   failure_tags_json, recommended_action, evidence_strength,
+                   append_source, artifact_version, created_at
             FROM experience_memory
             ORDER BY created_at DESC
             LIMIT 50
@@ -302,11 +303,16 @@ class BrainMemoryService:
         items = []
         for row in rows:
             tags = _loads(row["failure_tags_json"], [])
+            context = _loads(row["decision_context_json"], {})
+            lesson = context.get("lesson") if isinstance(context, dict) else {}
+            if not isinstance(lesson, dict):
+                lesson = {}
             summary = " ".join(
                 str(part or "")
                 for part in [
                     row["outcome_label"],
                     row["recommended_action"],
+                    lesson.get("summary"),
                     row["regime_id"],
                     " ".join(str(tag) for tag in tags),
                 ]
@@ -323,9 +329,14 @@ class BrainMemoryService:
                         "trade_id": row["trade_id"],
                         "source_table": row["source_table"],
                         "source_id": row["source_id"],
+                        "append_source": row["append_source"],
+                        "artifact_version": row["artifact_version"],
                         "outcome_label": row["outcome_label"],
                         "reward_score": reward,
                         "failure_tags": tags,
+                        "recommended_action": row["recommended_action"],
+                        "lesson": lesson,
+                        "decision_context": context,
                     },
                     evidence_score=max(0.0, min(_safe_float(row["evidence_strength"]), 1.0)),
                     polarity=polarity,

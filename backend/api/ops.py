@@ -6,6 +6,9 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from backend.core.auth import RequireUser
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_briefing import AgentBriefingContextService
+from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.autonomy_health import AutonomyHealthService
 from backend.services.brain_action_evaluator import BrainActionPlanEvaluatorService
 from backend.services.brain_memory import BrainMemoryService
@@ -17,6 +20,8 @@ from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailS
 from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
+from backend.services.factor_governance_effect_tracker import FactorGovernanceEffectTrackerService
+from backend.services.factor_pruning_governance import FactorPruningGovernanceService
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.live_autonomy import LiveAutonomyService
 from backend.services.proposal_registry import ProposalRegistryService
@@ -105,8 +110,30 @@ class BrainMediumImpactGovernanceRequest(BaseModel):
     allow_tighten_low_health: bool = False
 
 
+class FactorPruningGovernanceRequest(BaseModel):
+    limit: int = 50
+    min_priority: float = 0.75
+
+
+class FactorPruningGovernancePromoteRequest(BaseModel):
+    limit: int = 50
+    min_evidence_score: float = 0.9
+    require_weak_health: bool = True
+
+
+class FactorPruningGovernanceBridgeRequest(BaseModel):
+    limit: int = 5
+    require_demo_nursery: bool = True
+    actor: str = "api:ops.factor_pruning_governance.bridge_ready"
+
+
+class FactorGovernanceEffectReconcileRequest(BaseModel):
+    limit: int = 50
+
+
 class BrainGovernanceCandidateSubmitRequest(BaseModel):
     actor: str = "api:ops.brain.governance_candidate"
+    require_review: bool = True
 
 
 class BrainGovernanceCandidateReviewRequest(BaseModel):
@@ -237,6 +264,62 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
                 "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
             })
             return payload
+
+
+@router.get("/agent-authority")
+def get_agent_authority(_user: RequireUser) -> dict[str, Any]:
+    """Return the machine-readable authority contract for autonomous agents."""
+    registry = AgentAuthorityRegistryService()
+    return {
+        "ok": True,
+        "schema_version": "ops_agent_authority.v1",
+        "agent_authority": registry.list_agents(),
+        "status": registry.status(),
+    }
+
+
+@router.get("/agent-scorecard")
+def get_agent_scorecard(_user: RequireUser, limit: int = 500) -> dict[str, Any]:
+    """Return read-only quality and reliability metrics for autonomous agents."""
+    scorecard = AgentScorecardService().scorecard(limit=max(1, min(int(limit), 2000)))
+    return {
+        "ok": bool(scorecard.get("ok")),
+        "schema_version": "ops_agent_scorecard.v1",
+        "scorecard": scorecard,
+    }
+
+
+@router.get("/agent-briefing")
+def get_agent_briefing(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+    """Return shared read-only briefing context for autonomous agent review."""
+    briefing = AgentBriefingContextService().build(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(briefing.get("ok")),
+        "schema_version": "ops_agent_briefing.v1",
+        "briefing": briefing,
+    }
+
+
+@router.get("/agent-trade-attribution")
+def get_agent_trade_attribution(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+    """Return read-only trade outcome feedback linked back to source agents."""
+    attribution = AgentScorecardService().latest_trade_attributions(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(attribution.get("ok")),
+        "schema_version": "ops_agent_trade_attribution.v1",
+        "trade_attribution": attribution,
+    }
+
+
+@router.get("/agent-chain-health")
+def get_agent_chain_health(_user: RequireUser, limit: int = 300) -> dict[str, Any]:
+    """Return agent authority, proposal flow, scorecard, and feedback health."""
+    health = AgentScorecardService().chain_health(limit=max(1, min(int(limit), 1000)))
+    return {
+        "ok": bool(health.get("ok")),
+        "schema_version": "ops_agent_chain_health.v1",
+        "agent_chain_health": health,
+    }
 
 
 @router.get("/autonomy/proposals")
@@ -545,6 +628,77 @@ def materialize_brain_medium_impact_governance(req: BrainMediumImpactGovernanceR
     }
 
 
+@router.post("/factor/pruning-governance/materialize")
+def materialize_factor_pruning_governance(req: FactorPruningGovernanceRequest, _user: RequireUser) -> dict[str, Any]:
+    """Materialize factor pruning candidates into the isolated governance candidate lane."""
+    result = FactorPruningGovernanceService().materialize_latest(
+        limit=max(1, min(int(req.limit), 100)),
+        min_priority=max(0.0, min(float(req.min_priority), 1.0)),
+        persist=True,
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_factor_pruning_governance_materialize.v1",
+        "governance_run": result,
+    }
+
+
+@router.post("/factor/pruning-governance/promote-ready")
+def promote_factor_pruning_governance(req: FactorPruningGovernancePromoteRequest, _user: RequireUser) -> dict[str, Any]:
+    """Promote strong factor pruning candidates to governance_ready without submitting policy suggestions."""
+    result = FactorPruningGovernanceService().promote_ready(
+        limit=max(1, min(int(req.limit), 100)),
+        min_evidence_score=max(0.0, min(float(req.min_evidence_score), 1.0)),
+        require_weak_health=bool(req.require_weak_health),
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_factor_pruning_governance_promote_ready.v1",
+        "promote_run": result,
+    }
+
+
+@router.post("/factor/pruning-governance/bridge-ready")
+def bridge_factor_pruning_governance(req: FactorPruningGovernanceBridgeRequest, _user: RequireUser) -> dict[str, Any]:
+    """Bridge governance-ready factor pruning candidates into policy_suggestion without applying weights."""
+    result = FactorPruningGovernanceService().bridge_ready_candidates(
+        limit=max(1, min(int(req.limit), 20)),
+        require_demo_nursery=bool(req.require_demo_nursery),
+        actor=str(req.actor or "api:ops.factor_pruning_governance.bridge_ready"),
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_factor_pruning_governance_bridge_ready.v1",
+        "bridge_run": result,
+    }
+
+
+@router.get("/factor/governance-effects")
+def get_factor_governance_effects(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+    """Return pruning governance application effects using existing learning_application facts."""
+    result = FactorGovernanceEffectTrackerService().status(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_factor_governance_effects.v1",
+        "effects": result,
+    }
+
+
+@router.post("/factor/governance-effects/reconcile")
+def reconcile_factor_governance_effects(req: FactorGovernanceEffectReconcileRequest, _user: RequireUser) -> dict[str, Any]:
+    """Reconcile pruning governance effects through the existing governor effect engine."""
+    result = FactorGovernanceEffectTrackerService().reconcile(limit=max(1, min(int(req.limit), 200)))
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return {
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_factor_governance_effects_reconcile.v1",
+        "effects": result,
+    }
+
+
 @router.get("/brain/governance-candidates")
 def get_brain_governance_candidates(_user: RequireUser, limit: int = 50, status: str = "") -> dict[str, Any]:
     """Return isolated V16 governance candidates before policy_suggestion submission."""
@@ -562,6 +716,30 @@ def get_brain_governance_candidates(_user: RequireUser, limit: int = 50, status:
 @router.post("/brain/governance-candidates/{candidate_id}/submit")
 def submit_brain_governance_candidate(candidate_id: str, req: BrainGovernanceCandidateSubmitRequest, _user: RequireUser) -> dict[str, Any]:
     """Manually bridge a compatible V16 candidate into legacy policy_suggestion review."""
+    if bool(req.require_review):
+        review_result = BrainGovernanceCandidateReviewService().review_candidate(
+            candidate_id,
+            run_llm=False,
+            llm_dry_run=True,
+            persist=True,
+        )
+        review = dict(review_result.get("review") or {})
+        if not bool(review.get("bridge_ready")):
+            _READINESS_CACHE.invalidate("backend-readiness")
+            return {
+                "ok": False,
+                "schema_version": "ops_brain_governance_candidate_submit.v1",
+                "submit_result": {
+                    "ok": False,
+                    "schema_version": "brain_governance_candidate_submit.v1",
+                    "status": "blocked_candidate_review",
+                    "candidate_id": candidate_id,
+                    "review_status": review.get("review_status", review_result.get("status", "")),
+                    "evidence_gaps": review.get("evidence_gaps") or [],
+                    "review": review,
+                    "boundary": BrainGovernanceCandidateReviewService.boundary(),
+                },
+            }
     result = BrainGovernanceCandidateService().submit_candidate_to_policy_suggestion(
         candidate_id,
         actor=str(req.actor or "api:ops.brain.governance_candidate"),

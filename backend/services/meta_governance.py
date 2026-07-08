@@ -9,6 +9,7 @@ from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.ledger.service import DecisionLedger
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from research.meta_model_lightgbm import MODEL_TYPE, MetaModelLightGBMService
 
 
@@ -193,7 +194,7 @@ class MetaGovernanceService:
             include_samples=False,
             source=source,
         ) if snapshot else {}
-        suggestion = self._suggestion_from_report(report, snapshot_result=snapshot_result)
+        suggestion = self._suggestion_from_report(report, snapshot_result=snapshot_result, db_path=self.db_path)
         now = time.time()
         with self._conn() as conn:
             existing = _execute(
@@ -295,7 +296,7 @@ class MetaGovernanceService:
         }
 
     @staticmethod
-    def _suggestion_from_report(report: dict[str, Any], *, snapshot_result: dict[str, Any]) -> dict[str, Any]:
+    def _suggestion_from_report(report: dict[str, Any], *, snapshot_result: dict[str, Any], db_path: str | Path = STATE_DB) -> dict[str, Any]:
         accuracy = _safe_float(report.get("accuracy"))
         evaluated = int(report.get("evaluated_count") or 0)
         posture_distribution = dict(report.get("posture_distribution") or {})
@@ -316,6 +317,7 @@ class MetaGovernanceService:
             reason = f"meta model predicts elevated contract posture rate={contract_rate:.3f}"
             confidence = min(0.75, max(0.45, contract_rate))
         evidence = {
+            "schema_version": "meta_model_governance_advisory.v1",
             "report_id": str(snapshot_result.get("report_id") or ""),
             "model_type": MODEL_TYPE,
             "accuracy": accuracy,
@@ -328,6 +330,16 @@ class MetaGovernanceService:
             "approval_path": "human_or_governor_review_only",
             "safe_for_live_trading": False,
         }
+        evidence = attach_policy_suggestion_agent_context(
+            evidence,
+            source_agent="lightgbm_shadow_models",
+            scope_type="meta_model",
+            action=action,
+            requested_writes=[],
+            status="proposed",
+            impact_level="shadow",
+            db_path=db_path,
+        )
         return {
             "action": action,
             "confidence": round(confidence, 6),

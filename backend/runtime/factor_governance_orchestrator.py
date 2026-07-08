@@ -18,7 +18,9 @@ from alpha.portfolio_compositor import resolve_factor_role
 from backend.core.db import get_state_pg_conn
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
 from backend.services.factor_redundancy import RedundancyDetector
+from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.mutation_audit import record_api_mutation
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
 from config import runtime_config
@@ -893,6 +895,31 @@ class FactorGovernanceOrchestrator:
     ) -> str:
         suggestion_id = f"fgv3_{uuid.uuid4().hex[:16]}"
         now = time.time()
+        evidence_payload = {
+            "source_agent": "factor_governance",
+            "decision_id": decision_id,
+            **evidence,
+        }
+        evidence_payload.setdefault(
+            "authority_verdict",
+            AgentAuthorityRegistryService().evaluate_scope_write(
+                "factor_governance",
+                "factor",
+                action,
+                requested_writes=["policy_suggestion"],
+                status=status,
+                impact_level="medium",
+            ),
+        )
+        evidence_payload = attach_policy_suggestion_agent_context(
+            evidence_payload,
+            source_agent="factor_governance",
+            scope_type="factor",
+            action=action,
+            requested_writes=["policy_suggestion"],
+            status=status,
+            impact_level="medium",
+        )
         conn = get_state_pg_conn()
         try:
             conn.execute(
@@ -908,7 +935,7 @@ class FactorGovernanceOrchestrator:
                     action,
                     1.0 if status == "applied" else 0.0,
                     "autonomous_factor_governance_v3",
-                    _dumps({"decision_id": decision_id, **evidence}),
+                    _dumps(evidence_payload),
                     status,
                     now if status in {"auto_approved", "applied", "rolled_back", "blocked_by_risk", "superseded"} else 0.0,
                     "autonomous_execution_no_human_approval",
@@ -936,6 +963,21 @@ class FactorGovernanceOrchestrator:
         old_weight = float(before.get("weight") or 0.0)
         new_weight = float(after.get("weight") or old_weight)
         now = time.time()
+        details = {
+            "source_agent": "factor_governance",
+            "decision_id": decision_id,
+            "before": before,
+            "after": after,
+            "result": result or {},
+            "authority_verdict": AgentAuthorityRegistryService().evaluate_scope_write(
+                "factor_governance",
+                "factor",
+                action,
+                requested_writes=["learning_application_log"],
+                status=status,
+                impact_level="medium",
+            ),
+        }
         conn = get_state_pg_conn()
         try:
             conn.execute(
@@ -955,7 +997,7 @@ class FactorGovernanceOrchestrator:
                     new_weight,
                     _dumps([suggestion_id] if suggestion_id else []),
                     status,
-                    _dumps({"decision_id": decision_id, "before": before, "after": after, "result": result or {}}),
+                    _dumps(details),
                     now,
                 ),
             )

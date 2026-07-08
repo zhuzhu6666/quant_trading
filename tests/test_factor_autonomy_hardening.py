@@ -145,6 +145,24 @@ def test_startup_restore_applies_overlay_and_writes_snapshot(tmp_path):
     assert row == ("test_worker_startup", "startup_run")
 
 
+def test_runtime_config_shared_can_refresh_overlay_written_by_another_process(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = RuntimeConfigOverlayService(db_path)
+    service.apply_patch(
+        {"autonomy_mode": "demo_nursery", "dynamic_sizing_max_api_volume": 1000.0},
+        source="demo_nursery_switch",
+        run_id="nursery_run",
+    )
+    rc.replace(RuntimeConfig(autonomy_mode="demo_autonomous", dynamic_sizing_max_api_volume=100.0))
+
+    refreshed = rc.refresh_from_overlay(db_path, force=True)
+
+    assert refreshed is True
+    assert rc.shared().autonomy_mode == "demo_nursery"
+    assert rc.shared().dynamic_sizing_max_api_volume == 1000.0
+
+
 def test_clear_overlay_to_base_does_not_snapshot_stale_overlay(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
@@ -190,6 +208,29 @@ def test_runtime_config_mutation_service_uses_overlay_without_temp_db_audit(tmp_
     assert rc.shared().factor_portfolio_weights["rsi_14"] == 0.21
     overlay = RuntimeConfigOverlayService(db_path).latest()["overlay"]
     assert overlay["factor_portfolio_weights"]["rsi_14"] == 0.21
+
+
+def test_runtime_config_overlay_allows_dynamic_sizing_controls(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    result = RuntimeConfigMutationService(db_path).apply_patch(
+        {
+            "kelly_risk_per_trade_pct": 0.06,
+            "kelly_fraction": 0.5,
+            "dynamic_sizing_max_api_volume": 1000.0,
+        },
+        source="demo_dynamic_sizing_recalibration",
+        run_id="sizing_repair",
+    )
+
+    assert result["ok"] is True
+    assert rc.shared().kelly_risk_per_trade_pct == 0.06
+    assert rc.shared().kelly_fraction == 0.5
+    assert rc.shared().dynamic_sizing_max_api_volume == 1000.0
+    overlay = RuntimeConfigOverlayService(db_path).latest()["overlay"]
+    assert overlay["kelly_risk_per_trade_pct"] == 0.06
+    assert overlay["kelly_fraction"] == 0.5
+    assert overlay["dynamic_sizing_max_api_volume"] == 1000.0
 
 
 def test_incident_control_service_persists_via_overlay_and_requires_confirm_to_thaw(tmp_path):

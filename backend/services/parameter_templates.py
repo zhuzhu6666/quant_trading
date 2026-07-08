@@ -19,6 +19,7 @@ from backend.core.db import (
     state_pg_enabled,
 )
 from backend.services.factor_cards import FactorCardService
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from research.learning.governor import RuleEvolutionGovernor
 from risk.policy_service import RiskPolicyService
 
@@ -486,6 +487,16 @@ class ParameterTemplateService:
             "evidence_context": dict(evidence_context or {}),
             "note": note,
         }
+        payload = attach_policy_suggestion_agent_context(
+            payload,
+            source_agent="autonomous_learning",
+            scope_type="parameter_template",
+            action="switch_parameter_template",
+            requested_writes=["policy_suggestion"],
+            status="proposed",
+            impact_level="medium",
+            db_path=self.db_path,
+        )
         now = time.time()
         reason = (
             f"switch {factor_id} to {target['template_version']}"

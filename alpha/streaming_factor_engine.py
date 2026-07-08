@@ -74,6 +74,7 @@ class StreamingFactorEngine:
         self._available_factors: list[str] = list(factor_registry.list())
         self._incremental_state: dict[str, float] = {}
         self._warm: bool = False
+        self._last_bar_ts: float = 0.0
         self._factor_runtime_config: dict[str, dict] = dict(factor_runtime_config or {})
         self._factor_ids_explicit = factor_ids is not None
         self._requested_factor_ids = (
@@ -93,7 +94,12 @@ class StreamingFactorEngine:
         单个因子失败 → 该因子返回 None，不影响其他因子。
         buffer 不足 (小于 MIN_BARS) → 返回空 dict。
         """
+        bar_ts = self._bar_ts(bar)
+        if bar_ts > 0 and self._last_bar_ts > 0 and bar_ts <= self._last_bar_ts:
+            return self.get_snapshot() if self._warm else {}
         self._buffer.append(bar)
+        if bar_ts > 0:
+            self._last_bar_ts = bar_ts
         if len(self._buffer) < self.MIN_BARS:
             return {}
 
@@ -117,6 +123,15 @@ class StreamingFactorEngine:
 
         return self.get_snapshot()
 
+    @staticmethod
+    def _bar_ts(bar: dict | None) -> float:
+        if not isinstance(bar, dict):
+            return 0.0
+        try:
+            return float(bar.get("time") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def warmup_bars(self, bars: list[dict]) -> list[dict[str, float | None]]:
         """Prime the rolling buffer and compute historical factor snapshots once.
 
@@ -128,6 +143,9 @@ class StreamingFactorEngine:
         self.reset()
         for bar in bars[-self._buffer.maxlen:]:
             self._buffer.append(bar)
+            bar_ts = self._bar_ts(bar)
+            if bar_ts > 0:
+                self._last_bar_ts = bar_ts
         if len(self._buffer) < self.MIN_BARS:
             return []
 
@@ -230,6 +248,7 @@ class StreamingFactorEngine:
         self._factor_cache.clear()
         self._incremental_state.clear()
         self._warm = False
+        self._last_bar_ts = 0.0
 
     # ── 内部工具 ─────────────────────────────────────────
 

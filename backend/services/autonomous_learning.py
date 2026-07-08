@@ -33,6 +33,7 @@ from backend.services.review_contract import (
     normalize_trade_review_contract,
     review_has_system_contamination,
 )
+from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from research.features.evidence_contract import build_evidence_contract
 
 _scheduler_thread: threading.Thread | None = None
@@ -441,7 +442,7 @@ def _autonomy_mode() -> str:
 
 
 def _demo_autonomous_enabled() -> bool:
-    return _autonomy_mode() == "demo_autonomous"
+    return _autonomy_mode() in {"demo_autonomous", "demo_nursery"}
 
 
 def _new_experiment_id(prefix: str = "demoauto") -> str:
@@ -1468,6 +1469,16 @@ def materialize_entry_cluster_governance_suggestions(
                     "advisory_only": True,
                 },
             }
+            evidence = attach_policy_suggestion_agent_context(
+                evidence,
+                source_agent="autonomous_learning",
+                scope_type="entry_cluster",
+                action=action,
+                requested_writes=["policy_suggestion"],
+                status="proposed",
+                impact_level="medium",
+                db_path=db_path,
+            )
             _execute(
                 conn,
                 """
@@ -1701,6 +1712,16 @@ def materialize_event_window_governance_suggestions(
                     "advisory_only": True,
                 },
             }
+            evidence = attach_policy_suggestion_agent_context(
+                evidence,
+                source_agent="autonomous_learning",
+                scope_type="event_window",
+                action=action,
+                requested_writes=["policy_suggestion"],
+                status="proposed",
+                impact_level="medium",
+                db_path=db_path,
+            )
             _execute(
                 conn,
                 """
@@ -1909,6 +1930,16 @@ def materialize_entry_quality_governance_suggestions(
                 "position_ids": [item["position_id"] for item in items[:20]],
                 "recommended_controls": recommended_controls,
             }
+            evidence = attach_policy_suggestion_agent_context(
+                evidence,
+                source_agent="autonomous_learning",
+                scope_type="entry_quality",
+                action=action,
+                requested_writes=["policy_suggestion"],
+                status="proposed",
+                impact_level="medium",
+                db_path=db_path,
+            )
             _execute(
                 conn,
                 """
@@ -3721,6 +3752,35 @@ def _auto_rollback_position_supervisor_template(
         conn.close()
 
 
+def _run_demo_nursery_factor_pruning_governance(*, db_path: str | Path, bridge_limit: int = 5) -> dict[str, Any]:
+    mode = _autonomy_mode()
+    if mode != "demo_nursery":
+        return {
+            "schema_version": "demo_nursery_factor_pruning_governance.v1",
+            "enabled": False,
+            "mode": mode,
+        }
+    from backend.services.factor_pruning_governance import FactorPruningGovernanceService
+
+    service = FactorPruningGovernanceService(db_path)
+    materialize = service.materialize_latest(limit=50, min_priority=0.75, persist=True)
+    promote = service.promote_ready(limit=50, min_evidence_score=0.9, require_weak_health=True)
+    bridge = service.bridge_ready_candidates(
+        limit=max(1, min(int(bridge_limit), 20)),
+        require_demo_nursery=True,
+        actor="system:autonomous_learning.demo_nursery_factor_pruning",
+    )
+    return {
+        "schema_version": "demo_nursery_factor_pruning_governance.v1",
+        "enabled": True,
+        "mode": mode,
+        "materialize": materialize,
+        "promote": promote,
+        "bridge": bridge,
+        "bridge_limit": max(1, min(int(bridge_limit), 20)),
+    }
+
+
 def apply_demo_autonomy(
     *,
     db_path: str | Path = STATE_DB,
@@ -3743,6 +3803,7 @@ def apply_demo_autonomy(
         }
         finish_evolution_run(str(run.get("run_id") or experiment_id), status="skipped", summary=payload, db_path=db_path)
         return payload
+    factor_pruning_governance = _run_demo_nursery_factor_pruning_governance(db_path=db_path, bridge_limit=5)
     conn = _connect(db_path)
     try:
         approvals = _approve_demo_policy_suggestions(
@@ -3755,7 +3816,7 @@ def apply_demo_autonomy(
         _insert_evolution_event(
             conn,
             "demo_autonomy_governor_review",
-            {"experiment_id": experiment_id, **approvals},
+            {"experiment_id": experiment_id, "factor_pruning_governance": factor_pruning_governance, **approvals},
         )
         conn.commit()
     finally:
@@ -3786,8 +3847,9 @@ def apply_demo_autonomy(
     payload = {
         "schema_version": "demo_autonomy_apply.v1",
         "enabled": True,
-        "mode": "demo_autonomous",
+        "mode": _autonomy_mode(),
         "experiment_id": experiment_id,
+        "factor_pruning_governance": factor_pruning_governance,
         "approvals": approvals,
         "governance_conflicts": governance_conflicts,
         "factor_weights": factor_weights,

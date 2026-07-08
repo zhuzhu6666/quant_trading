@@ -17,7 +17,7 @@ def test_advisory_tick_data_does_not_force_critical_status() -> None:
     ]
     degradeds = [
         name for name, c in components.items()
-        if c.status == "degraded" or (c.status == "critical" and name in {"tick_data"})
+        if c.status == "degraded" and name not in {"tick_data"}
     ]
 
     report = HealthReport(components=components)
@@ -28,4 +28,4 @@ def test_advisory_tick_data_does_not_force_critical_status() -> None:
     else:
         report.overall = "healthy"
 
-    assert report.overall == "degraded"
+    assert report.overall == "healthy"

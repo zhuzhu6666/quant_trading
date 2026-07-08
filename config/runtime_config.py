@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import threading
+import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from backend.runtime.runtime_state import RuntimeState
@@ -251,6 +254,7 @@ class RuntimeConfig:
     # --- 组合参数 ---
     factor_tactical_alpha: float = 0.7      # 战术层权重
     factor_signal_threshold: float = 0.3    # 开仓信号阈值
+    live_factor_warmup_bars: int = 150      # live 启动时喂给因子/normalizer 的最近 K 线数
     filter_bb_enabled: bool = False  # deprecated: bb_width is context, not a hard gate
 
     # --- 金字塔/仓位控制 ---
@@ -348,9 +352,9 @@ class RuntimeConfig:
     kelly_enabled: bool = True                   # 是否启用 Kelly 仓位
     kelly_fraction: float = 0.5                  # 半凯利 = 0.5, 四分之一 = 0.25
     kelly_max_pct: float = 0.25                  # 最大资本占比上限
-    kelly_risk_per_trade_pct: float = 0.01       # 每笔风险 = equity × 1%
+    kelly_risk_per_trade_pct: float = 0.06       # 动态 Kelly 单笔风险上限；demo 育苗允许 6%
     dynamic_sizing_enabled: bool = True          # 是否启用实盘阶梯式动态仓位
-    dynamic_sizing_max_api_volume: float = 300.0 # 初期单笔动态仓位上限(API volume)
+    dynamic_sizing_max_api_volume: float = 1000.0 # demo 动态仓位硬上限(API volume)，实际下单仍由 equity 风险预算细分
     dynamic_sizing_api_units_per_display_unit: float = 100.0  # XAUUSD: 100 API volume ~= 1 oz PnL
 
     # --- 5.3 压力测试 ---
@@ -470,6 +474,85 @@ class _RuntimeConfigHolder:
 
 _holder: _RuntimeConfigHolder = _RuntimeConfigHolder()
 _holder_lock = threading.Lock()
+_overlay_refresh_lock = threading.Lock()
+_overlay_refreshing = False
+_overlay_last_check_ts = 0.0
+_overlay_last_hash_by_db: Dict[str, str] = {}
+
+
+def _truthy_env(name: str, default: str = "1") -> bool:
+    value = str(os.getenv(name, default) or "").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
+
+
+def _overlay_refresh_enabled() -> bool:
+    if not _truthy_env("QUANT_RUNTIME_CONFIG_AUTO_OVERLAY_REFRESH", "1"):
+        return False
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("PYTEST_VERSION"):
+        return str(os.getenv("QUANT_RUNTIME_CONFIG_AUTO_OVERLAY_REFRESH", "")).strip() == "1"
+    return True
+
+
+def _deep_merge_runtime_config(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in dict(overlay or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_runtime_config(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = False) -> bool:
+    """Refresh the in-process RuntimeConfig from the persisted DB overlay.
+
+    Runtime overlay writes are process-local at write time.  Other long-lived
+    processes observe the same authority by polling the overlay at this shared
+    config access point.  The refresh is intentionally throttled and disabled
+    under pytest unless explicitly opted in.
+    """
+
+    global _overlay_refreshing, _overlay_last_check_ts
+    if not force and not _overlay_refresh_enabled():
+        return False
+    now = time.time()
+    interval = float(os.getenv("QUANT_RUNTIME_CONFIG_OVERLAY_REFRESH_INTERVAL_SEC", "5") or 5)
+    if not force and now - _overlay_last_check_ts < max(0.5, interval):
+        return False
+    if _overlay_refreshing:
+        return False
+    with _overlay_refresh_lock:
+        if _overlay_refreshing:
+            return False
+        if not force and now - _overlay_last_check_ts < max(0.5, interval):
+            return False
+        _overlay_refreshing = True
+        _overlay_last_check_ts = now
+    try:
+        from backend.core.db import STATE_DB
+        from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+
+        effective_db_path = Path(db_path) if db_path is not None else Path(STATE_DB)
+        service = RuntimeConfigOverlayService(effective_db_path)
+        latest = service.latest()
+        overlay = dict(latest.get("overlay") or {})
+        overlay_hash = str(latest.get("overlay_hash") or "")
+        db_key = str(effective_db_path)
+        if not latest.get("ok") or not overlay or not overlay_hash:
+            _overlay_last_hash_by_db[db_key] = overlay_hash
+            return False
+        if not force and _overlay_last_hash_by_db.get(db_key) == overlay_hash:
+            return False
+        merged = _deep_merge_runtime_config(shared_holder().get().to_dict(), overlay)
+        shared_holder().replace(RuntimeConfig.from_dict(merged))
+        _overlay_last_hash_by_db[db_key] = overlay_hash
+        return True
+    except Exception:  # noqa: BLE001
+        logger.debug("RuntimeConfig overlay refresh skipped", exc_info=True)
+        return False
+    finally:
+        with _overlay_refresh_lock:
+            _overlay_refreshing = False
 
 
 def shared_holder() -> _RuntimeConfigHolder:
@@ -482,6 +565,7 @@ def shared_holder() -> _RuntimeConfigHolder:
 
 def shared() -> RuntimeConfig:
     """对外 API:拿到当前 RuntimeConfig 快照。"""
+    refresh_from_overlay()
     return shared_holder().get()
 
 
@@ -511,6 +595,9 @@ def version() -> int:
 
 def reset_for_tests() -> None:
     """仅供测试使用。"""
-    global _holder
+    global _holder, _overlay_last_check_ts
     with _holder_lock:
         _holder = _RuntimeConfigHolder()
+    with _overlay_refresh_lock:
+        _overlay_last_check_ts = 0.0
+        _overlay_last_hash_by_db.clear()

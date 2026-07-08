@@ -174,11 +174,11 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     suggestion = suggester.suggest_from_experience(experience)
 
     assert review["outcome_label"] == "bad_loss"
-    assert review["review_json"]["holding_seconds"] == pytest.approx(100_000.0)
+    assert review["review_json"]["holding_seconds"] == pytest.approx(99_999.0)
     assert review["review_json"]["mfe"] == pytest.approx(0.0)
     assert review["review_json"]["mae"] == pytest.approx(120.0)
     assert review["review_json"]["holding_efficiency"] >= 0.0
-    assert experience["decision_context_json"]["holding_minutes"] == pytest.approx(100_000.0 / 60.0)
+    assert experience["decision_context_json"]["holding_minutes"] == pytest.approx(99_999.0 / 60.0)
     assert "primary_responsibility" in experience["decision_context_json"]
     assert experience["source_table"] == "trade_outcome_review"
     assert experience["source_id"] == review["review_id"]

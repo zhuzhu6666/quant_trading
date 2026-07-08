@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, state_table_exists
+from backend.services.agent_briefing import AgentBriefingContextService
+from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.brain_action_planner import _connect, _dumps, _execute, _loads, _safe_float
 from backend.services.brain_governance_candidates import (
     BRIDGE_READY_STAGES,
@@ -91,11 +93,7 @@ class BrainGovernanceCandidateReviewService:
                 "boundary": self.boundary(),
             }
         now = time.time()
-        context = {
-            "policy_suggestions": self._active_policy_suggestions(),
-            "candidates": self.candidates.latest_candidates(limit=200).get("items") or [],
-            "source_reliability": self._source_reliability(),
-        }
+        context = self._review_context()
         items = [
             self._review_candidate(candidate, context=context, now=now, run_llm=run_llm, llm_dry_run=llm_dry_run)
             for candidate in candidates
@@ -108,6 +106,54 @@ class BrainGovernanceCandidateReviewService:
             "status": "reviewed",
             "item_count": len(items),
             "items": items,
+            "run_llm": bool(run_llm),
+            "llm_dry_run": bool(llm_dry_run),
+            "boundary": self.boundary(),
+            "created_at": now,
+        }
+
+    def _review_context(self) -> dict[str, Any]:
+        return {
+            "policy_suggestions": self._active_policy_suggestions(),
+            "candidates": self.candidates.latest_candidates(limit=200).get("items") or [],
+            "source_reliability": self._source_reliability(),
+            "agent_scorecard": self._agent_scorecard(),
+            "briefing": AgentBriefingContextService(self.db_path).build(limit=20),
+        }
+
+    def review_candidate(
+        self,
+        candidate_id: str,
+        *,
+        run_llm: bool = False,
+        llm_dry_run: bool = True,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        """Review one candidate through the same gates used by batch review."""
+        ensure_brain_governance_candidate_review_table(self.db_path)
+        candidate = self.candidates.load_candidate(str(candidate_id or ""))
+        if not candidate:
+            return {
+                "ok": False,
+                "schema_version": "brain_governance_candidate_review_run.v1",
+                "status": "missing_candidate",
+                "candidate_id": str(candidate_id or ""),
+                "items": [],
+                "boundary": self.boundary(),
+            }
+        now = time.time()
+        context = self._review_context()
+        item = self._review_candidate(candidate, context=context, now=now, run_llm=run_llm, llm_dry_run=llm_dry_run)
+        if persist:
+            self._persist([item])
+        return {
+            "ok": True,
+            "schema_version": "brain_governance_candidate_review_run.v1",
+            "status": "reviewed",
+            "item_count": 1,
+            "candidate_id": str(candidate_id or ""),
+            "review": item,
+            "items": [item],
             "run_llm": bool(run_llm),
             "llm_dry_run": bool(llm_dry_run),
             "boundary": self.boundary(),
@@ -175,6 +221,57 @@ class BrainGovernanceCandidateReviewService:
             "bridge_preview_only": True,
         }
 
+    def bridge_review_coverage(self, *, limit: int = 200) -> dict[str, Any]:
+        """Audit whether bridged policy suggestions have a bridge-ready candidate review."""
+        ensure_brain_governance_candidate_review_table(self.db_path)
+        limit = max(1, min(int(limit), 1000))
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "policy_suggestion"):
+                return {
+                    "ok": False,
+                    "schema_version": "candidate_bridge_review_coverage.v1",
+                    "status": "missing_policy_suggestion",
+                    "items": [],
+                    "boundary": self.boundary(),
+                }
+            rows = _execute(
+                conn,
+                """
+                SELECT suggestion_id, status, evidence_json, created_at
+                FROM policy_suggestion
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            items = [self._bridge_coverage_item(conn, row) for row in rows]
+        finally:
+            conn.close()
+        bridged = [item for item in items if item.get("is_candidate_bridge")]
+        violations = [item for item in bridged if item.get("coverage_status") == "missing_required_review"]
+        legacy_unreviewed = [item for item in bridged if item.get("coverage_status") == "legacy_unreviewed"]
+        covered = [item for item in bridged if item.get("coverage_status") == "covered"]
+        status = "ok" if not violations else "degraded"
+        return {
+            "ok": status == "ok",
+            "schema_version": "candidate_bridge_review_coverage.v1",
+            "status": status,
+            "candidate_bridge_count": len(bridged),
+            "covered_count": len(covered),
+            "missing_required_review_count": len(violations),
+            "legacy_unreviewed_count": len(legacy_unreviewed),
+            "coverage_ratio": round(len(covered) / len(bridged), 4) if bridged else 1.0,
+            "violations": violations[:25],
+            "items": bridged[: min(limit, 100)],
+            "boundary": {
+                **self.boundary(),
+                "read_only_bridge_coverage_audit": True,
+                "does_not_modify_policy_suggestion": True,
+                "does_not_submit_candidates": True,
+            },
+        }
+
     def _review_candidate(
         self,
         candidate: dict[str, Any],
@@ -192,6 +289,12 @@ class BrainGovernanceCandidateReviewService:
             str(candidate.get("source_agent") or ""),
             {},
         )
+        source_reliability["agent_scorecard"] = dict(context.get("agent_scorecard") or {}).get(
+            str(candidate.get("source_agent") or ""),
+            {},
+        )
+        source_reliability["briefing_refs"] = self._briefing_refs(candidate, context.get("briefing") or {})
+        evidence_gaps = sorted(set(evidence_gaps + self._reliability_evidence_gaps(source_reliability)))
         review_status = self._review_status(
             candidate=candidate,
             evidence_gaps=evidence_gaps,
@@ -231,9 +334,119 @@ class BrainGovernanceCandidateReviewService:
             "conflict": conflict,
             "bridge_preview": bridge_preview,
             "source_reliability": source_reliability,
+            "briefing_context": {
+                "schema_version": "candidate_review_briefing_context.v1",
+                "chain_health": (context.get("briefing") or {}).get("chain_health") or {},
+                "review_rules": (context.get("briefing") or {}).get("review_rules") or {},
+                "recent_trade_feedback": (context.get("briefing") or {}).get("recent_trade_feedback") or {},
+            },
             "llm_advisory": llm_advisory,
             "boundary": self.boundary(),
             "created_at": now,
+        }
+
+    def _bridge_coverage_item(self, conn: Any, row: Any) -> dict[str, Any]:
+        evidence = _loads(row["evidence_json"], {})
+        if not isinstance(evidence, dict):
+            evidence = {}
+        candidate_id = str(evidence.get("candidate_id") or "")
+        schema = str(evidence.get("schema_version") or "")
+        bridge = evidence.get("bridge") if isinstance(evidence.get("bridge"), dict) else {}
+        is_bridge = bool(candidate_id) and (
+            schema == "brain_governance_candidate_policy_suggestion_evidence.v1"
+            or bool(bridge)
+            or str(evidence.get("source_agent") or "") in {"v16_brain", "factor_pruning_governance"}
+        )
+        if not is_bridge:
+            return {
+                "suggestion_id": str(row["suggestion_id"] or ""),
+                "is_candidate_bridge": False,
+                "coverage_status": "not_candidate_bridge",
+            }
+        created_at = _safe_float(row["created_at"])
+        review = _execute(
+            conn,
+            """
+            SELECT review_id, review_status, bridge_ready, evidence_gaps_json, created_at
+            FROM brain_governance_candidate_review
+            WHERE candidate_id=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (candidate_id,),
+        ).fetchone()
+        required = bool(bridge.get("candidate_review_required") or bridge.get("candidate_review_required_before_submit"))
+        required_before_submit = bool(bridge.get("candidate_review_required_before_submit"))
+        review_ref = bridge.get("candidate_review") if isinstance(bridge.get("candidate_review"), dict) else {}
+        latest_review = self._row_to_bridge_review(review) if review else {}
+        ref_covered = bool(review_ref.get("bridge_ready")) and bool(review_ref.get("review_id"))
+        latest_covered = bool(latest_review.get("bridge_ready")) and _safe_float(latest_review.get("created_at")) <= created_at + 5.0
+        covered = ref_covered or latest_covered
+        if covered:
+            coverage_status = "covered"
+        elif required_before_submit:
+            coverage_status = "missing_required_review"
+        else:
+            coverage_status = "legacy_unreviewed"
+        return {
+            "suggestion_id": str(row["suggestion_id"] or ""),
+            "status": str(row["status"] or ""),
+            "candidate_id": candidate_id,
+            "source_agent": str(evidence.get("source_agent") or ""),
+            "is_candidate_bridge": True,
+            "candidate_review_required": required,
+            "candidate_review_required_before_submit": required_before_submit,
+            "coverage_status": coverage_status,
+            "evidence_review": review_ref,
+            "latest_review": latest_review,
+            "created_at": created_at,
+        }
+
+    @staticmethod
+    def _row_to_bridge_review(row: Any) -> dict[str, Any]:
+        if not row:
+            return {}
+        return {
+            "review_id": str(row["review_id"] or ""),
+            "review_status": str(row["review_status"] or ""),
+            "bridge_ready": bool(row["bridge_ready"]),
+            "evidence_gaps": _loads(row["evidence_gaps_json"], []),
+            "created_at": _safe_float(row["created_at"]),
+        }
+
+    @staticmethod
+    def _reliability_evidence_gaps(source_reliability: dict[str, Any]) -> list[str]:
+        gaps: list[str] = []
+        metric = dict(source_reliability.get("agent_scorecard") or {})
+        score = _safe_float(metric.get("quality_score"), 0.55)
+        if score < 0.5:
+            gaps.append("agent_reliability_low_requires_extra_evidence")
+        if int(metric.get("contract_violation_count") or 0) > 0:
+            gaps.append("agent_contract_violation_history_requires_manual_review")
+        if int(metric.get("negative_effect_count") or 0) > 0:
+            gaps.append("agent_negative_effect_history_requires_counter_evidence")
+        if int(metric.get("low_reliability_count") or 0) >= 3:
+            gaps.append("agent_low_reliability_history_requires_fresh_evidence")
+        briefing = dict(source_reliability.get("briefing_refs") or {})
+        if int(briefing.get("recent_loss_feedback_count") or 0) > 0 and score < 0.58:
+            gaps.append("recent_loss_feedback_requires_counter_evidence")
+        return sorted(set(gaps))
+
+    @staticmethod
+    def _briefing_refs(candidate: dict[str, Any], briefing: dict[str, Any]) -> dict[str, Any]:
+        source = str(candidate.get("source_agent") or "")
+        losses = []
+        for item in (((briefing.get("recent_trade_feedback") or {}).get("recent_losses") or [])):
+            targets = set(str(x) for x in (item.get("feedback_targets") or []))
+            targets.update(str(x) for x in ((item.get("lesson") or {}).get("feedback_agents") or []))
+            if source and source in targets:
+                losses.append(item)
+        return {
+            "schema_version": "candidate_review_briefing_refs.v1",
+            "source_agent": source,
+            "recent_loss_feedback_count": len(losses),
+            "recent_loss_review_ids": [str(item.get("review_id") or "") for item in losses[:5]],
+            "chain_health_status": (briefing.get("chain_health") or {}).get("status", ""),
         }
 
     @staticmethod
@@ -420,6 +633,17 @@ class BrainGovernanceCandidateReviewService:
         finally:
             conn.close()
 
+    def _agent_scorecard(self) -> dict[str, dict[str, Any]]:
+        try:
+            scorecard = AgentScorecardService(self.db_path).scorecard(limit=300)
+            return {
+                str(item.get("source_agent") or ""): item
+                for item in (scorecard.get("items") or [])
+                if str(item.get("source_agent") or "")
+            }
+        except Exception:
+            return {}
+
     def _llm_advisory(
         self,
         *,
@@ -446,6 +670,7 @@ class BrainGovernanceCandidateReviewService:
             "conflict": conflict,
             "bridge_preview": bridge_preview,
             "source_reliability": source_reliability,
+            "briefing": AgentBriefingContextService(self.db_path).build(limit=20),
             "forbidden_actions": [
                 "do_not_submit_orders",
                 "do_not_apply_factor_weights",

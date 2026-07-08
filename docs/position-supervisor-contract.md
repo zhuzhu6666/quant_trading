@@ -188,6 +188,10 @@ PositionSupervisor.evaluate(position_context: dict[str, Any]) -> PositionSupervi
 - `holding_efficiency`: 单位持仓时间对应的收益效率评分
 - `time_decay_score`: thesis 随持仓时间衰减后的质量分
 - `thesis_status`: `intact / weakening / broken`
+- `thesis_break_ready`: thesis broken 已超过模板最小证据窗且效率低，但不代表一定可 full close
+- `thesis_break_confirmed`: thesis broken 已获得强确认；强确认包括接近止损、regime confirmed、time decay、连续 broken 计数或信号反转
+- `thesis_broken_confirmations`: 连续 thesis broken 证据计数，缺失时按 0 处理
+- `signal_reversal`: 入场方向信号是否出现明确反转
 - `regime_shift`: `none / mild / confirmed`
 
 ---

@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, is_state_db_path, state_table_exists
+from backend.services.agent_authority_registry import (
+    AgentAuthorityRegistryService,
+    infer_policy_suggestion_source_agent,
+    policy_suggestion_requested_writes,
+)
 from backend.services.brain_action_planner import _connect, _dumps, _execute, _loads, _safe_float
 
 
@@ -23,6 +28,29 @@ ACTIVE_STATUSES = {
     "observing",
 }
 TERMINAL_STATUSES = {"applied", "rolled_back", "blocked", "blocked_by_risk", "superseded", "rejected"}
+ACTIONABLE_STATUSES = {
+    "active",
+    "proposed",
+    "reviewing",
+    "governance_ready",
+    "applyable",
+    "candidate_materialized",
+    "auto_approved",
+    "approved",
+}
+INERT_ACTIVE_STATUSES = {
+    "completed",
+    "dry_run",
+    "needs_evidence",
+    "observing",
+    "ok",
+    "recorded",
+    "reviewed",
+    "shadow",
+    "shadow_after_train",
+    "shadow_recorded",
+}
+ACTIONABLE_ROUTES = {"request_review", "request_replay", "submit_governance", "tighten_incident"}
 HIGH_IMPACTS = {"high", "critical", "live", "live_trading", "high_impact"}
 SOURCE_BASE_RELIABILITY = {
     "policy_suggestion": 0.62,
@@ -139,23 +167,7 @@ def _scope(scope_type: str, scope_key: str) -> str:
 
 
 def _control_surface(scope_type: str, action: str) -> str:
-    scope = _text(scope_type).lower()
-    act = _text(action).lower()
-    if "supervisor" in scope or "supervisor" in act:
-        return "position_supervisor_template"
-    if "parameter" in scope or "template" in act:
-        return "parameter_template"
-    if "factor" in scope or "weight" in act or act in {"update_weight", "downweight", "boost"}:
-        return "factor_weight"
-    if "context" in scope or "context" in act:
-        return "context_policy"
-    if "incident" in scope or "incident" in act:
-        return "incident_control"
-    if "model" in scope or "model" in act:
-        return "model_stage"
-    if "replay" in scope or "replay" in act:
-        return "replay"
-    return scope or act or "unknown"
+    return AgentAuthorityRegistryService.control_surface(scope_type, action)
 
 
 def _proposal_type(scope_type: str, action: str) -> str:
@@ -200,26 +212,16 @@ def _impact_level(surface: str, status: str = "", raw: str = "") -> str:
 
 
 def _required_gate(surface: str, action: str, source_agent: str) -> list[str]:
-    if source_agent == "llm_advisory":
-        return ["advisory_only"]
-    if surface == "factor_weight":
-        return ["DecisionPolicy", "RiskPolicyService"]
-    if surface in {"parameter_template", "position_supervisor_template", "context_policy", "incident_control", "model_stage", "replay"}:
-        return ["RiskPolicyService"]
-    return ["review"]
+    return AgentAuthorityRegistryService().evaluate(source_agent, surface, action).get("required_gate", ["review"])
 
 
 def _authority_state(source_agent: str, status: str, gates: list[str], impact: str) -> str:
-    normalized = _text(status).lower()
-    if source_agent == "llm_advisory":
-        return "advisory_only"
-    if normalized in {"applied", "rolled_back"}:
-        return "already_executed_audit"
-    if impact in {"observe", "shadow"}:
-        return "no_execution_authority"
-    if "RiskPolicyService" in gates or "DecisionPolicy" in gates:
-        return "requires_control_gate"
-    return "review_only"
+    return AgentAuthorityRegistryService().authority_state(
+        source_agent=source_agent,
+        status=status,
+        required_gate=gates,
+        impact_level=impact,
+    )
 
 
 def _route(status: str, impact: str, conflict: bool, gates: list[str]) -> str:
@@ -235,6 +237,19 @@ def _route(status: str, impact: str, conflict: bool, gates: list[str]) -> str:
     if "RiskPolicyService" in gates or "DecisionPolicy" in gates:
         return "submit_governance"
     return "observe"
+
+
+def _is_actionable_proposal(item: dict[str, Any]) -> bool:
+    status = _text(item.get("status")).lower()
+    if status in TERMINAL_STATUSES or status in INERT_ACTIVE_STATUSES:
+        return False
+    reliability = item.get("source_reliability") or {}
+    if bool(reliability.get("advisory_only")):
+        return False
+    route = _text(item.get("route_recommendation")).lower()
+    if route in ACTIONABLE_ROUTES:
+        return True
+    return status in ACTIONABLE_STATUSES
 
 
 class ProposalRegistryService:
@@ -266,6 +281,7 @@ class ProposalRegistryService:
         proposals = self._collect_source_proposals(limit=limit, now=now)
         conflicts = self._conflicts(proposals)
         by_id = {item["proposal_id"]: item for item in proposals}
+        agent_scores = self._agent_scorecard_context(limit=limit)
         for proposal_id, conflict in conflicts.items():
             if proposal_id in by_id:
                 by_id[proposal_id]["conflict"] = conflict
@@ -278,6 +294,15 @@ class ProposalRegistryService:
         for item in by_id.values():
             item["source_reliability"] = self._source_reliability(item)
             item["evidence_freshness"] = self._evidence_freshness(item, now=now)
+            reliability_gate = self._agent_reliability_gate(item, agent_scores)
+            item["source_reliability"]["agent_reliability_gate"] = reliability_gate
+            if reliability_gate.get("review_strictness") == "high":
+                item["source_reliability"]["band"] = "low"
+                item["route_recommendation"] = "request_review"
+                if _text(item.get("status")).lower() not in TERMINAL_STATUSES:
+                    item["status"] = "needs_evidence"
+            elif reliability_gate.get("priority_boost"):
+                item["source_reliability"]["priority_boost"] = reliability_gate["priority_boost"]
             if (
                 item["evidence_freshness"].get("status") == "stale"
                 and item.get("route_recommendation") not in {"request_review", "tighten_incident", "observe"}
@@ -293,6 +318,56 @@ class ProposalRegistryService:
             "high_unresolved_conflict_count": int(summary.get("high_unresolved_conflict_count", 0)),
             "summary": summary,
             "boundary": self.boundary(),
+        }
+
+    def _agent_scorecard_context(self, *, limit: int) -> dict[str, dict[str, Any]]:
+        try:
+            from backend.services.agent_scorecard import AgentScorecardService
+
+            scorecard = AgentScorecardService(self.db_path).scorecard(limit=max(100, min(int(limit), 1000)))
+            return {
+                str(item.get("source_agent") or ""): item
+                for item in (scorecard.get("items") or [])
+                if str(item.get("source_agent") or "")
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _agent_reliability_gate(item: dict[str, Any], scorecard: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        source_agent = _text(item.get("source_agent"), "unknown")
+        metric = scorecard.get(source_agent) or {}
+        score = _safe_float(metric.get("quality_score"), 0.55)
+        contract_violations = int(metric.get("contract_violation_count") or 0)
+        negative_effects = int(metric.get("negative_effect_count") or 0)
+        low_reliability = int(metric.get("low_reliability_count") or 0)
+        strictness = "normal"
+        reasons: list[str] = []
+        if contract_violations > 0:
+            strictness = "high"
+            reasons.append("agent_contract_violation_history")
+        if score < 0.5:
+            strictness = "high"
+            reasons.append("agent_quality_score_below_0_50")
+        elif score < 0.58:
+            strictness = "elevated"
+            reasons.append("agent_quality_score_below_0_58")
+        if negative_effects > 0:
+            strictness = "high"
+            reasons.append("agent_negative_effect_history")
+        if low_reliability >= 3 and strictness == "normal":
+            strictness = "elevated"
+            reasons.append("agent_low_reliability_history")
+        priority_boost = score >= 0.7 and contract_violations == 0
+        return {
+            "schema_version": "agent_reliability_gate.v1",
+            "source_agent": source_agent,
+            "quality_score": round(score, 6),
+            "review_strictness": strictness,
+            "reasons": sorted(set(reasons)),
+            "required_evidence_level": "high" if strictness == "high" else ("normal_plus" if strictness == "elevated" else "normal"),
+            "priority_boost": "review_first" if priority_boost else "",
+            "does_not_expand_authority": True,
         }
 
     def latest(self, *, limit: int = 100, status: str = "", refresh: bool = False) -> dict[str, Any]:
@@ -431,9 +506,17 @@ class ProposalRegistryService:
         finally:
             conn.close()
         active = [item for item in items if _text(item.get("status")).lower() not in TERMINAL_STATUSES]
-        conflict_items = [item for item in active if bool((item.get("conflict") or {}).get("conflict"))]
-        stale_items = [item for item in active if bool((item.get("evidence_freshness") or {}).get("stale"))]
+        actionable = [item for item in active if _is_actionable_proposal(item)]
+        conflict_items = [item for item in actionable if bool((item.get("conflict") or {}).get("conflict"))]
+        stale_items = [item for item in actionable if bool((item.get("evidence_freshness") or {}).get("stale"))]
         low_reliability_items = [
+            item
+            for item in actionable
+            if _text((item.get("source_reliability") or {}).get("band")).lower() == "low"
+        ]
+        raw_conflict_items = [item for item in active if bool((item.get("conflict") or {}).get("conflict"))]
+        raw_stale_items = [item for item in active if bool((item.get("evidence_freshness") or {}).get("stale"))]
+        raw_low_reliability_items = [
             item
             for item in active
             if _text((item.get("source_reliability") or {}).get("band")).lower() == "low"
@@ -452,12 +535,81 @@ class ProposalRegistryService:
             "schema_version": "proposal_registry_status.v1",
             "proposal_count": len(items),
             "active_count": len(active),
+            "actionable_count": len(actionable),
+            "historical_noise_count": max(0, len(active) - len(actionable)),
+            "needs_evidence_count": sum(1 for item in active if _text(item.get("status")).lower() == "needs_evidence"),
             "status_counts": counts,
             "conflict_count": len(conflict_items),
             "high_unresolved_conflict_count": len(high_conflict),
             "stale_evidence_count": len(stale_items),
             "low_reliability_count": len(low_reliability_items),
+            "raw_conflict_count": len(raw_conflict_items),
+            "raw_stale_evidence_count": len(raw_stale_items),
+            "raw_low_reliability_count": len(raw_low_reliability_items),
             "boundary": self.boundary(),
+        }
+
+    def generation_context_coverage(self, *, limit: int = 500) -> dict[str, Any]:
+        """Audit whether source proposals carry the shared agent generation context.
+
+        This is deliberately read-only. It treats explicit `agent_context_required`
+        flags as the new contract and keeps older policy suggestions visible as
+        legacy gaps instead of degrading runtime readiness.
+        """
+        limit = max(1, min(int(limit), 2000))
+        boundary = {
+            **self.boundary(),
+            "schema_version": "proposal_generation_context_coverage_boundary.v1",
+            "read_only_generation_context_audit": True,
+            "does_not_modify_policy_suggestion": True,
+            "does_not_refresh_proposal_registry": True,
+            "does_not_apply_proposals": True,
+        }
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "policy_suggestion"):
+                return {
+                    "ok": True,
+                    "schema_version": "proposal_generation_context_coverage.v1",
+                    "status": "ok",
+                    "proposal_count": 0,
+                    "covered_count": 0,
+                    "missing_required_context_count": 0,
+                    "legacy_missing_context_count": 0,
+                    "coverage_ratio": 1.0,
+                    "items": [],
+                    "boundary": boundary,
+                }
+            rows = _execute(
+                conn,
+                """
+                SELECT suggestion_id, scope_type, scope_key, action,
+                       evidence_json, status, created_at
+                FROM policy_suggestion
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        items = [self._proposal_generation_context_item(row) for row in rows]
+        covered = [item for item in items if item.get("coverage_status") == "covered"]
+        missing_required = [item for item in items if item.get("coverage_status") == "missing_required_agent_context"]
+        legacy_missing = [item for item in items if item.get("coverage_status") == "legacy_missing_agent_context"]
+        ratio = round(len(covered) / len(items), 6) if items else 1.0
+        return {
+            "ok": not missing_required,
+            "schema_version": "proposal_generation_context_coverage.v1",
+            "status": "degraded" if missing_required else "ok",
+            "proposal_count": len(items),
+            "covered_count": len(covered),
+            "missing_required_context_count": len(missing_required),
+            "legacy_missing_context_count": len(legacy_missing),
+            "coverage_ratio": ratio,
+            "items": items[:50],
+            "boundary": boundary,
         }
 
     def _collect_source_proposals(self, *, limit: int, now: float) -> list[dict[str, Any]]:
@@ -498,11 +650,20 @@ class ProposalRegistryService:
             action = _text(row["action"])
             surface = _control_surface(scope_type, action)
             status = _text(row["status"], "proposed")
-            gates = _required_gate(surface, action, "policy_suggestion")
+            source_agent = infer_policy_suggestion_source_agent(evidence, scope_type=scope_type, action=action)
+            authority = AgentAuthorityRegistryService().evaluate(
+                source_agent,
+                surface,
+                action,
+                requested_writes=policy_suggestion_requested_writes(source_agent, evidence),
+                status=status,
+                impact_level=_impact_level(surface, status),
+            )
+            gates = authority["required_gate"]
             impact = _impact_level(surface, status)
             items.append(self._proposal(
                 proposal_id=f"policy_suggestion:{row['suggestion_id']}",
-                source_agent=_text(evidence.get("source_agent"), "policy_suggestion"),
+                source_agent=source_agent,
                 source_ref_type="policy_suggestion",
                 source_ref_id=_text(row["suggestion_id"]),
                 proposal_type=_proposal_type(scope_type, action),
@@ -519,12 +680,79 @@ class ProposalRegistryService:
                 expected_effect=evidence.get("expected_effect") or {},
                 rollback_plan=evidence.get("rollback_plan") or evidence.get("rollback") or {},
                 status=status,
-                authority_state=_authority_state("policy_suggestion", status, gates, impact),
+                authority_state=authority["authority_state"],
                 route_recommendation=_route(status, impact, False, gates),
                 created_at=_safe_float(row["created_at"], now),
                 updated_at=max(_safe_float(row["reviewed_at"]), _safe_float(row["created_at"], now)),
             ))
         return items
+
+    @staticmethod
+    def _proposal_agent_context(evidence: dict[str, Any]) -> dict[str, Any]:
+        for key in ("agent_generation_context", "agent_context"):
+            value = evidence.get(key)
+            if isinstance(value, dict):
+                return value
+        lineage = evidence.get("lineage")
+        if isinstance(lineage, dict):
+            for key in ("agent_generation_context", "agent_context"):
+                value = lineage.get(key)
+                if isinstance(value, dict):
+                    return value
+        return {}
+
+    @staticmethod
+    def _proposal_agent_context_required(evidence: dict[str, Any]) -> bool:
+        if bool(evidence.get("agent_context_required")):
+            return True
+        lineage = evidence.get("lineage")
+        if isinstance(lineage, dict) and bool(lineage.get("agent_context_required")):
+            return True
+        bridge = evidence.get("bridge")
+        if isinstance(bridge, dict) and bool(bridge.get("candidate_review_required")):
+            return True
+        return False
+
+    @staticmethod
+    def _proposal_generation_context_item(row: Any) -> dict[str, Any]:
+        evidence = _loads(row["evidence_json"], {})
+        if not isinstance(evidence, dict):
+            evidence = {}
+        source_agent = infer_policy_suggestion_source_agent(
+            evidence,
+            scope_type=_text(row["scope_type"]),
+            action=_text(row["action"]),
+        )
+        canonical_source = AgentAuthorityRegistryService.canonical_source(source_agent)
+        registered = bool(AgentAuthorityRegistryService._source_contract(canonical_source))
+        context = ProposalRegistryService._proposal_agent_context(evidence)
+        required = ProposalRegistryService._proposal_agent_context_required(evidence)
+        covered = str(context.get("schema_version") or "") == "agent_generation_context.v1"
+        if covered:
+            coverage_status = "covered"
+        elif required:
+            coverage_status = "missing_required_agent_context"
+        elif registered:
+            coverage_status = "legacy_missing_agent_context"
+        else:
+            coverage_status = "unknown_source_no_agent_context"
+        return {
+            "suggestion_id": _text(row["suggestion_id"]),
+            "source_agent": source_agent,
+            "canonical_source_agent": canonical_source,
+            "registered_source": registered,
+            "scope_type": _text(row["scope_type"]),
+            "scope_key": _text(row["scope_key"]),
+            "action": _text(row["action"]),
+            "status": _text(row["status"]),
+            "created_at": _safe_float(row["created_at"]),
+            "agent_context_required": required,
+            "agent_context_present": covered,
+            "agent_context_schema": str(context.get("schema_version") or ""),
+            "coverage_status": coverage_status,
+            "evidence_schema": str(evidence.get("schema_version") or ""),
+            "candidate_id": _text(evidence.get("candidate_id")),
+        }
 
     def _from_brain_governance_candidates(self, conn: Any, *, limit: int, now: float) -> list[dict[str, Any]]:
         if not state_table_exists(conn, "brain_governance_candidate"):
@@ -552,10 +780,19 @@ class ProposalRegistryService:
             surface = _control_surface(scope_type, action)
             status = _text(row["status"], "active")
             impact = _impact_level(surface, status, row["max_impact"])
-            gates = _required_gate(surface, action, _text(row["source_agent"], "v16_brain"))
+            source_agent = _text(row["source_agent"], "v16_brain")
+            authority = AgentAuthorityRegistryService().evaluate(
+                source_agent,
+                surface,
+                action,
+                requested_writes=["brain_governance_candidate"],
+                status=status,
+                impact_level=impact,
+            )
+            gates = authority["required_gate"]
             items.append(self._proposal(
                 proposal_id=f"brain_governance_candidate:{row['candidate_id']}",
-                source_agent=_text(row["source_agent"], "v16_brain"),
+                source_agent=source_agent,
                 source_ref_type="brain_governance_candidate",
                 source_ref_id=_text(row["candidate_id"]),
                 proposal_type=_proposal_type(scope_type, action),
@@ -572,7 +809,7 @@ class ProposalRegistryService:
                 expected_effect=_loads(row["expected_effect_json"], {}),
                 rollback_plan=_loads(row["rollback_plan_json"], {}),
                 status=status,
-                authority_state=_authority_state(_text(row["source_agent"], "v16_brain"), status, gates, impact),
+                authority_state=authority["authority_state"],
                 route_recommendation=_route(status, impact, False, gates),
                 created_at=_safe_float(row["created_at"], now),
                 updated_at=_safe_float(row["updated_at"], now),
@@ -604,6 +841,15 @@ class ProposalRegistryService:
             status = _text(row["status"], "shadow_recorded")
             impact = _impact_level(surface, status, row["max_impact"])
             gates = _list(_loads(row["required_services_json"], []))
+            authority = AgentAuthorityRegistryService().evaluate(
+                "v16_brain",
+                surface,
+                action,
+                requested_writes=["brain_action_plan"],
+                status=status,
+                impact_level=impact,
+            )
+            gates = [str(item) for item in gates] or authority["required_gate"]
             items.append(self._proposal(
                 proposal_id=f"brain_action_plan:{row['plan_id']}",
                 source_agent="v16_brain",
@@ -617,14 +863,14 @@ class ProposalRegistryService:
                 confidence=0.0,
                 evidence_refs={"validation_refs": _loads(row["validation_refs_json"], {}), "shadow_eval": _loads(row["shadow_eval_json"], {})},
                 counter_evidence_refs={},
-                required_gate=[str(item) for item in gates],
+                required_gate=gates,
                 risk_verdict={},
                 decision_policy_preview={},
                 expected_effect={},
                 rollback_plan=_loads(row["rollback_plan_json"], {}),
                 status=status,
-                authority_state=_authority_state("v16_brain", status, [str(item) for item in gates], impact),
-                route_recommendation=_route(status, impact, False, [str(item) for item in gates]),
+                authority_state=authority["authority_state"],
+                route_recommendation=_route(status, impact, False, gates),
                 created_at=_safe_float(row["created_at"], now),
                 updated_at=_safe_float(row["created_at"], now),
             ))
@@ -652,7 +898,15 @@ class ProposalRegistryService:
             surface = _control_surface(scope_type, action)
             status = _text(row["status"], "applied")
             impact = _impact_level(surface, status)
-            gates = _required_gate(surface, action, "autonomous_learning")
+            authority = AgentAuthorityRegistryService().evaluate(
+                "autonomous_learning",
+                surface,
+                action,
+                requested_writes=["learning_application_log"],
+                status=status,
+                impact_level=impact,
+            )
+            gates = authority["required_gate"]
             details = _loads(row["details_json"], {})
             items.append(self._proposal(
                 proposal_id=f"learning_application_log:{row['application_id']}",
@@ -673,7 +927,7 @@ class ProposalRegistryService:
                 expected_effect=details.get("expected_effect") or {},
                 rollback_plan=details.get("rollback_json") or details.get("rollback_plan") or {},
                 status=status,
-                authority_state=_authority_state("autonomous_learning", status, gates, impact),
+                authority_state=authority["authority_state"],
                 route_recommendation=_route(status, impact, False, gates),
                 created_at=_safe_float(row["created_at"], _safe_float(row["cycle_ts"], now)),
                 updated_at=_safe_float(row["created_at"], _safe_float(row["cycle_ts"], now)),
@@ -702,7 +956,15 @@ class ProposalRegistryService:
             surface = _control_surface(scope_type, action)
             status = _text(row["status"], "recorded")
             impact = _impact_level(surface, status)
-            gates = _required_gate(surface, action, "evolution_decision")
+            authority = AgentAuthorityRegistryService().evaluate(
+                "factor_governance",
+                surface,
+                action,
+                requested_writes=["evolution_decision"],
+                status=status,
+                impact_level=impact,
+            )
+            gates = authority["required_gate"]
             items.append(self._proposal(
                 proposal_id=f"evolution_decision:{row['decision_id']}",
                 source_agent="factor_governance",
@@ -722,7 +984,7 @@ class ProposalRegistryService:
                 expected_effect={},
                 rollback_plan=_loads(row["rollback_json"], {}),
                 status=status,
-                authority_state=_authority_state("factor_governance", status, gates, impact),
+                authority_state=authority["authority_state"],
                 route_recommendation=_route(status, impact, False, gates),
                 created_at=_safe_float(row["created_at"], now),
                 updated_at=_safe_float(row["created_at"], now),
@@ -759,7 +1021,15 @@ class ProposalRegistryService:
                 continue
             action = "tighten_to_no_new_risk" if budget_breach else "review_live_autonomy_blocker"
             impact = "high" if budget_breach else "medium"
-            gates = ["RiskPolicyService", "RuntimeIncidentControlService"]
+            authority = AgentAuthorityRegistryService().evaluate(
+                "live_autonomy",
+                "incident_control",
+                action,
+                requested_writes=["live_autonomy_unlock_event"],
+                status="proposed",
+                impact_level=impact,
+            )
+            gates = authority["required_gate"]
             items.append(self._proposal(
                 proposal_id=f"live_autonomy_unlock_event:{row['event_id']}",
                 source_agent="live_autonomy",
@@ -795,7 +1065,7 @@ class ProposalRegistryService:
                     "required_gate": "RiskPolicyService.evaluate('set_incident_control')",
                 },
                 status="proposed",
-                authority_state=_authority_state("live_autonomy", "proposed", gates, impact),
+                authority_state=authority["authority_state"],
                 route_recommendation="tighten_incident" if budget_breach else "request_review",
                 created_at=_safe_float(row["created_at"], now),
                 updated_at=_safe_float(row["created_at"], now),
@@ -823,7 +1093,15 @@ class ProposalRegistryService:
             action = _text(row["task_type"], "advisory_review")
             surface = _control_surface(scope_type, action)
             result = _loads(row["result_json"], {})
-            gates = ["advisory_only"]
+            authority = AgentAuthorityRegistryService().evaluate(
+                "llm_advisory",
+                surface,
+                action,
+                requested_writes=["llm_advisory_audit"],
+                status=_text(row["status"], "recorded"),
+                impact_level="observe",
+            )
+            gates = authority["required_gate"]
             items.append(self._proposal(
                 proposal_id=f"llm_advisory_audit:{row['audit_id']}",
                 source_agent="llm_advisory",
@@ -843,7 +1121,7 @@ class ProposalRegistryService:
                 expected_effect={},
                 rollback_plan={},
                 status=_text(row["status"], "recorded"),
-                authority_state="advisory_only",
+                authority_state=authority["authority_state"],
                 route_recommendation="observe",
                 created_at=_safe_float(row["created_at"], now),
                 updated_at=_safe_float(row["created_at"], now),
@@ -880,9 +1158,17 @@ class ProposalRegistryService:
                 target = _text(row_dict.get(target_col), ref_id)
                 score = _safe_float(row_dict.get(primary_score), _safe_float(row_dict.get(secondary_score)))
                 status = _text(row_dict.get("mode"), "shadow")
+                authority = AgentAuthorityRegistryService().evaluate(
+                    "lightgbm_shadow_models",
+                    "model_stage",
+                    "shadow_model_audit",
+                    requested_writes=[table],
+                    status=status,
+                    impact_level="shadow",
+                )
                 items.append(self._proposal(
                     proposal_id=f"{table}:{ref_id}",
-                    source_agent=agent,
+                    source_agent="lightgbm_shadow_models",
                     source_ref_type=table,
                     source_ref_id=ref_id,
                     proposal_type="model_advisory",
@@ -891,15 +1177,15 @@ class ProposalRegistryService:
                     target_scope=_scope(table, target),
                     impact_level="shadow",
                     confidence=score,
-                    evidence_refs={"shadow_audit": row_dict},
+                    evidence_refs={"shadow_audit": row_dict, "model_source": agent},
                     counter_evidence_refs={},
-                    required_gate=["model_permissions", "RiskPolicyService"],
+                    required_gate=authority["required_gate"],
                     risk_verdict={},
                     decision_policy_preview={},
                     expected_effect={},
                     rollback_plan={},
                     status=status,
-                    authority_state="no_execution_authority",
+                    authority_state=authority["authority_state"],
                     route_recommendation="observe",
                     created_at=_safe_float(row_dict.get("created_at"), now),
                     updated_at=_safe_float(row_dict.get("created_at"), now),
@@ -941,9 +1227,14 @@ class ProposalRegistryService:
         if status in {"applied", "rolled_back"}:
             score += 0.06
             drivers.append({"name": "observed_application", "value": 0.06})
-        if source_agent == "llm_advisory" or source_ref_type == "llm_advisory_audit":
+        advisory_only = (
+            source_agent in {"llm_advisory", "lightgbm_shadow_models"}
+            or source_ref_type == "llm_advisory_audit"
+            or bool(((item.get("evidence_refs") or {}).get("evidence") or {}).get("advisory_only"))
+        )
+        if advisory_only:
             score = min(score, 0.35)
-            drivers.append({"name": "llm_advisory_cap", "value": 0.35})
+            drivers.append({"name": "advisory_only_cap", "value": 0.35})
         score = max(0.0, min(1.0, score))
         if score >= 0.7:
             band = "high"
@@ -958,7 +1249,7 @@ class ProposalRegistryService:
             "source_agent": source_agent,
             "source_ref_type": source_ref_type,
             "drivers": drivers,
-            "advisory_only": source_agent == "llm_advisory" or source_ref_type == "llm_advisory_audit",
+            "advisory_only": advisory_only,
         }
 
     def _evidence_freshness(self, item: dict[str, Any], *, now: float) -> dict[str, Any]:
