@@ -233,7 +233,7 @@ def _read_state_snapshot() -> dict:
         },
         "risk": {
             "circuit_breaker": bool(_live_state.get("circuit_breaker", False)),
-            "consecutive_loss": int(_live_state.get("session_losing", 0)),
+            "consecutive_loss": int(_live_state.get("session_consecutive_loss", 0)),
             # 风险模块自动计算结果 (VaR / Kelly / Stress / Concentration)
             **_live_state.get("risk", {}),
         },

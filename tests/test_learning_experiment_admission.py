@@ -101,3 +101,35 @@ def test_experience_prior_uses_only_terminal_bounded_effects(tmp_path):
     assert result["priors"]["rsi_14"]["multiplier"] == 1.1
     assert result["priors"]["rsi_14"]["confidence"] >= 0.6
     assert result["boundary"]["decision_policy_remains_authority"] is True
+
+
+def test_admission_enforces_global_active_experiment_budget(tmp_path):
+    db_path = _db(tmp_path)
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO learning_application_log
+            (application_id, cycle_ts, scope_type, scope_key, action, status, created_at)
+            VALUES (?, ?, 'factor', ?, 'update_weight', 'applied', ?)
+            """,
+            [("active_1", now, "factor_a", now), ("active_2", now, "factor_b", now)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    service = LearningExperimentAdmissionService(db_path)
+    result = service.evaluate(
+        scope_type="factor",
+        scope_key="factor_c",
+        action="update_weight",
+        old_weight=0.1,
+        new_weight=0.08,
+        max_global_active_experiments=2,
+    )
+
+    assert result["allowed"] is False
+    assert result["status"] == "blocked_global_experiment_budget"
+    assert result["global_active_count"] == 2

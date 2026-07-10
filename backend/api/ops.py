@@ -13,6 +13,7 @@ from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycle
 from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
 from backend.services.autonomy_health import AutonomyHealthService
 from backend.services.backend_readiness import BackendReadinessService
+from backend.services.backend_readiness_snapshot import BackendReadinessSnapshotService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.factor_governance_effect_tracker import FactorGovernanceEffectTrackerService
@@ -22,7 +23,7 @@ from backend.services.live_autonomy import LiveAutonomyService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
-from backend.services.stability import TimedCache, measure
+from backend.services.stability import TimedCache
 from backend.services.v15_phase0 import V15Phase0CompletionService
 from backend.services.v16_brain_snapshot import BrainStateService, BrainMemoryService
 from backend.services.v16_brain_planning import (
@@ -258,11 +259,6 @@ def get_recovery_history(_user: RequireUser) -> dict[str, Any]:
 @router.get("/backend-readiness")
 def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
     """前端交接用的后端统一状态合约。"""
-    def _compute() -> dict[str, Any]:
-        with measure("api.ops.backend_readiness"):
-            payload = BackendReadinessService().build()
-            return payload
-
     cache_key = "backend-readiness"
     payload = _READINESS_CACHE.get(cache_key)
     if payload is not None:
@@ -270,44 +266,34 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
         payload["cache"].update({"source": "cache", "ttl_sec": _BACKEND_READINESS_TTL_SEC})
         return payload
 
-    lock = _READINESS_CACHE.compute_lock(cache_key)
-    if lock.locked():
-        fallback = _READINESS_CACHE.last_good(cache_key)
-        if fallback:
-            created_at, payload = fallback
-            payload.setdefault("cache", {})
-            payload["cache"].update({
-                "source": "stale",
-                "ttl_sec": _BACKEND_READINESS_TTL_SEC,
-                "stale_reason": "compute_in_progress",
-                "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
-            })
-            return payload
-
-    with lock:
-        payload = _READINESS_CACHE.get(cache_key)
-        if payload is not None:
-            payload.setdefault("cache", {})
-            payload["cache"].update({"source": "cache", "ttl_sec": _BACKEND_READINESS_TTL_SEC})
-            return payload
-        try:
-            payload = _compute()
-            payload.setdefault("cache", {})
-            payload["cache"].update({"source": "computed", "ttl_sec": _BACKEND_READINESS_TTL_SEC})
-            return _READINESS_CACHE.set(cache_key, payload, ttl_sec=_BACKEND_READINESS_TTL_SEC)
-        except Exception:
-            fallback = _READINESS_CACHE.last_good(cache_key)
-            if not fallback:
-                raise
-            created_at, payload = fallback
-            payload.setdefault("cache", {})
-            payload["cache"].update({
-                "source": "stale",
-                "ttl_sec": _BACKEND_READINESS_TTL_SEC,
-                "stale_reason": "compute_error",
-                "last_good_age_sec": round(max(0.0, time.time() - created_at), 3),
-            })
-            return payload
+    snapshots = BackendReadinessSnapshotService()
+    current = snapshots.latest()
+    refresh = snapshots.refresh_async(max_age_seconds=_BACKEND_READINESS_TTL_SEC)
+    if current.get("ok"):
+        payload = dict(current.get("payload") or {})
+        payload.setdefault("cache", {})
+        payload["cache"].update({
+            "source": "persistent_snapshot",
+            "ttl_sec": _BACKEND_READINESS_TTL_SEC,
+            "age_sec": round(float(current.get("age_seconds") or 0.0), 3),
+            "refresh_status": refresh.get("status"),
+        })
+        return _READINESS_CACHE.set(cache_key, payload, ttl_sec=30.0)
+    return {
+        "ok": True,
+        "schema_version": "backend_readiness.v1",
+        "generated_at": time.time(),
+        "ready_for_frontend": False,
+        "status": "warming_snapshot",
+        "blockers": [],
+        "known_observations": [{
+            "component": "backend_readiness_snapshot",
+            "status": "warming",
+            "classification": "projection_initializing",
+        }],
+        "cache": {"source": "warming", "refresh_status": refresh.get("status")},
+        "v16": {},
+    }
 
 
 @router.get("/agent-authority")

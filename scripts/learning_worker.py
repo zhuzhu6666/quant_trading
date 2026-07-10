@@ -48,6 +48,11 @@ def _bootstrap_runtime() -> None:
 
         init_all()
         logger.info("[learning_worker] databases initialized")
+        from backend.services.evolution_ledger import expire_stale_evolution_runs
+
+        expired = expire_stale_evolution_runs(max_age_sec=3600.0)
+        if expired.get("expired_count"):
+            logger.info("[learning_worker] expired stale interrupted runs: {}", expired)
         from backend.services.learning_application_state import LearningApplicationStateService
 
         recovery = LearningApplicationStateService().recover_prepared()

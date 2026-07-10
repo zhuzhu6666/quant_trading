@@ -46,6 +46,7 @@
 | `AdaptiveWeightEngine` | 是否只调整 alpha |
 | `Factor Catalog` | role、enabled、used_in_score、lifecycle 是否一致 |
 | `readiness` | 是否误报 context/gate/sizing 缺权重 |
+| 启动恢复预算 | 是否只恢复配置命中和 discovered budget 内工作集；冷因子证据是否仍完整保留 |
 | `risk/concentration` | 是否只统计 alpha 共识 |
 | 前端展示 | context 不显示为多空投票 |
 | 测试 | live tick、alpha、AWE、readiness、frontend contract |
@@ -71,6 +72,8 @@
 | 效果证据质量 | 是否过滤污染/regime mismatch；并发 application 是否保持 observing 而非伪归因 |
 | 效果闭环 SLO | bounded window 是否归档终态；inconclusive 重试是否要求终态后的新证据且无更新 application |
 | 实验准入 | 同一 scope 是否只有一个 active effect；AWE/Factor Governance 是否共用门；微小 delta 是否被拒绝 |
+| 全局实验预算 | active application/effect 是否按 application_id 去重计数；预算触顶是否仅阻止新增扩张实验且不阻止风险回滚 |
+| 学习事实水位 | 无新 decision/order/position/review/supervisor 事实时是否跳过重建；失败轮次是否禁止推进 watermark |
 | mutation 覆盖 | 每个已生效 AWE 权重 patch 是否存在对应 `learning_application_log/effect`，历史缺口是否单独标 legacy |
 | 单一权重用例 | AWE、Factor Governance、Evolution/manual govern 是否都调用 `FactorWeightChangeService`，没有 DecisionPolicy/mutation 之间的旁路 |
 | 经验先验 | 是否只来自 terminal bounded effects；生产 DecisionPolicy 调用是否传入且保持 0.85~1.15 有界 |

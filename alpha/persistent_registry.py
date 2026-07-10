@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 
 def restore_from_log(lifecycle_log_path: str = "",
                      verbose: bool = True,
-                     adapter: "RegistryAdapter | None" = None) -> int:
+                     adapter: "RegistryAdapter | None" = None,
+                     preferred_names: set[str] | None = None,
+                     discovered_budget: int | None = None) -> int:
     """从主状态库 lifecycle_events 表恢复所有 shadow / discovered 因子.
 
     降级到 JSONL 文件 (如果传了路径且文件存在).
@@ -46,6 +48,7 @@ def restore_from_log(lifecycle_log_path: str = "",
                 "source": "",
                 "description": "",
                 "active": False,
+                "score": 0.0,
             },
         )
         if event_type == "register":
@@ -65,6 +68,7 @@ def restore_from_log(lifecycle_log_path: str = "",
             return
         state["event"] = event_type
         state["timestamp"] = ev.get("timestamp", state.get("timestamp", 0.0))
+        state["score"] = ev.get("score", state.get("score", 0.0))
 
     # 主路径: 从 PostgreSQL state store lifecycle_events 表读取
     try:
@@ -72,7 +76,7 @@ def restore_from_log(lifecycle_log_path: str = "",
 
         conn = get_state_pg_conn(read_only=True)
         rows = conn.execute(
-            "SELECT factor, event, source, description, timestamp "
+            "SELECT factor, event, source, description, timestamp, score "
             "FROM lifecycle_events "
             "WHERE event IN ('register', 'promote', 'retire', 'unregister', 'unretire') "
             "ORDER BY timestamp ASC"
@@ -114,10 +118,43 @@ def restore_from_log(lifecycle_log_path: str = "",
 
     if adapter is None:
         adapter = RegistryAdapter.shared()
+    preferred_names = {str(name) for name in (preferred_names or set())}
+    if discovered_budget is None and preferred_names:
+        try:
+            import os
+
+            discovered_budget = max(1, min(int(os.getenv("QUANT_RUNTIME_DISCOVERED_FACTOR_BUDGET", "24")), 128))
+        except Exception:
+            discovered_budget = 24
+
+    candidates = [
+        (name, ev)
+        for name, ev in latest_event.items()
+        if ev.get("active", False)
+        and ev.get("source", "") in ("shadow", "discovered")
+        and ev.get("description", "")
+    ]
+    candidates.sort(
+        key=lambda item: (
+            0 if item[0] in preferred_names else 1,
+            0 if item[1].get("source") == "discovered" else 1,
+            -float(item[1].get("score") or 0.0),
+            -float(item[1].get("timestamp") or 0.0),
+            item[0],
+        )
+    )
+    if discovered_budget is not None:
+        preferred = [item for item in candidates if item[0] in preferred_names]
+        cold = [
+            item for item in candidates
+            if item[0] not in preferred_names and item[1].get("source") == "discovered"
+        ][:max(0, int(discovered_budget))]
+        candidates = preferred + cold
+
     restored = 0
     skipped_invalid = 0
     skipped_artifact = 0
-    for name, ev in latest_event.items():
+    for name, ev in candidates:
         event_type = ev.get("event")
         source = ev.get("source", "")
         description = ev.get("description", "")

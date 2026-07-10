@@ -35,7 +35,7 @@ def test_put_config_reports_parse_errors(temp_settings_path):
 
 
 def test_patch_runtime_config_updates_runtime_only(temp_settings_path):
-    temp_settings_path.write_text("system:\n  mode: live\nctrader:\n  send_orders: false\n", encoding="utf-8")
+    temp_settings_path.write_text("system:\n  mode: live\nctrader:\n  host: demo.ctraderapi.com\n  send_orders: false\n", encoding="utf-8")
     result = config_service.patch_runtime_config(
         {"shadow_top_k": 9, "ctrader_send_orders": True},
         x_confirm="enable-send-orders",
@@ -57,7 +57,7 @@ def test_patch_runtime_config_rejects_send_orders_when_not_live(temp_settings_pa
 
 
 def test_patch_runtime_config_requires_confirm_when_enabling_effective_send_orders(temp_settings_path):
-    temp_settings_path.write_text("system:\n  mode: live\nctrader:\n  send_orders: false\n", encoding="utf-8")
+    temp_settings_path.write_text("system:\n  mode: live\nctrader:\n  host: demo.ctraderapi.com\n  send_orders: false\n", encoding="utf-8")
 
     with pytest.raises(PermissionError) as exc:
         config_service.patch_runtime_config({"ctrader_send_orders": True})
@@ -73,20 +73,20 @@ def test_put_config_rejects_conflicting_execution_semantics(temp_settings_path):
 
 
 def test_put_config_requires_confirm_when_enabling_effective_send_orders(temp_settings_path):
-    temp_settings_path.write_text("system:\n  mode: live\nctrader:\n  send_orders: false\n", encoding="utf-8")
+    temp_settings_path.write_text("system:\n  mode: live\nctrader:\n  host: demo.ctraderapi.com\n  send_orders: false\n", encoding="utf-8")
 
     with pytest.raises(PermissionError) as exc:
-        config_service.put_config("system:\n  mode: live\nctrader:\n  send_orders: true\n")
+        config_service.put_config("system:\n  mode: live\nctrader:\n  host: demo.ctraderapi.com\n  send_orders: true\n")
 
     assert "enable-send-orders" in str(exc.value)
 
 
 def test_put_config_returns_execution_semantics_and_drift(temp_settings_path):
-    temp_settings_path.write_text("system:\n  mode: live\nctrader:\n  send_orders: false\n", encoding="utf-8")
+    temp_settings_path.write_text("system:\n  mode: live\nctrader:\n  host: demo.ctraderapi.com\n  send_orders: false\n", encoding="utf-8")
     rc.replace(rc.RuntimeConfig(ctrader_send_orders=False, factor_dry_run=False))
 
     result = config_service.put_config(
-        "system:\n  mode: live\nctrader:\n  send_orders: true\n",
+        "system:\n  mode: live\nctrader:\n  host: demo.ctraderapi.com\n  send_orders: true\n",
         x_confirm="enable-send-orders",
         user="tester",
     )

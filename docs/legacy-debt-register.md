@@ -324,6 +324,24 @@
 - 收口方式: 按容器/展示边界拆分，页面文件降到约 600 行，并通过前端 architecture、typecheck 与 production build。
 - 验证方式: `npm --prefix web_frontend run test`、`typecheck`、`build`。
 
+### readiness 请求同步重建完整治理图
+
+- 状态: `fixed`
+- 旧理解: readiness 缓存失效后可以在 HTTP 请求内同步调用所有治理、回放、学习和 V16 聚合器。
+- 当前口径: 请求只消费 `backend_readiness_snapshot.v1` 持久化投影；过期时启动单例后台刷新，冷启动快速返回 `warming_snapshot`。
+- 影响面: API 延迟、backend 峰值内存、Web 操作台首屏、自治状态展示。
+- 收口方式: `BackendReadinessSnapshotService` 统一 publish/latest/refresh，backend 单例后台构建，API 只读取投影；learning worker 不承担该构建，避免 broker/live 依赖越界。
+- 验证方式: `tests/test_backend_readiness_snapshot.py`、`tests/test_backend_readiness_contract.py`。
+
+### 学习调度重复消费同一批历史事实
+
+- 状态: `fixed`
+- 旧理解: 每 30 分钟完整重建全部学习样本有助于持续进化，即使源事实没有变化。
+- 当前口径: 自主学习调度以五类事实水位决定是否运行；成功后才提交 watermark，手动完整周期不被禁止。
+- 影响面: learning worker CPU/内存、样本重复写、治理队列吞吐、实验后验窗口。
+- 收口方式: 新增事实 watermark，并为 active application/effect 增加默认 24 个全局实验预算；worker 启动同时归档中断的 stale run。
+- 验证方式: `tests/test_learning_cycle_watermark.py`、`tests/test_learning_experiment_admission.py`。
+
 ## 5. 新旧债登记模板
 
 复制下面模板新增条目：

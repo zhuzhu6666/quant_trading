@@ -3978,15 +3978,25 @@ def schedule_autonomous_learning(
         }
 
     def _worker() -> None:
+        from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
+
         if _stop_event.wait(max(0.0, delay_sec)):
             return
         while not _stop_event.is_set():
             try:
+                watermark_service = LearningCycleWatermarkService()
+                gate = watermark_service.evaluate()
+                if not gate.get("should_run"):
+                    logger.info("[autonomous_learning] scheduled run skipped: no new source facts")
+                    if _stop_event.wait(max(60.0, interval_sec)):
+                        return
+                    continue
                 result = run_autonomous_learning_cycle(
                     sample_limit=sample_limit,
                     recommendation_limit=recommendation_limit,
                     submit_offline_deep=submit_offline_deep,
                 )
+                watermark_service.mark_completed(gate["current"])
                 logger.info("[autonomous_learning] scheduled run completed: {}", _log_summary(result))
             except Exception as exc:
                 logger.warning("[autonomous_learning] scheduled run failed: {}", exc)

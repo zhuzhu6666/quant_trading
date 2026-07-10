@@ -7,6 +7,7 @@ before the existing posterior window has matured.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
@@ -36,6 +37,7 @@ class LearningExperimentAdmissionService:
             "schema_version": "learning_experiment_admission_boundary.v1",
             "read_only": True,
             "single_active_experiment_per_scope": True,
+            "global_active_experiment_budget": True,
             "does_not_apply_runtime_mutation": True,
             "does_not_create_application": True,
             "risk_reduction_bypass_requires_existing_control_path": True,
@@ -90,6 +92,27 @@ class LearningExperimentAdmissionService:
         finally:
             conn.close()
 
+    def global_active_count(self) -> int:
+        """Count unique non-terminal experiments across application/effect ledgers."""
+        try:
+            conn = self._conn()
+        except Exception:
+            return 0
+        try:
+            active_ids: set[str] = set()
+            if state_table_exists(conn, "learning_application_log"):
+                statuses = ",".join(f"'{status}'" for status in sorted(ACTIVE_APPLICATION_STATUSES))
+                rows = conn.execute(f"SELECT application_id FROM learning_application_log WHERE status IN ({statuses})").fetchall()
+                active_ids.update(str(row["application_id"] or "") for row in rows)
+            if state_table_exists(conn, "learning_application_effect"):
+                statuses = ",".join(f"'{status}'" for status in sorted(ACTIVE_EFFECT_STATUSES))
+                rows = conn.execute(f"SELECT application_id FROM learning_application_effect WHERE status IN ({statuses})").fetchall()
+                active_ids.update(str(row["application_id"] or "") for row in rows)
+            active_ids.discard("")
+            return len(active_ids)
+        finally:
+            conn.close()
+
     def evaluate(
         self,
         *,
@@ -101,6 +124,7 @@ class LearningExperimentAdmissionService:
         min_abs_delta: float = 0.002,
         min_relative_delta: float = 0.05,
         bypass_for_risk_reduction: bool = False,
+        max_global_active_experiments: int | None = None,
     ) -> dict[str, Any]:
         if action in STRUCTURAL_AUDIT_ACTIONS:
             return {
@@ -120,6 +144,23 @@ class LearningExperimentAdmissionService:
                 "active_application": active,
                 "boundary": self.boundary(),
             }
+        if not bypass_for_risk_reduction:
+            if max_global_active_experiments is None:
+                try:
+                    max_global_active_experiments = max(1, int(os.getenv("QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS", "24")))
+                except Exception:
+                    max_global_active_experiments = 24
+            global_active = self.global_active_count()
+            if global_active >= max_global_active_experiments:
+                return {
+                    "ok": True,
+                    "allowed": False,
+                    "status": "blocked_global_experiment_budget",
+                    "reason": "active_effect_backlog_must_terminalize",
+                    "global_active_count": global_active,
+                    "global_active_budget": max_global_active_experiments,
+                    "boundary": self.boundary(),
+                }
         delta = None
         threshold = None
         if action in WEIGHT_ACTIONS and old_weight is not None and new_weight is not None:

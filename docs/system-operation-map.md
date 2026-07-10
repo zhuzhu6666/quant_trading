@@ -469,7 +469,7 @@ _process_tick_factor_pipeline(...)
 - `LiveDecisionFrame` 是交易信号决策输出，不读取账户、不做仓位 sizing、不调用 `RiskPolicyService`、不触达 broker。
 - `RiskPolicyService` 是动作级裁决入口，开仓、模板切换、自治动作和 rollback 都不能绕过它；账户/运行态阈值通过 `RiskLimitSnapshot` 输入 `RiskGovernor`。live 数据层写入 `decision_freshness` 后，`RiskPolicyService.evaluate("open_trade")` 可用 `decision_bar_stale` 阻断新增风险；close/reduce/tighten 仍走降风险路径。
 - live loop 的日内 circuit breaker 是执行快停保护，阈值来自 `RiskLimitSnapshot.max_daily_loss_pct`，不是第二套风控事实源。
-- demo 真实采样上限由 `RiskLimitSnapshot` 输入 `RiskPolicyService`；`autonomy_mode=demo_autonomous` 使用 `RuntimeConfig.demo_learning_max_daily_trades` 提高有效日交易上限，`autonomy_mode=demo_nursery` 使用 `max_daily_trades=0` 表示不设日交易次数上限，其它硬风控仍由 `RiskPolicyService` 裁决。
+- demo 真实采样上限由 `RiskLimitSnapshot` 输入 `RiskPolicyService`；`demo_autonomous` 与 `demo_nursery` 都使用 `max(risk_max_daily_trades, demo_learning_max_daily_trades)` 的明确上限，不再用 0 表示无限制，其它硬风控仍由 `RiskPolicyService` 裁决。
 - context policy 只改有效阈值和仓位乘数，不改多空方向。
 
 ## 7. 因子评分真实语义

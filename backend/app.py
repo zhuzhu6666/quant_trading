@@ -141,17 +141,34 @@ async def lifespan(app: FastAPI):
 
     get_job_manager().bind_loop(asyncio.get_running_loop())
 
-    # Restore shadow/discovered factors from lifecycle log
+    # Restore only the configured and budgeted runtime factor working set.
     try:
         from alpha.persistent_registry import restore_from_log
-        restored = restore_from_log(verbose=False)
+        configured_factor_names = {
+            str(name)
+            for name, factor_cfg in dict(getattr(rc, "factor_signal_config", {}) or {}).items()
+            if not isinstance(factor_cfg, dict) or factor_cfg.get("enabled") is not False
+        }
+        restored = restore_from_log(
+            verbose=False,
+            preferred_names=configured_factor_names,
+            discovered_budget=None,
+        )
         if restored:
-            _lg.info(f"[lifespan] restored {restored} shadow/discovered factors from lifecycle log")
+            _lg.info(f"[lifespan] restored {restored} configured/budgeted runtime factors from lifecycle log")
     except Exception as e:
         _lg.warning(f"[lifespan] restore_from_log failed (non-fatal): {e}")
 
     runtime_lifecycle = BackendRuntimeLifecycle()
     runtime_lifecycle.start(_lg)
+
+    try:
+        from backend.services.backend_readiness_snapshot import BackendReadinessSnapshotService
+
+        refresh = BackendReadinessSnapshotService().refresh_async(max_age_seconds=180.0)
+        _lg.info(f"[lifespan] backend readiness projection: {refresh.get('status')}")
+    except Exception as e:
+        _lg.warning(f"[lifespan] backend readiness projection startup failed (non-fatal): {e}")
 
     _lg.info("[lifespan] PostgreSQL state store active; legacy state dual-write worker not started")
 

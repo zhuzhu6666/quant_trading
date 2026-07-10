@@ -9,6 +9,8 @@ from config.runtime_config import RuntimeConfig, shared as shared_runtime_config
 
 
 VALID_SYSTEM_MODES = {"backtest", "paper", "live"}
+LIVE_ACCOUNT_MAX_DAILY_LOSS_PCT = 5.0
+LIVE_ACCOUNT_MAX_DAILY_TRADES = 20
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,21 @@ def evaluate_execution_semantics(
         blocking_reason = f"invalid_system_mode:{mode}"
     elif mode != "live" and ctrader_send_orders:
         blocking_reason = "ctrader_send_orders_requires_system_mode_live"
+    elif mode == "live" and ctrader_send_orders and not factor_dry_run:
+        ctrader = (settings or {}).get("ctrader") if isinstance(settings, dict) else {}
+        ctrader = ctrader if isinstance(ctrader, dict) else {}
+        host = str(ctrader.get("host") or "").strip().lower()
+        is_demo_account = host.startswith("demo.") or ".demo." in host
+        if not is_demo_account:
+            daily_loss = float(getattr(cfg, "risk_max_daily_loss_pct", 5.0) or 5.0)
+            daily_trades = max(
+                int(getattr(cfg, "risk_max_daily_trades", 20) or 20),
+                int(getattr(cfg, "demo_learning_max_daily_trades", 20) or 20),
+            )
+            if daily_loss > LIVE_ACCOUNT_MAX_DAILY_LOSS_PCT:
+                blocking_reason = "demo_daily_loss_limit_requires_demo_ctrader_host"
+            elif daily_trades > LIVE_ACCOUNT_MAX_DAILY_TRADES:
+                blocking_reason = "demo_daily_trade_limit_requires_demo_ctrader_host"
 
     effective = bool(not blocking_reason and mode == "live" and ctrader_send_orders and not factor_dry_run)
     return ExecutionSemantics(

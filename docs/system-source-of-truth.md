@@ -49,7 +49,7 @@
 | 因子生命周期 | `RegistryAdapter` / lifecycle event | lifecycle 权威来源 |
 | DSL 因子表达式校验 | `alpha.factor_dsl.parse_dsl` + `backend.runtime.evolution_orchestrator` + `alpha.factor_health` | 进化注册前必须解析校验；历史坏表达式在健康评估中标记 `invalid_dsl`/`DEAD` 并跳过执行，不允许反复进入评估报错 |
 | 因子治理视图 | `Factor Catalog` | 聚合 registry、runtime config、weights、health、shadow、AWE、learning |
-| 生产因子预算 | `alpha.runtime_factor_selection` + readiness `runtime_factor_budget` | runtime config 明确启用的因子优先；额外 discovered 因子按 lifecycle/score 受 `QUANT_RUNTIME_DISCOVERED_FACTOR_BUDGET` 限额（默认 24），冷尾部保留 registry/权重/研究证据但不进入 live 计算和方向组合，不删除候选资产 |
+| 生产因子预算 | `alpha.persistent_registry` + `alpha.runtime_factor_selection` + readiness `runtime_factor_budget` | backend 启动只把 runtime config 明确启用的因子和 `QUANT_RUNTIME_DISCOVERED_FACTOR_BUDGET`（默认 24）以内的 discovered 工作集恢复进内存；冷尾部完整保留 lifecycle/registry/权重/研究证据但不进入 live 计算和方向组合，不删除候选资产 |
 | 因子组合体检 | `backend.services.factor_blend_health` + `/api/ops/backend-readiness.factor_blend_health` | 只读诊断 active alpha 数量、DSL/PCA 噪声族、低权重尾部、冗余组/标签集中度和弱健康活跃因子；默认以 Factor Catalog `used_in_score=true` 作为当前生产 active 口径，避免 runtime config 冷尾部污染健康状态；不写权重、不禁用因子、不授权交易 |
 | 因子裁剪候选 | `backend.services.factor_pruning_candidates` + `decision_factor_snapshot` / `trade_outcome_review` + `/api/ops/backend-readiness.factor_pruning_candidates` | 只读生成 `review_downweight` / `review_disable` 候选；要求近期真实决策参与和非零贡献，优先处理真实亏损贡献压力，也可纳入 runtime config 缺失但 live 快照中高贡献的 discovered DSL/PCA 因子；不写 `policy_suggestion`、不写 `brain_governance_candidate`、不改 runtime 权重 |
 | 因子裁剪反证 | `backend.services.factor_counter_evidence` + `shadow_factor_perf` / `factor_contribution_review` / `experience_memory` | 只读计算 `keep_score`、`prune_score` 和 regime exception；作为 pruning 晋级刹车，不直接写权重、不提交提案 |
@@ -97,7 +97,8 @@
 - 风控不产生 alpha，但拥有最高执行裁决权。
 - 因子治理、模板切换、回滚都不能绕过 RiskPolicyService。
 - live 日内熔断可以做执行快停，但阈值必须来自 `RiskLimitSnapshot`，不能在 live loop 内另设事实源。
-- `autonomy_mode=demo_autonomous` 下的真实 demo 采样可以使用 `RuntimeConfig.demo_learning_max_daily_trades` 作为有效日交易上限；`autonomy_mode=demo_nursery` 下 `RiskLimitSnapshot.max_daily_trades=0` 表示不设日交易次数上限。两者都只通过 `RiskLimitSnapshot` 输入 `RiskPolicyService`，不绕过断连、stale market、仓位、volume、日亏损或熔断裁决。
+- `autonomy_mode=demo_autonomous` 和 `demo_nursery` 的真实 demo 采样都使用 `max(risk_max_daily_trades, demo_learning_max_daily_trades)` 作为明确日交易上限（当前 100），不再以 0 表示无限制。该阈值只通过 `RiskLimitSnapshot` 输入 `RiskPolicyService`，不绕过断连、stale market、仓位、volume、日亏损或熔断裁决。
+- 宽松 Demo 账户阈值（当前允许日亏损 50%、日交易 100 笔）必须同时满足有效下单和 cTrader host 为 `demo.*`；非 Demo host 启动时最多接受日亏损 5%、日交易 20 笔，否则 `execution_semantics` fail-closed，避免配置迁移把 Demo 风险预算带入真实账户。
 - `autonomy_mode=demo_nursery` 是 demo 学习育苗模式，不是 live 风控旁路；`RiskPolicyService` 只会把 `loss_cooldown_active`、`consecutive_losses`、VaR/CVaR、同向学习冷却、entry quality 和 event-window learning control 记录为 `demo_nursery_observations`，断连、熔断、日亏损、最大回撤、decision stale、仓位/API 上限、重大事件硬窗口和运行健康底线仍硬拦。
 - NFP/GVZ/重大事件等事件风险在 live 中只能作为 `RiskPolicyService` 输入；`ExecutionGate` 的事件过滤保留给 backtest/legacy 兼容。
 - live 因子决策不得使用当前未闭合 K 线；`spot_quote` 只能修正执行参考价，不能把旧 bar 信号变成新信号。同一根已闭合 bar 不得重复 append 到 `StreamingFactorEngine`，也不得重复生成 open 决策；重复 loop tick 只能执行持仓观察、close/reduce/tighten 和保护修复。若 `decision_freshness.schema_version=decision_bar_freshness.v1` 且 `fresh=false`，开仓必须由 `RiskPolicyService` 返回 `decision_bar_stale`；若 bar fresh 但 `age_seconds` 超过 `max(180s, 1.5 * timeframe_seconds)`，开仓必须返回 `decision_signal_age_stale`。持仓监督的 close/reduce/tighten 仍可继续。
@@ -154,7 +155,8 @@
 | Meta Governance Web page | `web_frontend/src/pages/V16BrainPage.tsx` + `/v16` | 元治理大脑展示入口；读取 brain state/memory/action-plans/action-plan-evals/low-impact-executions/medium-impact-governance/governance-candidate-reviews/live-ready-guardrails/proposal-registry/live-autonomy/readiness API，展示 world model、memory、hypotheses、Critic、提案总线、实盘自治状态和边界；按钮只触发受控后端 API，不在前端重算策略/风控或执行未授权动作 |
 | 后验效果 | `learning_application_effect` | 回滚判断事实源 |
 | 效果归因质量 | `learning_application_effect.decision_json.evidence_quality` + `research.learning.application_effects` | 排除 partial/missing attribution、人工/重启污染和 regime mismatch；同一 scope 后续 application 会关闭前一 application 的观察窗口，前一窗口只能使用下一次变更之前的复盘证据，证据足够可做 bounded comparative 判定，不足则立即归档为 `inconclusive`，不允许跨变更混用样本；`mixed` 按冷却持续复评，开放窗口超过观察期仍不足则收口；无随机对照时不得声称严格因果 |
-| 学习实验准入 | `backend.services.learning_experiment_admission` | 同一 scope 同时最多一个 active experiment；权重变化还必须通过绝对/相对 materiality 门，风险回滚继续走既有降风险路径；`update_redundancy_groups` 是结构审计，不伪装成可由交易 PnL 归因的 factor experiment |
+| 学习实验准入 | `backend.services.learning_experiment_admission` | 同一 scope 同时最多一个 active experiment，全局 active application/effect 默认最多 24 个（`QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS`）；积压达到预算时先等待后验终态，风险回滚继续绕过扩张预算；权重变化还必须通过绝对/相对 materiality 门 |
+| 自主学习事实水位 | PostgreSQL `runtime_kv[autonomous_learning.fact_watermark.v1]` + `backend.services.learning_cycle_watermark` | 调度轮次比较 decision/order/position/review/supervisor 五类源事实的 count/max timestamp；没有新事实时跳过全量样本重建，成功完成后才推进水位；手动明确触发仍可运行完整学习周期 |
 | 权重应用状态机 | `backend.services.learning_application_state` + `learning_application_log/effect` + `runtime_config_snapshot` | `prepared -> applied/observing -> terminal`；配置 mutation 前先持久化 prepared，重启时以匹配 run/source 的 runtime snapshot 作为提交事实恢复，缺失快照的超时 prepared 标为 `mutation_failed`，同 scope 在 prepared 期间 fail-closed |
 | 有界经验先验 | `backend.services.experience_prior` + `DecisionPolicy.experience_priors` | 只聚合 terminal 且 `bounded_attribution_allowed=true` 的 factor effect，按样本、时效和效果生成 0.85~1.15 prior；AWE/Factor Governance 三个生产 `fast_decide` 调用统一传入，最终写权仍属于 DecisionPolicy/RiskPolicy/mutation boundary |
 | 学习闭环质量 SLO | `backend.services.learning_effect_quality` + `/api/learning/effect-quality` + readiness `learning_effect_quality` / `v16.learning_effect_quality` | 只读汇总效果终态率、开放窗口年龄、并发归因积压、bounded window 收口一致性和受控重试资格；`inconclusive` 只有在终态后出现新复盘证据且同 scope 没有更新 application 时才可成为重试候选，实际重试仍必须形成新 application 并经过既有 governor/风控/决策边界；SLO degraded 只进入 `known_observations`，不直接改权重、参数、权限或交易 readiness |
@@ -239,7 +241,7 @@
 | 事项 | 权威来源 | 说明 |
 |---|---|---|
 | 后端健康 | `/api/health` | 最小服务健康 |
-| 运维就绪 | `/api/ops/backend-readiness` | readiness、overlay、governance freshness、V15 replay/autonomy health |
+| 运维就绪 | PostgreSQL `runtime_kv[backend_readiness_snapshot.v1]` + `/api/ops/backend-readiness` | 昂贵 readiness 图由 backend 单例后台线程构建并发布持久化投影；请求只读最近快照并暴露 age/refresh 状态，冷启动返回 `warming_snapshot` 而不阻塞 API 请求；不得把构建迁入 learning worker，避免其间接加载 broker/live 依赖并争用交易会话；投影不参与交易授权 |
 | 学习闭环质量 | `/api/learning/effect-quality` + readiness `learning_effect_quality` / `v16.learning_effect_quality` | 查看效果终态率、开放窗口、归因积压、SLO 与只读受控重试候选；不创建 application、不应用 runtime mutation |
 | autonomy scope approval | `/api/ops/autonomy-health/scope-approvals/latest` / `/api/ops/autonomy-health/scope-approvals` | 查看或记录 health scope recommendation 审批审计；不应用 runtime 权限 |
 | autonomy scope enforcement | `/api/ops/autonomy-health/scope-enforcements/latest` / `/api/ops/autonomy-health/scope-enforcements` | 查看或显式执行 health scope recommendation 收紧；必须走 incident-control、`RiskPolicyService` 和 overlay/snapshot |

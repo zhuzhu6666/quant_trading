@@ -84,3 +84,40 @@ def test_restore_from_log_replays_lifecycle_and_only_restores_active_dsl(tmp_pat
     assert adapter.registered[0]["source"] == "discovered"
     assert adapter.registered[0]["description"] == "rank(close)"
     assert adapter.registered[0]["log_event"] is False
+
+
+def test_restore_from_log_keeps_preferred_and_limits_cold_runtime_factors(tmp_path, monkeypatch):
+    import backend.core.db as db
+
+    state_db = tmp_path / "state.db"
+    conn = _init_lifecycle_db(state_db)
+    conn.executemany(
+        """
+        INSERT INTO lifecycle_events (timestamp, event, factor, source, description)
+        VALUES (?, 'register', ?, 'discovered', ?)
+        """,
+        [
+            (1.0, "preferred_old", "rank(close)"),
+            (2.0, "cold_old", "rank(open)"),
+            (3.0, "cold_new", "rank(high)"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    def _test_state_conn(read_only=True):
+        conn = sqlite3.connect(state_db)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(db, "get_state_pg_conn", _test_state_conn)
+    adapter = _Adapter()
+    restored = persistent_registry.restore_from_log(
+        verbose=False,
+        adapter=adapter,
+        preferred_names={"preferred_old"},
+        discovered_budget=1,
+    )
+
+    assert restored == 2
+    assert [item["name"] for item in adapter.registered] == ["preferred_old", "cold_new"]

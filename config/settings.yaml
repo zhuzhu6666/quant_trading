@@ -147,7 +147,7 @@ runtime:
   autonomy_demo_auto_apply: true
   live_autonomy_unlocked: false
   live_autonomy_unlock_id: ''
-  demo_learning_max_daily_trades: 60
+  demo_learning_max_daily_trades: 100
   runtime_incident_mode: normal
   strategy_sl_atr: 2.0
   strategy_tp_atr: 3.0
