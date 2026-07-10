@@ -386,6 +386,8 @@ class ProposalRegistryService:
         score = _safe_float(metric.get("quality_score"), 0.55)
         contract_violations = int(metric.get("contract_violation_count") or 0)
         negative_effects = int(metric.get("negative_effect_count") or 0)
+        positive_effects = int(metric.get("positive_effect_count") or 0)
+        terminal_effects = int(metric.get("terminal_effect_count") or 0)
         low_reliability = int(metric.get("low_reliability_count") or 0)
         strictness = "normal"
         reasons: list[str] = []
@@ -398,9 +400,12 @@ class ProposalRegistryService:
         elif score < 0.58:
             strictness = "elevated"
             reasons.append("agent_quality_score_below_0_58")
-        if negative_effects > 0:
+        if negative_effects > 0 and (positive_effects == 0 or negative_effects >= positive_effects):
             strictness = "high"
             reasons.append("agent_negative_effect_history")
+        elif negative_effects > 0 and strictness == "normal":
+            strictness = "elevated"
+            reasons.append("agent_mixed_effect_history")
         if low_reliability >= 3 and strictness == "normal":
             strictness = "elevated"
             reasons.append("agent_low_reliability_history")
@@ -409,6 +414,9 @@ class ProposalRegistryService:
             "schema_version": "agent_reliability_gate.v1",
             "source_agent": source_agent,
             "quality_score": round(score, 6),
+            "verified_positive_effects": positive_effects,
+            "verified_negative_effects": negative_effects,
+            "terminal_effects": terminal_effects,
             "review_strictness": strictness,
             "reasons": sorted(set(reasons)),
             "required_evidence_level": "high" if strictness == "high" else ("normal_plus" if strictness == "elevated" else "normal"),

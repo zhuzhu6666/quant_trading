@@ -113,6 +113,8 @@ def test_agent_scorecard_counts_proposals_applications_and_effects(tmp_path):
     assert factor_agent["policy_suggestion_count"] == 1
     assert factor_agent["application_count"] == 1
     assert factor_agent["positive_effect_count"] == 1
+    assert factor_agent["terminal_effect_count"] == 1
+    assert factor_agent["observing_effect_count"] == 0
     assert factor_agent["contract_violation_count"] == 0
     assert scorecard["summary"]["application_count"] == 1
 

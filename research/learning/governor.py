@@ -11,6 +11,7 @@ from typing import Any
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from research.learning.application_effects import classify_effect, observation_window_expired
 from research.learning.governance_conflicts import GovernanceConflictResolver
 
 
@@ -788,6 +789,39 @@ class RuleEvolutionGovernor:
                     continue
                 scope_key_for_effect = str(app.get("scope_key") or "")
                 review_limit = max(int(observe_trades) * 5, int(observe_trades))
+                next_application_row = self._execute(
+                    conn,
+                    """
+                    SELECT application_id, action, cycle_ts
+                    FROM learning_application_log
+                    WHERE application_id<>?
+                      AND scope_type=? AND scope_key=?
+                      AND cycle_ts>?
+                      AND status NOT IN ('superseded', 'rolled_back', 'rejected')
+                    ORDER BY cycle_ts ASC
+                    LIMIT 1
+                    """,
+                    (
+                        app["application_id"],
+                        scope_type,
+                        str(app.get("scope_key") or ""),
+                        float(app.get("cycle_ts") or 0.0),
+                    ),
+                ).fetchone()
+                next_application = (
+                    {
+                        "application_id": str(next_application_row["application_id"] or ""),
+                        "action": str(next_application_row["action"] or ""),
+                        "cycle_ts": float(next_application_row["cycle_ts"] or 0.0),
+                    }
+                    if next_application_row
+                    else None
+                )
+                observation_upper_bound = (
+                    float(next_application["cycle_ts"])
+                    if next_application
+                    else 1.0e18
+                )
                 if scope_type == "position_supervisor_template":
                     if not scope_key_for_effect:
                         continue
@@ -797,6 +831,7 @@ class RuleEvolutionGovernor:
                                r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
                         FROM trade_outcome_review r
                         WHERE r.created_at > ?
+                          AND r.created_at < ?
                           AND (
                               r.review_json LIKE '%inferred_close_supervisor%'
                               OR r.review_json LIKE '%supervisor_%'
@@ -804,7 +839,7 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), review_limit),
+                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, review_limit),
                     ).fetchall()
                     post_reviews = [
                         r for r in (self._parse_review_row(row) for row in post_rows)
@@ -847,6 +882,7 @@ class RuleEvolutionGovernor:
                                r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
                         FROM trade_outcome_review r
                         WHERE r.created_at > ?
+                          AND r.created_at < ?
                           AND EXISTS (
                               SELECT 1
                               FROM decision_factor_snapshot dfs
@@ -856,7 +892,7 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), factor, review_limit),
+                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, factor, review_limit),
                     ).fetchall()
                     post_reviews = [self._parse_review_row(r) for r in post_rows]
 
@@ -912,37 +948,7 @@ class RuleEvolutionGovernor:
                 )
                 post_reviews = post_reviews[: int(observe_trades)]
                 pre_reviews = pre_reviews[: int(observe_trades)]
-                observation_end = max(
-                    (float(item.get("created_at") or 0.0) for item in raw_post_reviews),
-                    default=float(app.get("cycle_ts") or 0.0),
-                )
-                concurrent_rows = self._execute(
-                    conn,
-                    """
-                    SELECT application_id, action, cycle_ts
-                    FROM learning_application_log
-                    WHERE application_id<>?
-                      AND scope_type=? AND scope_key=?
-                      AND cycle_ts>? AND cycle_ts<=?
-                      AND status NOT IN ('superseded', 'rolled_back', 'rejected')
-                    ORDER BY cycle_ts ASC
-                    """,
-                    (
-                        app["application_id"],
-                        scope_type,
-                        str(app.get("scope_key") or ""),
-                        float(app.get("cycle_ts") or 0.0),
-                        observation_end,
-                    ),
-                ).fetchall()
-                concurrent_applications = [
-                    {
-                        "application_id": str(item["application_id"] or ""),
-                        "action": str(item["action"] or ""),
-                        "cycle_ts": float(item["cycle_ts"] or 0.0),
-                    }
-                    for item in concurrent_rows
-                ]
+                concurrent_applications = [next_application] if next_application else []
 
                 post_rewards = [reward_from_review(r) for r in post_reviews]
                 pre_rewards = [reward_from_review(r) for r in pre_reviews]
@@ -979,25 +985,32 @@ class RuleEvolutionGovernor:
                         "excluded_regime_mismatch_post": post_regime_mismatch,
                         "excluded_regime_mismatch_baseline": pre_regime_mismatch,
                         "concurrent_applications": concurrent_applications,
+                        "observation_window": {
+                            "start_ts": float(app.get("cycle_ts") or 0.0),
+                            "end_ts": observation_upper_bound if next_application else None,
+                            "closed_by_application_id": (
+                                str(next_application.get("application_id") or "")
+                                if next_application
+                                else ""
+                            ),
+                        },
                     },
                 }
 
-                next_status = "observing"
-                if concurrent_applications:
-                    next_status = "observing"
-                    decision["evidence_quality"]["causal_status"] = "confounded_by_concurrent_application"
-                elif len(post_reviews) < min_trades or len(pre_reviews) < baseline_min_trades:
-                    next_status = "observing"
-                    decision["evidence_quality"]["causal_status"] = "insufficient_comparable_samples"
-                elif delta >= reward_delta_for_effective:
-                    next_status = "effective"
-                    decision["evidence_quality"]["causal_status"] = "comparative_effective"
-                elif delta <= reward_delta_for_bad:
-                    next_status = "ineffective"
-                    decision["evidence_quality"]["causal_status"] = "comparative_ineffective"
-                else:
-                    next_status = "mixed"
-                    decision["evidence_quality"]["causal_status"] = "comparative_mixed"
+                classification = classify_effect(
+                    post_count=len(post_reviews),
+                    baseline_count=len(pre_reviews),
+                    min_trades=min_trades,
+                    baseline_min_trades=baseline_min_trades,
+                    delta=delta,
+                    effective_threshold=reward_delta_for_effective,
+                    ineffective_threshold=reward_delta_for_bad,
+                    window_closed=bool(next_application),
+                )
+                next_status = classification.status
+                decision["evidence_quality"]["causal_status"] = classification.causal_status
+                if classification.retry_via_new_application:
+                    decision["evidence_quality"]["retry_via_new_application"] = True
                 cycle_ts = float(app.get("cycle_ts") or 0.0)
                 observation_clock_valid = cycle_ts >= 946684800.0
                 observation_age_seconds = max(0.0, now - cycle_ts) if observation_clock_valid else 0.0
@@ -1007,18 +1020,17 @@ class RuleEvolutionGovernor:
                     86400.0,
                     float(max_observation_age_seconds or 0.0),
                 )
-                if (
-                    next_status in {"observing", "mixed"}
-                    and observation_clock_valid
-                    and observation_age_seconds
-                    >= max(86400.0, float(max_observation_age_seconds or 0.0))
+                if observation_window_expired(
+                    status=next_status,
+                    cycle_ts=cycle_ts,
+                    now=now,
+                    max_age_seconds=float(max_observation_age_seconds or 0.0),
                 ):
                     next_status = "inconclusive"
                     decision["evidence_quality"]["causal_status"] = "observation_window_expired_inconclusive"
                     decision["evidence_quality"]["retry_via_new_application"] = True
                 decision["evidence_quality"]["bounded_attribution_allowed"] = bool(
-                    not concurrent_applications
-                    and len(post_reviews) >= min_trades
+                    len(post_reviews) >= min_trades
                     and len(pre_reviews) >= baseline_min_trades
                     and target_regime
                     and regime_evidence_available

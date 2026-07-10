@@ -9,7 +9,7 @@ import {
   getOpsRecovery,
   getSyncStatus,
   getSystemDbHealth,
-} from "@/api/client";
+} from "@/api/domains/system";
 import { MetricCard } from "@/components/Card";
 import { CompactMetric as OpsMiniMetric, Field, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";

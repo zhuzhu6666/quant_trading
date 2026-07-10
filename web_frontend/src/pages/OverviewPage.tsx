@@ -14,13 +14,11 @@ import { useLiveState } from "@/hooks/useLiveState";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 import {
   getAccount,
-  getHealth,
-  getLogTail,
   getLoopStatus,
   getRiskSummary,
   getSessionStats,
-  getSystemDbHealth,
 } from "@/api/client";
+import { getHealth, getLogTail, getSystemDbHealth } from "@/api/domains/system";
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickString } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
 import { formatDecimal, formatMoney, formatTime } from "@/lib/format";

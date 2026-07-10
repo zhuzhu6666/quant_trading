@@ -1,7 +1,7 @@
 # Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-07-06
+> Last verified: 2026-07-10
 > Scope: known legacy concepts, deprecated paths, migration state, and cleanup rules.
 
 本文登记历史残留。目的不是列 TODO，而是防止旧概念在新实现里反复复活。
@@ -53,29 +53,32 @@
 
 ### 低频因子重复污染归一化历史
 
-- 状态: `migrating`
+- 状态: `fixed`
 - 旧理解: 所有因子每根 bar 都同样写入 normalizer 历史。
 - 当前口径: 低频因子按 cadence 和 history_sample_policy 采样，值未变化时不重复污染 rank/zscore。
 - 影响面: `SignalNormalizer`、外部因子、回测/live 对齐。
 - 收口方式: 保留默认 `bar/every_bar` 兼容；宏观/COT/ETF/事件使用低频策略。
+- 验证方式: `tests/test_signal_normalizer.py::test_low_frequency_factor_history_samples_only_on_value_change`、`tests/alpha/test_low_frequency_factors.py`。
 
 ### shadow/discovered/live 混用
 
-- 状态: `migrating`
+- 状态: `fixed`
 - 旧理解: 搜索出来的因子容易被直接注册或进入主链。
 - 当前口径: shadow 永不直接交易；discovered 必须经证据门槛和治理晋升；live 才进入主链路。
 - 影响面: discovery、registry、runtime selection、AWE、readiness、Catalog。
 - 收口方式: `runtime_factor_selection` 返回 selected/excluded/reason；治理动作由 Orchestrator 执行。
+- 验证方式: runtime selection 明确排除 `shadow_only` / `lifecycle_dead`，Factor Governance 是唯一 lifecycle executor。
 
 ## 3. 自治治理旧债
 
 ### policy_suggestion 作为人工审批队列
 
-- 状态: `migrating`
+- 状态: `fixed`
 - 旧理解: `policy_suggestion` 默认等待人工审批。
 - 当前口径: 它是自治建议和执行审计表，状态应归一到自治语义。
 - 影响面: learning API、evolution orchestrator、前端治理页面。
 - 收口方式: 使用 normalized status：`proposed/auto_approved/applied/rolled_back/blocked_by_risk/superseded`。
+- 验证方式: `backend.services.policy_suggestion_status` 统一转换历史 raw status；readiness、计数和 Proposal Registry 只按 normalized status 判断自治语义，历史 raw 值仅保留审计兼容。
 
 ### 自治配置直接 patch 内存
 
@@ -189,11 +192,12 @@
 
 ### scripts/debug 临时探针
 
-- 状态: `migrating`
+- 状态: `fixed`
 - 旧理解: debug 目录可长期保留一次性导入、GitHub 搜索、Windows 启动和本地 cTrader 验证脚本。
 - 当前口径: debug 目录不是稳定运维入口；一次性探针、硬编码 Windows 路径和联网搜索脚本会污染下一版架构判断。
 - 影响面: scripts、Windows 本地旧工作区、Dukascopy 采集、cTrader 验证。
-- 收口方式: 已删除无引用的一次性 debug 脚本；Dukascopy 增量拉取入口已迁到 `scripts/maintenance/pull_dukascopy_incremental.py`，debug 目录不再作为正式运行入口。
+- 收口方式: 已删除 `scripts/debug` 临时入口；Dukascopy 增量拉取入口已迁到 `scripts/maintenance/pull_dukascopy_incremental.py`，正式排障只使用受维护脚本和服务日志。
+- 验证方式: 仓库不再包含 `scripts/debug` 业务脚本，部署/SOP 不引用该目录。
 
 ### 旧 cloud_deploy / docker-compose 打包路线
 
@@ -205,19 +209,21 @@
 
 ### legacy AWE trailing 保护候选
 
-- 状态: `migrating`
+- 状态: `fixed`
 - 旧理解: AWE trailing 可以作为独立持仓保护执行器直接驱动止损。
 - 当前口径: 它只构造 legacy trailing 保护候选，并由统一持仓保护仲裁处理；不能绕过 `PositionSupervisor`、holding timeout 或 `RiskPolicyService`。
 - 影响面: `backend/services/live_service.py`、`backend/services/live_position_lifecycle.py`、持仓保护 trace、历史 close reason、测试兼容。
-- 收口方式: 暂保留，因为 live 保护链和测试仍覆盖它；下一版如要移除，必须先用 supervisor 模板/保护候选完全替代，并迁移历史 close reason 映射。
+- 收口方式: legacy 计算仅作为 `ProtectionCandidate` 兼容适配器保留，统一由持仓保护仲裁、`PositionSupervisor` 和 `RiskPolicyService` 决定是否执行；它不再拥有独立执行权。历史 close reason 映射继续只用于复盘兼容。
+- 验证方式: `tests/test_live_position_lifecycle.py` 覆盖候选生成，`tests/test_live_service_lifecycle.py::test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown` 覆盖统一仲裁边界。
 
 ### legacy parameter sweep
 
-- 状态: `migrating`
+- 状态: `fixed`
 - 旧理解: 旧参数网格扫描可以直接 patch runtime config。
-- 当前口径: `_scheduled_param_tune()` 仅 observation-only；运行参数切换必须走 parameter template、governance、risk policy 和 runtime overlay。
+- 当前口径: live 服务不再保留 `_scheduled_param_tune()` 或 param tune 状态写入口；运行参数切换必须走 parameter template、governance、risk policy 和 runtime overlay。
 - 影响面: `backend/services/live_service.py`、参数模板、evolution closure tests。
-- 收口方式: 暂保留测试防回归；下一版可删除旧 sweep 函数，但必须先确认没有 scheduler/API 调用，并保留“不得直接 patch RuntimeConfig”的测试语义。
+- 收口方式: 已确认没有 scheduler/API 生产调用后删除旧 sweep、JSON/DB 状态写函数；保留架构测试确保入口不会复活。
+- 验证方式: `tests/test_evolution_closure_fixes.py::test_legacy_param_tune_entrypoint_is_removed`。
 
 ### legacy PreTrade/CircuitBreaker live 误用
 

@@ -735,7 +735,18 @@ class FactorGovernanceOrchestrator:
             factor_configs=factor_configs,
             current_weights=current_weights,
         )
+        # DecisionPolicy may clamp an already-minimal weight back to its
+        # current value. Treat that as a no-op: writing/auditing it every
+        # governance tick creates duplicate proposals and makes effect
+        # attribution impossible without changing any runtime behavior.
+        decisions = {
+            name: decision
+            for name, decision in decisions.items()
+            if abs(float(decision.new_weight) - float(decision.old_weight)) > 1e-9
+        }
         partial = DecisionPolicy.to_weights(decisions)
+        if not partial:
+            return actions
         self._apply_runtime_patch(
             {"factor_portfolio_weights": partial},
             source="factor_governance_update_weight",

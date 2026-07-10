@@ -9,6 +9,8 @@ const pages = ["OverviewPage", "LearningPage", "ModelsPage", "RiskPage", "OpsPag
 const dashboardBits = read("src/components/DashboardBits.tsx");
 const cssEntry = read("src/main.css");
 const tokens = read("src/styles/tokens.css");
+const apiClient = read("src/api/client.ts");
+const systemApi = read("src/api/domains/system.ts");
 
 assert.equal((app.match(/<ProtectedAppLayout/g) ?? []).length, 1, "受保护页面应共用一个布局壳");
 assert.ok((app.match(/lazy\(\(\) => import/g) ?? []).length >= 10, "页面应按路由懒加载");
@@ -19,5 +21,7 @@ assert.doesNotMatch(pages.join("\n"), /function (LearningMiniMetric|ModelMiniMet
 assert.doesNotMatch(pages.join("\n"), /\["backend-readiness",|\["ops-backend-readiness"\]|\["v1[56]", "readiness"\]/);
 assert.equal((tokens.match(/:root\s*\{/g) ?? []).length, 1, "设计 token 必须只有一个事实源");
 assert.equal((cssEntry.match(/@import/g) ?? []).length, 6, "样式入口应只负责编排分层样式");
+assert.doesNotMatch(apiClient, /export (async function|const) get(SystemLoad|SystemDbHealth|OpsAlerts)/);
+assert.match(systemApi, /getSystemLoad/);
 
 console.log("web_frontend architecture test: ok");

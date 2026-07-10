@@ -241,6 +241,10 @@ class AgentScorecardService:
             "rolled_back_application_count": 0,
             "positive_effect_count": 0,
             "negative_effect_count": 0,
+            "terminal_effect_count": 0,
+            "inconclusive_effect_count": 0,
+            "observing_effect_count": 0,
+            "effect_evidence_trade_count": 0,
             "trade_lesson_feedback_count": 0,
             "advisory_shadow_count": 0,
             "low_reliability_count": 0,
@@ -422,9 +426,16 @@ class AgentScorecardService:
                 ).fetchone()
                 if effect:
                     delta = _safe_float(effect["delta_avg_reward"])
-                    if delta > 0:
+                    effect_status = _text(effect["status"])
+                    if effect_status in {"effective", "reinforced", "ineffective", "rolled_back"}:
+                        metric["terminal_effect_count"] += 1
+                    elif effect_status == "inconclusive":
+                        metric["inconclusive_effect_count"] += 1
+                    elif effect_status in {"observing", "mixed", "applied", ""}:
+                        metric["observing_effect_count"] += 1
+                    if effect_status in {"effective", "reinforced"} and delta > 0:
                         metric["positive_effect_count"] += 1
-                    if delta < 0:
+                    if effect_status in {"ineffective", "rolled_back"} and delta < 0:
                         metric["negative_effect_count"] += 1
 
     def _experience_metrics(self, conn: Any, metrics: dict[str, dict[str, Any]], limit: int, gaps: list[str]) -> None:
@@ -691,11 +702,23 @@ class AgentScorecardService:
     def _quality_score(metric: dict[str, Any]) -> float:
         proposal_count = max(1, int(metric.get("proposal_count") or 0))
         application_count = int(metric.get("application_count") or 0)
+        positive = int(metric.get("positive_effect_count") or 0)
+        negative = int(metric.get("negative_effect_count") or 0)
+        terminal = int(metric.get("terminal_effect_count") or 0)
+        inconclusive = int(metric.get("inconclusive_effect_count") or 0)
+        superseded = int((metric.get("status_counts") or {}).get("superseded") or 0)
+        outcome_count = positive + negative
         score = 0.55
-        score += min(0.15, 0.015 * int(metric.get("proposal_count") or 0))
-        score += min(0.12, 0.03 * int(metric.get("positive_effect_count") or 0))
+        # Reward verified outcomes, not proposal volume. A prolific agent with
+        # mostly superseded/observing proposals must not look more reliable.
+        if outcome_count:
+            score += 0.16 * (positive / outcome_count) * min(1.0, outcome_count / 5.0)
+        if application_count:
+            score += 0.08 * min(1.0, terminal / application_count)
+            score -= 0.08 * min(1.0, inconclusive / application_count)
+        score -= 0.10 * min(1.0, superseded / proposal_count)
         score += min(0.08, 0.01 * int(metric.get("trade_lesson_feedback_count") or 0))
-        score -= min(0.18, 0.04 * int(metric.get("negative_effect_count") or 0))
+        score -= min(0.18, 0.04 * negative)
         score -= min(0.18, 0.03 * int(metric.get("contract_violation_count") or 0))
         score -= min(0.12, 0.02 * int(metric.get("conflict_count") or 0))
         score -= min(0.10, 0.02 * int(metric.get("low_reliability_count") or 0))

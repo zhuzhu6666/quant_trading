@@ -993,7 +993,7 @@ def test_effect_reconciliation_filters_contaminated_and_wrong_regime_reviews():
     assert mismatched == 1
 
 
-def test_effect_reconciliation_does_not_attribute_concurrent_same_scope_change(tmp_path):
+def test_effect_reconciliation_closes_window_before_concurrent_same_scope_change(tmp_path):
     db_path = str(tmp_path / "state.db")
     gov = RuleEvolutionGovernor(db_path)
     first_id = gov.log_application(
@@ -1057,9 +1057,76 @@ def test_effect_reconciliation_does_not_attribute_concurrent_same_scope_change(t
     finally:
         conn.close()
     decision = json.loads(row["decision_json"])
-    assert row["status"] == "observing"
-    assert decision["evidence_quality"]["causal_status"] == "confounded_by_concurrent_application"
+    assert row["status"] == "inconclusive"
+    assert decision["evidence_quality"]["causal_status"] == "bounded_window_insufficient_samples"
+    assert decision["evidence_quality"]["observation_window"]["end_ts"] == 230.0
     assert decision["evidence_quality"]["bounded_attribution_allowed"] is False
+
+
+def test_effect_reconciliation_uses_only_evidence_before_next_same_scope_change(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    first_id = gov.log_application(
+        scope_type="factor",
+        scope_key="bounded_factor",
+        action="downweight",
+        bias_multiplier=0.9,
+        old_weight=0.3,
+        new_weight=0.27,
+        suggestion_ids=[],
+        cycle_ts=200.0,
+    )
+    gov.log_application(
+        scope_type="factor",
+        scope_key="bounded_factor",
+        action="boost_small",
+        bias_multiplier=1.05,
+        old_weight=0.27,
+        new_weight=0.2835,
+        suggestion_ids=[],
+        cycle_ts=230.0,
+    )
+    conn = _connect(db_path)
+    try:
+        samples = ((100.0, -20.0), (120.0, -10.0), (205.0, 80.0), (210.0, 90.0), (220.0, 85.0), (240.0, -100.0))
+        for idx, (ts, pnl) in enumerate(samples):
+            decision_id = f"bounded_dec_{idx}"
+            conn.execute(
+                "INSERT INTO decision_factor_snapshot (decision_id, factor, contribution_score) VALUES (?, 'bounded_factor', ?)",
+                (decision_id, pnl / 100.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
+                 failure_tags_json, summary_text, review_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, '[]', '', ?, ?)
+                """,
+                (
+                    f"bounded_review_{idx}", f"bounded_trade_{idx}", f"bounded_position_{idx}",
+                    decision_id, pnl, "good_win" if pnl > 0 else "bad_loss",
+                    json.dumps({"context_integrity": "full", "close_reason": "broker_close"}), ts,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    gov.reconcile_application_effects(min_trades=3, observe_trades=3, baseline_min_trades=2)
+
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status, observed_trade_count, decision_json FROM learning_application_effect WHERE application_id=?",
+            (first_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    decision = json.loads(row["decision_json"])
+    assert row["status"] == "reinforced"
+    assert row["observed_trade_count"] == 3
+    assert decision["evidence_quality"]["causal_status"] == "bounded_comparative_effective"
+    assert "bounded_review_5" not in decision["post_review_ids"]
 
 
 def test_mixed_effect_is_rechecked_after_cooldown(tmp_path):

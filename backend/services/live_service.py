@@ -419,9 +419,6 @@ _ENTRY_PROTECTION_REPAIR_SOURCE = "entry_protection_repair"
 _ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS = 20.0
 _PENDING_OPEN_ATTACH_TTL_SECONDS = 300.0
 
-# P1-d: module-level state for _scheduled_param_tune
-_PARAM_TUNE_STATE: dict[str, Any] = {}
-
 # ── AttributionEngine 开仓/平仓跟踪 ──
 # 记录上一 tick 的 position_id 集合, 用于检测平仓事件.
 # 在 _process_tick_factor_pipeline 中每 tick 更新.
@@ -2189,40 +2186,6 @@ def _resolve_position_api_volume(
         if current_pid is not None and int(current_pid) == int(position_id):
             return _position_api_volume(pos) or actual_api_volume
     return actual_api_volume
-
-
-def _save_param_tune_state() -> None:
-    """Persist param tune state to the state store + JSON backup."""
-    import json, time as _time
-    from pathlib import Path
-
-    path = Path(__file__).resolve().parent.parent.parent / "data" / "param_tune_state.json"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_PARAM_TUNE_STATE, indent=2, default=str))
-    except Exception as e:
-        logger.warning("Failed to save param tune state: %s", e)
-
-    try:
-        conn = _get_state_pg_conn()
-        try:
-            for key, val in _PARAM_TUNE_STATE.items():
-                _state_execute(
-                    conn,
-                    """
-                    INSERT INTO param_tune (key, value_json, updated_at)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET
-                        value_json=excluded.value_json,
-                        updated_at=excluded.updated_at
-                    """,
-                    (key, json.dumps(val, default=str), _time.time())
-                )
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception:
-        pass
 
 
 def _track_local_sl_tp(position_id: int, sl: float, tp: float) -> None:
@@ -4102,70 +4065,6 @@ _last_loop_end: float = 0.0
 _MIN_RESTART_INTERVAL = 60  # 最小重启间隔 60s
 _BAR_CACHE_PATH = Path(__file__).resolve().parent.parent.parent / "logs" / ".bar_cache.pkl"
 _PRICE_STUCK_WARNED: dict[str, float] = {}  # {(broker,tf): last_price}
-
-
-def _scheduled_param_tune():
-    """Daily legacy parameter sweep.
-
-    This job is observation-only now. Runtime parameter changes must flow
-    through parameter templates and governance, not a direct RuntimeConfig
-    patch from a legacy grid search.
-    """
-    import sys
-    from pathlib import Path
-    _root = Path(__file__).resolve().parent.parent.parent
-    if str(_root) not in sys.path:
-        sys.path.insert(0, str(_root))
-
-    try:
-        from scripts.tune_strategy_params import run_single_backtest
-    except ImportError:
-        logger.warning("[param_tune] tune_strategy_params.py not found, skip")
-        return
-
-    light_grid = {
-        "strategy_rsi_period": [7, 14, 21],
-        "strategy_sl_atr": [1.5, 2.0, 3.0],
-        "strategy_tp_atr": [2.0, 3.0, 4.0],
-        "strategy_votes_needed": [1.5, 2.0],
-        "strategy_cooldown_bars": [1, 3],
-    }
-    import itertools
-    keys = list(light_grid.keys())
-    combos = list(itertools.product(*light_grid.values()))
-
-    logger.info(f"[param_tune] starting sweep: {len(combos)} combos")
-    best = None
-    for i, combo in enumerate(combos):
-        params = dict(zip(keys, combo))
-        r = run_single_backtest(params, n_bars=3000, dry_run=False)
-        if r.error:
-            continue
-        if best is None or (r.sharpe > 0 and (best.sharpe <= 0 or r.sharpe > best.sharpe)):
-            best = r
-
-    if best is None or best.n_trades < 5:
-        logger.warning("[param_tune] no valid result, keeping current params")
-        return
-
-    logger.info(
-        f"[param_tune] candidate: rsi={best.params.get('strategy_rsi_period')} "
-        f"sl={best.params.get('strategy_sl_atr')} tp={best.params.get('strategy_tp_atr')} "
-        f"PnL={best.net_pnl:.1f} WR={best.win_rate:.0f}% Sharpe={best.sharpe:.2f}"
-    )
-    # 记录运行时间
-    _PARAM_TUNE_STATE["last_run_ts"] = time.time()
-    _save_param_tune_state()
-
-    try:
-        from monitor.evolution_story import EvolutionStory
-        EvolutionStory.shared().append(
-            event_type="param_tune_candidate",
-            payload={"best_params": best.params, "pnl": round(best.net_pnl, 2),
-                  "sharpe": round(best.sharpe, 2), "n_combos": len(combos), "applied": False}
-        )
-    except Exception as _e:
-        logger.debug("[param_tune] EvolutionStory.append failed: %s", _e)
 
 
 def _scheduled_awe_adapt():

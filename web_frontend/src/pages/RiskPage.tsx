@@ -10,8 +10,8 @@ import {
   getRecentTradeTraces,
   getRiskPolicyVerdicts,
   getRiskSummary,
-  getSystemDbHealth,
 } from "@/api/client";
+import { getSystemDbHealth } from "@/api/domains/system";
 import {
   asRecord,
   formatDirection,

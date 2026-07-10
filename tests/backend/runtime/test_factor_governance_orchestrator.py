@@ -169,6 +169,53 @@ def test_orchestrator_defers_factor_mutation_while_effect_is_pending(monkeypatch
     assert rc.shared().factor_portfolio_weights["model_weak_factor"] == 0.3
 
 
+def test_orchestrator_does_not_audit_decision_policy_noop(monkeypatch):
+    rc.reset_for_tests()
+    rc.patch({"factor_portfolio_weights": {"minimal_factor": 0.01}})
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    applied = []
+    audited = []
+
+    class _NoopDecision:
+        old_weight = 0.01
+        new_weight = 0.01
+
+        @staticmethod
+        def to_api():
+            return {"old_weight": 0.01, "new_weight": 0.01}
+
+    class _NoopPolicy:
+        def __init__(self, **kwargs):
+            pass
+
+        def fast_decide(self, **kwargs):
+            return {"minimal_factor": _NoopDecision()}
+
+        @staticmethod
+        def to_weights(decisions):
+            return {name: decision.new_weight for name, decision in decisions.items()}
+
+    monkeypatch.setattr("backend.runtime.factor_governance_orchestrator.DecisionPolicy", _NoopPolicy)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda factor_id: False)
+    monkeypatch.setattr(orch, "_apply_runtime_patch", lambda *args, **kwargs: applied.append((args, kwargs)))
+    monkeypatch.setattr(orch, "_audit_action", lambda *args, **kwargs: audited.append((args, kwargs)))
+
+    catalog = [{
+        "factor_id": "minimal_factor",
+        "source": "builtin",
+        "role": "alpha",
+        "used_in_score": True,
+        "weight": 0.01,
+        "health_score": 10.0,
+        "health_status": "DECAYING",
+        "factor_governance_shadow": {},
+    }]
+
+    assert orch._downweight_weak_alpha(catalog, {"run_id": "test-run"}) == []
+    assert applied == []
+    assert audited == []
+
+
 def test_pending_effect_gate_releases_factor_after_final_effect(monkeypatch):
     row = {"application_status": "reinforced", "effect_status": "reinforced"}
 

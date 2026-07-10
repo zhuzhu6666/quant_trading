@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { LogOut, LayoutDashboard, BarChart3, Activity, ShieldAlert, Settings2, BrainCircuit, Microscope, Cpu, Rocket } from "lucide-react";
-import { getSystemLoad } from "@/api/client";
+import { getSystemLoad } from "@/api/domains/system";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDecimal } from "@/lib/format";
 import { queryKeys } from "@/api/queryKeys";

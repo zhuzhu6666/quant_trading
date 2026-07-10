@@ -8,6 +8,7 @@ const requiredFiles = [
   "src/main.css",
   "src/api/client.ts",
   "src/api/domains/readiness.ts",
+  "src/api/domains/system.ts",
   "src/contexts/AuthContext.tsx",
   "src/hooks/useLiveState.ts",
   "src/pages/LoginPage.tsx",

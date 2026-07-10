@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-import types
 from dataclasses import dataclass
 
 import numpy as np
@@ -139,34 +137,8 @@ def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
     assert rc.shared().factor_portfolio_weights == {"foo": 1.0}
 
 
-def test_legacy_param_tune_no_longer_patches_runtime_config(monkeypatch):
-    rc.reset_for_tests()
-    rc.patch({"strategy_sl_atr": 1.5, "strategy_tp_atr": 2.5, "strategy_cooldown_bars": 3})
-
-    result = types.SimpleNamespace(
-        error=False,
-        n_trades=10,
-        sharpe=1.2,
-        params={
-            "strategy_rsi_period": 7,
-            "strategy_sl_atr": 3.0,
-            "strategy_tp_atr": 4.0,
-            "strategy_votes_needed": 2.0,
-            "strategy_cooldown_bars": 1,
-        },
-        net_pnl=12.3,
-        win_rate=55.0,
-    )
-    module = types.SimpleNamespace(run_single_backtest=lambda *args, **kwargs: result)
-    monkeypatch.setitem(sys.modules, "scripts.tune_strategy_params", module)
-    monkeypatch.setattr(live_service, "_save_param_tune_state", lambda: None)
-
-    live_service._scheduled_param_tune()
-
-    cfg = rc.shared()
-    assert cfg.strategy_sl_atr == 1.5
-    assert cfg.strategy_tp_atr == 2.5
-    assert cfg.strategy_cooldown_bars == 3
+def test_legacy_param_tune_entrypoint_is_removed():
+    assert not hasattr(live_service, "_scheduled_param_tune")
 
 
 def test_canary_intermediate_stage_does_not_execute_promotion(monkeypatch):

@@ -336,10 +336,6 @@ export async function getAuthMe(): Promise<AuthMe> {
   return getJson<AuthMe>("/api/auth/me");
 }
 
-export async function getHealth(): Promise<HealthResponse> {
-  return getJson<HealthResponse>("/api/health");
-}
-
 export async function getLoopStatus(): Promise<LoopStatus> {
   return getJson<LoopStatus>("/api/live/loop-status");
 }
@@ -379,38 +375,6 @@ export async function getRiskPolicyVerdicts(limit = 50): Promise<Record<string, 
 
 export async function getRecentTradeTraces(limit = 20): Promise<Record<string, unknown>> {
   return getJson<Record<string, unknown>>(`/api/risk/trade-trace/recent?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getSystemDbHealth(): Promise<DbHealthPayload> {
-  return getJson<DbHealthPayload>("/api/system/db-health");
-}
-
-export async function getSystemLoad(): Promise<SystemLoadPayload> {
-  return getJson<SystemLoadPayload>("/api/system/load");
-}
-
-export async function getLogTail(lines = 30): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>(`/api/logs/tail?lines=${encodeURIComponent(String(lines))}`);
-}
-
-export async function getOpsAlerts(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/alerts");
-}
-
-export async function getOpsRecovery(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/recovery");
-}
-
-export async function getSyncStatus(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/sync/status");
-}
-
-export async function getCtraderTokenStatus(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ctrader/token-status");
-}
-
-export async function getExternalDataStatus(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/data/external-status");
 }
 
 export async function getFactorV4Stats(): Promise<Record<string, unknown>> {
