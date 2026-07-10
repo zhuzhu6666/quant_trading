@@ -20,7 +20,7 @@ commission:
   type: fixed
   value: 6.0
 risk:
-  max_daily_loss_pct: 5.0
+  max_daily_loss_pct: 50.0
   max_position_lots: 0.5
   max_trades_per_day: 20
   single_trade_risk_usd: 2.0
@@ -123,7 +123,7 @@ runtime:
   risk_tp_atr: 2.5
   risk_max_drawdown_pct: 15.0
   risk_max_consecutive_losses: 8
-  risk_max_daily_loss_pct: 5.0
+  risk_max_daily_loss_pct: 50.0
   risk_max_daily_trades: 20
   risk_data_lag_max_seconds: 3600.0
   risk_circuit_breaker_bypass: false
