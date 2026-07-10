@@ -6856,12 +6856,16 @@ def _record_amended_open_execution_quality(
     composite: Any,
     actual_api_volume: float,
     pid: int,
+    submit_started_at: float | None = None,
+    fill_received_at: float | None = None,
 ) -> None:
     try:
+        submitted_at = float(submit_started_at or time.time())
+        filled_at = float(fill_received_at or time.time())
         _exec_quality.record(_ExecTrade(
-            signal_time=bar.get("time", time.time()),
-            submit_time=time.time(),
-            fill_time=time.time(),
+            signal_time=submitted_at,
+            submit_time=submitted_at,
+            fill_time=filled_at,
             signal_price=current_price,
             fill_price=fill_price,
             symbol="XAUUSD+",
@@ -7103,6 +7107,8 @@ def _record_amended_open_success_context(
     entry_protection_plan: dict[str, Any],
     direction_name: str,
     log,
+    submit_started_at: float | None = None,
+    fill_received_at: float | None = None,
 ) -> None:
     _mark_amended_open_success_local_state(
         pid=pid,
@@ -7117,6 +7123,7 @@ def _record_amended_open_success_context(
     _record_amended_open_execution_quality(
         bar=bar, current_price=current_price, fill_price=fill_price,
         composite=composite, actual_api_volume=actual_api_volume, pid=pid,
+        submit_started_at=submit_started_at, fill_received_at=fill_received_at,
     )
     try:
         trade_attr = _record_amended_open_attribution(
@@ -7678,6 +7685,8 @@ def _attach_open_trade_protection(
     candidate: _OpenTradeCandidate,
     entry_protection_plan: dict[str, Any],
     log,
+    submit_started_at: float | None = None,
+    fill_received_at: float | None = None,
 ) -> None:
     try:
         amend_res = bridge.amend_position_sltp(
@@ -7714,6 +7723,8 @@ def _attach_open_trade_protection(
                 entry_protection_plan=entry_protection_plan,
                 direction_name=candidate.direction_name,
                 log=log,
+                submit_started_at=submit_started_at,
+                fill_received_at=fill_received_at,
             )
             return
 
@@ -7856,6 +7867,8 @@ def _handle_open_trade_order_success(
     candidate: _OpenTradeCandidate,
     current_price: float,
     log,
+    submit_started_at: float | None = None,
+    fill_received_at: float | None = None,
 ) -> None:
     fill_price = _tick_resolve_order_fill_price(result, current_price=current_price)
     position_id = _tick_resolve_order_position_id(result, positions_before=positions)
@@ -7934,6 +7947,8 @@ def _handle_open_trade_order_success(
         candidate=candidate,
         entry_protection_plan=entry_protection_plan,
         log=log,
+        submit_started_at=submit_started_at,
+        fill_received_at=fill_received_at,
     )
 
 
@@ -7959,7 +7974,9 @@ def _submit_open_trade_candidate(
             log(f"tick {tick}: v4 open SKIP (loop_draining stage=broker_submit)")
             return False
         try:
+            submit_started_at = time.time()
             result = _submit_open_trade_order(bridge, composite, candidate.volume)
+            fill_received_at = time.time()
         except Exception as exc:
             log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
             return True
@@ -7984,6 +8001,8 @@ def _submit_open_trade_candidate(
                 candidate=candidate,
                 current_price=current_price,
                 log=log,
+                submit_started_at=submit_started_at,
+                fill_received_at=fill_received_at,
             )
         elif result is not None and not getattr(result, "success", False):
             _record_open_trade_order_failure(

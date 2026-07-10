@@ -273,6 +273,7 @@ class ProposalRegistryService:
             "does_not_approve_llm_advisory": True,
             "does_not_change_source_status": True,
             "routes_to_existing_control_gates": True,
+            "projection_compaction_preserves_source_ledgers": True,
         }
 
     def refresh(self, *, limit: int = 500) -> dict[str, Any]:
@@ -309,6 +310,7 @@ class ProposalRegistryService:
                 and item.get("route_recommendation") not in {"request_review", "tighten_incident", "observe"}
             ):
                 item["route_recommendation"] = "request_replay"
+        compaction = self.compact_projection()
         self._upsert(list(by_id.values()))
         summary = self.status(refresh=False)
         return {
@@ -318,7 +320,50 @@ class ProposalRegistryService:
             "conflict_count": int(summary.get("conflict_count", 0)),
             "high_unresolved_conflict_count": int(summary.get("high_unresolved_conflict_count", 0)),
             "summary": summary,
+            "compaction": compaction,
             "boundary": self.boundary(),
+        }
+
+    def compact_projection(
+        self,
+        *,
+        retention_seconds: float = 30 * 86400.0,
+        delete_limit: int = 1000,
+    ) -> dict[str, Any]:
+        """Trim old terminal/inert read-model rows; authoritative ledgers remain intact."""
+        ensure_proposal_registry_table(self.db_path)
+        cutoff = time.time() - max(7 * 86400.0, float(retention_seconds or 0.0))
+        limit = max(1, min(int(delete_limit or 1000), 5000))
+        conn = _connect(self.db_path)
+        try:
+            rows = _execute(
+                conn,
+                """
+                SELECT proposal_id
+                FROM proposal_registry
+                WHERE updated_at<?
+                  AND status IN (
+                      'applied', 'rolled_back', 'blocked', 'blocked_by_risk',
+                      'superseded', 'rejected', 'completed', 'dry_run',
+                      'ok', 'recorded', 'shadow_after_train'
+                  )
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+            proposal_ids = [str(row["proposal_id"] or "") for row in rows if str(row["proposal_id"] or "")]
+            for proposal_id in proposal_ids:
+                _execute(conn, "DELETE FROM proposal_registry WHERE proposal_id=?", (proposal_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        return {
+            "ok": True,
+            "schema_version": "proposal_registry_projection_compaction.v1",
+            "deleted_count": len(proposal_ids),
+            "retention_seconds": max(7 * 86400.0, float(retention_seconds or 0.0)),
+            "source_ledgers_preserved": True,
         }
 
     def _agent_scorecard_context(self, *, limit: int) -> dict[str, dict[str, Any]]:

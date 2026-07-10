@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -89,6 +90,18 @@ class AutonomousEvolutionNurseryRunner:
             readiness=initial_readiness,
             include_chain_health=False,
         )
+        release_cleanup = self._close_stale_release()
+        if str(release_cleanup.get("status") or "") == "cancelled":
+            actions.append({
+                "action": "close_stale_release",
+                "ok": bool(release_cleanup.get("ok")),
+                "result": release_cleanup,
+            })
+            initial_readiness = self._build_readiness()
+            initial_cycle = AutonomousEvolutionCycleService(self.db_path).status(
+                readiness=initial_readiness,
+                include_chain_health=False,
+            )
         if str(initial_cycle.get("status") or "") == "outside_demo_nursery_scope":
             return self._result(
                 run_id=run_id,
@@ -394,6 +407,15 @@ class AutonomousEvolutionNurseryRunner:
         from backend.services.proposal_registry import ProposalRegistryService
 
         return ProposalRegistryService(self.db_path).status(refresh=True)
+
+    def _close_stale_release(self) -> dict[str, Any]:
+        from backend.services.release_control import ReleaseControlService
+
+        max_age = float(os.getenv("QUANT_RELEASE_STARTED_MAX_AGE_SEC", "3600") or 3600)
+        return ReleaseControlService(self.db_path).close_stale_started_release(
+            max_age_seconds=max_age,
+            actor="system:autonomous_evolution_nursery_runner",
+        )
 
     def _review_candidates(self, *, limit: int) -> dict[str, Any]:
         from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService

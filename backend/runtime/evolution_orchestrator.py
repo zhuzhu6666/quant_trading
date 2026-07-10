@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json as _json
 import logging
+import os
 import time as _time
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -504,7 +505,44 @@ def _run_canary_evaluation(
                 dir_state.fresh_evidence_bars = int(state.get("fresh_evidence_bars", 0) or 0)
                 dir_state.history = [dict(event) for event in state.get("events", []) if isinstance(event, dict)]
 
-        for name, score, source in candidates:
+        stage_priority = {
+            "PROBATION": 0,
+            "CANARY_50": 1,
+            "CANARY_20": 2,
+            "CANARY_5": 3,
+            SHADOW: 4,
+        }
+        evaluation_limit = max(
+            10,
+            min(int(os.getenv("QUANT_CANARY_EVALUATION_LIMIT", "200") or 200), 1000),
+        )
+        evaluable_candidates = [
+            item
+            for item in candidates
+            if str((saved_states.get(item[0]) or {}).get("stage") or SHADOW).upper()
+            not in TERMINAL_STAGES | {ACTIVE}
+        ]
+        evaluable_candidates.sort(
+            key=lambda item: (
+                stage_priority.get(
+                    str((saved_states.get(item[0]) or {}).get("stage") or SHADOW).upper(),
+                    5,
+                ),
+                float((saved_states.get(item[0]) or {}).get("updated_at") or 0.0),
+                -float(item[1]),
+                item[0],
+            )
+        )
+        selected_candidates = evaluable_candidates[:evaluation_limit]
+        if len(evaluable_candidates) > len(selected_candidates):
+            _emit_evolution_story("canary_evaluation_bounded", {
+                "candidate_count": len(evaluable_candidates),
+                "evaluation_limit": evaluation_limit,
+                "deferred_count": len(evaluable_candidates) - len(selected_candidates),
+                "selection_policy": "advanced_stage_then_oldest_evaluation_then_score",
+            })
+
+        for name, score, source in selected_candidates:
             # ★ P0.1: 不再 bypass canary validation. 所有因子 (无论 source
             # 是什么) 都从 canary_state 恢复 stage, 走标准 canary 管道。
             # 移除了 "discovered源且无saved_states→直接ACTIVE" 的捷径。
@@ -531,7 +569,7 @@ def _run_canary_evaluation(
 
         # ★ 持久化 director 状态到 DB
         new_states: dict[str, dict] = {}
-        for name, _, _ in candidates:
+        for name, _, _ in selected_candidates:
             s = director.get_state(name)
             new_states[name] = {
                 "stage": s.stage,

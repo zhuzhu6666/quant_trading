@@ -115,7 +115,7 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
 
         def _run_nursery_cycle() -> None:
             result = AutonomousEvolutionNurseryRunner().run_once(
-                replay_if_stale=False,
+                replay_if_stale=_env_enabled("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_REPLAY_IF_STALE", "1"),
                 apply_when_ready=False,
                 consume_recommended_step=_env_enabled("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_CONSUME_STEP", "1"),
                 recommended_step_limit=int(os.getenv("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_STEP_LIMIT", "1") or "1"),

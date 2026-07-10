@@ -129,6 +129,22 @@
 - 影响面: Orchestrator、learning_application_effect、RiskPolicyService。
 - 收口方式: 负后验触发回滚前先过 `rollback_factor_action` 风控。
 
+### mixed 后验永久冻结
+
+- 状态: `fixed`
+- 旧理解: `learning_application_effect=mixed` 是最终状态，效果协调器只继续扫描 applied/observing/effective。
+- 当前口径: mixed 是有冷却的待复评状态，使用最新可比样本继续判断；超过观察窗仍无法归因时收口为 `inconclusive`，后续只能通过新 application 重试。
+- 影响面: `RuleEvolutionGovernor`、Factor Governance pending gate、Agent Scorecard、Proposal Registry。
+- 收口方式: bounded reconcile + mixed cooldown + observation timeout；不直接改权重，仍由既有 rollback/reinforce 路径处理最终后验。
+
+### YAML 与自治 overlay 差异误报 runtime drift
+
+- 状态: `fixed`
+- 旧理解: readiness 直接比较 YAML RuntimeConfig 与内存 singleton，合法持久化 overlay 也会被判定为 drift。
+- 当前口径: drift 比较 YAML base + persisted overlay 的有效配置与内存；base/overlay 差异单独展示，不作为异常。
+- 影响面: backend readiness、重启恢复、自治 posture。
+- 收口方式: `config_runtime_drift()` 读取 overlay authority，同时保留 disk/effective/memory execution semantics 供排障。
+
 ## 4. 数据和运行态旧债
 
 ### SQLite state.db 作为运行态主库

@@ -270,6 +270,63 @@ class ReleaseControlService:
         finally:
             conn.close()
 
+    def close_stale_started_release(
+        self,
+        *,
+        max_age_seconds: float = 3600.0,
+        actor: str = "system:release_watchdog",
+    ) -> dict[str, Any]:
+        """Cancel one abandoned release without creating a new release run."""
+        latest = self.latest_release()
+        if not latest.get("run_id"):
+            return {"ok": True, "status": "no_release"}
+        if str(latest.get("status") or "") != "started":
+            return {
+                "ok": True,
+                "status": "not_started",
+                "run_id": str(latest.get("run_id") or ""),
+            }
+        age_seconds = max(0.0, time.time() - _safe_float(latest.get("created_at")))
+        threshold = max(300.0, float(max_age_seconds or 3600.0))
+        if age_seconds < threshold:
+            return {
+                "ok": True,
+                "status": "still_fresh",
+                "run_id": str(latest.get("run_id") or ""),
+                "age_seconds": age_seconds,
+                "max_age_seconds": threshold,
+            }
+        summary = dict(latest.get("summary") or {})
+        summary["stale_release_watchdog"] = {
+            "status": "cancelled",
+            "reason": "started_release_exceeded_max_age",
+            "age_seconds": age_seconds,
+            "max_age_seconds": threshold,
+        }
+        result = self.finish_release(
+            str(latest["run_id"]),
+            status="cancelled",
+            summary=summary,
+        )
+        self.record_approval_event(
+            str(latest["run_id"]),
+            action="stale_release_watchdog",
+            actor=actor,
+            decision="cancelled",
+            reason="started_release_exceeded_max_age",
+            evidence_refs={
+                "age_seconds": age_seconds,
+                "max_age_seconds": threshold,
+            },
+        )
+        return {
+            "ok": bool(result.get("ok")),
+            "status": "cancelled",
+            "run_id": str(latest["run_id"]),
+            "age_seconds": age_seconds,
+            "max_age_seconds": threshold,
+        }
+
     def get_release(self, run_id: str) -> dict[str, Any]:
         conn = _connect(self.db_path, read_only=True)
         try:

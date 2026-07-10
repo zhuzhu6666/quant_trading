@@ -374,19 +374,21 @@ class SystemHealth:
                     )
                 else:
                     components["tick_data"] = ComponentStatus(
-                        name="Tick 数据", status="critical", score=0.0,
-                        detail=f"{age/60:.0f} min ago (stale)", ts=now,
+                        name="研究 Tick 归档", status="degraded", score=0.3,
+                        detail=(
+                            f"research archive {age/60:.0f} min ago (stale advisory); "
+                            "live cTrader quote health is monitored separately"
+                        ), ts=now,
                     )
-                    errors.append(f"Tick data stale: {age/60:.0f} min")
             else:
                 components["tick_data"] = ComponentStatus(
-                    name="Tick 数据", status="critical", score=0.0,
-                    detail="no data", ts=now,
+                    name="研究 Tick 归档", status="degraded", score=0.3,
+                    detail="no research archive data (advisory; live quotes monitored separately)", ts=now,
                 )
         except Exception as e:
             components["tick_data"] = ComponentStatus(
-                name="Tick 数据", status="critical", score=0.0,
-                detail=f"check failed: {e}", ts=now,
+                name="研究 Tick 归档", status="degraded", score=0.3,
+                detail=f"research archive check failed (advisory): {e}", ts=now,
             )
 
         # L2 depth (l2.duckdb)

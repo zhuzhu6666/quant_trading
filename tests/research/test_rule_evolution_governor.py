@@ -1060,3 +1060,64 @@ def test_effect_reconciliation_does_not_attribute_concurrent_same_scope_change(t
     assert row["status"] == "observing"
     assert decision["evidence_quality"]["causal_status"] == "confounded_by_concurrent_application"
     assert decision["evidence_quality"]["bounded_attribution_allowed"] is False
+
+
+def test_mixed_effect_is_rechecked_after_cooldown(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    app_id = gov.log_application(
+        scope_type="factor",
+        scope_key="mixed_factor",
+        action="downweight",
+        bias_multiplier=0.9,
+        old_weight=0.3,
+        new_weight=0.27,
+        suggestion_ids=[],
+        cycle_ts=200.0,
+    )
+    gov.reconcile_application_effects()
+    conn = _connect(db_path)
+    try:
+        conn.execute("UPDATE learning_application_log SET status='mixed' WHERE application_id=?", (app_id,))
+        conn.execute(
+            "UPDATE learning_application_effect SET status='mixed', updated_at=0 WHERE application_id=?",
+            (app_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = gov.reconcile_application_effects(mixed_recheck_after_seconds=300.0)
+
+    assert result["rechecked_mixed"] == 1
+    assert result["observed"] == 1
+    assert result["waiting"] == 1
+
+
+def test_observation_window_expires_as_inconclusive(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    app_id = gov.log_application(
+        scope_type="factor",
+        scope_key="expired_factor",
+        action="downweight",
+        bias_multiplier=0.9,
+        old_weight=0.3,
+        new_weight=0.27,
+        suggestion_ids=[],
+        cycle_ts=1_700_000_000.0,
+    )
+
+    result = gov.reconcile_application_effects(max_observation_age_seconds=86400.0)
+
+    assert result["inconclusive"] == 1
+    conn = _connect(db_path)
+    try:
+        effect = conn.execute(
+            "SELECT status, decision_json FROM learning_application_effect WHERE application_id=?",
+            (app_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert effect["status"] == "inconclusive"
+    assert json.loads(effect["decision_json"])["evidence_quality"]["retry_via_new_application"] is True

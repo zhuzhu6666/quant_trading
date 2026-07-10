@@ -17,6 +17,16 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _latency_ms(signal_time: float, fill_time: float) -> float | None:
+    """Return comparable wall-clock latency and reject mixed/stale timestamps."""
+    if signal_time <= 0 or fill_time <= 0:
+        return None
+    latency = (fill_time - signal_time) * 1000.0
+    if latency < 0 or latency > 300_000.0:
+        return None
+    return latency
+
+
 @dataclass
 class TradeExecution:
     """单笔成交的执行质量记录"""
@@ -73,7 +83,7 @@ class ExecutionQuality:
             self._total_rejected += 1
 
         # 计算延迟 (毫秒)
-        latency_ms = (trade.fill_time - trade.signal_time) * 1000 if trade.fill_time > 0 and trade.signal_time > 0 else None
+        latency_ms = _latency_ms(trade.signal_time, trade.fill_time)
         slippage_bps = None
         if trade.signal_price > 0 and trade.fill_price > 0:
             raw_slip = (trade.fill_price - trade.signal_price) / trade.signal_price * 10000
@@ -86,7 +96,8 @@ class ExecutionQuality:
             f"[ExecQuality] {trade.symbol} {trade.direction} "
             f"order={trade.order_id} vol={trade.volume:.4f} "
             f"signal={trade.signal_price:.2f} fill={trade.fill_price:.2f} "
-            f"slip={slippage_bps or 0:.1f}bps lat={latency_ms or 0:.0f}ms"
+            f"slip={slippage_bps or 0:.1f}bps "
+            f"lat={f'{latency_ms:.0f}ms' if latency_ms is not None else 'n/a'}"
         )
 
     def record_rejected(self):
@@ -123,8 +134,9 @@ class ExecutionQuality:
         # 延迟 (ms)
         latencies = []
         for r in filled:
-            if r.signal_time > 0 and r.fill_time > 0:
-                latencies.append((r.fill_time - r.signal_time) * 1000)
+            latency = _latency_ms(r.signal_time, r.fill_time)
+            if latency is not None:
+                latencies.append(latency)
 
         # 市场冲击: fill vs VWAP
         impacts = []

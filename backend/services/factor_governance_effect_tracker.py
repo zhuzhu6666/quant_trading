@@ -119,7 +119,9 @@ class FactorGovernanceEffectTrackerService:
     def reconcile(self, *, limit: int = 50) -> dict[str, Any]:
         from research.learning.governor import RuleEvolutionGovernor
 
-        governor_result = RuleEvolutionGovernor(str(self.db_path)).reconcile_application_effects()
+        governor_result = RuleEvolutionGovernor(str(self.db_path)).reconcile_application_effects(
+            application_limit=max(1, min(int(limit or 50), 200)),
+        )
         status = self.status(limit=limit)
         return {
             "ok": True,
@@ -263,6 +265,8 @@ class FactorGovernanceEffectTrackerService:
             return "ineffective", "rollback_or_block_more_pruning"
         if effect_status == "mixed":
             return "mixed", "continue_observation"
+        if effect_status == "inconclusive":
+            return "inconclusive", "retry_only_with_new_application"
         return effect_status or "unknown", "watch"
 
     def _empty(self, status: str) -> dict[str, Any]:

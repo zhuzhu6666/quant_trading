@@ -20,6 +20,33 @@ def test_readiness_reports_config_runtime_drift(monkeypatch, tmp_path):
     assert status["semantic_drift"] is True
 
 
+def test_config_runtime_drift_treats_persisted_overlay_as_authority(monkeypatch):
+    from backend.services import runtime_config_overlay
+
+    parsed = {"system": {"mode": "live"}, "ctrader": {"send_orders": False}}
+    base = rc.RuntimeConfig.from_yaml(parsed)
+    rc.register_overlay_base(base, replace_existing=True)
+    effective = rc.config_from_overlay({"ctrader_send_orders": True})
+    rc.replace(effective)
+
+    class _FakeOverlayService:
+        def latest(self):
+            return {
+                "ok": True,
+                "status": "available",
+                "overlay": {"ctrader_send_orders": True},
+            }
+
+    monkeypatch.setattr(runtime_config_overlay, "RuntimeConfigOverlayService", _FakeOverlayService)
+
+    status = config_service.config_runtime_drift(parsed, include_overlay=True)
+
+    assert status["drift"] is False
+    assert status["authority"] == "yaml_plus_runtime_overlay"
+    assert "ctrader_send_orders" in status["overlay_changed_keys"]
+    rc.reset_for_tests()
+
+
 def test_readiness_exposes_mutation_policy_and_audit_health():
     policy = BackendReadinessService._mutation_policy_status()
     audit = BackendReadinessService._audit_health_status()

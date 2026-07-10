@@ -653,3 +653,34 @@ def test_proposal_review_refuses_authorization_and_keeps_llm_advisory_read_only(
     refused = ProposalRegistryService(db_path).review("llm_advisory_audit:llm1", decision="approved")
     assert refused["ok"] is False
     assert refused["status"] == "refused_authorizing_review"
+
+
+def test_projection_compaction_preserves_authoritative_source_ledger(tmp_path):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute("CREATE TABLE source_fact (fact_id TEXT PRIMARY KEY, payload TEXT DEFAULT '')")
+        conn.execute("INSERT INTO source_fact (fact_id, payload) VALUES ('fact_old', 'kept')")
+        conn.execute(
+            """
+            INSERT INTO proposal_registry
+            (proposal_id, status, created_at, updated_at)
+            VALUES ('projection_old', 'completed', ?, ?)
+            """,
+            (time.time() - 40 * 86400.0, time.time() - 40 * 86400.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = ProposalRegistryService(db_path).compact_projection()
+
+    assert result["deleted_count"] == 1
+    assert result["source_ledgers_preserved"] is True
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        assert conn.execute("SELECT payload FROM source_fact WHERE fact_id='fact_old'").fetchone()[0] == "kept"
+        assert conn.execute("SELECT COUNT(*) AS n FROM proposal_registry").fetchone()[0] == 0
+    finally:
+        conn.close()

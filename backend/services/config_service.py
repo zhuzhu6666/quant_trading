@@ -1,6 +1,7 @@
 """Config service — read/edit config/settings.yaml."""
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -120,28 +121,58 @@ def get_config() -> dict:
     return {"yaml": text, "parsed": parsed, "path": str(SETTINGS_PATH), "exists": True}
 
 
-def config_runtime_drift(parsed: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Compare disk settings-derived runtime config with the in-memory singleton."""
-    from config.runtime_config import shared as shared_runtime_config
+def config_runtime_drift(
+    parsed: dict[str, Any] | None = None,
+    *,
+    include_overlay: bool | None = None,
+) -> dict[str, Any]:
+    """Compare the effective YAML+overlay authority with the in-memory singleton."""
+    from config.runtime_config import config_from_overlay, shared as shared_runtime_config
 
     if parsed is None:
         parsed = get_config().get("parsed") or {}
     if not isinstance(parsed, dict):
         parsed = {}
     disk_runtime = RuntimeConfig.from_yaml(parsed)
+    expected_runtime = disk_runtime
+    overlay_status: dict[str, Any] = {"ok": False, "status": "not_checked", "overlay": {}}
+    if include_overlay is None:
+        include_overlay = not (os.getenv("PYTEST_CURRENT_TEST") or os.getenv("PYTEST_VERSION"))
+    if include_overlay:
+        try:
+            from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+
+            overlay_status = RuntimeConfigOverlayService().latest()
+            if overlay_status.get("ok"):
+                expected_runtime = config_from_overlay(overlay_status.get("overlay") or {})
+        except Exception as exc:
+            overlay_status = {
+                "ok": False,
+                "status": "unavailable",
+                "error": f"{type(exc).__name__}: {exc}",
+                "overlay": {},
+            }
     memory_runtime = shared_runtime_config()
     disk_semantics = evaluate_execution_semantics(parsed, disk_runtime)
+    expected_semantics = evaluate_execution_semantics(parsed, expected_runtime)
     memory_semantics = evaluate_execution_semantics(parsed, memory_runtime)
     disk_dict = disk_runtime.to_dict()
+    expected_dict = expected_runtime.to_dict()
     memory_dict = memory_runtime.to_dict()
-    changed_keys = sorted(k for k in disk_dict if disk_dict.get(k) != memory_dict.get(k))
-    semantic_drift = disk_semantics.to_dict() != memory_semantics.to_dict()
+    changed_keys = sorted(k for k in expected_dict if expected_dict.get(k) != memory_dict.get(k))
+    overlay_changed_keys = sorted(k for k in disk_dict if disk_dict.get(k) != expected_dict.get(k))
+    semantic_drift = expected_semantics.to_dict() != memory_semantics.to_dict()
     return {
         "drift": bool(changed_keys or semantic_drift),
         "changed_keys": changed_keys[:200],
         "changed_key_count": len(changed_keys),
         "semantic_drift": semantic_drift,
+        "authority": "yaml_plus_runtime_overlay" if overlay_status.get("ok") else "yaml",
+        "overlay_status": str(overlay_status.get("status") or ""),
+        "overlay_changed_keys": overlay_changed_keys[:200],
+        "overlay_changed_key_count": len(overlay_changed_keys),
         "disk_execution_semantics": disk_semantics.to_dict(),
+        "expected_execution_semantics": expected_semantics.to_dict(),
         "memory_execution_semantics": memory_semantics.to_dict(),
     }
 

@@ -501,6 +501,8 @@ class MetaModelLightGBMService:
         horizon: int = 3,
         holdout_ratio: float = 0.25,
         min_samples: int = 30,
+        walk_forward_folds: int = 3,
+        max_generalization_gap: float = 0.25,
         register: bool = True,
         registry_db_path: str | None = None,
         symbol: str = "XAUUSD+",
@@ -552,20 +554,23 @@ class MetaModelLightGBMService:
         x_holdout = pd.DataFrame([item["features"] for item in holdout_samples], columns=FEATURE_NAMES)
         y_holdout = [int(item["label"]) for item in holdout_samples]
 
-        model = lgb.LGBMClassifier(
-            objective="multiclass",
-            num_class=len(POSTURE_LABELS),
-            n_estimators=160,
-            learning_rate=0.04,
-            num_leaves=15,
-            min_child_samples=max(1, min(20, len(train_samples) // 4)),
-            subsample=0.9,
-            colsample_bytree=0.9,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=1,
-            verbosity=-1,
-        )
+        def _new_model(sample_count: int):
+            return lgb.LGBMClassifier(
+                objective="multiclass",
+                num_class=len(POSTURE_LABELS),
+                n_estimators=160,
+                learning_rate=0.04,
+                num_leaves=15,
+                min_child_samples=max(1, min(20, sample_count // 4)),
+                subsample=0.9,
+                colsample_bytree=0.9,
+                class_weight="balanced",
+                random_state=42,
+                n_jobs=1,
+                verbosity=-1,
+            )
+
+        model = _new_model(len(train_samples))
         model.fit(x_train, y_train)
         train_pred = list(model.predict(x_train))
         holdout_pred = list(model.predict(x_holdout))
@@ -574,7 +579,7 @@ class MetaModelLightGBMService:
             rule_decision = self._rule_decision_from_features(sample["features"])
             rule_posture = str(rule_decision.get("posture") or "observe")
             rule_holdout_pred.append(POSTURE_LABELS.index(rule_posture) if rule_posture in POSTURE_LABELS else POSTURE_LABELS.index("observe"))
-        majority_label = Counter(y_holdout).most_common(1)[0][0]
+        majority_label = Counter(y_train).most_common(1)[0][0]
         majority_holdout_pred = [majority_label] * len(y_holdout)
 
         def _label_distribution(values: list[int]) -> dict[str, int]:
@@ -605,10 +610,82 @@ class MetaModelLightGBMService:
         model_balanced_accuracy = float(holdout_model["balanced_accuracy"] or 0.0)
         rule_balanced_accuracy = float(holdout_rule["balanced_accuracy"] or 0.0)
         majority_balanced_accuracy = float(holdout_majority["balanced_accuracy"] or 0.0)
+        requested_folds = max(2, min(int(walk_forward_folds or 3), 5))
+        initial_train_count = max(10, min(len(train_samples) - 1, len(train_samples) // 2))
+        validation_pool = max(0, len(train_samples) - initial_train_count)
+        fold_size = max(1, validation_pool // requested_folds) if validation_pool else 0
+        walk_forward_items: list[dict[str, Any]] = []
+        if fold_size > 0:
+            for fold_index in range(requested_folds):
+                validation_start = initial_train_count + fold_index * fold_size
+                validation_end = (
+                    len(train_samples)
+                    if fold_index == requested_folds - 1
+                    else min(len(train_samples), validation_start + fold_size)
+                )
+                fold_train = train_samples[:validation_start]
+                fold_validation = train_samples[validation_start:validation_end]
+                fold_train_labels = [int(item["label"]) for item in fold_train]
+                fold_validation_labels = [int(item["label"]) for item in fold_validation]
+                if (
+                    not fold_validation
+                    or len(set(fold_train_labels)) < 2
+                    or len(set(fold_validation_labels)) < 2
+                ):
+                    continue
+                fold_model = _new_model(len(fold_train))
+                fold_model.fit(
+                    pd.DataFrame([item["features"] for item in fold_train], columns=FEATURE_NAMES),
+                    fold_train_labels,
+                )
+                fold_predictions = [
+                    int(value)
+                    for value in fold_model.predict(
+                        pd.DataFrame([item["features"] for item in fold_validation], columns=FEATURE_NAMES)
+                    )
+                ]
+                fold_majority_label = Counter(fold_train_labels).most_common(1)[0][0]
+                fold_majority_predictions = [fold_majority_label] * len(fold_validation_labels)
+                walk_forward_items.append({
+                    "fold": fold_index + 1,
+                    "train_count": len(fold_train),
+                    "validation_count": len(fold_validation),
+                    "balanced_accuracy": round(
+                        float(balanced_accuracy_score(fold_validation_labels, fold_predictions)),
+                        6,
+                    ),
+                    "majority_baseline_balanced_accuracy": round(
+                        float(balanced_accuracy_score(fold_validation_labels, fold_majority_predictions)),
+                        6,
+                    ),
+                })
+        walk_forward_mean = (
+            sum(float(item["balanced_accuracy"]) for item in walk_forward_items) / len(walk_forward_items)
+            if walk_forward_items else 0.0
+        )
+        walk_forward_baseline_mean = (
+            sum(float(item["majority_baseline_balanced_accuracy"]) for item in walk_forward_items)
+            / len(walk_forward_items)
+            if walk_forward_items else 0.0
+        )
+        walk_forward_worst = min(
+            (float(item["balanced_accuracy"]) for item in walk_forward_items),
+            default=0.0,
+        )
+        walk_forward_ready = bool(
+            len(walk_forward_items) >= 2
+            and walk_forward_mean >= walk_forward_baseline_mean
+            and walk_forward_worst >= 0.25
+        )
+        train_accuracy = float(accuracy_score(y_train, train_pred))
+        generalization_gap = max(0.0, train_accuracy - model_accuracy)
+        generalization_ready = generalization_gap <= max(0.05, float(max_generalization_gap or 0.25))
         baseline_margin = 0.02
         model_beats_baseline = (
             model_accuracy >= majority_accuracy + baseline_margin
             and model_balanced_accuracy >= majority_balanced_accuracy
+            and walk_forward_ready
+            and generalization_ready
         )
         rule_beats_baseline = (
             rule_accuracy >= majority_accuracy + baseline_margin
@@ -626,8 +703,12 @@ class MetaModelLightGBMService:
             recommended_source = "simple_baseline_observer"
             readiness_status = "blocked_by_baseline"
             degradation_reason = "holdout_model_and_rule_do_not_beat_majority_baseline"
+            if not generalization_ready:
+                degradation_reason = "train_holdout_generalization_gap_exceeded"
+            elif not walk_forward_ready:
+                degradation_reason = "walk_forward_validation_not_stable"
         metrics = {
-            "train": {"count": len(y_train), "accuracy": round(float(accuracy_score(y_train, train_pred)), 6)},
+            "train": {"count": len(y_train), "accuracy": round(train_accuracy, 6)},
             "split": "time_ordered",
             "holdout_ratio": float(holdout_ratio),
             "train_count": len(train_samples),
@@ -645,6 +726,16 @@ class MetaModelLightGBMService:
                 "model_lift_vs_majority": round(float((holdout_model["accuracy"] or 0.0) - (holdout_majority["accuracy"] or 0.0)), 6),
                 "rule_lift_vs_majority": round(rule_accuracy - majority_accuracy, 6),
             },
+            "walk_forward": {
+                "split": "expanding_time_ordered",
+                "requested_folds": requested_folds,
+                "completed_folds": len(walk_forward_items),
+                "mean_balanced_accuracy": round(walk_forward_mean, 6),
+                "worst_balanced_accuracy": round(walk_forward_worst, 6),
+                "majority_baseline_mean_balanced_accuracy": round(walk_forward_baseline_mean, 6),
+                "ready": walk_forward_ready,
+                "folds": walk_forward_items,
+            },
             "governance_readiness": {
                 "status": readiness_status,
                 "model_ready_for_governance": bool(model_beats_baseline),
@@ -659,6 +750,10 @@ class MetaModelLightGBMService:
                     "rule_balanced_accuracy": round(rule_balanced_accuracy, 6),
                     "majority_baseline_accuracy": round(majority_accuracy, 6),
                     "majority_baseline_balanced_accuracy": round(majority_balanced_accuracy, 6),
+                    "walk_forward_ready": walk_forward_ready,
+                    "generalization_gap": round(generalization_gap, 6),
+                    "max_generalization_gap": max(0.05, float(max_generalization_gap or 0.25)),
+                    "generalization_ready": generalization_ready,
                 },
             },
             "sample_count": len(samples),
@@ -747,6 +842,9 @@ class MetaModelLightGBMService:
                     "majority_baseline_accuracy": metrics["holdout"]["majority_baseline_accuracy"],
                     "governance_readiness_status": metrics["governance_readiness"]["status"],
                     "recommended_source": metrics["governance_readiness"]["recommended_source"],
+                    "walk_forward_mean_balanced_accuracy": metrics["walk_forward"]["mean_balanced_accuracy"],
+                    "walk_forward_ready": metrics["walk_forward"]["ready"],
+                    "generalization_gap": metrics["governance_readiness"]["checks"]["generalization_gap"],
                     "safe_for_live_trading": False,
                 },
                 symbol=symbol,

@@ -596,3 +596,39 @@ def test_shadow_promote_blocked_by_risk_policy(monkeypatch):
     assert result["ok"] is False
     assert "risk_policy_block" in result["error"]
     assert adapter.promoted == []
+
+
+def test_canary_evaluation_is_bounded_and_rotates_oldest_candidates(monkeypatch):
+    class _ManyAdapter:
+        def __init__(self):
+            self._meta = {
+                f"factor_{idx:02d}": {"source": "shadow", "score": float(idx)}
+                for idx in range(12)
+            }
+
+        def get_meta(self, name):
+            return dict(self._meta[name])
+
+    saved = {}
+    states = {
+        f"factor_{idx:02d}": {"stage": "SHADOW", "updated_at": float(idx)}
+        for idx in range(12)
+    }
+    states["factor_11"]["stage"] = "PROBATION"
+    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "10")
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(_ManyAdapter))
+    monkeypatch.setattr(evo, "_load_canary_states", lambda: states)
+    monkeypatch.setattr(evo, "_save_canary_states", lambda value: saved.update(value))
+    monkeypatch.setattr(evo, "_emit_evolution_story", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_ctx_from_log",
+        lambda name, score: CanaryEvalContext(oos_bars=0, oos_pnl=0.0),
+    )
+
+    promotions, rollbacks, stay = evo._run_canary_evaluation("XAUUSD+", "M5", 1000)
+
+    assert promotions == []
+    assert rollbacks == []
+    assert len(stay) == 10
+    assert set(saved) == {"factor_11", *(f"factor_{idx:02d}" for idx in range(9))}

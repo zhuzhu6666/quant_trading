@@ -736,26 +736,53 @@ class RuleEvolutionGovernor:
         baseline_min_trades: int = 2,
         reward_delta_for_effective: float = 0.08,
         reward_delta_for_bad: float = -0.08,
+        application_limit: int = 200,
+        mixed_recheck_after_seconds: float = 6 * 3600.0,
+        max_observation_age_seconds: float = 30 * 86400.0,
     ) -> dict[str, int]:
         observed = 0
         rolled_back = 0
         reinforced = 0
         waiting = 0
+        rechecked_mixed = 0
+        inconclusive = 0
         template_runtime_sync_needed = False
 
         with self._conn() as conn:
+            now = time.time()
             rows = self._execute(conn,
                 """
-                SELECT *
-                FROM learning_application_log
-                WHERE status IN ('applied', 'observing', 'effective')
-                ORDER BY cycle_ts ASC
-                """
+                SELECT l.*
+                FROM learning_application_log l
+                LEFT JOIN learning_application_effect e
+                  ON e.application_id=l.application_id
+                WHERE l.status IN ('applied', 'observing', 'effective', 'mixed')
+                  AND (
+                      l.status<>'mixed'
+                      OR COALESCE(e.updated_at, 0)<=?
+                  )
+                ORDER BY
+                    COALESCE(e.updated_at, 0) ASC,
+                    CASE l.status
+                        WHEN 'applied' THEN 0
+                        WHEN 'observing' THEN 1
+                        WHEN 'mixed' THEN 2
+                        ELSE 3
+                    END,
+                    l.cycle_ts ASC
+                LIMIT ?
+                """,
+                (
+                    now - max(300.0, float(mixed_recheck_after_seconds or 0.0)),
+                    max(1, min(int(application_limit or 200), 2000)),
+                ),
             ).fetchall()
-            now = time.time()
 
             for row in rows:
                 app = self._parse_application_row(row)
+                prior_status = str(app.get("status") or "")
+                if prior_status == "mixed":
+                    rechecked_mixed += 1
                 scope_type = str(app.get("scope_type") or "")
                 if scope_type not in {"factor", "parameter_template", "position_supervisor_template"}:
                     continue
@@ -774,7 +801,7 @@ class RuleEvolutionGovernor:
                               r.review_json LIKE '%inferred_close_supervisor%'
                               OR r.review_json LIKE '%supervisor_%'
                           )
-                        ORDER BY r.created_at ASC
+                        ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
                         (float(app.get("cycle_ts") or 0.0), review_limit),
@@ -826,7 +853,7 @@ class RuleEvolutionGovernor:
                               WHERE dfs.decision_id = r.entry_decision_id
                                 AND dfs.factor = ?
                           )
-                        ORDER BY r.created_at ASC
+                        ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
                         (float(app.get("cycle_ts") or 0.0), factor, review_limit),
@@ -971,6 +998,24 @@ class RuleEvolutionGovernor:
                 else:
                     next_status = "mixed"
                     decision["evidence_quality"]["causal_status"] = "comparative_mixed"
+                cycle_ts = float(app.get("cycle_ts") or 0.0)
+                observation_clock_valid = cycle_ts >= 946684800.0
+                observation_age_seconds = max(0.0, now - cycle_ts) if observation_clock_valid else 0.0
+                decision["evidence_quality"]["observation_age_seconds"] = observation_age_seconds
+                decision["evidence_quality"]["observation_clock_valid"] = observation_clock_valid
+                decision["evidence_quality"]["max_observation_age_seconds"] = max(
+                    86400.0,
+                    float(max_observation_age_seconds or 0.0),
+                )
+                if (
+                    next_status in {"observing", "mixed"}
+                    and observation_clock_valid
+                    and observation_age_seconds
+                    >= max(86400.0, float(max_observation_age_seconds or 0.0))
+                ):
+                    next_status = "inconclusive"
+                    decision["evidence_quality"]["causal_status"] = "observation_window_expired_inconclusive"
+                    decision["evidence_quality"]["retry_via_new_application"] = True
                 decision["evidence_quality"]["bounded_attribution_allowed"] = bool(
                     not concurrent_applications
                     and len(post_reviews) >= min_trades
@@ -1040,6 +1085,9 @@ class RuleEvolutionGovernor:
 
                 if next_status == "observing":
                     waiting += 1
+                    continue
+                if next_status == "inconclusive":
+                    inconclusive += 1
                     continue
 
                 suggestion_ids = list(app.get("suggestion_ids") or [])
@@ -1217,4 +1265,6 @@ class RuleEvolutionGovernor:
             "rolled_back": rolled_back,
             "reinforced": reinforced,
             "waiting": waiting,
+            "rechecked_mixed": rechecked_mixed,
+            "inconclusive": inconclusive,
         }
