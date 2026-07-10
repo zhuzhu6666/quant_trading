@@ -152,6 +152,7 @@
 | Meta Governance Web page | `web_frontend/src/pages/V16BrainPage.tsx` + `/v16` | 元治理大脑展示入口；读取 brain state/memory/action-plans/action-plan-evals/low-impact-executions/medium-impact-governance/governance-candidate-reviews/live-ready-guardrails/proposal-registry/live-autonomy/readiness API，展示 world model、memory、hypotheses、Critic、提案总线、实盘自治状态和边界；按钮只触发受控后端 API，不在前端重算策略/风控或执行未授权动作 |
 | 后验效果 | `learning_application_effect` | 回滚判断事实源 |
 | 效果归因质量 | `learning_application_effect.decision_json.evidence_quality` + `research.learning.application_effects` | 排除 partial/missing attribution、人工/重启污染和 regime mismatch；同一 scope 后续 application 会关闭前一 application 的观察窗口，前一窗口只能使用下一次变更之前的复盘证据，证据足够可做 bounded comparative 判定，不足则立即归档为 `inconclusive`，不允许跨变更混用样本；`mixed` 按冷却持续复评，开放窗口超过观察期仍不足则收口；无随机对照时不得声称严格因果 |
+| 学习闭环质量 SLO | `backend.services.learning_effect_quality` + `/api/learning/effect-quality` + readiness `learning_effect_quality` / `v16.learning_effect_quality` | 只读汇总效果终态率、开放窗口年龄、并发归因积压、bounded window 收口一致性和受控重试资格；`inconclusive` 只有在终态后出现新复盘证据且同 scope 没有更新 application 时才可成为重试候选，实际重试仍必须形成新 application 并经过既有 governor/风控/决策边界；SLO degraded 只进入 `known_observations`，不直接改权重、参数、权限或交易 readiness |
 | 实验存储 | `data/experiments.db` canonical structured `experiments` schema + `research.experiment_tracker.ExperimentTracker` | `EvolutionExperimentRegistry` 是兼容适配器；旧 JSON blob 行原位迁移，不再维护第二套同名表 schema |
 | 应用日志 | `learning_application_log` | 动作应用状态 |
 | 建议/审计状态 | `policy_suggestion` + normalized status | `proposed/auto_approved/applied/rolled_back/blocked_by_risk/superseded` |
@@ -233,6 +234,7 @@
 |---|---|---|
 | 后端健康 | `/api/health` | 最小服务健康 |
 | 运维就绪 | `/api/ops/backend-readiness` | readiness、overlay、governance freshness、V15 replay/autonomy health |
+| 学习闭环质量 | `/api/learning/effect-quality` + readiness `learning_effect_quality` / `v16.learning_effect_quality` | 查看效果终态率、开放窗口、归因积压、SLO 与只读受控重试候选；不创建 application、不应用 runtime mutation |
 | autonomy scope approval | `/api/ops/autonomy-health/scope-approvals/latest` / `/api/ops/autonomy-health/scope-approvals` | 查看或记录 health scope recommendation 审批审计；不应用 runtime 权限 |
 | autonomy scope enforcement | `/api/ops/autonomy-health/scope-enforcements/latest` / `/api/ops/autonomy-health/scope-enforcements` | 查看或显式执行 health scope recommendation 收紧；必须走 incident-control、`RiskPolicyService` 和 overlay/snapshot |
 | replay 报告 | `/api/ops/replay/latest` / `/api/ops/replay/run` / `/api/ops/replay/bar-run` / `/api/ops/replay/bar-decisions` / `/api/ops/replay/bar-preview` | 查看或手动触发 V15 factor/gate/risk replay；P1 bar-run 生成 decision/bar window 与 factor-frame evidence；bar-decisions 供 Web 选择历史单；bar-preview 供 Web 快速展示 K线、盈亏归因和学习状态 |

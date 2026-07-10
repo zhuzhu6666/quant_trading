@@ -118,6 +118,14 @@ export function LearningPage() {
   const metaLightgbm = asRecord(pick(models, ["meta_lightgbm"]));
   const promotionGate = asRecord(pick(metaLightgbm, ["promotion_gate"]));
   const highLoad = asRecord(pick(readiness, ["high_load"]));
+  const effectQuality = asRecord(pick(readiness, ["learning_effect_quality"]));
+  const effectStatuses = asRecord(pick(effectQuality, ["status_counts"]));
+  const effectReasons = asRecord(pick(effectQuality, ["reason_counts"]));
+  const effectSlo = asRecord(pick(effectQuality, ["slo"]));
+  const effectActive = pickNumber(effectQuality, ["active_count"], 0);
+  const effectClosure = pickNumber(effectQuality, ["closure_ratio"], 0);
+  const retryCandidates = pickNumber(effectQuality, ["retry_candidate_count"], 0);
+  const confoundedEffects = pickNumber(effectReasons, ["confounded_by_concurrent_application"], 0);
 
   const suggestions = pickArray(suggestionsQuery.data, ["items"]);
   const applications = pickArray(applicationsQuery.data, ["items"]);
@@ -204,6 +212,18 @@ export function LearningPage() {
       </div>
 
       <div className="dashboard-grid">
+        <MetricCard title="学习闭环质量 SLO" className="wide-panel learning-control-panel">
+          <div className="learning-mini-grid">
+            <LearningMiniMetric label="闭环率" value={formatPct(effectClosure)} detail={`终态 ${pickNumber(effectQuality, ["terminal_count"], 0)}`} tone={effectClosure >= 0.7 ? "ok" : "warn"} />
+            <LearningMiniMetric label="开放窗口" value={formatDecimal(effectActive, 0)} detail={`观察 ${pickNumber(effectStatuses, ["observing"], 0)} · 混合 ${pickNumber(effectStatuses, ["mixed"], 0)}`} tone={effectActive ? "warn" : "ok"} />
+            <LearningMiniMetric label="并发积压" value={formatDecimal(confoundedEffects, 0)} detail="目标为 0" tone={confoundedEffects ? "warn" : "ok"} />
+            <LearningMiniMetric label="证据不足" value={formatDecimal(pickNumber(effectStatuses, ["inconclusive"], 0), 0)} detail={`受控重试候选 ${retryCandidates}`} tone={retryCandidates ? "warn" : "mute"} />
+            <LearningMiniMetric label="已强化" value={formatDecimal(pickNumber(effectStatuses, ["reinforced"], 0), 0)} detail={`无效 ${pickNumber(effectStatuses, ["ineffective"], 0)}`} tone={pickNumber(effectStatuses, ["reinforced"], 0) ? "ok" : "mute"} />
+            <LearningMiniMetric label="SLO" value={translateDisplayValue(pickString(effectSlo, ["status"], pickString(effectQuality, ["status"], "unknown")))} detail="只读质量门" tone={toneFromStatus(pickString(effectSlo, ["status"], "unknown"))} />
+          </div>
+          <div className="learning-note">重试资格只在出现新复盘证据且没有更新 application 时开放；看板不会自动改权重、参数或智能体权限。</div>
+        </MetricCard>
+
         <MetricCard title="学习控制台" className="wide-panel learning-control-panel">
           <div className="learning-mini-grid">
             <LearningMiniMetric label="治理待办" value={formatDecimal(proposed + pendingCandidates, 0)} detail={`建议 ${proposed} · 候选 ${pendingCandidates}`} tone={proposed + pendingCandidates > 0 ? "warn" : "ok"} />

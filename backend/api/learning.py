@@ -3529,6 +3529,16 @@ def get_learning_dataset_quality_health(
     }
 
 
+@router.get("/effect-quality")
+def get_learning_effect_quality(
+    _user: RequireUser,
+    limit: int = Query(default=1000, ge=1, le=5000),
+) -> dict:
+    from backend.services.learning_effect_quality import LearningEffectQualityService
+
+    return LearningEffectQualityService(_state_db_path()).status(limit=limit)
+
+
 @router.post("/dataset/validate")
 def validate_learning_dataset(_user: RequireUser, req: DatasetValidateRequest) -> dict:
     if not req.dataset_ref:

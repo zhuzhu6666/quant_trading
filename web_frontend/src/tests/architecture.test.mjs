@@ -11,6 +11,7 @@ const cssEntry = read("src/main.css");
 const tokens = read("src/styles/tokens.css");
 const apiClient = read("src/api/client.ts");
 const systemApi = read("src/api/domains/system.ts");
+const learningPage = read("src/pages/LearningPage.tsx");
 
 assert.equal((app.match(/<ProtectedAppLayout/g) ?? []).length, 1, "受保护页面应共用一个布局壳");
 assert.ok((app.match(/lazy\(\(\) => import/g) ?? []).length >= 10, "页面应按路由懒加载");
@@ -23,5 +24,8 @@ assert.equal((tokens.match(/:root\s*\{/g) ?? []).length, 1, "设计 token 必须
 assert.equal((cssEntry.match(/@import/g) ?? []).length, 6, "样式入口应只负责编排分层样式");
 assert.doesNotMatch(apiClient, /export (async function|const) get(SystemLoad|SystemDbHealth|OpsAlerts)/);
 assert.match(systemApi, /getSystemLoad/);
+assert.match(learningPage, /learning_effect_quality/);
+assert.match(learningPage, /重试资格只在出现新复盘证据/);
+assert.match(learningPage, /看板不会自动改权重、参数或智能体权限/);
 
 console.log("web_frontend architecture test: ok");

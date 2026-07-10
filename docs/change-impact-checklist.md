@@ -68,6 +68,7 @@
 | 生命周期单写者 | Evolution 是否只产候选；实际 promote/rollback/retire 是否只由 FactorGovernance 执行 |
 | Canary 证据 | evidence/dataset hash 是否变化；stage 是否累计足够 fresh bars，是否拒绝重复窗口 |
 | 效果证据质量 | 是否过滤污染/regime mismatch；并发 application 是否保持 observing 而非伪归因 |
+| 效果闭环 SLO | bounded window 是否归档终态；inconclusive 重试是否要求终态后的新证据且无更新 application |
 | 冷却/限频 | 单周期动作数量是否受限 |
 | 测试污染 | pytest/test overlay 是否被生产拒绝 |
 

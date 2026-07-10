@@ -297,6 +297,7 @@ class BackendReadinessService:
                 "factor_pruning_governance_bridge_ready": "/api/ops/factor/pruning-governance/bridge-ready",
                 "factor_governance_effects": "/api/ops/factor/governance-effects",
                 "factor_governance_effects_reconcile": "/api/ops/factor/governance-effects/reconcile",
+                "learning_effect_quality": "/api/learning/effect-quality",
                 "v16_brain_governance_candidates": "/api/ops/brain/governance-candidates",
                 "v16_brain_governance_candidate_submit": "/api/ops/brain/governance-candidates/{candidate_id}/submit",
                 "v16_brain_governance_candidate_reviews": "/api/ops/brain/governance-candidate-reviews",
@@ -345,6 +346,17 @@ class BackendReadinessService:
         payload["factor_pruning_governance"] = factor_pruning_governance
         factor_governance_effects = self._timed_component("factor_governance_effects", lambda: self._factor_governance_effect_status())
         payload["factor_governance_effects"] = factor_governance_effects
+        learning_effect_quality = self._timed_component("learning_effect_quality", lambda: self._learning_effect_quality_status())
+        payload["learning_effect_quality"] = learning_effect_quality
+        if str(learning_effect_quality.get("status") or "") == "degraded":
+            payload["known_observations"].append(
+                {
+                    "component": "learning_effect_quality",
+                    "status": "degraded",
+                    "classification": "learning_quality_read_only",
+                    "slo": learning_effect_quality.get("slo") or {},
+                }
+            )
         brain_governance_candidate_reviews = self._timed_component("brain_governance_candidate_reviews", lambda: self._brain_governance_candidate_review_status())
         payload["brain_governance_candidate_reviews"] = brain_governance_candidate_reviews
         candidate_bridge_review_coverage = self._timed_component("candidate_bridge_review_coverage", lambda: self._candidate_bridge_review_coverage_status())
@@ -385,6 +397,7 @@ class BackendReadinessService:
             "candidate_generation_context_coverage": candidate_generation_context_coverage,
             "factor_pruning_governance": factor_pruning_governance,
             "factor_governance_effects": factor_governance_effects,
+            "learning_effect_quality": learning_effect_quality,
             "governance_candidate_reviews": brain_governance_candidate_reviews,
             "candidate_bridge_review_coverage": candidate_bridge_review_coverage,
             "live_ready_guardrails": brain_live_ready_guardrails,
@@ -1221,6 +1234,20 @@ class BackendReadinessService:
                     "reconcile_uses_existing_governor": True,
                     "does_not_apply_factor_weights": True,
                 },
+            }
+
+    def _learning_effect_quality_status(self) -> dict[str, Any]:
+        from backend.services.learning_effect_quality import LearningEffectQualityService
+
+        try:
+            return LearningEffectQualityService(self.db_path).status(limit=1000)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "learning_effect_quality.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "boundary": LearningEffectQualityService.boundary(),
             }
 
     def _brain_governance_candidate_review_status(self) -> dict[str, Any]:
