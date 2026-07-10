@@ -3733,6 +3733,17 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
         market_session=state,
         spot_quote=quote or _live_state_get("spot_quote", None, clone=True),
     )
+    try:
+        from backend.services.runtime_health_projection import RuntimeHealthProjectionService
+
+        RuntimeHealthProjectionService().publish(
+            market_session=state,
+            ctrader_connected=broker_connected,
+            live_loop_running=bool(_live_state_get("loop_running", False)),
+            source="live_market_session",
+        )
+    except Exception as projection_exc:
+        logger.debug("[live] runtime health projection publish failed: %s", projection_exc)
     return state
 
 
@@ -4161,102 +4172,56 @@ def _scheduled_awe_adapt():
             logger.info("[awe_adapt] adapted {} factors: {}",
                         len(patches),
                         {k: v["weight"] for k, v in patches.items()})
-            # ★ 通过 DecisionPolicy 融合后再写 (保持一致性)
+            # All producers share the same decision/admission/application boundary.
             try:
-                from alpha.decision_policy import DecisionPolicy
-                from backend.services.experience_prior import ExperiencePriorService
-                from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
+                from backend.services.factor_weight_change import FactorWeightChangeService
 
-                dp = DecisionPolicy()
-                decisions = dp.fast_decide(
+                run_id = f"awe_adapt_{int(time.time())}"
+
+                def _awe_risk_check(plan: dict[str, Any]):
+                    partial = dict(plan.get("proposed_weights") or {})
+                    return RiskPolicyService.shared().evaluate(
+                        "update_weight",
+                        {
+                            "source": "awe_adapt",
+                            "required_mode": "autonomous_governance",
+                            "changed_factors": sorted(partial),
+                            "current_weights": current_weights,
+                            "proposed_weights": partial,
+                        },
+                    )
+
+                result = FactorWeightChangeService().execute(
+                    source="awe_decision_policy_update_weight",
+                    producer="awe_adapt",
+                    run_id=run_id,
+                    actor="system:awe_adapt",
+                    reason="AWE weight patch merged by governed weight service",
                     awe_patches=patches,
                     weight_policy_weights=None,
                     factor_configs=factor_configs,
                     current_weights=current_weights,
-                    experience_priors=ExperiencePriorService().priors(),
+                    fast=True,
+                    risk_check=_awe_risk_check,
                 )
-                admission_service = LearningExperimentAdmissionService()
-                admissions: dict[str, dict] = {}
-                admitted_decisions = {}
-                for name, decision in decisions.items():
-                    admission = admission_service.evaluate(
-                        scope_type="factor",
-                        scope_key=name,
-                        action="update_weight",
-                        old_weight=float(decision.old_weight),
-                        new_weight=float(decision.new_weight),
-                    )
-                    admissions[name] = admission
-                    if admission.get("allowed"):
-                        admitted_decisions[name] = decision
-                decisions = admitted_decisions
-                partial = DecisionPolicy.to_weights(decisions)
-                if not partial:
-                    logger.debug(
-                        "[awe_adapt] no admitted weight experiment: %s",
-                        {name: item.get("status") for name, item in admissions.items()},
-                    )
-                    return
-                risk_verdict = RiskPolicyService.shared().evaluate(
-                    "update_weight",
-                    {
-                        "source": "awe_adapt",
-                        "required_mode": "autonomous_governance",
-                        "changed_factors": sorted(partial),
-                        "current_weights": current_weights,
-                        "proposed_weights": partial,
-                    },
-                )
-                if not risk_verdict.allowed:
+                partial = dict(result.get("proposed_weights") or {})
+                if result.get("status") == "blocked_by_risk":
                     logger.warning(
                         "[awe_adapt] RiskPolicy blocked weight update: %s",
-                        risk_verdict.reason,
+                        (result.get("risk_verdict") or {}).get("reason"),
                     )
                     return
-                from backend.services.runtime_config_mutation import RuntimeConfigMutationService
-
-                run_id = f"awe_adapt_{int(time.time())}"
-                mutation = RuntimeConfigMutationService().apply_patch(
-                    # Persist only the factors decided in this cycle.  The
-                    # transactional overlay merges them under a writer lock,
-                    # so a concurrent governance decision cannot be erased by
-                    # a stale full-weight snapshot.
-                    {"factor_portfolio_weights": partial},
-                    source="awe_decision_policy_update_weight",
-                    run_id=run_id,
-                    actor="system:awe_adapt",
-                    action="update_weight",
-                    reason="AWE weight patch merged by DecisionPolicy",
-                )
-                applied_at = time.time()
-                from research.learning.governor import RuleEvolutionGovernor
-
-                governor = RuleEvolutionGovernor()
-                for name, decision in decisions.items():
-                    old_weight = float(decision.old_weight)
-                    new_weight = float(decision.new_weight)
-                    governor.log_application(
-                        scope_type="factor",
-                        scope_key=name,
-                        action="update_weight",
-                        bias_multiplier=(new_weight / old_weight) if old_weight else 1.0,
-                        old_weight=old_weight,
-                        new_weight=new_weight,
-                        suggestion_ids=[f"{run_id}:{name}"],
-                        cycle_ts=applied_at,
-                        status="applied",
-                        details={
-                            "source_agent": "factor_governance",
-                            "producer": "awe_adapt",
-                            "run_id": run_id,
-                            "applied_at": applied_at,
-                            "decision": decision.to_api(),
-                            "experiment_admission": admissions.get(name) or {},
-                            "mutation_snapshot": mutation.get("snapshot") or {},
+                if result.get("status") != "applied" or not partial:
+                    logger.debug(
+                        "[awe_adapt] no admitted weight experiment: %s",
+                        {
+                            name: item.get("status")
+                            for name, item in (result.get("admissions") or {}).items()
                         },
                     )
+                    return
                 logger.info(
-                    "[awe_adapt] weights pushed via DecisionPolicy (%d changed, %d total)",
+                    "[awe_adapt] weights pushed via governed service (%d changed, %d total)",
                     len(partial),
                     len(current_weights),
                 )
@@ -4275,71 +4240,9 @@ def _scheduled_awe_adapt():
 # ═══════════════════════════════════════════════════════════
 
 def _scheduled_feature_engineering():
-    """每天凌晨 3:00: 重新衍生特征 + PCA 压缩 + 特征筛选。
+    from backend.services.learning_research_jobs import run_feature_engineering_job
 
-    1. 加载最近 20,000 bars
-    2. 计算所有因子值
-    3. FeatureDeriver → 200+ 衍生特征
-    4. PCA → 压缩到 ~15 个正交因子
-    5. FeatureSelector → 筛选最优子集
-    6. 注册 pca_0..pca_N 因子到 factor_registry
-    """
-    try:
-        from data.store import DataStore
-        from alpha.features.selector import run_feature_selection
-        from alpha.registry import factor_registry
-        from monitor.evolution_story.report import EvolutionStory
-
-        store = DataStore()
-        df = store.load_bars("XAUUSD+", "M5", limit=20000)
-        if df.empty or len(df) < 1000:
-            logger.info("[fe] insufficient bars: %d", len(df))
-            return
-
-        # 预计算因子值
-        factor_vals: dict[str, "np.ndarray"] = {}
-        for name in factor_registry.list():
-            try:
-                fn = factor_registry.get(name)
-                if fn is None:
-                    continue
-                vals = fn(df)
-                arr = _np.asarray(vals, dtype=float)
-                arr[_np.isinf(arr)] = _np.nan
-                factor_vals[name] = arr
-            except Exception:
-                continue
-
-        # Forward returns
-        close = df["close"].values.astype(float)
-        fwd_ret = _np.full(len(close), _np.nan)
-        fwd_ret[:-1] = (close[1:] - close[:-1]) / close[:-1]
-
-        # 运行特征工程
-        result = run_feature_selection(df, fwd_ret, factor_vals)
-        logger.info(
-            "[fe] done: %d derived → %d pca (%.0f%%) → %d selected / %d candidates",
-            result.get("n_derived", 0),
-            result.get("pca_n_components", 0),
-            result.get("pca_variance", 0) * 100,
-            result.get("n_selected", 0),
-            result.get("n_candidates", 0),
-        )
-
-        # 记录
-        try:
-            story = EvolutionStory.shared() if hasattr(EvolutionStory, "shared") else None
-            if story:
-                story.append(event_type="feature_engineering", payload={
-                    "n_selected": result.get("n_selected"),
-                    "n_candidates": result.get("n_candidates"),
-                    "pca_n": result.get("pca_n_components"),
-                    "pca_var": result.get("pca_variance"),
-                })
-        except Exception as _e:
-            logger.debug("[fe] EvolutionStory.append failed: %s", _e)
-    except Exception as e:
-        logger.warning(f"[fe] failed: {e}", exc_info=True)
+    return run_feature_engineering_job()
 
 
 def _env_enabled(name: str, default: str = "1") -> bool:
@@ -4347,191 +4250,19 @@ def _env_enabled(name: str, default: str = "1") -> bool:
     return value not in {"0", "false", "no", "off", "disabled"}
 
 
-def _ensure_offmarket_high_load_audit_table(conn) -> None:
-    _state_execute(
-        conn,
-        """
-        CREATE TABLE IF NOT EXISTS offmarket_high_load_job_audit (
-            audit_id TEXT PRIMARY KEY,
-            job_name TEXT NOT NULL,
-            status TEXT NOT NULL,
-            session_status TEXT DEFAULT '',
-            high_load_profile TEXT DEFAULT '',
-            payload_json TEXT DEFAULT '{}',
-            result_json TEXT DEFAULT '{}',
-            error TEXT DEFAULT '',
-            started_at REAL NOT NULL,
-            finished_at REAL NOT NULL
-        )
-        """
-    )
-    _state_execute(
-        conn,
-        """
-        CREATE INDEX IF NOT EXISTS idx_offmarket_high_load_job_audit_created
-        ON offmarket_high_load_job_audit(started_at)
-        """
-    )
-
-
-def _record_offmarket_high_load_audit(
-    *,
-    job_name: str,
-    status: str,
-    session: dict[str, Any],
-    payload: dict[str, Any] | None = None,
-    result: dict[str, Any] | None = None,
-    error: str = "",
-    started_at: float | None = None,
-) -> dict[str, Any]:
-    now_ts = time.time()
-    started = float(started_at or now_ts)
-    audit_id = f"{job_name}:{int(started * 1000)}"
-    row = {
-        "audit_id": audit_id,
-        "job_name": job_name,
-        "status": status,
-        "session_status": str((session or {}).get("status") or ""),
-        "high_load_profile": str((session or {}).get("high_load_profile") or "disabled"),
-        "payload": payload or {},
-        "result": result or {},
-        "error": str(error or ""),
-        "started_at": started,
-        "finished_at": now_ts,
-    }
-    conn = _get_state_pg_conn()
-    try:
-        _ensure_offmarket_high_load_audit_table(conn)
-        _state_execute(
-            conn,
-            """
-            INSERT INTO offmarket_high_load_job_audit
-            (audit_id, job_name, status, session_status, high_load_profile,
-             payload_json, result_json, error, started_at, finished_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(audit_id) DO UPDATE SET
-                job_name=excluded.job_name,
-                status=excluded.status,
-                session_status=excluded.session_status,
-                high_load_profile=excluded.high_load_profile,
-                payload_json=excluded.payload_json,
-                result_json=excluded.result_json,
-                error=excluded.error,
-                started_at=excluded.started_at,
-                finished_at=excluded.finished_at
-            """,
-            (
-                audit_id,
-                row["job_name"],
-                row["status"],
-                row["session_status"],
-                row["high_load_profile"],
-                json.dumps(row["payload"], ensure_ascii=False, sort_keys=True),
-                json.dumps(row["result"], ensure_ascii=False, sort_keys=True),
-                row["error"],
-                row["started_at"],
-                row["finished_at"],
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return row
-
-
 def _offmarket_high_load_allowed(session: dict[str, Any]) -> tuple[bool, str]:
-    status = str((session or {}).get("status") or "")
-    if status not in {"closed_confirmed", "closed_pending_positions"}:
-        return False, f"market_session_not_offmarket:{status or 'unknown'}"
-    if not bool((session or {}).get("high_load_allowed", False)):
-        return False, "high_load_not_allowed"
-    return True, "ok"
+    from backend.services.learning_research_jobs import offmarket_high_load_allowed
+
+    return offmarket_high_load_allowed(session)
 
 
 def _scheduled_offmarket_position_quality_lightgbm() -> dict[str, Any]:
-    """Off-market LightGBM sidecar training.
+    from backend.services.learning_research_jobs import run_offmarket_position_quality_job
 
-    This is strictly advisory/shadow-only. It never places orders, closes
-    positions, changes risk limits, or touches cTrader execution.
-    """
-    job_name = "offmarket_position_quality_lightgbm"
-    started_at = time.time()
     session = _live_state_get("market_session", {}, clone=True) or {}
     if not session:
         session = _market_session_snapshot(None)
-    allowed, reason = _offmarket_high_load_allowed(session)
-    profile = str(session.get("high_load_profile") or "disabled")
-    payload = {
-        "job_name": job_name,
-        "market_session": session,
-        "limit": 500 if profile == "full" else 250,
-        "shadow_limit": 100 if profile == "full" else 30,
-        "min_samples": 20,
-        "profile": profile,
-    }
-    if not allowed:
-        result = {"ok": False, "skipped": True, "reason": reason}
-        audit = _record_offmarket_high_load_audit(
-            job_name=job_name,
-            status="skipped",
-            session=session,
-            payload=payload,
-            result=result,
-            started_at=started_at,
-        )
-        logger.info("[offmarket_high_load] {} skipped: {}", job_name, reason)
-        return {"ok": True, "skipped": True, "reason": reason, "audit": audit}
-
-    try:
-        from backend.core.db import STATE_DB
-        from research.position_quality_lightgbm import PositionQualityLightGBMService
-
-        service = PositionQualityLightGBMService(db_path=STATE_DB)
-        train_result = service.train(
-            limit=int(payload["limit"]),
-            holdout_ratio=0.2,
-            min_samples=int(payload["min_samples"]),
-            register=True,
-            symbol="XAUUSD+",
-            timeframe="M5",
-        )
-        result: dict[str, Any] = {"train": train_result}
-        if train_result.get("ok"):
-            result["shadow"] = service.score_samples(
-                artifact_path=train_result.get("artifact_path"),
-                limit=int(payload["shadow_limit"]),
-                mode="offmarket_shadow_after_train",
-            )
-        status = "done" if train_result.get("ok") else "failed"
-        audit = _record_offmarket_high_load_audit(
-            job_name=job_name,
-            status=status,
-            session=session,
-            payload=payload,
-            result=result,
-            error=str(train_result.get("error") or ""),
-            started_at=started_at,
-        )
-        logger.info(
-            "[offmarket_high_load] {} {} profile={} samples={} shadow={}",
-            job_name,
-            status,
-            profile,
-            (train_result.get("metrics") or {}).get("sample_count") or train_result.get("sample_count"),
-            (result.get("shadow") or {}).get("count"),
-        )
-        return {"ok": status == "done", "status": status, "audit": audit, "result": result}
-    except Exception as exc:
-        audit = _record_offmarket_high_load_audit(
-            job_name=job_name,
-            status="error",
-            session=session,
-            payload=payload,
-            error=f"{type(exc).__name__}: {exc}"[:500],
-            started_at=started_at,
-        )
-        logger.warning("[offmarket_high_load] {} error: {}", job_name, exc)
-        return {"ok": False, "status": "error", "audit": audit, "error": str(exc)}
+    return run_offmarket_position_quality_job(session=session)
 
 
 
@@ -5254,7 +4985,9 @@ def _run_live_loop_tick_body(
         bridge, err, warming = _get_ctrader()
         bridge_ready = bool(bridge is not None and not warming and bridge.is_connected)
         if err:
-            _market_session_snapshot(None, broker_error=err)
+            market_session = _market_session_snapshot(None, broker_error=err)
+        elif bridge is not None:
+            market_session = _market_session_snapshot(bridge)
         _set_loop_diagnostic(tick, "market_closed", bridge_ready=bridge_ready)
         log(
             _loop_market_closed_log_message(

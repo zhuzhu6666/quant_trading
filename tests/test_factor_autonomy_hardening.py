@@ -1,5 +1,6 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -397,8 +398,8 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
     monkeypatch.setattr("backend.runtime.scheduler.InProcessScheduler", lambda: _FakeScheduler())
     monkeypatch.setattr("backend.runtime.evolution_orchestrator.scheduled_evolution_cycle", lambda: None)
     monkeypatch.setattr("backend.runtime.factor_governance_orchestrator.run_autonomous_factor_governance_cycle", lambda: None)
-    monkeypatch.setattr("backend.services.live_service._scheduled_feature_engineering", lambda: None)
-    monkeypatch.setattr("backend.services.live_service._scheduled_offmarket_position_quality_lightgbm", lambda: None)
+    monkeypatch.setattr("backend.services.learning_research_jobs.run_feature_engineering_job", lambda: None)
+    monkeypatch.setattr("backend.services.learning_research_jobs.run_offmarket_position_quality_job", lambda: None)
 
     worker._register_heavy_jobs(include_system_health=False)
 
@@ -415,6 +416,8 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
         "2 * * * *",
         "coordinated_evolution_hourly",
     ) in registered
+    assert worker.__file__
+    assert "backend.services.live_service" not in Path(worker.__file__).read_text(encoding="utf-8")
 
 
 def test_factor_catalog_snapshot_round_trips_full_catalog_json(tmp_path):

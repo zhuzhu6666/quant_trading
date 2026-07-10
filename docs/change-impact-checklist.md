@@ -61,6 +61,7 @@
 | `evolution_decision` | 是否记录判断和 rollback_json |
 | `learning_application_log` | 是否记录应用状态 |
 | `learning_application_effect` | 是否能支撑后验回滚 |
+| 应用原子性 | 权重 mutation 前是否已有 `prepared`；成功后是否进入 `applied/observing`；重启是否能用 snapshot 幂等恢复 |
 | `runtime_config_overlay` | 重启是否可恢复 |
 | 原子性/并发 | overlay 与 snapshot 是否同事务；失败前是否禁止发布内存；producer 是否只写局部 patch |
 | 跨进程刷新 | 是否由 YAML base + 完整 overlay 重建；空 overlay/删除 key 是否能传播 |
@@ -71,6 +72,7 @@
 | 效果闭环 SLO | bounded window 是否归档终态；inconclusive 重试是否要求终态后的新证据且无更新 application |
 | 实验准入 | 同一 scope 是否只有一个 active effect；AWE/Factor Governance 是否共用门；微小 delta 是否被拒绝 |
 | mutation 覆盖 | 每个已生效 AWE 权重 patch 是否存在对应 `learning_application_log/effect`，历史缺口是否单独标 legacy |
+| 单一权重用例 | AWE、Factor Governance、Evolution/manual govern 是否都调用 `FactorWeightChangeService`，没有 DecisionPolicy/mutation 之间的旁路 |
 | 经验先验 | 是否只来自 terminal bounded effects；生产 DecisionPolicy 调用是否传入且保持 0.85~1.15 有界 |
 | 冷却/限频 | 单周期动作数量是否受限 |
 | 测试污染 | pytest/test overlay 是否被生产拒绝 |
@@ -96,6 +98,7 @@
 | 检查项 | 目标 |
 |---|---|
 | `FactorFrameBuilder` | live/evolution/health 是否共用入口 |
+| runtime health projection | `/api/health`、readiness、learning worker 是否消费同一 cTrader/session 投影，且投影不参与交易授权 |
 | `release_at` | 外部数据是否 point-in-time |
 | monthly DuckDB | 当前月链接是否正确 |
 | PostgreSQL state | 是否避免新增 SQLite state 写入 |

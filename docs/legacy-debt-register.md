@@ -288,6 +288,42 @@
 - 收口方式: 系统污染样本降为 partial/低权重；`factor_contribution_review` 标记 `system_contaminated` 并降低 confidence；`backfill_trade_review_timing_and_system_markers()` 只从现有 ledger/order/review 事实回填旧 review。
 - 验证方式: `tests/test_trade_reviewer.py::test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination`、`tests/test_autonomous_learning.py::test_backfill_trade_review_timing_marks_system_contamination`、`tests/test_factor_governance_lightgbm.py::test_factor_governance_lightgbm_skips_system_contaminated_reviews`。
 
+### 多条权重写链各自拼装治理门
+
+- 状态: `fixed`
+- 旧理解: AWE、Factor Governance 和 Evolution/manual govern 可以各自调用 DecisionPolicy、RiskPolicy 与 RuntimeConfigMutationService，只要局部链路看起来完整即可。
+- 当前口径: 所有实际因子权重变更统一由 `FactorWeightChangeService` 编排；每次都包含有界经验先验、共享实验准入、RiskPolicy、prepared application、runtime mutation 和后验观察。
+- 影响面: live AWE、因子降权/晋升、manual govern API、Evolution、学习效果账本。
+- 收口方式: 三条生产路径已迁入统一业务用例；prepared application 在 mutation 前落库，同 scope prepared 也属于 active experiment。
+- 验证方式: `tests/test_factor_weight_change_service.py`、`tests/test_evolution_closure_fixes.py`。
+
+### learning worker 导入 live_service 巨石
+
+- 状态: `fixed`
+- 旧理解: worker 可以复用 `live_service` 内的 feature engineering 和休市模型函数，即使这会同时加载 live 执行依赖和进程内状态。
+- 当前口径: 学习研究任务属于 `backend.services.learning_research_jobs`；worker 不导入 live_service，休市判断消费跨进程 runtime health projection。
+- 影响面: worker 启动内存、循环依赖、live/learning 权责边界、离线任务测试。
+- 收口方式: live 仅保留兼容调度 wrapper，worker 直接注册独立 research job。
+- 验证方式: `tests/test_factor_autonomy_hardening.py::test_learning_worker_registers_factor_governance_job`、`tests/test_offmarket_high_load.py`。
+
+### 健康接口各自推测 broker 状态
+
+- 状态: `fixed`
+- 旧理解: `/api/health`、readiness 和 worker 可以从各自进程状态推断 cTrader/market session；拿不到时长期返回 unknown。
+- 当前口径: live 进程发布 `runtime_health_projection.v1`，所有跨进程消费者读取同一新鲜度受控投影；投影只做展示/调度判断，不授权交易。
+- 影响面: health API、backend readiness、离线深度学习调度、运维观察。
+- 收口方式: 新增 `RuntimeHealthProjectionService`，live market-session snapshot 负责发布，消费者统一读取。
+- 验证方式: `tests/test_runtime_health_projection.py`、`tests/test_backend_health.py`、`tests/test_backend_readiness_contract.py`。
+
+### V16 页面同时承载解析、列表和容器编排
+
+- 状态: `fixed`
+- 旧理解: V16 自治页的字段解析、治理链展示和页面请求编排可以长期放在一个 1300+ 行组件中。
+- 当前口径: 页面保留查询/动作编排，纯展示、状态映射和治理列表归 `features/v16/V16BrainViews.tsx`；现有视觉 token、响应式 CSS 和 API contract 不改变。
+- 影响面: Web V16 页面可维护性、组件复用、首屏行为与交互回归。
+- 收口方式: 按容器/展示边界拆分，页面文件降到约 600 行，并通过前端 architecture、typecheck 与 production build。
+- 验证方式: `npm --prefix web_frontend run test`、`typecheck`、`build`。
+
 ## 5. 新旧债登记模板
 
 复制下面模板新增条目：

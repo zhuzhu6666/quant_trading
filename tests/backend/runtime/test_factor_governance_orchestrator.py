@@ -258,5 +258,5 @@ def test_scoped_factor_rollback_preserves_unrelated_runtime_config():
     )
 
     assert patch["factor_signal_config"]["rsi_14"]["enabled"] is True
-    assert patch["factor_signal_config"]["ema_slope"]["enabled"] is False
-    assert patch["factor_portfolio_weights"] == {"rsi_14": 0.4, "ema_slope": 0.8}
+    assert "ema_slope" not in patch["factor_signal_config"]
+    assert patch["factor_portfolio_weights"] == {"rsi_14": 0.4}

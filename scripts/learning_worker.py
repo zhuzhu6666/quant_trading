@@ -48,6 +48,11 @@ def _bootstrap_runtime() -> None:
 
         init_all()
         logger.info("[learning_worker] databases initialized")
+        from backend.services.learning_application_state import LearningApplicationStateService
+
+        recovery = LearningApplicationStateService().recover_prepared()
+        if recovery.get("checked"):
+            logger.info("[learning_worker] governed weight application recovery: {}", recovery)
     except Exception as exc:
         logger.warning("[learning_worker] db init failed: {}", exc)
 
@@ -91,9 +96,9 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
     from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
     from backend.services.evolution_work_coordinator import coordinated_job
     from config.runtime_config import shared as _runtime_shared
-    from backend.services.live_service import (
-        _scheduled_feature_engineering,
-        _scheduled_offmarket_position_quality_lightgbm,
+    from backend.services.learning_research_jobs import (
+        run_feature_engineering_job,
+        run_offmarket_position_quality_job,
     )
 
     scheduler = InProcessScheduler()
@@ -141,7 +146,7 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
         scheduler,
         "feature_eng",
         "0 3 * * *",
-        coordinated_job("feature_eng", _scheduled_feature_engineering),
+        coordinated_job("feature_eng", run_feature_engineering_job),
     )
     _add_job(
         scheduler,
@@ -149,7 +154,7 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
         "20 * * * *",
         coordinated_job(
             "offmarket_position_quality_lightgbm",
-            _scheduled_offmarket_position_quality_lightgbm,
+            run_offmarket_position_quality_job,
         ),
     )
     if include_system_health:

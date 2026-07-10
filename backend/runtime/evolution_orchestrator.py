@@ -993,18 +993,19 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
             except Exception as e:
                 logger.debug("[Evolve] regime_boost: %s", e)
 
-        # ★ 统一决策入口: DecisionPolicy 融合所有来源
-        from alpha.decision_policy import DecisionPolicy
-        dp = DecisionPolicy()
-        decisions = dp.decide(
-            awe_patches=None,  # evolution 不运行 awe.adapt (有 awe_adapt job)
+        from backend.services.factor_weight_change import FactorWeightChangeService
+
+        weight_service = FactorWeightChangeService()
+        plan = weight_service.plan(
+            awe_patches=None,
             weight_policy_weights=wp_weights,
             shadow_perfs=shadow_perfs,
             factor_configs=cfg.factor_signal_config,
             current_weights=current_weights,
             regime=regime,
+            fast=False,
         )
-        new_weights = DecisionPolicy.to_weights(decisions)
+        new_weights = dict(plan.get("proposed_weights") or {})
         if not new_weights:
             return False
 
@@ -1018,41 +1019,47 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
             })
             return False
 
-        from backend.services.runtime_config_mutation import RuntimeConfigMutationService
-        RuntimeConfigMutationService().apply_patch(
-            {"factor_portfolio_weights": new_weights},
+        run_id = f"evolution_weight_{int(_time.time())}"
+        weight_result = weight_service.execute(
             source="evolution_decision_policy_update_weight",
-            run_id=f"evolution_weight_{int(_time.time())}",
+            producer="weight_policy_governance",
+            run_id=run_id,
             actor="system:evolution_orchestrator",
-            action="update_weight",
             reason="explicit governed weight sync",
+            awe_patches=None,
+            weight_policy_weights=wp_weights,
+            shadow_perfs=shadow_perfs,
+            factor_configs=cfg.factor_signal_config,
+            current_weights=current_weights,
+            regime=regime,
+            fast=False,
+            suggestion_ids_by_factor={
+                factor: list((info or {}).get("suggestion_ids") or [])
+                for factor, info in applied_biases.items()
+            },
+            evidence_by_factor={
+                factor: {
+                    "governance": governance_result,
+                    "learning_bias": info,
+                }
+                for factor, info in applied_biases.items()
+            },
+            source_agent="factor_governance",
         )
+        if weight_result.get("status") != "applied":
+            _emit_evolution_story("weights_blocked", {
+                "status": weight_result.get("status"),
+                "risk_verdict": weight_result.get("risk_verdict") or {},
+                "admissions": weight_result.get("admissions") or {},
+            })
+            return False
+        new_weights = dict(weight_result.get("proposed_weights") or {})
         _emit_evolution_story("weights_updated", {
             "factors": len(new_weights),
             "factor_portfolio_weights": new_weights,
             "learning_biases": applied_biases,
         })
-        if applied_biases and _gov is not None:
-            cycle_ts = _time.time()
-            for factor, info in applied_biases.items():
-                try:
-                    _gov.log_application(
-                        scope_type="factor",
-                        scope_key=factor,
-                        action=str(info.get("action", "watch")),
-                        bias_multiplier=float(info.get("multiplier", 1.0)),
-                        old_weight=float(info.get("old_weight", 0.0)),
-                        new_weight=float(info.get("new_weight", info.get("biased_weight", 0.0))),
-                        suggestion_ids=list(info.get("suggestion_ids", []) or []),
-                        cycle_ts=cycle_ts,
-                        details={
-                            "governance": governance_result,
-                            "biased_weight": info.get("biased_weight", 0.0),
-                        },
-                    )
-                except Exception as e:
-                    logger.debug("[Evolve] learning application log %s: %s", factor, e)
-        logger.info("[Evolve] weights: %d factors → factor_portfolio_weights (via DecisionPolicy)",
+        logger.info("[Evolve] weights: %d factors → factor_portfolio_weights (via governed service)",
                     len(new_weights))
 
         if df is not None:

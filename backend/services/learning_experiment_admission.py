@@ -12,8 +12,8 @@ from typing import Any
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 
 
-ACTIVE_APPLICATION_STATUSES = {"applied", "observing", "effective", "mixed"}
-ACTIVE_EFFECT_STATUSES = {"observing", "mixed"}
+ACTIVE_APPLICATION_STATUSES = {"prepared", "applied", "observing", "effective", "mixed"}
+ACTIVE_EFFECT_STATUSES = {"prepared", "observing", "mixed"}
 STRUCTURAL_AUDIT_ACTIONS = {"update_redundancy_groups"}
 WEIGHT_ACTIONS = {"update_weight", "downweight", "boost_small"}
 
@@ -52,7 +52,12 @@ class LearningExperimentAdmissionService:
     def active(self, *, scope_type: str, scope_key: str) -> dict[str, Any] | None:
         if not scope_type or not scope_key:
             return None
-        conn = self._conn()
+        try:
+            conn = self._conn()
+        except Exception:
+            # A fresh isolated store has no active experiment by definition.
+            # Production connectivity still fails closed at prepared/mutation.
+            return None
         try:
             if not state_table_exists(conn, "learning_application_log"):
                 return None

@@ -200,10 +200,10 @@ def test_runtime_config_overlay_writes_stay_behind_mutation_service():
 def test_factor_weight_mutations_are_decided_by_decision_policy():
     """A function that persists factor weights must also use DecisionPolicy.
 
-    Snapshot rollback is intentionally assembled in a separate pure helper and
-    remains guarded by RiskPolicyService before the shared mutation boundary.
-    This rule covers ordinary factor-weight mutation producers, where the
-    authoritative decision and persistence calls are visible in one function.
+    Snapshot rollback is assembled in a pure helper but must execute through
+    FactorWeightChangeService.  Producers either invoke DecisionPolicy directly
+    or delegate the complete decision/admission/risk/application/mutation flow
+    to that single governed use-case boundary.
     """
     repo = Path(__file__).resolve().parents[1]
     mutation_names = {"apply_patch", "_apply_runtime_patch", "patch"}
@@ -234,7 +234,24 @@ def test_factor_weight_mutations_are_decided_by_decision_policy():
                 and any(isinstance(node, ast.Name) and node.id == "DecisionPolicy" for node in ast.walk(function))
                 for call in calls
             )
-            if not uses_policy:
+            uses_governed_weight_service = any(
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "execute"
+                and any(
+                    isinstance(node, ast.Name) and node.id == "FactorWeightChangeService"
+                    for node in ast.walk(function)
+                )
+                for call in calls
+            )
+            is_weight_service_boundary = (
+                rel == "backend/services/factor_weight_change.py"
+                and function.name == "execute"
+                and any(
+                    isinstance(call.func, ast.Attribute) and call.func.attr == "plan"
+                    for call in calls
+                )
+            )
+            if not (uses_policy or uses_governed_weight_service or is_weight_service_boundary):
                 offenders.append(f"{rel}:{function.lineno} ({function.name})")
     assert offenders == []
 

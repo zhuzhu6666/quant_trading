@@ -21,7 +21,7 @@
 | 静态默认配置 | `settings.yaml` / `config/runtime_config.py` | 基础配置，不由自治治理直接回写 |
 | 自治配置覆盖 | PostgreSQL `runtime_config_overlay` + `config.runtime_config.refresh_from_overlay()` | 自治层事实源；overlay 与 matching snapshot 在同一事务提交，PG advisory lock/SQLite immediate transaction 串行化并发 patch；提交成功后才发布内存，跨进程始终按 YAML base + 完整 overlay 重建，空 overlay 也必须传播 |
 | 配置快照 | PostgreSQL `runtime_config_snapshot` | 审计和回滚用，不临场推断；连续的同 hash + 同 source + 同 run_id 事件复用最近 snapshot version，事件审计仍由 evolution/mutation ledger 保留 |
-| 配置写入口 | `RuntimeConfigMutationService` / `DecisionPolicy` | 自治配置变更必须走统一写入口 |
+| 配置写入口 | `RuntimeConfigMutationService` / `DecisionPolicy` | 自治配置变更必须走统一写入口；因子权重业务写入统一由 `FactorWeightChangeService` 编排 |
 | 启动恢复 | `RuntimeConfigStartupService` | base YAML + DB overlay 后替换内存配置 |
 | incident control | `runtime_incident_mode` + `RuntimeIncidentControlService` + `RiskPolicyService` | V15 freeze/shadow_only/no_new_risk/only_close/frozen 控制入口 |
 | live autonomy unlock | PostgreSQL `live_autonomy_unlock_event` + `LiveAutonomyService` + runtime overlay | `live_autonomous` 一次性人工解锁/撤销账本；写入 `autonomy_mode`、`live_autonomy_unlocked`、`live_autonomy_unlock_id` 必须经 `RuntimeConfigMutationService` |
@@ -45,7 +45,7 @@
 | 因子角色 | `factor_signal_config.role` / registry fallback | `alpha/context/gate/sizing` |
 | 方向评分 | `PortfolioCompositor` | 只使用 enabled、weight > 0、role=alpha 的因子 |
 | live 信号决策编排 | `backend.services.live_decision_pipeline.LiveDecisionFrame` | factor refresh/append、normalizer、compositor、context policy、ExecutionGate 的单 tick 决策输出；不读账户、不触发 RiskPolicy、不下单 |
-| 权重写入 | `DecisionPolicy` | 权重治理唯一写入口 |
+| 权重写入 | `backend.services.factor_weight_change.FactorWeightChangeService` + `DecisionPolicy` | 所有实际因子权重变更统一执行 DecisionPolicy、Experience Prior、实验准入、RiskPolicy、prepared application 和 runtime mutation；DecisionPolicy 仍是唯一权重决策器 |
 | 因子生命周期 | `RegistryAdapter` / lifecycle event | lifecycle 权威来源 |
 | DSL 因子表达式校验 | `alpha.factor_dsl.parse_dsl` + `backend.runtime.evolution_orchestrator` + `alpha.factor_health` | 进化注册前必须解析校验；历史坏表达式在健康评估中标记 `invalid_dsl`/`DEAD` 并跳过执行，不允许反复进入评估报错 |
 | 因子治理视图 | `Factor Catalog` | 聚合 registry、runtime config、weights、health、shadow、AWE、learning |
@@ -66,7 +66,7 @@
 - context 可以影响状态、阈值、仓位，但不能直接改变多空方向。
 - live 信号决策层只产出 `CompositeSignal`、context policy effect、`GateResult` 和审计 payload；交易授权仍必须进入 `RiskPolicyService`，权重治理仍必须进入 `DecisionPolicy`。
 - shadow 因子不直接交易，必须经治理晋升。
-- `FactorGovernanceOrchestrator` 是因子晋升、Canary 回滚、禁用和退役的唯一调度执行者；Evolution 只能写证据和候选。AWE 只在持有 live attribution pipeline 的 backend 进程运行；AWE 与 Factor Governance 的权重 patch 都必须先过共享 `LearningExperimentAdmissionService`，再经过 `DecisionPolicy`、`RiskPolicyService` 和事务化 mutation boundary，并写入同一 `learning_application_log/effect` 后验账本。
+- `FactorGovernanceOrchestrator` 是因子晋升、Canary 回滚、禁用和退役的唯一调度执行者；Evolution 只能写证据和候选。AWE 只在持有 live attribution pipeline 的 backend 进程运行；AWE、Factor Governance 和 Evolution/manual govern 的实际权重 patch 必须统一调用 `FactorWeightChangeService`，先过 `DecisionPolicy`、有界经验先验、共享 `LearningExperimentAdmissionService` 和 `RiskPolicyService`，在 mutation 前写 `prepared` application，成功后进入 `applied/observing`，并由同一 `learning_application_log/effect` 后验账本收口。
 - Canary 阶段推进不得重复消费相同历史聚合窗口；首次 SHADOW 可用已有 OOS bootstrap，后续阶段必须满足 `fresh_evidence_bars`，数据/结果指纹和 stage watermark 必须进入审计。
 - 搜索/进化生成的 DSL 因子必须先通过 `parse_dsl()`；解析失败的表达式不能注册为 shadow 因子，历史残留坏 DSL 只能作为健康/治理噪音进入 `invalid_dsl` 审计，不能继续执行计算。
 - disabled/DEAD 因子应被 engine、compositor、AWE、readiness 一致排除。
@@ -83,6 +83,7 @@
 | 动作裁决 | `RiskPolicyService.evaluate(...)` | 风控统一裁决入口 |
 | 风险阈值快照 | `risk.runtime_policy.RiskLimitSnapshot` + `RuntimeConfig` / runtime overlay | 日内亏损、回撤、交易次数、数据延迟、L2、磁盘、VaR/CVaR 等阈值的统一输入口径 |
 | 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk、L2 等运行态统一输入口径 |
+| 跨进程运行健康投影 | PostgreSQL `runtime_kv[runtime_health_projection.v1]` + `backend.services.runtime_health_projection` | live 进程发布 market session、cTrader 连接和 loop 状态；`/api/health`、readiness、learning worker 只消费同一只读投影，不重复推测 broker 状态；该投影不授权交易 |
 | 决策 K 线/信号新鲜度 | `backend.services.live_data_sync_helpers` + `_live_state.decision_bar_freshness` + `_live_state.last_processed_decision_bar_ts` + `RiskPolicyService.evaluate("open_trade")` | live tick 只用最新已闭合 bar；缺应有闭合 bar 时先经主 cTrader bridge 回补月库并重载，修复失败以 `decision_bar_stale` 阻断开仓；同一根已闭合决策 bar 只推进一次 signal/open，重复 tick 只运行持仓观察/保护；即使 bar fresh，信号 age 超过 `max(180s, 1.5 * timeframe)` 时以 `decision_signal_age_stale` 阻断开仓 |
 | 下单/改仓/平仓 | cTrader bridge + ledger | broker 执行事实与账本共同追溯；live 开仓先经 `_run_open_trade_pipeline()` 生成 candidate/risk verdict/order block，再触达 broker |
 | 后端进程退出 | `BackendRuntimeLifecycle` + `stop_loop_for_process_shutdown()` + `live.loop.last_shutdown` | 进程退出保留 persisted desired loop state，同步等待当前 tick drain；`completed/timed_out/not_running` 写结构化 shutdown 结果，超时以 `recovery_required=true` 审计，不平仓、不主动断开 cTrader；手工 `/api/live/stop` 仍负责显式关闭 desired state |
@@ -154,6 +155,7 @@
 | 后验效果 | `learning_application_effect` | 回滚判断事实源 |
 | 效果归因质量 | `learning_application_effect.decision_json.evidence_quality` + `research.learning.application_effects` | 排除 partial/missing attribution、人工/重启污染和 regime mismatch；同一 scope 后续 application 会关闭前一 application 的观察窗口，前一窗口只能使用下一次变更之前的复盘证据，证据足够可做 bounded comparative 判定，不足则立即归档为 `inconclusive`，不允许跨变更混用样本；`mixed` 按冷却持续复评，开放窗口超过观察期仍不足则收口；无随机对照时不得声称严格因果 |
 | 学习实验准入 | `backend.services.learning_experiment_admission` | 同一 scope 同时最多一个 active experiment；权重变化还必须通过绝对/相对 materiality 门，风险回滚继续走既有降风险路径；`update_redundancy_groups` 是结构审计，不伪装成可由交易 PnL 归因的 factor experiment |
+| 权重应用状态机 | `backend.services.learning_application_state` + `learning_application_log/effect` + `runtime_config_snapshot` | `prepared -> applied/observing -> terminal`；配置 mutation 前先持久化 prepared，重启时以匹配 run/source 的 runtime snapshot 作为提交事实恢复，缺失快照的超时 prepared 标为 `mutation_failed`，同 scope 在 prepared 期间 fail-closed |
 | 有界经验先验 | `backend.services.experience_prior` + `DecisionPolicy.experience_priors` | 只聚合 terminal 且 `bounded_attribution_allowed=true` 的 factor effect，按样本、时效和效果生成 0.85~1.15 prior；AWE/Factor Governance 三个生产 `fast_decide` 调用统一传入，最终写权仍属于 DecisionPolicy/RiskPolicy/mutation boundary |
 | 学习闭环质量 SLO | `backend.services.learning_effect_quality` + `/api/learning/effect-quality` + readiness `learning_effect_quality` / `v16.learning_effect_quality` | 只读汇总效果终态率、开放窗口年龄、并发归因积压、bounded window 收口一致性和受控重试资格；`inconclusive` 只有在终态后出现新复盘证据且同 scope 没有更新 application 时才可成为重试候选，实际重试仍必须形成新 application 并经过既有 governor/风控/决策边界；SLO degraded 只进入 `known_observations`，不直接改权重、参数、权限或交易 readiness |
 | 实验存储 | `data/experiments.db` canonical structured `experiments` schema + `research.experiment_tracker.ExperimentTracker` | `EvolutionExperimentRegistry` 是兼容适配器；旧 JSON blob 行原位迁移，不再维护第二套同名表 schema |
@@ -176,6 +178,7 @@
 - 智能体质量以 `AgentScorecardService` 为只读观测口径；scorecard 可以影响 Proposal Registry 路由、证据要求和 candidate review 严格度，高分只能提高审查优先级，不能直接放大权限、改权重或下单。
 - `AgentBriefingContextService` 是多智能体统一战况简报；包含 chain health、proposal flow、scorecard、最近交易反馈、scope-relevant `experience_memory` 和治理覆盖率，只能作为 review/prompt/context 输入，不是执行授权。
 - `DecisionPolicy` 的 `experience_priors` 是学习后验接口，不是旁路；由 `ExperiencePriorService` 从终态有界效果构造，只有样本量和置信度达标的 prior 才可在 0.85~1.15 范围内小幅修正权重，最终仍受 role/lifecycle/diversity/redundancy、RiskPolicy 和 mutation boundary 约束。组合决策由 `backend.services.market_regime` 优先使用显式 regime，否则从既有 trend/volatility context 生成低基数事实标签并写入 `decision_ledger`；trade review 必须保存 entry decision 的 `regime_id/entry_regime`，历史只允许从 `decision_ledger` 事实回填。
+- `scripts/learning_worker.py` 不得导入 `backend.services.live_service` 获取研究任务；feature engineering 与休市 LightGBM 任务归 `backend.services.learning_research_jobs`，跨进程市场状态只读消费 runtime health projection，避免加载 live 执行巨石及其进程内状态。
 - 交易 lesson 写入 `experience_memory` 时可附带 `agent_attribution` / `feedback_agents`，用于把盈亏经验反馈给参与过提案、shadow audit 或 LLM advisory 的 agent；该反馈是记忆和评分证据，不是自动奖惩执行入口。
 - `model_ready=true` 还必须配合 `allowed_uses` 包含 `supervised_training`，才可进入强监督训练。
 - `train_weight` 由 `quality_score`、`integrity`、`causal_level`、`label_status` 共同决定。

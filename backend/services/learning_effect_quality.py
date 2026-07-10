@@ -209,7 +209,7 @@ class LearningEffectQualityService:
                 reason_counts[reason] += 1
                 if reason == "bounded_window_insufficient_samples" and status != "inconclusive":
                     bounded_nonterminal_count += 1
-                if status in {"observing", "mixed"}:
+                if status in {"prepared", "observing", "mixed"}:
                     oldest_active_age = max(oldest_active_age, now - float(row["cycle_ts"] or row["created_at"] or now))
                     oldest_active_review_age = max(oldest_active_review_age, now - float(row["updated_at"] or row["created_at"] or now))
                 if status == "inconclusive" and bool(quality.get("retry_via_new_application")):
@@ -230,7 +230,7 @@ class LearningEffectQualityService:
                         retry_candidate_count += 1
                         if len(retry_candidates) < 50:
                             retry_candidates.append(item)
-            active = status_counts["observing"] + status_counts["mixed"]
+            active = status_counts["prepared"] + status_counts["observing"] + status_counts["mixed"]
             terminal = sum(status_counts[key] for key in ("reinforced", "effective", "ineffective", "rolled_back", "inconclusive", "superseded"))
             confounded = reason_counts["confounded_by_concurrent_application"]
             closure_ratio = terminal / max(len(rows), 1)

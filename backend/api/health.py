@@ -38,10 +38,20 @@ def health() -> HealthResponse:
         else:
             db_status = f"error: {type(e).__name__}"
 
+    ctrader_status = "unknown"
+    try:
+        from backend.services.runtime_health_projection import RuntimeHealthProjectionService
+
+        projection = RuntimeHealthProjectionService().latest(max_age_seconds=180.0)
+        if projection.get("ok"):
+            ctrader_status = str((projection.get("ctrader") or {}).get("status") or "unknown")
+    except Exception:
+        ctrader_status = "unknown"
+
     return HealthResponse(
         status="ok" if db_status in {"connected", "locked_by_writer"} else "degraded",
         db=db_status,
-        ctrader="unknown",
+        ctrader=ctrader_status,
         server_time=datetime.now(timezone.utc).isoformat(),
         uptime_seconds=time.time() - _START_TIME,
     )

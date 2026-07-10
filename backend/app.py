@@ -99,6 +99,11 @@ async def lifespan(app: FastAPI):
         from backend.core.db import init_all
         init_all()
         _lg.info("[lifespan] databases initialized")
+        from backend.services.learning_application_state import LearningApplicationStateService
+
+        recovery = LearningApplicationStateService().recover_prepared()
+        if recovery.get("checked"):
+            _lg.info(f"[lifespan] governed weight application recovery: {recovery}")
     except Exception as e:
         effective_send_orders = bool(execution_semantics and execution_semantics.effective_send_orders)
         record_startup_issue("state_db", "critical" if effective_send_orders else "degraded", str(e), blocking=effective_send_orders)

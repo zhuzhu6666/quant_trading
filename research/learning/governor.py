@@ -576,7 +576,7 @@ class RuleEvolutionGovernor:
                 SELECT application_id, suggestion_ids_json, status
                 FROM learning_application_log
                 WHERE scope_type=? AND scope_key=? AND action=?
-                  AND status IN ('applied', 'observing', 'effective')
+                  AND status IN ('prepared', 'applied', 'observing', 'effective')
                 ORDER BY cycle_ts DESC, created_at DESC
                 LIMIT 1
                 """,
@@ -591,14 +591,14 @@ class RuleEvolutionGovernor:
                 except Exception:
                     existing_ids = "[]"
                 existing_status = str(existing["status"] or "")
-                if existing_ids == suggestion_ids_json and existing_status in {"applied", "observing", "effective"}:
+                if existing_ids == suggestion_ids_json and existing_status in {"prepared", "applied", "observing", "effective"}:
                     self._execute(conn,
                         """
                         UPDATE learning_application_log
                         SET status='superseded'
                         WHERE scope_type=? AND scope_key=? AND action=?
                           AND application_id<>?
-                          AND status IN ('applied', 'observing', 'effective')
+                          AND status IN ('prepared', 'applied', 'observing', 'effective')
                           AND suggestion_ids_json=?
                         """,
                         (
@@ -671,6 +671,7 @@ class RuleEvolutionGovernor:
                     return str(existing["application_id"])
 
             application_id = self._new_id("lapp")
+            effect_status = "prepared" if status == "prepared" else "observing"
             self._execute(conn,
                 """
                 INSERT INTO learning_application_log
@@ -698,7 +699,7 @@ class RuleEvolutionGovernor:
                 INSERT INTO learning_application_effect
                 (application_id, scope_type, scope_key, action, status, decision_json,
                  updated_at, created_at)
-                VALUES (?, ?, ?, ?, 'observing', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(application_id) DO UPDATE SET
                     scope_type=excluded.scope_type,
                     scope_key=excluded.scope_key,
@@ -712,6 +713,7 @@ class RuleEvolutionGovernor:
                     scope_type,
                     scope_key,
                     action,
+                    effect_status,
                     json.dumps(
                         {
                             "suggestion_ids": suggestion_ids,

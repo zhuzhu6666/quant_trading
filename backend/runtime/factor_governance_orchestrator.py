@@ -19,7 +19,7 @@ from backend.core.db import get_state_pg_conn
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
 from backend.services.factor_redundancy import RedundancyDetector
 from backend.services.agent_authority import AgentAuthorityRegistryService
-from backend.services.experience_prior import ExperiencePriorService
+from backend.services.factor_weight_change import FactorWeightChangeService
 from backend.services.learning_experiment_admission import (
     LearningExperimentAdmissionService,
     STRUCTURAL_AUDIT_ACTIONS,
@@ -197,18 +197,19 @@ class FactorGovernanceOrchestrator:
             current_signal = dict(current_cfg.get("factor_signal_config") or {})
             rollback_signal = dict(rollback_cfg.get("factor_signal_config") or {})
             if factor_id in rollback_signal:
-                current_signal[factor_id] = dict(rollback_signal[factor_id] or {})
+                factor_signal = dict(rollback_signal[factor_id] or {})
             else:
-                current_signal.pop(factor_id, None)
-            patch["factor_signal_config"] = current_signal
+                # Overlay patches are merge-only.  A factor absent from the
+                # rollback snapshot is represented as explicitly disabled.
+                factor_signal = dict(current_signal.get(factor_id, {}) or {})
+                factor_signal["enabled"] = False
+                factor_signal.setdefault("lifecycle_status", "QUARANTINE")
+            patch["factor_signal_config"] = {factor_id: factor_signal}
         if "factor_portfolio_weights" in rollback_cfg:
-            current_weights = dict(current_cfg.get("factor_portfolio_weights") or {})
             rollback_weights = dict(rollback_cfg.get("factor_portfolio_weights") or {})
-            if factor_id in rollback_weights:
-                current_weights[factor_id] = float(rollback_weights[factor_id] or 0.0)
-            else:
-                current_weights.pop(factor_id, None)
-            patch["factor_portfolio_weights"] = current_weights
+            patch["factor_portfolio_weights"] = {
+                factor_id: float(rollback_weights.get(factor_id, 0.0) or 0.0)
+            }
         return patch
 
     def _apply_runtime_patch(self, patch: dict[str, Any], *, source: str, run_id: str) -> dict[str, Any]:
@@ -290,11 +291,63 @@ class FactorGovernanceOrchestrator:
                         result={"reason": "missing_factor_scoped_rollback_config"},
                     ))
                     continue
-                self._apply_runtime_patch(
-                    rollback_patch,
-                    source="factor_governance_auto_rollback",
-                    run_id=str(run.get("run_id") or ""),
-                )
+                rollback_run_id = str(run.get("run_id") or "")
+                if "factor_portfolio_weights" in rollback_patch:
+                    current_weights = dict(before_cfg.get("factor_portfolio_weights") or {})
+                    rollback_weights = dict(rollback_patch.get("factor_portfolio_weights") or {})
+                    target_weight = float(rollback_weights.get(factor_id, 0.0) or 0.0)
+                    signal_patch = dict(rollback_patch.get("factor_signal_config") or {})
+                    factor_configs = self._portfolio_configs(
+                        runtime_config.shared(),
+                        signal_cfg=signal_patch or dict(before_cfg.get("factor_signal_config") or {}),
+                    )
+                    weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
+                        source="factor_governance_auto_rollback",
+                        producer="factor_governance_posterior_rollback",
+                        run_id=rollback_run_id,
+                        actor="system:factor_governance",
+                        reason=f"posterior rollback for {factor_id}",
+                        factor_configs=factor_configs,
+                        current_weights=current_weights,
+                        weight_policy_weights={factor_id: target_weight},
+                        fast=True,
+                        bypass_for_risk_reduction=True,
+                        risk_check=lambda _plan, _verdict=verdict: _verdict,
+                        evidence_by_factor={factor_id: evidence},
+                        suggestion_ids_by_factor={
+                            factor_id: [
+                                *self._loads_list(row["suggestion_ids_json"]),
+                                f"{rollback_run_id}:rollback:{factor_id}",
+                            ]
+                        },
+                        source_agent="factor_governance",
+                        additional_patch=(
+                            {"factor_signal_config": signal_patch} if signal_patch else None
+                        ),
+                    )
+                    if weight_result.get("status") not in {"applied", "no_admitted_change"}:
+                        actions.append(self._audit_action(
+                            run,
+                            item,
+                            "rollback_factor_action",
+                            "blocked_by_risk",
+                            evidence,
+                            verdict,
+                            result={"reason": weight_result.get("status"), "weight_result": weight_result},
+                        ))
+                        continue
+                    if weight_result.get("status") == "no_admitted_change" and signal_patch:
+                        self._apply_runtime_patch(
+                            {"factor_signal_config": signal_patch},
+                            source="factor_governance_auto_rollback_config_only",
+                            run_id=rollback_run_id,
+                        )
+                else:
+                    self._apply_runtime_patch(
+                        rollback_patch,
+                        source="factor_governance_auto_rollback_config_only",
+                        run_id=rollback_run_id,
+                    )
                 self._mark_application_rolled_back(
                     application_id=str(row["application_id"] or ""),
                     suggestion_ids=self._loads_list(row["suggestion_ids_json"]),
@@ -726,35 +779,32 @@ class FactorGovernanceOrchestrator:
         dp = DecisionPolicy(
             redundancy_max_group_weight=float(getattr(cfg, "factor_redundancy_max_group_weight", 0.35) or 0.35)
         )
-        decisions = dp.fast_decide(
+        weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
+            source="factor_governance_update_weight",
+            producer="factor_governance",
+            run_id=str(run.get("run_id") or ""),
+            actor="system:factor_governance",
+            reason="health/model evidence governed downweight",
             awe_patches=allowed_patches,
             weight_policy_weights=None,
             factor_configs=factor_configs,
             current_weights=current_weights,
-            experience_priors=ExperiencePriorService().priors(),
+            fast=True,
+            decision_policy=dp,
+            risk_check=lambda _plan: {
+                "allowed": True,
+                "reason": "producer_factor_risk_verdicts_allowed",
+                "producer_verdicts": {name: verdict.to_dict() for name, verdict in verdicts.items()},
+            },
+            evidence_by_factor=evidence_by_factor,
         )
-        # DecisionPolicy may clamp an already-minimal weight back to its
-        # current value. Treat that as a no-op: writing/auditing it every
-        # governance tick creates duplicate proposals and makes effect
-        # attribution impossible without changing any runtime behavior.
-        decisions = {
-            name: decision
-            for name, decision in decisions.items()
-            if abs(float(decision.new_weight) - float(decision.old_weight)) > 1e-9
-        }
-        admission_service = LearningExperimentAdmissionService()
-        admitted_decisions: dict[str, Any] = {}
-        for name, decision in decisions.items():
-            admission = admission_service.evaluate(
-                scope_type="factor",
-                scope_key=name,
-                action="update_weight",
-                old_weight=float(decision.old_weight),
-                new_weight=float(decision.new_weight),
-            )
+        decisions = dict(weight_result.get("admitted_decisions") or {})
+        for name, admission in (weight_result.get("admissions") or {}).items():
+            evidence_by_factor.setdefault(name, {})["experiment_admission"] = admission
             if admission.get("allowed"):
-                admitted_decisions[name] = decision
-                evidence_by_factor[name]["experiment_admission"] = admission
+                continue
+            decision = (weight_result.get("decisions") or {}).get(name)
+            if decision is None:
                 continue
             evidence_by_factor[name]["experiment_admission"] = admission
             item = next(item for item in catalog if item["factor_id"] == name)
@@ -769,15 +819,9 @@ class FactorGovernanceOrchestrator:
                 after={"weight": decision.old_weight},
                 result={"admission": admission},
             ))
-        decisions = admitted_decisions
         partial = DecisionPolicy.to_weights(decisions)
-        if not partial:
+        if weight_result.get("status") != "applied" or not partial:
             return actions
-        self._apply_runtime_patch(
-            {"factor_portfolio_weights": partial},
-            source="factor_governance_update_weight",
-            run_id=str(run.get("run_id") or ""),
-        )
         after_cfg = runtime_config.shared().to_dict()
         for name, decision in decisions.items():
             item = next(item for item in catalog if item["factor_id"] == name)
@@ -791,6 +835,10 @@ class FactorGovernanceOrchestrator:
                 before={"runtime_config": before_cfg, "weight": decision.old_weight},
                 after={"runtime_config": after_cfg, "weight": decision.new_weight},
                 rollback={"runtime_config": before_cfg},
+                result={
+                    "application_id": (weight_result.get("applications") or {}).get(name, ""),
+                    "weight_change_status": weight_result.get("status"),
+                },
             ))
         return actions
 
@@ -1012,22 +1060,35 @@ class FactorGovernanceOrchestrator:
             redundancy_max_group_weight=float(getattr(cfg, "factor_redundancy_max_group_weight", 0.35) or 0.35)
         )
         target = float(getattr(cfg, "factor_governance_new_factor_weight", 0.3) or 0.3)
-        decisions = dp.fast_decide(
+        weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
+            source="factor_governance_promote_factor",
+            producer="factor_governance_promotion",
+            run_id=run_id,
+            actor="system:factor_governance",
+            reason="governed factor promotion initial weight",
             awe_patches=None,
             weight_policy_weights={factor_id: target},
             factor_configs=factor_configs,
             current_weights=current_weights,
-            experience_priors=ExperiencePriorService().priors(),
-        )
-        weight_patch = DecisionPolicy.to_weights(decisions)
-        self._apply_runtime_patch(
-            {
-                "factor_signal_config": {factor_id: entry},
-                "factor_portfolio_weights": weight_patch,
+            fast=True,
+            decision_policy=dp,
+            risk_check=lambda _plan: {
+                "allowed": True,
+                "reason": "promotion_risk_verdict_allowed_by_orchestrator",
             },
-            source="factor_governance_promote_factor",
-            run_id=run_id,
+            evidence_by_factor={factor_id: {"promotion": True, "target_weight": target}},
+            additional_patch={"factor_signal_config": {factor_id: entry}},
         )
+        if weight_result.get("status") == "no_admitted_change":
+            self._apply_runtime_patch(
+                {"factor_signal_config": {factor_id: entry}},
+                source="factor_governance_promote_factor_config_only",
+                run_id=run_id,
+            )
+        elif weight_result.get("status") != "applied":
+            raise RuntimeError(
+                f"factor promotion weight change blocked: {weight_result.get('status')}"
+            )
 
     def _portfolio_configs(self, cfg: Any, *, signal_cfg: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
         signal_cfg = dict(signal_cfg if signal_cfg is not None else (getattr(cfg, "factor_signal_config", {}) or {}))
@@ -1187,7 +1248,7 @@ class FactorGovernanceOrchestrator:
         result: dict[str, Any] | None,
         decision_id: str = "",
     ) -> None:
-        if action in STRUCTURAL_AUDIT_ACTIONS:
+        if action in STRUCTURAL_AUDIT_ACTIONS or str((result or {}).get("application_id") or ""):
             return
         before = before or {}
         after = after or {}

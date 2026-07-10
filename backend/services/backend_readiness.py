@@ -105,6 +105,9 @@ class BackendReadinessService:
         high_load = self._timed_component("high_load", lambda: self._high_load_status(market_session))
         governance = self._timed_component("governance", self._governance_status)
         factor_data = self._timed_component("factor_data", self._factor_data_status)
+        runtime_health_projection = self._timed_component(
+            "runtime_health_projection", self._runtime_health_projection_status
+        )
         runtime_factor_budget = self._timed_component("runtime_factor_budget", self._runtime_factor_budget_status)
         governance_freshness = self._timed_component("governance_freshness", self._governance_freshness_status)
         runtime_weight_integrity = self._timed_component("runtime_weight_integrity", self._runtime_weight_integrity_status)
@@ -229,6 +232,7 @@ class BackendReadinessService:
             "models": model_status,
             "governance": governance,
             "factor_data": factor_data,
+            "runtime_health_projection": runtime_health_projection,
             "runtime_factor_budget": runtime_factor_budget,
             "governance_freshness": governance_freshness,
             "runtime_weight_integrity": runtime_weight_integrity,
@@ -401,6 +405,7 @@ class BackendReadinessService:
             "factor_governance_effects": factor_governance_effects,
             "learning_effect_quality": learning_effect_quality,
             "runtime_factor_budget": runtime_factor_budget,
+            "runtime_health_projection": runtime_health_projection,
             "governance_candidate_reviews": brain_governance_candidate_reviews,
             "candidate_bridge_review_coverage": candidate_bridge_review_coverage,
             "live_ready_guardrails": brain_live_ready_guardrails,
@@ -1264,6 +1269,20 @@ class BackendReadinessService:
             return {
                 "ok": False,
                 "schema_version": "runtime_factor_budget.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    @staticmethod
+    def _runtime_health_projection_status() -> dict[str, Any]:
+        try:
+            from backend.services.runtime_health_projection import RuntimeHealthProjectionService
+
+            return RuntimeHealthProjectionService().latest(max_age_seconds=180.0)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "runtime_health_projection.v1",
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
             }

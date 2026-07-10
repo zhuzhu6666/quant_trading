@@ -2936,14 +2936,14 @@ def _recommendation_already_materialized(conn, recommendation_id: str) -> bool:
     return False
 
 
-def _offline_deep_auto_submit_allowed() -> tuple[bool, str]:
+def _offline_deep_auto_submit_allowed(*, db_path: str | Path = STATE_DB) -> tuple[bool, str]:
     try:
-        from backend.services import live_service
+        from backend.services.learning_research_jobs import offmarket_high_load_allowed
+        from backend.services.runtime_health_projection import RuntimeHealthProjectionService
 
-        session = live_service._live_state_get("market_session", {}, clone=True) or {}
-        if not session:
-            session = live_service._market_session_snapshot(None)
-        allowed, reason = live_service._offmarket_high_load_allowed(session)
+        projection = RuntimeHealthProjectionService(db_path).latest(max_age_seconds=300.0)
+        session = dict(projection.get("market_session") or {}) if projection.get("ok") else {}
+        allowed, reason = offmarket_high_load_allowed(session)
         return bool(allowed), str(reason or "")
     except Exception as exc:
         return False, f"market_session_unavailable:{exc}"
@@ -2980,7 +2980,7 @@ def materialize_parameter_template_recommendations(
                         counts["skipped_offmarket"] += 1
                         items.append({"recommendation_id": recommendation_id, "mode": "offline_validate", "skipped": "offline_deep_disabled"})
                         continue
-                    allowed, reason = _offline_deep_auto_submit_allowed()
+                    allowed, reason = _offline_deep_auto_submit_allowed(db_path=db_path)
                     if not allowed:
                         counts["skipped_offmarket"] += 1
                         items.append({"recommendation_id": recommendation_id, "mode": "offline_validate", "skipped": reason})
