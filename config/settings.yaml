@@ -22,7 +22,7 @@ commission:
 risk:
   max_daily_loss_pct: 50.0
   max_position_lots: 0.5
-  max_trades_per_day: 20
+  max_trades_per_day: 100
   single_trade_risk_usd: 2.0
   circuit_breaker:
     consecutive_losses: 5
@@ -124,7 +124,7 @@ runtime:
   risk_max_drawdown_pct: 15.0
   risk_max_consecutive_losses: 8
   risk_max_daily_loss_pct: 50.0
-  risk_max_daily_trades: 20
+  risk_max_daily_trades: 100
   risk_data_lag_max_seconds: 3600.0
   risk_circuit_breaker_bypass: false
   risk_cooldown_bars: 3
