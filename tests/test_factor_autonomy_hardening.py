@@ -1,4 +1,5 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -194,6 +195,76 @@ def test_clear_overlay_to_base_does_not_snapshot_stale_overlay(tmp_path):
     assert "shadow_alpha_1" not in row[2]
 
 
+def test_runtime_config_overlay_serializes_concurrent_partial_patches(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = RuntimeConfigOverlayService(db_path)
+    rc.register_overlay_base(RuntimeConfig(), db_path)
+
+    def write_factor(name: str, weight: float):
+        return service.apply_patch(
+            {"factor_portfolio_weights": {name: weight}},
+            source="factor_governance_update_weight",
+            run_id=f"concurrent_{name}",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda item: write_factor(*item), [("alpha_a", 0.11), ("alpha_b", 0.22)]))
+
+    assert all(item["ok"] for item in results)
+    weights = service.latest()["overlay"]["factor_portfolio_weights"]
+    assert weights["alpha_a"] == 0.11
+    assert weights["alpha_b"] == 0.22
+
+
+def test_runtime_config_overlay_does_not_publish_failed_transaction(tmp_path, monkeypatch):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = RuntimeConfigOverlayService(db_path)
+    base = RuntimeConfig(autonomy_mode="demo_autonomous")
+    rc.register_overlay_base(base, db_path)
+    rc.replace(base)
+    version_before = rc.version()
+
+    def fail_persist(*_args, **_kwargs):
+        raise RuntimeError("simulated overlay persistence failure")
+
+    monkeypatch.setattr(service, "_persist_overlay_row", fail_persist)
+    with pytest.raises(RuntimeError, match="simulated overlay persistence failure"):
+        service.apply_patch(
+            {"autonomy_mode": "demo_nursery"},
+            source="factor_governance_update_weight",
+            run_id="failed_transaction",
+        )
+
+    assert rc.version() == version_before
+    assert rc.shared().autonomy_mode == "demo_autonomous"
+    assert service.latest()["ok"] is False
+
+
+def test_empty_overlay_refresh_rebuilds_yaml_base_and_removes_old_keys(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = RuntimeConfigOverlayService(db_path)
+    base = RuntimeConfig(autonomy_mode="demo_autonomous")
+    rc.register_overlay_base(base, db_path)
+    service.apply_patch(
+        {
+            "autonomy_mode": "demo_nursery",
+            "factor_portfolio_weights": {"temporary_alpha": 0.4},
+        },
+        source="factor_governance_update_weight",
+        run_id="before_clear",
+    )
+    service.clear_overlay_to_base(base, source="operator_clear", run_id="clear")
+
+    # Simulate a second process that still holds the pre-clear value.
+    rc.replace(RuntimeConfig(autonomy_mode="demo_nursery", factor_portfolio_weights={"temporary_alpha": 0.4}))
+    assert rc.refresh_from_overlay(db_path, force=True) is True
+    assert rc.shared().autonomy_mode == "demo_autonomous"
+    assert "temporary_alpha" not in rc.shared().factor_portfolio_weights
+
+
 def test_runtime_config_mutation_service_uses_overlay_without_temp_db_audit(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
@@ -326,7 +397,6 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
     monkeypatch.setattr("backend.runtime.scheduler.InProcessScheduler", lambda: _FakeScheduler())
     monkeypatch.setattr("backend.runtime.evolution_orchestrator.scheduled_evolution_cycle", lambda: None)
     monkeypatch.setattr("backend.runtime.factor_governance_orchestrator.run_autonomous_factor_governance_cycle", lambda: None)
-    monkeypatch.setattr("backend.services.live_service._scheduled_awe_adapt", lambda: None)
     monkeypatch.setattr("backend.services.live_service._scheduled_feature_engineering", lambda: None)
     monkeypatch.setattr("backend.services.live_service._scheduled_offmarket_position_quality_lightgbm", lambda: None)
 
@@ -334,7 +404,17 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
 
     names = [item[0] for item in registered]
     assert "factor_governance_autonomous" in names
-    assert ("factor_governance_autonomous", "*/15 * * * *", "<lambda>") in registered
+    assert (
+        "factor_governance_autonomous",
+        "*/15 * * * *",
+        "coordinated_factor_governance_autonomous",
+    ) in registered
+    assert "awe_adapt" not in names
+    assert (
+        "evolution_hourly",
+        "2 * * * *",
+        "coordinated_evolution_hourly",
+    ) in registered
 
 
 def test_factor_catalog_snapshot_round_trips_full_catalog_json(tmp_path):

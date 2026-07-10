@@ -58,6 +58,10 @@ from backend.services.live_decision_pipeline import (
     build_signal_decision_log_payload as _decision_build_signal_decision_log_payload,
     run_live_decision_pipeline as _decision_run_live_decision_pipeline,
 )
+from backend.services.live_factor_state import (
+    commit_ready_factor_decision as _factor_state_commit_ready_decision,
+    resolve_decision_bar_progress as _factor_state_resolve_bar_progress,
+)
 from backend.services.live_loop_shell import (
     adaptive_weight_config as _loop_adaptive_weight_config,
     apply_spot_quote_to_latest_bar as _loop_apply_spot_quote_to_latest_bar,
@@ -3362,6 +3366,8 @@ def _prime_live_loop_state(
         loop_running=True,
         loop_strategy=strategy_name,
         loop_started_at=started_at,
+        loop_shutdown=None,
+        accepting_new_risk=True,
         account=account,
         account_updated_at=time.time(),
     )
@@ -4089,6 +4095,8 @@ _loop_broker: str | None = None
 _loop_started_at: float | None = None
 _loop_strategy_name: str | None = "factor_pipeline_v4"
 _loop_state_lock = threading.Lock()
+_OPEN_TRADE_ADMISSION_LOCK = threading.Lock()
+_process_shutdown_requested = False
 # ★ v9-fix: 重启退避 + 价格僵死检测 + 备份 bar 缓存
 _last_loop_end: float = 0.0
 _MIN_RESTART_INTERVAL = 60  # 最小重启间隔 60s
@@ -4265,19 +4273,33 @@ def _scheduled_awe_adapt():
                     current_weights=current_weights,
                 )
                 partial = DecisionPolicy.to_weights(decisions)
-                merged = dict(current_weights)
-                merged.update(partial)
-                missing = set(current_weights) - set(merged)
-                if missing:
+                if not partial:
+                    logger.debug("[awe_adapt] DecisionPolicy produced no accepted weight changes")
+                    return
+                risk_verdict = RiskPolicyService.shared().evaluate(
+                    "update_weight",
+                    {
+                        "source": "awe_adapt",
+                        "required_mode": "autonomous_governance",
+                        "changed_factors": sorted(partial),
+                        "current_weights": current_weights,
+                        "proposed_weights": partial,
+                    },
+                )
+                if not risk_verdict.allowed:
                     logger.warning(
-                        "[awe_adapt] refusing partial weight patch; missing=%s",
-                        sorted(missing)[:20],
+                        "[awe_adapt] RiskPolicy blocked weight update: %s",
+                        risk_verdict.reason,
                     )
                     return
                 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 
                 RuntimeConfigMutationService().apply_patch(
-                    {"factor_portfolio_weights": merged},
+                    # Persist only the factors decided in this cycle.  The
+                    # transactional overlay merges them under a writer lock,
+                    # so a concurrent governance decision cannot be erased by
+                    # a stale full-weight snapshot.
+                    {"factor_portfolio_weights": partial},
                     source="awe_decision_policy_update_weight",
                     run_id=f"awe_adapt_{int(time.time())}",
                     actor="system:awe_adapt",
@@ -4287,7 +4309,7 @@ def _scheduled_awe_adapt():
                 logger.info(
                     "[awe_adapt] weights pushed via DecisionPolicy (%d changed, %d total)",
                     len(partial),
-                    len(merged),
+                    len(current_weights),
                 )
             except Exception as _e2:
                 logger.warning("[awe_adapt] DecisionPolicy weight push failed: %s", _e2)
@@ -4572,13 +4594,19 @@ def _start_live_scheduler():
         return
     run_heavy_jobs = _env_enabled("QUANT_BACKEND_HEAVY_JOBS", "0")
 
+    # AWE consumes the live process' in-memory attribution/pipeline state.  It
+    # therefore belongs to the backend even when CPU-heavy research jobs are
+    # delegated to the learning worker.  Offset it from governance/nursery
+    # minutes to avoid decisions from the same evidence window racing.
+    sched.add_job("awe_adapt", "8,38 * * * *", _scheduled_awe_adapt)
+
     if run_heavy_jobs:
         # ★ 初始化 EvolutionKernel (注册中枢 + quality gate + governor)
         from backend.runtime.evolution_kernel import EvolutionKernel
 
         kernel = EvolutionKernel.shared()
         kernel.set_pipeline(_factor_pipeline)
-        kernel.start()  # registers evolution_hourly + awe_adapt + system_health
+        kernel.start()  # registers evolution_hourly + factor governance + system_health
     else:
         try:
             from monitor.system_health import shared as _sh_shared
@@ -4610,7 +4638,8 @@ def _start_live_scheduler():
         logger=logger,
     )
     if run_heavy_jobs:
-        # ★ awe_adapt / evolution_hourly / system_health 已由 EvolutionKernel 注册
+        # evolution_hourly / factor governance / system_health 由 EvolutionKernel 注册;
+        # awe_adapt 始终由持有 live pipeline 的 backend 注册。
         # Phase 3: 特征工程 (每天凌晨 3:00)
         sched.add_job("feature_eng", "0 3 * * *", _scheduled_feature_engineering)
         # Phase F1.1: 停盘确认窗口 LightGBM 旁路训练 (每小时检查, 非窗口只写 skip 审计)
@@ -4670,6 +4699,13 @@ def start_loop(
     global _last_loop_end
 
     with _loop_state_lock:
+        if _process_shutdown_requested:
+            return {
+                "ok": False,
+                "error": "process_shutdown_in_progress",
+                "broker": broker,
+                "strategy_name": strategy_name,
+            }
         if _loop_thread is not None and _loop_thread.is_alive():
             return {
                 "ok": False,
@@ -4695,6 +4731,13 @@ def start_loop(
 
     with _loop_state_lock:
         # 再次检查是否有人在等的时候启动了
+        if _process_shutdown_requested:
+            return {
+                "ok": False,
+                "error": "process_shutdown_in_progress",
+                "broker": broker,
+                "strategy_name": strategy_name,
+            }
         if _loop_thread is not None and _loop_thread.is_alive():
             return {"ok": False, "error": "another loop started during backoff wait"}
 
@@ -4742,6 +4785,161 @@ def start_loop(
         "trigger_reason": trigger_reason,
         "msg": f"live loop thread started. Read /api/live/loop-status to monitor.",
     }
+
+
+def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
+    """Synchronously drain the live loop during backend process shutdown.
+
+    This process-lifecycle path deliberately preserves the persisted desired
+    state.  It does not stop schedulers, disconnect cTrader, or alter broker
+    positions.  The current tick is allowed to finish before the loop exits.
+    """
+    global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
+    global _loop_strategy_name, _last_loop_end
+    global _process_shutdown_requested
+
+    requested_at = time.time()
+    timeout = max(0.0, float(timeout_sec))
+    trigger_reason = "backend_shutdown"
+
+    with _loop_state_lock:
+        thread = _loop_thread
+        broker = _loop_broker
+        thread_id = getattr(thread, "ident", None) if thread is not None else None
+        if thread is None or not thread.is_alive():
+            with _OPEN_TRADE_ADMISSION_LOCK:
+                _process_shutdown_requested = True
+            ownership_released = _loop_thread is thread
+            if ownership_released:
+                _loop_thread = None
+                _loop_stop_flag = None
+                _loop_broker = None
+                _loop_started_at = None
+                _loop_strategy_name = None
+                _mark_loop_stopped_for_display()
+            finished_at = time.time()
+            result = {
+                "schema_version": "live_loop_process_shutdown.v1",
+                "status": "not_running",
+                "ok": True,
+                "graceful": True,
+                "recovery_required": False,
+                "was_running": False,
+                "desired_state_preserved": True,
+                "ownership_released": ownership_released,
+                "replacement_detected": not ownership_released,
+                "accepting_new_risk": False,
+                "broker": broker,
+                "thread_id": thread_id,
+                "timeout_sec": timeout,
+                "requested_at": requested_at,
+                "ts": finished_at,
+                "trigger_reason": trigger_reason,
+            }
+        else:
+            stop_flag = _loop_stop_flag
+            draining = {
+                "schema_version": "live_loop_process_shutdown.v1",
+                "status": "draining",
+                "ok": True,
+                "graceful": False,
+                "recovery_required": False,
+                "was_running": True,
+                "desired_state_preserved": True,
+                "ownership_released": False,
+                "replacement_detected": False,
+                "accepting_new_risk": False,
+                "broker": broker,
+                "thread_id": thread_id,
+                "timeout_sec": timeout,
+                "requested_at": requested_at,
+                "trigger_reason": trigger_reason,
+            }
+            # Linearize process draining against the final open-order admission
+            # check and market RPC.  An RPC admitted before this lock completes;
+            # an RPC arriving afterwards observes the latch/event and is blocked.
+            with _OPEN_TRADE_ADMISSION_LOCK:
+                _process_shutdown_requested = True
+                _live_state_update(
+                    loop_shutdown=draining,
+                    accepting_new_risk=False,
+                )
+                if stop_flag is not None:
+                    stop_flag.set()
+            result = None
+
+    if result is not None:
+        _live_state_update(loop_shutdown=result, accepting_new_risk=False)
+        _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
+        logger.info("[live] process shutdown: no running live loop")
+        return result
+
+    thread.join(timeout=timeout)
+    finished_at = time.time()
+    timed_out = thread.is_alive()
+
+    if timed_out:
+        result = {
+            "schema_version": "live_loop_process_shutdown.v1",
+            "status": "timed_out",
+            "ok": False,
+            "graceful": False,
+            "recovery_required": True,
+            "was_running": True,
+            "desired_state_preserved": True,
+            "ownership_released": False,
+            "replacement_detected": False,
+            "accepting_new_risk": False,
+            "broker": broker,
+            "thread_id": thread_id,
+            "timeout_sec": timeout,
+            "requested_at": requested_at,
+            "ts": finished_at,
+            "trigger_reason": trigger_reason,
+        }
+        _live_state_update(loop_shutdown=result, accepting_new_risk=False)
+        _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
+        logger.warning(
+            f"[live] process shutdown timed out after {timeout:.1f}s; "
+            "live loop recovery required"
+        )
+        return result
+
+    with _loop_state_lock:
+        ownership_released = _loop_thread is thread
+        if ownership_released:
+            _loop_thread = None
+            _loop_stop_flag = None
+            _loop_broker = None
+            _loop_started_at = None
+            _loop_strategy_name = None
+            _last_loop_end = finished_at
+            _mark_loop_stopped_for_display()
+
+    result = {
+        "schema_version": "live_loop_process_shutdown.v1",
+        "status": "completed",
+        "ok": True,
+        "graceful": True,
+        "recovery_required": False,
+        "was_running": True,
+        "desired_state_preserved": True,
+        "ownership_released": ownership_released,
+        "replacement_detected": not ownership_released,
+        "accepting_new_risk": False,
+        "broker": broker,
+        "thread_id": thread_id,
+        "timeout_sec": timeout,
+        "requested_at": requested_at,
+        "ts": finished_at,
+        "trigger_reason": trigger_reason,
+    }
+    _live_state_update(loop_shutdown=result, accepting_new_risk=False)
+    _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
+    logger.info(
+        f"[live] process shutdown completed; ownership_released={ownership_released}"
+    )
+    return result
 
 
 def stop_loop(
@@ -5210,7 +5408,16 @@ def _run_live_loop_tick_body(
         log(f"tick {tick}: CIRCUIT BREAKER: daily drawdown {dd_state['dd_pct']:.1f}%")
         return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": False}
     last_bar = df_new.iloc[-1]
-    _process_tick(bridge, None, df_new, last_bar, broker, tick, log)
+    _process_tick(
+        bridge,
+        None,
+        df_new,
+        last_bar,
+        broker,
+        tick,
+        log,
+        stop_requested=stop_requested,
+    )
     if stop_requested():
         log(f"tick {tick}: stop requested during processing, exiting")
         return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": True}
@@ -5829,13 +6036,24 @@ def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 30.0) -> 
 
 
 @record_timed("live.process_tick")
-def _process_tick(bridge, strategy, df_new, last_bar, broker: str, tick: int, log) -> None:
+def _process_tick(
+    bridge,
+    strategy,
+    df_new,
+    last_bar,
+    broker: str,
+    tick: int,
+    log,
+    *,
+    stop_requested=None,
+) -> None:
     """处理一根新 bar — 全部由 Factor Takeover v4 因子管道驱动。"""
     global _factor_pipeline
     if _factor_pipeline is not None:
         try:
             return _process_tick_factor_pipeline(
                 bridge, _factor_pipeline, df_new, last_bar, broker, tick, log,
+                stop_requested=stop_requested,
             )
         except Exception as e:
             log(f"tick {tick}: factor pipeline error: {e}")
@@ -7734,9 +7952,22 @@ def _submit_open_trade_candidate(
     candidate: _OpenTradeCandidate,
     current_price: float,
     log,
-) -> None:
+    stop_requested=None,
+) -> bool:
+    with _OPEN_TRADE_ADMISSION_LOCK:
+        if _open_trade_draining(stop_requested):
+            log(f"tick {tick}: v4 open SKIP (loop_draining stage=broker_submit)")
+            return False
+        try:
+            result = _submit_open_trade_order(bridge, composite, candidate.volume)
+        except Exception as exc:
+            log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
+            return True
+
+    # The market RPC was admitted.  Post-fill resolution, pending protection,
+    # SL/TP attach, and ledger/recovery writes must finish even if draining is
+    # requested after the RPC returns; process shutdown joins this loop thread.
     try:
-        result = _submit_open_trade_order(bridge, composite, candidate.volume)
         if result is not None and getattr(result, "success", False):
             _handle_open_trade_order_success(
                 result=result,
@@ -7770,6 +8001,18 @@ def _submit_open_trade_candidate(
             )
     except Exception as exc:
         log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
+    return True
+
+
+def _open_trade_draining(stop_requested=None) -> bool:
+    if _process_shutdown_requested:
+        return True
+    return bool(stop_requested is not None and stop_requested())
+
+
+def _loop_draining_gate_result(*, tick: int, stage: str, log):
+    log(f"tick {tick}: v4 open SKIP (loop_draining stage={stage})")
+    return _blocked_open_trade_gate_result("loop_draining")
 
 
 def _run_open_trade_pipeline(
@@ -7791,9 +8034,12 @@ def _run_open_trade_pipeline(
     send: bool,
     tick: int,
     log,
+    stop_requested=None,
 ):
     if not (composite.direction != 0 and gate_result.passed and send):
         return gate_result
+    if _open_trade_draining(stop_requested):
+        return _loop_draining_gate_result(tick=tick, stage="before_candidate", log=log)
     if pending_open_attach_ids:
         log(
             f"tick {tick}: v4 open SKIP (pending_open_attach "
@@ -7828,7 +8074,7 @@ def _run_open_trade_pipeline(
             log=log,
         )
 
-    _submit_open_trade_candidate(
+    admitted = _submit_open_trade_candidate(
         bridge=bridge,
         attr_engine=attr_engine,
         broker=broker,
@@ -7842,7 +8088,10 @@ def _run_open_trade_pipeline(
         candidate=candidate,
         current_price=current_price,
         log=log,
+        stop_requested=stop_requested,
     )
+    if not admitted:
+        return _blocked_open_trade_gate_result("loop_draining")
     return gate_result
 
 
@@ -7967,7 +8216,7 @@ def _process_tick_existing_decision_bar(
 
 def _process_tick_factor_pipeline(
     bridge, pipeline: dict, df_new, last_bar, broker: str,
-    tick: int, log,
+    tick: int, log, *, stop_requested=None,
 ) -> None:
     """使用 Factor Takeover v4 管道处理一根新 bar。
 
@@ -7986,15 +8235,11 @@ def _process_tick_factor_pipeline(
 
     # 1. 构造 bar dict
     bar = _tick_build_factor_bar(last_bar, df_new, _tf)
-    try:
-        bar_ts = float(bar.get("time") or 0.0)
-    except (TypeError, ValueError):
-        bar_ts = 0.0
-    try:
-        last_processed_ts = float(_live_state_get("last_processed_decision_bar_ts", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        last_processed_ts = 0.0
-    if bar_ts > 0 and last_processed_ts >= bar_ts:
+    bar_progress = _factor_state_resolve_bar_progress(
+        bar,
+        _live_state_get("last_processed_decision_bar_ts", 0.0),
+    )
+    if bar_progress.already_processed:
         _process_tick_existing_decision_bar(
             bridge=bridge,
             pipeline=pipeline,
@@ -8004,7 +8249,7 @@ def _process_tick_factor_pipeline(
             broker=broker,
             tick=tick,
             log=log,
-            last_processed_ts=last_processed_ts,
+            last_processed_ts=bar_progress.last_processed_ts,
         )
         return
 
@@ -8026,26 +8271,19 @@ def _process_tick_factor_pipeline(
         log(f"tick {tick}: {decision_frame.reason}")
         return
 
-    factor_values = decision_frame.factor_values
-    pipeline["last_factor_values"] = dict(factor_values or {})
-    if bar_ts > 0:
-        _live_state_update(last_processed_decision_bar_ts=bar_ts)
-    signals = decision_frame.signals
-    composite = decision_frame.composite
-    gate_result = decision_frame.gate_result
-    # ★ 保存因子投票快照到 _live_state, 前端「因子投票」面板读取
-    try:
-        _set_factor_snapshot(
-            _tick_build_factor_votes(
-                signals,
-                factor_values,
-                getattr(composite, "factor_roles", {}),
-                getattr(composite, "active_weights", {}),
-            ),
-            _tick_build_factor_snapshot_summary(composite, gate_result, now=time.time()),
-        )
-    except Exception as _e:
-        log(f"tick {tick}: factor votes save failed (non-fatal): {_e}")
+    committed_decision = _factor_state_commit_ready_decision(
+        decision_frame=decision_frame,
+        progress=bar_progress,
+        pipeline=pipeline,
+        update_live_state=_live_state_update,
+        set_factor_snapshot=_set_factor_snapshot,
+        tick=tick,
+        log=log,
+    )
+    factor_values = committed_decision.factor_values
+    signals = committed_decision.signals
+    composite = committed_decision.composite
+    gate_result = committed_decision.gate_result
     # ── 决策审计: signal ──
     if _DECISION_LOG:
         decision_log_payload = _decision_build_signal_decision_log_payload(
@@ -8207,6 +8445,7 @@ def _process_tick_factor_pipeline(
         send=send,
         tick=tick,
         log=log,
+        stop_requested=stop_requested,
     )
 
     # ── 日志 ──

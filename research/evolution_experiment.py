@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 import logging
 import time
-import threading
 from dataclasses import dataclass, field, asdict
 from typing import Any
+
+from research.experiment_tracker import Experiment, ExperimentTracker
 
 logger = logging.getLogger(__name__)
 
@@ -58,33 +59,11 @@ class EvolutionExperimentRegistry:
 
     def __init__(self, db_path: str | None = None):
         self._db_path = db_path
-
-    def _get_conn(self):
-        import sqlite3
-        if self._db_path:
-            path = self._db_path
-        else:
+        if db_path is None:
             from backend.core.db import EXPERIMENTS_DB
-            path = str(EXPERIMENTS_DB)
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        # Ensure DDL exists
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS experiments (
-                run_id TEXT PRIMARY KEY,
-                experiment_type TEXT,
-                params_json TEXT DEFAULT '{}',
-                metrics_json TEXT DEFAULT '{}',
-                tags_json TEXT DEFAULT '[]',
-                artifacts_json TEXT DEFAULT '[]',
-                status TEXT DEFAULT 'running',
-                timestamp REAL,
-                created_at REAL
-            )
-        """)
-        conn.commit()
-        return conn
+
+            db_path = str(EXPERIMENTS_DB)
+        self._tracker = ExperimentTracker(db_path=str(db_path))
 
     def start_run(
         self,
@@ -96,17 +75,12 @@ class EvolutionExperimentRegistry:
         """创建新实验记录. 返回 run_id."""
         import uuid
         run_id = f"{experiment_type}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-        now = time.time()
-        record = ExperimentRecord(
-            run_id=run_id,
-            experiment_type=experiment_type,
-            params_json=params or {},
-            status="running",
+        self._tracker.start_run(
+            experiment_type,
+            params=params or {},
             tags=tags or [],
-            timestamp=now,
-            created_at=now,
+            run_id=run_id,
         )
-        self._upsert(record)
         logger.info("[Experiment] started %s: %s", experiment_type, run_id)
         return run_id
 
@@ -120,38 +94,39 @@ class EvolutionExperimentRegistry:
         artifact_path: str = "",
     ) -> bool:
         """完成实验记录."""
-        record = self._load(run_id)
-        if record is None:
+        exp = self._tracker.get_run(run_id)
+        if exp is None:
             logger.warning("[Experiment] finish: run_id %s not found", run_id)
             return False
-        record.status = "accepted" if accepted else "rejected"
-        if metrics_in_sample:
-            record.metrics_in_sample = metrics_in_sample
-        if metrics_oos:
-            record.metrics_oos = metrics_oos
-        if artifact_path:
-            record.artifact_path = artifact_path
-        self._upsert(record)
+        metrics = dict(exp.metrics or {})
+        metrics["in_sample"] = dict(metrics_in_sample or metrics.get("in_sample") or {})
+        metrics["oos"] = dict(metrics_oos or metrics.get("oos") or {})
+        self._tracker.update_run(
+            run_id,
+            status="accepted" if accepted else "rejected",
+            metrics=metrics,
+            artifacts=[artifact_path] if artifact_path else None,
+        )
         logger.info("[Experiment] finished %s: status=%s metrics_oos=%s",
-                    run_id, record.status, record.metrics_oos)
+                    run_id, "accepted" if accepted else "rejected", metrics.get("oos"))
         return True
 
     def fail_run(self, run_id: str, error: str = "") -> bool:
         """标记实验失败."""
-        record = self._load(run_id)
-        if record is None:
+        exp = self._tracker.get_run(run_id)
+        if exp is None:
             return False
-        record.status = "failed"
-        record.metrics_oos["error"] = error
-        self._upsert(record)
+        oos = dict((exp.metrics or {}).get("oos") or {})
+        oos["error"] = error
+        self._tracker.update_run(run_id, status="failed", metrics={"oos": oos})
         return True
 
     def get_run(self, run_id: str) -> dict | None:
         """获取单次实验详情."""
-        record = self._load(run_id)
-        if record is None:
+        exp = self._tracker.get_run(run_id)
+        if exp is None:
             return None
-        return asdict(record)
+        return asdict(self._to_record(exp))
 
     def list_runs(
         self,
@@ -159,76 +134,28 @@ class EvolutionExperimentRegistry:
         limit: int = 20,
     ) -> list[dict]:
         """列出实验记录."""
-        conn = self._get_conn()
-        try:
-            if experiment_type:
-                rows = conn.execute(
-                    "SELECT * FROM experiments WHERE experiment_type=? ORDER BY timestamp DESC LIMIT ?",
-                    (experiment_type, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM experiments ORDER BY timestamp DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-            results = []
-            for r in rows:
-                results.append({
-                    "run_id": r["run_id"],
-                    "experiment_type": r["experiment_type"],
-                    "status": r["status"],
-                    "timestamp": r["timestamp"],
-                })
-            return results
-        finally:
-            conn.close()
+        return [
+            {
+                "run_id": exp.run_id,
+                "experiment_type": exp.experiment_type,
+                "status": exp.status,
+                "timestamp": exp.timestamp,
+            }
+            for exp in self._tracker.query(exp_type=experiment_type, limit=limit)
+        ]
 
-    def _upsert(self, record: ExperimentRecord) -> None:
-        """写入或更新实验记录."""
-        row = record.to_db_row()
-        conn = self._get_conn()
-        try:
-            conn.execute("""
-                INSERT OR REPLACE INTO experiments
-                (run_id, experiment_type, params_json, metrics_json,
-                 tags_json, artifacts_json, status, timestamp, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                row["run_id"], row["experiment_type"],
-                row["params_json"], row["metrics_json"],
-                row["tags_json"], row["artifacts_json"],
-                row["status"], row["timestamp"], row["created_at"],
-            ))
-            conn.commit()
-        finally:
-            conn.close()
-
-    def _load(self, run_id: str) -> ExperimentRecord | None:
-        """从 DB 加载实验记录."""
-        conn = self._get_conn()
-        try:
-            row = conn.execute(
-                "SELECT * FROM experiments WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            import json as _json
-            params = _json.loads(row["params_json"]) if row["params_json"] else {}
-            metrics = _json.loads(row["metrics_json"]) if row["metrics_json"] else {}
-            tags = _json.loads(row["tags_json"]) if row["tags_json"] else []
-            artifacts = _json.loads(row["artifacts_json"]) if row["artifacts_json"] else []
-            return ExperimentRecord(
-                run_id=row["run_id"],
-                experiment_type=row["experiment_type"],
-                params_json=params,
-                metrics_in_sample=metrics.get("in_sample", {}),
-                metrics_oos=metrics.get("oos", {}),
-                status=row["status"],
-                artifact_path=artifacts[0] if artifacts else "",
-                tags=tags,
-                timestamp=row["timestamp"],
-                created_at=row["created_at"],
-            )
-        finally:
-            conn.close()
+    @staticmethod
+    def _to_record(exp: Experiment) -> ExperimentRecord:
+        metrics = dict(exp.metrics or {})
+        return ExperimentRecord(
+            run_id=exp.run_id,
+            experiment_type=exp.experiment_type,
+            params_json=dict(exp.params or {}),
+            metrics_in_sample=dict(metrics.get("in_sample") or {}),
+            metrics_oos=dict(metrics.get("oos") or {}),
+            status=exp.status,
+            artifact_path=exp.artifacts[0] if exp.artifacts else "",
+            tags=list(exp.tags or []),
+            timestamp=exp.timestamp,
+            created_at=exp.timestamp,
+        )

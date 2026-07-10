@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, state_table_exists
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
-from backend.services.brain_action_planner import _connect, _dumps, _execute, _loads, _safe_float
+from backend.services.agent_authority import AgentAuthorityRegistryService
+from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 
 
 BRIDGE_READY_STAGES = {"governance_ready", "applyable"}

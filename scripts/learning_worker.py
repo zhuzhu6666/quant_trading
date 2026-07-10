@@ -89,21 +89,26 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
     from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
     from backend.runtime.scheduler import InProcessScheduler
     from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
+    from backend.services.evolution_work_coordinator import coordinated_job
     from config.runtime_config import shared as _runtime_shared
     from backend.services.live_service import (
-        _scheduled_awe_adapt,
         _scheduled_feature_engineering,
         _scheduled_offmarket_position_quality_lightgbm,
     )
 
     scheduler = InProcessScheduler()
-    _add_job(scheduler, "evolution_hourly", "0 * * * *", scheduled_evolution_cycle)
+    _add_job(
+        scheduler,
+        "evolution_hourly",
+        "2 * * * *",
+        coordinated_job("evolution_hourly", scheduled_evolution_cycle),
+    )
     governance_cron = str(getattr(_runtime_shared(), "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
     _add_job(
         scheduler,
         "factor_governance_autonomous",
         governance_cron,
-        run_autonomous_factor_governance_cycle,
+        coordinated_job("factor_governance_autonomous", run_autonomous_factor_governance_cycle),
     )
     if _env_enabled("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_RUNNER", "1"):
         nursery_cron = str(getattr(_runtime_shared(), "autonomous_evolution_nursery_cron", "7,22,37,52 * * * *") or "7,22,37,52 * * * *")
@@ -126,14 +131,26 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
                 },
             )
 
-        _add_job(scheduler, "autonomous_evolution_nursery", nursery_cron, _run_nursery_cycle)
-    _add_job(scheduler, "awe_adapt", "*/30 * * * *", _scheduled_awe_adapt)
-    _add_job(scheduler, "feature_eng", "0 3 * * *", _scheduled_feature_engineering)
+        _add_job(
+            scheduler,
+            "autonomous_evolution_nursery",
+            nursery_cron,
+            coordinated_job("autonomous_evolution_nursery", _run_nursery_cycle),
+        )
+    _add_job(
+        scheduler,
+        "feature_eng",
+        "0 3 * * *",
+        coordinated_job("feature_eng", _scheduled_feature_engineering),
+    )
     _add_job(
         scheduler,
         "offmarket_position_quality_lightgbm",
         "20 * * * *",
-        _scheduled_offmarket_position_quality_lightgbm,
+        coordinated_job(
+            "offmarket_position_quality_lightgbm",
+            _scheduled_offmarket_position_quality_lightgbm,
+        ),
     )
     if include_system_health:
         try:

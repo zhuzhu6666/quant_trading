@@ -66,6 +66,7 @@ def mark_loop_stopped_for_display(*, state_update: StateUpdate) -> None:
     state_update(
         loop_running=False,
         loop_strategy=None,
+        accepting_new_risk=False,
     )
 
 

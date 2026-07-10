@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
-from backend.services.evolution_ledger import persist_runtime_config_snapshot
+from backend.services.evolution_ledger import (
+    ensure_evolution_ledger_tables,
+    persist_runtime_config_snapshot,
+)
 from config.runtime_config import RuntimeConfig
 from config import runtime_config
 
@@ -249,24 +252,20 @@ class RuntimeConfigOverlayService:
         sanitized = _sanitize_patch(patch)
         if not sanitized:
             return {"ok": False, "status": "empty_overlay_patch", "updated_keys": []}
-
-        current = self.latest()
-        overlay = _deep_merge(dict(current.get("overlay") or {}), sanitized)
-        return self._write_overlay(
-            overlay,
+        return self._mutate_overlay(
+            sanitized,
             source=source,
             run_id=run_id,
-            patch_for_runtime=sanitized,
+            replace_overlay=False,
         )
 
     def replace_overlay(self, overlay: dict[str, Any], *, source: str, run_id: str = "") -> dict[str, Any]:
         sanitized = _sanitize_patch(overlay)
-        return self._write_overlay(
+        return self._mutate_overlay(
             sanitized,
             source=source,
             run_id=run_id,
-            patch_for_runtime=sanitized,
-            replace_runtime_keys=True,
+            replace_overlay=True,
         )
 
     def clear_overlay_to_base(
@@ -276,99 +275,128 @@ class RuntimeConfigOverlayService:
         source: str,
         run_id: str = "",
     ) -> dict[str, Any]:
-        _refuse_test_write_to_state(self.db_path, source=source, run_id=run_id)
-        now = time.time()
-        overlay: dict[str, Any] = {}
-        overlay_hash = _hash(overlay)
-        version = runtime_config.replace(base_cfg)
-
-        self.ensure_table()
-        conn = _connect(self.db_path)
-        try:
-            conn.execute(
-                _p(self.db_path, """
-                INSERT INTO runtime_config_overlay
-                (overlay_id, overlay_json, overlay_hash, source, run_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(overlay_id) DO UPDATE SET
-                    overlay_json=excluded.overlay_json,
-                    overlay_hash=excluded.overlay_hash,
-                    source=excluded.source,
-                    run_id=excluded.run_id,
-                    updated_at=excluded.updated_at
-                """),
-                (OVERLAY_ID, _dumps(overlay), overlay_hash, str(source or ""), str(run_id or ""), now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        snapshot = persist_runtime_config_snapshot(
-            base_cfg,
-            source=str(source or "runtime_config_overlay_clear"),
-            db_path=self.db_path,
-            run_id=str(run_id or ""),
+        runtime_config.register_overlay_base(base_cfg, self.db_path, replace_existing=True)
+        result = self._mutate_overlay(
+            {},
+            source=source,
+            run_id=run_id,
+            replace_overlay=True,
         )
-        return {
-            "ok": True,
-            "status": "cleared",
-            "version": version,
-            "updated_keys": [],
-            "overlay_hash": overlay_hash,
-            "updated_at": now,
-            "snapshot": snapshot,
-        }
+        result["status"] = "cleared"
+        return result
 
-    def _write_overlay(
+    def _read_overlay_in_transaction(self, conn: Any) -> dict[str, Any]:
+        row = conn.execute(
+            _p(self.db_path, """
+            SELECT overlay_json
+            FROM runtime_config_overlay
+            WHERE overlay_id=?
+            """),
+            (OVERLAY_ID,),
+        ).fetchone()
+        if not row:
+            return {}
+        raw = row["overlay_json"] if hasattr(row, "keys") else row[0]
+        try:
+            parsed = json.loads(raw or "{}")
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _begin_serialized_write(self, conn: Any) -> None:
+        if is_state_db_path(self.db_path):
+            conn.execute(
+                _p(self.db_path, "SELECT pg_advisory_xact_lock(hashtext(?))"),
+                ("quant_runtime_config_overlay",),
+            )
+        else:
+            # SQLite's deferred transactions allow two readers to calculate
+            # from the same stale overlay.  Take the writer lock before read.
+            conn.execute("BEGIN IMMEDIATE")
+
+    def _persist_overlay_row(
         self,
+        conn: Any,
         overlay: dict[str, Any],
+        *,
+        overlay_hash: str,
+        source: str,
+        run_id: str,
+        updated_at: float,
+    ) -> None:
+        conn.execute(
+            _p(self.db_path, """
+            INSERT INTO runtime_config_overlay
+            (overlay_id, overlay_json, overlay_hash, source, run_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(overlay_id) DO UPDATE SET
+                overlay_json=excluded.overlay_json,
+                overlay_hash=excluded.overlay_hash,
+                source=excluded.source,
+                run_id=excluded.run_id,
+                updated_at=excluded.updated_at
+            """),
+            (
+                OVERLAY_ID,
+                _dumps(overlay),
+                overlay_hash,
+                str(source or ""),
+                str(run_id or ""),
+                updated_at,
+            ),
+        )
+
+    def _mutate_overlay(
+        self,
+        sanitized: dict[str, Any],
         *,
         source: str,
         run_id: str = "",
-        patch_for_runtime: dict[str, Any] | None = None,
-        replace_runtime_keys: bool = False,
+        replace_overlay: bool,
     ) -> dict[str, Any]:
         _refuse_test_write_to_state(self.db_path, source=source, run_id=run_id)
-        now = time.time()
-        overlay_hash = _hash(overlay)
-        patch_for_runtime = dict(patch_for_runtime or {})
-        merged_runtime = _apply_runtime_overlay(
-            runtime_config.shared().to_dict(),
-            patch_for_runtime,
-            replace_keys=replace_runtime_keys,
-        )
-        version = runtime_config.replace(RuntimeConfig.from_dict(merged_runtime))
-
         self.ensure_table()
+        ensure_evolution_ledger_tables(self.db_path)
         conn = _connect(self.db_path)
         try:
-            conn.execute(
-                _p(self.db_path, """
-                INSERT INTO runtime_config_overlay
-                (overlay_id, overlay_json, overlay_hash, source, run_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(overlay_id) DO UPDATE SET
-                    overlay_json=excluded.overlay_json,
-                    overlay_hash=excluded.overlay_hash,
-                    source=excluded.source,
-                    run_id=excluded.run_id,
-                    updated_at=excluded.updated_at
-                """),
-                (OVERLAY_ID, _dumps(overlay), overlay_hash, str(source or ""), str(run_id or ""), now),
+            self._begin_serialized_write(conn)
+            current = self._read_overlay_in_transaction(conn)
+            overlay = deepcopy(sanitized) if replace_overlay else _deep_merge(current, sanitized)
+            effective_config = runtime_config.config_from_overlay(overlay, self.db_path)
+            now = time.time()
+            overlay_hash = _hash(overlay)
+            self._persist_overlay_row(
+                conn,
+                overlay,
+                overlay_hash=overlay_hash,
+                source=source,
+                run_id=run_id,
+                updated_at=now,
+            )
+            snapshot = persist_runtime_config_snapshot(
+                effective_config,
+                source=str(source or "runtime_config_overlay"),
+                db_path=self.db_path,
+                run_id=str(run_id or ""),
+                conn=conn,
             )
             conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
         finally:
             conn.close()
-        snapshot = persist_runtime_config_snapshot(
-            runtime_config.shared(),
-            source=str(source or "runtime_config_overlay"),
-            db_path=self.db_path,
-            run_id=str(run_id or ""),
-        )
+
+        # Publish only after both the overlay row and its audit snapshot commit.
+        version = runtime_config.replace(effective_config)
         return {
             "ok": True,
             "status": "applied",
             "version": version,
-            "updated_keys": sorted(patch_for_runtime.keys()),
+            "updated_keys": sorted(sanitized.keys()),
             "overlay_hash": overlay_hash,
             "updated_at": now,
             "snapshot": snapshot,

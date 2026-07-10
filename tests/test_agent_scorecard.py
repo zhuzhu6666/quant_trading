@@ -231,3 +231,42 @@ def test_agent_briefing_includes_governance_coverage(tmp_path):
     assert briefing["governance_coverage"]["proposal_generation_context_coverage"]["status"] == "ok"
     assert briefing["review_rules"]["candidate_context_required"] is True
     assert briefing["review_rules"]["candidate_review_required_before_bridge"] is True
+
+
+def test_agent_generation_context_includes_scope_relevant_experience(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = _setup_state(db_path)
+    try:
+        for factor, reward in (("rsi_14", -0.6), ("macd", 0.4)):
+            conn.execute(
+                """
+                INSERT INTO experience_memory
+                (experience_id, trade_id, regime_id, setup_hash, decision_context_json,
+                 outcome_label, reward_score, failure_tags_json, recommended_action,
+                 evidence_strength, artifact_version, created_at)
+                VALUES (?, ?, 'range', ?, ?, 'bad_loss', ?, '["weak_entry_signal"]',
+                        'downweight', 0.9, 'v1', ?)
+                """,
+                (
+                    f"exp_{factor}",
+                    f"trade_{factor}",
+                    f"setup_{factor}",
+                    json.dumps({"primary_factor": factor, "summary_text": f"lesson for {factor}"}),
+                    reward,
+                    time.time(),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    context = AgentBriefingContextService(db_path).agent_context(
+        "factor_governance",
+        scope_type="factor",
+        scope_key="rsi_14",
+        action="update_weight",
+        requested_writes=["policy_suggestion"],
+    )
+
+    assert [item["primary_factor"] for item in context["relevant_experience"]] == ["rsi_14"]
+    assert context["relevant_experience"][0]["recommended_action"] == "downweight"

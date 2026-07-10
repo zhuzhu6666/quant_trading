@@ -79,12 +79,20 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
 
     class _MutationService:
         def apply_patch(self, patch, **kwargs):
-            rc.patch(patch)
+            cfg = rc.shared().to_dict()
+            weights = dict(cfg.get("factor_portfolio_weights") or {})
+            weights.update(patch["factor_portfolio_weights"])
+            rc.patch({"factor_portfolio_weights": weights})
             return {"ok": True, "status": "applied", "version": 1}
 
     monkeypatch.setattr(
         "backend.services.runtime_config_mutation.RuntimeConfigMutationService",
         lambda: _MutationService(),
+    )
+    risk = _RiskPolicy(allowed=True)
+    monkeypatch.setattr(
+        "risk.policy_service.RiskPolicyService.shared",
+        staticmethod(lambda: risk),
     )
 
     monkeypatch.setattr(
@@ -96,6 +104,39 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
     live_service._scheduled_awe_adapt()
 
     assert rc.shared().factor_portfolio_weights == {"foo": 0.0, "bar": 2.0}
+    assert risk.calls[0][0] == "update_weight"
+    assert risk.calls[0][1]["proposed_weights"] == {"foo": 0.0}
+
+
+def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
+    rc.reset_for_tests()
+    rc.patch({"awe_min_trades": 1, "factor_portfolio_weights": {"foo": 1.0}})
+    writes = []
+
+    class _MutationService:
+        def apply_patch(self, patch, **kwargs):
+            writes.append((patch, kwargs))
+            return {"ok": True}
+
+    risk = _RiskPolicy(allowed=False, reason="risk_budget_exhausted")
+    monkeypatch.setattr(
+        "backend.services.runtime_config_mutation.RuntimeConfigMutationService",
+        lambda: _MutationService(),
+    )
+    monkeypatch.setattr(
+        "risk.policy_service.RiskPolicyService.shared",
+        staticmethod(lambda: risk),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_factor_pipeline",
+        {"attribution": _Attr(), "awe": _AWE(), "engine": None},
+    )
+
+    live_service._scheduled_awe_adapt()
+
+    assert writes == []
+    assert rc.shared().factor_portfolio_weights == {"foo": 1.0}
 
 
 def test_legacy_param_tune_no_longer_patches_runtime_config(monkeypatch):
@@ -284,6 +325,74 @@ def test_shadow_trader_evaluate_factor_builds_virtual_perf():
     assert perf.factor == "mom"
     assert perf.oos_bars > 0
     assert 0.0 <= perf.hit_rate <= 1.0
+    assert len(perf.evidence_hash) == 64
+    assert len(perf.dataset_hash) == 64
+    assert perf.new_evidence_bars == len(df)
+
+    repeated = evaluate_factor(
+        df,
+        "mom",
+        momentum_factor,
+        symbol="XAUUSD+",
+        timeframe="M5",
+        previous_perf=perf,
+    )
+    assert repeated is not None
+    assert repeated.evidence_hash == perf.evidence_hash
+    assert repeated.new_evidence_bars == 0
+
+
+def test_canary_requires_new_evidence_between_stage_promotions():
+    from deployment.canary import CanaryDirector
+
+    director = CanaryDirector()
+    first = CanaryEvalContext(
+        oos_bars=100,
+        oos_pnl=0.02,
+        additional_metrics={
+            "evidence_hash": "evidence-1",
+            "dataset_hash": "dataset-1",
+            "evidence_end_at": "2026-07-10T10:00:00Z",
+            "new_evidence_bars": 100,
+            "hit_rate": 0.6,
+            "n_active": 100,
+        },
+    )
+    assert director.check_promotion("fresh_alpha", first) == "promote"
+    assert director.promote("fresh_alpha") is True
+    assert director.get_stage("fresh_alpha") == CANARY_5
+
+    # The same aggregate window cannot be consumed again for CANARY_20.
+    assert director.check_promotion("fresh_alpha", first) == "stay"
+    assert director.get_state("fresh_alpha").fresh_evidence_bars == 0
+
+    second = CanaryEvalContext(
+        oos_bars=110,
+        oos_pnl=0.022,
+        additional_metrics={
+            **first.additional_metrics,
+            "evidence_hash": "evidence-2",
+            "dataset_hash": "dataset-2",
+            "evidence_end_at": "2026-07-10T10:50:00Z",
+            "new_evidence_bars": 10,
+        },
+    )
+    assert director.check_promotion("fresh_alpha", second) == "stay"
+
+    third = CanaryEvalContext(
+        oos_bars=115,
+        oos_pnl=0.024,
+        additional_metrics={
+            **second.additional_metrics,
+            "evidence_hash": "evidence-3",
+            "dataset_hash": "dataset-3",
+            "evidence_end_at": "2026-07-10T11:15:00Z",
+            "new_evidence_bars": 5,
+        },
+    )
+    assert director.check_promotion("fresh_alpha", third) == "promote"
+    assert director.promote("fresh_alpha") is True
+    assert director.get_stage("fresh_alpha") == CANARY_20
 
 
 def test_canary_context_prefers_shadow_factor_perf(monkeypatch):

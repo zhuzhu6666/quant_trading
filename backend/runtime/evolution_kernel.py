@@ -7,7 +7,7 @@ Design:
   EvolutionKernel 是单例, 由 live_service 在启动时初始化。
   内部:
     - 创建 InProcessScheduler
-    - 注册演化相关的 cron jobs (取代 live_service._start_live_scheduler)
+    - 注册重型演化相关 cron jobs (AWE 由持有 live pipeline 的 backend 管理)
     - 每次进化 cycle 跑 QualityGate → Governor → evolution → DecisionPolicy
 """
 
@@ -84,7 +84,7 @@ class EvolutionKernel:
     # ── Job 注册 ────────────────────────────────────────────────────
 
     def _register_jobs(self) -> None:
-        """注册演化相关的 cron jobs (evolution_hourly, factor_governance, awe_adapt, system_health).
+        """注册演化相关的 cron jobs (evolution_hourly, factor_governance, system_health).
 
         注意: InProcessScheduler 是单例, 此处注册的 job 与
         live_service._start_live_scheduler 中的数据 job 共享同一调度器.
@@ -95,7 +95,13 @@ class EvolutionKernel:
 
         # 每小时: 完整自进化循环 (GP + OOS + Canary + 退役 + 权重)
         from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
-        sched.add_job("evolution_hourly", "0 * * * *", scheduled_evolution_cycle)
+        from backend.services.evolution_work_coordinator import coordinated_job
+
+        sched.add_job(
+            "evolution_hourly",
+            "2 * * * *",
+            coordinated_job("evolution_hourly", scheduled_evolution_cycle),
+        )
 
         # 15 分钟: 因子 V3 自治治理 (发现晋升、降权、禁用、退役、审计)
         try:
@@ -103,16 +109,16 @@ class EvolutionKernel:
             from config.runtime_config import shared as _runtime_shared
 
             cron = str(getattr(_runtime_shared(), "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
-            sched.add_job("factor_governance_autonomous", cron, run_autonomous_factor_governance_cycle)
+            sched.add_job(
+                "factor_governance_autonomous",
+                cron,
+                coordinated_job(
+                    "factor_governance_autonomous",
+                    run_autonomous_factor_governance_cycle,
+                ),
+            )
         except Exception as e:
             logger.warning("[EvolutionKernel] factor_governance registration failed: %s", e)
-
-        # 30 分钟: AWE 权重自适应
-        try:
-            from backend.services.live_service import _scheduled_awe_adapt
-            sched.add_job("awe_adapt", "*/30 * * * *", _scheduled_awe_adapt)
-        except ImportError:
-            logger.warning("[EvolutionKernel] live_service._scheduled_awe_adapt not available")
 
         # 每分钟: 系统总健康检查 (桥/数据/调度器/磁盘/内存)
         try:

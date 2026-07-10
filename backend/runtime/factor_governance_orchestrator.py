@@ -18,7 +18,7 @@ from alpha.portfolio_compositor import resolve_factor_role
 from backend.core.db import get_state_pg_conn
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
 from backend.services.factor_redundancy import RedundancyDetector
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.mutation_audit import record_api_mutation
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
@@ -94,6 +94,9 @@ class FactorGovernanceOrchestrator:
                 run_id=str(run.get("run_id") or ""),
                 source="factor_governance_cycle",
             )
+            actions.extend(self._rollback_canary_regressions(catalog, run))
+            if actions:
+                catalog = build_factor_catalog()
             posture = self._autonomy_posture()
             if posture in {"shadow_only", "frozen"}:
                 summary = {
@@ -390,6 +393,7 @@ class FactorGovernanceOrchestrator:
             return []
         before_cfg = runtime_config.shared().to_dict()
         signal_cfg = dict(runtime_config.shared().factor_signal_config or {})
+        signal_patch: dict[str, dict[str, Any]] = {}
         for group in groups:
             group_id = str(group.get("group_id") or "")
             leader = str(group.get("leader") or "")
@@ -398,8 +402,9 @@ class FactorGovernanceOrchestrator:
                 entry["redundancy_group"] = group_id
                 entry["redundancy_leader"] = leader
                 signal_cfg[member] = entry
+                signal_patch[member] = entry
         result = self._apply_runtime_patch(
-            {"factor_signal_config": signal_cfg},
+            {"factor_signal_config": signal_patch},
             source="factor_governance_redundancy",
             run_id=str(run.get("run_id") or ""),
         )
@@ -580,6 +585,89 @@ class FactorGovernanceOrchestrator:
                 ))
         return actions
 
+    def _rollback_canary_regressions(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Apply explicit Canary regressions through the sole lifecycle executor.
+
+        Missing canary state is deliberately ignored so legacy discovered
+        factors are not mass-demoted.  A persisted, non-ACTIVE stage is an
+        explicit safety signal produced by the evolution evidence loop.
+        """
+
+        regression_stages = {
+            "SHADOW", "CANARY_5", "CANARY_20", "CANARY_50", "PROBATION", "QUARANTINED"
+        }
+        candidates = [
+            item
+            for item in catalog
+            if item.get("source") == "discovered"
+            and str((item.get("canary") or {}).get("stage") or "").upper() in regression_stages
+        ]
+        actions: list[dict[str, Any]] = []
+        for item in candidates:
+            factor_id = str(item.get("factor_id") or "")
+            stage = str((item.get("canary") or {}).get("stage") or "").upper()
+            evidence = {
+                "canary_stage": stage,
+                "reason": "persisted_canary_regression",
+                "source": item.get("source"),
+            }
+            verdict = self._risk("rollback_factor_action", item, evidence)
+            if not verdict.allowed:
+                actions.append(self._audit_action(
+                    run, item, "rollback_factor_action", "blocked_by_risk", evidence, verdict
+                ))
+                continue
+            before_cfg = runtime_config.shared().to_dict()
+            try:
+                from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
+
+                rolled_back = RegistryAdapter.shared().promote(
+                    factor_id,
+                    new_source=SOURCE_SHADOW,
+                    reason="canary_regression_via_factor_governance",
+                )
+                existing = dict(runtime_config.shared().factor_signal_config.get(factor_id, {}) or {})
+                existing.update({
+                    "enabled": False,
+                    "source": "shadow",
+                    "lifecycle_status": "QUARANTINE",
+                })
+                self._apply_runtime_patch(
+                    {"factor_signal_config": {factor_id: existing}},
+                    source="factor_governance_canary_rollback",
+                    run_id=str(run.get("run_id") or ""),
+                )
+                actions.append(self._audit_action(
+                    run,
+                    item,
+                    "rollback_factor_action",
+                    "applied" if rolled_back else "superseded",
+                    evidence,
+                    verdict,
+                    before={"source": "discovered", "runtime_config": before_cfg},
+                    after={"source": "shadow", "runtime_config": runtime_config.shared().to_dict()},
+                    rollback={"runtime_config": before_cfg},
+                    result={"rolled_back": bool(rolled_back)},
+                ))
+            except Exception as exc:
+                logger.exception("[factor_governance] canary rollback failed for %s", factor_id)
+                actions.append(self._audit_action(
+                    run,
+                    item,
+                    "rollback_factor_action",
+                    "failed",
+                    {**evidence, "error": str(exc)},
+                    verdict,
+                    before={"runtime_config": before_cfg},
+                    after={"runtime_config": runtime_config.shared().to_dict()},
+                    result={"error": str(exc)},
+                ))
+        return actions
+
     def _downweight_weak_alpha(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
         cfg = runtime_config.shared()
         watch = float(getattr(cfg, "factor_health_watch_threshold", 40.0) or 40.0)
@@ -648,10 +736,8 @@ class FactorGovernanceOrchestrator:
             current_weights=current_weights,
         )
         partial = DecisionPolicy.to_weights(decisions)
-        merged = dict(current_weights)
-        merged.update(partial)
         self._apply_runtime_patch(
-            {"factor_portfolio_weights": merged},
+            {"factor_portfolio_weights": partial},
             source="factor_governance_update_weight",
             run_id=str(run.get("run_id") or ""),
         )
@@ -703,14 +789,12 @@ class FactorGovernanceOrchestrator:
                 actions.append(self._audit_action(run, item, "disable_factor_live", "blocked_by_risk", evidence, verdict))
                 continue
             before_cfg = runtime_config.shared().to_dict()
-            signal_cfg = dict(runtime_config.shared().factor_signal_config or {})
             name = str(item["factor_id"])
-            entry = dict(signal_cfg.get(name, {}) or {})
+            entry = dict(runtime_config.shared().factor_signal_config.get(name, {}) or {})
             entry["enabled"] = False
             entry["lifecycle_status"] = entry.get("lifecycle_status", "QUARANTINE")
-            signal_cfg[name] = entry
             self._apply_runtime_patch(
-                {"factor_signal_config": signal_cfg},
+                {"factor_signal_config": {name: entry}},
                 source="factor_governance_disable_live",
                 run_id=str(run.get("run_id") or ""),
             )
@@ -866,7 +950,7 @@ class FactorGovernanceOrchestrator:
         cfg = runtime_config.shared()
         signal_cfg = dict(cfg.factor_signal_config or {})
         if factor_id not in signal_cfg:
-            signal_cfg[factor_id] = {
+            entry = {
                 "enabled": True,
                 "mode": "rank_mapping",
                 "window": 100,
@@ -882,8 +966,8 @@ class FactorGovernanceOrchestrator:
             entry = dict(signal_cfg[factor_id] or {})
             entry["enabled"] = True
             entry.setdefault("role", "alpha")
-            entry.setdefault("source", "discovered")
-            signal_cfg[factor_id] = entry
+            entry["source"] = "discovered"
+        signal_cfg[factor_id] = entry
 
         current_weights = dict(cfg.factor_portfolio_weights or {})
         factor_configs = self._portfolio_configs(cfg, signal_cfg=signal_cfg)
@@ -897,10 +981,12 @@ class FactorGovernanceOrchestrator:
             factor_configs=factor_configs,
             current_weights=current_weights,
         )
-        merged = dict(current_weights)
-        merged.update(DecisionPolicy.to_weights(decisions))
+        weight_patch = DecisionPolicy.to_weights(decisions)
         self._apply_runtime_patch(
-            {"factor_signal_config": signal_cfg, "factor_portfolio_weights": merged},
+            {
+                "factor_signal_config": {factor_id: entry},
+                "factor_portfolio_weights": weight_patch,
+            },
             source="factor_governance_promote_factor",
             run_id=run_id,
         )
@@ -1019,6 +1105,7 @@ class FactorGovernanceOrchestrator:
             evidence_payload,
             source_agent="factor_governance",
             scope_type="factor",
+            scope_key=factor_id,
             action=action,
             requested_writes=["policy_suggestion"],
             status=status,

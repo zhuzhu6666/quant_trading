@@ -1,0 +1,801 @@
+"""V16 Brain State & Memory — merged read-only snapshot layer.
+
+Combines BrainStateService (world model builder from readiness) and
+BrainMemoryService (experience/memory retrieval from source tables).
+
+Both are read-only aggregation: they translate existing V15 facts into
+display-friendly snapshots. They never mutate runtime config, weights,
+orders, positions, learning samples, or broker state.
+
+Previously: brain_state.py (579 lines) + brain_memory.py (592 lines) = 1,171 lines
+Now:        ~650 lines (shared helpers extracted to _brain_helpers.py)
+"""
+from __future__ import annotations
+
+import hashlib
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from backend.core.db import STATE_DB, state_table_columns, state_table_exists
+from backend.services._brain_helpers import (
+    connect,
+    dumps,
+    execute,
+    loads,
+    safe_float,
+    text,
+)
+
+
+# ---------------------------------------------------------------------------
+# Table helpers
+# ---------------------------------------------------------------------------
+
+def _memory_id(source_table: str, source_id: str) -> str:
+    raw = f"{source_table}:{source_id}".encode("utf-8")
+    return f"mem_{hashlib.sha256(raw).hexdigest()[:24]}"
+
+
+def _status_from_component(component: dict[str, Any], default: str = "unknown") -> str:
+    return str(component.get("status") or component.get("overall") or component.get("mode") or default)
+
+
+def ensure_brain_state_snapshot_table(db_path: str | Path = STATE_DB) -> None:
+    conn = connect(db_path)
+    try:
+        execute(
+            conn,
+            """CREATE TABLE IF NOT EXISTS brain_state_snapshot (
+                snapshot_id TEXT PRIMARY KEY,
+                schema_version TEXT DEFAULT 'brain_state_snapshot.v1',
+                source TEXT DEFAULT '',
+                status TEXT DEFAULT 'computed',
+                world_model_json TEXT NOT NULL DEFAULT '{}',
+                perceptions_json TEXT NOT NULL DEFAULT '{}',
+                memory_json TEXT NOT NULL DEFAULT '{}',
+                hypotheses_json TEXT NOT NULL DEFAULT '[]',
+                critic_json TEXT NOT NULL DEFAULT '{}',
+                evidence_refs_json TEXT NOT NULL DEFAULT '{}',
+                boundary_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )""",
+        )
+        if "memory_json" not in state_table_columns(conn, "brain_state_snapshot"):
+            execute(conn, "ALTER TABLE brain_state_snapshot ADD COLUMN memory_json TEXT NOT NULL DEFAULT '{}'")
+        execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_state_snapshot_created ON brain_state_snapshot(created_at)")
+        execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_state_snapshot_status ON brain_state_snapshot(status, created_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ensure_brain_memory_table(db_path: str | Path = STATE_DB) -> None:
+    conn = connect(db_path)
+    try:
+        execute(
+            conn,
+            """CREATE TABLE IF NOT EXISTS brain_memory (
+                memory_id TEXT PRIMARY KEY,
+                memory_type TEXT DEFAULT '',
+                source_table TEXT DEFAULT '',
+                source_id TEXT DEFAULT '',
+                symbol TEXT DEFAULT '',
+                timeframe TEXT DEFAULT '',
+                regime TEXT DEFAULT '',
+                text_summary TEXT DEFAULT '',
+                structured_json TEXT NOT NULL DEFAULT '{}',
+                evidence_score REAL NOT NULL DEFAULT 0.0,
+                similarity_score REAL NOT NULL DEFAULT 0.0,
+                polarity TEXT DEFAULT 'neutral',
+                created_at REAL NOT NULL DEFAULT 0.0,
+                last_used_at REAL NOT NULL DEFAULT 0.0
+            )""",
+        )
+        execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_memory_source ON brain_memory(source_table, source_id)")
+        execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_memory_type ON brain_memory(memory_type, created_at)")
+        execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_memory_score ON brain_memory(evidence_score, similarity_score)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# BrainStateService
+# ---------------------------------------------------------------------------
+
+class BrainStateService:
+    """Read-only V16 brain state snapshot builder.
+
+    Translates existing readiness/autonomy/replay/incident data into
+    a world-model, hypotheses, critic verdict, and evidence refs.
+    """
+
+    def __init__(self, db_path: str | Path = STATE_DB):
+        self.db_path = db_path
+
+    @staticmethod
+    def boundary() -> dict[str, Any]:
+        return {
+            "phase": "v16_phase1_read_only_brain",
+            "read_only": True,
+            "affects_trading": False,
+            "does_not_execute_action_plan": True,
+            "does_not_mutate_runtime_overlay": True,
+            "does_not_change_factor_weights": True,
+            "does_not_write_learning_samples": True,
+            "risk_policy_service_required_for_future_actions": True,
+            "decision_policy_required_for_future_weight_writes": True,
+        }
+
+    def build(
+        self,
+        *,
+        readiness: dict[str, Any],
+        persist: bool = True,
+        source: str = "brain_state_service",
+    ) -> dict[str, Any]:
+        now = time.time()
+        snapshot_id = f"brain_{uuid.uuid4().hex[:16]}"
+        perceptions = self._perceptions(readiness, now=now)
+        world_model = self._world_model(perceptions)
+        hypotheses = self._hypotheses(perceptions, world_model, now=now)
+        memory = self._memory(world_model=world_model, hypotheses=hypotheses)
+        hypotheses = self._attach_memory_evidence(hypotheses, memory)
+        critic = self._critic(hypotheses, world_model, memory)
+        evidence_refs = self._evidence_refs(perceptions, memory)
+        snapshot = {
+            "ok": True,
+            "schema_version": "brain_state_snapshot.v1",
+            "snapshot_id": snapshot_id,
+            "status": "computed",
+            "phase": "v16_phase1_read_only_brain",
+            "source": str(source or ""),
+            "world_model": world_model,
+            "perceptions": perceptions,
+            "memory": memory,
+            "hypotheses": hypotheses,
+            "critic": critic,
+            "evidence_refs": evidence_refs,
+            "boundary": self.boundary(),
+            "created_at": now,
+            "read_only": True,
+            "affects_trading": False,
+        }
+        if persist:
+            self._persist(snapshot)
+        return snapshot
+
+    def latest_snapshot(self) -> dict[str, Any]:
+        ensure_brain_state_snapshot_table(self.db_path)
+        conn = connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "brain_state_snapshot"):
+                return self._missing_status("missing_table")
+            row = execute(
+                conn,
+                """SELECT snapshot_id, schema_version, source, status, world_model_json,
+                   perceptions_json, memory_json, hypotheses_json, critic_json,
+                   evidence_refs_json, boundary_json, created_at
+                FROM brain_state_snapshot ORDER BY created_at DESC LIMIT 1""",
+            ).fetchone()
+            if not row:
+                return self._missing_status("missing_snapshot")
+            return self._row_to_snapshot(row)
+        finally:
+            conn.close()
+
+    def status(self) -> dict[str, Any]:
+        latest = self.latest_snapshot()
+        if not latest.get("snapshot_id"):
+            return latest
+        age_sec = max(0.0, time.time() - safe_float(latest.get("created_at")))
+        posture = latest.get("world_model", {}).get("strategy_posture", "unknown")
+        return {
+            "ok": True,
+            "schema_version": "brain_state_readiness.v1",
+            "status": "available",
+            "snapshot_id": latest.get("snapshot_id"),
+            "age_seconds": round(age_sec, 3),
+            "strategy_posture": posture,
+            "hypothesis_count": len(latest.get("hypotheses") or []),
+            "critic_verdict": latest.get("critic", {}).get("verdict", "unknown"),
+            "read_only": True,
+            "affects_trading": False,
+            "latest_snapshot": latest,
+        }
+
+    # -- internal helpers ---------------------------------------------------
+
+    def _persist(self, snapshot: dict[str, Any]) -> None:
+        ensure_brain_state_snapshot_table(self.db_path)
+        conn = connect(self.db_path)
+        try:
+            execute(
+                conn,
+                """INSERT INTO brain_state_snapshot
+                (snapshot_id, schema_version, source, status, world_model_json,
+                 perceptions_json, memory_json, hypotheses_json, critic_json,
+                 evidence_refs_json, boundary_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    snapshot["snapshot_id"], snapshot["schema_version"],
+                    snapshot["source"], snapshot["status"],
+                    dumps(snapshot["world_model"]), dumps(snapshot["perceptions"]),
+                    dumps(snapshot["memory"]), dumps(snapshot["hypotheses"]),
+                    dumps(snapshot["critic"]), dumps(snapshot["evidence_refs"]),
+                    dumps(snapshot["boundary"]), safe_float(snapshot["created_at"]),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _perceptions(readiness: dict[str, Any], *, now: float) -> dict[str, Any]:
+        replay = dict(readiness.get("replay") or {})
+        autonomy = dict(readiness.get("autonomy_health") or {})
+        incident = dict(readiness.get("incident_control") or {})
+        governance = dict(readiness.get("governance") or {})
+        freshness = dict(readiness.get("governance_freshness") or {})
+        live = dict(readiness.get("live") or {})
+        system = dict(readiness.get("system_health") or {})
+        release = dict(readiness.get("release") or {})
+        return {
+            "schema_version": "brain_perception_snapshot.v1",
+            "generated_at": now,
+            "market": {
+                "source": "backend_readiness.market_session",
+                "status": _status_from_component(dict(readiness.get("market_session") or {})),
+                "freshness": "readiness_snapshot",
+            },
+            "runtime": {
+                "source": "backend_readiness.live",
+                "ctrader": dict(live.get("ctrader") or {}),
+                "loop": dict(live.get("loop") or {}),
+                "system_health": system,
+                "freshness": "readiness_snapshot",
+            },
+            "governance": {
+                "source": "backend_readiness.governance",
+                "status": _status_from_component(governance, "unknown"),
+                "freshness": freshness,
+            },
+            "replay": {
+                "source": "backend_readiness.replay",
+                "ok": bool(replay.get("ok")),
+                "status": _status_from_component(replay, "unknown"),
+                "latest_report": dict(replay.get("latest_report") or replay.get("report") or {}),
+            },
+            "incident_control": {
+                "source": "backend_readiness.incident_control",
+                "mode": str(incident.get("mode") or "normal"),
+                "readiness_effect": dict(incident.get("readiness_effect") or {}),
+            },
+            "release": {
+                "source": "backend_readiness.release",
+                "ok": bool(release.get("ok")),
+                "latest_release": dict(release.get("latest_release") or {}),
+            },
+            "autonomy_health": {
+                "source": "backend_readiness.autonomy_health",
+                "score": safe_float(autonomy.get("score")),
+                "posture": str(autonomy.get("posture") or "unknown"),
+                "blockers": list(autonomy.get("blockers") or []),
+            },
+            "readiness": {
+                "source": "backend_readiness",
+                "ready_for_frontend": bool(readiness.get("ready_for_frontend")),
+                "blocker_count": len(readiness.get("blockers") or []),
+                "known_observation_count": len(readiness.get("known_observations") or []),
+            },
+        }
+
+    @staticmethod
+    def _world_model(perceptions: dict[str, Any]) -> dict[str, Any]:
+        incident_mode = str(perceptions.get("incident_control", {}).get("mode") or "normal")
+        autonomy_posture = str(perceptions.get("autonomy_health", {}).get("posture") or "unknown")
+        replay_ok = bool(perceptions.get("replay", {}).get("ok"))
+        runtime_system = perceptions.get("runtime", {}).get("system_health") or {}
+        runtime_status = _status_from_component(runtime_system, "unknown")
+        blocker_count = int(perceptions.get("readiness", {}).get("blocker_count") or 0)
+        if incident_mode in {"frozen", "only_close"} or autonomy_posture == "frozen":
+            strategy_posture = "no_new_risk"
+        elif incident_mode in {"shadow_only", "no_new_risk"} or autonomy_posture == "shadow_only":
+            strategy_posture = "observation_only"
+        elif autonomy_posture == "constrained" or blocker_count > 0 or not replay_ok:
+            strategy_posture = "defensive"
+        else:
+            strategy_posture = "normal"
+        execution_posture = "unsafe" if incident_mode in {"frozen", "only_close"} else (
+            "degraded" if (blocker_count > 0 or runtime_status in {"critical", "degraded"}) else "broker_ok"
+        )
+        governance_freshness = perceptions.get("governance", {}).get("freshness") or {}
+        stale_tables = [
+            name for name, item in dict(governance_freshness.get("tables") or {}).items()
+            if str((item or {}).get("status") or "") not in {"fresh", "ok"}
+        ]
+        return {
+            "schema_version": "brain_world_model.v1",
+            "market_regime": "event_window" if "event" in str(perceptions.get("market", {}).get("status") or "") else "unknown",
+            "strategy_posture": strategy_posture,
+            "factor_posture": "healthy" if not stale_tables else "unstable",
+            "execution_posture": execution_posture,
+            "learning_posture": "enough_evidence" if replay_ok else "warming_up",
+            "autonomy_posture": autonomy_posture,
+            "incident_mode": incident_mode,
+            "stale_governance_tables": stale_tables[:10],
+            "read_only": True,
+        }
+
+    @staticmethod
+    def _hypotheses(perceptions: dict[str, Any], world_model: dict[str, Any], *, now: float) -> list[dict[str, Any]]:
+        hypotheses: list[dict[str, Any]] = []
+        incident_mode = str(world_model.get("incident_mode") or "normal")
+        if incident_mode != "normal":
+            hypotheses.append(BrainStateService._hypothesis(
+                scope="incident",
+                claim=f"runtime incident mode is {incident_mode}; brain should observe only",
+                confidence=0.85, evidence_score=0.78, risk_class="high",
+                evidence_refs={"incident_control": "backend_readiness.incident_control"}, now=now,
+            ))
+        if str(world_model.get("autonomy_posture") or "") in {"constrained", "shadow_only", "frozen"}:
+            hypotheses.append(BrainStateService._hypothesis(
+                scope="autonomy",
+                claim="autonomy health limits current brain action scope",
+                confidence=0.8,
+                evidence_score=max(0.1, safe_float(perceptions.get("autonomy_health", {}).get("score"))),
+                risk_class="medium",
+                evidence_refs={"autonomy_health": "backend_readiness.autonomy_health"}, now=now,
+            ))
+        if not bool(perceptions.get("replay", {}).get("ok")):
+            hypotheses.append(BrainStateService._hypothesis(
+                scope="simulation",
+                claim="latest replay evidence is missing or unhealthy; high-impact actions must stay blocked",
+                confidence=0.75, evidence_score=0.45, risk_class="medium",
+                evidence_refs={"replay": "backend_readiness.replay"}, now=now,
+            ))
+        stale_tables = list(world_model.get("stale_governance_tables") or [])
+        if stale_tables:
+            hypotheses.append(BrainStateService._hypothesis(
+                scope="factor",
+                claim="governance freshness has stale inputs; factor posture should remain cautious",
+                confidence=0.65, evidence_score=0.5, risk_class="low",
+                evidence_refs={"governance_freshness": "backend_readiness.governance_freshness"}, now=now,
+            ))
+        if not hypotheses:
+            hypotheses.append(BrainStateService._hypothesis(
+                scope="runtime",
+                claim="no immediate V16 brain objection found; continue read-only observation",
+                confidence=0.55, evidence_score=0.6, risk_class="low",
+                evidence_refs={"readiness": "backend_readiness"}, now=now,
+            ))
+        return hypotheses
+
+    @staticmethod
+    def _hypothesis(*, scope: str, claim: str, confidence: float, evidence_score: float,
+                    risk_class: str, evidence_refs: dict[str, Any], now: float) -> dict[str, Any]:
+        return {
+            "hypothesis_id": f"hyp_{uuid.uuid4().hex[:12]}",
+            "schema_version": "brain_hypothesis.v1",
+            "scope": scope, "claim": claim,
+            "expected_effect": "read_only_operator_explanation",
+            "evidence_refs": evidence_refs, "counter_evidence_refs": {},
+            "confidence": round(max(0.0, min(float(confidence), 1.0)), 4),
+            "evidence_score": round(max(0.0, min(float(evidence_score), 1.0)), 4),
+            "risk_class": risk_class,
+            "required_validation": ["continue_read_only_observation"],
+            "action_scope": "observe_only",
+            "expires_at": now + 900.0,
+        }
+
+    @staticmethod
+    def _attach_memory_evidence(hypotheses: list[dict[str, Any]], memory: dict[str, Any]) -> list[dict[str, Any]]:
+        negative_matches = list(memory.get("negative_matches") or [])
+        counter_evidence = list(memory.get("counter_evidence") or [])
+        source_gaps = list(memory.get("source_gaps") or [])
+        enriched = []
+        for hypothesis in hypotheses:
+            item = dict(hypothesis)
+            if counter_evidence:
+                refs = dict(item.get("counter_evidence_refs") or {})
+                refs["memory"] = [{"memory_id": m.get("memory_id"), "source_table": m.get("source_table"),
+                                    "source_id": m.get("source_id"), "evidence_score": m.get("evidence_score"),
+                                    "similarity_score": m.get("similarity_score")} for m in counter_evidence[:3]]
+                item["counter_evidence_refs"] = refs
+            if negative_matches:
+                refs = dict(item.get("evidence_refs") or {})
+                refs["negative_memory"] = [{"memory_id": m.get("memory_id"), "source_table": m.get("source_table"),
+                                             "source_id": m.get("source_id"), "evidence_score": m.get("evidence_score"),
+                                             "similarity_score": m.get("similarity_score")} for m in negative_matches[:3]]
+                item["evidence_refs"] = refs
+            if source_gaps:
+                validation = list(item.get("required_validation") or [])
+                validation.append("memory_source_gap_review")
+                item["required_validation"] = sorted(set(validation))
+            enriched.append(item)
+        return enriched
+
+    def _memory(self, *, world_model: dict[str, Any], hypotheses: list[dict[str, Any]]) -> dict[str, Any]:
+        try:
+            return BrainMemoryService(self.db_path).retrieve(
+                world_model=world_model, hypotheses=hypotheses, limit=12, persist=True,
+            )
+        except Exception as exc:
+            return {
+                "ok": False, "schema_version": "brain_memory_retrieval.v1", "items": [],
+                "negative_matches": [], "counter_evidence": [], "source_gaps": ["brain_memory_error"],
+                "error": f"{type(exc).__name__}: {exc}", "read_only": True, "affects_trading": False,
+            }
+
+    @staticmethod
+    def _critic(hypotheses: list[dict[str, Any]], world_model: dict[str, Any],
+                memory: dict[str, Any]) -> dict[str, Any]:
+        objections = []
+        verdict = "pass"
+        if str(world_model.get("strategy_posture") or "") in {"defensive", "observation_only", "no_new_risk"}:
+            verdict = "shadow_only"
+            objections.append("strategy_posture_limits_action_scope")
+        if any(safe_float(h.get("evidence_score")) < 0.5 for h in hypotheses):
+            verdict = "shadow_only"
+            objections.append("evidence_score_below_action_threshold")
+        if memory.get("negative_matches"):
+            verdict = "shadow_only"
+            objections.append("negative_memory_match_requires_observation")
+        if memory.get("source_gaps"):
+            objections.append("memory_sources_incomplete")
+        return {
+            "schema_version": "brain_critic.v1", "verdict": verdict,
+            "objections": sorted(set(objections)),
+            "missing_evidence": ["v16_counter_evidence_search"] if not memory.get("counter_evidence") else [],
+            "required_replay": ["required_before_any_non_observe_action"],
+            "max_allowed_action_scope": "observe_only",
+            "read_only": True,
+        }
+
+    @staticmethod
+    def _evidence_refs(perceptions: dict[str, Any], memory: dict[str, Any]) -> dict[str, Any]:
+        latest_report = perceptions.get("replay", {}).get("latest_report") or {}
+        latest_release = perceptions.get("release", {}).get("latest_release") or {}
+        return {
+            "backend_readiness": {"schema": "backend_readiness.v1"},
+            "replay_report": {"replay_run_id": str(latest_report.get("replay_run_id") or ""),
+                              "artifact_hash": str(latest_report.get("artifact_hash") or "")},
+            "release_run": {"run_id": str(latest_release.get("run_id") or "")},
+            "incident_control": {"mode": str(perceptions.get("incident_control", {}).get("mode") or "normal")},
+            "autonomy_health": {"posture": str(perceptions.get("autonomy_health", {}).get("posture") or ""),
+                                "score": safe_float(perceptions.get("autonomy_health", {}).get("score"))},
+            "memory": {"item_count": len(memory.get("items") or []),
+                       "negative_match_count": len(memory.get("negative_matches") or []),
+                       "counter_evidence_count": len(memory.get("counter_evidence") or []),
+                       "source_gaps": memory.get("source_gaps") or []},
+        }
+
+    @staticmethod
+    def _missing_status(status: str) -> dict[str, Any]:
+        return {"ok": False, "schema_version": "brain_state_readiness.v1", "status": status,
+                "read_only": True, "affects_trading": False, "boundary": BrainStateService.boundary()}
+
+    @staticmethod
+    def _row_to_snapshot(row: Any) -> dict[str, Any]:
+        return {
+            "ok": True, "schema_version": str(row["schema_version"] or "brain_state_snapshot.v1"),
+            "snapshot_id": str(row["snapshot_id"] or ""), "status": str(row["status"] or ""),
+            "phase": "v16_phase1_read_only_brain", "source": str(row["source"] or ""),
+            "world_model": loads(row["world_model_json"], {}),
+            "perceptions": loads(row["perceptions_json"], {}),
+            "memory": loads(row["memory_json"], {}),
+            "hypotheses": loads(row["hypotheses_json"], []),
+            "critic": loads(row["critic_json"], {}),
+            "evidence_refs": loads(row["evidence_refs_json"], {}),
+            "boundary": loads(row["boundary_json"], BrainStateService.boundary()),
+            "created_at": safe_float(row["created_at"]),
+            "read_only": True, "affects_trading": False,
+        }
+
+
+# ---------------------------------------------------------------------------
+# BrainMemoryService
+# ---------------------------------------------------------------------------
+
+class BrainMemoryService:
+    """Read-only V16 memory retrieval over existing audit facts.
+
+    Materializes lightweight memory metadata for display. Does not create
+    learning labels, mutate runtime config, or authorize actions.
+    """
+
+    SHADOW_TABLES = {
+        "open_quality_shadow_audit": {"id": "inference_id", "score": "quality_score",
+                                       "risk": "risk_score", "summary": "open quality shadow audit"},
+        "position_quality_shadow_audit": {"id": "inference_id", "score": "hold_score",
+                                           "risk": "exit_risk_score", "summary": "position quality shadow audit"},
+        "factor_governance_shadow_audit": {"id": "inference_id", "score": "positive_score",
+                                            "risk": "weakness_score", "summary": "factor governance shadow audit"},
+        "meta_model_shadow_audit": {"id": "inference_id", "score": "posture_score",
+                                     "risk": "recover_score", "summary": "meta model shadow audit"},
+    }
+
+    def __init__(self, db_path: str | Path = STATE_DB):
+        self.db_path = db_path
+
+    @staticmethod
+    def boundary() -> dict[str, Any]:
+        return {"phase": "v16_phase1_read_only_memory", "read_only": True, "affects_trading": False,
+                "does_not_write_learning_samples": True, "does_not_authorize_actions": True,
+                "source_facts_remain_authoritative": True}
+
+    def retrieve(self, *, world_model: dict[str, Any] | None = None,
+                 hypotheses: list[dict[str, Any]] | None = None,
+                 limit: int = 12, persist: bool = True) -> dict[str, Any]:
+        limit = max(1, min(int(limit), 50))
+        terms = self._query_terms(world_model or {}, hypotheses or [])
+        source_gaps: list[str] = []
+        items: list[dict[str, Any]] = []
+        conn = connect(self.db_path, read_only=True)
+        try:
+            items.extend(self._experience_memories(conn, terms, source_gaps))
+            items.extend(self._trade_outcome_memories(conn, terms, source_gaps))
+            items.extend(self._policy_suggestion_memories(conn, terms, source_gaps))
+            items.extend(self._model_permission_memories(conn, terms, source_gaps))
+            items.extend(self._shadow_audit_memories(conn, terms, source_gaps))
+        finally:
+            conn.close()
+        ranked = sorted(items, key=lambda item: (
+            safe_float(item.get("similarity_score")), safe_float(item.get("evidence_score")),
+            safe_float(item.get("created_at")),
+        ), reverse=True)[:limit]
+        if persist and ranked:
+            self._persist_items(ranked)
+        negative_matches = [item for item in ranked if item.get("polarity") == "negative"]
+        counter_evidence = [item for item in ranked if item.get("polarity") == "positive"
+                            and safe_float(item.get("similarity_score")) >= 0.1]
+        return {
+            "ok": True, "schema_version": "brain_memory_retrieval.v1",
+            "items": ranked, "negative_matches": negative_matches[:5],
+            "counter_evidence": counter_evidence[:5], "source_gaps": sorted(set(source_gaps)),
+            "query_terms": sorted(terms), "boundary": self.boundary(),
+            "read_only": True, "affects_trading": False, "generated_at": time.time(),
+        }
+
+    def latest_indexed(self, *, limit: int = 50) -> dict[str, Any]:
+        limit = max(1, min(int(limit), 200))
+        conn = connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "brain_memory"):
+                return {"ok": False, "schema_version": "brain_memory_index.v1",
+                        "status": "missing_table", "items": [], "read_only": True, "affects_trading": False}
+            rows = execute(
+                conn,
+                """SELECT memory_id, memory_type, source_table, source_id, symbol, timeframe,
+                   regime, text_summary, structured_json, evidence_score,
+                   similarity_score, polarity, created_at, last_used_at
+                FROM brain_memory ORDER BY last_used_at DESC, created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return {"ok": True, "schema_version": "brain_memory_index.v1", "status": "available",
+                    "items": [self._row_to_item(row) for row in rows], "read_only": True, "affects_trading": False}
+        finally:
+            conn.close()
+
+    # -- internal helpers ---------------------------------------------------
+
+    def _persist_items(self, items: list[dict[str, Any]]) -> None:
+        ensure_brain_memory_table(self.db_path)
+        now = time.time()
+        conn = connect(self.db_path)
+        try:
+            for item in items:
+                execute(
+                    conn,
+                    """INSERT INTO brain_memory
+                    (memory_id, memory_type, source_table, source_id, symbol, timeframe,
+                     regime, text_summary, structured_json, evidence_score,
+                     similarity_score, polarity, created_at, last_used_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(memory_id) DO UPDATE SET
+                        memory_type=excluded.memory_type, symbol=excluded.symbol,
+                        timeframe=excluded.timeframe, regime=excluded.regime,
+                        text_summary=excluded.text_summary,
+                        structured_json=excluded.structured_json,
+                        evidence_score=excluded.evidence_score,
+                        similarity_score=excluded.similarity_score,
+                        polarity=excluded.polarity, last_used_at=excluded.last_used_at""",
+                    (item["memory_id"], item.get("memory_type", ""), item.get("source_table", ""),
+                     item.get("source_id", ""), item.get("symbol", ""), item.get("timeframe", ""),
+                     item.get("regime", ""), item.get("text_summary", ""),
+                     dumps(item.get("structured", {})), safe_float(item.get("evidence_score")),
+                     safe_float(item.get("similarity_score")), item.get("polarity", "neutral"),
+                     safe_float(item.get("created_at")), now),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _experience_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
+        if not state_table_exists(conn, "experience_memory"):
+            gaps.append("experience_memory")
+            return []
+        rows = execute(conn, """SELECT experience_id, trade_id, source_table, source_id, regime_id,
+            decision_context_json, outcome_label, reward_score, failure_tags_json,
+            recommended_action, evidence_strength, append_source, artifact_version, created_at
+            FROM experience_memory ORDER BY created_at DESC LIMIT 50""").fetchall()
+        items = []
+        for row in rows:
+            tags = loads(row["failure_tags_json"], [])
+            context = loads(row["decision_context_json"], {})
+            lesson = context.get("lesson") if isinstance(context, dict) else {}
+            if not isinstance(lesson, dict):
+                lesson = {}
+            summary = " ".join(str(part or "") for part in [row["outcome_label"],
+                row["recommended_action"], lesson.get("summary"), row["regime_id"],
+                " ".join(str(t) for t in tags)]).strip()
+            reward = safe_float(row["reward_score"])
+            polarity = "negative" if reward < 0 or tags else ("positive" if reward > 0 else "neutral")
+            items.append(self._item(
+                source_table="experience_memory", source_id=str(row["experience_id"] or ""),
+                memory_type="negative" if polarity == "negative" else "episodic",
+                text_summary=summary or "experience memory",
+                structured={"trade_id": row["trade_id"], "source_table": row["source_table"],
+                            "source_id": row["source_id"], "append_source": row["append_source"],
+                            "artifact_version": row["artifact_version"],
+                            "outcome_label": row["outcome_label"], "reward_score": reward,
+                            "failure_tags": tags, "recommended_action": row["recommended_action"],
+                            "lesson": lesson, "decision_context": context},
+                evidence_score=max(0.0, min(safe_float(row["evidence_strength"]), 1.0)),
+                polarity=polarity, created_at=safe_float(row["created_at"]), terms=terms,
+                regime=str(row["regime_id"] or ""),
+            ))
+        return items
+
+    def _trade_outcome_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
+        if not state_table_exists(conn, "trade_outcome_review"):
+            gaps.append("trade_outcome_review")
+            return []
+        rows = execute(conn, """SELECT review_id, trade_id, position_id, entry_decision_id, pnl,
+            outcome_label, failure_tags_json, summary_text, review_json, created_at
+            FROM trade_outcome_review ORDER BY created_at DESC LIMIT 50""").fetchall()
+        items = []
+        for row in rows:
+            tags = loads(row["failure_tags_json"], [])
+            pnl = safe_float(row["pnl"])
+            polarity = "negative" if pnl < 0 or tags else ("positive" if pnl > 0 else "neutral")
+            summary = " ".join(str(part or "") for part in [row["outcome_label"],
+                row["summary_text"], " ".join(str(t) for t in tags)]).strip()
+            items.append(self._item(
+                source_table="trade_outcome_review", source_id=str(row["review_id"] or ""),
+                memory_type="negative" if polarity == "negative" else "episodic",
+                text_summary=summary or "trade outcome review",
+                structured={"trade_id": row["trade_id"], "position_id": row["position_id"],
+                            "entry_decision_id": row["entry_decision_id"], "pnl": pnl,
+                            "outcome_label": row["outcome_label"], "failure_tags": tags,
+                            "review": loads(row["review_json"], {})},
+                evidence_score=0.75, polarity=polarity,
+                created_at=safe_float(row["created_at"]), terms=terms,
+            ))
+        return items
+
+    def _policy_suggestion_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
+        if not state_table_exists(conn, "policy_suggestion"):
+            gaps.append("policy_suggestion")
+            return []
+        rows = execute(conn, """SELECT suggestion_id, scope_type, scope_key, action, confidence,
+            reason, evidence_json, status, created_at
+            FROM policy_suggestion ORDER BY created_at DESC LIMIT 50""").fetchall()
+        items = []
+        for row in rows:
+            status = str(row["status"] or "")
+            action = str(row["action"] or "")
+            polarity = "negative" if status in {"rolled_back", "blocked_by_risk"} else "neutral"
+            summary = f"{row['scope_type']} {row['scope_key']} {action} {status} {row['reason']}"
+            items.append(self._item(
+                source_table="policy_suggestion", source_id=str(row["suggestion_id"] or ""),
+                memory_type="procedural", text_summary=summary,
+                structured={"scope_type": row["scope_type"], "scope_key": row["scope_key"],
+                            "action": action, "status": status,
+                            "evidence": loads(row["evidence_json"], {})},
+                evidence_score=max(0.0, min(safe_float(row["confidence"]), 1.0)),
+                polarity=polarity, created_at=safe_float(row["created_at"]), terms=terms,
+            ))
+        return items
+
+    def _model_permission_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
+        if not state_table_exists(conn, "model_permission_audit"):
+            gaps.append("model_permission_audit")
+            return []
+        rows = execute(conn, """SELECT audit_id, model_type, status, reason, capabilities_json,
+            violations_json, context_json, created_at
+            FROM model_permission_audit ORDER BY created_at DESC LIMIT 30""").fetchall()
+        items = []
+        for row in rows:
+            status = str(row["status"] or "")
+            polarity = "negative" if status == "blocked" else "neutral"
+            summary = f"{row['model_type']} permission {status} {row['reason']}"
+            items.append(self._item(
+                source_table="model_permission_audit", source_id=str(row["audit_id"] or ""),
+                memory_type="semantic" if polarity != "negative" else "negative",
+                text_summary=summary,
+                structured={"model_type": row["model_type"], "status": status,
+                            "reason": row["reason"],
+                            "capabilities": loads(row["capabilities_json"], {}),
+                            "violations": loads(row["violations_json"], []),
+                            "context": loads(row["context_json"], {})},
+                evidence_score=0.9 if polarity == "negative" else 0.65,
+                polarity=polarity, created_at=safe_float(row["created_at"]), terms=terms,
+            ))
+        return items
+
+    def _shadow_audit_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
+        items = []
+        for table, spec in self.SHADOW_TABLES.items():
+            if not state_table_exists(conn, table):
+                gaps.append(table)
+                continue
+            rows = execute(conn, f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT 20").fetchall()
+            for row in rows:
+                score = safe_float(row[spec["score"]]) if spec["score"] in row.keys() else 0.0
+                risk = safe_float(row[spec["risk"]]) if spec["risk"] in row.keys() else 0.0
+                source_id = str(row[spec["id"]] or "")
+                summary = f"{spec['summary']} score={score:.3f} risk={risk:.3f}"
+                polarity = "negative" if risk >= 0.65 else ("positive" if score >= 0.65 else "neutral")
+                items.append(self._item(
+                    source_table=table, source_id=source_id, memory_type="semantic",
+                    text_summary=summary,
+                    structured={key: row[key] for key in row.keys()
+                                if key.endswith("_id") or key in {"model_type", "factor", "mode"}},
+                    evidence_score=max(score, risk, 0.25), polarity=polarity,
+                    created_at=safe_float(row["created_at"]), terms=terms,
+                ))
+        return items
+
+    @staticmethod
+    def _query_terms(world_model: dict[str, Any], hypotheses: list[dict[str, Any]]) -> set[str]:
+        tokens = {str(world_model.get(k) or "") for k in
+                  ("market_regime", "strategy_posture", "factor_posture", "execution_posture",
+                   "learning_posture", "autonomy_posture", "incident_mode")}
+        tokens.update(str(item) for item in world_model.get("stale_governance_tables") or [])
+        for hypothesis in hypotheses:
+            tokens.add(str(hypothesis.get("scope") or ""))
+            tokens.update(str(hypothesis.get("claim") or "").lower().replace(";", " ").split())
+        return {token.lower() for token in tokens if token and len(token) >= 3}
+
+    @staticmethod
+    def _similarity(text_val: str, terms: set[str]) -> float:
+        if not terms:
+            return 0.0
+        hits = sum(1 for term in terms if term in text_val.lower())
+        return round(min(1.0, hits / max(3, min(len(terms), 12))), 4)
+
+    def _item(self, *, source_table: str, source_id: str, memory_type: str,
+              text_summary: str, structured: dict[str, Any], evidence_score: float,
+              polarity: str, created_at: float, terms: set[str],
+              symbol: str = "", timeframe: str = "", regime: str = "") -> dict[str, Any]:
+        similarity = self._similarity(" ".join([text_summary, dumps(structured), regime]), terms)
+        return {
+            "memory_id": _memory_id(source_table, source_id),
+            "schema_version": "brain_memory_item.v1",
+            "memory_type": memory_type, "source_table": source_table,
+            "source_id": source_id, "symbol": symbol, "timeframe": timeframe,
+            "regime": regime, "text_summary": text_summary,
+            "structured": structured,
+            "evidence_score": round(max(0.0, min(float(evidence_score), 1.0)), 4),
+            "similarity_score": similarity, "polarity": polarity,
+            "created_at": created_at,
+        }
+
+    @staticmethod
+    def _row_to_item(row: Any) -> dict[str, Any]:
+        return {
+            "memory_id": str(row["memory_id"] or ""), "schema_version": "brain_memory_item.v1",
+            "memory_type": str(row["memory_type"] or ""), "source_table": str(row["source_table"] or ""),
+            "source_id": str(row["source_id"] or ""), "symbol": str(row["symbol"] or ""),
+            "timeframe": str(row["timeframe"] or ""), "regime": str(row["regime"] or ""),
+            "text_summary": str(row["text_summary"] or ""),
+            "structured": loads(row["structured_json"], {}),
+            "evidence_score": safe_float(row["evidence_score"]),
+            "similarity_score": safe_float(row["similarity_score"]),
+            "polarity": str(row["polarity"] or "neutral"),
+            "created_at": safe_float(row["created_at"]),
+            "last_used_at": safe_float(row["last_used_at"]),
+        }

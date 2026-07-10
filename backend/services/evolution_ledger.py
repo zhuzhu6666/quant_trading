@@ -231,14 +231,23 @@ def persist_runtime_config_snapshot(
     source: str,
     db_path: str | Path = STATE_DB,
     run_id: str = "",
+    conn: Any | None = None,
 ) -> dict[str, Any]:
-    ensure_evolution_ledger_tables(db_path)
+    """Persist a config snapshot, optionally inside the caller's transaction.
+
+    Passing ``conn`` lets the runtime overlay and its matching snapshot commit
+    atomically.  Existing callers keep the historical owned-connection
+    behaviour.
+    """
+    if conn is None:
+        ensure_evolution_ledger_tables(db_path)
     payload = _as_dict(config)
     config_hash = _stable_hash(payload)
     now = time.time()
-    conn = _connect(db_path)
+    owned_conn = conn is None
+    active_conn = conn or _connect(db_path)
     try:
-        cur = conn.execute(
+        cur = active_conn.execute(
             _p(db_path, """
             INSERT INTO runtime_config_snapshot (config_hash, source, config_json, run_id, created_at)
             VALUES (?, ?, ?, ?, ?)
@@ -248,7 +257,8 @@ def persist_runtime_config_snapshot(
         )
         row = cur.fetchone()
         config_version = row["config_version"] if hasattr(row, "keys") and "config_version" in row.keys() else (row[0] if row else 0)
-        conn.commit()
+        if owned_conn:
+            active_conn.commit()
         return {
             "config_version": int(config_version or 0),
             "config_hash": config_hash,
@@ -256,7 +266,8 @@ def persist_runtime_config_snapshot(
             "created_at": now,
         }
     finally:
-        conn.close()
+        if owned_conn:
+            active_conn.close()
 
 
 def current_runtime_config_snapshot(

@@ -1,7 +1,8 @@
 """backend/runtime/evolution_orchestrator.py — 自进化编排器主循环 (v3: DB统一).
 
-把 GP 搜索 → 注册 shadow → Canary 晋升(持久化+执行) → 退役检查(执行)
-→ 权重更新 → 串成端到端闭环管线。
+把 GP 搜索 → 注册 shadow → Canary 证据刷新 → 退役候选发现
+→ 权重研究 → 串成端到端研究管线。生命周期执行统一交给
+FactorGovernanceOrchestrator，避免两个调度器同时拥有晋升/退役权。
 
 v3 修复 (audit 2026-06-22), PG 迁移更新 (2026-07-01):
   - 全部运行状态读写改用 PostgreSQL state store, 不再用 decision_log.db
@@ -48,11 +49,21 @@ def _ensure_canary_db() -> None:
                 cumulative_pnl REAL DEFAULT 0.0,
                 promote_time REAL DEFAULT 0.0,
                 rollback_count INTEGER DEFAULT 0,
+                evidence_hash TEXT DEFAULT '',
+                dataset_hash TEXT DEFAULT '',
+                evidence_end_at TEXT DEFAULT '',
+                stage_evidence_hash TEXT DEFAULT '',
+                fresh_evidence_bars INTEGER DEFAULT 0,
                 events_json TEXT DEFAULT '[]',
                 updated_at REAL DEFAULT 0.0
             )
         """)
         conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS rollback_count INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS evidence_hash TEXT DEFAULT ''")
+        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS dataset_hash TEXT DEFAULT ''")
+        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS evidence_end_at TEXT DEFAULT ''")
+        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS stage_evidence_hash TEXT DEFAULT ''")
+        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS fresh_evidence_bars INTEGER DEFAULT 0")
         conn.commit()
         conn.close()
     except Exception as e:
@@ -78,6 +89,11 @@ def _load_canary_states() -> dict[str, dict]:
                 "cumulative_pnl": r["cumulative_pnl"],
                 "promote_time": r["promote_time"],
                 "rollback_count": r["rollback_count"],
+                "evidence_hash": r["evidence_hash"] or "",
+                "dataset_hash": r["dataset_hash"] or "",
+                "evidence_end_at": r["evidence_end_at"] or "",
+                "stage_evidence_hash": r["stage_evidence_hash"] or "",
+                "fresh_evidence_bars": int(r["fresh_evidence_bars"] or 0),
                 "events": events,
                 "updated_at": r["updated_at"],
             }
@@ -98,14 +114,21 @@ def _save_canary_states(states: dict[str, dict]) -> None:
             events_json = _json.dumps(s.get("events", []), ensure_ascii=False)
             conn.execute("""
                 INSERT INTO canary_state
-                (factor_name, stage, oos_bars, cumulative_pnl, promote_time, rollback_count, events_json, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (factor_name, stage, oos_bars, cumulative_pnl, promote_time, rollback_count,
+                 evidence_hash, dataset_hash, evidence_end_at, stage_evidence_hash,
+                 fresh_evidence_bars, events_json, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(factor_name) DO UPDATE SET
                     stage=excluded.stage,
                     oos_bars=excluded.oos_bars,
                     cumulative_pnl=excluded.cumulative_pnl,
                     promote_time=excluded.promote_time,
                     rollback_count=excluded.rollback_count,
+                    evidence_hash=excluded.evidence_hash,
+                    dataset_hash=excluded.dataset_hash,
+                    evidence_end_at=excluded.evidence_end_at,
+                    stage_evidence_hash=excluded.stage_evidence_hash,
+                    fresh_evidence_bars=excluded.fresh_evidence_bars,
                     events_json=excluded.events_json,
                     updated_at=excluded.updated_at
             """, (
@@ -115,6 +138,11 @@ def _save_canary_states(states: dict[str, dict]) -> None:
                 s.get("cumulative_pnl", 0.0),
                 s.get("promote_time", 0.0),
                 s.get("rollback_count", 0),
+                s.get("evidence_hash", ""),
+                s.get("dataset_hash", ""),
+                s.get("evidence_end_at", ""),
+                s.get("stage_evidence_hash", ""),
+                s.get("fresh_evidence_bars", 0),
                 events_json,
                 now,
             ))
@@ -141,6 +169,8 @@ class EvolutionReport:
         self.retire_candidates: list[str] = []
         self.retire_reason: str = ""
         self.weights_updated: bool = False
+        self.lifecycle_executor: str = "factor_governance_autonomous"
+        self.lifecycle_actions_applied: bool = False
         self.duration_sec: float = 0.0
         self.error: str = ""
 
@@ -157,6 +187,8 @@ class EvolutionReport:
             "retire_candidates": self.retire_candidates,
             "retire_reason": self.retire_reason,
             "weights_updated": self.weights_updated,
+            "lifecycle_executor": self.lifecycle_executor,
+            "lifecycle_actions_applied": self.lifecycle_actions_applied,
             "duration_sec": round(self.duration_sec, 1),
             "error": self.error,
         }
@@ -239,13 +271,13 @@ def scheduled_evolution_cycle(
         else:
             logger.info("[Evolve] no new GP candidates")
 
-        # ── Step 3: Shadow 绩效刷新 + Canary 评估 (持久化 + 真正晋升) ──
+        # ── Step 3: Shadow 绩效刷新 + Canary 候选评估 ──
         cb("shadow_perf", 52, "refreshing shadow factor performance")
         shadow_count = _update_shadow_performance(shadow_oos_df, symbol, timeframe)
         if shadow_count:
             logger.info("[Evolve] shadow perf refreshed: %d factors", shadow_count)
 
-        # ── Step 3b: Canary 评估 (持久化 + 真正晋升) ──
+        # ── Step 3b: Canary 评估（只写证据/候选，不执行生命周期变更） ──
         cb("canary", 55, "running canary evaluation")
         promotions, rollbacks, stay = _run_canary_evaluation(
             symbol, timeframe, n_bars
@@ -255,16 +287,15 @@ def scheduled_evolution_cycle(
         report.canary_stay = stay
 
         if promotions:
-            logger.info("[Evolve] canary promoted: %s", promotions)
-            # ★ 真正执行晋升: 更新 RegistryAdapter source
-            _execute_promotions(promotions)
-            _emit_evolution_story("canary_promotions", {
-                "promoted": promotions, "rollbacked": rollbacks,
+            logger.info("[Evolve] canary promotion candidates: %s", promotions)
+            _emit_evolution_story("canary_transition_candidates", {
+                "promotion_candidates": promotions,
+                "rollback_candidates": rollbacks,
+                "executor": report.lifecycle_executor,
             })
         if rollbacks:
-            logger.info("[Evolve] canary rolled back: %s", rollbacks)
-            _execute_rollbacks(rollbacks)
-        cb("canary_done", 70, f"promoted {len(promotions)}, rolled {len(rollbacks)}")
+            logger.info("[Evolve] canary rollback candidates: %s", rollbacks)
+        cb("canary_done", 70, f"promotion candidates {len(promotions)}, rollback candidates {len(rollbacks)}")
 
         # ── Step 4: 退役检查 ──
         cb("retirement", 75, "checking factor retirement")
@@ -272,11 +303,13 @@ def scheduled_evolution_cycle(
         report.retire_candidates = retire_info["candidates"]
         report.retire_reason = retire_info["reason"]
         if retire_info["candidates"]:
-            logger.info("[Evolve] retiring: %s", retire_info["candidates"])
-            for name in retire_info["candidates"]:
-                if _try_retire(name, retire_info["reason"]):
-                    logger.info("[Evolve] retired: %s", name)
-        cb("retirement_done", 85, f"retired {len(retire_info['candidates'])} factors")
+            logger.info("[Evolve] retirement candidates: %s", retire_info["candidates"])
+            _emit_evolution_story("factor_retirement_candidates", {
+                "candidates": retire_info["candidates"],
+                "reason": retire_info["reason"],
+                "executor": report.lifecycle_executor,
+            })
+        cb("retirement_done", 85, f"retirement candidates {len(retire_info['candidates'])}")
 
         # ── Step 5: IC 刷新 + 因子健康报告 ──
         cb("ic_refresh", 86, "refreshing factor IC tracking")
@@ -464,6 +497,11 @@ def _run_canary_evaluation(
                 dir_state.cumulative_pnl = state.get("cumulative_pnl", 0.0)
                 dir_state.promote_time = state.get("promote_time", 0.0)
                 dir_state.rollback_count = int(state.get("rollback_count", 0) or 0)
+                dir_state.evidence_hash = str(state.get("evidence_hash") or "")
+                dir_state.dataset_hash = str(state.get("dataset_hash") or "")
+                dir_state.evidence_end_at = str(state.get("evidence_end_at") or "")
+                dir_state.stage_evidence_hash = str(state.get("stage_evidence_hash") or "")
+                dir_state.fresh_evidence_bars = int(state.get("fresh_evidence_bars", 0) or 0)
                 dir_state.history = [dict(event) for event in state.get("events", []) if isinstance(event, dict)]
 
         for name, score, source in candidates:
@@ -501,6 +539,11 @@ def _run_canary_evaluation(
                 "cumulative_pnl": s.cumulative_pnl,
                 "promote_time": s.promote_time,
                 "rollback_count": s.rollback_count,
+                "evidence_hash": s.evidence_hash,
+                "dataset_hash": s.dataset_hash,
+                "evidence_end_at": s.evidence_end_at,
+                "stage_evidence_hash": s.stage_evidence_hash,
+                "fresh_evidence_bars": s.fresh_evidence_bars,
                 "events": [dict(event) for event in s.history],
                 "updated_at": _time.time(),
             }
@@ -513,7 +556,7 @@ def _run_canary_evaluation(
 
 
 def _execute_promotions(names: list[str]) -> None:
-    """真正执行晋升: adapter.promote(name, SOURCE_DISCOVERED)."""
+    """Deprecated compatibility hook; lifecycle writes belong to factor governance."""
     try:
         from risk.policy_service import RiskPolicyService
         verdict = RiskPolicyService.shared().evaluate(
@@ -547,7 +590,7 @@ def _execute_promotions(names: list[str]) -> None:
 
 
 def _execute_rollbacks(names: list[str]) -> None:
-    """回滚因子到 SOURCE_SHADOW."""
+    """Deprecated compatibility hook; lifecycle writes belong to factor governance."""
     try:
         from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
         adapter = RegistryAdapter.shared()
@@ -608,6 +651,12 @@ def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
                     "hit_rate": perf.hit_rate,
                     "max_drawdown": perf.max_drawdown,
                     "last_signal": perf.last_signal,
+                    "n_active": perf.n_active,
+                    "evidence_hash": perf.evidence_hash,
+                    "dataset_hash": perf.dataset_hash,
+                    "evidence_start_at": perf.evidence_start_at,
+                    "evidence_end_at": perf.evidence_end_at,
+                    "new_evidence_bars": perf.new_evidence_bars,
                 },
             )
     except Exception as e:
@@ -658,6 +707,7 @@ def _check_retirement() -> dict[str, Any]:
 
 
 def _try_retire(name: str, reason: str) -> bool:
+    """Deprecated compatibility hook; scheduled evolution no longer calls it."""
     try:
         from alpha.registry_adapter import RegistryAdapter
         adapter = RegistryAdapter.shared()

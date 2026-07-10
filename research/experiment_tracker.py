@@ -50,18 +50,68 @@ class ExperimentTracker:
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        """Create the experiments table if it does not already exist."""
+        """Create/migrate the canonical structured experiment table."""
         try:
             with self._connect() as conn:
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS experiments (
                         run_id TEXT PRIMARY KEY,
-                        data TEXT,
-                        updated_at REAL
+                        experiment_type TEXT,
+                        params_json TEXT DEFAULT '{}',
+                        metrics_json TEXT DEFAULT '{}',
+                        tags_json TEXT DEFAULT '[]',
+                        artifacts_json TEXT DEFAULT '[]',
+                        status TEXT DEFAULT 'running',
+                        timestamp REAL,
+                        created_at REAL
                     )
                     """
                 )
+                columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(experiments)").fetchall()}
+                for name, ddl in {
+                    "experiment_type": "experiment_type TEXT",
+                    "params_json": "params_json TEXT DEFAULT '{}'",
+                    "metrics_json": "metrics_json TEXT DEFAULT '{}'",
+                    "tags_json": "tags_json TEXT DEFAULT '[]'",
+                    "artifacts_json": "artifacts_json TEXT DEFAULT '[]'",
+                    "status": "status TEXT DEFAULT 'running'",
+                    "timestamp": "timestamp REAL",
+                    "created_at": "created_at REAL",
+                }.items():
+                    if name not in columns:
+                        conn.execute(f"ALTER TABLE experiments ADD COLUMN {name} {ddl}")
+                # One older tracker stored a JSON blob in `data`.  Migrate it
+                # in place so both historical rows and the canonical schema
+                # remain readable without creating a second source of truth.
+                columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(experiments)").fetchall()}
+                if "data" in columns:
+                    rows = conn.execute(
+                        "SELECT run_id, data FROM experiments WHERE (experiment_type IS NULL OR experiment_type='') AND data IS NOT NULL"
+                    ).fetchall()
+                    for row in rows:
+                        try:
+                            payload = json.loads(row["data"] or "{}")
+                        except Exception:
+                            continue
+                        conn.execute(
+                            """UPDATE experiments SET experiment_type=?, params_json=?, metrics_json=?,
+                               tags_json=?, artifacts_json=?, status=?, timestamp=?, created_at=?
+                               WHERE run_id=?""",
+                            (
+                                str(payload.get("experiment_type") or "unknown"),
+                                json.dumps(payload.get("params") or {}),
+                                json.dumps(payload.get("metrics") or {}),
+                                json.dumps(payload.get("tags") or []),
+                                json.dumps(payload.get("artifacts") or []),
+                                str(payload.get("status") or "running"),
+                                float(payload.get("timestamp") or self._now()),
+                                float(payload.get("timestamp") or self._now()),
+                                row["run_id"],
+                            ),
+                        )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_type ON experiments(experiment_type)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status)")
             logger.debug("Database table guaranteed to exist.")
         except sqlite3.Error as exc:
             logger.error(f"Failed to initialise database: {exc}")
@@ -96,7 +146,19 @@ class ExperimentTracker:
 
     @staticmethod
     def _deserialise(row: sqlite3.Row) -> Experiment:
-        data = json.loads(row["data"])
+        keys = set(row.keys())
+        if "experiment_type" in keys and row["experiment_type"]:
+            return Experiment(
+                run_id=str(row["run_id"]),
+                timestamp=float(row["timestamp"] or row["created_at"] or 0.0),
+                experiment_type=str(row["experiment_type"]),
+                params=json.loads(row["params_json"] or "{}"),
+                metrics=json.loads(row["metrics_json"] or "{}"),
+                tags=json.loads(row["tags_json"] or "[]"),
+                artifacts=json.loads(row["artifacts_json"] or "[]"),
+                status=str(row["status"] or "running"),
+            )
+        data = json.loads(row["data"] or "{}")
         return Experiment(
             run_id=data["run_id"],
             timestamp=data["timestamp"],
@@ -113,8 +175,29 @@ class ExperimentTracker:
         try:
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT OR REPLACE INTO experiments (run_id, data, updated_at) VALUES (?, ?, ?)",
-                    (exp.run_id, self._serialise(exp), self._now()),
+                    """INSERT INTO experiments
+                       (run_id, experiment_type, params_json, metrics_json, tags_json,
+                        artifacts_json, status, timestamp, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(run_id) DO UPDATE SET
+                         experiment_type=excluded.experiment_type,
+                         params_json=excluded.params_json,
+                         metrics_json=excluded.metrics_json,
+                         tags_json=excluded.tags_json,
+                         artifacts_json=excluded.artifacts_json,
+                         status=excluded.status,
+                         timestamp=excluded.timestamp""",
+                    (
+                        exp.run_id,
+                        exp.experiment_type,
+                        json.dumps(exp.params, ensure_ascii=False),
+                        json.dumps(exp.metrics, ensure_ascii=False),
+                        json.dumps(exp.tags, ensure_ascii=False),
+                        json.dumps(exp.artifacts, ensure_ascii=False),
+                        exp.status,
+                        exp.timestamp,
+                        exp.timestamp,
+                    ),
                 )
         except sqlite3.Error as exc:
             logger.error(f"Failed to upsert run {exp.run_id}: {exc}")
@@ -129,6 +212,7 @@ class ExperimentTracker:
         exp_type: str,
         params: Optional[dict] = None,
         tags: Optional[list] = None,
+        run_id: str | None = None,
     ) -> str:
         """Create a new run and return its run_id.
 
@@ -147,7 +231,7 @@ class ExperimentTracker:
         str
             The newly created run ID (UUID v4 hex).
         """
-        run_id = uuid.uuid4().hex
+        run_id = str(run_id or uuid.uuid4().hex)
         exp = Experiment(
             run_id=run_id,
             timestamp=self._now(),
@@ -161,6 +245,27 @@ class ExperimentTracker:
         self._upsert(exp)
         logger.info(f"Started run {run_id} ({exp_type})")
         return run_id
+
+    def update_run(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        metrics: dict[str, Any] | None = None,
+        artifacts: list[str] | None = None,
+    ) -> Experiment:
+        """Update a run through the canonical store while preserving its API."""
+        exp = self.get_run(run_id)
+        if exp is None:
+            raise ValueError(f"Run {run_id} not found — cannot update.")
+        if status is not None:
+            exp.status = str(status)
+        if metrics:
+            exp.metrics.update(metrics)
+        if artifacts:
+            exp.artifacts.extend(str(item) for item in artifacts)
+        self._upsert(exp)
+        return exp
 
     def log_metric(self, run_id: str, key: str, value: float) -> None:
         """Log a single metric to an existing run.
@@ -214,7 +319,7 @@ class ExperimentTracker:
         try:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT data FROM experiments WHERE run_id = ?", (run_id,)
+                    "SELECT * FROM experiments WHERE run_id = ?", (run_id,)
                 ).fetchone()
             if row is None:
                 logger.warning(f"Run {run_id} not found.")
@@ -251,7 +356,7 @@ class ExperimentTracker:
         try:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT data FROM experiments ORDER BY updated_at DESC"
+                    "SELECT * FROM experiments ORDER BY COALESCE(timestamp, created_at, 0) DESC"
                 ).fetchall()
         except sqlite3.Error as exc:
             logger.error(f"Failed to query experiments: {exc}")
@@ -326,6 +431,8 @@ class ExperimentTracker:
                 metric_sums[t] = {}
                 metric_counts[t] = {}
             for k, v in r.metrics.items():
+                if not isinstance(v, (int, float)) or isinstance(v, bool):
+                    continue
                 metric_sums[t][k] = metric_sums[t].get(k, 0.0) + v
                 metric_counts[t][k] = metric_counts[t].get(k, 0) + 1
 

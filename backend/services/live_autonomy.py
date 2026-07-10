@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, state_table_exists
-from backend.services.brain_action_planner import _connect, _dumps, _execute, _loads, _safe_float
-from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
+from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
+from backend.services.v16_brain_planning import BrainLiveReadyGuardrailService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 from config import runtime_config

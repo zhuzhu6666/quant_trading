@@ -85,6 +85,42 @@
 - 影响面: AWE、参数模板、FactorGovernanceOrchestrator、startup。
 - 收口方式: 统一使用 `RuntimeConfigMutationService` / `RuntimeConfigOverlayService`。
 
+### overlay 非事务发布与并发全量覆盖
+
+- 状态: `fixed`
+- 旧理解: overlay 写入前可先替换进程内 RuntimeConfig，多个自治任务可各自读取并写回全量权重。
+- 当前口径: overlay row 与 snapshot 同事务提交、提交后发布；写事务使用跨进程锁，长期进程从 YAML base + 完整 overlay 重建，自治 producer 只写局部 patch。
+- 影响面: AWE、FactorGovernance、startup/refresh、clear/rollback。
+- 收口方式: `RuntimeConfigOverlayService._mutate_overlay` + registered overlay base + empty-overlay refresh。
+- 验证方式: `tests/test_factor_autonomy_hardening.py` 的 concurrent/failed transaction/empty overlay 测试。
+
+### Evolution 与 Factor Governance 双生命周期执行者
+
+- 状态: `fixed`
+- 旧理解: Evolution Canary 可以直接 promote/rollback/retire，同时 Factor Governance 也执行同类动作。
+- 当前口径: Evolution 只生产 shadow/Canary/retirement evidence 和 candidates；FactorGovernance 是唯一 lifecycle scheduler executor。重型任务由 `EvolutionWorkCoordinator` 跨进程串行。
+- 影响面: registry source、runtime factor config、Canary、学习审计、scheduler。
+- 收口方式: 移除 scheduled evolution 的直接 lifecycle 调用，Canary regression 由 FactorGovernance 经 RiskPolicy 执行。
+- 验证方式: `tests/test_evolution_closure_fixes.py`、`tests/test_evolution_work_coordinator.py`。
+
+### Canary 重复消费同一 OOS 窗口
+
+- 状态: `fixed`
+- 旧理解: 每小时重复计算相同 aggregate OOS bars/PnL 也可以连续推进多个 Canary stage。
+- 当前口径: shadow performance 保存 dataset/evidence hash、window watermark 和 new bars；同一 hash 只能评估一次，阶段间必须累计 fresh evidence。
+- 影响面: `alpha.shadow_trader`、`deployment.canary`、`canary_state`、Factor Catalog。
+- 收口方式: evidence watermark + `STAGE_MIN_FRESH_EVIDENCE`。
+- 验证方式: `tests/test_evolution_closure_fixes.py::test_canary_requires_new_evidence_between_stage_promotions`。
+
+### experiments 表双 schema
+
+- 状态: `fixed`
+- 旧理解: `ExperimentTracker` 可用 JSON blob schema，`EvolutionExperimentRegistry` 可在同一库使用 structured schema。
+- 当前口径: `data/experiments.db` 只有 structured canonical schema；Evolution registry 只是兼容 adapter，旧 blob 自动原位迁移。
+- 影响面: experiments API、周报、GP/模型实验记忆、db doctor。
+- 收口方式: 统一到 `research.experiment_tracker.ExperimentTracker`。
+- 验证方式: `tests/research/test_evolution_experiment.py`。
+
 ### 回滚临场推断
 
 - 状态: `fixed`

@@ -17,9 +17,8 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
-from backend.services.agent_briefing import AgentBriefingContextService
-from backend.services.agent_scorecard import AgentScorecardService
+from backend.services.agent_authority import AgentAuthorityRegistryService
+from backend.services.agent_governance import AgentBriefingContextService, AgentScorecardService
 from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
 from backend.services.meta_governance import MetaGovernanceService
 from backend.services.proposal_registry import ProposalRegistryService
@@ -1055,7 +1054,7 @@ class BackendReadinessService:
 
     def _brain_state_status(self, readiness: dict[str, Any]) -> dict[str, Any]:
         try:
-            from backend.services.brain_state import BrainStateService
+            from backend.services.v16_brain_snapshot import BrainStateService
 
             snapshot = BrainStateService(self.db_path).build(
                 readiness=readiness,
@@ -1086,7 +1085,7 @@ class BackendReadinessService:
 
     def _brain_action_plan_status(self) -> dict[str, Any]:
         try:
-            from backend.services.brain_action_planner import BrainActionPlannerService
+            from backend.services.v16_brain_planning import BrainActionPlannerService
 
             status = BrainActionPlannerService(self.db_path).status(limit=20)
             status.setdefault("read_only", True)
@@ -1104,7 +1103,7 @@ class BackendReadinessService:
 
     def _brain_action_plan_eval_status(self) -> dict[str, Any]:
         try:
-            from backend.services.brain_action_evaluator import BrainActionPlanEvaluatorService
+            from backend.services.v16_brain_planning import BrainActionPlanEvaluatorService
 
             status = BrainActionPlanEvaluatorService(self.db_path).status(limit=20)
             status.setdefault("read_only", True)
@@ -1122,7 +1121,7 @@ class BackendReadinessService:
 
     def _brain_low_impact_execution_status(self) -> dict[str, Any]:
         try:
-            from backend.services.brain_low_impact_executor import BrainLowImpactExecutorService
+            from backend.services.v16_brain_planning import BrainLowImpactExecutorService
 
             status = BrainLowImpactExecutorService(self.db_path).status(limit=20)
             status.setdefault("low_impact_only", True)
@@ -1138,7 +1137,7 @@ class BackendReadinessService:
 
     def _brain_medium_impact_governance_status(self) -> dict[str, Any]:
         try:
-            from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
+            from backend.services.v16_brain_planning import BrainMediumImpactGovernanceService
 
             status = BrainMediumImpactGovernanceService(self.db_path).status(limit=20)
             status.setdefault("medium_impact_governance", True)
@@ -1262,7 +1261,7 @@ class BackendReadinessService:
 
     def _brain_live_ready_guardrail_status(self) -> dict[str, Any]:
         try:
-            from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
+            from backend.services.v16_brain_planning import BrainLiveReadyGuardrailService
 
             status = BrainLiveReadyGuardrailService(self.db_path).status(limit=20)
             status.setdefault("live_ready_guardrails", True)

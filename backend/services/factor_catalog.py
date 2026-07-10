@@ -102,13 +102,21 @@ def _canary_by_factor(db_path: str | Path = STATE_DB) -> dict[str, dict[str, Any
         conn = _connect_state(db_path, read_only=True)
         try:
             rows = conn.execute(
-                "SELECT factor_name, stage, oos_bars, cumulative_pnl, updated_at FROM canary_state"
+                """SELECT factor_name, stage, oos_bars, cumulative_pnl,
+                          evidence_hash, dataset_hash, evidence_end_at,
+                          stage_evidence_hash, fresh_evidence_bars, updated_at
+                   FROM canary_state"""
             ).fetchall()
             return {
                 str(row["factor_name"]): {
                     "stage": str(row["stage"] or "SHADOW").upper(),
                     "oos_bars": int(row["oos_bars"] or 0),
                     "cumulative_pnl": float(row["cumulative_pnl"] or 0.0),
+                    "evidence_hash": str(row["evidence_hash"] or ""),
+                    "dataset_hash": str(row["dataset_hash"] or ""),
+                    "evidence_end_at": str(row["evidence_end_at"] or ""),
+                    "stage_evidence_hash": str(row["stage_evidence_hash"] or ""),
+                    "fresh_evidence_bars": int(row["fresh_evidence_bars"] or 0),
                     "updated_at": float(row["updated_at"] or 0.0),
                 }
                 for row in rows

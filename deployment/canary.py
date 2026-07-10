@@ -53,6 +53,17 @@ STAGE_REQUIREMENTS: dict[str, tuple[int, float]] = {
     ACTIVE: (0, 0.0),                # 最终阶段, 无晋升要求
 }
 
+# A stage transition must consume evidence that was not already used by the
+# previous transition.  SHADOW may bootstrap from an existing OOS window;
+# later stages require genuinely newer market bars.
+STAGE_MIN_FRESH_EVIDENCE: dict[str, int] = {
+    CANARY_5: 0,
+    CANARY_20: 15,
+    CANARY_50: 30,
+    PROBATION: 30,
+    ACTIVE: 20,
+}
+
 # 多维晋升过滤
 MIN_HIT_RATE_EARLY = 0.48
 MIN_HIT_RATE_LATE = 0.52
@@ -79,6 +90,11 @@ class CanaryState:
     promote_time: float | None = None  # 上次晋升时间戳
     rollback_count: int = 0            # 累计回滚次数
     history: list[dict] = field(default_factory=list)
+    evidence_hash: str = ""             # 最近一次已评估证据指纹
+    dataset_hash: str = ""              # 最近一次底层数据窗口指纹
+    evidence_end_at: str = ""           # 最近一次证据水位
+    stage_evidence_hash: str = ""       # 进入当前阶段时消费的证据
+    fresh_evidence_bars: int = 0         # 当前阶段累计的新 bar
 
 
 @dataclass
@@ -173,10 +189,25 @@ class CanaryDirector:
             cb("check_promotion", 100, f"{factor_name}: already ACTIVE, skip")
             return "stay"
 
+        metrics = dict(eval_ctx.additional_metrics or {})
+        evidence_hash = str(metrics.get("evidence_hash") or "")
+        if evidence_hash:
+            if evidence_hash == state.evidence_hash:
+                self._record_event(state, "duplicate_evidence", {
+                    "evidence_hash": evidence_hash,
+                    "evidence_end_at": str(metrics.get("evidence_end_at") or ""),
+                    "reason": "same_evidence_window_already_evaluated",
+                })
+                cb("check_promotion", 100, f"{factor_name}: duplicate evidence, stay")
+                return "stay"
+            state.evidence_hash = evidence_hash
+            state.dataset_hash = str(metrics.get("dataset_hash") or "")
+            state.evidence_end_at = str(metrics.get("evidence_end_at") or "")
+            state.fresh_evidence_bars += max(0, int(metrics.get("new_evidence_bars") or 0))
+
         # 更新统计
         state.oos_bars = eval_ctx.oos_bars
         state.cumulative_pnl = eval_ctx.oos_pnl
-        metrics = dict(eval_ctx.additional_metrics or {})
         self._record_event(state, "eval", {
             "oos_bars": eval_ctx.oos_bars,
             "oos_pnl": round(eval_ctx.oos_pnl, 6),
@@ -187,6 +218,11 @@ class CanaryDirector:
                 "health_score": round(float(metrics.get("health_score", 0.0) or 0.0), 4),
                 "independence_score": round(float(metrics.get("independence_score", 0.0) or 0.0), 4),
                 "n_active": int(metrics.get("n_active", eval_ctx.oos_bars) or eval_ctx.oos_bars),
+                "evidence_hash": evidence_hash,
+                "dataset_hash": str(metrics.get("dataset_hash") or ""),
+                "evidence_end_at": str(metrics.get("evidence_end_at") or ""),
+                "new_evidence_bars": int(metrics.get("new_evidence_bars") or 0),
+                "fresh_evidence_bars": state.fresh_evidence_bars,
             },
         })
 
@@ -228,6 +264,21 @@ class CanaryDirector:
             self._record_event(state, "stay", {"reason": reason, "next_stage": next_stage})
             cb("check_promotion", 100, f"{factor_name}: {reason}")
             return "stay"
+
+        if evidence_hash and current_stage != SHADOW:
+            min_fresh = int(STAGE_MIN_FRESH_EVIDENCE.get(next_stage, 1) or 0)
+            if state.fresh_evidence_bars < min_fresh:
+                reason = (
+                    f"insufficient fresh evidence ({state.fresh_evidence_bars} < {min_fresh})"
+                )
+                self._record_event(state, "stay", {
+                    "reason": reason,
+                    "next_stage": next_stage,
+                    "stage_evidence_hash": state.stage_evidence_hash,
+                    "latest_evidence_hash": evidence_hash,
+                })
+                cb("check_promotion", 100, f"{factor_name}: {reason}")
+                return "stay"
 
         metrics = eval_ctx.additional_metrics or {}
         hit_rate = float(metrics.get("hit_rate", 0.0) or 0.0)
@@ -308,6 +359,8 @@ class CanaryDirector:
 
         state.stage = next_stage
         state.promote_time = _now()
+        state.stage_evidence_hash = state.evidence_hash
+        state.fresh_evidence_bars = 0
         self._record_event(state, "promote", {
             "from": current,
             "to": next_stage,
@@ -339,6 +392,8 @@ class CanaryDirector:
         # P1.2: 连续回滚超限 → 自动隔离
         if state.rollback_count >= MAX_ROLLBACKS_BEFORE_QUARANTINE:
             state.stage = QUARANTINED
+            state.stage_evidence_hash = state.evidence_hash
+            state.fresh_evidence_bars = 0
             self._record_event(state, "quarantine", {
                 "from": current,
                 "rollback_count": state.rollback_count,
@@ -351,6 +406,8 @@ class CanaryDirector:
             return True
 
         state.stage = SHADOW
+        state.stage_evidence_hash = state.evidence_hash
+        state.fresh_evidence_bars = 0
         self._record_event(state, "rollback", {
             "from": current,
             "rollback_count": state.rollback_count,
@@ -380,6 +437,8 @@ class CanaryDirector:
             return False
         state.stage = SHADOW
         state.rollback_count = 0  # 重置回滚计数
+        state.stage_evidence_hash = state.evidence_hash
+        state.fresh_evidence_bars = 0
         self._record_event(state, "unquarantine", {"to": SHADOW, "reason": reason})
         logger.info(f"[CanaryDirector] unquarantine {factor_name}: -> SHADOW ({reason})")
         return True
@@ -492,6 +551,11 @@ class CanaryDirector:
             "cumulative_pnl": round(state.cumulative_pnl, 6),
             "promote_time": state.promote_time,
             "rollback_count": state.rollback_count,
+            "evidence_hash": state.evidence_hash,
+            "dataset_hash": state.dataset_hash,
+            "evidence_end_at": state.evidence_end_at,
+            "stage_evidence_hash": state.stage_evidence_hash,
+            "fresh_evidence_bars": state.fresh_evidence_bars,
             "quarantined": state.stage == QUARANTINED,
             "retired": state.stage == RETIRED,
             "history": state.history[-10:],  # 最近 10 条

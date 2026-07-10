@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_authority import AgentAuthorityRegistryService
 
 
 def attach_policy_suggestion_agent_context(
@@ -13,6 +13,7 @@ def attach_policy_suggestion_agent_context(
     *,
     source_agent: str,
     scope_type: str,
+    scope_key: str = "",
     action: str,
     requested_writes: list[str] | tuple[str, ...] | str | None = None,
     status: str = "proposed",
@@ -44,6 +45,7 @@ def attach_policy_suggestion_agent_context(
         context = _agent_context(
             source_agent=source_agent,
             scope_type=scope_type,
+            scope_key=scope_key,
             action=action,
             requested_writes=writes,
             status=status,
@@ -62,6 +64,7 @@ def _agent_context(
     *,
     source_agent: str,
     scope_type: str,
+    scope_key: str,
     action: str,
     requested_writes: list[str] | tuple[str, ...] | str | None,
     status: str,
@@ -74,6 +77,7 @@ def _agent_context(
         return AgentBriefingContextService(db_path).agent_context(
             source_agent,
             scope_type=scope_type,
+            scope_key=scope_key,
             action=action,
             requested_writes=requested_writes,
             status=status,
@@ -95,6 +99,7 @@ def _agent_context(
             "source_agent": source_agent,
             "canonical_source_agent": str(authority.get("canonical_source_agent") or source_agent),
             "scope_type": scope_type,
+            "scope_key": scope_key,
             "action": action,
             "authority_verdict": authority,
             "scorecard": {},

@@ -109,3 +109,37 @@ class TestDecisionPolicy:
         }
         flat = DecisionPolicy.to_weights(decisions)
         assert flat == {"a": 0.5, "b": 0.5}
+
+    def test_experience_prior_requires_bounded_attribution_and_minimum_evidence(self):
+        dp = DecisionPolicy(max_weight=1.0, diversity_max_pct=1.0)
+        base = {
+            "awe_patches": {
+                "learned": {"weight": 0.3, "reason": "awe"},
+                "unbounded": {"weight": 0.3, "reason": "awe"},
+            },
+            "factor_configs": {"learned": {}, "unbounded": {}},
+            "current_weights": {"learned": 0.3, "unbounded": 0.3},
+        }
+
+        decisions = dp.fast_decide(
+            **base,
+            experience_priors={
+                "learned": {
+                    "bounded_attribution_allowed": True,
+                    "sample_count": 8,
+                    "confidence": 0.8,
+                    "multiplier": 1.1,
+                },
+                "unbounded": {
+                    "bounded_attribution_allowed": False,
+                    "sample_count": 100,
+                    "confidence": 0.99,
+                    "multiplier": 1.15,
+                },
+            },
+        )
+
+        assert decisions["learned"].new_weight == pytest.approx(0.33)
+        assert decisions["learned"].source_scores["experience_prior"] == 1.1
+        assert decisions["unbounded"].new_weight == 0.3
+        assert "experience_prior" not in decisions["unbounded"].source_scores

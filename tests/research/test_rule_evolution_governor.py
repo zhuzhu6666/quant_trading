@@ -965,3 +965,98 @@ def test_conflict_resolver_keeps_auto_tpsl_over_stale_supervisor_template(tmp_pa
         conn.close()
     assert rows["old_profit"] == "superseded"
     assert rows["auto_tpsl"] == "approved"
+
+
+def test_effect_reconciliation_filters_contaminated_and_wrong_regime_reviews():
+    reviews = [
+        {
+            "review": {"regime_id": "range", "context_integrity": "full"},
+            "failure_tags": [],
+        },
+        {
+            "review": {"regime_id": "trend", "context_integrity": "full"},
+            "failure_tags": [],
+        },
+        {
+            "review": {"regime_id": "range", "context_integrity": "partial"},
+            "failure_tags": ["partial_context"],
+        },
+    ]
+
+    comparable, contaminated, mismatched = RuleEvolutionGovernor._comparable_reviews(
+        reviews,
+        regime="range",
+    )
+
+    assert len(comparable) == 1
+    assert contaminated == 1
+    assert mismatched == 1
+
+
+def test_effect_reconciliation_does_not_attribute_concurrent_same_scope_change(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    first_id = gov.log_application(
+        scope_type="factor",
+        scope_key="rsi_14",
+        action="downweight",
+        bias_multiplier=0.9,
+        old_weight=0.3,
+        new_weight=0.27,
+        suggestion_ids=[],
+        cycle_ts=200.0,
+    )
+    gov.log_application(
+        scope_type="factor",
+        scope_key="rsi_14",
+        action="boost_small",
+        bias_multiplier=1.05,
+        old_weight=0.27,
+        new_weight=0.2835,
+        suggestion_ids=[],
+        cycle_ts=230.0,
+    )
+    conn = _connect(db_path)
+    try:
+        for idx, (ts, pnl) in enumerate(((100.0, -20.0), (120.0, -10.0), (240.0, 80.0), (260.0, 90.0), (280.0, 85.0))):
+            decision_id = f"confound_dec_{idx}"
+            conn.execute(
+                "INSERT INTO decision_factor_snapshot (decision_id, factor, contribution_score) VALUES (?, 'rsi_14', ?)",
+                (decision_id, pnl / 100.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
+                 failure_tags_json, summary_text, review_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, '[]', '', ?, ?)
+                """,
+                (
+                    f"confound_review_{idx}",
+                    f"confound_trade_{idx}",
+                    f"confound_position_{idx}",
+                    decision_id,
+                    pnl,
+                    "good_win" if pnl > 0 else "bad_loss",
+                    json.dumps({"context_integrity": "full", "close_reason": "broker_close"}),
+                    ts,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    gov.reconcile_application_effects(min_trades=3, observe_trades=3, baseline_min_trades=2)
+
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status, decision_json FROM learning_application_effect WHERE application_id=?",
+            (first_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    decision = json.loads(row["decision_json"])
+    assert row["status"] == "observing"
+    assert decision["evidence_quality"]["causal_status"] == "confounded_by_concurrent_application"
+    assert decision["evidence_quality"]["bounded_attribution_allowed"] is False

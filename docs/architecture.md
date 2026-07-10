@@ -1,7 +1,7 @@
 # Quant Trading Architecture
 
 > Status: active
-> Last verified: 2026-07-06
+> Last verified: 2026-07-10
 > Scope: current system, target full architecture, and the delivery roadmap we will follow.
 
 本文现在是项目的长期架构蓝图。当前代码真实运行顺序、服务分工、tick 链路和 API 入口优先看 [system-operation-map.md](system-operation-map.md)；后续讨论中形成的新架构结论，优先更新这里；`TODO.md` 只负责承接近期执行项和验证项。
@@ -37,7 +37,9 @@
 
 2026-07-04 后端内部优化补充：
 
-**第一阶段不转 Rust、不重写交易链路，先补稳定性观测、读接口缓存和低风险模块抽取。** 当前已增加统一 TTL cache / last-good fallback / timings 工具，`/api/ops/backend-readiness` 暴露 `stability` 只读诊断，cTrader L2 writer 继续保持异步批量写入并补充 queue/batch latency 指标，live tick 与 position supervision 外层开始记录耗时。`live_runtime_state`、`live_ctrader_runtime`、`live_loop_shell`、`live_position_lifecycle`、`live_supervision_actions`、`live_tick_pipeline`、`live_risk_sizing`、`live_scheduler_jobs`、`live_data_sync_helpers` 和 `live_data_sync_job` 已承接低风险 helper / 注入式 job / payload 编排。`live_service.py` 保留 facade、broker IO、risk verdict、ledger 写入和最终执行动作；本阶段 live 维护性收口完成后，主要函数规模为：`_process_tick_factor_pipeline` 约 595 行、`_run_loop` 约 346 行、`_run_position_supervision` 约 214 行、`_record_amended_open_success_context` 约 125 行、`_execute_trailing_candidate` 约 109 行、`_record_filled_position_open_context` / `_handle_closed_positions_after_tick` 各约 80 行、`_update_trailing_stops` 约 48 行。后续优化优先用 timings 定位真实热点，再决定是否做局部 Rust PoC。
+**第一阶段不转 Rust、不重写交易链路，先补稳定性观测、读接口缓存和低风险模块抽取。** 当前已增加统一 TTL cache / last-good fallback / timings 工具，`/api/ops/backend-readiness` 暴露 `stability` 只读诊断，cTrader L2 writer 继续保持异步批量写入并补充 queue/batch latency 指标，live tick 与 position supervision 外层开始记录耗时。`live_runtime_state`、`live_ctrader_runtime`、`live_loop_shell`、`live_position_lifecycle`、`live_supervision_actions`、`live_tick_pipeline`、`live_factor_state`、`live_risk_sizing`、`live_scheduler_jobs`、`live_data_sync_helpers` 和 `live_data_sync_job` 已承接低风险 helper / 注入式 job / payload 编排；其中 `live_factor_state` 负责 decision bar 进度归一化和 ready factor decision 的非执行状态提交，不读取账户、不触发风控或 broker 动作。`live_service.py` 保留 facade、broker IO、risk verdict、ledger 写入和最终执行动作；本阶段 live 维护性收口完成后，主要函数规模为：`_process_tick_factor_pipeline` 约 270 行、`_run_loop` 约 350 行、`_run_position_supervision` 约 240 行、`_record_amended_open_success_context` 约 125 行、`_execute_trailing_candidate` 约 110 行、`_record_filled_position_open_context` / `_handle_closed_positions_after_tick` 各约 80 行、`_update_trailing_stops` 约 50 行。后续优化优先用 timings 定位真实热点，再决定是否做局部 Rust PoC。
+
+后端 lifespan 的非致命后台生命周期已收口到 `backend.services.backend_runtime_lifecycle.BackendRuntimeLifecycle`：它编排 DataStore/cTrader/db-health warmup、可选 backend learning schedulers、进程退出时的同步 live loop drain 和现有 scheduler stop；auth、execution semantics、overlay/DB fail-closed、模板与 factor registry 恢复仍由 `backend.app.lifespan` 持有。进程退出通过 `stop_loop_for_process_shutdown()` 保留 persisted desired state，等待当前 tick 完成后再释放 loop ownership；`loop_draining` 在 candidate 前和 market RPC admission lock 内阻止新开仓，但不打断已获准订单的 post-fill 保护和审计；超时写 `recovery_required=true` 且不伪报 graceful success。该路径不平仓、不主动断开 cTrader，也不改变手工 `/api/live/stop` 的语义。
 
 2026-07-06 因子自治治理补充：
 

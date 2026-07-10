@@ -30,6 +30,7 @@ class _IdleThread:
 
 @pytest.fixture(autouse=True)
 def _reset_loop_state():
+    live_service._process_shutdown_requested = False
     live_service._loop_thread = None
     live_service._loop_stop_flag = None
     live_service._loop_broker = None
@@ -46,10 +47,13 @@ def _reset_loop_state():
         loop_started_at=None,
         account=None,
         account_updated_at=None,
+        accepting_new_risk=False,
+        loop_shutdown=None,
     )
     live_service._reset_session_state_for_new_day()
     yield
     live_service._loop_thread = None
+    live_service._process_shutdown_requested = False
     live_service._loop_stop_flag = None
     live_service._loop_broker = None
     live_service._loop_started_at = None
@@ -65,6 +69,8 @@ def _reset_loop_state():
         loop_started_at=None,
         account=None,
         account_updated_at=None,
+        accepting_new_risk=False,
+        loop_shutdown=None,
     )
     live_service._reset_session_state_for_new_day()
 
@@ -340,6 +346,7 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
 
     monkeypatch.setattr(live_service, "_start_live_scheduler", lambda: scheduler_calls.append("started"))
     monkeypatch.setattr(live_service.threading, "Thread", _IdleThread)
+    live_service._live_state_update(loop_shutdown={"status": "completed"})
 
     result = live_service.start_loop("ctrader", strategy_name="smoke", persist_desired=False)
 
@@ -352,6 +359,7 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     assert live_service._live_state_get("loop_running") is True
     assert live_service._live_state_get("broker") == "ctrader"
     assert live_service._live_state_get("loop_strategy") == "smoke"
+    assert live_service._live_state_get("loop_shutdown") is None
 
     acct = live_service._live_state_get("account", clone=True)
     assert acct["ok"] is True
@@ -359,6 +367,207 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     assert acct["balance"] == 0
     assert live_service._live_state_get("session_trades") == 0
     assert live_service._live_state_get("session_pnl") == 0.0
+
+
+def test_process_shutdown_joins_loop_preserves_desired_and_releases_ownership(monkeypatch):
+    thread = _IdleThread()
+    thread.start()
+    stop_flag = threading.Event()
+    runtime_writes = []
+    desired_writes = []
+    live_service._loop_thread = thread
+    live_service._loop_stop_flag = stop_flag
+    live_service._loop_broker = "ctrader"
+    live_service._loop_started_at = 123.0
+    live_service._loop_strategy_name = "smoke"
+    live_service._live_state_update(loop_running=True, loop_strategy="smoke")
+    monkeypatch.setattr(
+        live_service,
+        "_runtime_kv_set",
+        lambda key, value: runtime_writes.append((key, value)),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_persist_loop_desired_state",
+        lambda *args, **kwargs: desired_writes.append((args, kwargs)),
+    )
+
+    result = live_service.stop_loop_for_process_shutdown(timeout_sec=7.5)
+
+    assert result["status"] == "completed"
+    assert result["recovery_required"] is False
+    assert result["desired_state_preserved"] is True
+    assert result["ownership_released"] is True
+    assert stop_flag.is_set() is True
+    assert live_service._loop_thread is None
+    assert live_service._loop_stop_flag is None
+    assert live_service._loop_broker is None
+    assert live_service._loop_started_at is None
+    assert live_service._loop_strategy_name is None
+    assert live_service._live_state_get("loop_running") is False
+    assert live_service._live_state_get("loop_shutdown") == result
+    assert desired_writes == []
+    assert runtime_writes == [(live_service._RUNTIME_KV_LAST_SHUTDOWN, result)]
+
+
+def test_process_shutdown_timeout_keeps_thread_ownership_for_recovery(monkeypatch):
+    class _TimeoutThread(_IdleThread):
+        def join(self, timeout=None):
+            self.join_timeout = timeout
+
+    thread = _TimeoutThread()
+    thread.start()
+    stop_flag = threading.Event()
+    runtime_writes = []
+    live_service._loop_thread = thread
+    live_service._loop_stop_flag = stop_flag
+    live_service._loop_broker = "ctrader"
+    live_service._loop_started_at = 456.0
+    live_service._loop_strategy_name = "smoke"
+    live_service._live_state_update(loop_running=True, loop_strategy="smoke")
+    monkeypatch.setattr(
+        live_service,
+        "_runtime_kv_set",
+        lambda key, value: runtime_writes.append((key, value)),
+    )
+
+    result = live_service.stop_loop_for_process_shutdown(timeout_sec=2.5)
+
+    assert result["status"] == "timed_out"
+    assert result["recovery_required"] is True
+    assert result["ownership_released"] is False
+    assert thread.join_timeout == 2.5
+    assert stop_flag.is_set() is True
+    assert live_service._loop_thread is thread
+    assert live_service._loop_stop_flag is stop_flag
+    assert live_service._loop_broker == "ctrader"
+    assert live_service._loop_started_at == 456.0
+    assert live_service._loop_strategy_name == "smoke"
+    assert live_service._live_state_get("loop_running") is True
+    assert live_service._live_state_get("loop_shutdown") == result
+    assert runtime_writes == [(live_service._RUNTIME_KV_LAST_SHUTDOWN, result)]
+
+
+def test_process_shutdown_not_running_is_idempotent_and_preserves_desired(monkeypatch):
+    runtime_writes = []
+    desired_writes = []
+    live_service._live_state_update(loop_running=True, loop_strategy="stale")
+    monkeypatch.setattr(
+        live_service,
+        "_runtime_kv_set",
+        lambda key, value: runtime_writes.append((key, value)),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_persist_loop_desired_state",
+        lambda *args, **kwargs: desired_writes.append((args, kwargs)),
+    )
+
+    first = live_service.stop_loop_for_process_shutdown(timeout_sec=1.0)
+    second = live_service.stop_loop_for_process_shutdown(timeout_sec=1.0)
+
+    assert first["status"] == "not_running"
+    assert second["status"] == "not_running"
+    assert first["desired_state_preserved"] is True
+    assert second["desired_state_preserved"] is True
+    assert first["accepting_new_risk"] is False
+    assert second["accepting_new_risk"] is False
+    assert live_service._live_state_get("loop_running") is False
+    assert desired_writes == []
+    assert [key for key, _value in runtime_writes] == [
+        live_service._RUNTIME_KV_LAST_SHUTDOWN,
+        live_service._RUNTIME_KV_LAST_SHUTDOWN,
+    ]
+
+
+def test_process_shutdown_latch_blocks_start_and_delayed_auto_resume(monkeypatch):
+    class _ImmediateThread:
+        def __init__(self, target=None, args=(), name=None, daemon=None):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            if self.target:
+                self.target(*self.args)
+
+    scheduler_starts = []
+    monkeypatch.setattr(live_service, "_runtime_kv_set", lambda _key, _value: None)
+    monkeypatch.setattr(
+        live_service,
+        "_read_loop_desired_state",
+        lambda: {
+            "enabled": True,
+            "broker": "ctrader",
+            "strategy_name": "factor_v4",
+        },
+    )
+    monkeypatch.setattr(live_service, "_start_live_scheduler", lambda: scheduler_starts.append(True))
+    monkeypatch.setattr(live_service.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(live_service.time, "sleep", lambda _seconds: None)
+
+    shutdown = live_service.stop_loop_for_process_shutdown(timeout_sec=0.0)
+    direct = live_service.start_loop("ctrader", persist_desired=False)
+    scheduled = live_service.schedule_auto_resume_loop(delay_sec=0.0)
+
+    assert shutdown["status"] == "not_running"
+    assert live_service._process_shutdown_requested is True
+    assert direct["error"] == "process_shutdown_in_progress"
+    assert scheduled is True
+    assert live_service._loop_thread is None
+    assert scheduler_starts == []
+
+
+def test_process_shutdown_does_not_clear_replacement_thread_state(monkeypatch):
+    replacement = _IdleThread()
+    replacement.start()
+
+    class _ReplacingThread(_IdleThread):
+        def join(self, timeout=None):
+            self._alive = False
+            live_service._loop_thread = replacement
+            live_service._loop_stop_flag = threading.Event()
+            live_service._loop_broker = "replacement"
+            live_service._loop_started_at = 999.0
+            live_service._loop_strategy_name = "replacement_strategy"
+            live_service._live_state_update(
+                loop_running=True,
+                loop_strategy="replacement_strategy",
+            )
+
+    original = _ReplacingThread()
+    original.start()
+    live_service._loop_thread = original
+    live_service._loop_stop_flag = threading.Event()
+    live_service._loop_broker = "ctrader"
+    live_service._loop_started_at = 321.0
+    live_service._loop_strategy_name = "original"
+    monkeypatch.setattr(live_service, "_runtime_kv_set", lambda _key, _value: None)
+
+    result = live_service.stop_loop_for_process_shutdown(timeout_sec=3.0)
+
+    assert result["status"] == "completed"
+    assert result["ownership_released"] is False
+    assert result["replacement_detected"] is True
+    assert live_service._loop_thread is replacement
+    assert live_service._loop_broker == "replacement"
+    assert live_service._loop_started_at == 999.0
+    assert live_service._loop_strategy_name == "replacement_strategy"
+    assert live_service._live_state_get("loop_running") is True
+    assert live_service._live_state_get("loop_strategy") == "replacement_strategy"
+
+
+def test_process_shutdown_latch_rejects_new_loop_generation(monkeypatch):
+    monkeypatch.setattr(live_service, "_process_shutdown_requested", True)
+    monkeypatch.setattr(
+        live_service,
+        "_start_live_scheduler",
+        lambda: pytest.fail("scheduler must not start during process shutdown"),
+    )
+
+    result = live_service.start_loop("ctrader", strategy_name="blocked", persist_desired=False)
+
+    assert result["ok"] is False
+    assert result["error"] == "process_shutdown_in_progress"
 
 
 def test_mark_loop_stopped_for_display_preserves_cached_data():

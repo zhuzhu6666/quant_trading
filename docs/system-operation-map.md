@@ -1,7 +1,7 @@
 # Current Runtime Architecture
 
 > Status: active
-> Last verified: 2026-07-07
+> Last verified: 2026-07-10
 > Scope: code-verified runtime map for backend startup, live trading, learning, shadow models, factor scoring, autonomous governance, state stores, and operator entry points.
 > Primary code anchors: `backend/app.py`, `backend/services/live_service.py`, `alpha/portfolio_compositor.py`, `backend/services/autonomous_learning.py`, `research/features/evidence_contract.py`, `research/*_lightgbm.py`, `backend/runtime/factor_governance_orchestrator.py`, `backend/services/factor_catalog.py`, `scripts/learning_worker.py`.
 
@@ -291,6 +291,8 @@ flowchart TD
 14. 如果 `QUANT_BACKEND_LEARNING_SCHEDULERS=1`，在 backend 内启动轻量 learning/supervisor/autonomous 调度；默认建议由独立 worker 承担。
 15. 预热 db-health cache。
 
+其中第 12-15 步的非致命 warmup、可选 backend learning scheduler 和 shutdown stop 由 `BackendRuntimeLifecycle` 统一编排；认证、配置/overlay、数据库 fail-closed、模板恢复和 factor registry 恢复继续保留在 `backend.app.lifespan`。正常或异常 lifespan 退出都会先调用 `stop_loop_for_process_shutdown(timeout_sec=30)`：保留 persisted desired state，设置当前 loop stop event 并同步等待当前 tick drain；完成后按 thread identity 释放 ownership，超时则保留 ownership 并写 `recovery_required=true`。随后才停止 learning 和 live scheduler。该路径不平仓、不主动断开 cTrader，也不替代手工 `/api/live/stop`。
+
 这意味着真实配置顺序不是“只读 YAML”：
 
 ```text
@@ -435,7 +437,8 @@ run_live_decision_pipeline(...)
   -> ExecutionGate.tick(...)
   -> LiveDecisionFrame
 _process_tick_factor_pipeline(...)
-  -> 写 factor vote snapshot / signal ledger
+  -> live_factor_state 提交 decision bar 进度、last_factor_values 和 factor vote snapshot
+  -> 写 signal ledger
   -> position close 检测与 deal sync
   -> _run_open_trade_pipeline(...)
        prepare candidate:
@@ -461,6 +464,7 @@ _process_tick_factor_pipeline(...)
 重点边界：
 
 - live `ExecutionGate` 处理信号阈值和策略冷却；NFP/GVZ legacy event filter 只生成 `event_filter` 风控输入，最终阻断由 `RiskPolicyService` 裁决。
+- process shutdown 进入 `loop_draining` 后，live open pipeline 在 candidate 前和 market RPC admission lock 内各检查一次，阻止新 `market_buy/sell`；已经获准的 market RPC 仍必须完成 fill、entry protection、SL/TP 和 ledger/recovery post-fill。close/reduce/tighten 不受该生命周期闸门阻断。
 - live 决策只使用最新已闭合 K 线。`_run_live_loop_tick_body()` 在因子计算前会过滤当前未闭合 bar，并在缺少应有闭合 bar 时通过主 cTrader bridge 回补 `data/bars_monthly/bars_YYYY_MM.duckdb` 后重载；修复失败只阻断 open_trade，不停止持仓监督和平仓链路。
 - `LiveDecisionFrame` 是交易信号决策输出，不读取账户、不做仓位 sizing、不调用 `RiskPolicyService`、不触达 broker。
 - `RiskPolicyService` 是动作级裁决入口，开仓、模板切换、自治动作和 rollback 都不能绕过它；账户/运行态阈值通过 `RiskLimitSnapshot` 输入 `RiskGovernor`。live 数据层写入 `decision_freshness` 后，`RiskPolicyService.evaluate("open_trade")` 可用 `decision_bar_stale` 阻断新增风险；close/reduce/tighten 仍走降风险路径。

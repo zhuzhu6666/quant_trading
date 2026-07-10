@@ -6,7 +6,7 @@ from typing import Any
 
 from alpha.decision_policy import DecisionPolicy
 from backend.core.db import STATE_DB, state_table_exists
-from backend.services.brain_action_planner import _connect, _dumps, _execute, _loads, _safe_float
+from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService, ensure_brain_governance_candidate_table
 from backend.services.factor_counter_evidence import FactorCounterEvidenceService
 from backend.services.factor_pruning_candidates import DEFAULT_MAX_CANDIDATES, FactorPruningCandidateService

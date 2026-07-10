@@ -33,6 +33,8 @@ def _reset_state():
     live_service._live_state["spot_quote"] = None
     live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._pos_open_api_volume.clear()
+    live_service._loop_stop_flag = None
+    live_service._process_shutdown_requested = False
     rc.reset_for_tests()
     yield
     live_service._local_positions.clear()
@@ -42,6 +44,8 @@ def _reset_state():
     live_service._live_state["spot_quote"] = None
     live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._pos_open_api_volume.clear()
+    live_service._loop_stop_flag = None
+    live_service._process_shutdown_requested = False
 
 
 def _make_df():
@@ -503,6 +507,166 @@ def test_open_trade_pipeline_stops_before_broker_order_when_attach_pending():
     assert any("pending_open_attach" in message for message in logs)
     bridge.market_buy.assert_not_called()
     bridge.market_sell.assert_not_called()
+
+
+def _open_pipeline_kwargs(bridge, logs, *, stop_requested=None):
+    return {
+        "bridge": bridge,
+        "pipeline": {},
+        "broker": "ctrader",
+        "cfg": SimpleNamespace(),
+        "bar": {"time": time.time()},
+        "factor_values": {},
+        "composite": SimpleNamespace(direction=1, score=0.8),
+        "gate_result": SimpleNamespace(passed=True, reason="pass"),
+        "account": {"balance": 10000.0, "equity": 10000.0},
+        "positions": [],
+        "attr_engine": None,
+        "current_price": 4000.0,
+        "atr_price": 4.0,
+        "pending_open_attach_ids": [],
+        "send": True,
+        "tick": 8,
+        "log": logs.append,
+        "stop_requested": stop_requested,
+    }
+
+
+def test_open_trade_pipeline_blocks_draining_before_candidate(monkeypatch):
+    bridge = _fake_bridge()
+    logs = []
+    stop_flag = threading.Event()
+    stop_flag.set()
+    prepare = MagicMock()
+    monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", prepare)
+
+    gate = live_service._run_open_trade_pipeline(
+        **_open_pipeline_kwargs(bridge, logs, stop_requested=stop_flag.is_set)
+    )
+
+    assert gate.passed is False
+    assert gate.reason == "loop_draining"
+    assert any("loop_draining stage=before_candidate" in item for item in logs)
+    prepare.assert_not_called()
+    bridge.market_buy.assert_not_called()
+    bridge.market_sell.assert_not_called()
+
+
+def test_open_trade_pipeline_blocks_draining_after_candidate_before_submit(monkeypatch):
+    bridge = _fake_bridge()
+    logs = []
+    stop_flag = threading.Event()
+    candidate = SimpleNamespace(
+        direction_name="LONG",
+        volume=100.0,
+        order_block={"order_blocked": False},
+    )
+
+    def _prepare(**_kwargs):
+        stop_flag.set()
+        return candidate
+
+    monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", _prepare)
+
+    gate = live_service._run_open_trade_pipeline(
+        **_open_pipeline_kwargs(bridge, logs, stop_requested=stop_flag.is_set)
+    )
+
+    assert gate.passed is False
+    assert gate.reason == "loop_draining"
+    assert any("loop_draining stage=broker_submit" in item for item in logs)
+    bridge.market_buy.assert_not_called()
+    bridge.market_sell.assert_not_called()
+
+
+def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
+    logs = []
+    stop_flag = threading.Event()
+    rpc_entered = threading.Event()
+    allow_rpc_return = threading.Event()
+    post_fill_entered = threading.Event()
+    allow_post_fill_return = threading.Event()
+    worker_finished = threading.Event()
+    shutdown_finished = threading.Event()
+    runtime_writes = []
+    candidate = SimpleNamespace(direction_name="LONG", volume=100.0)
+    result = SimpleNamespace(success=True)
+
+    def _order(_bridge, _composite, _volume):
+        rpc_entered.set()
+        assert allow_rpc_return.wait(2.0)
+        return result
+
+    def _post_fill(**_kwargs):
+        assert stop_flag.wait(2.0)
+        post_fill_entered.set()
+        assert allow_post_fill_return.wait(2.0)
+
+    monkeypatch.setattr(live_service, "_submit_open_trade_order", _order)
+    monkeypatch.setattr(live_service, "_handle_open_trade_order_success", _post_fill)
+    monkeypatch.setattr(
+        live_service,
+        "_runtime_kv_set",
+        lambda key, value: runtime_writes.append((key, value)),
+    )
+
+    def _run_order():
+        try:
+            live_service._submit_open_trade_candidate(
+                bridge=object(),
+                attr_engine=None,
+                broker="ctrader",
+                cfg=SimpleNamespace(),
+                bar={"time": time.time()},
+                tick=9,
+                account={},
+                positions=[],
+                composite=SimpleNamespace(direction=1),
+                gate_result=SimpleNamespace(passed=True, reason="pass"),
+                candidate=candidate,
+                current_price=4000.0,
+                log=logs.append,
+                stop_requested=stop_flag.is_set,
+            )
+        finally:
+            worker_finished.set()
+
+    worker = threading.Thread(target=_run_order)
+    live_service._loop_thread = worker
+    live_service._loop_stop_flag = stop_flag
+    live_service._loop_broker = "ctrader"
+    live_service._loop_started_at = time.time()
+    live_service._loop_strategy_name = "factor_v4"
+    worker.start()
+    assert rpc_entered.wait(1.0)
+
+    shutdown_result = {}
+
+    def _shutdown():
+        shutdown_result.update(
+            live_service.stop_loop_for_process_shutdown(timeout_sec=2.0)
+        )
+        shutdown_finished.set()
+
+    shutdown = threading.Thread(target=_shutdown)
+    shutdown.start()
+    allow_rpc_return.set()
+    assert post_fill_entered.wait(1.0)
+    assert live_service._live_state_get("loop_shutdown")["status"] == "draining"
+    assert live_service._live_state_get("accepting_new_risk") is False
+    assert shutdown_finished.is_set() is False
+    assert runtime_writes == []
+
+    allow_post_fill_return.set()
+    worker.join(timeout=2.0)
+    shutdown.join(timeout=2.0)
+
+    assert worker_finished.is_set() is True
+    assert shutdown_finished.is_set() is True
+    assert shutdown_result["status"] == "completed"
+    assert runtime_writes == [
+        (live_service._RUNTIME_KV_LAST_SHUTDOWN, shutdown_result)
+    ]
 
 
 def test_entry_protection_failed_status_increments_attempt_and_remains_repairable(monkeypatch):

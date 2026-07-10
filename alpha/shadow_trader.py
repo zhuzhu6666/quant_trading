@@ -9,6 +9,7 @@ persists aggregate OOS metrics to the PostgreSQL state store.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import time
@@ -46,6 +47,12 @@ class ShadowPerf:
     last_signal: float
     n_valid: int
     n_active: int
+    evidence_hash: str = ""
+    dataset_hash: str = ""
+    evidence_start_at: str = ""
+    evidence_end_at: str = ""
+    input_bars: int = 0
+    new_evidence_bars: int = 0
 
     def to_metrics(self) -> dict:
         data = asdict(self)
@@ -90,6 +97,52 @@ def _max_drawdown(equity: np.ndarray) -> float:
     peak = np.maximum.accumulate(equity)
     dd = peak - equity
     return float(np.max(dd)) if len(dd) else 0.0
+
+
+def _canonical_marker(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return str(value)
+
+
+def _evidence_markers(df: pd.DataFrame) -> list[str]:
+    for column in ("timestamp", "time", "datetime", "open_time", "ts"):
+        if column in df.columns:
+            return [_canonical_marker(value) for value in df[column].tolist()]
+    return [_canonical_marker(value) for value in df.index.tolist()]
+
+
+def _count_new_markers(markers: list[str], previous_end: str) -> int:
+    if not markers:
+        return 0
+    if not previous_end:
+        return len(markers)
+    positions = [idx for idx, marker in enumerate(markers) if marker == previous_end]
+    if positions:
+        return max(0, len(markers) - positions[-1] - 1)
+    try:
+        previous_ts = pd.Timestamp(previous_end)
+        parsed = pd.to_datetime(pd.Series(markers), errors="coerce", utc=True)
+        if not pd.isna(previous_ts):
+            if previous_ts.tzinfo is None:
+                previous_ts = previous_ts.tz_localize("UTC")
+            else:
+                previous_ts = previous_ts.tz_convert("UTC")
+            count = int((parsed > previous_ts).sum())
+            if count:
+                return count
+    except Exception:
+        pass
+    # Changed evidence without comparable timestamps still counts as one new
+    # observation, never as an entire recycled historical window.
+    return 1
 
 
 def _record_shadow_error(
@@ -202,6 +255,7 @@ def evaluate_factor(
     symbol: str = "",
     timeframe: str = "",
     threshold: float = 0.3,
+    previous_perf: ShadowPerf | None = None,
 ) -> ShadowPerf | None:
     """Evaluate one factor as a one-bar-ahead virtual strategy."""
     if df is None or len(df) < 30 or "close" not in df.columns:
@@ -237,6 +291,33 @@ def evaluate_factor(
     valid_mask = np.isfinite(pnl)
     active_mask = valid_mask & (positions != 0)
     active_pnl = pnl[active_mask]
+    markers = _evidence_markers(df)
+    dataset_hasher = hashlib.sha256()
+    dataset_hasher.update(str(symbol).encode("utf-8"))
+    dataset_hasher.update(str(timeframe).encode("utf-8"))
+    dataset_hasher.update("\x1f".join(markers).encode("utf-8"))
+    dataset_hasher.update(np.nan_to_num(closes, nan=0.0, posinf=0.0, neginf=0.0).tobytes())
+    dataset_hash = dataset_hasher.hexdigest()
+    evidence_hasher = hashlib.sha256()
+    evidence_hasher.update(dataset_hash.encode("ascii"))
+    evidence_hasher.update(str(factor).encode("utf-8"))
+    evidence_hasher.update(np.nan_to_num(positions, nan=0.0).tobytes())
+    evidence_hasher.update(np.nan_to_num(pnl, nan=0.0, posinf=0.0, neginf=0.0).tobytes())
+    evidence_hash = evidence_hasher.hexdigest()
+    if previous_perf is not None and previous_perf.evidence_hash == evidence_hash:
+        new_evidence_bars = 0
+    else:
+        new_evidence_bars = _count_new_markers(
+            markers,
+            previous_perf.evidence_end_at if previous_perf is not None else "",
+        )
+        if (
+            previous_perf is not None
+            and new_evidence_bars == 0
+            and previous_perf.dataset_hash != dataset_hash
+            and isinstance(df.index, pd.RangeIndex)
+        ):
+            new_evidence_bars = 1
 
     n_active = int(np.sum(active_mask))
     if n_active == 0:
@@ -261,6 +342,12 @@ def evaluate_factor(
         last_signal=float(signals[-1]) if len(signals) else 0.0,
         n_valid=int(np.sum(valid_mask)),
         n_active=n_active,
+        evidence_hash=evidence_hash,
+        dataset_hash=dataset_hash,
+        evidence_start_at=markers[0] if markers else "",
+        evidence_end_at=markers[-1] if markers else "",
+        input_bars=n,
+        new_evidence_bars=new_evidence_bars,
     )
 
 
@@ -336,6 +423,12 @@ def load_shadow_perf(factor: str) -> ShadowPerf | None:
         last_signal=float(row["last_signal"] or 0.0),
         n_valid=int(metrics.get("n_valid", row["oos_bars"] or 0)),
         n_active=int(metrics.get("n_active", row["oos_bars"] or 0)),
+        evidence_hash=str(metrics.get("evidence_hash") or ""),
+        dataset_hash=str(metrics.get("dataset_hash") or ""),
+        evidence_start_at=str(metrics.get("evidence_start_at") or ""),
+        evidence_end_at=str(metrics.get("evidence_end_at") or ""),
+        input_bars=int(metrics.get("input_bars") or 0),
+        new_evidence_bars=int(metrics.get("new_evidence_bars") or 0),
     )
 
 
@@ -362,6 +455,12 @@ def evaluate_shadow_factors(
         fn = factor_registry.get(name)
         if fn is None:
             continue
+        previous_perf = None
+        if persist:
+            try:
+                previous_perf = load_shadow_perf(name)
+            except Exception:
+                logger.debug("[shadow] previous evidence unavailable for %s", name, exc_info=True)
         perf = evaluate_factor(
             df,
             name,
@@ -369,6 +468,7 @@ def evaluate_shadow_factors(
             source=source,
             symbol=symbol,
             timeframe=timeframe,
+            previous_perf=previous_perf,
         )
         if perf is None:
             continue

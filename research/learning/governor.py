@@ -149,6 +149,48 @@ class RuleEvolutionGovernor:
         return item
 
     @staticmethod
+    def _review_regime(item: dict) -> str:
+        review = item.get("review") or {}
+        for value in (
+            review.get("regime_id"),
+            review.get("regime_key"),
+            review.get("entry_regime"),
+            review.get("regime"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _review_is_contaminated(item: dict) -> bool:
+        review = item.get("review") or {}
+        tags = {str(tag) for tag in (item.get("failure_tags") or [])}
+        close_reason = str(review.get("close_reason") or "")
+        context_integrity = str(review.get("context_integrity") or "full")
+        attribution_integrity = str(review.get("attribution_integrity") or "full")
+        return bool(
+            context_integrity != "full"
+            or attribution_integrity == "missing"
+            or close_reason in {"emergency_close", "restart_replay", "manual_close"}
+            or tags & {"manual_intervention", "partial_context", "attribution_missing", "restart_replay"}
+        )
+
+    @classmethod
+    def _comparable_reviews(
+        cls,
+        reviews: list[dict],
+        *,
+        regime: str,
+    ) -> tuple[list[dict], int, int]:
+        clean = [item for item in reviews if not cls._review_is_contaminated(item)]
+        contaminated = len(reviews) - len(clean)
+        if not regime:
+            return clean, contaminated, 0
+        matched = [item for item in clean if cls._review_regime(item) == regime]
+        return matched, contaminated, len(clean) - len(matched)
+
+    @staticmethod
     def _parse_evidence(row: sqlite3.Row) -> dict:
         try:
             value = row["evidence_json"]
@@ -718,10 +760,10 @@ class RuleEvolutionGovernor:
                 if scope_type not in {"factor", "parameter_template", "position_supervisor_template"}:
                     continue
                 scope_key_for_effect = str(app.get("scope_key") or "")
+                review_limit = max(int(observe_trades) * 5, int(observe_trades))
                 if scope_type == "position_supervisor_template":
                     if not scope_key_for_effect:
                         continue
-                    review_limit = max(int(observe_trades) * 5, int(observe_trades))
                     post_rows = self._execute(conn,
                         """
                         SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
@@ -787,7 +829,7 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at ASC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), factor, int(observe_trades)),
+                        (float(app.get("cycle_ts") or 0.0), factor, review_limit),
                     ).fetchall()
                     post_reviews = [self._parse_review_row(r) for r in post_rows]
 
@@ -806,10 +848,74 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), factor, int(observe_trades)),
+                        (float(app.get("cycle_ts") or 0.0), factor, review_limit),
                     ).fetchall()
                     pre_reviews = [self._parse_review_row(r) for r in pre_rows]
                     reward_from_review = self._reward_from_review
+
+                raw_post_reviews = list(post_reviews)
+                raw_pre_reviews = list(pre_reviews)
+                details = app.get("details") or {}
+                target_regime = str(
+                    details.get("regime_id")
+                    or details.get("regime_key")
+                    or details.get("entry_regime")
+                    or ""
+                ).strip()
+                if not target_regime:
+                    post_regimes = [
+                        self._review_regime(item)
+                        for item in raw_post_reviews
+                        if self._review_regime(item)
+                    ]
+                    if post_regimes:
+                        target_regime = max(set(post_regimes), key=post_regimes.count)
+                regime_evidence_available = any(
+                    self._review_regime(item)
+                    for item in raw_post_reviews + raw_pre_reviews
+                )
+                comparison_regime = target_regime if regime_evidence_available else ""
+                post_reviews, post_contaminated, post_regime_mismatch = self._comparable_reviews(
+                    raw_post_reviews,
+                    regime=comparison_regime,
+                )
+                pre_reviews, pre_contaminated, pre_regime_mismatch = self._comparable_reviews(
+                    raw_pre_reviews,
+                    regime=comparison_regime,
+                )
+                post_reviews = post_reviews[: int(observe_trades)]
+                pre_reviews = pre_reviews[: int(observe_trades)]
+                observation_end = max(
+                    (float(item.get("created_at") or 0.0) for item in raw_post_reviews),
+                    default=float(app.get("cycle_ts") or 0.0),
+                )
+                concurrent_rows = self._execute(
+                    conn,
+                    """
+                    SELECT application_id, action, cycle_ts
+                    FROM learning_application_log
+                    WHERE application_id<>?
+                      AND scope_type=? AND scope_key=?
+                      AND cycle_ts>? AND cycle_ts<=?
+                      AND status NOT IN ('superseded', 'rolled_back', 'rejected')
+                    ORDER BY cycle_ts ASC
+                    """,
+                    (
+                        app["application_id"],
+                        scope_type,
+                        str(app.get("scope_key") or ""),
+                        float(app.get("cycle_ts") or 0.0),
+                        observation_end,
+                    ),
+                ).fetchall()
+                concurrent_applications = [
+                    {
+                        "application_id": str(item["application_id"] or ""),
+                        "action": str(item["action"] or ""),
+                        "cycle_ts": float(item["cycle_ts"] or 0.0),
+                    }
+                    for item in concurrent_rows
+                ]
 
                 post_rewards = [reward_from_review(r) for r in post_reviews]
                 pre_rewards = [reward_from_review(r) for r in pre_reviews]
@@ -833,17 +939,45 @@ class RuleEvolutionGovernor:
                     "baseline_win_rate": round(pre_win_rate, 4),
                     "baseline_ready": len(pre_reviews) >= baseline_min_trades,
                     "observe_ready": len(post_reviews) >= min_trades,
+                    "evidence_quality": {
+                        "schema_version": "learning_effect_evidence.v2",
+                        "causal_claim_allowed": False,
+                        "target_regime": target_regime,
+                        "regime_evidence_available": regime_evidence_available,
+                        "regime_matched": bool(target_regime and regime_evidence_available),
+                        "raw_post_count": len(raw_post_reviews),
+                        "raw_baseline_count": len(raw_pre_reviews),
+                        "excluded_contaminated_post": post_contaminated,
+                        "excluded_contaminated_baseline": pre_contaminated,
+                        "excluded_regime_mismatch_post": post_regime_mismatch,
+                        "excluded_regime_mismatch_baseline": pre_regime_mismatch,
+                        "concurrent_applications": concurrent_applications,
+                    },
                 }
 
                 next_status = "observing"
-                if len(post_reviews) < min_trades or len(pre_reviews) < baseline_min_trades:
+                if concurrent_applications:
                     next_status = "observing"
+                    decision["evidence_quality"]["causal_status"] = "confounded_by_concurrent_application"
+                elif len(post_reviews) < min_trades or len(pre_reviews) < baseline_min_trades:
+                    next_status = "observing"
+                    decision["evidence_quality"]["causal_status"] = "insufficient_comparable_samples"
                 elif delta >= reward_delta_for_effective:
                     next_status = "effective"
+                    decision["evidence_quality"]["causal_status"] = "comparative_effective"
                 elif delta <= reward_delta_for_bad:
                     next_status = "ineffective"
+                    decision["evidence_quality"]["causal_status"] = "comparative_ineffective"
                 else:
                     next_status = "mixed"
+                    decision["evidence_quality"]["causal_status"] = "comparative_mixed"
+                decision["evidence_quality"]["bounded_attribution_allowed"] = bool(
+                    not concurrent_applications
+                    and len(post_reviews) >= min_trades
+                    and len(pre_reviews) >= baseline_min_trades
+                    and target_regime
+                    and regime_evidence_available
+                )
 
                 self._execute(conn,
                     """
@@ -1025,6 +1159,7 @@ class RuleEvolutionGovernor:
                         evidence,
                         source_agent="autonomous_learning",
                         scope_type=scope_type,
+                        scope_key=scope_key_for_effect,
                         action=app["action"],
                         requested_writes=["policy_suggestion"],
                         status="approved",

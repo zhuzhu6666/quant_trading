@@ -6,21 +6,13 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from backend.core.auth import RequireUser
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
-from backend.services.agent_briefing import AgentBriefingContextService
-from backend.services.agent_scorecard import AgentScorecardService
+from backend.services.agent_authority import AgentAuthorityRegistryService
+from backend.services.agent_governance import AgentScorecardService, AgentBriefingContextService
 from backend.services.autonomous_demo_apply_stepper import AutonomousDemoApplyStepper
 from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
 from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
 from backend.services.autonomy_health import AutonomyHealthService
-from backend.services.brain_action_evaluator import BrainActionPlanEvaluatorService
-from backend.services.brain_memory import BrainMemoryService
-from backend.services.brain_action_planner import BrainActionPlannerService
 from backend.services.backend_readiness import BackendReadinessService
-from backend.services.brain_state import BrainStateService
-from backend.services.brain_low_impact_executor import BrainLowImpactExecutorService
-from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
-from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.factor_governance_effect_tracker import FactorGovernanceEffectTrackerService
@@ -32,10 +24,15 @@ from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.stability import TimedCache, measure
 from backend.services.v15_phase0 import V15Phase0CompletionService
+from backend.services.v16_brain_snapshot import BrainStateService, BrainMemoryService
+from backend.services.v16_brain_planning import (
+    BrainActionPlannerService, BrainActionPlanEvaluatorService,
+    BrainLowImpactExecutorService, BrainMediumImpactGovernanceService,
+    BrainLiveReadyGuardrailService,
+)
 from monitor.auto_recovery import AutoRecovery
 from research.report_generator import WeeklyReport
 from research.experiment_tracker import ExperimentTracker
-
 router = APIRouter(prefix="/api/ops", tags=["ops"])
 
 # Singletons (lazy init)

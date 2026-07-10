@@ -15,6 +15,8 @@ def default_live_state() -> dict[str, Any]:
         "loop_running": False,
         "loop_strategy": None,
         "loop_started_at": None,
+        "loop_shutdown": None,
+        "accepting_new_risk": False,
         "account": None,
         "account_updated_at": None,
         "positions": [],

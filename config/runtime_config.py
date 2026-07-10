@@ -479,6 +479,7 @@ _overlay_refresh_lock = threading.Lock()
 _overlay_refreshing = False
 _overlay_last_check_ts = 0.0
 _overlay_last_hash_by_db: Dict[str, str] = {}
+_overlay_base_config_by_db: Dict[str, Dict[str, Any]] = {}
 
 
 def _truthy_env(name: str, default: str = "1") -> bool:
@@ -502,6 +503,58 @@ def _deep_merge_runtime_config(base: Dict[str, Any], overlay: Dict[str, Any]) ->
         else:
             result[key] = copy.deepcopy(value)
     return result
+
+
+def _overlay_db_key(db_path: str | Path | None = None) -> str:
+    if db_path is None:
+        try:
+            from backend.core.db import STATE_DB
+
+            db_path = STATE_DB
+        except Exception:  # noqa: BLE001
+            return "__default__"
+    return str(Path(db_path).expanduser())
+
+
+def register_overlay_base(
+    config: RuntimeConfig | Dict[str, Any],
+    db_path: str | Path | None = None,
+    *,
+    replace_existing: bool = True,
+) -> None:
+    """Register the immutable YAML/base layer used to rebuild an overlay.
+
+    Persisted overlays are complete layers, not patches against whichever
+    in-process value happened to be current.  Keeping the base separately is
+    what makes key removal and an empty/cleared overlay propagate correctly.
+    """
+
+    payload = config.to_dict() if isinstance(config, RuntimeConfig) else dict(config or {})
+    key = _overlay_db_key(db_path)
+    with _overlay_refresh_lock:
+        if replace_existing or key not in _overlay_base_config_by_db:
+            _overlay_base_config_by_db[key] = copy.deepcopy(payload)
+
+
+def overlay_base_config(db_path: str | Path | None = None) -> Dict[str, Any]:
+    key = _overlay_db_key(db_path)
+    with _overlay_refresh_lock:
+        registered = _overlay_base_config_by_db.get(key)
+        if registered is not None:
+            return copy.deepcopy(registered)
+    # Compatibility for callers that mutate an overlay before the explicit
+    # startup restore path has run (mostly tools/tests).  Capture once only.
+    fallback = shared_holder().get().to_dict()
+    register_overlay_base(fallback, db_path, replace_existing=False)
+    return copy.deepcopy(fallback)
+
+
+def config_from_overlay(
+    overlay: Dict[str, Any],
+    db_path: str | Path | None = None,
+) -> RuntimeConfig:
+    merged = _deep_merge_runtime_config(overlay_base_config(db_path), dict(overlay or {}))
+    return RuntimeConfig.from_dict(merged)
 
 
 def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = False) -> bool:
@@ -539,13 +592,12 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
         overlay = dict(latest.get("overlay") or {})
         overlay_hash = str(latest.get("overlay_hash") or "")
         db_key = str(effective_db_path)
-        if not latest.get("ok") or not overlay or not overlay_hash:
+        if not latest.get("ok") or not overlay_hash:
             _overlay_last_hash_by_db[db_key] = overlay_hash
             return False
         if not force and _overlay_last_hash_by_db.get(db_key) == overlay_hash:
             return False
-        merged = _deep_merge_runtime_config(shared_holder().get().to_dict(), overlay)
-        shared_holder().replace(RuntimeConfig.from_dict(merged))
+        shared_holder().replace(config_from_overlay(overlay, effective_db_path))
         _overlay_last_hash_by_db[db_key] = overlay_hash
         return True
     except Exception:  # noqa: BLE001
@@ -602,3 +654,4 @@ def reset_for_tests() -> None:
     with _overlay_refresh_lock:
         _overlay_last_check_ts = 0.0
         _overlay_last_hash_by_db.clear()
+        _overlay_base_config_by_db.clear()

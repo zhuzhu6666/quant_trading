@@ -7,7 +7,6 @@ Usage:
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -15,6 +14,7 @@ from fastapi import FastAPI
 from backend.api import ALL_ROUTERS
 from backend.core.logging import setup_logging
 from backend.jobs import get_job_manager
+from backend.services.backend_runtime_lifecycle import BackendRuntimeLifecycle
 from backend.ws.endpoints import router as ws_router
 from monitor.metrics import install_into_runtime_state
 from monitor.structured_log import setup_structured_logging
@@ -36,11 +36,6 @@ def _init_observability() -> None:
         _lg.info("[lifespan] Metrics installed into RuntimeState")
     except Exception as e:
         _lg.warning(f"[lifespan] Metrics.install_into_runtime_state failed (non-fatal): {e}")
-
-
-def _env_enabled(name: str, default: str = "1") -> bool:
-    value = str(os.getenv(name, default) or "").strip().lower()
-    return value not in {"0", "false", "no", "off", "disabled"}
 
 
 @asynccontextmanager
@@ -150,86 +145,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _lg.warning(f"[lifespan] restore_from_log failed (non-fatal): {e}")
 
-    # Pre-warm DataStore to avoid race on first access
-    try:
-        from data.store import DataStore
-        DataStore()
-        _lg.info("[lifespan] DataStore warmed up")
-    except Exception as e:
-        _lg.warning(f"[lifespan] DataStore warmup failed (non-fatal): {e}")
-
-    # Background warm-up cTrader bridge
-    try:
-        from backend.services.live_service import schedule_auto_resume_loop, warmup_ctrader
-        warmup_ctrader(timeout_sec=0.0)
-        if schedule_auto_resume_loop():
-            _lg.info("[lifespan] auto-resume loop scheduled from persisted desired state")
-    except Exception as e:
-        _lg.warning(f"[lifespan] cTrader warmup failed (non-fatal): {e}")
-
-    if _env_enabled("QUANT_BACKEND_LEARNING_SCHEDULERS", "0"):
-        # Delayed learning backfill: repair restart gaps using ctrader_deals + decision_ledger.
-        try:
-            from backend.services.learning_backfill import schedule_learning_backfill
-            if schedule_learning_backfill(delay_sec=180.0, limit=100, allow_partial=False, rebuild_learning=True):
-                _lg.info("[lifespan] learning backfill scheduled")
-        except Exception as e:
-            _lg.warning(f"[lifespan] learning backfill schedule failed (non-fatal): {e}")
-
-        # Supervisor counterfactual/advisory materialization.
-        try:
-            from backend.services.supervisor_learning_scheduler import schedule_supervisor_learning
-            if schedule_supervisor_learning(delay_sec=300.0, interval_sec=1800.0, limit=200):
-                _lg.info("[lifespan] supervisor learning scheduled")
-        except Exception as e:
-            _lg.warning(f"[lifespan] supervisor learning schedule failed (non-fatal): {e}")
-
-        # Autonomous learning factory: samples + governed suggestion materialization only.
-        try:
-            from backend.services.autonomous_learning import schedule_autonomous_learning
-            if schedule_autonomous_learning(delay_sec=420.0, interval_sec=1800.0, sample_limit=500, recommendation_limit=20):
-                _lg.info("[lifespan] autonomous learning scheduled")
-        except Exception as e:
-            _lg.warning(f"[lifespan] autonomous learning schedule failed (non-fatal): {e}")
-    else:
-        _lg.info("[lifespan] backend learning schedulers disabled by QUANT_BACKEND_LEARNING_SCHEDULERS")
-
-    # Background warm-up db-health cache (避免首次请求阻塞线程池 20s)
-    try:
-        from backend.api.db_health import _on_startup as _warm_db_health
-        _warm_db_health()
-        _lg.info("[lifespan] db-health cache warmup scheduled")
-    except Exception as e:
-        _lg.warning(f"[lifespan] db-health warmup failed (non-fatal): {e}")
+    runtime_lifecycle = BackendRuntimeLifecycle()
+    runtime_lifecycle.start(_lg)
 
     _lg.info("[lifespan] PostgreSQL state store active; legacy state dual-write worker not started")
 
-    yield
-
-    # Stop scheduler on shutdown
     try:
-        from backend.services.learning_backfill import stop_learning_backfill
-        stop_learning_backfill()
-    except Exception as e:
-        _lg.warning(f"[lifespan] learning backfill stop failed: {e}")
-
-    try:
-        from backend.services.supervisor_learning_scheduler import stop_supervisor_learning
-        stop_supervisor_learning()
-    except Exception as e:
-        _lg.warning(f"[lifespan] supervisor learning stop failed: {e}")
-
-    try:
-        from backend.services.autonomous_learning import stop_autonomous_learning
-        stop_autonomous_learning()
-    except Exception as e:
-        _lg.warning(f"[lifespan] autonomous learning stop failed: {e}")
-
-    try:
-        from backend.services.live_service import _stop_live_scheduler
-        _stop_live_scheduler()
-    except Exception as e:
-        _lg.warning(f"[lifespan] InProcessScheduler stop failed: {e}")
+        yield
+    finally:
+        runtime_lifecycle.stop(_lg)
 
 
 def create_app() -> FastAPI:

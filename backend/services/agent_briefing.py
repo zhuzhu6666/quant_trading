@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.proposal_registry import ProposalRegistryService
+from backend.services._brain_helpers import connect as _connect, execute as _execute, loads as _loads
 
 
 class AgentBriefingContextService:
@@ -79,6 +80,7 @@ class AgentBriefingContextService:
                 "summary": trade_feedback.get("summary") or {},
                 "recent_losses": recent_losses,
             },
+            "relevant_experience": self._relevant_experience(limit=10),
             "governance_coverage": governance_coverage,
             "review_rules": {
                 "low_score_requires_extra_evidence": True,
@@ -98,6 +100,7 @@ class AgentBriefingContextService:
         source_agent: str,
         *,
         scope_type: str,
+        scope_key: str = "",
         action: str,
         requested_writes: list[str] | tuple[str, ...] | str | None = None,
         status: str = "",
@@ -148,10 +151,16 @@ class AgentBriefingContextService:
             "source_agent": source_agent,
             "canonical_source_agent": canonical,
             "scope_type": scope_type,
+            "scope_key": scope_key,
             "action": action,
             "authority_verdict": authority,
             "scorecard": metric,
             "recent_loss_feedback": recent_losses[:10],
+            "relevant_experience": self._relevant_experience(
+                scope_type=scope_type,
+                scope_key=scope_key,
+                limit=10,
+            ),
             "review_rules": {
                 "low_score_requires_extra_evidence": True,
                 "contract_violation_blocks_auto_bridge": True,
@@ -165,6 +174,60 @@ class AgentBriefingContextService:
                 "does_not_create_candidates": True,
             },
         }
+
+    def _relevant_experience(
+        self,
+        *,
+        scope_type: str = "",
+        scope_key: str = "",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Return compact, evidence-weighted lessons for generation context."""
+        limit = max(1, min(int(limit), 50))
+        conn = None
+        try:
+            conn = _connect(self.db_path, read_only=True)
+            params: list[Any] = []
+            where = ""
+            if scope_type == "factor" and scope_key:
+                where = "WHERE decision_context_json LIKE ?"
+                params.append(f'%"primary_factor": "{scope_key}"%')
+            params.append(limit)
+            rows = _execute(
+                conn,
+                f"""
+                SELECT experience_id, trade_id, regime_id, outcome_label,
+                       reward_score, failure_tags_json, recommended_action,
+                       evidence_strength, decision_context_json, created_at
+                FROM experience_memory
+                {where}
+                ORDER BY evidence_strength DESC, created_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            result = []
+            for row in rows:
+                context = _loads(row["decision_context_json"], {})
+                result.append({
+                    "experience_id": str(row["experience_id"] or ""),
+                    "trade_id": str(row["trade_id"] or ""),
+                    "regime_id": str(row["regime_id"] or ""),
+                    "outcome_label": str(row["outcome_label"] or ""),
+                    "reward_score": float(row["reward_score"] or 0.0),
+                    "failure_tags": _loads(row["failure_tags_json"], []),
+                    "recommended_action": str(row["recommended_action"] or "watch"),
+                    "evidence_strength": float(row["evidence_strength"] or 0.0),
+                    "primary_factor": str(context.get("primary_factor") or ""),
+                    "summary_text": str(context.get("summary_text") or ""),
+                    "created_at": float(row["created_at"] or 0.0),
+                })
+            return result
+        except Exception:
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _governance_coverage(self) -> dict[str, Any]:
         try:

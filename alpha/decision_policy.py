@@ -112,6 +112,7 @@ class DecisionPolicy:
         factor_configs: dict[str, dict],
         current_weights: dict[str, float],
         regime: str | None = None,
+        experience_priors: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, WeightDecision]:
         """完整权重决策: 融合所有来源 → 唯一权重.
 
@@ -174,6 +175,12 @@ class DecisionPolicy:
                 sources,
             )
 
+            # Optional learned posterior. Only effects that passed comparable
+            # sample and confound checks may enter, and only as a bounded prior.
+            raw_weight, sources = self._apply_experience_prior(
+                raw_weight, factor, experience_priors, sources,
+            )
+
             # 6. 权重钳制
             new_weight = max(self._min_weight, min(self._max_weight, raw_weight))
             if awe_info and awe_info.get("weight", 0) == 0.0:
@@ -205,6 +212,7 @@ class DecisionPolicy:
         weight_policy_weights: dict[str, float] | None = None,
         factor_configs: dict[str, dict],
         current_weights: dict[str, float],
+        experience_priors: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, WeightDecision]:
         """轻量版: 仅对有变化的因子做决策, 其他保持."""
         decisions: dict[str, WeightDecision] = {}
@@ -215,13 +223,17 @@ class DecisionPolicy:
                 continue
             old_w = current_weights.get(name, 0.0)
             new_w = pinfo.get("weight", old_w)
+            source_scores = {"awe": new_w}
+            new_w, source_scores = self._apply_experience_prior(
+                new_w, name, experience_priors, source_scores,
+            )
             decisions[name] = WeightDecision(
                 factor=name,
                 old_weight=old_w,
                 new_weight=new_w,
                 reason=pinfo.get("reason", "AWE adapt"),
                 confidence=0.7,
-                source_scores={"awe": new_w},
+                source_scores=source_scores,
             )
 
         # WeightPolicy 补充 (对 AWE 未涉及且 WP 有变化的因子)
@@ -240,6 +252,18 @@ class DecisionPolicy:
                     confidence=0.5,
                     source_scores={"weight_policy": wp_w},
                 )
+
+        for name, decision in decisions.items():
+            if "experience_prior" in decision.source_scores:
+                continue
+            adjusted, scores = self._apply_experience_prior(
+                decision.new_weight,
+                name,
+                experience_priors,
+                dict(decision.source_scores),
+            )
+            decision.new_weight = round(max(0.0, min(self._max_weight, adjusted)), 4)
+            decision.source_scores = scores
 
         # 多样性约束
         if decisions:
@@ -347,6 +371,28 @@ class DecisionPolicy:
                 break
 
         return weight, sources
+
+    def _apply_experience_prior(
+        self,
+        weight: float,
+        factor: str,
+        priors: dict[str, dict[str, Any]] | None,
+        sources: dict[str, float],
+    ) -> tuple[float, dict[str, float]]:
+        """Apply a small learned prior only when its attribution is bounded."""
+        prior = (priors or {}).get(factor)
+        if not isinstance(prior, dict):
+            return weight, sources
+        if not bool(prior.get("bounded_attribution_allowed", False)):
+            return weight, sources
+        sample_count = int(prior.get("sample_count") or 0)
+        confidence = float(prior.get("confidence") or 0.0)
+        if sample_count < 5 or confidence < 0.6:
+            return weight, sources
+        multiplier = max(0.85, min(1.15, float(prior.get("multiplier") or 1.0)))
+        sources["experience_prior"] = multiplier
+        sources["experience_confidence"] = confidence
+        return weight * multiplier, sources
 
     def _enforce_diversity(
         self,

@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, state_table_exists
-from backend.services.agent_authority_registry import (
+from backend.services.agent_authority import (
     AgentAuthorityRegistryService,
     infer_policy_suggestion_source_agent,
     policy_suggestion_requested_writes,
 )
-from backend.services.brain_action_planner import _connect, _execute
+from backend.services._brain_helpers import connect as _connect, execute as _execute
 from backend.services.proposal_registry import ProposalRegistryService
 
 

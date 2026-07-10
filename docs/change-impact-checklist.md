@@ -62,7 +62,12 @@
 | `learning_application_log` | 是否记录应用状态 |
 | `learning_application_effect` | 是否能支撑后验回滚 |
 | `runtime_config_overlay` | 重启是否可恢复 |
+| 原子性/并发 | overlay 与 snapshot 是否同事务；失败前是否禁止发布内存；producer 是否只写局部 patch |
+| 跨进程刷新 | 是否由 YAML base + 完整 overlay 重建；空 overlay/删除 key 是否能传播 |
 | `factor_catalog_snapshot` | 每轮治理是否留痕 |
+| 生命周期单写者 | Evolution 是否只产候选；实际 promote/rollback/retire 是否只由 FactorGovernance 执行 |
+| Canary 证据 | evidence/dataset hash 是否变化；stage 是否累计足够 fresh bars，是否拒绝重复窗口 |
+| 效果证据质量 | 是否过滤污染/regime mismatch；并发 application 是否保持 observing 而非伪归因 |
 | 冷却/限频 | 单周期动作数量是否受限 |
 | 测试污染 | pytest/test overlay 是否被生产拒绝 |
 

@@ -32,6 +32,7 @@ def restore_runtime_config_on_startup(
     db_path: str | Path = STATE_DB,
     run_id: str = "",
 ) -> dict[str, Any]:
+    runtime_config.register_overlay_base(base_cfg, db_path, replace_existing=True)
     overlay_restore = RuntimeConfigOverlayService(db_path).restore_on_startup(base_cfg)
     cfg = overlay_restore["config"] if overlay_restore.get("restored") else base_cfg
     version = runtime_config.replace(cfg)

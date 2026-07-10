@@ -1,7 +1,7 @@
 # System Source Of Truth
 
 > Status: active
-> Last verified: 2026-07-07
+> Last verified: 2026-07-10
 > Scope: authoritative sources for runtime state, configuration, governance, data, and frontend contracts.
 
 本文回答一个问题：当文档、注释、接口、数据库和历史理解冲突时，到底以哪里为准。
@@ -19,7 +19,7 @@
 | 事项 | 权威来源 | 说明 |
 |---|---|---|
 | 静态默认配置 | `settings.yaml` / `config/runtime_config.py` | 基础配置，不由自治治理直接回写 |
-| 自治配置覆盖 | PostgreSQL `runtime_config_overlay` + `config.runtime_config.refresh_from_overlay()` | 自治层事实源；写入必须走受控 mutation，启动恢复，长期运行进程通过 `runtime_config.shared()` 低频吸收最新 overlay，避免跨进程配置漂移 |
+| 自治配置覆盖 | PostgreSQL `runtime_config_overlay` + `config.runtime_config.refresh_from_overlay()` | 自治层事实源；overlay 与 matching snapshot 在同一事务提交，PG advisory lock/SQLite immediate transaction 串行化并发 patch；提交成功后才发布内存，跨进程始终按 YAML base + 完整 overlay 重建，空 overlay 也必须传播 |
 | 配置快照 | PostgreSQL `runtime_config_snapshot` | 审计和回滚用，不临场推断 |
 | 配置写入口 | `RuntimeConfigMutationService` / `DecisionPolicy` | 自治配置变更必须走统一写入口 |
 | 启动恢复 | `RuntimeConfigStartupService` | base YAML + DB overlay 后替换内存配置 |
@@ -31,6 +31,7 @@
 - 生产自治动作不应直接修改 `settings.yaml`。
 - 看到内存配置异常时，先查 overlay、snapshot 和进程内 `runtime_config.shared()` 是否已刷新到最新 overlay hash。
 - 可疑测试 overlay 不应被生产启动恢复。
+- 自治 writer 只能提交作用域内的局部 patch；禁止用读取时的陈旧全量权重覆盖其他治理动作。overlay row 与 `runtime_config_snapshot` 任一写入失败时，内存配置不得提前变化。
 - incident control 模式变更必须先过 `RiskPolicyService.evaluate("set_incident_control")`，再由 runtime overlay 持久化。
 - position supervisor 模板切换必须先过 `RiskPolicyService.evaluate("switch_position_supervisor_template")`，再由 `RuntimeConfigMutationService` 写入 `runtime_config_overlay` 和 `runtime_config_snapshot`；只写 snapshot 或只改内存不算生效。
 - `autonomy_mode=live_autonomous` 不是风控旁路；解锁必须写 `live_autonomy_unlock_event`，并由 runtime overlay/snapshot 恢复。未解锁或预算触顶时，`RiskPolicyService` 阻断 open/update/promote 等新增风险动作，只允许 close/reduce/tighten/rollback 等降风险动作继续走受控入口；live 开仓路径若收到 `live_autonomy_budget_breach`，必须通过 `RuntimeIncidentControlService` 请求收紧到 `no_new_risk`，不能直接改 overlay。
@@ -53,6 +54,9 @@
 | 因子裁剪治理候选 | `backend.services.factor_pruning_governance` + PostgreSQL `brain_governance_candidate` / `brain_governance_candidate_review` + `/api/ops/factor/pruning-governance/materialize` / `promote-ready` / `bridge-ready` | 将裁剪候选稳定 upsert 到隔离治理候选池，并可在证据足够时晋级 `governance_ready`；候选 lineage 必须携带 `agent_generation_context`；`demo_nursery` 可限速桥接为 `policy_suggestion`，但自动桥接前必须通过 Candidate Review/scorecard/briefing 反证门，不直接改 runtime 权重，不禁用因子 |
 | 因子治理效果回流 | `backend.services.factor_governance_effect_tracker` + `learning_application_log/effect` + `/api/ops/factor/governance-effects` | 汇总 pruning suggestion 的应用与后续效果；只读状态不改权重，reconcile 复用 `RuleEvolutionGovernor.reconcile_application_effects` |
 | 因子治理周期 | `FactorGovernanceOrchestrator` | 自治决策中枢 |
+| 进化研究周期 | `backend.runtime.evolution_orchestrator` | 负责 GP、shadow performance、Canary 证据和 lifecycle candidate；不直接晋升、回滚或退役 registry 因子 |
+| Canary 增量证据 | `shadow_factor_perf.metrics_json` + PostgreSQL `canary_state` evidence watermark | 数据窗口、因子结果和最新 bar 均有指纹；同一 evidence hash 不能重复推进阶段，CANARY_20 以后必须累计阶段所需的新 bar |
+| 重型自治工作协调 | `backend.services.evolution_work_coordinator` | PostgreSQL session advisory lock 串行化 evolution、factor governance、nursery、feature/model research；不是新决策智能体，不拥有配置或生命周期写权限 |
 
 判断原则：
 
@@ -60,6 +64,8 @@
 - context 可以影响状态、阈值、仓位，但不能直接改变多空方向。
 - live 信号决策层只产出 `CompositeSignal`、context policy effect、`GateResult` 和审计 payload；交易授权仍必须进入 `RiskPolicyService`，权重治理仍必须进入 `DecisionPolicy`。
 - shadow 因子不直接交易，必须经治理晋升。
+- `FactorGovernanceOrchestrator` 是因子晋升、Canary 回滚、禁用和退役的唯一调度执行者；Evolution 只能写证据和候选。AWE 只在持有 live attribution pipeline 的 backend 进程运行，且每次权重 patch 同时经过 `DecisionPolicy`、`RiskPolicyService` 和事务化 mutation boundary。
+- Canary 阶段推进不得重复消费相同历史聚合窗口；首次 SHADOW 可用已有 OOS bootstrap，后续阶段必须满足 `fresh_evidence_bars`，数据/结果指纹和 stage watermark 必须进入审计。
 - 搜索/进化生成的 DSL 因子必须先通过 `parse_dsl()`；解析失败的表达式不能注册为 shadow 因子，历史残留坏 DSL 只能作为健康/治理噪音进入 `invalid_dsl` 审计，不能继续执行计算。
 - disabled/DEAD 因子应被 engine、compositor、AWE、readiness 一致排除。
 - 因子组合体检只能产生 `issues` 和 `recommendations`；默认 `build()` / readiness 使用 Factor Catalog `used_in_score=true` 统计当前实际参与评分的 alpha，显式传入 runtime config 的测试/分析可保留配置全量口径；后续 pruning、降权、禁用或晋升仍必须走 `DecisionPolicy`、`RiskPolicyService`、runtime overlay/snapshot 和治理审计。
@@ -77,6 +83,7 @@
 | 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk、L2 等运行态统一输入口径 |
 | 决策 K 线/信号新鲜度 | `backend.services.live_data_sync_helpers` + `_live_state.decision_bar_freshness` + `_live_state.last_processed_decision_bar_ts` + `RiskPolicyService.evaluate("open_trade")` | live tick 只用最新已闭合 bar；缺应有闭合 bar 时先经主 cTrader bridge 回补月库并重载，修复失败以 `decision_bar_stale` 阻断开仓；同一根已闭合决策 bar 只推进一次 signal/open，重复 tick 只运行持仓观察/保护；即使 bar fresh，信号 age 超过 `max(180s, 1.5 * timeframe)` 时以 `decision_signal_age_stale` 阻断开仓 |
 | 下单/改仓/平仓 | cTrader bridge + ledger | broker 执行事实与账本共同追溯；live 开仓先经 `_run_open_trade_pipeline()` 生成 candidate/risk verdict/order block，再触达 broker |
+| 后端进程退出 | `BackendRuntimeLifecycle` + `stop_loop_for_process_shutdown()` + `live.loop.last_shutdown` | 进程退出保留 persisted desired loop state，同步等待当前 tick drain；`completed/timed_out/not_running` 写结构化 shutdown 结果，超时以 `recovery_required=true` 审计，不平仓、不主动断开 cTrader；手工 `/api/live/stop` 仍负责显式关闭 desired state |
 | 信号门槛 | `ExecutionGate` + context policy effect | gate 前应用有效阈值；live 只负责信号/冷却，不作为事件风险最终裁决口 |
 | 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` | 持仓期间动作建议和 trace |
 | 动态仓位 | `backend.services.live_risk_sizing` + live sizing trace | Kelly、event sizing、context policy 统一生成 `position_sizing_trace.v1`；`kelly_risk_per_trade_pct` 是有效 Kelly 风险分数上限，不再与 Kelly 分数相乘；`dynamic_sizing_max_api_volume` 是 demo 硬上限，实际 raw volume 由当前账户 equity、SL distance 和 Kelly 风险预算推导；启用动态 Kelly 时，非 `demo_nursery` 的非正 Kelly、缺 equity 或低于 broker 最小量都产生 0 volume/blocked trace；`demo_nursery` 的非正 Kelly 使用 broker 默认最小单探索并写入 `demo_nursery_exploration` trace |
@@ -92,6 +99,7 @@
 - NFP/GVZ/重大事件等事件风险在 live 中只能作为 `RiskPolicyService` 输入；`ExecutionGate` 的事件过滤保留给 backtest/legacy 兼容。
 - live 因子决策不得使用当前未闭合 K 线；`spot_quote` 只能修正执行参考价，不能把旧 bar 信号变成新信号。同一根已闭合 bar 不得重复 append 到 `StreamingFactorEngine`，也不得重复生成 open 决策；重复 loop tick 只能执行持仓观察、close/reduce/tighten 和保护修复。若 `decision_freshness.schema_version=decision_bar_freshness.v1` 且 `fresh=false`，开仓必须由 `RiskPolicyService` 返回 `decision_bar_stale`；若 bar fresh 但 `age_seconds` 超过 `max(180s, 1.5 * timeframe_seconds)`，开仓必须返回 `decision_signal_age_stale`。持仓监督的 close/reduce/tighten 仍可继续。
 - live open-trade pipeline 只编排候选 sizing、`RiskPolicyService.evaluate("open_trade")`、market-session/order block、broker order 和 post-fill audit；它不拥有独立风控事实源。
+- `loop_draining` 是进程生命周期的新增风险闸门，不替代 `RiskPolicyService`：它只阻止尚未进入 admission lock 的新开仓；已获准 market RPC 必须继续完成成交解析、entry protection、SL/TP 和 ledger/recovery，close/reduce/tighten 继续允许。
 - demo nursery 的动态 Kelly 默认风险上限为 6%，单笔 API volume 硬顶为 `dynamic_sizing_max_api_volume=1000`；Kelly 为正时，实际档位由当前 equity、SL distance、Kelly 分数、broker min/step/max 和总仓位上限共同约束；Kelly 非正时，demo nursery 使用 broker 默认最小单探索。event sizing/context policy 的软缩仓不能把该探索最小单压成 0，但重大事件硬窗口和 `RiskPolicyService` 的断连、stale、仓位/API 上限、日亏损、最大回撤等硬拦仍生效。
 - `position_supervisor:profit_protection.v1` 对年轻仓位的 thesis-broken 判断采用最小证据窗：未满模板 `min_thesis_break_seconds` 时优先输出 tighten/observe 语义的 `thesis_broken_delayed`，不直接 full close；超过证据窗只代表 `thesis_break_ready`，还必须有接近止损、regime confirmed、time decay、连续 thesis broken 确认或信号反转等强证据，才允许 `thesis_broken` full close；close/reduce/tighten 仍必须经过 `RiskPolicyService`。
 - 最小交易量仓位的 supervisor reduce 不能因为 reduce volume 不可交易就无条件升级 full close；只有 `thesis_break_confirmed=true`、连续 thesis broken、信号反转、接近原止损，或 MFE 完全回吐且接近原止损等强风险证据，才允许走 reduce-to-close 兜底。
@@ -128,16 +136,11 @@
 | incident playbook event trail | PostgreSQL `incident_playbook_event` + `backend.services.incident_controls` | V15 事故 playbook 事件流，把 readiness、replay、release、operator note 等 evidence refs 绑定到 playbook；只做审计，不执行动作 |
 | V15 Phase 0 completion | `backend.services.v15_phase0` + `/api/ops/v15/phase0` | Phase 0 机器可读完成门，区分 implementation complete 与 operational evidence |
 | V15 Web cockpit | `web_frontend/src/pages/V15CockpitPage.tsx` + `/v15` | V15 操作台展示入口；读取 readiness/replay/autonomy/incident/release/catalog/risk/learning API，控制动作仍由后端边界执行 |
-| V16 read-only brain state | PostgreSQL `brain_state_snapshot` + `backend.services.brain_state` + `/api/ops/brain/state` | V16 Phase 1 只读大脑状态快照，汇总 V15 readiness/replay/incident/autonomy/governance/memory 事实生成 world model、observe-only hypothesis 和 Critic 限制；不执行动作、不写 overlay、不改权重/仓位/学习样本 |
-| V16 memory retrieval | PostgreSQL `brain_memory` + `backend.services.brain_memory` + `/api/ops/brain/memory` | V16 Phase 1 只读记忆检索/索引，从 `experience_memory`、`trade_outcome_review`、`policy_suggestion`、model permission audit 和可选 shadow audit 表生成 evidence/similarity/counter-evidence 摘要；原始事实源仍以来源表为准 |
-| V16 shadow action plans | PostgreSQL `brain_action_plan` + `backend.services.brain_action_planner` + `/api/ops/brain/action-plans` | V16 Phase 2 影子 ActionPlan 账本，覆盖 factor weight、parameter template、context policy、supervisor template；只记录 `pass/caution/reject`、所需后端服务、validation refs、shadow eval contract 和 future rollback 要求，不执行、不改 overlay/snapshot/权重/模板/订单/学习样本 |
-| V16 shadow action evaluations | PostgreSQL `brain_action_plan_eval` + `backend.services.brain_action_evaluator` + `/api/ops/brain/action-plan-evals` | V16 Phase 2 后验可比性审计，把 shadow action plan 与 `replay_report`、`trade_outcome_review`、`learning_application_effect`、`position_supervisor_trace` 比较，输出 coverage、comparison verdict 和 evidence refs；只记录评价，不授权执行 |
-| V16 low-impact executions | PostgreSQL `brain_low_impact_execution` + `backend.services.brain_low_impact_executor` + `/api/ops/brain/low-impact-executions` / `/api/ops/brain/low-impact-executions/run` | V16 Phase 3 低影响执行账本和显式执行入口；当前白名单只允许 read-only replay job，执行前必须记录 P2 eval、evidence score、Critic verdict、`RiskPolicyService.evaluate("run_replay_job")`、rollback/downgrade plan，坏化收紧只能显式允许并通过 incident-control/RiskPolicy/overlay |
-| V16 medium-impact governance | PostgreSQL `brain_medium_impact_governance` + `brain_governance_candidate` + `backend.services.brain_medium_impact_governance` + `/api/ops/brain/medium-impact-governance` / `/api/ops/brain/medium-impact-governance/materialize` | V16 Phase 4 中等影响治理候选账本；基于 P2/P3 证据、`RiskPolicyService` verdict 和权重动作 `DecisionPolicy` preview 生成隔离 `brain_governance_candidate`，不直接写 `policy_suggestion`、不直接应用权重/模板/订单/学习样本 |
-| V16 governance candidate bridge | PostgreSQL `brain_governance_candidate` + `brain_governance_candidate_review` + `policy_suggestion` + `backend.services.brain_governance_candidates` + `/api/ops/brain/governance-candidates` / `/api/ops/brain/governance-candidates/{candidate_id}/submit` + readiness `candidate_generation_context_coverage` | V16 候选到旧治理队列的手动桥接入口；候选 lineage 必须携带 `agent_generation_context`；API 和底层 submit 都要求已有 `bridge_ready=true` 的 Candidate Review，且候选为 `governance_ready/applyable`、RiskPolicy allowed、payload 被旧 `RuleEvolutionGovernor` 理解，才提交 `policy_suggestion(status='proposed')`；提交 evidence 会记录 `candidate_review_required_before_submit=true` 和 review 引用，之后仍由既有 governor/conflict/risk/release/rollback 链路处理；readiness 持续审计 required context 覆盖率 |
-| V16 governance candidate review | PostgreSQL `brain_governance_candidate_review` + `brain_governance_candidate` + `backend.services.brain_governance_candidate_review` + `/api/ops/brain/governance-candidate-reviews` / `/api/ops/brain/governance-candidates/review` + readiness `candidate_bridge_review_coverage` | V16 候选审查事实源；输出 evidence gaps、bridge preview、control-surface conflicts、source reliability 和可选 LLM advisory audit；只写审计，不提交 `policy_suggestion`，不执行 runtime mutation；readiness 覆盖率审计会把缺少 `candidate_review_required_before_submit` review 合同的新桥接标为 degraded，历史旧桥接只标 `legacy_unreviewed` |
-| V16 live-ready guardrails | PostgreSQL `brain_live_ready_guardrail` + `backend.services.brain_live_ready_guardrail` + `/api/ops/brain/live-ready-guardrails` / `/api/ops/brain/live-ready-guardrails/evaluate` / `/api/ops/brain/live-ready-guardrails/tighten` | V16 Phase 5 实盘前护栏审计账本；评估 live capability lock、broker/local divergence、incident memory、release rollback 和 P3/P4 evidence；显式 tightening 只能通过 `RuntimeIncidentControlService` + `RiskPolicyService` 收紧 incident mode，不能放宽权限、下单、提交或应用治理候选、写学习样本 |
-| Agent Authority Registry | `backend.services.agent_authority_registry` + `/api/ops/agent-authority` + readiness `agent_authority` / `v16.agent_authority` | 智能体权责合同事实源；登记 `v16_brain`、`autonomous_learning`、`factor_governance`、`factor_pruning_governance`、`llm_advisory`、`lightgbm_shadow_models` 的 allowed writes、control surfaces、required gates 和 forbidden actions；未知来源只能 review-only，LLM 永远 advisory-only，不授权下单、runtime mutation 或绕过风控 |
+|| V16 read-only brain state & memory | PostgreSQL `brain_state_snapshot` + `brain_memory` + `backend.services.v16_brain_snapshot.BrainStateService` / `BrainMemoryService` + `/api/ops/brain/state` / `/api/ops/brain/memory` | V16 Phase 1 只读大脑快照，汇总 V15 事实生成 world model、hypothesis、memory retrieval 和 Critic；不执行动作、不写 overlay、不改权重/仓位/学习样本。合并自旧 `brain_state.py` + `brain_memory.py` |
+|| V16 shadow plans & evaluations | PostgreSQL `brain_action_plan` + `brain_action_plan_eval` + `backend.services.v16_brain_planning.BrainActionPlannerService` / `BrainActionPlanEvaluatorService` + `/api/ops/brain/action-plans` / `/api/ops/brain/action-plan-evals` | V16 Phase 2 影子计划账本和后验比较，覆盖 factor weight、parameter template、context policy、supervisor template；只记录和比较，不执行/不变更 runtime。合并自旧 `brain_action_planner.py` + `brain_action_evaluator.py` |
+|| V16 low-impact executions | PostgreSQL `brain_low_impact_execution` + `backend.services.v16_brain_planning.BrainLowImpactExecutorService` + `/api/ops/brain/low-impact-executions` / `/api/ops/brain/low-impact-executions/run` | V16 Phase 3 低影响执行账本和显式执行入口；当前白名单只允许 read-only replay job，执行前必须记录 P2 eval、evidence score、Critic verdict、`RiskPolicyService.evaluate("run_replay_job")`、rollback/downgrade plan，坏化收紧只能显式允许并通过 incident-control/RiskPolicy/overlay |
+|| V16 medium-impact governance & guardrails | PostgreSQL `brain_medium_impact_governance` + `brain_live_ready_guardrail` + `brain_governance_candidate` + `backend.services.v16_brain_planning.BrainMediumImpactGovernanceService` / `BrainLiveReadyGuardrailService` + `/api/ops/brain/medium-impact-governance` / `/api/ops/brain/live-ready-guardrails` | V16 Phase 4-5 治理候选物化与实盘前护栏。P4 基于证据生成隔离 candidate；P5 评估 live capability lock、divergence、incident memory 和 release rollback，收紧入口只能调用 incident-control。合并自旧 `brain_medium_impact_governance.py` + `brain_live_ready_guardrail.py` |
+| Agent Authority Registry | `backend.services.agent_authority` + `/api/ops/agent-authority` + readiness `agent_authority` / `v16.agent_authority` | 智能体权责合同事实源；登记 `v16_brain`、`autonomous_learning`、`factor_governance`、`factor_pruning_governance`、`llm_advisory`、`lightgbm_shadow_models` 的 allowed writes、control surfaces、required gates 和 forbidden actions；未知来源只能 review-only，LLM 永远 advisory-only，不授权下单、runtime mutation 或绕过风控。简化自旧 `agent_authority_registry.py`，去除 ~300 行序列化样板 |
 | Agent Scorecard / Briefing / Chain Health | `backend.services.agent_scorecard` + `backend.services.agent_briefing` + `/api/ops/agent-scorecard` / `/api/ops/agent-briefing` / `/api/ops/agent-trade-attribution` / `/api/ops/agent-chain-health` + readiness `agent_scorecard` / `agent_briefing` / `agent_chain_health` | 只读聚合智能体行为质量和统一战况简报；从 Proposal Registry、治理候选、`policy_suggestion`、`learning_application_log/effect`、`trade_outcome_review`、`experience_memory`、shadow/LLM audit 统计提案、应用、效果、合同违规和交易反馈；交易反馈会合并 `experience_memory.decision_context_json.agent_attribution`，让 lesson memory 参与 linked review 口径；可提高低可靠来源的证据要求和审查严格度，但不改变 agent 权限、不执行动作、不自动批准 |
 | Proposal Registry | PostgreSQL `proposal_registry` + `backend.services.proposal_registry` + `/api/ops/autonomy/proposals*` + readiness `proposal_generation_context_coverage` | 统一 proposal 读模型，把 `policy_suggestion`、`brain_governance_candidate`、`brain_action_plan`、`learning_application_log`、`evolution_decision`、`live_autonomy_unlock_event`、shadow/advisory audit 和 LLM advisory audit 归一化；只做展示、来源可靠性评分、证据新鲜度标记、冲突检测、review 记录、生成上下文覆盖审计和路由建议；主汇总字段统计当前可行动提案，`raw_*`/`historical_noise_count` 保留历史噪音背景，并额外暴露 `top_duplicate_groups` / `conflict_groups` 供去噪和人工审查；stale evidence 继续暴露总数，同时拆分 `hard_stale_evidence_count`、`stale_replay_required_count` 和 `stale_review_required_count`，只有 hard stale 阻断自进化 guarded apply；不审批、不应用、不改来源状态 |
 | Autonomous Blueprint Status | `/api/ops/backend-readiness.autonomous_blueprint` / `v16.autonomous_blueprint` | 最终自治交易大纲的只读对齐状态；汇总 demo nursery scope、agent authority、proposal/candidate context、candidate review、proposal registry、memory/scorecard、执行边界和 live-ready guardrails；只报告 `ok/partial` 和 blockers，不执行、不审批、不改 runtime |
@@ -147,6 +150,8 @@
 | live autonomy unlock | PostgreSQL `live_autonomy_unlock_event` + `backend.services.live_autonomy` + `/api/ops/autonomy/live-status` / `/api/ops/autonomy/live-unlock*` | `live_autonomous` 一次性人工解锁事实源；评估 readiness/cTrader/live loop/incident/release rollback/replay/broker alignment/proposal conflict/RiskPolicy budget/evidence freshness，成功后经 `RuntimeConfigMutationService` 写 overlay/snapshot，撤销回到 `live_candidate`；预算触顶事件会作为 incident tighten proposal 进入 Proposal Registry，live 开仓被预算门阻断时由 `RuntimeIncidentControlService` 自动请求 `no_new_risk` |
 | Meta Governance Web page | `web_frontend/src/pages/V16BrainPage.tsx` + `/v16` | 元治理大脑展示入口；读取 brain state/memory/action-plans/action-plan-evals/low-impact-executions/medium-impact-governance/governance-candidate-reviews/live-ready-guardrails/proposal-registry/live-autonomy/readiness API，展示 world model、memory、hypotheses、Critic、提案总线、实盘自治状态和边界；按钮只触发受控后端 API，不在前端重算策略/风控或执行未授权动作 |
 | 后验效果 | `learning_application_effect` | 回滚判断事实源 |
+| 效果归因质量 | `learning_application_effect.decision_json.evidence_quality` | 排除 partial/missing attribution、人工/重启污染和 regime mismatch；同一 scope 存在并发 application 时保持 observing，不产生有效/无效归因；无随机对照时不得声称严格因果 |
+| 实验存储 | `data/experiments.db` canonical structured `experiments` schema + `research.experiment_tracker.ExperimentTracker` | `EvolutionExperimentRegistry` 是兼容适配器；旧 JSON blob 行原位迁移，不再维护第二套同名表 schema |
 | 应用日志 | `learning_application_log` | 动作应用状态 |
 | 建议/审计状态 | `policy_suggestion` + normalized status | `proposed/auto_approved/applied/rolled_back/blocked_by_risk/superseded` |
 | 智能单元总账 | `docs/rule-driven-intelligence-inventory.md` | 规则智能、影子模型、审计数据和精度口径 |
@@ -163,7 +168,8 @@
 - 对仍处于可执行/审查链路且缺 required context 的旧 `policy_suggestion`，`ProposalRegistryService.repair_missing_generation_context()` 只能补当前审查上下文并标记 `repair_current_context` / `repair_context_is_current_not_original`；它不改变 proposal 状态、不批准、不应用，也不伪装成原始生成时上下文。
 - `policy_suggestion` 旧行缺 `source_agent` 时必须通过 `infer_policy_suggestion_source_agent()` 统一推断来源；已知 LightGBM shadow/advisory schema 归入 `lightgbm_shadow_models` 并固定 `advisory_only` gate，不能默认归到 `autonomous_learning`。
 - 智能体质量以 `AgentScorecardService` 为只读观测口径；scorecard 可以影响 Proposal Registry 路由、证据要求和 candidate review 严格度，高分只能提高审查优先级，不能直接放大权限、改权重或下单。
-- `AgentBriefingContextService` 是多智能体统一战况简报；包含 chain health、proposal flow、scorecard、最近交易反馈和治理覆盖率，只能作为 review/prompt/context 输入，不是执行授权。
+- `AgentBriefingContextService` 是多智能体统一战况简报；包含 chain health、proposal flow、scorecard、最近交易反馈、scope-relevant `experience_memory` 和治理覆盖率，只能作为 review/prompt/context 输入，不是执行授权。
+- `DecisionPolicy` 的 `experience_priors` 是学习后验接口，不是旁路；只有 `bounded_attribution_allowed=true`、样本量和置信度达标的 prior 才可在 0.85~1.15 范围内小幅修正权重，最终仍受 role/lifecycle/diversity/redundancy、RiskPolicy 和 mutation boundary 约束。
 - 交易 lesson 写入 `experience_memory` 时可附带 `agent_attribution` / `feedback_agents`，用于把盈亏经验反馈给参与过提案、shadow audit 或 LLM advisory 的 agent；该反馈是记忆和评分证据，不是自动奖惩执行入口。
 - `model_ready=true` 还必须配合 `allowed_uses` 包含 `supervised_training`，才可进入强监督训练。
 - `train_weight` 由 `quality_score`、`integrity`、`causal_level`、`label_status` 共同决定。
@@ -272,3 +278,16 @@
 5. 历史 planning 文档和旧注释。
 
 历史 planning 文档和旧注释只能提供背景，不能单独作为实现依据。
+
+## 9. 2026-07-10 智能体层模块合并记录
+
+本文档中 V16 和 Agent Governance 的模块路径已更新，对应以下实际合并：
+
+| 旧模块 | 新模块 | 说明 |
+|---|---|---|
+| `brain_state.py` (579行) + `brain_memory.py` (592行) | `v16_brain_snapshot.py` (~690行) | 合并后消除 ~400 行重复样板代码 |
+| `brain_action_planner.py` (460行) + `brain_action_evaluator.py` (498行) + `brain_low_impact_executor.py` (384行) + `brain_medium_impact_governance.py` (470行) + `brain_live_ready_guardrail.py` (505行) | `v16_brain_planning.py` (~1,500行) | 5个文件合并为1个，共享 DB helper 来自 `_brain_helpers.py` |
+| `agent_authority_registry.py` (540行) | `agent_authority.py` (~280行) | 保留核心 evaluate/control_surface/required_gate 逻辑，移除 ~300 行序列化样板 |
+| `agent_governance.py` (新) | 统一导入入口 | 从 `agent_authority` + `agent_scorecard` + `agent_briefing` 整理 re-export |
+
+旧模块路径保留为向后兼容的 import stub（重导出到新模块），新代码应直接使用新路径。
