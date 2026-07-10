@@ -791,6 +791,52 @@ def _refresh_trade_lesson_memory(conn: sqlite3.Connection, *, limit: int = 200) 
     }
 
 
+def _backfill_trade_review_regimes(conn: sqlite3.Connection, *, limit: int = 1000) -> dict[str, Any]:
+    """Copy the factual entry-decision regime into legacy review JSON once."""
+
+    rows = _execute(
+        conn,
+        """
+        SELECT r.review_id, r.review_json, d.regime_id
+        FROM trade_outcome_review r
+        JOIN decision_ledger d ON d.decision_id=r.entry_decision_id
+        WHERE COALESCE(d.regime_id, '')<>''
+        ORDER BY r.created_at DESC
+        LIMIT ?
+        """,
+        (max(1, min(int(limit or 1000), 10000)),),
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        try:
+            review = row["review_json"] if isinstance(row["review_json"], dict) else json.loads(str(row["review_json"] or "{}"))
+        except Exception:
+            review = {}
+        if not isinstance(review, dict):
+            continue
+        if str(review.get("regime_id") or review.get("entry_regime") or "").strip():
+            continue
+        regime_id = str(row["regime_id"] or "").strip()
+        if not regime_id:
+            continue
+        review["regime_id"] = regime_id
+        review["entry_regime"] = regime_id
+        review["regime_source"] = "decision_ledger.entry_decision"
+        _execute(
+            conn,
+            "UPDATE trade_outcome_review SET review_json=? WHERE review_id=?",
+            (json.dumps(review, ensure_ascii=False, default=str), str(row["review_id"] or "")),
+        )
+        updated += 1
+    return {
+        "ok": True,
+        "status": "updated" if updated else "current",
+        "checked": len(rows),
+        "updated": updated,
+        "source": "decision_ledger.entry_decision",
+    }
+
+
 def run_learning_backfill(
     *,
     limit: int = _DEFAULT_LIMIT,
@@ -828,7 +874,12 @@ def run_learning_backfill(
                 "upserted": rebuilt,
             }
         elif rebuild_learning:
+            regime_backfill = _backfill_trade_review_regimes(conn, limit=max(1000, int(limit)))
             lesson_rebuild = _refresh_trade_lesson_memory(conn, limit=min(max(1, int(limit)), 200))
+        else:
+            regime_backfill = _backfill_trade_review_regimes(conn, limit=max(1000, int(limit)))
+        if rebuild_learning and inserted:
+            regime_backfill = _backfill_trade_review_regimes(conn, limit=max(1000, int(limit)))
         conn.commit()
         result = {
             "inserted_reviews": inserted,
@@ -836,6 +887,7 @@ def run_learning_backfill(
             "rebuild_reviews": rebuilt,
             "rebuild_suggestions": suggestions,
             "lesson_rebuild": lesson_rebuild,
+            "regime_backfill": regime_backfill,
             "require_decision": not allow_partial,
         }
         if inserted:

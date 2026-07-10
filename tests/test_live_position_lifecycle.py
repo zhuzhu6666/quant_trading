@@ -1239,6 +1239,15 @@ def test_current_regime_hint_from_composite_uses_first_available_key():
     assert current_regime_hint_from_composite(SimpleNamespace(regime="ignored")) == ""
 
 
+def test_current_regime_hint_from_composite_derives_context_state():
+    assert current_regime_hint_from_composite({
+        "context_state": {
+            "trend_strength_state": "strong",
+            "volatility_state": "normal",
+        }
+    }) == "trend=strong|volatility=normal"
+
+
 def test_remember_and_consume_close_verdict_persists_payload():
     pending = {}
     merged = {}

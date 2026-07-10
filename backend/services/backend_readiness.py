@@ -105,6 +105,7 @@ class BackendReadinessService:
         high_load = self._timed_component("high_load", lambda: self._high_load_status(market_session))
         governance = self._timed_component("governance", self._governance_status)
         factor_data = self._timed_component("factor_data", self._factor_data_status)
+        runtime_factor_budget = self._timed_component("runtime_factor_budget", self._runtime_factor_budget_status)
         governance_freshness = self._timed_component("governance_freshness", self._governance_freshness_status)
         runtime_weight_integrity = self._timed_component("runtime_weight_integrity", self._runtime_weight_integrity_status)
         factor_blend_health = self._timed_component("factor_blend_health", self._factor_blend_health_status)
@@ -228,6 +229,7 @@ class BackendReadinessService:
             "models": model_status,
             "governance": governance,
             "factor_data": factor_data,
+            "runtime_factor_budget": runtime_factor_budget,
             "governance_freshness": governance_freshness,
             "runtime_weight_integrity": runtime_weight_integrity,
             "factor_blend_health": factor_blend_health,
@@ -398,6 +400,7 @@ class BackendReadinessService:
             "factor_pruning_governance": factor_pruning_governance,
             "factor_governance_effects": factor_governance_effects,
             "learning_effect_quality": learning_effect_quality,
+            "runtime_factor_budget": runtime_factor_budget,
             "governance_candidate_reviews": brain_governance_candidate_reviews,
             "candidate_bridge_review_coverage": candidate_bridge_review_coverage,
             "live_ready_guardrails": brain_live_ready_guardrails,
@@ -1248,6 +1251,21 @@ class BackendReadinessService:
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
                 "boundary": LearningEffectQualityService.boundary(),
+            }
+
+    @staticmethod
+    def _runtime_factor_budget_status() -> dict[str, Any]:
+        try:
+            from alpha.runtime_factor_selection import runtime_factor_budget_status
+            from config import runtime_config
+
+            return runtime_factor_budget_status(runtime_config.shared().factor_signal_config)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "runtime_factor_budget.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
             }
 
     def _brain_governance_candidate_review_status(self) -> dict[str, Any]:

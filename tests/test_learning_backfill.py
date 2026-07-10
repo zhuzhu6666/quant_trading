@@ -291,3 +291,48 @@ def test_learning_backfill_refreshes_trade_lesson_memory_without_new_reviews(mon
     assert row is not None
     context = json.loads(row[0] or "{}")
     assert context["agent_attribution"]["feedback_targets"] == ["autonomous_learning"]
+
+
+def test_learning_backfill_restores_review_regime_from_entry_decision(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "state.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO decision_ledger
+            (decision_id, event_type, symbol, timeframe, decision_ts, regime_id, created_at)
+            VALUES ('decision_regime', 'open', 'XAUUSD+', 'M5', 100.0, 'trend', 100.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
+             failure_tags_json, summary_text, review_json, created_at)
+            VALUES ('review_regime', 'trade_regime', 'pos_regime', 'decision_regime', 1.0,
+                    'good_win', '[]', 'regime restore', '{}', 200.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def _get_conn():
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    monkeypatch.setattr(learning_backfill, "get_state_conn", _get_conn)
+    result = learning_backfill.run_learning_backfill(limit=10, allow_partial=True, rebuild_learning=True)
+    assert result["regime_backfill"]["updated"] == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='review_regime'").fetchone()[0]
+    finally:
+        conn.close()
+    review = json.loads(raw)
+    assert review["regime_id"] == "trend"
+    assert review["entry_regime"] == "trend"
+    assert review["regime_source"] == "decision_ledger.entry_decision"

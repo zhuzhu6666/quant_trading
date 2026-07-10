@@ -20,7 +20,7 @@
 |---|---|---|
 | 静态默认配置 | `settings.yaml` / `config/runtime_config.py` | 基础配置，不由自治治理直接回写 |
 | 自治配置覆盖 | PostgreSQL `runtime_config_overlay` + `config.runtime_config.refresh_from_overlay()` | 自治层事实源；overlay 与 matching snapshot 在同一事务提交，PG advisory lock/SQLite immediate transaction 串行化并发 patch；提交成功后才发布内存，跨进程始终按 YAML base + 完整 overlay 重建，空 overlay 也必须传播 |
-| 配置快照 | PostgreSQL `runtime_config_snapshot` | 审计和回滚用，不临场推断 |
+| 配置快照 | PostgreSQL `runtime_config_snapshot` | 审计和回滚用，不临场推断；连续的同 hash + 同 source + 同 run_id 事件复用最近 snapshot version，事件审计仍由 evolution/mutation ledger 保留 |
 | 配置写入口 | `RuntimeConfigMutationService` / `DecisionPolicy` | 自治配置变更必须走统一写入口 |
 | 启动恢复 | `RuntimeConfigStartupService` | base YAML + DB overlay 后替换内存配置 |
 | incident control | `runtime_incident_mode` + `RuntimeIncidentControlService` + `RiskPolicyService` | V15 freeze/shadow_only/no_new_risk/only_close/frozen 控制入口 |
@@ -49,6 +49,7 @@
 | 因子生命周期 | `RegistryAdapter` / lifecycle event | lifecycle 权威来源 |
 | DSL 因子表达式校验 | `alpha.factor_dsl.parse_dsl` + `backend.runtime.evolution_orchestrator` + `alpha.factor_health` | 进化注册前必须解析校验；历史坏表达式在健康评估中标记 `invalid_dsl`/`DEAD` 并跳过执行，不允许反复进入评估报错 |
 | 因子治理视图 | `Factor Catalog` | 聚合 registry、runtime config、weights、health、shadow、AWE、learning |
+| 生产因子预算 | `alpha.runtime_factor_selection` + readiness `runtime_factor_budget` | runtime config 明确启用的因子优先；额外 discovered 因子按 lifecycle/score 受 `QUANT_RUNTIME_DISCOVERED_FACTOR_BUDGET` 限额（默认 24），冷尾部保留 registry/权重/研究证据但不进入 live 计算和方向组合，不删除候选资产 |
 | 因子组合体检 | `backend.services.factor_blend_health` + `/api/ops/backend-readiness.factor_blend_health` | 只读诊断 active alpha 数量、DSL/PCA 噪声族、低权重尾部、冗余组/标签集中度和弱健康活跃因子；默认以 Factor Catalog `used_in_score=true` 作为当前生产 active 口径，避免 runtime config 冷尾部污染健康状态；不写权重、不禁用因子、不授权交易 |
 | 因子裁剪候选 | `backend.services.factor_pruning_candidates` + `decision_factor_snapshot` / `trade_outcome_review` + `/api/ops/backend-readiness.factor_pruning_candidates` | 只读生成 `review_downweight` / `review_disable` 候选；要求近期真实决策参与和非零贡献，优先处理真实亏损贡献压力，也可纳入 runtime config 缺失但 live 快照中高贡献的 discovered DSL/PCA 因子；不写 `policy_suggestion`、不写 `brain_governance_candidate`、不改 runtime 权重 |
 | 因子裁剪反证 | `backend.services.factor_counter_evidence` + `shadow_factor_perf` / `factor_contribution_review` / `experience_memory` | 只读计算 `keep_score`、`prune_score` 和 regime exception；作为 pruning 晋级刹车，不直接写权重、不提交提案 |
@@ -65,7 +66,7 @@
 - context 可以影响状态、阈值、仓位，但不能直接改变多空方向。
 - live 信号决策层只产出 `CompositeSignal`、context policy effect、`GateResult` 和审计 payload；交易授权仍必须进入 `RiskPolicyService`，权重治理仍必须进入 `DecisionPolicy`。
 - shadow 因子不直接交易，必须经治理晋升。
-- `FactorGovernanceOrchestrator` 是因子晋升、Canary 回滚、禁用和退役的唯一调度执行者；Evolution 只能写证据和候选。AWE 只在持有 live attribution pipeline 的 backend 进程运行，且每次权重 patch 同时经过 `DecisionPolicy`、`RiskPolicyService` 和事务化 mutation boundary。
+- `FactorGovernanceOrchestrator` 是因子晋升、Canary 回滚、禁用和退役的唯一调度执行者；Evolution 只能写证据和候选。AWE 只在持有 live attribution pipeline 的 backend 进程运行；AWE 与 Factor Governance 的权重 patch 都必须先过共享 `LearningExperimentAdmissionService`，再经过 `DecisionPolicy`、`RiskPolicyService` 和事务化 mutation boundary，并写入同一 `learning_application_log/effect` 后验账本。
 - Canary 阶段推进不得重复消费相同历史聚合窗口；首次 SHADOW 可用已有 OOS bootstrap，后续阶段必须满足 `fresh_evidence_bars`，数据/结果指纹和 stage watermark 必须进入审计。
 - 搜索/进化生成的 DSL 因子必须先通过 `parse_dsl()`；解析失败的表达式不能注册为 shadow 因子，历史残留坏 DSL 只能作为健康/治理噪音进入 `invalid_dsl` 审计，不能继续执行计算。
 - disabled/DEAD 因子应被 engine、compositor、AWE、readiness 一致排除。
@@ -152,6 +153,8 @@
 | Meta Governance Web page | `web_frontend/src/pages/V16BrainPage.tsx` + `/v16` | 元治理大脑展示入口；读取 brain state/memory/action-plans/action-plan-evals/low-impact-executions/medium-impact-governance/governance-candidate-reviews/live-ready-guardrails/proposal-registry/live-autonomy/readiness API，展示 world model、memory、hypotheses、Critic、提案总线、实盘自治状态和边界；按钮只触发受控后端 API，不在前端重算策略/风控或执行未授权动作 |
 | 后验效果 | `learning_application_effect` | 回滚判断事实源 |
 | 效果归因质量 | `learning_application_effect.decision_json.evidence_quality` + `research.learning.application_effects` | 排除 partial/missing attribution、人工/重启污染和 regime mismatch；同一 scope 后续 application 会关闭前一 application 的观察窗口，前一窗口只能使用下一次变更之前的复盘证据，证据足够可做 bounded comparative 判定，不足则立即归档为 `inconclusive`，不允许跨变更混用样本；`mixed` 按冷却持续复评，开放窗口超过观察期仍不足则收口；无随机对照时不得声称严格因果 |
+| 学习实验准入 | `backend.services.learning_experiment_admission` | 同一 scope 同时最多一个 active experiment；权重变化还必须通过绝对/相对 materiality 门，风险回滚继续走既有降风险路径；`update_redundancy_groups` 是结构审计，不伪装成可由交易 PnL 归因的 factor experiment |
+| 有界经验先验 | `backend.services.experience_prior` + `DecisionPolicy.experience_priors` | 只聚合 terminal 且 `bounded_attribution_allowed=true` 的 factor effect，按样本、时效和效果生成 0.85~1.15 prior；AWE/Factor Governance 三个生产 `fast_decide` 调用统一传入，最终写权仍属于 DecisionPolicy/RiskPolicy/mutation boundary |
 | 学习闭环质量 SLO | `backend.services.learning_effect_quality` + `/api/learning/effect-quality` + readiness `learning_effect_quality` / `v16.learning_effect_quality` | 只读汇总效果终态率、开放窗口年龄、并发归因积压、bounded window 收口一致性和受控重试资格；`inconclusive` 只有在终态后出现新复盘证据且同 scope 没有更新 application 时才可成为重试候选，实际重试仍必须形成新 application 并经过既有 governor/风控/决策边界；SLO degraded 只进入 `known_observations`，不直接改权重、参数、权限或交易 readiness |
 | 实验存储 | `data/experiments.db` canonical structured `experiments` schema + `research.experiment_tracker.ExperimentTracker` | `EvolutionExperimentRegistry` 是兼容适配器；旧 JSON blob 行原位迁移，不再维护第二套同名表 schema |
 | 应用日志 | `learning_application_log` | 动作应用状态 |
@@ -172,7 +175,7 @@
 - `policy_suggestion` 旧行缺 `source_agent` 时必须通过 `infer_policy_suggestion_source_agent()` 统一推断来源；已知 LightGBM shadow/advisory schema 归入 `lightgbm_shadow_models` 并固定 `advisory_only` gate，不能默认归到 `autonomous_learning`。
 - 智能体质量以 `AgentScorecardService` 为只读观测口径；scorecard 可以影响 Proposal Registry 路由、证据要求和 candidate review 严格度，高分只能提高审查优先级，不能直接放大权限、改权重或下单。
 - `AgentBriefingContextService` 是多智能体统一战况简报；包含 chain health、proposal flow、scorecard、最近交易反馈、scope-relevant `experience_memory` 和治理覆盖率，只能作为 review/prompt/context 输入，不是执行授权。
-- `DecisionPolicy` 的 `experience_priors` 是学习后验接口，不是旁路；只有 `bounded_attribution_allowed=true`、样本量和置信度达标的 prior 才可在 0.85~1.15 范围内小幅修正权重，最终仍受 role/lifecycle/diversity/redundancy、RiskPolicy 和 mutation boundary 约束。
+- `DecisionPolicy` 的 `experience_priors` 是学习后验接口，不是旁路；由 `ExperiencePriorService` 从终态有界效果构造，只有样本量和置信度达标的 prior 才可在 0.85~1.15 范围内小幅修正权重，最终仍受 role/lifecycle/diversity/redundancy、RiskPolicy 和 mutation boundary 约束。组合决策由 `backend.services.market_regime` 优先使用显式 regime，否则从既有 trend/volatility context 生成低基数事实标签并写入 `decision_ledger`；trade review 必须保存 entry decision 的 `regime_id/entry_regime`，历史只允许从 `decision_ledger` 事实回填。
 - 交易 lesson 写入 `experience_memory` 时可附带 `agent_attribution` / `feedback_agents`，用于把盈亏经验反馈给参与过提案、shadow audit 或 LLM advisory 的 agent；该反馈是记忆和评分证据，不是自动奖惩执行入口。
 - `model_ready=true` 还必须配合 `allowed_uses` 包含 `supervised_training`，才可进入强监督训练。
 - `train_weight` 由 `quality_score`、`integrity`、`causal_level`、`label_status` 共同决定。

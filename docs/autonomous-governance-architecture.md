@@ -595,7 +595,7 @@ ledger / lifecycle / trace / replay
 | position supervisor | backend live loop | 持仓期间周期评估 | 是 | 没有直接执行权 | 输出建议，再进 RiskPolicy |
 | learning worker | `quant-learning-worker.service` | 定时/backfill | 是 | 无 broker 执行权 | 写 samples、suggestions、effects |
 | factor governance | learning worker | 定时 governance cron | 是 | 有配置治理权，但受限 | 走 RiskPolicy、DecisionPolicy、overlay |
-| AWE | learning worker/governance | 权重建议 | 是 | 无直接写权 | 交给 DecisionPolicy |
+| AWE | backend live attribution pipeline | 权重建议 | 是 | 仅可经共享实验准入、DecisionPolicy、RiskPolicy 和 mutation boundary 写权 | 每次生效必须写 application/effect；有 active 同 scope 实验时等待证据 |
 | LightGBM models | research/worker | shadow/advisory | 是 | 无直接执行权 | 写 shadow audit |
 | LLM advisory | research/service | 显式调用或审查 | 是 | 无授权权 | 写 advisory audit |
 | replay harness | API/brain/manual | 显式或计划触发 | 是 | 无交易执行权 | 写 replay_report |
@@ -618,7 +618,7 @@ ledger / lifecycle / trace / replay
 | 平仓 | supervisor / broker sync / operator | `RiskPolicyService.evaluate("close_position")` -> cTrader | close ledger、position lifecycle、trade review | 受控自动 |
 | 减仓 | supervisor | `RiskPolicyService.evaluate("reduce_position")` -> cTrader | supervisor trace、position lifecycle | 受控自动 |
 | 收紧保护 | supervisor / guardrail | `RiskPolicyService.evaluate(...)` -> amend | supervisor trace、lifecycle | 受控自动 |
-| 因子权重变更 | AWE / FactorGovernanceOrchestrator / brain candidate bridge | `DecisionPolicy` + governance audit | evolution decision、overlay/snapshot、catalog snapshot | 受限自动 |
+| 因子权重变更 | AWE / FactorGovernanceOrchestrator / brain candidate bridge | `LearningExperimentAdmissionService` + `DecisionPolicy` + governance audit | evolution decision、overlay/snapshot、application/effect、catalog snapshot | 单 scope 单实验、materiality 门下受限自动 |
 | 参数模板切换 | learning / governance / operator | `RiskPolicyService.evaluate("switch_parameter_template")` + `RuntimeConfigMutationService` | policy_suggestion、overlay/snapshot、application log | demo autonomous 白名单内可自动 |
 | supervisor 模板切换 | supervisor learning / autonomous learning / operator | `RiskPolicyService.evaluate("switch_position_supervisor_template")` + `RuntimeConfigMutationService` | policy_suggestion、overlay/snapshot、application log/effect | demo autonomous 白名单内可自动 |
 | incident mode 收紧 | autonomy health / brain guardrail / operator | `RiskPolicyService.evaluate("set_incident_control")` + incident control service | runtime incident mode、overlay/snapshot、enforcement event | tightening-only 可自动或显式 |

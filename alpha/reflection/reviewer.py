@@ -422,6 +422,8 @@ class TradeReviewer:
             "holding_seconds": round(holding_seconds, 3),
             "holding_minutes": round(holding_seconds / 60.0, 3),
             "timeframe": timeframe,
+            "regime_id": regime_id,
+            "entry_regime": regime_id,
             "entry_timing_context": entry_timing_context,
             "decision_freshness_context": decision_freshness_context,
             "mfe": round(mfe, 6),

@@ -122,10 +122,14 @@ export function LearningPage() {
   const effectStatuses = asRecord(pick(effectQuality, ["status_counts"]));
   const effectReasons = asRecord(pick(effectQuality, ["reason_counts"]));
   const effectSlo = asRecord(pick(effectQuality, ["slo"]));
+  const effectPrior = asRecord(pick(effectQuality, ["experience_prior"]));
+  const aweMutationCoverage = asRecord(pick(effectQuality, ["awe_mutation_coverage"]));
+  const runtimeFactorBudget = asRecord(pick(readiness, ["runtime_factor_budget"]));
   const effectActive = pickNumber(effectQuality, ["active_count"], 0);
   const effectClosure = pickNumber(effectQuality, ["closure_ratio"], 0);
   const retryCandidates = pickNumber(effectQuality, ["retry_candidate_count"], 0);
   const confoundedEffects = pickNumber(effectReasons, ["confounded_by_concurrent_application"], 0);
+  const aweCoverageEnforced = pickNumber(aweMutationCoverage, ["enforced_from"], 0) > 0;
 
   const suggestions = pickArray(suggestionsQuery.data, ["items"]);
   const applications = pickArray(applicationsQuery.data, ["items"]);
@@ -219,6 +223,9 @@ export function LearningPage() {
             <LearningMiniMetric label="并发积压" value={formatDecimal(confoundedEffects, 0)} detail="目标为 0" tone={confoundedEffects ? "warn" : "ok"} />
             <LearningMiniMetric label="证据不足" value={formatDecimal(pickNumber(effectStatuses, ["inconclusive"], 0), 0)} detail={`受控重试候选 ${retryCandidates}`} tone={retryCandidates ? "warn" : "mute"} />
             <LearningMiniMetric label="已强化" value={formatDecimal(pickNumber(effectStatuses, ["reinforced"], 0), 0)} detail={`无效 ${pickNumber(effectStatuses, ["ineffective"], 0)}`} tone={pickNumber(effectStatuses, ["reinforced"], 0) ? "ok" : "mute"} />
+            <LearningMiniMetric label="经验先验" value={formatDecimal(pickNumber(effectPrior, ["eligible_count"], 0), 0)} detail={`有界因子 ${pickNumber(effectPrior, ["bounded_factor_count"], 0)}`} tone={pickNumber(effectPrior, ["eligible_count"], 0) ? "ok" : "warn"} />
+            <LearningMiniMetric label="AWE 账本" value={aweCoverageEnforced ? formatPct(pickNumber(aweMutationCoverage, ["coverage_ratio"], 0)) : "待新周期"} detail={`历史缺口 ${pickNumber(aweMutationCoverage, ["legacy_missing_count"], 0)}`} tone={aweCoverageEnforced ? toneFromStatus(pickString(aweMutationCoverage, ["status"], "unknown")) : "mute"} />
+            <LearningMiniMetric label="生产因子" value={formatDecimal(pickNumber(runtimeFactorBudget, ["selected_count"], 0), 0)} detail={`冷尾部 ${pickNumber(runtimeFactorBudget, ["budget_excluded_count"], 0)}`} tone={pickBoolean(runtimeFactorBudget, ["ok"], false) ? "ok" : "warn"} />
             <LearningMiniMetric label="SLO" value={translateDisplayValue(pickString(effectSlo, ["status"], pickString(effectQuality, ["status"], "unknown")))} detail="只读质量门" tone={toneFromStatus(pickString(effectSlo, ["status"], "unknown"))} />
           </div>
           <div className="learning-note">重试资格只在出现新复盘证据且没有更新 application 时开放；看板不会自动改权重、参数或智能体权限。</div>

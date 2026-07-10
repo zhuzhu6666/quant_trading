@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, MutableMapping
 
+from backend.services.market_regime import resolve_market_regime
 from risk.runtime_policy import RiskLimitSnapshot
 
 
@@ -1188,12 +1189,9 @@ def restore_attribution_for_positions(
 
 
 def current_regime_hint_from_composite(composite: Any) -> str:
-    if isinstance(composite, dict):
-        for key in ("regime_id", "regime", "regime_state"):
-            value = composite.get(key)
-            if value:
-                return str(value)
-    return ""
+    if not isinstance(composite, dict):
+        return ""
+    return str(resolve_market_regime(composite)["regime_id"] or "")
 
 
 def enrich_positions_with_lifecycle_metrics(

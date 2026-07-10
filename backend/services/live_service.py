@@ -4164,16 +4164,38 @@ def _scheduled_awe_adapt():
             # ★ 通过 DecisionPolicy 融合后再写 (保持一致性)
             try:
                 from alpha.decision_policy import DecisionPolicy
+                from backend.services.experience_prior import ExperiencePriorService
+                from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
+
                 dp = DecisionPolicy()
                 decisions = dp.fast_decide(
                     awe_patches=patches,
                     weight_policy_weights=None,
                     factor_configs=factor_configs,
                     current_weights=current_weights,
+                    experience_priors=ExperiencePriorService().priors(),
                 )
+                admission_service = LearningExperimentAdmissionService()
+                admissions: dict[str, dict] = {}
+                admitted_decisions = {}
+                for name, decision in decisions.items():
+                    admission = admission_service.evaluate(
+                        scope_type="factor",
+                        scope_key=name,
+                        action="update_weight",
+                        old_weight=float(decision.old_weight),
+                        new_weight=float(decision.new_weight),
+                    )
+                    admissions[name] = admission
+                    if admission.get("allowed"):
+                        admitted_decisions[name] = decision
+                decisions = admitted_decisions
                 partial = DecisionPolicy.to_weights(decisions)
                 if not partial:
-                    logger.debug("[awe_adapt] DecisionPolicy produced no accepted weight changes")
+                    logger.debug(
+                        "[awe_adapt] no admitted weight experiment: %s",
+                        {name: item.get("status") for name, item in admissions.items()},
+                    )
                     return
                 risk_verdict = RiskPolicyService.shared().evaluate(
                     "update_weight",
@@ -4193,18 +4215,46 @@ def _scheduled_awe_adapt():
                     return
                 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 
-                RuntimeConfigMutationService().apply_patch(
+                run_id = f"awe_adapt_{int(time.time())}"
+                mutation = RuntimeConfigMutationService().apply_patch(
                     # Persist only the factors decided in this cycle.  The
                     # transactional overlay merges them under a writer lock,
                     # so a concurrent governance decision cannot be erased by
                     # a stale full-weight snapshot.
                     {"factor_portfolio_weights": partial},
                     source="awe_decision_policy_update_weight",
-                    run_id=f"awe_adapt_{int(time.time())}",
+                    run_id=run_id,
                     actor="system:awe_adapt",
                     action="update_weight",
                     reason="AWE weight patch merged by DecisionPolicy",
                 )
+                applied_at = time.time()
+                from research.learning.governor import RuleEvolutionGovernor
+
+                governor = RuleEvolutionGovernor()
+                for name, decision in decisions.items():
+                    old_weight = float(decision.old_weight)
+                    new_weight = float(decision.new_weight)
+                    governor.log_application(
+                        scope_type="factor",
+                        scope_key=name,
+                        action="update_weight",
+                        bias_multiplier=(new_weight / old_weight) if old_weight else 1.0,
+                        old_weight=old_weight,
+                        new_weight=new_weight,
+                        suggestion_ids=[f"{run_id}:{name}"],
+                        cycle_ts=applied_at,
+                        status="applied",
+                        details={
+                            "source_agent": "factor_governance",
+                            "producer": "awe_adapt",
+                            "run_id": run_id,
+                            "applied_at": applied_at,
+                            "decision": decision.to_api(),
+                            "experiment_admission": admissions.get(name) or {},
+                            "mutation_snapshot": mutation.get("snapshot") or {},
+                        },
+                    )
                 logger.info(
                     "[awe_adapt] weights pushed via DecisionPolicy (%d changed, %d total)",
                     len(partial),
@@ -5751,7 +5801,9 @@ def _merge_portfolio_configs(
         discovered_names = set(active_discovered_factor_ids(signal_config))
     except Exception:
         discovered_names = set()
-    all_names = set(signal_config) | set(weight_config) | discovered_names
+    # Runtime weights retain cold candidates for rollback/research, but only
+    # configured or budget-admitted discovered factors enter live scoring.
+    all_names = set(signal_config) | discovered_names
     for name in all_names:
         sc = signal_config.get(name, {})
         if not isinstance(sc, dict):

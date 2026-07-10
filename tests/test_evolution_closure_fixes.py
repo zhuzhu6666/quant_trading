@@ -87,6 +87,19 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
         "backend.services.runtime_config_mutation.RuntimeConfigMutationService",
         lambda: _MutationService(),
     )
+    monkeypatch.setattr(
+        "backend.services.experience_prior.ExperiencePriorService.priors",
+        lambda self: {},
+    )
+    monkeypatch.setattr(
+        "backend.services.learning_experiment_admission.LearningExperimentAdmissionService.evaluate",
+        lambda self, **kwargs: {"allowed": True, "status": "admitted"},
+    )
+    logged = []
+    monkeypatch.setattr(
+        "research.learning.governor.RuleEvolutionGovernor.log_application",
+        lambda self, **kwargs: logged.append(kwargs) or "app_test",
+    )
     risk = _RiskPolicy(allowed=True)
     monkeypatch.setattr(
         "risk.policy_service.RiskPolicyService.shared",
@@ -104,6 +117,8 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
     assert rc.shared().factor_portfolio_weights == {"foo": 0.0, "bar": 2.0}
     assert risk.calls[0][0] == "update_weight"
     assert risk.calls[0][1]["proposed_weights"] == {"foo": 0.0}
+    assert logged[0]["scope_key"] == "foo"
+    assert logged[0]["details"]["producer"] == "awe_adapt"
 
 
 def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
@@ -120,6 +135,14 @@ def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
     monkeypatch.setattr(
         "backend.services.runtime_config_mutation.RuntimeConfigMutationService",
         lambda: _MutationService(),
+    )
+    monkeypatch.setattr(
+        "backend.services.experience_prior.ExperiencePriorService.priors",
+        lambda self: {},
+    )
+    monkeypatch.setattr(
+        "backend.services.learning_experiment_admission.LearningExperimentAdmissionService.evaluate",
+        lambda self, **kwargs: {"allowed": True, "status": "admitted"},
     )
     monkeypatch.setattr(
         "risk.policy_service.RiskPolicyService.shared",

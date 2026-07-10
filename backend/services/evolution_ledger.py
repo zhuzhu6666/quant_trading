@@ -247,6 +247,36 @@ def persist_runtime_config_snapshot(
     owned_conn = conn is None
     active_conn = conn or _connect(db_path)
     try:
+        existing = active_conn.execute(
+            _p(db_path, """
+            SELECT config_version, config_hash, source, run_id, created_at
+            FROM runtime_config_snapshot
+            ORDER BY config_version DESC
+            LIMIT 1
+            """),
+        ).fetchone()
+        if existing:
+            existing_hash = existing["config_hash"] if hasattr(existing, "keys") else existing[1]
+            existing_source_value = existing["source"] if hasattr(existing, "keys") else existing[2]
+            existing_run_value = existing["run_id"] if hasattr(existing, "keys") else existing[3]
+            if (
+                str(existing_hash or "") == config_hash
+                and str(existing_source_value or "") == str(source or "")
+                and str(existing_run_value or "") == str(run_id or "")
+            ):
+                config_version = existing["config_version"] if hasattr(existing, "keys") else existing[0]
+                existing_source = existing_source_value
+                existing_run_id = existing_run_value
+                existing_created_at = existing["created_at"] if hasattr(existing, "keys") else existing[4]
+                return {
+                    "config_version": int(config_version or 0),
+                    "config_hash": config_hash,
+                    "source": str(existing_source or ""),
+                    "run_id": str(existing_run_id or ""),
+                    "created_at": float(existing_created_at or 0.0),
+                    "reused": True,
+                    "requested_source": str(source or ""),
+                }
         cur = active_conn.execute(
             _p(db_path, """
             INSERT INTO runtime_config_snapshot (config_hash, source, config_json, run_id, created_at)
@@ -264,6 +294,7 @@ def persist_runtime_config_snapshot(
             "config_hash": config_hash,
             "source": str(source or ""),
             "created_at": now,
+            "reused": False,
         }
     finally:
         if owned_conn:

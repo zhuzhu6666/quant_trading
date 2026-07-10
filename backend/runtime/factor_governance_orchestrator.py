@@ -19,6 +19,11 @@ from backend.core.db import get_state_pg_conn
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
 from backend.services.factor_redundancy import RedundancyDetector
 from backend.services.agent_authority import AgentAuthorityRegistryService
+from backend.services.experience_prior import ExperiencePriorService
+from backend.services.learning_experiment_admission import (
+    LearningExperimentAdmissionService,
+    STRUCTURAL_AUDIT_ACTIONS,
+)
 from backend.services.mutation_audit import record_api_mutation
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
@@ -168,26 +173,18 @@ class FactorGovernanceOrchestrator:
                     _p("""
                     SELECT l.status AS application_status, e.status AS effect_status
                     FROM learning_application_log l
-                    LEFT JOIN learning_application_effect e
-                      ON e.application_id=l.application_id
-                    WHERE l.scope_type='factor'
-                      AND l.scope_key=?
-                    ORDER BY l.created_at DESC
+                    LEFT JOIN learning_application_effect e ON e.application_id=l.application_id
+                    WHERE l.scope_type='factor' AND l.scope_key=?
+                    ORDER BY l.cycle_ts DESC, l.created_at DESC
                     LIMIT 1
                     """),
                     (factor_id,),
                 ).fetchone()
-                if row is None:
-                    return False
-                effect_status = str(row["effect_status"] or "")
-                return (
-                    str(row["application_status"] or "") == "observing"
-                    or effect_status in {"", "observing", "mixed"}
-                )
+                return LearningExperimentAdmissionService.row_is_active(row)
             finally:
                 conn.close()
         except Exception:
-            return False
+            return True
 
     @staticmethod
     def _scoped_factor_rollback_patch(
@@ -734,6 +731,7 @@ class FactorGovernanceOrchestrator:
             weight_policy_weights=None,
             factor_configs=factor_configs,
             current_weights=current_weights,
+            experience_priors=ExperiencePriorService().priors(),
         )
         # DecisionPolicy may clamp an already-minimal weight back to its
         # current value. Treat that as a no-op: writing/auditing it every
@@ -744,6 +742,34 @@ class FactorGovernanceOrchestrator:
             for name, decision in decisions.items()
             if abs(float(decision.new_weight) - float(decision.old_weight)) > 1e-9
         }
+        admission_service = LearningExperimentAdmissionService()
+        admitted_decisions: dict[str, Any] = {}
+        for name, decision in decisions.items():
+            admission = admission_service.evaluate(
+                scope_type="factor",
+                scope_key=name,
+                action="update_weight",
+                old_weight=float(decision.old_weight),
+                new_weight=float(decision.new_weight),
+            )
+            if admission.get("allowed"):
+                admitted_decisions[name] = decision
+                evidence_by_factor[name]["experiment_admission"] = admission
+                continue
+            evidence_by_factor[name]["experiment_admission"] = admission
+            item = next(item for item in catalog if item["factor_id"] == name)
+            actions.append(self._audit_action(
+                run,
+                item,
+                "update_weight",
+                "blocked_by_evidence",
+                evidence_by_factor[name],
+                verdicts[name],
+                before={"weight": decision.old_weight},
+                after={"weight": decision.old_weight},
+                result={"admission": admission},
+            ))
+        decisions = admitted_decisions
         partial = DecisionPolicy.to_weights(decisions)
         if not partial:
             return actions
@@ -991,6 +1017,7 @@ class FactorGovernanceOrchestrator:
             weight_policy_weights={factor_id: target},
             factor_configs=factor_configs,
             current_weights=current_weights,
+            experience_priors=ExperiencePriorService().priors(),
         )
         weight_patch = DecisionPolicy.to_weights(decisions)
         self._apply_runtime_patch(
@@ -1160,6 +1187,8 @@ class FactorGovernanceOrchestrator:
         result: dict[str, Any] | None,
         decision_id: str = "",
     ) -> None:
+        if action in STRUCTURAL_AUDIT_ACTIONS:
+            return
         before = before or {}
         after = after or {}
         old_weight = float(before.get("weight") or 0.0)

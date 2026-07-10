@@ -11,7 +11,7 @@ from typing import Any
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
-from research.learning.application_effects import classify_effect, observation_window_expired
+from research.learning.effect_reconciliation import EffectEvaluation, evaluate_application_effect
 from research.learning.governance_conflicts import GovernanceConflictResolver
 
 
@@ -729,6 +729,73 @@ class RuleEvolutionGovernor:
             )
         return application_id
 
+    def _persist_effect_evaluation(
+        self,
+        conn: Any,
+        *,
+        app: dict[str, Any],
+        scope_type: str,
+        scope_key: str,
+        evaluation: EffectEvaluation,
+        now: float,
+    ) -> None:
+        self._execute(conn,
+            """
+            INSERT INTO learning_application_effect
+            (application_id, scope_type, scope_key, action, status,
+             observed_trade_count, baseline_trade_count,
+             post_avg_reward, baseline_avg_reward, delta_avg_reward,
+             post_win_rate, baseline_win_rate, decision_json,
+             last_review_at, updated_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(application_id) DO UPDATE SET
+                scope_type=excluded.scope_type,
+                scope_key=excluded.scope_key,
+                action=excluded.action,
+                status=excluded.status,
+                observed_trade_count=excluded.observed_trade_count,
+                baseline_trade_count=excluded.baseline_trade_count,
+                post_avg_reward=excluded.post_avg_reward,
+                baseline_avg_reward=excluded.baseline_avg_reward,
+                delta_avg_reward=excluded.delta_avg_reward,
+                post_win_rate=excluded.post_win_rate,
+                baseline_win_rate=excluded.baseline_win_rate,
+                decision_json=excluded.decision_json,
+                last_review_at=excluded.last_review_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                app["application_id"],
+                scope_type,
+                scope_key,
+                app["action"],
+                evaluation.status,
+                evaluation.post_count,
+                evaluation.baseline_count,
+                round(evaluation.post_avg, 6),
+                round(evaluation.baseline_avg, 6),
+                round(evaluation.delta, 6),
+                round(evaluation.post_win_rate, 4),
+                round(evaluation.baseline_win_rate, 4),
+                json.dumps(evaluation.decision, ensure_ascii=False, default=str),
+                evaluation.last_review_at,
+                now,
+                now,
+            ),
+        )
+        self._execute(conn,
+            """
+            UPDATE learning_application_log
+            SET status=?, details_json=?
+            WHERE application_id=?
+            """,
+            (
+                evaluation.status,
+                json.dumps({**(app.get("details") or {}), "effect": evaluation.decision}, ensure_ascii=False, default=str),
+                app["application_id"],
+            ),
+        )
+
     def reconcile_application_effects(
         self,
         *,
@@ -946,152 +1013,48 @@ class RuleEvolutionGovernor:
                     raw_pre_reviews,
                     regime=comparison_regime,
                 )
-                post_reviews = post_reviews[: int(observe_trades)]
-                pre_reviews = pre_reviews[: int(observe_trades)]
-                concurrent_applications = [next_application] if next_application else []
-
-                post_rewards = [reward_from_review(r) for r in post_reviews]
-                pre_rewards = [reward_from_review(r) for r in pre_reviews]
-                post_avg = sum(post_rewards) / len(post_rewards) if post_rewards else 0.0
-                pre_avg = sum(pre_rewards) / len(pre_rewards) if pre_rewards else 0.0
-                delta = post_avg - pre_avg
-                post_win_rate = sum(1 for r in post_reviews if float(r.get("pnl", 0.0) or 0.0) > 0) / max(len(post_reviews), 1)
-                pre_win_rate = sum(1 for r in pre_reviews if float(r.get("pnl", 0.0) or 0.0) > 0) / max(len(pre_reviews), 1)
-
-                decision = {
-                    "application_id": app["application_id"],
-                    "scope_type": scope_type,
-                    "scope_key": scope_key_for_effect,
-                    "action": app["action"],
-                    "post_review_ids": [r["review_id"] for r in post_reviews],
-                    "baseline_review_ids": [r["review_id"] for r in pre_reviews],
-                    "post_avg_reward": round(post_avg, 6),
-                    "baseline_avg_reward": round(pre_avg, 6),
-                    "delta_avg_reward": round(delta, 6),
-                    "post_win_rate": round(post_win_rate, 4),
-                    "baseline_win_rate": round(pre_win_rate, 4),
-                    "baseline_ready": len(pre_reviews) >= baseline_min_trades,
-                    "observe_ready": len(post_reviews) >= min_trades,
-                    "evidence_quality": {
-                        "schema_version": "learning_effect_evidence.v2",
-                        "causal_claim_allowed": False,
-                        "target_regime": target_regime,
-                        "regime_evidence_available": regime_evidence_available,
-                        "regime_matched": bool(target_regime and regime_evidence_available),
-                        "raw_post_count": len(raw_post_reviews),
-                        "raw_baseline_count": len(raw_pre_reviews),
-                        "excluded_contaminated_post": post_contaminated,
-                        "excluded_contaminated_baseline": pre_contaminated,
-                        "excluded_regime_mismatch_post": post_regime_mismatch,
-                        "excluded_regime_mismatch_baseline": pre_regime_mismatch,
-                        "concurrent_applications": concurrent_applications,
-                        "observation_window": {
-                            "start_ts": float(app.get("cycle_ts") or 0.0),
-                            "end_ts": observation_upper_bound if next_application else None,
-                            "closed_by_application_id": (
-                                str(next_application.get("application_id") or "")
-                                if next_application
-                                else ""
-                            ),
-                        },
-                    },
-                }
-
-                classification = classify_effect(
-                    post_count=len(post_reviews),
-                    baseline_count=len(pre_reviews),
+                evaluation = evaluate_application_effect(
+                    app=app,
+                    scope_type=scope_type,
+                    scope_key=scope_key_for_effect,
+                    post_reviews=post_reviews,
+                    baseline_reviews=pre_reviews,
+                    raw_post_count=len(raw_post_reviews),
+                    raw_baseline_count=len(raw_pre_reviews),
+                    excluded_contaminated_post=post_contaminated,
+                    excluded_contaminated_baseline=pre_contaminated,
+                    excluded_regime_mismatch_post=post_regime_mismatch,
+                    excluded_regime_mismatch_baseline=pre_regime_mismatch,
+                    target_regime=target_regime,
+                    regime_evidence_available=regime_evidence_available,
+                    next_application=next_application,
+                    observation_upper_bound=observation_upper_bound,
+                    reward_from_review=reward_from_review,
                     min_trades=min_trades,
+                    observe_trades=observe_trades,
                     baseline_min_trades=baseline_min_trades,
-                    delta=delta,
-                    effective_threshold=reward_delta_for_effective,
-                    ineffective_threshold=reward_delta_for_bad,
-                    window_closed=bool(next_application),
-                )
-                next_status = classification.status
-                decision["evidence_quality"]["causal_status"] = classification.causal_status
-                if classification.retry_via_new_application:
-                    decision["evidence_quality"]["retry_via_new_application"] = True
-                cycle_ts = float(app.get("cycle_ts") or 0.0)
-                observation_clock_valid = cycle_ts >= 946684800.0
-                observation_age_seconds = max(0.0, now - cycle_ts) if observation_clock_valid else 0.0
-                decision["evidence_quality"]["observation_age_seconds"] = observation_age_seconds
-                decision["evidence_quality"]["observation_clock_valid"] = observation_clock_valid
-                decision["evidence_quality"]["max_observation_age_seconds"] = max(
-                    86400.0,
-                    float(max_observation_age_seconds or 0.0),
-                )
-                if observation_window_expired(
-                    status=next_status,
-                    cycle_ts=cycle_ts,
+                    reward_delta_for_effective=reward_delta_for_effective,
+                    reward_delta_for_bad=reward_delta_for_bad,
+                    max_observation_age_seconds=max_observation_age_seconds,
                     now=now,
-                    max_age_seconds=float(max_observation_age_seconds or 0.0),
-                ):
-                    next_status = "inconclusive"
-                    decision["evidence_quality"]["causal_status"] = "observation_window_expired_inconclusive"
-                    decision["evidence_quality"]["retry_via_new_application"] = True
-                decision["evidence_quality"]["bounded_attribution_allowed"] = bool(
-                    len(post_reviews) >= min_trades
-                    and len(pre_reviews) >= baseline_min_trades
-                    and target_regime
-                    and regime_evidence_available
                 )
+                decision = evaluation.decision
+                next_status = evaluation.status
+                post_reviews = post_reviews[: evaluation.post_count]
+                pre_reviews = pre_reviews[: evaluation.baseline_count]
+                post_avg = evaluation.post_avg
+                pre_avg = evaluation.baseline_avg
+                delta = evaluation.delta
+                post_win_rate = evaluation.post_win_rate
+                pre_win_rate = evaluation.baseline_win_rate
 
-                self._execute(conn,
-                    """
-                    INSERT INTO learning_application_effect
-                    (application_id, scope_type, scope_key, action, status,
-                     observed_trade_count, baseline_trade_count,
-                     post_avg_reward, baseline_avg_reward, delta_avg_reward,
-                     post_win_rate, baseline_win_rate, decision_json,
-                     last_review_at, updated_at, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(application_id) DO UPDATE SET
-                        scope_type=excluded.scope_type,
-                        scope_key=excluded.scope_key,
-                        action=excluded.action,
-                        status=excluded.status,
-                        observed_trade_count=excluded.observed_trade_count,
-                        baseline_trade_count=excluded.baseline_trade_count,
-                        post_avg_reward=excluded.post_avg_reward,
-                        baseline_avg_reward=excluded.baseline_avg_reward,
-                        delta_avg_reward=excluded.delta_avg_reward,
-                        post_win_rate=excluded.post_win_rate,
-                        baseline_win_rate=excluded.baseline_win_rate,
-                        decision_json=excluded.decision_json,
-                        last_review_at=excluded.last_review_at,
-                        updated_at=excluded.updated_at
-                    """,
-                    (
-                        app["application_id"],
-                        scope_type,
-                        scope_key_for_effect,
-                        app["action"],
-                        next_status,
-                        len(post_reviews),
-                        len(pre_reviews),
-                        round(post_avg, 6),
-                        round(pre_avg, 6),
-                        round(delta, 6),
-                        round(post_win_rate, 4),
-                        round(pre_win_rate, 4),
-                        json.dumps(decision, ensure_ascii=False, default=str),
-                        max((float(r.get("created_at", 0.0) or 0.0) for r in post_reviews), default=0.0),
-                        now,
-                        now,
-                    ),
-                )
-
-                self._execute(conn,
-                    """
-                    UPDATE learning_application_log
-                    SET status=?, details_json=?
-                    WHERE application_id=?
-                    """,
-                    (
-                        next_status,
-                        json.dumps({**(app.get("details") or {}), "effect": decision}, ensure_ascii=False, default=str),
-                        app["application_id"],
-                    ),
+                self._persist_effect_evaluation(
+                    conn,
+                    app=app,
+                    scope_type=scope_type,
+                    scope_key=scope_key_for_effect,
+                    evaluation=evaluation,
+                    now=now,
                 )
                 observed += 1
 

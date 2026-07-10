@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, ensure_sqlite_columns, get_state_pg_conn, is_state_db_path
+from backend.services.market_regime import resolve_market_regime
 
 logger = logging.getLogger(__name__)
 
@@ -363,6 +364,7 @@ class DecisionLedger:
 
         gate_reason = str(getattr(gate_result, "reason", "")) if gate_result else ""
         gate_passed = bool(getattr(gate_result, "passed", False)) if gate_result else False
+        regime = resolve_market_regime(composite)
         action_payload = {
             "direction": getattr(composite, "direction", 0),
             "score": getattr(composite, "score", 0.0),
@@ -382,6 +384,9 @@ class DecisionLedger:
             "tags_breakdown": getattr(composite, "tags_breakdown", {}) or {},
             "gate_passed": gate_passed,
             "gate_reason": gate_reason,
+            "regime_id": regime["regime_id"],
+            "regime_confidence": regime["confidence"],
+            "regime_source": regime["source"],
         }
         if action_json:
             action_payload.update(action_json)
@@ -390,6 +395,8 @@ class DecisionLedger:
             symbol=symbol,
             timeframe=timeframe,
             decision_ts=decision_ts or getattr(composite, "timestamp", None),
+            regime_id=regime["regime_id"],
+            regime_confidence=regime["confidence"],
             trade_id=trade_id,
             position_id=position_id,
             portfolio_state=portfolio_state,

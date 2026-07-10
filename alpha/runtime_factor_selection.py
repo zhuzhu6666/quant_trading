@@ -6,6 +6,7 @@ Shadow factors stay in the shadow evaluator.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from alpha.registry import factor_registry
@@ -31,6 +32,20 @@ def configured_factor_ids(config: dict[str, dict] | None) -> list[str] | None:
     return names
 
 
+def _discovered_budget() -> int:
+    try:
+        return max(1, min(int(os.getenv("QUANT_RUNTIME_DISCOVERED_FACTOR_BUDGET", "24")), 128))
+    except Exception:
+        return 24
+
+
+def _score(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except Exception:
+        return 0.0
+
+
 def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[str]:
     try:
         from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED
@@ -41,7 +56,8 @@ def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[
     except Exception:
         return []
 
-    active: list[str] = []
+    active: list[tuple[int, float, str]] = []
+    explicitly_configured: set[str] = set()
     config = dict(config or {})
     for name in names:
         if name in dead:
@@ -51,13 +67,63 @@ def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[
         cfg = config.get(name)
         if isinstance(cfg, dict) and cfg.get("enabled") is False:
             continue
-        active.append(name)
-    return active
+        explicit = isinstance(cfg, dict)
+        if explicit:
+            explicitly_configured.add(name)
+        try:
+            meta = adapter.get_meta(name) if hasattr(adapter, "get_meta") else {}
+        except Exception:
+            meta = {}
+        lifecycle = str((meta or {}).get("lifecycle_status") or (meta or {}).get("status") or "").upper()
+        lifecycle_priority = 2 if lifecycle in {"LIVE", "ACTIVE", "CANARY_100"} else (1 if lifecycle.startswith("CANARY") else 0)
+        score = max(
+            _score((meta or {}).get("health_score")),
+            _score((meta or {}).get("fitness")),
+            _score((meta or {}).get("oos_score")),
+            _score((meta or {}).get("score")),
+        )
+        active.append((100 + lifecycle_priority if explicit else lifecycle_priority, score, str(name)))
+    budget = max(_discovered_budget(), len(explicitly_configured))
+    active.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return [name for _, _, name in active[:budget]]
 
 
 def runtime_factor_ids(config: dict[str, dict] | None) -> list[str] | None:
     selection = select_runtime_factors(config)
     return None if selection is None else selection.selected_factor_ids
+
+
+def runtime_factor_budget_status(config: dict[str, dict] | None) -> dict[str, object]:
+    selection = select_runtime_factors(config)
+    if selection is None:
+        return {
+            "ok": False,
+            "schema_version": "runtime_factor_budget.v1",
+            "status": "missing_config",
+            "selected_count": 0,
+            "budget_excluded_count": 0,
+            "discovered_budget": _discovered_budget(),
+        }
+    budget_excluded = [
+        name for name, reason in selection.reason_excluded.items()
+        if reason == "discovered_runtime_budget"
+    ]
+    return {
+        "ok": True,
+        "schema_version": "runtime_factor_budget.v1",
+        "status": "bounded" if budget_excluded else "within_budget",
+        "selected_count": len(selection.selected_factor_ids),
+        "selected_factor_ids": list(selection.selected_factor_ids),
+        "excluded_count": len(selection.excluded_factor_ids),
+        "budget_excluded_count": len(budget_excluded),
+        "budget_excluded_sample": sorted(budget_excluded)[:20],
+        "discovered_budget": _discovered_budget(),
+        "boundary": {
+            "registry_evidence_retained": True,
+            "cold_factors_remain_shadow_or_research": True,
+            "does_not_delete_factor_artifacts": True,
+        },
+    }
 
 
 def select_runtime_factors(config: dict[str, dict] | None) -> RuntimeFactorSelection | None:
@@ -76,14 +142,19 @@ def select_runtime_factors(config: dict[str, dict] | None) -> RuntimeFactorSelec
             excluded.append(str(name))
             reasons[str(name)] = "disabled_by_runtime_config"
 
-    for name in active_discovered_factor_ids(config):
+    selected_discovered = active_discovered_factor_ids(config)
+    for name in selected_discovered:
         if name not in seen:
             names.append(name)
             seen.add(name)
     try:
-        from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
+        from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED, SOURCE_SHADOW
 
         adapter = RegistryAdapter.shared()
+        for name in adapter.list_by_source(SOURCE_DISCOVERED):
+            if name not in selected_discovered and name not in reasons:
+                excluded.append(name)
+                reasons[name] = "discovered_runtime_budget"
         for name in adapter.list_by_source(SOURCE_SHADOW):
             if name not in reasons:
                 excluded.append(name)

@@ -71,6 +71,42 @@
 
 ## 3. 自治治理旧债
 
+### AWE 权重变更未进入后验账本
+
+- 状态: `fixed`
+- 旧理解: AWE 只要经过 DecisionPolicy、RiskPolicy 和 runtime mutation 就算完整闭环，可不写 learning application/effect。
+- 当前口径: AWE 与 Factor Governance 共用学习实验准入；每个实际生效的 AWE factor patch 必须记录 application/effect，readiness 交叉检查 mutation run 覆盖，历史缺口单列 legacy。
+- 影响面: live AWE scheduler、权重 mutation、效果归因、readiness、Learning Web。
+- 收口方式: `LearningExperimentAdmissionService` + `RuleEvolutionGovernor.log_application()`；同 scope active window 阻止新权重实验。
+- 验证方式: `tests/test_evolution_closure_fixes.py`、`tests/test_learning_experiment_admission.py`。
+
+### experience_priors 只有接口没有生产输入
+
+- 状态: `fixed`
+- 旧理解: DecisionPolicy 声明 `experience_priors` 参数就代表经验已经反哺权重决策。
+- 当前口径: prior 必须由 `ExperiencePriorService` 从 terminal bounded effects 构造，并显式传入全部三个生产 `fast_decide` 调用；原始 memory 或 mixed/inconclusive effect 不能直接影响权重。
+- 影响面: AWE、Factor Governance、trade review regime、effect ledger、Learning Web。
+- 收口方式: review 保存 entry regime；历史 regime 从 decision ledger 事实回填；prior 有样本、置信度、时效衰减和 0.85~1.15 硬边界。
+- 验证方式: `tests/test_learning_experiment_admission.py`、`tests/test_trade_reviewer.py`、`tests/test_learning_backfill.py`。
+
+### discovered 冷尾部自动进入 live
+
+- 状态: `fixed`
+- 旧理解: registry 中所有非 DEAD discovered factor 都应自动加入 live engine/compositor，即使没有显式 runtime config。
+- 当前口径: 显式配置因子优先；额外 discovered 受 runtime budget 限制并按 lifecycle/score 选择，剩余候选保留研究/registry 证据但不进入 live 方向组合。
+- 影响面: StreamingFactorEngine、PortfolioCompositor、decision snapshot、AWE、readiness。
+- 收口方式: `alpha.runtime_factor_selection` 默认 discovered budget 24，`_merge_portfolio_configs` 不再因冷尾部 weight row 自动激活因子。
+- 验证方式: `tests/alpha/test_runtime_factor_selection.py`、`tests/test_live_service_tick.py`。
+
+### runtime snapshot 相同事件重复写入
+
+- 状态: `fixed`
+- 旧理解: 同一 source/run 对完全相同 config 的重复 persist 也必须增加 snapshot version。
+- 当前口径: 连续同 hash + 同 source + 同 run_id 复用最近 snapshot；不同事件来源或 run 仍建立独立回滚点。
+- 影响面: startup、parameter sync、factor governance audit、overlay transaction、readiness。
+- 收口方式: `persist_runtime_config_snapshot()` 事务内幂等；不删除历史快照。
+- 验证方式: `tests/test_runtime_config.py`、`tests/test_factor_autonomy_hardening.py`。
+
 ### policy_suggestion 作为人工审批队列
 
 - 状态: `fixed`

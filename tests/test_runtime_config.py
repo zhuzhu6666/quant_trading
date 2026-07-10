@@ -87,7 +87,7 @@ def test_unknown_keys_go_to_extra() -> None:
     assert cfg.extra.get("made_up_field") == 999
 
 
-def test_runtime_config_snapshot_hash_stable_and_version_increments(tmp_path) -> None:
+def test_runtime_config_snapshot_hash_stable_and_reuses_identical_event(tmp_path) -> None:
     db_path = tmp_path / "state.db"
     cfg = rc.RuntimeConfig(shadow_vote_weight=0.33)
 
@@ -95,4 +95,9 @@ def test_runtime_config_snapshot_hash_stable_and_version_increments(tmp_path) ->
     second = persist_runtime_config_snapshot(cfg, source="test", db_path=db_path)
 
     assert first["config_hash"] == second["config_hash"]
-    assert second["config_version"] == first["config_version"] + 1
+    assert second["config_version"] == first["config_version"]
+    assert second["reused"] is True
+
+    third = persist_runtime_config_snapshot(cfg, source="different_event", db_path=db_path)
+    assert third["config_version"] == first["config_version"] + 1
+    assert third["reused"] is False

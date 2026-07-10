@@ -69,6 +69,9 @@
 | Canary 证据 | evidence/dataset hash 是否变化；stage 是否累计足够 fresh bars，是否拒绝重复窗口 |
 | 效果证据质量 | 是否过滤污染/regime mismatch；并发 application 是否保持 observing 而非伪归因 |
 | 效果闭环 SLO | bounded window 是否归档终态；inconclusive 重试是否要求终态后的新证据且无更新 application |
+| 实验准入 | 同一 scope 是否只有一个 active effect；AWE/Factor Governance 是否共用门；微小 delta 是否被拒绝 |
+| mutation 覆盖 | 每个已生效 AWE 权重 patch 是否存在对应 `learning_application_log/effect`，历史缺口是否单独标 legacy |
+| 经验先验 | 是否只来自 terminal bounded effects；生产 DecisionPolicy 调用是否传入且保持 0.85~1.15 有界 |
 | 冷却/限频 | 单周期动作数量是否受限 |
 | 测试污染 | pytest/test overlay 是否被生产拒绝 |
 

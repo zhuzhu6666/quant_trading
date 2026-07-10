@@ -27,5 +27,8 @@ assert.match(systemApi, /getSystemLoad/);
 assert.match(learningPage, /learning_effect_quality/);
 assert.match(learningPage, /重试资格只在出现新复盘证据/);
 assert.match(learningPage, /看板不会自动改权重、参数或智能体权限/);
+assert.match(learningPage, /experience_prior/);
+assert.match(learningPage, /awe_mutation_coverage/);
+assert.match(learningPage, /runtime_factor_budget/);
 
 console.log("web_frontend architecture test: ok");

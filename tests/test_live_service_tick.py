@@ -133,6 +133,21 @@ def test_merge_portfolio_configs_includes_active_discovered_factor(monkeypatch):
     assert merged[discovered]["role"] == "alpha"
 
 
+def test_merge_portfolio_configs_does_not_activate_cold_weight_only_factor(monkeypatch):
+    monkeypatch.setattr(
+        "alpha.runtime_factor_selection.active_discovered_factor_ids",
+        lambda config: [],
+    )
+    merged = live_service._merge_portfolio_configs(
+        {"rsi_14": {"enabled": True}},
+        {"rsi_14": 0.5, "dsl_auto_cold": 0.01},
+        0.7,
+        0.3,
+    )
+    assert "rsi_14" in merged
+    assert "dsl_auto_cold" not in merged
+
+
 def test_entry_quality_learning_gate_interprets_factor_context_before_risk():
     gate = live_service._entry_quality_gate_from_learning_policy(
         policy={

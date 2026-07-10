@@ -128,9 +128,9 @@ def test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination(
             """
             INSERT INTO decision_ledger
             (decision_id, trade_id, position_id, event_type, symbol, timeframe,
-             decision_ts, action_score, action_reason, action_json, risk_state_json, created_at)
+             decision_ts, regime_id, action_score, action_reason, action_json, risk_state_json, created_at)
             VALUES ('dec_open_delay', 'pos_delay', 'pos_delay', 'open', 'XAUUSD+',
-                    'M5', 1000.0, -0.91, 'executed', ?, ?, 1605.0)
+                    'M5', 1000.0, 'trend', -0.91, 'executed', ?, ?, 1605.0)
             """,
             (
                 json.dumps(action),
@@ -176,6 +176,8 @@ def test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination(
     assert review["signal_bar_ts"] == 1000.0
     assert review["entry_ts"] == 1607.0
     assert review["holding_seconds"] == 300.0
+    assert review["regime_id"] == "trend"
+    assert review["entry_regime"] == "trend"
     assert review["entry_timing_context"]["signal_to_fill_delay_seconds"] == 607.0
     assert review["primary_responsibility"] == "data_quality"
     assert "market_data_stale" in labels

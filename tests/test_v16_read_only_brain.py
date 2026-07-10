@@ -132,6 +132,7 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
 
     assert result["learning_effect_quality"]["boundary"]["read_only"] is True
     assert result["v16"]["learning_effect_quality"]["boundary"]["retry_requires_governor_decision"] is True
+    assert result["v16"]["runtime_factor_budget"]["schema_version"] == "runtime_factor_budget.v1"
     assert result["frontend_contract"]["learning_effect_quality"] == "/api/learning/effect-quality"
     assert result["frontend_contract"]["v16_brain_state"] == "/api/ops/brain/state"
     assert result["frontend_contract"]["v16_brain_memory"] == "/api/ops/brain/memory"

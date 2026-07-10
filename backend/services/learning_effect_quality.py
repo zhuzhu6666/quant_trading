@@ -32,6 +32,53 @@ class LearningEffectQualityService:
     def _sql(self, sql: str) -> str:
         return sql.replace("%", "%%").replace("?", "%s") if is_state_db_path(self.db_path) else sql
 
+    def _awe_mutation_coverage(self, conn: Any, *, now: float) -> dict[str, Any]:
+        if not state_table_exists(conn, "runtime_config_snapshot") or not state_table_exists(conn, "learning_application_log"):
+            return {"status": "unavailable", "mutation_count": 0, "covered_count": 0, "missing_run_ids": []}
+        cutoff = now - 24 * 3600.0
+        snapshots = conn.execute(
+            self._sql(
+                """
+                SELECT run_id, MAX(created_at) AS created_at
+                FROM runtime_config_snapshot
+                WHERE source='awe_decision_policy_update_weight' AND created_at>=?
+                GROUP BY run_id
+                """
+            ),
+            (cutoff,),
+        ).fetchall()
+        mutation_at = {
+            str(row["run_id"] or ""): float(row["created_at"] or 0.0)
+            for row in snapshots
+            if str(row["run_id"] or "")
+        }
+        mutation_runs = set(mutation_at)
+        applications = conn.execute(
+            self._sql("SELECT details_json FROM learning_application_log WHERE created_at>=?"),
+            (cutoff,),
+        ).fetchall()
+        covered_runs: set[str] = set()
+        covered_at: list[float] = []
+        for row in applications:
+            details = _loads(row["details_json"])
+            if str(details.get("producer") or "") == "awe_adapt" and str(details.get("run_id") or ""):
+                covered_runs.add(str(details["run_id"]))
+                covered_at.append(float(details.get("applied_at") or details.get("cycle_ts") or 0.0))
+        first_enforced_at = min((value for value in covered_at if value > 0.0), default=0.0)
+        missing_all = mutation_runs - covered_runs
+        missing = sorted(run_id for run_id in missing_all if first_enforced_at and mutation_at[run_id] >= first_enforced_at)
+        legacy_missing = sorted(missing_all - set(missing))
+        return {
+            "status": "ok" if not missing else "degraded",
+            "window_hours": 24,
+            "mutation_count": len(mutation_runs),
+            "covered_count": len(mutation_runs & covered_runs),
+            "coverage_ratio": round(len(mutation_runs & covered_runs) / max(len(mutation_runs), 1), 6),
+            "missing_run_ids": missing[:20],
+            "legacy_missing_count": len(legacy_missing),
+            "enforced_from": first_enforced_at,
+        }
+
     def _retry_context(
         self,
         conn: Any,
@@ -187,8 +234,13 @@ class LearningEffectQualityService:
             terminal = sum(status_counts[key] for key in ("reinforced", "effective", "ineffective", "rolled_back", "inconclusive", "superseded"))
             confounded = reason_counts["confounded_by_concurrent_application"]
             closure_ratio = terminal / max(len(rows), 1)
+            awe_mutation_coverage = self._awe_mutation_coverage(conn, now=now)
+            from backend.services.experience_prior import ExperiencePriorService
+
+            experience_prior = ExperiencePriorService(self.db_path).build(cache_seconds=0.0)
             checks = {
                 "no_concurrent_attribution_backlog": confounded == 0,
+                "all_awe_mutations_have_effect_ledger": not awe_mutation_coverage.get("missing_run_ids"),
                 "active_window_age_under_30d": oldest_active_age <= 30 * 86400.0,
                 "active_review_age_under_24h": oldest_active_review_age <= 86400.0,
                 "bounded_windows_terminalize": bounded_nonterminal_count == 0,
@@ -207,6 +259,14 @@ class LearningEffectQualityService:
                 "oldest_active_age_seconds": round(max(0.0, oldest_active_age), 3),
                 "oldest_active_review_age_seconds": round(max(0.0, oldest_active_review_age), 3),
                 "bounded_nonterminal_count": bounded_nonterminal_count,
+                "awe_mutation_coverage": awe_mutation_coverage,
+                "experience_prior": {
+                    "status": experience_prior.get("status"),
+                    "eligible_count": experience_prior.get("eligible_count", 0),
+                    "bounded_factor_count": experience_prior.get("bounded_factor_count", 0),
+                    "rejected_unbounded_count": experience_prior.get("rejected_unbounded_count", 0),
+                    "boundary": experience_prior.get("boundary") or {},
+                },
                 "slo": {"status": posture, "checks": checks},
                 "retry_reviews": retry_reviews,
                 "retry_review_count": retry_review_count,
@@ -218,4 +278,4 @@ class LearningEffectQualityService:
             conn.close()
 
     def _empty(self, reason: str) -> dict[str, Any]:
-        return {"ok": False, "schema_version": "learning_effect_quality.v1", "status": reason, "status_counts": {}, "reason_counts": {}, "active_count": 0, "terminal_count": 0, "closure_ratio": 0.0, "retry_reviews": [], "retry_review_count": 0, "retry_candidates": [], "retry_candidate_count": 0, "boundary": self.boundary()}
+        return {"ok": False, "schema_version": "learning_effect_quality.v1", "status": reason, "status_counts": {}, "reason_counts": {}, "active_count": 0, "terminal_count": 0, "closure_ratio": 0.0, "awe_mutation_coverage": {}, "experience_prior": {}, "retry_reviews": [], "retry_review_count": 0, "retry_candidates": [], "retry_candidate_count": 0, "boundary": self.boundary()}
