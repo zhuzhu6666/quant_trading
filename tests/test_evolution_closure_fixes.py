@@ -13,7 +13,7 @@ from backend.runtime import evolution_orchestrator as evo
 from backend.services import live_service
 from backend.services import shadow_service
 from config import runtime_config as rc
-from deployment.canary import ACTIVE, CANARY_5, CANARY_50, PROBATION, CanaryEvalContext
+from deployment.canary import ACTIVE, CANARY_5, CANARY_20, CANARY_50, PROBATION, QUARANTINED, CanaryEvalContext
 
 
 @dataclass
@@ -209,6 +209,59 @@ def test_canary_restores_legacy_lowercase_shadow(monkeypatch):
     assert promotions == []
     assert stay == ["foo"]
     assert saved["foo"]["stage"] == CANARY_5
+
+def test_discovered_factor_is_demoted_until_canary_is_active(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("discovered")))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_states",
+        lambda: {"foo": {"stage": CANARY_20, "oos_bars": 30, "cumulative_pnl": 0.004}},
+    )
+    monkeypatch.setattr(evo, "_save_canary_states", lambda states: saved.update(states))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_ctx_from_log",
+        lambda name, score: CanaryEvalContext(oos_bars=60, oos_pnl=0.006),
+    )
+
+    promotions, rollbacks, stay = evo._run_canary_evaluation("XAUUSD+", "M5", 1000)
+
+    assert promotions == []
+    assert rollbacks == ["foo"]
+    assert stay == []
+    assert saved["foo"]["stage"] == CANARY_50
+
+
+def test_canary_rollback_count_and_history_survive_cycle(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_states",
+        lambda: {
+            "foo": {
+                "stage": CANARY_5,
+                "oos_bars": 10,
+                "cumulative_pnl": 0.002,
+                "rollback_count": 2,
+                "events": [{"event": "prior"}],
+            }
+        },
+    )
+    monkeypatch.setattr(evo, "_save_canary_states", lambda states: saved.update(states))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_ctx_from_log",
+        lambda name, score: CanaryEvalContext(oos_bars=10, oos_pnl=-0.001),
+    )
+
+    _, rollbacks, _ = evo._run_canary_evaluation("XAUUSD+", "M5", 1000)
+
+    assert rollbacks == ["foo"]
+    assert saved["foo"]["stage"] == QUARANTINED
+    assert saved["foo"]["rollback_count"] == 3
+    assert len(saved["foo"]["events"]) > 1
 
 
 def test_shadow_trader_evaluate_factor_builds_virtual_perf():

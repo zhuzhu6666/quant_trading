@@ -47,10 +47,12 @@ def _ensure_canary_db() -> None:
                 oos_bars INTEGER DEFAULT 0,
                 cumulative_pnl REAL DEFAULT 0.0,
                 promote_time REAL DEFAULT 0.0,
+                rollback_count INTEGER DEFAULT 0,
                 events_json TEXT DEFAULT '[]',
                 updated_at REAL DEFAULT 0.0
             )
         """)
+        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS rollback_count INTEGER DEFAULT 0")
         conn.commit()
         conn.close()
     except Exception as e:
@@ -73,8 +75,11 @@ def _load_canary_states() -> dict[str, dict]:
                 events = []
             states[name] = {
                 "stage": r["stage"], "oos_bars": r["oos_bars"],
-                "cumulative_pnl": r["cumulative_pnl"], "promote_time": r["promote_time"],
-                "events": events, "updated_at": r["updated_at"],
+                "cumulative_pnl": r["cumulative_pnl"],
+                "promote_time": r["promote_time"],
+                "rollback_count": r["rollback_count"],
+                "events": events,
+                "updated_at": r["updated_at"],
             }
         if states:
             return states
@@ -93,13 +98,14 @@ def _save_canary_states(states: dict[str, dict]) -> None:
             events_json = _json.dumps(s.get("events", []), ensure_ascii=False)
             conn.execute("""
                 INSERT INTO canary_state
-                (factor_name, stage, oos_bars, cumulative_pnl, promote_time, events_json, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (factor_name, stage, oos_bars, cumulative_pnl, promote_time, rollback_count, events_json, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT(factor_name) DO UPDATE SET
                     stage=excluded.stage,
                     oos_bars=excluded.oos_bars,
                     cumulative_pnl=excluded.cumulative_pnl,
                     promote_time=excluded.promote_time,
+                    rollback_count=excluded.rollback_count,
                     events_json=excluded.events_json,
                     updated_at=excluded.updated_at
             """, (
@@ -108,6 +114,7 @@ def _save_canary_states(states: dict[str, dict]) -> None:
                 s.get("oos_bars", 0),
                 s.get("cumulative_pnl", 0.0),
                 s.get("promote_time", 0.0),
+                s.get("rollback_count", 0),
                 events_json,
                 now,
             ))
@@ -200,11 +207,19 @@ def scheduled_evolution_cycle(
             report.duration_sec = _time.time() - t0
             return report
         cb("data_loaded", 10, f"loaded {len(df)} bars")
+        split_at = max(500, int(len(df) * 0.80))
+        split_at = min(split_at, len(df) - 100)
+        research_df = df.iloc[:split_at].copy()
+        shadow_oos_df = df.iloc[split_at:].copy()
+        if len(shadow_oos_df) < 100:
+            report.error = f"insufficient shadow OOS bars: {len(shadow_oos_df)}"
+            report.duration_sec = _time.time() - t0
+            return report
 
         # ── Step 2: GP 搜索 ──
         if gp_pop > 0 and gp_gen > 0:
             cb("gp_search", 15, f"GP search pop={gp_pop} gen={gp_gen}")
-            expressions = _run_gp(df, pop=gp_pop, gen=gp_gen, top_k=gp_top_k)
+            expressions = _run_gp(research_df, pop=gp_pop, gen=gp_gen, top_k=gp_top_k)
             report.gp_new_candidates = len(expressions)
             logger.info("[Evolve] GP found %d candidates", len(expressions))
             cb("gp_done", 40, f"GP found {len(expressions)} candidates")
@@ -226,7 +241,7 @@ def scheduled_evolution_cycle(
 
         # ── Step 3: Shadow 绩效刷新 + Canary 评估 (持久化 + 真正晋升) ──
         cb("shadow_perf", 52, "refreshing shadow factor performance")
-        shadow_count = _update_shadow_performance(df, symbol, timeframe)
+        shadow_count = _update_shadow_performance(shadow_oos_df, symbol, timeframe)
         if shadow_count:
             logger.info("[Evolve] shadow perf refreshed: %d factors", shadow_count)
 
@@ -295,7 +310,7 @@ def scheduled_evolution_cycle(
 
         # ── Step 6: 权重更新 (推送到 AWE 消费同一字段) ──
         cb("weights", 88, "recomputing factor weights")
-        report.weights_updated = _update_weights(df=df)
+        report.weights_updated = _update_weights(df=df, apply=False)
         cb("weights_done", 95, "weights updated" if report.weights_updated else "weights unchanged")
 
         _emit_evolution_story("cycle_complete", report.to_dict())
@@ -448,6 +463,8 @@ def _run_canary_evaluation(
                 dir_state.oos_bars = state.get("oos_bars", 0)
                 dir_state.cumulative_pnl = state.get("cumulative_pnl", 0.0)
                 dir_state.promote_time = state.get("promote_time", 0.0)
+                dir_state.rollback_count = int(state.get("rollback_count", 0) or 0)
+                dir_state.history = [dict(event) for event in state.get("events", []) if isinstance(event, dict)]
 
         for name, score, source in candidates:
             # ★ P0.1: 不再 bypass canary validation. 所有因子 (无论 source
@@ -467,6 +484,9 @@ def _run_canary_evaluation(
                     rollbacks.append(name)
                 else:
                     stay.append(name)
+                if source == "discovered" and director.get_stage(name) != ACTIVE and name not in rollbacks:
+                    rollbacks.append(name)
+                    stay = [item for item in stay if item != name]
             except Exception as e:
                 logger.debug("[Evolve] canary check %s failed: %s", name, e)
                 stay.append(name)
@@ -480,7 +500,8 @@ def _run_canary_evaluation(
                 "oos_bars": s.oos_bars,
                 "cumulative_pnl": s.cumulative_pnl,
                 "promote_time": s.promote_time,
-                "events": [dict(e) for e in getattr(s, "_events", [])],
+                "rollback_count": s.rollback_count,
+                "events": [dict(event) for event in s.history],
                 "updated_at": _time.time(),
             }
         _save_canary_states(new_states)
@@ -612,14 +633,11 @@ def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
     except Exception as e:
         logger.debug("[Evolve] canary_ctx(%s) decision_log failed: %s", name, e)
 
-    # ── 最后: 基于 score 的估算 (无真实数据) ──
-    estimated_pnl = score * 0.05 if abs(score) > 0.01 else 0.0
-    estimated_bars = min(int(abs(score) * 5000), 5000)
-    logger.warning("[Evolve] canary_ctx(%s): no real perf data, estimated pnl=%.4f bars=%d",
-                   name, estimated_pnl, estimated_bars)
+    logger.warning("[Evolve] canary_ctx(%s): no real shadow perf data; staying in current stage", name)
     return CanaryEvalContext(
-        oos_bars=estimated_bars,
-        oos_pnl=estimated_pnl,
+        oos_bars=0,
+        oos_pnl=0.0,
+        additional_metrics={"source": "missing_shadow_perf"},
     )
 
 
@@ -810,7 +828,7 @@ def _apply_learning_biases(
     return adjusted, applied
 
 
-def _update_weights(df: pd.DataFrame | None = None) -> bool:
+def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bool:
     """计算动态权重并推入 factor_portfolio_weights (AWE 同一字段).
 
     从健康报告读取分数 → WeightPolicy + Shadow OOS → DecisionPolicy → RuntimeConfig.patch.
@@ -902,8 +920,25 @@ def _update_weights(df: pd.DataFrame | None = None) -> bool:
         if not new_weights:
             return False
 
-        from config.runtime_config import patch as rc_patch
-        rc_patch({"factor_portfolio_weights": new_weights})
+        if not apply:
+            _emit_evolution_story("weights_candidate", {
+                "factors": len(new_weights),
+                "factor_portfolio_weights": new_weights,
+                "learning_biases": applied_biases,
+                "applied": False,
+                "reason": "scheduled_evolution_is_observation_only",
+            })
+            return False
+
+        from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+        RuntimeConfigMutationService().apply_patch(
+            {"factor_portfolio_weights": new_weights},
+            source="evolution_decision_policy_update_weight",
+            run_id=f"evolution_weight_{int(_time.time())}",
+            actor="system:evolution_orchestrator",
+            action="update_weight",
+            reason="explicit governed weight sync",
+        )
         _emit_evolution_story("weights_updated", {
             "factors": len(new_weights),
             "factor_portfolio_weights": new_weights,

@@ -386,6 +386,7 @@ CREATE TABLE IF NOT EXISTS canary_state (
     oos_bars INTEGER DEFAULT 0,
     cumulative_pnl REAL DEFAULT 0.0,
     promote_time REAL DEFAULT 0.0,
+    rollback_count INTEGER DEFAULT 0,
     events_json TEXT DEFAULT '[]',
     updated_at REAL DEFAULT 0.0
 );

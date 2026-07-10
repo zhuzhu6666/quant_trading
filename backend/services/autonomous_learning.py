@@ -3874,6 +3874,7 @@ def run_autonomous_learning_cycle(
     sample_limit: int = 500,
     recommendation_limit: int = 20,
     submit_offline_deep: bool = True,
+    apply_demo: bool = False,
 ) -> dict[str, Any]:
     from research.learning.governor import RuleEvolutionGovernor
     from backend.services.supervisor_counterfactual import evaluate_counterfactuals
@@ -3898,7 +3899,16 @@ def run_autonomous_learning_cycle(
         limit=recommendation_limit,
         submit_offline_deep=submit_offline_deep,
     )
-    demo_apply = apply_demo_autonomy(db_path=db_path)
+    demo_apply = (
+        apply_demo_autonomy(db_path=db_path)
+        if apply_demo
+        else {
+            "schema_version": "demo_autonomy_apply.v1",
+            "enabled": False,
+            "mode": _autonomy_mode(),
+            "status": "skipped_explicit_apply_required",
+        }
+    )
     conn = _connect(db_path)
     try:
         payload = {

@@ -97,6 +97,29 @@ def _health_by_factor(db_path: str | Path = STATE_DB) -> dict[str, dict[str, Any
         return {}
 
 
+def _canary_by_factor(db_path: str | Path = STATE_DB) -> dict[str, dict[str, Any]]:
+    try:
+        conn = _connect_state(db_path, read_only=True)
+        try:
+            rows = conn.execute(
+                "SELECT factor_name, stage, oos_bars, cumulative_pnl, updated_at FROM canary_state"
+            ).fetchall()
+            return {
+                str(row["factor_name"]): {
+                    "stage": str(row["stage"] or "SHADOW").upper(),
+                    "oos_bars": int(row["oos_bars"] or 0),
+                    "cumulative_pnl": float(row["cumulative_pnl"] or 0.0),
+                    "updated_at": float(row["updated_at"] or 0.0),
+                }
+                for row in rows
+                if str(row["factor_name"] or "")
+            }
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
 def _latest_policy_by_factor() -> dict[str, dict[str, Any]]:
     return _latest_policy_by_factor_for_db(STATE_DB)
 
@@ -257,6 +280,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         dead = set()
 
     health = _health_by_factor(db_path)
+    canary = _canary_by_factor(db_path)
     latest_policy = _latest_policy_by_factor_for_db(db_path)
     factor_governance_shadow = _factor_governance_shadow_by_factor(db_path)
     latest_snapshot = _latest_catalog_snapshot_meta(db_path)
@@ -267,6 +291,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         | meta_names
         | set(health)
         | set(factor_governance_shadow)
+        | set(canary)
     )
 
     items: list[dict[str, Any]] = []
@@ -312,6 +337,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "history_sample_policy": sample_policy,
             "health_status": str(h.get("status") or "UNKNOWN"),
             "health_score": float(h.get("score") or 0.0),
+            "canary": canary.get(name, {}),
             "shadow_perf": _shadow_perf(name) if source in {"shadow", "discovered"} else {},
             "factor_governance_shadow": fg_shadow,
             "model_weakness_score": float(fg_shadow.get("weakness_score") or fg_shadow.get("avg_weakness_score") or 0.0),

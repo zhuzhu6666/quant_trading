@@ -412,6 +412,7 @@ class AutonomousEvolutionNurseryRunner:
             db_path=self.db_path,
             sample_limit=max(1, min(int(sample_limit), 2000)),
             recommendation_limit=max(1, min(int(recommendation_limit), 100)),
+            apply_demo=True,
         )
 
     def _run_demo_apply(self, *, suggestion_limit: int) -> dict[str, Any]:

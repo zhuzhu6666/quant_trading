@@ -94,6 +94,18 @@ class FactorGovernanceOrchestrator:
                 run_id=str(run.get("run_id") or ""),
                 source="factor_governance_cycle",
             )
+            posture = self._autonomy_posture()
+            if posture in {"shadow_only", "frozen"}:
+                summary = {
+                    "status": "observation_only",
+                    "reason": f"autonomy_posture:{posture}",
+                    "catalog_count": len(catalog),
+                    "actions": actions,
+                    "catalog_snapshot": catalog_snapshot,
+                    "redundancy_report": {},
+                }
+                finish_evolution_run(run["run_id"], status=status, summary=summary)
+                return summary
             cfg = runtime_config.shared()
             redundancy_report = RedundancyDetector().build_report(
                 catalog,
@@ -133,6 +145,72 @@ class FactorGovernanceOrchestrator:
 
     # ── Action selection ────────────────────────────────────────────
 
+    @staticmethod
+    def _autonomy_posture() -> str:
+        try:
+            from backend.services.autonomy_health import AutonomyHealthService
+
+            return str(AutonomyHealthService().latest_snapshot().get("posture") or "unknown")
+        except Exception:
+            return "unknown"
+
+    @staticmethod
+    def _factor_has_pending_effect(factor_id: str) -> bool:
+        if not factor_id:
+            return False
+        try:
+            conn = get_state_pg_conn(read_only=True)
+            try:
+                row = conn.execute(
+                    _p("""
+                    SELECT l.status AS application_status, e.status AS effect_status
+                    FROM learning_application_log l
+                    LEFT JOIN learning_application_effect e
+                      ON e.application_id=l.application_id
+                    WHERE l.scope_type='factor'
+                      AND l.scope_key=?
+                    ORDER BY l.created_at DESC
+                    LIMIT 1
+                    """),
+                    (factor_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                effect_status = str(row["effect_status"] or "")
+                return (
+                    str(row["application_status"] or "") == "observing"
+                    or effect_status in {"", "observing", "mixed"}
+                )
+            finally:
+                conn.close()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _scoped_factor_rollback_patch(
+        factor_id: str,
+        rollback_cfg: dict[str, Any],
+        current_cfg: dict[str, Any],
+    ) -> dict[str, Any]:
+        patch: dict[str, Any] = {}
+        if "factor_signal_config" in rollback_cfg:
+            current_signal = dict(current_cfg.get("factor_signal_config") or {})
+            rollback_signal = dict(rollback_cfg.get("factor_signal_config") or {})
+            if factor_id in rollback_signal:
+                current_signal[factor_id] = dict(rollback_signal[factor_id] or {})
+            else:
+                current_signal.pop(factor_id, None)
+            patch["factor_signal_config"] = current_signal
+        if "factor_portfolio_weights" in rollback_cfg:
+            current_weights = dict(current_cfg.get("factor_portfolio_weights") or {})
+            rollback_weights = dict(rollback_cfg.get("factor_portfolio_weights") or {})
+            if factor_id in rollback_weights:
+                current_weights[factor_id] = float(rollback_weights[factor_id] or 0.0)
+            else:
+                current_weights.pop(factor_id, None)
+            patch["factor_portfolio_weights"] = current_weights
+        return patch
+
     def _apply_runtime_patch(self, patch: dict[str, Any], *, source: str, run_id: str) -> dict[str, Any]:
         return RuntimeConfigMutationService(overlay=self.overlay).apply_patch(
             patch,
@@ -157,10 +235,18 @@ class FactorGovernanceOrchestrator:
                 FROM learning_application_log l
                 JOIN learning_application_effect e ON e.application_id = l.application_id
                 WHERE l.scope_type='factor'
-                  AND l.status='applied'
-                  AND e.status IN ('observing','applied')
+                  AND l.status IN ('applied','observing','ineffective')
+                  AND e.status IN ('observing','applied','ineffective')
                   AND e.observed_trade_count >= ?
                   AND e.delta_avg_reward <= ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM learning_application_log newer
+                      WHERE newer.scope_type='factor'
+                        AND newer.scope_key=l.scope_key
+                        AND newer.created_at > l.created_at
+                        AND newer.status NOT IN ('rolled_back','superseded')
+                  )
                 ORDER BY e.updated_at DESC, l.created_at DESC
                 LIMIT 5
                 """),
@@ -192,13 +278,20 @@ class FactorGovernanceOrchestrator:
                     ))
                     continue
                 before_cfg = runtime_config.shared().to_dict()
-                runtime_config.replace(RuntimeConfig.from_dict(rollback_cfg))
-                self.overlay.replace_overlay(
-                    {
-                        "factor_signal_config": rollback_cfg.get("factor_signal_config", {}),
-                        "factor_portfolio_weights": rollback_cfg.get("factor_portfolio_weights", {}),
-                        "extra": rollback_cfg.get("extra", {}),
-                    },
+                rollback_patch = self._scoped_factor_rollback_patch(factor_id, rollback_cfg, before_cfg)
+                if not rollback_patch:
+                    actions.append(self._audit_action(
+                        run,
+                        item,
+                        "rollback_factor_action",
+                        "superseded",
+                        evidence,
+                        verdict,
+                        result={"reason": "missing_factor_scoped_rollback_config"},
+                    ))
+                    continue
+                self._apply_runtime_patch(
+                    rollback_patch,
                     source="factor_governance_auto_rollback",
                     run_id=str(run.get("run_id") or ""),
                 )
@@ -436,6 +529,8 @@ class FactorGovernanceOrchestrator:
         for item in candidates:
             if len(actions) >= max_actions:
                 break
+            if self._factor_has_pending_effect(str(item.get("factor_id") or "")):
+                continue
             evidence = self._promotion_evidence(item, cfg)
             if not evidence["eligible"]:
                 continue
@@ -504,6 +599,8 @@ class FactorGovernanceOrchestrator:
             if not health_weak and not model_weak:
                 continue
             name = str(item["factor_id"])
+            if self._factor_has_pending_effect(name):
+                continue
             old_w = float(current_weights.get(name, item.get("weight", 0.0)) or 0.0)
             if old_w <= 0:
                 continue
@@ -582,6 +679,8 @@ class FactorGovernanceOrchestrator:
         for item in catalog:
             if not item.get("eligible_for_live") or item.get("role") != "alpha":
                 continue
+            if self._factor_has_pending_effect(str(item.get("factor_id") or "")):
+                continue
             score = float(item.get("health_score") or 0.0)
             model_evidence = self._model_governance_evidence(item, cfg)
             if (score > 0.0 and score < severe) or bool(model_evidence.get("weak_for_disable")):
@@ -637,6 +736,8 @@ class FactorGovernanceOrchestrator:
         for item in catalog:
             if item.get("source") != "discovered" or item.get("enabled"):
                 continue
+            if self._factor_has_pending_effect(str(item.get("factor_id") or "")):
+                continue
             score = float(item.get("health_score") or 0.0)
             model_evidence = self._model_governance_evidence(item, cfg)
             if (score > 0.0 and score < severe) or bool(model_evidence.get("weak_for_disable")):
@@ -688,6 +789,7 @@ class FactorGovernanceOrchestrator:
         max_drawdown = abs(float(perf.get("max_drawdown") or 0.0))
         health_score = float(item.get("health_score") or 0.0)
         health_status = str(item.get("health_status") or "UNKNOWN")
+        canary_stage = str((item.get("canary") or {}).get("stage") or "").upper()
         min_oos = int(getattr(cfg, "factor_governance_shadow_min_oos_bars", 100) or 100)
         min_valid = int(getattr(cfg, "factor_governance_shadow_min_valid", 80) or 80)
         min_hit = float(getattr(cfg, "factor_governance_shadow_min_hit_rate", 0.5) or 0.5)
@@ -695,7 +797,8 @@ class FactorGovernanceOrchestrator:
         watch = float(getattr(cfg, "factor_health_watch_threshold", 40.0) or 40.0)
         health_ok = health_status in {"UNKNOWN", "HEALTHY", "WATCH"} or health_score >= watch
         eligible = (
-            oos_bars >= min_oos
+            canary_stage == "ACTIVE"
+            and oos_bars >= min_oos
             and n_valid >= min_valid
             and cumulative_pnl > 0.0
             and hit_rate >= min_hit
@@ -711,6 +814,7 @@ class FactorGovernanceOrchestrator:
             "max_drawdown": max_drawdown,
             "health_score": health_score,
             "health_status": health_status,
+            "canary_stage": canary_stage,
             "thresholds": {
                 "min_oos_bars": min_oos,
                 "min_valid": min_valid,

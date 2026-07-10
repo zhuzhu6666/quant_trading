@@ -1551,7 +1551,7 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     )
     monkeypatch.setattr(governor_module, "RuleEvolutionGovernor", _Gov)
 
-    result = al.run_autonomous_learning_cycle(db_path=db_path, sample_limit=20)
+    result = al.run_autonomous_learning_cycle(db_path=db_path, sample_limit=20, apply_demo=True)
 
     assert result["counterfactuals"] == {"count": 1}
     assert result["trace_maturation"]["matured"] == 1
@@ -1572,3 +1572,9 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert calls[7] == "event_window_governance"
     assert calls[8] == "repair_contracts"
     assert calls[-1] == "demo_apply"
+
+    calls.clear()
+    result = al.run_autonomous_learning_cycle(db_path=db_path, sample_limit=20)
+
+    assert result["demo_autonomy"]["status"] == "skipped_explicit_apply_required"
+    assert "demo_apply" not in calls
