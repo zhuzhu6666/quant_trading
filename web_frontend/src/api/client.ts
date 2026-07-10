@@ -389,10 +389,6 @@ export async function getSystemLoad(): Promise<SystemLoadPayload> {
   return getJson<SystemLoadPayload>("/api/system/load");
 }
 
-export async function getBackendReadiness(): Promise<BackendReadinessPayload> {
-  return getJson<BackendReadinessPayload>("/api/ops/backend-readiness");
-}
-
 export async function getLogTail(lines = 30): Promise<Record<string, unknown>> {
   return getJson<Record<string, unknown>>(`/api/logs/tail?lines=${encodeURIComponent(String(lines))}`);
 }

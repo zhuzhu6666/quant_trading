@@ -6,10 +6,9 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { MetricCard } from "@/components/Card";
-import { Field, StatTile, numberTone, toneFromStatus, type Tone } from "@/components/DashboardBits";
+import { CompactMetric as ModelMiniMetric, Field, StatTile, numberTone, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import {
-  getBackendReadiness,
   getFactorGovernanceLightgbmAdvisories,
   getFactorGovernanceLightgbmAudits,
   getLearningDatasetQualityHealth,
@@ -28,6 +27,7 @@ import {
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
+import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 
 function formatPct(value: number): string {
   return `${formatDecimal(value * 100, 1)}%`;
@@ -91,26 +91,6 @@ function distributionSummary(record: unknown): string {
   return entries.length ? entries.join(" · ") : "--";
 }
 
-function ModelMiniMetric({
-  label,
-  value,
-  detail,
-  tone = "mute",
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: Tone;
-}) {
-  return (
-    <div className={`model-mini-metric model-mini-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
-}
-
 function ModelEventItem({
   title,
   meta,
@@ -144,12 +124,7 @@ function ModelEventItem({
 }
 
 export function ModelsPage() {
-  const readinessQuery = useQuery({
-    queryKey: ["backend-readiness", "models-page"],
-    queryFn: getBackendReadiness,
-    refetchInterval: 60_000,
-    staleTime: 20_000,
-  });
+  const readinessQuery = useBackendReadinessQuery(60_000);
   const datasetQuery = useQuery({
     queryKey: ["learning-dataset-readiness"],
     queryFn: getLearningDatasetReadiness,

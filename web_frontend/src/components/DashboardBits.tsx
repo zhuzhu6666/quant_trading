@@ -51,3 +51,90 @@ export function Field({ label, value, tone }: { label: string; value: ReactNode;
     </div>
   );
 }
+
+export function CompactMetric({
+  label,
+  value,
+  detail,
+  tone = "mute",
+  className = "",
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  detail?: ReactNode;
+  tone?: Tone;
+  className?: string;
+}) {
+  return (
+    <div className={`compact-metric compact-metric-${tone} ${className}`.trim()}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      {detail ? <small>{detail}</small> : null}
+    </div>
+  );
+}
+
+export function ProgressMetric({
+  label,
+  value,
+  detail,
+  tone = "mute",
+}: {
+  label: string;
+  value: number;
+  detail?: ReactNode;
+  tone?: Tone;
+}) {
+  const safeValue = Math.min(Math.max(Number.isFinite(value) ? value : 0, 0), 100);
+  return (
+    <div className={`progress-metric progress-${tone}`}>
+      <div><span>{label}</span><strong>{safeValue.toFixed(0)}%</strong></div>
+      <i aria-hidden="true"><b style={{ width: `${safeValue}%` }} /></i>
+      {detail ? <small>{detail}</small> : null}
+    </div>
+  );
+}
+
+export function SectionHead({
+  title,
+  status,
+  tone = "mute",
+}: {
+  title: ReactNode;
+  status?: string;
+  tone?: Tone;
+}) {
+  return (
+    <div className="section-head">
+      <h3>{title}</h3>
+      {status ? <StatusPill status={status} tone={tone} /> : null}
+    </div>
+  );
+}
+
+export function PageHeader({
+  eyebrow,
+  title,
+  description,
+  children,
+}: {
+  eyebrow: ReactNode;
+  title: ReactNode;
+  description?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <header className="dashboard-header">
+      <div>
+        <div className="eyebrow">{eyebrow}</div>
+        <h1>{title}</h1>
+        {description ? <p>{description}</p> : null}
+      </div>
+      {children ? <div className="page-header-actions">{children}</div> : null}
+    </header>
+  );
+}
+
+export function EmptyState({ children }: { children: ReactNode }) {
+  return <div className="empty-state-small" role="status">{children}</div>;
+}

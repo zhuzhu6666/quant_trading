@@ -7,12 +7,13 @@ import {
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { MetricCard } from "@/components/Card";
+import { CompactMetric as MiniMetric, Field, StatTile, numberTone, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLiveState } from "@/hooks/useLiveState";
+import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 import {
   getAccount,
-  getBackendReadiness,
   getHealth,
   getLogTail,
   getLoopStatus,
@@ -23,66 +24,6 @@ import {
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickString } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
 import { formatDecimal, formatMoney, formatTime } from "@/lib/format";
-
-type Tone = "ok" | "warn" | "bad" | "mute";
-
-function toneFromStatus(status: string): Tone {
-  const normalized = status.toLowerCase();
-  if (["ok", "healthy", "connected", "ready", "running", "active"].includes(normalized)) return "ok";
-  if (["degraded", "unknown", "idle", "warming"].includes(normalized)) return "warn";
-  if (["error", "failed", "blocked", "down", "offline"].includes(normalized)) return "bad";
-  return "mute";
-}
-
-function numberTone(value: number): Tone {
-  if (value > 0) return "ok";
-  if (value < 0) return "bad";
-  return "mute";
-}
-
-function StatTile({
-  label,
-  value,
-  detail,
-  tone = "mute",
-  icon: Icon,
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: Tone;
-  icon?: typeof Activity;
-}) {
-  return (
-    <div className={`stat-tile stat-${tone}`}>
-      <div className="stat-label">
-        {Icon ? <Icon size={15} /> : null}
-        <span>{label}</span>
-      </div>
-      <div className="stat-value">{value}</div>
-      {detail ? <div className="stat-detail">{detail}</div> : null}
-    </div>
-  );
-}
-
-function Field({ label, value, tone }: { label: string; value: string; tone?: Tone }) {
-  return (
-    <div className="field-row">
-      <span>{label}</span>
-      {tone ? <StatusPill status={value} tone={tone} /> : <strong>{value}</strong>}
-    </div>
-  );
-}
-
-function MiniMetric({ label, value, detail, tone }: { label: string; value: string; detail?: string; tone?: Tone }) {
-  return (
-    <div className={`overview-mini-metric ${tone ? `overview-mini-${tone}` : ""}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
-}
 
 function hasMeaningfulText(value: unknown): boolean {
   if (value === undefined || value === null) {
@@ -98,6 +39,7 @@ function translatedText(value: unknown): string {
 }
 
 function useDashboardQueries() {
+  const readiness = useBackendReadinessQuery();
   return {
     health: useQuery({
       queryKey: ["health"],
@@ -135,12 +77,7 @@ function useDashboardQueries() {
       refetchInterval: 15_000,
       staleTime: 5_000,
     }),
-    readiness: useQuery({
-      queryKey: ["backend-readiness", "overview"],
-      queryFn: getBackendReadiness,
-      refetchInterval: 15_000,
-      staleTime: 5_000,
-    }),
+    readiness,
     logs: useQuery({
       queryKey: ["logs-tail", "overview"],
       queryFn: () => getLogTail(24),

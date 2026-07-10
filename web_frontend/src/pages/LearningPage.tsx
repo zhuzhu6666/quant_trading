@@ -1,11 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { BrainCircuit, FileCheck2, GitBranch, GraduationCap, Layers3, ShieldCheck } from "lucide-react";
 import { MetricCard } from "@/components/Card";
-import { Field, StatTile, numberTone, toneFromStatus } from "@/components/DashboardBits";
+import { CompactMetric as LearningMiniMetric, Field, StatTile, numberTone, toneFromStatus } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import {
   getAutonomousLearningSamples,
-  getBackendReadiness,
   getLearningApplications,
   getLearningLifecycle,
   getLearningReviews,
@@ -17,6 +16,7 @@ import {
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
 import { translateDisplayValue, translateReasonText, translateScopeLabel } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
+import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 
 function countFrom(record: unknown, key: string): number {
   return pickNumber(record, [key], 0);
@@ -43,26 +43,6 @@ function statusTone(status: string): "ok" | "warn" | "bad" | "mute" {
   if (["proposed", "pending", "watch", "queued", "review"].includes(normalized)) return "warn";
   if (["failed", "rejected", "rolled_back", "error", "blocked"].includes(normalized)) return "bad";
   return "mute";
-}
-
-function LearningMiniMetric({
-  label,
-  value,
-  detail,
-  tone = "mute",
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: "ok" | "warn" | "bad" | "mute";
-}) {
-  return (
-    <div className={`learning-mini-metric learning-mini-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
 }
 
 function shortId(value: string): string {
@@ -119,12 +99,7 @@ export function LearningPage() {
     refetchInterval: 60_000,
     staleTime: 20_000,
   });
-  const readinessQuery = useQuery({
-    queryKey: ["backend-readiness", "learning"],
-    queryFn: getBackendReadiness,
-    refetchInterval: 30_000,
-    staleTime: 10_000,
-  });
+  const readinessQuery = useBackendReadinessQuery(30_000);
 
   const summary = asRecord(summaryQuery.data);
   const suggestionCounts = asRecord(pick(summary, ["suggestions"]));

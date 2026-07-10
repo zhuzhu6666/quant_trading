@@ -7,6 +7,7 @@ const requiredFiles = [
   "src/App.tsx",
   "src/main.css",
   "src/api/client.ts",
+  "src/api/domains/readiness.ts",
   "src/contexts/AuthContext.tsx",
   "src/hooks/useLiveState.ts",
   "src/pages/LoginPage.tsx",
@@ -18,6 +19,7 @@ const requiredFiles = [
   "src/pages/LearningPage.tsx",
   "src/pages/ModelsPage.tsx",
   "src/pages/V15CockpitPage.tsx",
+  "src/pages/V16BrainPage.tsx",
 ];
 
 let fail = false;
@@ -51,6 +53,8 @@ assert.match(tradingSource, /emergencyClose\(true\)/);
 
 const appSource = fs.readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
 assert.match(appSource, /path="\/v15"/);
+assert.match(appSource, /path="\/v16"/);
+assert.match(appSource, /lazy\(\(\) => import/);
 
 const v15Source = fs.readFileSync(path.join(process.cwd(), "src/pages/V15CockpitPage.tsx"), "utf8");
 assert.match(v15Source, /order_outcome_causality_replay/);

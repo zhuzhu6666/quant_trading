@@ -2,7 +2,6 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import {
-  getBackendReadiness,
   getCtraderTokenStatus,
   getExternalDataStatus,
   getHealth,
@@ -12,11 +11,12 @@ import {
   getSystemDbHealth,
 } from "@/api/client";
 import { MetricCard } from "@/components/Card";
-import { Field, toneFromStatus, type Tone } from "@/components/DashboardBits";
+import { CompactMetric as OpsMiniMetric, Field, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { formatTime } from "@/lib/format";
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
+import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 
 function dbFreshness(data: unknown): "ok" | "warn" | "bad" {
   const overall = pickString(data, ["overall", "status", "state"], "");
@@ -80,26 +80,6 @@ function summarizeIssues(raw: string): { short: string; full: string; count: num
   };
 }
 
-function OpsMiniMetric({
-  label,
-  value,
-  detail,
-  tone = "mute",
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: Tone;
-}) {
-  return (
-    <div className={`ops-mini-metric ops-mini-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
-}
-
 export function OpsPage() {
   const healthQuery = useQuery({
     queryKey: ["ops-health"],
@@ -113,12 +93,7 @@ export function OpsPage() {
     refetchInterval: 15_000,
     staleTime: 5_000,
   });
-  const readinessQuery = useQuery({
-    queryKey: ["ops-backend-readiness"],
-    queryFn: getBackendReadiness,
-    refetchInterval: 15_000,
-    staleTime: 5_000,
-  });
+  const readinessQuery = useBackendReadinessQuery();
   const alertsQuery = useQuery({
     queryKey: ["ops-alerts"],
     queryFn: getOpsAlerts,

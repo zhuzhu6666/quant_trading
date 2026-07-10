@@ -21,7 +21,6 @@ import {
 import {
   evaluateLiveAutonomyUnlock,
   evaluateBrainLiveReadyGuardrail,
-  getBackendReadiness,
   getAutonomyProposals,
   getBrainActionPlanEvals,
   getBrainActionPlans,
@@ -42,10 +41,11 @@ import {
   unlockLiveAutonomy,
 } from "@/api/client";
 import { MetricCard } from "@/components/Card";
-import { Field, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
+import { CompactMetric, Field, SectionHead, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { JsonBlock } from "@/components/JsonBlock";
 import { StatusPill } from "@/components/StatusPill";
 import { formatDecimal } from "@/lib/format";
+import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -286,16 +286,6 @@ function CompactFacts({ facts }: { facts: Array<{ label: string; value: string; 
   );
 }
 
-function CompactMetric({ label, value, detail, tone = "mute" }: { label: string; value: string; detail?: string; tone?: Tone }) {
-  return (
-    <div className={`v15-compact-metric v15-compact-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
-}
-
 function ChainStep({
   icon: Icon,
   label,
@@ -488,15 +478,6 @@ function CoveragePanel({
           </div>
         );
       })}
-    </div>
-  );
-}
-
-function SectionHead({ title, status, tone = "mute" }: { title: string; status?: string; tone?: Tone }) {
-  return (
-    <div className="v15-section-head">
-      <h3>{title}</h3>
-      {status ? <StatusPill status={status} tone={tone} /> : null}
     </div>
   );
 }
@@ -848,7 +829,7 @@ function ProposalRegistryList({
 
 export function V16BrainPage() {
   const queryClient = useQueryClient();
-  const readinessQuery = useQuery({ queryKey: ["v16", "readiness"], queryFn: getBackendReadiness, refetchInterval: 15_000, staleTime: 5_000 });
+  const readinessQuery = useBackendReadinessQuery();
   const brainStateQuery = useQuery({ queryKey: ["v16", "brain-state"], queryFn: () => getBrainState(false), refetchInterval: 20_000, staleTime: 8_000 });
   const brainMemoryQuery = useQuery({ queryKey: ["v16", "brain-memory"], queryFn: () => getBrainMemory(false, 80), refetchInterval: 30_000, staleTime: 10_000 });
   const brainActionPlansQuery = useQuery({ queryKey: ["v16", "brain-action-plans"], queryFn: () => getBrainActionPlans(false, 80), refetchInterval: 30_000, staleTime: 10_000 });

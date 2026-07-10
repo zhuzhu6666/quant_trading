@@ -1,0 +1,31 @@
+/* Single token source; later declarations intentionally win. */
+:root {
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --danger: #d14343;
+  --ok: #188d5f;
+  --warn: #9c6a00;
+  --bg: #eef3f7;
+  --bg-elev: rgba(255, 255, 255, 0.9);
+  --line: rgba(145, 158, 179, 0.34);
+  --text: #0b1220;
+  --muted: #536173;
+  --primary: #0a84ff;
+  --primary-weak: #e8f2ff;
+  --surface: rgba(255, 255, 255, 0.86);
+  --surface-soft: rgba(248, 250, 252, 0.82);
+  --surface-raised: rgba(255, 255, 255, 0.88);
+  --ink: #0b1220;
+  --ink-soft: #536173;
+  --border-strong: rgba(145, 158, 179, 0.44);
+  --blue: #0a84ff;
+  --green: #1f9d73;
+  --amber: #b86e00;
+  --red: #d93636;
+  --focus: #0a84ff;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.08), 0 1px 0 rgba(255, 255, 255, 0.72) inset;
+  --shadow-md: 0 16px 36px rgba(31, 43, 68, 0.1), 0 1px 0 rgba(255, 255, 255, 0.72) inset;
+  --shadow-lg: 0 24px 64px rgba(31, 43, 68, 0.14), 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+  --ease-spring: cubic-bezier(0.2, 0.8, 0.2, 1);
+}

@@ -1,21 +1,30 @@
+import { useEffect, useRef } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { LogOut, LayoutDashboard, BarChart3, Activity, ShieldAlert, Settings2, BrainCircuit, Microscope, Cpu, Rocket } from "lucide-react";
 import { getSystemLoad } from "@/api/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDecimal } from "@/lib/format";
+import { queryKeys } from "@/api/queryKeys";
 
-const navItems = [
-  { to: "/overview", label: "总览", icon: LayoutDashboard },
-  { to: "/trading", label: "交易", icon: Activity },
-  { to: "/pnl", label: "盈亏", icon: BarChart3 },
-  { to: "/risk", label: "风控", icon: ShieldAlert },
-  { to: "/learning", label: "学习", icon: BrainCircuit },
-  { to: "/models", label: "模型", icon: Microscope },
-  { to: "/v15", label: "运行中枢", icon: Rocket },
-  { to: "/v16", label: "自治链路", icon: BrainCircuit },
-  { to: "/ops", label: "运维", icon: Settings2 },
+const navGroups = [
+  { label: "交易运行", items: [
+    { to: "/overview", label: "总览", icon: LayoutDashboard },
+    { to: "/trading", label: "交易", icon: Activity },
+    { to: "/pnl", label: "盈亏", icon: BarChart3 },
+    { to: "/risk", label: "风控", icon: ShieldAlert },
+  ] },
+  { label: "自主进化", items: [
+    { to: "/learning", label: "学习", icon: BrainCircuit },
+    { to: "/models", label: "模型", icon: Microscope },
+    { to: "/v15", label: "运行中枢", icon: Rocket },
+    { to: "/v16", label: "自治链路", icon: BrainCircuit },
+  ] },
+  { label: "系统", items: [
+    { to: "/ops", label: "运维", icon: Settings2 },
+  ] },
 ];
+const navItems = navGroups.flatMap((group) => group.items);
 
 function loadTone(value: number): "ok" | "warn" | "bad" {
   if (value >= 85) return "bad";
@@ -38,9 +47,10 @@ function NavLoadItem({ label, value }: { label: string; value: number }) {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const location = useLocation();
+  const mainRef = useRef<HTMLElement>(null);
   const { logout, user } = useAuth();
   const systemLoadQuery = useQuery({
-    queryKey: ["system-load", "chrome"],
+    queryKey: queryKeys.systemLoad,
     queryFn: getSystemLoad,
     refetchInterval: 5_000,
     staleTime: 2_500,
@@ -48,6 +58,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   });
 
   const active = location.pathname;
+  useEffect(() => {
+    mainRef.current?.focus({ preventScroll: true });
+  }, [active]);
   if (active === "/login") {
     return <>{children}</>;
   }
@@ -62,21 +75,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="app-chrome">
         <nav className="app-nav" aria-label="主导航">
           <div className="nav-link-group">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = active === item.to;
-              return (
-                <Link
-                  key={item.to}
-                  to={item.to}
-                  className={`nav-link ${isActive ? "nav-link-active" : ""}`}
-                  aria-current={isActive ? "page" : undefined}
-                >
-                  <Icon size={16} aria-hidden="true" />
-                  <span>{item.label}</span>
-                </Link>
-              );
-            })}
+            {navGroups.map((group) => (
+              <div className="nav-section" key={group.label}>
+                <span className="nav-section-label">{group.label}</span>
+                <div className="nav-section-links">
+                  {group.items.map((item) => {
+                    const Icon = item.icon;
+                    const isActive = active === item.to;
+                    return (
+                      <Link key={item.to} to={item.to} className={`nav-link ${isActive ? "nav-link-active" : ""}`} aria-current={isActive ? "page" : undefined}>
+                        <Icon size={16} aria-hidden="true" /><span>{item.label}</span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
           <div className="nav-system-load" aria-label="服务器实时负载">
             <span className="nav-load-title">
@@ -102,7 +116,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </nav>
       </div>
-      <main id="main-content" className="app-main" tabIndex={-1}>{children}</main>
+      <main ref={mainRef} id="main-content" className="app-main" tabIndex={-1}>{children}</main>
     </div>
   );
 }

@@ -21,7 +21,6 @@ import {
   getAutonomousLearningSamples,
   getAutonomyScopeApprovalLatest,
   getAutonomyScopeEnforcementLatest,
-  getBackendReadiness,
   getEvolutionRuns,
   getFactorCatalog,
   getIncidentControl,
@@ -43,9 +42,11 @@ import {
 } from "@/api/client";
 import { ActionButton } from "@/components/ActionButton";
 import { MetricCard } from "@/components/Card";
-import { Field, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
+import { CompactMetric, Field, ProgressMetric, SectionHead, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { JsonBlock } from "@/components/JsonBlock";
 import { StatusPill } from "@/components/StatusPill";
+import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
+import { queryKeys } from "@/api/queryKeys";
 import { asRecord, isRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
 import { translateDisplayValue, translateReasonText } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
@@ -102,42 +103,6 @@ function safeLabel(value: unknown): string {
   const record = asRecord(value);
   const direct = pickString(record, ["label", "name", "id", "key", "status", "reason", "message"], "");
   return direct ? translateReasonText(direct) : "--";
-}
-
-function CompactMetric({
-  label,
-  value,
-  detail,
-  tone = "mute",
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: Tone;
-}) {
-  return (
-    <div className={`v15-compact-metric v15-compact-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
-}
-
-function ProgressMetric({ label, value, detail, tone }: { label: string; value: number; detail?: string; tone?: Tone }) {
-  const pct = clampPct(value);
-  return (
-    <div className={`v15-progress v15-progress-${tone || metricTone(pct)}`}>
-      <div className="v15-progress-head">
-        <span>{label}</span>
-        <strong>{formatDecimal(pct, 1)}%</strong>
-      </div>
-      <div className="v15-progress-track" aria-label={`${label} ${formatDecimal(pct, 1)}%`}>
-        <i style={{ width: `${pct}%` }} />
-      </div>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
 }
 
 function DataList({ items, empty = "无记录" }: { items: unknown[]; empty?: string }) {
@@ -643,15 +608,6 @@ function barWindowIssues(items: unknown[], mode: "blocking" | "notice"): unknown
   });
 }
 
-function SectionHead({ title, status, tone = "mute" }: { title: string; status?: string; tone?: Tone }) {
-  return (
-    <div className="v15-section-head">
-      <h3>{title}</h3>
-      {status ? <StatusPill status={status} tone={tone} /> : null}
-    </div>
-  );
-}
-
 async function runAndDiscard(action: Promise<unknown>): Promise<void> {
   await action;
 }
@@ -661,7 +617,7 @@ export function V15CockpitPage() {
   const [selectedReplayDecisionId, setSelectedReplayDecisionId] = useState("latest_trade");
   const queryClient = useQueryClient();
 
-  const readinessQuery = useQuery({ queryKey: ["v15", "readiness"], queryFn: getBackendReadiness, refetchInterval: 15_000, staleTime: 5_000 });
+  const readinessQuery = useBackendReadinessQuery();
   const phase0Query = useQuery({ queryKey: ["v15", "phase0"], queryFn: getV15Phase0, refetchInterval: 30_000, staleTime: 10_000 });
   const replayQuery = useQuery({ queryKey: ["v15", "replay-latest"], queryFn: getReplayLatest, refetchInterval: 30_000, staleTime: 10_000 });
   const replayChoicesQuery = useQuery({ queryKey: ["v15", "replay-bar-decisions"], queryFn: () => getReplayBarDecisions(30), refetchInterval: 60_000, staleTime: 20_000 });
@@ -703,7 +659,7 @@ export function V15CockpitPage() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["v15", "scope-enforcement"] });
       void queryClient.invalidateQueries({ queryKey: ["v15", "incident-control"] });
-      void queryClient.invalidateQueries({ queryKey: ["v15", "readiness"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.readiness });
     },
   });
   const playbookMutation = useMutation({
@@ -718,7 +674,7 @@ export function V15CockpitPage() {
     mutationFn: (mode: string) => setIncidentControl(mode, `web_v15_cockpit:${mode}`),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["v15", "incident-control"] });
-      void queryClient.invalidateQueries({ queryKey: ["v15", "readiness"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.readiness });
     },
   });
 

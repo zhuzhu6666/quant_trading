@@ -2,12 +2,11 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Gauge, ShieldAlert, ShieldCheck } from "lucide-react";
 import { MetricCard } from "@/components/Card";
-import { Field, StatTile, toneFromStatus } from "@/components/DashboardBits";
+import { CompactMetric as RiskMiniMetric, Field, StatTile, toneFromStatus } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLiveState } from "@/hooks/useLiveState";
 import {
-  getBackendReadiness,
   getRecentTradeTraces,
   getRiskPolicyVerdicts,
   getRiskSummary,
@@ -25,6 +24,7 @@ import {
 } from "@/lib/compat";
 import { translateDisplayValue, translateReasonText } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
+import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 
 function itemLabel(value: unknown): string {
   const item = asRecord(value);
@@ -49,26 +49,6 @@ function percentTone(value: number): "ok" | "warn" | "bad" | "mute" {
   if (value >= 100) return "bad";
   if (value >= 70) return "warn";
   return "ok";
-}
-
-function RiskMiniMetric({
-  label,
-  value,
-  detail,
-  tone = "mute",
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: "ok" | "warn" | "bad" | "mute";
-}) {
-  return (
-    <div className={`risk-mini-metric risk-mini-${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
 }
 
 function RiskBar({
@@ -140,12 +120,7 @@ export function RiskPage() {
     refetchInterval: 15_000,
     staleTime: 5_000,
   });
-  const readinessQuery = useQuery({
-    queryKey: ["backend-readiness", "risk"],
-    queryFn: getBackendReadiness,
-    refetchInterval: 15_000,
-    staleTime: 5_000,
-  });
+  const readinessQuery = useBackendReadinessQuery();
   const policyQuery = useQuery({
     queryKey: ["risk-policy-verdicts"],
     queryFn: () => getRiskPolicyVerdicts(50),
