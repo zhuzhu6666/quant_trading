@@ -47,7 +47,7 @@ def test_patch_runtime_endpoint_rejects_invalid_risk_bounds(monkeypatch, tmp_pat
 def test_patch_runtime_endpoint_persists_and_runtime_config_reads_updated_values(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
     path.write_text(
-        "system:\n  mode: live\nctrader:\n  send_orders: false\nruntime:\n  shadow_top_k: 3\n  factor_signal_threshold: 0.2\n",
+        "system:\n  mode: live\nctrader:\n  send_orders: false\n  host: demo.ctraderapi.com\nruntime:\n  shadow_top_k: 3\n  factor_signal_threshold: 0.2\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(config_service, "SETTINGS_PATH", path)
@@ -74,7 +74,10 @@ def test_patch_runtime_endpoint_persists_and_runtime_config_reads_updated_values
 
 def test_patch_runtime_endpoint_requires_confirm_when_enabling_effective_send_orders(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
-    path.write_text("system:\n  mode: live\nctrader:\n  send_orders: false\n", encoding="utf-8")
+    path.write_text(
+        "system:\n  mode: live\nctrader:\n  send_orders: false\n  host: demo.ctraderapi.com\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(config_service, "SETTINGS_PATH", path)
 
     client = TestClient(app, headers={"Authorization": f"Bearer {create_token('tester')}"})
@@ -102,11 +105,17 @@ def test_patch_runtime_endpoint_rejects_send_orders_when_not_live(monkeypatch, t
 
 def test_put_config_endpoint_requires_confirm_when_enabling_effective_send_orders(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
-    path.write_text("system:\n  mode: live\nctrader:\n  send_orders: false\n", encoding="utf-8")
+    path.write_text(
+        "system:\n  mode: live\nctrader:\n  send_orders: false\n  host: demo.ctraderapi.com\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(config_service, "SETTINGS_PATH", path)
 
     client = TestClient(app, headers={"Authorization": f"Bearer {create_token('tester')}"})
-    r = client.put("/api/config", json={"yaml": "system:\n  mode: live\nctrader:\n  send_orders: true\n"})
+    r = client.put(
+        "/api/config",
+        json={"yaml": "system:\n  mode: live\nctrader:\n  send_orders: true\n  host: demo.ctraderapi.com\n"},
+    )
 
     assert r.status_code == 403
     assert "enable-send-orders" in str(r.json())
@@ -114,13 +123,16 @@ def test_put_config_endpoint_requires_confirm_when_enabling_effective_send_order
 
 def test_put_config_endpoint_returns_semantics_with_confirm(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
-    path.write_text("system:\n  mode: live\nctrader:\n  send_orders: false\n", encoding="utf-8")
+    path.write_text(
+        "system:\n  mode: live\nctrader:\n  send_orders: false\n  host: demo.ctraderapi.com\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(config_service, "SETTINGS_PATH", path)
 
     client = TestClient(app, headers={"Authorization": f"Bearer {create_token('tester')}"})
     r = client.put(
         "/api/config",
-        json={"yaml": "system:\n  mode: live\nctrader:\n  send_orders: true\n"},
+        json={"yaml": "system:\n  mode: live\nctrader:\n  send_orders: true\n  host: demo.ctraderapi.com\n"},
         headers={"X-Confirm": "enable-send-orders"},
     )
 

@@ -134,11 +134,6 @@ runtime:
   risk_supervisor_reentry_block_reduce: true
   risk_max_holding_bars: 288
   risk_block_on_disk_critical: true
-  risk_require_l2_depth: false
-  l2_collection_enabled: true
-  l2_snapshot_interval_sec: 5.0
-  l2_write_batch_size: 5000
-  l2_write_flush_interval_sec: 5.0
   risk_enable_nfp_skip: false
   risk_enable_gvz_gate: false
   risk_gvz_drop_pct: -2.0

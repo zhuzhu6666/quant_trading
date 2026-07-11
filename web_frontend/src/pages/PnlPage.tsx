@@ -38,7 +38,7 @@ function buildPath(points: RealizedPoint[], width = 720, height = 220, pad = 18)
 }
 
 function safeCurrency(raw: unknown): string {
-  return String(raw || "USD");
+  return String(raw || "");
 }
 
 export function PnlPage() {
@@ -62,7 +62,7 @@ export function PnlPage() {
   const losses = pickNumber(summary, ["losses", "loss"], 0);
   const rawWinRate = pickNumber(summary, ["win_rate", "winRate", "rate"], trades ? wins / trades : 0);
   const winRate = rawWinRate > 1 ? rawWinRate : rawWinRate * 100;
-  const currency = safeCurrency(pickString(summary, ["currency", "ccy", "symbol"], pickString(seriesQuery.data, ["currency"], "USD")));
+  const currency = safeCurrency(pickString(summary, ["currency", "ccy", "symbol"], pickString(seriesQuery.data, ["currency"], "")));
   const fromTs = pick(seriesQuery.data, ["from_ts", "fromTs", "start", "start_ts"]);
   const toTs = pick(seriesQuery.data, ["to_ts", "toTs", "end", "end_ts"]);
 
@@ -74,6 +74,7 @@ export function PnlPage() {
   const bestTrade = points.reduce((best, point) => Math.max(best, Number(point.pnl || 0)), 0);
   const worstTrade = points.reduce((worst, point) => Math.min(worst, Number(point.pnl || 0)), 0);
   const avgTrade = trades ? realized / trades : 0;
+  const hasSummaryData = Object.keys(summary).length > 0;
 
   return (
     <section className="dashboard">
@@ -104,10 +105,10 @@ export function PnlPage() {
       </div>
 
       <div className="stat-grid">
-        <StatTile icon={realized >= 0 ? TrendingUp : TrendingDown} label="已实现盈亏" value={formatMoney(realized, currency)} detail={lastPoint ? `最新 ${formatMoney(lastPoint.pnl, currency)}` : "暂无成交"} tone={numberTone(realized)} />
-        <StatTile icon={ListChecks} label="交易数" value={formatDecimal(trades, 0)} detail={`胜 ${formatDecimal(wins, 0)} / 负 ${formatDecimal(losses, 0)}`} tone={trades ? "ok" : "mute"} />
-        <StatTile icon={Percent} label="胜率" value={`${formatDecimal(winRate, 1)}%`} detail={`均值 ${formatMoney(avgTrade, currency)}`} tone={winRate >= 50 ? "ok" : trades ? "warn" : "mute"} />
-        <StatTile icon={CalendarClock} label="数据窗口" value={fromTs ? formatTime(fromTs) : "--"} detail={toTs ? `至 ${formatTime(toTs)}` : "等待数据"} tone={hasData ? "ok" : "mute"} />
+        {hasSummaryData || hasData ? <StatTile icon={realized >= 0 ? TrendingUp : TrendingDown} label="已实现盈亏" value={formatMoney(realized, currency)} detail={lastPoint ? `最新 ${formatMoney(lastPoint.pnl, currency)}` : undefined} tone={numberTone(realized)} /> : null}
+        {hasSummaryData || hasData ? <StatTile icon={ListChecks} label="交易数" value={formatDecimal(trades, 0)} detail={trades ? `胜 ${formatDecimal(wins, 0)} / 负 ${formatDecimal(losses, 0)}` : undefined} tone={trades ? "ok" : "mute"} /> : null}
+        {trades > 0 ? <StatTile icon={Percent} label="胜率" value={`${formatDecimal(winRate, 1)}%`} detail={`均值 ${formatMoney(avgTrade, currency)}`} tone={winRate >= 50 ? "ok" : "warn"} /> : null}
+        <StatTile icon={CalendarClock} label="数据窗口" value={fromTs ? formatTime(fromTs) : ""} detail={toTs ? `至 ${formatTime(toTs)}` : "等待数据"} tone={hasData ? "ok" : "mute"} />
       </div>
 
       <div className="dashboard-grid">
@@ -121,13 +122,14 @@ export function PnlPage() {
             <Field label="最佳单笔" value={formatMoney(bestTrade, currency)} tone={bestTrade > 0 ? "ok" : "mute"} />
             <Field label="最差单笔" value={formatMoney(worstTrade, currency)} tone={worstTrade < 0 ? "bad" : "mute"} />
             <Field label="平均单笔" value={formatMoney(avgTrade, currency)} tone={numberTone(avgTrade)} />
-            <Field label="首条成交" value={firstTs ? formatTime(firstTs) : "--"} />
-            <Field label="末条成交" value={lastTs ? formatTime(lastTs) : "--"} />
+            <Field label="首条成交" value={firstTs ? formatTime(firstTs) : ""} />
+            <Field label="末条成交" value={lastTs ? formatTime(lastTs) : ""} />
           </div>
           <div className="chart-card chart-card-strong">
             <div className="mini-chart">
               {hasData ? (
-                <svg viewBox="0 0 720 220" preserveAspectRatio="none">
+                <svg viewBox="0 0 720 220" preserveAspectRatio="none" role="img" aria-label={`累计已实现盈亏曲线，共 ${points.length} 个成交点，累计 ${formatMoney(realized, currency)}`}>
+                  <title>{`累计已实现盈亏 ${formatMoney(realized, currency)}`}</title>
                   <rect x={0} y={0} width={720} height={220} className="chart-bg" />
                   <path d="M18 110H702" className="chart-zero" />
                   <path d={pathD} fill="none" className="chart-line" />
@@ -140,9 +142,10 @@ export function PnlPage() {
               )}
             </div>
             <div className="chart-meta">
-              <span>来源：{pickString(seriesQuery.data, ["source", "provider", "origin"], "realized-pnl-series")}</span>
+              {pickString(seriesQuery.data, ["source", "provider", "origin"], "") ? <span>来源：{pickString(seriesQuery.data, ["source", "provider", "origin"], "")}</span> : null}
               <span>{firstTs ? `${formatTime(firstTs)} 到 ${formatTime(lastTs)}` : "等待成交点"}</span>
             </div>
+            {hasData ? <p className="chart-summary">本窗口累计 {formatMoney(realized, currency)}，最佳单笔 {formatMoney(bestTrade, currency)}，最差单笔 {formatMoney(worstTrade, currency)}。</p> : null}
           </div>
         </MetricCard>
 
@@ -151,14 +154,14 @@ export function PnlPage() {
             <table className="mobile-card-table pnl-deals-table">
               <thead>
                 <tr>
-                  <th>时间</th>
-                  <th>持仓ID</th>
-                  <th>成交ID</th>
-                  <th>方向</th>
-                  <th>品种</th>
-                  <th>累计盈亏</th>
-                  <th>单笔盈亏</th>
-                  <th>来源</th>
+                  <th scope="col">时间</th>
+                  <th scope="col">持仓ID</th>
+                  <th scope="col">成交ID</th>
+                  <th scope="col">方向</th>
+                  <th scope="col">品种</th>
+                  <th scope="col">累计盈亏</th>
+                  <th scope="col">单笔盈亏</th>
+                  <th scope="col">来源</th>
                 </tr>
               </thead>
               <tbody>
@@ -170,13 +173,13 @@ export function PnlPage() {
                 {points.slice(-50).reverse().map((row, idx) => (
                   <tr key={`${row.deal_id || row.position_id || idx}-${row.ts}`}>
                     <td>{formatTime(row.ts)}</td>
-                    <td>{row.position_id ?? "--"}</td>
-                    <td>{row.deal_id ?? "--"}</td>
+                    <td>{row.position_id ?? ""}</td>
+                    <td>{row.deal_id ?? ""}</td>
                     <td>{translateDisplayValue(formatDirection(row.direction))}</td>
-                    <td>{row.symbol || "--"}</td>
+                    <td>{row.symbol || ""}</td>
                     <td>{formatMoney(row.cumulative, currency)}</td>
                     <td className={Number(row.pnl || 0) >= 0 ? "status-ok" : "status-bad"}>{formatMoney(row.pnl, currency)}</td>
-                    <td>{row.source || "--"}</td>
+                    <td>{row.source || ""}</td>
                   </tr>
                 ))}
               </tbody>

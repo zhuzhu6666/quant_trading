@@ -47,11 +47,9 @@ class _FakeHealth:
 
 
 class _FakeDuckConn:
-    def __init__(self, path, *, bar_latest, tick_symbol_latest=0.0, tick_global_latest=0.0):
+    def __init__(self, path, *, bar_latest):
         self.path = path
         self.bar_latest = bar_latest
-        self.tick_symbol_latest = tick_symbol_latest
-        self.tick_global_latest = tick_global_latest
         self._last_sql = ""
         self._last_params = None
 
@@ -70,9 +68,7 @@ class _FakeDuckConn:
         if self.path == "bars":
             tf = self._last_params[1]
             return (self.bar_latest.get(tf, 0.0),)
-        if self._last_params:
-            return (self.tick_symbol_latest,)
-        return (self.tick_global_latest,)
+        return (0.0,)
 
 
 class _FakeStore:
@@ -83,16 +79,14 @@ class _FakeStore:
         self.inserts.append((bars, symbol, timeframe))
 
 
-def _duckdb_runtime(*, bar_latest, tick_symbol_latest=0.0, tick_global_latest=0.0):
+def _duckdb_runtime(*, bar_latest):
     def _connect(path, snapshot_first=True):
         return _FakeDuckConn(
             path,
             bar_latest=bar_latest,
-            tick_symbol_latest=tick_symbol_latest,
-            tick_global_latest=tick_global_latest,
         )
 
-    return lambda: ("bars", "ticks", _connect)
+    return lambda: ("bars", _connect)
 
 
 def _bar_df():
@@ -124,7 +118,7 @@ def test_data_sync_skips_when_previous_run_is_active():
     assert logger.messages[-1][1] == "[data_sync] previous run still active, skip overlapping trigger"
 
 
-def test_data_sync_fresh_bars_skip_bridge_even_when_tick_advisory_stale():
+def test_data_sync_fresh_bars_skip_bridge():
     now = 1_000_000.0
     lock = _FakeLock()
     logger = _FakeLogger()
@@ -144,7 +138,7 @@ def test_data_sync_fresh_bars_skip_bridge_even_when_tick_advisory_stale():
         market_session_snapshot=lambda _arg: {},
         health_factory=lambda: health,
         config_factory=lambda: SimpleNamespace(enabled_symbols=["XAUUSD+"]),
-        duckdb_runtime_factory=_duckdb_runtime(bar_latest=bar_latest, tick_symbol_latest=0.0),
+        duckdb_runtime_factory=_duckdb_runtime(bar_latest=bar_latest),
         now_fn=lambda: now,
     )
 

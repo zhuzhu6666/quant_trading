@@ -217,38 +217,6 @@ def test_open_trade_blocks_on_disk_space_critical():
     assert verdict.audit_payload["source"] == "RiskGovernor"
 
 
-def test_open_trade_blocks_on_l2_depth_only_when_required():
-    service = _service()
-
-    allowed = service.evaluate(
-        "open_trade",
-        {
-            "runtime_health": {
-                "system_health": {
-                    "component_status": {"l2_depth": "critical"},
-                    "critical_components": ["l2_depth"],
-                }
-            },
-            "require_l2_depth": False,
-        },
-    )
-    blocked = service.evaluate(
-        "open_trade",
-        {
-            "runtime_health": {
-                "system_health": {
-                    "component_status": {"l2_depth": "critical"},
-                    "critical_components": ["l2_depth"],
-                }
-            },
-            "require_l2_depth": True,
-        },
-    )
-
-    assert allowed.allowed is True
-    assert blocked.allowed is False
-    assert blocked.reason == "l2_depth_unavailable"
-
 
 def test_open_trade_blocks_loss_cooldown_when_gap_too_short():
     service = _service()

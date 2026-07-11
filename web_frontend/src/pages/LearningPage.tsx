@@ -26,13 +26,13 @@ function formatPct(value: number): string {
   return `${formatDecimal(value * 100, 1)}%`;
 }
 
-function shortText(value: unknown, fallback = "--"): string {
+function shortText(value: unknown, fallback = ""): string {
   const text = String(value || "").trim();
   if (!text) return fallback;
   return text.length > 96 ? `${text.slice(0, 96)}...` : text;
 }
 
-function fullText(value: unknown, fallback = "--"): string {
+function fullText(value: unknown, fallback = ""): string {
   const text = String(value || "").trim();
   return text || fallback;
 }
@@ -46,7 +46,7 @@ function statusTone(status: string): "ok" | "warn" | "bad" | "mute" {
 }
 
 function shortId(value: string): string {
-  if (!value || value === "--") return "--";
+  if (!value || value === "") return "";
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-4)}` : value;
 }
 
@@ -153,9 +153,9 @@ export function LearningPage() {
   const evaluatedCount = pickNumber(metaReport, ["evaluated_count"], pickNumber(metaLightgbm, ["report.evaluated_count"], 0));
   const modelEligible = pickBoolean(promotionGate, ["eligible_for_live", "eligible_for_governor_review"], false);
   const automaticExecution = pickBoolean(governance, ["automatic_execution_enabled"], false);
-  const autonomyMode = pickString(governance, ["autonomy_mode"], "unknown");
+  const autonomyMode = pickString(governance, ["autonomy_mode"], "");
   const latestFactorUpdate = asRecord(pick(factorData, ["last_enrichment"]));
-  const highLoadProfile = pickString(highLoad, ["profile"], "--");
+  const highLoadProfile = pickString(highLoad, ["profile"], "");
 
   const hasError = [
     summaryQuery,
@@ -224,9 +224,9 @@ export function LearningPage() {
             <LearningMiniMetric label="证据不足" value={formatDecimal(pickNumber(effectStatuses, ["inconclusive"], 0), 0)} detail={`受控重试候选 ${retryCandidates}`} tone={retryCandidates ? "warn" : "mute"} />
             <LearningMiniMetric label="已强化" value={formatDecimal(pickNumber(effectStatuses, ["reinforced"], 0), 0)} detail={`无效 ${pickNumber(effectStatuses, ["ineffective"], 0)}`} tone={pickNumber(effectStatuses, ["reinforced"], 0) ? "ok" : "mute"} />
             <LearningMiniMetric label="经验先验" value={formatDecimal(pickNumber(effectPrior, ["eligible_count"], 0), 0)} detail={`有界因子 ${pickNumber(effectPrior, ["bounded_factor_count"], 0)}`} tone={pickNumber(effectPrior, ["eligible_count"], 0) ? "ok" : "warn"} />
-            <LearningMiniMetric label="AWE 账本" value={aweCoverageEnforced ? formatPct(pickNumber(aweMutationCoverage, ["coverage_ratio"], 0)) : "待新周期"} detail={`历史缺口 ${pickNumber(aweMutationCoverage, ["legacy_missing_count"], 0)}`} tone={aweCoverageEnforced ? toneFromStatus(pickString(aweMutationCoverage, ["status"], "unknown")) : "mute"} />
+            <LearningMiniMetric label="AWE 账本" value={aweCoverageEnforced ? formatPct(pickNumber(aweMutationCoverage, ["coverage_ratio"], 0)) : "待新周期"} detail={`历史缺口 ${pickNumber(aweMutationCoverage, ["legacy_missing_count"], 0)}`} tone={aweCoverageEnforced ? toneFromStatus(pickString(aweMutationCoverage, ["status"], "")) : "mute"} />
             <LearningMiniMetric label="生产因子" value={formatDecimal(pickNumber(runtimeFactorBudget, ["selected_count"], 0), 0)} detail={`冷尾部 ${pickNumber(runtimeFactorBudget, ["budget_excluded_count"], 0)}`} tone={pickBoolean(runtimeFactorBudget, ["ok"], false) ? "ok" : "warn"} />
-            <LearningMiniMetric label="SLO" value={translateDisplayValue(pickString(effectSlo, ["status"], pickString(effectQuality, ["status"], "unknown")))} detail="只读质量门" tone={toneFromStatus(pickString(effectSlo, ["status"], "unknown"))} />
+            <LearningMiniMetric label="SLO" value={translateDisplayValue(pickString(effectSlo, ["status"], pickString(effectQuality, ["status"], "")))} detail="只读质量门" tone={toneFromStatus(pickString(effectSlo, ["status"], ""))} />
           </div>
           <div className="learning-note">重试资格只在出现新复盘证据且没有更新 application 时开放；看板不会自动改权重、参数或智能体权限。</div>
         </MetricCard>
@@ -237,7 +237,7 @@ export function LearningPage() {
             <LearningMiniMetric label="建议流转" value={`${formatDecimal(applied, 0)} 应用`} detail={`批准 ${approved} · 回滚 ${rolledBack}`} tone={rolledBack > 0 ? "warn" : applied > 0 ? "ok" : "mute"} />
             <LearningMiniMetric label="样本池" value={formatDecimal(sampleCount, 0)} detail={`复盘 ${reviews.length} · 应用 ${applicationsCount}`} tone={sampleCount > 0 ? "ok" : "mute"} />
             <LearningMiniMetric label="模型精度" value={formatPct(modelAccuracy)} detail={`${formatDecimal(evaluatedCount, 0)} 条评估`} tone={numberTone(modelAccuracy - 0.5)} />
-            <LearningMiniMetric label="因子健康" value={`${healthyFactors}/${totalFactors || "--"}`} detail={`观察 ${watchFactors}`} tone={watchFactors > 0 ? "warn" : healthyFactors > 0 ? "ok" : "mute"} />
+            <LearningMiniMetric label="因子健康" value={`${healthyFactors}/${totalFactors || ""}`} detail={`观察 ${watchFactors}`} tone={watchFactors > 0 ? "warn" : healthyFactors > 0 ? "ok" : "mute"} />
             <LearningMiniMetric label="权限审计" value={formatDecimal(permissions.length, 0)} detail={modelEligible ? "可进入治理审查" : "影子/顾问模式"} tone={modelEligible ? "ok" : "mute"} />
           </div>
 
@@ -247,7 +247,7 @@ export function LearningPage() {
                 <h3>治理摘要</h3>
                 <StatusPill status={automaticExecution ? "自动应用" : "人工审核"} tone={automaticExecution ? "warn" : "ok"} />
               </div>
-              <div className="learning-note">{fullText(pickString(summary, ["parameter_template_ops_summary"], pickString(overview, ["headline"], "--")), "--")}</div>
+              <div className="learning-note">{fullText(pickString(summary, ["parameter_template_ops_summary"], pickString(overview, ["headline"], "")), "")}</div>
               <div className="learning-chip-row">
                 <span className="data-badge">推荐 {countFrom(recommendationCounts, "total")}</span>
                 <span className="data-badge">在线 {countFrom(recommendationCounts, "online_light")}</span>
@@ -270,10 +270,10 @@ export function LearningPage() {
             <section className="learning-control-section">
               <div className="learning-section-head">
                 <h3>最近复盘</h3>
-                <StatusPill status={latestReview.review_id ? translateDisplayValue(pickString(latestReview, ["outcome_label"], "--")) : "暂无"} tone={latestReview.review_id ? numberTone(pickNumber(latestReview, ["pnl"], 0)) : "mute"} />
+                <StatusPill status={latestReview.review_id ? translateDisplayValue(pickString(latestReview, ["outcome_label"], "")) : "暂无"} tone={latestReview.review_id ? numberTone(pickNumber(latestReview, ["pnl"], 0)) : "mute"} />
               </div>
               <div className="learning-note">
-                {latestReview.review_id ? `${formatDecimal(pickNumber(latestReview, ["pnl"], 0), 2)} · ${fullText(pickString(latestReview, ["summary_text", "review_summary"], "--"))}` : fullText(pickString(todo, ["title", "summary"], "暂无复盘任务"))}
+                {latestReview.review_id ? `${formatDecimal(pickNumber(latestReview, ["pnl"], 0), 2)} · ${fullText(pickString(latestReview, ["summary_text", "review_summary"], ""))}` : fullText(pickString(todo, ["title", "summary"], "暂无复盘任务"))}
               </div>
             </section>
           </div>
@@ -286,13 +286,13 @@ export function LearningPage() {
             <div className="learning-card-list">
               {suggestions.slice(0, 8).map((raw, index) => {
                 const item = asRecord(raw);
-                const status = pickString(item, ["status"], "--");
+                const status = pickString(item, ["status"], "");
                 return (
                   <article className="learning-list-item" key={`${pickString(item, ["suggestion_id"], String(index))}-${index}`}>
                     <div className="learning-list-main">
                       <div>
-                        <strong>{translateDisplayValue(pickString(item, ["action"], "--"))}</strong>
-                        <span>{translateScopeLabel(pickString(item, ["scope_type"], "--"), pickString(item, ["scope_key"], "--"))}</span>
+                        <strong>{translateDisplayValue(pickString(item, ["action"], ""))}</strong>
+                        <span>{translateScopeLabel(pickString(item, ["scope_type"], ""), pickString(item, ["scope_key"], ""))}</span>
                       </div>
                       <StatusPill status={status} tone={statusTone(status)} />
                     </div>
@@ -300,7 +300,7 @@ export function LearningPage() {
                       <span><BrainCircuit size={13} /> {formatPct(pickNumber(item, ["confidence"], 0))}</span>
                       <span>{formatTime(pick(item, ["created_at"]))}</span>
                     </div>
-                    <p>{shortText(translateReasonText(pickString(item, ["reason"], "--")))}</p>
+                    <p>{shortText(translateReasonText(pickString(item, ["reason"], "")))}</p>
                   </article>
                 );
               })}
@@ -320,8 +320,8 @@ export function LearningPage() {
                   return (
                     <div className="learning-event-row" key={`${pickString(item, ["review_id"], String(index))}-${index}`}>
                       <div>
-                        <strong>{translateDisplayValue(pickString(item, ["outcome_label"], "--"))}</strong>
-                        <span>{shortId(pickString(item, ["position_id", "trade_id"], "--"))} · {formatTime(pick(item, ["created_at"]))}</span>
+                        <strong>{translateDisplayValue(pickString(item, ["outcome_label"], ""))}</strong>
+                        <span>{shortId(pickString(item, ["position_id", "trade_id"], ""))} · {formatTime(pick(item, ["created_at"]))}</span>
                       </div>
                       <StatusPill status={formatDecimal(pnl, 2)} tone={numberTone(pnl)} />
                     </div>
@@ -339,8 +339,8 @@ export function LearningPage() {
                   return (
                     <div className="learning-event-row" key={`${pickString(item, ["sample_id"], String(index))}-${index}`}>
                       <div>
-                        <strong>{translateDisplayValue(pickString(item, ["sample_type"], "--"))}</strong>
-                        <span>{translateDisplayValue(pickString(item, ["label_status"], "--"))} · {formatTime(pick(item, ["event_ts", "created_at"]))}</span>
+                        <strong>{translateDisplayValue(pickString(item, ["sample_type"], ""))}</strong>
+                        <span>{translateDisplayValue(pickString(item, ["label_status"], ""))} · {formatTime(pick(item, ["event_ts", "created_at"]))}</span>
                       </div>
                       <span className="learning-weight">{formatDecimal(pickNumber(item, ["train_weight"], 0), 3)}</span>
                     </div>
@@ -359,12 +359,12 @@ export function LearningPage() {
                 {!applications.length ? <div className="empty-state-small">暂无应用记录</div> : null}
                 {applications.slice(0, 5).map((raw, index) => {
                   const item = asRecord(raw);
-                  const status = pickString(item, ["status"], "--");
+                  const status = pickString(item, ["status"], "");
                   return (
                     <div className="learning-event-row" key={`${pickString(item, ["application_id"], String(index))}-${index}`}>
                       <div>
-                        <strong>{translateDisplayValue(pickString(item, ["action"], "--"))}</strong>
-                        <span>{translateScopeLabel(pickString(item, ["scope_type"], "--"), pickString(item, ["scope_key"], "--"))}</span>
+                        <strong>{translateDisplayValue(pickString(item, ["action"], ""))}</strong>
+                        <span>{translateScopeLabel(pickString(item, ["scope_type"], ""), pickString(item, ["scope_key"], ""))}</span>
                       </div>
                       <StatusPill status={status} tone={statusTone(status)} />
                     </div>
@@ -379,12 +379,12 @@ export function LearningPage() {
                 {!lifecycle.length ? <div className="empty-state-small">暂无生命周期事件</div> : null}
                 {lifecycle.slice(0, 6).map((raw, index) => {
                   const item = asRecord(raw);
-                  const status = pickString(item, ["status"], "--");
+                  const status = pickString(item, ["status"], "");
                   return (
                     <div className="learning-event-row" key={`${pickString(item, ["id"], String(index))}-${index}`}>
                       <div>
-                        <strong>{translateDisplayValue(pickString(item, ["event"], "--"))}</strong>
-                        <span>{pickString(item, ["factor"], "--")} · {formatTime(pick(item, ["ts", "timestamp"]))}</span>
+                        <strong>{translateDisplayValue(pickString(item, ["event"], ""))}</strong>
+                        <span>{pickString(item, ["factor"], "")} · {formatTime(pick(item, ["ts", "timestamp"]))}</span>
                       </div>
                       <StatusPill status={status} tone={statusTone(status)} />
                     </div>

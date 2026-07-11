@@ -1,12 +1,13 @@
 """Single governed use-case boundary for factor weight mutations."""
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from alpha.decision_policy import DecisionPolicy
-from backend.core.db import STATE_DB
+from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.experience_prior import ExperiencePriorService
 from backend.services.learning_application_state import LearningApplicationStateService
 from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
@@ -45,6 +46,35 @@ class FactorWeightChangeService:
         if self.db_path == Path(STATE_DB):
             return runtime_config_mutation.RuntimeConfigMutationService()
         return runtime_config_mutation.RuntimeConfigMutationService(self.db_path)
+
+    def _replay_admission(self, decisions: dict[str, Any]) -> dict[str, Any]:
+        max_delta = max(
+            (abs(float(item.new_weight) - float(item.old_weight)) for item in decisions.values()),
+            default=0.0,
+        )
+        if max_delta < 0.10:
+            return {"required": False, "allowed": True, "max_delta": max_delta}
+        conn = get_state_pg_conn(read_only=True) if is_state_db_path(self.db_path) else connect_sqlite(self.db_path, read_only=True)
+        try:
+            row = conn.execute(
+                "SELECT replay_run_id, evidence_grade, status, replay_error, created_at "
+                "FROM replay_report ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        except Exception as exc:
+            row = None
+            error = f"{type(exc).__name__}: {exc}"
+        else:
+            error = ""
+        finally:
+            conn.close()
+        payload = dict(row) if row is not None else {}
+        grade = str(payload.get("evidence_grade") or "")
+        allowed = bool(payload) and str(payload.get("status") or "") == "completed" and not payload.get("replay_error") and grade in {"A", "B"}
+        return {
+            "required": True, "allowed": allowed, "max_delta": max_delta,
+            "replay_run_id": str(payload.get("replay_run_id") or ""),
+            "evidence_grade": grade, "error": error,
+        }
 
     @staticmethod
     def boundary() -> dict[str, Any]:
@@ -155,6 +185,23 @@ class FactorWeightChangeService:
         source_agent: str = "factor_governance",
         additional_patch: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # Fail before preparing application rows when pytest accidentally
+        # inherits the production PostgreSQL DSN.  The overlay boundary used
+        # to reject only after `learning_application_log` was written, leaving
+        # production audit pollution marked as mutation_failed.
+        if (
+            is_state_db_path(self.db_path)
+            and (os.getenv("PYTEST_CURRENT_TEST") or os.getenv("PYTEST_VERSION"))
+            and os.getenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "").strip() != "1"
+        ):
+            return {
+                "ok": False,
+                "schema_version": "factor_weight_change_plan.v1",
+                "status": "blocked_test_state_isolation",
+                "reason": "pytest_must_use_isolated_state_store",
+                "applications": {},
+                "boundary": self.boundary(),
+            }
         plan = self.plan(
             factor_configs=factor_configs,
             current_weights=current_weights,
@@ -169,6 +216,14 @@ class FactorWeightChangeService:
         proposed_weights = dict(plan["proposed_weights"])
         if not proposed_weights:
             return {**plan, "status": "no_admitted_change", "applications": {}}
+        replay_admission = self._replay_admission(plan["admitted_decisions"])
+        if not replay_admission.get("allowed"):
+            return {
+                **plan,
+                "status": "blocked_by_replay_admission",
+                "replay_admission": replay_admission,
+                "applications": {},
+            }
 
         risk_context = {
             "schema_version": "factor_weight_change_risk_context.v1",
@@ -177,6 +232,7 @@ class FactorWeightChangeService:
             "run_id": run_id,
             "proposed_weights": proposed_weights,
             "decision_count": len(proposed_weights),
+            "replay_admission": replay_admission,
         }
         if risk_check is None:
             from risk.policy_service import RiskPolicyService

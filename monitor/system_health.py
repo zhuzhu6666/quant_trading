@@ -4,7 +4,7 @@ monitor/system_health.py — 系统总健康检查 (每 60 秒)
 检查项:
   - cTrader 桥连接
   - Live loop 存活性
-  - 数据新鲜度 (M1/M5 bars, ticks, L2 depth)
+  - 数据新鲜度 (M1/M5 bars)
   - 调度器 7 个 job 是否都在运行
   - DuckDB 3 个库可读写
   - 磁盘空间 / 进程内存
@@ -54,18 +54,12 @@ THRESHOLDS = {
     "m1_warn_age": 900,      # 15 分钟
     "m5_max_age": 900,       # 15 分钟
     "m5_warn_age": 1800,     # 30 分钟
-    "tick_max_age": 7200,    # 2 小时
-    "tick_warn_age": 21600,  # 6 小时
-    "l2_max_age": 60,        # 1 分钟
-    "l2_warn_age": 300,      # 5 分钟
     "disk_min_gb": 10,       # 最少 10GB 剩余
     "disk_warn_gb": 20,      # 低于 20GB 告警
     "memory_max_pct": 80,    # 内存使用率上限 (%)
 }
 
-ADVISORY_ONLY_COMPONENTS = {
-    "tick_data",  # Dukascopy tick 库仅供研究/订单流分析, 不应阻断 cTrader live
-}
+ADVISORY_ONLY_COMPONENTS: set[str] = set()
 
 
 def _active_bar_component() -> str:
@@ -242,11 +236,7 @@ class SystemHealth:
         # 严重故障 → 告警
         if report.overall == "critical" and self._alerter:
             try:
-                blocking_errors = [
-                    err for err in errors
-                    if not err.lower().startswith("tick data stale:")
-                ]
-                detail = "; ".join((blocking_errors or errors)[:5])
+                detail = "; ".join(errors[:5])
                 self._alerter("ERROR", "⚠️ 系统健康检查", f"级别: critical\n{detail}")
             except Exception:
                 pass
@@ -264,7 +254,7 @@ class SystemHealth:
     def _check_data_freshness(
         self, components: dict[str, ComponentStatus], errors: list[str]
     ) -> None:
-        """检查 bars / ticks / L2 数据新鲜度."""
+        """检查 bars 数据新鲜度。"""
         now = time.time()
         market_closed = False
         market_closed_detail = ""
@@ -348,98 +338,12 @@ class SystemHealth:
             )
             errors.append(f"data_freshness: {e}")
 
-        # Ticks (ticks.duckdb)
-        try:
-            with duckdb_readonly_connection(
-                Path(__file__).resolve().parent.parent / "data" / "ticks.duckdb",
-                snapshot_first=True,
-            ) as tdb:
-                tick_ts = tdb.execute("SELECT MAX(time) FROM ticks").fetchone()[0]
-            if tick_ts:
-                age = now - tick_ts
-                if age < THRESHOLDS["tick_max_age"]:
-                    components["tick_data"] = ComponentStatus(
-                        name="Tick 数据", status="ok", score=1.0,
-                        detail=f"{age/60:.0f} min ago", ts=now,
-                    )
-                elif market_closed:
-                    components["tick_data"] = ComponentStatus(
-                        name="Tick 数据", status="ok", score=1.0,
-                        detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
-                    )
-                elif age < THRESHOLDS["tick_warn_age"]:
-                    components["tick_data"] = ComponentStatus(
-                        name="Tick 数据", status="degraded", score=0.5,
-                        detail=f"{age/60:.0f} min ago", ts=now,
-                    )
-                else:
-                    components["tick_data"] = ComponentStatus(
-                        name="研究 Tick 归档", status="degraded", score=0.3,
-                        detail=(
-                            f"research archive {age/60:.0f} min ago (stale advisory); "
-                            "live cTrader quote health is monitored separately"
-                        ), ts=now,
-                    )
-            else:
-                components["tick_data"] = ComponentStatus(
-                    name="研究 Tick 归档", status="degraded", score=0.3,
-                    detail="no research archive data (advisory; live quotes monitored separately)", ts=now,
-                )
-        except Exception as e:
-            components["tick_data"] = ComponentStatus(
-                name="研究 Tick 归档", status="degraded", score=0.3,
-                detail=f"research archive check failed (advisory): {e}", ts=now,
-            )
-
-        # L2 depth (l2.duckdb)
-        try:
-            with duckdb_readonly_connection(
-                Path(__file__).resolve().parent.parent / "data" / "l2.duckdb",
-                snapshot_first=True,
-            ) as ldb:
-                l2_ts = ldb.execute("SELECT MAX(ts) FROM orderbook_changes").fetchone()[0]
-                l2_cnt = ldb.execute("SELECT COUNT(*) FROM orderbook_changes").fetchone()[0]
-            if l2_ts and l2_cnt > 0:
-                age = now - l2_ts
-                if age < THRESHOLDS["l2_max_age"]:
-                    components["l2_depth"] = ComponentStatus(
-                        name="L2 订单簿", status="ok", score=1.0,
-                        detail=f"{l2_cnt:,} rows, last {age:.0f}s ago", ts=now,
-                    )
-                elif market_closed:
-                    components["l2_depth"] = ComponentStatus(
-                        name="L2 订单簿", status="ok", score=1.0,
-                        detail=f"market closed; {l2_cnt:,} rows, last {age:.0f}s ago ({market_closed_detail})", ts=now,
-                    )
-                elif age < THRESHOLDS["l2_warn_age"]:
-                    components["l2_depth"] = ComponentStatus(
-                        name="L2 订单簿", status="degraded", score=0.5,
-                        detail=f"{l2_cnt:,} rows, last {age:.0f}s ago", ts=now,
-                    )
-                else:
-                    components["l2_depth"] = ComponentStatus(
-                        name="L2 订单簿", status="critical", score=0.0,
-                        detail=f"{l2_cnt:,} rows, last {age:.0f}s ago (stale)", ts=now,
-                    )
-            else:
-                components["l2_depth"] = ComponentStatus(
-                    name="L2 订单簿", status="degraded", score=0.3,
-                    detail="no data yet (market may be closed)", ts=now,
-                )
-        except Exception as e:
-            components["l2_depth"] = ComponentStatus(
-                name="L2 订单簿", status="critical", score=0.0,
-                detail=f"check failed: {e}", ts=now,
-            )
-
     def _check_duckdb(
         self, components: dict[str, ComponentStatus], errors: list[str]
     ) -> None:
-        """确认 3 个 DuckDB 库可读写."""
+        """确认活跃 DuckDB 库可读写。"""
         dbs = [
             ("bars.duckdb", "K 线库"),
-            ("ticks.duckdb", "Tick 库"),
-            ("l2.duckdb", "L2 库"),
         ]
         base = Path(__file__).resolve().parent.parent / "data"
         for fname, label in dbs:

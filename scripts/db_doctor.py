@@ -24,8 +24,6 @@ from backend.core.db import (  # noqa: E402
     DUCKDB_BARS_LEGACY,
     DUCKDB_EXTERNAL,
     DUCKDB_EVENTS,
-    DUCKDB_L2,
-    DUCKDB_TICKS,
     DUCKDB_TRADES,
     EXPERIMENTS_DB,
     STATE_DB,
@@ -131,14 +129,6 @@ def main() -> int:
         (
             DUCKDB_BARS_LEGACY.name,
             _check_duckdb(DUCKDB_BARS_LEGACY, {}),
-        ),
-        (
-            DUCKDB_TICKS.name,
-            _check_duckdb(DUCKDB_TICKS, {"ticks": {"symbol", "time", "bid", "ask", "last", "volume"}}),
-        ),
-        (
-            DUCKDB_L2.name,
-            _check_duckdb(DUCKDB_L2, {"orderbook_changes": {"ts"}}),
         ),
         (
             DUCKDB_TRADES.name,

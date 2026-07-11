@@ -15,7 +15,7 @@
 | 因子语义 | role、归一化、组合、权重 | 可能影响方向评分、AWE、readiness、前端 |
 | 自治治理 | 晋升、降权、禁用、回滚、模板切换 | 可能影响配置持久化和实盘安全 |
 | 风控执行 | gate、sizing、position supervisor、event sizing | 可能影响下单、改仓、平仓 |
-| 数据链路 | bars/ticks/L2/external/events/state | 可能影响 PIT、freshness、回测/live 一致性 |
+| 数据链路 | bars/cTrader spot/external/events/state | 可能影响 PIT、freshness、回测/live 一致性 |
 | 学习链路 | 样本、evidence、模型、policy suggestion | 可能影响训练准入和治理证据 |
 | API/前端契约 | 新字段、旧字段兼容、展示含义 | 可能造成小程序/Web 误读 |
 | 运维启动 | systemd、startup、overlay restore、readiness | 可能造成重启后状态漂移 |

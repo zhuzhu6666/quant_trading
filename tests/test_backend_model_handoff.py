@@ -110,9 +110,9 @@ def test_backend_readiness_contract(monkeypatch, tmp_path):
                 "overall": "critical",
                 "display_overall": "degraded",
                 "score": 0.8,
-                "components": {"l2_depth": "critical"},
+                "components": {"data_freshness": "critical"},
                 "blocking_components": [],
-                "known_observations": [{"component": "l2_depth", "status": "critical"}],
+                "known_observations": [{"component": "data_freshness", "status": "critical"}],
             }
         ),
     )

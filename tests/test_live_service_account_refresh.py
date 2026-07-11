@@ -16,6 +16,56 @@ import pytest
 from backend.services import live_service
 
 
+def test_recent_review_reentry_block_uses_consecutive_conflicting_losses(monkeypatch):
+    now = 10_000.0
+    rows = [
+        {
+            "review_id": "r2", "position_id": "p2", "outcome_label": "bad_loss",
+            "failure_tags_json": '["factor_conflict", "thesis_broken"]',
+            "review_json": '{"direction": -1}', "created_at": now - 60,
+        },
+        {
+            "review_id": "r1", "position_id": "p1", "outcome_label": "bad_loss",
+            "failure_tags_json": '["regime_mismatch"]',
+            "review_json": '{"direction": -1}', "created_at": now - 600,
+        },
+    ]
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = rows
+    monkeypatch.setattr("backend.core.db.get_state_pg_conn", lambda **_kwargs: conn)
+
+    block = live_service._recent_review_reentry_block(
+        symbol="XAUUSD+", direction=-1, now_ts=now,
+    )
+
+    assert block is not None
+    assert block["reason"] == "repeated_conflicting_thesis_loss"
+    assert block["review_ids"] == ["r2", "r1"]
+    assert block["remaining_seconds"] == 3540.0
+
+
+def test_recent_review_reentry_block_requires_consecutive_failures(monkeypatch):
+    rows = [
+        {
+            "review_id": "win", "position_id": "p2", "outcome_label": "good_win",
+            "failure_tags_json": "[]", "review_json": '{"direction": -1}',
+            "created_at": 9_900.0,
+        },
+        {
+            "review_id": "loss", "position_id": "p1", "outcome_label": "bad_loss",
+            "failure_tags_json": '["factor_conflict"]',
+            "review_json": '{"direction": -1}', "created_at": 9_000.0,
+        },
+    ]
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = rows
+    monkeypatch.setattr("backend.core.db.get_state_pg_conn", lambda **_kwargs: conn)
+
+    assert live_service._recent_review_reentry_block(
+        symbol="XAUUSD+", direction=-1, now_ts=10_000.0,
+    ) is None
+
+
 @pytest.fixture(autouse=True)
 def _reset_state():
     live_service._live_state["account"] = None

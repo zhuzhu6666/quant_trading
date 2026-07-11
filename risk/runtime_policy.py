@@ -55,7 +55,6 @@ class RiskLimitSnapshot:
     loss_cooldown_after_losses: int = 2
     loss_cooldown_bars: int = 3
     block_on_disk_critical: bool = True
-    require_l2_depth: bool = False
     var_threshold_pct: float = 2.0
     cvar_threshold_pct: float = 2.0
     circuit_breaker_bypass: bool = False
@@ -81,7 +80,6 @@ class RiskLimitSnapshot:
             loss_cooldown_after_losses=_safe_int(getattr(cfg, "risk_loss_cooldown_after_losses", 2), 2),
             loss_cooldown_bars=_safe_int(getattr(cfg, "risk_loss_cooldown_bars", 3), 3),
             block_on_disk_critical=bool(getattr(cfg, "risk_block_on_disk_critical", True)),
-            require_l2_depth=bool(getattr(cfg, "risk_require_l2_depth", False)),
             var_threshold_pct=_pct_value(getattr(cfg, "risk_var_threshold_pct", legacy_var_threshold), 2.0),
             cvar_threshold_pct=_pct_value(getattr(cfg, "risk_cvar_threshold_pct", legacy_var_threshold), 2.0),
             circuit_breaker_bypass=bool(getattr(cfg, "risk_circuit_breaker_bypass", False)),
@@ -108,7 +106,6 @@ class RiskLimitSnapshot:
             ),
             loss_cooldown_bars=_safe_int(raw.get("loss_cooldown_bars"), base.loss_cooldown_bars),
             block_on_disk_critical=bool(raw.get("block_on_disk_critical", base.block_on_disk_critical)),
-            require_l2_depth=bool(raw.get("require_l2_depth", base.require_l2_depth)),
             var_threshold_pct=_pct_value(
                 var_cfg.get("threshold_pct", raw.get("var_threshold_pct", base.var_threshold_pct)),
                 base.var_threshold_pct,
@@ -132,7 +129,6 @@ class RuntimeHealthSnapshot:
     bridge_connected: bool | None = None
     data_lag_seconds: float = 0.0
     disk_space_status: str = ""
-    l2_depth_status: str = ""
     raw: dict[str, Any] | None = None
 
     @classmethod
@@ -152,7 +148,6 @@ class RuntimeHealthSnapshot:
             bridge_connected=context.get("bridge_connected") if "bridge_connected" in context else None,
             data_lag_seconds=_safe_float(context.get("data_lag_seconds", 0.0), 0.0),
             disk_space_status=str(component_status.get("disk_space") or ""),
-            l2_depth_status=str(component_status.get("l2_depth") or ""),
             raw=runtime_health,
         )
 

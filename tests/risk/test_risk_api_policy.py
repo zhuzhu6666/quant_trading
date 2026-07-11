@@ -86,7 +86,6 @@ def test_system_health_summary_serializes_latest_report(monkeypatch):
                 errors=["disk low"],
                 components={
                     "disk_space": _Component("critical", "3.2 GB left", 0.0),
-                    "l2_depth": _Component("degraded", "5 min stale", 0.5),
                 },
             )
 
@@ -94,93 +93,20 @@ def test_system_health_summary_serializes_latest_report(monkeypatch):
     monkeypatch.setattr(
         risk_api,
         "_runtime_risk_policy",
-        lambda: {"require_l2_depth": False, "block_on_disk_critical": True},
+        lambda: {"block_on_disk_critical": True},
     )
     result = risk_api._system_health_summary()
 
     assert result["overall"] == "critical"
     assert result["overall_score"] == 0.8
     assert result["critical_components"] == ["disk_space"]
-    assert result["degraded_components"] == ["l2_depth"]
+    assert result["degraded_components"] == []
     assert result["blocking_components"] == ["disk_space"]
     assert result["advisory_critical_components"] == []
     assert result["trading_blocked"] is True
     assert result["impact_status"] == "blocked"
     assert result["components"]["disk_space"]["detail"] == "3.2 GB left"
 
-
-def test_system_health_summary_marks_optional_l2_as_observe_only(monkeypatch):
-    class _Component:
-        def __init__(self, status, detail, score):
-            self.status = status
-            self.detail = detail
-            self.score = score
-
-    monkeypatch.setattr(
-        risk_api,
-        "_get_system_health_report",
-        lambda: SimpleNamespace(
-            overall="critical",
-            overall_score=0.75,
-            ts=456.0,
-            errors=[],
-            components={
-                "l2_depth": _Component("critical", "15 min stale", 0.0),
-                "disk_space": _Component("degraded", "18 GB left", 0.6),
-            },
-        ),
-    )
-    monkeypatch.setattr(
-        risk_api,
-        "_runtime_risk_policy",
-        lambda: {"require_l2_depth": False, "block_on_disk_critical": True},
-    )
-
-    result = risk_api._system_health_summary()
-
-    assert result["critical_components"] == ["l2_depth"]
-    assert result["blocking_components"] == []
-    assert result["advisory_critical_components"] == ["l2_depth"]
-    assert result["trading_blocked"] is False
-    assert result["impact_status"] == "observe"
-    assert "不会直接阻断交易" in result["impact_summary"]
-
-
-def test_system_health_summary_marks_tick_data_as_observe_only(monkeypatch):
-    class _Component:
-        def __init__(self, status, detail, score):
-            self.status = status
-            self.detail = detail
-            self.score = score
-
-    monkeypatch.setattr(
-        risk_api,
-        "_get_system_health_report",
-        lambda: SimpleNamespace(
-            overall="critical",
-            overall_score=0.6,
-            ts=789.0,
-            errors=["Tick data stale: 440 min"],
-            components={
-                "tick_data": _Component("critical", "440 min stale", 0.0),
-                "bar_m5": _Component("ok", "2 min ago", 1.0),
-            },
-        ),
-    )
-    monkeypatch.setattr(
-        risk_api,
-        "_runtime_risk_policy",
-        lambda: {"require_l2_depth": False, "block_on_disk_critical": True},
-    )
-
-    result = risk_api._system_health_summary()
-
-    assert result["critical_components"] == ["tick_data"]
-    assert result["blocking_components"] == []
-    assert result["advisory_critical_components"] == ["tick_data"]
-    assert result["trading_blocked"] is False
-    assert result["impact_status"] == "observe"
-    assert "tick_data" in result["impact_summary"]
 
 
 def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path):

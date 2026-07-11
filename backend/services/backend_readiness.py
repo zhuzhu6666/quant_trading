@@ -30,7 +30,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 LOG_PATH = PROJECT_ROOT / "logs" / "backend_uvicorn.log"
 
 KNOWN_OBSERVATION_COMPONENTS = {
-    "l2_depth": "known_l2_depth_gap",
     "disk_space": "known_disk_space_degraded",
     "bar_m1": "m1_data_feed_observation",
 }
@@ -38,8 +37,6 @@ BLOCKING_COMPONENTS = {
     "ctrader_bridge",
     "live_loop",
     "db_ctrader_data",
-    "db_ticks",
-    "db_l2",
 }
 
 
@@ -910,7 +907,6 @@ class BackendReadinessService:
         return {
             "schema_version": "backend_stability.v1",
             "timings": timing_snapshot("backend_readiness."),
-            "l2_writer": self._runtime_kv_get("live.l2_writer.health", {}),
             "runtime_config_snapshot": self._runtime_config_snapshot_status(),
             "runtime_config_overlay": self._runtime_config_overlay_status(),
             "freshness_watchdog": self._freshness_watchdog_status(

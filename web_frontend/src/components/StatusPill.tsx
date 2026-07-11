@@ -10,8 +10,9 @@ const toneClass: Record<StatusTone, string> = {
 };
 
 export function StatusPill({ status, tone = "mute" }: { status: string; tone?: StatusTone }) {
+  if (!status || ["", "—"].includes(status.trim())) return null;
   const safeTone = toneClass[tone] || toneClass.mute;
-  return <span className={`status-pill ${safeTone}`}>{translateDisplayValue(status || "—")}</span>;
+  return <span className={`status-pill ${safeTone}`}>{translateDisplayValue(status)}</span>;
 };
 
 export default StatusPill;

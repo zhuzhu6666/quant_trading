@@ -55,7 +55,7 @@ function normalizePositions(raw: unknown): PositionRow[] {
       const row = asRecord(item);
       const id = pickString(row, ["position_id", "positionId", "ticket", "id", "deal_id", "order_id"], "");
       return {
-        symbol: pickString(row, ["symbol", "instrument", "code", "asset"], "--"),
+        symbol: pickString(row, ["symbol", "instrument", "code", "asset"], ""),
         direction: formatDirection(pick(row, ["direction", "dir", "type", "side"])),
         volume: pickNumber(row, ["api_volume", "volume", "lots", "size", "positionSize", "qty"], 0),
         entry: pickNumber(row, ["price_open", "open_price", "entry_price", "open", "entry"], 0),
@@ -67,12 +67,12 @@ function normalizePositions(raw: unknown): PositionRow[] {
         ),
         stop: pickNumber(row, ["sl", "stop_loss", "stop", "stop_loss_price"], 0),
         take: pickNumber(row, ["tp", "take_profit", "take", "take_profit_price"], 0),
-        source: pickString(row, ["source", "origin", "route", "broker"], "--"),
-        id: id || pickString(row, ["position_id_str", "ticket_str"], "--"),
+        source: pickString(row, ["source", "origin", "route", "broker"], ""),
+        id: id || pickString(row, ["position_id_str", "ticket_str"], ""),
         openTs: pick(row, ["open_time", "openTs", "open_timestamp", "openTsMs", "created_at", "opened_at"]),
       };
     })
-    .filter((row) => row.symbol !== "--" || row.id !== "--");
+    .filter((row) => row.symbol !== "" || row.id !== "");
 }
 
 function normalizePositionCount(raw: unknown): number {
@@ -191,21 +191,21 @@ export function TradingPage() {
 
   const connectionTone = connected ? "ok" : source === "polling" ? "warn" : "bad";
   const loopRunning = pickBoolean(loop, ["running", "is_running", "pipeline_active", "alive", "status"], false);
-  const broker = pickString(loop, ["broker", "broker_name", "exchange"], pickString(account, ["broker"], "ctrader"));
-  const strategy = pickString(loop, ["strategy_name", "strategy", "strategyName", "active_strategy"], "live");
-  const reason = pickString(loop, ["reason", "status", "stop_reason", "message", "state"], loopRunning ? "running" : "--");
+  const broker = pickString(loop, ["broker", "broker_name", "exchange"], pickString(account, ["broker"], ""));
+  const strategy = pickString(loop, ["strategy_name", "strategy", "strategyName", "active_strategy"], "");
+  const reason = pickString(loop, ["reason", "status", "stop_reason", "message", "state"], loopRunning ? "running" : "");
   const loopPid = pickNumber(loop, ["pid", "process_id", "pid_file"], 0);
   const loopStarted = formatReadableTime(pick(loop, ["started_at", "startedAt", "loop_started_at", "started", "start_time"]));
-  const loopMode = pickString(loop, ["mode", "execution_mode", "send_mode"], "--");
+  const loopMode = pickString(loop, ["mode", "execution_mode", "send_mode"], "");
 
-  const currency = pickString(account, ["currency", "ccy"], "EUR");
+  const currency = pickString(account, ["currency", "ccy"], "");
   const balance = pickNumber(account, ["balance", "account_balance"], 0);
   const equity = pickNumber(account, ["equity", "account_equity"], 0);
-  const leverage = pickString(account, ["leverage", "leverage_ratio"], "--");
+  const leverage = pickString(account, ["leverage", "leverage_ratio"], "");
   const spotMid = pickNumber(spotQuote, ["mid"], pickNumber(snapshot, ["current_price"], 0));
   const spotBid = pickNumber(spotQuote, ["bid"], 0);
   const spotAsk = pickNumber(spotQuote, ["ask"], 0);
-  const marketStatus = pickString(marketSession, ["status"], "--");
+  const marketStatus = pickString(marketSession, ["status"], "");
 
   const positionCount = positions.length || normalizePositionCount(positionsQuery.data);
   const cumulativeVolume = positions.reduce((sum, p) => sum + Math.abs(p.volume), 0);
@@ -224,12 +224,15 @@ export function TradingPage() {
   const signalDirection = formatDirection(pick(lastComposite, ["direction"]));
   const signalScore = pickNumber(lastComposite, ["score"], 0);
   const gatePassed = pickBoolean(lastComposite, ["gate_passed"], false);
-  const gateReason = pickString(lastComposite, ["gate_reason"], pickString(strategyStatus, ["reason"], "--"));
+  const gateReason = pickString(lastComposite, ["gate_reason"], pickString(strategyStatus, ["reason"], ""));
   const engineWarm = pickBoolean(v4Status, ["engine_warm"], false);
   const bufferSize = pickNumber(v4Status, ["buffer_size"], 0);
   const aweConviction = pickNumber(v4Status, ["awe_conviction"], 0);
   const attributedTrades = pickNumber(v4Status, ["n_attribution_trades"], pickNumber(factorSummary, ["total_voted"], 0));
   const overallWinRate = pickNumber(factorSummary, ["overall_win_rate"], 0);
+  const hasLoopData = Object.keys(loop).length > 0;
+  const hasAccountData = pick(account, ["balance", "equity"]) !== undefined;
+  const hasPositionData = pick(snapshot, ["positions_list", "positions"]) !== undefined || positionsQuery.data !== undefined || positions.length > 0;
 
   const refreshAll = async () => {
     await refresh();
@@ -291,16 +294,16 @@ export function TradingPage() {
         </div>
         <div className="header-status">
           <StatusPill status={connected ? `连接 ${source}` : "连接中断"} tone={connectionTone} />
-          <StatusPill status={loopRunning ? "循环运行中" : "循环未运行"} tone={loopRunning ? "ok" : "warn"} />
+          {hasLoopData ? <StatusPill status={loopRunning ? "循环运行中" : "循环未运行"} tone={loopRunning ? "ok" : "warn"} /> : null}
           <StatusPill status={`市场 ${translateDisplayValue(marketStatus)}`} tone={toneFromStatus(marketStatus)} />
           <StatusPill status={broker} tone="mute" />
         </div>
       </div>
 
       <div className="trading-toolbar">
-        <ActionButton icon={Play} label="启动" variant="primary" disabled={loopRunning || startBusy} loading={startBusy} error={startError} onAction={runStart} />
-        <ActionButton icon={PowerOff} label="停止" variant="danger" disabled={!loopRunning || stopBusy} loading={stopBusy} error={stopError} onAction={runStop} />
-        <ActionButton icon={RotateCcw} label="紧急平仓" variant="danger" disabled={closeBusy} loading={closeBusy} error={closeError} onAction={runEmergency} />
+        <ActionButton icon={Play} label="启动" variant="primary" disabled={!hasLoopData || loopRunning || startBusy} loading={startBusy} error={startError} confirmTitle="确认启动实盘交易" confirmMessage={`将使用 ${broker || "服务端配置"}${strategy ? ` · ${strategy}` : ""} 启动交易循环。请确认账户与风控状态正常。`} onAction={runStart} />
+        <ActionButton icon={PowerOff} label="停止" variant="danger" disabled={!loopRunning || stopBusy} loading={stopBusy} error={stopError} confirmTitle="确认停止交易循环" confirmMessage="停止后不再产生新订单；已有持仓不会因此自动平仓。" onAction={runStop} />
+        <ActionButton icon={RotateCcw} label="紧急平仓" variant="danger" disabled={closeBusy || positionCount === 0} loading={closeBusy} error={closeError} confirmTitle="确认紧急平仓" confirmMessage={`服务端将处理当前 ${formatDecimal(positionCount, 0)} 个持仓，当前浮动盈亏 ${formatMoney(unrealized, currency)}。该操作不可撤销。`} onAction={runEmergency} />
         <button className="action-btn action-ghost refresh-inline" type="button" onClick={() => void refreshAll()}>
           <RefreshCw size={15} />
           <span>刷新</span>
@@ -315,10 +318,10 @@ export function TradingPage() {
       </div>
 
       <div className="stat-grid">
-        <StatTile icon={Activity} label="交易循环" value={loopRunning ? "运行中" : "未运行"} detail={translateDisplayValue(reason)} tone={loopRunning ? "ok" : "warn"} />
-        <StatTile icon={Wallet} label="账户权益" value={formatMoney(equity, currency)} detail={`余额 ${formatMoney(balance, currency)}`} tone={equity > 0 ? "ok" : "mute"} />
-        <StatTile icon={Gauge} label="XAU 现价" value={spotMid > 0 ? formatDecimal(spotMid, 2) : "--"} detail={spotBid && spotAsk ? `买 ${formatDecimal(spotBid, 2)} · 卖 ${formatDecimal(spotAsk, 2)}` : `持仓 ${formatDecimal(positionCount, 0)} 个`} tone={spotMid > 0 ? "ok" : "mute"} />
-        <StatTile icon={ShieldAlert} label="浮动盈亏" value={formatMoney(unrealized, currency)} detail={`会话 ${formatMoney(sessionPnl, currency)}`} tone={unrealized > 0 ? "ok" : unrealized < 0 ? "bad" : "mute"} />
+        {hasLoopData ? <StatTile icon={Activity} label="交易循环" value={loopRunning ? "运行中" : "未运行"} detail={translateDisplayValue(reason)} tone={loopRunning ? "ok" : "warn"} /> : null}
+        {hasAccountData ? <StatTile icon={Wallet} label="账户权益" value={formatMoney(equity, currency)} detail={`余额 ${formatMoney(balance, currency)}`} tone={equity > 0 ? "ok" : "mute"} /> : null}
+        <StatTile icon={Gauge} label="XAU 现价" value={spotMid > 0 ? formatDecimal(spotMid, 2) : ""} detail={spotBid && spotAsk ? `买 ${formatDecimal(spotBid, 2)} · 卖 ${formatDecimal(spotAsk, 2)}` : `持仓 ${formatDecimal(positionCount, 0)} 个`} tone={spotMid > 0 ? "ok" : "mute"} />
+        {hasPositionData ? <StatTile icon={ShieldAlert} label="浮动盈亏" value={formatMoney(unrealized, currency)} detail={`会话 ${formatMoney(sessionPnl, currency)}`} tone={unrealized > 0 ? "ok" : unrealized < 0 ? "bad" : "mute"} /> : null}
       </div>
 
       <MetricCard title="运行总览" className="wide-panel trading-status-overview">
@@ -332,7 +335,7 @@ export function TradingPage() {
               <Field label="经纪商" value={broker} />
               <Field label="策略" value={strategy} />
               <Field label="执行模式" value={translateDisplayValue(loopMode)} />
-              <Field label="PID" value={loopPid || "--"} />
+              <Field label="PID" value={loopPid || ""} />
               <Field label="启动时间" value={loopStarted} />
               <Field label="状态说明" value={reason} tone={toneFromStatus(reason)} />
             </div>
@@ -363,7 +366,7 @@ export function TradingPage() {
               <Field label="弃权因子" value={formatDecimal(pickNumber(lastComposite, ["n_abstain"], 0), 0)} />
               <Field label="归因样本" value={formatDecimal(attributedTrades, 0)} />
               <Field label="AWE 置信" value={formatDecimal(aweConviction * 100, 1) + "%"} />
-              <Field label="归因胜率" value={overallWinRate ? `${formatDecimal(overallWinRate * 100, 1)}%` : "--"} />
+              <Field label="归因胜率" value={overallWinRate ? `${formatDecimal(overallWinRate * 100, 1)}%` : ""} />
             </div>
             <div className="compact-list trading-inline-badges">
               {topContributors.slice(0, 4).map((raw, index) => {
@@ -386,12 +389,12 @@ export function TradingPage() {
               <Field label="执行尝试" value={formatDecimal(attempts, 0)} />
               <Field label="下单成功" value={formatDecimal(successes, 0)} tone={successes > 0 ? "ok" : "mute"} />
               <Field label="失败" value={formatDecimal(failures, 0)} tone={failures > 0 ? "bad" : "ok"} />
-              <Field label="最近执行" value={translateDisplayValue(pickString(liveExecutionSummary, ["last_reason", "last_reason_text", "lastReason"], "--"))} />
+              <Field label="最近执行" value={translateDisplayValue(pickString(liveExecutionSummary, ["last_reason", "last_reason_text", "lastReason"], ""))} />
             </div>
             <div className="compact-list trading-inline-badges">
               {executionEvents.slice(0, 3).map((raw, index) => {
                 const item = asRecord(raw);
-                const stage = pickString(item, ["stage"], "--");
+                const stage = pickString(item, ["stage"], "");
                 return (
                   <span className={`data-badge ${stage === "success" ? "data-badge-ok" : stage === "failure" ? "data-badge-bad" : "data-badge-warn"}`} key={`${pickString(item, ["time"], String(index))}-${index}`}>
                     {translateDisplayValue(stage)} · {translateDisplayValue(formatDirection(pick(item, ["direction"])))}
@@ -408,13 +411,13 @@ export function TradingPage() {
           <table className="mobile-card-table factor-ticks-table">
             <thead>
               <tr>
-                <th>时间</th>
-                <th>Tick</th>
-                <th>战术分</th>
-                <th>宏观分</th>
-                <th>活跃因子</th>
-                <th>弃权</th>
-                <th>闸门原因</th>
+                <th scope="col">时间</th>
+                <th scope="col">Tick</th>
+                <th scope="col">战术分</th>
+                <th scope="col">宏观分</th>
+                <th scope="col">活跃因子</th>
+                <th scope="col">弃权</th>
+                <th scope="col">闸门原因</th>
               </tr>
             </thead>
             <tbody>
@@ -430,7 +433,7 @@ export function TradingPage() {
                     <td>{formatDecimal(pickNumber(item, ["macro_score"], 0), 4)}</td>
                     <td>{formatDecimal(pickNumber(item, ["n_active"], 0), 0)}</td>
                     <td>{formatDecimal(pickNumber(item, ["n_abstain"], 0), 0)}</td>
-                    <td>{translateDisplayValue(pickString(item, ["gate_reason"], "--"))}</td>
+                    <td>{translateDisplayValue(pickString(item, ["gate_reason"], ""))}</td>
                   </tr>
                 );
               })}
@@ -444,17 +447,17 @@ export function TradingPage() {
           <table className="mobile-card-table positions-table">
             <thead>
               <tr>
-                <th>品种</th>
-                <th>方向</th>
-                <th>数量</th>
-                <th>开仓价</th>
-                <th>当前价</th>
-                <th>浮盈</th>
-                <th>止损</th>
-                <th>止盈</th>
-                <th>持仓ID</th>
-                <th>来源</th>
-                <th>开仓时间</th>
+                <th scope="col">品种</th>
+                <th scope="col">方向</th>
+                <th scope="col">数量</th>
+                <th scope="col">开仓价</th>
+                <th scope="col">当前价</th>
+                <th scope="col">浮盈</th>
+                <th scope="col">止损</th>
+                <th scope="col">止盈</th>
+                <th scope="col">持仓ID</th>
+                <th scope="col">来源</th>
+                <th scope="col">开仓时间</th>
               </tr>
             </thead>
             <tbody>
@@ -472,11 +475,11 @@ export function TradingPage() {
                     </span>
                   </td>
                   <td>{formatDecimal(item.volume, 2)}</td>
-                  <td>{item.entry ? formatDecimal(item.entry, 5) : "--"}</td>
-                  <td>{item.current ? formatDecimal(item.current, 5) : "--"}</td>
+                  <td>{item.entry ? formatDecimal(item.entry, 5) : ""}</td>
+                  <td>{item.current ? formatDecimal(item.current, 5) : ""}</td>
                   <td className={item.unrealized >= 0 ? "status-ok" : "status-bad"}>{formatMoney(item.unrealized, currency)}</td>
-                  <td>{item.stop ? formatDecimal(item.stop, 5) : "--"}</td>
-                  <td>{item.take ? formatDecimal(item.take, 5) : "--"}</td>
+                  <td>{item.stop ? formatDecimal(item.stop, 5) : ""}</td>
+                  <td>{item.take ? formatDecimal(item.take, 5) : ""}</td>
                   <td>{item.id}</td>
                   <td>{item.source}</td>
                   <td>{formatReadableTime(item.openTs)}</td>

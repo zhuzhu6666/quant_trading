@@ -841,5 +841,8 @@ def test_should_send_orders_respects_system_mode(monkeypatch, tmp_path):
 
     assert live_service._should_send_orders("ctrader") is False
 
-    path.write_text("system:\n  mode: live\nctrader:\n  send_orders: true\n", encoding="utf-8")
+    path.write_text(
+        "system:\n  mode: live\nctrader:\n  send_orders: true\n  host: demo.ctraderapi.com\n",
+        encoding="utf-8",
+    )
     assert live_service._should_send_orders("ctrader") is True

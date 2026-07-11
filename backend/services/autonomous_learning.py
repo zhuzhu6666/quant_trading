@@ -577,6 +577,22 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
         label["label"] = str(verdict.get("action") or row["event_type"] or "")
         label["summary_reason"] = str(verdict.get("summary_reason") or row["action_reason"] or "")
         train_weight = 0.6
+        if outcome_review is not None:
+            review_json = _loads(outcome_review["review_json"], {})
+            integrity, review_weight = _review_integrity_for_training(review_json)
+            label_status = "matured" if integrity != "missing" else "pending"
+            train_weight = min(train_weight, review_weight)
+            label.update(
+                {
+                    "review_id": str(outcome_review["review_id"] or ""),
+                    "outcome_label": str(outcome_review["outcome_label"] or ""),
+                    "pnl": float(outcome_review["pnl"] or 0.0),
+                    "mae": float(outcome_review["mae"] or 0.0),
+                    "mfe": float(outcome_review["mfe"] or 0.0),
+                    "primary_responsibility": str(review_json.get("primary_responsibility") or ""),
+                    "close_ts": float(review_json.get("close_ts") or outcome_review["created_at"] or 0.0),
+                }
+            )
     return {
         "sample_type": sample_type,
         "source_table": "decision_ledger",
@@ -1234,7 +1250,8 @@ def materialize_autonomous_learning_samples(
                     if _upsert_sample(conn, {**_sample_from_decision(row, "risk_rejection"), **sample_context}):
                         counts["risk_rejection"] += 1
             if event_type.startswith("supervisor_"):
-                if _upsert_sample(conn, {**_sample_from_decision(row, "supervisor_trajectory"), **sample_context}):
+                outcome_review = _review_for_open_decision(conn, row)
+                if _upsert_sample(conn, {**_sample_from_decision(row, "supervisor_trajectory", outcome_review=outcome_review), **sample_context}):
                     counts["supervisor_trajectory"] += 1
 
         if state_table_exists(conn, "position_supervisor_trace"):
@@ -3868,6 +3885,56 @@ def apply_demo_autonomy(
     return payload
 
 
+def materialize_portfolio_shadow_trades(
+    *, db_path: str | Path = STATE_DB, limit: int = 1000,
+) -> dict[str, Any]:
+    """Build a combination-level shadow ledger from matured open outcomes."""
+    conn = _connect(db_path)
+    inserted = 0
+    try:
+        rows = _execute(
+            conn,
+            """
+            SELECT sample_id, symbol, timeframe, event_ts, features_json, label_json
+            FROM autonomous_learning_sample
+            WHERE sample_type='shadow_open_decision' AND label_status='matured'
+            ORDER BY event_ts DESC LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        for row in rows:
+            features = _loads(row["features_json"], {})
+            label = _loads(row["label_json"], {})
+            action = features.get("action") or {}
+            score = float(action.get("score") or action.get("action_score") or features.get("action_score") or 0.0)
+            direction = int(action.get("direction") or (1 if score > 0 else -1 if score < 0 else 0))
+            stable_id = int(hashlib.sha1(f"portfolio:{row['sample_id']}".encode("utf-8")).hexdigest()[:15], 16)
+            exists = _execute(conn, "SELECT 1 FROM shadow_trades WHERE id=?", (stable_id,)).fetchone()
+            if exists:
+                continue
+            _execute(
+                conn,
+                """
+                INSERT INTO shadow_trades
+                (id, factor, symbol, timeframe, ts, signal, position, pnl, created_at)
+                VALUES (?, '__portfolio_shadow__', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stable_id, str(row["symbol"] or ""), str(row["timeframe"] or ""),
+                    float(row["event_ts"] or 0.0), score, direction,
+                    float(label.get("pnl") or 0.0), time.time(),
+                ),
+            )
+            inserted += 1
+        conn.commit()
+        return {"schema_version": "portfolio_shadow_ledger.v1", "inserted": inserted, "scanned": len(rows)}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def run_autonomous_learning_cycle(
     *,
     db_path: str | Path = STATE_DB,
@@ -3884,6 +3951,7 @@ def run_autonomous_learning_cycle(
     review_integrity_backfill = backfill_trade_review_integrity_markers(db_path=db_path, limit=sample_limit)
     close_source_backfill = backfill_trade_review_close_sources(db_path=db_path, limit=sample_limit)
     samples = materialize_autonomous_learning_samples(db_path=db_path, limit=sample_limit)
+    portfolio_shadow = materialize_portfolio_shadow_trades(db_path=db_path, limit=sample_limit)
     entry_quality_governance = materialize_entry_quality_governance_suggestions(db_path=db_path, limit=sample_limit)
     entry_cluster_governance = materialize_entry_cluster_governance_suggestions(db_path=db_path, limit=sample_limit)
     event_window_governance = materialize_event_window_governance_suggestions(db_path=db_path, limit=sample_limit)
@@ -3918,6 +3986,7 @@ def run_autonomous_learning_cycle(
             "review_integrity_backfill": review_integrity_backfill,
             "close_source_backfill": close_source_backfill,
             "samples": samples,
+            "portfolio_shadow": portfolio_shadow,
             "entry_quality_governance": entry_quality_governance,
             "entry_cluster_governance": entry_cluster_governance,
             "event_window_governance": event_window_governance,

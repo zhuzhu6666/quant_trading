@@ -828,7 +828,6 @@ class RiskPolicyService:
         extra["block_on_disk_critical"] = bool(
             context.get("block_on_disk_critical", risk_limits.block_on_disk_critical)
         )
-        extra["require_l2_depth"] = bool(context.get("require_l2_depth", risk_limits.require_l2_depth))
         extra["loss_cooldown_after_losses"] = int(
             context.get("loss_cooldown_after_losses", risk_limits.loss_cooldown_after_losses) or 0
         )

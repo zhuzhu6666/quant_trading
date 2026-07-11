@@ -94,6 +94,9 @@ def test_live_decision_pipeline_applies_context_policy_before_gate():
     assert frame.signals == {"rsi_14": 0.72}
     assert frame.context_policy["reason"] == "high_volatility"
     assert frame.composite.context_policy["position_multiplier"] == 0.8
+    assert frame.composite.calibrated_confidence["risk_reducing_only"] is True
+    assert frame.composite.context_state["calibrated_probability"] >= 0.0
+    assert frame.composite.context_state["confidence_sizing_multiplier"] <= 1.0
     assert gate.filter_calls[0][3] == 0.55
     assert gate.tick_count == 1
 

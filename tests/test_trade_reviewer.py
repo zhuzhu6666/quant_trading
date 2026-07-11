@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pytest
+
 from alpha.reflection.reviewer import TradeReviewer
 
 
@@ -80,6 +82,70 @@ def test_trade_reviewer_deduplicates_same_broker_deal(tmp_path):
     finally:
         conn.close()
     assert count == 1
+
+
+def test_trade_reviewer_uses_path_quality_for_good_win(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "state.db")
+    reviewer = TradeReviewer(db_path)
+    monkeypatch.setattr(
+        "alpha.reflection.reviewer.update_position_path_metrics",
+        lambda **_kwargs: (
+            {},
+            {
+                "mae": 0.0, "mfe": 6.78, "holding_efficiency": 0.95,
+                "giveback_ratio": 0.09, "profit_capture_ratio": 0.91,
+                "time_in_profit_seconds": 1000.0, "time_in_profit_ratio": 1.0,
+                "time_decay_score": 0.8, "thesis_status": "intact",
+                "regime_shift": "none",
+            },
+        ),
+    )
+
+    result = reviewer.review_closed_trade(
+        position_id="clean_win",
+        pnl=6.18,
+        close_price=4098.58,
+        close_ts=10_000.0,
+        contributions={"trend": 1.0, "noise": -2.0},
+        real_pnl={"deal_id": 99, "net": 6.18, "exec_timestamp": 10_000.0},
+        close_reason="broker_close",
+    )
+
+    assert result["outcome_label"] == "good_win"
+    assert "lucky_win" not in result["failure_tags"]
+    assert result["review_json"]["entry_quality"] >= 0.62
+    assert result["review_json"]["exit_quality"] == pytest.approx(0.887, abs=0.001)
+
+
+def test_trade_reviewer_assigns_full_giveback_loss_to_exit(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "state.db")
+    reviewer = TradeReviewer(db_path)
+    monkeypatch.setattr(
+        "alpha.reflection.reviewer.update_position_path_metrics",
+        lambda **_kwargs: (
+            {},
+            {
+                "mae": 1.0, "mfe": 3.2, "holding_efficiency": 0.2,
+                "giveback_ratio": 1.0, "profit_capture_ratio": 0.0,
+                "time_in_profit_seconds": 400.0, "time_in_profit_ratio": 0.55,
+                "time_decay_score": 0.5, "thesis_status": "broken",
+                "regime_shift": "none",
+            },
+        ),
+    )
+
+    result = reviewer.review_closed_trade(
+        position_id="giveback_loss",
+        pnl=-0.2,
+        close_price=4104.0,
+        close_ts=11_000.0,
+        contributions={"trend": -0.1},
+        real_pnl={"deal_id": 100, "net": -0.2, "exec_timestamp": 11_000.0},
+        close_reason="broker_close",
+    )
+
+    assert "alpha_correct_but_capture_failed" in result["failure_tags"]
+    assert result["review_json"]["primary_responsibility"] == "exit"
 
 
 def test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination(tmp_path):

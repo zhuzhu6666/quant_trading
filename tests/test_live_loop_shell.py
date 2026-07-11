@@ -13,14 +13,12 @@ from backend.services.live_loop_shell import (
     collect_open_risk_runtime_health,
     cross_asset_symbols_for_config,
     dataframe_to_factor_bars,
-    depth_subscription_followup_message,
-    depth_subscription_required,
     enabled_symbols_from_config,
     execution_gate_config,
     loop_status_snapshot,
     mark_loop_stopped_for_display,
     market_closed_log_message,
-    subscribe_spot_depth_once,
+    subscribe_spot_once,
     system_health_snapshot_from_report,
     unique_factor_pipelines,
 )
@@ -449,24 +447,6 @@ def test_cross_asset_symbols_for_config_requires_multiple_symbols_and_flag():
     ) == ["XAUUSD+", "EURUSD"]
 
 
-def test_depth_subscription_helpers_preserve_l2_policy_messages():
-    assert depth_subscription_required(require_l2_depth=True, l2_collection_enabled=False) is True
-    assert depth_subscription_required(require_l2_depth=False, l2_collection_enabled=True) is True
-    assert depth_subscription_required(require_l2_depth=False, l2_collection_enabled=False) is False
-    assert depth_subscription_followup_message(
-        require_l2_depth=True,
-        l2_collection_enabled=True,
-    ) == ""
-    assert depth_subscription_followup_message(
-        require_l2_depth=False,
-        l2_collection_enabled=True,
-    ) == "L2 depth collected for research; risk_require_l2_depth=false so it is not a trading gate"
-    assert depth_subscription_followup_message(
-        require_l2_depth=False,
-        l2_collection_enabled=False,
-    ) == "L2 depth subscription skipped: risk_require_l2_depth=false and l2_collection_enabled=false"
-
-
 def test_market_closed_log_message_preserves_live_text_shape():
     market_session = {"reason": "weekend", "high_load_allowed": False}
 
@@ -494,38 +474,30 @@ def test_market_closed_log_message_preserves_live_text_shape():
     )
 
 
-class _SpotDepthBridge:
+class _SpotBridge:
     def __init__(self, *, connected: bool):
         self.is_connected = connected
         self.spot_subscriptions = 0
-        self.depth_subscriptions = 0
 
     def subscribe_spots(self):
         self.spot_subscriptions += 1
 
-    def subscribe_depth(self):
-        self.depth_subscriptions += 1
-
-
-def test_subscribe_spot_depth_once_skips_when_bridge_error():
-    bridge = _SpotDepthBridge(connected=True)
+def test_subscribe_spot_once_skips_when_bridge_error():
+    bridge = _SpotBridge(connected=True)
     logs: list[str] = []
 
-    subscribe_spot_depth_once(
+    subscribe_spot_once(
         get_ctrader=lambda: (bridge, "missing credentials", False),
         wait_ctrader_ready=lambda *_args, **_kwargs: "",
-        require_l2_depth=False,
-        l2_collection_enabled=True,
         log=logs.append,
     )
 
     assert bridge.spot_subscriptions == 0
-    assert bridge.depth_subscriptions == 0
     assert logs == ["subscribe_spots skipped: missing credentials"]
 
 
-def test_subscribe_spot_depth_once_waits_then_subscribes_depth_for_research():
-    bridge = _SpotDepthBridge(connected=False)
+def test_subscribe_spot_once_waits_then_subscribes_spot():
+    bridge = _SpotBridge(connected=False)
     logs: list[str] = []
     waits: list[tuple[object, float]] = []
 
@@ -534,38 +506,29 @@ def test_subscribe_spot_depth_once_waits_then_subscribes_depth_for_research():
         bridge.is_connected = True
         return ""
 
-    subscribe_spot_depth_once(
+    subscribe_spot_once(
         get_ctrader=lambda: (bridge, "", True),
         wait_ctrader_ready=wait_ready,
-        require_l2_depth=False,
-        l2_collection_enabled=True,
         log=logs.append,
         timeout_sec=7.5,
     )
 
     assert waits == [(bridge, 7.5)]
     assert bridge.spot_subscriptions == 1
-    assert bridge.depth_subscriptions == 1
-    assert logs == [
-        "subscribed to spot/depth events for real-time price and L2 research",
-        "L2 depth collected for research; risk_require_l2_depth=false so it is not a trading gate",
-    ]
+    assert logs == ["subscribed to cTrader spot events"]
 
 
-def test_subscribe_spot_depth_once_skips_when_ready_wait_fails():
-    bridge = _SpotDepthBridge(connected=False)
+def test_subscribe_spot_once_skips_when_ready_wait_fails():
+    bridge = _SpotBridge(connected=False)
     logs: list[str] = []
 
-    subscribe_spot_depth_once(
+    subscribe_spot_once(
         get_ctrader=lambda: (bridge, "", True),
         wait_ctrader_ready=lambda *_args, **_kwargs: "warming timeout",
-        require_l2_depth=True,
-        l2_collection_enabled=True,
         log=logs.append,
     )
 
     assert bridge.spot_subscriptions == 0
-    assert bridge.depth_subscriptions == 0
     assert logs == ["subscribe_spots skipped: warming timeout"]
 
 

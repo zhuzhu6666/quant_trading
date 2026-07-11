@@ -229,13 +229,9 @@ class RiskGovernor:
         component_status = system_health.get("component_status", {}) if isinstance(system_health, dict) else {}
         if system_health:
             disk_status = str(component_status.get("disk_space") or "")
-            l2_status = str(component_status.get("l2_depth") or "")
             block_on_disk_critical = bool(state.extra.get("block_on_disk_critical", True))
-            require_l2_depth = bool(state.extra.get("require_l2_depth", False))
             if block_on_disk_critical and disk_status == "critical":
                 return GovernorVerdict(False, "disk_space_critical", "disk space is critically low")
-            if require_l2_depth and l2_status == "critical":
-                return GovernorVerdict(False, "l2_depth_unavailable", "required L2 depth feed is unavailable")
 
         return GovernorVerdict(True, "ok")
 

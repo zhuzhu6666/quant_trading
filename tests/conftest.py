@@ -41,6 +41,24 @@ def auth_client():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _isolate_attribution_duckdb(tmp_path_factory):
+    """Keep attribution tests from writing into data/trades.duckdb."""
+    from alpha import attribution_engine
+
+    original_path = attribution_engine.DUCKDB_TRADES
+    original_schema_ready = attribution_engine._TRADES_SCHEMA_READY
+    attribution_engine.DUCKDB_TRADES = (
+        tmp_path_factory.mktemp("attribution") / "trades.duckdb"
+    )
+    attribution_engine._TRADES_SCHEMA_READY = False
+    try:
+        yield
+    finally:
+        attribution_engine.DUCKDB_TRADES = original_path
+        attribution_engine._TRADES_SCHEMA_READY = original_schema_ready
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _shutdown_background_job_loops():
     yield
     try:

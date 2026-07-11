@@ -98,11 +98,11 @@ function boolTone(value: boolean): Tone {
 }
 
 function safeLabel(value: unknown): string {
-  if (value === undefined || value === null || value === "") return "--";
+  if (value === undefined || value === null || value === "") return "";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return translateDisplayValue(String(value));
   const record = asRecord(value);
   const direct = pickString(record, ["label", "name", "id", "key", "status", "reason", "message"], "");
-  return direct ? translateReasonText(direct) : "--";
+  return direct ? translateReasonText(direct) : "";
 }
 
 function DataList({ items, empty = "无记录" }: { items: unknown[]; empty?: string }) {
@@ -233,8 +233,8 @@ function FactorCatalogList({ items }: { items: unknown[] }) {
     <div className="v15-list">
       {records.slice(0, 12).map((item, index) => {
         const factorId = factorIdOf(item) || `#${index + 1}`;
-        const role = pickString(item, ["role"], "--");
-        const source = pickString(item, ["source"], "--");
+        const role = pickString(item, ["role"], "");
+        const source = pickString(item, ["source"], "");
         const enabled = pickBoolean(item, ["enabled"], false);
         const eligible = pickBoolean(item, ["eligible_for_live"], false);
         const usedInScore = pickBoolean(item, ["used_in_score"], false);
@@ -338,7 +338,7 @@ function TemplateList({ items }: { items: unknown[] }) {
           <div className="v15-list-row" key={`${factorId}-${templateId}-${index}`}>
             <div>
               <strong>{factorId}</strong>
-              <span>{detail || "--"}</span>
+              <span>{detail || ""}</span>
             </div>
             {status ? <StatusPill status={status} tone={toneFromStatus(status)} /> : null}
           </div>
@@ -486,10 +486,10 @@ function TradeOutcomeLearningPanel({ preview }: { preview: unknown }) {
   const pnlText =
     status === "no_trade" ? "未交易" :
       status === "open" ? "未平仓" :
-        status === "missing" ? "--" :
+        status === "missing" ? "" :
           `${pnl >= 0 ? "+" : ""}${formatDecimal(pnl, 2)}`;
   const tradeRef = pickString(item, ["position_id"], "") || pickString(item, ["trade_id"], "");
-  const tradeTitle = tradeRef ? `仓位 ${tradeRef}` : pickString(item, ["decision_id"], "--");
+  const tradeTitle = tradeRef ? `仓位 ${tradeRef}` : pickString(item, ["decision_id"], "");
   const directionLabel = translateDisplayValue(pickString(item, ["direction_label"], ""));
   const label = translateDisplayValue(pickString(outcome, ["outcome_label"], "") || result || status);
   const closeReason = translateDisplayValue(pickString(outcome, ["close_reason"], ""));
@@ -510,11 +510,11 @@ function TradeOutcomeLearningPanel({ preview }: { preview: unknown }) {
         <StatusPill status={translateDisplayValue(learningStatus || status)} tone={learningTone(learningStatus)} />
       </div>
       <div className="v15-mini-grid">
-        <CompactMetric label="开仓方向" value={directionLabel} detail={pickString(item, ["symbol"], "") || "--"} tone={directionLabel === "--" ? "mute" : "ok"} />
+        <CompactMetric label="开仓方向" value={directionLabel} detail={pickString(item, ["symbol"], "") || ""} tone={directionLabel === "" ? "mute" : "ok"} />
         <CompactMetric label="这单结果" value={translateDisplayValue(result || status)} detail={label} tone={outcomeTone(result, status)} />
         <CompactMetric label="实际盈亏" value={pnlText} detail={tradeTitle} tone={outcomeTone(result, status)} />
-        <CompactMetric label="平仓原因" value={closeReason} detail={formatTime(pick(outcome, ["close_ts"]))} tone={closeReason === "--" ? "mute" : "warn"} />
-        <CompactMetric label="学习处理" value={translateDisplayValue(learningStatus)} detail={sampleDetail || "--"} tone={learningTone(learningStatus)} />
+        <CompactMetric label="平仓原因" value={closeReason} detail={formatTime(pick(outcome, ["close_ts"]))} tone={closeReason === "" ? "mute" : "warn"} />
+        <CompactMetric label="学习处理" value={translateDisplayValue(learningStatus)} detail={sampleDetail || ""} tone={learningTone(learningStatus)} />
       </div>
       <div className="v15-replay-reading">
         <strong>系统会怎么学</strong>
@@ -579,7 +579,7 @@ function BarWindowIssueList({ items }: { items: unknown[] }) {
     <div className="v15-list">
       {records.slice(0, 6).map((item, index) => {
         const decisionId = pickString(item, ["decision_id"], `#${index + 1}`);
-        const issues = pickArray(item, ["issues"]).map((issue) => translateDisplayValue(issue)).join("、") || "--";
+        const issues = pickArray(item, ["issues"]).map((issue) => translateDisplayValue(issue)).join("、") || "";
         const detail = [
           `${pickString(item, ["symbol"], "XAUUSD+")}/${pickString(item, ["timeframe"], "M5")}`,
           `K线 ${formatDecimal(pickNumber(item, ["bar_count"], 0), 0)}`,
@@ -721,12 +721,12 @@ export function V15CockpitPage() {
 
   const readyForFrontend = pickBoolean(readiness, ["ready_for_frontend", "ok"], false);
   const healthScore = scorePct(pickNumber(autonomyHealth, ["score"], 0));
-  const healthPosture = pickString(autonomyHealth, ["posture"], "unknown");
-  const incidentMode = pickString(incidentControl, ["mode"], "normal");
-  const latestReplayGrade = pickString(replayDisplayReport, ["evidence_grade"], "missing");
+  const healthPosture = pickString(autonomyHealth, ["posture"], "");
+  const incidentMode = pickString(incidentControl, ["mode"], "");
+  const latestReplayGrade = pickString(replayDisplayReport, ["evidence_grade"], "");
   const replayMismatch = pickNumber(replayDisplayReport, ["mismatch_count"], 0);
   const replayError = pickString(replayDisplayReport, ["replay_error"], "");
-  const releaseStatus = pickString(release, ["status"], "missing");
+  const releaseStatus = pickString(release, ["status"], "");
   const phase0Complete = pickBoolean(phase0, ["implementation_complete"], false);
   const operationallyReady = pickBoolean(phase0, ["operationally_ready"], false);
   const blockers = pickArray(readiness, ["blockers"]);
@@ -757,7 +757,7 @@ export function V15CockpitPage() {
     <section className="dashboard v15-dashboard">
       <div className="dashboard-header">
         <div>
-          <div className="eyebrow">Autonomous Runtime Platform</div>
+          <div className="eyebrow">自治运行平台</div>
           <h1>运行中枢</h1>
           <p>统一查看运行态、回放证据、自治健康、事故控制和发布审计。</p>
         </div>
@@ -796,7 +796,7 @@ export function V15CockpitPage() {
         <div className="dashboard-grid">
           <MetricCard title="运行态合约" className="wide-panel">
             <div className="v15-mini-grid">
-              <CompactMetric label="就绪状态" value={readyForFrontend ? "就绪" : "受限"} detail={pickString(readiness, ["schema_version"], "--")} tone={boolTone(readyForFrontend)} />
+              <CompactMetric label="就绪状态" value={readyForFrontend ? "就绪" : "受限"} detail={pickString(readiness, ["schema_version"], "")} tone={boolTone(readyForFrontend)} />
               <CompactMetric label="运行覆盖层" value={safeLabel(pick(v15, ["overlay.status", "snapshot.status"]))} detail={safeLabel(pick(v15, ["snapshot.config_hash", "snapshot.overlay_hash"]))} tone={toneFromStatus(safeLabel(pick(v15, ["overlay.status", "snapshot.status"])))} />
               <CompactMetric label="回滚快照" value={pickBoolean(v15, ["snapshot.ok"], false) ? "正常" : "缺失"} detail={formatTime(pick(v15, ["snapshot.created_at", "snapshot.updated_at"]))} tone={pickBoolean(v15, ["snapshot.ok"], false) ? "ok" : "warn"} />
               <CompactMetric label="基础证据" value={phase0Complete ? "已完成" : "未完成"} detail={operationallyReady ? "可运行" : "待补证据"} tone={phase0Complete ? "ok" : "warn"} />
@@ -866,12 +866,12 @@ export function V15CockpitPage() {
             <KlineWindowPreview preview={barWindowPreview} pending={runReplayMutation.isPending} />
             <TradeOutcomeLearningPanel preview={tradeOutcomeLearningPreview} />
             <div className="v15-mini-grid">
-              <CompactMetric label="回放编号" value={pickString(replayDisplayReport, ["replay_run_id"], "--")} detail={formatTime(pick(replayDisplayReport, ["created_at"]))} tone={latestReplayGrade === "missing" ? "warn" : "ok"} />
+              <CompactMetric label="回放编号" value={pickString(replayDisplayReport, ["replay_run_id"], "")} detail={formatTime(pick(replayDisplayReport, ["created_at"]))} tone={latestReplayGrade === "missing" ? "warn" : "ok"} />
               <CompactMetric label="证据等级" value={latestReplayGrade} detail={`误差 ${formatDecimal(replayMismatch, 0)}`} tone={latestReplayGrade === "A" || latestReplayGrade === "B" ? "ok" : latestReplayGrade === "C" ? "warn" : "bad"} />
               <CompactMetric label="决策数量" value={formatDecimal(pickNumber(replayDisplayReport, ["decision_count"], 0), 0)} detail={`匹配 ${formatDecimal(pickNumber(replayDisplayReport, ["matched_live_count"], 0), 0)}`} tone="mute" />
-              <CompactMetric label="证据文件" value={pickString(replayDisplayReport, ["artifact_hash"], "").slice(0, 12) || "--"} detail={pickString(replayDisplayReport, ["artifact_path"], "--")} tone={pickString(replayDisplayReport, ["artifact_hash"], "") ? "ok" : "warn"} />
+              <CompactMetric label="证据文件" value={pickString(replayDisplayReport, ["artifact_hash"], "").slice(0, 12) || ""} detail={pickString(replayDisplayReport, ["artifact_path"], "")} tone={pickString(replayDisplayReport, ["artifact_hash"], "") ? "ok" : "warn"} />
               <CompactMetric label="K线覆盖" value={`${formatDecimal(scorePct(pickNumber(barReplayMetrics, ["bar_window_coverage"], 0)), 1)}%`} detail={`缺口 ${formatDecimal(pickNumber(barReplayMetrics, ["missing_bar_window_count"], 0), 0)} / 过期 ${formatDecimal(pickNumber(barReplayMetrics, ["stale_bar_alignment_count"], 0), 0)}`} tone={scorePct(pickNumber(barReplayMetrics, ["bar_window_coverage"], 0)) >= 95 ? "ok" : "warn"} />
-              <CompactMetric label="K线窗口Hash" value={pickString(barReplayMetrics, ["bar_window_hash"], "").slice(0, 12) || "--"} detail={`前 ${formatDecimal(pickNumber(barReplayMetrics, ["warmup_bars"], 0), 0)} / 后 ${formatDecimal(pickNumber(barReplayMetrics, ["post_bars"], 0), 0)}`} tone={pickString(barReplayMetrics, ["bar_window_hash"], "") ? "ok" : "warn"} />
+              <CompactMetric label="K线窗口Hash" value={pickString(barReplayMetrics, ["bar_window_hash"], "").slice(0, 12) || ""} detail={`前 ${formatDecimal(pickNumber(barReplayMetrics, ["warmup_bars"], 0), 0)} / 后 ${formatDecimal(pickNumber(barReplayMetrics, ["post_bars"], 0), 0)}`} tone={pickString(barReplayMetrics, ["bar_window_hash"], "") ? "ok" : "warn"} />
             </div>
             <SectionHead title="K线窗口严重缺口" status={`${barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "blocking").length}`} tone={barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "blocking").length ? "warn" : "ok"} />
             <BarWindowIssueList items={barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "blocking")} />
@@ -882,7 +882,7 @@ export function V15CockpitPage() {
                 {replayKeys.map((key) => {
                   const metric = asRecord(replayMetrics[key]);
                   const coverage = scorePct(pickNumber(metric, ["coverage", "bar_window_coverage", "factor_frame_coverage", "causality_coverage", "counterfactual_coverage", "agreement_rate"], 0));
-                  return <ProgressMetric key={key} label={replayMetricLabels[key] || key} value={coverage} detail={pickString(metric, ["schema_version"], "--")} tone={coverage >= 95 ? "ok" : coverage > 0 ? "warn" : "mute"} />;
+                  return <ProgressMetric key={key} label={replayMetricLabels[key] || key} value={coverage} detail={pickString(metric, ["schema_version"], "")} tone={coverage >= 95 ? "ok" : coverage > 0 ? "warn" : "mute"} />;
                 })}
               </div>
             ) : null}
@@ -934,10 +934,10 @@ export function V15CockpitPage() {
             </div>
             <div className="field-list">
               <Field label="当前模式" value={incidentMode} tone={incidentMode === "normal" ? "ok" : "warn"} />
-              <Field label="应急预案" value={pickString(latestPlaybook, ["playbook_id", "status"], "--")} />
-              <Field label="目标模式" value={pickString(latestPlaybook, ["target_mode"], "--")} tone={toneFromStatus(pickString(latestPlaybook, ["target_mode"], ""))} />
-              <Field label="范围审批" value={pickString(latestScopeApproval, ["decision", "status"], "--")} />
-              <Field label="范围收紧" value={pickString(latestScopeEnforcement, ["status"], "--")} tone={toneFromStatus(pickString(latestScopeEnforcement, ["status"], ""))} />
+              <Field label="应急预案" value={pickString(latestPlaybook, ["playbook_id", "status"], "")} />
+              <Field label="目标模式" value={pickString(latestPlaybook, ["target_mode"], "")} tone={toneFromStatus(pickString(latestPlaybook, ["target_mode"], ""))} />
+              <Field label="范围审批" value={pickString(latestScopeApproval, ["decision", "status"], "")} />
+              <Field label="范围收紧" value={pickString(latestScopeEnforcement, ["status"], "")} tone={toneFromStatus(pickString(latestScopeEnforcement, ["status"], ""))} />
             </div>
           </MetricCard>
           <MetricCard title="最近应急预案">
@@ -953,11 +953,11 @@ export function V15CockpitPage() {
               <ActionButton icon={Rocket} label="开始发布记录" variant="primary" loading={releaseStartMutation.isPending} error={releaseStartMutation.isError ? "启动失败" : null} onAction={() => runAndDiscard(releaseStartMutation.mutateAsync())} />
             </div>
             <div className="field-list">
-              <Field label="发布编号" value={releaseRunId || "--"} />
+              <Field label="发布编号" value={releaseRunId || ""} />
               <Field label="状态" value={releaseStatus} tone={toneFromStatus(releaseStatus)} />
-              <Field label="回放编号" value={pickString(release, ["replay_run_id"], "--")} />
-              <Field label="运行配置哈希" value={pickString(release, ["runtime_config_hash"], "--")} />
-              <Field label="就绪姿态" value={pickString(release, ["readiness_posture"], "--")} />
+              <Field label="回放编号" value={pickString(release, ["replay_run_id"], "")} />
+              <Field label="运行配置哈希" value={pickString(release, ["runtime_config_hash"], "")} />
+              <Field label="就绪姿态" value={pickString(release, ["readiness_posture"], "")} />
             </div>
           </MetricCard>
           <MetricCard title="审批轨迹">

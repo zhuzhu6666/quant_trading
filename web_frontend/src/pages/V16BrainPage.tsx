@@ -37,6 +37,7 @@ import {
   unlockLiveAutonomy,
 } from "@/api/client";
 import { MetricCard } from "@/components/Card";
+import { ActionButton } from "@/components/ActionButton";
 import { CompactMetric, Field, SectionHead, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { JsonBlock } from "@/components/JsonBlock";
 import { StatusPill } from "@/components/StatusPill";
@@ -169,12 +170,7 @@ export function V16BrainPage() {
   });
 
   const liveUnlockMutation = useMutation({
-    mutationFn: async () => {
-      if (!window.confirm("确认一次性解锁实盘自治？")) {
-        return { ok: false, status: "cancelled" };
-      }
-      return unlockLiveAutonomy();
-    },
+    mutationFn: () => unlockLiveAutonomy(),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["autonomy"] });
       void queryClient.invalidateQueries({ queryKey: ["v16"] });
@@ -271,7 +267,7 @@ export function V16BrainPage() {
     if (["no_new_risk", "observation_only"].includes(posture)) return "bad";
     return "warn";
   }, [worldModel]);
-  const criticVerdict = pickString(critic, ["verdict"], pickString(brainState, ["critic_verdict"], "unknown"));
+  const criticVerdict = pickString(critic, ["verdict"], pickString(brainState, ["critic_verdict"], ""));
   const readOnly = pickBoolean(brainState, ["read_only"], true) && pickBoolean(boundary, ["read_only"], true);
   const affectsTrading = pickBoolean(brainState, ["affects_trading"], false);
 
@@ -279,45 +275,17 @@ export function V16BrainPage() {
     <section className="dashboard v16-dashboard">
       <div className="dashboard-header">
         <div>
-          <div className="eyebrow">Autonomy Brain</div>
+          <div className="eyebrow">自治决策系统</div>
           <h1>自治治理链路</h1>
           <p>多智能体权责、提案总线、候选审查、记忆反馈和执行边界。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={displayValue(pickString(autonomousBlueprint, ["status"], "unknown"))} tone={pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn"} />
-          <StatusPill status={displayStage(pickString(v16Readiness, ["phase"], "phase5_live_ready_guardrails"))} tone="ok" />
+          <StatusPill status={displayValue(pickString(autonomousBlueprint, ["status"], ""))} tone={pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn"} />
+          <StatusPill status={displayStage(pickString(v16Readiness, ["phase"], ""))} tone="ok" />
           <StatusPill status={readOnly && !affectsTrading ? "交易边界正常" : "边界异常"} tone={readOnly && !affectsTrading ? "ok" : "bad"} />
           <button className="header-refresh" type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>
             <RefreshCw size={15} aria-hidden="true" />
             {refreshMutation.isPending ? "刷新中" : "刷新大脑"}
-          </button>
-          <button className="header-refresh" type="button" disabled={lowImpactMutation.isPending} onClick={() => lowImpactMutation.mutate()}>
-            <Play size={15} aria-hidden="true" />
-            {lowImpactMutation.isPending ? "运行中" : "低影响回放"}
-          </button>
-          <button className="header-refresh" type="button" disabled={mediumImpactMutation.isPending} onClick={() => mediumImpactMutation.mutate()}>
-            <ListChecks size={15} aria-hidden="true" />
-            {mediumImpactMutation.isPending ? "生成中" : "生成治理候选"}
-          </button>
-          <button className="header-refresh" type="button" disabled={candidateReviewMutation.isPending} onClick={() => candidateReviewMutation.mutate()}>
-            <GitBranch size={15} aria-hidden="true" />
-            {candidateReviewMutation.isPending ? "审查中" : "审查候选"}
-          </button>
-          <button className="header-refresh" type="button" disabled={liveReadyEvaluateMutation.isPending} onClick={() => liveReadyEvaluateMutation.mutate()}>
-            <ShieldCheck size={15} aria-hidden="true" />
-            {liveReadyEvaluateMutation.isPending ? "评估中" : "护栏评估"}
-          </button>
-          <button className="header-refresh" type="button" disabled={liveReadyTightenMutation.isPending} onClick={() => liveReadyTightenMutation.mutate("no_new_risk")}>
-            <ShieldCheck size={15} aria-hidden="true" />
-            不增风险
-          </button>
-          <button className="header-refresh" type="button" disabled={liveReadyTightenMutation.isPending} onClick={() => liveReadyTightenMutation.mutate("only_close")}>
-            <ShieldCheck size={15} aria-hidden="true" />
-            仅平仓
-          </button>
-          <button className="header-refresh" type="button" disabled={liveReadyTightenMutation.isPending} onClick={() => liveReadyTightenMutation.mutate("frozen")}>
-            <ShieldCheck size={15} aria-hidden="true" />
-            冻结
           </button>
           {refreshMutation.isError ? <span className="error-text small">刷新失败</span> : null}
           {lowImpactMutation.isError ? <span className="error-text small">低影响回放失败</span> : null}
@@ -328,21 +296,31 @@ export function V16BrainPage() {
         </div>
       </div>
 
+      <div className="page-action-bar" aria-label="自治治理操作">
+        <button className="header-refresh" type="button" disabled={lowImpactMutation.isPending} onClick={() => lowImpactMutation.mutate()}><Play size={15} />{lowImpactMutation.isPending ? "运行中" : "低影响回放"}</button>
+        <button className="header-refresh" type="button" disabled={mediumImpactMutation.isPending} onClick={() => mediumImpactMutation.mutate()}><ListChecks size={15} />{mediumImpactMutation.isPending ? "生成中" : "生成候选"}</button>
+        <button className="header-refresh" type="button" disabled={candidateReviewMutation.isPending} onClick={() => candidateReviewMutation.mutate()}><GitBranch size={15} />{candidateReviewMutation.isPending ? "审查中" : "审查候选"}</button>
+        <button className="header-refresh" type="button" disabled={liveReadyEvaluateMutation.isPending} onClick={() => liveReadyEvaluateMutation.mutate()}><ShieldCheck size={15} />{liveReadyEvaluateMutation.isPending ? "评估中" : "护栏评估"}</button>
+        <ActionButton icon={ShieldCheck} label="不增风险" variant="ghost" disabled={liveReadyTightenMutation.isPending} confirmMessage="将实盘自治收紧为不允许增加风险。" onAction={() => liveReadyTightenMutation.mutateAsync("no_new_risk")} />
+        <ActionButton icon={ShieldCheck} label="仅平仓" variant="danger" disabled={liveReadyTightenMutation.isPending} confirmMessage="将实盘自治收紧为只允许平仓。" onAction={() => liveReadyTightenMutation.mutateAsync("only_close")} />
+        <ActionButton icon={ShieldCheck} label="冻结" variant="danger" disabled={liveReadyTightenMutation.isPending} confirmMessage="将冻结实盘自治能力，后续需要重新评估才能放开。" onAction={() => liveReadyTightenMutation.mutateAsync("frozen")} />
+      </div>
+
       <div className="stat-grid v15-stat-grid">
-        <StatTile icon={Network} label="大纲对齐" value={displayValue(pickString(autonomousBlueprint, ["status"], "unknown"))} detail={`阻断 ${formatDecimal(blueprintBlockers.length, 0)} / 检查 ${formatDecimal(pickArray(autonomousBlueprint, ["checks"]).length, 0)}`} tone={pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn"} />
+        <StatTile icon={Network} label="大纲对齐" value={displayValue(pickString(autonomousBlueprint, ["status"], ""))} detail={`阻断 ${formatDecimal(blueprintBlockers.length, 0)} / 检查 ${formatDecimal(pickArray(autonomousBlueprint, ["checks"]).length, 0)}`} tone={pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn"} />
         <StatTile icon={UsersRound} label="Agent 权责" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`未知 ${formatDecimal(countOf(pick(agentAuthority, ["unknown_sources"])), 0)} / 违规 ${formatDecimal(countOf(pick(agentAuthority, ["contract_violations"])), 0)}`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
-        <StatTile icon={Route} label="上下文覆盖" value={displayValue(pickString(proposalContextCoverage, ["status"], "unknown"))} detail={`候选 ${displayValue(pickString(candidateContextCoverage, ["status"], "unknown"))} / 桥接 ${displayValue(pickString(candidateBridgeReviewCoverage, ["status"], "unknown"))}`} tone={statusTone(pickString(proposalContextCoverage, ["status"], "unknown"))} />
-        <StatTile icon={BrainCircuit} label="策略姿态" value={displayValue(pickString(worldModel, ["strategy_posture"], "unknown"))} detail={displayValue(pickString(worldModel, ["market_regime"], "unknown"))} tone={statTone} />
-        <StatTile icon={ShieldCheck} label="Critic" value={displayValue(criticVerdict)} detail={displayValue(pickString(critic, ["max_allowed_action_scope"], "observe_only"))} tone={criticVerdict === "pass" ? "ok" : "warn"} />
+        <StatTile icon={Route} label="上下文覆盖" value={displayValue(pickString(proposalContextCoverage, ["status"], ""))} detail={`候选 ${displayValue(pickString(candidateContextCoverage, ["status"], ""))} / 桥接 ${displayValue(pickString(candidateBridgeReviewCoverage, ["status"], ""))}`} tone={statusTone(pickString(proposalContextCoverage, ["status"], ""))} />
+        <StatTile icon={BrainCircuit} label="策略姿态" value={displayValue(pickString(worldModel, ["strategy_posture"], ""))} detail={displayValue(pickString(worldModel, ["market_regime"], ""))} tone={statTone} />
+        <StatTile icon={ShieldCheck} label="审查结论" value={displayValue(criticVerdict)} detail={displayValue(pickString(critic, ["max_allowed_action_scope"], ""))} tone={criticVerdict === "pass" ? "ok" : "warn"} />
         <StatTile icon={Database} label="记忆命中" value={formatDecimal(memoryItems.length, 0)} detail={`负面 ${formatDecimal(negativeMemory.length, 0)} / 反证 ${formatDecimal(counterEvidence.length, 0)}`} tone={negativeMemory.length ? "warn" : "ok"} />
         <StatTile icon={Workflow} label="假设" value={formatDecimal(hypotheses.length, 0)} detail={formatTime(pick(brainState, ["created_at"]))} tone={hypotheses.length ? "ok" : "warn"} />
-        <StatTile icon={ListChecks} label="影子计划" value={formatDecimal(actionPlans.length, 0)} detail={displayValue(pickString(actionPlanRun, ["status"], "shadow"))} tone={actionPlans.length ? "ok" : "warn"} />
-        <StatTile icon={GitBranch} label="后验评价" value={formatDecimal(actionPlanEvals.length, 0)} detail={displayValue(pickString(actionPlanEvalRun, ["status"], "posterior"))} tone={actionPlanEvals.length ? "ok" : "warn"} />
-        <StatTile icon={Play} label="低影响执行" value={formatDecimal(lowImpactExecutions.length, 0)} detail={displayValue(pickString(lowImpactExecutionRun, ["status"], "low-impact"))} tone={lowImpactExecutions.length ? "ok" : "warn"} />
-        <StatTile icon={ListChecks} label="治理候选" value={formatDecimal(mediumImpactGovernance.length, 0)} detail={displayValue(pickString(mediumImpactGovernanceRun, ["status"], "medium-impact"))} tone={mediumImpactGovernance.length ? "ok" : "warn"} />
-        <StatTile icon={GitBranch} label="候选审查" value={formatDecimal(candidateReviews.length, 0)} detail={displayValue(pickString(candidateReviewRun, ["status"], "review"))} tone={candidateReviews.length ? "ok" : "warn"} />
+        {Object.keys(actionPlanRun).length ? <StatTile icon={ListChecks} label="影子计划" value={formatDecimal(actionPlans.length, 0)} detail={displayValue(pickString(actionPlanRun, ["status"], ""))} tone={actionPlans.length ? "ok" : "warn"} /> : null}
+        {Object.keys(actionPlanEvalRun).length ? <StatTile icon={GitBranch} label="后验评价" value={formatDecimal(actionPlanEvals.length, 0)} detail={displayValue(pickString(actionPlanEvalRun, ["status"], ""))} tone={actionPlanEvals.length ? "ok" : "warn"} /> : null}
+        {Object.keys(lowImpactExecutionRun).length ? <StatTile icon={Play} label="低影响执行" value={formatDecimal(lowImpactExecutions.length, 0)} detail={displayValue(pickString(lowImpactExecutionRun, ["status"], ""))} tone={lowImpactExecutions.length ? "ok" : "warn"} /> : null}
+        {Object.keys(mediumImpactGovernanceRun).length ? <StatTile icon={ListChecks} label="治理候选" value={formatDecimal(mediumImpactGovernance.length, 0)} detail={displayValue(pickString(mediumImpactGovernanceRun, ["status"], ""))} tone={mediumImpactGovernance.length ? "ok" : "warn"} /> : null}
+        {Object.keys(candidateReviewRun).length ? <StatTile icon={GitBranch} label="候选审查" value={formatDecimal(candidateReviews.length, 0)} detail={displayValue(pickString(candidateReviewRun, ["status"], ""))} tone={candidateReviews.length ? "ok" : "warn"} /> : null}
         <StatTile icon={ListChecks} label="提案总线" value={formatDecimal(pickNumber(proposalSummary, ["proposal_count"], proposalItems.length), 0)} detail={`冲突 ${formatDecimal(pickNumber(proposalSummary, ["conflict_count"], 0), 0)}`} tone={pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok"} />
-        <StatTile icon={ShieldCheck} label="实盘自治" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], "manual"))} detail={displayValue(pickString(liveAutonomyEvaluation, ["status"], "locked"))} tone={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : liveAutonomyBlockers.length ? "warn" : "mute"} />
+        {Object.keys(liveAutonomy).length ? <StatTile icon={ShieldCheck} label="实盘自治" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], ""))} detail={displayValue(pickString(liveAutonomyEvaluation, ["status"], ""))} tone={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : liveAutonomyBlockers.length ? "warn" : "mute"} /> : null}
         <StatTile icon={ShieldCheck} label="实盘护栏" value={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "已锁定" : formatDecimal(liveReadyGuardrails.length, 0)} detail={displayValue(pickString(liveReadyGuardrailRun, ["status"], pickString(latestGuardrail, ["action_recommendation.target_mode"], "live-ready")))} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
       </div>
 
@@ -378,11 +356,11 @@ export function V16BrainPage() {
 
         <MetricCard title="世界模型" className="wide-panel">
           <div className="v15-mini-grid">
-            <CompactMetric label="市场状态" value={displayValue(pickString(worldModel, ["market_regime"], "unknown"))} tone="mute" />
-            <CompactMetric label="因子姿态" value={displayValue(pickString(worldModel, ["factor_posture"], "unknown"))} tone={toneFromStatus(pickString(worldModel, ["factor_posture"], "unknown"))} />
-            <CompactMetric label="执行姿态" value={displayValue(pickString(worldModel, ["execution_posture"], "unknown"))} tone={toneFromStatus(pickString(worldModel, ["execution_posture"], "unknown"))} />
-            <CompactMetric label="学习姿态" value={displayValue(pickString(worldModel, ["learning_posture"], "unknown"))} tone="mute" />
-            <CompactMetric label="自治姿态" value={displayValue(pickString(worldModel, ["autonomy_posture"], "unknown"))} tone={toneFromStatus(pickString(worldModel, ["autonomy_posture"], "unknown"))} />
+            <CompactMetric label="市场状态" value={displayValue(pickString(worldModel, ["market_regime"], ""))} tone="mute" />
+            <CompactMetric label="因子姿态" value={displayValue(pickString(worldModel, ["factor_posture"], ""))} tone={toneFromStatus(pickString(worldModel, ["factor_posture"], ""))} />
+            <CompactMetric label="执行姿态" value={displayValue(pickString(worldModel, ["execution_posture"], ""))} tone={toneFromStatus(pickString(worldModel, ["execution_posture"], ""))} />
+            <CompactMetric label="学习姿态" value={displayValue(pickString(worldModel, ["learning_posture"], ""))} tone="mute" />
+            <CompactMetric label="自治姿态" value={displayValue(pickString(worldModel, ["autonomy_posture"], ""))} tone={toneFromStatus(pickString(worldModel, ["autonomy_posture"], ""))} />
             <CompactMetric label="事故模式" value={displayValue(pickString(worldModel, ["incident_mode"], "normal"))} tone={pickString(worldModel, ["incident_mode"], "normal") === "normal" ? "ok" : "warn"} />
           </div>
           <div className="v16-boundary">
@@ -401,7 +379,7 @@ export function V16BrainPage() {
             <Field label="高危未解" value={formatDecimal(pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0), 0)} tone={pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok"} />
             <Field label="低可信" value={formatDecimal(pickNumber(proposalSummary, ["low_reliability_count"], 0), 0)} tone={pickNumber(proposalSummary, ["low_reliability_count"], 0) ? "warn" : "ok"} />
             <Field label="证据过期" value={formatDecimal(pickNumber(proposalSummary, ["stale_evidence_count"], 0), 0)} tone={pickNumber(proposalSummary, ["stale_evidence_count"], 0) ? "warn" : "ok"} />
-            <Field label="契约" value={displayContract(pickString(proposalRegistry, ["schema_version"], "--"))} />
+            <Field label="契约" value={displayContract(pickString(proposalRegistry, ["schema_version"], ""))} />
           </div>
           <div className="brain-card-actions">
             <button className="header-refresh" type="button" disabled={proposalRefreshMutation.isPending} onClick={() => proposalRefreshMutation.mutate()}>
@@ -433,14 +411,8 @@ export function V16BrainPage() {
               <ShieldCheck size={15} aria-hidden="true" />
               {liveUnlockEvaluateMutation.isPending ? "评估中" : "评估解锁"}
             </button>
-            <button className="header-refresh" type="button" disabled={liveUnlockMutation.isPending || !pickBoolean(liveAutonomyEvaluation, ["ok"], false)} onClick={() => liveUnlockMutation.mutate()}>
-              <ShieldCheck size={15} aria-hidden="true" />
-              {liveUnlockMutation.isPending ? "解锁中" : "一次解锁"}
-            </button>
-            <button className="header-refresh" type="button" disabled={liveRevokeMutation.isPending || !pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false)} onClick={() => liveRevokeMutation.mutate()}>
-              <ShieldCheck size={15} aria-hidden="true" />
-              {liveRevokeMutation.isPending ? "撤销中" : "撤销自治"}
-            </button>
+            <ActionButton icon={ShieldCheck} label="一次解锁" variant="danger" disabled={liveUnlockMutation.isPending || !pickBoolean(liveAutonomyEvaluation, ["ok"], false)} loading={liveUnlockMutation.isPending} confirmTitle="确认解锁实盘自治" confirmMessage="只有服务端评估通过时才能执行。解锁后自治链路可能影响实盘，请确认护栏、事故模式和阻断项均已检查。" onAction={() => liveUnlockMutation.mutateAsync()} />
+            <ActionButton icon={ShieldCheck} label="撤销自治" variant="danger" disabled={liveRevokeMutation.isPending || !pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false)} loading={liveRevokeMutation.isPending} confirmMessage="撤销后实盘自治立即回到锁定状态。" onAction={() => liveRevokeMutation.mutateAsync()} />
             {liveUnlockEvaluateMutation.isError ? <span className="error-text small">解锁评估失败</span> : null}
             {liveUnlockMutation.isError ? <span className="error-text small">解锁失败</span> : null}
             {liveRevokeMutation.isError ? <span className="error-text small">撤销失败</span> : null}
@@ -479,7 +451,7 @@ export function V16BrainPage() {
             <Field label="只读计划" value={pickBoolean(actionPlanRun, ["read_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(actionPlanRun, ["read_only"], true))} />
             <Field label="影响交易" value={pickBoolean(actionPlanRun, ["affects_trading"], false) ? "true" : "false"} tone={pickBoolean(actionPlanRun, ["affects_trading"], false) ? "bad" : "ok"} />
             <Field label="阶段" value={displayStage(pickString(actionPlanRun, ["phase"], "v16_phase2_shadow_brain"))} />
-            <Field label="快照" value={pickString(actionPlanRun, ["snapshot_id"], pickString(brainState, ["snapshot_id"], "--"))} />
+            <Field label="快照" value={pickString(actionPlanRun, ["snapshot_id"], pickString(brainState, ["snapshot_id"], ""))} />
           </div>
           <ActionPlanList items={actionPlans} />
         </MetricCard>
@@ -488,7 +460,7 @@ export function V16BrainPage() {
           <div className="v16-boundary">
             <Field label="只读评价" value={pickBoolean(actionPlanEvalRun, ["read_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(actionPlanEvalRun, ["read_only"], true))} />
             <Field label="影响交易" value={pickBoolean(actionPlanEvalRun, ["affects_trading"], false) ? "true" : "false"} tone={pickBoolean(actionPlanEvalRun, ["affects_trading"], false) ? "bad" : "ok"} />
-            <Field label="评价契约" value={displayContract(pickString(actionPlanEvalRun, ["schema_version"], "--"))} />
+            <Field label="评价契约" value={displayContract(pickString(actionPlanEvalRun, ["schema_version"], ""))} />
             <Field label="证据缺口" value={formatDecimal(pickArray(actionPlanEvalRun, ["source_gaps"]).length, 0)} tone={pickArray(actionPlanEvalRun, ["source_gaps"]).length ? "warn" : "ok"} />
           </div>
           <EvaluationList items={actionPlanEvals} />
@@ -498,7 +470,7 @@ export function V16BrainPage() {
           <div className="v16-boundary">
             <Field label="白名单" value={pickBoolean(lowImpactExecutionRun, ["boundary.low_impact_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(lowImpactExecutionRun, ["boundary.low_impact_only"], true))} />
             <Field label="RiskPolicy" value={pickBoolean(lowImpactExecutionRun, ["boundary.risk_policy_service_required"], true) ? "required" : "missing"} tone={boolTone(pickBoolean(lowImpactExecutionRun, ["boundary.risk_policy_service_required"], true))} />
-            <Field label="执行契约" value={displayContract(pickString(lowImpactExecutionRun, ["schema_version"], "--"))} />
+            <Field label="执行契约" value={displayContract(pickString(lowImpactExecutionRun, ["schema_version"], ""))} />
             <Field label="最近更新" value={formatTime(pick(lowImpactExecutionRun, ["latest_created_at"]))} />
           </div>
           <ExecutionList items={lowImpactExecutions} />
@@ -509,7 +481,7 @@ export function V16BrainPage() {
             <Field label="只生成候选" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_governance_candidates_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_governance_candidates_only"], true))} />
             <Field label="手动桥接" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.policy_suggestion_bridge_manual_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.policy_suggestion_bridge_manual_only"], true))} />
             <Field label="不改权重" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.does_not_apply_factor_weights"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.does_not_apply_factor_weights"], true))} />
-            <Field label="治理契约" value={displayContract(pickString(mediumImpactGovernanceRun, ["schema_version"], "--"))} />
+            <Field label="治理契约" value={displayContract(pickString(mediumImpactGovernanceRun, ["schema_version"], ""))} />
             <Field label="最近更新" value={formatTime(pick(mediumImpactGovernanceRun, ["latest_created_at"]))} />
           </div>
           <GovernanceList items={mediumImpactGovernance} />
@@ -528,10 +500,10 @@ export function V16BrainPage() {
         <MetricCard title="实盘护栏" className="wide-panel">
           <div className="v16-boundary">
             <Field label="能力锁" value={displayValue(pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "locked" : "blocked")} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
-            <Field label="偏差" value={displayValue(pickString(latestGuardrail, ["broker_local_divergence.status"], pickString(liveReadyGuardrailRun, ["divergence_status"], "--")))} tone={pickString(latestGuardrail, ["broker_local_divergence.status"], "") === "divergent" ? "bad" : "ok"} />
-            <Field label="事故" value={displayValue(pickString(latestGuardrail, ["incident_control.mode"], "--"))} tone={pickString(latestGuardrail, ["incident_control.mode"], "normal") === "normal" ? "ok" : "warn"} />
+            <Field label="偏差" value={displayValue(pickString(latestGuardrail, ["broker_local_divergence.status"], pickString(liveReadyGuardrailRun, ["divergence_status"], "")))} tone={pickString(latestGuardrail, ["broker_local_divergence.status"], "") === "divergent" ? "bad" : "ok"} />
+            <Field label="事故" value={displayValue(pickString(latestGuardrail, ["incident_control.mode"], ""))} tone={pickString(latestGuardrail, ["incident_control.mode"], "normal") === "normal" ? "ok" : "warn"} />
             <Field label="回滚" value={displayValue(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false) ? "ready" : "missing")} tone={boolTone(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false))} />
-            <Field label="建议模式" value={displayValue(pickString(latestGuardrail, ["action_recommendation.target_mode"], pickString(liveReadyGuardrailRun, ["recommended_mode"], "--")))} />
+            <Field label="建议模式" value={displayValue(pickString(latestGuardrail, ["action_recommendation.target_mode"], pickString(liveReadyGuardrailRun, ["recommended_mode"], "")))} />
             <Field label="最近更新" value={formatTime(pick(liveReadyGuardrailRun, ["latest_created_at"]))} />
           </div>
           <GuardrailList items={liveReadyGuardrails} />
@@ -576,15 +548,15 @@ export function V16BrainPage() {
 
         <MetricCard title="契约状态">
           <div className="field-list">
-            <Field label="后端就绪" value={displayContract(pickString(readiness, ["schema_version"], "--"))} />
-            <Field label="自治就绪" value={displayContract(pickString(v16Readiness, ["schema_version"], "--"))} />
-            <Field label="大脑快照" value={pickString(brainState, ["snapshot_id"], "--")} />
-            <Field label="记忆检索" value={displayContract(pickString(memory, ["schema_version"], "--"))} />
-            <Field label="影子计划" value={displayContract(pickString(actionPlanRun, ["schema_version"], "--"))} />
-            <Field label="后验评价" value={displayContract(pickString(actionPlanEvalRun, ["schema_version"], "--"))} />
-            <Field label="低影响执行" value={displayContract(pickString(lowImpactExecutionRun, ["schema_version"], "--"))} />
-            <Field label="治理候选" value={displayContract(pickString(mediumImpactGovernanceRun, ["schema_version"], "--"))} />
-            <Field label="候选审查" value={displayContract(pickString(candidateReviewRun, ["schema_version"], "--"))} />
+            <Field label="后端就绪" value={displayContract(pickString(readiness, ["schema_version"], ""))} />
+            <Field label="自治就绪" value={displayContract(pickString(v16Readiness, ["schema_version"], ""))} />
+            <Field label="大脑快照" value={pickString(brainState, ["snapshot_id"], "")} />
+            <Field label="记忆检索" value={displayContract(pickString(memory, ["schema_version"], ""))} />
+            <Field label="影子计划" value={displayContract(pickString(actionPlanRun, ["schema_version"], ""))} />
+            <Field label="后验评价" value={displayContract(pickString(actionPlanEvalRun, ["schema_version"], ""))} />
+            <Field label="低影响执行" value={displayContract(pickString(lowImpactExecutionRun, ["schema_version"], ""))} />
+            <Field label="治理候选" value={displayContract(pickString(mediumImpactGovernanceRun, ["schema_version"], ""))} />
+            <Field label="候选审查" value={displayContract(pickString(candidateReviewRun, ["schema_version"], ""))} />
           </div>
           <div className="brain-ref-row">
             <GitBranch size={15} aria-hidden="true" />

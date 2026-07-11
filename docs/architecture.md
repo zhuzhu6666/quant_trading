@@ -37,7 +37,7 @@
 
 2026-07-04 后端内部优化补充：
 
-**第一阶段不转 Rust、不重写交易链路，先补稳定性观测、读接口缓存和低风险模块抽取。** 当前已增加统一 TTL cache / last-good fallback / timings 工具，`/api/ops/backend-readiness` 暴露 `stability` 只读诊断，cTrader L2 writer 继续保持异步批量写入并补充 queue/batch latency 指标，live tick 与 position supervision 外层开始记录耗时。`live_runtime_state`、`live_ctrader_runtime`、`live_loop_shell`、`live_position_lifecycle`、`live_supervision_actions`、`live_tick_pipeline`、`live_factor_state`、`live_risk_sizing`、`live_scheduler_jobs`、`live_data_sync_helpers` 和 `live_data_sync_job` 已承接低风险 helper / 注入式 job / payload 编排；其中 `live_factor_state` 负责 decision bar 进度归一化和 ready factor decision 的非执行状态提交，不读取账户、不触发风控或 broker 动作。`live_service.py` 保留 facade、broker IO、risk verdict、ledger 写入和最终执行动作；本阶段 live 维护性收口完成后，主要函数规模为：`_process_tick_factor_pipeline` 约 270 行、`_run_loop` 约 350 行、`_run_position_supervision` 约 240 行、`_record_amended_open_success_context` 约 125 行、`_execute_trailing_candidate` 约 110 行、`_record_filled_position_open_context` / `_handle_closed_positions_after_tick` 各约 80 行、`_update_trailing_stops` 约 50 行。后续优化优先用 timings 定位真实热点，再决定是否做局部 Rust PoC。
+**2026-07-11 更新：** 稳定性观测保留 TTL cache / last-good fallback / timings；cTrader L2 writer 与 depth 订阅已经退役。live tick 与 position supervision 继续记录耗时，`live_service.py` 仍持有 broker IO、RiskPolicy、ledger 和最终执行权。
 
 后端 lifespan 的非致命后台生命周期已收口到 `backend.services.backend_runtime_lifecycle.BackendRuntimeLifecycle`：它编排 DataStore/cTrader/db-health warmup、可选 backend learning schedulers、进程退出时的同步 live loop drain 和现有 scheduler stop；auth、execution semantics、overlay/DB fail-closed、模板与 factor registry 恢复仍由 `backend.app.lifespan` 持有。进程退出通过 `stop_loop_for_process_shutdown()` 保留 persisted desired state，等待当前 tick 完成后再释放 loop ownership；`loop_draining` 在 candidate 前和 market RPC admission lock 内阻止新开仓，但不打断已获准订单的 post-fill 保护和审计；超时写 `recovery_required=true` 且不伪报 graceful success。该路径不平仓、不主动断开 cTrader，也不改变手工 `/api/live/stop` 的语义。
 
@@ -60,8 +60,6 @@
   - `data/bars.duckdb`
   - `data/external_data.duckdb`
   - `data/ctrader_data.duckdb` 旧 K 线冷备/兼容库
-  - `data/ticks.duckdb`
-  - `data/l2.duckdb` -> `data/l2_monthly/l2_YYYY_MM.duckdb`，由 L2 writer 跨月自动刷新
   - `data/trades.duckdb`
   - `data/events.duckdb`
 - 业务代码禁止直接使用 `sqlite3.connect(...)` / `duckdb.connect(...)`
@@ -88,7 +86,7 @@
   - execution / deals
 - 第二数据源当前不再参与 live 开仓、风控放行或 broker 状态判断
 - COT / ETF / FRED / events 属于外部研究数据，只能按 `release_at` 做 point-in-time 因子输入，不能替代 cTrader 实时行情/执行状态
-- `L2 depth` 当前可以作为研究支路在 cTrader 主连接内采集，但默认不是实盘前置依赖；只有在 `risk_require_l2_depth=true` 时，才允许成为 live 开仓/风控门槛
+- `L2 depth` 已退役：不订阅、不采集、不参与 live/readiness/risk，相关代码、配置和数据文件均已删除。
 
 这条边界的目的，是把“今天真要交易必须依赖的数据”与“未来研究可能有帮助的数据”彻底分开，避免研究支路反向拖垮实盘链路。
 
@@ -1059,7 +1057,7 @@ RiskPolicyService.evaluate(action, context) -> RiskVerdict
 - `evolution_run / evolution_decision / runtime_config_snapshot`
 - demo autonomous 自动审批、自动应用、自动 rollback 账本
 - strict evidence contract training gate
-- `/api/ops/backend-readiness.stability` 只读诊断：timings、L2 writer health、runtime config snapshot、freshness watchdog、rollback policy 边界
+- `/api/ops/backend-readiness.stability` 只读诊断：timings、runtime config snapshot、freshness watchdog、rollback policy 边界
 
 不允许自动化：
 

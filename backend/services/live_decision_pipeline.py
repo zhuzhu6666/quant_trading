@@ -8,11 +8,42 @@ orders.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
 ContextPolicyEvaluator = Callable[[dict[str, Any], Any], Any]
+
+
+def calibrated_signal_confidence(score: float, *, path: str | Path = "data/charts/calibrator_bucket.json") -> dict[str, Any]:
+    """Convert absolute composite strength into a calibrated win probability.
+
+    The result is advisory and bounded: downstream sizing may only reduce,
+    never enlarge, exposure from this probability.
+    """
+    raw_probability = max(0.5, min(0.999, 0.5 + 0.5 * abs(float(score or 0.0))))
+    try:
+        from alpha.probability_calibrator import ProbabilityCalibrator
+
+        calibrator = ProbabilityCalibrator.load(str(path))
+        calibrated = float(calibrator.calibrate(raw_probability))
+        source = "probability_calibrator"
+    except Exception:
+        calibrated = raw_probability
+        source = "identity_fallback"
+    calibrated = max(0.0, min(1.0, calibrated))
+    # Confidence is risk-reducing only.  Below 50% receives the strongest
+    # haircut; high confidence never increases the original position.
+    sizing_multiplier = max(0.5, min(1.0, 0.5 + calibrated * 0.5))
+    return {
+        "schema_version": "calibrated_signal_confidence.v1",
+        "raw_probability": round(raw_probability, 6),
+        "calibrated_probability": round(calibrated, 6),
+        "sizing_multiplier": round(sizing_multiplier, 6),
+        "source": source,
+        "risk_reducing_only": True,
+    }
 
 
 @dataclass
@@ -112,6 +143,11 @@ def run_live_decision_pipeline(
         factor_values,
         timestamp=bar.get("time", time.time()),
     )
+    confidence = calibrated_signal_confidence(float(getattr(composite, "score", 0.0) or 0.0))
+    setattr(composite, "calibrated_confidence", confidence)
+    if isinstance(getattr(composite, "context_state", None), dict):
+        composite.context_state["calibrated_probability"] = confidence["calibrated_probability"]
+        composite.context_state["confidence_sizing_multiplier"] = confidence["sizing_multiplier"]
     try:
         context_policy = evaluate_context_policy_for_decision(
             composite=composite,

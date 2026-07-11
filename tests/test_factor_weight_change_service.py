@@ -57,8 +57,35 @@ def _service(monkeypatch, tmp_path, mutation):
     service = FactorWeightChangeService(path)
     monkeypatch.setattr(service.admission, "evaluate", lambda **_kwargs: {"allowed": True, "status": "admitted"})
     monkeypatch.setattr(service, "_mutation_service", lambda: mutation)
+    monkeypatch.setattr(
+        service,
+        "_replay_admission",
+        lambda _decisions: {
+            "required": True,
+            "allowed": True,
+            "max_delta": 0.3,
+            "replay_run_id": "replay-test",
+            "evidence_grade": "A",
+        },
+    )
     monkeypatch.setattr("backend.services.factor_weight_change.ExperiencePriorService.priors", lambda _self: {})
     return path, service
+
+
+def test_weight_change_blocks_large_delta_without_replay(monkeypatch, tmp_path):
+    mutation = _Mutation()
+    _path, service = _service(monkeypatch, tmp_path, mutation)
+    monkeypatch.setattr(
+        service,
+        "_replay_admission",
+        lambda _decisions: {"required": True, "allowed": False, "max_delta": 0.3},
+    )
+
+    result = _execute(service)
+
+    assert result["status"] == "blocked_by_replay_admission"
+    assert result["applications"] == {}
+    assert mutation.calls == []
 
 
 def _execute(service):

@@ -98,34 +98,6 @@ class TestRiskGovernor:
         assert not v.allowed
         assert v.reason == "disk_space_critical"
 
-    def test_l2_depth_only_blocks_when_required(self, gov):
-        allowed = gov.allow_trade(
-            GovernorState(
-                extra={
-                    "require_l2_depth": False,
-                    "runtime_health": {
-                        "system_health": {
-                            "component_status": {"l2_depth": "critical"},
-                        }
-                    },
-                }
-            )
-        )
-        blocked = gov.allow_trade(
-            GovernorState(
-                extra={
-                    "require_l2_depth": True,
-                    "runtime_health": {
-                        "system_health": {
-                            "component_status": {"l2_depth": "critical"},
-                        }
-                    },
-                }
-            )
-        )
-        assert allowed.allowed is True
-        assert blocked.allowed is False
-        assert blocked.reason == "l2_depth_unavailable"
 
     def test_loop_not_running_blocks_trade(self, gov):
         """live loop 未运行 → 禁止交易."""

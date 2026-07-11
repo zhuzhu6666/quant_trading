@@ -29,7 +29,7 @@ export function pick(value: unknown, path: string[]): unknown {
   return current;
 }
 
-export function pickString(value: unknown, path: string[], fallback = "--"): string {
+export function pickString(value: unknown, path: string[], fallback = ""): string {
   const raw = pick(value, path);
   if (raw === null || raw === undefined || raw === "") return fallback;
   return String(raw);
@@ -53,7 +53,7 @@ export function pickArray(value: unknown, path: string[]): unknown[] {
 
 export function formatTime(raw: unknown): string {
   const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0) return "--";
+  if (!Number.isFinite(value) || value <= 0) return "";
   return new Date(value * 1000).toLocaleString();
 }
 
@@ -304,21 +304,21 @@ export function BlueprintOverview({
   return (
     <>
       <div className="v16-blueprint-summary">
-        <CompactMetric label="大纲" value={displayValue(pickString(blueprint, ["status"], "unknown"))} detail={`阻断 ${blockers.length}`} tone={pickBoolean(blueprint, ["ok"], false) ? "ok" : "warn"} />
-        <CompactMetric label="Agent" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`${countOf(pick(agentAuthority, ["unknown_sources"]))} 未知 / ${countOf(pick(agentAuthority, ["contract_violations"]))} 违规`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
-        <CompactMetric label="Proposal Context" value={displayValue(pickString(proposalContext, ["status"], "unknown"))} detail={`缺 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(proposalContext, ["status"], "unknown"))} />
-        <CompactMetric label="Candidate Context" value={displayValue(pickString(candidateContext, ["status"], "unknown"))} detail={`缺 ${formatDecimal(pickNumber(candidateContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(candidateContext, ["status"], "unknown"))} />
-        <CompactMetric label="Bridge Review" value={displayValue(pickString(candidateReview, ["status"], "unknown"))} detail={`缺 ${formatDecimal(pickNumber(candidateReview, ["missing_required_review_count"], 0), 0)}`} tone={statusTone(pickString(candidateReview, ["status"], "unknown"))} />
-        <CompactMetric label="Feedback" value={displayValue(pickString(chainHealth, ["status"], "unknown"))} detail={`检查 ${chainChecks.length}`} tone={statusTone(pickString(chainHealth, ["status"], "unknown"))} />
+        <CompactMetric label="大纲" value={displayValue(pickString(blueprint, ["status"], ""))} detail={`阻断 ${blockers.length}`} tone={pickBoolean(blueprint, ["ok"], false) ? "ok" : "warn"} />
+        <CompactMetric label="智能体" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`${countOf(pick(agentAuthority, ["unknown_sources"]))} 未知 / ${countOf(pick(agentAuthority, ["contract_violations"]))} 违规`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
+        <CompactMetric label="提案上下文" value={displayValue(pickString(proposalContext, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(proposalContext, ["status"], ""))} />
+        <CompactMetric label="候选上下文" value={displayValue(pickString(candidateContext, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(candidateContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(candidateContext, ["status"], ""))} />
+        <CompactMetric label="桥接审查" value={displayValue(pickString(candidateReview, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(candidateReview, ["missing_required_review_count"], 0), 0)}`} tone={statusTone(pickString(candidateReview, ["status"], ""))} />
+        <CompactMetric label="反馈" value={displayValue(pickString(chainHealth, ["status"], ""))} detail={`检查 ${chainChecks.length}`} tone={statusTone(pickString(chainHealth, ["status"], ""))} />
       </div>
 
-      <div className="v16-chain-map" aria-label="autonomy governance chain">
-        <ChainStep icon={UsersRound} label="Agent" status={pickString(agentAuthority, ["status"], "unknown")} detail={`${formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} registered`} />
-        <ChainStep icon={Route} label="Proposal" status={pickString(proposalContext, ["status"], "unknown")} detail={`${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)} missing`} />
-        <ChainStep icon={ListChecks} label="Candidate" status={pickString(candidateReview, ["status"], "unknown")} detail={`${formatDecimal(pickNumber(candidateReview, ["candidate_bridge_count"], 0), 0)} bridges`} />
-        <ChainStep icon={ShieldCheck} label="Policy Gate" status={pickString(blueprint, ["status"], "unknown")} detail={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "Risk/Decision kept" : "gate attention"} />
-        <ChainStep icon={Activity} label="Execution" status={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "ok" : "attention"} detail={pickString(liveAutonomy, ["autonomy_mode"], "manual")} />
-        <ChainStep icon={BookOpenCheck} label="Memory" status={pickString(chainHealth, ["status"], "unknown")} detail={`lessons ${formatDecimal(pickNumber(chainHealth, ["trade_feedback_summary.lesson_count"], 0), 0)}`} />
+      <div className="v16-chain-map" aria-label="自治治理链路">
+        <ChainStep icon={UsersRound} label="智能体" status={pickString(agentAuthority, ["status"], "")} detail={`已登记 ${formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)}`} />
+        <ChainStep icon={Route} label="提案" status={pickString(proposalContext, ["status"], "")} detail={`缺失 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} />
+        <ChainStep icon={ListChecks} label="候选" status={pickString(candidateReview, ["status"], "")} detail={`桥接 ${formatDecimal(pickNumber(candidateReview, ["candidate_bridge_count"], 0), 0)}`} />
+        <ChainStep icon={ShieldCheck} label="策略闸门" status={pickString(blueprint, ["status"], "")} detail={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "保留风控与决策边界" : "闸门需关注"} />
+        <ChainStep icon={Activity} label="执行" status={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "ok" : "attention"} detail={pickString(liveAutonomy, ["autonomy_mode"], "manual")} />
+        <ChainStep icon={BookOpenCheck} label="记忆" status={pickString(chainHealth, ["status"], "")} detail={`经验 ${formatDecimal(pickNumber(chainHealth, ["trade_feedback_summary.lesson_count"], 0), 0)}`} />
       </div>
 
       <div className="v16-blueprint-checks">
@@ -368,9 +368,9 @@ export function AgentAuthorityPanel({
   return (
     <>
       <div className="v16-agent-strip">
-        <CompactMetric label="登记 Agent" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={displayContract(pickString(agentAuthority, ["schema_version"], "--"))} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
-        <CompactMetric label="未知来源" value={formatDecimal(unknownSources.length, 0)} detail="review only" tone={unknownSources.length ? "warn" : "ok"} />
-        <CompactMetric label="合同违规" value={formatDecimal(contractViolations.length, 0)} detail={displayValue(pickString(chainHealth, ["status"], "unknown"))} tone={contractViolations.length ? "bad" : "ok"} />
+        <CompactMetric label="登记 Agent" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={displayContract(pickString(agentAuthority, ["schema_version"], ""))} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
+        <CompactMetric label="未知来源" value={formatDecimal(unknownSources.length, 0)} detail="仅供审查" tone={unknownSources.length ? "warn" : "ok"} />
+        <CompactMetric label="合同违规" value={formatDecimal(contractViolations.length, 0)} detail={displayValue(pickString(chainHealth, ["status"], ""))} tone={contractViolations.length ? "bad" : "ok"} />
         <CompactMetric label="提案流" value={formatDecimal(pickNumber(summary, ["proposal_count"], 0), 0)} detail={`候选 ${formatDecimal(pickNumber(summary, ["candidate_count"], 0), 0)}`} tone={pickNumber(summary, ["proposal_count"], 0) || pickNumber(summary, ["candidate_count"], 0) ? "ok" : "warn"} />
       </div>
 
@@ -404,8 +404,8 @@ export function AgentAuthorityPanel({
       <div className="v16-boundary v16-boundary-tight">
         <Field label="高影响需审查" value={pickBoolean(reviewRules, ["high_impact_requires_review"], true) ? "true" : "false"} tone={boolTone(pickBoolean(reviewRules, ["high_impact_requires_review"], true))} />
         <Field label="低可靠加严" value={pickBoolean(reviewRules, ["low_reliability_requires_extra_evidence"], true) ? "true" : "false"} tone={boolTone(pickBoolean(reviewRules, ["low_reliability_requires_extra_evidence"], true))} />
-        <Field label="链路" value={displayValue(pickString(chainHealth, ["status"], "unknown"))} tone={statusTone(pickString(chainHealth, ["status"], "unknown"))} />
-        <Field label="契约" value={displayContract(pickString(agentBriefing, ["schema_version"], "--"))} />
+        <Field label="链路" value={displayValue(pickString(chainHealth, ["status"], ""))} tone={statusTone(pickString(chainHealth, ["status"], ""))} />
+        <Field label="契约" value={displayContract(pickString(agentBriefing, ["schema_version"], ""))} />
       </div>
     </>
   );
@@ -421,19 +421,19 @@ export function CoveragePanel({
   candidateReview: Record<string, unknown>;
 }) {
   const items = [
-    { key: "proposal", label: "Proposal Context", record: proposalContext, missing: "missing_required_context_count", legacy: "legacy_missing_context_count", total: "policy_suggestion_count" },
-    { key: "candidate", label: "Candidate Context", record: candidateContext, missing: "missing_required_context_count", legacy: "legacy_missing_context_count", total: "candidate_count" },
-    { key: "bridge", label: "Bridge Review", record: candidateReview, missing: "missing_required_review_count", legacy: "legacy_unreviewed_count", total: "candidate_bridge_count" },
+    { key: "proposal", label: "提案上下文", record: proposalContext, missing: "missing_required_context_count", legacy: "legacy_missing_context_count", total: "policy_suggestion_count" },
+    { key: "candidate", label: "候选上下文", record: candidateContext, missing: "missing_required_context_count", legacy: "legacy_missing_context_count", total: "candidate_count" },
+    { key: "bridge", label: "桥接审查", record: candidateReview, missing: "missing_required_review_count", legacy: "legacy_unreviewed_count", total: "candidate_bridge_count" },
   ];
   return (
     <div className="v16-coverage-list">
       {items.map((item) => {
-        const status = pickString(item.record, ["status"], "unknown");
+        const status = pickString(item.record, ["status"], "");
         return (
           <div className="v16-coverage-row" key={item.key}>
             <div>
               <strong>{item.label}</strong>
-              <span>{displayContract(pickString(item.record, ["schema_version"], "--"))}</span>
+              <span>{displayContract(pickString(item.record, ["schema_version"], ""))}</span>
             </div>
             <CompactFacts facts={[
               { label: "状态", value: displayValue(status), tone: statusTone(status) },
@@ -474,18 +474,18 @@ export function MemoryList({ items, empty }: { items: unknown[]; empty: string }
 }
 
 export function HypothesisList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无 hypothesis</div>;
+  if (!items.length) return <div className="empty-state-small">暂无假设</div>;
   return (
     <div className="brain-hypothesis-list">
       {items.map((raw, index) => {
         const item = asRecord(raw);
-        const risk = pickString(item, ["risk_class"], "unknown");
+        const risk = pickString(item, ["risk_class"], "");
         return (
           <article className="brain-hypothesis" key={`${pickString(item, ["hypothesis_id"], "hyp")}-${index}`}>
             <div className="brain-hypothesis-head">
               <div>
                 <strong>{pickString(item, ["scope"], "scope")}</strong>
-                <span>{pickString(item, ["claim"], "--")}</span>
+                <span>{pickString(item, ["claim"], "")}</span>
               </div>
               <StatusPill status={displayValue(risk)} tone={riskTone(risk)} />
             </div>
@@ -512,9 +512,9 @@ export function ActionPlanList({ items }: { items: unknown[] }) {
       {items.slice(0, 8).map((raw, index) => {
         const item = asRecord(raw);
         const scope = asRecord(pick(item, ["scope"]));
-        const status = pickString(item, ["status"], "unknown");
-        const verdict = pickString(item, ["critic_verdict"], "unknown");
-        const risk = pickString(item, ["risk_class"], "unknown");
+        const status = pickString(item, ["status"], "");
+        const verdict = pickString(item, ["critic_verdict"], "");
+        const risk = pickString(item, ["risk_class"], "");
         const requiredServices = pickArray(item, ["required_services"]).map(String);
         return (
           <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["plan_id"], "plan")}-${index}`}>
@@ -522,7 +522,7 @@ export function ActionPlanList({ items }: { items: unknown[] }) {
               <div>
                 <strong>{displayAction(pickString(item, ["action_type"], "action_plan"))}</strong>
                 <span>
-                  {pickString(scope, ["scope_type"], "scope")} · {pickString(scope, ["scope_key"], "--")}
+                  {pickString(scope, ["scope_type"], "scope")} · {pickString(scope, ["scope_key"], "")}
                 </span>
               </div>
               <StatusPill status={displayValue(status)} tone={status === "shadow_recorded" ? "ok" : "warn"} />
@@ -552,7 +552,7 @@ export function EvaluationList({ items }: { items: unknown[] }) {
         const item = asRecord(raw);
         const comparison = asRecord(pick(item, ["comparison"]));
         const presence = asRecord(pick(comparison, ["source_presence"]));
-        const verdict = pickString(item, ["comparison_verdict"], "unknown");
+        const verdict = pickString(item, ["comparison_verdict"], "");
         const coverage = scorePct(pickNumber(item, ["coverage_score"], 0));
         return (
           <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["eval_id"], "eval")}-${index}`}>
@@ -582,12 +582,12 @@ export function EvaluationList({ items }: { items: unknown[] }) {
 }
 
 export function ExecutionList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无 low-impact execution</div>;
+  if (!items.length) return <div className="empty-state-small">暂无低影响执行</div>;
   return (
     <div className="brain-action-plan-list">
       {items.slice(0, 8).map((raw, index) => {
         const item = asRecord(raw);
-        const status = pickString(item, ["status"], "unknown");
+        const status = pickString(item, ["status"], "");
         const riskVerdict = asRecord(pick(item, ["risk_verdict"]));
         const result = asRecord(pick(item, ["result"]));
         const posterior = asRecord(pick(item, ["posterior_monitor"]));
@@ -603,13 +603,13 @@ export function ExecutionList({ items }: { items: unknown[] }) {
             <CompactFacts facts={[
               { label: "证据", value: `${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`, tone: "ok" },
               { label: "RiskPolicy", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
-              { label: "Critic", value: displayValue(pickString(item, ["critic_verdict"], "unknown")), tone: pickString(item, ["critic_verdict"], "") === "reject" ? "bad" : "warn" },
-              { label: "后验", value: displayValue(pickString(item, ["comparison_verdict"], "unknown")), tone: pickString(item, ["comparison_verdict"], "") === "caution" ? "warn" : "ok" },
+              { label: "Critic", value: displayValue(pickString(item, ["critic_verdict"], "")), tone: pickString(item, ["critic_verdict"], "") === "reject" ? "bad" : "warn" },
+              { label: "后验", value: displayValue(pickString(item, ["comparison_verdict"], "")), tone: pickString(item, ["comparison_verdict"], "") === "caution" ? "warn" : "ok" },
             ]} />
             <div className="brain-ref-row">
               <span>{pickString(result, ["replay_run_id"], "no replay")}</span>
               <span>bad posterior {pickBoolean(posterior, ["bad_posterior"], false) ? "yes" : "no"}</span>
-              <span>{pickString(riskVerdict, ["reason"], "--")}</span>
+              <span>{pickString(riskVerdict, ["reason"], "")}</span>
             </div>
           </article>
         );
@@ -624,7 +624,7 @@ export function GovernanceList({ items }: { items: unknown[] }) {
     <div className="brain-action-plan-list">
       {items.slice(0, 8).map((raw, index) => {
         const item = asRecord(raw);
-        const status = pickString(item, ["status"], "unknown");
+        const status = pickString(item, ["status"], "");
         const riskVerdict = asRecord(pick(item, ["risk_verdict"]));
         const decisionPolicy = asRecord(pick(item, ["decision_policy"]));
         return (
@@ -632,7 +632,7 @@ export function GovernanceList({ items }: { items: unknown[] }) {
             <div className="brain-hypothesis-head">
               <div>
                 <strong>{displayAction(pickString(item, ["governance_action"], "governance_action"))}</strong>
-                <span>{pickString(item, ["scope_type"], "scope")} · {pickString(item, ["scope_key"], "--")}</span>
+                <span>{pickString(item, ["scope_type"], "scope")} · {pickString(item, ["scope_key"], "")}</span>
               </div>
               <StatusPill status={displayValue(status)} tone={status === "candidate_materialized" ? "ok" : status.includes("blocked") ? "warn" : "mute"} />
             </div>
@@ -640,12 +640,12 @@ export function GovernanceList({ items }: { items: unknown[] }) {
               { label: "证据", value: `${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`, tone: "ok" },
               { label: "RiskPolicy", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
               { label: "DecisionPolicy", value: pickBoolean(decisionPolicy, ["required"], false) ? "preview" : "n/a", tone: "mute" },
-              { label: "候选", value: pickString(item, ["candidate_id"], "--"), tone: pickString(item, ["candidate_id"], "") ? "ok" : "mute" },
-              { label: "建议", value: pickString(item, ["suggestion_id"], "--"), tone: pickString(item, ["suggestion_id"], "") ? "ok" : "mute" },
+              { label: "候选", value: pickString(item, ["candidate_id"], ""), tone: pickString(item, ["candidate_id"], "") ? "ok" : "mute" },
+              { label: "建议", value: pickString(item, ["suggestion_id"], ""), tone: pickString(item, ["suggestion_id"], "") ? "ok" : "mute" },
             ]} />
             <div className="brain-ref-row">
-              <span>{displayValue(pickString(item, ["comparison_verdict"], "unknown"))}</span>
-              <span>{pickString(riskVerdict, ["reason"], "--")}</span>
+              <span>{displayValue(pickString(item, ["comparison_verdict"], ""))}</span>
+              <span>{pickString(riskVerdict, ["reason"], "")}</span>
               <span>runtime mutation {pickBoolean(item, ["rollback_plan.runtime_mutation"], false) ? "yes" : "no"}</span>
             </div>
           </article>
@@ -661,7 +661,7 @@ export function CandidateReviewList({ items }: { items: unknown[] }) {
     <div className="brain-action-plan-list">
       {items.slice(0, 8).map((raw, index) => {
         const item = asRecord(raw);
-        const status = pickString(item, ["review_status"], "unknown");
+        const status = pickString(item, ["review_status"], "");
         const conflict = asRecord(pick(item, ["conflict"]));
         const bridgePreview = asRecord(pick(item, ["bridge_preview"]));
         const gaps = pickArray(item, ["evidence_gaps"]);
@@ -683,8 +683,8 @@ export function CandidateReviewList({ items }: { items: unknown[] }) {
               { label: "LLM", value: pickBoolean(item, ["llm_advisory.enabled"], false) ? pickString(item, ["llm_advisory.status"], "enabled") : "off", tone: "mute" },
             ]} />
             <div className="brain-ref-row">
-              <span>{pickString(conflict, ["surface"], "--")}</span>
-              <span>{pickString(bridgePreview, ["reason"], pickString(item, ["bridge_reason"], "--"))}</span>
+              <span>{pickString(conflict, ["surface"], "")}</span>
+              <span>{pickString(bridgePreview, ["reason"], pickString(item, ["bridge_reason"], ""))}</span>
               <span>{gaps.slice(0, 2).map(String).join(", ") || "evidence ok"}</span>
             </div>
           </article>
@@ -695,12 +695,12 @@ export function CandidateReviewList({ items }: { items: unknown[] }) {
 }
 
 export function GuardrailList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无 live-ready guardrail</div>;
+  if (!items.length) return <div className="empty-state-small">暂无实盘护栏</div>;
   return (
     <div className="brain-action-plan-list">
       {items.slice(0, 8).map((raw, index) => {
         const item = asRecord(raw);
-        const status = pickString(item, ["status"], "unknown");
+        const status = pickString(item, ["status"], "");
         const lock = asRecord(pick(item, ["live_capability_lock"]));
         const divergence = asRecord(pick(item, ["broker_local_divergence"]));
         const incident = asRecord(pick(item, ["incident_control"]));
@@ -713,19 +713,19 @@ export function GuardrailList({ items }: { items: unknown[] }) {
             <div className="brain-hypothesis-head">
               <div>
                 <strong>{displayAction(pickString(recommendation, ["action"], "guardrail"))}</strong>
-                <span>{formatTime(pick(item, ["created_at"]))} · {displayValue(pickString(recommendation, ["target_mode"], "--"))}</span>
+                <span>{formatTime(pick(item, ["created_at"]))} · {displayValue(pickString(recommendation, ["target_mode"], ""))}</span>
               </div>
               <StatusPill status={displayValue(status)} tone={locked ? "ok" : status.includes("attention") ? "warn" : "mute"} />
             </div>
             <CompactFacts facts={[
               { label: "能力", value: displayValue(locked ? "locked" : "blocked"), tone: locked ? "ok" : "warn" },
-              { label: "偏差", value: displayValue(pickString(divergence, ["status"], "unknown")), tone: divergent ? "bad" : "ok" },
+              { label: "偏差", value: displayValue(pickString(divergence, ["status"], "")), tone: divergent ? "bad" : "ok" },
               { label: "事故", value: displayValue(pickString(incident, ["mode"], "normal")), tone: pickString(incident, ["mode"], "normal") === "normal" ? "ok" : "warn" },
               { label: "回滚", value: displayValue(pickBoolean(rollback, ["rollback_ready"], false) ? "ready" : "missing"), tone: boolTone(pickBoolean(rollback, ["rollback_ready"], false)) },
             ]} />
             <div className="brain-ref-row">
-              <span>broker {pickString(divergence, ["broker_open_count"], "--")}</span>
-              <span>local {pickString(divergence, ["local_open_count"], "--")}</span>
+              <span>broker {pickString(divergence, ["broker_open_count"], "")}</span>
+              <span>local {pickString(divergence, ["local_open_count"], "")}</span>
               <span>{pickArray(recommendation, ["reasons"]).slice(0, 2).map(String).join(", ") || "no blocker"}</span>
             </div>
           </article>
@@ -750,32 +750,32 @@ export function ProposalRegistryList({
       {items.slice(0, 10).map((raw, index) => {
         const item = asRecord(raw);
         const proposalId = pickString(item, ["proposal_id"], "");
-        const status = pickString(item, ["status"], "unknown");
+        const status = pickString(item, ["status"], "");
         const conflict = asRecord(pick(item, ["conflict"]));
         const hasConflict = pickBoolean(conflict, ["conflict"], false);
         const route = pickString(item, ["route_recommendation"], "observe");
         const reliability = asRecord(pick(item, ["source_reliability"]));
         const freshness = asRecord(pick(item, ["evidence_freshness"]));
-        const reliabilityBand = pickString(reliability, ["band"], "unknown");
-        const freshnessStatus = pickString(freshness, ["status"], "unknown");
+        const reliabilityBand = pickString(reliability, ["band"], "");
+        const freshnessStatus = pickString(freshness, ["status"], "");
         return (
           <article className="brain-action-plan brain-action-plan-compact" key={`${proposalId || "proposal"}-${index}`}>
             <div className="brain-hypothesis-head">
               <div>
                 <strong>{displayValue(pickString(item, ["control_surface"], "proposal_registry"))}</strong>
-                <span title={pickString(item, ["target_scope"], "--")}>{pickString(item, ["target_scope"], "--")}</span>
+                <span title={pickString(item, ["target_scope"], "")}>{pickString(item, ["target_scope"], "")}</span>
               </div>
               <StatusPill status={displayValue(status)} tone={status.includes("blocked") || hasConflict ? "bad" : status === "reviewed" ? "ok" : "warn"} />
             </div>
             <CompactFacts facts={[
-              { label: "来源", value: displayValue(pickString(item, ["source_agent"], "unknown")), tone: "mute" },
+              { label: "来源", value: displayValue(pickString(item, ["source_agent"], "")), tone: "mute" },
               { label: "影响", value: displayValue(pickString(item, ["impact_level"], "observe")), tone: riskTone(pickString(item, ["impact_level"], "observe")) },
               { label: "可信", value: `${displayValue(reliabilityBand)} ${formatDecimal(scorePct(pickNumber(reliability, ["score"], 0)), 0)}%`, tone: reliabilityBand === "low" ? "warn" : reliabilityBand === "high" ? "ok" : "mute" },
               { label: "新鲜", value: displayValue(freshnessStatus), tone: freshnessStatus === "fresh" ? "ok" : "warn" },
               { label: "路由", value: displayValue(route), tone: route === "request_review" ? "warn" : "mute" },
             ]} />
             <div className="brain-ref-row brain-ref-row-actions">
-              <span title={proposalId}>{proposalId || "--"}</span>
+              <span title={proposalId}>{proposalId || ""}</span>
               <span>{hasConflict ? displayValue(pickString(conflict, ["severity"], "conflict_detected")) : "无冲突"}</span>
               <button
                 className="brain-inline-button"
@@ -792,4 +792,3 @@ export function ProposalRegistryList({
     </div>
   );
 }
-

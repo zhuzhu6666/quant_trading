@@ -30,38 +30,6 @@ def _default_data_store_factory():
     return DataStore()
 
 
-def make_dukascopy_tick_job(
-    *,
-    repo_root: Path,
-    logger,
-    runner: Runner = subprocess.run,
-    python_executable: str | None = None,
-):
-    script = repo_root / "scripts" / "maintenance" / "pull_dukascopy_incremental.py"
-
-    def _scheduled_dukascopy_tick():
-        """运行 Dukascopy tick 增量拉取脚本."""
-        try:
-            if not script.exists():
-                logger.warning("[dukascopy_tick] script not found: {}", script)
-                return
-            result = runner(
-                [python_executable or _python_executable(), str(script)],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            out = (result.stdout or "").strip()
-            if result.returncode == 0:
-                logger.info("[dukascopy_tick] {}", out.split(chr(10))[-1] if out else "done")
-            else:
-                logger.warning("[dukascopy_tick] failed (rc={}): {}", result.returncode, (result.stderr or "")[:200])
-        except Exception as e:
-            logger.warning("[dukascopy_tick] error: {}", e)
-
-    return _scheduled_dukascopy_tick
-
-
 def make_events_sync_job(
     *,
     repo_root: Path,
@@ -137,16 +105,6 @@ def register_external_sync_jobs(
     """Register external data/script jobs with the legacy names and cron specs."""
 
     sched.add_job(
-        "dukascopy_tick",
-        "0 * * * *",
-        make_dukascopy_tick_job(
-            repo_root=repo_root,
-            logger=logger,
-            runner=runner,
-            python_executable=python_executable,
-        ),
-    )
-    sched.add_job(
         "events_sync",
         "0 8 * * *",
         make_events_sync_job(
@@ -201,7 +159,6 @@ def startup_catch_up_jobs(*, run_heavy_jobs: bool) -> tuple[list[str], list[tupl
 
     immediate_jobs = [
         "data_sync",
-        "dukascopy_tick",
         "events_sync",
     ]
     deferred_jobs = [

@@ -937,8 +937,8 @@ def test_run_live_loop_tick_body_returns_wait_when_market_closed(monkeypatch):
 
     result = live_service._run_live_loop_tick_body(
         broker="ctrader",
-        bridge_cfg=SimpleNamespace(risk_require_l2_depth=False, l2_collection_enabled=True),
         timeframe="M5",
+        bridge_cfg=SimpleNamespace(),
         tick=12,
         recovery_bootstrapped=False,
         stop_requested=lambda: False,
@@ -1418,7 +1418,7 @@ def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
                 overall="critical",
                 overall_score=0.8,
                 components={
-                    "l2_depth": _Component("critical"),
+                    "custom_component": _Component("critical"),
                     "disk_space": _Component("degraded"),
                 },
             )
@@ -1445,7 +1445,6 @@ def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
             risk_loss_cooldown_after_losses=2,
             risk_loss_cooldown_bars=3,
             risk_block_on_disk_critical=True,
-            risk_require_l2_depth=False,
             max_position_count=3,
             max_position_api_volume=1000.0,
             pyramid_enabled=True,
@@ -1466,7 +1465,7 @@ def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
     assert "session_label" in ctx["temporal_context"]
     assert ctx["runtime_health"]["sync_health"]["degraded"] is True
     assert ctx["runtime_health"]["system_health"]["overall"] == "critical"
-    assert "l2_depth" in ctx["runtime_health"]["system_health"]["critical_components"]
+    assert "custom_component" in ctx["runtime_health"]["system_health"]["critical_components"]
     assert ctx["runtime_health"]["account_cache_age_seconds"] >= 10.0
     assert ctx["runtime_health"]["positions_cache_age_seconds"] >= 30.0
 
@@ -1491,7 +1490,6 @@ def test_open_trade_risk_context_separates_market_and_runtime_time(monkeypatch):
             risk_loss_cooldown_after_losses=2,
             risk_loss_cooldown_bars=3,
             risk_block_on_disk_critical=True,
-            risk_require_l2_depth=False,
             max_position_count=3,
             max_position_api_volume=1000.0,
             pyramid_enabled=True,

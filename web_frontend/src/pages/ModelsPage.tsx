@@ -33,7 +33,7 @@ function formatPct(value: number): string {
   return `${formatDecimal(value * 100, 1)}%`;
 }
 
-function shortText(value: unknown, fallback = "--", maxLength = 96): string {
+function shortText(value: unknown, fallback = "", maxLength = 96): string {
   const text = String(value || "").trim();
   if (!text) return fallback;
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
@@ -74,12 +74,12 @@ function keyFor(item: Record<string, unknown>, index: number, keys: string[]): s
 }
 
 function objectSummary(value: unknown): string {
-  if (!value) return "--";
+  if (!value) return "";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
   try {
-    return shortText(JSON.stringify(value), "--", 140);
+    return shortText(JSON.stringify(value), "", 140);
   } catch {
-    return "--";
+    return "";
   }
 }
 
@@ -88,7 +88,7 @@ function distributionSummary(record: unknown): string {
   const entries = Object.entries(dist)
     .filter(([, value]) => Number(value) > 0)
     .map(([key, value]) => `${translateDisplayValue(key)} ${formatDecimal(Number(value), 0)}`);
-  return entries.length ? entries.join(" · ") : "--";
+  return entries.length ? entries.join(" · ") : "";
 }
 
 function ModelEventItem({
@@ -250,8 +250,8 @@ export function ModelsPage() {
   const holdoutRuleAccuracy = pickNumber(holdoutMetrics, ["rule_accuracy"], 0);
   const holdoutMajorityAccuracy = pickNumber(holdoutMetrics, ["majority_baseline_accuracy"], 0);
   const ruleLiftVsMajority = pickNumber(holdoutMetrics, ["rule_lift_vs_majority"], 0);
-  const governanceReadinessStatus = pickString(governanceReadiness, ["status"], "unknown");
-  const recommendedSource = pickString(governanceReadiness, ["recommended_source"], "--");
+  const governanceReadinessStatus = pickString(governanceReadiness, ["status"], "");
+  const recommendedSource = pickString(governanceReadiness, ["recommended_source"], "");
   const degradationReason = pickString(governanceReadiness, ["degradation_reason"], "");
   const ruleAgreement = pickNumber(ruleComparison, ["agreement_rate"], 0);
   const modelReady = pickNumber(dataset, ["model_ready", "ready", "quality.model_ready"], 0);
@@ -266,7 +266,7 @@ export function ModelsPage() {
   const evidenceBadTotal = pickNumber(evidenceCounts, ["bad_total"], 0);
   const gateEligible = pickBoolean(promotionGate, ["eligible_for_live", "eligible_for_governor_review", "ok"], false);
   const gateDecision = pickString(promotionGate, ["decision", "status"], gateEligible ? "eligible" : "shadow_only");
-  const highLoadProfile = pickString(highLoad, ["profile", "status"], "--");
+  const highLoadProfile = pickString(highLoad, ["profile", "status"], "");
   const advisoryOnly = pickBoolean(capabilities, ["advisory_only"], true);
 
   const modelCards = [
@@ -373,7 +373,7 @@ export function ModelsPage() {
           <div className="model-mini-grid">
             <ModelMiniMetric label="治理模式" value={advisoryOnly ? "影子顾问" : "治理候选"} detail={translateDisplayValue(gateDecision)} tone={advisoryOnly ? "warn" : "ok"} />
             <ModelMiniMetric label="Meta 准确率" value={formatPct(accuracy)} detail={`${formatDecimal(evaluatedCount, 0)} 样本 · ${formatDecimal(auditCount, 0)} 审计`} tone={numberTone(accuracy - 0.5)} />
-            <ModelMiniMetric label="Holdout" value={holdoutAccuracy > 0 ? formatPct(holdoutAccuracy) : "--"} detail={`规则 ${formatPct(holdoutRuleAccuracy)} · 基线 ${formatPct(holdoutMajorityAccuracy)}`} tone={holdoutAccuracy >= 0.55 ? "ok" : "mute"} />
+            <ModelMiniMetric label="Holdout" value={holdoutAccuracy > 0 ? formatPct(holdoutAccuracy) : ""} detail={`规则 ${formatPct(holdoutRuleAccuracy)} · 基线 ${formatPct(holdoutMajorityAccuracy)}`} tone={holdoutAccuracy >= 0.55 ? "ok" : "mute"} />
             <ModelMiniMetric label="样本准备" value={`${formatDecimal(modelReady, 0)}/${formatDecimal(sampleTotal || modelReady + needsAttention, 0)}`} detail={`${formatDecimal(needsAttention, 0)} 需处理`} tone={needsAttention > 0 ? "warn" : modelReady > 0 ? "ok" : "mute"} />
             <ModelMiniMetric label="开仓上下文" value={formatPct(Math.min(entryBarCoverage, entryExecutionCoverage, entryMicroCoverage))} detail={`${formatDecimal(entryOpenDecisions, 0)} 决策`} tone={entryContextStatus === "ok" ? "ok" : entryContextStatus === "warming" ? "mute" : "warn"} />
             <ModelMiniMetric label="契约异常" value={formatDecimal(evidenceBadTotal, 0)} detail={`${formatDecimal(pickNumber(evidenceCounts, ["checked"], 0), 0)} 已检查`} tone={evidenceBadTotal > 0 ? "bad" : "ok"} />
@@ -390,7 +390,7 @@ export function ModelsPage() {
                 <Field label="推荐来源" value={translateDisplayValue(recommendedSource)} />
                 <Field label="实时权限" value={pickBoolean(capabilities, ["can_place_orders"], false) ? "允许下单" : "禁止下单"} tone={pickBoolean(capabilities, ["can_place_orders"], false) ? "bad" : "ok"} />
                 <Field label="风险权限" value={pickBoolean(capabilities, ["can_change_risk_limits"], false) ? "允许改风控" : "禁止改风控"} tone={pickBoolean(capabilities, ["can_change_risk_limits"], false) ? "bad" : "ok"} />
-                <Field label="退化原因" value={degradationReason ? translateDisplayValue(degradationReason) : "--"} />
+                <Field label="退化原因" value={degradationReason ? translateDisplayValue(degradationReason) : ""} />
               </div>
             </section>
 
@@ -401,10 +401,10 @@ export function ModelsPage() {
               </div>
               <div className="field-list model-compact-fields">
                 <Field label="规则提升" value={formatPct(ruleLiftVsMajority)} tone={numberTone(ruleLiftVsMajority)} />
-                <Field label="规则一致率" value={ruleAgreement > 0 ? formatPct(ruleAgreement) : "--"} tone={ruleAgreement >= 0.55 ? "ok" : "mute"} />
+                <Field label="规则一致率" value={ruleAgreement > 0 ? formatPct(ruleAgreement) : ""} tone={ruleAgreement >= 0.55 ? "ok" : "mute"} />
                 <Field label="预测分布" value={distributionSummary(pick(metaReport, ["posture_distribution"]))} />
                 <Field label="标签分布" value={distributionSummary(pick(metaReport, ["label_distribution"]))} />
-                <Field label="模型文件" value={shortText(pickString(artifactSummary, ["artifact_path"], "--"), "--", 58)} />
+                <Field label="模型文件" value={shortText(pickString(artifactSummary, ["artifact_path"], ""), "", 58)} />
               </div>
             </section>
 
@@ -459,7 +459,7 @@ export function ModelsPage() {
                     return (
                       <div className="model-feature-row" key={keyFor(item, index, ["feature", "name"])}>
                         <div>
-                          <strong>{pickString(item, ["feature", "name"], "--")}</strong>
+                          <strong>{pickString(item, ["feature", "name"], "")}</strong>
                           <span>{value > 0 ? "增强" : value < 0 ? "抑制" : "中性"}</span>
                         </div>
                         <b>{formatDecimal(value, 4)}</b>
@@ -477,14 +477,14 @@ export function ModelsPage() {
                     {!metaAdvisories.length ? <div className="empty-state-small">暂无顾问记录</div> : null}
                     {metaAdvisories.slice(0, 6).map((raw, index) => {
                       const item = asRecord(raw);
-                      const status = pickString(item, ["status", "decision", "posture"], "--");
+                      const status = pickString(item, ["status", "decision", "posture"], "");
                       return (
                         <ModelEventItem
                           key={keyFor(item, index, ["advisory_id", "decision_id", "id"])}
-                          title={translateDisplayValue(pickString(item, ["posture", "target_posture"], "--"))}
+                          title={translateDisplayValue(pickString(item, ["posture", "target_posture"], ""))}
                           meta={formatTime(pick(item, ["created_at", "ts"]))}
                           status={status}
-                          detail={shortText(pickString(item, ["summary", "reason", "rationale"], "--"), "--", 140)}
+                          detail={shortText(pickString(item, ["summary", "reason", "rationale"], ""), "", 140)}
                         />
                       );
                     })}
@@ -497,29 +497,29 @@ export function ModelsPage() {
                     {!shadowQueue.length && !canaryReviews.length ? <div className="empty-state-small">暂无影子候选 · 暂无 Canary 审查</div> : null}
                     {shadowQueue.slice(0, 8).map((raw, index) => {
                       const item = asRecord(raw);
-                      const status = pickString(item, ["status"], "--");
-                      const gate = pickString(item, ["gate_decision", "gate.decision"], "--");
+                      const status = pickString(item, ["status"], "");
+                      const gate = pickString(item, ["gate_decision", "gate.decision"], "");
                       return (
                         <ModelEventItem
                           key={keyFor(item, index, ["candidate_id"])}
-                          title={pickString(item, ["model_type"], "--")}
+                          title={pickString(item, ["model_type"], "")}
                           meta={`${formatTime(pick(item, ["updated_at", "created_at"]))} · 门控 ${translateDisplayValue(gate)}`}
                           status={status}
-                          detail={shortText(pickString(item, ["note", "candidate_id"], "--"), "--", 140)}
+                          detail={shortText(pickString(item, ["note", "candidate_id"], ""), "", 140)}
                         />
                       );
                     })}
                     {canaryReviews.slice(0, 8).map((raw, index) => {
                       const item = asRecord(raw);
-                      const decision = pickString(item, ["decision", "status"], "--");
+                      const decision = pickString(item, ["decision", "status"], "");
                       return (
                         <ModelEventItem
                           key={keyFor(item, index, ["review_id", "candidate_id"])}
-                          title={shortText(pickString(item, ["candidate_id"], "--"), "--", 44)}
+                          title={shortText(pickString(item, ["candidate_id"], ""), "", 44)}
                           meta={formatTime(pick(item, ["created_at", "updated_at"]))}
                           status={decision}
                           score={formatPct(pickNumber(item, ["accuracy", "metrics.accuracy"], 0))}
-                          detail={shortText(pickString(item, ["reason", "note", "summary"], "--"), "--", 140)}
+                          detail={shortText(pickString(item, ["reason", "note", "summary"], ""), "", 140)}
                         />
                       );
                     })}
@@ -534,15 +534,15 @@ export function ModelsPage() {
                     )}
                     {[...permissionAudits.slice(0, 5), ...inferenceAudits.slice(0, 5)].map((raw, index) => {
                       const item = asRecord(raw);
-                      const status = pickString(item, ["status", "decision", "allowed"], "--");
+                      const status = pickString(item, ["status", "decision", "allowed"], "");
                       const source = index < Math.min(permissionAudits.length, 5) ? "权限" : "推理";
                       return (
                         <ModelEventItem
                           key={keyFor(item, index, ["audit_id", "inference_id", "candidate_id", "id"])}
-                          title={`${source} · ${shortText(pickString(item, ["model_type", "candidate_id"], "--"), "--", 48)}`}
+                          title={`${source} · ${shortText(pickString(item, ["model_type", "candidate_id"], ""), "", 48)}`}
                           meta={formatTime(pick(item, ["created_at", "event_ts", "updated_at"]))}
                           status={status}
-                          detail={shortText(pickString(item, ["reason", "error", "note"], objectSummary(pickRecord(item, ["result", "verdict"]))), "--", 150)}
+                          detail={shortText(pickString(item, ["reason", "error", "note"], objectSummary(pickRecord(item, ["result", "verdict"]))), "", 150)}
                         />
                       );
                     })}
@@ -561,12 +561,12 @@ export function ModelsPage() {
                   const item = asRecord(raw);
                   const modelType = pickString(item, ["model_type", "type"], "shadow_model");
                   const score = pickNumber(item, ["posture_score", "score", "quality_score", "weakness_score", "confidence"], 0);
-                  const output = translateDisplayValue(pickString(item, ["posture", "label", "decision", "status"], "--"));
+                  const output = translateDisplayValue(pickString(item, ["posture", "label", "decision", "status"], ""));
                   return (
                     <ModelEventItem
                       key={keyFor(item, index, ["inference_id", "audit_id", "id", "position_id", "factor"])}
                       title={translateDisplayValue(modelType)}
-                      meta={`${formatTime(pick(item, ["created_at", "event_ts", "updated_at"]))} · ${shortText(pickString(item, ["position_id", "factor", "sample_id", "target_position_id"], "--"), "--", 52)}`}
+                      meta={`${formatTime(pick(item, ["created_at", "event_ts", "updated_at"]))} · ${shortText(pickString(item, ["position_id", "factor", "sample_id", "target_position_id"], ""), "", 52)}`}
                       status={output}
                       tone={statusTone(output)}
                       score={formatDecimal(score, 4)}

@@ -45,7 +45,6 @@ _POSITIVE_INT_FIELDS = {
     "risk_max_consecutive_losses",
     "risk_max_daily_trades",
     "sync_interval_sec",
-    "l2_write_batch_size",
     "var_window",
 }
 _NON_NEGATIVE_INT_FIELDS = {

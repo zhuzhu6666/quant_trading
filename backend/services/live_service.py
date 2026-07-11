@@ -76,7 +76,7 @@ from backend.services.live_loop_shell import (
     loop_status_snapshot as _loop_status_snapshot,
     market_closed_log_message as _loop_market_closed_log_message,
     mark_loop_stopped_for_display as _loop_mark_stopped_for_display,
-    subscribe_spot_depth_once as _loop_subscribe_spot_depth_once,
+    subscribe_spot_once as _loop_subscribe_spot_once,
     unique_factor_pipelines as _loop_unique_factor_pipelines,
 )
 from backend.services.live_risk_sizing import (
@@ -237,6 +237,7 @@ _LEDGER: DecisionLedger | None = None
 _TRADE_REVIEWER: TradeReviewer | None = None
 _EXPERIENCE_BUILDER: ExperienceBuilder | None = None
 _POLICY_SUGGESTER: PolicySuggester | None = None
+_POSITION_QUALITY_ADVISOR: Any = None
 _RISK_POLICY = RiskPolicyService.shared()
 _DECISION_LOG_PENDING_PATH = Path("data/charts/decision_log.pending.jsonl")
 _DECISION_LOG_PENDING_LOCK = threading.Lock()
@@ -687,6 +688,93 @@ def _active_supervisor_reentry_block(*, symbol: str, direction: int) -> dict[str
     return view
 
 
+def _recent_review_reentry_block(
+    *, symbol: str, direction: int, now_ts: float | None = None,
+) -> dict[str, Any] | None:
+    """Reuse mature trade reviews to stop immediate repetition of a failed thesis.
+
+    This is deliberately narrow: two consecutive same-direction bad losses,
+    both carrying conflict/thesis evidence, create a one-hour re-entry block.
+    It does not mutate factors or bypass the existing RiskPolicy decision.
+    """
+    if int(direction or 0) == 0:
+        return None
+    now = float(now_ts or time.time())
+    try:
+        from backend.core.db import get_state_pg_conn
+
+        conn = get_state_pg_conn(read_only=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT review_id, position_id, outcome_label, failure_tags_json,
+                       review_json, created_at
+                FROM trade_outcome_review
+                WHERE created_at >= %s
+                ORDER BY created_at DESC
+                LIMIT 12
+                """,
+                (now - 3 * 3600.0,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("[live] recent review reentry evidence unavailable: {}", exc)
+        return None
+
+    matched: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        review = item.get("review_json") or {}
+        if isinstance(review, str):
+            try:
+                review = json.loads(review or "{}")
+            except Exception:
+                review = {}
+        if int((review or {}).get("direction") or 0) != int(direction):
+            continue
+        tags = item.get("failure_tags_json") or []
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags or "[]")
+            except Exception:
+                tags = []
+        tag_set = {str(tag) for tag in tags}
+        is_failed_thesis = (
+            str(item.get("outcome_label") or "") == "bad_loss"
+            and bool(tag_set.intersection({
+                "factor_conflict", "conflicting_factor_entry",
+                "conflict_entry_loss", "thesis_broken", "regime_mismatch",
+            }))
+        )
+        if not is_failed_thesis:
+            break  # require consecutive same-direction failed reviews
+        matched.append(item)
+        if len(matched) >= 2:
+            break
+    if len(matched) < 2:
+        return None
+
+    latest_close = float(matched[0].get("created_at") or 0.0)
+    expires_at = latest_close + 3600.0
+    if expires_at <= now:
+        return None
+    return {
+        "schema_version": "retrospective_reentry_block.v1",
+        "active": True,
+        "source": "trade_outcome_review",
+        "action": "block_same_direction_reentry",
+        "reason": "repeated_conflicting_thesis_loss",
+        "symbol": str(symbol or ""),
+        "direction": int(direction),
+        "position_id": str(matched[0].get("position_id") or ""),
+        "review_ids": [str(item.get("review_id") or "") for item in matched],
+        "started_at": latest_close,
+        "expires_at": expires_at,
+        "remaining_seconds": round(expires_at - now, 3),
+    }
+
+
 def _pending_supervisor_reentry_block_from_positions(
     positions: list[Any],
     *,
@@ -763,13 +851,18 @@ def _build_open_trade_risk_context(
         loop_started_at=float(_live_state_get("loop_started_at", 0.0) or 0.0),
     )
     active_supervisor_block = _active_supervisor_reentry_block(symbol=symbol, direction=direction)
+    retrospective_block = _recent_review_reentry_block(
+        symbol=symbol, direction=direction, now_ts=now,
+    )
     pending_supervisor_block = _pending_supervisor_reentry_block_from_positions(
         positions or [],
         symbol=symbol,
         direction=direction,
         cfg=cfg,
     )
-    supervisor_reentry_block = pending_supervisor_block or active_supervisor_block
+    supervisor_reentry_block = (
+        pending_supervisor_block or active_supervisor_block or retrospective_block
+    )
     entry_cluster_context = _build_entry_cluster_context(
         positions_before=positions or [],
         direction=direction,
@@ -1607,8 +1700,27 @@ def _evaluate_position_supervisor_for_position(
     broker: str = "",
     strategy_name: str = "",
 ) -> dict[str, Any]:
+    global _POSITION_QUALITY_ADVISOR
     context = _build_position_supervisor_context(position, cfg=cfg, acct=acct, now_ts=now_ts, positions=positions)
     verdict = evaluate_position_supervisor(context)
+    try:
+        if _POSITION_QUALITY_ADVISOR is None:
+            from research.position_quality_lightgbm import PositionQualityLightGBMService
+
+            _POSITION_QUALITY_ADVISOR = PositionQualityLightGBMService()
+        advisory = _POSITION_QUALITY_ADVISOR.score_position_context(context)
+    except Exception as exc:
+        advisory = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    verdict["position_quality_advisory"] = advisory
+    evidence = dict(verdict.get("evidence") or {})
+    evidence["position_quality_advisory"] = advisory
+    verdict["evidence"] = evidence
+    # Shadow models remain non-authoritative.  High exit risk raises review
+    # priority/confidence only; actual controls still come from rule-based
+    # PositionSupervisor and pass through RiskPolicyService.
+    if advisory.get("ok") and float(advisory.get("exit_risk_score") or 0.0) >= 0.65:
+        verdict["model_review_priority"] = "high"
+        verdict["confidence"] = max(float(verdict.get("confidence") or 0.0), 0.65)
     if persist:
         pid = int(position.get("position_id") or position.get("ticket") or 0)
         row = _load_recovery_position_row(pid)
@@ -3444,11 +3556,6 @@ def _make_ctrader_bridge(**overrides):
         proxy_rdns=str(
             os.getenv("CTRADER_PROXY_RDNS", ctrader_cfg.get("proxy_rdns", True))
         ).strip().lower() not in {"0", "false", "no", "off"},
-        l2_persist_enabled=bool(getattr(runtime_cfg, "l2_collection_enabled", True)),
-        l2_snapshot_interval_sec=float(getattr(runtime_cfg, "l2_snapshot_interval_sec", 5.0) or 5.0),
-        l2_write_batch_size=int(getattr(runtime_cfg, "l2_write_batch_size", 5000) or 5000),
-        l2_write_flush_interval_sec=float(getattr(runtime_cfg, "l2_write_flush_interval_sec", 5.0) or 5.0),
-        l2_depth_log_interval_sec=float(getattr(runtime_cfg, "l2_depth_log_interval_sec", 30.0) or 30.0),
     )
     kw.update(overrides)
     bridge = CTraderBridge(**kw)
@@ -3456,23 +3563,8 @@ def _make_ctrader_bridge(**overrides):
     return bridge, None
 
 
-def _apply_l2_runtime_config(bridge) -> None:
-    if bridge is None:
-        return
-    try:
-        from config.runtime_config import shared as _runtime_cfg
-
-        runtime_cfg = _runtime_cfg()
-    except Exception:
-        return
-    try:
-        bridge.l2_persist_enabled = bool(getattr(runtime_cfg, "l2_collection_enabled", True))
-        bridge.l2_snapshot_interval_sec = max(0.0, float(getattr(runtime_cfg, "l2_snapshot_interval_sec", 5.0) or 5.0))
-        bridge.l2_write_batch_size = max(1, int(getattr(runtime_cfg, "l2_write_batch_size", 5000) or 5000))
-        bridge.l2_write_flush_interval_sec = max(0.1, float(getattr(runtime_cfg, "l2_write_flush_interval_sec", 5.0) or 5.0))
-        bridge.l2_depth_log_interval_sec = max(0.0, float(getattr(runtime_cfg, "l2_depth_log_interval_sec", 30.0) or 30.0))
-    except Exception as exc:
-        logger.debug("[ctrader] l2 runtime config apply skipped: %s", exc)
+def _apply_ctrader_runtime_config(_bridge) -> None:
+    """Reserved for non-order runtime bridge settings."""
 
 
 def _install_ctrader_live_listener(bridge) -> None:
@@ -3643,7 +3735,7 @@ def _get_ctrader():
     result = _CTRADER_RUNTIME.get_or_start(
         make_bridge=_make_ctrader_bridge,
         should_send_orders=_should_send_orders,
-        apply_runtime_config=_apply_l2_runtime_config,
+        apply_runtime_config=_apply_ctrader_runtime_config,
         logger=logger,
     )
     _sync_ctrader_runtime_from_legacy()
@@ -3750,8 +3842,6 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
 def _ensure_spot_subscription(
     bridge,
     *,
-    require_l2_depth: bool = False,
-    l2_collection_enabled: bool = False,
     log=None,
 ) -> None:
     global _last_spot_subscription_attempt_ts
@@ -3768,8 +3858,7 @@ def _ensure_spot_subscription(
         float((quote or {}).get("ts") or 0.0) <= 0
         or not _quote_is_fresh(quote, now_ts=now_ts)
     )
-    depth_needed = bool(require_l2_depth or l2_collection_enabled) and hasattr(bridge, "subscribe_depth") and not bool(getattr(bridge, "_depth_subscribed", False))
-    if not spot_needed and not depth_needed:
+    if not spot_needed:
         return
     if now_ts - _last_spot_subscription_attempt_ts < 60:
         return
@@ -3777,9 +3866,7 @@ def _ensure_spot_subscription(
     try:
         if spot_needed and hasattr(bridge, "subscribe_spots"):
             bridge.subscribe_spots()
-        if depth_needed:
-            bridge.subscribe_depth()
-        msg = "market subscriptions refreshed after broker connection became ready"
+        msg = "spot subscription refreshed after broker connection became ready"
         log(msg) if log else logger.info(msg)
     except Exception as exc:
         logger.debug("[market_session] spot subscription refresh failed: %s", exc)
@@ -5027,12 +5114,8 @@ def _run_live_loop_tick_body(
         log(f"tick {tick}: cTrader warming/disconnected, running pipeline dry")
     else:
         try:
-            require_l2_depth = bool(getattr(bridge_cfg, "risk_require_l2_depth", False))
-            l2_collection_enabled = bool(getattr(bridge_cfg, "l2_collection_enabled", True))
             _ensure_spot_subscription(
                 bridge,
-                require_l2_depth=require_l2_depth,
-                l2_collection_enabled=l2_collection_enabled,
                 log=log,
             )
         except Exception as _spot_sub_err:
@@ -5450,13 +5533,9 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     # 订阅 cTrader 实时报价；warmup local_db 路径从 _get_ctrader() 拿真 bridge 并短等 ready.
     if broker == "ctrader":
         try:
-            require_l2_depth = bool(getattr(_rcfg, "risk_require_l2_depth", False))
-            l2_collection_enabled = bool(getattr(_rcfg, "l2_collection_enabled", True))
-            _loop_subscribe_spot_depth_once(
+            _loop_subscribe_spot_once(
                 get_ctrader=_get_ctrader,
                 wait_ctrader_ready=_wait_ctrader_ready,
-                require_l2_depth=require_l2_depth,
-                l2_collection_enabled=l2_collection_enabled,
                 log=log,
                 timeout_sec=10.0,
             )

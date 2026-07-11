@@ -144,6 +144,7 @@ class PositionQualityLightGBMService:
     ):
         self.db_path = Path(db_path)
         self.artifact_dir = Path(artifact_dir) if artifact_dir else DATA_DIR / "model_artifacts" / MODEL_TYPE
+        self._live_bundle_cache: tuple[str, int, dict[str, Any], Any] | None = None
         self._ensure_audit_table()
 
     def _use_pg(self) -> bool:
@@ -427,6 +428,74 @@ class PositionQualityLightGBMService:
     def latest_artifact_path(self) -> str:
         paths = sorted(self.artifact_dir.glob(f"{MODEL_TYPE}_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         return str(paths[0]) if paths else ""
+
+    def score_position_context(self, position_context: dict[str, Any]) -> dict[str, Any]:
+        """Score a live position as an advisory, risk-reducing-only input.
+
+        The model remains unable to close or amend positions.  Callers may
+        only use high exit risk to tighten an existing rule-based verdict.
+        """
+        dep_error = _dependency_error()
+        if dep_error:
+            return {"ok": False, "error": "dependency_missing", "detail": dep_error}
+        import joblib
+        import pandas as pd
+
+        path = Path(self.latest_artifact_path())
+        if not path.exists():
+            return {"ok": False, "error": "artifact_missing"}
+        cache_key = (str(path), path.stat().st_mtime_ns)
+        if self._live_bundle_cache and self._live_bundle_cache[:2] == cache_key:
+            artifact = self._live_bundle_cache[2]
+            bundle = self._live_bundle_cache[3]
+        else:
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            bundle = None
+        permission = validate_model_artifact(
+            artifact, model_type=MODEL_TYPE, db_path=self.db_path,
+            context={"mode": "advisory", "operation": "position_quality_live_advisory"},
+        )
+        if not permission.get("ok"):
+            return {"ok": False, "error": "model_permission_violation", "permission": permission}
+        model_file = Path(str(artifact.get("model_file") or ""))
+        if not model_file.exists():
+            return {"ok": False, "error": "model_file_missing"}
+        if bundle is None:
+            bundle = joblib.load(model_file)
+            self._live_bundle_cache = (cache_key[0], cache_key[1], artifact, bundle)
+        model = bundle["model"]
+        feature_names = list(bundle.get("feature_names") or FEATURE_NAMES)
+        risk = dict(position_context.get("risk") or {})
+        temporal = dict(position_context.get("temporal_context") or {})
+        thesis = str(risk.get("thesis_status") or "").lower()
+        regime_shift = str(risk.get("regime_shift") or "").lower()
+        features = {
+            "mfe": _safe_float(risk.get("mfe")),
+            "mae": _safe_float(risk.get("mae")),
+            "giveback_ratio": _safe_float(risk.get("giveback_ratio")),
+            "profit_capture_ratio": _safe_float(risk.get("profit_capture_ratio")),
+            "time_in_profit": _safe_float(risk.get("time_in_profit") or risk.get("time_in_profit_seconds")),
+            "holding_efficiency": _safe_float(risk.get("holding_efficiency")),
+            "time_decay_score": _safe_float(risk.get("time_decay_score")),
+            "holding_seconds": _safe_float(temporal.get("holding_seconds")),
+            "thesis_broken": 1.0 if thesis == "broken" else 0.0,
+            "thesis_weakening": 1.0 if thesis == "weakening" else 0.0,
+            "regime_shift_confirmed": 1.0 if regime_shift == "confirmed" else 0.0,
+        }
+        frame = pd.DataFrame([[features.get(name, 0.0) for name in feature_names]], columns=feature_names)
+        hold_score = float(model.predict_proba(frame)[:, 1][0])
+        exit_risk = max(0.0, min(1.0, 1.0 - hold_score))
+        return {
+            "ok": True,
+            "schema_version": "position_quality_live_advisory.v1",
+            "hold_score": round(hold_score, 8),
+            "exit_risk_score": round(exit_risk, 8),
+            "risk_bucket": "high_exit_risk" if exit_risk >= 0.65 else "medium_exit_risk" if exit_risk >= 0.4 else "low_exit_risk",
+            "features": features,
+            "model_version": str(artifact.get("model_version") or MODEL_VERSION),
+            "advisory_only": True,
+            "risk_reducing_only": True,
+        }
 
     def score_samples(
         self,

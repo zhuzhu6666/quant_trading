@@ -12,46 +12,19 @@ execution/ctrader_bridge.py — cTrader Open API 桥接（当前实盘主链）
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import queue
 import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 
-def _persist_runtime_kv(key: str, value: dict[str, Any]) -> None:
-    try:
-        from backend.core.db import get_state_pg_conn
-
-        conn = get_state_pg_conn()
-        try:
-            sql = """
-                INSERT INTO runtime_kv(key, value_json, updated_at)
-                VALUES (%s, %s, %s)
-                ON CONFLICT(key) DO UPDATE SET
-                    value_json=excluded.value_json,
-                    updated_at=excluded.updated_at
-                """
-            conn.execute(
-                sql,
-                (key, json.dumps(value, ensure_ascii=False, default=str), time.time()),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception as exc:
-        logger.debug("runtime_kv persist skipped for %s: %s", key, exc)
-
 # Phase 4: 统一接口
-from backend.core.db import DUCKDB_L2, connect_duckdb
 from execution.base import BaseBrokerBridge, OrderResult, PositionInfo, AccountInfo
 from execution.ctrader_ssl_patch import _patch_ctrader_ssl_endpoint
 
@@ -138,77 +111,6 @@ _ASSET_ID_TO_CODE = {
 }
 
 
-def _ensure_l2_snapshot_schema(conn) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS orderbook_snapshots (
-            id BIGINT PRIMARY KEY,
-            symbol VARCHAR NOT NULL DEFAULT 'XAUUSD+',
-            ts DOUBLE NOT NULL,
-            bid1_price DOUBLE, bid1_size DOUBLE,
-            bid2_price DOUBLE, bid2_size DOUBLE,
-            bid3_price DOUBLE, bid3_size DOUBLE,
-            bid4_price DOUBLE, bid4_size DOUBLE,
-            bid5_price DOUBLE, bid5_size DOUBLE,
-            ask1_price DOUBLE, ask1_size DOUBLE,
-            ask2_price DOUBLE, ask2_size DOUBLE,
-            ask3_price DOUBLE, ask3_size DOUBLE,
-            ask4_price DOUBLE, ask4_size DOUBLE,
-            ask5_price DOUBLE, ask5_size DOUBLE,
-            spread DOUBLE,
-            imbalance DOUBLE,
-            total_bid DOUBLE,
-            total_ask DOUBLE,
-            created_at DOUBLE
-        )
-        """
-    )
-
-
-def _top_l2_levels(quotes: list[dict], side: str, limit: int = 5) -> list[tuple[float, float]]:
-    key = "bid" if side == "bid" else "ask"
-    rows: dict[float, float] = {}
-    for item in quotes:
-        try:
-            price = float(item.get(key) or 0.0)
-            size = float(item.get("size") or 0.0)
-        except Exception:
-            continue
-        if price <= 0 or size <= 0:
-            continue
-        rows[price] = rows.get(price, 0.0) + size
-    return sorted(rows.items(), key=lambda item: item[0], reverse=(side == "bid"))[:limit]
-
-
-def _l2_month_db_path(ts: float | None = None) -> Path:
-    """Return the monthly L2 DuckDB path for a Unix timestamp, using UTC."""
-    tm = time.gmtime(float(ts or time.time()))
-    return DUCKDB_L2.parent / "l2_monthly" / f"l2_{tm.tm_year:04d}_{tm.tm_mon:02d}.duckdb"
-
-
-def _refresh_l2_legacy_pointer(target_path: Path) -> None:
-    """Point data/l2.duckdb at the active monthly DB when it is safe to do so."""
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    legacy_path = DUCKDB_L2
-    relative_target = Path("l2_monthly") / target_path.name
-    try:
-        if legacy_path.is_symlink():
-            if os.readlink(legacy_path) != str(relative_target):
-                legacy_path.unlink()
-                legacy_path.symlink_to(relative_target)
-            return
-        if not legacy_path.exists():
-            legacy_path.symlink_to(relative_target)
-            return
-        if legacy_path.resolve() != target_path.resolve():
-            logger.warning(
-                "L2 monthly pointer not updated because %s is a regular file",
-                legacy_path,
-            )
-    except Exception as exc:
-        logger.warning("L2 monthly pointer update failed: %s", exc)
-
-
 # ── 主类 ────────────────────────────────────────────────
 
 class CTraderBridge(BaseBrokerBridge):
@@ -232,12 +134,7 @@ class CTraderBridge(BaseBrokerBridge):
                  send_orders: bool = False,
                  proxy_url: str = "",
                  proxy_rdns: bool = True,
-                 forced_symbol_id: int | None = None,
-                 l2_persist_enabled: bool = False,
-                 l2_snapshot_interval_sec: float = 5.0,
-                 l2_write_batch_size: int = 5000,
-                 l2_write_flush_interval_sec: float = 5.0,
-                 l2_depth_log_interval_sec: float = 30.0):
+                 forced_symbol_id: int | None = None):
         if not HAS_CTRADER:
             raise ImportError("ctrader-open-api 未装; pip install ctrader-open-api")
         self.client_id = client_id
@@ -252,11 +149,6 @@ class CTraderBridge(BaseBrokerBridge):
         self.send_orders = send_orders  # 安全闸: False 时只打 log 不真发
         self.proxy_url = str(proxy_url or "").strip()
         self.proxy_rdns = bool(proxy_rdns)
-        self.l2_persist_enabled = bool(l2_persist_enabled)
-        self.l2_snapshot_interval_sec = max(0.0, float(l2_snapshot_interval_sec or 0.0))
-        self.l2_write_batch_size = max(1, int(l2_write_batch_size or 5000))
-        self.l2_write_flush_interval_sec = max(0.1, float(l2_write_flush_interval_sec or 5.0))
-        self.l2_depth_log_interval_sec = max(0.0, float(l2_depth_log_interval_sec or 30.0))
 
         self._client: "Client | None" = None
         self._reactor = None
@@ -275,7 +167,6 @@ class CTraderBridge(BaseBrokerBridge):
         self._spot_ask: float | None = None
         self._spot_ts: float = 0.0
         self._spot_lock = threading.Lock()
-        self._depth_subscribed: bool = False
         # ── 熔断 / 退避 ──
         self._fail_count: int = 0
         self._last_fail_time: float = 0.0
@@ -287,26 +178,6 @@ class CTraderBridge(BaseBrokerBridge):
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
 
-        # ── L2 DuckDB writer: depth 回调只入队, 后台线程批量写, 避免阻塞 Twisted/live loop ──
-        self._l2_db = None
-        self._l2_db_path: Path | None = None
-        self._l2_db_lock = threading.Lock()
-        self._l2_writer_queue: queue.Queue[tuple[str, tuple]] = queue.Queue(maxsize=200_000)
-        self._l2_writer_stop = threading.Event()
-        self._l2_writer_thread: threading.Thread | None = None
-        self._l2_writer_started = False
-        self._l2_dropped_rows: int = 0
-        self._l2_written_rows: int = 0
-        self._l2_write_batches: int = 0
-        self._l2_last_write_ts: float = 0.0
-        self._l2_last_batch_rows: int = 0
-        self._l2_last_batch_elapsed_ms: float = 0.0
-        self._l2_max_batch_elapsed_ms: float = 0.0
-        self._l2_last_error: str = ""
-        self._l2_drop_log_ts: float = 0.0
-        self._l2_health_persist_ts: float = 0.0
-        self._snapshot_last_ts: float = 0.0
-        self._snapshot_counter: int | None = None
 
         # ── 持久 reactor 线程 (auth 后不停, 保持连接活跃) ──
         self._reactor_started = False
@@ -323,9 +194,6 @@ class CTraderBridge(BaseBrokerBridge):
         self._event_listeners: list[Callable[[str, dict[str, Any]], None]] = []
         self._event_listeners_lock = threading.Lock()
         self._last_reconcile_at: float = 0.0
-        self._depth_log_last_ts: float = 0.0
-        self._depth_log_accum_new: int = 0
-        self._depth_log_accum_deleted: int = 0
 
     def has_token(self) -> bool:
         """检查必要凭证是否已设置 (client_id + client_secret + access_token).
@@ -684,7 +552,6 @@ class CTraderBridge(BaseBrokerBridge):
             self._connected = False
         self._app_authed = False
         self._account_authed = False
-        self._depth_subscribed = False
 
     def _should_backoff(self) -> bool:
         """指数退避检查: 连续失败越久, 跳过时间越长.
@@ -777,7 +644,6 @@ class CTraderBridge(BaseBrokerBridge):
             from ctrader_open_api import Protobuf
             payload = Protobuf.extract(message)
             self._handle_spot_event(payload)
-            self._handle_depth_event(payload)
             self._handle_execution_event(payload)
             self._handle_trader_update_event(payload)
         except Exception as e:
@@ -1049,465 +915,6 @@ class CTraderBridge(BaseBrokerBridge):
         except Exception as exc:
             logger.debug("trader updated event parse failed: %s", exc)
 
-    def _load_depth_counter(self, db_path: Path | None = None) -> int:
-        """从现有 orderbook_changes 的最大 id 继续递增, 新库从 0 开始."""
-        path = db_path or DUCKDB_L2
-        try:
-            if path.exists():
-                con = connect_duckdb(path, read_only=True)
-                try:
-                    tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
-                    if "orderbook_changes" not in tables:
-                        return 0
-                    row = con.execute(
-                        "SELECT COALESCE(MAX(id), 0) FROM orderbook_changes"
-                    ).fetchone()
-                    if row and row[0] is not None:
-                        return int(row[0])
-                finally:
-                    con.close()
-        except Exception:
-            pass
-        return 0
-
-    def _load_snapshot_counter(self, db_path: Path | None = None) -> int:
-        path = db_path or DUCKDB_L2
-        try:
-            if path.exists():
-                con = connect_duckdb(path, read_only=True)
-                try:
-                    tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
-                    if "orderbook_snapshots" not in tables:
-                        return 0
-                    row = con.execute(
-                        "SELECT COALESCE(MAX(id), 0) FROM orderbook_snapshots"
-                    ).fetchone()
-                    return int(row[0] or 0)
-                finally:
-                    con.close()
-        except Exception:
-            pass
-        return 0
-
-    def _ensure_l2_schema(self, tdb) -> None:
-        """Ensure the L2 DuckDB schema matches the live depth payloads.
-
-        quote_id values from cTrader can exceed INT32, and the old L2 collector
-        drove id near the INT32 limit, so both ids are BIGINT for replacement DBs.
-        """
-        try:
-            cols = {
-                row[1].lower(): str(row[2]).upper()
-                for row in tdb.execute("PRAGMA table_info('orderbook_changes')").fetchall()
-            }
-        except Exception:
-            cols = {}
-        if not cols:
-            tdb.execute("""
-                CREATE TABLE IF NOT EXISTS orderbook_changes (
-                    id BIGINT PRIMARY KEY,
-                    symbol VARCHAR NOT NULL DEFAULT 'XAUUSD+',
-                    ts DOUBLE NOT NULL,
-                    quote_id BIGINT NOT NULL,
-                    side VARCHAR NOT NULL,
-                    price DOUBLE NOT NULL,
-                    size DOUBLE,
-                    change_type VARCHAR NOT NULL,
-                    created_at DOUBLE DEFAULT (date_part('EPOCH', CURRENT_TIMESTAMP))
-                )
-            """)
-            return
-        if cols.get('id') and cols['id'] not in {'BIGINT', 'HUGEINT', 'UBIGINT'}:
-            try:
-                tdb.execute("ALTER TABLE orderbook_changes ALTER COLUMN id SET DATA TYPE BIGINT")
-            except Exception as exc:
-                logger.warning("l2 schema id remains %s; rebuild l2.duckdb to BIGINT: %s", cols.get('id'), exc)
-        if cols.get('quote_id') and cols['quote_id'] != 'BIGINT':
-            tdb.execute("ALTER TABLE orderbook_changes ALTER COLUMN quote_id SET DATA TYPE BIGINT")
-
-    def _ensure_l2_writer_started(self) -> None:
-        if not self.l2_persist_enabled:
-            return
-        if self._l2_writer_thread and self._l2_writer_thread.is_alive():
-            return
-        if self._l2_writer_started:
-            return
-        active_path = _l2_month_db_path(time.time())
-        _refresh_l2_legacy_pointer(active_path)
-        self._l2_writer_started = True
-        self._l2_writer_stop.clear()
-        self._snapshot_counter = self._load_snapshot_counter(active_path)
-        self._l2_writer_thread = threading.Thread(
-            target=self._l2_writer_loop,
-            daemon=True,
-            name="ctrader-l2-writer",
-        )
-        self._l2_writer_thread.start()
-        logger.info("L2 async writer started: db=%s", DUCKDB_L2)
-
-    def _ensure_l2_db_open(self, target_path: Path) -> None:
-        if self._l2_db is not None and self._l2_db_path == target_path:
-            return
-        if self._l2_db is not None:
-            try:
-                self._l2_db.close()
-            except Exception:
-                pass
-            self._l2_db = None
-            self._l2_db_path = None
-        _refresh_l2_legacy_pointer(target_path)
-        self._l2_db = connect_duckdb(target_path)
-        self._l2_db_path = target_path
-        self._ensure_l2_schema(self._l2_db)
-        _ensure_l2_snapshot_schema(self._l2_db)
-        logger.info("L2 writer using monthly db: %s", target_path)
-
-    def _stop_l2_writer(self) -> None:
-        self._l2_writer_stop.set()
-        thread = self._l2_writer_thread
-        if thread and thread.is_alive():
-            thread.join(timeout=5.0)
-        self._l2_writer_thread = None
-        self._l2_writer_started = False
-        with self._l2_db_lock:
-            if self._l2_db is not None:
-                try:
-                    self._l2_db.close()
-                except Exception:
-                    pass
-                self._l2_db = None
-                self._l2_db_path = None
-        self._persist_l2_writer_health(force=True)
-
-    def _persist_l2_writer_health(self, *, force: bool = False, status: str = "running") -> None:
-        now = time.time()
-        if not force and now - self._l2_health_persist_ts < 30.0:
-            return
-        self._l2_health_persist_ts = now
-        try:
-            queue_size = int(self._l2_writer_queue.qsize())
-        except Exception:
-            queue_size = -1
-        queue_capacity = int(getattr(self._l2_writer_queue, "maxsize", 0) or 0)
-        queue_utilization = (
-            round(max(0.0, float(queue_size)) / float(queue_capacity), 6)
-            if queue_size >= 0 and queue_capacity > 0
-            else None
-        )
-        _persist_runtime_kv(
-            "live.l2_writer.health",
-            {
-                "status": status,
-                "persist_enabled": bool(self.l2_persist_enabled),
-                "db_path": str(self._l2_db_path or ""),
-                "queue_size": queue_size,
-                "queue_capacity": queue_capacity,
-                "queue_utilization": queue_utilization,
-                "dropped_rows": int(self._l2_dropped_rows),
-                "written_rows": int(self._l2_written_rows),
-                "write_batches": int(self._l2_write_batches),
-                "last_batch_rows": int(self._l2_last_batch_rows),
-                "last_batch_elapsed_ms": round(float(self._l2_last_batch_elapsed_ms or 0.0), 3),
-                "max_batch_elapsed_ms": round(float(self._l2_max_batch_elapsed_ms or 0.0), 3),
-                "last_write_ts": float(self._l2_last_write_ts or 0.0),
-                "last_error": str(self._l2_last_error or ""),
-                "updated_at": now,
-            },
-        )
-
-    def l2_writer_health(self) -> dict[str, Any]:
-        try:
-            queue_size = int(self._l2_writer_queue.qsize())
-        except Exception:
-            queue_size = -1
-        queue_capacity = int(getattr(self._l2_writer_queue, "maxsize", 0) or 0)
-        queue_utilization = (
-            round(max(0.0, float(queue_size)) / float(queue_capacity), 6)
-            if queue_size >= 0 and queue_capacity > 0
-            else None
-        )
-        return {
-            "status": "running" if self._l2_writer_thread and self._l2_writer_thread.is_alive() else "stopped",
-            "persist_enabled": bool(self.l2_persist_enabled),
-            "db_path": str(self._l2_db_path or ""),
-            "queue_size": queue_size,
-            "queue_capacity": queue_capacity,
-            "queue_utilization": queue_utilization,
-            "dropped_rows": int(self._l2_dropped_rows),
-            "written_rows": int(self._l2_written_rows),
-            "write_batches": int(self._l2_write_batches),
-            "last_batch_rows": int(self._l2_last_batch_rows),
-            "last_batch_elapsed_ms": round(float(self._l2_last_batch_elapsed_ms or 0.0), 3),
-            "max_batch_elapsed_ms": round(float(self._l2_max_batch_elapsed_ms or 0.0), 3),
-            "last_write_ts": float(self._l2_last_write_ts or 0.0),
-            "last_error": str(self._l2_last_error or ""),
-        }
-
-    def _enqueue_l2_row(self, kind: str, row: tuple) -> None:
-        if not self.l2_persist_enabled:
-            return
-        self._ensure_l2_writer_started()
-        try:
-            self._l2_writer_queue.put_nowait((kind, row))
-        except queue.Full:
-            self._l2_dropped_rows += 1
-            now = time.time()
-            if now - self._l2_drop_log_ts > 30:
-                logger.warning("L2 writer queue full; dropped rows=%d", self._l2_dropped_rows)
-                self._l2_drop_log_ts = now
-                self._persist_l2_writer_health(force=True, status="dropping")
-
-    def _l2_writer_loop(self) -> None:
-        changes: list[tuple[str, tuple]] = []
-        snapshots: list[tuple] = []
-        last_flush = time.time()
-        while not self._l2_writer_stop.is_set() or not self._l2_writer_queue.empty():
-            timeout = max(0.1, self.l2_write_flush_interval_sec)
-            try:
-                kind, row = self._l2_writer_queue.get(timeout=timeout)
-                if kind == "snapshot":
-                    snapshots.append(row)
-                else:
-                    changes.append((kind, row))
-            except queue.Empty:
-                pass
-            now = time.time()
-            pending = len(changes) + len(snapshots)
-            if pending <= 0:
-                continue
-            if pending < self.l2_write_batch_size and now - last_flush < self.l2_write_flush_interval_sec:
-                continue
-            try:
-                batch_started = time.perf_counter()
-                total_rows_written = 0
-                buckets: dict[Path, dict[str, list]] = {}
-                for kind, row in changes:
-                    bucket = buckets.setdefault(
-                        _l2_month_db_path(row[1]),
-                        {"changes": [], "snapshots": []},
-                    )
-                    bucket["changes"].append((kind, row))
-                for row in snapshots:
-                    bucket = buckets.setdefault(
-                        _l2_month_db_path(row[1]),
-                        {"changes": [], "snapshots": []},
-                    )
-                    bucket["snapshots"].append(row)
-                for target_path in sorted(buckets):
-                    bucket = buckets[target_path]
-                    with self._l2_db_lock:
-                        self._ensure_l2_db_open(target_path)
-                        conn = self._l2_db
-                        new_rows = [row for kind, row in bucket["changes"] if kind == "new"]
-                        delete_rows = [row for kind, row in bucket["changes"] if kind == "delete"]
-                        snapshot_rows = bucket["snapshots"]
-                        rows_written = len(new_rows) + len(delete_rows) + len(snapshot_rows)
-                        conn.execute("BEGIN TRANSACTION")
-                        if new_rows:
-                            conn.executemany(
-                                """
-                                INSERT INTO orderbook_changes
-                                (id, symbol, ts, quote_id, side, price, size, change_type, created_at)
-                                VALUES (?, 'XAUUSD+', ?, ?, ?, ?, ?, 'new', ?)
-                                """,
-                                new_rows,
-                            )
-                        if delete_rows:
-                            conn.executemany(
-                                """
-                                INSERT INTO orderbook_changes
-                                (id, symbol, ts, quote_id, side, price, size, change_type, created_at)
-                                VALUES (?, 'XAUUSD+', ?, ?, '', 0, 0, 'delete', ?)
-                                """,
-                                delete_rows,
-                            )
-                        if snapshot_rows:
-                            conn.executemany(
-                                """
-                                INSERT INTO orderbook_snapshots (
-                                    id, symbol, ts,
-                                    bid1_price, bid1_size, bid2_price, bid2_size, bid3_price, bid3_size,
-                                    bid4_price, bid4_size, bid5_price, bid5_size,
-                                    ask1_price, ask1_size, ask2_price, ask2_size, ask3_price, ask3_size,
-                                    ask4_price, ask4_size, ask5_price, ask5_size,
-                                    spread, imbalance, total_bid, total_ask, created_at
-                                )
-                                VALUES (
-                                    ?, 'XAUUSD+', ?,
-                                    ?, ?, ?, ?, ?, ?,
-                                    ?, ?, ?, ?,
-                                    ?, ?, ?, ?, ?, ?,
-                                    ?, ?, ?, ?,
-                                    ?, ?, ?, ?, ?
-                                )
-                                """,
-                                snapshot_rows,
-                            )
-                        conn.execute("COMMIT")
-                        total_rows_written += rows_written
-                        self._l2_written_rows += rows_written
-                elapsed_ms = (time.perf_counter() - batch_started) * 1000.0
-                if total_rows_written > 0:
-                    self._l2_write_batches += 1
-                    self._l2_last_batch_rows = total_rows_written
-                    self._l2_last_batch_elapsed_ms = elapsed_ms
-                    self._l2_max_batch_elapsed_ms = max(self._l2_max_batch_elapsed_ms, elapsed_ms)
-                    self._l2_last_write_ts = time.time()
-                    try:
-                        from backend.services.stability import record_timing
-
-                        record_timing(
-                            "ctrader.l2_writer.batch",
-                            elapsed_ms / 1000.0,
-                            extra={"rows": total_rows_written, "buckets": len(buckets)},
-                        )
-                    except Exception:
-                        pass
-                    self._l2_last_error = ""
-                changes.clear()
-                snapshots.clear()
-                last_flush = now
-                self._persist_l2_writer_health(status="running")
-            except Exception as exc:
-                self._l2_last_error = str(exc)[:300]
-                self._persist_l2_writer_health(force=True, status="error")
-                logger.warning("L2 async write failed: %s", exc)
-                with self._l2_db_lock:
-                    if self._l2_db is not None:
-                        try:
-                            self._l2_db.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                        try:
-                            self._l2_db.close()
-                        except Exception:
-                            pass
-                        self._l2_db = None
-                time.sleep(0.2)
-
-    def _build_l2_snapshot_row(self, ts: float) -> tuple | None:
-        quotes = self.get_depth_quotes()
-        bids = _top_l2_levels(quotes, "bid", 5)
-        asks = _top_l2_levels(quotes, "ask", 5)
-        if not bids or not asks:
-            return None
-        total_bid = sum(size for _, size in bids)
-        total_ask = sum(size for _, size in asks)
-        spread = asks[0][0] - bids[0][0]
-        denom = total_bid + total_ask
-        imbalance = (total_bid - total_ask) / denom if denom > 0 else 0.0
-        bid_values = [value for level in bids for value in level]
-        ask_values = [value for level in asks for value in level]
-        bid_values.extend([None] * (10 - len(bid_values)))
-        ask_values.extend([None] * (10 - len(ask_values)))
-        if self._snapshot_counter is None:
-            self._snapshot_counter = self._load_snapshot_counter()
-        self._snapshot_counter += 1
-        return (
-            self._snapshot_counter,
-            ts,
-            *bid_values[:10],
-            *ask_values[:10],
-            spread,
-            imbalance,
-            total_bid,
-            total_ask,
-            ts,
-        )
-
-    def _handle_depth_event(self, payload):
-        """处理深度报价 (Level II) 事件."""
-        if not hasattr(self, '_depth_quotes'):
-            self._depth_quotes = []
-            self._depth_lock = threading.Lock()
-            # 从 DB 取最大 id 作为起始, 避免重启后计数器重置产生重复
-            active_path = _l2_month_db_path(time.time())
-            _refresh_l2_legacy_pointer(active_path)
-            self._depth_counter = self._load_depth_counter(active_path)
-        try:
-            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOADepthEvent
-            if not isinstance(payload, ProtoOADepthEvent):
-                return
-            # 收集新报价
-            new_quotes = []
-            for q in payload.newQuotes:
-                bid = q.bid / 100000.0
-                ask = q.ask / 100000.0
-                size = q.size / 100.0  # 官方: depth 量 ÷ 100
-                new_quotes.append({
-                    'id': q.id,
-                    'bid': round(bid, 2),
-                    'ask': round(ask, 2),
-                    'size': size,
-                })
-            deleted_ids = list(payload.deletedQuotes)
-            # 存入 bridge 状态
-            if not hasattr(self, '_depth_quotes'):
-                self._depth_quotes = []
-                self._depth_lock = threading.Lock()
-            # 更新本地 order book
-            with self._depth_lock:
-                # 删除旧报价
-                if deleted_ids:
-                    del_set = set(deleted_ids)
-                    self._depth_quotes = [q for q in self._depth_quotes if q['id'] not in del_set]
-                # 添加/更新新报价
-                for q in new_quotes:
-                    found = False
-                    for existing in self._depth_quotes:
-                        if existing['id'] == q['id']:
-                            existing.update(q)
-                            found = True
-                            break
-                    if not found:
-                        self._depth_quotes.append(q)
-            self._depth_log_accum_new += len(new_quotes)
-            self._depth_log_accum_deleted += len(deleted_ids)
-            now = time.time()
-            depth_log_interval = float(getattr(self, "l2_depth_log_interval_sec", 30.0) or 0.0)
-            if depth_log_interval > 0 and now - self._depth_log_last_ts >= depth_log_interval:
-                logger.info(
-                    "depth events (%.0fs): +%d / -%d, book=%d",
-                    depth_log_interval,
-                    self._depth_log_accum_new,
-                    self._depth_log_accum_deleted,
-                    len(self._depth_quotes),
-                )
-                self._depth_log_last_ts = now
-                self._depth_log_accum_new = 0
-                self._depth_log_accum_deleted = 0
-
-            if self.l2_persist_enabled:
-                self._ensure_l2_writer_started()
-                for q in new_quotes:
-                    self._depth_counter += 1
-                    side = 'bid' if q.get('bid', 0) > 0 else 'ask'
-                    price = q.get('bid', 0) or q.get('ask', 0)
-                    self._enqueue_l2_row(
-                        "new",
-                        (self._depth_counter, now, q['id'], side, price, q['size'], now),
-                    )
-                for did in deleted_ids:
-                    self._depth_counter += 1
-                    self._enqueue_l2_row(
-                        "delete",
-                        (self._depth_counter, now, did, now),
-                    )
-                if self.l2_snapshot_interval_sec > 0 and now - self._snapshot_last_ts >= self.l2_snapshot_interval_sec:
-                    self._snapshot_last_ts = now
-                    snapshot_row = self._build_l2_snapshot_row(now)
-                    if snapshot_row is not None:
-                        self._enqueue_l2_row("snapshot", snapshot_row)
-        except Exception as e:
-            logger.warning(f"depth event parse failed: {e}")
-
-    def get_depth_quotes(self) -> list[dict]:
-        """获取当前深度报价快照."""
-        if not hasattr(self, '_depth_quotes'):
-            return []
-        with self._depth_lock:
-            return list(self._depth_quotes)
-
     def subscribe_spots(self, symbol_id: int | None = None) -> bool:
         """订阅实时报价 (ProtoOASubscribeSpotsReq). 成功后 _on_message 会持续收到 spot event."""
         from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASubscribeSpotsReq
@@ -1524,25 +931,6 @@ class CTraderBridge(BaseBrokerBridge):
             return True
         except Exception as e:
             logger.warning(f"subscribe_spots failed: {e}")
-            return False
-
-    def subscribe_depth(self, symbol_id: int | None = None) -> bool:
-        """订阅 L2 深度报价 (ProtoOASubscribeDepthQuotesReq)."""
-        from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASubscribeDepthQuotesReq
-        sid = symbol_id or self._symbol_id
-        if not sid:
-            logger.error("subscribe_depth: no symbol_id")
-            return False
-        try:
-            req = ProtoOASubscribeDepthQuotesReq()
-            req.ctidTraderAccountId = self.account_id
-            req.symbolId.append(sid)
-            self._send(req, timeout=5.0)
-            self._depth_subscribed = True
-            logger.info(f"subscribe_depth OK for symbol_id={sid}")
-            return True
-        except Exception as e:
-            logger.warning(f"subscribe_depth failed: {e}")
             return False
 
     def get_spot_price(self) -> float | None:
@@ -1563,7 +951,6 @@ class CTraderBridge(BaseBrokerBridge):
     def disconnect(self):
         """停 client service + 关连接; reactor 留着(全局 reactor 不能跨进程 stop)"""
         self._stop_heartbeat()
-        self._stop_l2_writer()
         if self._client:
             self._teardown_client()
         # 不调 reactor.stop() — 那是全局 reactor, 关了影响别的
@@ -1571,7 +958,6 @@ class CTraderBridge(BaseBrokerBridge):
             self._connected = False
         self._app_authed = False
         self._account_authed = False
-        self._depth_subscribed = False
         logger.info("cTrader disconnected (reactor 留着, 给下次 connect 复用)")
 
     @property

@@ -9,12 +9,13 @@ export const safeNumber = (value: unknown, fallback = 0): number => {
 
 const normalizeCurrency = (currency: unknown): string => {
   const text = String(currency || "").trim().toUpperCase();
-  return /^[A-Z]{3}$/.test(text) ? text : "EUR";
+  return /^[A-Z]{3}$/.test(text) ? text : "";
 };
 
-export const formatMoney = (value: unknown, currency = "USD"): string => {
+export const formatMoney = (value: unknown, currency = ""): string => {
   const amount = safeNumber(value, 0);
   const safeCurrency = normalizeCurrency(currency);
+  if (!safeCurrency) return amount.toLocaleString("zh-CN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   try {
     return new Intl.NumberFormat("zh-CN", {
       style: "currency",
@@ -49,7 +50,7 @@ export const formatTime = (value: unknown): string => {
     }
   }
   const ts = safeNumber(value, 0);
-  if (!ts) return "--";
+  if (!ts) return "";
   return new Intl.DateTimeFormat("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",

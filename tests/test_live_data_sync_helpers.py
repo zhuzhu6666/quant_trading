@@ -1,12 +1,9 @@
-import math
-
 import pandas as pd
 
 from backend.services.live_data_sync_helpers import (
     BAR_FRESHNESS_THRESHOLDS,
     classify_decision_bar_freshness,
     classify_bar_freshness,
-    classify_tick_freshness,
     dataframe_to_store_bars,
 )
 
@@ -50,17 +47,6 @@ def test_classify_decision_bar_freshness_accepts_latest_closed_bar():
     assert stale["expected_closed_bar_ts"] == 1_783_395_900.0
     assert stale["missing_closed_bars"] == 1
     assert fresh["fresh"] is True
-
-
-def test_classify_tick_freshness_treats_missing_ticks_as_stale_advisory():
-    missing = classify_tick_freshness(0, now=1_000.0)
-    fresh = classify_tick_freshness(900.0, now=1_000.0)
-    stale = classify_tick_freshness(100.0, now=1_000.0)
-
-    assert missing["stale"] is True
-    assert math.isinf(missing["age_seconds"])
-    assert fresh == {"latest_ts": 900.0, "stale": False, "age_seconds": 100.0}
-    assert stale == {"latest_ts": 100.0, "stale": True, "age_seconds": 900.0}
 
 
 def test_dataframe_to_store_bars_matches_datastore_payload_shape():

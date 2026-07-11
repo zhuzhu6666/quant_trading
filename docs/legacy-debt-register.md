@@ -155,10 +155,17 @@
 
 - 状态: `fixed`
 - 旧理解: `ExperimentTracker` 可用 JSON blob schema，`EvolutionExperimentRegistry` 可在同一库使用 structured schema。
-- 当前口径: `data/experiments.db` 只有 structured canonical schema；Evolution registry 只是兼容 adapter，旧 blob 自动原位迁移。
+- 当前口径: `data/experiments.db` 只有 structured canonical schema；未接线的 Evolution registry adapter 已移除，旧 blob 自动原位迁移。
 - 影响面: experiments API、周报、GP/模型实验记忆、db doctor。
 - 收口方式: 统一到 `research.experiment_tracker.ExperimentTracker`。
-- 验证方式: `tests/research/test_evolution_experiment.py`。
+- 验证方式: `research.experiment_tracker.ExperimentTracker` 的 API/报告回归测试。
+
+### 旧 RegimeAwareClassifier
+
+- 状态: `retired`
+- 旧理解: `alpha/regime_classifier.py` 的 LogisticRegression 可以作为 regime 条件下的开仓判断。
+- 退役原因: 旧 artifact 只保存 pickle 模型和 trained 标记，缺少固定特征 schema、PIT 数据窗口、OOS/replay、校准与权限证据；当前代码产生 15 个特征，旧模型仅接受 9 个特征，无法安全推理。
+- 当前口径: regime 事实使用 `risk.regime.RegimeDetector` 和 `backend.services.market_regime.resolve_market_regime`；不恢复旧 pickle。未来如建模，必须使用固定特征 schema 和成熟后验样本，先进入 shadow/context advisory，且只允许收紧风险。
 
 ### 回滚临场推断
 
@@ -198,7 +205,8 @@
 
 - 状态: `deprecated`
 - 旧理解: 用独立 Open API 连接采集 L2。
-- 当前口径: L2 由 backend 内 cTrader 主连接采集。
+- 当前口径: L2 整体采集链已于 2026-07-11 退役；depth 代码、配置、风控字段和历史数据库均已删除。
+- 退役原因: 当前 cTrader depth size 为固定对称档位，`imbalance` 恒为 0，不具备真实流动性/订单流语义。
 - 影响面: systemd、scripts、运行 SOP。
 - 收口方式: 不恢复 `quant-l2-collector.service` 和旧脚本。
 
@@ -231,8 +239,8 @@
 - 状态: `fixed`
 - 旧理解: debug 目录可长期保留一次性导入、GitHub 搜索、Windows 启动和本地 cTrader 验证脚本。
 - 当前口径: debug 目录不是稳定运维入口；一次性探针、硬编码 Windows 路径和联网搜索脚本会污染下一版架构判断。
-- 影响面: scripts、Windows 本地旧工作区、Dukascopy 采集、cTrader 验证。
-- 收口方式: 已删除 `scripts/debug` 临时入口；Dukascopy 增量拉取入口已迁到 `scripts/maintenance/pull_dukascopy_incremental.py`，正式排障只使用受维护脚本和服务日志。
+- 影响面: scripts、Windows 本地旧工作区、已退役 tick 采集、cTrader 验证。
+- 收口方式: 已删除 `scripts/debug` 临时入口；Dukascopy 历史 tick 采集于 2026-07-11 完全退役，正式排障只使用受维护脚本和服务日志。
 - 验证方式: 仓库不再包含 `scripts/debug` 业务脚本，部署/SOP 不引用该目录。
 
 ### 旧 cloud_deploy / docker-compose 打包路线
@@ -264,9 +272,9 @@
 ### legacy PreTrade/CircuitBreaker live 误用
 
 - 状态: `fixed`
-- 旧理解: `risk/pre_trade.py`、`risk/circuit.py` 或 `execution/router.py` 可以作为 live 主链路的开仓授权/熔断事实源。
+- 旧理解: `risk/pre_trade.py`、`risk/circuit.py` 或旧 `execution/router.py` 可以作为 live 主链路的开仓授权/熔断事实源。
 - 当前口径: 当前 live 主链路由 `RiskPolicyService.evaluate(...)` 统一授权；账户/运行态阈值由 `RiskLimitSnapshot` 输入 `RiskGovernor`；live loop 的日内 circuit breaker 只是执行快停保护，阈值同样来自 `RiskLimitSnapshot`。
-- 影响面: `risk/pre_trade.py`、`risk/circuit.py`、`execution/router.py`、`backend/services/live_service.py`、`risk/policy_service.py`、测试、文档。
+- 影响面: `risk/pre_trade.py`、`risk/circuit.py`、已移除的 legacy execution router、`backend/services/live_service.py`、`risk/policy_service.py`、测试、文档。
 - 收口方式: 旧模块已在代码注释中标为 paper/backtest/legacy；live 不新增这些模块的调用；VaR/CVaR、事件风险、模型权限和开仓/改仓/治理动作均回到 `RiskPolicyService`。
 - 验证方式: `tests/risk/test_policy_service.py`、`tests/test_live_service_circuit.py`、`tests/alpha/test_execution_gate.py`、`tests/test_live_loop_shell.py`。
 

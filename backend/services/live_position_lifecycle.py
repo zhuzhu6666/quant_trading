@@ -518,6 +518,7 @@ def build_decision_quality_context(composite: Any) -> dict[str, Any]:
         "alpha_score": float(getattr(composite, "alpha_score", getattr(composite, "score", 0.0)) or 0.0),
         "tactical_score": float(getattr(composite, "tactical_score", 0.0) or 0.0),
         "macro_score": float(getattr(composite, "macro_score", 0.0) or 0.0),
+        "calibrated_confidence": dict(getattr(composite, "calibrated_confidence", {}) or {}),
         "n_active_factors": int(getattr(composite, "n_active_factors", 0) or 0),
         "n_active_alpha_factors": int(getattr(composite, "n_active_alpha_factors", 0) or 0),
         "effective_alpha_factor_count": int(getattr(composite, "effective_alpha_factor_count", getattr(composite, "n_active_alpha_factors", 0)) or 0),
@@ -741,7 +742,6 @@ def build_open_trade_risk_context_payload(
         "loss_cooldown_after_losses": risk_limits.loss_cooldown_after_losses,
         "loss_cooldown_bars": risk_limits.loss_cooldown_bars,
         "block_on_disk_critical": risk_limits.block_on_disk_critical,
-        "require_l2_depth": risk_limits.require_l2_depth,
         "temporal_context": temporal_context,
         "supervisor_reentry_block": supervisor_reentry_block or {},
     }
@@ -919,6 +919,7 @@ def build_trade_attribution_payload_from_composite(
         "alpha_score": float(getattr(composite, "alpha_score", getattr(composite, "score", 0.0)) or 0.0),
         "tactical_score": float(getattr(composite, "tactical_score", 0.0) or 0.0),
         "macro_score": float(getattr(composite, "macro_score", 0.0) or 0.0),
+        "calibrated_confidence": dict(getattr(composite, "calibrated_confidence", {}) or {}),
         "tags_breakdown": dict(getattr(composite, "tags_breakdown", {}) or {}),
         "total_signal_abs": total_signal_abs,
         "api_volume": float(actual_api_volume),

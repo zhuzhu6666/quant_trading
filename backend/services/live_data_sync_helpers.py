@@ -30,7 +30,6 @@ TIMEFRAME_SECONDS: dict[str, int] = {
     "D1": 86400,
 }
 
-TICK_ADVISORY_MAX_AGE_SECONDS = 600.0
 
 
 def timeframe_seconds(timeframe: str | None) -> int:
@@ -134,25 +133,6 @@ def classify_bar_freshness(
         "observed_bar_ts_by_tf": observed_bar_ts_by_tf,
         "expected_bar_ts_by_tf": expected_bar_ts_by_tf,
         "missing_closed_bars_by_tf": missing_closed_bars_by_tf,
-    }
-
-
-def classify_tick_freshness(
-    latest_ts: Any,
-    *,
-    now: float,
-    max_age_seconds: float = TICK_ADVISORY_MAX_AGE_SECONDS,
-) -> dict[str, Any]:
-    try:
-        tick_latest = float(latest_ts or 0.0)
-    except Exception:
-        tick_latest = 0.0
-    tick_stale = tick_latest == 0 or (now - tick_latest) > float(max_age_seconds)
-    tick_age = (now - tick_latest) if tick_latest > 0 else float("inf")
-    return {
-        "latest_ts": tick_latest,
-        "stale": tick_stale,
-        "age_seconds": tick_age,
     }
 
 

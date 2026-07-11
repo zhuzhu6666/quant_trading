@@ -197,7 +197,7 @@ python scripts/refresh_external_data.py --source cot --force
 统一规则:
 
 - `PostgreSQL state_v1` 用于运行时状态；`SQLite` 仅保留 `experiments.db` 和显式临时/迁移源库
-- `DuckDB` 只用于行情、外部研究数据、tick、L2、归因、事件库
+- `DuckDB` 只用于行情、外部研究数据、tick、归因、事件库
 - 业务代码必须走 `backend/core/db.py` 的统一连接入口
 
 启动前或排障时优先执行:

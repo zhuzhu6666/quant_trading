@@ -89,14 +89,15 @@
   - 排查运行态状态禁止用 `sqlite3 data/state.db` 或手写 `sqlite3.connect("data/state.db")`
   - 只读查询统一用 `.venv/bin/python scripts/state_query.py --sql "..."`
   - 业务代码统一用 `backend.core.db.get_state_pg_conn()` / `get_state_conn()`，不要新增生产路径写入 SQLite state
-- tick 数据在服务器上按月库保存：
-  - `data/ticks_monthly/ticks_YYYY_MM.duckdb`
-  - `data/ticks.duckdb` 是指向当前月份库的兼容链接
-- L2 数据在服务器上由 cTrader 主连接采集，不再使用独立 Open API 连接：
-  - `quant-l2-collector.service` 和 `scripts/run_l2_collector.py` 属于旧方案，已移除；不要再恢复为默认方案
-  - 月库：`data/l2_monthly/l2_YYYY_MM.duckdb`
-  - `data/l2.duckdb` 是指向当前月份库的兼容链接，由 L2 writer 跨月自动刷新
-  - `risk_require_l2_depth=false` 只表示交易风控不依赖 L2；研究采集由 `l2_collection_enabled` 控制
+- 历史 tick 采集链已于 2026-07-11 退役：
+  - Dukascopy/cTrader 历史 tick 拉取、月库、健康检查、调度任务和本地数据均已删除
+  - cTrader 主连接的实时 `ProtoOASpotEvent` 报价必须保留；它用于实时 bid/ask/mid、持仓保护和执行参考价，不属于历史 tick 采集
+  - 不得恢复 `ticks.duckdb`、`ticks_monthly/`、Dukascopy tick timer 或历史 tick writer
+- L2 数据链路已于 2026-07-11 退役：
+  - cTrader 主连接仅保留 spot/account/positions/execution，depth protobuf、订阅、内存簿、writer、配置和风控字段均已删除
+  - `data/l2_monthly/` 和 `data/l2.duckdb` 已删除，不保留历史 L2 数据
+  - 退役原因：cTrader 该深度源的 size 是固定对称档位，无法代表真实挂单量或 imbalance
+  - `quant-l2-collector.service` 和 `scripts/run_l2_collector.py` 已移除，不得恢复
 - 这些运行数据不进入 GitHub。
 
 ## 3.3 当前小程序图表约定

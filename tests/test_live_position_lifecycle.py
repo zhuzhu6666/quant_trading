@@ -579,7 +579,6 @@ def test_build_open_trade_risk_context_payload_preserves_live_shape():
             risk_loss_cooldown_after_losses=2,
             risk_loss_cooldown_bars=5,
             risk_block_on_disk_critical=False,
-            risk_require_l2_depth=True,
         ),
         acct={"equity": 10000.0},
         positions=[{"position_id": 1}],
@@ -650,7 +649,6 @@ def test_build_open_trade_risk_context_payload_preserves_live_shape():
     assert payload["loss_cooldown_after_losses"] == 2
     assert payload["loss_cooldown_bars"] == 5
     assert payload["block_on_disk_critical"] is False
-    assert payload["require_l2_depth"] is True
     assert payload["temporal_context"] == {"timeframe": "M5"}
     assert payload["supervisor_reentry_block"] == {"active": True}
 
@@ -860,6 +858,7 @@ def test_build_trade_attribution_payload_from_composite_matches_live_shape():
         "alpha_score": 0.4,
         "tactical_score": 0.3,
         "macro_score": 0.1,
+        "calibrated_confidence": {},
         "tags_breakdown": {"trend": ["momentum"]},
         "total_signal_abs": 0.5,
         "api_volume": 200.0,

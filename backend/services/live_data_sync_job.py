@@ -8,7 +8,6 @@ from typing import Any, Callable
 from backend.services.live_data_sync_helpers import (
     BAR_FRESHNESS_THRESHOLDS,
     classify_bar_freshness,
-    classify_tick_freshness,
     dataframe_to_store_bars,
 )
 
@@ -26,9 +25,9 @@ def _default_config_factory():
 
 
 def _default_duckdb_runtime():
-    from backend.core.db import DUCKDB_BARS, DUCKDB_TICKS, duckdb_readonly_connection
+    from backend.core.db import DUCKDB_BARS, duckdb_readonly_connection
 
-    return DUCKDB_BARS, DUCKDB_TICKS, duckdb_readonly_connection
+    return DUCKDB_BARS, duckdb_readonly_connection
 
 
 def _default_data_store_factory():
@@ -49,14 +48,14 @@ def make_data_sync_job(
     market_session_snapshot: Callable[[Any], dict[str, Any] | None],
     health_factory: Callable[[], Any] = _default_health_factory,
     config_factory: Callable[[], Any] = _default_config_factory,
-    duckdb_runtime_factory: Callable[[], tuple[Any, Any, Callable[..., Any]]] = _default_duckdb_runtime,
+    duckdb_runtime_factory: Callable[[], tuple[Any, Callable[..., Any]]] = _default_duckdb_runtime,
     data_store_factory: Callable[[], Any] = _default_data_store_factory,
     now_fn: Callable[[], float] = time.time,
 ):
     """Build the legacy data_sync job with injectable IO dependencies."""
 
     def _data_sync():
-        """先检查 bars + ticks 新鲜度, 有缺口才回补, 不缺就跳过。"""
+        """检查 bars 新鲜度，有缺口时通过主 bridge 回补。"""
         if not lock.acquire(blocking=False):
             logger.warning("[data_sync] previous run still active, skip overlapping trigger")
             return
@@ -66,7 +65,7 @@ def make_data_sync_job(
             cfg = config_factory()
             symbols = _enabled_symbols(cfg)
             now = now_fn()
-            duckdb_bars, duckdb_ticks, duckdb_readonly_connection = duckdb_runtime_factory()
+            duckdb_bars, duckdb_readonly_connection = duckdb_runtime_factory()
 
             # 1. 检查 bar 新鲜度: 各周期最新 bar 时间 vs 预期阈值
             latest_bar_ts_by_tf: dict[str, float] = {}
@@ -85,46 +84,12 @@ def make_data_sync_job(
             fresh_tfs = bar_freshness["fresh_tfs"]
             observed_bar_ts_by_tf = bar_freshness["observed_bar_ts_by_tf"]
 
-            # 2. 检查 tick 新鲜度 (advisory only; never gates trading/bar sync)
-            tick_query_error = ""
-            try:
-                with duckdb_readonly_connection(duckdb_ticks, snapshot_first=True) as tick_conn:
-                    tick_row = tick_conn.execute(
-                        "SELECT MAX(time) FROM ticks WHERE symbol=?",
-                        [symbols[0]],
-                    ).fetchone()
-                    tick_latest = float(tick_row[0]) if tick_row and tick_row[0] else 0
-                    if tick_latest <= 0:
-                        tick_row = tick_conn.execute("SELECT MAX(time) FROM ticks").fetchone()
-                        tick_latest = float(tick_row[0]) if tick_row and tick_row[0] else 0
-                tick_freshness = classify_tick_freshness(tick_latest, now=now)
-                tick_stale = tick_freshness["stale"]
-                tick_age = tick_freshness["age_seconds"]
-            except Exception as e:
-                tick_stale = True
-                tick_age = float("inf")
-                tick_query_error = str(e)[:120]
-
-            # 3. 日志: 数据健康摘要
+            # 2. 日志: 数据健康摘要
             bar_status = f"{len(fresh_tfs)}/{len(BAR_FRESHNESS_THRESHOLDS)} fresh"
             if stale_tfs:
-                logger.info("[data_sync] stale: bars={} tick_age={:.0f}m → pulling", stale_tfs, tick_age / 60)
+                logger.info("[data_sync] stale bars={} → pulling", stale_tfs)
             else:
-                # Tick data is research/advisory only; it must not trigger live bar pulls
-                # or become a trading gate. The hourly dukascopy_tick job owns tick catch-up.
-                if tick_stale:
-                    if tick_query_error:
-                        logger.info(
-                            "[data_sync] bars ok, tick advisory unavailable ({}) → skip bar pull",
-                            tick_query_error,
-                        )
-                    else:
-                        logger.info(
-                            "[data_sync] bars ok, tick advisory stale (age={:.0f}m) → skip bar pull",
-                            tick_age / 60,
-                        )
-                else:
-                    logger.debug("[data_sync] all fresh ({}), tick age={:.0f}m, skip pull", bar_status, tick_age / 60)
+                logger.debug("[data_sync] all fresh ({}), skip pull", bar_status)
                 health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
                 return
 
@@ -142,7 +107,7 @@ def make_data_sync_job(
             except Exception as exc:
                 logger.debug("[data_sync] market session check failed before pull: {}", exc)
 
-            # 4. 回补 bars (用主 bridge 直接拉, 不再开第二连接)
+            # 3. 回补 bars (用主 bridge 直接拉, 不再开第二连接)
             total_bars = 0
             sync_tfs = stale_tfs if stale_tfs else list(BAR_FRESHNESS_THRESHOLDS.keys())
             if sync_tfs:
@@ -169,11 +134,11 @@ def make_data_sync_job(
                             except Exception as e:
                                 logger.warning("[data_sync] {} {} pull failed: {}", sym, tf, e)
 
-            # 5. 记录健康状态
+            # 4. 记录健康状态
             elapsed = now_fn() - t0
             health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
-            if total_bars > 0 or tick_stale:
-                logger.info("[data_sync] done ({:.1f}s): +{} bars, tick_gap={:.0f}m", elapsed, total_bars, tick_age / 60)
+            if total_bars > 0:
+                logger.info("[data_sync] done ({:.1f}s): +{} bars", elapsed, total_bars)
         except Exception as e:
             logger.warning("[data_sync] failed: {}", e)
             try:

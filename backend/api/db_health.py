@@ -30,8 +30,6 @@ _DB_LIST = [
     ("bars.duckdb", "当前月K线", "duckdb"),
     ("external_data.duckdb", "外部数据(COT/ETF/宏观)", "duckdb"),
     ("ctrader_data.duckdb", "旧K线/外部数据兼容库", "duckdb"),
-    ("ticks.duckdb", "Dukascopy Tick", "duckdb"),
-    ("l2.duckdb", "L2 深度", "duckdb"),
     ("trades.duckdb", "交易记录", "duckdb"),
     ("events.duckdb", "事件日历", "duckdb"),
     ("state_v1", "统一状态库(PostgreSQL)", "postgres_state"),

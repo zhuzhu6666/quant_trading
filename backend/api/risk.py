@@ -129,12 +129,10 @@ def _runtime_risk_policy() -> dict[str, bool]:
 
         cfg = _runtime_cfg()
         return {
-            "require_l2_depth": bool(getattr(cfg, "risk_require_l2_depth", False)),
             "block_on_disk_critical": bool(getattr(cfg, "risk_block_on_disk_critical", True)),
         }
     except Exception:
         return {
-            "require_l2_depth": False,
             "block_on_disk_critical": True,
         }
 
@@ -152,7 +150,7 @@ def _active_bar_component() -> str:
 
 
 def _advisory_only_components() -> set[str]:
-    advisory = {"tick_data"}
+    advisory: set[str] = set()
     active_bar = _active_bar_component()
     for name in ("bar_m1", "bar_m5"):
         if name != active_bar:
@@ -2051,8 +2049,6 @@ def _system_health_summary() -> dict[str, Any]:
     advisory_critical_components: list[str] = []
     for name in critical_components:
         if name in advisory_only_components:
-            advisory_critical_components.append(name)
-        elif name == "l2_depth" and not policy_flags["require_l2_depth"]:
             advisory_critical_components.append(name)
         elif name == "disk_space" and not policy_flags["block_on_disk_critical"]:
             advisory_critical_components.append(name)

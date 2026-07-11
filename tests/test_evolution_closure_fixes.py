@@ -72,6 +72,7 @@ class _RiskPolicy:
 
 
 def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
+    monkeypatch.setenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "1")
     rc.reset_for_tests()
     rc.patch({"awe_min_trades": 1, "factor_portfolio_weights": {"foo": 1.0, "bar": 2.0}})
 
@@ -95,10 +96,13 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
         "backend.services.learning_experiment_admission.LearningExperimentAdmissionService.evaluate",
         lambda self, **kwargs: {"allowed": True, "status": "admitted"},
     )
-    logged = []
     monkeypatch.setattr(
-        "research.learning.governor.RuleEvolutionGovernor.log_application",
-        lambda self, **kwargs: logged.append(kwargs) or "app_test",
+        "backend.services.learning_application_state.LearningApplicationStateService.prepare",
+        lambda self, **kwargs: "app_test",
+    )
+    monkeypatch.setattr(
+        "backend.services.learning_application_state.LearningApplicationStateService.transition",
+        lambda self, application_id, **kwargs: {"ok": True, "application_id": application_id},
     )
     risk = _RiskPolicy(allowed=True)
     monkeypatch.setattr(
@@ -117,8 +121,6 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
     assert rc.shared().factor_portfolio_weights == {"foo": 0.0, "bar": 2.0}
     assert risk.calls[0][0] == "update_weight"
     assert risk.calls[0][1]["proposed_weights"] == {"foo": 0.0}
-    assert logged[0]["scope_key"] == "foo"
-    assert logged[0]["details"]["producer"] == "awe_adapt"
 
 
 def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):

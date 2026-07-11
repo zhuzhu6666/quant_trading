@@ -67,7 +67,7 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
 
     if entry_quality >= 0.6 and exit_quality <= 0.45:
         labels.append("entry_good_exit_bad")
-    if mfe > 0 and pnl >= 0 and giveback_ratio >= 0.5 and profit_capture_ratio < 0.7:
+    if mfe > 0 and giveback_ratio >= 0.5 and profit_capture_ratio < 0.7:
         labels.append("alpha_correct_but_capture_failed")
     if close_reason == "holding_timeout" or (holding_seconds >= 24 * 3600 and time_decay_score <= 0.35):
         labels.append("holding_too_long")
@@ -118,6 +118,8 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
         primary = "data_quality"
     elif "execution_slippage" in labels:
         primary = "execution"
+    elif "alpha_correct_but_capture_failed" in labels:
+        primary = "exit"
     elif "weak_signal_overtraded" in labels:
         primary = "signal_quality"
     elif "conflicting_factor_entry" in labels:
@@ -125,8 +127,6 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
     elif "low_reward_to_risk_entry" in labels:
         primary = "reward_risk"
     elif "entry_good_exit_bad" in labels:
-        primary = "exit"
-    elif "alpha_correct_but_capture_failed" in labels:
         primary = "exit"
     elif "holding_too_long" in labels:
         primary = "timing"

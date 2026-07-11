@@ -376,7 +376,6 @@ class TestLiveServiceAuditContext:
                 risk_loss_cooldown_after_losses=0,
                 risk_loss_cooldown_bars=0,
                 risk_block_on_disk_critical=True,
-                risk_require_l2_depth=False,
             ),
             bridge=SimpleNamespace(is_connected=True),
             acct={"equity": 1000.0},

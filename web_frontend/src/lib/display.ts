@@ -193,9 +193,9 @@ const REASON_TRANSLATIONS: Record<string, string> = {
 };
 
 export function translateDisplayValue(value: unknown): string {
-  if (value === undefined || value === null || value === "") return "--";
+  if (value === undefined || value === null || value === "") return "";
   const text = String(value).trim();
-  if (!text) return "--";
+  if (!text) return "";
 
   const exact = DISPLAY_TRANSLATIONS[text] || DISPLAY_TRANSLATIONS[text.toLowerCase()];
   if (exact) return exact;
@@ -212,9 +212,9 @@ export function translateScopeLabel(scopeType: unknown, scopeKey: unknown): stri
 }
 
 export function translateReasonText(value: unknown): string {
-  if (value === undefined || value === null || value === "") return "--";
+  if (value === undefined || value === null || value === "") return "";
   const text = String(value).trim();
-  if (!text) return "--";
+  if (!text) return "";
 
   const exact = REASON_TRANSLATIONS[text] || REASON_TRANSLATIONS[text.toLowerCase()];
   if (exact) return exact;

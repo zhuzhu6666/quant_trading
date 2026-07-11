@@ -28,12 +28,12 @@ function hasMeaningfulText(value: unknown): boolean {
     return false;
   }
   const text = String(value).trim();
-  return Boolean(text && text !== "--" && text !== "null" && text !== "undefined");
+  return Boolean(text && text !== "" && text !== "null" && text !== "undefined");
 }
 
 function translatedText(value: unknown): string {
   const text = translateDisplayValue(value);
-  return text === "--" ? "" : text;
+  return text === "" ? "" : text;
 }
 
 function useDashboardQueries() {
@@ -99,12 +99,12 @@ export function OverviewPage() {
   const readiness = asRecord(queries.readiness.data);
   const logPayload = asRecord(queries.logs.data);
 
-  const currency = pickString(account, ["currency", "ccy"], "EUR");
-  const broker = pickString(account, ["broker"], pickString(snapshotRecord, ["broker"], pickString(loop, ["broker"], "ctrader")));
-  const healthStatus = pickString(queries.health.data, ["status"], "unknown");
-  const dbStatus = pickString(db, ["overall", "status"], pickString(queries.health.data, ["db"], "unknown"));
+  const currency = pickString(account, ["currency", "ccy"], "");
+  const broker = pickString(account, ["broker"], pickString(snapshotRecord, ["broker"], pickString(loop, ["broker"], "")));
+  const healthStatus = pickString(queries.health.data, ["status"], "");
+  const dbStatus = pickString(db, ["overall", "status"], pickString(queries.health.data, ["db"], ""));
   const loopRunning = pickBoolean(loop, ["running"], false);
-  const strategy = pickString(loop, ["strategy", "strategy_name"], pickString(snapshotRecord.active_strategy, ["id"], "live"));
+  const strategy = pickString(loop, ["strategy", "strategy_name"], pickString(snapshotRecord.active_strategy, ["id"], ""));
   const loopReason = translatedText(pick(loop, ["reason", "stop_reason"]));
   const executionMode = translatedText(pick(loop, ["execution_mode", "mode"]));
   const loopStartedAt = pick(loop, ["started_at", "start_time", "startedAt"]);
@@ -114,9 +114,12 @@ export function OverviewPage() {
   const equity = pickNumber(account, ["equity"], 0);
   const margin = pickNumber(account, ["margin"], 0);
   const marginFree = pickNumber(account, ["margin_free", "free_margin"], 0);
-  const leverage = pickString(account, ["leverage"], "--");
+  const leverage = pickString(account, ["leverage"], "");
   const hasMarginData = margin > 0 || marginFree > 0;
   const hasLeverageData = hasMeaningfulText(leverage) && leverage !== "0";
+  const hasAccountData = pick(account, ["balance", "equity"]) !== undefined;
+  const hasSessionData = Object.keys(session).length > 0;
+  const hasLoopData = Object.keys(loop).length > 0;
 
   const pnl = pickNumber(session, ["pnl_today", "pnl", "session_pnl"], pickNumber(snapshotRecord, ["pnl_today"], 0));
   const trades = pickNumber(session, ["trades", "session_trades"], 0);
@@ -192,31 +195,31 @@ export function OverviewPage() {
       tone: connected ? "ok" : "warn",
     },
     {
-      time: hasMeaningfulText(loopStartedAt) ? formatTime(loopStartedAt) : serverTime ? formatTime(serverTime) : "--",
+      time: hasMeaningfulText(loopStartedAt) ? formatTime(loopStartedAt) : serverTime ? formatTime(serverTime) : "",
       title: loopRunning ? "交易循环运行中" : "交易循环未运行",
       detail: `${broker} · ${strategy}${executionMode ? ` · ${executionMode}` : ""}${loopReason ? ` · ${loopReason}` : ""}`,
       tone: loopRunning ? "ok" : "warn",
     },
     {
-      time: serverTime ? formatTime(serverTime) : "--",
+      time: serverTime ? formatTime(serverTime) : "",
       title: currentPrice > 0 ? "行情报价已更新" : "等待行情报价",
       detail: currentPrice > 0 ? `XAU ${formatDecimal(currentPrice, 2)}${hasSpread ? ` · spread ${formatDecimal(spread, 2)}` : ""}` : "暂无有效现价",
       tone: currentPrice > 0 ? "ok" : "warn",
     },
     {
-      time: serverTime ? formatTime(serverTime) : "--",
+      time: serverTime ? formatTime(serverTime) : "",
       title: circuitBreaker ? "风控熔断触发" : "风控检查正常",
       detail: `连续亏损 ${formatDecimal(consecutiveLoss, 0)} · 回撤 ${formatDecimal(drawdown, 2)}%`,
       tone: circuitBreaker ? "bad" : consecutiveLoss >= 3 ? "warn" : "ok",
     },
     {
-      time: serverTime ? formatTime(serverTime) : "--",
+      time: serverTime ? formatTime(serverTime) : "",
       title: readinessOk ? "后端就绪检查通过" : "后端就绪受限",
       detail: blockers.length ? `阻断项 ${blockers.length}：${blockers.slice(0, 2).map((item) => translateDisplayValue(item)).join("；")}` : readinessText,
       tone: readinessOk ? "ok" : blockers.length ? "bad" : "warn",
     },
     {
-      time: serverTime ? formatTime(serverTime) : "--",
+      time: serverTime ? formatTime(serverTime) : "",
       title: dbProblems > 0 ? "数据库健康存在异常" : "数据库健康正常",
       detail: `状态 ${translateDisplayValue(dbStatus)} · 数据库 ${formatDecimal(dbList.length, 0)} · 异常 ${dbProblems}`,
       tone: dbProblems > 0 ? "warn" : toneFromStatus(dbStatus),
@@ -234,26 +237,26 @@ export function OverviewPage() {
         </div>
         <div className="header-status">
           <StatusPill status={connected ? "WS 在线" : "轮询/离线"} tone={connected ? "ok" : "warn"} />
-          <StatusPill status={loopRunning ? "交易运行中" : "交易未运行"} tone={loopRunning ? "ok" : "warn"} />
+          {hasLoopData ? <StatusPill status={loopRunning ? "交易运行中" : "交易未运行"} tone={loopRunning ? "ok" : "warn"} /> : null}
           <StatusPill status={`接口 ${healthStatus}`} tone={toneFromStatus(healthStatus)} />
         </div>
       </div>
 
       <div className="stat-grid">
-        <StatTile
+        {hasAccountData ? <StatTile
           icon={Wallet}
           label="账户权益"
           value={formatMoney(equity, currency)}
           detail={`余额 ${formatMoney(balance, currency)} · ${currency}`}
           tone={equity > 0 ? "ok" : "mute"}
-        />
-        <StatTile
+        /> : null}
+        {hasSessionData ? <StatTile
           icon={pnl >= 0 ? TrendingUp : TrendingDown}
           label="会话盈亏"
           value={formatMoney(pnl, currency)}
           detail={trades > 0 ? `${formatDecimal(trades, 0)} 笔 · 胜率 ${formatDecimal(winRate, 1)}%` : "今日暂无成交"}
           tone={numberTone(pnl)}
-        />
+        /> : null}
         <StatTile
           icon={Activity}
           label="XAU 实时价"
@@ -274,8 +277,8 @@ export function OverviewPage() {
         <MetricCard title="运行与行情">
           <div className="overview-mini-grid">
             <MiniMetric label="持仓" value={formatDecimal(positionCount, 0)} detail={`浮盈 ${formatMoney(positionFloating, currency)}`} tone={numberTone(positionFloating)} />
-            <MiniMetric label="买卖价差" value={hasSpread ? formatDecimal(spread, 2) : "--"} detail={hasSpread ? `${formatDecimal(priceBid, 2)} / ${formatDecimal(priceAsk, 2)}` : "等待报价"} tone={hasSpread ? "ok" : "warn"} />
-            <MiniMetric label="执行模式" value={executionMode || "--"} detail={loopRunning ? "循环活跃" : "等待启动"} tone={loopRunning ? "ok" : "warn"} />
+            <MiniMetric label="买卖价差" value={hasSpread ? formatDecimal(spread, 2) : ""} detail={hasSpread ? `${formatDecimal(priceBid, 2)} / ${formatDecimal(priceAsk, 2)}` : "等待报价"} tone={hasSpread ? "ok" : "warn"} />
+            <MiniMetric label="执行模式" value={executionMode || ""} detail={loopRunning ? "循环活跃" : "等待启动"} tone={loopRunning ? "ok" : "warn"} />
             <MiniMetric label="数据源" value={translateDisplayValue(source || "offline")} detail={connected ? "WS 实时" : "轮询/离线"} tone={connected ? "ok" : "warn"} />
           </div>
           <div className="field-list overview-field-list">
@@ -290,7 +293,7 @@ export function OverviewPage() {
             {priceAsk > 0 ? <Field label="卖价" value={formatDecimal(priceAsk, 2)} /> : null}
             <Field label="行情状态" value={priceStatus} tone={currentPrice > 0 ? "ok" : "warn"} />
             {hasMeaningfulText(priceSource) ? <Field label="行情来源" value={translateDisplayValue(priceSource)} /> : null}
-            <Field label="更新时间" value={serverTime ? formatTime(serverTime) : "--"} />
+            <Field label="更新时间" value={serverTime ? formatTime(serverTime) : ""} />
           </div>
           <div className="overview-chip-row">
             <span className="data-badge">持仓 {formatDecimal(positionCount, 0)}</span>
@@ -302,7 +305,7 @@ export function OverviewPage() {
 
         <MetricCard title="账户与风控">
           <div className="overview-mini-grid">
-            <MiniMetric label="保证金使用" value={hasMarginData ? `${formatDecimal(marginUsage, 1)}%` : "--"} detail={hasMarginData ? `${formatMoney(margin, currency)} / ${formatMoney(marginBase, currency)}` : "暂无保证金数据"} tone={marginUsage >= 70 ? "warn" : "ok"} />
+            <MiniMetric label="保证金使用" value={hasMarginData ? `${formatDecimal(marginUsage, 1)}%` : ""} detail={hasMarginData ? `${formatMoney(margin, currency)} / ${formatMoney(marginBase, currency)}` : "暂无保证金数据"} tone={marginUsage >= 70 ? "warn" : "ok"} />
             <MiniMetric label="今日交易" value={formatDecimal(trades, 0)} detail={`胜 ${formatDecimal(wins, 0)} / 负 ${formatDecimal(losses, 0)}`} tone={trades > 0 ? "ok" : "mute"} />
             <MiniMetric label="胜率" value={`${formatDecimal(winRate, 1)}%`} detail={`PnL ${formatMoney(pnl, currency)}`} tone={winRate >= 50 ? "ok" : trades > 0 ? "warn" : "mute"} />
             <MiniMetric label="数据健康" value={dbProblems > 0 ? `${dbProblems} 异常` : readinessText} detail={`库 ${formatDecimal(dbList.length, 0)} · ${dbStatus}`} tone={dbProblems > 0 || !readinessOk ? "warn" : "ok"} />

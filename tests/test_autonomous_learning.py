@@ -1521,6 +1521,11 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     )
     monkeypatch.setattr(
         al,
+        "materialize_portfolio_shadow_trades",
+        lambda **kwargs: calls.append("portfolio_shadow") or {"inserted": 1},
+    )
+    monkeypatch.setattr(
+        al,
         "materialize_entry_quality_governance_suggestions",
         lambda **kwargs: calls.append("entry_quality_governance") or {"suggestions": 1},
     )
@@ -1567,10 +1572,11 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
         "backfill_close_sources",
         "materialize_samples",
     ]
-    assert calls[5] == "entry_quality_governance"
-    assert calls[6] == "entry_cluster_governance"
-    assert calls[7] == "event_window_governance"
-    assert calls[8] == "repair_contracts"
+    assert calls[5] == "portfolio_shadow"
+    assert calls[6] == "entry_quality_governance"
+    assert calls[7] == "entry_cluster_governance"
+    assert calls[8] == "event_window_governance"
+    assert calls[9] == "repair_contracts"
     assert calls[-1] == "demo_apply"
 
     calls.clear()

@@ -1,13 +1,15 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { Eye, EyeOff } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 
 export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { authenticated, loading, login } = useAuth();
-  const [username, setUsername] = useState("zhu");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
 
@@ -36,12 +38,12 @@ export function LoginPage() {
 
   return (
     <div className="auth-root">
-      <form className="panel auth-card" onSubmit={onSubmit} aria-label="登录 Quant Trading Console">
+      <form className="panel auth-card" onSubmit={onSubmit} aria-label="登录量化交易控制台">
         <div className="auth-card-head">
           <div className="brand-mark auth-brand-mark" aria-hidden="true">Q</div>
           <div>
-            <div className="eyebrow">Web Console</div>
-            <h1>登录</h1>
+            <div className="eyebrow">量化交易控制台</div>
+            <h1>登录系统</h1>
           </div>
         </div>
         <label className="form-row">
@@ -50,20 +52,24 @@ export function LoginPage() {
         </label>
         <label className="form-row">
           <span>密码</span>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-            required
-          />
+          <span className="password-field">
+            <input
+              type={showPassword ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              required
+            />
+            <button type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "隐藏密码" : "显示密码"}>
+              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </span>
         </label>
         <button className="action-btn action-primary" type="submit" disabled={working}>
           {working ? "登录中..." : "进入操作台"}
         </button>
         {error ? <p className="error-text" role="alert">{error}</p> : null}
       </form>
-      <p className="muted">支持账号：zhu</p>
     </div>
   );
 }

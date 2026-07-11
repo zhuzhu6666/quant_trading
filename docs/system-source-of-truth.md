@@ -81,8 +81,8 @@
 | 事项 | 权威来源 | 说明 |
 |---|---|---|
 | 动作裁决 | `RiskPolicyService.evaluate(...)` | 风控统一裁决入口 |
-| 风险阈值快照 | `risk.runtime_policy.RiskLimitSnapshot` + `RuntimeConfig` / runtime overlay | 日内亏损、回撤、交易次数、数据延迟、L2、磁盘、VaR/CVaR 等阈值的统一输入口径 |
-| 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk、L2 等运行态统一输入口径 |
+| 风险阈值快照 | `risk.runtime_policy.RiskLimitSnapshot` + `RuntimeConfig` / runtime overlay | 日内亏损、回撤、交易次数、数据延迟、磁盘、VaR/CVaR 等阈值的统一输入口径 |
+| 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk 等运行态统一输入口径 |
 | 跨进程运行健康投影 | PostgreSQL `runtime_kv[runtime_health_projection.v1]` + `backend.services.runtime_health_projection` | live 进程发布 market session、cTrader 连接和 loop 状态；`/api/health`、readiness、learning worker 只消费同一只读投影，不重复推测 broker 状态；该投影不授权交易 |
 | 决策 K 线/信号新鲜度 | `backend.services.live_data_sync_helpers` + `_live_state.decision_bar_freshness` + `_live_state.last_processed_decision_bar_ts` + `RiskPolicyService.evaluate("open_trade")` | live tick 只用最新已闭合 bar；缺应有闭合 bar 时先经主 cTrader bridge 回补月库并重载，修复失败以 `decision_bar_stale` 阻断开仓；同一根已闭合决策 bar 只推进一次 signal/open，重复 tick 只运行持仓观察/保护；即使 bar fresh，信号 age 超过 `max(180s, 1.5 * timeframe)` 时以 `decision_signal_age_stale` 阻断开仓 |
 | 下单/改仓/平仓 | cTrader bridge + ledger | broker 执行事实与账本共同追溯；live 开仓先经 `_run_open_trade_pipeline()` 生成 candidate/risk verdict/order block，再触达 broker |
@@ -107,10 +107,11 @@
 - demo nursery 的动态 Kelly 默认风险上限为 6%，单笔 API volume 硬顶为 `dynamic_sizing_max_api_volume=1000`；Kelly 为正时，实际档位由当前 equity、SL distance、Kelly 分数、broker min/step/max 和总仓位上限共同约束；Kelly 非正时，demo nursery 使用 broker 默认最小单探索。event sizing/context policy 的软缩仓不能把该探索最小单压成 0，但重大事件硬窗口和 `RiskPolicyService` 的断连、stale、仓位/API 上限、日亏损、最大回撤等硬拦仍生效。
 - `position_supervisor:profit_protection.v1` 对年轻仓位的 thesis-broken 判断采用最小证据窗：未满模板 `min_thesis_break_seconds` 时优先输出 tighten/observe 语义的 `thesis_broken_delayed`，不直接 full close；超过证据窗只代表 `thesis_break_ready`，还必须有接近止损、regime confirmed、time decay、连续 thesis broken 确认或信号反转等强证据，才允许 `thesis_broken` full close；close/reduce/tighten 仍必须经过 `RiskPolicyService`。
 - 最小交易量仓位的 supervisor reduce 不能因为 reduce volume 不可交易就无条件升级 full close；只有 `thesis_break_confirmed=true`、连续 thesis broken、信号反转、接近原止损，或 MFE 完全回吐且接近原止损等强风险证据，才允许走 reduce-to-close 兜底。
+- 平仓后验必须以完整持仓路径区分入场与退出责任：`MFE/MAE`、profit capture、giveback 和 time-in-profit 决定 `good_win/lucky_win` 与责任归属，不能只按最终盈亏或因子贡献正负贴标签。最近三小时内连续两笔同方向 `bad_loss` 且带 factor-conflict/thesis/regime 失败证据时，live 复用现有 supervisor re-entry/RiskPolicy 硬闸门暂停该方向一小时；该闸门只消费已落库 review，不直接改因子权重。
 - 同品种存在反向持仓时，开仓必须由 `RiskPolicyService` 以 `opposite_direction_position_open` 硬拦；系统不支持隐式 hedge/flip，未来如果要反手必须走显式“先平后开”动作链。
 - 非 demo nursery 的 context policy 或 Kelly sizing 把建议仓位压到 broker 最小交易量以下时，live 开仓候选必须以 0 volume 进入风控并被 `non_positive_requested_volume` 阻断，不能悄悄恢复为最小仓位；demo nursery 的非正 Kelly 探索例外必须带 `demo_nursery_exploration` trace。
-- Dukascopy `tick_data` 是研究/订单流支路，不是 cTrader live 执行事实源；tick 月库 stale/missing/check-failed 统一以 degraded advisory 暴露并明确 live cTrader quote 另行监控，不能单独把 system health overall 降为 degraded/critical，不能阻断 demo live 交易，也不能单独把交易复盘归因为 `market_data_stale` / `data_quality`。
-- `risk/pre_trade.py`、`risk/circuit.py`、`execution/router.py` 属于 paper/backtest/legacy execution router，不是当前 live 主授权口。
+- 历史 tick 采集链已退役并删除；live 实时报价事实源仍是 cTrader `ProtoOASpotEvent`，不得因删除历史 tick 库而删除或绕过 spot quote、持仓保护与执行参考价链路。
+- `risk/pre_trade.py`、`risk/circuit.py` 属于 paper/backtest 兼容风控，不是当前 live 主授权口；未接线的 legacy `execution/router.py` 已移除。
 - 模型阶段裁决必须复用 `backend.services.model_permissions`，不能维护第二套模型权限事实。
 - BB 不进入 ExecutionGate 作为硬过滤器。
 
@@ -160,7 +161,7 @@
 | 权重应用状态机 | `backend.services.learning_application_state` + `learning_application_log/effect` + `runtime_config_snapshot` | `prepared -> applied/observing -> terminal`；配置 mutation 前先持久化 prepared，重启时以匹配 run/source 的 runtime snapshot 作为提交事实恢复，缺失快照的超时 prepared 标为 `mutation_failed`，同 scope 在 prepared 期间 fail-closed |
 | 有界经验先验 | `backend.services.experience_prior` + `DecisionPolicy.experience_priors` | 只聚合 terminal 且 `bounded_attribution_allowed=true` 的 factor effect，按样本、时效和效果生成 0.85~1.15 prior；AWE/Factor Governance 三个生产 `fast_decide` 调用统一传入，最终写权仍属于 DecisionPolicy/RiskPolicy/mutation boundary |
 | 学习闭环质量 SLO | `backend.services.learning_effect_quality` + `/api/learning/effect-quality` + readiness `learning_effect_quality` / `v16.learning_effect_quality` | 只读汇总效果终态率、开放窗口年龄、并发归因积压、bounded window 收口一致性和受控重试资格；`inconclusive` 只有在终态后出现新复盘证据且同 scope 没有更新 application 时才可成为重试候选，实际重试仍必须形成新 application 并经过既有 governor/风控/决策边界；SLO degraded 只进入 `known_observations`，不直接改权重、参数、权限或交易 readiness |
-| 实验存储 | `data/experiments.db` canonical structured `experiments` schema + `research.experiment_tracker.ExperimentTracker` | `EvolutionExperimentRegistry` 是兼容适配器；旧 JSON blob 行原位迁移，不再维护第二套同名表 schema |
+| 实验存储 | `data/experiments.db` canonical structured `experiments` schema + `research.experiment_tracker.ExperimentTracker` | 未接线的 `EvolutionExperimentRegistry` 适配层已移除；旧 JSON blob 行原位迁移，不再维护第二套同名表 schema |
 | 应用日志 | `learning_application_log` | 动作应用状态 |
 | 建议/审计状态 | `policy_suggestion` + normalized status | `proposed/auto_approved/applied/rolled_back/blocked_by_risk/superseded` |
 | 智能单元总账 | `docs/rule-driven-intelligence-inventory.md` | 规则智能、影子模型、审计数据和精度口径 |
@@ -222,8 +223,6 @@
 | 数据 | 权威来源 | 说明 |
 |---|---|---|
 | K 线 | `data/bars_monthly/bars_YYYY_MM.duckdb` | `data/bars.duckdb` 是当前月兼容链接 |
-| tick | `data/ticks_monthly/ticks_YYYY_MM.duckdb` | `data/ticks.duckdb` 是当前月兼容链接 |
-| L2 | `data/l2_monthly/l2_YYYY_MM.duckdb` | 由 backend 内 cTrader 主连接采集 |
 | 外部研究数据 | `data/external_data.duckdb` | COT/ETF/FRED/宏观，必须按 `release_at` 做 PIT |
 | 经济事件 | `data/events.duckdb` | 风控事件缩放读取 |
 | 运行态状态 | PostgreSQL `state_v1` | 不再使用 `data/state.db` |
@@ -280,7 +279,18 @@
 - context 因子不应显示成多空投票。
 - 旧字段保留兼容，但新语义以 V2/V3 字段为准。
 
-## 8. 冲突处理顺序
+## 8. 运行数据到学习治理的闭环
+
+以下链路是当前生产事实，不应另建平行实现：
+
+- `PortfolioCompositor.context_state` 汇总已存在的 COT、实际利率、美元相关性、ETF 持仓和央行购金因子；`ContextPolicyService` 仅用极端宏观证据提高入场阈值并缩小仓位，不生成方向。
+- `ProbabilityCalibrator` 校准组合信号置信度；校准结果通过 context policy 只允许缩仓，不允许放大原始仓位，缺失或损坏 artifact 时退化为 identity。
+- `PositionQualityLightGBMService.score_position_context` 接入持仓 supervisor 热路径，但保持 shadow/advisory 权限；结果写入 supervisor verdict/evidence，不能直接平仓、改单或修改硬风控。
+- `trade_outcome_review` 会成熟 supervisor trajectory；成熟 open outcome 同步进入 `shadow_trades.factor='__portfolio_shadow__'`，用于组合级而非单因子级后验统计。
+- 因子权重单次最大变化达到 `0.10` 时，`FactorWeightChangeService` 要求最近 replay 为 `completed`、无错误且 evidence grade 为 A/B；否则变更停在应用账本写入之前。
+- 上述最终动作仍必须经过 `RiskPolicyService`、runtime mutation overlay/snapshot 和 learning application effect observation，不允许模型或经验直接绕过权力边界。
+
+## 9. 冲突处理顺序
 
 当信息冲突时，按下面顺序判断：
 
@@ -292,7 +302,7 @@
 
 历史 planning 文档和旧注释只能提供背景，不能单独作为实现依据。
 
-## 9. 2026-07-10 智能体层模块合并记录
+## 10. 2026-07-10 智能体层模块合并记录
 
 本文档中 V16 和 Agent Governance 的模块路径已更新，对应以下实际合并：
 

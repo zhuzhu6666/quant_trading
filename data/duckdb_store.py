@@ -2,7 +2,7 @@
 data/duckdb_store.py — DuckDB 时序数据存储 (Phase 6.1)
 
 替代 SQLite，提供列式存储 + 向量化查询。
-接口与 DataStore 完全一致 (load_bars / insert_bars / insert_ticks 等)。
+接口与 DataStore 完全一致。
 
 DuckDB 优势:
   - 列式存储 → 聚合查询 10-50x 快于 SQLite
@@ -41,7 +41,6 @@ class DuckDBDataStore:
 
     Schema:
       bars(symbol, timeframe, time, open, high, low, close, volume, spread)
-      ticks(symbol, time, bid, ask, last, volume, flags)
       etf_holdings / cb_gold / cot_gold (同 SQLite)
     """
 
@@ -115,27 +114,6 @@ class DuckDBDataStore:
             # legacy ctrader_data.duckdb 的外部表写入自动跳到 external_data.duckdb。
             if not self._monthly_bars and not self._external_only:
                 ensure_bars_table(conn)
-            if not self._external_only and not self._externalized_legacy:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS ticks (
-                        symbol VARCHAR NOT NULL,
-                        time DOUBLE NOT NULL,
-                        bid DOUBLE, ask DOUBLE, last DOUBLE,
-                        volume DOUBLE DEFAULT 0,
-                        flags INTEGER DEFAULT 0
-                    )
-                """)
-                # DuckDB 1.x: UNIQUE INDEX 不是约束, INSERT OR REPLACE 无法用.
-                # 改用普通 INDEX + 纯 INSERT (增量 tick 按时间序, 无重复).
-                # 先尝试删旧 UNIQUE INDEX (若表已存在), 再建普通 INDEX.
-                try:
-                    conn.execute("DROP INDEX IF EXISTS idx_ticks_sym_time")
-                except Exception:
-                    pass
-                conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_ticks_sym_time
-                    ON ticks(symbol, time)
-                """)
             # ETF 持仓
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS etf_holdings (
@@ -244,8 +222,6 @@ class DuckDBDataStore:
             refresh_current_bars_link()
         return len(rows)
 
-    # (P1-a: first insert_ticks removed — duplicate, second one below is the live version)
-
     def load_bars(self, symbol: str, timeframe: str,
                   start: str | None = None, end: str | None = None,
                   limit: int | None = None) -> pd.DataFrame:
@@ -295,58 +271,6 @@ class DuckDBDataStore:
         df.set_index("time", inplace=True)
         df["time"] = df.index  # 保留为列供因子计算使用
         return df
-
-    # ── Ticks ──────────────────────────────────────────────
-
-    def insert_ticks(self, ticks: list[dict], symbol: str):
-        if not ticks:
-            return
-        conn = self._get_conn()
-        try:
-            rows = [(symbol, t["time"], t.get("bid", 0), t.get("ask", 0),
-                     t.get("last", 0), t.get("volume", 0), t.get("flags", 0))
-                    for t in ticks]
-            # 批量写入 (MT5 tick 增量顺时间序, 无重复)
-            for i in range(0, len(rows), 5000):
-                batch = rows[i:i + 5000]
-                placeholders = ", ".join(["(?, ?, ?, ?, ?, ?, ?)"] * len(batch))
-                flat = [item for row in batch for item in row]
-                conn.execute(
-                    f"INSERT INTO ticks (symbol, time, bid, ask, last, volume, flags) VALUES {placeholders}",
-                    flat,
-                )
-        finally:
-            conn.close()
-
-    def load_ticks(self, symbol: str,
-                   start: float | None = None, end: float | None = None,
-                   limit: int = 10000) -> pd.DataFrame:
-        """加载 tick 数据"""
-        conn = self._get_conn()
-        try:
-            query = "SELECT * FROM ticks WHERE symbol=?"
-            params = [symbol]
-            if start is not None:
-                query += " AND time >= ?"
-                params.append(start)
-            if end is not None:
-                query += " AND time <= ?"
-                params.append(end)
-            query += " ORDER BY time ASC LIMIT ?"
-            params.append(limit)
-            return conn.execute(query, params).df()
-        finally:
-            conn.close()
-
-    def tick_count(self, symbol: str) -> int:
-        conn = self._get_conn()
-        try:
-            r = conn.execute(
-                "SELECT COUNT(*) FROM ticks WHERE symbol=?", [symbol]
-            ).fetchone()
-            return int(r[0]) if r else 0
-        finally:
-            conn.close()
 
     # ── ETF / CB / COT ─────────────────────────────────────
 

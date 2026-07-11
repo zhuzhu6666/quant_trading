@@ -1402,6 +1402,35 @@ def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):
     assert float(experience["evidence_strength"]) < 0.2
 
 
+def test_experience_builder_does_not_downweight_alpha_for_exit_failure(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    builder = ExperienceBuilder(db_path)
+    review = {
+        "review_id": "review_exit_failure",
+        "trade_id": "exit_failure",
+        "position_id": "exit_failure",
+        "regime_id": "trend",
+        "outcome_label": "bad_loss",
+        "pnl": -0.2,
+        "failure_tags": ["profit_giveback", "alpha_correct_but_capture_failed"],
+        "summary_text": "alpha worked but profit was fully given back",
+        "review_json": {
+            "primary_responsibility": "exit",
+            "entry_ts": 100.0,
+            "close_ts": 200.0,
+            "worst_factor": "trend",
+            "top_weight_factor": "trend",
+            "context_integrity": "full",
+            "attribution_integrity": "full",
+        },
+    }
+
+    experience = builder.build_from_review(review)
+
+    assert experience["recommended_action"] == "watch"
+    assert experience["decision_context_json"]["primary_responsibility"] == "exit"
+
+
 def test_governance_run_returns_risk_verdict(monkeypatch):
     class _FakeGovernor:
         def list_suggestions(self, limit=500, status=None):

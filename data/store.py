@@ -3,12 +3,10 @@ Data Store — 时序数据持久化
 
 提供统一的数据存取层:
 - 历史bar读写
-- 当日tick存储
 - DuckDB 后端 (Phase 6 迁移完成)
 
 Schema:
   bars(symbol, timeframe, time, open, high, low, close, volume)
-  ticks(symbol, time, bid, ask, last, volume)
 """
 
 import logging
@@ -62,9 +60,6 @@ class DataStore:
                   start: str | None = None, end: str | None = None,
                   limit: int | None = None) -> pd.DataFrame:
         return self._backend.load_bars(symbol, timeframe, start=start, end=end, limit=limit)
-
-    def insert_ticks(self, ticks: list[dict], symbol: str):
-        self._backend.insert_ticks(ticks, symbol)
 
     def insert_etf_holding(self, symbol: str, date: str,
                            total_tonnes: float | None = None,

@@ -266,6 +266,22 @@ class PortfolioCompositor:
         event_score = max((float(v) for v in event_values), default=0.0)
         event_window_state = "active" if event_score >= 0.9 else "near" if event_score > 0.0 else "none"
 
+        macro_context_names = {
+            "cot_extreme_signal", "real_yield_pct_rank", "dxy_corr_20",
+            "slv_gld_ratio", "slv_tonnes_chg_20d", "silver_gold_holdings_ratio",
+            "cb_total_chg_3m", "cb_china_chg_3m", "cb_russia_chg_3m",
+            "cb_china_3m_zscore",
+        }
+        macro_context_values = []
+        for name in macro_context_names:
+            value = finite(name)
+            if value is not None:
+                macro_context_values.append(value)
+        macro_context_score = (
+            sum(float(value) for value in macro_context_values) / len(macro_context_values)
+            if macro_context_values else 0.0
+        )
+
         hour = factor_values.get("hour_utc")
         try:
             hour_i = int(float(hour)) if hour is not None else -1
@@ -290,6 +306,9 @@ class PortfolioCompositor:
             "event_window_state": event_window_state,
             "event_window_score": round(float(event_score), 6),
             "session_state": session_state,
+            "macro_context_score": round(float(macro_context_score), 6),
+            "macro_evidence_count": len(macro_context_values),
+            "macro_context_source": "external_factor_frame",
         }
 
     def _build_redundancy_groups(self, factor_roles: dict[str, str]) -> dict[str, list[str]]:

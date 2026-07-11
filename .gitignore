@@ -48,11 +48,8 @@ data/model_eval_reports/
 data/cot/
 data/external_raw/
 data/sec_gld/
-data/ticks/
-data/ticks_monthly/
 data/bars_monthly/
 data/l2_monthly/
-data/dukascopy_raw/
 data/feature_models/
 data/ml_models/
 data/browser/

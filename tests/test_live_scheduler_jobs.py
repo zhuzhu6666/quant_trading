@@ -4,7 +4,6 @@ import pandas as pd
 
 from backend.services.live_scheduler_jobs import (
     make_initial_ctrader_data_pull,
-    make_dukascopy_tick_job,
     make_events_sync_job,
     make_external_data_sync_job,
     register_external_sync_jobs,
@@ -64,33 +63,11 @@ def test_register_external_sync_jobs_keeps_legacy_names_and_crons(tmp_path):
     )
 
     assert [(name, cron) for name, cron, _func in sched.jobs] == [
-        ("dukascopy_tick", "0 * * * *"),
         ("events_sync", "0 8 * * *"),
         ("cot_sync", "0 6 * * 6"),
         ("etf_sync", "0 4 1 */3 *"),
         ("fred_sync", "20 5 * * *"),
     ]
-
-
-def test_dukascopy_tick_job_runs_incremental_script_and_logs_last_line(tmp_path):
-    script = tmp_path / "scripts" / "maintenance" / "pull_dukascopy_incremental.py"
-    script.parent.mkdir(parents=True)
-    script.write_text("# test\n", encoding="utf-8")
-    calls = []
-    logger = _FakeLogger()
-
-    job = make_dukascopy_tick_job(
-        repo_root=tmp_path,
-        logger=logger,
-        runner=lambda *args, **kwargs: calls.append((args, kwargs)) or SimpleNamespace(returncode=0, stdout="first\nlast\n", stderr=""),
-        python_executable="python-test",
-    )
-
-    job()
-
-    assert calls[0][0][0] == ["python-test", str(script)]
-    assert calls[0][1]["timeout"] == 180
-    assert logger.messages[-1] == ("info", "[dukascopy_tick] {}", ("last",))
 
 
 def test_events_sync_job_passes_two_week_window(tmp_path):
@@ -146,7 +123,7 @@ def test_external_data_sync_job_preserves_force_flag_by_source(tmp_path):
 def test_startup_catch_up_jobs_preserves_legacy_light_and_heavy_order():
     immediate, deferred = startup_catch_up_jobs(run_heavy_jobs=False)
 
-    assert immediate == ["data_sync", "dukascopy_tick", "events_sync"]
+    assert immediate == ["data_sync", "events_sync"]
     assert deferred == [(300.0, "cot_sync"), (360.0, "etf_sync")]
 
     _immediate_heavy, deferred_heavy = startup_catch_up_jobs(run_heavy_jobs=True)
@@ -195,7 +172,6 @@ def test_start_scheduler_catch_up_runs_immediate_then_deferred_serially():
     ]
     assert sched.ran == [
         "data_sync",
-        "dukascopy_tick",
         "events_sync",
         "cot_sync",
         "etf_sync",
@@ -228,7 +204,6 @@ def test_start_scheduler_catch_up_includes_heavy_jobs_when_enabled():
 
     assert sched.ran == [
         "data_sync",
-        "dukascopy_tick",
         "events_sync",
         "cot_sync",
         "etf_sync",

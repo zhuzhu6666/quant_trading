@@ -21,6 +21,8 @@ const requiredFiles = [
   "src/pages/ModelsPage.tsx",
   "src/pages/V15CockpitPage.tsx",
   "src/pages/V16BrainPage.tsx",
+  "src/pages/WorkspacePages.tsx",
+  "src/styles/console.css",
 ];
 
 let fail = false;

@@ -34,6 +34,16 @@ def test_orchestrator_promotes_eligible_shadow_without_human_approval(monkeypatc
         classmethod(lambda cls: _Adapter()),
     )
     monkeypatch.setattr(
+        "backend.services.factor_weight_change.FactorWeightChangeService._replay_admission",
+        lambda _self, _decisions: {
+            "required": True,
+            "allowed": True,
+            "max_delta": 0.3,
+            "replay_run_id": "replay-test",
+            "evidence_grade": "A",
+        },
+    )
+    monkeypatch.setattr(
         orch,
         "_audit_action",
         lambda run, item, action, status, evidence, verdict, **kwargs: audited.append(

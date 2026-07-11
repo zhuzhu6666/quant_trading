@@ -2363,7 +2363,6 @@ class ReplayHarnessService:
                 risk_loss_cooldown_after_losses=0,
                 risk_loss_cooldown_bars=0,
                 risk_block_on_disk_critical=True,
-                risk_require_l2_depth=False,
                 runtime_incident_mode="normal",
             )
         incident_mode = (
@@ -2417,7 +2416,6 @@ class ReplayHarnessService:
             "loss_cooldown_after_losses": int(getattr(cfg, "risk_loss_cooldown_after_losses", 0) or 0),
             "loss_cooldown_bars": int(getattr(cfg, "risk_loss_cooldown_bars", 0) or 0),
             "block_on_disk_critical": bool(getattr(cfg, "risk_block_on_disk_critical", True)),
-            "require_l2_depth": bool(getattr(cfg, "risk_require_l2_depth", False)),
             "temporal_context": temporal_context,
             "supervisor_reentry_block": {},
             "runtime_incident_mode": str(incident_mode),

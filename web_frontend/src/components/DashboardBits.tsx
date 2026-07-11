@@ -4,6 +4,12 @@ import { StatusPill } from "@/components/StatusPill";
 
 export type Tone = "ok" | "warn" | "bad" | "mute";
 
+export function hasDisplayValue(value: ReactNode): boolean {
+  if (value === null || value === undefined || value === false) return false;
+  if (typeof value === "string") return !["", "", "—"].includes(value.trim());
+  return true;
+}
+
 export function toneFromStatus(status: string): Tone {
   const normalized = status.toLowerCase();
   if (["ok", "healthy", "connected", "ready", "running", "active", "online"].includes(normalized)) return "ok";
@@ -31,6 +37,7 @@ export function StatTile({
   tone?: Tone;
   icon?: LucideIcon;
 }) {
+  if (!hasDisplayValue(value)) return null;
   return (
     <div className={`stat-tile stat-${tone}`}>
       <div className="stat-label">
@@ -38,16 +45,17 @@ export function StatTile({
         <span>{label}</span>
       </div>
       <div className="stat-value">{value}</div>
-      {detail ? <div className="stat-detail">{detail}</div> : null}
+      {hasDisplayValue(detail) ? <div className="stat-detail">{detail}</div> : null}
     </div>
   );
 }
 
 export function Field({ label, value, tone }: { label: string; value: ReactNode; tone?: Tone }) {
+  if (!hasDisplayValue(value)) return null;
   return (
     <div className="field-row">
       <span>{label}</span>
-      {tone ? <StatusPill status={String(value || "--")} tone={tone} /> : <strong>{value || "--"}</strong>}
+      {tone ? <StatusPill status={String(value)} tone={tone} /> : <strong>{value}</strong>}
     </div>
   );
 }
@@ -65,11 +73,12 @@ export function CompactMetric({
   tone?: Tone;
   className?: string;
 }) {
+  if (!hasDisplayValue(value)) return null;
   return (
     <div className={`compact-metric compact-metric-${tone} ${className}`.trim()}>
       <span>{label}</span>
       <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
+      {hasDisplayValue(detail) ? <small>{detail}</small> : null}
     </div>
   );
 }

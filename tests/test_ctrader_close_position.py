@@ -27,6 +27,24 @@ def _bridge(monkeypatch):
     return bridge
 
 
+def test_spot_event_still_updates_realtime_quote_after_depth_removal(monkeypatch):
+    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
+
+    bridge = _bridge(monkeypatch)
+    bridge._symbol_meta = {"digits": 2, "pip_position": 2}
+    event = ProtoOASpotEvent()
+    event.bid = 412050
+    event.ask = 412070
+
+    bridge._handle_spot_event(event)
+
+    quote = bridge.get_spot_quote()
+    assert quote["bid"] == pytest.approx(4120.5)
+    assert quote["ask"] == pytest.approx(4120.7)
+    assert quote["mid"] == pytest.approx(4120.6)
+    assert quote["ts"] > 0
+
+
 def test_close_position_refreshes_for_full_close_and_rejects_order_error(monkeypatch):
     bridge = _bridge(monkeypatch)
     refresh_calls = []
@@ -165,25 +183,3 @@ def test_execution_event_keeps_partial_close_remaining_position():
     assert len(positions) == 1
     assert positions[0].position_id == 270
     assert positions[0].volume == pytest.approx(50.0)
-
-
-def test_l2_writer_health_exposes_queue_and_batch_metrics(monkeypatch):
-    bridge = _bridge(monkeypatch)
-    bridge._l2_written_rows = 123
-    bridge._l2_write_batches = 4
-    bridge._l2_last_batch_rows = 25
-    bridge._l2_last_batch_elapsed_ms = 7.25
-    bridge._l2_max_batch_elapsed_ms = 12.5
-    bridge._l2_last_error = "last"
-
-    health = bridge.l2_writer_health()
-
-    assert health["status"] == "stopped"
-    assert health["queue_capacity"] == 200000
-    assert health["queue_utilization"] == 0.0
-    assert health["written_rows"] == 123
-    assert health["write_batches"] == 4
-    assert health["last_batch_rows"] == 25
-    assert health["last_batch_elapsed_ms"] == pytest.approx(7.25)
-    assert health["max_batch_elapsed_ms"] == pytest.approx(12.5)
-    assert health["last_error"] == "last"

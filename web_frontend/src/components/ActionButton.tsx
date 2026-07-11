@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { LucideIcon } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { AlertTriangle, LucideIcon, X } from "lucide-react";
 
 type ActionButtonProps = {
   icon: LucideIcon;
@@ -8,7 +8,9 @@ type ActionButtonProps = {
   disabled?: boolean;
   loading?: boolean;
   error?: string | null;
-  onAction: () => Promise<void> | void;
+  confirmTitle?: string;
+  confirmMessage?: string;
+  onAction: () => Promise<unknown> | unknown;
 };
 
 export function ActionButton({
@@ -18,10 +20,17 @@ export function ActionButton({
   disabled,
   loading,
   error,
+  confirmTitle,
+  confirmMessage,
   onAction,
 }: ActionButtonProps) {
   const [confirming, setConfirming] = useState(false);
-  const buttonLabel = loading ? `${label}请求中` : confirming ? `再次确认${label}` : label;
+  const dialogTitleId = useId();
+  const confirmRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (confirming) confirmRef.current?.focus();
+  }, [confirming]);
 
   return (
     <div className="action-wrap">
@@ -30,40 +39,40 @@ export function ActionButton({
         type="button"
         disabled={disabled || loading}
         aria-busy={loading || undefined}
-        aria-label={buttonLabel}
-        data-confirming={confirming || undefined}
-        onClick={async () => {
-          if (!confirming) {
-            setConfirming(true);
-            return;
-          }
-          try {
-            await onAction();
-            setConfirming(false);
-          } catch {
-            setConfirming(false);
-          }
-        }}
+        aria-label={loading ? `${label}请求中` : label}
+        onClick={() => setConfirming(true)}
       >
-        <Icon size={16} />
-        <span>
-          {loading
-            ? "请求中..."
-            : confirming
-              ? `再次确认 ${label}`
-              : label}
-        </span>
+        <Icon size={16} aria-hidden="true" />
+        <span>{loading ? "请求中…" : label}</span>
       </button>
       {error ? <div className="small error-text action-error" role="alert">{error}</div> : null}
       {confirming ? (
-        <button
-          className="action-cancel"
-          type="button"
-          aria-label={`取消${label}确认`}
-          onClick={() => setConfirming(false)}
+        <div
+          className="confirm-backdrop"
+          role="presentation"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) setConfirming(false); }}
+          onKeyDown={(event) => { if (event.key === "Escape") setConfirming(false); }}
         >
-          取消
-        </button>
+          <section className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby={dialogTitleId}>
+            <button className="confirm-close" type="button" onClick={() => setConfirming(false)} aria-label="关闭确认窗口"><X size={18} /></button>
+            <span className={`confirm-icon ${variant === "danger" ? "confirm-icon-danger" : ""}`} aria-hidden="true"><AlertTriangle size={22} /></span>
+            <div className="confirm-copy">
+              <h2 id={dialogTitleId}>{confirmTitle || `确认${label}`}</h2>
+              <p>{confirmMessage || `请确认是否继续执行“${label}”。操作结果以服务端响应为准。`}</p>
+            </div>
+            <div className="confirm-actions">
+              <button className="action-btn action-ghost" type="button" onClick={() => setConfirming(false)}>取消</button>
+              <button
+                ref={confirmRef}
+                className={`action-btn action-${variant}`}
+                type="button"
+                onClick={async () => { try { await onAction(); } finally { setConfirming(false); } }}
+              >
+                确认{label}
+              </button>
+            </div>
+          </section>
+        </div>
       ) : null}
     </div>
   );

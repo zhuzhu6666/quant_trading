@@ -301,18 +301,6 @@ def cross_asset_symbols_for_config(cfg: Any) -> list[str]:
     return []
 
 
-def depth_subscription_required(*, require_l2_depth: bool, l2_collection_enabled: bool) -> bool:
-    return bool(require_l2_depth or l2_collection_enabled)
-
-
-def depth_subscription_followup_message(*, require_l2_depth: bool, l2_collection_enabled: bool) -> str:
-    if require_l2_depth:
-        return ""
-    if l2_collection_enabled:
-        return "L2 depth collected for research; risk_require_l2_depth=false so it is not a trading gate"
-    return "L2 depth subscription skipped: risk_require_l2_depth=false and l2_collection_enabled=false"
-
-
 def bridge_readiness_label(*, bridge_ready: bool, warming: bool) -> str:
     if bridge_ready:
         return "ready"
@@ -336,12 +324,10 @@ def market_closed_log_message(
     )
 
 
-def subscribe_spot_depth_once(
+def subscribe_spot_once(
     *,
     get_ctrader: Callable[[], tuple[Any, str, bool]],
     wait_ctrader_ready: Callable[..., str],
-    require_l2_depth: bool,
-    l2_collection_enabled: bool,
     log: Callable[[str], None],
     timeout_sec: float = 10.0,
 ) -> None:
@@ -355,18 +341,7 @@ def subscribe_spot_depth_once(
             log(f"subscribe_spots skipped: {wait_err}")
             return
     spot_bridge.subscribe_spots()
-    if depth_subscription_required(
-        require_l2_depth=require_l2_depth,
-        l2_collection_enabled=l2_collection_enabled,
-    ):
-        spot_bridge.subscribe_depth()
-    log("subscribed to spot/depth events for real-time price and L2 research")
-    depth_message = depth_subscription_followup_message(
-        require_l2_depth=require_l2_depth,
-        l2_collection_enabled=l2_collection_enabled,
-    )
-    if depth_message:
-        log(depth_message)
+    log("subscribed to cTrader spot events")
 
 
 def apply_spot_quote_to_latest_bar(

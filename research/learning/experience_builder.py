@@ -304,7 +304,11 @@ class ExperienceBuilder:
             and context_integrity == "full"
             and attribution_integrity != "missing"
         )
-        if review.get("outcome_label") == "bad_loss" or supervisor_entry_failure:
+        primary_responsibility = str(review_json.get("primary_responsibility") or "")
+        if (
+            (review.get("outcome_label") == "bad_loss" or supervisor_entry_failure)
+            and primary_responsibility not in {"exit", "holding", "execution", "data_quality", "system"}
+        ):
             recommended_action = "downweight"
         elif review.get("outcome_label") == "good_win":
             recommended_action = "watch"
@@ -321,7 +325,7 @@ class ExperienceBuilder:
             "position_id": review.get("position_id", ""),
             "trade_id": review.get("trade_id", ""),
             "primary_factor": primary_factor,
-            "primary_responsibility": review_json.get("primary_responsibility", ""),
+            "primary_responsibility": primary_responsibility,
             "responsibility_labels": list(review_json.get("responsibility_labels", []) or []),
             "direction": review_json.get("direction", 0),
             "action_score": review_json.get("entry_score", 0.0),

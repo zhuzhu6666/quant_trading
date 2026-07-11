@@ -350,14 +350,12 @@ class TradeReviewer:
             if "data_quality_issue" not in failure_tags:
                 failure_tags.append("data_quality_issue")
 
-        entry_quality = _clamp(0.55 + (0.25 if pnl > 0 else -0.30) * min(abs(entry_score), 1.0))
-        hold_quality = _clamp(0.55 if pnl > 0 else 0.40)
-        exit_quality = _clamp(0.55 if real_pnl else 0.45)
-        regime_fit_score = _clamp(
-            0.70
-            if pnl > 0
-            else 0.35 + (0.10 if "clean_good_loss" in failure_tags else 0.0) - (0.05 if "avoidable_loss" in failure_tags else 0.0)
-        )
+        # Provisional values are replaced after the complete position path is
+        # available.  Do not infer review quality from final PnL alone.
+        entry_quality = 0.5
+        hold_quality = 0.5
+        exit_quality = 0.5
+        regime_fit_score = 0.5
         execution_quality = _clamp(0.60 if real_pnl else 0.45)
         close_ts = float(close_ts or time.time())
         risk_verdict = (
@@ -403,6 +401,48 @@ class TradeReviewer:
         mae = float(path_metrics["mae"])
         mfe = float(path_metrics["mfe"])
         hold_quality = _clamp(0.30 + path_metrics["holding_efficiency"] * 0.7)
+
+        capture = float(path_metrics["profit_capture_ratio"] or 0.0)
+        giveback = float(path_metrics["giveback_ratio"] or 0.0)
+        time_in_profit_ratio = float(path_metrics["time_in_profit_ratio"] or 0.0)
+        meaningful_mfe = mfe >= max(0.25, mae * 0.35)
+        clean_direction = meaningful_mfe and (mae <= max(0.25, mfe * 0.35))
+        direction_failed = mfe <= max(0.15, mae * 0.20) and mae > 0.0
+        capture_failed = meaningful_mfe and (capture < 0.35 or giveback >= 0.65)
+
+        # Reclassify the outcome from path evidence.  A clean profitable path
+        # is a good win even when attribution factors disagree; conversely a
+        # trade that first worked and then gave everything back is primarily
+        # an exit/holding failure rather than proof that entry alpha was bad.
+        if pnl > 0:
+            outcome_label = "good_win" if clean_direction and capture >= 0.50 else "lucky_win"
+            if outcome_label == "good_win" and "lucky_win" in failure_tags:
+                failure_tags.remove("lucky_win")
+            elif outcome_label == "lucky_win" and "lucky_win" not in failure_tags:
+                failure_tags.append("lucky_win")
+        if capture_failed:
+            for label in ("profit_giveback", "alpha_correct_but_capture_failed"):
+                if label not in failure_tags:
+                    failure_tags.append(label)
+
+        conviction = min(abs(entry_score), 1.0)
+        if clean_direction:
+            entry_quality = _clamp(0.62 + 0.18 * conviction)
+        elif direction_failed:
+            entry_quality = _clamp(0.42 - 0.18 * conviction)
+        else:
+            entry_quality = _clamp(0.48 + 0.12 * time_in_profit_ratio)
+        exit_quality = _clamp(0.25 + 0.70 * capture)
+        if mfe <= 0.0 and pnl <= 0.0:
+            exit_quality = max(exit_quality, 0.50)  # little profit existed to protect
+        conflict_present = "factor_conflict" in failure_tags or "conflicting_factor_entry" in failure_tags
+        regime_fit_score = _clamp(
+            0.72
+            if clean_direction
+            else (0.32 if direction_failed or "regime_mismatch" in failure_tags else 0.52)
+        )
+        if conflict_present:
+            regime_fit_score = min(regime_fit_score, 0.45)
 
         top_factor = ""
         top_factor_mc = 0.0

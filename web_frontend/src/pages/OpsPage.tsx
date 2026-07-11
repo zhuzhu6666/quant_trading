@@ -27,11 +27,11 @@ function dbFreshness(data: unknown): "ok" | "warn" | "bad" {
 
 function statusFromMaybeObject(value: unknown): string {
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
-  return pickString(value, ["status", "state", "overall"], "--");
+  return pickString(value, ["status", "state", "overall"], "");
 }
 
 function readableObjectLabel(value: unknown): string {
-  if (value === undefined || value === null || value === "") return "--";
+  if (value === undefined || value === null || value === "") return "";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
 
   const record = asRecord(value);
@@ -49,27 +49,27 @@ function readableObjectLabel(value: unknown): string {
     .filter(([, entryValue]) => entryValue !== undefined && entryValue !== null && typeof entryValue !== "object")
     .slice(0, 3)
     .map(([key, entryValue]) => `${key}: ${String(entryValue)}`);
-  return entries.length ? entries.join(" · ") : "--";
+  return entries.length ? entries.join(" · ") : "";
 }
 
 function factorUpdateLabel(value: unknown): string {
   const record = asRecord(value);
   const last = pick(record, ["last_enrichment", "last_enrichment_ts", "updated_at"]);
-  if (!last) return "--";
+  if (!last) return "";
   if (typeof last === "string" || typeof last === "number") return formatTime(last);
 
   const lastRecord = asRecord(last);
   const updatedAt = pick(lastRecord, ["updated_at", "updatedAt", "ts"]);
   const ok = pickBoolean(lastRecord, ["ok"], true);
   const error = pickString(lastRecord, ["error", "message"], "");
-  const timeLabel = updatedAt ? formatTime(updatedAt) : "--";
+  const timeLabel = updatedAt ? formatTime(updatedAt) : "";
   if (error) return `${timeLabel} · ${error}`;
   return `${timeLabel} · ${ok ? "正常" : "异常"}`;
 }
 
 function summarizeIssues(raw: string): { short: string; full: string; count: number } {
   const full = raw.trim();
-  if (!full) return { short: "--", full: "", count: 0 };
+  if (!full) return { short: "", full: "", count: 0 };
   const parts = full.split(";").map((item) => item.trim()).filter(Boolean);
   const count = parts.length || 1;
   const short = parts.slice(0, 2).join("; ");
@@ -126,12 +126,12 @@ export function OpsPage() {
   });
 
   const health = asRecord(healthQuery.data);
-  const backendHealth = pickString(health, ["status", "overall"], "--");
+  const backendHealth = pickString(health, ["status", "overall"], "");
   const healthDbStatus = statusFromMaybeObject(pick(health, ["db"]));
   const healthTime = pick(health, ["server_time", "updatedAt", "checked_at"]);
 
   const backendReady = pickBoolean(readinessQuery.data, ["ready_for_frontend", "ready", "ok"], false);
-  const backendSchema = pickString(readinessQuery.data, ["schema_version", "version"], "--");
+  const backendSchema = pickString(readinessQuery.data, ["schema_version", "version"], "");
   const readinessUpdated = pick(readinessQuery.data, ["generated_at", "updated_at", "ts"]);
   const live = pickRecord(readinessQuery.data, ["live"]) || {};
   const liveCtrader = pickRecord(live, ["ctrader"]) || {};
@@ -139,10 +139,10 @@ export function OpsPage() {
   const liveReadiness = pickRecord(live, ["readiness"]) || {};
   const ctraderStatus = pickString(liveCtrader, ["status", "state"], statusFromMaybeObject(pick(health, ["ctrader"])));
   const loopRunning = pickBoolean(liveLoop, ["running"], false);
-  const liveReadinessState = pickString(liveReadiness, ["state", "status"], "--");
+  const liveReadinessState = pickString(liveReadiness, ["state", "status"], "");
   const readinessModel = pickRecord(readinessQuery.data, ["models"]) || {};
   const readinessService = pickRecord(readinessQuery.data, ["backend_service", "service_health"]) || {};
-  const serviceStatus = pickString(readinessService, ["service_status", "serviceState", "status", "state"], "unknown");
+  const serviceStatus = pickString(readinessService, ["service_status", "serviceState", "status", "state"], "");
   const modelEligible = pickBoolean(readinessModel, ["permission_ok", "eligible", "ok"], false);
   const blockers = pickArray(readinessQuery.data, ["blockers"]);
   const highLoad = pickRecord(readinessQuery.data, ["high_load"]) || {};
@@ -151,7 +151,7 @@ export function OpsPage() {
   const cpuHigh = pickBoolean(highLoad, ["high_cpu", "cpu_high"], false);
   const memoryHigh = pickBoolean(highLoad, ["high_memory", "memory_high"], false);
   const alerts = asRecord(alertsQuery.data);
-  const alertStatus = pickString(alerts, ["status"], "--");
+  const alertStatus = pickString(alerts, ["status"], "");
   const alertRules = pickNumber(alerts, ["rules_active"], pickArray(alerts, ["rules"]).length);
   const recovery = asRecord(recoveryQuery.data);
   const recoveryRunning = pickBoolean(recovery, ["running"], false);
@@ -159,7 +159,7 @@ export function OpsPage() {
   const schedulerHealthy = pickBoolean(recovery, ["scheduler_healthy"], false);
   const recoveryFailures = pickNumber(recovery, ["failures"], 0);
   const sync = asRecord(syncQuery.data);
-  const syncStatus = pickString(sync, ["last_status", "status"], "--");
+  const syncStatus = pickString(sync, ["last_status", "status"], "");
   const syncLast = pick(sync, ["last_sync_utc", "last_sync", "updated_at"]);
   const syncTfCount = Object.keys(asRecord(pick(sync, ["per_tf"]))).length;
   const tokenStatus = asRecord(tokenQuery.data);
@@ -168,7 +168,7 @@ export function OpsPage() {
   const externalSources = pickArray(externalQuery.data, ["sources"]);
   const externalStale = externalSources.filter((item) => pickBoolean(item, ["stale"], false) || pickString(item, ["status"], "") === "error").length;
 
-  const dbStatus = pickString(dbQuery.data, ["overall", "status"], "--");
+  const dbStatus = pickString(dbQuery.data, ["overall", "status"], "");
   const dbChecked = pick(dbQuery.data, ["checked_at", "checkedAt", "updated_at"]);
   const dbFresh = dbFreshness(dbQuery.data);
   const dbSummary = pickRecord(dbQuery.data, ["summary"]) || {};
@@ -182,11 +182,11 @@ export function OpsPage() {
     return raw.map((entry) => {
       const item = pickRecord(entry, ["item"]) || asRecord(entry);
       return {
-        name: pickString(item, ["name"], "--"),
-        file: pickString(item, ["file", "path"], "--"),
-        type: pickString(item, ["type", "role"], "--"),
+        name: pickString(item, ["name"], ""),
+        file: pickString(item, ["file", "path"], ""),
+        type: pickString(item, ["type", "role"], ""),
         exists: pickBoolean(item, ["exists"], false),
-        freshness: pickString(item, ["freshness", "status", "state"], "--"),
+        freshness: pickString(item, ["freshness", "status", "state"], ""),
         totalRows: pickString(item, ["total_rows", "rows"], "0"),
         latestTs: pick(item, ["latest_ts", "latestTs", "updated_at"]),
         issues: summarizeIssues(pickArray(item, ["errors", "issues"]).map(readableObjectLabel).join("; ")),
@@ -300,14 +300,14 @@ export function OpsPage() {
                 <Field label="最近同步" value={formatTime(syncLast)} />
                 <Field label="周期数" value={syncTfCount} />
                 <Field label="cTrader Token" value={tokenOk ? "有效" : "异常"} tone={tokenOk ? "ok" : "bad"} />
-                <Field label="Token 剩余" value={tokenHours ? `${Math.round(tokenHours)} 小时` : "--"} />
+                <Field label="Token 剩余" value={tokenHours ? `${Math.round(tokenHours)} 小时` : ""} />
                 <Field label="外部异常" value={externalStale} tone={externalStale ? "warn" : "ok"} />
               </div>
               <div className="compact-list ops-inline-badges">
                 {externalSources.slice(0, 8).map((raw, index) => {
                   const item = asRecord(raw);
                   const sourceName = pickString(item, ["source", "table"], String(index + 1));
-                  const status = pickString(item, ["status"], "--");
+                  const status = pickString(item, ["status"], "");
                   const stale = pickBoolean(item, ["stale"], false);
                   return (
                     <span className={`data-badge ${stale ? "data-badge-warn" : toneFromStatus(status) === "bad" ? "data-badge-bad" : "data-badge-ok"}`} key={`${sourceName}-${index}`}>

@@ -54,7 +54,7 @@
 flowchart TD
     subgraph F["事实层"]
         Broker["cTrader broker facts"]
-        Market["DuckDB bars/ticks/L2/external/events"]
+        Market["DuckDB bars/external/events + cTrader spot"]
         State["PostgreSQL state_v1"]
         Overlay["runtime_config_overlay"]
         Ledger["decision/order/position/trade ledgers"]
@@ -206,8 +206,6 @@ flowchart TD
 |---|---|---|---|
 | cTrader broker facts | cTrader bridge、deals、positions | 提供 live broker 状态、成交、账户、持仓 | broker 回执、position/deal facts |
 | K 线月库 | `data/bars_monthly/bars_YYYY_MM.duckdb` | 保存 bars 主数据 | bars / bar window |
-| tick 月库 | `data/ticks_monthly/ticks_YYYY_MM.duckdb` | 保存 tick 数据 | tick facts |
-| L2 月库 | `data/l2_monthly/l2_YYYY_MM.duckdb` | 研究采集和可选风控输入 | depth facts |
 | 外部研究库 | `data/external_data.duckdb` | COT/ETF/FRED/宏观 PIT 数据 | external factor inputs |
 | 事件库 | `data/events.duckdb` | 经济事件日历 | event sizing inputs |
 | PostgreSQL state | `state_v1` | 运行审计、学习、治理、配置事实主库 | ledgers、samples、snapshots、brain tables |
@@ -320,7 +318,7 @@ settings.yaml base
 | `RiskPolicyService` | `risk/policy_service.py` | 动作级统一裁决 | `RiskVerdict` |
 | `RiskGovernor` | `risk/governor.py` | 账户、回撤、次数、运行态硬风控 | allow/block |
 | `RiskLimitSnapshot` | `risk/runtime_policy.py` | 风险阈值统一输入词汇 | risk limit snapshot |
-| `RuntimeHealthSnapshot` | `risk/runtime_policy.py` | loop、bridge、data lag、disk、L2 等运行态输入 | runtime health snapshot |
+| `RuntimeHealthSnapshot` | `risk/runtime_policy.py` | loop、bridge、data lag、disk等运行态输入 | runtime health snapshot |
 | model stage gate | `backend/services/model_permissions.py` | 模型能力和阶段权限 | permission audit |
 | incident mode gate | `runtime_incident_mode` | normal/shadow_only/no_new_risk/only_close/frozen | stricter runtime posture |
 | live autonomy budget gate | `live_autonomous` + unlock state + `RiskPolicyService.evaluate("live_autonomy_budget")` | live 自治预算和解锁检查 | 阻断新增风险 / 允许降风险 |

@@ -76,6 +76,7 @@ def build_factor_snapshot_summary(composite: Any, gate_result: Any, *, now: floa
         "composer_version": str(getattr(composite, "composer_version", "")),
         "context_state": dict(getattr(composite, "context_state", {}) or {}),
         "context_policy": dict(getattr(composite, "context_policy", {}) or {}),
+        "calibrated_confidence": dict(getattr(composite, "calibrated_confidence", {}) or {}),
         "redundancy_groups": dict(getattr(composite, "redundancy_groups", {}) or {}),
         "gate_passed": gate_result.passed,
         "gate_reason": gate_result.reason,

@@ -180,7 +180,7 @@ export const pickRecord = (input: unknown, keys: readonly string[]): AnyRecord |
 export const pickObjectSummary = (
   input: unknown,
   keys: readonly string[],
-  fallback = "--",
+  fallback = "",
 ): string => {
   const raw = pick(input, keys);
   if (raw === undefined || raw === null) {
@@ -201,7 +201,7 @@ export const pickObjectSummary = (
 
 export const formatDirection = (value: unknown): string => {
   if (value === undefined || value === null) {
-    return "--";
+    return "";
   }
   if (typeof value === "number") {
     if (value > 0) {
@@ -222,12 +222,12 @@ export const formatDirection = (value: unknown): string => {
     }
     return value;
   }
-  return "--";
+  return "";
 };
 
 export const compactJson = (value: unknown, maxChars = 1600): string => {
   if (value === undefined || value === null) {
-    return "--";
+    return "";
   }
   try {
     const text = JSON.stringify(value, null, 2);
@@ -242,7 +242,7 @@ export const compactJson = (value: unknown, maxChars = 1600): string => {
 
 export const formatReadableTime = (value: unknown): string => {
   if (value === undefined || value === null) {
-    return "--";
+    return "";
   }
   if (typeof value === "number" && Number.isFinite(value)) {
     const ts = value > 1e12 ? value : value * 1000;
@@ -269,7 +269,7 @@ export const formatReadableTime = (value: unknown): string => {
       second: "2-digit",
     }).format(d);
   }
-  return "--";
+  return "";
 };
 
 export const asRecord = (value: unknown): AnyRecord => (isRecord(value) ? value : {});

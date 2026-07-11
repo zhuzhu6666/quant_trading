@@ -28,7 +28,7 @@ import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 
 function itemLabel(value: unknown): string {
   const item = asRecord(value);
-  return translateDisplayValue(pickString(item, ["name", "component", "id", "key"], typeof value === "string" ? value : "--"));
+  return translateDisplayValue(pickString(item, ["name", "component", "id", "key"], typeof value === "string" ? value : ""));
 }
 
 function mergeRiskSummary(base: unknown, live: unknown): Record<string, unknown> {
@@ -80,19 +80,19 @@ function RiskBar({
 }
 
 function compactId(value: string): string {
-  if (!value || value === "--") return "--";
+  if (!value || value === "") return "";
   if (value.length <= 12) return value;
   return `${value.slice(0, 8)}...${value.slice(-4)}`;
 }
 
 function extractTraceToken(summary: string, key: string): string {
-  if (!summary || summary === "--") return "--";
+  if (!summary || summary === "") return "";
   const match = summary.match(new RegExp(`${key}=([^;]+)`));
-  return match ? translateReasonText(match[1].trim()) : "--";
+  return match ? translateReasonText(match[1].trim()) : "";
 }
 
 function traceOutcomeTone(outcome: string): "ok" | "warn" | "bad" | "mute" {
-  if (!outcome || outcome === "--") return "mute";
+  if (!outcome || outcome === "") return "mute";
   if (outcome.includes("盈利") || outcome.includes("优秀")) return "ok";
   if (outcome.includes("亏损")) return "bad";
   if (outcome.includes("可接受") || outcome.includes("持平")) return "warn";
@@ -170,13 +170,13 @@ export function RiskPage() {
   const policyItems = useMemo(() => pickArray(policy, ["items", "recent_items", "decisions", "history"]), [policy]);
   const tradeTraces = useMemo(() => pickArray(tradeTracesQuery.data, ["items", "traces", "rows"]), [tradeTracesQuery.data]);
 
-  const riskHealth = pickString(systemHealth, ["overall", "status", "state"], "unknown");
+  const riskHealth = pickString(systemHealth, ["overall", "status", "state"], "");
   const riskBlocked = pickBoolean(systemHealth, ["trading_blocked", "blocked"], false);
   const critical = pickArray(systemHealth, ["critical_components", "blocking_components"]);
   const degraded = pickArray(systemHealth, ["degraded_components"]);
-  const impact = pickString(systemHealth, ["impact_summary", "status", "summary"], "--");
+  const impact = pickString(systemHealth, ["impact_summary", "status", "summary"], "");
   const readinessReady = pickBoolean(readinessQuery.data, ["ready_for_frontend", "ready", "ok"], false);
-  const schema = pickString(readinessQuery.data, ["schema_version", "version"], "--");
+  const schema = pickString(readinessQuery.data, ["schema_version", "version"], "");
   const blockers = pickArray(readinessQuery.data, ["blockers"]);
 
   const dbList = pickArray(dbQuery.data, ["databases", "database_list", "items"]);
@@ -187,13 +187,13 @@ export function RiskPage() {
     const hasIssues = pickArray(row, ["errors", "issues"]).length > 0;
     return acc + (!exists || hasIssues || ["missing", "stale", "old", "error"].includes(freshness) ? 1 : 0);
   }, 0);
-  const dbStatus = pickString(dbQuery.data, ["overall", "status"], "--");
+  const dbStatus = pickString(dbQuery.data, ["overall", "status"], "");
   const riskBlockers = [...critical, ...blockers];
   const latestPolicy = asRecord(policyItems[0]);
   const latestTrace = asRecord(tradeTraces[0]);
   const latestPolicyAllowed = policyItems.length ? pickBoolean(latestPolicy, ["allowed", "ok", "pass"], false) : undefined;
-  const latestPolicyReason = policyItems.length ? translateReasonText(pickString(latestPolicy, ["reason", "message"], "--")) : "--";
-  const latestTraceOutcome = tradeTraces.length ? translateDisplayValue(pickString(latestTrace, ["outcome_label"], "--")) : "--";
+  const latestPolicyReason = policyItems.length ? translateReasonText(pickString(latestPolicy, ["reason", "message"], "")) : "";
+  const latestTraceOutcome = tradeTraces.length ? translateDisplayValue(pickString(latestTrace, ["outcome_label"], "")) : "";
   const hasSystemQueryError = riskQuery.isError || dbQuery.isError || readinessQuery.isError;
 
   return (
@@ -202,7 +202,7 @@ export function RiskPage() {
         <div>
           <div className="eyebrow">风控审计</div>
           <h1>风控审计</h1>
-          <p>展示风险引擎状态、限额占用、Policy 裁决和阻断组件。</p>
+          <p>展示风险引擎状态、限额占用、策略裁决和阻断组件。</p>
         </div>
         <div className="header-status">
           <StatusPill status={`风险 ${riskHealth}`} tone={toneFromStatus(riskHealth)} />
@@ -214,7 +214,7 @@ export function RiskPage() {
       <div className="stat-grid">
         <StatTile icon={ShieldCheck} label="系统健康" value={translateDisplayValue(riskHealth)} detail={translateDisplayValue(impact)} tone={toneFromStatus(riskHealth)} />
         <StatTile icon={ShieldAlert} label="策略拦截" value={formatDecimal(blocked, 0)} detail={`允许 ${formatDecimal(allowed, 0)} · 通过率 ${formatDecimal(allowedRate, 1)}%`} tone={blocked ? "warn" : "ok"} />
-        <StatTile icon={Gauge} label="VaR" value={varHasData ? formatDecimal(varValue, 4) : "未接入"} detail={varHasData ? (varBudget ? `限额 ${formatDecimal(varBudget, 4)}` : "未返回限额") : "summary 未传权益曲线"} tone={varBudget && varValue > varBudget ? "bad" : "mute"} />
+        {varHasData ? <StatTile icon={Gauge} label="VaR" value={formatDecimal(varValue, 4)} detail={varBudget ? `限额 ${formatDecimal(varBudget, 4)}` : undefined} tone={varBudget && varValue > varBudget ? "bad" : "mute"} /> : null}
         <StatTile icon={AlertTriangle} label="阻断组件" value={formatDecimal(critical.length + blockers.length, 0)} detail={`退化 ${formatDecimal(degraded.length, 0)} · DB 异常 ${formatDecimal(dbErrorCount, 0)}`} tone={critical.length || blockers.length ? "bad" : degraded.length || dbErrorCount ? "warn" : "ok"} />
       </div>
 
@@ -222,9 +222,9 @@ export function RiskPage() {
         <MetricCard title="风险控制面板" className="wide-panel risk-control-overview">
           <div className="risk-mini-grid">
             <RiskMiniMetric label="交易闸门" value={riskBlocked ? "阻断" : "放行"} detail={translateDisplayValue(impact)} tone={riskBlocked ? "bad" : "ok"} />
-            <RiskMiniMetric label="VaR 占用" value={varHasData && varBudget ? `${formatDecimal(varUsage, 1)}%` : "未接入"} detail={varHasData ? `${formatDecimal(varValue, 4)} / ${varBudget ? formatDecimal(varBudget, 4) : "--"}` : "等待权益曲线"} tone={varHasData ? percentTone(varUsage) : "mute"} />
-            <RiskMiniMetric label="Kelly 占用" value={kellyHasData ? (kellyBudget ? `${formatDecimal(kellyUsage, 1)}%` : formatDecimal(kellyFraction, 4)) : "未接入"} detail={kellyHasData ? `预算 ${kellyBudget ? formatDecimal(kellyBudget, 4) : "--"}` : "等待交易胜率"} tone={kellyHasData ? percentTone(kellyUsage) : "mute"} />
-            <RiskMiniMetric label="Policy 通过率" value={`${formatDecimal(allowedRate, 1)}%`} detail={`允许 ${formatDecimal(allowed, 0)} / 拦截 ${formatDecimal(blocked, 0)}`} tone={blocked ? "warn" : "ok"} />
+            {varHasData ? <RiskMiniMetric label="VaR 占用" value={varBudget ? `${formatDecimal(varUsage, 1)}%` : formatDecimal(varValue, 4)} detail={varBudget ? `${formatDecimal(varValue, 4)} / ${formatDecimal(varBudget, 4)}` : undefined} tone={percentTone(varUsage)} /> : null}
+            {kellyHasData ? <RiskMiniMetric label="Kelly 占用" value={kellyBudget ? `${formatDecimal(kellyUsage, 1)}%` : formatDecimal(kellyFraction, 4)} detail={kellyBudget ? `预算 ${formatDecimal(kellyBudget, 4)}` : undefined} tone={percentTone(kellyUsage)} /> : null}
+            <RiskMiniMetric label="策略通过率" value={`${formatDecimal(allowedRate, 1)}%`} detail={`允许 ${formatDecimal(allowed, 0)} / 拦截 ${formatDecimal(blocked, 0)}`} tone={blocked ? "warn" : "ok"} />
             <RiskMiniMetric label="组件异常" value={formatDecimal(riskBlockers.length + degraded.length, 0)} detail={`阻断 ${formatDecimal(riskBlockers.length, 0)} · 退化 ${formatDecimal(degraded.length, 0)}`} tone={riskBlockers.length ? "bad" : degraded.length ? "warn" : "ok"} />
             <RiskMiniMetric label="数据健康" value={dbQuery.isError ? "接口异常" : dbErrorCount ? `${formatDecimal(dbErrorCount, 0)} 异常` : translateDisplayValue(dbStatus)} detail={`库 ${formatDecimal(dbList.length, 0)} · 合约 ${schema}`} tone={dbQuery.isError || dbErrorCount ? "bad" : toneFromStatus(dbStatus)} />
           </div>
@@ -235,9 +235,9 @@ export function RiskPage() {
                 <h3>限额占用</h3>
                 <StatusPill status={varHasData || kellyHasData || concentrationHasData ? (varUsage >= 100 || kellyUsage >= 100 ? "超限" : "正常") : "未接入"} tone={varHasData || kellyHasData || concentrationHasData ? (varUsage >= 100 || kellyUsage >= 100 ? "bad" : "ok") : "mute"} />
               </div>
-              <RiskBar label="VaR" value={varUsage} valueLabel={varHasData ? undefined : "--"} detail={varHasData ? `当前 ${formatDecimal(varValue, 4)} · 限额 ${varBudget ? formatDecimal(varBudget, 4) : "--"}` : "等待权益曲线输入"} tone={varHasData ? percentTone(varUsage) : "mute"} />
-              <RiskBar label="Kelly" value={kellyUsage} valueLabel={kellyHasData ? undefined : "--"} detail={kellyHasData ? `当前 ${formatDecimal(kellyFraction, 4)} · 预算 ${kellyBudget ? formatDecimal(kellyBudget, 4) : "--"}` : "等待交易胜率与盈亏样本"} tone={kellyHasData ? percentTone(kellyUsage) : "mute"} />
-              <RiskBar label="集中度" value={concentrationUsage} valueLabel={concentrationHasData ? undefined : "--"} detail={concentrationHasData ? `单品种 ${formatDecimal(concentrationMax, 4)} · 行业 ${formatDecimal(concentrationSector, 4)}` : "等待仓位/因子权重"} tone={concentrationHasData ? percentTone(concentrationUsage) : "mute"} />
+              {varHasData && varBudget ? <RiskBar label="VaR" value={varUsage} detail={`当前 ${formatDecimal(varValue, 4)} · 限额 ${formatDecimal(varBudget, 4)}`} tone={percentTone(varUsage)} /> : null}
+              {kellyHasData && kellyBudget ? <RiskBar label="Kelly" value={kellyUsage} detail={`当前 ${formatDecimal(kellyFraction, 4)} · 预算 ${formatDecimal(kellyBudget, 4)}`} tone={percentTone(kellyUsage)} /> : null}
+              {concentrationHasData ? <RiskBar label="集中度" value={concentrationUsage} detail={`单品种 ${formatDecimal(concentrationMax, 4)} · 行业 ${formatDecimal(concentrationSector, 4)}`} tone={percentTone(concentrationUsage)} /> : null}
             </section>
 
             <section className="risk-control-section">
@@ -246,8 +246,8 @@ export function RiskPage() {
                 <StatusPill status={stressHasData ? "有数据" : "未接入"} tone={stressHasData ? "ok" : "mute"} />
               </div>
               <div className="field-list risk-compact-fields">
-                <Field label="Stress VaR" value={stressHasData ? formatDecimal(stressVaR, 4) : "等待权益曲线"} />
-                <Field label="Stress 回撤" value={stressHasData ? formatDecimal(stressDrop, 4) : "等待压力测试"} />
+                {stressHasData ? <Field label="压力 VaR" value={formatDecimal(stressVaR, 4)} /> : null}
+                {stressHasData ? <Field label="压力回撤" value={formatDecimal(stressDrop, 4)} /> : null}
                 <Field label="单品种权重" value={concentrationHasData ? formatDecimal(concentrationMax, 4) : "等待权重"} />
                 <Field label="行业集中度" value={concentrationHasData ? formatDecimal(concentrationSector, 4) : "等待权重"} />
               </div>
@@ -313,10 +313,10 @@ export function RiskPage() {
               {policyItems.slice(0, 12).map((raw, index) => {
                 const item = asRecord(raw);
                 const itemAllowed = pickBoolean(item, ["allowed", "ok", "pass"], false);
-                const decisionId = pickString(item, ["decision_id", "id"], "--");
+                const decisionId = pickString(item, ["decision_id", "id"], "");
                 const action = translateDisplayValue(pickString(item, ["action", "type"], "policy"));
                 const direction = translateDisplayValue(formatDirection(pick(item, ["direction", "side"])));
-                const reason = translateReasonText(pickString(item, ["reason", "message"], "--"));
+                const reason = translateReasonText(pickString(item, ["reason", "message"], ""));
 
                 return (
                   <article className="policy-item" key={`${decisionId}-${index}`}>
@@ -343,16 +343,16 @@ export function RiskPage() {
             <div className="trace-list">
               {tradeTraces.slice(0, 12).map((raw, index) => {
                 const item = asRecord(raw);
-                const rawSummary = pickString(item, ["summary_text"], "--");
-                const outcome = translateDisplayValue(pickString(item, ["outcome_label"], "--"));
-                const closeReason = translateDisplayValue(pickString(item, ["close_reason"], "--"));
-                const responsibility = translateDisplayValue(pickString(item, ["primary_responsibility"], "--"));
+                const rawSummary = pickString(item, ["summary_text"], "");
+                const outcome = translateDisplayValue(pickString(item, ["outcome_label"], ""));
+                const closeReason = translateDisplayValue(pickString(item, ["close_reason"], ""));
+                const responsibility = translateDisplayValue(pickString(item, ["primary_responsibility"], ""));
                 const pnl = extractTraceToken(rawSummary, "pnl");
                 const primaryFactor = extractTraceToken(rawSummary, "primary_factor");
                 const worstFactor = extractTraceToken(rawSummary, "worst_factor");
-                const positionId = pickString(item, ["position_id", "trade_id"], "--");
-                const entryDecision = pickString(item, ["entry_decision_id"], "--");
-                const exitDecision = pickString(item, ["exit_decision_id"], "--");
+                const positionId = pickString(item, ["position_id", "trade_id"], "");
+                const entryDecision = pickString(item, ["entry_decision_id"], "");
+                const exitDecision = pickString(item, ["exit_decision_id"], "");
 
                 return (
                   <article className="trace-item" key={`${pickString(item, ["review_id", "position_id"], String(index))}-${index}`}>

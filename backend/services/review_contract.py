@@ -11,7 +11,7 @@ SYSTEM_CONTAMINATION_LABELS = {
     "signal_execution_delay",
 }
 
-ADVISORY_ONLY_HEALTH_COMPONENTS = {"tick_data"}
+ADVISORY_ONLY_HEALTH_COMPONENTS: set[str] = set()
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

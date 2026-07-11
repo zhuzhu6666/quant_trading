@@ -35,8 +35,6 @@ DUCKDB_BARS_MONTHLY_DIR = DATA_DIR / "bars_monthly"
 DUCKDB_BARS_CURRENT = DATA_DIR / "bars.duckdb"           # 当前月 K线兼容链接
 DUCKDB_BARS    = DUCKDB_BARS_CURRENT                     # K线当前月入口
 DUCKDB_EXTERNAL = DATA_DIR / "external_data.duckdb"      # COT/ETF/宏观等外部数据
-DUCKDB_TICKS   = DATA_DIR / "ticks.duckdb"           # Dukascopy tick
-DUCKDB_L2      = DATA_DIR / "l2.duckdb"              # L2 订单簿深度
 DUCKDB_TRADES  = DATA_DIR / "trades.duckdb"          # 交易记录(归因用)
 DUCKDB_EVENTS  = DATA_DIR / "events.duckdb"          # 经济事件日历
 
@@ -58,8 +56,6 @@ _KNOWN_DUCKDB_PATHS: Final[set[Path]] = {
     DUCKDB_BARS_LEGACY.resolve(),
     DUCKDB_BARS_CURRENT.resolve(),
     DUCKDB_EXTERNAL.resolve(),
-    DUCKDB_TICKS.resolve(),
-    DUCKDB_L2.resolve(),
     DUCKDB_TRADES.resolve(),
     DUCKDB_EVENTS.resolve(),
 }

@@ -145,7 +145,7 @@ def _merge_open_action(action: dict[str, Any], cluster: dict[str, Any], *, force
             "schema_version": "entry_data_quality_context.v1",
             "backfilled_by": SCHEMA_VERSION,
             "historical_backfill": True,
-            "unavailable_fields": ["quote_fresh", "quote_age_seconds", "spread", "bid", "ask", "l2_context"],
+            "unavailable_fields": ["quote_fresh", "quote_age_seconds", "spread", "bid", "ask"],
         }
         changed = True
     if changed:

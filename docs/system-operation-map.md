@@ -49,7 +49,7 @@ Caddy + web_frontend + miniprogram_v2
 ```mermaid
 flowchart TD
     subgraph EXT["外部世界"]
-        Market["行情 / bars / ticks / spot"]
+        Market["行情 / bars / cTrader spot"]
         Events["经济事件日历"]
         ExternalData["COT / ETF / FRED / 宏观"]
         CTrader["cTrader broker"]
@@ -57,8 +57,6 @@ flowchart TD
 
     subgraph DATA["数据事实源"]
         Bars["DuckDB bars 月库"]
-        Ticks["DuckDB ticks 月库"]
-        L2["DuckDB L2 月库"]
         ExternalDB["DuckDB external_data"]
         EventsDB["DuckDB events"]
         StatePG["PostgreSQL state_v1"]
@@ -148,15 +146,12 @@ flowchart TD
     end
 
     Market --> Bars
-    Market --> Ticks
-    Market --> L2
     ExternalData --> ExternalDB
     Events --> EventsDB
     CTrader <--> Bridge
 
     Bars --> LiveLoop
-    Ticks --> LiveLoop
-    L2 --> LiveLoop
+    Bridge --> LiveLoop
     ExternalDB --> FactorEngine
     EventsDB --> Sizing
     StatePG <--> API
@@ -663,8 +658,6 @@ GET /api/v4/catalog?snapshot=latest
 | V16 medium-impact governance | PostgreSQL `brain_medium_impact_governance` + `brain_governance_candidate` + `brain_governance_candidate_review` + `/api/ops/brain/medium-impact-governance` + `/api/ops/brain/governance-candidates` + readiness `v16.medium_impact_governance` / `v16.governance_candidates` / `v16.governance_candidate_reviews` |
 | V16 live-ready guardrails | PostgreSQL `brain_live_ready_guardrail` + `/api/ops/brain/live-ready-guardrails` + readiness `v16.live_ready_guardrails` |
 | bars | `data/bars_monthly/bars_YYYY_MM.duckdb`，`data/bars.duckdb` 为当前月兼容链接 |
-| ticks | `data/ticks_monthly/ticks_YYYY_MM.duckdb`，`data/ticks.duckdb` 为当前月兼容链接 |
-| L2 | `data/l2_monthly/l2_YYYY_MM.duckdb`，由 backend 内 cTrader 主连接采集 |
 | 外部研究数据 | `data/external_data.duckdb`，按 `release_at` PIT 使用 |
 | 经济事件 | `data/events.duckdb` |
 | broker 实时真相 | cTrader spot/account/positions/execution/deals |
@@ -726,7 +719,6 @@ Web 前端应优先读 `/api/ops/backend-readiness`、`/api/ops/v15/phase0`、`/
 - `policy_suggestion` 不是必须等待人工审批的队列，而是自治建议和执行审计。
 - SQLite `data/state.db` 不是运行状态库。
 - 旧 Web Console / Nginx H5 / 小程序 web-view 路线不再维护。
-- L2 不再通过独立 cTrader Open API collector 采集。
 - 影子模型不是执行模型，不能下单、平仓、改硬风控或绕过治理写配置。
 - `model_ready` 不等于“任何模型都能训练”；必须同时满足 evidence contract 的 `supervised_training` 准入。
 

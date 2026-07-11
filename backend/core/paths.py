@@ -12,7 +12,7 @@ CHARTS_DIR: Path = DATA_DIR / "charts"
 
 # 从统一数据库模块导入路径常量 (向后兼容)
 from backend.core.db import (
-    DUCKDB_BARS, DUCKDB_TICKS, DUCKDB_L2, DUCKDB_TRADES, DUCKDB_EVENTS,
+    DUCKDB_BARS, DUCKDB_TRADES, DUCKDB_EVENTS,
     STATE_DB, EXPERIMENTS_DB,
 )
 

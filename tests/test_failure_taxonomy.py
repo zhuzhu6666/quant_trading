@@ -23,6 +23,27 @@ def test_build_failure_taxonomy_marks_exit_capture_and_entry_good_exit_bad():
     assert "alpha_correct_but_capture_failed" in result["responsibility_labels"]
 
 
+def test_build_failure_taxonomy_assigns_losing_profit_giveback_to_exit():
+    result = build_failure_taxonomy(
+        {
+            "entry_quality": 0.58,
+            "exit_quality": 0.25,
+            "holding_efficiency": 0.15,
+            "giveback_ratio": 1.0,
+            "profit_capture_ratio": 0.0,
+            "holding_seconds": 900,
+            "pnl": -0.2,
+            "mfe": 3.2,
+            "mae": 1.0,
+            "decision_quality_context": {"factor_conflict_ratio": 0.6},
+            "context_integrity": "full",
+        }
+    )
+
+    assert result["primary_responsibility"] == "exit"
+    assert "alpha_correct_but_capture_failed" in result["responsibility_labels"]
+
+
 def test_build_failure_taxonomy_marks_timing_and_regime_cases():
     result = build_failure_taxonomy(
         {
@@ -110,44 +131,6 @@ def test_build_failure_taxonomy_prioritizes_system_data_contamination():
     assert result["system_issue_context"]["contaminates_learning"] is True
 
 
-def test_advisory_tick_data_health_does_not_contaminate_trade_review():
-    result = build_failure_taxonomy(
-        {
-            "entry_quality": 0.31,
-            "exit_quality": 0.55,
-            "action_score": -0.91,
-            "pnl": -0.27,
-            "mae": -0.48,
-            "mfe": 0.05,
-            "timeframe": "M5",
-            "entry_timing_context": {
-                "schema_version": "entry_timing_context.v1",
-                "timeframe_seconds": 300,
-            },
-            "decision_freshness_context": {
-                "schema_version": "review_decision_freshness_context.v1",
-                "fresh": True,
-                "data_lag_seconds": 0.0,
-            },
-            "data_quality_context": {
-                "quote_fresh": True,
-                "runtime_health": {
-                    "system_health": {
-                        "component_status": {"tick_data": "critical"},
-                    },
-                },
-            },
-            "context_integrity": "full",
-        }
-    )
-
-    labels = result["responsibility_labels"]
-    assert "market_data_stale" not in labels
-    assert "data_quality_issue" not in labels
-    assert result["system_issue_context"]["primary_responsibility"] == ""
-    assert result["system_issue_context"]["contaminates_learning"] is False
-
-
 def test_component_health_without_freshness_failure_does_not_contaminate_m5_review():
     result = build_failure_taxonomy(
         {
@@ -173,7 +156,6 @@ def test_component_health_without_freshness_failure_does_not_contaminate_m5_revi
                     "system_health": {
                         "component_status": {
                             "bar_m1": "degraded",
-                            "tick_data": "critical",
                         },
                     },
                 },
