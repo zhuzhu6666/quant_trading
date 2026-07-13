@@ -31,7 +31,7 @@ from backend.core.db import (
     ensure_bars_table,
     refresh_current_bars_link,
 )
-from data.external_schema import cot_release_at, ensure_external_schema, etf_release_at, macro_release_at
+from data.external_schema import cb_release_at, cot_release_at, ensure_external_schema, etf_release_at, macro_release_at
 
 logger = logging.getLogger(__name__)
 
@@ -310,10 +310,51 @@ class DuckDBDataStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, [
                 country, date, total_tonnes, monthly_chg_tonnes,
-                float(release_at if release_at is not None else macro_release_at(date)),
+                float(release_at if release_at is not None else cb_release_at(date)),
                 float(fetched_at or time.time()),
                 source,
             ])
+        finally:
+            conn.close()
+
+    def insert_etf_daily(self, symbol: str, date: str, close: float,
+                         release_at: float | None = None,
+                         fetched_at: float | None = None,
+                         source: str = "yahoo_chart"):
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO etf_daily
+                (symbol, date, close, release_at, fetched_at, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    symbol,
+                    date,
+                    float(close),
+                    float(release_at if release_at is not None else macro_release_at(date)),
+                    float(fetched_at or time.time()),
+                    source,
+                ],
+            )
+        finally:
+            conn.close()
+
+    def insert_etf_daily_batch(self, rows: list[tuple[str, str, float, float, float, str]]):
+        """Insert one downloaded symbol window in a single DuckDB transaction."""
+        if not rows:
+            return
+        conn = self._get_conn()
+        try:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO etf_daily
+                (symbol, date, close, release_at, fetched_at, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
         finally:
             conn.close()
 

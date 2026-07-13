@@ -235,6 +235,153 @@ runtime:
       tags:
       - 技术
       - 动量
+    htf_trend_alignment:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: alpha
+      source: builtin
+      tags:
+      - 技术
+      - 高周期
+      - 趋势
+    donchian_breakout_20:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: alpha
+      source: builtin
+      tags:
+      - 技术
+      - 突破
+      - 结构
+    range_expansion_20:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: context
+      source: builtin
+      tags:
+      - 技术
+      - 波动率
+      - 结构
+    price_location_50:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: alpha
+      source: builtin
+      tags:
+      - 技术
+      - 价格位置
+      - 结构
+    candle_body_pressure:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: alpha
+      source: builtin
+      tags:
+      - K线
+      - 实体
+      - 方向
+    wick_rejection:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: alpha
+      source: builtin
+      tags:
+      - K线
+      - 影线
+      - 反转
+    morning_evening_star:
+      mode: discrete
+      value_map:
+        '-1': -1.0
+        '0': 0.0
+        '1': 1.0
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: alpha
+      source: builtin
+      tags:
+      - K线
+      - 三K
+      - 反转
+    harami:
+      mode: discrete
+      value_map:
+        '-1': -1.0
+        '0': 0.0
+        '1': 1.0
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: alpha
+      source: builtin
+      tags:
+      - K线
+      - 两K
+      - 反转
+    fib_retracement_position:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: context
+      source: builtin
+      tags:
+      - Fibonacci
+      - 波段
+      - 价格位置
+    fib_level_proximity:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: context
+      source: builtin
+      tags:
+      - Fibonacci
+      - 支撑阻力
+      - 价格位置
+    fib_rejection_confirmation:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      enabled: true
+      lifecycle_status: SHADOW
+      autonomous_activation: true
+      role: alpha
+      source: builtin
+      tags:
+      - Fibonacci
+      - 反弹确认
+      - 反转
     dxy_corr_20:
       mode: rank_mapping
       window: 100
@@ -479,6 +626,17 @@ runtime:
     engulfing: 1.0
     pin_bar: 0.8
     inside_bar: 0.3
+    htf_trend_alignment: 0.0
+    donchian_breakout_20: 0.0
+    range_expansion_20: 0.0
+    price_location_50: 0.0
+    candle_body_pressure: 0.0
+    wick_rejection: 0.0
+    morning_evening_star: 0.0
+    harami: 0.0
+    fib_retracement_position: 0.0
+    fib_level_proximity: 0.0
+    fib_rejection_confirmation: 0.0
     dxy_corr_20: 0.8
     slv_gld_ratio: 0.5
     real_yield_chg: 0.5
@@ -537,6 +695,12 @@ runtime:
   factor_governance_max_promotions_per_cycle: 1
   factor_governance_max_disables_per_cycle: 1
   factor_governance_max_retires_per_cycle: 1
+  factor_governance_builtin_activation_enabled: true
+  factor_governance_builtin_activation_min_health_score: 70.0
+  factor_governance_builtin_activation_min_n_obs: 500
+  factor_governance_builtin_activation_max_weakness: 0.65
+  factor_governance_builtin_activation_weight: 0.05
+  factor_governance_max_builtin_activations_per_cycle: 1
   factor_governance_model_min_samples: 3
   factor_governance_model_weakness_threshold: 0.65
   factor_governance_model_disable_threshold: 0.85
@@ -581,6 +745,8 @@ runtime:
   kelly_fraction: 0.5
   kelly_max_pct: 0.25
   kelly_risk_per_trade_pct: 0.06
+  kelly_min_closed_trades: 20
+  kelly_canary_max_api_volume: 100.0
   dynamic_sizing_enabled: true
   dynamic_sizing_max_api_volume: 1000.0
   dynamic_sizing_api_units_per_display_unit: 100.0

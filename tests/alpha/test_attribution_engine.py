@@ -136,6 +136,39 @@ class TestAttributionEngine:
         assert result["rsi_14"] == pytest.approx(5.0)
         assert result["di_spread"] == pytest.approx(5.0)
 
+    def test_partial_close_is_recorded_and_final_price_pnl_uses_remaining_volume(self, tmp_path):
+        engine = AttributionEngine(
+            trade_log_path=str(tmp_path / "trades.jsonl"),
+            stats_snapshot_path=str(tmp_path / "stats.json"),
+        )
+        attr = _make_attribution(
+            position_id=1201,
+            open_price=4500.0,
+            signals={"rsi_14": 0.5, "di_spread": 0.5},
+        )
+        attr.api_volume = 200.0
+        engine.record_open(1201, attr)
+
+        assert engine.record_partial_close(
+            1201,
+            close_price=4510.0,
+            close_ts=100.0,
+            volume=100.0,
+            reason="supervisor_reduce",
+        ) is True
+        result = engine.record_close(
+            1201,
+            close_price=4520.0,
+            close_ts=200.0,
+        )
+
+        # 100 units close at +10, remaining 100 units close at +20.
+        assert sum(result.values()) == pytest.approx(3000.0)
+        entry = json.loads((tmp_path / "trades.jsonl").read_text(encoding="utf-8").strip())
+        assert entry["partial_close_volume"] == pytest.approx(100.0)
+        assert entry["final_close_volume"] == pytest.approx(100.0)
+        assert entry["partial_closes"][0]["reason"] == "supervisor_reduce"
+
     def test_close_unknown_position(self):
         """不存在的 position_id 返回空 dict。"""
         engine = AttributionEngine()

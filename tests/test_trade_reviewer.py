@@ -44,6 +44,8 @@ def test_trade_reviewer_uses_broker_close_ts_for_created_at(tmp_path):
     assert float(row["created_at"]) == close_ts
     assert payload["close_ts"] == close_ts
     assert payload["real_pnl"]["deal_id"] == 323453066
+    assert payload["signal_score"] is None
+    assert "signal_score_missing" in payload["failure_taxonomy"]["evidence_gaps"]
 
 
 def test_trade_reviewer_deduplicates_same_broker_deal(tmp_path):
@@ -181,6 +183,10 @@ def test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination(
             "direction": -1,
             "score": -0.91,
             "risk_verdict": risk_verdict,
+            "execution_context": {"actual_api_volume": 100.0},
+            "sizing_trace": {"final_api_volume": 300.0},
+            "event_context": {"event_near": True},
+            "decision_quality_context": {"context_state": {"event_window_state": "none"}},
             "data_quality_context": {
                 "schema_version": "entry_data_quality_context.v1",
                 "quote_fresh": True,
@@ -245,6 +251,11 @@ def test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination(
     assert review["regime_id"] == "trend"
     assert review["entry_regime"] == "trend"
     assert review["entry_timing_context"]["signal_to_fill_delay_seconds"] == 607.0
+    assert review["signal_score"] == -0.91
+    assert review["action_score"] == -0.91
+    assert review["summary_consistency"]["overall"] == "mismatch"
+    assert review["summary_consistency"]["checks"]["sizing_trace_matches_execution"]["status"] == "mismatch"
+    assert review["summary_consistency"]["checks"]["event_context_vs_factor_context"]["status"] == "different_scopes"
     assert review["primary_responsibility"] == "data_quality"
     assert "market_data_stale" in labels
     assert "signal_execution_delay" in labels

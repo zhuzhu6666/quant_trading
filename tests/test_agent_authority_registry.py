@@ -12,11 +12,12 @@ def test_agent_authority_registry_lists_current_source_agents():
     listing = registry.list_agents()
 
     assert listing["schema_version"] == "agent_authority_registry.v1"
-    assert listing["registered_agents"] == 6
+    assert listing["registered_agents"] == 7
     assert {item["source_agent"] for item in listing["sources"]} == {
         "v16_brain",
         "autonomous_learning",
         "factor_governance",
+        "position_supervisor_governance",
         "factor_pruning_governance",
         "llm_advisory",
         "lightgbm_shadow_models",
@@ -130,7 +131,7 @@ def test_agent_authority_status_reports_unknown_sources(tmp_path):
     status = AgentAuthorityRegistryService().status(db_path=db_path)
 
     assert status["status"] == "degraded"
-    assert status["registered_agents"] == 6
+    assert status["registered_agents"] == 7
     assert status["unknown_sources"][0]["source_agent"] == "mystery_agent"
 
 
@@ -203,6 +204,54 @@ def test_manual_bridge_policy_suggestion_is_not_direct_write_violation(tmp_path)
              reason, evidence_json, status, created_at)
             VALUES ('brain_bridge_1', 'factor', 'rsi_14', 'downweight',
                     0.7, 'manual bridge', ?, 'proposed', 10.0)
+            """,
+            (json.dumps(evidence),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = AgentAuthorityRegistryService().status(db_path=db_path)
+
+    assert status["status"] == "ok"
+    assert status["contract_violations"] == []
+
+
+def test_demo_system_bridge_is_not_direct_write_violation(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE policy_suggestion (
+                suggestion_id TEXT PRIMARY KEY,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                confidence REAL DEFAULT 0.0,
+                reason TEXT DEFAULT '',
+                evidence_json TEXT DEFAULT '{}',
+                status TEXT DEFAULT 'proposed',
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        evidence = {
+            "source_agent": "v16_brain",
+            "bridge": {
+                "manual_only": False,
+                "automatic_demo": True,
+                "demo_nursery": True,
+                "actor": "system:autonomous_demo_nursery.brain_bridge",
+            },
+        }
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             reason, evidence_json, status, created_at)
+            VALUES ('brain_bridge_demo_1', 'factor', 'rsi_14', 'downweight',
+                    0.7, 'demo system bridge', ?, 'proposed', 10.0)
             """,
             (json.dumps(evidence),),
         )

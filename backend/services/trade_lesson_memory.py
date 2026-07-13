@@ -175,6 +175,11 @@ def build_trade_lesson(row: Any) -> dict[str, Any]:
         "entry_reason": {
             "entry_decision_id": str(_row_get(row, "entry_decision_id", "") or ""),
             "top_factor": review.get("top_factor") or "",
+            "largest_contribution_factor": (
+                review.get("largest_contribution_factor")
+                or review.get("top_factor")
+                or ""
+            ),
             "top_weight_factor": review.get("top_weight_factor") or "",
             "signal_score": review.get("signal_score"),
             "summary_text": str(_row_get(row, "summary_text", "") or ""),

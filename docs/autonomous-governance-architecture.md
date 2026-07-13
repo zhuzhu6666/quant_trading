@@ -1,7 +1,7 @@
 # Autonomous Governance Architecture
 
 > Status: active
-> Last verified: 2026-07-07
+> Last verified: 2026-07-14
 > Scope: governance architecture for live trading, risk, learning, models, autonomous governance, autonomous brain, and operator surfaces.
 
 本文回答一个问题：当前系统这么多规则、模型、学习器和自治大脑，到底如何治理，谁在链路中的哪个位置，能做什么，不能做什么。
@@ -43,7 +43,8 @@
 | broker 执行 | cTrader bridge + live execution pipeline | cTrader 是 live broker 状态和成交事实源 |
 | 学习样本 | `autonomous_learning_sample` + evidence contract | 不能从模型输出倒推真实标签 |
 | 模型能力 | `model_permissions` + `RiskPolicyService` model stage gate | shadow/advisory 默认不能 live trading |
-| 智能体权责合同 | `AgentAuthorityRegistryService` -> readiness `agent_authority` | 统一登记 source agent、allowed writes、control surfaces、required gates、authority state 和 forbidden actions；未知来源只能 review-only，LLM 永远 advisory-only |
+| 智能体权责合同 | `AgentAuthorityRegistryService` -> readiness `agent_authority` | 统一登记 7 个 source agent、allowed writes、control surfaces、required gates、authority state 和 forbidden actions；未知来源只能 review-only，LLM 永远 advisory-only |
+| 自主变更命令闸门 | `V16CommandGate` -> `v16_brain_command` | 扩张性 mutation 必须持有近期、目标/scope/action/证据一致的 V16 delegate；先 claim、再单次 consume，重复 worker 不能复用同一命令；缺命令 fail-closed，rollback/reduce/tighten 保留风险收紧例外 |
 | 智能体质量/简报反馈 | `AgentScorecardService` + `AgentBriefingContextService` -> readiness `agent_scorecard` / `agent_briefing` / `agent_chain_health` | 只读统计 agent 提案、候选、应用、效果、合同违规、治理覆盖率和交易复盘反馈，并生成统一战况简报；可收紧证据要求和审查严格度，但不改变权限、不执行动作 |
 | 统一建议总线 | `ProposalRegistryService` -> `proposal_registry` | 归一化、展示、来源可靠性、证据新鲜度、冲突检测和审查；主汇总只统计当前可行动提案，历史/shadow/needs_evidence 噪音保留在 raw 字段；不审批、不应用 |
 | 实盘自治解锁 | `LiveAutonomyService` -> `live_autonomy_unlock_event` + runtime overlay/snapshot | 一次性人工解锁/撤销能力开关，持续输出 operational posture，不下单、不绕过风控 |
@@ -117,10 +118,14 @@ flowchart TD
         BrainMemory["BrainMemoryService"]
         Planner["BrainActionPlannerService"]
         Evaluator["BrainActionPlanEvaluatorService"]
+        Orchestrator["V16BrainOrchestratorService\njudge + delegate only"]
+        Commands["v16_brain_command\ncommand ledger"]
+        CommandGate["V16CommandGate\nclaim + consume + evidence binding"]
         LowImpact["BrainLowImpactExecutorService"]
         MediumGov["BrainMediumImpactGovernanceService"]
         CandidateReview["BrainGovernanceCandidateReviewService"]
         Guardrail["BrainLiveReadyGuardrailService"]
+        Specialists["downstream specialist agents\nexisting governors"]
     end
 
     subgraph U["操作面"]
@@ -172,12 +177,17 @@ flowchart TD
 
     State --> BrainState
     BrainMemory --> BrainState
-    BrainState --> Planner --> Evaluator --> LowImpact
-    Evaluator --> MediumGov --> CandidateReview
+    BrainState --> Orchestrator
+    Orchestrator --> Planner --> Evaluator
+    Evaluator --> Orchestrator
+    Orchestrator --> LowImpact
+    Orchestrator --> MediumGov --> CandidateReview
+    Orchestrator --> Commands --> CommandGate --> Specialists
+    CommandGate -.authorize only.-> DecisionPolicy
     BrainState --> Guardrail
     Planner --> ProposalRegistry
     CandidateReview --> ProposalRegistry
-    CandidateReview -.manual bridge.-> Suggestions
+    CandidateReview -.demo system bridge / non-demo explicit bridge.-> Suggestions
     Guardrail -.tighten only.-> Incident --> RiskPolicy
     Guardrail --> LiveAutonomy
 
@@ -190,6 +200,8 @@ flowchart TD
 - 横向看，系统有多条并行证据链。
 - 纵向看，真实动作必须穿过风控、决策和配置写入口。
 - 虚线表示候选、审查或收紧路径，不表示直接执行权限。
+- V16 元大脑只负责感知、因果仲裁、优先级和命令交接；`v16_brain_command` 不是配置写入口。实际变更必须由目标专员和既有 Governor 执行，并继续经过 `V16CommandGate`、`RiskPolicyService`、`DecisionPolicy`、`RuntimeConfigMutationService`；V16 不直接写建议、overlay、权重、模板、订单或 broker。命令采用 claim/consume 单次凭证，绑定 candidate、posterior/evidence fingerprint 和 target scope；运行时变更入口会自动识别治理字段，调用方不能用旧的 `require_v16_command=False` 忘记闸门。服务启动时仅恢复已经持久化且已生效的模板/overlay 事实，不视为新决策。风险回滚、减仓、降权、收紧保护可以走已有风险收紧通道，但不能借此扩大风险。
+- `FactorGovernanceOrchestrator` 保留因子目录、生命周期和权重治理权，但只读取并转交参数模板证据；参数模板/上下文模板的实际激活归 `autonomous_learning`，`EvolutionOrchestrator` 只产生 canary evidence/candidate，不再保留隐藏的 RegistryAdapter 生命周期写入。两个智能体都保留，执行责任不重复。
 
 ## 3. Layer 1: 事实层
 
@@ -215,6 +227,7 @@ flowchart TD
 允许行为：
 
 - 记录事实、审计、快照和后验结果。
+- V16 记忆不是把原始复盘文本直接升级成全局结论：监督后验按 `close_ts` 事件时间排序，成熟后与交易复盘按交易/持仓因果范围做 `memory_posterior_reconciliation.v1`；最终可复用的结论写入 `posterior_arbitration` 投影，过期或被拒绝的建议只保留在来源审计表，不进入当前记忆索引。
 - 给上层提供可追溯输入。
 - 用 `scripts/state_query.py` 做只读排查。
 
@@ -464,7 +477,7 @@ ledger / lifecycle / trace / replay
 |---|---|---|---|
 | open quality LightGBM | `research/open_quality_lightgbm.py` | 评估开仓质量 | shadow audit |
 | position quality LightGBM | `research/position_quality_lightgbm.py` | 评估持仓质量 | shadow audit |
-| factor governance LightGBM | `research/factor_governance_lightgbm.py` | 因子弱化建议 | advisory/shadow evidence |
+| factor governance LightGBM | `research/factor_governance_lightgbm.py` | 因子弱化建议；demo nursery 强证据可规范化为受控 `downweight` 建议 | advisory/shadow evidence -> governed policy suggestion |
 | meta model LightGBM | `research/meta_model_lightgbm.py` | 全局姿态评分 | meta shadow report |
 | meta governance sidecar | `backend/services/meta_governance.py` | 全局 observe/block/review 建议 | meta suggestion |
 | shadow/canary runner | `research/model_shadow_queue.py` / `research/model_canary.py` | shadow 和 canary 审计 | model audit |
@@ -592,13 +605,15 @@ ledger / lifecycle / trace / replay
 | live loop | `quant-backend.service` | tick / broker state 驱动 | 是 | 有，但只执行风控允许动作 | 写 ledger、调用 RiskPolicy、触达 cTrader |
 | position supervisor | backend live loop | 持仓期间周期评估 | 是 | 没有直接执行权 | 输出建议，再进 RiskPolicy |
 | learning worker | `quant-learning-worker.service` | 定时/backfill | 是 | 无 broker 执行权 | 写 samples、suggestions、effects |
-| factor governance | learning worker | 定时 governance cron | 是 | 有配置治理权，但受限 | 走 RiskPolicy、DecisionPolicy、overlay |
+| factor governance | learning worker | 定时 governance cron | 是 | 因子目录、生命周期、权重治理；参数模板只读转交 | 先过近期 V16 command，再走 RiskPolicy、DecisionPolicy、overlay；模板执行交给 autonomous learning；rollback/downweight 可走收紧例外 |
+| position supervisor governance | backend/learning worker | supervisor template cycle | 是 | 仅有模板治理权 | 先过 V16 command，再走 RiskPolicy、RuntimeConfigMutationService；无 broker 直写权 |
+| autonomous learning | learning worker | learning/evolution cycle | 是 | 参数/模板/学习账本受限写入 | 先过近期 V16 command，再走 DecisionPolicy、RiskPolicy、实验准入和 mutation boundary |
 | AWE | backend live attribution pipeline | 权重建议 | 是 | 仅可经共享实验准入、DecisionPolicy、RiskPolicy 和 mutation boundary 写权 | 每次生效必须写 application/effect；有 active 同 scope 实验时等待证据 |
-| LightGBM models | research/worker | shadow/advisory | 是 | 无直接执行权 | 写 shadow audit |
+| LightGBM models | research/worker | shadow/advisory | 是 | 无直接执行权 | 写 shadow audit；`demo_nursery` 由既有治理服务把符合证据门的 factor model 建议转成受控 `policy_suggestion` |
 | LLM advisory | research/service | 显式调用或审查 | 是 | 无授权权 | 写 advisory audit |
 | replay harness | API/brain/manual | 显式或计划触发 | 是 | 无交易执行权 | 写 replay_report |
 | autonomy health | readiness/worker | 周期汇总 | 是 | 只能作为收紧证据 | 写 health snapshot / enforcement evidence |
-| autonomous brain | API/services | 读取/计划/审查/低影响动作 | 是 | 低影响白名单和收紧-only | 写 brain ledgers，候选回旧治理链 |
+| autonomous brain / V16 | API/services | 读取/计划/审查/委派 | 是 | 只判断和指挥，不直接 mutation | 写 brain ledgers/command ledger；目标专员执行，缺近期 command 自动阻断 |
 | Web console | Caddy/API | 人机操作面 | 是 | 无本地执行权 | 触发受控 API |
 
 结论：
@@ -616,16 +631,16 @@ ledger / lifecycle / trace / replay
 | 平仓 | supervisor / broker sync / operator | `RiskPolicyService.evaluate("close_position")` -> cTrader | close ledger、position lifecycle、trade review | 受控自动 |
 | 减仓 | supervisor | `RiskPolicyService.evaluate("reduce_position")` -> cTrader | supervisor trace、position lifecycle | 受控自动 |
 | 收紧保护 | supervisor / guardrail | `RiskPolicyService.evaluate(...)` -> amend | supervisor trace、lifecycle | 受控自动 |
-| 因子权重变更 | AWE / FactorGovernanceOrchestrator / brain candidate bridge | `LearningExperimentAdmissionService` + `DecisionPolicy` + governance audit | evolution decision、overlay/snapshot、application/effect、catalog snapshot | 单 scope 单实验、materiality 门下受限自动 |
-| 参数模板切换 | learning / governance / operator | `RiskPolicyService.evaluate("switch_parameter_template")` + `RuntimeConfigMutationService` | policy_suggestion、overlay/snapshot、application log | demo autonomous 白名单内可自动 |
-| supervisor 模板切换 | supervisor learning / autonomous learning / operator | `RiskPolicyService.evaluate("switch_position_supervisor_template")` + `RuntimeConfigMutationService` | policy_suggestion、overlay/snapshot、application log/effect | demo autonomous 白名单内可自动 |
+| 因子权重变更 | AWE / FactorGovernanceOrchestrator / brain candidate bridge | `V16CommandGate` + 原子实验预留 + `LearningExperimentAdmissionService` + `DecisionPolicy` + governance audit | evolution decision、overlay/snapshot、application/effect、catalog snapshot | 单 scope 单实验、全局 24 槽位原子预留、materiality 门下受限自动 |
+| 参数模板切换 | autonomous learning（factor governance 只转交证据） | `RiskPolicyService` + `V16CommandGate` claim/consume + `LearningExperimentAdmissionService.reserve_scope` + `RuntimeConfigMutationService` | policy_suggestion、overlay/snapshot、application/effect、reservation | demo autonomous 自动；同一 scope 替换时先收敛旧 effect，不重复占用全局槽位 |
+| supervisor 模板切换 | autonomous learning / position supervisor governance | `RiskPolicyService` + `V16CommandGate` claim/consume + `LearningExperimentAdmissionService.reserve_scope` + `RuntimeConfigMutationService` | overlay/snapshot、application/effect、reservation | demo autonomous 自动；同一 scope 替换受统一实验预算约束 |
 | incident mode 收紧 | autonomy health / brain guardrail / operator | `RiskPolicyService.evaluate("set_incident_control")` + incident control service | runtime incident mode、overlay/snapshot、enforcement event | tightening-only 可自动或显式 |
 | incident mode 放松 | operator | `RiskPolicyService.evaluate("set_incident_control")` + confirm thaw | overlay/snapshot | 不应由 brain 自动放松 |
 | replay job | operator / brain P3 | `RiskPolicyService.evaluate("run_replay_job")` | replay_report、brain_low_impact_execution | 低影响白名单内可执行 |
-| governance candidate submit | operator / brain bridge | candidate review + bridge compatibility + old governance queue | brain candidate、policy_suggestion | 当前应显式触发 |
+| governance candidate submit | demo nursery system / non-demo explicit bridge | candidate review + bridge compatibility + old governance queue | brain candidate、policy_suggestion | demo 自动触发；非 demo 显式触发 |
 | 模型阶段推进 | model promotion pipeline | model permissions + RiskPolicy model gate | model_permission_audit、shadow/canary audit | shadow/advisory；live trading blocked |
-| release / approval | operator/release service | release_control APIs | release_run、release_approval_event | 审计，不直接改交易 |
-| proposal review | operator / brain meta-governance | Proposal Registry review-only API | proposal_registry.review_json | 不审批、不应用、不改来源状态 |
+| release / approval | demo nursery system / release service | release_control APIs | release_run、release_approval_event | demo 自动形成审计，不直接改交易 |
+| proposal review | demo nursery system / brain meta-governance | Proposal Registry review-only API + existing governor | proposal_registry.review_json | Registry 本身不授权；demo 由既有 governor 自动决定是否进入 apply |
 | live_autonomous unlock/revoke | operator + LiveAutonomyService | readiness + proposal conflicts + RiskPolicy budget + RuntimeConfigMutationService | live_autonomy_unlock_event、overlay/snapshot | 一次性人工解锁；撤销回 `live_candidate` |
 
 ## 15. Proposal Lifecycle Registry
@@ -640,7 +655,7 @@ ledger / lifecycle / trace / replay
 - shadow/advisory model audit
 - LLM advisory audit
 
-当前已落地 `AgentAuthorityRegistryService` 作为智能体权责合同，`AgentScorecardService` 作为只读质量反馈，`AgentBriefingContextService` 作为多智能体共享战况简报，`ProposalRegistryService` / `proposal_registry` 作为统一读模型。Proposal Registry 不迁移旧表、不删除旧队列，也不负责授权；它把旧表和 shadow/advisory audit 显式映射到统一 proposal envelope，并由权责合同生成 `required_gate`、`authority_state` 和边界说明。scorecard/briefing 可以把低可靠来源路由到 `needs_evidence` 或提高 candidate review 严格度，但高分只能提高审查优先级，不能扩大权限、改权重或下单。新增建议类模块必须先登记 source agent 权责，再至少能表达这些字段：
+当前已落地 `AgentAuthorityRegistryService` 作为智能体权责合同，`AgentScorecardService` 作为只读质量反馈，`AgentBriefingContextService` 作为多智能体共享战况简报，`V16CommandGate` 作为元大脑到专员的命令闸门，`ProposalRegistryService` / `proposal_registry` 作为统一读模型。Proposal Registry 不迁移旧表、不删除旧队列，也不负责授权；它把旧表和 shadow/advisory audit 显式映射到统一 proposal envelope，并由权责合同生成 `required_gate`、`authority_state` 和边界说明。投影层按 source/scope/action 去重，维护型噪音不进入可行动建议，但原始来源账本始终保留。scorecard/briefing 可以把低可靠来源路由到 `needs_evidence` 或提高 candidate review 严格度，但高分只能提高审查优先级，不能扩大权限、改权重或下单。新增建议类模块必须先登记 source agent 权责，再至少能表达这些字段：
 
 | 字段 | 含义 |
 |---|---|
@@ -654,7 +669,7 @@ ledger / lifecycle / trace / replay
 | `confidence` | 来源置信度，不等于授权 |
 | `evidence_refs` | replay、sample、review、shadow audit、memory 等证据 |
 | `counter_evidence_refs` | 反证、失败记忆或冲突 evidence |
-| `required_gate` | RiskPolicyService / DecisionPolicy / manual bridge / release |
+| `required_gate` | RiskPolicyService / DecisionPolicy / governed bridge（demo 自动，非 demo 显式）/ release |
 | `risk_verdict` | 已有风控裁决或 preview，不等于最终授权 |
 | `decision_policy_preview` | 权重/治理类建议的 DecisionPolicy 预览 |
 | `expected_effect` | 预期改善指标 |
@@ -663,7 +678,7 @@ ledger / lifecycle / trace / replay
 | `status` | proposed / reviewing / blocked / approved / applied / observing / rolled_back / superseded |
 | `authority_state` | advisory_only / review_only / pending_governance / governed_apply 等授权状态 |
 | `source_reliability` / `evidence_freshness` | 来源可信度和证据新鲜度，只供排序、审查和 degraded 判断 |
-| `boundary` | 明确是否影响交易、是否写 overlay、是否需要人工 |
+| `boundary` | 明确是否影响交易、是否写 overlay、demo 是否需要人工（demo 不需要；live unlock 另有人工闸门） |
 
 这个 envelope 的治理意义：
 
@@ -685,6 +700,7 @@ ledger / lifecycle / trace / replay
 - `agent_generation_context` 必须随 governance candidate lineage 写入，记录生成时的 authority verdict、scorecard、近期负反馈和 review rules；它只服务审查、复盘和反证，不扩大权限。
 - readiness `candidate_generation_context_coverage` 持续审计候选是否带 required context；缺新 context 是 degraded，历史旧候选只标 legacy。
 - `factor_pruning_governance.bridge_ready_candidates` 虽然可在 `demo_nursery` 下限速桥接，但每个候选必须先通过 `BrainGovernanceCandidateReviewService.review_candidate`；低可靠来源、负反馈或合同违规会阻断自动桥接并写入 review 审计。
+- `factor_governance_lightgbm` 的 demo bridge 不是模型授权：只接受 `used_in_score=true` 的 alpha 因子、至少 2 条独立弱样本、平均 weakness >= 0.85 和 `advisory_only=true` 的 evidence，固定映射为 `downweight`；模型建议若没有该 bridge envelope，Governor 必须拒绝，不能因模型分数高而放宽权限。
 - `/api/ops/brain/governance-candidates/{candidate_id}/submit` 和底层 `BrainGovernanceCandidateService.submit_candidate_to_policy_suggestion()` 都必须看到最新单候选 review 且 `bridge_ready=true`；preview 仍只判断材料是否可桥接，避免和 review 流程互相依赖。
 - readiness `candidate_bridge_review_coverage` 持续审计已桥接的 `policy_suggestion` 是否有 `candidate_review_required_before_submit` review 合同；缺新 review 是 degraded，历史旧桥接只标 legacy。
 - readiness `proposal_generation_context_coverage` 持续审计 `policy_suggestion` evidence/lineage 是否携带 `agent_generation_context`；显式 required 缺失会 degraded，历史旧提案只标 legacy，Proposal Registry 不因此审批、拒绝或应用提案。
@@ -729,9 +745,9 @@ ledger / lifecycle / trace / replay
 | 输出是什么 | signal、verdict、proposal、audit、config patch、broker action |
 | 是否影响交易 | affects_trading true/false |
 | impact level | observe/shadow/low/medium/high |
-| 必经 gate | RiskPolicyService、DecisionPolicy、model permissions、manual bridge、release |
+| 必经 gate | RiskPolicyService、DecisionPolicy、model permissions、governed bridge（demo 自动，非 demo 显式）、release |
 | 审计表是什么 | 必须可追溯 |
-| 回滚或降级方式 | rollback_json、snapshot、incident tighten、manual review |
+| 回滚或降级方式 | rollback_json、snapshot、incident tighten、system evidence review；live unlock 仍可人工撤销 |
 | 前端如何展示 | 只展示事实和受控动作，不重算 |
 
 没有这张声明的新模块，不应进入 live 或治理主链。

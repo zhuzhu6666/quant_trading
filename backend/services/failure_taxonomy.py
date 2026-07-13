@@ -12,6 +12,19 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(default)
 
 
+def _optional_float(*values: Any) -> float | None:
+    """Return the first parseable score without treating missing as zero."""
+
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return None
+
+
 def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict(review or {})
     labels: list[str] = []
@@ -24,7 +37,11 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
     profit_capture_ratio = _safe_float(payload.get("profit_capture_ratio"))
     holding_seconds = _safe_float(payload.get("holding_seconds"))
     time_decay_score = _safe_float(payload.get("time_decay_score"))
-    action_score = _safe_float(payload.get("action_score"))
+    signal_score = _optional_float(
+        payload.get("signal_score"),
+        payload.get("action_score"),
+        payload.get("entry_score"),
+    )
     close_reason = str(payload.get("close_reason") or "")
     direction = str(payload.get("direction") or payload.get("side") or "").lower()
     thesis_status = str(payload.get("thesis_status_at_exit") or payload.get("thesis_status") or "")
@@ -60,6 +77,14 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
     factor_conflict_ratio = _safe_float(decision_quality_context.get("factor_conflict_ratio"))
     negative_contribution_abs = _safe_float(decision_quality_context.get("negative_contribution_abs"))
     positive_contribution_abs = _safe_float(decision_quality_context.get("positive_contribution_abs"))
+    effective_alpha_factor_count = _safe_float(
+        decision_quality_context.get("effective_alpha_factor_count"),
+        _safe_float(decision_quality_context.get("n_active_alpha_factors")),
+    )
+    factor_conflict_supported = (
+        factor_conflict_ratio >= 0.4
+        and effective_alpha_factor_count >= 3
+    )
     bar_close_location = _safe_float(bar_context.get("bar_close_location"), 0.5)
     chased_long = direction in {"buy", "long"} and bar_close_location >= 0.82
     chased_short = direction in {"sell", "short"} and bar_close_location <= 0.18
@@ -67,7 +92,8 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
 
     if entry_quality >= 0.6 and exit_quality <= 0.45:
         labels.append("entry_good_exit_bad")
-    if mfe > 0 and giveback_ratio >= 0.5 and profit_capture_ratio < 0.7:
+    meaningful_mfe = mfe >= max(2.0, mae * 0.35)
+    if meaningful_mfe and giveback_ratio >= 0.5 and profit_capture_ratio < 0.7:
         labels.append("alpha_correct_but_capture_failed")
     if close_reason == "holding_timeout" or (holding_seconds >= 24 * 3600 and time_decay_score <= 0.35):
         labels.append("holding_too_long")
@@ -95,9 +121,9 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
                 labels.append(str(label))
     if pnl <= 0 and (chased_long or chased_short):
         labels.append("entry_chase")
-    if pnl <= 0 and abs(action_score) < 0.45 and entry_quality <= 0.5:
+    if pnl <= 0 and signal_score is not None and abs(signal_score) < 0.45 and entry_quality <= 0.5:
         labels.append("weak_signal_overtraded")
-    if pnl <= 0 and (factor_conflict_ratio >= 0.4 or negative_contribution_abs > positive_contribution_abs):
+    if pnl <= 0 and factor_conflict_supported:
         labels.append("conflicting_factor_entry")
     if pnl <= 0 and mfe <= max(2.0, mae * 0.35) and mae >= 5.0:
         labels.append("low_reward_to_risk_entry")
@@ -149,5 +175,11 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
         "responsibility_labels": labels,
         "confidence": round(confidence, 3),
         "context_integrity": context_integrity,
+        "evidence_gaps": [
+            gap for gap, missing in (
+                ("signal_score_missing", signal_score is None),
+                ("factor_count_missing", effective_alpha_factor_count < 1),
+            ) if missing
+        ],
         "system_issue_context": system_issue_context or {},
     }

@@ -2685,9 +2685,14 @@ def _summary_from_review(review: dict[str, Any], *, pnl: float, outcome_label: s
         parts.append(f"primary_responsibility={primary}")
     if labels:
         parts.append(f"system_issue={','.join(labels[:4])}")
-    factor_hint = str(review.get("top_factor") or review.get("top_weight_factor") or "")
-    if factor_hint:
-        parts.append(f"factor_hint={factor_hint}")
+    largest_contribution_factor = str(
+        review.get("largest_contribution_factor")
+        or review.get("top_factor")
+        or review.get("top_weight_factor")
+        or ""
+    )
+    if largest_contribution_factor:
+        parts.append(f"largest_contribution_factor={largest_contribution_factor}")
     worst = str(review.get("worst_factor") or "")
     if worst:
         parts.append(f"worst_factor={worst}")
@@ -3525,6 +3530,22 @@ def _auto_apply_position_supervisor_template_suggestions(
                 )
                 skipped.append({"suggestion_id": suggestion_id, "reason": "risk_blocked", "risk_verdict": verdict})
                 continue
+            from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
+
+            experiment_admission = LearningExperimentAdmissionService(db_path).reserve_scope(
+                scope_type="position_supervisor_template",
+                scope_key=target_template_id,
+                action="switch_position_supervisor_template",
+                allow_active_replacement=True,
+            )
+            if not experiment_admission.get("allowed"):
+                skipped.append({
+                    "suggestion_id": suggestion_id,
+                    "reason": str(experiment_admission.get("status") or "experiment_admission_blocked"),
+                    "experiment_admission": experiment_admission,
+                })
+                continue
+            reservation_id = str(experiment_admission.get("reservation_id") or "")
             mutation = RuntimeConfigMutationService(db_path).apply_patch(
                 {"position_supervisor_template_id": target_template_id},
                 source="position_supervisor_template_switch",
@@ -3532,7 +3553,20 @@ def _auto_apply_position_supervisor_template_suggestions(
                 actor="system:autonomous_learning",
                 action="switch_position_supervisor_template",
                 reason=f"demo_autonomous applied suggestion {suggestion_id}",
+                require_v16_command=is_state_db_path(db_path),
+                v16_target_agent="position_supervisor_governance",
+                v16_scope_type="supervisor_template",
+                v16_scope_key=target_template_id,
+                v16_action="switch_position_supervisor_template",
             )
+            if mutation.get("ok") is False:
+                LearningExperimentAdmissionService(db_path).release_reservations([reservation_id])
+                skipped.append({
+                    "suggestion_id": suggestion_id,
+                    "reason": "v16_command_required",
+                    "mutation": mutation,
+                })
+                continue
             snapshot = dict(mutation.get("snapshot") or {})
             now_ts = time.time()
             application_id = f"psv_apply_{int(now_ts)}_{suggestion_id[-8:]}"
@@ -3548,6 +3582,7 @@ def _auto_apply_position_supervisor_template_suggestions(
                 "mutation": mutation,
                 "config_version": int(snapshot.get("config_version") or 0),
                 "config_hash": str(snapshot.get("config_hash") or ""),
+                "experiment_reservation_id": reservation_id,
             }
             _execute(
                 conn,
@@ -3579,6 +3614,10 @@ def _auto_apply_position_supervisor_template_suggestions(
                     _dumps(details),
                     now_ts,
                 ),
+            )
+            LearningExperimentAdmissionService(db_path).finalize_reservation(
+                reservation_id,
+                application_id=application_id,
             )
             _execute(
                 conn,
@@ -3712,7 +3751,20 @@ def _auto_rollback_position_supervisor_template(
                 actor="system:autonomous_learning",
                 action="rollback_position_supervisor_template",
                 reason=f"rollback ineffective supervisor template {application_id}",
+                require_v16_command=is_state_db_path(db_path),
+                v16_target_agent="position_supervisor_governance",
+                v16_scope_type="supervisor_template",
+                v16_scope_key=target_template_id,
+                v16_action="rollback_position_supervisor_template",
+                risk_reduction=True,
             )
+            if mutation.get("ok") is False:
+                skipped.append({
+                    "application_id": application_id,
+                    "reason": "runtime_mutation_blocked",
+                    "mutation": mutation,
+                })
+                continue
             snapshot = dict(mutation.get("snapshot") or {})
             now_ts = time.time()
             rollback = {
@@ -3777,6 +3829,23 @@ def _run_demo_nursery_factor_pruning_governance(*, db_path: str | Path, bridge_l
             "enabled": False,
             "mode": mode,
         }
+    try:
+        from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
+
+        model_advisories = FactorGovernanceLightGBMService(db_path=db_path).materialize_demo_governance_advisories(
+            limit=5000,
+            min_weakness_score=0.85,
+            min_weak_sample_count=2,
+            max_factors=10,
+        )
+    except Exception as exc:
+        model_advisories = {
+            "schema_version": "factor_governance_demo_bridge.v1",
+            "enabled": True,
+            "materialized": False,
+            "count": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     from backend.services.factor_pruning_governance import FactorPruningGovernanceService
 
     service = FactorPruningGovernanceService(db_path)
@@ -3791,6 +3860,7 @@ def _run_demo_nursery_factor_pruning_governance(*, db_path: str | Path, bridge_l
         "schema_version": "demo_nursery_factor_pruning_governance.v1",
         "enabled": True,
         "mode": mode,
+        "model_advisories": model_advisories,
         "materialize": materialize,
         "promote": promote,
         "bridge": bridge,
@@ -3820,6 +3890,20 @@ def apply_demo_autonomy(
         }
         finish_evolution_run(str(run.get("run_id") or experiment_id), status="skipped", summary=payload, db_path=db_path)
         return payload
+    demo_effect_reconcile = {}
+    if _autonomy_mode() == "demo_nursery":
+        from research.learning.governor import RuleEvolutionGovernor
+
+        # Demo nursery must not let an old observation-only window occupy a
+        # scope indefinitely.  One day is long enough to collect a live demo
+        # observation, while an absent/insufficient baseline is explicitly
+        # closed as inconclusive and retried through a new governed application.
+        demo_effect_reconcile = RuleEvolutionGovernor(str(db_path)).reconcile_application_effects(
+            application_limit=2000,
+            mixed_recheck_after_seconds=0.0,
+            max_observation_age_seconds=86400.0,
+            terminalize_mixed_after_recheck=True,
+        )
     factor_pruning_governance = _run_demo_nursery_factor_pruning_governance(db_path=db_path, bridge_limit=5)
     conn = _connect(db_path)
     try:
@@ -3866,6 +3950,7 @@ def apply_demo_autonomy(
         "enabled": True,
         "mode": _autonomy_mode(),
         "experiment_id": experiment_id,
+        "demo_effect_reconcile": demo_effect_reconcile,
         "factor_pruning_governance": factor_pruning_governance,
         "approvals": approvals,
         "governance_conflicts": governance_conflicts,

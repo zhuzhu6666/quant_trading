@@ -11,11 +11,13 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any
 
 from alpha.decision_policy import DecisionPolicy
 from alpha.portfolio_compositor import resolve_factor_role
-from backend.core.db import get_state_pg_conn
+from backend.core.db import get_state_pg_conn, is_state_db_path
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
 from backend.services.factor_redundancy import RedundancyDetector
 from backend.services.agent_authority import AgentAuthorityRegistryService
@@ -39,8 +41,21 @@ def _p(sql: str) -> str:
     return sql.replace("?", "%s")
 
 
+def _json_default(value: Any) -> Any:
+    """Normalize governance result objects before they enter JSON ledgers."""
+    if hasattr(value, "to_api"):
+        return value.to_api()
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
 def _dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=_json_default)
 
 
 def _loads(raw: Any, default: Any) -> Any:
@@ -115,6 +130,39 @@ class FactorGovernanceOrchestrator:
                 finish_evolution_run(run["run_id"], status=status, summary=summary)
                 return summary
             cfg = runtime_config.shared()
+            v16_authority: dict[str, Any] = {}
+            if is_state_db_path(self.overlay.db_path):
+                from backend.services.v16_command_gate import V16CommandGate
+
+                v16_authority = V16CommandGate.authorize(
+                    self.overlay.db_path,
+                    target_agent="factor_governance",
+                    scope_type="factor_weight",
+                    scope_key="alpha_weight_policy",
+                    action="factor_governance_cycle",
+                )
+                if not v16_authority.get("allowed"):
+                    summary = {
+                        "status": "waiting_v16_command",
+                        "reason": "factor_governance_mutation_requires_current_v16_delegate",
+                        "catalog_count": len(catalog),
+                        "actions": actions,
+                        "catalog_snapshot": catalog_snapshot,
+                        "redundancy_report": {},
+                        "v16_authority": v16_authority,
+                    }
+                    finish_evolution_run(
+                        run["run_id"],
+                        status="blocked_by_v16_command",
+                        summary=summary,
+                    )
+                    return summary
+            actions.extend(self._restore_quarantined_builtin_alpha(catalog, run))
+            if actions:
+                catalog = build_factor_catalog()
+            actions.extend(self._activate_healthy_builtin_shadow(catalog, run))
+            if actions:
+                catalog = build_factor_catalog()
             redundancy_report = RedundancyDetector().build_report(
                 catalog,
                 min_samples=int(getattr(cfg, "factor_redundancy_min_samples", 200) or 200),
@@ -125,7 +173,11 @@ class FactorGovernanceOrchestrator:
                 catalog = build_factor_catalog()
             actions.extend(self._promote_shadow_candidates(catalog, run))
             catalog = build_factor_catalog()
-            actions.extend(self._apply_parameter_template_actions(catalog, run))
+            actions.extend(self._apply_parameter_template_actions(
+                catalog,
+                run,
+                v16_command_id=str(v16_authority.get("command_id") or ""),
+            ))
             catalog = build_factor_catalog()
             actions.extend(self._downweight_weak_alpha(catalog, run))
             catalog = build_factor_catalog()
@@ -133,13 +185,21 @@ class FactorGovernanceOrchestrator:
             catalog = build_factor_catalog()
             actions.extend(self._retire_quarantined_discovered(catalog, run))
             summary = {
-                "status": "ok",
+                "status": "completed_with_errors" if any(
+                    str(item.get("status") or "") in {"failed", "error", "mutation_failed"}
+                    for item in actions
+                ) else "ok",
                 "catalog_count": len(catalog),
                 "actions": actions,
                 "catalog_snapshot": catalog_snapshot,
                 "redundancy_report": redundancy_report,
+                "v16_authority": v16_authority,
             }
-            finish_evolution_run(run["run_id"], status=status, summary=summary)
+            finish_evolution_run(
+                run["run_id"],
+                status="completed_with_errors" if summary["status"] == "completed_with_errors" else status,
+                summary=summary,
+            )
             return summary
         except Exception as exc:
             status = "failed"
@@ -213,6 +273,11 @@ class FactorGovernanceOrchestrator:
         return patch
 
     def _apply_runtime_patch(self, patch: dict[str, Any], *, source: str, run_id: str) -> dict[str, Any]:
+        factor_keys = list((patch.get("factor_signal_config") or {}).keys())
+        risk_reduction = any(
+            token in str(source or "").lower()
+            for token in ("rollback", "disable", "downweight", "retire", "quarantine")
+        )
         return RuntimeConfigMutationService(overlay=self.overlay).apply_patch(
             patch,
             source=source,
@@ -220,6 +285,12 @@ class FactorGovernanceOrchestrator:
             actor="system:factor_governance",
             action=source,
             audit=False,
+            require_v16_command=is_state_db_path(self.overlay.db_path),
+            v16_target_agent="factor_governance",
+            v16_scope_type="factor_weight",
+            v16_scope_key=str(factor_keys[0]) if len(factor_keys) == 1 else "alpha_weight_policy",
+            v16_action=source,
+            risk_reduction=risk_reduction,
         )
 
     def _rollback_failed_actions(self, run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -473,7 +544,21 @@ class FactorGovernanceOrchestrator:
             result=result,
         )]
 
-    def _apply_parameter_template_actions(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
+    def _apply_parameter_template_actions(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+        *,
+        v16_command_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Publish template evidence and hand execution to autonomous learning.
+
+        Factor governance keeps its factor lifecycle/weight responsibility;
+        parameter-template activation is owned by ``autonomous_learning``.
+        Keeping this read path here is intentional: factor evidence can still
+        surface a template mismatch, but two agents must not race to activate
+        the same template or write the same runtime overlay.
+        """
         actions: list[dict[str, Any]] = []
         try:
             from backend.services.parameter_templates import ParameterTemplateService
@@ -499,61 +584,40 @@ class FactorGovernanceOrchestrator:
                 "factor_id": factor_id,
                 "target_template_id": target_template_id,
                 "boundary": boundary,
+                "execution_owner": "autonomous_learning",
+                "handoff_reason": "factor_governance_is_not_a_parameter_template_executor",
             }
             item = by_factor[factor_id]
-            if scope == "online_light":
-                verdict = self._risk("switch_parameter_template", item, evidence)
-                if not verdict.allowed:
-                    actions.append(self._audit_action(run, item, "switch_parameter_template", "blocked_by_risk", evidence, verdict))
-                    continue
-                before_cfg = runtime_config.shared().to_dict()
-                current = service.get_active_template(
-                    factor_id=factor_id,
-                    regime_key=str(rec.get("regime_key") or ""),
-                ) or {}
-                if str(current.get("template_id") or "") == target_template_id:
-                    continue
-                result = service.activate_template(
-                    factor_id=factor_id,
-                    template_id=target_template_id,
-                    regime_key=str(rec.get("regime_key") or ""),
-                    suggestion_id=str(rec.get("suggestion_id") or ""),
-                    note="autonomous factor governance online_light switch",
-                )
-                service.sync_runtime_config()
-                after_cfg = runtime_config.shared().to_dict()
-                self._apply_runtime_patch(
-                    {
-                        "factor_signal_config": after_cfg.get("factor_signal_config", {}),
-                        "extra": after_cfg.get("extra", {}),
-                    },
-                    source="factor_governance_parameter_template",
-                    run_id=str(run.get("run_id") or ""),
-                )
-                actions.append(self._audit_action(
-                    run,
-                    item,
-                    "switch_parameter_template",
-                    "applied" if not result.get("blocked") else "blocked_by_risk",
-                    evidence,
-                    verdict,
-                    before={"runtime_config": before_cfg},
-                    after={"runtime_config": runtime_config.shared().to_dict()},
-                    rollback={"runtime_config": before_cfg},
-                    result=result,
-                ))
-            elif scope == "offline_deep":
-                result = self._submit_offline_template_validation(rec)
-                if result:
-                    actions.append(self._audit_action(
-                        run,
-                        item,
-                        "submit_parameter_template_validation",
-                        "applied",
-                        evidence,
-                        RiskVerdict(allowed=True, reason="ok"),
-                        result=result,
-                    ))
+            if scope not in {"online_light", "offline_deep"}:
+                continue
+            current = service.get_active_template(
+                factor_id=factor_id,
+                regime_key=str(rec.get("regime_key") or ""),
+            ) or {}
+            if scope == "online_light" and str(current.get("template_id") or "") == target_template_id:
+                continue
+            action = (
+                "handoff_parameter_template_switch"
+                if scope == "online_light"
+                else "handoff_parameter_template_validation"
+            )
+            verdict = RiskVerdict(allowed=True, reason="handoff_only_no_mutation")
+            actions.append(self._audit_action(
+                run,
+                item,
+                action,
+                "delegated_to_autonomous_learning",
+                evidence,
+                verdict,
+                result={
+                    "target_template_id": target_template_id,
+                    "regime_key": str(rec.get("regime_key") or ""),
+                    "scope": scope,
+                    "v16_command_id": v16_command_id,
+                    "execution_owner": "autonomous_learning",
+                    "applied": False,
+                },
+            ))
         return actions
 
     def _submit_offline_template_validation(self, rec: dict[str, Any]) -> dict[str, Any]:
@@ -877,7 +941,12 @@ class FactorGovernanceOrchestrator:
             name = str(item["factor_id"])
             entry = dict(runtime_config.shared().factor_signal_config.get(name, {}) or {})
             entry["enabled"] = False
-            entry["lifecycle_status"] = entry.get("lifecycle_status", "QUARANTINE")
+            # A live factor that fails again must re-enter the recoverable
+            # quarantine state.  Preserving ACTIVE here would make the next
+            # automatic recovery cycle unable to distinguish it from an
+            # explicit/unknown disable.
+            entry["lifecycle_status"] = "QUARANTINE"
+            entry["disabled_at"] = time.time()
             self._apply_runtime_patch(
                 {"factor_signal_config": {name: entry}},
                 source="factor_governance_disable_live",
@@ -895,6 +964,330 @@ class FactorGovernanceOrchestrator:
                 after={"runtime_config": after_cfg, "enabled": False},
                 rollback={"runtime_config": before_cfg},
             ))
+        return actions
+
+    def _activate_healthy_builtin_shadow(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Autonomously activate explicitly enrolled builtin shadow factors.
+
+        Builtins are already executable code, so they do not need a registry
+        source promotion.  They do need the same evidence boundary as a
+        discovered factor: enough out-of-sample health observations, no
+        current decay, and a governed initial weight.  ``weight == 0`` plus
+        ``lifecycle_status == SHADOW`` is the observation-only state.
+        """
+        cfg = runtime_config.shared()
+        if not bool(getattr(cfg, "factor_governance_builtin_activation_enabled", True)):
+            return []
+
+        min_score = float(getattr(cfg, "factor_governance_builtin_activation_min_health_score", 70.0) or 70.0)
+        min_n_obs = int(getattr(cfg, "factor_governance_builtin_activation_min_n_obs", 500) or 500)
+        max_activations = int(getattr(cfg, "factor_governance_max_builtin_activations_per_cycle", 1) or 1)
+        initial_weight = max(
+            0.01,
+            min(0.50, float(getattr(cfg, "factor_governance_builtin_activation_weight", 0.05) or 0.05)),
+        )
+        signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
+        candidates: list[dict[str, Any]] = []
+        for item in catalog:
+            factor_id = str(item.get("factor_id") or "")
+            entry = signal_cfg.get(factor_id)
+            if not isinstance(entry, dict):
+                continue
+            if item.get("source") != "builtin" or item.get("role") not in {"alpha", "context"}:
+                continue
+            if str(item.get("lifecycle_status") or "").upper() != "SHADOW":
+                continue
+            if not bool(entry.get("autonomous_activation")):
+                continue
+            if not bool(item.get("enabled")) or item.get("lifecycle_status") == "DEAD":
+                continue
+            score = float(item.get("health_score") or 0.0)
+            n_obs = int(item.get("health_n_obs") or 0)
+            if score < min_score or n_obs < min_n_obs:
+                continue
+            if str(item.get("health_status") or "").upper() == "DECAYING":
+                continue
+            model_evidence = self._model_governance_evidence(item, cfg)
+            model_samples = int(model_evidence.get("sample_count") or 0)
+            model_weak_samples = int(model_evidence.get("weak_sample_count") or 0)
+            if (model_samples or model_weak_samples) and (
+                float(model_evidence.get("avg_weakness_score") or 0.0)
+                >= float(getattr(cfg, "factor_governance_builtin_activation_max_weakness", 0.65) or 0.65)
+            ):
+                continue
+            candidates.append({**item, "_model_governance": model_evidence})
+
+        candidates.sort(key=lambda item: (
+            -float(item.get("health_score") or 0.0),
+            -int(item.get("health_n_obs") or 0),
+            str(item.get("factor_id") or ""),
+        ))
+
+        actions: list[dict[str, Any]] = []
+        activated = 0
+        for item in candidates:
+            if activated >= max_activations:
+                break
+            factor_id = str(item.get("factor_id") or "")
+            entry = dict(signal_cfg.get(factor_id, {}) or {})
+            evidence = {
+                "activation_mode": "builtin_shadow_to_live",
+                "health_score": float(item.get("health_score") or 0.0),
+                "health_status": str(item.get("health_status") or "UNKNOWN"),
+                "health_n_obs": int(item.get("health_n_obs") or 0),
+                "current_weight": float((cfg.factor_portfolio_weights or {}).get(factor_id, 0.0) or 0.0),
+                "target_weight": initial_weight if item.get("role") == "alpha" else 0.0,
+                "model_governance": item.get("_model_governance") or {},
+                "thresholds": {
+                    "min_health_score": min_score,
+                    "min_n_obs": min_n_obs,
+                    "max_activations_per_cycle": max_activations,
+                },
+            }
+            verdict = self._risk("promote_factor", item, evidence)
+            if not verdict.allowed:
+                actions.append(self._audit_action(run, item, "promote_factor", "blocked_by_risk", evidence, verdict))
+                continue
+
+            before_cfg = runtime_config.shared().to_dict()
+            active_entry = dict(entry)
+            active_entry.update({
+                "enabled": True,
+                "lifecycle_status": "ACTIVE",
+                "activation_source": "factor_governance_builtin_health_gate",
+                "activated_at": time.time(),
+            })
+            try:
+                if str(item.get("role") or "alpha") == "alpha":
+                    current_weights = dict(cfg.factor_portfolio_weights or {})
+                    factor_configs = self._portfolio_configs(
+                        cfg,
+                        signal_cfg={factor_id: active_entry},
+                    )
+                    weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
+                        source="factor_governance_builtin_activation",
+                        producer="factor_governance_builtin_shadow_activation",
+                        run_id=str(run.get("run_id") or ""),
+                        actor="system:factor_governance",
+                        reason="healthy builtin shadow factor activation",
+                        factor_configs=factor_configs,
+                        current_weights=current_weights,
+                        weight_policy_weights={factor_id: initial_weight},
+                        fast=True,
+                        decision_policy=DecisionPolicy(
+                            redundancy_max_group_weight=float(
+                                getattr(cfg, "factor_redundancy_max_group_weight", 0.35) or 0.35
+                            )
+                        ),
+                        risk_check=lambda _plan, _verdict=verdict: _verdict,
+                        evidence_by_factor={factor_id: evidence},
+                        additional_patch={"factor_signal_config": {factor_id: active_entry}},
+                    )
+                    if weight_result.get("status") != "applied":
+                        actions.append(self._audit_action(
+                            run,
+                            item,
+                            "promote_factor",
+                            "blocked_by_evidence",
+                            {**evidence, "weight_change": weight_result},
+                            verdict,
+                            before={"runtime_config": before_cfg},
+                            after={"runtime_config": before_cfg},
+                            result={"reason": weight_result.get("status"), "weight_change": weight_result},
+                        ))
+                        continue
+                    result = {"activation": "applied", "weight_change": weight_result}
+                else:
+                    result = self._apply_runtime_patch(
+                        {"factor_signal_config": {factor_id: active_entry}},
+                        source="factor_governance_builtin_context_activation",
+                        run_id=str(run.get("run_id") or ""),
+                    )
+                activated += 1
+                actions.append(self._audit_action(
+                    run,
+                    item,
+                    "promote_factor",
+                    "applied",
+                    evidence,
+                    verdict,
+                    before={"runtime_config": before_cfg, "lifecycle_status": "SHADOW"},
+                    after={
+                        "runtime_config": runtime_config.shared().to_dict(),
+                        "lifecycle_status": "ACTIVE",
+                    },
+                    rollback={"runtime_config": before_cfg},
+                    result=result,
+                ))
+            except Exception as exc:
+                logger.exception("[factor_governance] builtin activation failed for %s", factor_id)
+                actions.append(self._audit_action(
+                    run,
+                    item,
+                    "promote_factor",
+                    "failed",
+                    {**evidence, "error": str(exc)},
+                    verdict,
+                    before={"runtime_config": before_cfg, "lifecycle_status": "SHADOW"},
+                    after={"runtime_config": runtime_config.shared().to_dict()},
+                    rollback={"runtime_config": before_cfg},
+                    result={"error": str(exc)},
+                ))
+        return actions
+
+    def _restore_quarantined_builtin_alpha(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Automatically recover quarantined builtin alpha factors.
+
+        Governance previously had a one-way path: a weak factor was marked
+        ``enabled=false``/``QUARANTINE`` and AWE could only resurrect its
+        weight.  That left the factor permanently outside the live selector.
+        Recovery is deliberately conservative and only restores builtin
+        factors after a fresh health evaluation, a cooldown, and (when model
+        evidence exists) a cleared weakness verdict.  Discovered factors keep
+        their separate Canary lifecycle and are not enabled by this path.
+        """
+        cfg = runtime_config.shared()
+        if not bool(getattr(cfg, "factor_governance_auto_restore_enabled", True)):
+            return []
+
+        max_actions = max(
+            0,
+            int(getattr(cfg, "factor_governance_max_restores_per_cycle", 1) or 1),
+        )
+        if max_actions <= 0:
+            return []
+        cooldown_days = max(
+            0.0,
+            float(getattr(cfg, "factor_governance_restore_cooldown_days", 7) or 0),
+        )
+        health_threshold = float(
+            getattr(cfg, "factor_governance_restore_health_threshold", 60.0) or 60.0
+        )
+        max_weakness = float(
+            getattr(cfg, "factor_governance_restore_max_weakness", 0.65) or 0.65
+        )
+        min_obs = int(getattr(cfg, "factor_health_min_n_obs", 100) or 100)
+        now = time.time()
+        candidates: list[tuple[dict[str, Any], dict[str, Any], float]] = []
+
+        for item in catalog:
+            factor_id = str(item.get("factor_id") or "")
+            if not factor_id or item.get("source") != "builtin":
+                continue
+            if item.get("role") != "alpha" or item.get("lifecycle_status") == "DEAD":
+                continue
+            if item.get("governance_action") != "disable_factor_live":
+                continue
+            signal_entry = dict(cfg.factor_signal_config.get(factor_id, {}) or {})
+            lifecycle = str(signal_entry.get("lifecycle_status") or "").upper()
+            if signal_entry.get("enabled", True) is not False:
+                continue
+            if lifecycle not in {"QUARANTINE", "QUARANTINED"}:
+                # Do not override an explicit/unknown disable reason.
+                continue
+
+            disabled_at = float(signal_entry.get("disabled_at") or item.get("last_action_ts") or 0.0)
+            if disabled_at <= 0.0 or now - disabled_at < cooldown_days * 86400.0:
+                continue
+            health_updated_at = float(item.get("health_updated_at") or 0.0)
+            if health_updated_at <= disabled_at:
+                continue
+            health_score = float(item.get("health_score") or 0.0)
+            health_n_obs = int(item.get("health_n_obs") or 0)
+            if health_score < health_threshold or health_n_obs < min_obs:
+                continue
+
+            model_evidence = self._model_governance_evidence(item, cfg)
+            model_samples = int(model_evidence.get("sample_count") or 0)
+            weak_samples = int(model_evidence.get("weak_sample_count") or 0)
+            has_model_evidence = model_samples >= int(
+                getattr(cfg, "factor_governance_model_min_samples", 3) or 3
+            ) or weak_samples >= int(
+                getattr(cfg, "factor_governance_model_min_samples", 3) or 3
+            )
+            observed_weakness = max(
+                float(model_evidence.get("avg_weakness_score") or 0.0),
+                float(model_evidence.get("latest_weakness_score") or 0.0),
+            )
+            if has_model_evidence and observed_weakness >= max_weakness:
+                continue
+
+            weight = float((cfg.factor_portfolio_weights or {}).get(factor_id, 0.0) or 0.0)
+            if weight <= 0.0:
+                continue
+            candidates.append((item, signal_entry, disabled_at))
+
+        candidates.sort(key=lambda row: (float(row[0].get("health_score") or 0.0), row[0].get("factor_id", "")), reverse=True)
+        actions: list[dict[str, Any]] = []
+        for item, entry, disabled_at in candidates[:max_actions]:
+            factor_id = str(item["factor_id"])
+            evidence = {
+                "reason": "autonomous_quarantine_recovery",
+                "source": item.get("source"),
+                "health_score": float(item.get("health_score") or 0.0),
+                "health_status": item.get("health_status"),
+                "health_n_obs": int(item.get("health_n_obs") or 0),
+                "health_updated_at": float(item.get("health_updated_at") or 0.0),
+                "disabled_at": disabled_at,
+                "cooldown_days": cooldown_days,
+                "restore_health_threshold": health_threshold,
+                "model_governance": self._model_governance_evidence(item, cfg),
+            }
+            verdict = self._risk("restore_factor_live", item, evidence)
+            if not verdict.allowed:
+                actions.append(self._audit_action(run, item, "restore_factor_live", "blocked_by_risk", evidence, verdict))
+                continue
+
+            before_cfg = runtime_config.shared().to_dict()
+            restored_entry = dict(entry)
+            restored_entry["enabled"] = True
+            restored_entry["lifecycle_status"] = "ACTIVE"
+            restored_entry["restored_at"] = now
+            restored_entry["restored_from"] = "QUARANTINE"
+            try:
+                result = self._apply_runtime_patch(
+                    {"factor_signal_config": {factor_id: restored_entry}},
+                    source="factor_governance_restore_live",
+                    run_id=str(run.get("run_id") or ""),
+                )
+                actions.append(self._audit_action(
+                    run,
+                    item,
+                    "restore_factor_live",
+                    "applied",
+                    evidence,
+                    verdict,
+                    before={"runtime_config": before_cfg, "enabled": False},
+                    after={
+                        "runtime_config": runtime_config.shared().to_dict(),
+                        "enabled": True,
+                        "weight": float((runtime_config.shared().factor_portfolio_weights or {}).get(factor_id, 0.0) or 0.0),
+                    },
+                    rollback={"runtime_config": before_cfg},
+                    result=result,
+                ))
+            except Exception as exc:
+                logger.exception("[factor_governance] restore failed for %s", factor_id)
+                actions.append(self._audit_action(
+                    run,
+                    item,
+                    "restore_factor_live",
+                    "failed",
+                    {**evidence, "error": str(exc)},
+                    verdict,
+                    before={"runtime_config": before_cfg, "enabled": False},
+                    after={"runtime_config": runtime_config.shared().to_dict(), "enabled": False},
+                    rollback={"runtime_config": before_cfg},
+                    result={"error": str(exc)},
+                ))
         return actions
 
     def _retire_quarantined_discovered(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1164,6 +1557,8 @@ class FactorGovernanceOrchestrator:
             reason=_dumps(evidence),
             required_confirm="autonomous-risk-policy",
             confirm_ok=verdict.allowed,
+            source_agent="factor_governance",
+            decision_type="autonomous_mutation",
         )
         return {
             "factor_id": factor_id,

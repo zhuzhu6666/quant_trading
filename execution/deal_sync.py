@@ -149,7 +149,7 @@ def find_close_deal(
     conn: sqlite3.Connection,
     position_id: int,
 ) -> dict | None:
-    """按 position_id 查找已存储的平仓成交记录.
+    """按 position_id 聚合已存储的平仓成交记录.
 
     Args:
         conn: PostgreSQL state store 连接.
@@ -158,36 +158,43 @@ def find_close_deal(
     Returns:
         close_detail dict 或 None (找不到 / 只有开仓腿).
     """
-    row = _execute(
+    rows = _execute(
         conn,
         """
         SELECT *
         FROM ctrader_deals
         WHERE position_id=? AND (is_close=1 OR closed_volume > 0)
-        ORDER BY exec_timestamp DESC, deal_id DESC
-        LIMIT 1
+        ORDER BY exec_timestamp ASC, deal_id ASC
         """,
         (position_id,),
-    ).fetchone()
-    if row is None:
+    ).fetchall()
+    if not rows:
         return None
-    return _row_to_close_detail(row)
+    return _aggregate_close_details(rows)
 
 
-def _row_to_close_detail(row: sqlite3.Row) -> dict:
-    """将 ctrader_deals 行转为 close_detail dict."""
+def _aggregate_close_details(rows: list[sqlite3.Row]) -> dict:
+    """将同一仓位的所有 close legs 合并为一个 close_detail.
+
+    cTrader 对部分平仓和最终平仓分别产生 deal。只取最新一笔会漏掉
+    supervisor reduce 的已实现盈亏；金额字段应求和，价格/余额/时间等
+    快照字段取最后一笔。
+    """
+    latest = rows[-1]
     return {
-        "gross_profit": row["gross_profit"],
-        "swap": row["swap"],
-        "close_commission": row["close_commission"],
-        "balance": row["balance"],
-        "entry_price": row["entry_price"],
-        "exec_price": row["exec_price"],
-        "volume": row["volume"],
-        "closed_volume": row["closed_volume"],
-        "exec_timestamp": row["exec_timestamp"],
-        "trade_side": row["trade_side"],
-        "deal_id": row["deal_id"],
+        "gross_profit": sum(float(row["gross_profit"] or 0.0) for row in rows),
+        "swap": sum(float(row["swap"] or 0.0) for row in rows),
+        "close_commission": sum(float(row["close_commission"] or 0.0) for row in rows),
+        "balance": latest["balance"],
+        "entry_price": latest["entry_price"],
+        "exec_price": latest["exec_price"],
+        "volume": sum(float(row["volume"] or 0.0) for row in rows),
+        "closed_volume": sum(float(row["closed_volume"] or 0.0) for row in rows),
+        "exec_timestamp": latest["exec_timestamp"],
+        "trade_side": latest["trade_side"],
+        "deal_id": latest["deal_id"],
+        "deal_ids": [row["deal_id"] for row in rows],
+        "close_deals_count": len(rows),
     }
 
 
@@ -302,5 +309,7 @@ def _cd_to_real_pnl(cd: dict) -> dict:
         "balance": cd.get("balance", 0.0),
         "closed_volume": cd.get("closed_volume", 0),
         "deal_id": cd.get("deal_id", 0),
+        "deal_ids": list(cd.get("deal_ids") or ([cd.get("deal_id")] if cd.get("deal_id") else [])),
+        "close_deals_count": int(cd.get("close_deals_count") or 1),
         "source": "ctrader_deals",
     }

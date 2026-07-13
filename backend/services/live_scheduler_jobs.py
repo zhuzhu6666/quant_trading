@@ -147,7 +147,31 @@ def register_external_sync_jobs(
             repo_root=repo_root,
             source="fred",
             logger=logger,
-            timeout=180,
+            timeout=300,
+            runner=runner,
+            python_executable=python_executable,
+        ),
+    )
+    sched.add_job(
+        "cb_sync",
+        "0 7 10 * *",
+        make_external_data_sync_job(
+            repo_root=repo_root,
+            source="cb",
+            logger=logger,
+            timeout=120,
+            runner=runner,
+            python_executable=python_executable,
+        ),
+    )
+    sched.add_job(
+        "etf_daily_sync",
+        "30 4 * * *",
+        make_external_data_sync_job(
+            repo_root=repo_root,
+            source="etf_daily",
+            logger=logger,
+            timeout=120,
             runner=runner,
             python_executable=python_executable,
         ),
@@ -161,10 +185,9 @@ def startup_catch_up_jobs(*, run_heavy_jobs: bool) -> tuple[list[str], list[tupl
         "data_sync",
         "events_sync",
     ]
-    deferred_jobs = [
-        (300.0, "cot_sync"),
-        (360.0, "etf_sync"),
-    ]
+    # External refreshers are cron-owned and self-throttled.  Running them on
+    # every backend restart caused overlapping SEC/CFTC jobs and DuckDB locks.
+    deferred_jobs = []
     if run_heavy_jobs:
         deferred_jobs.extend(
             [

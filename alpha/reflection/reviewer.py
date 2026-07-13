@@ -67,11 +67,85 @@ def _first_float(*values: object, default: float = 0.0) -> float:
     return float(default)
 
 
+def _optional_float(*values: object) -> float | None:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return None
+
+
 def _event_ts(order_events: list[dict], event_type: str) -> float:
     for row in order_events:
         if str(row.get("event_type") or "") == event_type:
             return _safe_float(row.get("event_ts"))
     return 0.0
+
+
+def _review_consistency(entry_action: dict, order_events: list[dict]) -> dict:
+    """Expose cross-trace mismatches without converting them into causal labels."""
+
+    action = entry_action if isinstance(entry_action, dict) else {}
+    execution = action.get("execution_context") if isinstance(action.get("execution_context"), dict) else {}
+    sizing = action.get("sizing_trace") if isinstance(action.get("sizing_trace"), dict) else {}
+    event_context = action.get("event_context") if isinstance(action.get("event_context"), dict) else {}
+    decision_quality = action.get("decision_quality_context") if isinstance(action.get("decision_quality_context"), dict) else {}
+    context_state = decision_quality.get("context_state") if isinstance(decision_quality.get("context_state"), dict) else {}
+
+    actual_volume = _optional_float(
+        execution.get("actual_api_volume"), action.get("volume"), action.get("actual_api_volume"),
+    )
+    final_sizing_volume = _optional_float(
+        sizing.get("final_api_volume"), sizing.get("event_adjusted_api_volume"),
+    )
+    filled_volumes = []
+    for raw_event in order_events or []:
+        event = dict(raw_event) if not isinstance(raw_event, dict) else raw_event
+        if str(event.get("event_type") or "") != "filled":
+            continue
+        volume = _optional_float(event.get("volume"))
+        if volume is not None and volume > 0:
+            filled_volumes.append(volume)
+    filled_volume = max(filled_volumes) if filled_volumes else None
+
+    def _volume_check(expected: float | None, observed: float | None) -> dict:
+        if expected is None or observed is None:
+            return {"status": "missing", "expected": expected, "observed": observed}
+        tolerance = max(1e-6, abs(expected) * 1e-6)
+        return {
+            "status": "consistent" if abs(expected - observed) <= tolerance else "mismatch",
+            "expected": expected,
+            "observed": observed,
+        }
+
+    event_near = event_context.get("event_near") if "event_near" in event_context else None
+    event_window_state = context_state.get("event_window_state")
+    event_scope_status = "missing"
+    if event_near is not None and event_window_state:
+        expected_near = str(event_window_state).lower() in {"near", "active"}
+        event_scope_status = "consistent" if bool(event_near) == expected_near else "different_scopes"
+
+    sizing_check = _volume_check(final_sizing_volume, actual_volume)
+    fill_check = _volume_check(actual_volume, filled_volume)
+    hard_mismatch = sizing_check["status"] == "mismatch" or fill_check["status"] == "mismatch"
+    return {
+        "schema_version": "review_summary_consistency.v1",
+        "overall": "mismatch" if hard_mismatch else ("ambiguous" if event_scope_status == "different_scopes" else "consistent"),
+        "causal_level": "observational",
+        "checks": {
+            "sizing_trace_matches_execution": sizing_check,
+            "execution_matches_filled_order": fill_check,
+            "event_context_vs_factor_context": {
+                "status": event_scope_status,
+                "event_near": event_near,
+                "context_event_window_state": event_window_state,
+                "interpretation": "different_scopes_require_review" if event_scope_status == "different_scopes" else "",
+            },
+        },
+    }
 
 
 def _review_summary(
@@ -93,9 +167,9 @@ def _review_summary(
         parts.append(f"primary_responsibility={primary_responsibility}")
     if system_labels:
         parts.append(f"system_issue={','.join(system_labels[:4])}")
-    factor_hint = top_factor or top_weight_factor
-    if factor_hint:
-        parts.append(f"factor_hint={factor_hint}")
+    largest_contribution_factor = top_factor or top_weight_factor
+    if largest_contribution_factor:
+        parts.append(f"largest_contribution_factor={largest_contribution_factor}")
     if worst_factor:
         parts.append(f"worst_factor={worst_factor}")
     return "; ".join(parts)
@@ -216,7 +290,11 @@ class TradeReviewer:
             ).fetchone()
             entry_decision_id = str(entry["decision_id"]) if entry else ""
             trade_id = str(entry["trade_id"]) if entry and entry["trade_id"] else str(position_id)
-            entry_score = float(entry["action_score"] or 0.0) if entry else 0.0
+            entry_score = (
+                float(entry["action_score"])
+                if entry and entry["action_score"] is not None
+                else None
+            )
             regime_id = str(entry["regime_id"] or "") if entry else ""
             entry_decision_ts = float(entry["decision_ts"] or 0.0) if entry else 0.0
             timeframe = str(entry["timeframe"] or "") if entry else ""
@@ -277,10 +355,26 @@ class TradeReviewer:
             if outcome_label == "lucky_win":
                 failure_tags.append("lucky_win")
         else:
-            conviction = abs(entry_score)
+            conviction = abs(float(entry_score or 0.0))
             has_entry_context = entry is not None
             has_attribution = bool(contributions)
-            conflict = has_attribution and pos_mc > 0 and neg_mc < 0
+            decision_quality_context = (
+                (entry_action or {}).get("decision_quality_context")
+                if isinstance(entry_action, dict)
+                else {}
+            ) or {}
+            factor_conflict_ratio = _safe_float(decision_quality_context.get("factor_conflict_ratio"))
+            effective_alpha_factor_count = _safe_int(
+                decision_quality_context.get("effective_alpha_factor_count")
+                or decision_quality_context.get("n_active_alpha_factors")
+            )
+            conflict = (
+                has_attribution
+                and pos_mc > 0
+                and neg_mc < 0
+                and factor_conflict_ratio >= 0.4
+                and effective_alpha_factor_count >= 3
+            )
             weak_entry = has_entry_context and conviction < 0.55
             avoidable_entry = weak_entry and (conflict or (has_attribution and positive_share < 0.45))
             outcome_label = "bad_loss" if conviction >= 0.55 or avoidable_entry else "good_loss"
@@ -425,7 +519,7 @@ class TradeReviewer:
                 if label not in failure_tags:
                     failure_tags.append(label)
 
-        conviction = min(abs(entry_score), 1.0)
+        conviction = min(abs(float(entry_score or 0.0)), 1.0)
         if clean_direction:
             entry_quality = _clamp(0.62 + 0.18 * conviction)
         elif direction_failed:
@@ -480,6 +574,8 @@ class TradeReviewer:
             "regime_shift": path_metrics["regime_shift"],
             "regime_shift_at_exit": path_metrics["regime_shift"],
             "entry_score": entry_score,
+            "signal_score": entry_score,
+            "action_score": entry_score,
             "entry_action": entry_action if isinstance(entry_action, dict) else {},
             "entry_risk_state": entry_risk_state if isinstance(entry_risk_state, dict) else {},
             "direction": _safe_int((entry_action or {}).get("direction") if isinstance(entry_action, dict) else 0),
@@ -492,6 +588,10 @@ class TradeReviewer:
             "bar_context": (entry_action or {}).get("bar_context", {}) if isinstance(entry_action, dict) else {},
             "event_context": event_context or {},
             "execution_context": execution_context or {},
+            "summary_consistency": _review_consistency(
+                entry_action if isinstance(entry_action, dict) else {},
+                [dict(row) for row in order_events],
+            ),
             "data_quality_context": data_quality_context or {},
             "market_session": (entry_action or {}).get("market_session", {}) if isinstance(entry_action, dict) else {},
             "decision_quality_context": (entry_action or {}).get("decision_quality_context", {}) if isinstance(entry_action, dict) else {},
@@ -499,6 +599,14 @@ class TradeReviewer:
             "top_weight": top_weight,
             "top_factor": top_factor,
             "top_factor_mc": top_factor_mc,
+            "largest_contribution_factor": top_factor,
+            "factor_attribution": {
+                "schema_version": "factor_attribution.v1",
+                "largest_contribution_factor": top_factor,
+                "largest_contribution_score": top_factor_mc,
+                "causal_level": "observational",
+                "causal_claim": False,
+            },
             "worst_factor": worst_factor,
             "worst_factor_mc": worst_mc,
             "positive_share": round(positive_share, 4),

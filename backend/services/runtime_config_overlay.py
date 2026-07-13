@@ -114,6 +114,8 @@ def _sanitize_patch(patch: dict[str, Any]) -> dict[str, Any]:
             or key == "kelly_risk_per_trade_pct"
             or key == "kelly_fraction"
             or key == "kelly_max_pct"
+            or key == "kelly_min_closed_trades"
+            or key == "kelly_canary_max_api_volume"
             or key == "dynamic_sizing_enabled"
             or key == "dynamic_sizing_max_api_volume"
             or key == "dynamic_sizing_api_units_per_display_unit"

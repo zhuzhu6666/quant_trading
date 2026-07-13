@@ -289,6 +289,7 @@ class BackendReadinessService:
                 "v15_release_finish": "/api/ops/release/{run_id}/finish",
                 "v16_brain_state": "/api/ops/brain/state",
                 "v16_brain_memory": "/api/ops/brain/memory",
+                "v16_brain_commands": "/api/ops/brain/commands",
                 "v16_brain_action_plans": "/api/ops/brain/action-plans",
                 "v16_brain_action_plan_evals": "/api/ops/brain/action-plan-evals",
                 "v16_brain_low_impact_executions": "/api/ops/brain/low-impact-executions",
@@ -343,6 +344,11 @@ class BackendReadinessService:
         payload["brain_medium_impact_governance"] = brain_medium_impact_governance
         brain_governance_candidates = self._timed_component("brain_governance_candidates", lambda: self._brain_governance_candidate_status())
         payload["brain_governance_candidates"] = brain_governance_candidates
+        v16_brain_orchestration = self._timed_component(
+            "v16_brain_orchestration",
+            lambda: self._v16_brain_orchestration_status(),
+        )
+        payload["v16_brain_orchestration"] = v16_brain_orchestration
         candidate_generation_context_coverage = self._timed_component("candidate_generation_context_coverage", lambda: self._candidate_generation_context_coverage_status())
         payload["candidate_generation_context_coverage"] = candidate_generation_context_coverage
         factor_pruning_governance = self._timed_component("factor_pruning_governance", lambda: self._factor_pruning_governance_status())
@@ -397,6 +403,7 @@ class BackendReadinessService:
             "low_impact_executions": brain_low_impact_executions,
             "medium_impact_governance": brain_medium_impact_governance,
             "governance_candidates": brain_governance_candidates,
+            "orchestration": v16_brain_orchestration,
             "candidate_generation_context_coverage": candidate_generation_context_coverage,
             "factor_pruning_governance": factor_pruning_governance,
             "factor_governance_effects": factor_governance_effects,
@@ -427,6 +434,15 @@ class BackendReadinessService:
                 "medium_impact_policy_suggestion_direct_write": False,
                 "candidate_generation_context_required": True,
                 "candidate_review_bridge_preview_only": True,
+                "meta_brain_command_only": True,
+                "v16_command_owner": True,
+                "v16_downstream_execution_owner": True,
+                "v16_direct_policy_suggestion_write": False,
+                "v16_direct_runtime_mutation": False,
+                "v16_posterior_must_dispatch_to_specialist": True,
+                "demo_nursery_automatic_governance_enabled": governance.get("autonomy_mode") in {"demo_nursery", "demo_autonomous"},
+                "demo_nursery_human_approval_required": False,
+                "demo_nursery_system_runner": "AutonomousEvolutionNurseryRunner",
                 "candidate_review_llm_advisory_only": True,
                 "candidate_bridge_requires_review": True,
                 "medium_impact_future_apply_requires_decision_policy": True,
@@ -1184,6 +1200,25 @@ class BackendReadinessService:
                 "error": f"{type(exc).__name__}: {exc}",
                 "candidate_lane_isolated": True,
                 "policy_suggestion_bridge_manual_only": True,
+            }
+
+    def _v16_brain_orchestration_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+            return V16BrainOrchestratorService(self.db_path).status(limit=50)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "v16_brain_orchestration_status.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "posterior_to_brain_closed": False,
+                "command_to_candidate_closed": False,
+                "boundary": {
+                    "meta_brain_command_only": True,
+                    "direct_mutation": False,
+                },
             }
 
     def _candidate_generation_context_coverage_status(self) -> dict[str, Any]:

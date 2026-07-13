@@ -41,6 +41,7 @@ def test_execute_supervisor_reduce_action_partial_success_logs_reduced_event():
         "retired": [],
         "logs": [],
         "ledger_events": [],
+        "partial_accounting": [],
     }
 
     class _Bridge:
@@ -67,12 +68,18 @@ def test_execute_supervisor_reduce_action_partial_success_logs_reduced_event():
         controls={"reduce_fraction": 0.25},
         log=lambda msg: calls["logs"].append(msg),
         ledger=_Ledger(),
+        record_partial_close_execution=lambda **kwargs: calls["partial_accounting"].append(kwargs) or True,
         **_deps(calls),
     )
 
     assert calls["close_call"] == (7, 25.0)
     assert calls["ledger_events"][0]["event_type"] == "reduced"
     assert calls["ledger_events"][0]["net_volume"] == 75.0
+    assert calls["ledger_events"][0]["realized_pnl"] == 0.0
+    assert calls["ledger_events"][0]["details"]["realized_pnl_scope"] == "execution_detail_only"
+    assert calls["partial_accounting"][0]["position_id"] == 7
+    assert calls["partial_accounting"][0]["volume"] == 25.0
+    assert calls["traces"][0]["execution"]["accounting_recorded"] is True
     assert calls["supervisor_state"][0][1]["action_applied"] == "reduce"
     assert calls["traces"][0]["execution_reason"] == "partial_close_success"
     assert calls["logs"] == ["tick 9: supervisor reduce pos=7 vol=25"]

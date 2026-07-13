@@ -234,6 +234,44 @@ class RuleEvolutionGovernor:
             and (legacy_pruning_evidence or live_harm_evidence)
         )
 
+    @staticmethod
+    def _factor_model_evidence_ready(evidence: dict, *, confidence: float) -> bool:
+        """Accept strong demo model evidence without pretending it is experience.
+
+        A shadow model may contribute a governed factor action in demo nursery,
+        but only through an explicit bridge envelope.  This keeps model
+        authority advisory-only while preventing the governor from treating a
+        valid model proposal as an unknown legacy action.
+        """
+        if str(evidence.get("source_agent") or "") != "lightgbm_shadow_models":
+            return False
+        if str(evidence.get("model_type") or "") != "factor_governance_lightgbm":
+            return False
+        if evidence.get("advisory_only") is not True:
+            return False
+        bridge = evidence.get("bridge") or {}
+        if not (bridge.get("automatic_demo") is True and bridge.get("demo_nursery") is True):
+            return False
+        if not str(bridge.get("actor") or "").startswith("system:autonomous_learning.demo_nursery"):
+            return False
+        if str(evidence.get("governed_action") or "") != "downweight":
+            return False
+        active_context = evidence.get("active_factor_context") or {}
+        if active_context.get("used_in_score") is not True or str(active_context.get("role") or "") != "alpha":
+            return False
+        if float(confidence) < 0.55:
+            return False
+        sample_count = int(evidence.get("sample_count") or 0)
+        weak_sample_count = int(evidence.get("weak_sample_count") or 0)
+        min_weakness = float(evidence.get("min_weakness_score") or 0.0)
+        avg_weakness = float(evidence.get("avg_weakness_score") or 0.0)
+        return (
+            sample_count >= 2
+            and weak_sample_count >= 2
+            and min_weakness >= 0.85
+            and avg_weakness >= 0.85
+        )
+
     def list_suggestions(self, *, status: str | None = None, limit: int = 100) -> list[dict]:
         sql = """
             SELECT suggestion_id, scope_type, scope_key, action, confidence, reason,
@@ -308,9 +346,16 @@ class RuleEvolutionGovernor:
                             status = "approved"
                             note = "approved by governor: online_light parameter template switch evidence present"
                     elif scope_type == "factor" and action == "downweight":
-                        if self._factor_pruning_evidence_ready(evidence, confidence=confidence):
+                        if (
+                            self._factor_pruning_evidence_ready(evidence, confidence=confidence)
+                            or self._factor_model_evidence_ready(evidence, confidence=confidence)
+                        ):
                             status = "approved"
-                            note = "approved by governor: factor pruning governance evidence present"
+                            note = (
+                                "approved by governor: factor model evidence bridged through demo nursery"
+                                if self._factor_model_evidence_ready(evidence, confidence=confidence)
+                                else "approved by governor: factor pruning governance evidence present"
+                            )
                     if status == "proposed":
                         status = "rejected"
                         note = "rejected by governor: no autonomous evidence rule available"
@@ -338,7 +383,10 @@ class RuleEvolutionGovernor:
                 status = "proposed"
 
                 if action == "downweight":
-                    if sample_count >= 3 and bad_loss_count >= 2 and avg_reward <= -0.20 and confidence >= 0.45:
+                    if self._factor_model_evidence_ready(evidence, confidence=confidence):
+                        status = "approved"
+                        note = "approved by governor: factor model evidence bridged through demo nursery"
+                    elif sample_count >= 3 and bad_loss_count >= 2 and avg_reward <= -0.20 and confidence >= 0.45:
                         status = "approved"
                         note = f"approved by governor: samples={sample_count}, avg_reward={avg_reward:.3f}"
                     elif sample_count >= 4 and avg_reward >= -0.05:
@@ -809,6 +857,7 @@ class RuleEvolutionGovernor:
         application_limit: int = 200,
         mixed_recheck_after_seconds: float = 6 * 3600.0,
         max_observation_age_seconds: float = 30 * 86400.0,
+        terminalize_mixed_after_recheck: bool = False,
     ) -> dict[str, int]:
         observed = 0
         rolled_back = 0
@@ -1040,6 +1089,29 @@ class RuleEvolutionGovernor:
                     max_observation_age_seconds=max_observation_age_seconds,
                     now=now,
                 )
+                if (
+                    terminalize_mixed_after_recheck
+                    and evaluation.status == "mixed"
+                    and evaluation.post_count >= int(min_trades)
+                    and evaluation.baseline_count >= int(baseline_min_trades)
+                ):
+                    decision = dict(evaluation.decision)
+                    evidence_quality = dict(decision.get("evidence_quality") or {})
+                    evidence_quality["causal_status"] = "demo_mixed_terminal_inconclusive"
+                    evidence_quality["retry_via_new_application"] = True
+                    decision["evidence_quality"] = evidence_quality
+                    evaluation = EffectEvaluation(
+                        decision=decision,
+                        status="inconclusive",
+                        post_count=evaluation.post_count,
+                        baseline_count=evaluation.baseline_count,
+                        post_avg=evaluation.post_avg,
+                        baseline_avg=evaluation.baseline_avg,
+                        delta=evaluation.delta,
+                        post_win_rate=evaluation.post_win_rate,
+                        baseline_win_rate=evaluation.baseline_win_rate,
+                        last_review_at=evaluation.last_review_at,
+                    )
                 decision = evaluation.decision
                 next_status = evaluation.status
                 post_reviews = post_reviews[: evaluation.post_count]

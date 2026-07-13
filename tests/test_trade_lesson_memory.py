@@ -90,6 +90,10 @@ def test_trade_lesson_memory_upserts_stable_experience_and_brain_reads_it(tmp_pa
         item for item in memory["items"]
         if item["source_table"] == "experience_memory" and item["source_id"] == "trade_lesson:review_lesson_1"
     )
+    assert memory["raw_item_count"] == 2
+    assert memory["evidence_unit_count"] == 1
+    assert item["evidence_unit_id"] == "trade_review:review_lesson_1"
+    assert len(item["evidence_sources"]) == 2
     assert item["structured"]["append_source"] == "trade_lesson_memory.v1"
     assert item["structured"]["lesson"]["recommended_action"] == "tighten_entry_review"
     assert item["structured"]["recommended_action"] == "tighten_entry_review"

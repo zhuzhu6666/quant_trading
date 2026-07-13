@@ -349,7 +349,13 @@ class ParameterTemplateService:
             cfg["parameter_overrides"] = deepcopy(template.get("parameters") or {})
         return signal_config
 
-    def sync_runtime_config(self) -> int:
+    def sync_runtime_config(
+        self,
+        *,
+        v16_command_id: str = "",
+        v16_claim_token: str = "",
+        restore_only: bool = False,
+    ) -> int:
         from config.runtime_config import shared as _rc_shared
         from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 
@@ -371,12 +377,29 @@ class ParameterTemplateService:
                 "factor_signal_config": signal_config,
                 "extra": merged_extra,
             },
-            source="parameter_template_sync_runtime_config",
+            source=(
+                "parameter_template_restore_runtime_config"
+                if restore_only
+                else "parameter_template_sync_runtime_config"
+            ),
             run_id=f"parameter_template_sync_{int(time.time())}",
             actor="system:parameter_template_service",
-            action="sync_runtime_parameter_templates",
-            reason="sync active parameter templates into runtime config",
+            action=("restore_runtime_parameter_templates" if restore_only else "sync_runtime_parameter_templates"),
+            reason=(
+                "restore persisted active parameter templates into runtime config"
+                if restore_only
+                else "sync active parameter templates into runtime config"
+            ),
+            require_v16_command=is_state_db_path(self.db_path) and not restore_only,
+            v16_command_id=v16_command_id,
+            v16_claim_token=v16_claim_token,
+            v16_target_agent="autonomous_learning",
+            v16_scope_type="parameter_template",
+            v16_scope_key="online_light",
+            v16_action="switch_parameter_template",
         )
+        if result.get("ok") is False:
+            raise RuntimeError(str(result.get("status") or "v16_command_required"))
         return int(result.get("version") or 0)
 
     def upsert_template(
@@ -671,6 +694,7 @@ class ParameterTemplateService:
         suggestion_id: str = "",
         note: str = "",
         allow_offline_deep: bool = False,
+        v16_command_id: str = "",
     ) -> dict[str, Any]:
         target = self.get_template(template_id=template_id)
         if not target:
@@ -712,6 +736,54 @@ class ParameterTemplateService:
                 "risk_verdict": verdict,
                 "boundary": boundary,
             }
+        v16_authority: dict[str, Any] = {}
+        if is_state_db_path(self.db_path):
+            from backend.services.v16_command_gate import V16CommandGate
+
+            v16_authority = V16CommandGate.claim(
+                self.db_path,
+                target_agent="autonomous_learning",
+                scope_type="parameter_template",
+                scope_key="online_light",
+                action="switch_parameter_template",
+                command_id=v16_command_id,
+            )
+            if not v16_authority.get("allowed"):
+                return {
+                    "ok": False,
+                    "blocked": True,
+                    "status": "blocked_v16_command_required",
+                    "reason": "v16_command_required",
+                    "v16_authority": v16_authority,
+                    "boundary": boundary,
+                }
+        from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
+
+        experiment_admission = LearningExperimentAdmissionService(self.db_path).reserve_scope(
+            scope_type="parameter_template",
+            scope_key=f"{factor_id}:{regime_key or 'default'}",
+            action="switch_parameter_template",
+            allow_active_replacement=True,
+        )
+        if not experiment_admission.get("allowed"):
+            if v16_authority.get("claim_token"):
+                from backend.services.v16_command_gate import V16CommandGate
+
+                V16CommandGate.release(
+                    self.db_path,
+                    command_id=str(v16_authority.get("command_id") or v16_command_id),
+                    claim_token=str(v16_authority.get("claim_token") or ""),
+                    reason="parameter_template_experiment_admission_blocked",
+                )
+            return {
+                "ok": False,
+                "blocked": True,
+                "status": str(experiment_admission.get("status") or "blocked_experiment_admission"),
+                "reason": str(experiment_admission.get("reason") or "experiment_admission_failed"),
+                "experiment_admission": experiment_admission,
+                "boundary": boundary,
+            }
+        reservation_id = str(experiment_admission.get("reservation_id") or "")
         switch_id = self._new_id("ptsw")
         now = time.time()
         context = {
@@ -723,8 +795,9 @@ class ParameterTemplateService:
             "boundary": boundary,
             "allow_offline_deep": bool(allow_offline_deep),
         }
-        with self._conn() as conn:
-            _execute(
+        try:
+            with self._conn() as conn:
+                _execute(
                 conn,
                 """
                 UPDATE parameter_template_registry
@@ -733,7 +806,7 @@ class ParameterTemplateService:
                 """,
                 (template_id, now, factor_id, regime_key),
             )
-            _execute(
+                _execute(
                 conn,
                 """
                 INSERT INTO parameter_template_active
@@ -760,7 +833,7 @@ class ParameterTemplateService:
                     now,
                 ),
             )
-            _execute(
+                _execute(
                 conn,
                 """
                 INSERT INTO parameter_template_switch_log
@@ -780,27 +853,91 @@ class ParameterTemplateService:
                     now,
                 ),
             )
-            conn.commit()
-        RuleEvolutionGovernor(str(self.db_path)).log_application(
-            scope_type="parameter_template",
-            scope_key=f"{factor_id}:{regime_key or 'default'}",
-            action="switch_parameter_template",
-            bias_multiplier=1.0,
-            old_weight=0.0,
-            new_weight=0.0,
-            suggestion_ids=[suggestion_id] if suggestion_id else [],
-            cycle_ts=now,
-            details={
-                "factor_id": factor_id,
-                "regime_key": regime_key,
-                "old_template_id": current.get("template_id", "") if current else "",
-                "new_template_id": template_id,
-                "switch_id": switch_id,
-                "boundary": boundary,
-                "note": note,
-            },
+                conn.commit()
+        except Exception:
+            LearningExperimentAdmissionService(self.db_path).release_reservations([reservation_id])
+            if v16_authority.get("claim_token"):
+                from backend.services.v16_command_gate import V16CommandGate
+
+                V16CommandGate.release(
+                    self.db_path,
+                    command_id=str(v16_authority.get("command_id") or v16_command_id),
+                    claim_token=str(v16_authority.get("claim_token") or ""),
+                    reason="parameter_template_registry_write_failed",
+                )
+            raise
+        try:
+            self.sync_runtime_config(
+                v16_command_id=str(v16_authority.get("command_id") or v16_command_id or ""),
+                v16_claim_token=str(v16_authority.get("claim_token") or ""),
+            )
+        except Exception:
+            # The command is already consumed by the runtime boundary.  Make
+            # the persisted active-template projection agree with the failed
+            # runtime mutation and force a fresh V16 command on retry.
+            with self._conn() as conn:
+                _execute(
+                    conn,
+                    "UPDATE parameter_template_registry SET active=0, updated_at=? WHERE factor_id=? AND regime_key=?",
+                    (time.time(), factor_id, regime_key),
+                )
+                if current and current.get("template_id"):
+                    _execute(
+                        conn,
+                        "UPDATE parameter_template_registry SET active=1, updated_at=? WHERE template_id=?",
+                        (time.time(), str(current.get("template_id") or "")),
+                    )
+                    _execute(
+                        conn,
+                        """UPDATE parameter_template_active
+                           SET template_id=?, template_version=?, status='active', updated_at=?
+                           WHERE factor_id=? AND regime_key=?""",
+                        (
+                            str(current.get("template_id") or ""),
+                            str(current.get("template_version") or ""),
+                            time.time(),
+                            factor_id,
+                            regime_key,
+                        ),
+                    )
+                else:
+                    _execute(
+                        conn,
+                        "DELETE FROM parameter_template_active WHERE factor_id=? AND regime_key=?",
+                        (factor_id, regime_key),
+                    )
+                _execute(
+                    conn,
+                    "UPDATE parameter_template_switch_log SET status='mutation_failed' WHERE switch_id=?",
+                    (switch_id,),
+                )
+                conn.commit()
+            LearningExperimentAdmissionService(self.db_path).release_reservations([reservation_id])
+            raise
+        application_id = RuleEvolutionGovernor(str(self.db_path)).log_application(
+                scope_type="parameter_template",
+                scope_key=f"{factor_id}:{regime_key or 'default'}",
+                action="switch_parameter_template",
+                bias_multiplier=1.0,
+                old_weight=0.0,
+                new_weight=0.0,
+                suggestion_ids=[suggestion_id] if suggestion_id else [],
+                cycle_ts=now,
+                details={
+                    "factor_id": factor_id,
+                    "regime_key": regime_key,
+                    "old_template_id": current.get("template_id", "") if current else "",
+                    "new_template_id": template_id,
+                    "switch_id": switch_id,
+                    "boundary": boundary,
+                    "note": note,
+                    "experiment_reservation_id": reservation_id,
+                },
+            )
+        LearningExperimentAdmissionService(self.db_path).finalize_reservation(
+            reservation_id,
+            application_id=application_id,
         )
-        self.sync_runtime_config()
         return {
             "ok": True,
             "switch_id": switch_id,
@@ -809,6 +946,9 @@ class ParameterTemplateService:
             "old_template_id": current.get("template_id", "") if current else "",
             "new_template_id": template_id,
             "risk_verdict": verdict,
+            "v16_authority": v16_authority,
+            "experiment_admission": experiment_admission,
+            "application_id": application_id,
             "boundary": boundary,
         }
 

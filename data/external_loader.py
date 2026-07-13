@@ -10,7 +10,7 @@ data/external_loader.py
   - macro_daily: DFII10 / DTWEXBGS (DXY 代理) / GVZCLS / VIXCLS
   - etf_daily:   GLD / SLV / TLT  (收盘价)
   - etf_holdings: GLD / SLV 持仓量 (吨) + shares outstanding  (P0-ETF 2026-06-03)
-  - cb_gold:     央行黄金月度净买入 (吨)  (P0-CB 2026-06-03)
+  - cb_gold:     央行黄金月度/季度净买入 (吨)  (P0-CB 2026-06-03)
   - events:      FOMC / NFP / CPI / PCE, 共 105 条
 
 输出 (对齐到 bar_df 的 DatetimeIndex):
@@ -408,19 +408,25 @@ class ExternalDataLoader:
         return out
 
     def _compute_cb_derived(self, cb_gold: pd.DataFrame) -> pd.DataFrame:
-        """从央行月度数据派生 3m/6m 累计净买入."""
+        """从央行月度或季度数据派生统一的 3m/6m/12m 净买入."""
         if cb_gold.empty:
             return pd.DataFrame()
         out = cb_gold.copy()
+        # WGC 的官方持有量序列按季度发布；旧适配器按月滚动会把一个
+        # 季度变化错误地再累计三次。按观测/发布时间间隔选择窗口，
+        # 让季度数据的 3m 直接对应单个季度变化。
+        dates = pd.DatetimeIndex(out.index).sort_values()
+        median_gap_days = 0.0
+        if len(dates) > 1:
+            gaps = pd.Series(dates).diff().dt.total_seconds().dropna() / 86_400.0
+            median_gap_days = float(gaps.median()) if not gaps.empty else 0.0
+        quarterly = median_gap_days >= 60.0
+        windows = {"3m": 1, "6m": 2, "12m": 4} if quarterly else {"3m": 3, "6m": 6, "12m": 12}
         for country in ["china", "russia", "turkey", "india", "total"]:
             chg_col = f"cb_{country}_chg"
             if chg_col in out.columns:
-                # 3 月累计 (季度)
-                out[f"cb_{country}_chg_3m"] = out[chg_col].rolling(3, min_periods=1).sum()
-                # 6 月累计 (半年)
-                out[f"cb_{country}_chg_6m"] = out[chg_col].rolling(6, min_periods=1).sum()
-                # 12 月累计 (年度)
-                out[f"cb_{country}_chg_12m"] = out[chg_col].rolling(12, min_periods=1).sum()
+                for label, window in windows.items():
+                    out[f"cb_{country}_chg_{label}"] = out[chg_col].rolling(window, min_periods=1).sum()
         if "cb_china_chg_3m" in out.columns:
             roll = out["cb_china_chg_3m"].rolling(60, min_periods=10)
             out["cb_china_3m_zscore"] = (

@@ -5,8 +5,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from backend.core.db import STATE_DB, is_state_db_path
+from backend.core.db import STATE_DB, is_state_db_path, state_table_exists
 from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
+from backend.services._brain_helpers import connect as _connect
 
 
 class AutonomousEvolutionNurseryRunner:
@@ -30,6 +31,8 @@ class AutonomousEvolutionNurseryRunner:
             "uses_existing_replay_harness": True,
             "uses_existing_release_control": True,
             "uses_existing_candidate_review": True,
+            "demo_nursery_automatic_review_and_bridge": True,
+            "demo_nursery_automatic_apply_and_reconcile": True,
             "uses_existing_effect_reconcile": True,
             "demo_apply_uses_existing_autonomous_learning_cycle": True,
             "recommended_step_consumption_supported": True,
@@ -79,6 +82,8 @@ class AutonomousEvolutionNurseryRunner:
         consume_recommended_step: bool = False,
         recommended_step_limit: int = 1,
         recommended_step_allowlist: list[str] | tuple[str, ...] | None = None,
+        automatic_demo: bool = False,
+        automatic_bridge_limit: int = 20,
         readiness: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         started_at = time.time()
@@ -113,6 +118,11 @@ class AutonomousEvolutionNurseryRunner:
                 status="skipped_outside_demo_nursery",
             )
 
+        automatic_demo = bool(automatic_demo) and str(initial_cycle.get("autonomy_mode") or "") in {
+            "demo_nursery",
+            "demo_autonomous",
+        }
+
         components = {str(item.get("component") or "") for item in initial_cycle.get("blockers") or []}
         if replay_if_stale and ("evidence" in components or "replay" in components):
             actions.append(
@@ -138,12 +148,32 @@ class AutonomousEvolutionNurseryRunner:
         if refresh_proposals and ("proposal_registry" in components or proposal_empty):
             actions.append(self._record("refresh_proposal_registry", self._refresh_proposals))
 
-        candidate_count = int((initial_cycle.get("candidate_lane") or {}).get("candidate_count") or 0)
-        review_count = int((initial_cycle.get("candidate_review") or {}).get("review_count") or 0)
-        if review_candidates and candidate_count > 0 and review_count <= 0:
+        # V16 is the decision coordinator for the demo nursery.  It consumes
+        # the repaired posterior evidence, materializes isolated candidates,
+        # and records a command addressed to the specialist executor.  It does
+        # not perform the mutation itself; the existing review/bridge/apply
+        # services below remain the only mutation path.
+        candidate_cycle = initial_cycle
+        if automatic_demo and self._v16_orchestration_ready():
             actions.append(
                 self._record(
-                    "review_governance_candidates",
+                    "run_v16_brain_orchestration",
+                    lambda: self._run_v16_brain_orchestration(limit=review_limit),
+                )
+            )
+            candidate_readiness = self._build_readiness()
+            candidate_cycle = AutonomousEvolutionCycleService(self.db_path).status(
+                readiness=candidate_readiness,
+                refresh_proposals=False,
+                include_chain_health=False,
+            )
+
+        candidate_count = int((candidate_cycle.get("candidate_lane") or {}).get("candidate_count") or 0)
+        review_count = int((candidate_cycle.get("candidate_review") or {}).get("review_count") or 0)
+        if review_candidates and candidate_count > 0 and (automatic_demo or review_count <= 0):
+            actions.append(
+                self._record(
+                    "auto_review_governance_candidates" if automatic_demo else "review_governance_candidates",
                     lambda: self._review_candidates(limit=review_limit),
                 )
             )
@@ -154,6 +184,14 @@ class AutonomousEvolutionNurseryRunner:
             refresh_proposals=False,
             include_chain_health=False,
         )
+
+        if automatic_demo and int((repaired_cycle.get("candidate_lane") or {}).get("candidate_count") or 0) > 0:
+            actions.append(
+                self._record(
+                    "auto_bridge_governance_candidates",
+                    lambda: self._bridge_demo_candidates(limit=automatic_bridge_limit),
+                )
+            )
 
         release_run: dict[str, Any] = {}
         if create_release_evidence and self._release_missing(repaired_cycle):
@@ -185,8 +223,9 @@ class AutonomousEvolutionNurseryRunner:
                 )
             )
 
-        if apply_when_ready and bool(repaired_cycle.get("stable_demo_nursery_ready")):
-            if full_learning_cycle:
+        effective_apply_when_ready = bool(apply_when_ready or automatic_demo)
+        if effective_apply_when_ready and bool(repaired_cycle.get("stable_demo_nursery_ready")):
+            if full_learning_cycle or automatic_demo:
                 actions.append(
                     self._record(
                         "run_autonomous_learning_cycle",
@@ -211,7 +250,7 @@ class AutonomousEvolutionNurseryRunner:
         )
         errored = any(not bool(item.get("ok")) and str(item.get("action")) != "record_release_evidence" for item in actions)
         status = "completed_with_errors" if errored else "completed"
-        if apply_when_ready and not bool(repaired_cycle.get("stable_demo_nursery_ready")):
+        if effective_apply_when_ready and not bool(repaired_cycle.get("stable_demo_nursery_ready")):
             status = "repaired_waiting_for_ready"
         return self._result(
             run_id=run_id,
@@ -426,6 +465,127 @@ class AutonomousEvolutionNurseryRunner:
             llm_dry_run=True,
             persist=True,
         )
+
+    def _bridge_demo_candidates(self, *, limit: int) -> dict[str, Any]:
+        """Bridge only reviewed, compatible candidates inside demo mode.
+
+        The source agent never receives a direct policy_suggestion write.  The
+        system nursery invokes the existing candidate service, which still
+        requires RiskPolicy, candidate evidence, review, and the legacy
+        governor before any later application step.
+        """
+        from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
+        from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
+        from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+        limit = max(1, min(int(limit or 20), 100))
+        candidate_service = BrainGovernanceCandidateService(self.db_path)
+        review_service = BrainGovernanceCandidateReviewService(self.db_path)
+        candidates = list(candidate_service.latest_candidates(limit=200, status="active").get("items") or [])
+        reviews = list(review_service.latest_reviews(limit=400).get("items") or [])
+        current_v16_commands = list(
+            V16BrainOrchestratorService(self.db_path).latest_commands(limit=200).get("commands") or []
+        )
+        current_v16_delegate_ids = {
+            str(item.get("candidate_id") or "")
+            for item in current_v16_commands
+            if item.get("decision") == "delegate" and item.get("candidate_id")
+        }
+        latest_reviews: dict[str, dict[str, Any]] = {}
+        for review in reviews:
+            candidate_id = str(review.get("candidate_id") or "")
+            if candidate_id and candidate_id not in latest_reviews:
+                latest_reviews[candidate_id] = dict(review)
+
+        items: list[dict[str, Any]] = []
+        submitted_count = 0
+        for candidate in candidates:
+            if submitted_count >= limit:
+                break
+            candidate_id = str(candidate.get("candidate_id") or "")
+            source_agent = str(candidate.get("source_agent") or "")
+            # Factor pruning has additional live-participation and counter-
+            # evidence gates and is bridged by its dedicated governance step.
+            if source_agent == "factor_pruning_governance":
+                continue
+            if source_agent == "v16_brain" and candidate_id not in current_v16_delegate_ids:
+                items.append({
+                    "status": "system_not_selected_by_v16",
+                    "candidate_id": candidate_id,
+                    "reason": "no_current_v16_delegate_command",
+                })
+                continue
+            review = latest_reviews.get(candidate_id)
+            if not review:
+                reviewed = review_service.review_candidate(
+                    candidate_id,
+                    run_llm=False,
+                    llm_dry_run=True,
+                    persist=True,
+                )
+                review = dict(reviewed.get("review") or {})
+            if not bool(review.get("bridge_ready")):
+                items.append({
+                    "status": "system_waiting_for_evidence",
+                    "candidate_id": candidate_id,
+                    "review_status": review.get("review_status", ""),
+                    "evidence_gaps": review.get("evidence_gaps") or [],
+                })
+                continue
+            submitted = candidate_service.submit_candidate_to_policy_suggestion(
+                candidate_id,
+                actor="system:autonomous_demo_nursery.brain_bridge",
+            )
+            result_status = str(submitted.get("status") or "")
+            if result_status in {"submitted_to_policy_suggestion", "already_submitted"}:
+                submitted_count += 1
+            items.append({
+                "status": result_status,
+                "candidate_id": candidate_id,
+                "suggestion_id": submitted.get("suggestion_id", ""),
+                "reason": submitted.get("reason", ""),
+            })
+        return {
+            "ok": True,
+            "schema_version": "autonomous_evolution_runner_demo_candidate_bridge.v1",
+            "status": "bridged" if submitted_count else "waiting_for_system_decision",
+            "candidate_count": len(items),
+            "submitted_count": submitted_count,
+            "system_owned": True,
+            "items": items[:100],
+            "boundary": {
+                "does_not_submit_orders": True,
+                "source_agent_direct_policy_suggestion_write": False,
+                "uses_existing_candidate_review": True,
+                "uses_existing_risk_and_governor_gates": True,
+                "human_approval_required_in_demo": False,
+            },
+        }
+
+    def _run_v16_brain_orchestration(self, *, limit: int) -> dict[str, Any]:
+        from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+        return V16BrainOrchestratorService(self.db_path).run_once(
+            readiness=self._build_readiness(),
+            limit=max(4, min(int(limit or 20), 50)),
+            source="system:autonomous_evolution_nursery_runner.v16",
+            persist=True,
+        )
+
+    def _v16_orchestration_ready(self) -> bool:
+        """Require the authoritative posterior/effect ledgers before dispatch."""
+        required = {
+            "replay_report",
+            "trade_outcome_review",
+            "learning_application_effect",
+            "position_supervisor_trace",
+            "supervisor_counterfactual_review",
+        }
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            return all(state_table_exists(conn, table) for table in required)
+        finally:
+            conn.close()
 
     def _run_learning_cycle(self, *, sample_limit: int, recommendation_limit: int) -> dict[str, Any]:
         from backend.services.autonomous_learning import run_autonomous_learning_cycle

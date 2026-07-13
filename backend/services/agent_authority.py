@@ -21,10 +21,32 @@ AGENTS: dict[str, dict[str, Any]] = {
         "source_kind": "brain_medium_impact_governance",
         "capability_scope": "medium_impact_governance",
         "allowed_writes": ["brain_action_plan", "brain_action_plan_eval",
-                           "brain_governance_candidate", "brain_medium_impact_governance", "brain_memory"],
+                           "brain_governance_candidate", "brain_medium_impact_governance", "brain_memory",
+                           "brain_state_snapshot", "v16_brain_command"],
         "control_surfaces": ["proposal_governance", "factor_weight", "parameter_template",
                              "position_supervisor_template", "context_policy", "replay", "memory"],
+        # V16 can select and route a candidate, but the policy queue remains a
+        # governed bridge owned by the downstream system.  Keeping this field
+        # as manual_bridge_only preserves the source-agent contract: V16 never
+        # receives direct policy_suggestion write authority.
         "policy_suggestion_write": "manual_bridge_only",
+        "bridge_mode": "governed_system_bridge",
+        "delegation_targets": {
+            "autonomous_learning": {
+                "owns": ["entry_parameters", "context_policy", "learning_application"],
+                "required_gates": ["RiskPolicyService", "DecisionPolicy", "RuntimeConfigMutationService"],
+            },
+            "factor_governance": {
+                "owns": ["factor_weight", "factor_catalog_governance"],
+                "delegates_execution": ["parameter_template", "context_policy"],
+                "delegated_execution_owner": "autonomous_learning",
+                "required_gates": ["RiskPolicyService", "DecisionPolicy", "RuntimeConfigMutationService"],
+            },
+            "position_supervisor_governance": {
+                "owns": ["position_supervisor_template", "supervisor_protection_policy"],
+                "required_gates": ["RiskPolicyService", "RuntimeConfigMutationService"],
+            },
+        },
         "authority_state": "requires_control_gate",
         "forbidden_actions": ["submit_order", "apply_runtime_overlay", "apply_factor_weight"],
     },
@@ -33,7 +55,11 @@ AGENTS: dict[str, dict[str, Any]] = {
         "capability_scope": "legacy_policy_governance",
         "allowed_writes": ["policy_suggestion", "evolution_run", "learning_application_log", "experience_memory"],
         "control_surfaces": ["factor_weight", "parameter_template", "context_policy", "memory"],
+        "execution_owner": ["parameter_template", "context_policy", "learning_application"],
+        "receives_handoffs_from": ["factor_governance", "v16_brain"],
         "policy_suggestion_write": "native",
+        "requires_v16_command": True,
+        "risk_reduction_exception": "rollback_or_reduce_only",
         "authority_state": "requires_control_gate",
         "forbidden_actions": ["submit_order", "bypass_risk_policy"],
     },
@@ -43,9 +69,25 @@ AGENTS: dict[str, dict[str, Any]] = {
         "allowed_writes": ["policy_suggestion", "factor_catalog", "runtime_config_overlay",
                            "evolution_decision", "learning_application_log"],
         "control_surfaces": ["factor_weight", "parameter_template", "runtime_config", "model_stage"],
+        "execution_owner": ["factor_weight", "factor_catalog_governance", "model_stage"],
+        "delegated_execution_owner": {"parameter_template": "autonomous_learning", "context_policy": "autonomous_learning"},
         "policy_suggestion_write": "native_governed",
+        "requires_v16_command": True,
+        "risk_reduction_exception": "rollback_or_reduce_only",
         "authority_state": "requires_control_gate",
         "forbidden_actions": ["submit_order", "bypass_decision_policy", "bypass_risk_policy"],
+    },
+    "position_supervisor_governance": {
+        "source_kind": "position_supervisor_governance",
+        "capability_scope": "position_supervisor_template_governance",
+        "allowed_writes": ["runtime_config_overlay", "runtime_config_snapshot",
+                           "learning_application_log", "evolution_decision"],
+        "control_surfaces": ["position_supervisor_template"],
+        "policy_suggestion_write": "native_governed",
+        "requires_v16_command": True,
+        "risk_reduction_exception": "rollback_or_reduce_only",
+        "authority_state": "requires_control_gate",
+        "forbidden_actions": ["submit_order", "bypass_risk_policy"],
     },
     "factor_pruning_governance": {
         "source_kind": "factor_pruning_candidate_materializer",
@@ -53,6 +95,7 @@ AGENTS: dict[str, dict[str, Any]] = {
         "allowed_writes": ["brain_governance_candidate"],
         "control_surfaces": ["factor_weight", "proposal_governance"],
         "policy_suggestion_write": "manual_bridge_only",
+        "requires_v16_command": False,
         "authority_state": "requires_control_gate",
         "forbidden_actions": ["write_policy_suggestion_directly", "apply_factor_weight", "submit_order"],
     },
@@ -62,6 +105,7 @@ AGENTS: dict[str, dict[str, Any]] = {
         "allowed_writes": ["llm_advisory_audit"],
         "control_surfaces": ["macro_advisory", "proposal_governance", "factor_weight", "context_policy"],
         "policy_suggestion_write": "never_direct",
+        "requires_v16_command": False,
         "authority_state": "advisory_only",
         "forbidden_actions": ["write_policy_suggestion", "apply_runtime_overlay", "submit_order", "approve_proposal"],
     },
@@ -72,6 +116,7 @@ AGENTS: dict[str, dict[str, Any]] = {
                            "factor_governance_shadow_audit", "meta_model_shadow_audit"],
         "control_surfaces": ["model_stage", "factor_weight", "trade_execution", "position_sizing"],
         "policy_suggestion_write": "only_through_existing_governance_services",
+        "requires_v16_command": False,
         "authority_state": "no_execution_authority",
         "forbidden_actions": ["write_policy_suggestion_directly", "apply_model_stage", "submit_order"],
     },
@@ -216,6 +261,24 @@ def policy_suggestion_requested_writes(source_agent: str, evidence: dict[str, An
     bridge = evidence.get("bridge") if isinstance(evidence, dict) else {}
     if (isinstance(bridge, dict) and bridge.get("manual_only") is True
             and (contract or {}).get("policy_suggestion_write") == "manual_bridge_only"):
+        return []
+    # In demo_nursery the existing governance service may perform the bridge
+    # automatically.  The source agent still does not receive a direct
+    # policy_suggestion write; the system actor is audited as the bridge.
+    if (
+        isinstance(bridge, dict)
+        and bridge.get("automatic_demo") is True
+        and bridge.get("demo_nursery") is True
+        and str(bridge.get("actor") or "").startswith(
+            (
+                "system:autonomous_demo_nursery",
+                "system:autonomous_demo_apply_stepper",
+                "system:autonomous_learning.demo_nursery",
+                "system:factor_pruning_governance.demo_nursery",
+            )
+        )
+        and (contract or {}).get("policy_suggestion_write") == "manual_bridge_only"
+    ):
         return []
     if (isinstance(evidence, dict) and evidence.get("advisory_only") is True
             and (contract or {}).get("policy_suggestion_write") == "only_through_existing_governance_services"):

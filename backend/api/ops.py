@@ -26,6 +26,7 @@ from backend.services.replay_harness import ReplayHarnessService
 from backend.services.stability import TimedCache
 from backend.services.v15_phase0 import V15Phase0CompletionService
 from backend.services.v16_brain_snapshot import BrainStateService, BrainMemoryService
+from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 from backend.services.v16_brain_planning import (
     BrainActionPlannerService, BrainActionPlanEvaluatorService,
     BrainLowImpactExecutorService, BrainMediumImpactGovernanceService,
@@ -664,6 +665,22 @@ def get_brain_memory(_user: RequireUser, refresh: bool = False, limit: int = 50)
         "ok": bool(memory.get("ok")),
         "schema_version": "ops_brain_memory.v1",
         "memory": memory,
+    }
+
+
+@router.get("/brain/commands")
+def get_brain_commands(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
+    """Return V16 decisions and specialist delegations.
+
+    This endpoint is intentionally read-only.  A command can point to a
+    governance candidate, but the mutation remains in the downstream agent
+    and its existing RiskPolicy/DecisionPolicy gates.
+    """
+    commands = V16BrainOrchestratorService().latest_commands(limit=max(1, min(int(limit), 200)))
+    return {
+        "ok": bool(commands.get("ok")),
+        "schema_version": "ops_v16_brain_commands.v1",
+        "commands": commands,
     }
 
 

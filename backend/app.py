@@ -114,7 +114,7 @@ async def lifespan(app: FastAPI):
 
     try:
         from backend.services.parameter_templates import ParameterTemplateService
-        ParameterTemplateService().sync_runtime_config()
+        ParameterTemplateService().sync_runtime_config(restore_only=True)
         _lg.info("[lifespan] active parameter templates synced into RuntimeConfig")
     except Exception as e:
         _lg.warning(f"[lifespan] parameter template runtime sync failed (non-fatal): {e}")

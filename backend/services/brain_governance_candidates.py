@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import os
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,8 @@ class BrainGovernanceCandidateService:
             "does_not_write_learning_samples": True,
             "does_not_write_policy_suggestion_directly": True,
             "policy_suggestion_bridge_manual_only": True,
+            "demo_nursery_system_bridge_supported": True,
+            "demo_nursery_bridge_stays_in_existing_governance_services": True,
             "bridge_requires_existing_governor_compatible_payload": True,
             "bridge_ready_stages": sorted(BRIDGE_READY_STAGES),
         }
@@ -151,6 +154,13 @@ class BrainGovernanceCandidateService:
     ) -> dict[str, Any]:
         ensure_brain_governance_candidate_table(self.db_path)
         created_at = _safe_float(now if now is not None else time.time())
+        try:
+            candidate_ttl = max(3600.0, float(os.getenv("QUANT_BRAIN_CANDIDATE_TTL_SECONDS", "86400")))
+        except Exception:
+            candidate_ttl = 86400.0
+        effective_expires_at = _safe_float(expires_at)
+        if effective_expires_at <= 0.0 and str(status or "active") not in {"submitted", "superseded", "rejected"}:
+            effective_expires_at = created_at + candidate_ttl
         agent_context = self._agent_generation_context(
             source_agent=source_agent,
             scope_type=scope_type,
@@ -197,7 +207,7 @@ class BrainGovernanceCandidateService:
             "status": status,
             "submitted_suggestion_id": "",
             "submitted_at": 0.0,
-            "expires_at": _safe_float(expires_at),
+            "expires_at": effective_expires_at,
             "created_at": created_at,
             "updated_at": created_at,
             "boundary": self.boundary(),
@@ -249,20 +259,100 @@ class BrainGovernanceCandidateService:
                 "boundary": {"pre_generation_context_only": True},
             }
 
-    def latest_candidates(self, *, limit: int = 50, status: str = "") -> dict[str, Any]:
+    def reconcile_expired_candidates(
+        self,
+        *,
+        now: float | None = None,
+        ttl_seconds: float | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """Close stale candidates and assign TTLs to legacy rows."""
+        ensure_brain_governance_candidate_table(self.db_path)
+        current = float(now if now is not None else time.time())
+        try:
+            ttl = max(
+                3600.0,
+                float(ttl_seconds if ttl_seconds is not None else os.getenv("QUANT_BRAIN_CANDIDATE_TTL_SECONDS", "86400")),
+            )
+        except Exception:
+            ttl = 86400.0
+        conn = _connect(self.db_path)
+        try:
+            active_statuses = (
+                "active", "brain_candidate", "governance_ready", "applyable", "candidate_materialized"
+            )
+            placeholders = ",".join("?" for _ in active_statuses)
+            _execute(
+                conn,
+                f"""UPDATE brain_governance_candidate
+                    SET expires_at=created_at+?
+                    WHERE status IN ({placeholders}) AND expires_at<=0 AND created_at>0""",
+                (ttl, *active_statuses),
+            )
+            rows = _execute(
+                conn,
+                f"""SELECT candidate_id, lineage_json FROM brain_governance_candidate
+                    WHERE status IN ({placeholders}) AND expires_at>0 AND expires_at<=?
+                    ORDER BY expires_at ASC LIMIT ?""",
+                (*active_statuses, current, max(1, min(int(limit), 5000))),
+            ).fetchall()
+            expired_ids: list[str] = []
+            for row in rows:
+                candidate_id = str(row["candidate_id"] or "")
+                lineage = _loads(row["lineage_json"], {})
+                if not isinstance(lineage, dict):
+                    lineage = {}
+                lineage["lifecycle_reconciliation"] = {
+                    "status": "expired",
+                    "reconciled_at": current,
+                    "reason": "candidate_ttl_elapsed_without_new_evidence",
+                }
+                _execute(
+                    conn,
+                    """UPDATE brain_governance_candidate
+                       SET status='superseded', proposal_stage='expired', lineage_json=?, updated_at=?
+                       WHERE candidate_id=? AND status IN (""" + placeholders + ")",
+                    (_dumps(lineage), current, candidate_id, *active_statuses),
+                )
+                expired_ids.append(candidate_id)
+            conn.commit()
+            return {
+                "ok": True,
+                "schema_version": "brain_governance_candidate_lifecycle_reconcile.v1",
+                "expired_count": len(expired_ids),
+                "expired_candidate_ids": expired_ids,
+                "ttl_seconds": ttl,
+            }
+        finally:
+            conn.close()
+
+    def latest_candidates(
+        self,
+        *,
+        limit: int = 50,
+        status: str = "",
+        include_expired: bool = False,
+    ) -> dict[str, Any]:
         ensure_brain_governance_candidate_table(self.db_path)
         limit = max(1, min(int(limit), 200))
         conn = _connect(self.db_path, read_only=True)
         try:
             if not state_table_exists(conn, "brain_governance_candidate"):
                 return self._missing_status("missing_table")
-            params: tuple[Any, ...]
-            where = ""
+            params: list[Any] = []
+            clauses: list[str] = []
             if status:
-                where = "WHERE status = ?"
-                params = (status, limit)
+                clauses.append("status = ?")
+                params.append(status)
             else:
-                params = (limit,)
+                clauses.append(
+                    "status IN ('active', 'brain_candidate', 'governance_ready', 'applyable', 'candidate_materialized')"
+                )
+            if not include_expired:
+                clauses.append("(expires_at<=0 OR expires_at>?)")
+                params.append(time.time())
+            where = "WHERE " + " AND ".join(clauses)
+            params.append(limit)
             rows = _execute(
                 conn,
                 f"""
@@ -279,7 +369,7 @@ class BrainGovernanceCandidateService:
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                params,
+                tuple(params),
             ).fetchall()
             return {
                 "ok": bool(rows),
@@ -378,7 +468,8 @@ class BrainGovernanceCandidateService:
                 "status": latest.get("status", "missing_candidates"),
                 "candidate_count": 0,
                 "candidate_lane_isolated": True,
-                "policy_suggestion_bridge_manual_only": True,
+                "policy_suggestion_bridge_manual_only": self._manual_bridge_only(),
+                "demo_nursery_system_bridge_enabled": not self._manual_bridge_only(),
                 "source_registry": self.source_registry(),
             }
         stages: dict[str, int] = {}
@@ -397,7 +488,8 @@ class BrainGovernanceCandidateService:
             "stages": dict(sorted(stages.items())),
             "statuses": dict(sorted(statuses.items())),
             "candidate_lane_isolated": True,
-            "policy_suggestion_bridge_manual_only": True,
+            "policy_suggestion_bridge_manual_only": self._manual_bridge_only(),
+            "demo_nursery_system_bridge_enabled": not self._manual_bridge_only(),
             "source_registry": self.source_registry(),
         }
 
@@ -429,8 +521,14 @@ class BrainGovernanceCandidateService:
         if not bool(risk_verdict.get("allowed")):
             return self._blocked_submit(candidate, "risk_policy_not_allowed")
         candidate_review = self._latest_bridge_ready_review(candidate_id)
+        automatic_demo = self._automatic_demo_bridge_enabled()
 
-        payload = self._policy_suggestion_payload(candidate, actor=actor, candidate_review=candidate_review)
+        payload = self._policy_suggestion_payload(
+            candidate,
+            actor=actor,
+            candidate_review=candidate_review,
+            automatic_demo=automatic_demo,
+        )
         if not payload.get("ok"):
             return self._blocked_submit(candidate, str(payload.get("reason") or "not_governor_compatible"), payload=payload)
         if not candidate_review.get("bridge_ready"):
@@ -520,7 +618,12 @@ class BrainGovernanceCandidateService:
         risk_verdict = dict(candidate.get("risk_verdict") or {})
         if not bool(risk_verdict.get("allowed")):
             return self._blocked_preview(candidate, "risk_policy_not_allowed")
-        payload = self._policy_suggestion_payload(candidate, actor=actor)
+        automatic_demo = self._automatic_demo_bridge_enabled()
+        payload = self._policy_suggestion_payload(
+            candidate,
+            actor=actor,
+            automatic_demo=automatic_demo,
+        )
         if not payload.get("ok"):
             return self._blocked_preview(candidate, str(payload.get("reason") or "not_governor_compatible"), payload=payload)
         return {
@@ -535,7 +638,8 @@ class BrainGovernanceCandidateService:
                 "schema_version": (payload.get("evidence") or {}).get("schema_version", ""),
                 "has_risk_verdict": bool((payload.get("evidence") or {}).get("risk_verdict")),
                 "has_rollback_plan": bool((payload.get("evidence") or {}).get("rollback_plan")),
-                "manual_only": True,
+                "manual_only": bool((payload.get("evidence") or {}).get("bridge", {}).get("manual_only", True)),
+                "automatic_demo": bool((payload.get("evidence") or {}).get("bridge", {}).get("automatic_demo", False)),
             },
             "boundary": self.boundary(),
         }
@@ -554,6 +658,7 @@ class BrainGovernanceCandidateService:
                  decision_policy_json, rollback_plan_json, lineage_json, status,
                  submitted_suggestion_id, submitted_at, expires_at, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?)
+                ON CONFLICT(candidate_id) DO NOTHING
                 """,
                 (
                     item["candidate_id"],
@@ -617,6 +722,7 @@ class BrainGovernanceCandidateService:
         *,
         actor: str,
         candidate_review: dict[str, Any] | None = None,
+        automatic_demo: bool = False,
     ) -> dict[str, Any]:
         scope_type = str(candidate.get("scope_type") or "")
         scope_key = str(candidate.get("scope_key") or "")
@@ -627,6 +733,7 @@ class BrainGovernanceCandidateService:
         evidence_refs = dict(candidate.get("evidence_refs") or {})
         source_agent = str(candidate.get("source_agent") or "")
         impact_level = str(candidate.get("max_impact") or "")
+        delegation = dict(lineage.get("delegation") or {})
         agent_generation_context = dict(lineage.get("agent_generation_context") or lineage.get("agent_context") or {})
         if not agent_generation_context:
             agent_generation_context = self._agent_generation_context(
@@ -640,6 +747,19 @@ class BrainGovernanceCandidateService:
             lineage = {**lineage, "agent_generation_context": agent_generation_context}
         elif not isinstance(lineage.get("agent_generation_context"), dict):
             lineage = {**lineage, "agent_generation_context": agent_generation_context}
+        bridge = {
+            "actor": actor,
+            "manual_only": not bool(automatic_demo),
+            "automatic_demo": bool(automatic_demo),
+            "demo_nursery": bool(automatic_demo),
+            "candidate_review_required": True,
+            "candidate_review_required_before_submit": True,
+            "candidate_review": candidate_review or {},
+            "requires_rule_evolution_governor_review": True,
+            "command_owner": "v16_brain" if source_agent == "v16_brain" else source_agent,
+            "target_agent": str(delegation.get("target_agent") or ""),
+            "execution_owner": str(delegation.get("execution_owner") or delegation.get("target_agent") or ""),
+        }
         base_evidence = {
             "schema_version": "brain_governance_candidate_policy_suggestion_evidence.v1",
             "candidate_id": candidate.get("candidate_id", ""),
@@ -657,22 +777,16 @@ class BrainGovernanceCandidateService:
             "lineage": lineage,
             "agent_context_required": True,
             "agent_generation_context": agent_generation_context,
+            "delegation": delegation,
             "authority_verdict": AgentAuthorityRegistryService().evaluate_scope_write(
                 source_agent,
                 scope_type,
                 action,
-                requested_writes=["policy_suggestion"],
+                requested_writes=[] if automatic_demo else ["policy_suggestion"],
                 status="proposed",
                 impact_level=impact_level,
             ),
-            "bridge": {
-                "actor": actor,
-                "manual_only": True,
-                "candidate_review_required": True,
-                "candidate_review_required_before_submit": True,
-                "candidate_review": candidate_review or {},
-                "requires_rule_evolution_governor_review": True,
-            },
+            "bridge": bridge,
             "boundary": self.boundary(),
         }
 
@@ -825,6 +939,19 @@ class BrainGovernanceCandidateService:
             "bridge_preview": payload or {},
             "boundary": self.boundary(),
         }
+
+    @staticmethod
+    def _automatic_demo_bridge_enabled() -> bool:
+        try:
+            from config.runtime_config import shared as runtime_config
+
+            mode = str(getattr(runtime_config(), "autonomy_mode", "") or "")
+            return mode in {"demo_nursery", "demo_autonomous"}
+        except Exception:
+            return False
+
+    def _manual_bridge_only(self) -> bool:
+        return not self._automatic_demo_bridge_enabled()
 
     def _blocked_preview(self, candidate: dict[str, Any], reason: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return {

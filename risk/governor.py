@@ -264,6 +264,12 @@ class RiskGovernor:
             return GovernorVerdict(False, "force_factor_disable_freeze")
         return GovernorVerdict(True, "ok")
 
+    def allow_factor_restore(self, state: GovernorState | None = None) -> GovernorVerdict:
+        """允许恢复被隔离的 live 因子吗?"""
+        if self._overrides.get("force_factor_restore_freeze"):
+            return GovernorVerdict(False, "force_factor_restore_freeze")
+        return GovernorVerdict(True, "ok")
+
     def allow_factor_retire(self, state: GovernorState | None = None) -> GovernorVerdict:
         """允许退役因子吗?"""
         if self._overrides.get("force_factor_retire_freeze"):

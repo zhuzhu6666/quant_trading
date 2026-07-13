@@ -177,6 +177,8 @@ readiness 状态语义：
 - `system_issue_context`: 数据时效、决策陈旧、信号到成交延迟等是否污染学习样本
 - `market_session`: 市场会话状态
 
+复盘摘要的附加口径：`factor_attribution` 必须标注 `causal_level=observational`，`largest_contribution_factor` 只表示最大观测贡献，不表示因果责任；`summary_consistency` 用于记录 sizing trace、执行量、成交量和事件上下文之间的可比性。发现 mismatch 或 different scopes 时只能增加 evidence gap/审计提示，不能直接生成因子惩罚或策略结论。
+
 历史样本不得伪造不可恢复的实时上下文。旧 open decision 可以回填同向簇和组合暴露，但 `bar_context / execution_context / market_micro_context / event_context / sizing_trace` 等只能从真实新单开始自然积累；缺少事件距离或窗口桶的旧样本不得事后猜测补造。
 
 如果 `system_issue_context.contaminates_learning=true`：
@@ -251,7 +253,9 @@ readiness 状态语义：
 | `meta_model_lightgbm` | `meta_model_shadow_audit` | `posture/posture_score/risk_budget_advice/trade_frequency_advice` |
 | 通用 inference | `model_inference_audit` | canary-ready advisory score |
 
-`factor_governance_lightgbm` 可以把高 weakness score 转成 `policy_suggestion`，但该建议仍是 advisory/governance 输入；真正降权、禁用、退役或回滚必须由 `FactorGovernanceOrchestrator`、`DecisionPolicy`、`RiskPolicyService` 和 runtime overlay/snapshot 链路执行。
+`factor_governance_lightgbm` 可以把高 weakness score 转成 `policy_suggestion`，但该建议仍是 advisory/governance 输入。`demo_nursery` 下，`FactorGovernanceLightGBMService.materialize_demo_governance_advisories` 仅把当前仍启用且可进入 live 的活跃 alpha 因子、至少两条弱样本且平均 weakness 不低于 0.85 的强证据规范化为白名单 `downweight`；这不是模型直接写权重。若因子在桥接后被 quarantine/disabled，建议自动 supersede，避免把历史建议误报为采用。真正降权、禁用、退役或回滚必须由 `RuleEvolutionGovernor`、`FactorGovernanceOrchestrator`、`DecisionPolicy`、`RiskPolicyService`、`FactorWeightChangeService` 和 runtime overlay/snapshot 链路执行，并进入 `learning_application_log/effect` 后验观察。
+
+`demo_nursery` 的 effect reconcile 对超过 24 小时仍没有可比较 baseline 的旧 observing 窗口标记为 `inconclusive`，不把它当作成功或失败经验；该终态只释放同 scope 的实验准入，后续建议仍须重新经过 Governor、DecisionPolicy、RiskPolicy 和效果观察。
 
 `meta_model_lightgbm` 可以 materialize advisory ledger，但不能直接改变风险预算、交易频率、因子权重或 hard risk limits。
 

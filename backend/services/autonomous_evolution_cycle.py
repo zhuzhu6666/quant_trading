@@ -141,6 +141,7 @@ class AutonomousEvolutionCycleService:
             boundaries=boundaries,
         )
         next_actions = self._next_actions(
+            autonomy_mode=autonomy_mode,
             blockers=blockers,
             proposal_status=proposal_status,
             candidate_status=candidate_status,
@@ -170,6 +171,9 @@ class AutonomousEvolutionCycleService:
             "status": status,
             "autonomy_mode": autonomy_mode or "unknown",
             "autonomy_posture": posture or "unknown",
+            "automatic_demo_governance": autonomy_mode in {"demo_nursery", "demo_autonomous"},
+            "human_intervention_required": False if autonomy_mode in {"demo_nursery", "demo_autonomous"} else True,
+            "system_decision_owner": "autonomous_evolution_nursery" if autonomy_mode in {"demo_nursery", "demo_autonomous"} else "operator",
             "replay_status": replay_status or "unknown",
             "release_status": release_status or "unknown",
             "stable_demo_nursery_ready": status == "ready_for_guarded_demo_apply",
@@ -389,34 +393,49 @@ class AutonomousEvolutionCycleService:
     @staticmethod
     def _next_actions(
         *,
+        autonomy_mode: str,
         blockers: list[dict[str, Any]],
         proposal_status: dict[str, Any],
         candidate_status: dict[str, Any],
         candidate_review_status: dict[str, Any],
         effect: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        automatic_demo = autonomy_mode in {"demo_nursery", "demo_autonomous"}
         components = {str(item.get("component") or "") for item in blockers}
         actions: list[dict[str, Any]] = []
         if int(proposal_status.get("stale_replay_required_count") or 0) > 0:
-            actions.append({"action": "run_proposal_replay_refresh", "endpoint": "/api/ops/replay/bar-run", "reason": "proposal_registry_request_replay"})
+            actions.append({
+                "action": "auto_run_proposal_replay_refresh" if automatic_demo else "run_proposal_replay_refresh",
+                "endpoint": "/api/ops/replay/bar-run",
+                "executor": "autonomous_evolution_nursery" if automatic_demo else "operator",
+                "reason": "proposal_registry_request_replay",
+            })
         if int(proposal_status.get("stale_review_required_count") or 0) > 0:
-            actions.append({"action": "review_stale_proposals", "endpoint": "/api/ops/autonomy/proposals", "reason": "proposal_registry_request_review"})
+            actions.append({
+                "action": "auto_review_stale_proposals" if automatic_demo else "review_stale_proposals",
+                "endpoint": "/api/ops/autonomy/proposals",
+                "executor": "autonomous_evolution_nursery" if automatic_demo else "operator",
+                "reason": "proposal_registry_request_review",
+            })
         if not blockers:
             if int(candidate_review_status.get("bridge_ready_count") or 0) > 0:
                 actions.append({
-                    "action": "bridge_reviewed_candidates",
+                    "action": "auto_bridge_reviewed_candidates" if automatic_demo else "bridge_reviewed_candidates",
                     "endpoint": "/api/ops/brain/governance-candidates/{candidate_id}/submit",
+                    "executor": "autonomous_evolution_nursery" if automatic_demo else "operator",
                     "reason": "reviewed_candidate_ready_for_controlled_bridge",
                 })
             actions.append({
-                "action": "inspect_demo_apply_plan",
+                "action": "auto_inspect_demo_apply_plan" if automatic_demo else "inspect_demo_apply_plan",
                 "endpoint": "/api/ops/autonomy/demo-apply-plan",
-                "reason": "ready_for_single_step_demo_apply_plan",
+                "executor": "autonomous_evolution_nursery" if automatic_demo else "operator",
+                "reason": "ready_for_system_owned_demo_apply_plan" if automatic_demo else "ready_for_single_step_demo_apply_plan",
             })
             actions.append({
-                "action": "guarded_demo_apply_step",
+                "action": "auto_guarded_demo_apply" if automatic_demo else "guarded_demo_apply_step",
                 "endpoint": "/api/ops/autonomy/demo-apply-step",
-                "reason": "ready_for_confirmed_single_step_demo_mutation",
+                "executor": "autonomous_evolution_nursery" if automatic_demo else "operator",
+                "reason": "system_will_apply_with_existing_gates" if automatic_demo else "ready_for_confirmed_single_step_demo_mutation",
             })
             return actions
         if "evidence" in components or "replay" in components:
@@ -426,11 +445,26 @@ class AutonomousEvolutionCycleService:
         if int(proposal_status.get("active_count") or 0) == 0:
             actions.append({"action": "refresh_proposal_registry", "endpoint": "/api/ops/autonomy/proposals/refresh", "reason": "proposal_bus_empty"})
         if int(candidate_status.get("candidate_count") or 0) > 0 and int(candidate_review_status.get("review_count") or 0) == 0:
-            actions.append({"action": "review_candidates", "endpoint": "/api/ops/brain/governance-candidates/review", "reason": "candidate_review_required"})
+            actions.append({
+                "action": "auto_review_candidates" if automatic_demo else "review_candidates",
+                "endpoint": "/api/ops/brain/governance-candidates/review",
+                "executor": "autonomous_evolution_nursery" if automatic_demo else "operator",
+                "reason": "candidate_review_required",
+            })
         if "proposal_registry" in components:
-            actions.append({"action": "resolve_proposal_conflicts", "endpoint": "/api/ops/autonomy/proposals", "reason": "conflict_or_stale_evidence"})
+            actions.append({
+                "action": "auto_resolve_proposal_conflicts" if automatic_demo else "resolve_proposal_conflicts",
+                "endpoint": "/api/ops/autonomy/proposals",
+                "executor": "autonomous_evolution_nursery" if automatic_demo else "operator",
+                "reason": "conflict_or_stale_evidence",
+            })
         if not bool(effect.get("ok")):
-            actions.append({"action": "reconcile_effects", "endpoint": "/api/ops/factor/governance-effects/reconcile", "reason": "effect_monitor_required"})
+            actions.append({
+                "action": "auto_reconcile_effects" if automatic_demo else "reconcile_effects",
+                "endpoint": "/api/ops/factor/governance-effects/reconcile",
+                "executor": "autonomous_evolution_nursery" if automatic_demo else "operator",
+                "reason": "effect_monitor_required",
+            })
         return actions
 
     @staticmethod

@@ -68,6 +68,52 @@ def test_governor_reviews_pending_and_rolls_back(tmp_path):
     assert rolled[0]["scope_key"] == "fragile_factor"
 
 
+def test_governor_accepts_strong_demo_model_bridge_without_experience_stats(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    evidence = {
+        "schema_version": "factor_governance_advisory.v1",
+        "source_agent": "lightgbm_shadow_models",
+        "model_type": "factor_governance_lightgbm",
+        "advisory_only": True,
+        "sample_count": 2,
+        "weak_sample_count": 2,
+        "min_weakness_score": 0.85,
+        "avg_weakness_score": 0.92,
+        "governed_action": "downweight",
+        "active_factor_context": {"used_in_score": True, "role": "alpha"},
+        "bridge": {
+            "automatic_demo": True,
+            "demo_nursery": True,
+            "actor": "system:autonomous_learning.demo_nursery_model_governance",
+        },
+    }
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, created_at)
+            VALUES ('model_bridge_1', 'factor', 'weak_factor', 'downweight',
+                    0.55, 'model evidence', ?, 'proposed', 1.0)
+            """,
+            (json.dumps(evidence),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reviewed = gov.review_pending()
+
+    assert reviewed["approved"] == 1
+    row = _connect(db_path).execute(
+        "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='model_bridge_1'"
+    ).fetchone()
+    assert row["status"] == "approved"
+    assert "factor model evidence bridged" in row["review_note"]
+
+
 def test_governor_logs_learning_application(tmp_path):
     db_path = str(tmp_path / "state.db")
     gov = RuleEvolutionGovernor(db_path)
@@ -587,6 +633,69 @@ def test_reconcile_application_effects_waits_when_baseline_too_thin(tmp_path):
     assert effect_row["status"] == "observing"
     assert int(effect_row["observed_trade_count"]) == 3
     assert int(effect_row["baseline_trade_count"]) == 1
+
+
+def test_demo_reconcile_terminalizes_comparatively_mixed_effects(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    app_id = gov.log_application(
+        scope_type="factor",
+        scope_key="mixed_factor",
+        action="downweight",
+        bias_multiplier=0.88,
+        old_weight=0.4,
+        new_weight=0.35,
+        suggestion_ids=[],
+        cycle_ts=1_700_000_000.0,
+        details={},
+    )
+    conn = _connect(db_path)
+    try:
+        for idx in range(3):
+            decision_id = f"mixed_post_{idx}"
+            conn.execute(
+                "INSERT INTO decision_factor_snapshot (decision_id, factor) VALUES (?, 'mixed_factor')",
+                (decision_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, entry_decision_id, pnl, outcome_label, review_json, created_at)
+                VALUES (?, ?, ?, ?, 'mixed', '{}', ?)
+                """,
+                (f"mixed_post_review_{idx}", f"mixed_trade_{idx}", decision_id, 1.0, 1_700_000_100.0 + idx),
+            )
+        for idx in range(3):
+            decision_id = f"mixed_pre_{idx}"
+            conn.execute(
+                "INSERT INTO decision_factor_snapshot (decision_id, factor) VALUES (?, 'mixed_factor')",
+                (decision_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, entry_decision_id, pnl, outcome_label, review_json, created_at)
+                VALUES (?, ?, ?, ?, 'mixed', '{}', ?)
+                """,
+                (f"mixed_pre_review_{idx}", f"mixed_pre_trade_{idx}", decision_id, 1.0, 1_699_999_900.0 + idx),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = gov.reconcile_application_effects(
+        min_trades=3,
+        observe_trades=3,
+        baseline_min_trades=2,
+        terminalize_mixed_after_recheck=True,
+    )
+
+    assert result["inconclusive"] == 1
+    row = _connect(db_path).execute(
+        "SELECT status FROM learning_application_effect WHERE application_id=?",
+        (app_id,),
+    ).fetchone()
+    assert row["status"] == "inconclusive"
 
 
 def test_reconcile_application_effects_waits_when_no_post_reviews(tmp_path):

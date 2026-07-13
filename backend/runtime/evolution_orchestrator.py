@@ -595,52 +595,24 @@ def _run_canary_evaluation(
 
 def _execute_promotions(names: list[str]) -> None:
     """Deprecated compatibility hook; lifecycle writes belong to factor governance."""
-    try:
-        from risk.policy_service import RiskPolicyService
-        verdict = RiskPolicyService.shared().evaluate(
-            "promote_factor",
-            {
-                "required_mode": "discovered",
-                "factor_count": len(names),
-                "source": "evolution_orchestrator",
-            },
-        )
-        if not verdict.allowed:
-            logger.warning("[Evolve] promotion blocked by risk policy: %s", verdict.reason)
-            _emit_evolution_story("canary_promotion_blocked", {
-                "promoted": names,
-                "risk_verdict": verdict.to_dict(),
-            })
-            return
-
-        from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED
-        adapter = RegistryAdapter.shared()
-        for name in names:
-            try:
-                ok = adapter.promote(name, new_source=SOURCE_DISCOVERED,
-                                     reason="canary_promotion")
-                if ok:
-                    logger.info("[Evolve] ✓ promoted %s → DISCOVERED", name)
-            except Exception as e:
-                logger.debug("[Evolve] promote %s failed: %s", name, e)
-    except Exception as e:
-        logger.debug("[Evolve] execute_promotions failed: %s", e)
+    # Kept as an import-compatible evidence hook for older callers.  The
+    # evolution worker may report canary candidates, but it must never write
+    # RegistryAdapter lifecycle state; FactorGovernanceOrchestrator is the
+    # sole lifecycle executor.
+    _emit_evolution_story("canary_promotion_deferred_to_factor_governance", {
+        "promotion_candidates": list(names),
+        "execution_owner": "factor_governance",
+        "applied": False,
+    })
 
 
 def _execute_rollbacks(names: list[str]) -> None:
     """Deprecated compatibility hook; lifecycle writes belong to factor governance."""
-    try:
-        from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
-        adapter = RegistryAdapter.shared()
-        for name in names:
-            try:
-                adapter.promote(name, new_source=SOURCE_SHADOW,
-                                reason="canary_rollback")
-                logger.info("[Evolve] ↺ rolled back %s → SHADOW", name)
-            except Exception as e:
-                logger.debug("[Evolve] rollback %s failed: %s", name, e)
-    except Exception as e:
-        logger.debug("[Evolve] execute_rollbacks failed: %s", e)
+    _emit_evolution_story("canary_rollback_deferred_to_factor_governance", {
+        "rollback_candidates": list(names),
+        "execution_owner": "factor_governance",
+        "applied": False,
+    })
 
 
 def _update_shadow_performance(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
@@ -848,15 +820,62 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
                 continue
 
             source_weight = 0.0
+            evidence: dict[str, Any] = {}
             try:
-                evidence = _json.loads(row["evidence_json"] or "{}")
+                raw_evidence = row["evidence_json"] or "{}"
+                evidence = raw_evidence if isinstance(raw_evidence, dict) else _json.loads(raw_evidence)
                 expected = evidence.get("expected_effect") or {}
                 source_weight = float(expected.get("current_weight") or expected.get("suggested_target_weight") or 0.0)
+                active_factor_context = evidence.get("active_factor_context") or {}
+                source_weight = max(
+                    source_weight,
+                    float(active_factor_context.get("weight") or 0.0),
+                )
             except Exception:
                 source_weight = 0.0
+            bridge = evidence.get("bridge") or {}
+            is_demo_model_bridge = (
+                str(evidence.get("source_agent") or "") == "lightgbm_shadow_models"
+                and str(evidence.get("model_type") or "") == "factor_governance_lightgbm"
+                and bridge.get("automatic_demo") is True
+                and bridge.get("demo_nursery") is True
+            )
+            if is_demo_model_bridge:
+                # A model suggestion is tied to the runtime factor snapshot
+                # that produced it.  If pruning/quarantine disabled the
+                # factor afterwards, do not keep feeding a stale suggestion
+                # into the weight policy or report it as adopted.
+                try:
+                    from alpha.portfolio_compositor import resolve_factor_role
+                    from config.runtime_config import shared as _runtime_config
+
+                    runtime_cfg = _runtime_config()
+                    factor_cfg = dict((runtime_cfg.factor_signal_config or {}).get(factor) or {})
+                    current_runtime_weight = float((runtime_cfg.factor_portfolio_weights or {}).get(factor) or 0.0)
+                    if (
+                        factor_cfg.get("enabled") is False
+                        or str(factor_cfg.get("lifecycle_status") or "").upper() in {"DEAD", "QUARANTINE"}
+                        or resolve_factor_role(factor, factor_cfg) != "alpha"
+                        or current_runtime_weight <= 0.0
+                    ):
+                        item["stale_runtime_target"] = True
+                        item["stale_runtime_target_reason"] = "factor_not_active_in_runtime_score"
+                        continue
+                except Exception:
+                    # If the runtime snapshot cannot be read, retain the
+                    # fail-closed advisory behavior and do not apply it.
+                    item["stale_runtime_target"] = True
+                    item["stale_runtime_target_reason"] = "runtime_snapshot_unavailable"
+                    continue
             bias_info = approved_biases.get(
                 factor,
-                {"multiplier": 1.0, "action": action, "suggestion_ids": [], "source_weight": source_weight},
+                {
+                    "multiplier": 1.0,
+                    "action": action,
+                    "suggestion_ids": [],
+                    "source_weight": source_weight,
+                    "model_contributor": False,
+                },
             )
             if source_weight > 0:
                 bias_info["source_weight"] = max(float(bias_info.get("source_weight") or 0.0), source_weight)
@@ -867,6 +886,14 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
                 current *= min(1.08, 1.0 + 0.08 * min(confidence, 1.0))
             bias_info["multiplier"] = min(1.10, max(0.70, current))
             bias_info["action"] = action
+            bias_info["model_contributor"] = bool(
+                bias_info.get("model_contributor")
+                or (
+                    str(evidence.get("source_agent") or "") == "lightgbm_shadow_models"
+                    and bridge.get("automatic_demo") is True
+                    and bridge.get("demo_nursery") is True
+                )
+            )
             bias_info["suggestion_ids"].append(str(row["suggestion_id"]))
             approved_biases[factor] = bias_info
     except Exception as e:
@@ -895,6 +922,15 @@ def _apply_learning_biases(
                 adjusted[factor] = source_weight
             else:
                 adjusted[factor] = float(base_weights[factor] or 0.0)
+        elif float(adjusted.get(factor) or 0.0) <= 0.0 and float((bias_info or {}).get("source_weight") or 0.0) > 0.0:
+            # WeightPolicy may emit a zero for a factor that still has a
+            # small live weight.  An explicitly approved model downweight is
+            # a bounded relative change from that live weight; preserve that
+            # baseline so DecisionPolicy and the weight service can evaluate
+            # the change instead of silently dropping the model contribution.
+            adjusted[factor] = float(
+                base_weights.get(factor) or (bias_info or {}).get("source_weight") or 0.0
+            )
         mult = float((bias_info or {}).get("multiplier", 1.0))
         old_w = float(adjusted[factor] or 0.0)
         new_w = max(0.0, old_w * float(mult))
@@ -916,6 +952,117 @@ def _apply_learning_biases(
     return adjusted, applied
 
 
+def _apply_model_governed_downweights(
+    *,
+    approved_biases: dict[str, dict] | None = None,
+) -> dict[str, Any]:
+    """Apply approved model downweights before the broad health-score sync.
+
+    Model governance must not depend on the much larger health-score/portfolio
+    rebuild completing first.  That rebuild can be slow or empty during a
+    worker restart, which used to make an approved model suggestion appear to
+    be ignored.  This helper is intentionally limited to the demo bridge's
+    risk-reducing factor downweight and still uses the normal mutation service.
+    """
+    try:
+        if approved_biases is None:
+            _, approved_biases = _collect_learning_suggestions()
+        model_biases = {
+            factor: info
+            for factor, info in (approved_biases or {}).items()
+            if bool((info or {}).get("model_contributor"))
+            and str((info or {}).get("action") or "") == "downweight"
+        }
+        if not model_biases:
+            return {"attempted": 0, "applied": False, "applications": {}}
+
+        from alpha.decision_policy import DecisionPolicy
+        from backend.services.factor_weight_change import FactorWeightChangeService
+        from config.runtime_config import shared as _rc
+
+        cfg = _rc()
+        if str(getattr(cfg, "autonomy_mode", "") or "") != "demo_nursery":
+            return {
+                "attempted": 0,
+                "applied": False,
+                "applications": {},
+                "reason": "model_bridge_demo_nursery_only",
+            }
+        current_weights = dict(cfg.factor_portfolio_weights)
+        model_weight_service = FactorWeightChangeService()
+        model_applications: dict[str, Any] = {}
+        for factor, info in model_biases.items():
+            old_weight = float(current_weights.get(factor) or 0.0)
+            if old_weight <= 0.0:
+                model_applications[factor] = {
+                    "status": "skipped",
+                    "reason": "current_weight_zero",
+                    "suggestion_ids": list((info or {}).get("suggestion_ids") or []),
+                }
+                continue
+            requested_multiplier = float((info or {}).get("multiplier") or 0.89)
+            requested_target = old_weight * max(0.70, min(1.0, requested_multiplier))
+            materiality_floor = max(0.002, old_weight * 0.05)
+            target_weight = max(0.0, min(requested_target, old_weight - materiality_floor))
+            result = model_weight_service.execute(
+                source="demo_model_governance_downweight",
+                producer="factor_governance",
+                run_id=f"demo_model_weight_{int(_time.time())}",
+                actor="system:evolution_orchestrator.demo_model_governance",
+                reason="approved LightGBM model downweight through demo nursery",
+                awe_patches={
+                    factor: {
+                        "weight": target_weight,
+                        "reason": "approved_model_downweight",
+                    }
+                },
+                weight_policy_weights=None,
+                factor_configs=cfg.factor_signal_config,
+                current_weights=current_weights,
+                fast=True,
+                bypass_for_risk_reduction=True,
+                decision_policy=DecisionPolicy(min_weight=0.0),
+                suggestion_ids_by_factor={factor: list((info or {}).get("suggestion_ids") or [])},
+                evidence_by_factor={
+                    factor: {
+                        "model_governed_step": True,
+                        "requested_multiplier": requested_multiplier,
+                        "materiality_floor": materiality_floor,
+                        "requested_target_weight": requested_target,
+                        "target_weight": target_weight,
+                        "model_bias": info,
+                    }
+                },
+                source_agent="factor_governance",
+            )
+            model_applications[factor] = {
+                "status": result.get("status"),
+                "application_ids": result.get("applications") or {},
+                "risk_verdict": result.get("risk_verdict") or {},
+                "admissions": result.get("admissions") or {},
+                "suggestion_ids": list((info or {}).get("suggestion_ids") or []),
+            }
+        applied = any(str(item.get("status") or "") == "applied" for item in model_applications.values())
+        _emit_evolution_story("model_governed_applications", {
+            "attempted": len(model_applications),
+            "applied": applied,
+            "items": model_applications,
+        })
+        if applied:
+            # Ensure the broad sync, if it proceeds, starts from the actual
+            # post-model runtime snapshot rather than the pre-application map.
+            _rc()
+        return {"attempted": len(model_applications), "applied": applied, "applications": model_applications}
+    except Exception as exc:
+        logger.warning("[Evolve] model governed downweight failed: %s", exc)
+        _emit_evolution_story("model_governed_applications", {
+            "attempted": 0,
+            "applied": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        return {"attempted": 0, "applied": False, "applications": {}, "error": str(exc)}
+
+
 def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bool:
     """计算动态权重并推入 factor_portfolio_weights (AWE 同一字段).
 
@@ -923,6 +1070,12 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
     DecisionPolicy 是唯一写路径, 解决 AWE 和 WeightPolicy 互相覆盖的问题.
     """
     try:
+        # Execute the concrete model bridge independently of the broad health
+        # score rebuild.  In demo mode this is the only model-originated
+        # mutation and remains a risk-reducing, governed downweight.
+        if apply:
+            _, pre_model_biases = _collect_learning_suggestions()
+            _apply_model_governed_downweights(approved_biases=pre_model_biases)
         from alpha.registry_adapter import RegistryAdapter
         adapter = RegistryAdapter.shared()
         scores = adapter.all_health_scores()
@@ -994,8 +1147,14 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
                 logger.debug("[Evolve] regime_boost: %s", e)
 
         from backend.services.factor_weight_change import FactorWeightChangeService
+        from alpha.decision_policy import DecisionPolicy
 
         weight_service = FactorWeightChangeService()
+        model_decision_policy = (
+            DecisionPolicy(min_weight=0.0)
+            if any(bool((info or {}).get("model_contributor")) for info in applied_biases.values())
+            else None
+        )
         plan = weight_service.plan(
             awe_patches=None,
             weight_policy_weights=wp_weights,
@@ -1004,6 +1163,7 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
             current_weights=current_weights,
             regime=regime,
             fast=False,
+            decision_policy=model_decision_policy,
         )
         new_weights = dict(plan.get("proposed_weights") or {})
         if not new_weights:
@@ -1033,6 +1193,7 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
             current_weights=current_weights,
             regime=regime,
             fast=False,
+            decision_policy=model_decision_policy,
             suggestion_ids_by_factor={
                 factor: list((info or {}).get("suggestion_ids") or [])
                 for factor, info in applied_biases.items()

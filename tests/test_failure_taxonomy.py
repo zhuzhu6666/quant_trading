@@ -83,6 +83,7 @@ def test_build_failure_taxonomy_marks_granular_entry_failures():
                 "factor_conflict_ratio": 0.52,
                 "positive_contribution_abs": 0.2,
                 "negative_contribution_abs": 0.6,
+                "effective_alpha_factor_count": 5,
             },
             "context_integrity": "full",
         }
@@ -95,6 +96,56 @@ def test_build_failure_taxonomy_marks_granular_entry_failures():
     assert "macro_event_overridden" in labels
     assert "low_reward_to_risk_entry" in labels
     assert result["primary_responsibility"] == "timing"
+
+
+def test_build_failure_taxonomy_does_not_call_low_ratio_mixed_contributions_conflict():
+    result = build_failure_taxonomy(
+        {
+            "entry_quality": 0.31,
+            "signal_score": -0.49,
+            "pnl": -1.0,
+            "decision_quality_context": {
+                "factor_conflict_ratio": 0.1,
+                "positive_contribution_abs": 0.8,
+                "negative_contribution_abs": 1.2,
+                "effective_alpha_factor_count": 12,
+            },
+            "context_integrity": "full",
+        }
+    )
+
+    assert "conflicting_factor_entry" not in result["responsibility_labels"]
+    assert "weak_signal_overtraded" not in result["responsibility_labels"]
+
+
+def test_build_failure_taxonomy_marks_missing_signal_score_as_an_evidence_gap():
+    result = build_failure_taxonomy(
+        {
+            "entry_quality": 0.31,
+            "pnl": -1.0,
+            "context_integrity": "full",
+        }
+    )
+
+    assert "weak_signal_overtraded" not in result["responsibility_labels"]
+    assert "signal_score_missing" in result["evidence_gaps"]
+
+
+def test_build_failure_taxonomy_does_not_call_micro_mfe_capture_failure():
+    result = build_failure_taxonomy(
+        {
+            "entry_quality": 0.48,
+            "exit_quality": 0.2,
+            "pnl": -9.95,
+            "mfe": 0.12,
+            "mae": 7.39,
+            "giveback_ratio": 1.0,
+            "profit_capture_ratio": 0.0,
+            "context_integrity": "full",
+        }
+    )
+
+    assert "alpha_correct_but_capture_failed" not in result["responsibility_labels"]
 
 
 def test_build_failure_taxonomy_prioritizes_system_data_contamination():

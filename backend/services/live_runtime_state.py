@@ -35,6 +35,7 @@ def default_live_state() -> dict[str, Any]:
         "session_peak_equity": 0.0,
         "session_start_balance": 0.0,
         "session_last_trade_ts": 0.0,
+        "session_state_source": "runtime_incremental",
         "circuit_breaker": False,
         "circuit_reason": "",
         "trade_equity_history": [],

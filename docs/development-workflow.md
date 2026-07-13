@@ -122,12 +122,13 @@ tests/
 ```text
 data/bars_monthly/bars_YYYY_MM.duckdb     # cTrader K 线月库
 data/bars.duckdb                          # 指向当前月份 K 线月库的兼容 symlink
-data/external_data.duckdb                 # 外部研究数据主库(COT/ETF/宏观), 按 release_at 做 point-in-time 对齐
+data/external_data.duckdb                 # 外部研究数据主库(COT/ETF/央行/FRED/宏观), 按 release_at 做 point-in-time 对齐
 data/ctrader_data.duckdb                  # 旧 K 线冷备/兼容库，不再作为 live K 线主写入入口
 data/events.duckdb                        # 经济事件日历，供风控事件缩放读取
-data/external_raw/                        # 外部数据原始响应快照(FRED/events 等)，不入 Git
+data/external_raw/                        # 外部数据原始响应快照(FRED/events/WGC/Yahoo 等)，不入 Git
 data/cot/                                 # CFTC COT 原始 zip 缓存，不入 Git
 data/sec_gld/                             # SEC GLD filing 缓存，不入 Git
+data/sec_slv/                             # SEC SLV filing 缓存，不入 Git
 data/archive/                             # 已归档的旧运行库，例如 legacy decision_log.db
 ```
 

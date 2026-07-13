@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import time
 import uuid
+import hashlib
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_exists
+from backend.core.db import STATE_DB, state_table_columns, state_table_exists
 from backend.services.agent_governance import AgentBriefingContextService, AgentScorecardService
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.brain_governance_candidates import (
@@ -40,8 +41,15 @@ def ensure_brain_governance_candidate_review_table(db_path: str | Path = STATE_D
             )
             """,
         )
+        columns = state_table_columns(conn, "brain_governance_candidate_review")
+        if "evidence_fingerprint" not in columns:
+            _execute(
+                conn,
+                "ALTER TABLE brain_governance_candidate_review ADD COLUMN evidence_fingerprint TEXT NOT NULL DEFAULT ''",
+            )
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_candidate ON brain_governance_candidate_review(candidate_id, created_at)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_status ON brain_governance_candidate_review(review_status, created_at)")
+        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_fingerprint ON brain_governance_candidate_review(candidate_id, evidence_fingerprint, created_at)")
         conn.commit()
     finally:
         conn.close()
@@ -66,6 +74,8 @@ class BrainGovernanceCandidateReviewService:
             "does_not_write_learning_samples": True,
             "does_not_submit_policy_suggestion": True,
             "bridge_preview_only": True,
+            "demo_nursery_system_review_supported": True,
+            "demo_nursery_review_does_not_require_operator": True,
             "llm_advisory_optional": True,
             "llm_advisory_only": True,
             "uses_existing_conflict_surface": True,
@@ -80,6 +90,7 @@ class BrainGovernanceCandidateReviewService:
         persist: bool = True,
     ) -> dict[str, Any]:
         ensure_brain_governance_candidate_review_table(self.db_path)
+        lifecycle = self.candidates.reconcile_expired_candidates()
         limit = max(1, min(int(limit), 200))
         latest = self.candidates.latest_candidates(limit=limit)
         candidates = list(latest.get("items") or [])
@@ -93,17 +104,32 @@ class BrainGovernanceCandidateReviewService:
             }
         now = time.time()
         context = self._review_context()
-        items = [
-            self._review_candidate(candidate, context=context, now=now, run_llm=run_llm, llm_dry_run=llm_dry_run)
-            for candidate in candidates
-        ]
+        items = []
+        skipped_unchanged = 0
+        for candidate in candidates:
+            fingerprint = self._evidence_fingerprint(candidate, context)
+            if persist and self._has_reviewed_fingerprint(str(candidate.get("candidate_id") or ""), fingerprint):
+                skipped_unchanged += 1
+                continue
+            items.append(
+                self._review_candidate(
+                    candidate,
+                    context=context,
+                    now=now,
+                    run_llm=run_llm,
+                    llm_dry_run=llm_dry_run,
+                    evidence_fingerprint=fingerprint,
+                )
+            )
         if persist:
             self._persist(items)
         return {
             "ok": True,
             "schema_version": "brain_governance_candidate_review_run.v1",
-            "status": "reviewed",
+            "status": "reviewed" if items else "no_new_evidence",
             "item_count": len(items),
+            "skipped_unchanged_count": skipped_unchanged,
+            "lifecycle_reconcile": lifecycle,
             "items": items,
             "run_llm": bool(run_llm),
             "llm_dry_run": bool(llm_dry_run),
@@ -142,7 +168,26 @@ class BrainGovernanceCandidateReviewService:
             }
         now = time.time()
         context = self._review_context()
-        item = self._review_candidate(candidate, context=context, now=now, run_llm=run_llm, llm_dry_run=llm_dry_run)
+        fingerprint = self._evidence_fingerprint(candidate, context)
+        if persist and self._has_reviewed_fingerprint(str(candidate_id or ""), fingerprint):
+            return {
+                "ok": True,
+                "schema_version": "brain_governance_candidate_review_run.v1",
+                "status": "no_new_evidence",
+                "item_count": 0,
+                "candidate_id": str(candidate_id or ""),
+                "items": [],
+                "boundary": self.boundary(),
+                "created_at": now,
+            }
+        item = self._review_candidate(
+            candidate,
+            context=context,
+            now=now,
+            run_llm=run_llm,
+            llm_dry_run=llm_dry_run,
+            evidence_fingerprint=fingerprint,
+        )
         if persist:
             self._persist([item])
         return {
@@ -279,6 +324,7 @@ class BrainGovernanceCandidateReviewService:
         now: float,
         run_llm: bool,
         llm_dry_run: bool,
+        evidence_fingerprint: str = "",
     ) -> dict[str, Any]:
         candidate_id = str(candidate.get("candidate_id") or "")
         evidence_gaps = self._evidence_gaps(candidate, now=now)
@@ -315,6 +361,7 @@ class BrainGovernanceCandidateReviewService:
             "review_id": f"brain_candidate_review_{uuid.uuid4().hex[:16]}",
             "schema_version": "brain_governance_candidate_review.v1",
             "candidate_id": candidate_id,
+            "evidence_fingerprint": evidence_fingerprint,
             "candidate": {
                 "source_agent": candidate.get("source_agent", ""),
                 "source_kind": candidate.get("source_kind", ""),
@@ -421,7 +468,7 @@ class BrainGovernanceCandidateReviewService:
         if score < 0.5:
             gaps.append("agent_reliability_low_requires_extra_evidence")
         if int(metric.get("contract_violation_count") or 0) > 0:
-            gaps.append("agent_contract_violation_history_requires_manual_review")
+            gaps.append("agent_contract_violation_history_requires_system_evidence")
         if int(metric.get("negative_effect_count") or 0) > 0:
             gaps.append("agent_negative_effect_history_requires_counter_evidence")
         if int(metric.get("low_reliability_count") or 0) >= 3:
@@ -709,9 +756,9 @@ class BrainGovernanceCandidateReviewService:
                     INSERT INTO brain_governance_candidate_review
                     (review_id, candidate_id, review_status, bridge_ready,
                      bridge_reason, evidence_gaps_json, conflict_json,
-                     bridge_preview_json, source_reliability_json,
-                     llm_advisory_json, boundary_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    bridge_preview_json, source_reliability_json,
+                     llm_advisory_json, boundary_json, evidence_fingerprint, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item["review_id"],
@@ -725,6 +772,7 @@ class BrainGovernanceCandidateReviewService:
                         _dumps(item.get("source_reliability", {})),
                         _dumps(item.get("llm_advisory", {})),
                         _dumps(item.get("boundary", {})),
+                        str(item.get("evidence_fingerprint") or ""),
                         _safe_float(item.get("created_at")),
                     ),
                 )
@@ -747,8 +795,54 @@ class BrainGovernanceCandidateReviewService:
             "source_reliability": _loads(row["source_reliability_json"], {}),
             "llm_advisory": _loads(row["llm_advisory_json"], {}),
             "boundary": _loads(row["boundary_json"], BrainGovernanceCandidateReviewService.boundary()),
+            "evidence_fingerprint": str(row["evidence_fingerprint"] or "") if "evidence_fingerprint" in row.keys() else "",
             "created_at": _safe_float(row["created_at"]),
         }
+
+    @staticmethod
+    def _evidence_fingerprint(candidate: dict[str, Any], context: dict[str, Any]) -> str:
+        scorecard = dict(context.get("agent_scorecard") or {}).get(str(candidate.get("source_agent") or ""), {})
+        briefing = dict(context.get("briefing") or {})
+        payload = {
+            "candidate_id": candidate.get("candidate_id"),
+            "updated_at": candidate.get("updated_at"),
+            "status": candidate.get("status"),
+            "proposal_stage": candidate.get("proposal_stage"),
+            "scope_type": candidate.get("scope_type"),
+            "scope_key": candidate.get("scope_key"),
+            "action": candidate.get("action"),
+            "confidence": candidate.get("confidence"),
+            "evidence_score": candidate.get("evidence_score"),
+            "expires_at": candidate.get("expires_at"),
+            "evidence_refs": candidate.get("evidence_refs"),
+            "counter_evidence_refs": candidate.get("counter_evidence_refs"),
+            "source_scorecard": {
+                "quality_score": scorecard.get("quality_score"),
+                "contract_violation_count": scorecard.get("contract_violation_count"),
+                "negative_effect_count": scorecard.get("negative_effect_count"),
+                "positive_effect_count": scorecard.get("positive_effect_count"),
+            },
+            "chain_health": (briefing.get("chain_health") or {}).get("status"),
+        }
+        return hashlib.sha256(_dumps(payload).encode("utf-8")).hexdigest()
+
+    def _has_reviewed_fingerprint(self, candidate_id: str, fingerprint: str) -> bool:
+        if not candidate_id or not fingerprint:
+            return False
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "brain_governance_candidate_review"):
+                return False
+            row = _execute(
+                conn,
+                """SELECT 1 FROM brain_governance_candidate_review
+                   WHERE candidate_id=? AND evidence_fingerprint=?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (candidate_id, fingerprint),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
 
     @staticmethod
     def _missing_status(status: str) -> dict[str, Any]:

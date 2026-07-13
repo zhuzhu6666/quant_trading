@@ -190,3 +190,93 @@ def test_factor_governance_lightgbm_skips_system_contaminated_reviews(tmp_path):
 
     assert len(samples) == 7
     assert all(sample["review_id"] != "rev_1" for sample in samples)
+
+
+def test_factor_governance_demo_bridge_emits_whitelisted_downweight(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    _create_factor_reviews(db_path)
+    service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=tmp_path / "artifacts")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executemany(
+            """
+            INSERT INTO factor_governance_shadow_audit
+            (inference_id, model_type, model_version, review_id, factor,
+             mode, positive_score, weakness_score, prediction, created_at)
+            VALUES (?, ?, ?, ?, ?, 'shadow', ?, ?, 0, ?)
+            """,
+            [
+                ("fg_demo_1", MODEL_TYPE, "1.0", "rev_1", "weak_factor", 0.10, 0.90, 10.0),
+                ("fg_demo_2", MODEL_TYPE, "1.0", "rev_3", "weak_factor", 0.05, 0.95, 11.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        "backend.services.factor_catalog.build_factor_catalog",
+        lambda _db_path: [
+            {
+                "factor_id": "weak_factor",
+                "used_in_score": True,
+                "role": "alpha",
+                "weight": 0.25,
+                "health_score": 32.0,
+                "health_status": "DECAYING",
+            }
+        ],
+    )
+
+    result = service.materialize_demo_governance_advisories()
+
+    assert result["materialized"] is True
+    assert result["count"] == 1
+    assert result["items"][0]["action"] == "downweight"
+    evidence = result["items"][0]["evidence"]
+    assert evidence["bridge"]["automatic_demo"] is True
+    assert evidence["bridge"]["demo_nursery"] is True
+    assert evidence["governed_action"] == "downweight"
+    assert evidence["direct_model_application"] is False
+
+    row = sqlite3.connect(str(db_path)).execute(
+        "SELECT action, status FROM policy_suggestion WHERE suggestion_id=?",
+        (result["items"][0]["suggestion_id"],),
+    ).fetchone()
+    assert row == ("downweight", "proposed")
+
+
+def test_factor_governance_demo_bridge_supersedes_inactive_target(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    _create_factor_reviews(db_path)
+    service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=tmp_path / "artifacts")
+    evidence = {
+        "model_type": MODEL_TYPE,
+        "source_agent": "lightgbm_shadow_models",
+        "bridge": {"automatic_demo": True, "demo_nursery": True},
+    }
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence,
+             evidence_json, status, created_at)
+            VALUES ('fgm_stale', 'factor', 'quarantined_factor', 'downweight',
+                    0.9, ?, 'approved', 10.0)
+            """,
+            (json.dumps(evidence),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr("backend.services.factor_catalog.build_factor_catalog", lambda _db_path: [])
+    result = service.materialize_demo_governance_advisories()
+
+    assert result["stale_superseded"] == 1
+    row = sqlite3.connect(str(db_path)).execute(
+        "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='fgm_stale'"
+    ).fetchone()
+    assert row == ("superseded", "superseded: factor is no longer active in runtime score")

@@ -51,6 +51,13 @@ INERT_ACTIVE_STATUSES = {
     "shadow_recorded",
 }
 ACTIONABLE_ROUTES = {"request_review", "request_replay", "submit_governance", "tighten_incident"}
+IGNORED_MAINTENANCE_ACTIONS = {
+    "sync_runtime_parameter_templates",
+    "upsert_samples",
+    "rebuild_contract_json",
+    "review_suggestion",
+    "meta_model_shadow_audit",
+}
 HIGH_IMPACTS = {"high", "critical", "live", "live_trading", "high_impact"}
 SOURCE_BASE_RELIABILITY = {
     "policy_suggestion": 0.62,
@@ -113,6 +120,7 @@ def ensure_proposal_registry_table(db_path: str | Path = STATE_DB) -> None:
         )
         _ensure_column(conn, db_path, "proposal_registry", "source_reliability_json", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(conn, db_path, "proposal_registry", "evidence_freshness_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(conn, db_path, "proposal_registry", "proposal_action", "TEXT DEFAULT ''")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_updated ON proposal_registry(updated_at)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_surface ON proposal_registry(control_surface, target_scope, status)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_source ON proposal_registry(source_agent, source_ref_type, updated_at)")
@@ -312,6 +320,7 @@ class ProposalRegistryService:
                 item["route_recommendation"] = "request_replay"
         compaction = self.compact_projection()
         self._upsert(list(by_id.values()))
+        projection_compaction = self._compact_duplicate_projection()
         summary = self.status(refresh=False)
         return {
             "ok": True,
@@ -321,6 +330,7 @@ class ProposalRegistryService:
             "high_unresolved_conflict_count": int(summary.get("high_unresolved_conflict_count", 0)),
             "summary": summary,
             "compaction": compaction,
+            "projection_compaction": projection_compaction,
             "boundary": self.boundary(),
         }
 
@@ -358,10 +368,31 @@ class ProposalRegistryService:
             conn.commit()
         finally:
             conn.close()
+        ignored_deleted = 0
+        ignored = sorted(IGNORED_MAINTENANCE_ACTIONS)
+        if ignored:
+            conn = _connect(self.db_path)
+            try:
+                placeholders = ",".join("?" for _ in ignored)
+                row = _execute(
+                    conn,
+                    f"SELECT COUNT(*) AS n FROM proposal_registry WHERE proposal_action IN ({placeholders})",
+                    tuple(ignored),
+                ).fetchone()
+                ignored_deleted = int(row["n"] or 0) if row else 0
+                _execute(
+                    conn,
+                    f"DELETE FROM proposal_registry WHERE proposal_action IN ({placeholders})",
+                    tuple(ignored),
+                )
+                conn.commit()
+            finally:
+                conn.close()
         return {
             "ok": True,
             "schema_version": "proposal_registry_projection_compaction.v1",
-            "deleted_count": len(proposal_ids),
+            "deleted_count": len(proposal_ids) + ignored_deleted,
+            "maintenance_deleted_count": ignored_deleted,
             "retention_seconds": max(7 * 86400.0, float(retention_seconds or 0.0)),
             "source_ledgers_preserved": True,
         }
@@ -549,6 +580,44 @@ class ProposalRegistryService:
             "boundary": self.boundary(),
         }
 
+    def _compact_duplicate_projection(self) -> dict[str, Any]:
+        """Keep one current projection row per source/control/action surface."""
+        conn = _connect(self.db_path)
+        try:
+            rows = _execute(
+                conn,
+                """SELECT proposal_id, source_agent, proposal_type, control_surface,
+                          target_scope, proposal_action, updated_at
+                   FROM proposal_registry
+                   ORDER BY updated_at DESC, created_at DESC""",
+            ).fetchall()
+            keep: set[tuple[str, str, str, str, str]] = set()
+            delete_ids: list[str] = []
+            for row in rows:
+                key = (
+                    _text(row["source_agent"], "unknown"),
+                    _text(row["proposal_type"], "unknown"),
+                    _text(row["control_surface"], "unknown"),
+                    _text(row["target_scope"], "unknown"),
+                    _text(row["proposal_action"], "unknown"),
+                )
+                proposal_id = _text(row["proposal_id"])
+                if key in keep:
+                    delete_ids.append(proposal_id)
+                else:
+                    keep.add(key)
+            for proposal_id in delete_ids:
+                _execute(conn, "DELETE FROM proposal_registry WHERE proposal_id=?", (proposal_id,))
+            conn.commit()
+            return {
+                "ok": True,
+                "schema_version": "proposal_registry_duplicate_compaction.v1",
+                "deleted_count": len(delete_ids),
+                "source_ledgers_preserved": True,
+            }
+        finally:
+            conn.close()
+
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
         if refresh:
             self.refresh()
@@ -559,6 +628,7 @@ class ProposalRegistryService:
                 conn,
                 """
                 SELECT proposal_id, source_agent, source_ref_type, proposal_type,
+                       proposal_action,
                        control_surface, target_scope, impact_level, source_reliability_json,
                        evidence_freshness_json, status, route_recommendation,
                        conflict_json
@@ -608,13 +678,14 @@ class ProposalRegistryService:
         counts: dict[str, int] = {}
         for item in items:
             counts[_text(item.get("status"), "unknown")] = counts.get(_text(item.get("status"), "unknown"), 0) + 1
-        duplicate_groups: dict[tuple[str, str, str, str], int] = {}
+        duplicate_groups: dict[tuple[str, str, str, str, str], int] = {}
         for item in active:
             key = (
                 _text(item.get("source_agent"), "unknown"),
                 _text(item.get("proposal_type"), "unknown"),
                 _text(item.get("control_surface"), "unknown"),
                 _text(item.get("target_scope"), "unknown"),
+                _text(item.get("proposal_action"), "unknown"),
             )
             duplicate_groups[key] = duplicate_groups.get(key, 0) + 1
         duplicate_group_items = [
@@ -623,6 +694,7 @@ class ProposalRegistryService:
                 "proposal_type": key[1],
                 "control_surface": key[2],
                 "target_scope": key[3],
+                "proposal_action": key[4],
                 "count": count,
             }
             for key, count in sorted(duplicate_groups.items(), key=lambda kv: kv[1], reverse=True)
@@ -669,7 +741,8 @@ class ProposalRegistryService:
             "proposal_id": _text(row["proposal_id"]),
             "source_agent": _text(row["source_agent"]),
             "source_ref_type": _text(row["source_ref_type"]),
-            "proposal_type": _text(row["proposal_type"]),
+                "proposal_type": _text(row["proposal_type"]),
+                "proposal_action": _text(row["proposal_action"]) if "proposal_action" in row.keys() else "",
             "control_surface": _text(row["control_surface"]),
             "target_scope": _text(row["target_scope"]),
             "impact_level": _text(row["impact_level"]),
@@ -952,9 +1025,30 @@ class ProposalRegistryService:
             items.extend(self._from_live_autonomy_events(conn, limit=limit, now=now))
             items.extend(self._from_llm_advisory(conn, limit=limit, now=now))
             items.extend(self._from_shadow_audits(conn, limit=limit, now=now))
-            return items
+            return self._compact_source_proposals(items)
         finally:
             conn.close()
+
+    @staticmethod
+    def _compact_source_proposals(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse repeated source events into the newest read-model row."""
+        latest: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        for item in items:
+            key = (
+                _text(item.get("source_agent"), "unknown"),
+                _text(item.get("proposal_type"), "unknown"),
+                _text(item.get("control_surface"), "unknown"),
+                _text(item.get("target_scope"), "unknown"),
+                _text(item.get("proposal_action"), "unknown"),
+            )
+            current = latest.get(key)
+            if current is None or (
+                _safe_float(item.get("updated_at")), _safe_float(item.get("created_at"))
+            ) >= (
+                _safe_float(current.get("updated_at")), _safe_float(current.get("created_at"))
+            ):
+                latest[key] = item
+        return list(latest.values())
 
     def _from_policy_suggestions(self, conn: Any, *, limit: int, now: float) -> list[dict[str, Any]]:
         if not state_table_exists(conn, "policy_suggestion"):
@@ -976,6 +1070,8 @@ class ProposalRegistryService:
             scope_type = _text(row["scope_type"])
             scope_key = _text(row["scope_key"])
             action = _text(row["action"])
+            if action in IGNORED_MAINTENANCE_ACTIONS:
+                continue
             surface = _control_surface(scope_type, action)
             status = _text(row["status"], "proposed")
             source_agent = infer_policy_suggestion_source_agent(evidence, scope_type=scope_type, action=action)
@@ -1278,9 +1374,16 @@ class ProposalRegistryService:
         ).fetchall()
         items = []
         for row in rows:
+            if _text(row["decision_type"]) in {"manual_api_mutation", "autonomous_mutation"}:
+                continue
             scope_type = _text(row["scope_type"])
             scope_key = _text(row["scope_key"])
             action = _text(row["action"] or row["decision_type"])
+            if action in IGNORED_MAINTENANCE_ACTIONS:
+                continue
+            decision_evidence = _loads(row["evidence_json"], {})
+            if not isinstance(decision_evidence, dict):
+                decision_evidence = {}
             surface = _control_surface(scope_type, action)
             status = _text(row["status"], "recorded")
             impact = _impact_level(surface, status)
@@ -1295,7 +1398,7 @@ class ProposalRegistryService:
             gates = authority["required_gate"]
             items.append(self._proposal(
                 proposal_id=f"evolution_decision:{row['decision_id']}",
-                source_agent="factor_governance",
+                source_agent=_text(decision_evidence.get("source_agent"), "factor_governance"),
                 source_ref_type="evolution_decision",
                 source_ref_id=_text(row["decision_id"]),
                 proposal_type=_proposal_type(scope_type, action),
@@ -1304,7 +1407,7 @@ class ProposalRegistryService:
                 target_scope=_scope(scope_type, scope_key),
                 impact_level=impact,
                 confidence=0.0,
-                evidence_refs={"run_id": row["run_id"], "evidence": _loads(row["evidence_json"], {}), "result": _loads(row["result_json"], {})},
+                evidence_refs={"run_id": row["run_id"], "evidence": decision_evidence, "result": _loads(row["result_json"], {})},
                 counter_evidence_refs={},
                 required_gate=gates,
                 risk_verdict=_loads(row["risk_verdict_json"], {}),
@@ -1644,17 +1747,18 @@ class ProposalRegistryService:
                     """
                     INSERT INTO proposal_registry
                     (proposal_id, source_agent, source_ref_type, source_ref_id, proposal_type,
-                     control_surface, target_scope, impact_level, confidence, evidence_refs_json,
+                     proposal_action, control_surface, target_scope, impact_level, confidence, evidence_refs_json,
                      counter_evidence_refs_json, required_gate_json, risk_verdict_json,
                      decision_policy_preview_json, expected_effect_json, rollback_plan_json,
                      source_reliability_json, evidence_freshness_json, status, authority_state,
                      route_recommendation, conflict_json, review_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (proposal_id) DO UPDATE SET
                         source_agent=excluded.source_agent,
                         source_ref_type=excluded.source_ref_type,
                         source_ref_id=excluded.source_ref_id,
                         proposal_type=excluded.proposal_type,
+                        proposal_action=excluded.proposal_action,
                         control_surface=excluded.control_surface,
                         target_scope=excluded.target_scope,
                         impact_level=excluded.impact_level,
@@ -1680,6 +1784,7 @@ class ProposalRegistryService:
                         item.get("source_ref_type", ""),
                         item.get("source_ref_id", ""),
                         item.get("proposal_type", ""),
+                        item.get("proposal_action", ""),
                         item.get("control_surface", ""),
                         item.get("target_scope", ""),
                         item.get("impact_level", ""),
@@ -1713,6 +1818,7 @@ class ProposalRegistryService:
             "source_ref_type": _text(row["source_ref_type"]),
             "source_ref_id": _text(row["source_ref_id"]),
             "proposal_type": _text(row["proposal_type"]),
+            "proposal_action": _text(row["proposal_action"]) if "proposal_action" in row.keys() else "",
             "control_surface": _text(row["control_surface"]),
             "target_scope": _text(row["target_scope"]),
             "impact_level": _text(row["impact_level"]),

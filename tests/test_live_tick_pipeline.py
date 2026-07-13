@@ -62,6 +62,11 @@ def test_factor_snapshot_helpers_preserve_vote_and_summary_payloads():
         composer_version="factor_roles.v2",
         context_state={"volatility_state": "normal"},
         redundancy_groups={"trend": ["trend", "mean"]},
+        calibrated_confidence={
+            "schema_version": "calibrated_signal_confidence.v1",
+            "calibrated_probability": 0.61,
+            "sizing_multiplier": 0.805,
+        },
     )
     gate = SimpleNamespace(passed=True, reason="ok")
 
@@ -91,6 +96,11 @@ def test_factor_snapshot_helpers_preserve_vote_and_summary_payloads():
         "composer_version": "factor_roles.v2",
         "context_state": {"volatility_state": "normal"},
         "context_policy": {},
+        "calibrated_confidence": {
+            "schema_version": "calibrated_signal_confidence.v1",
+            "calibrated_probability": 0.61,
+            "sizing_multiplier": 0.805,
+        },
         "redundancy_groups": {"trend": ["trend", "mean"]},
         "gate_passed": True,
         "gate_reason": "ok",

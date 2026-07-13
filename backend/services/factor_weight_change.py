@@ -184,6 +184,7 @@ class FactorWeightChangeService:
         suggestion_ids_by_factor: dict[str, list[str]] | None = None,
         source_agent: str = "factor_governance",
         additional_patch: dict[str, Any] | None = None,
+        v16_command_id: str = "",
     ) -> dict[str, Any]:
         # Fail before preparing application rows when pytest accidentally
         # inherits the production PostgreSQL DSN.  The overlay boundary used
@@ -213,11 +214,38 @@ class FactorWeightChangeService:
             bypass_for_risk_reduction=bypass_for_risk_reduction,
             decision_policy=decision_policy,
         )
+        # A per-factor read-only admission is not sufficient for a batch: all
+        # factors can observe the same pre-write global count.  Reserve the
+        # remaining slots atomically before replay/risk/mutation work starts.
+        batch_admission = self.admission.reserve_batch(
+            plan.get("admitted_decisions") or {},
+            action="update_weight",
+            bypass_for_risk_reduction=bypass_for_risk_reduction,
+        )
+        reserved_admissions = dict(batch_admission.get("admissions") or {})
+        admitted_decisions = {
+            name: decision
+            for name, decision in (plan.get("admitted_decisions") or {}).items()
+            if bool((reserved_admissions.get(name) or {}).get("allowed"))
+        }
+        plan["admissions"] = {
+            **dict(plan.get("admissions") or {}),
+            **reserved_admissions,
+        }
+        plan["admitted_decisions"] = admitted_decisions
+        plan["proposed_weights"] = DecisionPolicy.to_weights(admitted_decisions)
+        plan["batch_admission"] = batch_admission
         proposed_weights = dict(plan["proposed_weights"])
         if not proposed_weights:
-            return {**plan, "status": "no_admitted_change", "applications": {}}
+            return {
+                **plan,
+                "status": str(batch_admission.get("status") or "no_admitted_change"),
+                "applications": {},
+            }
+        reservation_ids = list((batch_admission.get("reservations") or {}).values())
         replay_admission = self._replay_admission(plan["admitted_decisions"])
         if not replay_admission.get("allowed"):
+            self.admission.release_reservations(reservation_ids)
             return {
                 **plan,
                 "status": "blocked_by_replay_admission",
@@ -242,6 +270,7 @@ class FactorWeightChangeService:
             verdict = risk_check({**plan, "risk_context": risk_context})
         risk_verdict = _verdict_payload(verdict)
         if not bool(risk_verdict.get("allowed")):
+            self.admission.release_reservations(reservation_ids)
             return {
                 **plan,
                 "status": "blocked_by_risk",
@@ -265,6 +294,8 @@ class FactorWeightChangeService:
                     "experiment_admission": plan["admissions"].get(name) or {},
                     "risk_verdict": risk_verdict,
                     "evidence": evidence_by_factor.get(name) or {},
+                    "v16_command_id": v16_command_id,
+                    "experiment_reservation_id": (reserved_admissions.get(name) or {}).get("reservation_id", ""),
                 }
                 application_ids[name] = self.applications.prepare(
                     scope_key=name,
@@ -274,7 +305,12 @@ class FactorWeightChangeService:
                     cycle_ts=cycle_ts,
                     details=details,
                 )
+                self.admission.finalize_reservation(
+                    str((reserved_admissions.get(name) or {}).get("reservation_id") or ""),
+                    application_id=application_ids[name],
+                )
         except Exception as exc:
+            self.admission.release_reservations(reservation_ids)
             for application_id in application_ids.values():
                 self.applications.transition(
                     application_id,
@@ -294,6 +330,12 @@ class FactorWeightChangeService:
                 actor=actor,
                 action="update_weight",
                 reason=reason,
+                require_v16_command=is_state_db_path(self.db_path) and str(actor or "").startswith("system:"),
+                v16_command_id=v16_command_id,
+                v16_target_agent=source_agent,
+                v16_scope_type="factor_weight",
+                v16_action="update_weight",
+                risk_reduction=bypass_for_risk_reduction,
             )
             if mutation.get("ok") is False:
                 raise RuntimeError(str(mutation.get("status") or "runtime_config_mutation_failed"))

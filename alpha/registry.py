@@ -284,7 +284,9 @@ def factor_vol_ma_ratio(df, period: int = 20):
 
     正值 = 放量, 负值 = 缩量。配合价格 = 突破/反转的强度证据。
     """
-    vol = df["volume"].values if "volume" in df.columns else np.zeros(len(df))
+    # Always use float buffers: broker/database volume columns are commonly
+    # integer typed, while np.divide(out=...) writes floating ratios.
+    vol = np.asarray(df["volume"].values, dtype=float) if "volume" in df.columns else np.zeros(len(df), dtype=float)
     n = len(vol)
     if n < period:
         return np.full(n, np.nan)
@@ -364,6 +366,443 @@ def factor_inside_bar(df):
         if h[i] <= h[i - 1] and l[i] >= l[i - 1]:
             out[i] = 1.0
     return out
+
+
+# =============================================================================
+# P0-4 结构/高周期因子 (2026-07-13)
+#
+# These factors deliberately use only completed information at each bar.  The
+# higher-timeframe factor aggregates the lower-timeframe frame and assigns the
+# last completed higher-timeframe value to the current bucket, so an unfinished
+# H1/H4 candle can never leak into the M5 decision.
+# =============================================================================
+
+
+def _factor_time_index(df: pd.DataFrame) -> pd.DatetimeIndex | None:
+    """Return a normalized time index when a factor frame exposes timestamps."""
+    if not isinstance(df, pd.DataFrame) or len(df) == 0:
+        return None
+    if isinstance(df.index, pd.DatetimeIndex):
+        idx = pd.DatetimeIndex(df.index)
+    elif "time" in df.columns:
+        raw = df["time"]
+        if pd.api.types.is_numeric_dtype(raw):
+            idx = pd.DatetimeIndex(pd.to_datetime(raw, unit="s", errors="coerce", utc=True))
+        else:
+            idx = pd.DatetimeIndex(pd.to_datetime(raw, errors="coerce", utc=True))
+    else:
+        return None
+    if idx.tz is not None:
+        idx = idx.tz_convert(None)
+    return idx
+
+
+def _infer_factor_minutes(df: pd.DataFrame, index: pd.DatetimeIndex | None) -> float:
+    """Infer base bar minutes without trusting a possibly stale timeframe tag."""
+    if isinstance(index, pd.DatetimeIndex) and len(index) >= 3:
+        diffs = pd.Series(index).diff().dropna().dt.total_seconds().div(60.0)
+        diffs = diffs[(diffs > 0) & np.isfinite(diffs)]
+        if not diffs.empty:
+            return float(diffs.median())
+    if isinstance(df, pd.DataFrame) and "timeframe" in df.columns:
+        text = str(df["timeframe"].dropna().iloc[0]).upper() if df["timeframe"].notna().any() else ""
+        if text.startswith("M"):
+            try:
+                return float(text[1:])
+            except ValueError:
+                pass
+        if text.startswith("H"):
+            try:
+                return float(text[1:]) * 60.0
+            except ValueError:
+                pass
+    return 5.0
+
+
+def _higher_timeframe_alignment(df: pd.DataFrame) -> np.ndarray:
+    """Calculate completed higher-timeframe trend alignment for every bar."""
+    close = np.asarray(df["close"], dtype=float)
+    n = len(close)
+    out = np.full(n, np.nan)
+    index = _factor_time_index(df)
+    if n < 20 or index is None or len(index) != n:
+        return out
+
+    base_minutes = _infer_factor_minutes(df, index)
+    if base_minutes <= 15:
+        target_minutes = 60.0
+    elif base_minutes <= 60:
+        target_minutes = 240.0
+    else:
+        target_minutes = base_minutes * 4.0
+    if target_minutes <= base_minutes:
+        return out
+
+    # A fixed-minute bucket is deterministic for both historical and live
+    # frames.  The current bucket is excluded from the signal assignment.
+    # Pandas can retain second-resolution datetime indexes when the source is
+    # an integer epoch column.  Normalize explicitly before integer bucketing
+    # so the unit can never accidentally collapse the whole frame into one
+    # bucket.
+    index_ns = pd.DatetimeIndex(index).astype("datetime64[ns]").asi8
+    bucket_ns = int(target_minutes * 60.0 * 1_000_000_000)
+    bucket_values = index_ns // bucket_ns
+    unique_buckets = np.unique(bucket_values)
+    if len(unique_buckets) < 14:
+        return out
+
+    htf_close = np.asarray([
+        close[bucket_values == bucket].astype(float)[-1]
+        for bucket in unique_buckets
+    ])
+    fast = pd.Series(htf_close).ewm(span=5, min_periods=5, adjust=False).mean().to_numpy()
+    slow = pd.Series(htf_close).ewm(span=13, min_periods=13, adjust=False).mean().to_numpy()
+    pct_move = pd.Series(htf_close).pct_change().abs().rolling(5, min_periods=5).mean().to_numpy()
+    distance = np.divide(
+        fast - slow,
+        htf_close * np.maximum(pct_move, 1e-5),
+        out=np.full(len(htf_close), np.nan),
+        where=np.isfinite(htf_close) & (htf_close != 0) & np.isfinite(pct_move),
+    )
+    htf_signal = np.tanh(distance * 0.5)
+    bucket_to_pos = {int(bucket): pos for pos, bucket in enumerate(unique_buckets)}
+    for i, bucket in enumerate(bucket_values):
+        # pos-1 is the last fully closed higher-timeframe candle.  This also
+        # keeps the current higher-timeframe bucket out of historical output.
+        pos = bucket_to_pos[int(bucket)] - 1
+        if pos >= 0 and np.isfinite(htf_signal[pos]):
+            out[i] = htf_signal[pos]
+    return out
+
+
+@factor_registry.register("htf_trend_alignment", "高周期趋势一致性 (M5→H1 / H1→H4)")
+def factor_htf_trend_alignment(df):
+    """Completed higher-timeframe EMA alignment in the range [-1, 1]."""
+    return _higher_timeframe_alignment(df)
+
+
+@factor_registry.register("donchian_breakout_20", "Donchian(20) 突破压力 (-1 ~ +1)")
+def factor_donchian_breakout_20(df, period: int = 20):
+    """Directional breakout pressure, excluding the current bar's range."""
+    high = np.asarray(df["high"], dtype=float)
+    low = np.asarray(df["low"], dtype=float)
+    close = np.asarray(df["close"], dtype=float)
+    n = len(close)
+    out = np.zeros(n, dtype=float)
+    if n <= period:
+        out[: max(n, 0)] = np.nan
+        return out
+    previous_high = pd.Series(high).rolling(period, min_periods=period).max().shift(1).to_numpy()
+    previous_low = pd.Series(low).rolling(period, min_periods=period).min().shift(1).to_numpy()
+    true_range = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    true_range[0] = high[0] - low[0]
+    scale = pd.Series(true_range).rolling(14, min_periods=5).median().to_numpy()
+    up = np.divide(close - previous_high, scale, out=np.zeros(n), where=np.isfinite(previous_high) & (scale > 0))
+    down = np.divide(close - previous_low, scale, out=np.zeros(n), where=np.isfinite(previous_low) & (scale > 0))
+    out = np.where(close > previous_high, np.clip(up, 0.0, 1.0), out)
+    out = np.where(close < previous_low, np.clip(down, -1.0, 0.0), out)
+    out[:period] = np.nan
+    return out
+
+
+@factor_registry.register("range_expansion_20", "20-bar 区间扩张与方向压力")
+def factor_range_expansion_20(df, period: int = 20):
+    """Context factor: expansion magnitude, signed by the completed bar body."""
+    high = np.asarray(df["high"], dtype=float)
+    low = np.asarray(df["low"], dtype=float)
+    close = np.asarray(df["close"], dtype=float)
+    open_ = np.asarray(df["open"], dtype=float) if "open" in df.columns else np.roll(close, 1)
+    n = len(close)
+    out = np.full(n, np.nan)
+    if n == 0:
+        return out
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    baseline = pd.Series(tr).rolling(period, min_periods=period).median().shift(1).to_numpy()
+    expansion = np.divide(tr, baseline, out=np.full(n, np.nan), where=np.isfinite(baseline) & (baseline > 0)) - 1.0
+    body_direction = np.sign(close - open_)
+    out = np.clip(expansion, -1.0, 3.0) * body_direction
+    out[:period] = np.nan
+    return out
+
+
+@factor_registry.register("price_location_50", "价格在过去 50-bar 区间的位置 (-1 ~ +1)")
+def factor_price_location_50(df, period: int = 50):
+    """Close location in the prior rolling range; current high/low excluded."""
+    high = np.asarray(df["high"], dtype=float)
+    low = np.asarray(df["low"], dtype=float)
+    close = np.asarray(df["close"], dtype=float)
+    n = len(close)
+    out = np.full(n, np.nan)
+    previous_high = pd.Series(high).rolling(period, min_periods=period).max().shift(1).to_numpy()
+    previous_low = pd.Series(low).rolling(period, min_periods=period).min().shift(1).to_numpy()
+    width = previous_high - previous_low
+    valid = np.isfinite(width) & (width > 0)
+    out[valid] = 2.0 * (close[valid] - previous_low[valid]) / width[valid] - 1.0
+    return np.clip(out, -1.0, 1.0)
+
+
+# =============================================================================
+# P0-5 K 线形态与 Fibonacci 回撤因子 (2026-07-13)
+#
+# The Fibonacci features use confirmed M15 swing points.  A swing at index i
+# is only available after ``right_bars`` later M15 bars, and every M5 bar uses
+# the last completed M15 bucket.  This makes the feature intentionally lagged
+# but prevents repainting/look-ahead in both live and historical evaluation.
+# =============================================================================
+
+
+def _fib_ohlc_cache(df: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Return cached Fibonacci features for one factor frame."""
+    if not isinstance(df, pd.DataFrame):
+        return {}
+    cache = df.attrs.setdefault("_quant_factor_cache", {})
+    cache_key = "fib_m15_confirmed_v1"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    n = len(df)
+    empty = {
+        "position": np.full(n, np.nan),
+        "proximity": np.full(n, np.nan),
+        "rejection": np.full(n, np.nan),
+        "direction": np.full(n, np.nan),
+    }
+    if n < 12 or not all(col in df.columns for col in ("high", "low", "close")):
+        cache[cache_key] = empty
+        return empty
+
+    index = _factor_time_index(df)
+    if index is None or len(index) != n:
+        cache[cache_key] = empty
+        return empty
+    index_ns = pd.DatetimeIndex(index).astype("datetime64[ns]").asi8
+    base_minutes = _infer_factor_minutes(df, index)
+    target_minutes = 15.0 if base_minutes <= 15.0 else base_minutes
+    bucket_ns = int(target_minutes * 60.0 * 1_000_000_000)
+    bucket_values = index_ns // bucket_ns
+    unique_buckets = np.unique(bucket_values)
+    if len(unique_buckets) < 10:
+        cache[cache_key] = empty
+        return empty
+
+    high = np.asarray(df["high"], dtype=float)
+    low = np.asarray(df["low"], dtype=float)
+    close = np.asarray(df["close"], dtype=float)
+    open_ = np.asarray(df["open"], dtype=float) if "open" in df.columns else np.roll(close, 1)
+    htf_open = np.empty(len(unique_buckets), dtype=float)
+    htf_high = np.empty(len(unique_buckets), dtype=float)
+    htf_low = np.empty(len(unique_buckets), dtype=float)
+    htf_close = np.empty(len(unique_buckets), dtype=float)
+    bucket_to_pos: dict[int, int] = {}
+    for pos, bucket in enumerate(unique_buckets):
+        mask = bucket_values == bucket
+        bucket_to_pos[int(bucket)] = pos
+        htf_open[pos] = open_[np.flatnonzero(mask)[0]]
+        htf_high[pos] = np.nanmax(high[mask])
+        htf_low[pos] = np.nanmin(low[mask])
+        htf_close[pos] = close[np.flatnonzero(mask)[-1]]
+
+    left_bars = 2
+    right_bars = 2
+    swing_high = np.zeros(len(unique_buckets), dtype=bool)
+    swing_low = np.zeros(len(unique_buckets), dtype=bool)
+    for pos in range(left_bars, len(unique_buckets) - right_bars):
+        left_high = htf_high[pos - left_bars:pos]
+        right_high = htf_high[pos + 1:pos + right_bars + 1]
+        left_low = htf_low[pos - left_bars:pos]
+        right_low = htf_low[pos + 1:pos + right_bars + 1]
+        swing_high[pos] = bool(
+            np.isfinite(htf_high[pos])
+            and htf_high[pos] >= np.nanmax(left_high)
+            and htf_high[pos] > np.nanmax(right_high)
+        )
+        swing_low[pos] = bool(
+            np.isfinite(htf_low[pos])
+            and htf_low[pos] <= np.nanmin(left_low)
+            and htf_low[pos] < np.nanmin(right_low)
+        )
+
+    levels = np.asarray([0.236, 0.382, 0.5, 0.618, 0.786], dtype=float)
+    state_direction = np.full(len(unique_buckets), np.nan)
+    state_low = np.full(len(unique_buckets), np.nan)
+    state_high = np.full(len(unique_buckets), np.nan)
+    state_range = np.full(len(unique_buckets), np.nan)
+
+    for current_pos in range(len(unique_buckets)):
+        # The current M15 bucket is never used as a swing confirmation source.
+        confirmed_limit = current_pos - right_bars
+        if confirmed_limit < left_bars:
+            continue
+        high_candidates = np.flatnonzero(swing_high[:confirmed_limit + 1])
+        low_candidates = np.flatnonzero(swing_low[:confirmed_limit + 1])
+        if len(high_candidates) == 0 or len(low_candidates) == 0:
+            continue
+        last_high_idx = int(high_candidates[-1])
+        last_low_idx = int(low_candidates[-1])
+        if last_high_idx == last_low_idx:
+            continue
+        if last_high_idx > last_low_idx:
+            direction = 1.0
+            swing_low_value = htf_low[last_low_idx]
+            swing_high_value = htf_high[last_high_idx]
+        else:
+            direction = -1.0
+            swing_low_value = htf_low[last_low_idx]
+            swing_high_value = htf_high[last_high_idx]
+        price_range = float(swing_high_value - swing_low_value)
+        if not np.isfinite(price_range) or price_range <= 0:
+            continue
+        state_direction[current_pos] = direction
+        state_low[current_pos] = swing_low_value
+        state_high[current_pos] = swing_high_value
+        state_range[current_pos] = price_range
+
+    position = np.full(n, np.nan)
+    proximity = np.full(n, np.nan)
+    rejection = np.full(n, np.nan)
+    direction_values = np.full(n, np.nan)
+    for i, bucket in enumerate(bucket_values):
+        current_pos = bucket_to_pos[int(bucket)] - 1
+        if current_pos < 0 or not np.isfinite(state_range[current_pos]):
+            continue
+        direction = state_direction[current_pos]
+        swing_low_value = state_low[current_pos]
+        swing_high_value = state_high[current_pos]
+        price_range = state_range[current_pos]
+        if direction > 0:
+            retracement = (swing_high_value - close[i]) / price_range
+        else:
+            retracement = (close[i] - swing_low_value) / price_range
+        retracement = float(np.clip(retracement, -0.5, 1.5))
+        position[i] = float(np.clip(direction * (1.0 - 2.0 * retracement), -1.0, 1.0))
+        distances = np.abs(retracement - levels)
+        nearest = int(np.argmin(distances))
+        level_ratio = float(levels[nearest])
+        proximity[i] = float(np.clip(1.0 - distances[nearest] / 0.06, 0.0, 1.0))
+        level_price = (
+            swing_high_value - level_ratio * price_range
+            if direction > 0
+            else swing_low_value + level_ratio * price_range
+        )
+        candle_range = max(float(high[i] - low[i]), 1e-9)
+        body_pressure = abs(float(close[i] - open_[i])) / candle_range
+        bullish_rejection = direction > 0 and low[i] <= level_price and close[i] > level_price and close[i] > open_[i]
+        bearish_rejection = direction < 0 and high[i] >= level_price and close[i] < level_price and close[i] < open_[i]
+        if proximity[i] > 0 and (bullish_rejection or bearish_rejection):
+            rejection[i] = float(np.clip(direction * body_pressure * proximity[i], -1.0, 1.0))
+        else:
+            rejection[i] = 0.0
+        direction_values[i] = direction
+
+    result = {
+        "position": position,
+        "proximity": proximity,
+        "rejection": rejection,
+        "direction": direction_values,
+    }
+    cache[cache_key] = result
+    return result
+
+
+@factor_registry.register("candle_body_pressure", "K线实体方向压力 (-1 ~ +1)")
+def factor_candle_body_pressure(df):
+    """Signed body/range pressure; unlike a named pattern it is continuous."""
+    if not all(col in df.columns for col in ("open", "high", "low", "close")):
+        return np.full(len(df), np.nan)
+    open_, high, low, close = (np.asarray(df[col], dtype=float) for col in ("open", "high", "low", "close"))
+    candle_range = np.maximum(high - low, 1e-9)
+    return np.clip((close - open_) / candle_range, -1.0, 1.0)
+
+
+@factor_registry.register("wick_rejection", "K线影线拒绝压力 (-1 ~ +1)")
+def factor_wick_rejection(df):
+    """Lower-wick rejection is positive; upper-wick rejection is negative."""
+    if not all(col in df.columns for col in ("open", "high", "low", "close")):
+        return np.full(len(df), np.nan)
+    open_, high, low, close = (np.asarray(df[col], dtype=float) for col in ("open", "high", "low", "close"))
+    body_top = np.maximum(open_, close)
+    body_bottom = np.minimum(open_, close)
+    candle_range = np.maximum(high - low, 1e-9)
+    upper = np.maximum(high - body_top, 0.0)
+    lower = np.maximum(body_bottom - low, 0.0)
+    return np.clip((lower - upper) / candle_range, -1.0, 1.0)
+
+
+@factor_registry.register("morning_evening_star", "早晨/黄昏之星三K形态 (+1/-1)")
+def factor_morning_evening_star(df):
+    """Three-bar reversal pattern using closed OHLC bars only."""
+    if not all(col in df.columns for col in ("open", "high", "low", "close")):
+        return np.full(len(df), np.nan)
+    open_, high, low, close = (np.asarray(df[col], dtype=float) for col in ("open", "high", "low", "close"))
+    n = len(close)
+    out = np.zeros(n, dtype=float)
+    for i in range(2, n):
+        first_body = abs(close[i - 2] - open_[i - 2])
+        middle_body = abs(close[i - 1] - open_[i - 1])
+        third_body = abs(close[i] - open_[i])
+        if min(first_body, third_body) <= 1e-9:
+            continue
+        middle_range = max(high[i - 1] - low[i - 1], 1e-9)
+        first_mid = (open_[i - 2] + close[i - 2]) / 2.0
+        if (
+            close[i - 2] < open_[i - 2]
+            and middle_body <= first_body * 0.45
+            and middle_body <= middle_range * 0.45
+            and close[i] > open_[i]
+            and close[i] >= first_mid
+            and third_body >= first_body * 0.35
+        ):
+            out[i] = 1.0
+        elif (
+            close[i - 2] > open_[i - 2]
+            and middle_body <= first_body * 0.45
+            and middle_body <= middle_range * 0.45
+            and close[i] < open_[i]
+            and close[i] <= first_mid
+            and third_body >= first_body * 0.35
+        ):
+            out[i] = -1.0
+    return out
+
+
+@factor_registry.register("harami", "Harami 两K形态 (+1/-1)")
+def factor_harami(df):
+    """Bullish/bearish Harami with the current bar body inside the prior body."""
+    if not all(col in df.columns for col in ("open", "close")):
+        return np.full(len(df), np.nan)
+    open_, close = np.asarray(df["open"], dtype=float), np.asarray(df["close"], dtype=float)
+    n = len(close)
+    out = np.zeros(n, dtype=float)
+    for i in range(1, n):
+        prev_hi, prev_lo = max(open_[i - 1], close[i - 1]), min(open_[i - 1], close[i - 1])
+        cur_hi, cur_lo = max(open_[i], close[i]), min(open_[i], close[i])
+        prev_body = prev_hi - prev_lo
+        if prev_body <= 1e-9 or cur_hi > prev_hi or cur_lo < prev_lo:
+            continue
+        if close[i - 1] < open_[i - 1] and close[i] >= open_[i]:
+            out[i] = 1.0
+        elif close[i - 1] > open_[i - 1] and close[i] <= open_[i]:
+            out[i] = -1.0
+    return out
+
+
+@factor_registry.register("fib_retracement_position", "确认波段 Fibonacci 回撤位置 (-1 ~ +1)")
+def factor_fib_retracement_position(df):
+    """Directional position within the latest confirmed M15 retracement leg."""
+    return _fib_ohlc_cache(df).get("position", np.full(len(df), np.nan))
+
+
+@factor_registry.register("fib_level_proximity", "接近 Fibonacci 回撤位程度 (0 ~ 1)")
+def factor_fib_level_proximity(df):
+    """Context strength for proximity to common Fibonacci retracement levels."""
+    return _fib_ohlc_cache(df).get("proximity", np.full(len(df), np.nan))
+
+
+@factor_registry.register("fib_rejection_confirmation", "Fibonacci 回撤位反弹确认 (-1 ~ +1)")
+def factor_fib_rejection_confirmation(df):
+    """Directional rejection only after a closed bar confirms the response."""
+    return _fib_ohlc_cache(df).get("rejection", np.full(len(df), np.nan))
 
 
 # =============================================================================

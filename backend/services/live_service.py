@@ -20,7 +20,7 @@ import json
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
@@ -2071,6 +2071,7 @@ def _run_position_supervision(
     tick: int,
     log,
     skip_position_ids: set[int] | None = None,
+    record_partial_close_execution=None,
 ) -> set[int]:
     handled: set[int] = set()
     skip_position_ids = set(skip_position_ids or set())
@@ -2234,6 +2235,7 @@ def _run_position_supervision(
                     remember_close_verdict=_remember_close_verdict,
                     result_is_position_not_found=_result_is_position_not_found,
                     retire_broker_missing_position=_retire_broker_missing_position,
+                    record_partial_close_execution=record_partial_close_execution,
                 )
             elif action == "close":
                 _execute_supervisor_close_action(
@@ -2643,7 +2645,9 @@ def _session_state_snapshot(trade_date: str | None = None) -> dict:
     if not trade_date:
         trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return {
+        "schema_version": "live_session_state.v2",
         "trade_date": trade_date,
+        "source": str(_live_state_get("session_state_source", "runtime_incremental") or "runtime_incremental"),
         "session_pnl": float(_live_state_get("session_pnl", 0.0) or 0.0),
         "session_trades": int(_live_state_get("session_trades", 0) or 0),
         "session_winning": int(_live_state_get("session_winning", 0) or 0),
@@ -2669,12 +2673,159 @@ def _persist_session_state(trade_date: str | None = None) -> None:
         logger.debug("[live] session state persist failed: %s", exc)
 
 
+def _session_trade_window(trade_date: str) -> tuple[float, float]:
+    """Return the UTC window used by the live session key."""
+    day_start = datetime.strptime(str(trade_date), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return day_start.timestamp(), (day_start + timedelta(days=1)).timestamp()
+
+
+def _load_authoritative_session_trades(trade_date: str) -> list[dict] | None:
+    """Load one PnL row per position whose final close happened on a date.
+
+    ``runtime_kv`` is a recovery cache, not the trade fact source. Broker
+    deals are grouped by position so partial-close legs remain one trade and
+    their aggregate net PnL matches ``execution.deal_sync``.
+
+    ``None`` means the authoritative query failed and callers may use the
+    persisted cache as a compatibility fallback. An empty list is a valid
+    no-trades result.
+    """
+    try:
+        window_start, window_end = _session_trade_window(trade_date)
+        conn = _get_state_read_conn()
+        try:
+            rows = _state_execute(
+                conn,
+                """
+                WITH final_close AS (
+                    SELECT position_id, MAX(exec_timestamp) AS final_close_ts
+                    FROM ctrader_deals
+                    WHERE position_id > 0
+                      AND (is_close=1 OR closed_volume > 0)
+                      AND exec_timestamp > 0
+                    GROUP BY position_id
+                    HAVING MAX(exec_timestamp) >= ?
+                       AND MAX(exec_timestamp) < ?
+                )
+                SELECT d.position_id,
+                       SUM(COALESCE(d.gross_profit, 0.0)) AS gross_profit,
+                       SUM(COALESCE(d.swap, 0.0)) AS swap,
+                       SUM(COALESCE(d.close_commission, 0.0)) AS close_commission,
+                       SUM(COALESCE(d.gross_profit, 0.0)
+                           + COALESCE(d.swap, 0.0)
+                           + COALESCE(d.close_commission, 0.0)) AS net,
+                       MAX(d.exec_timestamp) AS exec_timestamp,
+                       COUNT(*) AS close_deals_count
+                FROM ctrader_deals d
+                JOIN final_close f ON f.position_id = d.position_id
+                WHERE d.is_close=1 OR d.closed_volume > 0
+                GROUP BY d.position_id
+                ORDER BY exec_timestamp ASC, d.position_id ASC
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            return [
+                {
+                    "position_id": int(row["position_id"] or 0),
+                    "gross": float(row["gross_profit"] or 0.0),
+                    "swap": float(row["swap"] or 0.0),
+                    "commission": float(row["close_commission"] or 0.0),
+                    "net": float(row["net"] or 0.0),
+                    "exec_timestamp": float(row["exec_timestamp"] or 0.0),
+                    "close_deals_count": int(row["close_deals_count"] or 0),
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("[live] authoritative session trade rebuild failed for %s: %s", trade_date, exc)
+        return None
+
+
+def _build_session_state_from_authoritative_trades(
+    *,
+    trade_date: str,
+    trades: list[dict],
+    persisted_state: dict,
+) -> dict:
+    """Project broker close facts into the live risk session state."""
+    all_trade_pnls = [float(row.get("net", 0.0) or 0.0) for row in trades]
+    trade_pnls = all_trade_pnls[-200:]
+    session_pnl = sum(all_trade_pnls)
+    winning = sum(1 for pnl in all_trade_pnls if pnl > 0)
+    losing = sum(1 for pnl in all_trade_pnls if pnl < 0)
+    consecutive_loss = 0
+    for pnl in reversed(all_trade_pnls):
+        if pnl < 0:
+            consecutive_loss += 1
+        elif pnl > 0:
+            break
+
+    account = _live_state_get("account", {}, clone=True) or {}
+    start_balance = float(account.get("balance", 0.0) or 0.0)
+    if start_balance <= 0:
+        start_balance = float(persisted_state.get("session_start_balance", 0.0) or 0.0)
+
+    max_drawdown_pct = 0.0
+    if start_balance > 0:
+        running_pnl = 0.0
+        for pnl in all_trade_pnls:
+            running_pnl += pnl
+            max_drawdown_pct = max(max_drawdown_pct, max(0.0, -running_pnl) / start_balance * 100.0)
+
+    last_trade_ts = max(
+        (float(row.get("exec_timestamp", 0.0) or 0.0) for row in trades),
+        default=0.0,
+    )
+    return {
+        "trade_date": trade_date,
+        "session_pnl": session_pnl,
+        "session_trades": len(all_trade_pnls),
+        "session_winning": winning,
+        "session_losing": losing,
+        "session_trade_pnls": trade_pnls,
+        "session_consecutive_loss": consecutive_loss,
+        "session_max_drawdown_pct": max_drawdown_pct,
+        "session_peak_equity": float(persisted_state.get("session_peak_equity", 0.0) or 0.0),
+        "session_start_balance": start_balance,
+        "session_last_trade_ts": last_trade_ts,
+        "session_state_source": "ctrader_deals.final_close_rebuild.v1",
+        "circuit_breaker": False,
+        "circuit_reason": "",
+        "trade_equity_history": list(persisted_state.get("trade_equity_history") or [])[-500:],
+    }
+
+
 def _restore_session_state_for_day(trade_date: str | None = None) -> bool:
     if not trade_date:
         trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     state = _runtime_kv_get(_session_state_key(trade_date), {}) or {}
     if not isinstance(state, dict) or state.get("trade_date") != trade_date:
         return False
+    authoritative_trades = _load_authoritative_session_trades(trade_date)
+    if authoritative_trades is not None and (
+        authoritative_trades
+        or not int(state.get("session_trades", 0) or 0)
+    ):
+        restored = _build_session_state_from_authoritative_trades(
+            trade_date=trade_date,
+            trades=authoritative_trades,
+            persisted_state=state,
+        )
+        _live_state_update(**restored)
+        # Heal stale runtime_kv snapshots so the next restart sees the same
+        # broker-derived session state without another stale carry-over.
+        _persist_session_state(trade_date)
+        return True
+
+    # Compatibility for old snapshots created before ctrader_deals was
+    # available. Keep them only when the authoritative read itself failed or
+    # the old snapshot has trades but no broker rows yet.
+    logger.warning(
+        "[live] restoring legacy session snapshot for %s because broker close facts are unavailable",
+        trade_date,
+    )
     _live_state_update(
         session_pnl=float(state.get("session_pnl", 0.0) or 0.0),
         session_trades=int(state.get("session_trades", 0) or 0),
@@ -2686,6 +2837,7 @@ def _restore_session_state_for_day(trade_date: str | None = None) -> bool:
         session_peak_equity=float(state.get("session_peak_equity", 0.0) or 0.0),
         session_start_balance=float(state.get("session_start_balance", 0.0) or 0.0),
         session_last_trade_ts=float(state.get("session_last_trade_ts", 0.0) or 0.0),
+        session_state_source="runtime_legacy_snapshot",
         circuit_breaker=bool(state.get("circuit_breaker", False)),
         circuit_reason=str(state.get("circuit_reason", "") or ""),
         trade_equity_history=list(state.get("trade_equity_history") or [])[-500:],
@@ -3315,6 +3467,7 @@ def _reset_session_state_for_new_day() -> None:
         session_max_drawdown_pct=0.0,
         session_start_balance=start_balance,
         session_last_trade_ts=0.0,
+        session_state_source="ctrader_deals.final_close_rebuild.v1",
     )
     _persist_session_state()
 
@@ -5221,7 +5374,9 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
             win_rate = len(wins) / kelly_total if kelly_total > 0 else 0.0
             avg_win = sum(wins) / len(wins) if wins else 0.0
             avg_loss = sum(losses) / len(losses) if losses else 0.01
-            _set_risk_metric("kelly", _kelly_calc.calculate(win_rate, avg_win, max(avg_loss, 0.01)))
+            kelly_status = _kelly_calc.calculate(win_rate, avg_win, max(avg_loss, 0.01))
+            kelly_status["closed_trades"] = kelly_total
+            _set_risk_metric("kelly", kelly_status)
         elif total > 0:
             win_rate = sw / total
             session_pnl = float(_live_state_get("session_pnl", 0.0))
@@ -5232,9 +5387,13 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
             else:
                 avg_win = 0.0
                 avg_loss = 0.01
-            _set_risk_metric("kelly", _kelly_calc.calculate(win_rate, avg_win, avg_loss))
+            kelly_status = _kelly_calc.calculate(win_rate, avg_win, avg_loss)
+            kelly_status["closed_trades"] = total
+            _set_risk_metric("kelly", kelly_status)
         else:
-            _set_risk_metric("kelly", _kelly_calc.get_status())
+            kelly_status = _kelly_calc.get_status()
+            kelly_status["closed_trades"] = 0
+            _set_risk_metric("kelly", kelly_status)
 
         from backend.risk.stress_test import StressTest as _StressTest
         _stress = _StressTest()
@@ -7114,7 +7273,10 @@ def _apply_context_position_sizing(
     elif (
         context_mult < 1.0
         and context_raw_volume < min_volume
-        and bool(next_trace.get("demo_nursery_exploration"))
+        and bool(
+            next_trace.get("demo_exploration")
+            or next_trace.get("demo_nursery_exploration")
+        )
     ):
         adjusted_volume = input_volume
         next_trace["context_policy_demo_nursery_min_preserved"] = True
@@ -8942,6 +9104,9 @@ def _run_position_protection_cycle(
         tick=tick,
         log=log,
         skip_position_ids=set(timeout_handled) | set(entry_repair_applied),
+        record_partial_close_execution=(
+            getattr(pipeline.get("attribution"), "record_partial_close", None)
+        ),
     )
     protected_pids = set(timeout_handled) | set(entry_repair_applied) | set(supervisor_handled)
     trailing_applied: set[int] = set()

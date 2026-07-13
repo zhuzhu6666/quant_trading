@@ -256,3 +256,46 @@ def test_status_latest_timestamp_reads_snapshot_when_duckdb_locked(tmp_path):
         writer.close()
 
     assert latest.strftime("%Y-%m-%d") == "2026-01-01"
+
+
+def test_quarterly_cb_changes_are_not_tripled_as_monthly_rolls(tmp_path):
+    loader = ExternalDataLoader(tmp_path / "external.duckdb", tmp_path / "events.duckdb")
+    cb = pd.DataFrame(
+        {"cb_china_chg": [10.0, -4.0, 8.0], "cb_total_chg": [20.0, 5.0, -2.0]},
+        index=pd.to_datetime(["2026-01-15", "2026-04-15", "2026-07-15"]),
+    )
+
+    out = loader._compute_cb_derived(cb)
+
+    assert out["cb_china_chg_3m"].tolist() == [10.0, -4.0, 8.0]
+    assert out["cb_china_chg_6m"].tolist() == [10.0, 6.0, 4.0]
+    assert out["cb_china_chg_12m"].tolist() == [10.0, 6.0, 14.0]
+
+
+def test_external_refresh_parsers_keep_source_dates_and_values():
+    import scripts.refresh_external_data as refresh
+
+    cb_rows = refresh._parse_wgc_cb_payload(
+        {
+            "chartData": {
+                "linechart": {
+                    "QTD_FULL": {
+                        "gold_reserves_tns": {
+                            "data": [
+                                {"name": "CHN", "data": [[1767139200000, 2300], [1774915200000, 2310]]},
+                                {"name": "RUS", "data": [[1767139200000, 2300], [1774915200000, 2290]]},
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    )
+    assert {row["country"] for row in cb_rows} == {"china", "russia", "total"}
+    china = [row for row in cb_rows if row["country"] == "china"]
+    assert china[-1]["change_tonnes"] == 10.0
+
+    etf_rows = refresh._parse_yahoo_chart_payload(
+        {"chart": {"result": [{"timestamp": [1767225600], "indicators": {"quote": [{"close": [123.45]}]}}]}}
+    )
+    assert etf_rows == [("2026-01-01", 123.45)]

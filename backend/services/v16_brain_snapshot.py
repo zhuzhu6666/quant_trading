@@ -13,6 +13,7 @@ Now:        ~650 lines (shared helpers extracted to _brain_helpers.py)
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 import uuid
 from pathlib import Path
@@ -40,6 +41,156 @@ def _memory_id(source_table: str, source_id: str) -> str:
 
 def _status_from_component(component: dict[str, Any], default: str = "unknown") -> str:
     return str(component.get("status") or component.get("overall") or component.get("mode") or default)
+
+
+_SUPERVISOR_COUNTERFACTUAL_ACTIONS = {
+    "protection_too_tight": ("over_protected", "less_tighten"),
+    "premature_tighten": ("over_protected", "less_tighten"),
+    "noise_stopout": ("over_protected", "less_tighten"),
+    "sl_too_tight": ("over_protected", "less_tighten"),
+    "tp_too_near": ("over_protected", "less_tighten"),
+    "missed_extension": ("over_protected", "less_tighten"),
+    "correct_stop": ("correct_action", "keep"),
+    "profit_protected": ("correct_action", "keep"),
+    "missed_protection": ("under_protected", "tighten"),
+    "sl_too_loose": ("under_protected", "tighten"),
+    "tp_too_far": ("under_protected", "tighten"),
+    "mfe_capture_failed": ("under_protected", "tighten"),
+}
+
+_NON_ACTIONABLE_POLICY_STATUSES = {
+    "superseded",
+    "rejected",
+    "failed",
+    "blocked_by_evidence",
+}
+
+
+def build_posterior_arbitration(
+    *,
+    trade_reviews: list[dict[str, Any]] | None = None,
+    counterfactuals: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Select the strongest post-close conclusion by causal scope.
+
+    A negative realized PnL can identify an entry/thesis problem while the
+    future path independently proves that a supervisor intervention was too
+    early.  Those are not competing labels.  V16 must keep both facts and
+    dispatch each conclusion to the agent that owns that surface.
+    """
+    reviews = [dict(item) for item in (trade_reviews or []) if isinstance(item, dict)]
+    cfs = [dict(item) for item in (counterfactuals or []) if isinstance(item, dict)]
+    supervisor_items: list[dict[str, Any]] = []
+    for item in cfs:
+        label = str(item.get("label") or "")
+        mapped = _SUPERVISOR_COUNTERFACTUAL_ACTIONS.get(label)
+        horizons = item.get("horizons") or []
+        confidence = max(0.0, min(1.0, safe_float(item.get("confidence"))))
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        tags = list(evidence.get("tags") or [])
+        if not mapped or confidence < 0.5 or not horizons:
+            continue
+        supervisor_items.append({
+            "causal_scope": "supervisor",
+            "conclusion": mapped[0],
+            "recommended_action": mapped[1],
+            "counterfactual_label": label,
+            "confidence": confidence,
+            "evidence_score": round(confidence * (1.0 if "no_future_bars" not in tags else 0.5), 6),
+            "source_ref_type": "supervisor_counterfactual_review",
+            "source_ref_id": str(item.get("counterfactual_id") or ""),
+            "position_id": str(item.get("position_id") or ""),
+            "review_id": str(item.get("review_id") or ""),
+            "evidence_tags": tags,
+        })
+    supervisor = max(supervisor_items, key=lambda item: item["evidence_score"]) if supervisor_items else {}
+
+    entry = {}
+    if reviews:
+        review = max(reviews, key=lambda item: safe_float(item.get("created_at")))
+        review_json = review.get("review") if isinstance(review.get("review"), dict) else review.get("review_json")
+        if isinstance(review_json, str):
+            try:
+                review_json = json.loads(review_json)
+            except Exception:
+                review_json = {}
+        if not isinstance(review_json, dict):
+            review_json = {}
+        failure_taxonomy = review_json.get("failure_taxonomy")
+        if not isinstance(failure_taxonomy, dict):
+            failure_taxonomy = {}
+        failure_tags = review.get("failure_tags") or review.get("failure_tags_json") or review_json.get("failure_tags")
+        if isinstance(failure_tags, str):
+            try:
+                failure_tags = json.loads(failure_tags)
+            except Exception:
+                failure_tags = [failure_tags] if failure_tags else []
+        if not isinstance(failure_tags, list):
+            failure_tags = []
+        primary = str(
+            review_json.get("primary_responsibility")
+            or failure_taxonomy.get("primary_responsibility")
+            or ""
+        )
+        outcome = str(review.get("outcome_label") or review_json.get("outcome_label") or "")
+        tags = list(failure_tags)
+        if primary or outcome or tags:
+            entry = {
+                "causal_scope": "entry",
+                "conclusion": "entry_or_thesis_failure" if safe_float(review.get("pnl", review_json.get("pnl"))) < 0 else "entry_supported",
+                "primary_responsibility": primary,
+                "outcome_label": outcome,
+                "failure_tags": tags,
+                "confidence": 0.75 if primary else 0.55,
+                "evidence_score": 0.75,
+                "source_ref_type": "trade_outcome_review",
+                "source_ref_id": str(review.get("review_id") or ""),
+                "position_id": str(review.get("position_id") or ""),
+            }
+
+    # A successful/neutral trade review is useful context but is not an entry
+    # correction command.  Only a realized loss is actionable for the entry
+    # agent; a mature counterfactual can still independently select the
+    # supervisor agent for the same position.
+    entry_actionable = entry if entry.get("conclusion") == "entry_or_thesis_failure" else {}
+    selected = supervisor or entry_actionable
+    selected_scope = str(selected.get("causal_scope") or "")
+    conflicts = []
+    if supervisor and entry_actionable:
+        conflicts.append({
+            "type": "causal_scope_overlap_reviewed",
+            "status": "separated",
+            "scopes": ["entry", "supervisor"],
+            "reason": "realized_outcome_judges_entry_thesis; future_path_judges_supervisor_intervention",
+        })
+    fingerprint_payload = {
+        "selected": selected,
+        "entry": entry,
+        "supervisor": supervisor,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "schema_version": "posterior_arbitration.v1",
+        "status": "actionable" if selected else "needs_evidence",
+        "selected_scope": selected_scope,
+        "selected_conclusion": selected,
+        "entry_conclusion": entry,
+        "supervisor_conclusion": supervisor,
+        "conflicts": conflicts,
+        "selection_reason": (
+            "mature_counterfactual_has_highest_causal_evidence"
+            if supervisor else "trade_outcome_review_is_current_best_source" if entry_actionable else "no_actionable_posterior"
+        ),
+        "fingerprint": fingerprint,
+        "authority": {
+            "v16_role": "judge_and_dispatch_only",
+            "entry_agent": "autonomous_learning",
+            "supervisor_agent": "position_supervisor_governance",
+            "runtime_mutation_agent": "downstream_governor_only",
+        },
+    }
 
 
 def ensure_brain_state_snapshot_table(db_path: str | Path = STATE_DB) -> None:
@@ -308,9 +459,14 @@ class BrainStateService:
             strategy_posture = "defensive"
         else:
             strategy_posture = "normal"
-        execution_posture = "unsafe" if incident_mode in {"frozen", "only_close"} else (
-            "degraded" if (blocker_count > 0 or runtime_status in {"critical", "degraded"}) else "broker_ok"
-        )
+        if incident_mode in {"frozen", "only_close"}:
+            execution_posture = "unsafe"
+        elif blocker_count > 0 or runtime_status in {"critical", "degraded"}:
+            execution_posture = "degraded"
+        elif not runtime_system:
+            execution_posture = "unknown"
+        else:
+            execution_posture = "broker_ok"
         governance_freshness = perceptions.get("governance", {}).get("freshness") or {}
         stale_tables = [
             name for name, item in dict(governance_freshness.get("tables") or {}).items()
@@ -321,8 +477,13 @@ class BrainStateService:
             "market_regime": "event_window" if "event" in str(perceptions.get("market", {}).get("status") or "") else "unknown",
             "strategy_posture": strategy_posture,
             "factor_posture": "healthy" if not stale_tables else "unstable",
+            "factor_governance_posture": "stale" if stale_tables else "fresh",
+            "factor_performance_posture": "not_assessed",
             "execution_posture": execution_posture,
-            "learning_posture": "enough_evidence" if replay_ok else "warming_up",
+            "execution_evidence_posture": "complete" if runtime_system else "incomplete",
+            "replay_evidence_posture": "validated" if replay_ok else "missing",
+            "performance_evidence_posture": "not_assessed",
+            "learning_posture": "replay_validated" if replay_ok else "warming_up",
             "autonomy_posture": autonomy_posture,
             "incident_mode": incident_mode,
             "stale_governance_tables": stale_tables[:10],
@@ -440,9 +601,12 @@ class BrainStateService:
         if any(safe_float(h.get("evidence_score")) < 0.5 for h in hypotheses):
             verdict = "shadow_only"
             objections.append("evidence_score_below_action_threshold")
-        if memory.get("negative_matches"):
+        balance = memory.get("evidence_balance") or {}
+        if balance.get("dominant") == "negative":
             verdict = "shadow_only"
-            objections.append("negative_memory_match_requires_observation")
+            objections.append("negative_memory_dominates")
+        elif memory.get("negative_matches") or memory.get("counter_evidence"):
+            objections.append("mixed_or_insufficient_memory_requires_observation")
         if memory.get("source_gaps"):
             objections.append("memory_sources_incomplete")
         return {
@@ -467,8 +631,12 @@ class BrainStateService:
             "autonomy_health": {"posture": str(perceptions.get("autonomy_health", {}).get("posture") or ""),
                                 "score": safe_float(perceptions.get("autonomy_health", {}).get("score"))},
             "memory": {"item_count": len(memory.get("items") or []),
+                       "raw_item_count": int(memory.get("raw_item_count") or 0),
+                       "evidence_unit_count": int(memory.get("evidence_unit_count") or 0),
                        "negative_match_count": len(memory.get("negative_matches") or []),
                        "counter_evidence_count": len(memory.get("counter_evidence") or []),
+                       "evidence_balance": memory.get("evidence_balance") or {},
+                       "posterior_arbitration": memory.get("posterior_arbitration") or {},
                        "source_gaps": memory.get("source_gaps") or []},
         }
 
@@ -537,26 +705,303 @@ class BrainMemoryService:
         try:
             items.extend(self._experience_memories(conn, terms, source_gaps))
             items.extend(self._trade_outcome_memories(conn, terms, source_gaps))
+            items.extend(self._counterfactual_memories(conn, terms, source_gaps))
             items.extend(self._policy_suggestion_memories(conn, terms, source_gaps))
             items.extend(self._model_permission_memories(conn, terms, source_gaps))
             items.extend(self._shadow_audit_memories(conn, terms, source_gaps))
         finally:
             conn.close()
-        ranked = sorted(items, key=lambda item: (
+        raw_item_count = len(items)
+        posterior_sources = self._posterior_source_facts(items)
+        items = self._deduplicate_items(items)
+        posterior_arbitration = build_posterior_arbitration(
+            trade_reviews=posterior_sources["trade_reviews"],
+            counterfactuals=posterior_sources["counterfactuals"],
+        )
+        items = [
+            self._apply_posterior_reconciliation(
+                item,
+                trade_reviews=posterior_sources["trade_reviews"],
+                counterfactuals=posterior_sources["counterfactuals"],
+            )
+            for item in items
+        ]
+        scored_items = sorted(items, key=lambda item: (
             safe_float(item.get("similarity_score")), safe_float(item.get("evidence_score")),
             safe_float(item.get("created_at")),
-        ), reverse=True)[:limit]
+        ), reverse=True)
+        ranked = scored_items[:limit]
+        posterior_memory = self._posterior_memory_item(posterior_arbitration)
         if persist and ranked:
-            self._persist_items(ranked)
-        negative_matches = [item for item in ranked if item.get("polarity") == "negative"]
-        counter_evidence = [item for item in ranked if item.get("polarity") == "positive"
-                            and safe_float(item.get("similarity_score")) >= 0.1]
+            self._persist_items(ranked + ([posterior_memory] if posterior_memory else []))
+        # The display window is intentionally bounded, but evidence balance
+        # must include every matched unit so a cluster of negative rows cannot
+        # hide positive counter-evidence merely by ranking ahead of it.
+        matched = [
+            item for item in scored_items
+            if safe_float(item.get("similarity_score")) >= 0.1
+            and item.get("evidence_eligible", True)
+        ]
+        negative_matches = sorted(
+            (item for item in matched if item.get("polarity") == "negative"),
+            key=self._evidence_weight,
+            reverse=True,
+        )
+        counter_evidence = sorted(
+            (item for item in matched if item.get("polarity") == "positive"),
+            key=self._evidence_weight,
+            reverse=True,
+        )
+        evidence_balance = self._evidence_balance(matched)
         return {
             "ok": True, "schema_version": "brain_memory_retrieval.v1",
             "items": ranked, "negative_matches": negative_matches[:5],
             "counter_evidence": counter_evidence[:5], "source_gaps": sorted(set(source_gaps)),
+            "raw_item_count": raw_item_count,
+            "evidence_unit_count": len(items),
+            "evidence_balance": evidence_balance,
+            "posterior_arbitration": posterior_arbitration,
+            "posterior_memory": posterior_memory or {},
             "query_terms": sorted(terms), "boundary": self.boundary(),
             "read_only": True, "affects_trading": False, "generated_at": time.time(),
+        }
+
+    @staticmethod
+    def _source_identity(item: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+        structured = item.get("structured") if isinstance(item.get("structured"), dict) else {}
+        source_table = str(structured.get("source_table") or item.get("source_table") or "")
+        source_id = str(structured.get("source_id") or item.get("source_id") or "")
+        return source_table, source_id, structured
+
+    @classmethod
+    def _posterior_source_facts(cls, items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        """Build posterior inputs before evidence deduplication.
+
+        ``experience_memory`` rows carry the original review reference in
+        ``structured``.  If deduplication selects that row over the raw review,
+        filtering only on the top-level source table silently drops the review
+        from arbitration.  Prefer the raw review when both representations
+        exist, while still allowing a source-backed experience row to fill a
+        missing review.
+        """
+        reviews: dict[str, dict[str, Any]] = {}
+        review_priority: dict[str, int] = {}
+        counterfactuals: dict[str, dict[str, Any]] = {}
+        for item in items:
+            source_table, source_id, structured = cls._source_identity(item)
+            if source_table == "trade_outcome_review" and source_id:
+                payload = dict(structured)
+                payload.setdefault("review_id", source_id)
+                payload.setdefault("source_id", source_id)
+                priority = 2 if str(item.get("source_table") or "") == "trade_outcome_review" else 1
+                if priority >= review_priority.get(source_id, -1):
+                    reviews[source_id] = payload
+                    review_priority[source_id] = priority
+            elif source_table == "supervisor_counterfactual_review" and source_id:
+                payload = dict(structured)
+                payload.setdefault("counterfactual_id", source_id)
+                counterfactuals[source_id] = payload
+        return {
+            "trade_reviews": list(reviews.values()),
+            "counterfactuals": list(counterfactuals.values()),
+        }
+
+    @classmethod
+    def _apply_posterior_reconciliation(
+        cls,
+        item: dict[str, Any],
+        *,
+        trade_reviews: list[dict[str, Any]],
+        counterfactuals: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Attach causal-scope status without rewriting source facts.
+
+        A raw entry review and a later supervisor counterfactual can both be
+        true.  The memory index must therefore preserve the source text but
+        prevent the raw entry recommendation from being treated as a global
+        action after the supervisor posterior wins.
+        """
+        result = dict(item)
+        structured = dict(item.get("structured") or {})
+        source_table, source_id, _ = cls._source_identity(item)
+        status = "source_observation"
+        causal_scope = ""
+        action_owner = ""
+        actionable = True
+        local_arbitration: dict[str, Any] = {}
+
+        if source_table == "trade_outcome_review" and source_id:
+            review = next((row for row in trade_reviews if str(row.get("review_id") or row.get("source_id") or "") == source_id), {})
+            review_id = source_id
+            related_cfs = [
+                row for row in counterfactuals
+                if str(row.get("review_id") or "") == review_id
+                or (
+                    str(row.get("position_id") or "")
+                    and str(row.get("position_id") or "") == str(review.get("position_id") or "")
+                )
+            ]
+            local_arbitration = build_posterior_arbitration(
+                trade_reviews=[review] if review else [],
+                counterfactuals=related_cfs,
+            )
+            selected_scope = str(local_arbitration.get("selected_scope") or "")
+            causal_scope = "entry"
+            action_owner = "autonomous_learning"
+            if selected_scope == "supervisor":
+                status = "entry_conclusion_retained"
+                actionable = False
+                # The entry observation remains available in the final
+                # posterior record, but it must not become global negative
+                # evidence when the supervisor counterfactual is stronger.
+                result["polarity"] = "neutral"
+                result["memory_type"] = "episodic"
+            elif selected_scope == "entry":
+                status = "selected_entry_conclusion"
+            elif review:
+                status = "entry_observation_pending_supervisor_posterior"
+        elif source_table == "supervisor_counterfactual_review" and source_id:
+            related = next((row for row in counterfactuals if str(row.get("counterfactual_id") or "") == source_id), {})
+            review_id = str(related.get("review_id") or structured.get("review_id") or "")
+            related_reviews = [
+                row for row in trade_reviews
+                if str(row.get("review_id") or row.get("source_id") or "") == review_id
+            ]
+            local_arbitration = build_posterior_arbitration(
+                trade_reviews=related_reviews,
+                counterfactuals=[related] if related else [],
+            )
+            selected = local_arbitration.get("selected_conclusion") or {}
+            causal_scope = "supervisor"
+            action_owner = "position_supervisor_governance"
+            if str(selected.get("source_ref_id") or "") == source_id:
+                status = "selected_supervisor_conclusion"
+            else:
+                status = "supervisor_observation"
+        elif source_table == "policy_suggestion":
+            policy_status = str(structured.get("status") or "")
+            causal_scope = "governance"
+            action_owner = "downstream_specialist_and_governor"
+            if policy_status in _NON_ACTIONABLE_POLICY_STATUSES:
+                status = "historical_non_actionable"
+                actionable = False
+                result["polarity"] = "neutral"
+                result["memory_type"] = "historical"
+
+        structured["posterior_reconciliation"] = {
+            "schema_version": "memory_posterior_reconciliation.v1",
+            "status": status,
+            "causal_scope": causal_scope,
+            "action_owner": action_owner,
+            "evidence_eligible": actionable,
+            "local_arbitration": local_arbitration,
+        }
+        result["structured"] = structured
+        result["evidence_eligible"] = actionable
+        return result
+
+    def _posterior_memory_item(self, arbitration: dict[str, Any]) -> dict[str, Any] | None:
+        selected = dict(arbitration.get("selected_conclusion") or {})
+        fingerprint = str(arbitration.get("fingerprint") or "")
+        if not selected or not fingerprint:
+            return None
+        scope = str(selected.get("causal_scope") or arbitration.get("selected_scope") or "")
+        conclusion = str(selected.get("conclusion") or "")
+        action = str(selected.get("recommended_action") or "hold")
+        owner = (
+            "position_supervisor_governance"
+            if scope == "supervisor" else "autonomous_learning"
+        )
+        return self._item(
+            source_table="posterior_arbitration",
+            source_id=fingerprint,
+            memory_type="posterior",
+            text_summary=f"{scope} {conclusion} {action}".strip(),
+            structured={
+                "final_memory": True,
+                "posterior_arbitration": arbitration,
+                "action_owner": owner,
+                "allowed_uses": ["memory_retrieval", "critic_context", "v16_dispatch"],
+            },
+            evidence_score=max(0.0, min(1.0, safe_float(selected.get("evidence_score")))),
+            polarity="positive" if scope == "supervisor" else "negative",
+            created_at=time.time(),
+            terms=set(),
+        )
+
+    @staticmethod
+    def _evidence_identity(item: dict[str, Any]) -> str | None:
+        structured = item.get("structured") if isinstance(item.get("structured"), dict) else {}
+        item_source = str(item.get("source_table") or "")
+        source_table = str(structured.get("source_table") or item_source)
+        source_id = str(structured.get("source_id") or item.get("source_id") or "")
+        trade_id = str(structured.get("trade_id") or "")
+        if source_table == "trade_outcome_review" and source_id:
+            return f"trade_review:{source_id}"
+        if item_source == "trade_outcome_review" and source_id:
+            return f"trade_review:{source_id}"
+        if trade_id and item_source == "experience_memory":
+            return f"trade:{trade_id}"
+        return None
+
+    @classmethod
+    def _deduplicate_items(cls, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        standalone: list[dict[str, Any]] = []
+        for item in items:
+            identity = cls._evidence_identity(item)
+            if identity is None:
+                standalone.append(item)
+            else:
+                groups.setdefault(identity, []).append(item)
+
+        deduped = list(standalone)
+        for identity, group in groups.items():
+            representative = dict(max(
+                group,
+                key=lambda item: (
+                    1 if str(item.get("source_table") or "") == "experience_memory" else 0,
+                    safe_float(item.get("evidence_score")),
+                    safe_float(item.get("similarity_score")),
+                    safe_float(item.get("created_at")),
+                ),
+            ))
+            if len(group) > 1:
+                representative["evidence_unit_id"] = identity
+                representative["evidence_sources"] = [
+                    {
+                        "source_table": str(item.get("source_table") or ""),
+                        "source_id": str(item.get("source_id") or ""),
+                    }
+                    for item in group
+                ]
+            deduped.append(representative)
+        return deduped
+
+    @staticmethod
+    def _evidence_weight(item: dict[str, Any]) -> float:
+        evidence_score = max(0.0, min(1.0, safe_float(item.get("evidence_score"))))
+        similarity = max(0.1, min(1.0, safe_float(item.get("similarity_score"))))
+        return evidence_score * similarity
+
+    @classmethod
+    def _evidence_balance(cls, items: list[dict[str, Any]]) -> dict[str, Any]:
+        negative = [item for item in items if item.get("polarity") == "negative"]
+        positive = [item for item in items if item.get("polarity") == "positive"]
+        negative_score = sum(cls._evidence_weight(item) for item in negative)
+        positive_score = sum(cls._evidence_weight(item) for item in positive)
+        dominant = "mixed"
+        if len(negative) >= 2 and negative_score > positive_score * 1.25:
+            dominant = "negative"
+        elif len(positive) >= 2 and positive_score > negative_score * 1.25:
+            dominant = "positive"
+        return {
+            "schema_version": "memory_evidence_balance.v1",
+            "negative_count": len(negative),
+            "positive_count": len(positive),
+            "negative_score": round(negative_score, 6),
+            "positive_score": round(positive_score, 6),
+            "dominant": dominant,
         }
 
     def latest_indexed(self, *, limit: int = 50) -> dict[str, Any]:
@@ -586,6 +1031,23 @@ class BrainMemoryService:
         now = time.time()
         conn = connect(self.db_path)
         try:
+            # These are derived projections.  Rebuild their current window on
+            # every refresh so a later posterior cannot leave an older
+            # counterfactual/final-arbitration record looking current.
+            execute(
+                conn,
+                "DELETE FROM brain_memory WHERE source_table IN ('supervisor_counterfactual_review', 'posterior_arbitration')",
+            )
+            if state_table_exists(conn, "policy_suggestion"):
+                execute(
+                    conn,
+                    """DELETE FROM brain_memory
+                       WHERE source_table='policy_suggestion'
+                         AND source_id IN (
+                             SELECT suggestion_id FROM policy_suggestion
+                             WHERE status IN ('superseded', 'rejected', 'failed', 'blocked_by_evidence')
+                         )""",
+                )
             for item in items:
                 execute(
                     conn,
@@ -632,7 +1094,14 @@ class BrainMemoryService:
                 row["recommended_action"], lesson.get("summary"), row["regime_id"],
                 " ".join(str(t) for t in tags)]).strip()
             reward = safe_float(row["reward_score"])
-            polarity = "negative" if reward < 0 or tags else ("positive" if reward > 0 else "neutral")
+            outcome_label = str(row["outcome_label"] or "")
+            # ``good_loss`` is a controlled/acceptable loss label, not proof
+            # that the entry factor was wrong.  Keep it neutral until the
+            # per-trade posterior arbitration assigns causal ownership.
+            if outcome_label == "good_loss":
+                polarity = "neutral"
+            else:
+                polarity = "negative" if reward < 0 or tags else ("positive" if reward > 0 else "neutral")
             items.append(self._item(
                 source_table="experience_memory", source_id=str(row["experience_id"] or ""),
                 memory_type="negative" if polarity == "negative" else "episodic",
@@ -640,7 +1109,7 @@ class BrainMemoryService:
                 structured={"trade_id": row["trade_id"], "source_table": row["source_table"],
                             "source_id": row["source_id"], "append_source": row["append_source"],
                             "artifact_version": row["artifact_version"],
-                            "outcome_label": row["outcome_label"], "reward_score": reward,
+                            "outcome_label": outcome_label, "reward_score": reward,
                             "failure_tags": tags, "recommended_action": row["recommended_action"],
                             "lesson": lesson, "decision_context": context},
                 evidence_score=max(0.0, min(safe_float(row["evidence_strength"]), 1.0)),
@@ -660,19 +1129,81 @@ class BrainMemoryService:
         for row in rows:
             tags = loads(row["failure_tags_json"], [])
             pnl = safe_float(row["pnl"])
-            polarity = "negative" if pnl < 0 or tags else ("positive" if pnl > 0 else "neutral")
+            outcome_label = str(row["outcome_label"] or "")
+            polarity = (
+                "neutral" if outcome_label == "good_loss"
+                else "negative" if pnl < 0 or tags
+                else "positive" if pnl > 0 else "neutral"
+            )
             summary = " ".join(str(part or "") for part in [row["outcome_label"],
                 row["summary_text"], " ".join(str(t) for t in tags)]).strip()
             items.append(self._item(
                 source_table="trade_outcome_review", source_id=str(row["review_id"] or ""),
                 memory_type="negative" if polarity == "negative" else "episodic",
                 text_summary=summary or "trade outcome review",
-                structured={"trade_id": row["trade_id"], "position_id": row["position_id"],
+                structured={"review_id": str(row["review_id"] or ""),
+                            "trade_id": row["trade_id"], "position_id": row["position_id"],
                             "entry_decision_id": row["entry_decision_id"], "pnl": pnl,
-                            "outcome_label": row["outcome_label"], "failure_tags": tags,
-                            "review": loads(row["review_json"], {})},
+                            "outcome_label": outcome_label, "failure_tags": tags,
+                            "review": loads(row["review_json"], {}),
+                            "created_at": safe_float(row["created_at"])},
                 evidence_score=0.75, polarity=polarity,
                 created_at=safe_float(row["created_at"]), terms=terms,
+            ))
+        return items
+
+    def _counterfactual_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
+        if not state_table_exists(conn, "supervisor_counterfactual_review"):
+            gaps.append("supervisor_counterfactual_review")
+            return []
+        rows = execute(conn, """SELECT counterfactual_id, review_id, trade_id, position_id,
+            close_ts, close_reason, supervisor_event_type, supervisor_reason, label,
+            confidence, horizons_json, evidence_json, created_at, updated_at
+            -- close_ts is the event-time ordering.  updated_at is only the
+            -- batch/recompute timestamp and must not decide which posterior
+            -- enters the brain's bounded evidence window.
+            FROM supervisor_counterfactual_review ORDER BY close_ts DESC, updated_at DESC LIMIT 50""").fetchall()
+        items = []
+        for row in rows:
+            horizons = loads(row["horizons_json"], [])
+            evidence = loads(row["evidence_json"], {})
+            label = str(row["label"] or "")
+            confidence = safe_float(row["confidence"])
+            mapped = _SUPERVISOR_COUNTERFACTUAL_ACTIONS.get(label)
+            summary = " ".join(
+                str(part or "")
+                for part in [label, row["supervisor_reason"], row["supervisor_event_type"], " ".join(evidence.get("tags") or [])]
+            ).strip()
+            structured = {
+                "counterfactual_id": str(row["counterfactual_id"] or ""),
+                "review_id": str(row["review_id"] or ""),
+                "trade_id": str(row["trade_id"] or ""),
+                "position_id": str(row["position_id"] or ""),
+                "close_ts": safe_float(row["close_ts"]),
+                "close_reason": str(row["close_reason"] or ""),
+                "supervisor_event_type": str(row["supervisor_event_type"] or ""),
+                "supervisor_reason": str(row["supervisor_reason"] or ""),
+                "label": label,
+                "confidence": confidence,
+                "horizons": horizons,
+                "evidence": evidence,
+                "causal_scope": "supervisor",
+                "posterior_verdict": mapped[0] if mapped else "inconclusive",
+                "recommended_action": mapped[1] if mapped else "hold",
+            }
+            # A matured counterfactual is positive evidence for the affected
+            # intervention even when the realized trade itself was a loss.
+            polarity = "positive" if mapped and confidence >= 0.5 and horizons else "neutral"
+            items.append(self._item(
+                source_table="supervisor_counterfactual_review",
+                source_id=str(row["counterfactual_id"] or ""),
+                memory_type="counterfactual",
+                text_summary=summary or "supervisor counterfactual review",
+                structured=structured,
+                evidence_score=max(0.0, min(1.0, confidence)),
+                polarity=polarity,
+                created_at=safe_float(row["updated_at"] or row["created_at"]),
+                terms=terms,
             ))
         return items
 
@@ -682,7 +1213,9 @@ class BrainMemoryService:
             return []
         rows = execute(conn, """SELECT suggestion_id, scope_type, scope_key, action, confidence,
             reason, evidence_json, status, created_at
-            FROM policy_suggestion ORDER BY created_at DESC LIMIT 50""").fetchall()
+            FROM policy_suggestion
+            WHERE status NOT IN ('superseded', 'rejected', 'failed', 'blocked_by_evidence')
+            ORDER BY created_at DESC LIMIT 50""").fetchall()
         items = []
         for row in rows:
             status = str(row["status"] or "")
@@ -755,6 +1288,7 @@ class BrainMemoryService:
                   ("market_regime", "strategy_posture", "factor_posture", "execution_posture",
                    "learning_posture", "autonomy_posture", "incident_mode")}
         tokens.update(str(item) for item in world_model.get("stale_governance_tables") or [])
+        tokens.update({"supervisor", "counterfactual", "posterior", "thesis"})
         for hypothesis in hypotheses:
             tokens.add(str(hypothesis.get("scope") or ""))
             tokens.update(str(hypothesis.get("claim") or "").lower().replace(";", " ").split())
@@ -764,7 +1298,10 @@ class BrainMemoryService:
     def _similarity(text_val: str, terms: set[str]) -> float:
         if not terms:
             return 0.0
-        hits = sum(1 for term in terms if term in text_val.lower())
+        import re
+
+        tokens = set(re.findall(r"[a-z0-9_]+", text_val.lower()))
+        hits = sum(1 for term in terms if str(term).lower() in tokens)
         return round(min(1.0, hits / max(3, min(len(terms), 12))), 4)
 
     def _item(self, *, source_table: str, source_id: str, memory_type: str,

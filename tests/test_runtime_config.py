@@ -79,6 +79,8 @@ def test_from_yaml_uses_defaults_for_missing_keys() -> None:
     assert cfg.dynamic_sizing_enabled is True
     assert cfg.dynamic_sizing_max_api_volume == 1000.0
     assert cfg.kelly_risk_per_trade_pct == 0.06
+    assert cfg.kelly_min_closed_trades == 20
+    assert cfg.kelly_canary_max_api_volume == 100.0
 
 
 def test_unknown_keys_go_to_extra() -> None:
@@ -101,3 +103,24 @@ def test_runtime_config_snapshot_hash_stable_and_reuses_identical_event(tmp_path
     third = persist_runtime_config_snapshot(cfg, source="different_event", db_path=db_path)
     assert third["config_version"] == first["config_version"] + 1
     assert third["reused"] is False
+
+
+def test_runtime_mutation_refreshes_yaml_base_before_overlay_snapshot(monkeypatch, tmp_path) -> None:
+    from backend.services import runtime_config_mutation, runtime_config_startup
+    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+
+    yaml_base = rc.RuntimeConfig(ctrader_send_orders=True)
+    rc.replace(rc.RuntimeConfig(ctrader_send_orders=False))
+    monkeypatch.setattr(runtime_config_mutation, "is_state_db_path", lambda _path: True)
+    monkeypatch.setattr(runtime_config_startup, "load_yaml_runtime_config", lambda: (yaml_base, {}))
+
+    result = RuntimeConfigMutationService(tmp_path / "state.db").apply_patch(
+        {"position_supervisor_template_id": "position_supervisor:test.v1"},
+        source="test_refresh_yaml_base",
+        run_id="unit_refresh_yaml_base",
+        audit=False,
+    )
+
+    assert result["ok"] is True
+    assert rc.shared().ctrader_send_orders is True
+    assert result["snapshot"]["config_version"] > 0

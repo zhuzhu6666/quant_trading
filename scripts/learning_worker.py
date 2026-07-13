@@ -126,8 +126,14 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
         def _run_nursery_cycle() -> None:
             result = AutonomousEvolutionNurseryRunner().run_once(
                 replay_if_stale=_env_enabled("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_REPLAY_IF_STALE", "1"),
-                apply_when_ready=False,
-                consume_recommended_step=_env_enabled("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_CONSUME_STEP", "1"),
+                # The learning worker is the system owner of demo_nursery.
+                # It performs review, bridge, governed apply and reconciliation
+                # without waiting for an operator confirmation.  Live unlock
+                # remains outside this path and still requires the live gate.
+                automatic_demo=True,
+                apply_when_ready=True,
+                full_learning_cycle=True,
+                consume_recommended_step=False,
                 recommended_step_limit=int(os.getenv("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_STEP_LIMIT", "1") or "1"),
             )
             logger.info(
@@ -222,7 +228,14 @@ def _run_once() -> None:
     logger.info("[learning_worker] run-once factor governance")
     logger.info("[learning_worker] factor governance result: {}", run_autonomous_factor_governance_cycle())
     logger.info("[learning_worker] run-once autonomous evolution nursery")
-    logger.info("[learning_worker] autonomous evolution nursery result: {}", AutonomousEvolutionNurseryRunner().run_once())
+    logger.info(
+        "[learning_worker] autonomous evolution nursery result: {}",
+        AutonomousEvolutionNurseryRunner().run_once(
+            automatic_demo=True,
+            apply_when_ready=True,
+            full_learning_cycle=True,
+        ),
+    )
 
 
 def main() -> int:

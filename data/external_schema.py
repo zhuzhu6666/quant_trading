@@ -17,6 +17,7 @@ from typing import Any
 from backend.core.db import DUCKDB_EXTERNAL, connect_duckdb, duckdb_readonly_connection
 
 PARSER_VERSION = "external_schema_v1"
+REFRESH_AUDIT_STALE_AFTER_SEC = 15 * 60
 
 
 def utc_epoch_for_date(date_str: str, *, hour: int = 0, minute: int = 0) -> float:
@@ -46,6 +47,17 @@ def macro_release_at(date_str: str) -> float:
     """Daily FRED series are usable from the following UTC day in backtests."""
     dt = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
     return (dt + timedelta(days=1)).timestamp()
+
+
+def cb_release_at(date_str: str) -> float:
+    """Conservative availability time for quarterly central-bank data.
+
+    The World Gold Council publishes the quarterly series after the quarter
+    closes.  A 45-day lag keeps live/backtest joins point-in-time safe when
+    the source only exposes the observation quarter-end date.
+    """
+    dt = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return (dt + timedelta(days=45, hours=21, minutes=30)).timestamp()
 
 
 def ensure_external_schema(db_path: str | Path = DUCKDB_EXTERNAL) -> None:
@@ -192,9 +204,22 @@ def start_refresh_audit(source: str, db_path: str | Path = DUCKDB_EXTERNAL) -> s
     run_id = f"{source}_{uuid.uuid4().hex[:16]}"
     conn = connect_duckdb(db_path)
     try:
+        # A process can be killed before its finally block runs.  The global
+        # refresh lock prevents a live overlap, so an older same-source row is
+        # safe to close when a new run starts after a short grace period.
+        now = time.time()
+        conn.execute(
+            """
+            UPDATE external_refresh_audit
+            SET finished_at=?, status='abandoned',
+                error=COALESCE(error, 'superseded stale refresh subprocess')
+            WHERE source=? AND status='running' AND started_at < ?
+            """,
+            [now, source, now - 60.0],
+        )
         conn.execute(
             "INSERT INTO external_refresh_audit (run_id, source, started_at, status) VALUES (?, ?, ?, 'running')",
-            [run_id, source, time.time()],
+            [run_id, source, now],
         )
     finally:
         conn.close()
@@ -221,6 +246,38 @@ def finish_refresh_audit(
             """,
             [time.time(), status, int(rows or 0), latest_date, latest_release_at, error, run_id],
         )
+    finally:
+        conn.close()
+
+
+def reconcile_stale_refresh_audits(
+    db_path: str | Path = DUCKDB_EXTERNAL,
+    *,
+    stale_after_sec: float = REFRESH_AUDIT_STALE_AFTER_SEC,
+) -> int:
+    """Close refresh rows left running by a killed or timed-out subprocess."""
+    if not Path(db_path).exists():
+        return 0
+    ensure_external_schema(db_path)
+    now = time.time()
+    cutoff = now - max(60.0, float(stale_after_sec))
+    conn = connect_duckdb(db_path)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM external_refresh_audit WHERE status='running' AND started_at < ?",
+            [cutoff],
+        ).fetchone()
+        stale_count = int(count[0] if count else 0)
+        conn.execute(
+            """
+            UPDATE external_refresh_audit
+            SET finished_at=?, status='abandoned',
+                error=COALESCE(error, 'refresh subprocess exited or timed out')
+            WHERE status='running' AND started_at < ?
+            """,
+            [now, cutoff],
+        )
+        return stale_count
     finally:
         conn.close()
 
@@ -275,11 +332,22 @@ def latest_audit_by_source(db_path: str | Path = DUCKDB_EXTERNAL) -> dict[str, d
                 """
                 SELECT source, started_at, finished_at, status, rows, latest_date, latest_release_at, error
                 FROM (
-                    SELECT *, ROW_NUMBER() OVER (PARTITION BY source ORDER BY started_at DESC) rn
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY source
+                        ORDER BY
+                            CASE
+                                WHEN status='running' AND started_at >= ? THEN 3
+                                WHEN status IN ('success', 'skipped') THEN 2
+                                WHEN status NOT IN ('running', 'abandoned') THEN 1
+                                ELSE 0
+                            END DESC,
+                            started_at DESC
+                    ) rn
                     FROM external_refresh_audit
                 )
                 WHERE rn=1
-                """
+                """,
+                [time.time() - REFRESH_AUDIT_STALE_AFTER_SEC],
             ).fetchall()
     except Exception:
         return {}

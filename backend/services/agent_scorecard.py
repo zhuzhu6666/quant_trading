@@ -505,6 +505,7 @@ class AgentScorecardService:
             participants.extend(self._shadow_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
             participants.extend(self._llm_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
             participants.extend(self._proposal_links(conn, review_id=review_id, trade_id=trade_id, position_id=position_id))
+            participants.extend(self._counterfactual_links(conn, review_id=review_id, position_id=position_id))
         participants = self._dedupe_participants(participants)
         lesson = self._trade_lesson(conn, review_id)
         lesson_attribution = ((lesson or {}).get("context") or {}).get("agent_attribution") or {}
@@ -513,6 +514,7 @@ class AgentScorecardService:
                 participants + list(lesson_attribution.get("participants") or [])
             )
         feedback_targets = sorted({item["source_agent"] for item in participants} | set((lesson or {}).get("feedback_agents") or []))
+        posterior_arbitration = self._posterior_arbitration(conn, review_id=review_id, position_id=position_id, review=row)
         return {
             "review_id": review_id,
             "trade_id": trade_id,
@@ -525,10 +527,12 @@ class AgentScorecardService:
                 "failure_taxonomy": review.get("failure_taxonomy") or {},
                 "system_issue_context": review.get("system_issue_context") or {},
                 "summary_text": _text(row["summary_text"]),
+                "posterior_arbitration": posterior_arbitration,
             },
             "participants": participants,
             "feedback_targets": feedback_targets,
             "lesson": lesson,
+            "counterfactuals": posterior_arbitration.get("counterfactuals") or [],
             "created_at": _safe_float(row["created_at"]),
         }
 
@@ -651,6 +655,64 @@ class AgentScorecardService:
                     }
                 )
         return links
+
+    def _counterfactual_links(self, conn: Any, *, review_id: str, position_id: str) -> list[dict[str, Any]]:
+        if not state_table_exists(conn, "supervisor_counterfactual_review"):
+            return []
+        rows = _execute(
+            conn,
+            """SELECT counterfactual_id, updated_at
+               FROM supervisor_counterfactual_review
+               WHERE (review_id=? AND review_id <> '') OR position_id=?
+               ORDER BY updated_at DESC LIMIT 10""",
+            (review_id, position_id),
+        ).fetchall()
+        return [
+            {
+                "source_agent": "autonomous_learning",
+                "source_ref_type": "supervisor_counterfactual_review",
+                "source_ref_id": _text(row["counterfactual_id"]),
+                "role": "posterior_counterfactual",
+                "created_at": _safe_float(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    def _posterior_arbitration(self, conn: Any, *, review_id: str, position_id: str, review: Any) -> dict[str, Any]:
+        try:
+            from backend.services.v16_brain_snapshot import build_posterior_arbitration
+
+            counterfactuals = []
+            if state_table_exists(conn, "supervisor_counterfactual_review"):
+                rows = _execute(
+                    conn,
+                    """SELECT counterfactual_id, review_id, trade_id, position_id, label,
+                       confidence, horizons_json, evidence_json, updated_at
+                       FROM supervisor_counterfactual_review
+                       WHERE (review_id=? AND review_id <> '') OR position_id=?
+                       ORDER BY updated_at DESC LIMIT 10""",
+                    (review_id, position_id),
+                ).fetchall()
+                for row in rows:
+                    counterfactuals.append(
+                        {
+                            "counterfactual_id": _text(row["counterfactual_id"]),
+                            "review_id": _text(row["review_id"]),
+                            "trade_id": _text(row["trade_id"]),
+                            "position_id": _text(row["position_id"]),
+                            "label": _text(row["label"]),
+                            "confidence": _safe_float(row["confidence"]),
+                            "horizons": _loads(row["horizons_json"], []),
+                            "evidence": _loads(row["evidence_json"], {}),
+                        }
+                    )
+            review_dict = dict(review)
+            review_dict["review_json"] = review_dict.get("review_json")
+            return build_posterior_arbitration(trade_reviews=[review_dict], counterfactuals=counterfactuals) | {
+                "counterfactuals": counterfactuals,
+            }
+        except Exception as exc:
+            return {"schema_version": "posterior_arbitration.v1", "status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
     def _trade_lesson(self, conn: Any, review_id: str) -> dict[str, Any]:
         if not review_id or not state_table_exists(conn, "experience_memory"):

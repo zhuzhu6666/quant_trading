@@ -54,6 +54,66 @@ def test_risk_kelly_sizing_outputs_api_volume_tiers():
     assert result["trace"]["base_api_volume"] == 200.0
 
 
+def test_risk_kelly_sizing_caps_early_positive_edge_to_canary_volume():
+    cfg = SimpleNamespace(
+        kelly_enabled=True,
+        kelly_fraction=1.0,
+        kelly_risk_per_trade_pct=0.10,
+        kelly_max_pct=0.25,
+        kelly_min_closed_trades=20,
+        kelly_canary_max_api_volume=100.0,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=1000.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+
+    result = risk_kelly_sizing(
+        cfg=cfg,
+        direction=-1,
+        current_price=4000.0,
+        sl_price=3990.0,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        account={"equity": 1000.0},
+        kelly_data={"kelly_fraction": 1.0, "closed_trades": 1},
+    )
+
+    assert result["volume"] == 100.0
+    assert result["trace"]["reason"] == "kelly_canary_cap"
+    assert result["trace"]["kelly_canary_cap_active"] is True
+    assert result["trace"]["pre_canary_capped_api_volume"] > 100.0
+    assert result["trace"]["capped_raw_api_volume"] == 100.0
+
+
+def test_risk_kelly_sizing_releases_canary_after_minimum_samples():
+    cfg = SimpleNamespace(
+        kelly_enabled=True,
+        kelly_fraction=1.0,
+        kelly_risk_per_trade_pct=0.10,
+        kelly_max_pct=0.25,
+        kelly_min_closed_trades=20,
+        kelly_canary_max_api_volume=100.0,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=1000.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+
+    result = risk_kelly_sizing(
+        cfg=cfg,
+        direction=1,
+        current_price=4000.0,
+        sl_price=3990.0,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        account={"equity": 1000.0},
+        kelly_data={"kelly_fraction": 1.0, "closed_trades": 20},
+    )
+
+    assert result["volume"] == 1000.0
+    assert result["trace"]["kelly_canary_cap_active"] is False
+    assert result["trace"]["reason"] == "ok"
+
+
 def test_risk_kelly_sizing_respects_dynamic_cap_and_fallbacks():
     cfg = SimpleNamespace(
         kelly_enabled=True,
@@ -120,6 +180,54 @@ def test_demo_nursery_non_positive_kelly_uses_min_volume_exploration():
     assert result["trace"]["reason"] == "demo_nursery_min_volume_exploration"
     assert result["trace"]["demo_nursery_exploration"] is True
     assert result["trace"]["blocked_reason"] == ""
+
+
+def test_demo_autonomous_low_kelly_uses_min_volume_until_sample_floor():
+    cfg = SimpleNamespace(
+        autonomy_mode="demo_autonomous",
+        kelly_enabled=True,
+        kelly_fraction=0.5,
+        kelly_risk_per_trade_pct=0.06,
+        kelly_max_pct=0.25,
+        kelly_min_closed_trades=20,
+        kelly_canary_max_api_volume=100.0,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=1000.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+
+    result = risk_kelly_sizing(
+        cfg=cfg,
+        direction=1,
+        current_price=3350.0,
+        sl_price=3300.0,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        account={"equity": 434.62},
+        kelly_data={"kelly_fraction": 0.004, "closed_trades": 5},
+    )
+
+    assert result["volume"] == 100.0
+    assert result["trace"]["reason"] == "demo_autonomous_min_volume_exploration"
+    assert result["trace"]["demo_exploration"] is True
+    assert result["trace"]["demo_nursery_exploration"] is False
+    assert result["trace"]["exploration_reason"] == "insufficient_closed_trades"
+    assert result["trace"]["kelly_closed_trades"] == 5
+    assert result["trace"]["blocked_reason"] == ""
+
+    released = risk_kelly_sizing(
+        cfg=cfg,
+        direction=1,
+        current_price=3350.0,
+        sl_price=3300.0,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        account={"equity": 434.62},
+        kelly_data={"kelly_fraction": 0.004, "closed_trades": 20},
+    )
+
+    assert released["volume"] == 0.0
+    assert released["trace"]["reason"] == "kelly_sizing_below_min"
+    assert released["trace"]["blocked_reason"].startswith("kelly_sizing_below_min")
 
 
 def test_risk_kelly_sizing_can_scale_to_demo_hard_cap_from_equity_budget():

@@ -79,32 +79,65 @@ def risk_kelly_sizing(
         trace.update({"reason": "dynamic_sizing_disabled", "raw_api_volume": default_vol})
         return {"volume": default_vol, "trace": trace}
 
-    kelly_f = (kelly_data or {}).get("kelly_fraction", 0) or 0
-    demo_nursery_exploration = str(getattr(cfg, "autonomy_mode", "") or "") == "demo_nursery"
-    if kelly_f <= 0 and demo_nursery_exploration:
+    kelly_payload = dict(kelly_data or {})
+    kelly_f = kelly_payload.get("kelly_fraction", 0) or 0
+    min_closed_trades = int(getattr(cfg, "kelly_min_closed_trades", 0) or 0)
+    canary_max_api = float(getattr(cfg, "kelly_canary_max_api_volume", 0.0) or 0.0)
+    closed_trades_raw = kelly_payload.get("closed_trades", kelly_payload.get("trades"))
+    try:
+        closed_trades = max(0, int(closed_trades_raw)) if closed_trades_raw is not None else 0
+    except (TypeError, ValueError):
+        closed_trades = 0
+    kelly_canary_active = min_closed_trades > 0 and (
+        closed_trades_raw is None or closed_trades < min_closed_trades
+    )
+    trace.update(
+        {
+            "kelly_closed_trades": closed_trades,
+            "kelly_min_closed_trades": min_closed_trades,
+            "kelly_canary_max_api_volume": canary_max_api,
+            "kelly_canary_cap_active": kelly_canary_active,
+        }
+    )
+    autonomy_mode = str(getattr(cfg, "autonomy_mode", "") or "")
+    demo_exploration_mode = autonomy_mode in {"demo_nursery", "demo_autonomous"}
+    demo_nursery_exploration = autonomy_mode == "demo_nursery"
+    # Demo must be able to bootstrap its own Kelly sample set.  A positive but
+    # tiny Kelly edge before the minimum sample count is reached can otherwise
+    # floor below the broker minimum forever, so use the same bounded minimum
+    # exploration lot as the non-positive-Kelly bootstrap path.
+    if demo_exploration_mode and (kelly_f <= 0 or kelly_canary_active):
+        exploration_prefix = "demo_nursery" if demo_nursery_exploration else "demo_autonomous"
+        exploration_reason = (
+            "insufficient_closed_trades" if kelly_canary_active else "non_positive_kelly"
+        )
         if max_order_api > 0 and default_vol > max_order_api:
             trace.update(
                 {
-                    "reason": "demo_nursery_min_volume_exceeds_cap",
+                    "reason": f"{exploration_prefix}_min_volume_exceeds_cap",
                     "kelly_fraction": float(kelly_f or 0.0),
                     "raw_api_volume": default_vol,
                     "base_api_volume": 0.0,
                     "final_api_volume": 0.0,
-                    "blocked_reason": "demo_nursery_min_volume_exceeds_cap",
-                    "demo_nursery_exploration": True,
+                    "blocked_reason": f"{exploration_prefix}_min_volume_exceeds_cap",
+                    "demo_exploration": True,
+                    "demo_nursery_exploration": demo_nursery_exploration,
+                    "exploration_reason": exploration_reason,
                     "exploration_api_volume": default_vol,
                 }
             )
             return {"volume": 0.0, "trace": trace}
         trace.update(
             {
-                "reason": "demo_nursery_min_volume_exploration",
+                "reason": f"{exploration_prefix}_min_volume_exploration",
                 "kelly_fraction": float(kelly_f or 0.0),
                 "raw_api_volume": default_vol,
                 "base_api_volume": default_vol,
                 "final_api_volume": default_vol,
                 "blocked_reason": "",
-                "demo_nursery_exploration": True,
+                "demo_exploration": True,
+                "demo_nursery_exploration": demo_nursery_exploration,
+                "exploration_reason": exploration_reason,
                 "exploration_api_volume": default_vol,
             }
         )
@@ -158,6 +191,12 @@ def risk_kelly_sizing(
     capped_raw = min(raw_api_volume, max_api_volume_calc)
     if max_order_api > 0:
         capped_raw = min(capped_raw, max_order_api)
+    pre_canary_capped = capped_raw
+    if kelly_canary_active and canary_max_api > 0:
+        canary_cap = canary_max_api
+        if max_order_api > 0:
+            canary_cap = min(canary_cap, max_order_api)
+        capped_raw = min(capped_raw, canary_cap)
     tiered_volume = floor_api_volume_to_step(capped_raw, meta)
     volume = tiered_volume
     if max_order_api > 0:
@@ -169,9 +208,12 @@ def risk_kelly_sizing(
         blocked_reason = (
             f"kelly_sizing_below_min: raw={capped_raw:.2f}<{default_vol:.0f}"
         )
+    sizing_reason = "kelly_canary_cap" if kelly_canary_active and volume > 0 else (
+        "ok" if volume > 0 else "kelly_sizing_below_min"
+    )
     trace.update(
         {
-            "reason": "ok" if volume > 0 else "kelly_sizing_below_min",
+            "reason": sizing_reason,
             "equity": equity,
             "kelly_fraction": float(kelly_f or 0.0),
             "kelly_multiplier": float(kelly_mult or 0.0),
@@ -184,6 +226,7 @@ def risk_kelly_sizing(
             "raw_display_units": raw_display_units,
             "raw_api_volume": raw_api_volume,
             "max_api_volume_by_capital": max_api_volume_calc,
+            "pre_canary_capped_api_volume": pre_canary_capped,
             "capped_raw_api_volume": capped_raw,
             "tiered_base_api_volume": tiered_volume,
             "base_api_volume": volume,
@@ -213,7 +256,9 @@ def apply_entry_event_sizing(
     if base <= 0:
         final_volume = 0.0
         blocked_reason = upstream_blocked_reason or "non_positive_base_volume"
-    elif multiplier < 1.0 and bool(trace.get("demo_nursery_exploration")):
+    elif multiplier < 1.0 and bool(
+        trace.get("demo_exploration") or trace.get("demo_nursery_exploration")
+    ):
         final_volume = base
         blocked_reason = upstream_blocked_reason
         trace["event_sizing_demo_nursery_min_preserved"] = True

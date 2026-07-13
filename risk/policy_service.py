@@ -30,6 +30,7 @@ INCIDENT_CONTROLLED_ACTIONS = {
     "update_weight",
     "switch_parameter_template",
     "disable_factor_live",
+    "restore_factor_live",
     "retire_factor",
     "enable_context_policy",
     "rollback_factor_action",
@@ -46,6 +47,7 @@ LIVE_AUTONOMY_EXPANSION_ACTIONS = {
     "update_weight",
     "switch_parameter_template",
     "disable_factor_live",
+    "restore_factor_live",
     "retire_factor",
     "enable_context_policy",
     "switch_position_supervisor_template",
@@ -127,6 +129,8 @@ class RiskPolicyService:
             return self._evaluate_governor_action(action, context, "allow_template_switch")
         if action == "disable_factor_live":
             return self._evaluate_governor_action(action, context, "allow_factor_disable")
+        if action == "restore_factor_live":
+            return self._evaluate_governor_action(action, context, "allow_factor_restore")
         if action == "retire_factor":
             return self._evaluate_governor_action(action, context, "allow_factor_retire")
         if action == "enable_context_policy":

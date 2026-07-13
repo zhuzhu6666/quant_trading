@@ -193,6 +193,66 @@ def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
     assert live_service._live_state_get("session_trades") == 29
 
 
+def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+    from backend.core import db as db_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    _patch_live_state_conn(monkeypatch, _conn)
+    live_service._live_state_update(
+        account={"balance": 1000.0},
+        session_pnl=-0.17,
+        session_trades=1,
+        session_winning=0,
+        session_losing=1,
+        session_trade_pnls=[-0.17],
+    )
+    live_service._persist_session_state("2026-07-13")
+
+    day_start = datetime(2026, 7, 13, tzinfo=timezone.utc).timestamp()
+    conn = _conn()
+    try:
+        conn.executemany(
+            """
+            INSERT INTO ctrader_deals
+            (deal_id, position_id, exec_timestamp, gross_profit,
+             close_commission, closed_volume, is_close)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, 101, day_start - 100.0, 10.0, 0.0, 100, 1),
+                (2, 102, day_start + 100.0, -1.0, -0.1, 100, 1),
+                (3, 103, day_start + 200.0, -2.0, 0.0, 100, 1),
+                (4, 103, day_start + 300.0, 5.0, 0.0, 100, 1),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert live_service._restore_session_state_for_day("2026-07-13") is True
+    assert live_service._live_state_get("session_pnl") == pytest.approx(1.9)
+    assert live_service._live_state_get("session_trades") == 2
+    assert live_service._live_state_get("session_winning") == 1
+    assert live_service._live_state_get("session_losing") == 1
+    assert live_service._live_state_get("session_trade_pnls", clone=True) == pytest.approx([-1.1, 3.0])
+    assert live_service._live_state_get("session_consecutive_loss") == 0
+    assert live_service._live_state_get("session_state_source") == "ctrader_deals.final_close_rebuild.v1"
+
+
 def test_floor_api_volume_to_step_skips_untradeable_partial_reduce():
     meta = {"api_min_volume": 100, "api_step_volume": 100}
 
@@ -345,6 +405,7 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     scheduler_calls = []
 
     monkeypatch.setattr(live_service, "_start_live_scheduler", lambda: scheduler_calls.append("started"))
+    monkeypatch.setattr(live_service, "_restore_session_state_for_day", lambda trade_date=None: False)
     monkeypatch.setattr(live_service.threading, "Thread", _IdleThread)
     live_service._live_state_update(loop_shutdown={"status": "completed"})
 

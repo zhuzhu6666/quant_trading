@@ -309,6 +309,7 @@ def execute_supervisor_reduce_action(
     remember_close_verdict: Callable[[int, Any], Any],
     result_is_position_not_found: Callable[[Any], bool],
     retire_broker_missing_position: Callable[..., Any],
+    record_partial_close_execution: Callable[..., Any] | None = None,
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     current_volume = float(position.get("volume", position.get("api_volume", 0.0)) or 0.0)
@@ -322,6 +323,24 @@ def execute_supervisor_reduce_action(
     if reduce_volume >= min_volume and current_volume - reduce_volume >= min_volume:
         result = bridge.close_position(pid, volume=reduce_volume)
         if getattr(result, "success", False):
+            accounting_recorded = None
+            if record_partial_close_execution is not None:
+                try:
+                    accounting_recorded = bool(
+                        record_partial_close_execution(
+                            position_id=pid,
+                            close_price=float(
+                                getattr(result, "price", 0.0)
+                                or position.get("current_price", position.get("price_current", 0.0))
+                                or 0.0
+                            ),
+                            close_ts=time.time(),
+                            volume=reduce_volume,
+                            reason=str(verdict.get("summary_reason") or "supervisor_reduce"),
+                        )
+                    )
+                except Exception as exc:
+                    log(f"tick {tick}: partial close accounting failed pos={pid}: {exc}")
             if ledger:
                 ledger.log_position_event(
                     position_id=str(pid),
@@ -330,11 +349,16 @@ def execute_supervisor_reduce_action(
                     event_type="reduced",
                     net_volume=max(0.0, current_volume - reduce_volume),
                     avg_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                    # The final ``closed`` event owns the aggregate PnL for
+                    # the position. Partial-close PnL remains in execution
+                    # details and must not be summed again at lifecycle level.
+                    realized_pnl=0.0,
                     details={
                         "supervisor_action": "reduce",
                         "supervisor_reason": verdict.get("summary_reason"),
                         "risk_verdict_reason": risk_verdict.get("reason"),
                         "applied_controls": {**(controls or {}), "reduce_volume": reduce_volume},
+                        "realized_pnl_scope": "execution_detail_only",
                     },
                 )
             remember_supervisor_state(
@@ -356,7 +380,11 @@ def execute_supervisor_reduce_action(
                 risk_verdict=risk_verdict,
                 execution_status="applied",
                 execution_reason="partial_close_success",
-                execution={"reduce_volume": reduce_volume, "applied_controls": controls},
+                execution={
+                    "reduce_volume": reduce_volume,
+                    "applied_controls": controls,
+                    "accounting_recorded": accounting_recorded,
+                },
                 acct=acct,
             )
             if result_is_position_not_found(result):

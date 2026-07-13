@@ -634,12 +634,18 @@ class FactorGovernanceLightGBMService:
         items: list[dict[str, Any]] | None = None,
         materialize: bool = False,
         min_weakness_score: float = 0.65,
+        governed_action: str = "review_factor_weight_or_template",
+        min_weak_sample_count: int = 1,
+        factor_allowlist: set[str] | None = None,
+        evidence_context_by_factor: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         source_items = items if items is not None else self.list_audits(limit=500)["items"]
         grouped: dict[str, list[dict[str, Any]]] = {}
         for item in source_items:
             factor = str(item.get("factor") or "")
             if not factor:
+                continue
+            if factor_allowlist is not None and factor not in factor_allowlist:
                 continue
             grouped.setdefault(factor, []).append(item)
         suggestions = []
@@ -648,36 +654,47 @@ class FactorGovernanceLightGBMService:
                 item for item in factor_items
                 if _safe_float(item.get("weakness_score")) >= float(min_weakness_score)
             ]
-            if not weak_items:
+            if len(weak_items) < max(1, int(min_weak_sample_count)):
                 continue
             avg_weakness = sum(_safe_float(item.get("weakness_score")) for item in weak_items) / max(len(weak_items), 1)
             confidence = min(0.92, max(0.55, avg_weakness * min(1.0, len(weak_items) / 5.0)))
-            suggestion_id = "fgm_" + hashlib.sha1(
-                f"{factor}:{len(weak_items)}:{round(avg_weakness, 4)}".encode("utf-8")
-            ).hexdigest()[:16]
+            identity = f"{factor}:{len(weak_items)}:{round(avg_weakness, 4)}"
+            if governed_action != "review_factor_weight_or_template" or min_weak_sample_count > 1:
+                identity = ":".join(
+                    [
+                        factor,
+                        governed_action,
+                        ",".join(sorted(str(item.get("review_id") or item.get("inference_id") or "") for item in weak_items)),
+                        str(round(avg_weakness, 4)),
+                    ]
+                )
+            suggestion_id = "fgm_" + hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
+            evidence = {
+                "schema_version": "factor_governance_advisory.v1",
+                "model_type": MODEL_TYPE,
+                "sample_count": len(factor_items),
+                "weak_sample_count": len(weak_items),
+                "avg_weakness_score": round(avg_weakness, 6),
+                "min_weakness_score": float(min_weakness_score),
+                "latest_inference_ids": [str(item.get("inference_id") or "") for item in weak_items[:5]],
+                "advisory_only": True,
+                "approval_path": "governor_review_then_offline_replay",
+            }
+            evidence.update(dict((evidence_context_by_factor or {}).get(factor) or {}))
             suggestions.append(
                 {
                     "suggestion_id": suggestion_id,
                     "scope_type": "factor",
                     "scope_key": factor,
-                    "action": "review_factor_weight_or_template",
+                    "action": governed_action,
                     "confidence": round(confidence, 4),
                     "reason": "LightGBM shadow model detected repeated weak factor contribution samples",
                     "evidence": attach_policy_suggestion_agent_context(
-                        {
-                        "schema_version": "factor_governance_advisory.v1",
-                        "model_type": MODEL_TYPE,
-                        "sample_count": len(factor_items),
-                        "weak_sample_count": len(weak_items),
-                        "avg_weakness_score": round(avg_weakness, 6),
-                        "min_weakness_score": float(min_weakness_score),
-                        "latest_inference_ids": [str(item.get("inference_id") or "") for item in weak_items[:5]],
-                        "advisory_only": True,
-                        "approval_path": "governor_review_then_offline_replay",
-                        },
+                        evidence,
                         source_agent="lightgbm_shadow_models",
                         scope_type="factor",
-                        action="review_factor_weight_or_template",
+                        scope_key=factor,
+                        action=governed_action,
                         requested_writes=[],
                         status="proposed",
                         impact_level="shadow",
@@ -697,6 +714,165 @@ class FactorGovernanceLightGBMService:
             "items": suggestions,
             "count": len(suggestions),
         }
+
+    def materialize_demo_governance_advisories(
+        self,
+        *,
+        limit: int = 5000,
+        min_weakness_score: float = 0.85,
+        min_weak_sample_count: int = 2,
+        max_factors: int = 10,
+    ) -> dict[str, Any]:
+        """Bridge strong model evidence into the guarded demo governance queue.
+
+        The LightGBM model remains advisory-only.  This method only creates a
+        factor-scoped ``policy_suggestion`` with a concrete, whitelisted
+        ``downweight`` action.  Approval and application remain owned by the
+        existing governor, DecisionPolicy, RiskPolicyService, and weight
+        mutation service.
+        """
+        from backend.services.factor_catalog import build_factor_catalog
+
+        catalog = build_factor_catalog(self.db_path)
+        active = {
+            str(item.get("factor_id") or ""): item
+            for item in catalog
+            if bool(item.get("used_in_score"))
+            and bool(item.get("enabled", True))
+            and bool(item.get("eligible_for_live", True))
+            and str(item.get("lifecycle_status") or "ACTIVE").upper() not in {"DEAD", "QUARANTINE"}
+            and str(item.get("role") or "") == "alpha"
+        }
+        stale_superseded = self._supersede_inactive_demo_suggestions(set(active))
+        audits = self.list_audits(limit=max(100, int(limit))).get("items") or []
+        if not active or not audits:
+            return {
+                "schema_version": "factor_governance_demo_bridge.v1",
+                "enabled": True,
+                "materialized": False,
+                "count": 0,
+                "eligible_active_factors": len(active),
+                "stale_superseded": stale_superseded,
+                "reason": "no_active_factors_or_model_audits",
+            }
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in audits:
+            factor = str(item.get("factor") or "")
+            if factor in active:
+                grouped.setdefault(factor, []).append(item)
+        ranked: list[tuple[float, str]] = []
+        for factor, items in grouped.items():
+            weak = [
+                item for item in items
+                if _safe_float(item.get("weakness_score")) >= float(min_weakness_score)
+            ]
+            if len(weak) < max(1, int(min_weak_sample_count)):
+                continue
+            avg_weakness = sum(_safe_float(item.get("weakness_score")) for item in weak) / max(len(weak), 1)
+            ranked.append((avg_weakness, factor))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        selected = {factor for _, factor in ranked[:max(1, int(max_factors))]}
+        context = {
+            factor: {
+                "bridge_schema_version": "factor_governance_demo_bridge.v1",
+                "bridge": {
+                    "automatic_demo": True,
+                    "demo_nursery": True,
+                    "actor": "system:autonomous_learning.demo_nursery_model_governance",
+                    "service": "FactorGovernanceLightGBMService.materialize_demo_governance_advisories",
+                    "manual_only": False,
+                },
+                "model_advisory": True,
+                "model_action": "review_factor_weight_or_template",
+                "governed_action": "downweight",
+                "active_factor_context": {
+                    "used_in_score": True,
+                    "role": "alpha",
+                    "weight": float(active[factor].get("weight") or 0.0),
+                    "health_score": float(active[factor].get("health_score") or 0.0),
+                    "health_status": str(active[factor].get("health_status") or "UNKNOWN"),
+                },
+                "governance_consumer": "RuleEvolutionGovernor+FactorWeightChangeService",
+                "direct_model_application": False,
+                "downstream_gates_required": [
+                    "demo_governor_review",
+                    "DecisionPolicy",
+                    "RiskPolicyService",
+                    "runtime_overlay_snapshot",
+                    "learning_application_effect",
+                ],
+            }
+            for factor in selected
+        }
+        result = self.build_advisories(
+            items=audits,
+            materialize=False,
+            min_weakness_score=min_weakness_score,
+            governed_action="downweight",
+            min_weak_sample_count=min_weak_sample_count,
+            factor_allowlist=selected,
+            evidence_context_by_factor=context,
+        )
+        suggestions = list(result.get("items") or [])
+        if suggestions:
+            self._materialize_suggestions(suggestions)
+        return {
+            **result,
+            "schema_version": "factor_governance_demo_bridge.v1",
+            "enabled": True,
+            "materialized": bool(suggestions),
+            "eligible_active_factors": len(active),
+            "selected_factors": sorted(selected),
+            "stale_superseded": stale_superseded,
+            "min_weakness_score": float(min_weakness_score),
+            "min_weak_sample_count": int(min_weak_sample_count),
+        }
+
+    def _supersede_inactive_demo_suggestions(self, active_factors: set[str]) -> int:
+        """Close stale model bridges after their factor leaves the runtime score."""
+        changed = 0
+        conn = self._conn()
+        try:
+            rows = self._execute(
+                conn,
+                """
+                SELECT suggestion_id, scope_key, evidence_json
+                FROM policy_suggestion
+                WHERE scope_type='factor'
+                  AND action='downweight'
+                  AND status IN ('proposed', 'approved')
+                """,
+            ).fetchall()
+            now = time.time()
+            for row in rows:
+                evidence = _loads(row["evidence_json"], {})
+                bridge = evidence.get("bridge") if isinstance(evidence, dict) else {}
+                if not (
+                    isinstance(evidence, dict)
+                    and evidence.get("model_type") == MODEL_TYPE
+                    and isinstance(bridge, dict)
+                    and bridge.get("automatic_demo") is True
+                    and bridge.get("demo_nursery") is True
+                ):
+                    continue
+                if str(row["scope_key"] or "") in active_factors:
+                    continue
+                self._execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET status='superseded', reviewed_at=?,
+                        review_note='superseded: factor is no longer active in runtime score'
+                    WHERE suggestion_id=?
+                    """,
+                    (now, str(row["suggestion_id"] or "")),
+                )
+                changed += 1
+            conn.commit()
+            return changed
+        finally:
+            conn.close()
 
     def _materialize_suggestions(self, suggestions: list[dict[str, Any]]) -> None:
         conn = self._conn()

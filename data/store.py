@@ -75,8 +75,35 @@ class DataStore:
 
     def insert_cb_gold(self, country: str, date: str,
                        total_tonnes: float | None = None,
-                       monthly_chg_tonnes: float | None = None):
-        self._backend.insert_cb_gold(country, date, total_tonnes, monthly_chg_tonnes)
+                       monthly_chg_tonnes: float | None = None,
+                       release_at: float | None = None,
+                       fetched_at: float | None = None,
+                       source: str = "external"):
+        self._backend.insert_cb_gold(
+            country,
+            date,
+            total_tonnes,
+            monthly_chg_tonnes,
+            release_at=release_at,
+            fetched_at=fetched_at,
+            source=source,
+        )
+
+    def insert_etf_daily(self, symbol: str, date: str, close: float,
+                         release_at: float | None = None,
+                         fetched_at: float | None = None,
+                         source: str = "yahoo_chart"):
+        self._backend.insert_etf_daily(
+            symbol,
+            date,
+            close,
+            release_at=release_at,
+            fetched_at=fetched_at,
+            source=source,
+        )
+
+    def insert_etf_daily_batch(self, rows: list[tuple[str, str, float, float, float, str]]):
+        self._backend.insert_etf_daily_batch(rows)
 
     def insert_cot_gold(self, report_date: str,
                         open_interest: int | None = None,

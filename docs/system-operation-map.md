@@ -498,6 +498,8 @@ _process_tick_factor_pipeline(...)
   -> build_factor_catalog()
   -> rollback failed actions
   -> persist_factor_catalog_snapshot()
+  -> restore eligible quarantined builtin alpha
+  -> activate healthy builtin structure/K-line/Fibonacci SHADOW candidates (max 1/cycle)
   -> RedundancyDetector.build_report()
   -> apply redundancy report
   -> refresh catalog
@@ -599,8 +601,8 @@ V16 Phase 1 已新增只读大脑状态最小闭环，Phase 2 已完成最小影
 - Shadow plans：覆盖 factor weight、parameter template、context policy、supervisor template，记录 Critic verdict、validation refs、required services、shadow eval contract 和 future rollback 要求。
 - Shadow evals：读取 `replay_report`、`trade_outcome_review`、`learning_application_effect`、`position_supervisor_trace`，输出 coverage、comparison verdict 和 evidence refs。
 - Low-impact executions：当前白名单只允许 read-only `run_replay_job`；执行前记录 evidence score、Critic verdict、`RiskPolicyService` verdict、rollback/downgrade plan，执行后写 replay result 和 posterior monitor。坏化后可选收紧到 `shadow_only`，但必须显式允许并走 incident-control/RiskPolicy/overlay。
-- Medium-impact governance：基于 P2/P3 evidence、`RiskPolicyService` verdict 和 `DecisionPolicy` preview 生成隔离 `brain_governance_candidate` 候选，写 `brain_medium_impact_governance`；不直接写 `policy_suggestion`，不直接应用 factor weight、template、model promotion 或 runtime overlay。候选只有通过手动 bridge 且兼容旧 governor evidence 才能进入 `policy_suggestion(status='proposed')`。
-- Governance candidate review：读取隔离候选池、现有 active `policy_suggestion` 和 source reliability，复用 `research.learning.governance_conflicts.control_surface` 输出冲突面，调用 bridge preview 判断旧 governor 兼容性，并可选复用 `LLMAdvisoryService` 生成 advisory audit；review 不提交候选、不执行 runtime mutation。
+- Medium-impact governance：基于 P2/P3 evidence、`RiskPolicyService` verdict 和 `DecisionPolicy` preview 生成隔离 `brain_governance_candidate` 候选，写 `brain_medium_impact_governance`；候选来源不直接写 `policy_suggestion`，不直接应用 factor weight、template、model promotion 或 runtime overlay。`demo_nursery` 由 `AutonomousEvolutionNurseryRunner` 自动调用既有 bridge service，非 demo 才由显式 bridge 入口触发；两者都必须满足旧 governor evidence。
+- Governance candidate review：读取隔离候选池、现有 active `policy_suggestion` 和 source reliability，复用 `research.learning.governance_conflicts.control_surface` 输出冲突面，调用 bridge preview 判断旧 governor 兼容性，并可选复用 `LLMAdvisoryService` 生成 advisory audit；demo runner 自动执行 review，并只提交 `bridge_ready=true` 的候选，review service 本身不执行 runtime mutation。
 - Live-ready guardrails：评估 capability lock、broker/local divergence、incident memory、release rollback 和 P3/P4 evidence，写 `brain_live_ready_guardrail`；显式 `tighten` 只能通过 incident-control/RiskPolicy/overlay 进入更严格模式，不能放宽权限。
 - Proposal Registry：归一化 policy suggestion、brain candidate/action plan、learning application、evolution decision、live autonomy event、shadow/advisory 和 LLM audit，输出 source reliability、evidence freshness、conflict 和 route；review 不授权、不应用、不改来源状态。
 - Live autonomy：评估 readiness、release rollback、replay、broker alignment、proposal conflict、evidence freshness 和 RiskPolicy budget；成功解锁/撤销只通过 `RuntimeConfigMutationService` 写 overlay/snapshot。GET/evaluate 不自动改 incident mode；live 开仓路径若被 `RiskPolicyService` 判定为 `live_autonomy_budget_breach`，会通过 `RuntimeIncidentControlService` 自动请求 `no_new_risk`，并保留 incident/proposal/overlay 审计。
@@ -690,8 +692,8 @@ GET /api/v4/catalog?snapshot=latest
 | `GET /api/ops/brain/action-plan-evals` | 查看或刷新 V16 Phase 2 shadow action posterior comparisons；只记录 coverage/verdict/evidence refs，不授权执行 |
 | `GET /api/ops/brain/low-impact-executions` / `POST /api/ops/brain/low-impact-executions/run` | 查看或显式运行 V16 Phase 3 低影响白名单动作；当前只允许 read-only replay job，执行前必须有 RiskPolicy verdict |
 | `GET /api/ops/brain/medium-impact-governance` / `POST /api/ops/brain/medium-impact-governance/materialize` | 查看或显式生成 V16 Phase 4 中等影响治理候选；只写 `brain_governance_candidate` 和审计账本，不应用 runtime mutation，不直接写 `policy_suggestion` |
-| `GET /api/ops/brain/governance-candidates` / `POST /api/ops/brain/governance-candidates/{candidate_id}/submit` | 查看 V16 隔离候选池；手动 submit 仅在 stage、RiskPolicy verdict、旧 governor evidence 兼容时桥接到 `policy_suggestion` review |
-| `GET /api/ops/brain/governance-candidate-reviews` / `POST /api/ops/brain/governance-candidates/review` | 查看或运行 V16 候选审查；输出 bridge preview、证据缺口、冲突面、source reliability 和可选 LLM advisory，只写审计不提交 |
+| `GET /api/ops/brain/governance-candidates` / `POST /api/ops/brain/governance-candidates/{candidate_id}/submit` | 查看 V16 隔离候选池；demo 由 nursery 自动 submit，非 demo 的显式 submit 仅在 stage、RiskPolicy verdict、旧 governor evidence 兼容时桥接到 `policy_suggestion` review |
+| `GET /api/ops/brain/governance-candidate-reviews` / `POST /api/ops/brain/governance-candidates/review` | 查看或运行 V16 候选审查；demo runner 自动运行并输出 bridge preview、证据缺口、冲突面、source reliability 和可选 LLM advisory，只提交 bridge-ready 候选 |
 | `GET /api/ops/brain/live-ready-guardrails` / `POST /api/ops/brain/live-ready-guardrails/evaluate` / `POST /api/ops/brain/live-ready-guardrails/tighten` | 查看或显式评估 V16 Phase 5 实盘前护栏；tighten 只能通过 incident-control 收紧权限，不能恢复 normal 或放宽 incident mode |
 | `GET/POST /api/ops/autonomy/proposals*` | 查看、刷新和记录 Proposal Registry review；包含 source reliability、evidence freshness、conflict 和 route，不能授权或应用 |
 | `GET /api/ops/autonomy/live-status` / `POST /api/ops/autonomy/live-unlock*` | 查看、评估、一次性解锁或撤销 `live_autonomous`；评估包含 evidence freshness、operational posture 和 budget response，mutation 必须走 overlay/snapshot |

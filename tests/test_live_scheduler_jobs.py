@@ -67,6 +67,8 @@ def test_register_external_sync_jobs_keeps_legacy_names_and_crons(tmp_path):
         ("cot_sync", "0 6 * * 6"),
         ("etf_sync", "0 4 1 */3 *"),
         ("fred_sync", "20 5 * * *"),
+        ("cb_sync", "0 7 10 * *"),
+        ("etf_daily_sync", "30 4 * * *"),
     ]
 
 
@@ -124,12 +126,10 @@ def test_startup_catch_up_jobs_preserves_legacy_light_and_heavy_order():
     immediate, deferred = startup_catch_up_jobs(run_heavy_jobs=False)
 
     assert immediate == ["data_sync", "events_sync"]
-    assert deferred == [(300.0, "cot_sync"), (360.0, "etf_sync")]
+    assert deferred == []
 
     _immediate_heavy, deferred_heavy = startup_catch_up_jobs(run_heavy_jobs=True)
     assert deferred_heavy == [
-        (300.0, "cot_sync"),
-        (360.0, "etf_sync"),
         (480.0, "evolution_hourly"),
         (720.0, "awe_adapt"),
         (1200.0, "feature_eng"),
@@ -173,10 +173,8 @@ def test_start_scheduler_catch_up_runs_immediate_then_deferred_serially():
     assert sched.ran == [
         "data_sync",
         "events_sync",
-        "cot_sync",
-        "etf_sync",
     ]
-    assert sleeps == [300.0, 30.0, 30.0, 30.0]
+    assert sleeps == []
 
 
 def test_start_scheduler_catch_up_includes_heavy_jobs_when_enabled():
@@ -205,8 +203,6 @@ def test_start_scheduler_catch_up_includes_heavy_jobs_when_enabled():
     assert sched.ran == [
         "data_sync",
         "events_sync",
-        "cot_sync",
-        "etf_sync",
         "evolution_hourly",
         "awe_adapt",
         "feature_eng",

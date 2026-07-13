@@ -36,6 +36,7 @@ _POSITIVE_FLOAT_FIELDS = {
     "max_position_api_volume",
     "kelly_max_pct",
     "kelly_risk_per_trade_pct",
+    "kelly_canary_max_api_volume",
     "dynamic_sizing_max_api_volume",
     "dynamic_sizing_api_units_per_display_unit",
 }
@@ -46,6 +47,7 @@ _POSITIVE_INT_FIELDS = {
     "risk_max_daily_trades",
     "sync_interval_sec",
     "var_window",
+    "kelly_min_closed_trades",
 }
 _NON_NEGATIVE_INT_FIELDS = {
     "risk_cooldown_bars",

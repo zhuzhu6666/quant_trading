@@ -928,8 +928,55 @@ CREATE TABLE IF NOT EXISTS brain_governance_candidate_review (
     source_reliability_json TEXT NOT NULL DEFAULT '{}',
     llm_advisory_json TEXT NOT NULL DEFAULT '{}',
     boundary_json TEXT NOT NULL DEFAULT '{}',
+    evidence_fingerprint TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0
 );
+
+CREATE TABLE IF NOT EXISTS v16_brain_command (
+    command_id TEXT PRIMARY KEY,
+    snapshot_id TEXT DEFAULT '',
+    plan_id TEXT DEFAULT '',
+    eval_id TEXT DEFAULT '',
+    candidate_id TEXT DEFAULT '',
+    target_agent TEXT DEFAULT '',
+    scope_type TEXT DEFAULT '',
+    scope_key TEXT DEFAULT '',
+    action TEXT DEFAULT '',
+    decision TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    delegation_json TEXT NOT NULL DEFAULT '{}',
+    claim_status TEXT NOT NULL DEFAULT 'available',
+    claim_token TEXT DEFAULT '',
+    claimed_at REAL NOT NULL DEFAULT 0.0,
+    claim_expires_at REAL NOT NULL DEFAULT 0.0,
+    apply_count INTEGER NOT NULL DEFAULT 0,
+    max_apply_count INTEGER NOT NULL DEFAULT 1,
+    consumed_at REAL NOT NULL DEFAULT 0.0,
+    consumed_mutation_id TEXT DEFAULT '',
+    posterior_fingerprint TEXT DEFAULT '',
+    evidence_fingerprint TEXT DEFAULT '',
+    last_release_reason TEXT DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS learning_experiment_reservation (
+    reservation_id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL DEFAULT '',
+    scope_key TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'reserved',
+    application_id TEXT NOT NULL DEFAULT '',
+    expires_at REAL NOT NULL DEFAULT 0.0,
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_status
+    ON learning_experiment_reservation(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_scope
+    ON learning_experiment_reservation(scope_type, scope_key, status);
 
 CREATE TABLE IF NOT EXISTS proposal_registry (
     proposal_id TEXT PRIMARY KEY,
@@ -937,6 +984,7 @@ CREATE TABLE IF NOT EXISTS proposal_registry (
     source_ref_type TEXT DEFAULT '',
     source_ref_id TEXT DEFAULT '',
     proposal_type TEXT DEFAULT '',
+    proposal_action TEXT DEFAULT '',
     control_surface TEXT DEFAULT '',
     target_scope TEXT DEFAULT '',
     impact_level TEXT DEFAULT '',
@@ -1305,6 +1353,12 @@ CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_scope ON brain_governa
 CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_source ON brain_governance_candidate(source_agent, source_kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_candidate ON brain_governance_candidate_review(candidate_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_status ON brain_governance_candidate_review(review_status, created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_fingerprint
+ON brain_governance_candidate_review(candidate_id, evidence_fingerprint, created_at);
+CREATE INDEX IF NOT EXISTS idx_v16_brain_command_created ON v16_brain_command(created_at);
+CREATE INDEX IF NOT EXISTS idx_v16_brain_command_target ON v16_brain_command(target_agent, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_v16_brain_command_scope ON v16_brain_command(scope_type, scope_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_v16_brain_command_claim ON v16_brain_command(target_agent, scope_type, claim_status, claim_expires_at);
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_updated ON proposal_registry(updated_at);
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_surface ON proposal_registry(control_surface, target_scope, status);
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_source ON proposal_registry(source_agent, source_ref_type, updated_at);
@@ -1359,8 +1413,8 @@ CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp
 
 
 def init_state_db() -> None:
-    """Verify PostgreSQL state schema is available."""
-    conn = get_state_pg_conn(read_only=True)
+    """Verify and idempotently upgrade the PostgreSQL state schema."""
+    conn = get_state_pg_conn()
     try:
         row = conn.execute(
             """
@@ -1371,8 +1425,79 @@ def init_state_db() -> None:
         ).fetchone()
         if row is None or int(row["n"] or 0) == 0:
             raise RuntimeError("PostgreSQL state schema is empty; run scripts/migrate_state_sqlite_to_pg.py first")
+        _ensure_state_schema_compatibility(conn)
+        conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_state_schema_compatibility(conn) -> None:
+    """Apply small, additive migrations required by current governance paths.
+
+    The historical SQLite DDL is not replayed against PostgreSQL on every
+    startup.  Keep the live migration surface narrow and idempotent: these
+    objects are append-only audit/read-model support and do not rewrite
+    trading state.
+    """
+    conn.execute(
+        "ALTER TABLE brain_governance_candidate_review "
+        "ADD COLUMN IF NOT EXISTS evidence_fingerprint TEXT NOT NULL DEFAULT ''"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_fingerprint "
+        "ON brain_governance_candidate_review(candidate_id, evidence_fingerprint, created_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learning_experiment_reservation (
+            reservation_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL DEFAULT '',
+            scope_key TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'reserved',
+            application_id TEXT NOT NULL DEFAULT '',
+            expires_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_status "
+        "ON learning_experiment_reservation(status, expires_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_scope "
+        "ON learning_experiment_reservation(scope_type, scope_key, status)"
+    )
+    conn.execute(
+        "ALTER TABLE proposal_registry "
+        "ADD COLUMN IF NOT EXISTS proposal_action TEXT NOT NULL DEFAULT ''"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_proposal_registry_projection_key "
+        "ON proposal_registry(source_agent, proposal_type, control_surface, target_scope, proposal_action)"
+    )
+    for column, ddl in {
+        "claim_status": "TEXT NOT NULL DEFAULT 'available'",
+        "claim_token": "TEXT DEFAULT ''",
+        "claimed_at": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+        "claim_expires_at": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+        "apply_count": "INTEGER NOT NULL DEFAULT 0",
+        "max_apply_count": "INTEGER NOT NULL DEFAULT 1",
+        "consumed_at": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+        "consumed_mutation_id": "TEXT DEFAULT ''",
+        "posterior_fingerprint": "TEXT DEFAULT ''",
+        "evidence_fingerprint": "TEXT DEFAULT ''",
+        "last_release_reason": "TEXT DEFAULT ''",
+    }.items():
+        conn.execute(
+            f'ALTER TABLE v16_brain_command ADD COLUMN IF NOT EXISTS "{column}" {ddl}'
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_v16_brain_command_claim "
+        "ON v16_brain_command(target_agent, scope_type, claim_status, claim_expires_at)"
+    )
 
 
 def get_state_pg_conn(*, read_only: bool = False):

@@ -36,13 +36,32 @@ def record_api_mutation(
     reason: str = "",
     required_confirm: str = "",
     confirm_ok: bool = False,
+    source_agent: str = "",
+    decision_type: str = "",
 ) -> str:
     """Best-effort audit record for high-impact authenticated API mutations."""
     try:
         from backend.services.evolution_ledger import record_evolution_decision
 
+        actor = str(user or "")
+        inferred_agent = str(source_agent or "").strip()
+        if not inferred_agent:
+            actor_lower = actor.lower()
+            if actor_lower.startswith("system:factor_governance"):
+                inferred_agent = "factor_governance"
+            elif actor_lower.startswith("system:autonomous_learning"):
+                inferred_agent = "autonomous_learning"
+            elif actor_lower.startswith("system:parameter_template"):
+                inferred_agent = "autonomous_learning"
+            elif actor_lower.startswith("system:"):
+                inferred_agent = "autonomous_runtime"
+            else:
+                inferred_agent = "operator"
+        inferred_decision_type = str(decision_type or "").strip()
+        if not inferred_decision_type:
+            inferred_decision_type = "manual_api_mutation" if inferred_agent == "operator" else "autonomous_mutation"
         decision_id = record_evolution_decision(
-            decision_type="manual_api_mutation",
+            decision_type=inferred_decision_type,
             scope_type="api",
             scope_key=endpoint,
             action=action,
@@ -50,6 +69,8 @@ def record_api_mutation(
             evidence={
                 "user": user,
                 "endpoint": endpoint,
+                "source_agent": inferred_agent,
+                "decision_type": inferred_decision_type,
                 "required_confirm": required_confirm,
                 "confirm_ok": bool(confirm_ok),
                 "reason": reason,

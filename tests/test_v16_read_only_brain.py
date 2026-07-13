@@ -200,7 +200,7 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["brain_live_ready_guardrails"]["schema_version"] == "brain_live_ready_guardrail_readiness.v1"
     assert result["brain_live_ready_guardrails"]["live_ready_guardrails"] is True
     assert result["agent_authority"]["schema_version"] == "agent_authority_status.v1"
-    assert result["agent_authority"]["registered_agents"] == 6
+    assert result["agent_authority"]["registered_agents"] == 7
     assert result["v16"]["agent_authority"]["status"] == "ok"
     assert result["agent_scorecard"]["schema_version"] == "agent_scorecard_readiness.v1"
     assert result["agent_briefing"]["schema_version"] == "agent_briefing_readiness.v1"
@@ -259,8 +259,18 @@ def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
     assert memory["ok"] is True
     assert memory["negative_matches"]
     assert memory["counter_evidence"]
+    assert memory["evidence_balance"]["dominant"] == "mixed"
+    narrow_memory = BrainMemoryService(db_path).retrieve(
+        world_model={"market_regime": "defensive"},
+        hypotheses=[],
+        persist=False,
+        limit=1,
+    )
+    assert len(narrow_memory["items"]) == 1
+    assert narrow_memory["counter_evidence"]
+    assert narrow_memory["evidence_balance"]["positive_count"] >= 1
     assert snapshot["critic"]["verdict"] == "shadow_only"
-    assert "negative_memory_match_requires_observation" in snapshot["critic"]["objections"]
+    assert "mixed_or_insufficient_memory_requires_observation" in snapshot["critic"]["objections"]
     assert any((item.get("counter_evidence_refs") or {}).get("memory") for item in snapshot["hypotheses"])
     assert any((item.get("evidence_refs") or {}).get("negative_memory") for item in snapshot["hypotheses"])
 
@@ -271,6 +281,11 @@ def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
         "trade_outcome_review",
         "policy_suggestion",
     }
+
+
+def test_brain_memory_uses_token_matching_not_generic_substrings():
+    assert BrainMemoryService._similarity("factorization instability", {"factor"}) == 0.0
+    assert BrainMemoryService._similarity("factor instability", {"factor"}) > 0.0
 
 
 def test_brain_action_planner_records_shadow_only_action_plans(tmp_path):

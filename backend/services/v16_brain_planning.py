@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,11 @@ from backend.services._brain_helpers import (
     safe_float,
     text,
 )
-from backend.services.v16_brain_snapshot import BrainMemoryService, BrainStateService
+from backend.services.v16_brain_snapshot import (
+    BrainMemoryService,
+    BrainStateService,
+    build_posterior_arbitration,
+)
 from backend.services.brain_governance_candidates import (
     BrainGovernanceCandidateService,
     ensure_brain_governance_candidate_table,
@@ -253,14 +258,36 @@ class BrainActionPlannerService:
         critic_verdict = self._critic_verdict(risk_class, critic, memory, world_model)
         status = "shadow_recorded" if critic_verdict in {"pass", "caution"} else "critic_rejected"
         validation_refs = self._validation_refs(snapshot_id, hypothesis, memory)
+        posterior = dict(memory.get("posterior_arbitration") or {})
+        selected = dict(posterior.get("selected_conclusion") or {})
+        delegated_agent = {
+            "factor_weight": "factor_governance",
+            "parameter_template": "autonomous_learning",
+            "context_policy": "autonomous_learning",
+            "supervisor_template": "position_supervisor_governance",
+        }.get(action["scope_type"], "autonomous_learning")
+        delegation = {
+            "schema_version": "v16_agent_delegation.v1",
+            "target_agent": delegated_agent,
+            "command_owner": "v16_brain",
+            "execution_owner": delegated_agent,
+            "v16_may": ["select", "prioritize", "set_evidence_requirements", "route_to_governor"],
+            "v16_may_not": ["write_policy_suggestion", "mutate_runtime_overlay", "change_factor_weight", "submit_order"],
+        }
+        scope = {"scope_type": action["scope_type"], "scope_key": action["scope_key"],
+                 "candidate_change": action["candidate_change"], "source": source,
+                 "world_model": {k: world_model.get(k) for k in
+                                 ("strategy_posture", "factor_posture", "learning_posture", "execution_posture")},
+                 "posterior_arbitration": posterior,
+                 "delegation": delegation}
+        if action["scope_type"] == "supervisor_template" and selected:
+            scope["candidate_change"] = f"delegate {selected.get('recommended_action') or 'hold'} to {delegated_agent}"
+            scope["selected_posterior_conclusion"] = selected
         return {
             "plan_id": f"bap_{uuid.uuid4().hex[:16]}", "schema_version": "brain_action_plan.v1",
             "snapshot_id": snapshot_id, "hypothesis_id": str(hypothesis.get("hypothesis_id") or ""),
             "action_type": action["action_type"], "status": status,
-            "scope": {"scope_type": action["scope_type"], "scope_key": action["scope_key"],
-                      "candidate_change": action["candidate_change"], "source": source,
-                      "world_model": {k: world_model.get(k) for k in
-                                      ("strategy_posture", "factor_posture", "learning_posture", "execution_posture")}},
+            "scope": scope,
             "max_impact": "none_shadow_only", "risk_class": risk_class,
             "critic_verdict": critic_verdict, "validation_refs": validation_refs,
             "rollback_plan": {"required": False, "reason": "shadow_plan_does_not_mutate_runtime_state",
@@ -270,7 +297,8 @@ class BrainActionPlannerService:
             "required_services": list(action["required_services"]),
             "shadow_eval": {"schema_version": "brain_shadow_action_eval_contract.v1", "record_only": True,
                             "compare_to_sources": ["replay_report", "trade_outcome_review",
-                                                    "learning_application_effect", "position_supervisor_trace"],
+                                                    "learning_application_effect", "position_supervisor_trace",
+                                                    "supervisor_counterfactual_review"],
                             "success_metric": "post_action_reward_delta_or_replay_agreement",
                             "minimum_observation": {"replay_required_before_execution": True,
                                                     "live_observed_trade_count_before_governance": 3}},
@@ -318,7 +346,9 @@ class BrainActionPlannerService:
         return {"brain_snapshot_id": snapshot_id, "hypothesis_id": str(hypothesis.get("hypothesis_id") or ""),
                 "hypothesis_evidence_refs": hypothesis.get("evidence_refs") or {},
                 "hypothesis_counter_evidence_refs": hypothesis.get("counter_evidence_refs") or {},
-                "memory_refs": memory_items, "requires_replay_before_execution": True}
+                "memory_refs": memory_items,
+                "posterior_arbitration": memory.get("posterior_arbitration") or {},
+                "requires_replay_before_execution": True}
 
     def _persist(self, plans: list[dict[str, Any]]) -> None:
         ensure_brain_action_plan_table(self.db_path)
@@ -368,6 +398,7 @@ class BrainActionPlanEvaluatorService:
 
     REQUIRED_SOURCES = ["replay_report", "trade_outcome_review",
                         "learning_application_effect", "position_supervisor_trace"]
+    OPTIONAL_POSTERIOR_SOURCES = ["supervisor_counterfactual_review"]
 
     def __init__(self, db_path: str | Path = STATE_DB):
         self.db_path = db_path
@@ -441,7 +472,7 @@ class BrainActionPlanEvaluatorService:
             trade_reviews = self._fetch_table(conn, "trade_outcome_review", limit,
                                               cols=["review_id", "trade_id", "position_id", "pnl",
                                                     "outcome_label", "failure_tags_json",
-                                                    "summary_text", "created_at"])
+                                                    "summary_text", "review_json", "created_at"])
             learning_effects = self._fetch_table(conn, "learning_application_effect", limit,
                                                   cols=["application_id", "scope_type", "scope_key",
                                                         "action", "status", "observed_trade_count",
@@ -456,9 +487,16 @@ class BrainActionPlanEvaluatorService:
                                                          "risk_reason", "execution_status",
                                                          "trace_integrity", "event_ts", "created_at"],
                                                    order_col="event_ts")
+            counterfactuals = self._fetch_table(conn, "supervisor_counterfactual_review", limit,
+                                                 cols=["counterfactual_id", "review_id", "trade_id", "position_id",
+                                                       "close_ts", "label", "confidence", "horizons_json",
+                                                       "evidence_json", "updated_at", "created_at"],
+                                                 order_col="updated_at")
             return {"replay_report": replay, "trade_outcome_review": trade_reviews,
                     "learning_application_effect": learning_effects,
-                    "position_supervisor_trace": supervisor_traces, "source_gaps": source_gaps}
+                    "position_supervisor_trace": supervisor_traces,
+                    "supervisor_counterfactual_review": counterfactuals,
+                    "source_gaps": source_gaps}
         finally:
             conn.close()
 
@@ -480,16 +518,25 @@ class BrainActionPlanEvaluatorService:
         learning_effects = [e for e in list(evidence.get("learning_application_effect") or [])
                             if self._matches_scope(scope_type, e)]
         supervisor_traces = list(evidence.get("position_supervisor_trace") or [])
+        counterfactuals = [self._counterfactual_item(item) for item in list(evidence.get("supervisor_counterfactual_review") or [])]
         source_presence = {"replay_report": bool(replay.get("replay_run_id")),
                            "trade_outcome_review": bool(trade_reviews),
                            "learning_application_effect": bool(learning_effects),
-                           "position_supervisor_trace": bool(supervisor_traces)}
-        coverage_score = round(sum(1 for v in source_presence.values() if v) / len(self.REQUIRED_SOURCES), 6)
+                           "position_supervisor_trace": bool(supervisor_traces),
+                           "supervisor_counterfactual_review": bool(counterfactuals)}
+        # The counterfactual table is an optional posterior enrichment.  It
+        # must improve routing quality, not inflate the four-source coverage
+        # contract above 1.0.
+        coverage_score = min(
+            1.0,
+            round(sum(1 for name in self.REQUIRED_SOURCES if source_presence.get(name)) / len(self.REQUIRED_SOURCES), 6),
+        )
         comparison = self._comparison_summary(replay=replay, trade_reviews=trade_reviews,
                                                learning_effects=learning_effects,
                                                supervisor_traces=supervisor_traces,
+                                               counterfactuals=counterfactuals,
                                                source_presence=source_presence)
-        verdict = self._comparison_verdict(coverage_score=coverage_score, comparison=comparison)
+        verdict = self._comparison_verdict(scope_type=scope_type, coverage_score=coverage_score, comparison=comparison)
         return {"eval_id": f"bape_{uuid.uuid4().hex[:16]}", "schema_version": "brain_action_plan_eval.v1",
                 "plan_id": str(plan.get("plan_id") or ""), "snapshot_id": str(plan.get("snapshot_id") or ""),
                 "action_type": str(plan.get("action_type") or ""), "scope_type": scope_type,
@@ -499,7 +546,8 @@ class BrainActionPlanEvaluatorService:
                 "evidence_refs": {"replay_report": replay.get("replay_run_id") or "",
                                   "trade_outcome_review": [t.get("review_id") for t in trade_reviews[:5]],
                                   "learning_application_effect": [e.get("application_id") for e in learning_effects[:5]],
-                                  "position_supervisor_trace": [t.get("trace_id") for t in supervisor_traces[:5]]},
+                                  "position_supervisor_trace": [t.get("trace_id") for t in supervisor_traces[:5]],
+                                  "supervisor_counterfactual_review": [t.get("counterfactual_id") for t in counterfactuals[:5]]},
                 "boundary": self.boundary(), "read_only": True, "affects_trading": False, "created_at": now}
 
     @staticmethod
@@ -515,7 +563,7 @@ class BrainActionPlanEvaluatorService:
     @staticmethod
     def _comparison_summary(*, replay: dict[str, Any], trade_reviews: list[dict[str, Any]],
                             learning_effects: list[dict[str, Any]], supervisor_traces: list[dict[str, Any]],
-                            source_presence: dict[str, bool]) -> dict[str, Any]:
+                            counterfactuals: list[dict[str, Any]], source_presence: dict[str, bool]) -> dict[str, Any]:
         dc = safe_float(replay.get("decision_count"))
         replay_agreement = safe_float(replay.get("matched_live_count")) / dc if dc > 0 else 0.0
         pnls = [safe_float(t.get("pnl")) for t in trade_reviews]
@@ -541,12 +589,27 @@ class BrainActionPlanEvaluatorService:
             "supervisor": {"trace_count": len(supervisor_traces),
                            "risk_allowed_coverage": round(risk_allowed / len(supervisor_traces), 6) if supervisor_traces else 0.0,
                            "integrity_issues": sum(1 for t in supervisor_traces if str(t.get("trace_integrity") or "full") != "full")},
+            "counterfactual": {"count": len(counterfactuals),
+                               "labels": dict(sorted({str(item.get("label") or "unknown"): sum(1 for x in counterfactuals if str(x.get("label") or "unknown") == str(item.get("label") or "unknown")) for item in counterfactuals}.items())),
+                               "items": counterfactuals[:5]},
+            "posterior_arbitration": build_posterior_arbitration(
+                trade_reviews=trade_reviews,
+                counterfactuals=counterfactuals,
+            ),
         }
 
     @staticmethod
-    def _comparison_verdict(*, coverage_score: float, comparison: dict[str, Any]) -> str:
+    def _comparison_verdict(*, scope_type: str, coverage_score: float, comparison: dict[str, Any]) -> str:
         if coverage_score < 0.5:
             return "needs_more_evidence"
+        arbitration = dict(comparison.get("posterior_arbitration") or {})
+        selected_scope = str(arbitration.get("selected_scope") or "")
+        supervisor = dict(arbitration.get("supervisor_conclusion") or {})
+        if scope_type == "supervisor_template" and selected_scope == "supervisor":
+            if supervisor.get("recommended_action") == "less_tighten" and safe_float(supervisor.get("confidence")) >= 0.6:
+                return "supportive"
+            if supervisor.get("recommended_action") == "tighten" and safe_float(supervisor.get("confidence")) >= 0.6:
+                return "caution"
         delta = safe_float((comparison.get("learning_effects") or {}).get("avg_delta_reward"))
         avg_pnl = safe_float((comparison.get("trade_outcomes") or {}).get("avg_pnl"))
         replay_err = bool((comparison.get("replay") or {}).get("has_error"))
@@ -555,6 +618,19 @@ class BrainActionPlanEvaluatorService:
         if delta > 0.05 or avg_pnl > 0:
             return "supportive"
         return "inconclusive"
+
+    @staticmethod
+    def _counterfactual_item(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "counterfactual_id": str(item.get("counterfactual_id") or ""),
+            "review_id": str(item.get("review_id") or ""),
+            "trade_id": str(item.get("trade_id") or ""),
+            "position_id": str(item.get("position_id") or ""),
+            "label": str(item.get("label") or ""),
+            "confidence": safe_float(item.get("confidence")),
+            "horizons": loads(item.get("horizons_json"), []),
+            "evidence": loads(item.get("evidence_json"), {}),
+        }
 
     def _persist(self, evals: list[dict[str, Any]]) -> None:
         ensure_brain_action_plan_eval_table(self.db_path)
@@ -791,6 +867,8 @@ class BrainMediumImpactGovernanceService:
                 "materializes_policy_suggestions_only": False,
                 "does_not_write_policy_suggestion_directly": True,
                 "policy_suggestion_bridge_manual_only": True,
+                "demo_nursery_system_bridge_supported": True,
+                "demo_nursery_human_approval_required": False,
                 "does_not_apply_factor_weights": True, "does_not_switch_templates": True,
                 "does_not_submit_orders": True, "does_not_write_learning_samples": True,
                 "risk_policy_service_required": True,
@@ -851,6 +929,35 @@ class BrainMediumImpactGovernanceService:
                           autonomy_guard: dict[str, Any], persist_candidate: bool) -> dict[str, Any]:
         plan = self._load_plan(str(evaluation.get("plan_id") or ""))
         mapped = self._map_action(evaluation=evaluation, plan=plan)
+        comparison = dict(evaluation.get("comparison") or {})
+        arbitration = dict(comparison.get("posterior_arbitration") or {})
+        selected_scope = str(arbitration.get("selected_scope") or "")
+        scope_causal = {
+            "factor_weight": "factor",
+            "parameter_template": "entry",
+            "context_policy": "entry",
+            "supervisor_template": "supervisor",
+        }.get(str(evaluation.get("scope_type") or ""), "")
+        if selected_scope and scope_causal and selected_scope != scope_causal:
+            return {
+                "governance_id": f"brain_p4_gov_{uuid.uuid4().hex[:16]}",
+                "schema_version": "brain_medium_impact_governance.v1",
+                "plan_id": str(evaluation.get("plan_id") or ""),
+                "eval_id": str(evaluation.get("eval_id") or ""),
+                "governance_action": mapped["policy_action"],
+                "scope_type": mapped["scope_type"],
+                "scope_key": mapped["scope_key"],
+                "status": "not_selected_by_posterior",
+                "candidate_id": "", "suggestion_id": "",
+                "evidence_score": safe_float(evaluation.get("coverage_score")),
+                "critic_verdict": str(plan.get("critic_verdict") or ""),
+                "comparison_verdict": str(evaluation.get("comparison_verdict") or ""),
+                "risk_verdict": {}, "decision_policy": {},
+                "rollback_plan": self._rollback_plan(mapped),
+                "posterior_refs": evaluation.get("evidence_refs") or {},
+                "autonomy_guard": autonomy_guard, "boundary": self.boundary(),
+                "created_at": now, "updated_at": time.time(),
+            }
         evidence_score = safe_float(evaluation.get("coverage_score"))
         critic_verdict = str(plan.get("critic_verdict") or "")
         comparison_verdict = str(evaluation.get("comparison_verdict") or "")
@@ -860,7 +967,9 @@ class BrainMediumImpactGovernanceService:
             "evidence": {"brain_eval": evaluation.get("evidence_refs") or {},
                          "comparison": evaluation.get("comparison") or {},
                          "replay_summary": (evaluation.get("comparison") or {}).get("replay") or {},
-                         "counterfactual_summary": (evaluation.get("comparison") or {}).get("supervisor") or {}},
+                         "counterfactual_summary": (comparison.get("counterfactual") or {}) | {
+                             "posterior_arbitration": arbitration,
+                         }},
             "suggestion_status": "approved", "target_template_id": mapped.get("target_template_id", ""),
             "autonomous_apply": False,
         }).to_dict()
@@ -873,16 +982,19 @@ class BrainMediumImpactGovernanceService:
         elif not bool(risk_verdict.get("allowed")):
             status = "blocked_by_risk"
         else:
+            delegation = dict((plan.get("scope") or {}).get("delegation") or {})
+            target_agent = str(delegation.get("target_agent") or "autonomous_learning")
             candidate = BrainGovernanceCandidateService(self.db_path).create_candidate(
-                candidate_id=f"brain_candidate_{uuid.uuid4().hex[:16]}",
+                candidate_id=self._candidate_id(evaluation=evaluation, mapped=mapped),
                 source_agent="v16_brain", source_kind="brain_medium_impact_governance",
-                source_ref_type="brain_action_plan_eval", source_ref_id=str(evaluation.get("eval_id") or ""),
+                source_ref_type=("v16_posterior_arbitration" if arbitration.get("fingerprint") else "brain_action_plan_eval"),
+                source_ref_id=str(arbitration.get("fingerprint") or evaluation.get("eval_id") or ""),
                 proposal_stage="governance_ready", capability_scope="medium_impact_governance",
                 scope_type=mapped["scope_type"], scope_key=mapped["scope_key"],
                 action=mapped["policy_action"],
                 confidence=max(0.1, min(0.95, evidence_score)), evidence_score=evidence_score,
                 risk_class="medium", max_impact="medium_impact",
-                expected_effect=evaluation.get("comparison") or {},
+                expected_effect=comparison,
                 evidence_refs={"plan_id": evaluation.get("plan_id", ""), "eval_id": evaluation.get("eval_id", ""),
                                "posterior": evaluation.get("evidence_refs") or {}},
                 counter_evidence_refs=dict(plan.get("counter_evidence_refs") or {}),
@@ -892,8 +1004,12 @@ class BrainMediumImpactGovernanceService:
                          "phase": "v16_phase4_medium_impact_governance",
                          "plan_id": evaluation.get("plan_id", ""), "eval_id": evaluation.get("eval_id", ""),
                          "critic_verdict": critic_verdict, "comparison_verdict": comparison_verdict,
-                         "mapped_action": mapped,
-                         "bridge": {"policy_suggestion_direct_write": False, "manual_bridge_required": True}},
+                         "mapped_action": mapped, "posterior_arbitration": arbitration,
+                         "delegation": {**delegation, "target_agent": target_agent,
+                                        "command_owner": "v16_brain",
+                                        "execution_owner": target_agent},
+                         "bridge": {"policy_suggestion_direct_write": False, "governed_bridge_required": True,
+                                     "demo_nursery_system_bridge": True, "non_demo_explicit_bridge": True}},
                 expires_at=now + 14 * 86400, now=now, persist=persist_candidate,
             )
             candidate_id = str(candidate.get("candidate_id") or "")
@@ -911,6 +1027,20 @@ class BrainMediumImpactGovernanceService:
                 "created_at": now, "updated_at": time.time()}
 
     @staticmethod
+    def _candidate_id(*, evaluation: dict[str, Any], mapped: dict[str, str]) -> str:
+        comparison = dict(evaluation.get("comparison") or {})
+        arbitration = dict(comparison.get("posterior_arbitration") or {})
+        identity = "|".join(
+            [
+                str(arbitration.get("fingerprint") or evaluation.get("eval_id") or ""),
+                str(mapped.get("scope_type") or ""),
+                str(mapped.get("policy_action") or ""),
+                str(mapped.get("target_template_id") or ""),
+            ]
+        )
+        return f"brain_candidate_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:16]}"
+
+    @staticmethod
     def _map_action(*, evaluation: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
         scope = str(evaluation.get("scope_type") or (plan.get("scope") or {}).get("scope_type") or "")
         if scope == "parameter_template":
@@ -922,10 +1052,20 @@ class BrainMediumImpactGovernanceService:
                     "policy_action": "enable_context_policy", "risk_action": "enable_context_policy",
                     "target_template_id": ""}
         if scope == "supervisor_template":
+            arbitration = dict((evaluation.get("comparison") or {}).get("posterior_arbitration") or {})
+            selected = dict(arbitration.get("supervisor_conclusion") or {})
+            recommended = str(selected.get("recommended_action") or "")
+            target = (
+                "position_supervisor:conservative.v1"
+                if recommended == "less_tighten"
+                else "position_supervisor:profit_protection.v1"
+                if recommended == "tighten"
+                else "position_supervisor:conservative.v1"
+            )
             return {"scope_type": "supervisor_template", "scope_key": "position_supervisor",
                     "policy_action": "switch_position_supervisor_template",
                     "risk_action": "switch_position_supervisor_template",
-                    "target_template_id": "position_supervisor:conservative.v1"}
+                    "target_template_id": target}
         return {"scope_type": "factor", "scope_key": "alpha_weight_policy",
                 "policy_action": "update_weight", "risk_action": "update_weight", "target_template_id": ""}
 
@@ -946,7 +1086,9 @@ class BrainMediumImpactGovernanceService:
     def _rollback_plan(mapped: dict[str, str]) -> dict[str, Any]:
         return {"schema_version": "brain_medium_impact_rollback_plan.v1", "policy_suggestion_only": False,
                 "candidate_lane_only": True, "runtime_mutation": False,
-                "future_submit_requires_manual_bridge": True,
+                "future_submit_requires_governed_bridge": True,
+                "demo_nursery_system_bridge": True,
+                "non_demo_explicit_bridge": True,
                 "future_apply_requires_runtime_snapshot": True,
                 "future_apply_requires_release_evidence": True,
                 "future_apply_requires_rollback_json": True,

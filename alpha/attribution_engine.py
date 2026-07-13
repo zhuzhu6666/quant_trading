@@ -417,6 +417,9 @@ class AttributionEngine:
     def __init__(self, trade_log_path: str | None = None,
                  stats_snapshot_path: str | None = None):
         self._open_trades: dict[int, TradeAttribution] = {}
+        # 部分平仓只结束一部分仓位，必须留在同一笔归因上下文里，直到
+        # 最终 close 才统一做一次因子归因；execution 明细则即时落库。
+        self._partial_closes: dict[int, list[dict[str, Any]]] = {}
         self._per_factor: dict[str, FactorAttributionStats] = {}
         # 检测 pytest 环境 → 自动使用临时路径, 避免污染生产文件
         import os as _os
@@ -447,7 +450,9 @@ class AttributionEngine:
     def record_open(self, position_id: int, attribution: TradeAttribution):
         """开仓时记录归因数据。"""
         attribution.attribution_integrity = attribution.attribution_integrity or "full"
+        position_id = int(position_id)
         self._open_trades[position_id] = attribution
+        self._partial_closes.pop(position_id, None)
         # 写入 trades.duckdb
         try:
             _ensure_trades_duckdb_schema()
@@ -478,6 +483,63 @@ class AttributionEngine:
         except Exception as e:
             logger.warning("Failed to record open trade to DB: %s", e)
 
+    def record_partial_close(
+        self,
+        position_id: int,
+        *,
+        close_price: float,
+        close_ts: float,
+        volume: float,
+        reason: str = "supervisor_reduce",
+    ) -> bool:
+        """Record one partial close without closing the attribution context.
+
+        The broker's realized PnL is reconciled later from all cTrader close
+        deals. This method records the execution immediately and keeps the
+        price/volume segment so the fallback price PnL is not overstated.
+        """
+        position_id = int(position_id)
+        if position_id not in self._open_trades:
+            logger.warning("No attribution for partial close position %d", position_id)
+            return False
+        volume = float(volume or 0.0)
+        close_price = float(close_price or 0.0)
+        close_ts = float(close_ts or time.time())
+        if volume <= 0.0 or close_price <= 0.0:
+            logger.warning(
+                "Invalid partial close position=%d price=%s volume=%s",
+                position_id, close_price, volume,
+            )
+            return False
+
+        partial = {
+            "exec_ts": close_ts,
+            "price": close_price,
+            "volume": volume,
+            "reason": str(reason or "supervisor_reduce"),
+        }
+        self._partial_closes.setdefault(position_id, []).append(partial)
+        try:
+            _ensure_trades_duckdb_schema()
+            tdb = connect_duckdb(DUCKDB_TRADES)
+            try:
+                tdb.execute(
+                    """
+                    INSERT INTO trade_executions
+                    (id, trade_id, exec_ts, exec_type, price, volume, reason)
+                    VALUES (?, ?, ?, 'reduce', ?, ?, ?)
+                    """,
+                    [
+                        _next_db_id(), position_id, close_ts, close_price,
+                        volume, str(reason or "supervisor_reduce"),
+                    ],
+                )
+            finally:
+                tdb.close()
+        except Exception as e:
+            logger.warning("Failed to record partial close execution: %s", e)
+        return True
+
     def restore_open(self, position_id: int, payload: dict[str, Any] | TradeAttribution | None) -> bool:
         """Restore in-memory attribution context without writing a new open execution."""
         if position_id in self._open_trades:
@@ -488,6 +550,7 @@ class AttributionEngine:
         attrib.position_id = int(position_id or attrib.position_id)
         attrib.attribution_integrity = "recovered"
         self._open_trades[int(position_id)] = attrib
+        self._partial_closes[int(position_id)] = self._load_partial_close_executions(int(position_id))
         return True
 
     def has_open(self, position_id: int) -> bool:
@@ -517,12 +580,24 @@ class AttributionEngine:
         Returns:
             {factor_name: marginal_contribution}
         """
+        position_id = int(position_id)
         attrib = self._open_trades.pop(position_id, None)
         if attrib is None:
             logger.warning("No attribution for position %d", position_id)
             return {}
 
-        trade_pnl = (close_price - attrib.open_price) * attrib.direction * attrib.api_volume
+        partial_closes = self._partial_closes.pop(position_id, None)
+        if partial_closes is None:
+            partial_closes = self._load_partial_close_executions(position_id)
+        partial_volume = sum(float(item.get("volume") or 0.0) for item in partial_closes)
+        remaining_volume = max(0.0, float(attrib.api_volume or 0.0) - partial_volume)
+        trade_pnl = sum(
+            (float(item.get("price") or 0.0) - attrib.open_price)
+            * attrib.direction
+            * float(item.get("volume") or 0.0)
+            for item in partial_closes
+        )
+        trade_pnl += (close_price - attrib.open_price) * attrib.direction * remaining_volume
 
         # ── 优先使用真实 PnL ──
         actual_pnl = trade_pnl
@@ -564,6 +639,8 @@ class AttributionEngine:
         self._write_trade_log(
             position_id, attrib, close_price, close_ts,
             marginal_contributions, trade_pnl, actual_pnl, real_pnl,
+            partial_closes=partial_closes,
+            final_close_volume=remaining_volume,
         )
 
         return marginal_contributions
@@ -664,6 +741,8 @@ class AttributionEngine:
         trade_pnl: float,
         actual_pnl: float | None = None,
         real_pnl: dict | None = None,
+        partial_closes: list[dict[str, Any]] | None = None,
+        final_close_volume: float | None = None,
     ):
         """追加一行逐笔归因明细到 JSONL 和 trades.duckdb。
 
@@ -696,6 +775,15 @@ class AttributionEngine:
                 "real_net": round(real_pnl.get("net", 0), 6) if real_pnl else None,
                 "real_balance": round(real_pnl.get("balance", 0), 2) if real_pnl else None,
                 "deal_id": real_pnl.get("deal_id") if real_pnl else None,
+                "close_deals_count": real_pnl.get("close_deals_count") if real_pnl else None,
+                "deal_ids": real_pnl.get("deal_ids") if real_pnl else None,
+                "partial_closes": list(partial_closes or []),
+                "partial_close_volume": round(
+                    sum(float(item.get("volume") or 0.0) for item in (partial_closes or [])), 6
+                ),
+                "final_close_volume": round(
+                    float(final_close_volume if final_close_volume is not None else attrib.api_volume), 6
+                ),
             }
             # JSONL 日志 (保留)
             path = Path(self._trade_log_path)
@@ -743,10 +831,43 @@ class AttributionEngine:
                 INSERT INTO trade_executions
                 (id, trade_id, exec_ts, exec_type, price, volume, reason)
                 VALUES (?, ?, ?, 'close', ?, ?, 'signal_close')
-            """, [close_exec_id, position_id, close_ts, close_price, attrib.api_volume])
+            """, [
+                close_exec_id, position_id, close_ts, close_price,
+                float(final_close_volume if final_close_volume is not None else attrib.api_volume),
+            ])
             _tdb.close()
         except Exception as e:
             logger.warning("Failed to write trade to DB: %s", e)
+
+    def _load_partial_close_executions(self, position_id: int) -> list[dict[str, Any]]:
+        """Reload reduce executions after a process restart."""
+        try:
+            _ensure_trades_duckdb_schema()
+            tdb = connect_duckdb(DUCKDB_TRADES)
+            try:
+                rows = tdb.execute(
+                    """
+                    SELECT exec_ts, price, volume, reason
+                    FROM trade_executions
+                    WHERE trade_id=? AND exec_type='reduce'
+                    ORDER BY exec_ts ASC, id ASC
+                    """,
+                    [int(position_id)],
+                ).fetchall()
+            finally:
+                tdb.close()
+            return [
+                {
+                    "exec_ts": float(row[0] or 0.0),
+                    "price": float(row[1] or 0.0),
+                    "volume": float(row[2] or 0.0),
+                    "reason": str(row[3] or "supervisor_reduce"),
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.debug("Failed to reload partial close executions: %s", e)
+            return []
 
     # ── 持久化: 归因快照 (原子写入 → factor_attribution.json) ──
 
@@ -918,6 +1039,18 @@ class AttributionEngine:
             return
 
         for name, d in data.items():
+            # `__SYSTEM__` is a separate real-PnL accumulator, not a factor.
+            # Restore it explicitly so the next close cannot restart the
+            # system totals from zero after a process restart.
+            if name == "__SYSTEM__":
+                self._system_pnl = {
+                    "gross": float(d.get("total_gross", 0.0) or 0.0),
+                    "swap": float(d.get("total_swap", 0.0) or 0.0),
+                    "commission": float(d.get("total_commission", 0.0) or 0.0),
+                    "net": float(d.get("total_net_pnl", 0.0) or 0.0),
+                    "trades": int(d.get("n_trades", 0) or 0),
+                }
+                continue
             stats = FactorAttributionStats(name=name)
             stats.n_trades = d.get("n_trades", 0)
             stats.n_voted = d.get("n_voted", 0)

@@ -138,7 +138,9 @@ def test_autonomous_evolution_cycle_ready_for_guarded_demo_apply(tmp_path, monke
     assert cycle["status"] == "ready_for_guarded_demo_apply"
     assert cycle["stable_demo_nursery_ready"] is True
     assert cycle["blockers"] == []
-    assert cycle["next_actions"][0]["action"] == "bridge_reviewed_candidates"
+    assert cycle["next_actions"][0]["action"] == "auto_bridge_reviewed_candidates"
+    assert cycle["next_actions"][0]["executor"] == "autonomous_evolution_nursery"
+    assert cycle["human_intervention_required"] is False
 
 
 def test_autonomous_evolution_cycle_treats_routed_stale_proposals_as_work_queue(tmp_path, monkeypatch):
@@ -172,8 +174,8 @@ def test_autonomous_evolution_cycle_treats_routed_stale_proposals_as_work_queue(
 
     assert "proposal_registry" not in {item["component"] for item in cycle["blockers"]}
     actions = {item["action"] for item in cycle["next_actions"]}
-    assert "run_proposal_replay_refresh" in actions
-    assert "review_stale_proposals" in actions
+    assert "auto_run_proposal_replay_refresh" in actions
+    assert "auto_review_stale_proposals" in actions
 
 
 def test_autonomous_evolution_runner_repairs_then_uses_existing_learning_cycle(tmp_path, monkeypatch):
@@ -268,6 +270,51 @@ def test_autonomous_evolution_runner_defaults_to_small_demo_apply(tmp_path, monk
     actions = result["actions"]
     demo_action = next(item for item in actions if item["action"] == "run_demo_autonomy_apply")
     assert demo_action["result"]["suggestion_limit"] == 7
+
+
+def test_autonomous_evolution_runner_demo_owns_review_bridge_and_apply(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    _create_core_tables(db_path, include_replay=True, include_effect=True)
+    _create_candidate_review(db_path)
+    monkeypatch.setattr(
+        AutonomousEvolutionCycleService,
+        "_chain_health",
+        lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
+    )
+    monkeypatch.setattr(AutonomousEvolutionNurseryRunner, "_build_readiness", lambda self: _readiness())
+    monkeypatch.setattr(
+        AutonomousEvolutionNurseryRunner,
+        "_review_candidates",
+        lambda self, *, limit: {"ok": True, "status": "reviewed", "limit": limit},
+    )
+    monkeypatch.setattr(
+        AutonomousEvolutionNurseryRunner,
+        "_bridge_demo_candidates",
+        lambda self, *, limit: {"ok": True, "status": "bridged", "submitted_count": 1, "limit": limit},
+    )
+    monkeypatch.setattr(
+        AutonomousEvolutionNurseryRunner,
+        "_run_learning_cycle",
+        lambda self, *, sample_limit, recommendation_limit: {
+            "ok": True,
+            "schema_version": "test_learning.v1",
+            "status": "completed",
+        },
+    )
+
+    result = AutonomousEvolutionNurseryRunner(db_path).run_once(
+        refresh_proposals=False,
+        automatic_demo=True,
+    )
+
+    assert result["status"] == "completed"
+    actions = [item["action"] for item in result["actions"]]
+    assert actions == [
+        "auto_review_governance_candidates",
+        "auto_bridge_governance_candidates",
+        "run_autonomous_learning_cycle",
+    ]
 
 
 def test_autonomous_evolution_runner_consumes_one_recommended_step(tmp_path, monkeypatch):

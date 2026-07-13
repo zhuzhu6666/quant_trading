@@ -1,7 +1,7 @@
 # Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-07-10
+> Last verified: 2026-07-14
 > Scope: known legacy concepts, deprecated paths, migration state, and cleanup rules.
 
 本文登记历史残留。目的不是列 TODO，而是防止旧概念在新实现里反复复活。
@@ -70,6 +70,52 @@
 - 验证方式: runtime selection 明确排除 `shadow_only` / `lifecycle_dead`，Factor Governance 是唯一 lifecycle executor。
 
 ## 3. 自治治理旧债
+
+### V16 后验只进入学习账本，没有进入元大脑调度
+
+- 状态: `fixed`
+- 旧理解: `supervisor_counterfactual_review` 只供复盘/自主学习使用，V16 只生成只读快照，结论不会定向到具体智能体；入场亏损和监督器过早干预可能被混成一个“失败”。
+- 当前口径: `BrainMemoryService` 读取成熟后验，`build_posterior_arbitration()` 按因果范围分离 entry 与 supervisor；`V16BrainOrchestratorService` 将最高证据结论写入 `v16_brain_command` 并定向给专员。V16 只能判断、排序、要求证据和下达交接命令，实际 policy/runtime/权重/模板变更仍由专员和既有 Governor 经过风控与回滚边界执行。
+- 影响面: V16 brain state/memory/plans/evals、`brain_governance_candidate`、demo nursery、agent scorecard/briefing、readiness 和 Web V16 页面。
+- 收口方式: demo runner 在 review/bridge/apply 前自动调用 V16 编排；命令以 posterior fingerprint + scope/action 幂等；`/api/ops/brain/commands` 和 readiness `v16_brain_orchestration` 暴露闭环状态；缺少后验源表时标记 `posterior_source_missing`，不伪造健康闭环。
+- 验证方式: `tests/test_v16_brain_orchestrator.py`、`tests/test_v16_read_only_brain.py`、`tests/test_autonomous_evolution_cycle.py`。
+
+### V16 委派命令没有成为专员 mutation 的统一闸门
+
+- 状态: `fixed`
+- 旧理解: V16 虽然能写 `v16_brain_command`，但部分 Governor、模板同步和自主学习路径仍可自行改 runtime/权重。
+- 当前口径: 生产环境中 `autonomous_learning`、`factor_governance`、`position_supervisor_governance` 的扩张性 mutation 必须由 `V16CommandGate` 校验近期、目标和 scope 一致的 delegate 命令；V16 只判断/指挥，专员负责执行。rollback、reduce、tighten 属于风险收紧例外。
+- 影响面: `v16_brain_command`、runtime mutation、factor governance、parameter templates、position supervisor、Agent Authority。
+- 收口方式: 缺命令 fail-closed，并继续执行 `RiskPolicyService`、`DecisionPolicy`、`RuntimeConfigMutationService`；新增专员必须先登记 Agent Authority contract。
+- 验证方式: `tests/test_agent_coordination_fixes.py::test_v16_command_gate_fails_closed_and_accepts_recent_delegate`。
+
+### 全局实验预算被批量准入绕过
+
+- 状态: `fixed`
+- 旧理解: 每个候选单独 admission，批量运行可能在同一时刻超过全局 24 个实验预算。
+- 当前口径: `learning_experiment_reservation` 在单事务/锁内原子预留槽位，应用失败会释放，成功 prepare 后结算；全局 active 统计包含 reservation。
+- 验证方式: `tests/test_agent_coordination_fixes.py::test_batch_reservation_is_atomic_and_bounded`。
+
+### 候选审查重复和过期候选持续占用队列
+
+- 状态: `fixed`
+- 旧理解: 相同 evidence 每轮生成新的 review，旧 active candidate 没有统一 TTL。
+- 当前口径: candidate 默认 TTL 24 小时；review 使用 evidence fingerprint 幂等去重，过期 active candidate 自动标记 `superseded/expired`。
+- 验证方式: `tests/test_agent_coordination_fixes.py::test_candidate_review_is_idempotent_and_expiry_is_reconciled`。
+
+### Proposal Registry 把维护事件和重复投影当作可行动建议
+
+- 状态: `fixed`
+- 旧理解: Registry 读模型会积累重复建议、维护动作和历史噪音，掩盖真实可行动 proposal。
+- 当前口径: 按 source/scope/action 压缩投影，维护型动作不进入 actionable projection；原始来源账本不删除，始终可重建。
+- 验证方式: `tests/test_agent_coordination_fixes.py::test_proposal_projection_compacts_without_deleting_source_ledger`。
+
+### 自主变更统一标记为人工 API mutation
+
+- 状态: `fixed`
+- 旧理解: system actor 的自动变更仍写 `manual_api_mutation`，导致 scorecard、后验归因和治理审计失真。
+- 当前口径: `MutationAudit` 按 source agent/actor 写入 `autonomous_mutation`；真实人工调用保留 `manual_api_mutation`。
+- 验证方式: `tests/test_agent_coordination_fixes.py::test_mutation_audit_distinguishes_autonomous_and_manual`。
 
 ### AWE 权重变更未进入后验账本
 
@@ -141,6 +187,15 @@
 - 影响面: registry source、runtime factor config、Canary、学习审计、scheduler。
 - 收口方式: 移除 scheduled evolution 的直接 lifecycle 调用，Canary regression 由 FactorGovernance 经 RiskPolicy 执行。
 - 验证方式: `tests/test_evolution_closure_fixes.py`、`tests/test_evolution_work_coordinator.py`。
+
+### builtin quarantine 只有隔离没有自动恢复
+
+- 状态: `fixed`
+- 旧理解: Factor Governance 可以把弱 live 因子置为 `enabled=false`，但后续只能靠人工或 AWE 恢复权重，无法重新进入 live selector。
+- 当前口径: `QUARANTINE` builtin alpha 因子满足冷却期、健康证据、样本新鲜度和模型弱势清除条件后，由 Factor Governance 在 demo 自治周期自动恢复；`RETIRED/DEAD` 和 discovered Canary 生命周期不被该入口反向复活。
+- 影响面: Factor Catalog、runtime factor selection、Factor Governance、RiskPolicy、runtime overlay/snapshot、治理审计。
+- 收口方式: 新增 `restore_factor_live` RiskPolicy 动作和受控 runtime mutation；重复失败的 live 因子始终重新进入 `QUARANTINE`，避免恢复后状态变成不可恢复的 `ACTIVE + disabled`。
+- 验证方式: `tests/test_factor_governance_recovery.py`。
 
 ### Canary 重复消费同一 OOS 窗口
 
@@ -340,6 +395,42 @@
 - 影响面: API 延迟、backend 峰值内存、Web 操作台首屏、自治状态展示。
 - 收口方式: `BackendReadinessSnapshotService` 统一 publish/latest/refresh，backend 单例后台构建，API 只读取投影；learning worker 不承担该构建，避免 broker/live 依赖越界。
 - 验证方式: `tests/test_backend_readiness_snapshot.py`、`tests/test_backend_readiness_contract.py`。
+
+### V16 delegate 可被多个 worker 重复使用
+
+- 状态: fixed
+- 旧理解: 近期 delegate 只做 read-only authorize，执行者自行决定何时应用，同一命令可能被重复消费。
+- 当前口径: `v16_brain_command` 记录 claim/consume 状态、token、过期时间、apply count 和 posterior/evidence fingerprint；`V16CommandGate` 原子 claim，`RuntimeConfigMutationService` 在变更尝试前 consume，单条命令最多一次。
+- 影响面: V16 委派可靠性、并发 worker、后验与参数变更的时间一致性。
+- 收口方式: PostgreSQL additive migration + SQLite 兼容迁移；过期 claim 自动释放，已消费命令 fail-closed。
+- 验证方式: `tests/test_agent_coordination_fixes.py::test_v16_command_claim_is_single_use_and_evidence_bound`。
+
+### 治理配置入口依赖调用方记得传 V16 flag
+
+- 状态: fixed
+- 旧理解: `RuntimeConfigMutationService.apply_patch(require_v16_command=False)` 的默认值让新增系统调用可能绕过元大脑。
+- 当前口径: 生产状态库上按 patch/source/action 自动识别治理 mutation；restore、incident 收紧和风险收紧例外保持边界，普通治理调用不能通过显式 false 绕过。
+- 影响面: factor weight、factor signal、parameter template、position supervisor template、context policy。
+- 收口方式: 中央推导 gate + claim/consume；所有下游仍必须经过 RiskPolicy/DecisionPolicy。
+- 验证方式: runtime mutation、V16 gate 和治理回归测试。
+
+### Factor Governance 与 Autonomous Learning 重复执行参数模板
+
+- 状态: fixed
+- 旧理解: FactorGovernanceOrchestrator 和 autonomous_learning 都可能激活模板并同步 runtime overlay。
+- 当前口径: Factor Governance 保留证据读取和 handoff 审计，Autonomous Learning 作为参数/上下文模板执行 owner；Evolution 只产出 canary evidence/candidate，不再写 RegistryAdapter lifecycle。
+- 影响面: 参数模板、学习应用、runtime overlay、重复 application/effect。
+- 收口方式: 保留智能体，收敛 execution owner；模板和 supervisor 模板统一进入实验 reservation。
+- 验证方式: parameter template、evolution closure、factor governance recovery 回归测试。
+
+### 模板实验不进入统一 24 槽位预算
+
+- 状态: fixed
+- 旧理解: 24 槽位只约束 factor weight，模板切换可能绕过 effect backlog 和全局预算。
+- 当前口径: parameter template 和 position supervisor template 使用 `LearningExperimentAdmissionService.reserve_scope`，同 scope 替换只复用一个 active effect 槽位，失败和过期 reservation 可回收。
+- 影响面: demo 自主学习吞吐、effect 后验窗口、跨智能体实验竞争。
+- 收口方式: 原子 reservation + finalize/release + application/effect 审计。
+- 验证方式: `tests/test_learning_experiment_admission.py`、参数模板和 supervisor template 回归测试。
 
 ### 学习调度重复消费同一批历史事实
 

@@ -165,6 +165,52 @@ class RuntimeConfig:
         "vol_ma_ratio":    {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["量价"]},
         "macd_hist":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "动量"]},
 
+        # 结构/高周期候选：先 shadow 观察，健康后由治理循环自动启用。
+        "htf_trend_alignment": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                 "enabled": True, "lifecycle_status": "SHADOW",
+                                 "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                                 "tags": ["技术", "高周期", "趋势"]},
+        "donchian_breakout_20": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                  "enabled": True, "lifecycle_status": "SHADOW",
+                                  "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                                  "tags": ["技术", "突破", "结构"]},
+        "range_expansion_20": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                "enabled": True, "lifecycle_status": "SHADOW",
+                                "autonomous_activation": True, "role": "context", "source": "builtin",
+                                "tags": ["技术", "波动率", "结构"]},
+        "price_location_50": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                               "enabled": True, "lifecycle_status": "SHADOW",
+                               "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                               "tags": ["技术", "价格位置", "结构"]},
+        "candle_body_pressure": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                  "enabled": True, "lifecycle_status": "SHADOW",
+                                  "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                                  "tags": ["K线", "实体", "方向"]},
+        "wick_rejection": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                            "enabled": True, "lifecycle_status": "SHADOW",
+                            "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                            "tags": ["K线", "影线", "反转"]},
+        "morning_evening_star": {"mode": "discrete", "value_map": {"-1": -1.0, "0": 0.0, "1": 1.0},
+                                  "enabled": True, "lifecycle_status": "SHADOW",
+                                  "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                                  "tags": ["K线", "三K", "反转"]},
+        "harami": {"mode": "discrete", "value_map": {"-1": -1.0, "0": 0.0, "1": 1.0},
+                    "enabled": True, "lifecycle_status": "SHADOW",
+                    "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                    "tags": ["K线", "两K", "反转"]},
+        "fib_retracement_position": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                      "enabled": True, "lifecycle_status": "SHADOW",
+                                      "autonomous_activation": True, "role": "context", "source": "builtin",
+                                      "tags": ["Fibonacci", "波段", "价格位置"]},
+        "fib_level_proximity": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                 "enabled": True, "lifecycle_status": "SHADOW",
+                                 "autonomous_activation": True, "role": "context", "source": "builtin",
+                                 "tags": ["Fibonacci", "支撑阻力", "价格位置"]},
+        "fib_rejection_confirmation": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                        "enabled": True, "lifecycle_status": "SHADOW",
+                                        "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                                        "tags": ["Fibonacci", "反弹确认", "反转"]},
+
         # 模式 B: rank_mapping（宏观/持仓/COT 因子）
         "dxy_corr_20":             {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": -1, "tags": ["宏观", "美元"]},
         "slv_gld_ratio":           {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": 1,  "tags": ["宏观", "金银比"]},
@@ -216,6 +262,18 @@ class RuntimeConfig:
         "engulfing":       1.0,
         "pin_bar":         0.8,
         "inside_bar":      0.3,
+        # 新增结构因子初始权重为 0；通过后验健康门槛后由治理服务设置小权重。
+        "htf_trend_alignment": 0.0,
+        "donchian_breakout_20": 0.0,
+        "range_expansion_20": 0.0,
+        "price_location_50": 0.0,
+        "candle_body_pressure": 0.0,
+        "wick_rejection": 0.0,
+        "morning_evening_star": 0.0,
+        "harami": 0.0,
+        "fib_retracement_position": 0.0,
+        "fib_level_proximity": 0.0,
+        "fib_rejection_confirmation": 0.0,
 
         # 宏观因子（Macro Layer）
         "dxy_corr_20":             0.8,
@@ -287,6 +345,19 @@ class RuntimeConfig:
     factor_governance_max_promotions_per_cycle: int = 1
     factor_governance_max_disables_per_cycle: int = 1
     factor_governance_max_retires_per_cycle: int = 1
+    # 内置结构候选的 shadow -> live 自动启用边界。
+    factor_governance_builtin_activation_enabled: bool = True
+    factor_governance_builtin_activation_min_health_score: float = 70.0
+    factor_governance_builtin_activation_min_n_obs: int = 500
+    factor_governance_builtin_activation_max_weakness: float = 0.65
+    factor_governance_builtin_activation_weight: float = 0.05
+    factor_governance_max_builtin_activations_per_cycle: int = 1
+    # 被自治治理隔离的因子自动恢复：只针对 QUARANTINE，不恢复 RETIRED/DEAD。
+    factor_governance_auto_restore_enabled: bool = True
+    factor_governance_restore_cooldown_days: int = 7
+    factor_governance_restore_health_threshold: float = 60.0
+    factor_governance_restore_max_weakness: float = 0.65
+    factor_governance_max_restores_per_cycle: int = 1
     factor_governance_model_min_samples: int = 3
     factor_governance_model_weakness_threshold: float = 0.65
     factor_governance_model_disable_threshold: float = 0.85
@@ -348,6 +419,8 @@ class RuntimeConfig:
     kelly_fraction: float = 0.5                  # 半凯利 = 0.5, 四分之一 = 0.25
     kelly_max_pct: float = 0.25                  # 最大资本占比上限
     kelly_risk_per_trade_pct: float = 0.06       # 动态 Kelly 单笔风险上限；demo 育苗允许 6%
+    kelly_min_closed_trades: int = 20            # 样本不足时 demo 仅最小探索，非 demo 不放大
+    kelly_canary_max_api_volume: float = 100.0   # Kelly 育苗期单笔 API volume 上限
     dynamic_sizing_enabled: bool = True          # 是否启用实盘阶梯式动态仓位
     dynamic_sizing_max_api_volume: float = 1000.0 # demo 动态仓位硬上限(API volume)，实际下单仍由 equity 风险预算细分
     dynamic_sizing_api_units_per_display_unit: float = 100.0  # XAUUSD: 100 API volume ~= 1 oz PnL

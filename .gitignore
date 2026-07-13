@@ -48,6 +48,8 @@ data/model_eval_reports/
 data/cot/
 data/external_raw/
 data/sec_gld/
+data/sec_slv/
+data/.external_data_refresh.lock
 data/bars_monthly/
 data/l2_monthly/
 data/feature_models/

@@ -311,12 +311,22 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         cfg_dict = cfg_entry if isinstance(cfg_entry, dict) else {}
         role = resolve_factor_role(name, cfg_dict)
         enabled = not (isinstance(cfg_entry, dict) and cfg_entry.get("enabled") is False)
-        lifecycle_status = "DEAD" if name in dead else str(
-            getattr(adapter, "_lifecycle_statuses", {}).get(name) if adapter is not None else ""
-            or ("ACTIVE" if factor_registry.get(name) else "UNKNOWN")
+        configured_lifecycle = str(cfg_dict.get("lifecycle_status") or "").upper()
+        lifecycle_status = "DEAD" if name in dead else (
+            configured_lifecycle
+            if configured_lifecycle
+            else str(
+                getattr(adapter, "_lifecycle_statuses", {}).get(name) if adapter is not None else ""
+                or ("ACTIVE" if factor_registry.get(name) else "UNKNOWN")
+            )
         )
         weight = float(weights.get(name, 0.3 if source == "discovered" else 0.0) or 0.0)
-        eligible = name in selected and enabled and lifecycle_status != "DEAD" and source != "shadow"
+        eligible = (
+            name in selected
+            and enabled
+            and lifecycle_status not in {"DEAD", "SHADOW", "QUARANTINE", "QUARANTINED"}
+            and source != "shadow"
+        )
         used_in_score = bool(eligible and role == "alpha" and weight > 0)
         cadence, sample_policy = infer_factor_cadence(name, cfg_dict)
         policy = latest_policy.get(name, {})
@@ -345,6 +355,8 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "history_sample_policy": sample_policy,
             "health_status": str(h.get("status") or "UNKNOWN"),
             "health_score": float(h.get("score") or 0.0),
+            "health_n_obs": int(h.get("n_obs") or 0),
+            "health_updated_at": float(h.get("updated_at") or 0.0),
             "canary": canary.get(name, {}),
             "shadow_perf": _shadow_perf(name) if source in {"shadow", "discovered"} else {},
             "factor_governance_shadow": fg_shadow,

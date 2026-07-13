@@ -69,6 +69,7 @@ class AutonomousDemoApplyStepper:
             "does_not_bypass_risk_policy": True,
             "does_not_bypass_decision_policy": True,
             "mutating_steps_require_confirm_step": True,
+            "system_demo_actor_auto_confirms": True,
             "full_learning_cycle_not_run_here": True,
         }
 
@@ -117,7 +118,7 @@ class AutonomousDemoApplyStepper:
                 "known_steps": self.STEP_ORDER,
                 "boundary": self.boundary(),
             }
-        if step in self.MUTATING_STEPS and not confirm_step:
+        if step in self.MUTATING_STEPS and not confirm_step and not self._is_system_demo_actor(actor):
             return {
                 "ok": False,
                 "schema_version": "autonomous_demo_apply_step.v1",
@@ -212,7 +213,7 @@ class AutonomousDemoApplyStepper:
                 "known_steps": self.STEP_ORDER,
                 "boundary": self.boundary(),
             }
-        if step in self.MUTATING_STEPS and not confirm_step:
+        if step in self.MUTATING_STEPS and not confirm_step and not self._is_system_demo_actor(actor):
             return {
                 "ok": False,
                 "schema_version": "autonomous_demo_apply_step.v1",
@@ -349,9 +350,9 @@ class AutonomousDemoApplyStepper:
 
         pending_count = int(step_info.get("pending_count") or pending.get(step, 0) or 0)
         recommended = bool(step_info.get("recommended"))
-        selected_reason = "recommended_pending_step" if recommended else "manual_or_worker_selected_step"
+        selected_reason = "recommended_pending_step" if recommended else "system_or_worker_selected_step"
         if pending_count <= 0:
-            selected_reason = "manual_or_worker_selected_no_pending_snapshot"
+            selected_reason = "system_or_worker_selected_no_pending_snapshot"
 
         return {
             "schema_version": "autonomous_demo_apply_step_execution_context.v1",
@@ -733,3 +734,15 @@ class AutonomousDemoApplyStepper:
             return str(getattr(runtime_config(), "autonomy_mode", "") or "manual")
         except Exception:
             return "manual"
+
+    @staticmethod
+    def _is_system_demo_actor(actor: str) -> bool:
+        if str(actor or "").startswith("api:"):
+            return False
+        try:
+            from config.runtime_config import shared as runtime_config
+
+            mode = str(getattr(runtime_config(), "autonomy_mode", "") or "")
+        except Exception:
+            mode = ""
+        return mode in {"demo_nursery", "demo_autonomous"} and str(actor or "").startswith("system:")
