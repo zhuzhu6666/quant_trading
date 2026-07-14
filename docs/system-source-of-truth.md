@@ -337,5 +337,5 @@
 - Supervisor 反事实按 5/15/30/60/120 分钟分别成熟，只有完整 M1 覆盖才算成熟；60 分钟是治理门槛，120 分钟是完全成熟。
 - Supervisor thesis-break 使用模板中的完整 bar 窗口和独立证据族；高波动/弱趋势至少 1 根新 M5，其他至少 2 根。硬风险可绕过窗口。
 - Demo nursery 的 `would_block` 探索使用 PostgreSQL 原子 reservation：每原因 5/日、全局 15/日、同 setup 1/日，broker 未成交时释放。
-- Supervisor template auto-apply 还必须满足 50 笔 60 分钟成熟样本及两个 session、两个 regime；readiness 缺项时保持冻结。
+- Supervisor template auto-apply 还必须满足 50 笔 60 分钟成熟样本及两个 session、两个 regime；冻结期间候选模板只并行产生 `position_supervisor_trace.stage=canary_shadow` 的非权威 verdict，不执行动作。Canary readiness 必须同时匹配候选 `template_id`、候选创建时间和对应仓位的 shadow trace，默认模板交易不得冒充候选样本；readiness 缺项时保持冻结。
 - 新责任归因以 alpha/gate/context/sizing role 为边界；gate/context 不得生成 alpha downweight。

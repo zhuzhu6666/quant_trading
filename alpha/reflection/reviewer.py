@@ -375,6 +375,10 @@ class TradeReviewer:
         positive_share = pos_mc / total_abs_mc
 
         failure_tags: list[str] = []
+        # Profit branches never enter the loss-only avoidability analysis,
+        # but the orthogonal outcome contract still requires a deterministic
+        # value for this field.
+        avoidable_entry = False
         if pnl > 0:
             outcome_label = "good_win" if positive_share >= 0.55 else "lucky_win"
             if outcome_label == "lucky_win":

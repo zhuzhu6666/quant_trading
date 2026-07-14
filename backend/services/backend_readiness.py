@@ -496,12 +496,26 @@ class BackendReadinessService:
                     "SELECT position_id, close_ts, evidence_json FROM supervisor_counterfactual_review ORDER BY updated_at DESC LIMIT 5000",
                 ).fetchall()
             canary_started_at = 0.0
+            canary_template_id = ""
+            shadow_position_ids: set[str] = set()
             if _table_exists(conn, "policy_suggestion"):
                 candidate = _execute(
                     conn,
-                    "SELECT created_at FROM policy_suggestion WHERE scope_type='position_supervisor_template' AND status IN ('proposed','approved') ORDER BY created_at DESC LIMIT 1",
+                    "SELECT scope_key, created_at FROM policy_suggestion WHERE scope_type='position_supervisor_template' AND status='approved' ORDER BY created_at DESC LIMIT 1",
                 ).fetchone()
                 canary_started_at = _safe_float(dict(candidate).get("created_at")) if candidate else 0.0
+                canary_template_id = str(dict(candidate).get("scope_key") or "") if candidate else ""
+            if canary_template_id and _table_exists(conn, "position_supervisor_trace"):
+                shadow_rows = _execute(
+                    conn,
+                    """
+                    SELECT DISTINCT position_id
+                    FROM position_supervisor_trace
+                    WHERE template_id=? AND stage='canary_shadow' AND event_ts>=?
+                    """,
+                    (canary_template_id, canary_started_at),
+                ).fetchall()
+                shadow_position_ids = {str(dict(row).get("position_id") or "") for row in shadow_rows}
             mature_positions: set[str] = set()
             sessions: set[str] = set()
             regimes: set[str] = set()
@@ -522,7 +536,12 @@ class BackendReadinessService:
                     invalidated_counterfactuals += 1
                 if not eligible and not counterfactual_invalidated and close_ts <= now - result["governance_horizon_minutes"] * 60:
                     immature += 1
-                if eligible and canary_started_at > 0 and close_ts >= canary_started_at:
+                if (
+                    eligible
+                    and canary_started_at > 0
+                    and close_ts >= canary_started_at
+                    and str(item.get("position_id") or "") in shadow_position_ids
+                ):
                     mature_positions.add(str(item.get("position_id") or ""))
                     hour = time.gmtime(close_ts).tm_hour
                     sessions.add("asia" if hour < 7 else "europe" if hour < 13 else "us")
@@ -570,8 +589,10 @@ class BackendReadinessService:
                 "over_7d": sum(age >= 7 * 86400 for age in effect_ages),
             },
             "exploration_budget_usage": budget,
-            "canary": {
-                "started_at": canary_started_at,
+                "canary": {
+                    "started_at": canary_started_at,
+                    "template_id": canary_template_id,
+                    "shadow_position_count": len(shadow_position_ids),
                 "mature_trade_count": len(mature_positions),
                 "sessions": sorted(sessions - {"unknown"}),
                 "regimes": sorted(regimes - {"unknown"}),

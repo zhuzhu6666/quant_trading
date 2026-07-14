@@ -343,6 +343,50 @@ def latest_applied_position_supervisor_template_id(*, db_path: str | Path | None
         conn.close()
 
 
+def latest_approved_position_supervisor_candidate(*, db_path: str | Path | None = None) -> dict[str, Any]:
+    """Return the newest governed candidate eligible for non-authoritative shadow evaluation."""
+    try:
+        from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+
+        path = Path(db_path or STATE_DB)
+        use_pg = is_state_db_path(path)
+        conn = get_state_pg_conn(read_only=True) if use_pg else connect_sqlite(path, read_only=True)
+        if not use_pg:
+            conn.row_factory = sqlite3.Row
+    except Exception:
+        return {}
+    try:
+        row = conn.execute(
+            _sql(
+                conn,
+                """
+                SELECT suggestion_id, scope_key, created_at
+                FROM policy_suggestion
+                WHERE scope_type='position_supervisor_template'
+                  AND status='approved'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+            )
+        ).fetchone()
+        if not row:
+            return {}
+        template_id = str(row["scope_key"] or "")
+        template = get_position_supervisor_template(template_id, db_path=path)
+        if str(template.get("template_id") or "") != template_id:
+            return {}
+        return {
+            "suggestion_id": str(row["suggestion_id"] or ""),
+            "template_id": template_id,
+            "created_at": float(row["created_at"] or 0.0),
+            "template": template,
+        }
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
 def normalize_position_supervisor_template(template: dict[str, Any] | str | None = None) -> dict[str, Any]:
     if template is None or template == "":
         return get_position_supervisor_template(DEFAULT_TEMPLATE_ID)

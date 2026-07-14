@@ -2109,6 +2109,41 @@ def _run_position_supervision(
             broker="ctrader",
             strategy_name=str(_loop_strategy_name or "factor_v4"),
         )
+        if bool(getattr(cfg, "autonomy_expansion_frozen", True)):
+            try:
+                from backend.services.position_supervisor_templates import (
+                    latest_approved_position_supervisor_candidate,
+                )
+
+                canary = latest_approved_position_supervisor_candidate()
+                candidate_template = canary.get("template") or {}
+                if candidate_template:
+                    shadow_context = _build_position_supervisor_context(
+                        position,
+                        cfg=cfg,
+                        acct=acct,
+                        now_ts=time.time(),
+                        positions=pos,
+                    )
+                    shadow_context["position_supervisor_template"] = candidate_template
+                    shadow_verdict = evaluate_position_supervisor(shadow_context)
+                    shadow_evidence = dict(shadow_verdict.get("evidence") or {})
+                    shadow_evidence["canary_suggestion_id"] = str(canary.get("suggestion_id") or "")
+                    shadow_evidence["non_authoritative"] = True
+                    shadow_verdict["evidence"] = shadow_evidence
+                    _log_supervisor_trace(
+                        position=position,
+                        verdict=shadow_verdict,
+                        cfg=cfg,
+                        tick=tick,
+                        stage="canary_shadow",
+                        outcome=str(shadow_verdict.get("action") or "hold"),
+                        execution_status="shadow_only",
+                        execution_reason="autonomy_expansion_frozen",
+                        acct=acct,
+                    )
+            except Exception as exc:
+                logger.warning("[live] supervisor canary shadow evaluation failed: %s", exc)
         action = str(verdict.get("action") or "hold")
         if action == "hold":
             _log_supervisor_trace(
@@ -8003,13 +8038,14 @@ def _submit_open_trade_candidate(
     stop_requested=None,
 ) -> bool:
     def _finalize_nursery(consumed: bool) -> None:
-        if not candidate.nursery_reservation_id:
+        reservation_id = str(getattr(candidate, "nursery_reservation_id", "") or "")
+        if not reservation_id:
             return
         try:
             from backend.services.nursery_exploration_budget import NurseryExplorationBudgetService
 
             NurseryExplorationBudgetService().finalize(
-                candidate.nursery_reservation_id,
+                reservation_id,
                 consumed=consumed,
             )
         except Exception as exc:
