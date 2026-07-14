@@ -143,6 +143,20 @@ runtime:
   live_autonomy_unlocked: false
   live_autonomy_unlock_id: ''
   demo_learning_max_daily_trades: 100
+  autonomy_expansion_frozen: true
+  supervisor_counterfactual_governance_horizon_minutes: 60
+  supervisor_counterfactual_full_horizon_minutes: 120
+  supervisor_canary_mature_trade_count: 50
+  learning_effect_inconclusive_after_days: 7
+  nursery_exploration_per_reason_daily_limit: 5
+  nursery_exploration_global_daily_limit: 15
+  nursery_exploration_setup_daily_limit: 1
+  nursery_exploration_reservation_ttl_seconds: 300
+  supervisor_min_stop_distance_points: 0.20
+  supervisor_stop_safety_buffer_ratio: 0.00008
+  supervisor_min_tighten_delta_points: 0.01
+  supervisor_quote_max_age_seconds: 10.0
+  entry_edge_uncertainty_atr_ratio: 0.10
   runtime_incident_mode: normal
   strategy_sl_atr: 2.0
   strategy_tp_atr: 3.0

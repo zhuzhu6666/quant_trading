@@ -89,7 +89,7 @@ def test_position_supervisor_recommends_close_when_timeout_exceeded():
     assert verdict["recommended_controls"]["protection_mode"] == "full_exit"
 
 
-def test_position_supervisor_default_template_preserves_thesis_broken_close():
+def test_position_supervisor_default_template_delays_thesis_break_until_complete_bars():
     verdict = evaluate_position_supervisor(
         {
             "position": {
@@ -111,8 +111,8 @@ def test_position_supervisor_default_template_preserves_thesis_broken_close():
         }
     )
 
-    assert verdict["action"] == "close"
-    assert verdict["summary_reason"] == "thesis_broken"
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "thesis_weakening"
     assert verdict["supervisor_template"]["template_version"] == "default.v1"
 
 
@@ -177,7 +177,7 @@ def test_profit_protection_template_delays_young_thesis_broken_full_exit():
     assert verdict["supervisor_template"]["thresholds"]["min_thesis_break_seconds"] == 300.0
 
 
-def test_profit_protection_template_closes_confirmed_thesis_broken_after_evidence_window():
+def test_profit_protection_template_requires_two_independent_evidence_families():
     verdict = evaluate_position_supervisor(
         {
             "position": {
@@ -204,9 +204,9 @@ def test_profit_protection_template_closes_confirmed_thesis_broken_after_evidenc
         }
     )
 
-    assert verdict["action"] == "close"
-    assert verdict["summary_reason"] == "thesis_broken"
-    assert verdict["evidence"]["thesis_break_confirmed"] is True
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "thesis_weakening"
+    assert verdict["evidence"]["thesis_break_confirmed"] is False
     assert verdict["evidence"]["thesis_broken_confirmations"] == 2
 
 
@@ -239,12 +239,12 @@ def test_profit_protection_template_delays_unconfirmed_thesis_broken_after_evide
         }
     )
 
-    assert verdict["action"] == "tighten"
-    assert verdict["summary_reason"] == "thesis_weakening"
-    assert verdict["evidence"]["thesis_break_ready"] is True
+    assert verdict["action"] == "reduce"
+    assert verdict["summary_reason"] == "profit_giveback_after_mfe"
+    assert verdict["evidence"]["thesis_break_ready"] is False
     assert verdict["evidence"]["thesis_break_confirmed"] is False
     assert verdict["evidence"]["stop_loss_progress"] < 0.82
-    assert "thesis_broken_unconfirmed" in verdict["evidence"]["trigger_tags"]
+    assert "profit_giveback_after_mfe" in verdict["evidence"]["trigger_tags"]
 
 
 def test_position_supervisor_captures_when_near_take_profit():

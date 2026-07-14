@@ -138,9 +138,9 @@ def test_replay_position_supervisor_templates_compares_default_and_candidate(tmp
 
     assert result["sample_count"] == 1
     summaries = {item["template_id"]: item for item in result["templates"]}
-    assert summaries[DEFAULT_TEMPLATE_ID]["actions"]["close"] == 1
-    assert summaries[CONSERVATIVE_TEMPLATE_ID]["actions"]["tighten"] == 1
-    assert result["comparison"]["small_loss_closes_reduced"] == 1
+    assert summaries[DEFAULT_TEMPLATE_ID]["actions"]["close"] == 0
+    assert summaries[CONSERVATIVE_TEMPLATE_ID]["actions"]["close"] == 0
+    assert result["comparison"]["small_loss_closes_reduced"] == 0
 
 
 def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp_path):
@@ -156,8 +156,8 @@ def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp
     assert result["advisory_only"] is True
     assert result["materialized"] is True
     actions = {item["action"] for item in result["items"]}
-    assert "relax_thesis_break" in actions
-    assert result["replay_summary"]["counterfactual_summary"]["labels"]["protection_too_tight"] == 1
+    assert "relax_thesis_break" not in actions
+    assert result["replay_summary"]["counterfactual_summary"]["total"] == 0
 
     conn = sqlite3.connect(str(db_path))
     try:

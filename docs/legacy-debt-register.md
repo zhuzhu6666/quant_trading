@@ -441,6 +441,24 @@
 - 收口方式: 新增事实 watermark，并为 active application/effect 增加默认 24 个全局实验预算；worker 启动同时归档中断的 stale run。
 - 验证方式: `tests/test_learning_cycle_watermark.py`、`tests/test_learning_experiment_admission.py`。
 
+### Supervisor 反事实整条记录提前成熟
+
+- 状态: fixed
+- 旧理解: 只要存在未来 bar，就可用最后值补齐所有 horizon 并标记整条记录成熟。
+- 当前口径: 每个 horizon 独立记录 expected/observed bars、窗口边界、最新 bar、成熟状态和数据指纹；60 分钟前不可治理。
+- 影响面: supervisor template、policy suggestion、learning effect、Canary readiness。
+- 收口方式: JSON v2 兼容扩展，旧字段继续读取，旧污染证据不得进入 active application。
+- 验证方式: `tests/test_supervisor_counterfactual.py`。
+
+### Gate/context 因子承担方向责任
+
+- 状态: fixed
+- 旧理解: 所有贡献度都可竞争 worst factor 并形成 downweight 建议。
+- 当前口径: 只有 alpha 承担方向责任；gate 进入准入域，context/sizing 分别进入情境和仓位域。
+- 影响面: `hours_to_fomc` 等事件因子、权重治理、复盘标签。
+- 收口方式: review 中按 factor role 分域并保留兼容字段。
+- 验证方式: reviewer/learning 回归测试。
+
 ## 5. 新旧债登记模板
 
 复制下面模板新增条目：

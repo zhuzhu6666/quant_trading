@@ -412,6 +412,7 @@ class _OpenTradeCandidate:
     risk_verdict: Any
     market_session: dict[str, Any]
     order_block: dict[str, Any]
+    nursery_reservation_id: str = ""
 
 _local_positions: dict[int, _LocalSLTP] = {}
 _local_positions_lock = threading.Lock()
@@ -1944,11 +1945,24 @@ def _log_protection_candidate_superseded(
 
 
 def _supervisor_tighten_sl_plan(position: dict[str, Any], target_sl: float, quote: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        from config.runtime_config import shared as _runtime_cfg
+
+        cfg = _runtime_cfg()
+        policy = {
+            "min_stop_distance_points": getattr(cfg, "supervisor_min_stop_distance_points", 0.20),
+            "stop_safety_buffer_ratio": getattr(cfg, "supervisor_stop_safety_buffer_ratio", 0.00008),
+            "min_tighten_delta_points": getattr(cfg, "supervisor_min_tighten_delta_points", 0.01),
+            "quote_max_age_seconds": getattr(cfg, "supervisor_quote_max_age_seconds", 10.0),
+        }
+    except Exception:
+        policy = {}
     return _lifecycle_build_supervisor_tighten_sl_plan(
         **_lifecycle_build_supervisor_tighten_sl_plan_inputs(
             position=position,
             target_sl=target_sl,
             quote=quote,
+            policy=policy,
         ),
     )
 
@@ -7414,6 +7428,99 @@ def _prepare_open_trade_candidate(
         market_session=market_session,
         risk_verdict=risk_verdict,
     )
+    quote = _live_state_get("spot_quote", {}, clone=True) or {}
+    bid = float(quote.get("bid") or 0.0)
+    ask = float(quote.get("ask") or 0.0)
+    spread_points = max(0.0, ask - bid) if bid > 0 and ask > 0 else 0.0
+    try:
+        from config import load_config
+
+        settings = load_config()
+    except Exception:
+        settings = {}
+    commission_per_lot = float(((settings.get("commission") or {}).get("value") or 0.0))
+    slippage_points = float(((settings.get("execution") or {}).get("slippage_value") or 0.0))
+    lots = max(0.0, volume) / 10000.0
+    ounces = lots * float(bridge_meta.get("lot_size") or 0.0)
+    uncertainty_points = max(0.0, atr_price) * float(
+        getattr(cfg, "entry_edge_uncertainty_atr_ratio", 0.10) or 0.10
+    )
+    gross_edge = max(0.0, tp_dist) * ounces
+    estimated_cost = (
+        (spread_points + slippage_points + uncertainty_points) * ounces
+        + commission_per_lot * lots
+    )
+    edge_evidence = {
+        "schema_version": "entry_cost_edge.v1",
+        "gross_edge": gross_edge,
+        "estimated_cost": estimated_cost,
+        "net_edge": gross_edge - estimated_cost,
+        "spread_points": spread_points,
+        "expected_slippage_points": slippage_points,
+        "uncertainty_points": uncertainty_points,
+        "commission_per_lot": commission_per_lot,
+        "lots": lots,
+        "lot_size": float(bridge_meta.get("lot_size") or 0.0),
+    }
+    audit_payload = dict(getattr(risk_verdict, "audit_payload", {}) or {})
+    audit_payload["entry_cost_edge"] = edge_evidence
+    risk_verdict.audit_payload = audit_payload
+    if not bool(order_block.get("order_blocked")) and (ounces <= 0 or gross_edge <= estimated_cost):
+        order_block = {
+            **order_block,
+            "order_blocked": True,
+            "block_reason": "no_positive_edge_after_costs",
+            "skip_stage": "entry_cost_edge",
+        }
+    nursery_reservation_id = ""
+    audit_payload = dict(getattr(risk_verdict, "audit_payload", {}) or {})
+    observations = list(audit_payload.get("demo_nursery_observations") or [])
+    if observations and not bool(order_block.get("order_blocked")):
+        try:
+            from backend.services.nursery_exploration_budget import (
+                NurseryExplorationBudgetService,
+                build_setup_fingerprint,
+            )
+
+            decision_quality = _decision_quality_context(composite)
+            context_state = dict(decision_quality.get("context_state") or {})
+            top_contributors = list(decision_quality.get("top_contributors") or [])
+            setup_fingerprint = build_setup_fingerprint(
+                symbol="XAUUSD+",
+                direction=int(composite.direction or 0),
+                regime=str(decision_quality.get("regime_id") or ""),
+                session=str(context_state.get("session_state") or ""),
+                event_state=str(context_state.get("event_window_state") or ""),
+                signal_score=float(composite.score or 0.0),
+                alpha_family=[str(item.get("factor") or "") for item in top_contributors],
+            )
+            reservation = NurseryExplorationBudgetService().reserve(
+                reasons=[str(item.get("reason") or "") for item in observations],
+                setup_fingerprint=setup_fingerprint,
+                per_reason_limit=int(getattr(cfg, "nursery_exploration_per_reason_daily_limit", 5) or 5),
+                global_limit=int(getattr(cfg, "nursery_exploration_global_daily_limit", 15) or 15),
+                setup_limit=int(getattr(cfg, "nursery_exploration_setup_daily_limit", 1) or 1),
+                ttl_seconds=int(getattr(cfg, "nursery_exploration_reservation_ttl_seconds", 300) or 300),
+            )
+            audit_payload["nursery_exploration_budget"] = reservation
+            risk_verdict.audit_payload = audit_payload
+            if reservation.get("allowed"):
+                nursery_reservation_id = str(reservation.get("reservation_id") or "")
+            else:
+                order_block = {
+                    **order_block,
+                    "order_blocked": True,
+                    "block_reason": str(reservation.get("status") or "nursery_exploration_budget_exhausted"),
+                    "skip_stage": "nursery_exploration_budget",
+                }
+        except Exception as exc:
+            order_block = {
+                **order_block,
+                "order_blocked": True,
+                "block_reason": "nursery_exploration_budget_unavailable",
+                "skip_stage": "nursery_exploration_budget",
+            }
+            logger.warning("[live] nursery exploration reservation failed closed: %s", exc)
 
     return _OpenTradeCandidate(
         direction_name=direction_name,
@@ -7431,6 +7538,7 @@ def _prepare_open_trade_candidate(
         risk_verdict=risk_verdict,
         market_session=market_session,
         order_block=order_block,
+        nursery_reservation_id=nursery_reservation_id,
     )
 
 
@@ -7894,9 +8002,23 @@ def _submit_open_trade_candidate(
     log,
     stop_requested=None,
 ) -> bool:
+    def _finalize_nursery(consumed: bool) -> None:
+        if not candidate.nursery_reservation_id:
+            return
+        try:
+            from backend.services.nursery_exploration_budget import NurseryExplorationBudgetService
+
+            NurseryExplorationBudgetService().finalize(
+                candidate.nursery_reservation_id,
+                consumed=consumed,
+            )
+        except Exception as exc:
+            logger.warning("[live] nursery exploration reservation finalize failed: %s", exc)
+
     with _OPEN_TRADE_ADMISSION_LOCK:
         if _open_trade_draining(stop_requested):
             log(f"tick {tick}: v4 open SKIP (loop_draining stage=broker_submit)")
+            _finalize_nursery(False)
             return False
         try:
             submit_started_at = time.time()
@@ -7904,6 +8026,7 @@ def _submit_open_trade_candidate(
             fill_received_at = time.time()
         except Exception as exc:
             log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
+            _finalize_nursery(False)
             return True
 
     # The market RPC was admitted.  Post-fill resolution, pending protection,
@@ -7911,6 +8034,7 @@ def _submit_open_trade_candidate(
     # requested after the RPC returns; process shutdown joins this loop thread.
     try:
         if result is not None and getattr(result, "success", False):
+            _finalize_nursery(True)
             _handle_open_trade_order_success(
                 result=result,
                 bridge=bridge,
@@ -7930,6 +8054,7 @@ def _submit_open_trade_candidate(
                 fill_received_at=fill_received_at,
             )
         elif result is not None and not getattr(result, "success", False):
+            _finalize_nursery(False)
             _record_open_trade_order_failure(
                 result=result,
                 cfg=cfg,
@@ -7943,7 +8068,11 @@ def _submit_open_trade_candidate(
                 tick=tick,
                 log=log,
             )
+        else:
+            _finalize_nursery(False)
+            log(f"tick {tick}: v4 {candidate.direction_name} order returned no result")
     except Exception as exc:
+        _finalize_nursery(False)
         log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
     return True
 

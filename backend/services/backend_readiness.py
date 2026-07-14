@@ -118,6 +118,7 @@ class BackendReadinessService:
         replay = self._timed_component("replay", self._replay_status)
         incident_control = self._timed_component("incident_control", self._incident_control_status)
         release = self._timed_component("release", self._release_status)
+        learning_repair = self._timed_component("learning_repair", self._learning_repair_status)
         stability = self._timed_component(
             "stability",
             lambda: self._stability_status(
@@ -244,6 +245,7 @@ class BackendReadinessService:
             "replay": replay,
             "incident_control": incident_control,
             "release": release,
+            "learning_repair": learning_repair,
             "autonomy_health": autonomy_health,
             "stability": stability,
             "v15": {
@@ -468,6 +470,113 @@ class BackendReadinessService:
         payload["v16"]["autonomous_blueprint"] = autonomous_blueprint
         record_timing("backend_readiness.build", time.perf_counter() - build_started, extra={"ready": ready_for_frontend})
         return payload
+
+    def _learning_repair_status(self) -> dict[str, Any]:
+        from config.runtime_config import shared as runtime_config
+
+        cfg = runtime_config()
+        result: dict[str, Any] = {
+            "schema_version": "learning_repair_readiness.v1",
+            "expansion_frozen": bool(getattr(cfg, "autonomy_expansion_frozen", True)),
+            "governance_horizon_minutes": int(
+                getattr(cfg, "supervisor_counterfactual_governance_horizon_minutes", 60) or 60
+            ),
+            "canary_required": int(getattr(cfg, "supervisor_canary_mature_trade_count", 50) or 50),
+            "active_effect_limit": 24,
+        }
+        try:
+            conn = _connect_state(self.db_path)
+        except Exception as exc:
+            return {**result, "ok": False, "reason": f"state_unavailable:{exc}"}
+        try:
+            maturity_rows = []
+            if _table_exists(conn, "supervisor_counterfactual_review"):
+                maturity_rows = _execute(
+                    conn,
+                    "SELECT position_id, close_ts, evidence_json FROM supervisor_counterfactual_review ORDER BY updated_at DESC LIMIT 5000",
+                ).fetchall()
+            canary_started_at = 0.0
+            if _table_exists(conn, "policy_suggestion"):
+                candidate = _execute(
+                    conn,
+                    "SELECT created_at FROM policy_suggestion WHERE scope_type='position_supervisor_template' AND status IN ('proposed','approved') ORDER BY created_at DESC LIMIT 1",
+                ).fetchone()
+                canary_started_at = _safe_float(dict(candidate).get("created_at")) if candidate else 0.0
+            mature_positions: set[str] = set()
+            sessions: set[str] = set()
+            regimes: set[str] = set()
+            immature = 0
+            invalid_evidence = 0
+            invalidated_counterfactuals = 0
+            now = time.time()
+            for row in maturity_rows:
+                item = dict(row)
+                evidence = item.get("evidence_json") or {}
+                if isinstance(evidence, str):
+                    evidence = _loads(evidence, {})
+                maturity = dict((evidence or {}).get("maturity") or {})
+                close_ts = _safe_float(item.get("close_ts"))
+                eligible = bool(maturity.get("governance_eligible"))
+                counterfactual_invalidated = bool((evidence or {}).get("evidence_invalidated"))
+                if counterfactual_invalidated:
+                    invalidated_counterfactuals += 1
+                if not eligible and not counterfactual_invalidated and close_ts <= now - result["governance_horizon_minutes"] * 60:
+                    immature += 1
+                if eligible and canary_started_at > 0 and close_ts >= canary_started_at:
+                    mature_positions.add(str(item.get("position_id") or ""))
+                    hour = time.gmtime(close_ts).tm_hour
+                    sessions.add("asia" if hour < 7 else "europe" if hour < 13 else "us")
+                    regimes.add(str((evidence or {}).get("regime") or "unknown"))
+
+            active_effects = 0
+            effect_ages: list[float] = []
+            if _table_exists(conn, "learning_application_effect"):
+                rows = _execute(
+                    conn,
+                    "SELECT status, updated_at FROM learning_application_effect WHERE status IN ('prepared','observing','mixed')",
+                ).fetchall()
+                active_effects = len(rows)
+                effect_ages = [max(0.0, now - _safe_float(dict(row).get("updated_at"))) for row in rows]
+
+            budget = {"reserved": 0, "consumed": 0}
+            if _table_exists(conn, "nursery_exploration_reservation"):
+                trade_date = time.strftime("%Y-%m-%d", time.gmtime())
+                rows = _execute(
+                    conn,
+                    "SELECT status, COUNT(DISTINCT reservation_id) AS n FROM nursery_exploration_reservation WHERE trade_date=? GROUP BY status",
+                    (trade_date,),
+                ).fetchall()
+                budget.update({str(dict(row).get("status")): int(dict(row).get("n") or 0) for row in rows})
+        finally:
+            conn.close()
+        checks = {
+            "active_effect_capacity": active_effects <= 24,
+            "no_invalidated_active_evidence": invalid_evidence == 0,
+            "counterfactual_maturity": immature == 0 and bool(maturity_rows),
+            "canary_sample_count": len(mature_positions) >= result["canary_required"],
+            "canary_session_coverage": len(sessions - {"unknown"}) >= 2,
+            "canary_regime_coverage": len(regimes - {"unknown"}) >= 2,
+        }
+        return {
+            **result,
+            "ok": all(checks.values()),
+            "checks": checks,
+            "immature_counterfactual_count": immature,
+            "invalid_evidence_count": invalid_evidence,
+            "invalidated_counterfactual_count": invalidated_counterfactuals,
+            "active_effect_count": active_effects,
+            "active_effect_age_seconds": {
+                "max": max(effect_ages, default=0.0),
+                "over_7d": sum(age >= 7 * 86400 for age in effect_ages),
+            },
+            "exploration_budget_usage": budget,
+            "canary": {
+                "started_at": canary_started_at,
+                "mature_trade_count": len(mature_positions),
+                "sessions": sorted(sessions - {"unknown"}),
+                "regimes": sorted(regimes - {"unknown"}),
+            },
+        }
 
     @staticmethod
     def _timed_component(name: str, func):

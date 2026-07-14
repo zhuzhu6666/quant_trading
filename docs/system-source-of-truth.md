@@ -330,3 +330,12 @@
 | `agent_governance.py` (新) | 统一导入入口 | 从 `agent_authority` + `agent_scorecard` + `agent_briefing` 整理 re-export |
 
 旧模块路径保留为向后兼容的 import stub（重导出到新模块），新代码应直接使用新路径。
+
+## 11. 2026-07-14 学习闭环修复期事实源
+
+- 扩张性自治由 `RuntimeConfig.autonomy_expansion_frozen` 统一冻结；回滚、close/reduce/tighten、样本物化和只读分析不受影响。
+- Supervisor 反事实按 5/15/30/60/120 分钟分别成熟，只有完整 M1 覆盖才算成熟；60 分钟是治理门槛，120 分钟是完全成熟。
+- Supervisor thesis-break 使用模板中的完整 bar 窗口和独立证据族；高波动/弱趋势至少 1 根新 M5，其他至少 2 根。硬风险可绕过窗口。
+- Demo nursery 的 `would_block` 探索使用 PostgreSQL 原子 reservation：每原因 5/日、全局 15/日、同 setup 1/日，broker 未成交时释放。
+- Supervisor template auto-apply 还必须满足 50 笔 60 分钟成熟样本及两个 session、两个 regime；readiness 缺项时保持冻结。
+- 新责任归因以 alpha/gate/context/sizing role 为边界；gate/context 不得生成 alpha downweight。

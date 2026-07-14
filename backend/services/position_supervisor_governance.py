@@ -191,24 +191,29 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
         rows = _execute(
             conn,
             """
-            SELECT label, supervisor_event_type, COUNT(*) AS n
+            SELECT label, supervisor_event_type, evidence_json
             FROM supervisor_counterfactual_review
-            WHERE updated_at >= ? AND updated_at < ?
-            GROUP BY label, supervisor_event_type
-            ORDER BY n DESC
+            WHERE close_ts >= ? AND close_ts < ?
             """,
             (start_ts, end_ts),
         ).fetchall()
-    except sqlite3.Error:
+    except Exception:
         rows = []
     labels: dict[str, int] = {}
     events: dict[str, int] = {}
     for row in rows:
         label = str(row["label"] or "")
         event_type = str(row["supervisor_event_type"] or "")
-        n = int(row["n"] or 0)
-        labels[label] = labels.get(label, 0) + n
-        events[event_type] = events.get(event_type, 0) + n
+        evidence = row["evidence_json"] or {}
+        if isinstance(evidence, str):
+            try:
+                evidence = json.loads(evidence or "{}")
+            except Exception:
+                evidence = {}
+        if not bool(((evidence or {}).get("maturity") or {}).get("governance_eligible")):
+            continue
+        labels[label] = labels.get(label, 0) + 1
+        events[event_type] = events.get(event_type, 0) + 1
     return {
         "day": day,
         "total": sum(labels.values()),
@@ -375,7 +380,10 @@ def build_position_supervisor_advisories(
             return None
         base = get_position_supervisor_template(PROFIT_PROTECTION_TEMPLATE_ID)
         suffix = hashlib.sha1(
-            f"{day}:{capture_failed_count}:{avg_giveback:.4f}:{avg_capture:.4f}".encode("utf-8")
+            (
+                f"v2:{day}:{capture_failed_count}:{avg_giveback:.4f}:{avg_capture:.4f}:"
+                f"{int(counterfactual_summary.get('total') or 0)}"
+            ).encode("utf-8")
         ).hexdigest()[:10]
         thresholds = dict(base.get("thresholds") or {})
         sl_policy = dict(base.get("sl_policy") or {})

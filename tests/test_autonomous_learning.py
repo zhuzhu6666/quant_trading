@@ -202,7 +202,9 @@ def _create_sample_db(path):
          confidence, horizons_json, evidence_json, created_at, updated_at)
         VALUES ('scf1', 'rev1', 'p1', 'p1', 180.0, 'broker_close',
                 'supervisor_tighten', 'thesis_weakening', 'premature_tighten',
-                0.78, '[{"horizon_minutes": 15}]', '{"advisory_only": true}', 181.0, 181.0)
+                0.78, '[{"horizon_minutes": 60, "matured": true}]',
+                '{"advisory_only": true, "maturity": {"status": "governance_ready", "governance_eligible": true}}',
+                181.0, 181.0)
         """
     )
     conn.commit()
@@ -1280,7 +1282,7 @@ def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypa
     assert len(calls) == 1
 
 
-def test_auto_apply_position_supervisor_template_persists_runtime_overlay(tmp_path):
+def test_auto_apply_position_supervisor_template_is_blocked_while_expansion_frozen(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))
@@ -1319,24 +1321,20 @@ def test_auto_apply_position_supervisor_template_persists_runtime_overlay(tmp_pa
             run_id="evorun_pytest",
         )
 
-        assert result["applied"][0]["suggestion_id"] == "psv_auto_overlay"
-        assert rc.shared().position_supervisor_template_id == "position_supervisor:conservative.v1"
+        assert result["applied"] == []
+        assert result["status"] == "observation_only"
+        assert result["skipped"][0]["reason"] == "autonomy_expansion_frozen"
+        assert rc.shared().position_supervisor_template_id == "position_supervisor:default.v1"
 
         conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
         try:
-            overlay = conn.execute("SELECT overlay_json FROM runtime_config_overlay").fetchone()
-            suggestion = conn.execute(
+            assert conn.execute("SELECT COUNT(*) FROM runtime_config_overlay").fetchone()[0] == 0
+            assert conn.execute(
                 "SELECT status FROM policy_suggestion WHERE suggestion_id='psv_auto_overlay'"
-            ).fetchone()
-            application = conn.execute("SELECT details_json FROM learning_application_log").fetchone()
+            ).fetchone()[0] == "approved"
+            assert conn.execute("SELECT COUNT(*) FROM learning_application_log").fetchone()[0] == 0
         finally:
             conn.close()
-        overlay_json = json.loads(overlay["overlay_json"])
-        details_json = json.loads(application["details_json"])
-        assert overlay_json["position_supervisor_template_id"] == "position_supervisor:conservative.v1"
-        assert suggestion["status"] == "applied"
-        assert details_json["mutation"]["status"] == "applied"
     finally:
         rc.reset_for_tests()
 

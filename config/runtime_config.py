@@ -124,6 +124,20 @@ class RuntimeConfig:
     live_autonomy_unlocked: bool = False
     live_autonomy_unlock_id: str = ""
     demo_learning_max_daily_trades: int = 60
+    autonomy_expansion_frozen: bool = True
+    supervisor_counterfactual_governance_horizon_minutes: int = 60
+    supervisor_counterfactual_full_horizon_minutes: int = 120
+    supervisor_canary_mature_trade_count: int = 50
+    learning_effect_inconclusive_after_days: int = 7
+    nursery_exploration_per_reason_daily_limit: int = 5
+    nursery_exploration_global_daily_limit: int = 15
+    nursery_exploration_setup_daily_limit: int = 1
+    nursery_exploration_reservation_ttl_seconds: int = 300
+    supervisor_min_stop_distance_points: float = 0.20
+    supervisor_stop_safety_buffer_ratio: float = 0.00008
+    supervisor_min_tighten_delta_points: float = 0.01
+    supervisor_quote_max_age_seconds: float = 10.0
+    entry_edge_uncertainty_atr_ratio: float = 0.10
     runtime_incident_mode: str = "normal"  # normal | shadow_only | no_new_risk | only_close | frozen
     # 别名兼容 (旧代码仍读 strategy_sl_atr 等, 这里存一份等同值供 RuntimeConfig.patch)
     strategy_sl_atr: float = 1.5

@@ -23,6 +23,10 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         "description": "Keep current supervisor behavior unchanged.",
         "thresholds": {
             "min_thesis_break_seconds": 0.0,
+            "min_closed_bars_high_vol_or_weak_trend": 1,
+            "min_closed_bars_default": 2,
+            "hard_risk_bypass": True,
+            "min_independent_thesis_break_evidence": 2,
             "broken_holding_efficiency_threshold": 1.00,
             "giveback_reduce_threshold": 0.70,
             "giveback_tighten_threshold": 0.35,
@@ -75,6 +79,10 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         "description": "Delay early thesis-broken full exits and prefer tighten/reduce evidence first.",
         "thresholds": {
             "min_thesis_break_seconds": 300.0,
+            "min_closed_bars_high_vol_or_weak_trend": 1,
+            "min_closed_bars_default": 2,
+            "hard_risk_bypass": True,
+            "min_independent_thesis_break_evidence": 2,
             "broken_holding_efficiency_threshold": 0.12,
             "giveback_reduce_threshold": 0.78,
             "giveback_tighten_threshold": 0.42,
@@ -127,6 +135,10 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         "description": "Protect positions that already showed useful MFE before profit capture deteriorates.",
         "thresholds": {
             "min_thesis_break_seconds": 300.0,
+            "min_closed_bars_high_vol_or_weak_trend": 1,
+            "min_closed_bars_default": 2,
+            "hard_risk_bypass": True,
+            "min_independent_thesis_break_evidence": 2,
             "broken_holding_efficiency_threshold": 0.18,
             "giveback_reduce_threshold": 0.52,
             "giveback_tighten_threshold": 0.22,

@@ -339,10 +339,35 @@ class TradeReviewer:
             top_weight_factor = str(best["factor"])
             top_weight = float(best["policy_weight"] or 0.0)
 
+        decision_quality_context = (
+            (entry_action or {}).get("decision_quality_context")
+            if isinstance(entry_action, dict)
+            else {}
+        ) or {}
+        factor_roles = dict(
+            decision_quality_context.get("factor_roles")
+            or ((entry_action or {}).get("factor_roles") if isinstance(entry_action, dict) else {})
+            or {}
+        )
+        alpha_contributions = {
+            name: value
+            for name, value in contributions.items()
+            if str(factor_roles.get(name) or "alpha") == "alpha"
+        }
+        admission_contributions = {
+            name: value
+            for name, value in contributions.items()
+            if str(factor_roles.get(name) or "alpha") == "gate"
+        }
+        context_contributions = {
+            name: value
+            for name, value in contributions.items()
+            if str(factor_roles.get(name) or "alpha") in {"context", "sizing"}
+        }
         worst_factor = ""
         worst_mc = 0.0
-        if contributions:
-            worst_factor, worst_mc = min(contributions.items(), key=lambda kv: kv[1])
+        if alpha_contributions:
+            worst_factor, worst_mc = min(alpha_contributions.items(), key=lambda kv: kv[1])
 
         pos_mc = sum(v for v in contributions.values() if v > 0)
         neg_mc = sum(v for v in contributions.values() if v < 0)
@@ -540,8 +565,8 @@ class TradeReviewer:
 
         top_factor = ""
         top_factor_mc = 0.0
-        if contributions:
-            top_factor, top_factor_mc = max(contributions.items(), key=lambda kv: abs(kv[1]))
+        if alpha_contributions:
+            top_factor, top_factor_mc = max(alpha_contributions.items(), key=lambda kv: abs(kv[1]))
 
         review_json = {
             "contract_version": "phase_d.v1",
@@ -609,6 +634,39 @@ class TradeReviewer:
             },
             "worst_factor": worst_factor,
             "worst_factor_mc": worst_mc,
+            "responsibility_domains": {
+                "entry_signal": {
+                    "eligible_factors": sorted(alpha_contributions),
+                    "worst_factor": worst_factor,
+                    "worst_contribution": worst_mc,
+                },
+                "entry_admission": {
+                    "eligible_factors": sorted(admission_contributions),
+                    "worst_factor": min(admission_contributions, key=admission_contributions.get) if admission_contributions else "",
+                },
+                "position_management": {
+                    "close_reason_source": close_reason_source,
+                    "supervisor": inferred_close_supervisor,
+                },
+                "execution": {
+                    "execution_quality": round(execution_quality, 4),
+                },
+                "context": {
+                    "eligible_factors": sorted(context_contributions),
+                },
+            },
+            "outcome_dimensions": {
+                "schema_version": "trade_outcome_dimensions.v1",
+                "financial_result": "profit" if pnl > 0 else "loss" if pnl < 0 else "flat",
+                "entry_avoidability": "avoidable" if avoidable_entry else "not_established",
+                "exit_control_quality": (
+                    "controlled" if exit_quality >= 0.65
+                    else "weak" if exit_quality < 0.40
+                    else "mixed"
+                ),
+                "counterfactual_result": "pending_post_close_maturity",
+                "legacy_outcome_label": outcome_label,
+            },
             "positive_share": round(positive_share, 4),
             "close_price": close_price,
             "real_pnl": real_pnl or {},

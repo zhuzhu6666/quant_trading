@@ -3057,7 +3057,7 @@ def test_build_supervisor_tighten_sl_plan_inputs_extracts_legacy_fields():
         quote={"bid": 4010.1, "ask": 4010.3, "price": 4010.2},
     )
 
-    assert inputs == {
+    assert {key: inputs[key] for key in ("current_sl", "current_price", "direction", "target_sl", "bid", "ask", "mid")} == {
         "current_sl": 3990.0,
         "current_price": 4010.0,
         "direction": 1,
@@ -3066,6 +3066,8 @@ def test_build_supervisor_tighten_sl_plan_inputs_extracts_legacy_fields():
         "ask": 4010.3,
         "mid": 4010.2,
     }
+    assert inputs["min_stop_distance_points"] == 0.2
+    assert inputs["quote_max_age_seconds"] == 10.0
 
 
 def test_target_tp_is_extension_uses_directional_progress():

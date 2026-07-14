@@ -2621,6 +2621,12 @@ def build_supervisor_tighten_sl_plan(
     bid: float = 0.0,
     ask: float = 0.0,
     mid: float = 0.0,
+    quote_age_seconds: float = 0.0,
+    quote_max_age_seconds: float = 10.0,
+    min_stop_distance_points: float = 0.20,
+    stop_safety_buffer_ratio: float = 0.00008,
+    min_tighten_delta_points: float = 0.01,
+    precision: int = 2,
 ) -> dict[str, Any]:
     direction = int(direction or 0)
     current_sl = float(current_sl or 0.0)
@@ -2635,8 +2641,11 @@ def build_supervisor_tighten_sl_plan(
         else current_price
     )
     target_sl = float(target_sl or 0.0)
-    min_delta = 0.01
-    buffer = max(0.20, abs(reference_price) * 0.00008) if reference_price > 0 else 0.0
+    min_delta = max(0.0, float(min_tighten_delta_points or 0.0))
+    buffer = max(
+        max(0.0, float(min_stop_distance_points or 0.0)),
+        abs(reference_price) * max(0.0, float(stop_safety_buffer_ratio or 0.0)),
+    ) if reference_price > 0 else 0.0
     plan = {
         "allowed": False,
         "reason": "",
@@ -2649,7 +2658,13 @@ def build_supervisor_tighten_sl_plan(
         "ask": ask,
         "direction": direction,
         "buffer": buffer,
+        "quote_age_seconds": float(quote_age_seconds or 0.0),
+        "quote_max_age_seconds": float(quote_max_age_seconds or 0.0),
+        "precision": int(precision or 0),
     }
+    if quote_age_seconds > quote_max_age_seconds >= 0:
+        plan["reason"] = "stale_quote"
+        return plan
     if target_sl <= 0:
         plan["reason"] = "missing_target_stop_loss"
         return plan
@@ -2669,7 +2684,7 @@ def build_supervisor_tighten_sl_plan(
             return plan
         if current_sl > 0 and planned_sl <= current_sl + min_delta:
             plan["reason"] = "not_tightening_long_stop_loss"
-            plan["planned_sl"] = round(planned_sl, 2)
+            plan["planned_sl"] = round(planned_sl, precision)
             return plan
     else:
         legal_floor = reference_price + buffer
@@ -2677,10 +2692,10 @@ def build_supervisor_tighten_sl_plan(
         plan["legal_boundary"] = legal_floor
         if current_sl > 0 and planned_sl >= current_sl - min_delta:
             plan["reason"] = "not_tightening_short_stop_loss"
-            plan["planned_sl"] = round(planned_sl, 2)
+            plan["planned_sl"] = round(planned_sl, precision)
             return plan
 
-    planned_sl = round(planned_sl, 2)
+    planned_sl = round(planned_sl, precision)
     if current_sl > 0 and abs(planned_sl - current_sl) < min_delta:
         plan["reason"] = "stop_loss_delta_too_small"
         plan["planned_sl"] = planned_sl
@@ -2696,8 +2711,11 @@ def build_supervisor_tighten_sl_plan_inputs(
     position: dict[str, Any],
     target_sl: float,
     quote: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     quote = quote or {}
+    policy = policy or {}
+    quote_ts = float(quote.get("ts") or 0.0)
     return {
         "current_sl": float_payload_value(position, "sl", "stop_loss", "stopLoss"),
         "current_price": float_payload_value(position, "current_price", "price_current", "price", "mark_price"),
@@ -2706,6 +2724,12 @@ def build_supervisor_tighten_sl_plan_inputs(
         "bid": float_payload_value(quote, "bid"),
         "ask": float_payload_value(quote, "ask"),
         "mid": float_payload_value(quote, "mid", "price"),
+        "quote_age_seconds": max(0.0, time.time() - quote_ts) if quote_ts > 0 else 0.0,
+        "quote_max_age_seconds": float(policy.get("quote_max_age_seconds", 10.0) or 10.0),
+        "min_stop_distance_points": float(policy.get("min_stop_distance_points", 0.20) or 0.20),
+        "stop_safety_buffer_ratio": float(policy.get("stop_safety_buffer_ratio", 0.00008) or 0.00008),
+        "min_tighten_delta_points": float(policy.get("min_tighten_delta_points", 0.01) or 0.01),
+        "precision": int(policy.get("precision", position.get("digits", 2)) or 2),
     }
 
 

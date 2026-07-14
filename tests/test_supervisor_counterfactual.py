@@ -6,6 +6,23 @@ import pandas as pd
 from backend.services import supervisor_counterfactual as scf
 
 
+def _complete_m1_bars(*, close_ts=1000.0, minutes=120, overrides=None):
+    overrides = overrides or {}
+    rows = []
+    for minute in range(1, minutes + 1):
+        row = {
+            "time": close_ts + minute * 60,
+            "open": 100.0,
+            "high": 100.1,
+            "low": 99.9,
+            "close": 100.0,
+            "volume": 1,
+        }
+        row.update(overrides.get(minute, {}))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def _create_db(path):
     conn = sqlite3.connect(str(path))
     conn.executescript(
@@ -117,12 +134,7 @@ def test_counterfactual_labels_premature_tighten_when_future_recovers(monkeypatc
     db_path = tmp_path / "state.db"
     _create_db(db_path)
 
-    bars = pd.DataFrame(
-        [
-            {"time": 1100.0, "open": 100.0, "high": 100.1, "low": 98.0, "close": 98.5, "volume": 1},
-            {"time": 1300.0, "open": 98.5, "high": 99.0, "low": 94.9, "close": 95.2, "volume": 1},
-        ]
-    )
+    bars = _complete_m1_bars(overrides={2: {"low": 94.9, "close": 95.2}})
     monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: bars)
 
     result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
@@ -134,15 +146,28 @@ def test_counterfactual_labels_premature_tighten_when_future_recovers(monkeypatc
     assert stored["items"][0]["evidence"]["advisory_only"] is True
 
 
+def test_counterfactual_sparse_future_bars_are_not_governance_ready(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    bars = _complete_m1_bars(minutes=59, overrides={2: {"low": 94.9, "close": 95.2}})
+    monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: bars)
+
+    item = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=False)["items"][0]
+
+    assert item["maturity_status"] == "partially_matured"
+    assert item["governance_eligible"] is False
+    horizon_60 = next(row for row in item["horizons"] if row["horizon_minutes"] == 60)
+    assert horizon_60["expected_bars"] == 60
+    assert horizon_60["observed_bars"] == 59
+    assert horizon_60["matured"] is False
+
+
 def test_counterfactual_respects_original_sl_before_later_tp(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     _create_db(db_path)
 
-    bars = pd.DataFrame(
-        [
-            {"time": 1100.0, "open": 100.0, "high": 103.2, "low": 99.0, "close": 102.8, "volume": 1},
-            {"time": 1300.0, "open": 102.8, "high": 103.0, "low": 94.9, "close": 95.2, "volume": 1},
-        ]
+    bars = _complete_m1_bars(
+        overrides={1: {"high": 103.2, "low": 99.0, "close": 102.8}, 2: {"low": 94.9, "close": 95.2}}
     )
     monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: bars)
 
@@ -158,12 +183,7 @@ def test_counterfactual_default_horizon_catches_two_hour_recovery(monkeypatch, t
     db_path = tmp_path / "state.db"
     _create_db(db_path)
 
-    bars = pd.DataFrame(
-        [
-            {"time": 1000.0 + 70 * 60, "open": 100.0, "high": 100.2, "low": 97.5, "close": 98.0, "volume": 1},
-            {"time": 1000.0 + 90 * 60, "open": 98.0, "high": 98.2, "low": 94.9, "close": 95.2, "volume": 1},
-        ]
-    )
+    bars = _complete_m1_bars(overrides={90: {"low": 94.9, "close": 95.2}})
     monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: bars)
 
     result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
@@ -171,8 +191,9 @@ def test_counterfactual_default_horizon_catches_two_hour_recovery(monkeypatch, t
     assert result["count"] == 1
     item = result["items"][0]
     assert item["label"] == "premature_tighten"
-    assert [h["horizon_minutes"] for h in item["horizons"]] == [120]
-    assert item["horizons"][0]["first_original_hit"] == "tp"
+    assert item["maturity_status"] == "fully_matured"
+    assert item["horizons"][-1]["horizon_minutes"] == 120
+    assert item["horizons"][-1]["first_original_hit"] == "tp"
 
 
 def test_counterfactual_includes_supervisor_reduce_close_with_m1_evidence(monkeypatch, tmp_path):
@@ -213,12 +234,7 @@ def test_counterfactual_includes_supervisor_reduce_close_with_m1_evidence(monkey
     conn.commit()
     conn.close()
 
-    bars = pd.DataFrame(
-        [
-            {"time": 1060.0, "open": 100.0, "high": 100.1, "low": 98.0, "close": 98.5, "volume": 1},
-            {"time": 1120.0, "open": 98.5, "high": 99.0, "low": 94.9, "close": 95.2, "volume": 1},
-        ]
-    )
+    bars = _complete_m1_bars(overrides={2: {"low": 94.9, "close": 95.2}})
     calls = []
 
     def _future(symbol, timeframe, close_ts, max_minutes):

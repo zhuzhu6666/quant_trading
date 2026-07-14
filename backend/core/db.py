@@ -607,6 +607,18 @@ CREATE TABLE IF NOT EXISTS supervisor_counterfactual_review (
     updated_at REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS nursery_exploration_reservation (
+    reservation_id TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    setup_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'reserved',
+    expires_at REAL NOT NULL DEFAULT 0.0,
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (reservation_id, reason)
+);
+
 CREATE TABLE IF NOT EXISTS runtime_config_snapshot (
     config_version INTEGER PRIMARY KEY AUTOINCREMENT,
     config_hash TEXT NOT NULL,
@@ -1309,6 +1321,7 @@ CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_even
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
 CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_position ON supervisor_counterfactual_review(position_id, close_ts);
 CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_label ON supervisor_counterfactual_review(label, updated_at);
+CREATE INDEX IF NOT EXISTS idx_nursery_exploration_budget ON nursery_exploration_reservation(trade_date, status, reason, setup_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_runtime_config_snapshot_hash ON runtime_config_snapshot(config_hash, created_at);
 CREATE INDEX IF NOT EXISTS idx_evolution_run_type ON evolution_run(run_type, status, started_at);
 CREATE INDEX IF NOT EXISTS idx_evolution_decision_run ON evolution_decision(run_id, decision_type, created_at);
@@ -1469,6 +1482,40 @@ def _ensure_state_schema_compatibility(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_scope "
         "ON learning_experiment_reservation(scope_type, scope_key, status)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS nursery_exploration_reservation (
+            reservation_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            setup_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'reserved',
+            expires_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (reservation_id, reason)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_nursery_exploration_budget "
+        "ON nursery_exploration_reservation(trade_date, status, reason, setup_fingerprint)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS supervisor_counterfactual_history (
+            history_id TEXT PRIMARY KEY,
+            counterfactual_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            archived_reason TEXT NOT NULL DEFAULT '',
+            created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_history_source "
+        "ON supervisor_counterfactual_history(counterfactual_id, created_at)"
     )
     conn.execute(
         "ALTER TABLE proposal_registry "

@@ -712,9 +712,15 @@ def _sample_from_review(row: Any) -> dict[str, Any]:
 def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
     label = str(row["label"] or "")
     confidence = float(row["confidence"] or 0.0)
-    label_status = "pending" if label == "insufficient_future_data" else "matured"
+    evidence = _loads(row["evidence_json"], {})
+    maturity = evidence.get("maturity") or {}
+    maturity_status = str(maturity.get("status") or "")
+    governance_eligible = bool(maturity.get("governance_eligible"))
+    label_status = "matured" if governance_eligible else (
+        "partially_matured" if maturity_status == "partially_matured" else "pending"
+    )
     if label in {"", "insufficient_future_data"} and confidence <= 0.25:
-        label_status = "invalid"
+        label_status = "pending" if maturity_status in {"", "pending"} else label_status
     return {
         "sample_type": "post_close_counterfactual",
         "source_table": "supervisor_counterfactual_review",
@@ -731,7 +737,8 @@ def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
             "supervisor_event_type": str(row["supervisor_event_type"] or ""),
             "supervisor_reason": str(row["supervisor_reason"] or ""),
             "horizons": _loads(row["horizons_json"], []),
-            "evidence": _loads(row["evidence_json"], {}),
+            "evidence": evidence,
+            "maturity": maturity,
         },
         "verdict": {
             "counterfactual_label": label,
@@ -3396,6 +3403,14 @@ def _auto_apply_position_supervisor_template_suggestions(
     from backend.services.runtime_config_mutation import RuntimeConfigMutationService
     from research.learning.governor import RuleEvolutionGovernor
 
+    cfg = runtime_config()
+    if bool(getattr(cfg, "autonomy_expansion_frozen", False)):
+        return {
+            "applied": [],
+            "skipped": [{"reason": "autonomy_expansion_frozen"}],
+            "status": "observation_only",
+        }
+
     def _template_switch_priority(row) -> tuple[int, float, float]:
         action = str(row["action"] or "")
         target_template_id = str(row["scope_key"] or "")
@@ -3415,7 +3430,7 @@ def _auto_apply_position_supervisor_template_suggestions(
 
     RuleEvolutionGovernor(str(db_path)).resolve_conflicts()
     valid_templates = {str(item.get("template_id") or "") for item in list_position_supervisor_templates()}
-    previous_template_id = str(getattr(runtime_config(), "position_supervisor_template_id", "") or "position_supervisor:default.v1")
+    previous_template_id = str(getattr(cfg, "position_supervisor_template_id", "") or "position_supervisor:default.v1")
     conn = _connect(db_path)
     applied = []
     skipped = []
@@ -3461,6 +3476,40 @@ def _auto_apply_position_supervisor_template_suggestions(
         for row in sorted(rows, key=_template_switch_priority, reverse=True):
             suggestion_id = str(row["suggestion_id"] or "")
             target_template_id = str(row["scope_key"] or "")
+            canary_required = max(1, int(getattr(cfg, "supervisor_canary_mature_trade_count", 50) or 50))
+            cf_rows = _execute(
+                conn,
+                "SELECT position_id, close_ts, evidence_json FROM supervisor_counterfactual_review WHERE close_ts>=? ORDER BY close_ts DESC LIMIT 2000",
+                (float(row["created_at"] or 0.0),),
+            ).fetchall()
+            mature_positions: set[str] = set()
+            mature_sessions: set[str] = set()
+            mature_regimes: set[str] = set()
+            for cf_row in cf_rows:
+                cf_evidence = _loads(cf_row["evidence_json"], {})
+                if not bool((cf_evidence.get("maturity") or {}).get("governance_eligible")):
+                    continue
+                mature_positions.add(str(cf_row["position_id"] or ""))
+                close_hour = time.gmtime(float(cf_row["close_ts"] or 0.0)).tm_hour
+                mature_sessions.add("asia" if close_hour < 7 else "europe" if close_hour < 13 else "us")
+                regime = str(cf_evidence.get("regime") or "")
+                if regime and regime != "unknown":
+                    mature_regimes.add(regime)
+            canary_ready = (
+                len(mature_positions) >= canary_required
+                and len(mature_sessions) >= 2
+                and len(mature_regimes) >= 2
+            )
+            if not canary_ready:
+                skipped.append({
+                    "suggestion_id": suggestion_id,
+                    "reason": "supervisor_canary_not_ready",
+                    "mature_trade_count": len(mature_positions),
+                    "required_trade_count": canary_required,
+                    "session_count": len(mature_sessions),
+                    "regime_count": len(mature_regimes),
+                })
+                continue
             if switch_claimed:
                 _execute(
                     conn,
@@ -4020,6 +4069,76 @@ def materialize_portfolio_shadow_trades(
         conn.close()
 
 
+def maybe_auto_unfreeze_learning_repair(*, db_path: str | Path = STATE_DB) -> dict[str, Any]:
+    """Atomically release the repair freeze only after every safety gate passes."""
+    from backend.services.backend_readiness import BackendReadinessService
+    from backend.services.release_control import ReleaseControlService
+    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+    from config.runtime_config import shared as runtime_config
+
+    if not bool(getattr(runtime_config(), "autonomy_expansion_frozen", True)):
+        return {"status": "already_unfrozen", "ok": True}
+    readiness = BackendReadinessService(db_path=db_path).build()
+    repair = dict(readiness.get("learning_repair") or {})
+    replay = dict(readiness.get("replay") or {})
+    drift = dict(readiness.get("config_runtime_drift") or {})
+    execution = dict(readiness.get("execution_semantics") or {})
+    conn = _connect(db_path, read_only=True)
+    try:
+        verification = _execute(
+            conn,
+            "SELECT payload_json, timestamp FROM evolution_events WHERE event_type='learning_closure_verification_passed' ORDER BY timestamp DESC LIMIT 1",
+        ).fetchone()
+        conflict_count = int(_execute(
+            conn,
+            "SELECT COUNT(*) AS n FROM policy_suggestion WHERE scope_type='position_supervisor_template' AND status IN ('approved','applied')",
+        ).fetchone()["n"] or 0)
+    finally:
+        conn.close()
+    checks = {
+        "learning_repair": bool(repair.get("ok")),
+        "replay": bool(replay.get("ok")),
+        "config_drift": not bool(drift.get("drift")) and not bool(drift.get("semantic_drift")),
+        "proposal_conflicts": conflict_count <= 1,
+        "broker_alignment": not bool(execution.get("blocking_components")),
+        "verification": verification is not None,
+    }
+    if not all(checks.values()):
+        return {"ok": False, "status": "freeze_retained", "checks": checks, "learning_repair": repair}
+
+    mutation = RuntimeConfigMutationService(db_path).apply_patch(
+        {"autonomy_expansion_frozen": False},
+        source="learning_repair_auto_unfreeze",
+        actor="system:learning_repair_release",
+        action="auto_unfreeze_expansionary_autonomy",
+        reason="all learning repair, replay, canary, drift and broker-alignment gates passed",
+    )
+    if not mutation.get("ok"):
+        return {"ok": False, "status": "freeze_retained_mutation_failed", "checks": checks, "mutation": mutation}
+    release_service = ReleaseControlService(db_path)
+    release = release_service.start_release(
+        release_class="learning_closure_repair",
+        summary={"checks": checks, "learning_repair": repair, "mutation": mutation},
+        tests=[{"name": "learning_closure_verification", "status": "passed"}],
+        rollback_ref={"runtime_config_snapshot": mutation.get("snapshot") or mutation.get("config_snapshot") or {}},
+        created_by="system:learning_repair_release",
+        readiness=readiness,
+    )
+    release = release_service.finish_release(
+        str(release.get("run_id") or ""),
+        status="completed",
+        summary={"checks": checks, "learning_repair": repair, "mutation": mutation},
+        readiness=readiness,
+    )
+    conn = _connect(db_path)
+    try:
+        _insert_evolution_event(conn, "learning_repair_auto_unfrozen", {"checks": checks, "mutation": mutation, "release": release})
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "status": "auto_unfrozen", "checks": checks, "mutation": mutation, "release": release}
+
+
 def run_autonomous_learning_cycle(
     *,
     db_path: str | Path = STATE_DB,
@@ -4064,6 +4183,7 @@ def run_autonomous_learning_cycle(
     )
     conn = _connect(db_path)
     try:
+        auto_unfreeze = maybe_auto_unfreeze_learning_repair(db_path=db_path)
         payload = {
             "schema_version": "autonomous_learning_cycle.v1",
             "counterfactuals": counterfactuals,
@@ -4079,6 +4199,7 @@ def run_autonomous_learning_cycle(
             "governance": governance,
             "parameter_template_recommendations": recommendations,
             "demo_autonomy": demo_apply,
+            "learning_repair_auto_unfreeze": auto_unfreeze,
         }
         _insert_evolution_event(conn, "autonomous_learning_cycle", payload)
         conn.commit()

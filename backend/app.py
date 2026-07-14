@@ -128,6 +128,10 @@ async def lifespan(app: FastAPI):
 
         active_template_id = latest_applied_position_supervisor_template_id(db_path=STATE_DB)
         current_template_id = str(getattr(rc_shared(), "position_supervisor_template_id", "") or "")
+        expansion_frozen = bool(getattr(rc_shared(), "autonomy_expansion_frozen", False))
+        if expansion_frozen:
+            active_template_id = ""
+            _lg.info("[lifespan] supervisor template restore skipped: autonomy expansion frozen")
         if active_template_id and active_template_id != current_template_id:
             rc_patch({"position_supervisor_template_id": active_template_id})
             persist_runtime_config_snapshot(

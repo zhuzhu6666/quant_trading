@@ -180,6 +180,10 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     summary_reason = "position_healthy"
     severity = "info"
     min_thesis_break_seconds = _safe_float(thresholds.get("min_thesis_break_seconds"))
+    min_closed_bars_fast = max(1, _safe_int(thresholds.get("min_closed_bars_high_vol_or_weak_trend"), 1))
+    min_closed_bars_default = max(min_closed_bars_fast, _safe_int(thresholds.get("min_closed_bars_default"), 2))
+    hard_risk_bypass = bool(thresholds.get("hard_risk_bypass", True))
+    min_independent_evidence = max(1, _safe_int(thresholds.get("min_independent_thesis_break_evidence"), 2))
     broken_holding_efficiency_threshold = _safe_float(thresholds.get("broken_holding_efficiency_threshold"), 0.20)
     giveback_reduce_threshold = _safe_float(thresholds.get("giveback_reduce_threshold"), 0.70)
     giveback_tighten_threshold = _safe_float(thresholds.get("giveback_tighten_threshold"), 0.35)
@@ -235,20 +239,41 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         or risk.get("direction_reversal")
         or risk.get("entry_signal_reversed")
     )
+    completed_bars_after_entry = max(
+        0,
+        _safe_int(temporal.get("completed_bars_after_entry"), int(holding_seconds // 300.0)),
+    )
+    current_regime_text = str(risk.get("current_regime") or "").lower()
+    fast_window = "volatility=high" in current_regime_text or "trend=weak" in current_regime_text
+    required_closed_bars = min_closed_bars_fast if fast_window else min_closed_bars_default
+    closed_bar_window_ready = completed_bars_after_entry >= required_closed_bars
+    thesis_break_evidence_families: list[str] = []
+    if signal_reversal:
+        thesis_break_evidence_families.append("signal_reversal")
+    if regime_shift == "confirmed":
+        thesis_break_evidence_families.append("regime_shift")
+    if stop_loss_progress >= near_sl_progress_threshold:
+        thesis_break_evidence_families.append("market_structure_risk")
+    if time_decay_score <= time_decay_reduce_threshold or timeout_ratio >= timeout_reduce_ratio:
+        thesis_break_evidence_families.append("time_decay")
+    if thesis_broken_confirmations >= 2:
+        thesis_break_evidence_families.append("persistent_price_path")
+    thesis_break_evidence_families = list(dict.fromkeys(thesis_break_evidence_families))
+    hard_risk_active = bool(
+        risk.get("hard_risk_active")
+        or risk.get("circuit_breaker_active")
+        or risk.get("connection_risk_active")
+        or stop_loss_progress >= 1.0
+    )
     thesis_break_ready = (
-        thesis_status == "broken"
+        thesis_status in {"broken", "confirmed_broken"}
         and holding_seconds >= min_thesis_break_seconds
+        and (closed_bar_window_ready or (hard_risk_bypass and hard_risk_active))
         and holding_efficiency <= broken_holding_efficiency_threshold
     )
-    thesis_break_requires_confirmation = min_thesis_break_seconds > 0
     thesis_break_confirmed = (
-        not thesis_break_requires_confirmation
-        or stop_loss_progress >= near_sl_progress_threshold
-        or regime_shift == "confirmed"
-        or time_decay_score <= time_decay_reduce_threshold
-        or timeout_ratio >= timeout_reduce_ratio
-        or thesis_broken_confirmations >= 2
-        or signal_reversal
+        (hard_risk_bypass and hard_risk_active)
+        or len(thesis_break_evidence_families) >= min_independent_evidence
     )
 
     if max_holding_seconds > 0 and holding_seconds >= max_holding_seconds:
@@ -390,6 +415,12 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "thesis_status": thesis_status,
         "thesis_break_ready": bool(thesis_break_ready),
         "thesis_break_confirmed": bool(thesis_break_confirmed),
+        "completed_bars_after_entry": int(completed_bars_after_entry),
+        "required_closed_bars": int(required_closed_bars),
+        "closed_bar_window_ready": bool(closed_bar_window_ready),
+        "thesis_break_evidence_families": thesis_break_evidence_families,
+        "min_independent_thesis_break_evidence": int(min_independent_evidence),
+        "hard_risk_active": bool(hard_risk_active),
         "thesis_broken_confirmations": int(thesis_broken_confirmations),
         "signal_reversal": bool(signal_reversal),
         "regime_shift": regime_shift,

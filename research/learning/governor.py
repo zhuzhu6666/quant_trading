@@ -856,7 +856,7 @@ class RuleEvolutionGovernor:
         reward_delta_for_bad: float = -0.08,
         application_limit: int = 200,
         mixed_recheck_after_seconds: float = 6 * 3600.0,
-        max_observation_age_seconds: float = 30 * 86400.0,
+        max_observation_age_seconds: float | None = None,
         terminalize_mixed_after_recheck: bool = False,
     ) -> dict[str, int]:
         observed = 0
@@ -869,6 +869,17 @@ class RuleEvolutionGovernor:
 
         with self._conn() as conn:
             now = time.time()
+            if max_observation_age_seconds is None:
+                try:
+                    from config.runtime_config import shared as _runtime_config_shared
+
+                    effect_days = max(
+                        1,
+                        int(getattr(_runtime_config_shared(), "learning_effect_inconclusive_after_days", 7) or 7),
+                    )
+                except Exception:
+                    effect_days = 7
+                max_observation_age_seconds = float(effect_days * 86400)
             rows = self._execute(conn,
                 """
                 SELECT l.*

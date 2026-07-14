@@ -118,10 +118,11 @@ class FactorGovernanceOrchestrator:
             if actions:
                 catalog = build_factor_catalog()
             posture = self._autonomy_posture()
-            if posture in {"shadow_only", "frozen"}:
+            expansion_frozen = bool(getattr(cfg, "autonomy_expansion_frozen", False))
+            if posture in {"shadow_only", "frozen"} or expansion_frozen:
                 summary = {
                     "status": "observation_only",
-                    "reason": f"autonomy_posture:{posture}",
+                    "reason": "autonomy_expansion_frozen" if expansion_frozen else f"autonomy_posture:{posture}",
                     "catalog_count": len(catalog),
                     "actions": actions,
                     "catalog_snapshot": catalog_snapshot,

@@ -262,10 +262,33 @@ def _horizon_metrics(
         bars = bars.copy()
         bars["_epoch_time"] = float(close_ts)
     out = []
+    latest_available_bar_ts = max((_safe_float(x) for x in bars["_epoch_time"].tolist()), default=0.0)
     for minutes in horizons_minutes:
         cutoff = close_ts + int(minutes) * 60
-        window = bars[bars["_epoch_time"] <= cutoff]
+        window = bars[(bars["_epoch_time"] > float(close_ts)) & (bars["_epoch_time"] <= cutoff)]
         if window is None or getattr(window, "empty", True):
+            window = bars.iloc[0:0]
+        expected_bars = max(1, int(minutes))
+        observed_bars = int(len(window.index))
+        matured = bool(latest_available_bar_ts >= cutoff and observed_bars >= expected_bars)
+        fingerprint_payload = [
+            [round(_safe_float(row.get("_epoch_time")), 3), _safe_float(row.get("open")),
+             _safe_float(row.get("high")), _safe_float(row.get("low")), _safe_float(row.get("close"))]
+            for _, row in window.iterrows()
+        ]
+        common = {
+            "horizon_minutes": int(minutes),
+            "expected_bars": expected_bars,
+            "observed_bars": observed_bars,
+            "window_end_ts": round(float(cutoff), 3),
+            "latest_available_bar_ts": round(latest_available_bar_ts, 3),
+            "matured": matured,
+            "data_fingerprint": hashlib.sha256(
+                json.dumps(fingerprint_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+        }
+        if window.empty:
+            out.append(common)
             continue
         if direction >= 0:
             favorable_price = max(_safe_float(x) for x in window["high"].tolist())
@@ -289,7 +312,7 @@ def _horizon_metrics(
         )
         out.append(
             {
-                "horizon_minutes": int(minutes),
+                **common,
                 "best_pnl": round(best_pnl, 6),
                 "worst_pnl": round(worst_pnl, 6),
                 "end_pnl": round(end_pnl, 6),
@@ -306,6 +329,7 @@ def _horizon_metrics(
 
 
 def _classify_counterfactual(close_pnl: float, horizons: list[dict[str, Any]], supervisor: dict[str, Any]) -> tuple[str, float, list[str]]:
+    horizons = [item for item in horizons if bool(item.get("matured"))]
     if not horizons:
         return "insufficient_future_data", 0.2, ["no_future_bars"]
     max_best_delta = max(_safe_float(item.get("best_delta_vs_close")) for item in horizons)
@@ -360,6 +384,8 @@ def ensure_counterfactual_table(db_path: str | Path = STATE_DB) -> None:
         if _conn_is_pg(conn):
             if not state_table_exists(conn, "supervisor_counterfactual_review"):
                 raise RuntimeError("missing state table: supervisor_counterfactual_review")
+            if not state_table_exists(conn, "supervisor_counterfactual_history"):
+                raise RuntimeError("missing state table: supervisor_counterfactual_history")
             return
         _execute(
             conn,
@@ -379,6 +405,18 @@ def ensure_counterfactual_table(db_path: str | Path = STATE_DB) -> None:
                 evidence_json TEXT DEFAULT '{}',
                 created_at REAL NOT NULL DEFAULT 0.0,
                 updated_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        _execute(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS supervisor_counterfactual_history (
+                history_id TEXT PRIMARY KEY,
+                counterfactual_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                archived_reason TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0.0
             )
             """
         )
@@ -521,8 +559,32 @@ def evaluate_counterfactuals(
                 original_sl=_safe_float(opened.get("sl")),
             )
             label, confidence, tags = _classify_counterfactual(close_pnl, horizon_items, supervisor)
+            matured_minutes = sorted(
+                int(item.get("horizon_minutes") or 0)
+                for item in horizon_items
+                if bool(item.get("matured"))
+            )
+            try:
+                from config.runtime_config import shared as _runtime_config_shared
+
+                runtime_cfg = _runtime_config_shared()
+                governance_horizon = int(
+                    getattr(runtime_cfg, "supervisor_counterfactual_governance_horizon_minutes", 60) or 60
+                )
+                full_horizon = int(
+                    getattr(runtime_cfg, "supervisor_counterfactual_full_horizon_minutes", 120) or 120
+                )
+            except Exception:
+                governance_horizon, full_horizon = 60, 120
+            max_matured = max(matured_minutes, default=0)
+            maturity_status = (
+                "fully_matured" if max_matured >= full_horizon
+                else "governance_ready" if max_matured >= governance_horizon
+                else "partially_matured" if max_matured > 0
+                else "pending"
+            )
             evidence = {
-                "schema_version": "supervisor_counterfactual.v1",
+                "schema_version": "supervisor_counterfactual.v2",
                 "direction": direction,
                 "entry_price": entry_price,
                 "close_price": close_price,
@@ -534,6 +596,15 @@ def evaluate_counterfactuals(
                 "advisory_only": True,
                 "bar_timeframe": timeframe,
                 "trade_timeframe": trade_timeframe,
+                "session": str(review.get("session") or review.get("market_session") or "unknown"),
+                "regime": str(review.get("regime_id") or review.get("regime") or "unknown"),
+                "maturity": {
+                    "status": maturity_status,
+                    "matured_horizons_minutes": matured_minutes,
+                    "governance_horizon_minutes": governance_horizon,
+                    "full_horizon_minutes": full_horizon,
+                    "governance_eligible": maturity_status in {"governance_ready", "fully_matured"},
+                },
             }
             counterfactual_id = "scf_" + hashlib.sha1(
                 f"{row['review_id']}:{position_id}:{close_ts}".encode("utf-8")
@@ -551,10 +622,47 @@ def evaluate_counterfactuals(
                 "confidence": round(confidence, 4),
                 "horizons": horizon_items,
                 "evidence": evidence,
+                "maturity_status": maturity_status,
+                "governance_eligible": evidence["maturity"]["governance_eligible"],
             }
             items.append(item)
             if materialize:
                 now = time.time()
+                previous = _execute(
+                    conn,
+                    "SELECT * FROM supervisor_counterfactual_review WHERE counterfactual_id=?",
+                    (item["counterfactual_id"],),
+                ).fetchone()
+                if previous:
+                    previous_payload = dict(previous)
+                    previous_evidence = previous_payload.get("evidence_json") or {}
+                    if isinstance(previous_evidence, str):
+                        previous_evidence = _loads(previous_evidence, {})
+                    # Terminal evidence invalidation is an audit decision.  A
+                    # later idempotent rematerialization must not resurrect it.
+                    if bool((previous_evidence or {}).get("evidence_invalidated")):
+                        item["evidence"]["evidence_invalidated"] = True
+                        item["evidence"]["invalidation_reason"] = str(
+                            (previous_evidence or {}).get("invalidation_reason") or "invalidated_evidence"
+                        )
+                        item["evidence"]["maturity"]["status"] = "invalidated_missing_m1"
+                        item["evidence"]["maturity"]["governance_eligible"] = False
+                        item["maturity_status"] = "invalidated_missing_m1"
+                        item["governance_eligible"] = False
+                    if str((previous_evidence or {}).get("schema_version") or "") != "supervisor_counterfactual.v2":
+                        history_id = "scfh_" + hashlib.sha1(
+                            f"{item['counterfactual_id']}:{previous_payload.get('updated_at', 0)}".encode("utf-8")
+                        ).hexdigest()[:20]
+                        _execute(
+                            conn,
+                            """
+                            INSERT INTO supervisor_counterfactual_history
+                            (history_id, counterfactual_id, payload_json, archived_reason, created_at)
+                            VALUES (?, ?, ?, 'maturity_contract_v2_rematerialization', ?)
+                            ON CONFLICT(history_id) DO NOTHING
+                            """,
+                            (history_id, item["counterfactual_id"], json.dumps(previous_payload, ensure_ascii=False, default=str), now),
+                        )
                 _execute(
                     conn,
                     """
