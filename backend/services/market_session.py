@@ -50,6 +50,41 @@ class MarketSessionState:
         return asdict(self)
 
 
+def maintenance_wait_evidence(
+    session: dict[str, Any] | None,
+    *,
+    latest_market_data_ts: float,
+    now_ts: float,
+    grace_seconds: float,
+) -> dict[str, Any]:
+    """Classify a bounded scheduled-open/no-quote maintenance wait.
+
+    This deliberately uses the shared market-session evidence instead of a
+    fixed wall-clock window. A live API plus no broker error is required, and
+    stale data becomes critical again as soon as the configured grace expires.
+    """
+    payload = dict(session or {})
+    status = str(payload.get("status") or "")
+    evidence = [str(item) for item in (payload.get("evidence") or [])]
+    age = max(0.0, float(now_ts) - float(latest_market_data_ts or 0.0)) if latest_market_data_ts else float("inf")
+    grace = max(0.0, float(grace_seconds or 0.0))
+    api_healthy = bool(payload.get("api_available")) and payload.get("broker_connected") is not False
+    broker_error = "broker_market_closed_error" in evidence or bool(payload.get("broker_error"))
+    eligible_statuses = {"open_pending_quote", "broker_connected_market_data_stale"}
+    eligible = status in eligible_statuses and api_healthy and not broker_error
+    active = eligible and age < grace
+    return {
+        "eligible": eligible,
+        "active": active,
+        "status": status,
+        "age_seconds": age,
+        "grace_seconds": grace,
+        "remaining_seconds": max(0.0, grace - age) if eligible else 0.0,
+        "api_healthy": api_healthy,
+        "evidence": evidence,
+    }
+
+
 def _parse_hhmm(value: str) -> dtime:
     hh, mm = str(value or "00:00").split(":", 1)
     return dtime(hour=int(hh), minute=int(mm), tzinfo=timezone.utc)

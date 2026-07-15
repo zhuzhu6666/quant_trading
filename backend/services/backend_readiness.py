@@ -98,6 +98,7 @@ class BackendReadinessService:
         live_status = self._timed_component("live_status", self._live_status)
         market_session = dict(live_status.get("market_session") or {})
         system_health = self._timed_component("system_health", self._system_health)
+        metrics = self._timed_component("metrics", self._metrics_status)
         model_status = self._timed_component("model_status", self._model_status)
         high_load = self._timed_component("high_load", lambda: self._high_load_status(market_session))
         governance = self._timed_component("governance", self._governance_status)
@@ -164,6 +165,14 @@ class BackendReadinessService:
         ready_for_frontend = not blockers
         known_observations = []
         known_observations.extend(system_health.get("known_observations") or [])
+        if metrics.get("status") == "degraded":
+            known_observations.append(
+                {
+                    "component": "metrics_backend",
+                    "status": "degraded",
+                    "classification": "prometheus_fallback_active",
+                }
+            )
         if not is_runtime_state_db:
             known_observations.extend(
                 {
@@ -220,6 +229,7 @@ class BackendReadinessService:
             "ready_for_frontend": ready_for_frontend,
             "backend_service": self._service_status(),
             "system_health": system_health,
+            "metrics": metrics,
             "market_session": market_session,
             "live": {
                 "ctrader": live_status.get("ctrader") or {},
@@ -1886,6 +1896,21 @@ class BackendReadinessService:
             "known_observations": observations,
             "source": str(LOG_PATH),
         }
+
+    @staticmethod
+    def _metrics_status() -> dict[str, Any]:
+        try:
+            from monitor.metrics import metrics_backend_status
+
+            return metrics_backend_status()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "degraded",
+                "metrics_backend": "fallback",
+                "prometheus_available": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     @staticmethod
     def _latest_system_health_line() -> str:

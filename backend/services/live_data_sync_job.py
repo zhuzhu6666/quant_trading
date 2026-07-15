@@ -104,6 +104,24 @@ def make_data_sync_job(
                     )
                     health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
                     return
+                if session_status == "open_pending_quote":
+                    from backend.services.market_session import maintenance_wait_evidence
+
+                    latest_market_data_ts = max(observed_bar_ts_by_tf.values(), default=0.0)
+                    maintenance = maintenance_wait_evidence(
+                        session,
+                        latest_market_data_ts=latest_market_data_ts,
+                        now_ts=now,
+                        grace_seconds=float(cfg.market_open_pending_quote_grace_seconds),
+                    )
+                    if maintenance["active"]:
+                        logger.info(
+                            "[data_sync] bars stale during maintenance wait (remaining={:.0f}s, evidence={}); skip bar pull",
+                            maintenance["remaining_seconds"],
+                            maintenance["evidence"],
+                        )
+                        health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
+                        return
             except Exception as exc:
                 logger.debug("[data_sync] market session check failed before pull: {}", exc)
 
@@ -144,7 +162,7 @@ def make_data_sync_job(
             try:
                 health.record_failure(str(e)[:200])
             except Exception as inner_exc:
-                logger.debug("[data_sync] health.record_failure failed: %s", inner_exc)
+                logger.debug("[data_sync] health.record_failure failed: {}", inner_exc)
         finally:
             lock.release()
 

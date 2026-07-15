@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from monitor.metrics import Metrics
+from monitor.metrics import Metrics, metrics_backend_status
 
 
 @pytest.fixture
@@ -28,6 +28,12 @@ def test_metrics_health_endpoint_returns_enabled_status(client: TestClient) -> N
     data = r.json()
     assert "enabled" in data
     assert "prometheus_content_type" in data
+
+
+def test_metrics_backend_status_contract() -> None:
+    status = metrics_backend_status()
+    assert status["metrics_backend"] in {"prometheus", "fallback"}
+    assert status["status"] in {"healthy", "degraded"}
 
 
 def test_metrics_endpoint_returns_text(client: TestClient) -> None:

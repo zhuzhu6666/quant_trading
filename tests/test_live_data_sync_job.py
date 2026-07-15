@@ -178,6 +178,45 @@ def test_data_sync_stale_bars_skip_pull_when_market_closed():
     assert health.successes == [{"last_bar_ts_by_tf": None}]
 
 
+def test_data_sync_stale_bars_skip_pull_during_bounded_maintenance_wait():
+    now = 1_000_000.0
+    latest = now - 74 * 60
+    lock = _FakeLock()
+    health = _FakeHealth()
+    bridge_called = False
+
+    def _bridge():
+        nonlocal bridge_called
+        bridge_called = True
+        return None, None, False
+
+    job = make_data_sync_job(
+        lock=lock,
+        logger=_FakeLogger(),
+        get_ctrader=_bridge,
+        market_session_snapshot=lambda _arg: {
+            "status": "open_pending_quote",
+            "api_available": True,
+            "broker_connected": True,
+            "evidence": ["market_data_stale"],
+        },
+        health_factory=lambda: health,
+        config_factory=lambda: SimpleNamespace(
+            enabled_symbols=["XAUUSD+"],
+            market_open_pending_quote_grace_seconds=4500.0,
+        ),
+        duckdb_runtime_factory=_duckdb_runtime(
+            bar_latest={tf: latest for tf in BAR_FRESHNESS_THRESHOLDS}
+        ),
+        now_fn=lambda: now,
+    )
+
+    job()
+
+    assert bridge_called is False
+    assert health.successes
+
+
 def test_data_sync_stale_bars_pull_with_primary_bridge_and_insert_store_bars():
     now = 1_000_000.0
     lock = _FakeLock()

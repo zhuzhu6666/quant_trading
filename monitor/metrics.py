@@ -38,6 +38,17 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
+def metrics_backend_status() -> dict[str, Any]:
+    """Stable readiness contract for the active metrics implementation."""
+    backend = "prometheus" if _PROM_AVAILABLE else "fallback"
+    return {
+        "ok": bool(_PROM_AVAILABLE),
+        "status": "healthy" if _PROM_AVAILABLE else "degraded",
+        "metrics_backend": backend,
+        "prometheus_available": bool(_PROM_AVAILABLE),
+    }
+
+
 class Metrics:
     """Prometheus 指标单例。
 

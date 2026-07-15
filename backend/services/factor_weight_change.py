@@ -203,25 +203,59 @@ class FactorWeightChangeService:
                 "applications": {},
                 "boundary": self.boundary(),
             }
-        plan = self.plan(
-            factor_configs=factor_configs,
-            current_weights=current_weights,
-            awe_patches=awe_patches,
-            weight_policy_weights=weight_policy_weights,
-            shadow_perfs=shadow_perfs,
-            regime=regime,
-            fast=fast,
-            bypass_for_risk_reduction=bypass_for_risk_reduction,
-            decision_policy=decision_policy,
-        )
+        try:
+            plan = self.plan(
+                factor_configs=factor_configs,
+                current_weights=current_weights,
+                awe_patches=awe_patches,
+                weight_policy_weights=weight_policy_weights,
+                shadow_perfs=shadow_perfs,
+                regime=regime,
+                fast=fast,
+                bypass_for_risk_reduction=bypass_for_risk_reduction,
+                decision_policy=decision_policy,
+            )
+        except Exception as exc:
+            return self._governance_error(stage="plan", exc=exc)
+        if (
+            is_state_db_path(self.db_path)
+            and str(actor or "").startswith("system:")
+            and not bypass_for_risk_reduction
+            and plan.get("admitted_decisions")
+        ):
+            try:
+                from backend.services.v16_command_gate import V16CommandGate
+
+                v16_authority = V16CommandGate.authorize(
+                    self.db_path,
+                    target_agent=source_agent,
+                    scope_type="factor_weight",
+                    action="update_weight",
+                    command_id=v16_command_id,
+                )
+            except Exception as exc:
+                return {**plan, **self._governance_error(stage="v16_preflight", exc=exc)}
+            if not v16_authority.get("allowed"):
+                return {
+                    **plan,
+                    "ok": True,
+                    "status": "blocked_by_admission",
+                    "admission_status": "blocked_v16_command_required",
+                    "reason": str(v16_authority.get("status") or "v16_command_required"),
+                    "v16_authority": v16_authority,
+                    "applications": {},
+                }
         # A per-factor read-only admission is not sufficient for a batch: all
         # factors can observe the same pre-write global count.  Reserve the
         # remaining slots atomically before replay/risk/mutation work starts.
-        batch_admission = self.admission.reserve_batch(
-            plan.get("admitted_decisions") or {},
-            action="update_weight",
-            bypass_for_risk_reduction=bypass_for_risk_reduction,
-        )
+        try:
+            batch_admission = self.admission.reserve_batch(
+                plan.get("admitted_decisions") or {},
+                action="update_weight",
+                bypass_for_risk_reduction=bypass_for_risk_reduction,
+            )
+        except Exception as exc:
+            return {**plan, **self._governance_error(stage="admission", exc=exc)}
         reserved_admissions = dict(batch_admission.get("admissions") or {})
         admitted_decisions = {
             name: decision
@@ -239,16 +273,26 @@ class FactorWeightChangeService:
         if not proposed_weights:
             return {
                 **plan,
-                "status": str(batch_admission.get("status") or "no_admitted_change"),
+                "status": (
+                    "blocked_by_admission"
+                    if plan.get("decisions")
+                    else "no_admitted_change"
+                ),
+                "admission_status": str(batch_admission.get("status") or "no_admitted_change"),
                 "applications": {},
             }
         reservation_ids = list((batch_admission.get("reservations") or {}).values())
-        replay_admission = self._replay_admission(plan["admitted_decisions"])
+        try:
+            replay_admission = self._replay_admission(plan["admitted_decisions"])
+        except Exception as exc:
+            self._release_reservations_safely(reservation_ids)
+            return {**plan, **self._governance_error(stage="replay", exc=exc)}
         if not replay_admission.get("allowed"):
-            self.admission.release_reservations(reservation_ids)
+            self._release_reservations_safely(reservation_ids)
             return {
                 **plan,
-                "status": "blocked_by_replay_admission",
+                "status": "blocked_by_replay",
+                "legacy_status": "blocked_by_replay_admission",
                 "replay_admission": replay_admission,
                 "applications": {},
             }
@@ -262,15 +306,19 @@ class FactorWeightChangeService:
             "decision_count": len(proposed_weights),
             "replay_admission": replay_admission,
         }
-        if risk_check is None:
-            from risk.policy_service import RiskPolicyService
+        try:
+            if risk_check is None:
+                from risk.policy_service import RiskPolicyService
 
-            verdict = RiskPolicyService.shared().evaluate("update_weight", risk_context)
-        else:
-            verdict = risk_check({**plan, "risk_context": risk_context})
+                verdict = RiskPolicyService.shared().evaluate("update_weight", risk_context)
+            else:
+                verdict = risk_check({**plan, "risk_context": risk_context})
+        except Exception as exc:
+            self._release_reservations_safely(reservation_ids)
+            return {**plan, **self._governance_error(stage="risk", exc=exc)}
         risk_verdict = _verdict_payload(verdict)
         if not bool(risk_verdict.get("allowed")):
-            self.admission.release_reservations(reservation_ids)
+            self._release_reservations_safely(reservation_ids)
             return {
                 **plan,
                 "status": "blocked_by_risk",
@@ -310,14 +358,18 @@ class FactorWeightChangeService:
                     application_id=application_ids[name],
                 )
         except Exception as exc:
-            self.admission.release_reservations(reservation_ids)
+            self._release_reservations_safely(reservation_ids)
             for application_id in application_ids.values():
                 self.applications.transition(
                     application_id,
                     status="mutation_failed",
                     details_patch={"prepare_error": f"{type(exc).__name__}: {exc}"},
                 )
-            raise
+            return {
+                **plan,
+                **self._governance_error(stage="prepare_application", exc=exc),
+                "applications": application_ids,
+            }
 
         try:
             mutation = self._mutation_service().apply_patch(
@@ -346,7 +398,11 @@ class FactorWeightChangeService:
                     status="mutation_failed",
                     details_patch={"mutation_error": f"{type(exc).__name__}: {exc}"},
                 )
-            raise
+            return {
+                **plan,
+                **self._governance_error(stage="runtime_mutation", exc=exc),
+                "applications": application_ids,
+            }
 
         transitions: dict[str, dict[str, Any]] = {}
         for name, application_id in application_ids.items():
@@ -374,4 +430,24 @@ class FactorWeightChangeService:
             "mutation": mutation,
             "applications": application_ids,
             "transitions": transitions,
+        }
+
+    def _release_reservations_safely(self, reservation_ids: list[str]) -> None:
+        try:
+            self.admission.release_reservations(reservation_ids)
+        except Exception:
+            # The original governance error remains authoritative. Expiry is
+            # the final fail-safe for a reservation store outage.
+            pass
+
+    @staticmethod
+    def _governance_error(*, stage: str, exc: Exception) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "schema_version": "factor_weight_change_result.v1",
+            "status": "governance_error",
+            "error_stage": str(stage),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "applications": {},
         }

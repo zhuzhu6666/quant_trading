@@ -3991,6 +3991,10 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
             quote = bridge.get_spot_quote() or {}
         except Exception:
             quote = {}
+    if not quote:
+        stored_quote = _live_state_get("spot_quote", None, clone=True)
+        if isinstance(stored_quote, dict):
+            quote = stored_quote
     quote_changed_at = float((quote or {}).get("changed_at") or _live_state_get("spot_quote_changed_at", 0.0) or 0.0)
     if quote:
         quote = {**quote, "changed_at": quote_changed_at}
@@ -4393,6 +4397,9 @@ def _scheduled_awe_adapt():
 
         from config.runtime_config import shared as _rc
         cfg = _rc()
+        if bool(getattr(cfg, "autonomy_expansion_frozen", True)):
+            logger.info("[awe_adapt] skipped: autonomy expansion frozen")
+            return
 
         # 检查交易笔数门槛
         all_stats = attr.get_all_factor_stats()
@@ -4419,9 +4426,9 @@ def _scheduled_awe_adapt():
                             if min_len >= 2:
                                 ictracker.update(fname, fvals[:min_len], fwd_ret[:min_len])
                         except Exception as _e:
-                            logger.debug("[awe_adapt] ictracker.update failed for %s: %s", fname, _e)
+                            logger.debug("[awe_adapt] ictracker.update failed for {}: {}: {}", fname, type(_e).__name__, _e)
             except Exception as _e2:
-                logger.debug("[awe_adapt] export_factor_history failed: %s", _e2)
+                logger.debug("[awe_adapt] export_factor_history failed: {}: {}", type(_e2).__name__, _e2)
 
         # 如果因子数据充足且 blend baseline 未计算, 触发计算
         use_blend = bool(awe._blend_baselines)
@@ -4444,7 +4451,7 @@ def _scheduled_awe_adapt():
                     awe.compute_blend_baseline(factor_mat, fwd_ret[:len(fwd_ret)], f_names)
                     use_blend = True
             except Exception as _e2:
-                logger.debug("[awe_adapt] blend_baseline compute failed: %s", _e2)
+                logger.debug("[awe_adapt] blend_baseline compute failed: {}: {}", type(_e2).__name__, _e2)
 
         current_weights = dict(cfg.factor_portfolio_weights or {})
         factor_configs = _merge_portfolio_configs(
@@ -4494,19 +4501,30 @@ def _scheduled_awe_adapt():
                     risk_check=_awe_risk_check,
                 )
                 partial = dict(result.get("proposed_weights") or {})
-                if result.get("status") == "blocked_by_risk":
-                    logger.warning(
-                        "[awe_adapt] RiskPolicy blocked weight update: %s",
+                status = str(result.get("status") or "")
+                if status == "blocked_by_risk":
+                    logger.info(
+                        "[awe_adapt] RiskPolicy blocked weight update run_id={} reason={}",
+                        run_id,
                         (result.get("risk_verdict") or {}).get("reason"),
                     )
                     return
-                if result.get("status") != "applied" or not partial:
-                    logger.debug(
-                        "[awe_adapt] no admitted weight experiment: %s",
-                        {
-                            name: item.get("status")
-                            for name, item in (result.get("admissions") or {}).items()
-                        },
+                if status == "governance_error":
+                    logger.error(
+                        "[awe_adapt] governed weight update failed run_id={} stage={} error={}: {}",
+                        run_id,
+                        result.get("error_stage") or "unknown",
+                        result.get("error_type") or "Error",
+                        result.get("error") or "unknown",
+                    )
+                    return
+                if status != "applied" or not partial:
+                    logger.info(
+                        "[awe_adapt] weight update not applied run_id={} status={} admission_status={} admissions={}",
+                        run_id,
+                        status or "unknown",
+                        result.get("admission_status") or "",
+                        {name: item.get("status") for name, item in (result.get("admissions") or {}).items()},
                     )
                     return
                 logger.info(
@@ -4515,7 +4533,12 @@ def _scheduled_awe_adapt():
                     len(current_weights),
                 )
             except Exception as _e2:
-                logger.warning("[awe_adapt] DecisionPolicy weight push failed: %s", _e2)
+                logger.opt(exception=True).error(
+                    "[awe_adapt] unexpected weight push exception run_id={} error={}: {}",
+                    locals().get("run_id", "unassigned"),
+                    type(_e2).__name__,
+                    _e2,
+                )
         else:
             logger.debug("[awe_adapt] no weight changes needed")
     except Exception as e:

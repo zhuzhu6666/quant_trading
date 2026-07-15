@@ -74,7 +74,11 @@ class _RiskPolicy:
 def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
     monkeypatch.setenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "1")
     rc.reset_for_tests()
-    rc.patch({"awe_min_trades": 1, "factor_portfolio_weights": {"foo": 1.0, "bar": 2.0}})
+    rc.patch({
+        "autonomy_expansion_frozen": False,
+        "awe_min_trades": 1,
+        "factor_portfolio_weights": {"foo": 1.0, "bar": 2.0},
+    })
 
     class _MutationService:
         def apply_patch(self, patch, **kwargs):
@@ -109,6 +113,10 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
         "risk.policy_service.RiskPolicyService.shared",
         staticmethod(lambda: risk),
     )
+    monkeypatch.setattr(
+        "backend.services.v16_command_gate.V16CommandGate.authorize",
+        lambda *_args, **_kwargs: {"allowed": True, "status": "test_authorized"},
+    )
 
     monkeypatch.setattr(
         live_service,
@@ -125,7 +133,11 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
 
 def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
     rc.reset_for_tests()
-    rc.patch({"awe_min_trades": 1, "factor_portfolio_weights": {"foo": 1.0}})
+    rc.patch({
+        "autonomy_expansion_frozen": False,
+        "awe_min_trades": 1,
+        "factor_portfolio_weights": {"foo": 1.0},
+    })
     writes = []
 
     class _MutationService:
@@ -151,6 +163,10 @@ def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
         staticmethod(lambda: risk),
     )
     monkeypatch.setattr(
+        "backend.services.v16_command_gate.V16CommandGate.authorize",
+        lambda *_args, **_kwargs: {"allowed": True, "status": "test_authorized"},
+    )
+    monkeypatch.setattr(
         live_service,
         "_factor_pipeline",
         {"attribution": _Attr(), "awe": _AWE(), "engine": None},
@@ -160,6 +176,23 @@ def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
 
     assert writes == []
     assert rc.shared().factor_portfolio_weights == {"foo": 1.0}
+
+
+def test_scheduled_awe_adapt_skips_while_expansion_is_frozen(monkeypatch):
+    rc.reset_for_tests()
+    rc.patch({"autonomy_expansion_frozen": True, "awe_min_trades": 1})
+
+    class _ExplodingAttribution:
+        def get_all_factor_stats(self):
+            raise AssertionError("frozen AWE must not evaluate or mutate weights")
+
+    monkeypatch.setattr(
+        live_service,
+        "_factor_pipeline",
+        {"attribution": _ExplodingAttribution(), "awe": object(), "engine": None},
+    )
+
+    live_service._scheduled_awe_adapt()
 
 
 def test_legacy_param_tune_entrypoint_is_removed():

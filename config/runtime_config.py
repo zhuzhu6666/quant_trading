@@ -347,6 +347,10 @@ class RuntimeConfig:
     awe_resurrect_dsr_p: float = 0.05
     awe_resurrect_cooldown_days: int = 7
     awe_max_type_weight_pct: float = 0.40
+    # Scheduled-open sessions can temporarily have no fresh quote during the
+    # broker's maintenance break.  Health may tolerate that evidence-bound
+    # state for this long, but must fail critical after the grace expires.
+    market_open_pending_quote_grace_seconds: float = 4500.0
 
     # --- Factor Governance V3: 全自主自治 ---
     factor_governance_enabled: bool = True

@@ -83,7 +83,8 @@ def test_weight_change_blocks_large_delta_without_replay(monkeypatch, tmp_path):
 
     result = _execute(service)
 
-    assert result["status"] == "blocked_by_replay_admission"
+    assert result["status"] == "blocked_by_replay"
+    assert result["legacy_status"] == "blocked_by_replay_admission"
     assert result["applications"] == {}
     assert mutation.calls == []
 
@@ -131,8 +132,12 @@ def test_weight_change_prepares_before_mutation_and_enters_observation(monkeypat
 def test_weight_change_marks_prepared_application_failed_when_mutation_interrupts(monkeypatch, tmp_path):
     path, service = _service(monkeypatch, tmp_path, _Mutation(fail=True))
 
-    with pytest.raises(RuntimeError, match="mutation interrupted"):
-        _execute(service)
+    result = _execute(service)
+
+    assert result["status"] == "governance_error"
+    assert result["error_stage"] == "runtime_mutation"
+    assert result["error_type"] == "RuntimeError"
+    assert result["error"] == "mutation interrupted"
 
     conn = connect_sqlite(path, read_only=True)
     try:
@@ -142,6 +147,63 @@ def test_weight_change_marks_prepared_application_failed_when_mutation_interrupt
         conn.close()
     assert app[0] == "mutation_failed"
     assert effect[0] == "superseded"
+
+
+def test_weight_change_releases_reservation_when_risk_check_crashes(monkeypatch, tmp_path):
+    _path, service = _service(monkeypatch, tmp_path, _Mutation())
+    released = []
+    monkeypatch.setattr(service.admission, "release_reservations", lambda ids: released.extend(ids))
+
+    result = service.execute(
+        source="test_governed_weight",
+        producer="test",
+        run_id="run-risk-error",
+        actor="system:test",
+        reason="risk exception test",
+        factor_configs={"alpha_x": {"role": "alpha"}},
+        current_weights={"alpha_x": 1.0},
+        decision_policy=_Policy(),
+        risk_check=lambda _plan: (_ for _ in ()).throw(ConnectionError("risk unavailable")),
+    )
+
+    assert result["status"] == "governance_error"
+    assert result["error_stage"] == "risk"
+    assert result["error_type"] == "ConnectionError"
+    assert len(released) == 1
+
+
+def test_weight_change_reports_admission_infrastructure_error(monkeypatch, tmp_path):
+    _path, service = _service(monkeypatch, tmp_path, _Mutation())
+    monkeypatch.setattr(
+        service.admission,
+        "reserve_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("postgres unavailable")),
+    )
+
+    result = _execute(service)
+
+    assert result["status"] == "governance_error"
+    assert result["error_stage"] == "admission"
+    assert result["error_type"] == "ConnectionError"
+
+
+def test_production_system_weight_change_preflights_v16_before_reservation(monkeypatch, tmp_path):
+    _path, service = _service(monkeypatch, tmp_path, _Mutation())
+    monkeypatch.setenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "1")
+    monkeypatch.setattr("backend.services.factor_weight_change.is_state_db_path", lambda _path: True)
+    monkeypatch.setattr(
+        "backend.services.v16_command_gate.V16CommandGate.authorize",
+        lambda *_args, **_kwargs: {"allowed": False, "status": "v16_command_required"},
+    )
+    reserved = []
+    monkeypatch.setattr(service.admission, "reserve_batch", lambda *_args, **_kwargs: reserved.append(True))
+
+    result = _execute(service)
+
+    assert result["status"] == "blocked_by_admission"
+    assert result["admission_status"] == "blocked_v16_command_required"
+    assert result["applications"] == {}
+    assert reserved == []
 
 
 def test_prepared_recovery_uses_runtime_snapshot_as_commit_fact(tmp_path):

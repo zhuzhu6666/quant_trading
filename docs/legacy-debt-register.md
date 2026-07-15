@@ -459,6 +459,33 @@
 - 收口方式: review 中按 factor role 分域并保留兼容字段。
 - 验证方式: reviewer/learning 回归测试。
 
+### AWE 治理异常被调度日志吞没
+
+- 状态: fixed
+- 旧理解: AWE 调度只要捕获异常并继续运行即可，业务阻断和基础设施失败可以共用 warning。
+- 当前口径: `FactorWeightChangeService` 明确返回 applied、blocked_by_admission/risk/replay 或 governance_error；扩张冻结时 AWE 整轮跳过，缺 V16 delegate 在 reservation/application 前收口；异常路径释放 reservation，AWE 使用结构化 Loguru 日志记录 stage、type、message 和 run_id。
+- 影响面: AWE、实验准入、application/effect、RuntimeConfig mutation、运维审计。
+- 收口方式: 统一结果契约，不增加权重写入旁路；冻结、预算和 replay 阻断属于正常治理结果。
+- 验证方式: `tests/test_factor_weight_change_service.py`、`tests/test_evolution_closure_fixes.py`。
+
+### 每日维护窗口被识别为行情故障
+
+- 状态: fixed
+- 旧理解: 计划交易时段内没有新 bar 一律按 stale data 升级 critical，并持续重复回补。
+- 当前口径: 统一 market session 返回 open_pending_quote 或 broker_connected_market_data_stale、API/连接健康且无 broker error 时，按 RuntimeConfig 的75分钟上限进入 maintenance_wait；快照复用最新 spot quote，正常 open、到期或断连状态仍严格判 stale。
+- 影响面: system health、data sync、告警和 readiness。
+- 收口方式: 使用市场证据和限时宽限，不写死每日钟点；维护期抑制无效回补，首个新 bar 后自然恢复。
+- 验证方式: `tests/test_market_maintenance_wait.py`、`tests/test_live_data_sync_job.py`。
+
+### Prometheus 依赖未纳入生产安装
+
+- 状态: fixed
+- 旧理解: 指标 fallback 可长期视为等价生产后端。
+- 当前口径: `prometheus-client` 是正式运行依赖；fallback 仅容灾，并在 backend readiness 中显示 degraded。
+- 影响面: `/metrics`、监控告警和 readiness。
+- 收口方式: requirements 固定依赖并公开 metrics backend 状态。
+- 验证方式: `tests/test_metrics_endpoint.py`、`tests/test_backend_readiness_contract.py`。
+
 ## 5. 新旧债登记模板
 
 复制下面模板新增条目：

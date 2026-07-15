@@ -32,7 +32,7 @@ from loguru import logger
 @dataclass
 class ComponentStatus:
     name: str
-    status: str  # "ok" | "degraded" | "critical"
+    status: str  # "ok" | "maintenance_wait" | "degraded" | "critical"
     score: float  # 0.0 ~ 1.0
     detail: str = ""
     ts: float = 0.0
@@ -45,6 +45,7 @@ class HealthReport:
     ts: float = 0.0
     components: dict[str, ComponentStatus] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    market_session: dict = field(default_factory=dict)
 
 
 # ── 阈值 ────────────────────────────────────────────────────────
@@ -126,6 +127,7 @@ class SystemHealth:
         errors: list[str] = []
 
         # 1. cTrader 桥连接
+        bridge = None
         try:
             from backend.services.live_service import _get_ctrader
             bridge, err, warming = _get_ctrader()
@@ -199,7 +201,7 @@ class SystemHealth:
             errors.append(f"live_loop check: {e}")
 
         # 3. 数据新鲜度
-        self._check_data_freshness(components, errors)
+        self._check_data_freshness(components, errors, report=report, bridge=bridge)
 
         # 4. DuckDB 可读写
         self._check_duckdb(components, errors)
@@ -242,17 +244,19 @@ class SystemHealth:
                 pass
 
         logger.info(
-            "[system_health] overall={} score={:.2f} components={} errors={}",
+            "[system_health] overall={} score={:.2f} components={} errors={} market_session_status={}",
             report.overall, report.overall_score,
             {k: v.status for k, v in components.items()},
             len(errors),
+            str((report.market_session or {}).get("status") or "unknown"),
         )
         return report
 
     # ── 子检查 ────────────────────────────────────────────
 
     def _check_data_freshness(
-        self, components: dict[str, ComponentStatus], errors: list[str]
+        self, components: dict[str, ComponentStatus], errors: list[str],
+        *, report: HealthReport, bridge=None,
     ) -> None:
         """检查 bars 数据新鲜度。"""
         now = time.time()
@@ -263,13 +267,41 @@ class SystemHealth:
             from backend.core.db import DUCKDB_BARS
             with duckdb_readonly_connection(DUCKDB_BARS, snapshot_first=True) as db:
 
-                # M1
                 m1_ts = db.execute(
                     "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M1'"
                 ).fetchone()[0]
+                m5_ts = db.execute(
+                    "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M5'"
+                ).fetchone()[0]
+                try:
+                    from backend.services.live_service import _market_session_snapshot
+
+                    report.market_session = dict(_market_session_snapshot(None) or {})
+                    if bridge is not None:
+                        report.market_session["broker_connected"] = bool(
+                            getattr(bridge, "is_connected", False)
+                        )
+                except Exception as exc:
+                    logger.debug("[system_health] shared market session snapshot failed: {}", exc)
+                    report.market_session = {}
+                try:
+                    from config.runtime_config import shared as _runtime_cfg
+                    grace_seconds = float(_runtime_cfg().market_open_pending_quote_grace_seconds)
+                except Exception:
+                    from config.runtime_config import RuntimeConfig
+                    grace_seconds = float(RuntimeConfig().market_open_pending_quote_grace_seconds)
+
+                # M1
                 if m1_ts:
                     age = now - m1_ts
                     market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m1_ts))
+                    from backend.services.market_session import maintenance_wait_evidence
+                    maintenance = maintenance_wait_evidence(
+                        report.market_session,
+                        latest_market_data_ts=float(m1_ts),
+                        now_ts=now,
+                        grace_seconds=grace_seconds,
+                    )
                     if age < THRESHOLDS["m1_max_age"]:
                         components["bar_m1"] = ComponentStatus(
                             name="M1 Bar", status="ok", score=1.0,
@@ -279,6 +311,14 @@ class SystemHealth:
                         components["bar_m1"] = ComponentStatus(
                             name="M1 Bar", status="ok", score=1.0,
                             detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
+                        )
+                    elif maintenance["active"]:
+                        components["bar_m1"] = ComponentStatus(
+                            name="M1 Bar", status="maintenance_wait", score=1.0,
+                            detail=(
+                                f"scheduled-open maintenance wait; last {age/60:.0f} min ago; "
+                                f"grace remaining {maintenance['remaining_seconds']/60:.0f} min"
+                            ), ts=now,
                         )
                     elif age < THRESHOLDS["m1_warn_age"]:
                         components["bar_m1"] = ComponentStatus(
@@ -298,13 +338,17 @@ class SystemHealth:
                     )
 
                 # M5
-                m5_ts = db.execute(
-                    "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M5'"
-                ).fetchone()[0]
                 if m5_ts:
                     age = now - m5_ts
                     if not market_closed:
                         market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m5_ts))
+                    from backend.services.market_session import maintenance_wait_evidence
+                    maintenance = maintenance_wait_evidence(
+                        report.market_session,
+                        latest_market_data_ts=float(m5_ts),
+                        now_ts=now,
+                        grace_seconds=grace_seconds,
+                    )
                     if age < THRESHOLDS["m5_max_age"]:
                         components["bar_m5"] = ComponentStatus(
                             name="M5 Bar", status="ok", score=1.0,
@@ -314,6 +358,14 @@ class SystemHealth:
                         components["bar_m5"] = ComponentStatus(
                             name="M5 Bar", status="ok", score=1.0,
                             detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
+                        )
+                    elif maintenance["active"]:
+                        components["bar_m5"] = ComponentStatus(
+                            name="M5 Bar", status="maintenance_wait", score=1.0,
+                            detail=(
+                                f"scheduled-open maintenance wait; last {age/60:.0f} min ago; "
+                                f"grace remaining {maintenance['remaining_seconds']/60:.0f} min"
+                            ), ts=now,
                         )
                     elif age < THRESHOLDS["m5_warn_age"]:
                         components["bar_m5"] = ComponentStatus(
