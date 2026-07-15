@@ -334,7 +334,7 @@
 
 ## 11. 2026-07-14 学习闭环修复期事实源
 
-- 扩张性自治由 `RuntimeConfig.autonomy_expansion_frozen` 统一冻结；回滚、close/reduce/tighten、样本物化和只读分析不受影响。
+- 扩张性自治由 `RuntimeConfig.autonomy_expansion_frozen` 统一冻结；AWE、因子生命周期晋升、Canary 证据阶段上升和 supervisor template auto-apply 均不得绕过。Canary 证据可以继续刷新，回滚、close/reduce/tighten、样本物化和只读分析不受影响。
 - Supervisor 反事实按 5/15/30/60/120 分钟分别成熟，只有完整 M1 覆盖才算成熟；60 分钟是治理门槛，120 分钟是完全成熟。
 - Supervisor thesis-break 使用模板中的完整 bar 窗口和独立证据族；高波动/弱趋势至少 1 根新 M5，其他至少 2 根。硬风险可绕过窗口。
 - Demo nursery 的 `would_block` 探索使用 PostgreSQL 原子 reservation：每原因 5/日、全局 15/日、同 setup 1/日，broker 未成交时释放。

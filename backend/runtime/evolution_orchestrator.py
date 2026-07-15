@@ -464,6 +464,7 @@ def _run_canary_evaluation(
     saved_states: dict[str, dict] = {}
 
     try:
+        from config.runtime_config import shared as runtime_config
         from deployment.canary import ACTIVE, CANARY_STAGES, SHADOW, QUARANTINED, RETIRED, TERMINAL_STAGES, CanaryDirector, CanaryEvalContext
         from alpha.registry_adapter import RegistryAdapter
         adapter = RegistryAdapter.shared()
@@ -484,6 +485,9 @@ def _run_canary_evaluation(
             return promotions, rollbacks, stay
 
         director = CanaryDirector()
+        expansion_frozen = bool(
+            getattr(runtime_config(), "autonomy_expansion_frozen", True)
+        )
         candidate_names = {name for name, _, _ in candidates}
 
         # 恢复持久化状态到 director
@@ -550,11 +554,21 @@ def _run_canary_evaluation(
             try:
                 result = director.check_promotion(name, ctx)
                 if result == "promote":
-                    director.promote(name)
-                    if director.get_stage(name) == ACTIVE:
-                        promotions.append(name)
-                    else:
+                    if expansion_frozen:
+                        # Evidence may continue to refresh while expansion is
+                        # frozen, but no Canary stage may advance. Rollbacks
+                        # remain available because they reduce risk.
+                        logger.info(
+                            "[Evolve] canary promotion blocked by autonomy expansion freeze: %s",
+                            name,
+                        )
                         stay.append(name)
+                    else:
+                        director.promote(name)
+                        if director.get_stage(name) == ACTIVE:
+                            promotions.append(name)
+                        else:
+                            stay.append(name)
                 elif result == "rollback":
                     director.rollback(name)
                     rollbacks.append(name)

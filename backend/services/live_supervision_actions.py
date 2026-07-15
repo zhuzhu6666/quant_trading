@@ -63,11 +63,20 @@ def execute_supervisor_tighten_action(
     retire_broker_missing_position: Callable[..., Any],
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
+    stop_policy = {
+        "quote_max_age_seconds": getattr(cfg, "supervisor_quote_max_age_seconds", 10.0),
+        "min_stop_distance_points": getattr(cfg, "supervisor_min_stop_distance_points", 0.20),
+        "stop_safety_buffer_ratio": getattr(cfg, "supervisor_stop_safety_buffer_ratio", 0.00008),
+        "min_tighten_delta_points": getattr(cfg, "supervisor_min_tighten_delta_points", 0.01),
+        "precision": int(position.get("digits", 2) or 2),
+        "require_side_quote": True,
+    }
     quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
     tighten_plan = build_tighten_execution_plan(
         position=position,
         controls=controls,
         quote=quote,
+        policy=stop_policy,
     )
     target_sl = float(tighten_plan.get("target_sl") or 0.0)
     current_tp = float(tighten_plan.get("current_tp") or 0.0)
@@ -75,6 +84,50 @@ def execute_supervisor_tighten_action(
     planned_tp = float(tighten_plan.get("planned_tp") or 0.0)
     sl_plan = tighten_plan.get("sl_plan") or {}
     if not sl_plan["allowed"]:
+        result_payloads = build_tighten_result_payloads(
+            result="skipped",
+            action="tighten",
+            verdict=verdict,
+            risk_action=risk_action,
+            risk_verdict=risk_verdict,
+            decision_id=decision_id,
+            controls=controls,
+            sl_plan=sl_plan,
+        )
+        log_supervisor_position_event(
+            position=position,
+            event_type=result_payloads["position_event_type"],
+            details=result_payloads["position_event_details"],
+        )
+        log_supervisor_trace(
+            position=position,
+            verdict=verdict,
+            cfg=cfg,
+            tick=tick,
+            **result_payloads["trace_fields"],
+            acct=acct,
+        )
+        log(f"tick {tick}: supervisor tighten SKIP pos={pid} reason={sl_plan.get('reason')}")
+        remember_supervisor_state(position, verdict, broker=broker, strategy_name=strategy_name)
+        return
+
+    # Re-read bid/ask immediately before touching the broker. The first quote
+    # can become invalid while risk evaluation and audit payloads are built.
+    # Replanning also rechecks direction, freshness, stop distance, precision,
+    # and whether the resulting stop still tightens the existing protection.
+    latest_quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else quote
+    tighten_plan = build_tighten_execution_plan(
+        position=position,
+        controls=controls,
+        quote=latest_quote,
+        policy=stop_policy,
+    )
+    target_sl = float(tighten_plan.get("target_sl") or 0.0)
+    current_tp = float(tighten_plan.get("current_tp") or 0.0)
+    target_tp = float(tighten_plan.get("target_tp") or 0.0)
+    planned_tp = float(tighten_plan.get("planned_tp") or 0.0)
+    sl_plan = tighten_plan.get("sl_plan") or {}
+    if not sl_plan.get("allowed"):
         result_payloads = build_tighten_result_payloads(
             result="skipped",
             action="tighten",

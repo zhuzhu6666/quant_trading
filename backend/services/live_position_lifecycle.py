@@ -2627,6 +2627,7 @@ def build_supervisor_tighten_sl_plan(
     stop_safety_buffer_ratio: float = 0.00008,
     min_tighten_delta_points: float = 0.01,
     precision: int = 2,
+    require_side_quote: bool = False,
 ) -> dict[str, Any]:
     direction = int(direction or 0)
     current_sl = float(current_sl or 0.0)
@@ -2661,6 +2662,7 @@ def build_supervisor_tighten_sl_plan(
         "quote_age_seconds": float(quote_age_seconds or 0.0),
         "quote_max_age_seconds": float(quote_max_age_seconds or 0.0),
         "precision": int(precision or 0),
+        "require_side_quote": bool(require_side_quote),
     }
     if quote_age_seconds > quote_max_age_seconds >= 0:
         plan["reason"] = "stale_quote"
@@ -2670,6 +2672,12 @@ def build_supervisor_tighten_sl_plan(
         return plan
     if direction == 0:
         plan["reason"] = "missing_position_direction"
+        return plan
+    if require_side_quote and direction > 0 and bid <= 0:
+        plan["reason"] = "missing_bid_quote"
+        return plan
+    if require_side_quote and direction < 0 and ask <= 0:
+        plan["reason"] = "missing_ask_quote"
         return plan
     if reference_price <= 0:
         plan["reason"] = "missing_current_price"
@@ -2730,6 +2738,7 @@ def build_supervisor_tighten_sl_plan_inputs(
         "stop_safety_buffer_ratio": float(policy.get("stop_safety_buffer_ratio", 0.00008) or 0.00008),
         "min_tighten_delta_points": float(policy.get("min_tighten_delta_points", 0.01) or 0.01),
         "precision": int(policy.get("precision", position.get("digits", 2)) or 2),
+        "require_side_quote": bool(policy.get("require_side_quote", False)),
     }
 
 
@@ -2859,6 +2868,7 @@ def build_supervisor_tighten_execution_plan(
     position: dict[str, Any],
     controls: dict[str, Any],
     quote: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target_sl = float((controls or {}).get("target_stop_loss", 0.0) or 0.0)
     current_tp = float((position or {}).get("tp", 0.0) or 0.0)
@@ -2875,6 +2885,7 @@ def build_supervisor_tighten_execution_plan(
             position=position,
             target_sl=target_sl,
             quote=quote,
+            policy=policy,
         )
     )
     return {

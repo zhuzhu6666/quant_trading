@@ -468,6 +468,24 @@
 - 收口方式: 统一结果契约，不增加权重写入旁路；冻结、预算和 replay 阻断属于正常治理结果。
 - 验证方式: `tests/test_factor_weight_change_service.py`、`tests/test_evolution_closure_fixes.py`。
 
+### 扩张冻结未覆盖 Canary 证据阶段推进
+
+- 状态: fixed
+- 旧理解: Evolution 只写研究证据，因此其内部 `canary_state` 从 SHADOW 推进到 CANARY 阶段不属于扩张动作。
+- 当前口径: Canary 阶段上升本身就是扩张性状态变化；冻结时仍刷新证据并允许回滚，但任何阶段上升都保持原 stage，并写明确阻断日志。
+- 影响面: Evolution、Canary readiness、Factor Governance 和自动解冻判断。
+- 收口方式: `_run_canary_evaluation()` 在调用 `CanaryDirector.promote()` 前读取 RuntimeConfig 冻结事实源并 fail-closed。
+- 验证方式: `tests/test_evolution_closure_fixes.py::test_canary_stage_does_not_advance_while_expansion_is_frozen`。
+
+### Supervisor tighten 使用过期的动作起始报价
+
+- 状态: fixed
+- 旧理解: 动作开始时完成一次 stop 合法性规划即可直接提交 broker。
+- 当前口径: tighten 在 broker 提交前必须重新读取方向侧 bid/ask，并使用 RuntimeConfig 的 quote freshness、最小 stop distance、安全缓冲、最小 tighten delta 和 precision 重建计划；缺少方向侧报价或重建后不再合法时只审计 skip，不提交 amend。
+- 影响面: Position Supervisor、cTrader amend、执行 trace 和 broker alignment readiness。
+- 收口方式: supervisor action 执行器增加最终报价二次校验，不增加重试旁路或业务魔法阈值。
+- 验证方式: `tests/test_live_supervision_actions.py::test_execute_supervisor_tighten_action_rechecks_quote_before_amend`。
+
 ### 每日维护窗口被识别为行情故障
 
 - 状态: fixed

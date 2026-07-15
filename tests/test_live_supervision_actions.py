@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 from backend.services.live_risk_sizing import floor_api_volume_to_step
@@ -327,6 +328,74 @@ def test_execute_supervisor_tighten_action_skip_when_plan_not_allowed():
     assert calls["events"][0]["event_type"] == "supervisor_tighten_skipped"
     assert calls["state"][0][1]["broker"] == "ctrader"
     assert calls["logs"] == ["tick 9: supervisor tighten SKIP pos=7 reason=not_tighter"]
+
+
+def test_execute_supervisor_tighten_action_rechecks_quote_before_amend():
+    calls = {"traces": [], "events": [], "state": [], "logs": [], "quotes": 0}
+
+    class _Bridge:
+        def get_spot_quote(self):
+            calls["quotes"] += 1
+            return {"bid": 4010.0 if calls["quotes"] == 1 else 4004.0, "ts": time.time()}
+
+        def amend_position_sltp(self, *_args, **_kwargs):
+            raise AssertionError("invalidated stop must not reach broker")
+
+    def build_plan(*, quote, policy, **_kwargs):
+        assert policy["min_stop_distance_points"] == 0.5
+        if quote["bid"] < 4005.0:
+            return {
+                "target_sl": 4005.0,
+                "current_tp": 4020.0,
+                "target_tp": 0.0,
+                "planned_tp": 4020.0,
+                "planned_sl": 0.0,
+                "sl_plan": {"allowed": False, "reason": "not_tightening_long_stop_loss"},
+            }
+        return {
+            "target_sl": 4005.0,
+            "current_tp": 4020.0,
+            "target_tp": 0.0,
+            "planned_tp": 4020.0,
+            "planned_sl": 4005.0,
+            "sl_plan": {"allowed": True, "reason": "ok"},
+        }
+
+    execute_supervisor_tighten_action(
+        bridge=_Bridge(),
+        position={"position_id": 7, "current_price": 4010.0},
+        verdict={"summary_reason": "protect_profit"},
+        risk_action="tighten_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-tighten",
+        cfg=SimpleNamespace(supervisor_min_stop_distance_points=0.5),
+        tick=9,
+        acct=None,
+        controls={"target_stop_loss": 4005.0},
+        log=calls["logs"].append,
+        build_tighten_execution_plan=build_plan,
+        build_tighten_result_payloads=lambda **kwargs: {
+            "position_event_type": "amend_skipped",
+            "position_event_details": {"reason": kwargs["sl_plan"]["reason"]},
+            "trace_fields": {
+                "stage": "execution_skipped",
+                "outcome": "skipped",
+                "execution_status": "skipped",
+                "execution_reason": kwargs["sl_plan"]["reason"],
+            },
+        },
+        log_supervisor_position_event=lambda **kwargs: calls["events"].append(kwargs),
+        log_supervisor_trace=lambda **kwargs: calls["traces"].append(kwargs),
+        remember_supervisor_state=lambda *args, **kwargs: calls["state"].append((args, kwargs)),
+        remember_supervisor_reentry_block=lambda **_kwargs: None,
+        track_local_sl_tp=lambda *_args, **_kwargs: None,
+        result_is_position_not_found=lambda _result: False,
+        retire_broker_missing_position=lambda *_args, **_kwargs: None,
+    )
+
+    assert calls["quotes"] == 2
+    assert calls["events"][0]["event_type"] == "amend_skipped"
+    assert "not_tightening_long_stop_loss" in calls["logs"][0]
 
 
 def test_execute_supervisor_close_action_success_remembers_reason_and_verdict():

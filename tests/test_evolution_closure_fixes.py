@@ -200,6 +200,7 @@ def test_legacy_param_tune_entrypoint_is_removed():
 
 
 def test_canary_intermediate_stage_does_not_execute_promotion(monkeypatch):
+    rc.patch({"autonomy_expansion_frozen": False})
     saved = {}
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
     monkeypatch.setattr(evo, "_load_canary_states", lambda: {})
@@ -218,7 +219,28 @@ def test_canary_intermediate_stage_does_not_execute_promotion(monkeypatch):
     assert saved["foo"]["stage"] == CANARY_5
 
 
+def test_canary_stage_does_not_advance_while_expansion_is_frozen(monkeypatch):
+    saved = {}
+    rc.patch({"autonomy_expansion_frozen": True})
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
+    monkeypatch.setattr(evo, "_load_canary_states", lambda: {})
+    monkeypatch.setattr(evo, "_save_canary_states", lambda states: saved.update(states))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_ctx_from_log",
+        lambda name, score: CanaryEvalContext(oos_bars=10, oos_pnl=0.005),
+    )
+
+    promotions, rollbacks, stay = evo._run_canary_evaluation("XAUUSD+", "M5", 1000)
+
+    assert promotions == []
+    assert rollbacks == []
+    assert stay == ["foo"]
+    assert saved["foo"]["stage"] == "SHADOW"
+
+
 def test_canary_canary50_enters_probation_without_execution(monkeypatch):
+    rc.patch({"autonomy_expansion_frozen": False})
     saved = {}
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
     monkeypatch.setattr(
@@ -242,6 +264,7 @@ def test_canary_canary50_enters_probation_without_execution(monkeypatch):
 
 
 def test_canary_only_active_stage_executes_promotion(monkeypatch):
+    rc.patch({"autonomy_expansion_frozen": False})
     saved = {}
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
     monkeypatch.setattr(
@@ -265,6 +288,7 @@ def test_canary_only_active_stage_executes_promotion(monkeypatch):
 
 
 def test_canary_restores_legacy_lowercase_shadow(monkeypatch):
+    rc.patch({"autonomy_expansion_frozen": False})
     saved = {}
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
     monkeypatch.setattr(evo, "_load_canary_states", lambda: {"foo": {"stage": "shadow"}})
@@ -282,6 +306,7 @@ def test_canary_restores_legacy_lowercase_shadow(monkeypatch):
     assert saved["foo"]["stage"] == CANARY_5
 
 def test_discovered_factor_is_demoted_until_canary_is_active(monkeypatch):
+    rc.patch({"autonomy_expansion_frozen": False})
     saved = {}
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("discovered")))
     monkeypatch.setattr(
@@ -305,6 +330,7 @@ def test_discovered_factor_is_demoted_until_canary_is_active(monkeypatch):
 
 
 def test_canary_rollback_count_and_history_survive_cycle(monkeypatch):
+    rc.patch({"autonomy_expansion_frozen": False})
     saved = {}
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
     monkeypatch.setattr(
