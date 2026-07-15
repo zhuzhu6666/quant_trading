@@ -6,6 +6,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
@@ -38,6 +39,12 @@ class NurseryExplorationBudgetService:
     def _sql(conn, sql: str) -> str:
         return sql.replace("%", "%%").replace("?", "%s") if conn.__class__.__module__.startswith("psycopg") else sql
 
+    @staticmethod
+    def _count(row: Any) -> int:
+        if isinstance(row, Mapping):
+            return int(next(iter(row.values()), 0) or 0)
+        return int(row[0] or 0) if row else 0
+
     def reserve(self, *, reasons: list[str], setup_fingerprint: str, per_reason_limit: int,
                 global_limit: int, setup_limit: int, ttl_seconds: int, now: float | None = None) -> dict[str, Any]:
         reasons = sorted({str(reason) for reason in reasons if reason})
@@ -53,16 +60,16 @@ class NurseryExplorationBudgetService:
                 conn.execute("BEGIN IMMEDIATE")
             conn.execute(self._sql(conn, "UPDATE nursery_exploration_reservation SET status='expired', updated_at=? WHERE status='reserved' AND expires_at<=?"), (now, now))
             active = ("reserved", "consumed")
-            global_count = conn.execute(self._sql(conn, "SELECT COUNT(DISTINCT reservation_id) FROM nursery_exploration_reservation WHERE trade_date=? AND status IN (?, ?)"), (trade_date, *active)).fetchone()[0]
+            global_count = self._count(conn.execute(self._sql(conn, "SELECT COUNT(DISTINCT reservation_id) FROM nursery_exploration_reservation WHERE trade_date=? AND status IN (?, ?)"), (trade_date, *active)).fetchone())
             if int(global_count) >= max(0, int(global_limit)):
                 conn.rollback()
                 return {"allowed": False, "status": "global_budget_exhausted", "global_count": int(global_count)}
-            setup_count = conn.execute(self._sql(conn, "SELECT COUNT(DISTINCT reservation_id) FROM nursery_exploration_reservation WHERE trade_date=? AND setup_fingerprint=? AND status IN (?, ?)"), (trade_date, setup_fingerprint, *active)).fetchone()[0]
+            setup_count = self._count(conn.execute(self._sql(conn, "SELECT COUNT(DISTINCT reservation_id) FROM nursery_exploration_reservation WHERE trade_date=? AND setup_fingerprint=? AND status IN (?, ?)"), (trade_date, setup_fingerprint, *active)).fetchone())
             if int(setup_count) >= max(0, int(setup_limit)):
                 conn.rollback()
                 return {"allowed": False, "status": "setup_budget_exhausted", "setup_count": int(setup_count)}
             for reason in reasons:
-                count = conn.execute(self._sql(conn, "SELECT COUNT(*) FROM nursery_exploration_reservation WHERE trade_date=? AND reason=? AND status IN (?, ?)"), (trade_date, reason, *active)).fetchone()[0]
+                count = self._count(conn.execute(self._sql(conn, "SELECT COUNT(*) FROM nursery_exploration_reservation WHERE trade_date=? AND reason=? AND status IN (?, ?)"), (trade_date, reason, *active)).fetchone())
                 if int(count) >= max(0, int(per_reason_limit)):
                     conn.rollback()
                     return {"allowed": False, "status": "reason_budget_exhausted", "reason": reason, "reason_count": int(count)}

@@ -7555,7 +7555,7 @@ def _prepare_open_trade_candidate(
                 "block_reason": "nursery_exploration_budget_unavailable",
                 "skip_stage": "nursery_exploration_budget",
             }
-            logger.warning("[live] nursery exploration reservation failed closed: %s", exc)
+            logger.warning("[live] nursery exploration reservation failed closed: {}", exc)
 
     return _OpenTradeCandidate(
         direction_name=direction_name,

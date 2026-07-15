@@ -59,3 +59,8 @@ def test_expired_reservation_does_not_consume_budget(tmp_path):
     assert first["allowed"] is True
     later = _reserve(service, setup="setup-b", now=1_700_000_400.0, global_limit=1)
     assert later["allowed"] is True
+
+
+def test_count_accepts_postgres_dict_rows():
+    assert NurseryExplorationBudgetService._count({"count": 3}) == 3
+    assert NurseryExplorationBudgetService._count((4,)) == 4
