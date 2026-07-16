@@ -742,6 +742,13 @@ class BackendReadinessService:
         }
 
     def _model_status(self) -> dict[str, Any]:
+        from backend.services.model_influence import ModelInfluenceService
+        from backend.services.model_influence_governance import ModelInfluenceGovernanceService
+        from config.runtime_config import shared as runtime_config
+        from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
+        from research.open_quality_lightgbm import OpenQualityLightGBMService
+        from research.position_quality_lightgbm import PositionQualityLightGBMService
+
         service = MetaModelLightGBMService(db_path=self.db_path)
         report = service.build_shadow_report(limit=200, include_samples=False)
         artifact = dict(report.get("artifact_summary") or {})
@@ -756,6 +763,21 @@ class BackendReadinessService:
             and bool(permission.get("ok", True))
             and bool((metrics or {}).get("safe_for_live_trading", False))
         )
+        artifact_services = {
+            "open_quality_lightgbm": OpenQualityLightGBMService(db_path=self.db_path),
+            "position_quality_lightgbm": PositionQualityLightGBMService(db_path=self.db_path),
+            "factor_governance_lightgbm": FactorGovernanceLightGBMService(db_path=self.db_path),
+            "meta_model_lightgbm": service,
+        }
+        gate_service = ModelInfluenceGovernanceService(self.db_path)
+        promotion_gates = {}
+        for model_type, artifact_service in artifact_services.items():
+            latest_path = artifact_service.latest_artifact_path()
+            promotion_gates[model_type] = (
+                gate_service.evaluate_artifact(latest_path)
+                if latest_path else {"passed": False, "reason": "artifact_missing", "failed_checks": ["artifact_missing"]}
+            )
+        influence_status = ModelInfluenceService(self.db_path).status(runtime_config())
         return {
             "meta_lightgbm": {
                 "report": report,
@@ -774,6 +796,8 @@ class BackendReadinessService:
                     "evaluated_count": evaluated_count,
                 },
             },
+            "promotion_gates": promotion_gates,
+            "influence": influence_status,
             "permission_ok": bool(permission.get("ok", True)),
             "latest_permission_audit": permission,
         }

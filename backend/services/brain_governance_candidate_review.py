@@ -18,6 +18,25 @@ from research.learning.governance_conflicts import ACTIVE_CONFLICT_STATUSES, con
 from research.llm_advisory import LLMAdvisoryService
 
 
+def _substantive_evidence(value: Any) -> Any:
+    """Strip rotating audit coordinates while retaining measured evidence."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if (
+                normalized in {"created_at", "updated_at", "expires_at", "timestamp", "ts"}
+                or normalized.endswith("_id")
+                or normalized.endswith("_ids")
+            ):
+                continue
+            result[str(key)] = _substantive_evidence(item)
+        return result
+    if isinstance(value, list):
+        return [_substantive_evidence(item) for item in value]
+    return value
+
+
 def ensure_brain_governance_candidate_review_table(db_path: str | Path = STATE_DB) -> None:
     ensure_brain_governance_candidate_table(db_path)
     conn = _connect(db_path)
@@ -803,9 +822,34 @@ class BrainGovernanceCandidateReviewService:
     def _evidence_fingerprint(candidate: dict[str, Any], context: dict[str, Any]) -> str:
         scorecard = dict(context.get("agent_scorecard") or {}).get(str(candidate.get("source_agent") or ""), {})
         briefing = dict(context.get("briefing") or {})
+        candidate_row = BrainGovernanceCandidateReviewService._candidate_as_row(candidate)
+        surface = control_surface(candidate_row)
+        policy_conflicts = sorted(
+            (
+                str(row.get("status") or ""),
+                str(row.get("scope_type") or ""),
+                str(row.get("scope_key") or ""),
+                str(row.get("action") or ""),
+            )
+            for row in (context.get("policy_suggestions") or [])
+            if control_surface(row) == surface
+        )
+        candidate_conflicts = sorted(
+            (
+                str(item.get("proposal_stage") or ""),
+                str(item.get("scope_type") or ""),
+                str(item.get("scope_key") or ""),
+                str(item.get("action") or ""),
+            )
+            for item in (context.get("candidates") or [])
+            if str(item.get("candidate_id") or "") != str(candidate.get("candidate_id") or "")
+            and str(item.get("status") or "") == "active"
+            and control_surface(BrainGovernanceCandidateReviewService._candidate_as_row(item)) == surface
+        )
+        expected = dict(candidate.get("expected_effect") or {})
+        mapped = dict((candidate.get("lineage") or {}).get("mapped_action") or {})
         payload = {
             "candidate_id": candidate.get("candidate_id"),
-            "updated_at": candidate.get("updated_at"),
             "status": candidate.get("status"),
             "proposal_stage": candidate.get("proposal_stage"),
             "scope_type": candidate.get("scope_type"),
@@ -813,9 +857,19 @@ class BrainGovernanceCandidateReviewService:
             "action": candidate.get("action"),
             "confidence": candidate.get("confidence"),
             "evidence_score": candidate.get("evidence_score"),
-            "expires_at": candidate.get("expires_at"),
-            "evidence_refs": candidate.get("evidence_refs"),
-            "counter_evidence_refs": candidate.get("counter_evidence_refs"),
+            "risk_allowed": bool((candidate.get("risk_verdict") or {}).get("allowed")),
+            "source_presence": expected.get("source_presence") or {},
+            "replay_status": (expected.get("replay") or {}).get("status"),
+            "supervisor_trace_count": (expected.get("supervisor") or {}).get("trace_count"),
+            "mapped_action": {
+                "target_template_id": mapped.get("target_template_id"),
+                "recommended_scope": mapped.get("recommended_scope"),
+            },
+            "evidence": _substantive_evidence(candidate.get("evidence_refs") or {}),
+            "counter_evidence": _substantive_evidence(candidate.get("counter_evidence_refs") or {}),
+            "control_surface": surface,
+            "policy_conflicts": policy_conflicts,
+            "candidate_conflicts": candidate_conflicts,
             "source_scorecard": {
                 "quality_score": scorecard.get("quality_score"),
                 "contract_violation_count": scorecard.get("contract_violation_count"),

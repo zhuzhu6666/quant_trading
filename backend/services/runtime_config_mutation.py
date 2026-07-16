@@ -195,6 +195,8 @@ class RuntimeConfigMutationService:
     @staticmethod
     def _scope_type(*, action: str) -> str:
         value = str(action or "").lower()
+        if "model" in value:
+            return "model_stage"
         if "supervisor" in value:
             return "supervisor_template"
         if "parameter" in value or "template" in value:
@@ -222,6 +224,8 @@ class RuntimeConfigMutationService:
             "position_supervisor_template_id",
             "active_parameter_templates",
             "context_policy",
+            "demo_model_influence_enabled",
+            "model_influence_config",
         }
         governance_tokens = (
             "factor_governance",
@@ -234,6 +238,7 @@ class RuntimeConfigMutationService:
             "context_policy",
             "switch_parameter",
             "switch_position",
+            "model_influence",
         )
         return bool(keys & governance_keys) or any(
             token in f"{source} {action}".lower() for token in governance_tokens
@@ -246,6 +251,10 @@ class RuntimeConfigMutationService:
             return "switch_parameter_template"
         if "supervisor" in normalized and "rollback" not in normalized:
             return "switch_position_supervisor_template"
+        if "model" in normalized and any(token in normalized for token in ("demot", "quarant", "rollback", "disable")):
+            return "demote_model_influence"
+        if "model" in normalized:
+            return "promote_model_influence"
         if "rollback" in normalized or "downsize" in normalized or "disable" in normalized or "retire" in normalized or "quarantine" in normalized:
             return "retire_factor"
         if "promot" in normalized or "activat" in normalized:

@@ -67,10 +67,16 @@ def _init_db(path):
             },
             "event_context": {"event_near": not good, "multiplier": 0.2 if not good else 1.0},
             "decision_quality_context": {
+                "schema_version": "decision_quality_context.v1",
+                "composer_version": "factor_roles.v2",
+                "factor_roles": {"rsi": "alpha", "atr": "risk"},
+                "n_active_alpha_factors": 1,
                 "factor_conflict_ratio": 0.1 if good else 0.7,
                 "positive_contribution_abs": 2.0 if good else 0.4,
                 "negative_contribution_abs": 0.3 if good else 2.2,
             },
+            "bar_context": {"schema_version": "decision_bar.v1", "complete": True},
+            "market_micro_context": {"quote_fresh": True, "quote_age_seconds": 0.1},
         }
         label = {
             "label": "open_outcome",
@@ -83,9 +89,9 @@ def _init_db(path):
             (sample_id, sample_type, source_table, source_id, decision_id, trade_id,
              position_id, symbol, timeframe, event_ts, label_status, integrity,
              train_weight, features_json, label_json, trace_json,
-             evidence_contract_json, created_at, updated_at)
+            evidence_contract_json, config_hash, created_at, updated_at)
             VALUES (?, 'shadow_open_decision', 'decision_ledger', ?, ?, ?, ?,
-                    'XAUUSD+', 'M5', ?, 'matured', 'full', 1.0, ?, ?, ?, ?, ?, ?)
+                    'XAUUSD+', 'M5', ?, 'matured', 'full', 1.0, ?, ?, ?, ?, 'cfg-current', ?, ?)
             """,
             (
                 f"als_open_{idx}",
@@ -117,7 +123,8 @@ def test_open_quality_lightgbm_trains_or_reports_dependency(tmp_path):
         assert result["error"] == "dependency_missing"
         return
     assert result["model_type"] == MODEL_TYPE
-    assert result["metrics"]["split"] == "time_ordered"
+    assert result["metrics"]["split"] == "time_ordered_grouped_purged"
+    assert result["feature_schema_version"] == "pit.v2.open_lineage"
     assert result["metrics"]["holdout"]["rule_accuracy"] is not None
     assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None
     assert "model_lift_vs_rule" in result["metrics"]["holdout"]

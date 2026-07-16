@@ -1139,3 +1139,29 @@ def test_brain_live_ready_guardrail_tightens_only_through_incident_control(tmp_p
         assert RuntimeIncidentControlService(db_path).status()["mode"] == "frozen"
     finally:
         RuntimeIncidentControlService(db_path).set_mode("normal", reason="restore", confirm_thaw=True)
+
+
+def test_candidate_review_fingerprint_ignores_volatile_audit_timestamps():
+    candidate = {
+        "candidate_id": "candidate-1",
+        "source_agent": "factor_governance",
+        "status": "active",
+        "proposal_stage": "governance_ready",
+        "scope_type": "factor",
+        "scope_key": "rsi_14",
+        "action": "downweight",
+        "confidence": 0.7,
+        "evidence_score": 0.8,
+        "updated_at": 100.0,
+        "expires_at": 200.0,
+        "risk_verdict": {"allowed": True},
+    }
+    context = {"agent_scorecard": {}, "briefing": {}, "policy_suggestions": [], "candidates": [candidate]}
+    first = BrainGovernanceCandidateReviewService._evidence_fingerprint(candidate, context)
+    refreshed = {**candidate, "updated_at": 150.0, "expires_at": 250.0}
+    second = BrainGovernanceCandidateReviewService._evidence_fingerprint(
+        refreshed,
+        {**context, "candidates": [refreshed]},
+    )
+
+    assert second == first

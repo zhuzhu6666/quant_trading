@@ -7,6 +7,21 @@ from backend.services.position_supervisor import evaluate_position_supervisor
 from backend.services.position_supervisor_templates import CONSERVATIVE_TEMPLATE_ID, PROFIT_PROTECTION_TEMPLATE_ID
 
 
+def test_position_supervisor_derives_completed_bars_when_temporal_value_is_missing():
+    verdict = evaluate_position_supervisor({
+        "position": {
+            "position_id": "bars-fallback", "direction": 1,
+            "entry_price": 3000.0, "current_price": 3001.0,
+            "volume": 100.0, "unrealized_pnl": 1.0,
+        },
+        "risk": {"thesis_status": "intact", "regime_shift": "none"},
+        "temporal_context": {"holding_seconds": 1252.0},
+    })
+
+    assert verdict["evidence"]["completed_bars_after_entry"] == 4
+    assert verdict["evidence"]["closed_bar_window_ready"] is True
+
+
 def test_position_supervisor_recommends_reduce_after_large_giveback():
     verdict = evaluate_position_supervisor(
         {

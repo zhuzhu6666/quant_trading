@@ -251,6 +251,30 @@ def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypat
     assert live_service._live_state_get("session_trade_pnls", clone=True) == pytest.approx([-1.1, 3.0])
     assert live_service._live_state_get("session_consecutive_loss") == 0
     assert live_service._live_state_get("session_state_source") == "ctrader_deals.final_close_rebuild.v1"
+    assert live_service._live_state_get("session_start_balance") == pytest.approx(998.1)
+
+
+def test_session_windows_distinguish_utc_risk_day_from_beijing_calendar_day():
+    utc_start, utc_end = live_service._session_trade_window("2026-07-16", "UTC")
+    cn_start, cn_end = live_service._session_trade_window("2026-07-16", "Asia/Shanghai")
+
+    assert utc_end - utc_start == 86400
+    assert cn_end - cn_start == 86400
+    assert utc_start - cn_start == 8 * 3600
+
+
+def test_session_start_balance_is_repaired_after_late_broker_account(monkeypatch):
+    monkeypatch.setattr(live_service, "_persist_session_state", lambda trade_date=None: None)
+    live_service._live_state_update(
+        account={"balance": 369.84},
+        session_pnl=-5.40,
+        session_start_balance=0.0,
+    )
+
+    repaired = live_service._repair_session_start_balance_from_account()
+
+    assert repaired == pytest.approx(375.24)
+    assert live_service._live_state_get("session_start_balance") == pytest.approx(375.24)
 
 
 def test_floor_api_volume_to_step_skips_untradeable_partial_reduce():

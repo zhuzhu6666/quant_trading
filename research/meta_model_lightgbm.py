@@ -16,8 +16,10 @@ from research.features.evidence_contract import stable_hash
 
 
 MODEL_TYPE = "meta_model_lightgbm"
-MODEL_VERSION = "1.1"
+MODEL_VERSION = "4.0"
+FEATURE_SCHEMA_VERSION = "pit.v2.meta_residual_rate"
 POSTURE_LABELS = ["contract", "observe", "recover"]
+RESIDUAL_LABELS = ["contract_more", "agree", "recover_more"]
 FEATURE_NAMES = [
     "rolling_trade_count",
     "rolling_pnl_sum",
@@ -34,14 +36,13 @@ FEATURE_NAMES = [
     "rolling_profit_capture_avg",
     "rolling_giveback_avg",
     "rolling_holding_efficiency_avg",
-    "future_window_trade_count",
-    "risk_blocked_count",
-    "risk_allowed_count",
-    "supervisor_close_count",
-    "supervisor_reduce_count",
-    "supervisor_tighten_count",
-    "amend_skipped_count",
-    "amend_failed_count",
+    "risk_blocked_rate_per_hour",
+    "risk_allowed_rate_per_hour",
+    "supervisor_close_rate_per_hour",
+    "supervisor_reduce_rate_per_hour",
+    "supervisor_tighten_rate_per_hour",
+    "amend_skipped_rate_per_hour",
+    "amend_failed_rate_per_hour",
     "position_quality_weak_rate",
     "factor_governance_weak_rate",
     "counterfactual_premature_rate",
@@ -292,10 +293,14 @@ class MetaModelLightGBMService:
                 history = reviews[:idx]
                 target = reviews[idx]
                 future = reviews[idx:idx + max(1, int(horizon))]
-                label = _future_window_posture_label(future)
+                future_posture_index = _future_window_posture_label(future)
                 features = _rolling_features(history, window=window)
                 features.update(self._window_features(conn, end_ts=target["created_at"], window_items=history[-max(1, int(window)):]))
-                features["future_window_trade_count"] = float(len(future))
+                features = {name: _safe_float(features.get(name)) for name in FEATURE_NAMES}
+                rule_posture = str(self._rule_decision_from_features(features).get("posture") or "observe")
+                rule_posture_index = POSTURE_LABELS.index(rule_posture) if rule_posture in POSTURE_LABELS else 1
+                residual_direction = max(-1, min(1, future_posture_index - rule_posture_index))
+                residual_label = residual_direction + 1
                 samples.append(
                     {
                         "sample_id": f"meta:{target['review_id'] or target['position_id']}",
@@ -309,9 +314,13 @@ class MetaModelLightGBMService:
                             "pnl_sum": round(sum(_safe_float(item.get("pnl")) for item in future), 8),
                             "labels": [str(item.get("outcome_label") or "") for item in future],
                         },
-                        "label": label,
-                        "label_name": POSTURE_LABELS[label],
-                        "features": {name: _safe_float(features.get(name)) for name in FEATURE_NAMES},
+                        "label": residual_label,
+                        "label_name": RESIDUAL_LABELS[residual_label],
+                        "future_posture_index": future_posture_index,
+                        "future_posture": POSTURE_LABELS[future_posture_index],
+                        "rule_posture_index": rule_posture_index,
+                        "rule_posture": POSTURE_LABELS[rule_posture_index],
+                        "features": features,
                         "traceability": {
                             "source_table": "trade_outcome_review",
                             "target_review_id": target["review_id"],
@@ -319,6 +328,7 @@ class MetaModelLightGBMService:
                             "history_count": len(history),
                             "future_count": len(future),
                             "causal_level": "observational",
+                            "target_contract": "rule_posture_residual.v1",
                         },
                     }
                 )
@@ -333,16 +343,19 @@ class MetaModelLightGBMService:
         end_ts: float,
         window_items: list[dict[str, Any]],
     ) -> dict[str, float]:
-        history_start_ts = min([_safe_float(item.get("created_at"), end_ts) for item in window_items] or [end_ts])
-        start_ts = min(history_start_ts, float(end_ts) - 3600.0)
+        # All event-volume features use the same fixed 24-hour observation
+        # window and are normalized to hourly rates.  The previous variable
+        # window made busier/newer periods look intrinsically riskier.
+        start_ts = float(end_ts) - 86400.0
+        observation_hours = 24.0
         features = {
-            "risk_blocked_count": 0.0,
-            "risk_allowed_count": 0.0,
-            "supervisor_close_count": 0.0,
-            "supervisor_reduce_count": 0.0,
-            "supervisor_tighten_count": 0.0,
-            "amend_skipped_count": 0.0,
-            "amend_failed_count": 0.0,
+            "risk_blocked_rate_per_hour": 0.0,
+            "risk_allowed_rate_per_hour": 0.0,
+            "supervisor_close_rate_per_hour": 0.0,
+            "supervisor_reduce_rate_per_hour": 0.0,
+            "supervisor_tighten_rate_per_hour": 0.0,
+            "amend_skipped_rate_per_hour": 0.0,
+            "amend_failed_rate_per_hour": 0.0,
             "position_quality_weak_rate": 0.0,
             "factor_governance_weak_rate": 0.0,
             "counterfactual_premature_rate": 0.0,
@@ -363,18 +376,18 @@ class MetaModelLightGBMService:
             for row in rows:
                 event_type = str(row["event_type"] or "")
                 if event_type == "supervisor_close":
-                    features["supervisor_close_count"] += 1.0
+                    features["supervisor_close_rate_per_hour"] += 1.0
                 elif event_type == "supervisor_reduce":
-                    features["supervisor_reduce_count"] += 1.0
+                    features["supervisor_reduce_rate_per_hour"] += 1.0
                 elif event_type == "supervisor_tighten":
-                    features["supervisor_tighten_count"] += 1.0
+                    features["supervisor_tighten_rate_per_hour"] += 1.0
                 risk_state = _loads(row["risk_state_json"], {})
                 verdict = risk_state.get("policy_verdict") or risk_state.get("risk_verdict") or {}
                 if verdict:
                     if verdict.get("allowed") is False:
-                        features["risk_blocked_count"] += 1.0
+                        features["risk_blocked_rate_per_hour"] += 1.0
                     elif verdict.get("allowed") is True:
-                        features["risk_allowed_count"] += 1.0
+                        features["risk_allowed_rate_per_hour"] += 1.0
 
         if _table_exists(conn, "position_lifecycle_event"):
             rows = _execute(conn,
@@ -389,9 +402,17 @@ class MetaModelLightGBMService:
             ).fetchall()
             for row in rows:
                 key = str(row["event_type"] or "")
-                feature_key = f"{key}_count"
+                feature_key = f"{key}_rate_per_hour"
                 if feature_key in features:
                     features[feature_key] = _safe_float(row["n"])
+
+        for feature_key in (
+            "risk_blocked_rate_per_hour", "risk_allowed_rate_per_hour",
+            "supervisor_close_rate_per_hour", "supervisor_reduce_rate_per_hour",
+            "supervisor_tighten_rate_per_hour", "amend_skipped_rate_per_hour",
+            "amend_failed_rate_per_hour",
+        ):
+            features[feature_key] = features[feature_key] / observation_hours
 
         features["position_quality_weak_rate"] = self._shadow_weak_rate(
             conn,
@@ -530,7 +551,9 @@ class MetaModelLightGBMService:
                 "ok": False,
                 "model_type": MODEL_TYPE,
                 "model_version": MODEL_VERSION,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
                 "sample_count": len(samples),
+                "target_contract": "rule_posture_residual.v1",
                 "error": "insufficient_meta_samples",
             }
         labels = [int(item["label"]) for item in samples]
@@ -540,7 +563,7 @@ class MetaModelLightGBMService:
                 "model_type": MODEL_TYPE,
                 "model_version": MODEL_VERSION,
                 "sample_count": len(samples),
-                "label_distribution": {POSTURE_LABELS[i]: labels.count(i) for i in range(len(POSTURE_LABELS))},
+                "label_distribution": {RESIDUAL_LABELS[i]: labels.count(i) for i in range(len(RESIDUAL_LABELS))},
                 "error": "single_class_training_data",
             }
 
@@ -553,11 +576,13 @@ class MetaModelLightGBMService:
         y_train = [int(item["label"]) for item in train_samples]
         x_holdout = pd.DataFrame([item["features"] for item in holdout_samples], columns=FEATURE_NAMES)
         y_holdout = [int(item["label"]) for item in holdout_samples]
+        actual_train = [int(item["future_posture_index"]) for item in train_samples]
+        actual_holdout = [int(item["future_posture_index"]) for item in holdout_samples]
 
         def _new_model(sample_count: int):
             return lgb.LGBMClassifier(
                 objective="multiclass",
-                num_class=len(POSTURE_LABELS),
+                num_class=len(RESIDUAL_LABELS),
                 n_estimators=160,
                 learning_rate=0.04,
                 num_leaves=15,
@@ -572,15 +597,20 @@ class MetaModelLightGBMService:
 
         model = _new_model(len(train_samples))
         model.fit(x_train, y_train)
-        train_pred = list(model.predict(x_train))
-        holdout_pred = list(model.predict(x_holdout))
-        rule_holdout_pred = []
-        for sample in holdout_samples:
-            rule_decision = self._rule_decision_from_features(sample["features"])
-            rule_posture = str(rule_decision.get("posture") or "observe")
-            rule_holdout_pred.append(POSTURE_LABELS.index(rule_posture) if rule_posture in POSTURE_LABELS else POSTURE_LABELS.index("observe"))
-        majority_label = Counter(y_train).most_common(1)[0][0]
-        majority_holdout_pred = [majority_label] * len(y_holdout)
+        train_residual_pred = [int(value) for value in model.predict(x_train)]
+        holdout_residual_pred = [int(value) for value in model.predict(x_holdout)]
+
+        def _fused_postures(items: list[dict[str, Any]], residual_predictions: list[int]) -> list[int]:
+            return [
+                max(0, min(len(POSTURE_LABELS) - 1, int(item["rule_posture_index"]) + int(prediction) - 1))
+                for item, prediction in zip(items, residual_predictions)
+            ]
+
+        train_pred = _fused_postures(train_samples, train_residual_pred)
+        holdout_pred = _fused_postures(holdout_samples, holdout_residual_pred)
+        rule_holdout_pred = [int(item["rule_posture_index"]) for item in holdout_samples]
+        majority_label = Counter(actual_train).most_common(1)[0][0]
+        majority_holdout_pred = [majority_label] * len(actual_holdout)
 
         def _label_distribution(values: list[int]) -> dict[str, int]:
             counts = Counter(int(value) for value in values)
@@ -588,8 +618,8 @@ class MetaModelLightGBMService:
 
         def _holdout_metrics(preds: list[int]) -> dict[str, Any]:
             return {
-                "accuracy": round(float(accuracy_score(y_holdout, preds)), 6) if y_holdout else None,
-                "balanced_accuracy": round(float(balanced_accuracy_score(y_holdout, preds)), 6) if y_holdout else None,
+                "accuracy": round(float(accuracy_score(actual_holdout, preds)), 6) if actual_holdout else None,
+                "balanced_accuracy": round(float(balanced_accuracy_score(actual_holdout, preds)), 6) if actual_holdout else None,
                 "prediction_distribution": _label_distribution(preds),
             }
 
@@ -600,7 +630,7 @@ class MetaModelLightGBMService:
                 key=lambda item: (-int(item[1]), item[0]),
             )
         ]
-        label_distribution = {POSTURE_LABELS[i]: labels.count(i) for i in range(len(POSTURE_LABELS))}
+        label_distribution = {RESIDUAL_LABELS[i]: labels.count(i) for i in range(len(RESIDUAL_LABELS))}
         holdout_model = _holdout_metrics([int(value) for value in holdout_pred])
         holdout_rule = _holdout_metrics(rule_holdout_pred)
         holdout_majority = _holdout_metrics(majority_holdout_pred)
@@ -627,6 +657,7 @@ class MetaModelLightGBMService:
                 fold_validation = train_samples[validation_start:validation_end]
                 fold_train_labels = [int(item["label"]) for item in fold_train]
                 fold_validation_labels = [int(item["label"]) for item in fold_validation]
+                fold_validation_actual = [int(item["future_posture_index"]) for item in fold_validation]
                 if (
                     not fold_validation
                     or len(set(fold_train_labels)) < 2
@@ -638,24 +669,25 @@ class MetaModelLightGBMService:
                     pd.DataFrame([item["features"] for item in fold_train], columns=FEATURE_NAMES),
                     fold_train_labels,
                 )
-                fold_predictions = [
+                fold_residual_predictions = [
                     int(value)
                     for value in fold_model.predict(
                         pd.DataFrame([item["features"] for item in fold_validation], columns=FEATURE_NAMES)
                     )
                 ]
-                fold_majority_label = Counter(fold_train_labels).most_common(1)[0][0]
-                fold_majority_predictions = [fold_majority_label] * len(fold_validation_labels)
+                fold_predictions = _fused_postures(fold_validation, fold_residual_predictions)
+                fold_majority_label = Counter(int(item["future_posture_index"]) for item in fold_train).most_common(1)[0][0]
+                fold_majority_predictions = [fold_majority_label] * len(fold_validation_actual)
                 walk_forward_items.append({
                     "fold": fold_index + 1,
                     "train_count": len(fold_train),
                     "validation_count": len(fold_validation),
                     "balanced_accuracy": round(
-                        float(balanced_accuracy_score(fold_validation_labels, fold_predictions)),
+                        float(balanced_accuracy_score(fold_validation_actual, fold_predictions)),
                         6,
                     ),
                     "majority_baseline_balanced_accuracy": round(
-                        float(balanced_accuracy_score(fold_validation_labels, fold_majority_predictions)),
+                        float(balanced_accuracy_score(fold_validation_actual, fold_majority_predictions)),
                         6,
                     ),
                 })
@@ -677,15 +709,31 @@ class MetaModelLightGBMService:
             and walk_forward_mean >= walk_forward_baseline_mean
             and walk_forward_worst >= 0.25
         )
-        train_accuracy = float(accuracy_score(y_train, train_pred))
+        train_accuracy = float(accuracy_score(actual_train, train_pred))
         generalization_gap = max(0.0, train_accuracy - model_accuracy)
         generalization_ready = generalization_gap <= max(0.05, float(max_generalization_gap or 0.25))
         baseline_margin = 0.02
+        train_future_distribution = Counter(actual_train)
+        holdout_future_distribution = Counter(actual_holdout)
+        max_future_posture_rate_delta = max(
+            abs(
+                train_future_distribution.get(index, 0) / max(len(actual_train), 1)
+                - holdout_future_distribution.get(index, 0) / max(len(actual_holdout), 1)
+            )
+            for index in range(len(POSTURE_LABELS))
+        )
+        holdout_rule_distribution = Counter(rule_holdout_pred)
+        holdout_rule_max_rate = max(holdout_rule_distribution.values(), default=0) / max(len(rule_holdout_pred), 1)
+        distribution_ready = bool(
+            max_future_posture_rate_delta <= 0.25
+            and holdout_rule_max_rate <= 0.90
+        )
         model_beats_baseline = (
             model_accuracy >= majority_accuracy + baseline_margin
             and model_balanced_accuracy >= majority_balanced_accuracy
             and walk_forward_ready
             and generalization_ready
+            and distribution_ready
         )
         rule_beats_baseline = (
             rule_accuracy >= majority_accuracy + baseline_margin
@@ -707,6 +755,8 @@ class MetaModelLightGBMService:
                 degradation_reason = "train_holdout_generalization_gap_exceeded"
             elif not walk_forward_ready:
                 degradation_reason = "walk_forward_validation_not_stable"
+            elif not distribution_ready:
+                degradation_reason = "posture_distribution_drift_or_rule_collapse"
         metrics = {
             "train": {"count": len(y_train), "accuracy": round(train_accuracy, 6)},
             "split": "time_ordered",
@@ -736,6 +786,13 @@ class MetaModelLightGBMService:
                 "ready": walk_forward_ready,
                 "folds": walk_forward_items,
             },
+            "distribution_stability": {
+                "max_future_posture_rate_delta": round(max_future_posture_rate_delta, 6),
+                "max_allowed_future_posture_rate_delta": 0.25,
+                "holdout_rule_max_posture_rate": round(holdout_rule_max_rate, 6),
+                "max_allowed_rule_posture_rate": 0.90,
+                "ready": distribution_ready,
+            },
             "governance_readiness": {
                 "status": readiness_status,
                 "model_ready_for_governance": bool(model_beats_baseline),
@@ -754,11 +811,17 @@ class MetaModelLightGBMService:
                     "generalization_gap": round(generalization_gap, 6),
                     "max_generalization_gap": max(0.05, float(max_generalization_gap or 0.25)),
                     "generalization_ready": generalization_ready,
+                    "distribution_ready": distribution_ready,
                 },
             },
             "sample_count": len(samples),
             "feature_count": len(FEATURE_NAMES),
             "label_distribution": label_distribution,
+            "future_posture_distribution": {
+                POSTURE_LABELS[i]: [int(item["future_posture_index"]) for item in samples].count(i)
+                for i in range(len(POSTURE_LABELS))
+            },
+            "target_contract": "rule_posture_residual.v1",
             "safe_for_live_trading": False,
         }
         now = time.time()
@@ -766,18 +829,26 @@ class MetaModelLightGBMService:
         artifact_base = f"{MODEL_TYPE}_{int(now)}"
         model_path = self.artifact_dir / f"{artifact_base}.joblib"
         metadata_path = self.artifact_dir / f"{artifact_base}.json"
-        joblib.dump({"model": model, "feature_names": FEATURE_NAMES, "posture_labels": POSTURE_LABELS}, model_path)
+        joblib.dump({
+            "model": model,
+            "feature_names": FEATURE_NAMES,
+            "posture_labels": POSTURE_LABELS,
+            "residual_labels": RESIDUAL_LABELS,
+            "target_contract": "rule_posture_residual.v1",
+        }, model_path)
         artifact = {
-            "schema_version": "meta_model_lightgbm_artifact.v1",
+            "schema_version": "meta_model_lightgbm_artifact.v2",
             "model_type": MODEL_TYPE,
             "model_version": MODEL_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "created_at": now,
             "artifact_path": str(metadata_path),
             "model_file": str(model_path),
             "model_file_sha256": _sha256(model_path),
             "feature_names": FEATURE_NAMES,
             "posture_labels": POSTURE_LABELS,
-            "label": "future_meta_posture",
+            "residual_labels": RESIDUAL_LABELS,
+            "label": "future_meta_posture_residual_vs_rule",
             "sample_window": {
                 "limit": int(limit),
                 "sample_count": len(samples),
@@ -855,6 +926,7 @@ class MetaModelLightGBMService:
             "ok": True,
             "model_type": MODEL_TYPE,
             "model_version": MODEL_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "artifact_path": str(metadata_path),
             "artifact_sha256": artifact["artifact_sha256"],
             "model_file": str(model_path),
@@ -947,19 +1019,34 @@ class MetaModelLightGBMService:
         materialize_ledger: bool,
     ) -> dict[str, Any]:
         now = time.time()
-        padded = list(scores)[: len(POSTURE_LABELS)]
-        while len(padded) < len(POSTURE_LABELS):
-            padded.append(0.0)
-        best_idx = max(range(len(POSTURE_LABELS)), key=lambda idx: padded[idx])
+        residual_scores = list(scores)[: len(RESIDUAL_LABELS)]
+        while len(residual_scores) < len(RESIDUAL_LABELS):
+            residual_scores.append(0.0)
+        rule_idx = int(sample.get("rule_posture_index", 1))
+        rule_idx = max(0, min(len(POSTURE_LABELS) - 1, rule_idx))
+        posture_scores = [0.0] * len(POSTURE_LABELS)
+        for residual_idx, probability in enumerate(residual_scores):
+            final_idx = max(0, min(len(POSTURE_LABELS) - 1, rule_idx + residual_idx - 1))
+            posture_scores[final_idx] += float(probability)
+        best_residual_idx = max(range(len(RESIDUAL_LABELS)), key=lambda idx: residual_scores[idx])
+        best_idx = max(range(len(POSTURE_LABELS)), key=lambda idx: posture_scores[idx])
         posture = POSTURE_LABELS[best_idx]
-        posture_score = max(padded)
+        posture_score = posture_scores[best_idx]
         result = {
             "schema_version": "meta_model_shadow_result.v1",
             "model_type": MODEL_TYPE,
             "model_version": str(artifact.get("model_version") or MODEL_VERSION),
             "posture": posture,
             "posture_score": round(float(posture_score), 8),
-            "scores": {label: round(float(padded[idx]), 8) for idx, label in enumerate(POSTURE_LABELS)},
+            "scores": {label: round(float(posture_scores[idx]), 8) for idx, label in enumerate(POSTURE_LABELS)},
+            "rule_posture": POSTURE_LABELS[rule_idx],
+            "residual": RESIDUAL_LABELS[best_residual_idx],
+            "residual_score": round(float(residual_scores[best_residual_idx]), 8),
+            "residual_scores": {
+                label: round(float(residual_scores[idx]), 8)
+                for idx, label in enumerate(RESIDUAL_LABELS)
+            },
+            "target_contract": "rule_posture_residual.v1",
             "risk_budget_advice": self._risk_budget_advice(posture),
             "trade_frequency_advice": self._trade_frequency_advice(posture),
             "advice": "review_only",
@@ -992,8 +1079,11 @@ class MetaModelLightGBMService:
             "target_position_id": sample["target_position_id"],
             "target_pnl": sample["target_pnl"],
             "future_window": sample.get("future_window") or {},
-            "label": sample["label"],
-            "label_name": sample["label_name"],
+            "label": sample["future_posture_index"],
+            "label_name": sample["future_posture"],
+            "residual_label": sample["label"],
+            "residual_label_name": sample["label_name"],
+            "rule_posture": sample["rule_posture"],
             "features": sample["features"],
             "traceability": {
                 **(sample.get("traceability") or {}),
@@ -1039,9 +1129,9 @@ class MetaModelLightGBMService:
                     str(mode),
                     posture,
                     float(posture_score),
-                    float(padded[0]),
-                    float(padded[1]),
-                    float(padded[2]),
+                    float(posture_scores[0]),
+                    float(posture_scores[1]),
+                    float(posture_scores[2]),
                     ledger_decision_id,
                     json.dumps(payload, ensure_ascii=False, sort_keys=True),
                     json.dumps(result, ensure_ascii=False, sort_keys=True),
@@ -1266,7 +1356,9 @@ class MetaModelLightGBMService:
         context = {
             "schema_version": "meta_shadow_report_rule_context.v1",
             "risk": {
-                "blocked_verdict_count_24h": _safe_int(features.get("risk_blocked_count")),
+                "blocked_verdict_count_24h": int(round(
+                    _safe_float(features.get("risk_blocked_rate_per_hour")) * 24.0
+                )),
             },
             "factor": {
                 "health": {

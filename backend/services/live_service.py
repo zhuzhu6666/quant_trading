@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from loguru import logger
@@ -239,6 +240,7 @@ _TRADE_REVIEWER: TradeReviewer | None = None
 _EXPERIENCE_BUILDER: ExperienceBuilder | None = None
 _POLICY_SUGGESTER: PolicySuggester | None = None
 _POSITION_QUALITY_ADVISOR: Any = None
+_OPEN_QUALITY_ADVISOR: Any = None
 _RISK_POLICY = RiskPolicyService.shared()
 _DECISION_LOG_PENDING_PATH = Path("data/charts/decision_log.pending.jsonl")
 _DECISION_LOG_PENDING_LOCK = threading.Lock()
@@ -1242,6 +1244,72 @@ _bar_context_snapshot = _lifecycle_build_bar_context_snapshot
 _decision_quality_context = _lifecycle_build_decision_quality_context
 
 
+def _evaluate_open_quality_model_veto(
+    *,
+    cfg: Any,
+    bridge: Any,
+    bar: dict[str, Any],
+    composite: Any,
+    positions: list[Any],
+    current_price: float,
+    event_context: dict[str, Any],
+    rule_decision: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate the promoted PIT-v2 open model as a veto-only control."""
+    global _OPEN_QUALITY_ADVISOR
+    from backend.services.model_influence import shared_model_influence_service
+
+    influence = shared_model_influence_service()
+    policy = influence.active_policy("open_quality_lightgbm", cfg)
+    if not policy:
+        return {"passed": True, "reason": "model_open_influence_inactive"}
+    if _OPEN_QUALITY_ADVISOR is None:
+        from research.open_quality_lightgbm import OpenQualityLightGBMService
+
+        _OPEN_QUALITY_ADVISOR = OpenQualityLightGBMService()
+    direction = int(getattr(composite, "direction", 0) or 0)
+    decision_quality = _decision_quality_context(composite)
+    entry_cluster = _build_entry_cluster_context(
+        positions_before=positions,
+        direction=direction,
+        symbol="XAUUSD+",
+        now_ts=float(bar.get("time") or time.time()),
+    )
+    action = {
+        "score": float(getattr(composite, "score", 0.0) or 0.0),
+        "direction": direction,
+        "entry_cluster": entry_cluster,
+        **{
+            key: decision_quality.get(key)
+            for key in (
+                "tactical_score", "macro_score", "alpha_score", "n_active_factors",
+                "n_active_alpha_factors", "n_abstain_factors",
+            )
+        },
+    }
+    score = _OPEN_QUALITY_ADVISOR.score_open_context({
+        "action_score": action["score"],
+        "action": action,
+        "entry_cluster": entry_cluster,
+        "portfolio_exposure": entry_cluster,
+        "market_micro_context": _market_micro_context_snapshot(
+            bridge=bridge,
+            current_price=current_price,
+            direction=direction,
+        ),
+        "bar_context": _bar_context_snapshot(bar),
+        "event_context": event_context,
+        "decision_quality_context": decision_quality,
+    }, artifact_path=str(policy.get("artifact_path") or ""))
+    subject_id = f"XAUUSD+:{int(float(bar.get('time') or time.time()))}:{direction}"
+    return influence.evaluate_open_veto(
+        score=score,
+        subject_id=subject_id,
+        cfg=cfg,
+        rule_decision=rule_decision,
+    )
+
+
 def _entry_quality_gate_from_learning_policy(
     *,
     policy: dict[str, Any],
@@ -1710,19 +1778,42 @@ def _evaluate_position_supervisor_for_position(
             from research.position_quality_lightgbm import PositionQualityLightGBMService
 
             _POSITION_QUALITY_ADVISOR = PositionQualityLightGBMService()
-        advisory = _POSITION_QUALITY_ADVISOR.score_position_context(context)
+        from backend.services.model_influence import shared_model_influence_service
+
+        position_policy = shared_model_influence_service().active_policy("position_quality_lightgbm", cfg)
+        advisory = _POSITION_QUALITY_ADVISOR.score_position_context(
+            context,
+            artifact_path=str((position_policy or {}).get("artifact_path") or "") or None,
+        )
     except Exception as exc:
         advisory = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     verdict["position_quality_advisory"] = advisory
     evidence = dict(verdict.get("evidence") or {})
     evidence["position_quality_advisory"] = advisory
     verdict["evidence"] = evidence
-    # Shadow models remain non-authoritative.  High exit risk raises review
-    # priority/confidence only; actual controls still come from rule-based
-    # PositionSupervisor and pass through RiskPolicyService.
+    # Keep raw rule and model confidences separate.  A promoted PIT-v2 model
+    # may only tighten the rule verdict through ModelInfluenceService.
     if advisory.get("ok") and float(advisory.get("exit_risk_score") or 0.0) >= 0.65:
         verdict["model_review_priority"] = "high"
-        verdict["confidence"] = max(float(verdict.get("confidence") or 0.0), 0.65)
+    try:
+        from backend.services.model_influence import shared_model_influence_service
+        from backend.services.position_supervisor import build_model_tighten_controls
+
+        verdict = shared_model_influence_service().fuse_position(
+            verdict=verdict,
+            advisory=advisory,
+            position_id=str(position.get("position_id") or position.get("ticket") or ""),
+            cfg=cfg,
+            tighten_controls=build_model_tighten_controls(context),
+        )
+    except Exception as exc:
+        verdict["model_influence"] = {
+            "schema_version": "model_influence_result.v1",
+            "model_type": "position_quality_lightgbm",
+            "stage": "shadow",
+            "applied": False,
+            "reason": f"model_influence_unavailable:{type(exc).__name__}",
+        }
     if persist:
         pid = int(position.get("position_id") or position.get("ticket") or 0)
         row = _load_recovery_position_row(pid)
@@ -2694,9 +2785,16 @@ def _session_state_key(trade_date: str | None = None) -> str:
 def _session_state_snapshot(trade_date: str | None = None) -> dict:
     if not trade_date:
         trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    window_start, window_end = _session_trade_window(trade_date)
+    calendar_day = _calendar_day_trade_summary("Asia/Shanghai")
     return {
-        "schema_version": "live_session_state.v2",
+        "schema_version": "live_session_state.v3",
         "trade_date": trade_date,
+        "session_date_basis": "utc_risk_day",
+        "session_timezone": "UTC",
+        "session_window_start": window_start,
+        "session_window_end": window_end,
+        "calendar_day": calendar_day,
         "source": str(_live_state_get("session_state_source", "runtime_incremental") or "runtime_incremental"),
         "session_pnl": float(_live_state_get("session_pnl", 0.0) or 0.0),
         "session_trades": int(_live_state_get("session_trades", 0) or 0),
@@ -2723,13 +2821,14 @@ def _persist_session_state(trade_date: str | None = None) -> None:
         logger.debug("[live] session state persist failed: %s", exc)
 
 
-def _session_trade_window(trade_date: str) -> tuple[float, float]:
-    """Return the UTC window used by the live session key."""
-    day_start = datetime.strptime(str(trade_date), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+def _session_trade_window(trade_date: str, timezone_name: str = "UTC") -> tuple[float, float]:
+    """Return a natural-day window in the requested IANA timezone."""
+    tz = timezone.utc if timezone_name == "UTC" else ZoneInfo(timezone_name)
+    day_start = datetime.strptime(str(trade_date), "%Y-%m-%d").replace(tzinfo=tz)
     return day_start.timestamp(), (day_start + timedelta(days=1)).timestamp()
 
 
-def _load_authoritative_session_trades(trade_date: str) -> list[dict] | None:
+def _load_authoritative_session_trades(trade_date: str, timezone_name: str = "UTC") -> list[dict] | None:
     """Load one PnL row per position whose final close happened on a date.
 
     ``runtime_kv`` is a recovery cache, not the trade fact source. Broker
@@ -2741,7 +2840,7 @@ def _load_authoritative_session_trades(trade_date: str) -> list[dict] | None:
     no-trades result.
     """
     try:
-        window_start, window_end = _session_trade_window(trade_date)
+        window_start, window_end = _session_trade_window(trade_date, timezone_name)
         conn = _get_state_read_conn()
         try:
             rows = _state_execute(
@@ -2793,6 +2892,35 @@ def _load_authoritative_session_trades(trade_date: str) -> list[dict] | None:
         return None
 
 
+def _calendar_day_trade_summary(timezone_name: str = "Asia/Shanghai") -> dict:
+    """Read-only operator-day view; never drives the UTC risk circuit."""
+    tz = ZoneInfo(timezone_name)
+    trade_date = datetime.now(tz).strftime("%Y-%m-%d")
+    trades = _load_authoritative_session_trades(trade_date, timezone_name)
+    if trades is None:
+        return {
+            "status": "unavailable",
+            "trade_date": trade_date,
+            "timezone": timezone_name,
+            "risk_authoritative": False,
+        }
+    pnls = [float(item.get("net", 0.0) or 0.0) for item in trades]
+    window_start, window_end = _session_trade_window(trade_date, timezone_name)
+    return {
+        "status": "available",
+        "trade_date": trade_date,
+        "timezone": timezone_name,
+        "window_start": window_start,
+        "window_end": window_end,
+        "trade_count": len(pnls),
+        "winning_count": sum(1 for pnl in pnls if pnl > 0),
+        "losing_count": sum(1 for pnl in pnls if pnl < 0),
+        "net_pnl": sum(pnls),
+        "risk_authoritative": False,
+        "source": "ctrader_deals.final_close_calendar_view.v1",
+    }
+
+
 def _build_session_state_from_authoritative_trades(
     *,
     trade_date: str,
@@ -2813,7 +2941,8 @@ def _build_session_state_from_authoritative_trades(
             break
 
     account = _live_state_get("account", {}, clone=True) or {}
-    start_balance = float(account.get("balance", 0.0) or 0.0)
+    current_balance = float(account.get("balance", 0.0) or 0.0)
+    start_balance = current_balance - session_pnl if current_balance > 0 else 0.0
     if start_balance <= 0:
         start_balance = float(persisted_state.get("session_start_balance", 0.0) or 0.0)
 
@@ -3520,6 +3649,25 @@ def _reset_session_state_for_new_day() -> None:
         session_state_source="ctrader_deals.final_close_rebuild.v1",
     )
     _persist_session_state()
+
+
+def _repair_session_start_balance_from_account(*, persist: bool = True) -> float:
+    """Fill a startup-time zero baseline once broker balance becomes available."""
+    existing = float(_live_state_get("session_start_balance", 0.0) or 0.0)
+    if existing > 0:
+        return existing
+    account = _live_state_get("account", {}, clone=True) or {}
+    current_balance = float(account.get("balance", 0.0) or 0.0)
+    if current_balance <= 0:
+        return 0.0
+    session_pnl = float(_live_state_get("session_pnl", 0.0) or 0.0)
+    reconstructed = current_balance - session_pnl
+    if reconstructed <= 0:
+        return 0.0
+    _live_state_update(session_start_balance=reconstructed)
+    if persist:
+        _persist_session_state()
+    return reconstructed
 
 
 def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> dict:
@@ -5473,6 +5621,7 @@ def _run_live_loop_tick_body(
 def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
     try:
         acct = _live_state_get("account", {}, clone=True) or {}
+        _repair_session_start_balance_from_account()
         equity = float(acct.get("equity") or 0.0)
         eq_hist = _live_state_get("trade_equity_history", [], clone=True) or []
         if equity > 0:
@@ -5646,6 +5795,14 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 _rcfg.factor_signal_threshold,
             )
         )
+        try:
+            from alpha.runtime_factor_selection import select_runtime_factors
+            from backend.services.runtime_factor_selection_projection import RuntimeFactorSelectionProjectionService
+            _selection = select_runtime_factors(_rcfg.factor_signal_config)
+            if _selection is not None:
+                RuntimeFactorSelectionProjectionService().publish(_selection)
+        except Exception as _selection_err:
+            logger.warning("[live] factor selection projection publish failed: %s", _selection_err)
         gate = ExecutionGate(_loop_execution_gate_config(_rcfg))
         from alpha.attribution_engine import AttributionEngine
         from alpha.adaptive_weight_engine import AdaptiveWeightEngine
@@ -5685,6 +5842,14 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                         cfg=cfg,
                         merged_config=merged_cfg,
                     )
+                    try:
+                        from alpha.runtime_factor_selection import select_runtime_factors
+                        from backend.services.runtime_factor_selection_projection import RuntimeFactorSelectionProjectionService
+                        _selection = select_runtime_factors(cfg.factor_signal_config)
+                        if _selection is not None:
+                            RuntimeFactorSelectionProjectionService().publish(_selection)
+                    except Exception as _selection_err:
+                        logger.warning("[live] factor selection projection refresh failed: %s", _selection_err)
                     logger.debug("[live] factor pipeline hot-reloaded (v%d)", version)
                 except Exception as _e:
                     logger.debug("[live] factor pipeline hot-reload: %s", _e)
@@ -5895,14 +6060,21 @@ def _merge_portfolio_configs(
     为 PortfolioCompositor 所需的格式: {name: {weight, tags, mode, enabled, ...}}"""
     merged = {}
     try:
-        from alpha.runtime_factor_selection import active_discovered_factor_ids
+        from alpha.runtime_factor_selection import select_runtime_factors
 
-        discovered_names = set(active_discovered_factor_ids(signal_config))
+        selection = select_runtime_factors(signal_config)
+        selected_names = set(selection.selected_factor_ids if selection is not None else signal_config)
+        discovered_names = (selected_names - set(signal_config)) | {
+            name for name in selected_names
+            if isinstance(signal_config.get(name), dict)
+            and signal_config.get(name, {}).get("source") == "discovered"
+        }
     except Exception:
+        selected_names = set(signal_config)
         discovered_names = set()
     # Runtime weights retain cold candidates for rollback/research, but only
     # configured or budget-admitted discovered factors enter live scoring.
-    all_names = set(signal_config) | discovered_names
+    all_names = selected_names
     for name in all_names:
         sc = signal_config.get(name, {})
         if not isinstance(sc, dict):
@@ -7507,6 +7679,23 @@ def _prepare_open_trade_candidate(
         composite=composite,
         bridge_meta=bridge_meta,
     )
+    try:
+        from backend.services.model_influence import shared_model_influence_service
+
+        meta_cap = shared_model_influence_service().apply_meta_risk_cap(
+            volume=volume,
+            subject_id=f"XAUUSD+:{int(float(bar.get('time') or time.time()))}",
+            cfg=cfg,
+        )
+        capped_volume = float(meta_cap.get("volume") or 0.0)
+        if capped_volume < volume:
+            volume = _floor_api_volume_to_step(capped_volume, bridge_meta)
+        sizing_trace["meta_model_risk_cap"] = {**meta_cap, "rounded_api_volume": volume}
+    except Exception as exc:
+        sizing_trace["meta_model_risk_cap"] = {
+            "applied": False,
+            "reason": f"meta_model_cap_unavailable:{type(exc).__name__}",
+        }
 
     log(
         f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
@@ -7586,6 +7775,37 @@ def _prepare_open_trade_candidate(
             "block_reason": "no_positive_edge_after_costs",
             "skip_stage": "entry_cost_edge",
         }
+    if not bool(order_block.get("order_blocked")):
+        try:
+            model_veto = _evaluate_open_quality_model_veto(
+                cfg=cfg,
+                bridge=bridge,
+                bar=bar,
+                composite=composite,
+                positions=positions,
+                current_price=current_price,
+                event_context=event_sizing_context,
+                rule_decision={
+                    "passed": True,
+                    "risk_reason": str(getattr(risk_verdict, "reason", "") or ""),
+                    "entry_cost_edge": edge_evidence,
+                },
+            )
+        except Exception as exc:
+            model_veto = {
+                "passed": True,
+                "reason": f"model_open_veto_unavailable:{type(exc).__name__}",
+            }
+        audit_payload = dict(getattr(risk_verdict, "audit_payload", {}) or {})
+        audit_payload["model_open_quality"] = model_veto
+        risk_verdict.audit_payload = audit_payload
+        if not bool(model_veto.get("passed", True)):
+            order_block = {
+                **order_block,
+                "order_blocked": True,
+                "block_reason": "model_open_quality_veto",
+                "skip_stage": "model_influence",
+            }
     nursery_reservation_id = ""
     audit_payload = dict(getattr(risk_verdict, "audit_payload", {}) or {})
     observations = list(audit_payload.get("demo_nursery_observations") or [])

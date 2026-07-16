@@ -171,7 +171,7 @@ def run_offmarket_position_quality_job(
     session: dict[str, Any] | None = None,
     db_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run advisory LightGBM work from the shared runtime health projection."""
+    """Train the PIT-v2 model suite and promote only evidence-ready artifacts."""
     job_name = "offmarket_position_quality_lightgbm"
     started_at = time.time()
     db_path = Path(db_path or state_db.STATE_DB)
@@ -183,7 +183,7 @@ def run_offmarket_position_quality_job(
     payload = {
         "job_name": job_name,
         "market_session": session or {},
-        "limit": 500 if profile == "full" else 250,
+        "limit": 4000 if profile == "full" else 250,
         "shadow_limit": 100 if profile == "full" else 30,
         "min_samples": 20,
         "profile": profile,
@@ -197,6 +197,11 @@ def run_offmarket_position_quality_job(
         logger.info("[offmarket_high_load] %s skipped: %s", job_name, reason)
         return {"ok": True, "skipped": True, "reason": reason, "audit": audit}
     try:
+        from backend.services.model_influence_governance import ModelInfluenceGovernanceService
+        from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+        from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
+        from research.meta_model_lightgbm import MetaModelLightGBMService
+        from research.open_quality_lightgbm import OpenQualityLightGBMService
         from research.position_quality_lightgbm import PositionQualityLightGBMService
 
         service = PositionQualityLightGBMService(db_path=db_path)
@@ -205,14 +210,55 @@ def run_offmarket_position_quality_job(
             min_samples=int(payload["min_samples"]), register=True,
             symbol="XAUUSD+", timeframe="M5",
         )
-        result: dict[str, Any] = {"train": train}
+        result: dict[str, Any] = {"train": train, "models": {"position_quality_lightgbm": {"train": train}}}
         if train.get("ok"):
             result["shadow"] = service.score_samples(
                 artifact_path=train.get("artifact_path"),
                 limit=int(payload["shadow_limit"]),
                 mode="offmarket_shadow_after_train",
             )
-        status = "done" if train.get("ok") else "failed"
+        suite = [
+            ("open_quality_lightgbm", OpenQualityLightGBMService(db_path=db_path), {
+                "limit": 3000, "holdout_ratio": 0.25, "min_samples": 100, "register": True,
+            }),
+            ("factor_governance_lightgbm", FactorGovernanceLightGBMService(db_path=db_path), {
+                "limit": 5000, "holdout_ratio": 0.25, "min_samples": 100, "register": True,
+            }),
+            ("meta_model_lightgbm", MetaModelLightGBMService(db_path=db_path), {
+                "limit": 3000, "window": 12, "horizon": 3, "holdout_ratio": 0.25,
+                "min_samples": 100, "register": True,
+            }),
+        ]
+        if profile == "full":
+            for model_type, model_service, train_kwargs in suite:
+                result["models"][model_type] = {"train": model_service.train(**train_kwargs)}
+
+        governance = ModelInfluenceGovernanceService(db_path)
+        result["reconcile_before_training"] = governance.reconcile_active_models()
+        v16 = V16BrainOrchestratorService(db_path)
+        promoted = []
+        for model_type, item in result["models"].items():
+            trained = dict(item.get("train") or {})
+            if not trained.get("ok"):
+                continue
+            gate = governance.evaluate_artifact(str(trained.get("artifact_path") or ""))
+            item["promotion_gate"] = gate
+            if not gate.get("passed"):
+                continue
+            delegation = v16.delegate_model_promotion(gate, persist=True)
+            item["v16_delegation"] = delegation
+            command_id = str((delegation.get("command") or {}).get("command_id") or "")
+            promotion = governance.promote(
+                str(trained.get("artifact_path") or ""),
+                stage="demo_canary",
+                v16_command_id=command_id,
+            )
+            item["promotion"] = promotion
+            if promotion.get("ok"):
+                promoted.append(model_type)
+        result["promoted_models"] = promoted
+        trained_ok = [bool((item.get("train") or {}).get("ok")) for item in result["models"].values()]
+        status = "done" if any(trained_ok) else "failed"
         audit = _record_offmarket_audit(
             job_name=job_name, status=status, session=session or {}, payload=payload,
             result=result, error=str(train.get("error") or ""),

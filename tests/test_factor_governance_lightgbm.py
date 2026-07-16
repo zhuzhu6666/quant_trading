@@ -58,7 +58,7 @@ def _create_factor_reviews(path):
         );
         """
     )
-    for i in range(10):
+    for i in range(18):
         positive = i % 2 == 0
         conn.execute(
             """
@@ -115,8 +115,10 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
 
     service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
     samples = service.load_samples(limit=20)
-    assert len(samples) == 8
-    assert {sample["label_source"] for sample in samples} == {"next_same_factor_outcome"}
+    assert len(samples) == 12
+    assert {sample["label_source"] for sample in samples} == {
+        "next_same_factor_outcome_from_rolling_history"
+    }
 
     result = service.train(limit=20, min_samples=6, register=False)
 
@@ -125,6 +127,9 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
         return
 
     assert result["model_type"] == MODEL_TYPE
+    assert result["feature_schema_version"] == "pit.v2.factor_rolling_lineage"
+    assert result["metrics"]["distinct_trade_count"] == 12
+    assert result["metrics"]["train_trade_count"] + result["metrics"]["holdout_trade_count"] == 12
     assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None
     assert result["metrics"]["holdout"]["balanced_accuracy"] is not None
     assert result["capabilities"]["live_trading"] is False
@@ -136,9 +141,10 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
         min_weakness_score=0.1,
     )
     assert shadow["ok"] is True
-    assert shadow["count"] == len(samples)
+    scored_samples = service.load_samples(limit=10)
+    assert shadow["count"] == len(scored_samples)
     audits = service.list_audits(limit=20)
-    assert audits["count"] == len(samples)
+    assert audits["count"] == len(scored_samples)
     assert audits["items"][0]["result"]["capabilities"]["shadow_only"] is True
     rows = sqlite3.connect(str(db_path)).execute(
         "SELECT scope_type, action, status, evidence_json FROM policy_suggestion"
@@ -188,7 +194,7 @@ def test_factor_governance_lightgbm_skips_system_contaminated_reviews(tmp_path):
     service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
     samples = service.load_samples(limit=20)
 
-    assert len(samples) == 7
+    assert len(samples) == 11
     assert all(sample["review_id"] != "rev_1" for sample in samples)
 
 
@@ -227,6 +233,15 @@ def test_factor_governance_demo_bridge_emits_whitelisted_downweight(tmp_path, mo
                 "health_status": "DECAYING",
             }
         ],
+    )
+    monkeypatch.setattr(
+        "backend.services.model_influence.ModelInfluenceService.active_policy",
+        classmethod(lambda cls, model_type, cfg: {
+            "stage": "demo_canary",
+            "feature_schema_version": "pit.v2",
+            "allowed_effects": ["suggest_downweight"],
+            "artifact_path": "",
+        }),
     )
 
     result = service.materialize_demo_governance_advisories()

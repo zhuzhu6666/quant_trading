@@ -326,6 +326,65 @@ class V16BrainOrchestratorService:
             "boundary": self.boundary(),
         }
 
+    def delegate_model_promotion(self, gate: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
+        """Delegate one evidence-qualified model stage change to its specialist.
+
+        This is a V16 command only: it does not change RuntimeConfig or grant
+        the model broker/config permissions.  The specialist must still pass
+        RiskPolicy and the runtime mutation gate.
+        """
+        model_type = str(gate.get("model_type") or "")
+        if not bool(gate.get("passed")) or not model_type:
+            return {
+                "ok": False,
+                "status": "model_promotion_evidence_not_ready",
+                "model_type": model_type,
+                "failed_checks": list(gate.get("failed_checks") or []),
+                "boundary": self.boundary(),
+            }
+        evidence_fingerprint = hashlib.sha256(dumps({
+            "model_type": model_type,
+            "artifact_sha256": gate.get("artifact_sha256"),
+            "feature_schema_version": gate.get("feature_schema_version"),
+            "checks": gate.get("checks") or [],
+        }).encode("utf-8")).hexdigest()
+        now = time.time()
+        command = {
+            "command_id": f"v16cmd_{hashlib.sha1(('model|' + evidence_fingerprint).encode('utf-8')).hexdigest()[:20]}",
+            "schema_version": "v16_brain_command.v1",
+            "snapshot_id": "",
+            "plan_id": "",
+            "eval_id": "",
+            "candidate_id": f"modelgate_{evidence_fingerprint[:16]}",
+            "target_agent": "factor_governance",
+            "scope_type": "model_stage",
+            "scope_key": model_type,
+            "action": "promote_model_influence",
+            "decision": "delegate",
+            "status": "delegated_to_specialist",
+            "evidence": {
+                "schema_version": "v16_model_promotion_evidence.v1",
+                "promotion_gate": gate,
+                "risk_reducing_or_veto_only": True,
+            },
+            "delegation": {
+                "target_agent": "factor_governance",
+                "delegated_by": "v16_brain",
+                "specialist_must_use": ["RiskPolicyService", "RuntimeConfigMutationService"],
+                "specialist_must_not": ["bypass_risk_policy", "write_broker_directly", "expand_hard_risk_limits"],
+            },
+            "posterior_fingerprint": "",
+            "evidence_fingerprint": evidence_fingerprint,
+            "max_apply_count": 1,
+            "created_at": now,
+            "updated_at": now,
+            "boundary": self.boundary(),
+        }
+        if persist:
+            ensure_v16_brain_command_table(self.db_path)
+            self._persist_commands([command])
+        return {"ok": True, "status": "delegated", "command": command, "boundary": self.boundary()}
+
     def _command_for_evaluation(
         self,
         *,
@@ -343,20 +402,30 @@ class V16BrainOrchestratorService:
         action = str(governance.get("governance_action") or evaluation.get("action_type") or "observe")
         status = "delegated_to_specialist" if decision == "delegate" else str(governance.get("status") or evaluation.get("comparison_verdict") or "observing")
         posterior_fingerprint = str(posterior.get("fingerprint") or "")
-        evidence_fingerprint = hashlib.sha256(
-            dumps({
-                "posterior": posterior,
-                "evaluation": evaluation,
-                "governance": governance,
-            }).encode("utf-8")
-        ).hexdigest()
+        command_scope_type = str(governance.get("scope_type") or evaluation.get("scope_type") or "")
+        command_scope_key = str(governance.get("scope_key") or scope.get("scope_key") or "")
+        # IDs and timestamps are audit coordinates, not new evidence. Hash only
+        # the substantive verdict so a periodic rerun updates one command
+        # instead of manufacturing a new command for the same posterior.
+        evidence_fingerprint = hashlib.sha256(dumps({
+            "posterior_fingerprint": posterior_fingerprint,
+            "selected_scope": posterior.get("selected_scope"),
+            "selected_conclusion": posterior.get("selected_conclusion"),
+            "comparison_verdict": evaluation.get("comparison_verdict"),
+            "coverage_score": round(safe_float(evaluation.get("coverage_score")), 6),
+            "governance_status": governance.get("status"),
+            "candidate_id": candidate_id,
+            "scope_type": governance.get("scope_type") or evaluation.get("scope_type"),
+            "scope_key": governance.get("scope_key") or scope.get("scope_key"),
+            "action": action,
+        }).encode("utf-8")).hexdigest()
         identity = "|".join(
             [
                 posterior_fingerprint or str(evaluation.get("eval_id") or ""),
                 evidence_fingerprint,
-                str(evaluation.get("scope_type") or ""),
+                command_scope_type,
                 action,
-                str(scope.get("scope_key") or governance.get("scope_key") or ""),
+                command_scope_key,
             ]
         )
         command_id = f"v16cmd_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:20]}"
@@ -368,8 +437,8 @@ class V16BrainOrchestratorService:
             "eval_id": str(evaluation.get("eval_id") or ""),
             "candidate_id": candidate_id,
             "target_agent": target_agent,
-            "scope_type": str(governance.get("scope_type") or evaluation.get("scope_type") or ""),
-            "scope_key": str(governance.get("scope_key") or scope.get("scope_key") or ""),
+            "scope_type": command_scope_type,
+            "scope_key": command_scope_key,
             "action": action,
             "decision": decision,
             "status": status,
@@ -408,6 +477,7 @@ class V16BrainOrchestratorService:
             "parameter_template": "autonomous_learning",
             "context_policy": "autonomous_learning",
             "supervisor_template": "position_supervisor_governance",
+            "model_stage": "factor_governance",
         }.get(scope_type, "autonomous_learning")
 
     @staticmethod

@@ -175,5 +175,6 @@ def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
     try:
         assert conn.execute("SELECT COUNT(*) FROM policy_suggestion").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM brain_governance_candidate").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 4
     finally:
         conn.close()

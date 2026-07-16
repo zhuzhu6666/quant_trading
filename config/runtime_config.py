@@ -125,6 +125,11 @@ class RuntimeConfig:
     live_autonomy_unlock_id: str = ""
     demo_learning_max_daily_trades: int = 60
     autonomy_expansion_frozen: bool = True
+    # Scoped demo-only envelope for bounded model decision influence.  This is
+    # deliberately separate from ``autonomy_expansion_frozen`` so an operator
+    # can canary one validated model without thawing unrelated governance.
+    demo_model_influence_enabled: bool = False
+    model_influence_config: Dict[str, Any] = field(default_factory=dict)
     supervisor_counterfactual_governance_horizon_minutes: int = 60
     supervisor_counterfactual_full_horizon_minutes: int = 120
     supervisor_canary_mature_trade_count: int = 50

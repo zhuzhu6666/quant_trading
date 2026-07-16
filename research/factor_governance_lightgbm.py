@@ -14,23 +14,24 @@ from backend.services.policy_suggestion_context import attach_policy_suggestion_
 
 
 MODEL_TYPE = "factor_governance_lightgbm"
-MODEL_VERSION = "1.0"
+MODEL_VERSION = "4.0"
+FEATURE_SCHEMA_VERSION = "pit.v2.factor_rolling_lineage"
 FEATURE_NAMES = [
-    "entry_contribution",
-    "hold_contribution",
-    "exit_contribution",
-    "net_contribution",
-    "confidence",
-    "entry_quality",
-    "hold_quality",
-    "exit_quality",
-    "regime_fit_score",
-    "execution_quality",
-    "pnl",
-    "mae",
-    "mfe",
-    "is_loss",
-    "is_bad_loss",
+    "current_entry_contribution",
+    "current_net_contribution",
+    "current_confidence",
+    "rolling_sample_count",
+    "rolling_positive_rate",
+    "rolling_entry_contribution_avg",
+    "rolling_net_contribution_avg",
+    "rolling_confidence_avg",
+    "rolling_entry_quality_avg",
+    "rolling_hold_quality_avg",
+    "rolling_exit_quality_avg",
+    "rolling_pnl_avg",
+    "rolling_mae_avg",
+    "rolling_mfe_avg",
+    "rolling_loss_rate",
 ]
 
 
@@ -99,30 +100,43 @@ def _row_system_contaminated(item: dict[str, Any]) -> bool:
     )
 
 
-def _sample_from_row(row: Any, *, label: int | None = None, label_source: str = "current_factor_outcome") -> dict[str, Any]:
+def _rolling_factor_features(history: list[dict[str, Any]], *, window: int = 5) -> dict[str, float]:
+    items = history[-max(2, int(window)):]
+    current = items[-1]
+    n = max(len(items), 1)
+    return {
+        "current_entry_contribution": _safe_float(current.get("entry_contribution")),
+        "current_net_contribution": _safe_float(current.get("net_contribution")),
+        "current_confidence": _safe_float(current.get("confidence")),
+        "rolling_sample_count": float(n),
+        "rolling_positive_rate": sum(_current_row_label(item) for item in items) / n,
+        "rolling_entry_contribution_avg": sum(_safe_float(item.get("entry_contribution")) for item in items) / n,
+        "rolling_net_contribution_avg": sum(_safe_float(item.get("net_contribution")) for item in items) / n,
+        "rolling_confidence_avg": sum(_safe_float(item.get("confidence")) for item in items) / n,
+        "rolling_entry_quality_avg": sum(_safe_float(item.get("entry_quality")) for item in items) / n,
+        "rolling_hold_quality_avg": sum(_safe_float(item.get("hold_quality")) for item in items) / n,
+        "rolling_exit_quality_avg": sum(_safe_float(item.get("exit_quality")) for item in items) / n,
+        "rolling_pnl_avg": sum(_safe_float(item.get("pnl")) for item in items) / n,
+        "rolling_mae_avg": sum(_safe_float(item.get("mae")) for item in items) / n,
+        "rolling_mfe_avg": sum(_safe_float(item.get("mfe")) for item in items) / n,
+        "rolling_loss_rate": sum(1 for item in items if _safe_float(item.get("pnl")) < 0.0) / n,
+    }
+
+
+def _sample_from_row(
+    row: Any,
+    *,
+    label: int | None = None,
+    label_source: str = "current_factor_outcome",
+    rolling_history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     item = dict(row)
     outcome = str(item.get("outcome_label") or "").lower()
     pnl = _safe_float(item.get("pnl"))
     net = _safe_float(item.get("net_contribution"))
     confidence = _safe_float(item.get("confidence"))
     target_label = _current_row_label(item) if label is None else int(label)
-    features = {
-        "entry_contribution": _safe_float(item.get("entry_contribution")),
-        "hold_contribution": _safe_float(item.get("hold_contribution")),
-        "exit_contribution": _safe_float(item.get("exit_contribution")),
-        "net_contribution": net,
-        "confidence": confidence,
-        "entry_quality": _safe_float(item.get("entry_quality")),
-        "hold_quality": _safe_float(item.get("hold_quality")),
-        "exit_quality": _safe_float(item.get("exit_quality")),
-        "regime_fit_score": _safe_float(item.get("regime_fit_score")),
-        "execution_quality": _safe_float(item.get("execution_quality")),
-        "pnl": pnl,
-        "mae": _safe_float(item.get("mae")),
-        "mfe": _safe_float(item.get("mfe")),
-        "is_loss": 1.0 if pnl < 0 else 0.0,
-        "is_bad_loss": 1.0 if outcome == "bad_loss" else 0.0,
-    }
+    features = _rolling_factor_features(list(rolling_history or [item]))
     return {
         "sample_id": f"{item.get('review_id') or ''}:{item.get('factor') or ''}",
         "review_id": str(item.get("review_id") or ""),
@@ -154,6 +168,7 @@ class FactorGovernanceLightGBMService:
     ):
         self.db_path = Path(db_path)
         self.artifact_dir = Path(artifact_dir) if artifact_dir else DATA_DIR / "model_artifacts" / MODEL_TYPE
+        self.last_data_quality: dict[str, Any] = {}
         self._ensure_tables()
 
     def _use_pg(self) -> bool:
@@ -236,27 +251,70 @@ class FactorGovernanceLightGBMService:
             ).fetchall()
             row_items = [dict(row) for row in rows]
             row_items = [item for item in row_items if not _row_system_contaminated(item)]
-            by_factor: dict[str, list[dict[str, Any]]] = {}
+            review_row_counts: dict[str, int] = {}
             for item in row_items:
+                review_id = str(item.get("review_id") or item.get("trade_id") or "")
+                review_row_counts[review_id] = review_row_counts.get(review_id, 0) + 1
+            # The old unbounded factor universe produced roughly 300 rows per
+            # trade.  Current runtime selection is explicitly budgeted and
+            # remains below 64 rows.  Do not mix these structural generations.
+            for item in row_items:
+                review_id = str(item.get("review_id") or item.get("trade_id") or "")
+                notes = _loads(str(item.get("notes") or "{}"), {})
+                explicit_generation = str(notes.get("factor_generation") or "")
+                item["factor_generation"] = explicit_generation or (
+                    "runtime_bounded_v1" if review_row_counts.get(review_id, 0) <= 64
+                    else "legacy_unbounded"
+                )
+            latest_generation = str(row_items[-1].get("factor_generation") or "") if row_items else ""
+            lineage_items = [
+                item for item in row_items
+                if str(item.get("factor_generation") or "") == latest_generation
+            ]
+            by_factor: dict[str, list[dict[str, Any]]] = {}
+            for item in lineage_items:
                 by_factor.setdefault(str(item.get("factor") or ""), []).append(item)
-            next_label_by_key: dict[tuple[str, str], int] = {}
-            for factor_rows in by_factor.values():
+            samples = []
+            for factor, factor_rows in by_factor.items():
                 ordered = sorted(factor_rows, key=lambda item: (_safe_float(item.get("created_at")), int(item.get("id") or 0)))
                 for idx, item in enumerate(ordered[:-1]):
+                    if idx < 2:
+                        continue
                     future = ordered[idx + 1]
-                    next_label_by_key[(str(item.get("review_id") or ""), str(item.get("factor") or ""))] = _current_row_label(future)
-            samples = []
-            for item in row_items:
-                key = (str(item.get("review_id") or ""), str(item.get("factor") or ""))
-                if key not in next_label_by_key:
-                    continue
-                samples.append(
-                    _sample_from_row(
-                        item,
-                        label=next_label_by_key[key],
-                        label_source="next_same_factor_outcome",
+                    samples.append(
+                        _sample_from_row(
+                            item,
+                            label=_current_row_label(future),
+                            label_source="next_same_factor_outcome_from_rolling_history",
+                            rolling_history=ordered[max(0, idx - 4):idx + 1],
+                        )
                     )
-                )
+            samples.sort(key=lambda item: (item["created_at"], item["factor"]))
+            selected_trades = {
+                str(item.get("trade_id") or item.get("review_id") or "")
+                for item in samples
+                if str(item.get("trade_id") or item.get("review_id") or "")
+            }
+            factor_sample_counts = {
+                factor: len(items) for factor, items in by_factor.items()
+            }
+            self.last_data_quality = {
+                "schema_version": "model_training_data_quality.v1",
+                "candidate_row_count": len(rows),
+                "uncontaminated_row_count": len(row_items),
+                "lineage_row_count": len(lineage_items),
+                "selected_count": len(samples),
+                "selected_distinct_trade_count": len(selected_trades),
+                "factor_count": len(by_factor),
+                "factor_generation": latest_generation,
+                "generation_contract": "factor_universe_budget.v1",
+                "excluded_other_generation_count": len(row_items) - len(lineage_items),
+                "factors_below_10_samples": sum(count < 10 for count in factor_sample_counts.values()),
+                "factors_below_20_samples": sum(count < 20 for count in factor_sample_counts.values()),
+                "rolling_window": 5,
+                "min_history": 3,
+                "removed_constant_features": ["hold_contribution", "exit_contribution"],
+            }
             return samples
         finally:
             conn.close()
@@ -289,13 +347,21 @@ class FactorGovernanceLightGBMService:
         from sklearn.metrics import accuracy_score, balanced_accuracy_score, recall_score, roc_auc_score
 
         samples = self.load_samples(limit=limit)
-        if len(samples) < int(min_samples):
+        distinct_trade_ids = {
+            str(item.get("trade_id") or item.get("review_id") or "")
+            for item in samples
+            if str(item.get("trade_id") or item.get("review_id") or "")
+        }
+        if len(distinct_trade_ids) < int(min_samples):
             return {
                 "ok": False,
                 "model_type": MODEL_TYPE,
                 "model_version": MODEL_VERSION,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
                 "sample_count": len(samples),
-                "error": "insufficient_factor_contribution_samples",
+                "distinct_trade_count": len(distinct_trade_ids),
+                "data_quality": dict(self.last_data_quality),
+                "error": "insufficient_distinct_factor_trades",
             }
         labels = [int(item["label"]) for item in samples]
         if len(set(labels)) < 2:
@@ -308,15 +374,33 @@ class FactorGovernanceLightGBMService:
                 "error": "single_class_training_data",
             }
 
-        holdout_count = max(1, int(round(len(samples) * max(0.0, min(float(holdout_ratio), 0.8)))))
-        holdout_count = min(holdout_count, len(samples) - 1)
-        train_samples = samples[:-holdout_count]
-        holdout_samples = samples[-holdout_count:]
+        ordered_trades: list[str] = []
+        for item in samples:
+            trade_id = str(item.get("trade_id") or item.get("review_id") or "")
+            if trade_id and trade_id not in ordered_trades:
+                ordered_trades.append(trade_id)
+        holdout_groups = max(1, int(round(len(ordered_trades) * max(0.0, min(float(holdout_ratio), 0.8)))))
+        holdout_trade_ids = set(ordered_trades[-holdout_groups:])
+        train_samples = [item for item in samples if str(item.get("trade_id") or item.get("review_id") or "") not in holdout_trade_ids]
+        holdout_samples = [item for item in samples if str(item.get("trade_id") or item.get("review_id") or "") in holdout_trade_ids]
+        if not train_samples or not holdout_samples:
+            return {"ok": False, "model_type": MODEL_TYPE, "error": "grouped_time_split_empty"}
 
         x_train = pd.DataFrame([item["features"] for item in train_samples], columns=FEATURE_NAMES)
         y_train = [int(item["label"]) for item in train_samples]
         x_holdout = pd.DataFrame([item["features"] for item in holdout_samples], columns=FEATURE_NAMES)
         y_holdout = [int(item["label"]) for item in holdout_samples]
+        trade_counts: dict[str, int] = {}
+        for item in train_samples:
+            key = str(item.get("trade_id") or item.get("review_id") or "")
+            trade_counts[key] = trade_counts.get(key, 0) + 1
+        newest_train_ts = max((_safe_float(item.get("created_at")) for item in train_samples), default=0.0)
+        train_weights = []
+        for item in train_samples:
+            key = str(item.get("trade_id") or item.get("review_id") or "")
+            age_days = max(0.0, newest_train_ts - _safe_float(item.get("created_at"))) / 86400.0
+            recency_weight = math.exp(-math.log(2.0) * age_days / 14.0)
+            train_weights.append(recency_weight / max(1, trade_counts.get(key, 1)))
 
         model = lgb.LGBMClassifier(
             objective="binary",
@@ -331,7 +415,7 @@ class FactorGovernanceLightGBMService:
             n_jobs=1,
             verbosity=-1,
         )
-        model.fit(x_train, y_train)
+        model.fit(x_train, y_train, sample_weight=train_weights)
         train_prob = model.predict_proba(x_train)[:, 1]
         holdout_prob = model.predict_proba(x_holdout)[:, 1]
 
@@ -370,13 +454,24 @@ class FactorGovernanceLightGBMService:
             "train": _metrics(y_train, train_prob),
             "holdout": _metrics(y_holdout, holdout_prob),
             "sample_count": len(samples),
+            "distinct_trade_count": len(ordered_trades),
+            "train_trade_count": len(set(ordered_trades) - holdout_trade_ids),
+            "holdout_trade_count": len(holdout_trade_ids),
             "feature_count": len(FEATURE_NAMES),
-            "split": "time_ordered",
+            "split": "time_ordered_grouped_purged",
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "holdout_ratio": float(holdout_ratio),
             "train_count": len(train_samples),
             "holdout_count": len(holdout_samples),
             "label_distribution": {"negative": labels.count(0), "positive": labels.count(1)},
             "safe_for_live_trading": False,
+            "data_quality": dict(self.last_data_quality),
+            "label_contract": {
+                "label": "next_same_factor_outcome_from_rolling_history",
+                "trade_balanced_training_weight": True,
+                "recency_half_life_days": 14.0,
+                "factor_generation": self.last_data_quality.get("factor_generation"),
+            },
         }
         now = time.time()
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -385,16 +480,18 @@ class FactorGovernanceLightGBMService:
         metadata_path = self.artifact_dir / f"{artifact_base}.json"
         joblib.dump({"model": model, "feature_names": FEATURE_NAMES}, model_path)
         artifact = {
-            "schema_version": "factor_governance_lightgbm_artifact.v1",
+            "schema_version": "factor_governance_lightgbm_artifact.v2",
             "model_type": MODEL_TYPE,
             "model_version": MODEL_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "created_at": now,
             "artifact_path": str(metadata_path),
             "model_file": str(model_path),
             "model_file_sha256": _sha256(model_path),
             "feature_names": FEATURE_NAMES,
-            "label": "next_same_factor_positive_contribution",
+            "label": "next_same_factor_positive_contribution_from_rolling_history",
             "sample_window": {"limit": int(limit), "sample_count": len(samples)},
+            "training_lineage": dict(self.last_data_quality),
             "metrics": metrics,
             "explainability": {
                 "feature_importance": feature_importance,
@@ -452,6 +549,7 @@ class FactorGovernanceLightGBMService:
             "ok": True,
             "model_type": MODEL_TYPE,
             "model_version": MODEL_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "artifact_path": str(metadata_path),
             "artifact_sha256": artifact["artifact_sha256"],
             "model_file": str(model_path),
@@ -732,6 +830,12 @@ class FactorGovernanceLightGBMService:
         mutation service.
         """
         from backend.services.factor_catalog import build_factor_catalog
+        from backend.services.model_influence import ModelInfluenceService
+        from config.runtime_config import shared as runtime_config
+
+        cfg = runtime_config()
+        influence = ModelInfluenceService(self.db_path)
+        policy = influence.active_policy(MODEL_TYPE, cfg)
 
         catalog = build_factor_catalog(self.db_path)
         active = {
@@ -744,7 +848,20 @@ class FactorGovernanceLightGBMService:
             and str(item.get("role") or "") == "alpha"
         }
         stale_superseded = self._supersede_inactive_demo_suggestions(set(active))
+        if not policy or "suggest_downweight" not in set(policy.get("allowed_effects") or []):
+            return {
+                "schema_version": "factor_governance_demo_bridge.v1",
+                "enabled": False,
+                "materialized": False,
+                "count": 0,
+                "eligible_active_factors": len(active),
+                "stale_superseded": stale_superseded,
+                "reason": "factor_model_influence_inactive",
+            }
         audits = self.list_audits(limit=max(100, int(limit))).get("items") or []
+        artifact_path = str(policy.get("artifact_path") or "")
+        if artifact_path:
+            audits = [item for item in audits if str(item.get("artifact_path") or "") == artifact_path]
         if not active or not audits:
             return {
                 "schema_version": "factor_governance_demo_bridge.v1",
@@ -784,6 +901,9 @@ class FactorGovernanceLightGBMService:
                     "manual_only": False,
                 },
                 "model_advisory": True,
+                "model_influence_active": True,
+                "model_stage": str(policy.get("stage") or ""),
+                "feature_schema_version": str(policy.get("feature_schema_version") or ""),
                 "model_action": "review_factor_weight_or_template",
                 "governed_action": "downweight",
                 "active_factor_context": {
@@ -817,6 +937,21 @@ class FactorGovernanceLightGBMService:
         suggestions = list(result.get("items") or [])
         if suggestions:
             self._materialize_suggestions(suggestions)
+            for suggestion in suggestions:
+                influence.audit(
+                    model_type=MODEL_TYPE,
+                    policy=policy,
+                    subject_id=str(suggestion.get("scope_key") or ""),
+                    rule_decision={"governance_required": True, "direct_weight_change": False},
+                    model_result=dict(suggestion.get("evidence") or {}),
+                    fused_decision={
+                        "suggestion_id": suggestion.get("suggestion_id"),
+                        "action": "downweight",
+                        "status": "proposed",
+                    },
+                    applied=True,
+                    reason="model_factor_downweight_suggestion",
+                )
         return {
             **result,
             "schema_version": "factor_governance_demo_bridge.v1",

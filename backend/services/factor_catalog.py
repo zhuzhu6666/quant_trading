@@ -275,6 +275,17 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
     selection = select_runtime_factors(signal_cfg)
     selected = set(selection.selected_factor_ids if selection is not None else factor_registry.list())
     excluded_reasons = dict(selection.reason_excluded if selection is not None else {})
+    selection_source = "local_fallback"
+    try:
+        from backend.services.runtime_factor_selection_projection import RuntimeFactorSelectionProjectionService
+
+        projection = RuntimeFactorSelectionProjectionService(db_path).latest()
+        if projection.get("ok"):
+            selected = set(projection.get("selected_factor_ids") or [])
+            excluded_reasons = dict(projection.get("reason_excluded") or {})
+            selection_source = "live_runtime_projection"
+    except Exception:
+        pass
 
     try:
         from alpha.registry_adapter import RegistryAdapter
@@ -370,6 +381,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "last_action_ts": float(policy.get("created_at") or meta.get("promote_time") or meta.get("register_time") or 0.0),
             "rollback_state": "available" if policy else "",
             "reason_excluded": reason,
+            "runtime_selection_source": selection_source,
             "catalog_ts": now,
             "latest_catalog_snapshot_id": str(latest_snapshot.get("snapshot_id") or ""),
             "latest_catalog_snapshot_run_id": str(latest_snapshot.get("run_id") or ""),

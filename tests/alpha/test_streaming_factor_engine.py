@@ -4,6 +4,7 @@ Phase 1 of FACTOR_TAKEOVER_V4.
 """
 import math
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -390,6 +391,12 @@ class TestRefreshFactorList:
             def get_meta(self, name):
                 return dict(self._meta.get(name, {"source": "builtin"}))
 
+            def all_statuses(self):
+                return [
+                    SimpleNamespace(factor="rsi_14", status="HEALTHY", n_obs=100),
+                    SimpleNamespace(factor=discovered, status="HEALTHY", n_obs=100),
+                ]
+
         monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
 
         try:
@@ -424,6 +431,9 @@ class TestRefreshFactorList:
             def get_meta(self, name):
                 return {"source": "discovered"} if name == discovered else {"source": "builtin"}
 
+            def all_statuses(self):
+                return [SimpleNamespace(factor="rsi_14", status="HEALTHY", n_obs=100)]
+
         monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
 
         try:
@@ -455,6 +465,9 @@ class TestRefreshFactorList:
 
             def get_meta(self, name):
                 return {"source": "discovered"} if name == dead else {"source": "builtin"}
+
+            def all_statuses(self):
+                return [SimpleNamespace(factor="rsi_14", status="HEALTHY", n_obs=100)]
 
         monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
 

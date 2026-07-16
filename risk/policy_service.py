@@ -147,6 +147,10 @@ class RiskPolicyService:
             return self._evaluate_model_stage(action, context, required_mode="shadow")
         if action == "start_canary_model":
             return self._evaluate_model_stage(action, context, required_mode="canary")
+        if action == "promote_model_influence":
+            return self._evaluate_model_influence(context, promotion=True)
+        if action == "demote_model_influence":
+            return self._evaluate_model_influence(context, promotion=False)
         if action == "run_replay_job":
             return self._evaluate_low_impact_replay_job(context)
         return RiskVerdict(
@@ -276,6 +280,7 @@ class RiskPolicyService:
             "autonomy_mode": mode,
             "live_autonomy_unlocked": bool(unlocked),
             "live_autonomy_unlock_id": str(unlock_id or ""),
+            "runtime_incident_mode": RiskPolicyService._current_incident_mode(context),
         }
 
     @classmethod
@@ -1381,6 +1386,82 @@ class RiskPolicyService:
                 "candidate_status": candidate_status,
                 "capabilities": capabilities,
                 "model_permission": permission,
+            },
+        )
+
+    def _evaluate_model_influence(self, context: dict[str, Any], *, promotion: bool) -> RiskVerdict:
+        """Authorize a bounded model stage transition, never direct execution."""
+        if not promotion:
+            return RiskVerdict(
+                allowed=True,
+                reason="risk_reducing_model_demotion",
+                required_mode="shadow",
+                audit_payload={"action": "demote_model_influence", "source": "risk_policy"},
+            )
+        runtime = self._runtime_autonomy_context(context)
+        if runtime.get("autonomy_mode") not in {"demo_nursery", "demo_autonomous"}:
+            return RiskVerdict(
+                allowed=False,
+                reason="model_influence_demo_only",
+                severity="error",
+                required_mode="demo_canary",
+                audit_payload={"runtime": runtime},
+            )
+        if str(runtime.get("runtime_incident_mode") or "normal") != "normal":
+            return RiskVerdict(
+                allowed=False,
+                reason="incident_mode_blocks_model_promotion",
+                severity="error",
+                required_mode="demo_canary",
+                audit_payload={"runtime": runtime},
+            )
+        if not bool(context.get("demo_model_influence_enabled")):
+            return RiskVerdict(
+                allowed=False,
+                reason="demo_model_influence_not_unlocked",
+                severity="error",
+                required_mode="demo_canary",
+                audit_payload={"runtime": runtime},
+            )
+        capabilities = dict(context.get("capabilities") or {})
+        forbidden = [
+            key for key in ("live_trading", "can_place_orders", "can_close_positions",
+                            "can_change_risk_limits", "can_change_factor_weights", "can_bypass_risk_policy")
+            if bool(capabilities.get(key))
+        ]
+        if forbidden:
+            return RiskVerdict(
+                allowed=False,
+                reason="unsafe_model_influence_capability",
+                severity="error",
+                required_mode="demo_canary",
+                audit_payload={"forbidden": forbidden, "capabilities": capabilities},
+            )
+        if not str(context.get("feature_schema_version") or "").startswith("pit.v2"):
+            return RiskVerdict(
+                allowed=False,
+                reason="model_influence_requires_pit_v2",
+                severity="error",
+                required_mode="demo_canary",
+                audit_payload={"feature_schema_version": context.get("feature_schema_version")},
+            )
+        if not bool(context.get("promotion_gate_passed")):
+            return RiskVerdict(
+                allowed=False,
+                reason="model_promotion_evidence_not_ready",
+                severity="error",
+                required_mode="demo_canary",
+                audit_payload={"gate": context.get("promotion_gate") or {}},
+            )
+        return RiskVerdict(
+            allowed=True,
+            reason="bounded_demo_model_influence",
+            required_mode="demo_canary",
+            audit_payload={
+                "action": "promote_model_influence",
+                "model_type": context.get("model_type"),
+                "allowed_effects": context.get("allowed_effects") or [],
+                "direct_execution": False,
             },
         )
 

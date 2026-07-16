@@ -46,6 +46,36 @@ def _score(value: object) -> float:
         return 0.0
 
 
+def _health_evidence(adapter: object) -> dict[str, object]:
+    """Return persisted health rows keyed by factor.
+
+    An absent row is deliberately different from a low score: live alpha may
+    remain active while WATCH/DECAYING, but it must not enter directional
+    scoring without any measured observations at all.
+    """
+    try:
+        statuses = adapter.all_statuses() if hasattr(adapter, "all_statuses") else []
+    except Exception:
+        statuses = []
+    return {
+        str(getattr(item, "factor", "") or ""): item
+        for item in statuses
+        if str(getattr(item, "factor", "") or "")
+    }
+
+
+def _has_health_evidence(name: str, health: dict[str, object]) -> bool:
+    item = health.get(name)
+    if item is None:
+        return False
+    status = str(getattr(item, "status", "UNKNOWN") or "UNKNOWN").upper()
+    try:
+        n_obs = int(getattr(item, "n_obs", 0) or 0)
+    except Exception:
+        n_obs = 0
+    return n_obs > 0 and status not in {"", "UNKNOWN"}
+
+
 def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[str]:
     try:
         from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED
@@ -53,6 +83,7 @@ def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[
         adapter = RegistryAdapter.shared()
         names = list(adapter.list_by_source(SOURCE_DISCOVERED))
         dead = set(adapter.dead_names()) if hasattr(adapter, "dead_names") else set()
+        health = _health_evidence(adapter)
     except Exception:
         return []
 
@@ -63,6 +94,8 @@ def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[
         if name in dead:
             continue
         if factor_registry.get(name) is None:
+            continue
+        if not _has_health_evidence(name, health):
             continue
         cfg = config.get(name)
         if isinstance(cfg, dict) and cfg.get("enabled") is False:
@@ -151,10 +184,15 @@ def select_runtime_factors(config: dict[str, dict] | None) -> RuntimeFactorSelec
         from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED, SOURCE_SHADOW
 
         adapter = RegistryAdapter.shared()
+        health = _health_evidence(adapter)
         for name in adapter.list_by_source(SOURCE_DISCOVERED):
             if name not in selected_discovered and name not in reasons:
                 excluded.append(name)
-                reasons[name] = "discovered_runtime_budget"
+                reasons[name] = (
+                    "discovered_runtime_budget"
+                    if _has_health_evidence(name, health)
+                    else "missing_health_evidence"
+                )
         for name in adapter.list_by_source(SOURCE_SHADOW):
             if name not in reasons:
                 excluded.append(name)
@@ -167,6 +205,23 @@ def select_runtime_factors(config: dict[str, dict] | None) -> RuntimeFactorSelec
             if name not in reasons:
                 excluded.append(name)
                 reasons[name] = "lifecycle_dead"
+
+        admitted: list[str] = []
+        for name in names:
+            cfg = config.get(name) if isinstance(config.get(name), dict) else {}
+            role = str((cfg or {}).get("role") or "alpha").lower()
+            lifecycle = str((cfg or {}).get("lifecycle_status") or "").upper()
+            if lifecycle in {"DEAD", "SHADOW", "QUARANTINE", "QUARANTINED"}:
+                excluded.append(name)
+                reasons[name] = "lifecycle_not_live"
+                continue
+            if role == "alpha" and not bool((cfg or {}).get("health_gate_exempt", False)):
+                if not _has_health_evidence(name, health):
+                    excluded.append(name)
+                    reasons[name] = "missing_health_evidence"
+                    continue
+            admitted.append(name)
+        names = admitted
     except Exception:
         pass
 

@@ -310,6 +310,8 @@ def should_full_close_untradeable_reduce(
 
     evidence = dict((verdict or {}).get("evidence") or {})
     controls = dict((verdict or {}).get("recommended_controls") or {})
+    if controls.get("allow_full_close_fallback") is False:
+        return False, "full_close_fallback_disabled"
     summary_reason = str((verdict or {}).get("summary_reason") or "")
     thesis_status = str(evidence.get("thesis_status") or "").lower()
     trigger_tags = evidence.get("trigger_tags") or []

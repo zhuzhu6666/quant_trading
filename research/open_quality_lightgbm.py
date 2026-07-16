@@ -13,29 +13,26 @@ from backend.services.model_permissions import validate_model_artifact
 
 
 MODEL_TYPE = "open_quality_lightgbm"
-MODEL_VERSION = "1.0"
+MODEL_VERSION = "3.0"
+FEATURE_SCHEMA_VERSION = "pit.v2.open_lineage"
 
 FEATURE_NAMES = [
     "action_score",
     "abs_action_score",
     "direction",
     "same_direction_open_count",
-    "same_direction_open_count_after",
     "pyramid_depth",
     "is_pyramid",
     "recent_same_direction_5m",
     "recent_same_direction_15m",
     "recent_same_direction_30m",
     "same_direction_api_volume_before",
-    "same_direction_api_volume_after",
     "open_position_count_before",
-    "open_position_count_after",
     "event_near",
     "event_multiplier",
     "spread",
     "quote_fresh",
     "quote_age_seconds",
-    "adverse_slippage_points",
     "bar_body_ratio",
     "bar_close_location",
     "bar_range_points",
@@ -128,22 +125,18 @@ def _features_from_sample(row: Any) -> dict[str, float]:
         "abs_action_score": abs(action_score),
         "direction": _safe_float(action.get("direction")),
         "same_direction_open_count": _safe_float(action.get("same_direction_open_count"), _safe_float(entry_cluster.get("same_direction_open_count_before"))),
-        "same_direction_open_count_after": _safe_float(entry_cluster.get("same_direction_open_count_after"), _safe_float(portfolio.get("same_direction_open_count_after"))),
         "pyramid_depth": _safe_float(entry_cluster.get("pyramid_depth")),
         "is_pyramid": 1.0 if bool(entry_cluster.get("is_pyramid")) else 0.0,
         "recent_same_direction_5m": _safe_float(recent.get("5m")),
         "recent_same_direction_15m": _safe_float(recent.get("15m")),
         "recent_same_direction_30m": _safe_float(recent.get("30m")),
         "same_direction_api_volume_before": _safe_float(entry_cluster.get("same_direction_api_volume_before"), _safe_float(portfolio.get("same_direction_api_volume_before"))),
-        "same_direction_api_volume_after": _safe_float(entry_cluster.get("same_direction_api_volume_after"), _safe_float(portfolio.get("same_direction_api_volume_after"))),
         "open_position_count_before": _safe_float(entry_cluster.get("open_position_count_before"), _safe_float(portfolio.get("open_position_count_before"))),
-        "open_position_count_after": _safe_float(entry_cluster.get("open_position_count_after"), _safe_float(portfolio.get("open_position_count_after"))),
         "event_near": 1.0 if bool(event.get("event_near")) else 0.0,
         "event_multiplier": _safe_float(event.get("multiplier"), 1.0),
         "spread": _safe_float(micro.get("spread"), _safe_float(action.get("spread"))),
         "quote_fresh": 1.0 if bool(micro.get("quote_fresh", True)) else 0.0,
         "quote_age_seconds": _safe_float(micro.get("quote_age_seconds")),
-        "adverse_slippage_points": _safe_float(micro.get("adverse_slippage_points")),
         "bar_body_ratio": _safe_float(bar.get("body_ratio")),
         "bar_close_location": _safe_float(bar.get("close_location")),
         "bar_range_points": _safe_float(bar.get("range_points")),
@@ -167,6 +160,42 @@ def _sample_from_row(row: Any) -> dict[str, Any] | None:
         return None
     if str(label_json.get("label") or "") != "open_outcome":
         return None
+    features_json = _loads(row["features_json"], {})
+    action = dict(features_json.get("action") or {})
+    decision_quality = dict(
+        features_json.get("decision_quality_context")
+        or action.get("decision_quality_context")
+        or {}
+    )
+    bar_context = dict(features_json.get("bar_context") or action.get("bar_context") or {})
+    micro = dict(features_json.get("market_micro_context") or action.get("market_micro_context") or {})
+    factor_roles = dict(action.get("factor_roles") or decision_quality.get("factor_roles") or {})
+    config_hash = str(row["config_hash"] or "")
+    composer_version = str(action.get("composer_version") or decision_quality.get("composer_version") or "")
+    strategy_version = f"factor_pipeline_v4:{composer_version or 'unknown'}"
+    factor_universe = sorted(factor_roles)
+    lineage_payload = {
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "strategy_version": strategy_version,
+        "decision_quality_schema": str(decision_quality.get("schema_version") or ""),
+        "bar_schema": str(bar_context.get("schema_version") or ""),
+    }
+    lineage_id = hashlib.sha256(
+        json.dumps(lineage_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    quality_errors = []
+    if not config_hash:
+        quality_errors.append("missing_config_hash")
+    if not composer_version:
+        quality_errors.append("missing_composer_version")
+    if str(decision_quality.get("schema_version") or "") != "decision_quality_context.v1":
+        quality_errors.append("invalid_decision_quality_schema")
+    if not factor_roles or int(_safe_float(decision_quality.get("n_active_alpha_factors"))) <= 0:
+        quality_errors.append("missing_active_alpha_universe")
+    if bar_context.get("complete") is not True:
+        quality_errors.append("decision_bar_not_complete")
+    if micro.get("quote_fresh") is False:
+        quality_errors.append("stale_entry_quote")
     features = _features_from_sample(row)
     return {
         "sample_id": str(row["sample_id"] or ""),
@@ -179,6 +208,11 @@ def _sample_from_row(row: Any) -> dict[str, Any] | None:
         "label": _label_from_open_outcome(label_json),
         "rule_label": _rule_baseline_label(features),
         "features": features,
+        "config_hash": config_hash,
+        "strategy_version": strategy_version,
+        "lineage_id": lineage_id,
+        "lineage": {**lineage_payload, "observed_factor_universe": factor_universe},
+        "quality_errors": quality_errors,
     }
 
 
@@ -188,6 +222,7 @@ class OpenQualityLightGBMService:
     def __init__(self, *, db_path: str | Path = STATE_DB, artifact_dir: str | Path | None = None):
         self.db_path = Path(db_path)
         self.artifact_dir = Path(artifact_dir) if artifact_dir else DATA_DIR / "model_artifacts" / MODEL_TYPE
+        self.last_data_quality: dict[str, Any] = {}
         self._ensure_audit_table()
 
     def _use_pg(self) -> bool:
@@ -269,11 +304,29 @@ class OpenQualityLightGBMService:
                 """,
                 (int(limit),),
             ).fetchall()
-            samples = []
+            candidates = []
             for row in rows:
                 item = _sample_from_row(row)
                 if item is not None:
-                    samples.append(item)
+                    candidates.append(item)
+            valid = [item for item in candidates if not item.get("quality_errors")]
+            latest_lineage = str(valid[-1].get("lineage_id") or "") if valid else ""
+            samples = [item for item in valid if str(item.get("lineage_id") or "") == latest_lineage]
+            rejection_counts: dict[str, int] = {}
+            for item in candidates:
+                for reason in item.get("quality_errors") or []:
+                    rejection_counts[str(reason)] = rejection_counts.get(str(reason), 0) + 1
+            self.last_data_quality = {
+                "schema_version": "model_training_data_quality.v1",
+                "candidate_count": len(candidates),
+                "valid_count": len(valid),
+                "selected_count": len(samples),
+                "selected_lineage_id": latest_lineage,
+                "selected_lineage": dict(samples[-1].get("lineage") or {}) if samples else {},
+                "selected_config_hashes": sorted({str(item.get("config_hash") or "") for item in samples}),
+                "excluded_other_lineage_count": len(valid) - len(samples),
+                "rejection_counts": rejection_counts,
+            }
             return samples
         finally:
             conn.close()
@@ -300,7 +353,12 @@ class OpenQualityLightGBMService:
 
         samples = self.load_samples(limit=limit)
         if len(samples) < int(min_samples):
-            return {"ok": False, "model_type": MODEL_TYPE, "model_version": MODEL_VERSION, "sample_count": len(samples), "error": "insufficient_open_outcome_samples"}
+            return {
+                "ok": False, "model_type": MODEL_TYPE, "model_version": MODEL_VERSION,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "sample_count": len(samples), "data_quality": dict(self.last_data_quality),
+                "error": "insufficient_open_outcome_samples",
+            }
         labels = [int(item["label"]) for item in samples]
         if len(set(labels)) < 2:
             return {"ok": False, "model_type": MODEL_TYPE, "model_version": MODEL_VERSION, "sample_count": len(samples), "error": "single_class_training_data"}
@@ -367,11 +425,13 @@ class OpenQualityLightGBMService:
         metrics = {
             "train": _metrics(train_samples, y_train, train_prob),
             "holdout": _metrics(holdout_samples, y_holdout, holdout_prob),
-            "split": "time_ordered",
+            "split": "time_ordered_grouped_purged",
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "sample_count": len(samples),
             "feature_count": len(FEATURE_NAMES),
             "label_distribution": {"negative": labels.count(0), "positive": labels.count(1)},
             "safe_for_live_trading": False,
+            "data_quality": dict(self.last_data_quality),
         }
         now = time.time()
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -380,9 +440,10 @@ class OpenQualityLightGBMService:
         metadata_path = self.artifact_dir / f"{artifact_base}.json"
         joblib.dump({"model": model, "feature_names": FEATURE_NAMES}, model_path)
         artifact = {
-            "schema_version": "open_quality_lightgbm_artifact.v1",
+            "schema_version": "open_quality_lightgbm_artifact.v2",
             "model_type": MODEL_TYPE,
             "model_version": MODEL_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "created_at": now,
             "artifact_path": str(metadata_path),
             "model_file": str(model_path),
@@ -390,6 +451,7 @@ class OpenQualityLightGBMService:
             "feature_names": FEATURE_NAMES,
             "label": "acceptable_open_outcome",
             "sample_window": {"limit": int(limit), "sample_count": len(samples)},
+            "training_lineage": dict(self.last_data_quality),
             "metrics": metrics,
             "explainability": {
                 "feature_importance": feature_importance,
@@ -438,6 +500,7 @@ class OpenQualityLightGBMService:
             "ok": True,
             "model_type": MODEL_TYPE,
             "model_version": MODEL_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "artifact_path": str(metadata_path),
             "artifact_sha256": artifact["artifact_sha256"],
             "model_file": str(model_path),
@@ -450,6 +513,50 @@ class OpenQualityLightGBMService:
     def latest_artifact_path(self) -> str:
         paths = sorted(self.artifact_dir.glob(f"{MODEL_TYPE}_*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
         return str(paths[0]) if paths else ""
+
+    def score_open_context(
+        self,
+        context: dict[str, Any],
+        *,
+        artifact_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Score a pre-order context using the exact PIT v2 training schema."""
+        dep_error = _dependency_error()
+        if dep_error:
+            return {"ok": False, "error": "dependency_missing", "detail": dep_error}
+        import joblib
+        import pandas as pd
+
+        path = Path(str(artifact_path or self.latest_artifact_path()))
+        if not path.exists():
+            return {"ok": False, "error": "artifact_missing"}
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        if str(artifact.get("feature_schema_version") or "") != FEATURE_SCHEMA_VERSION:
+            return {"ok": False, "error": "artifact_feature_schema_not_pit_v2"}
+        permission = validate_model_artifact(
+            artifact, model_type=MODEL_TYPE, db_path=self.db_path,
+            context={"mode": "demo_influence_candidate", "operation": "open_quality_live_score"},
+        )
+        if not permission.get("ok"):
+            return {"ok": False, "error": "model_permission_violation", "permission": permission}
+        model_file = Path(str(artifact.get("model_file") or ""))
+        if not model_file.exists():
+            return {"ok": False, "error": "model_file_missing"}
+        bundle = joblib.load(model_file)
+        feature_names = list(bundle.get("feature_names") or FEATURE_NAMES)
+        features = _features_from_sample({"features_json": json.dumps(context or {}, ensure_ascii=False)})
+        frame = pd.DataFrame([[features.get(name, 0.0) for name in feature_names]], columns=feature_names)
+        quality_score = float(bundle["model"].predict_proba(frame)[:, 1][0])
+        return {
+            "ok": True,
+            "schema_version": "open_quality_live_score.v2",
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "quality_score": round(quality_score, 8),
+            "risk_score": round(1.0 - quality_score, 8),
+            "features": features,
+            "model_version": str(artifact.get("model_version") or MODEL_VERSION),
+            "artifact_path": str(path),
+        }
 
     def score_samples(self, *, artifact_path: str | Path | None = None, limit: int = 100, mode: str = "shadow") -> dict[str, Any]:
         dep_error = _dependency_error()

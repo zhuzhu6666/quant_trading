@@ -18,7 +18,9 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
-        return int(value or 0)
+        if value is None or value == "":
+            return int(default)
+        return int(value)
     except Exception:
         return int(default)
 
@@ -51,6 +53,33 @@ def _tightened_sl(
         lock_price = entry_price - max(0.0, (entry_price - current_price) * lock_ratio)
         target = min(current_sl if current_sl > 0 else breakeven, breakeven, lock_price)
     return round(target, 2)
+
+
+def build_model_tighten_controls(context: dict[str, Any]) -> dict[str, Any]:
+    """Reuse the authoritative supervisor SL policy for model fusion."""
+    position = dict(context.get("position") or {})
+    risk = dict(context.get("risk") or {})
+    template = normalize_position_supervisor_template(context.get("position_supervisor_template") or {})
+    sl_policy = dict(template.get("sl_policy") or {})
+    direction = int(position.get("direction") or risk.get("direction") or 0)
+    entry_price = _safe_float(position.get("entry_price") or risk.get("entry_price"))
+    current_price = _safe_float(position.get("current_price") or risk.get("current_price"))
+    current_sl = _safe_float(position.get("sl") or position.get("stop_loss") or risk.get("current_sl"))
+    target = _tightened_sl(
+        direction=direction,
+        entry_price=entry_price,
+        current_price=current_price,
+        current_sl=current_sl,
+        profit_capture_ratio=_safe_float(risk.get("profit_capture_ratio")),
+        sl_policy=sl_policy,
+    )
+    if target <= 0:
+        return {}
+    return {
+        "target_stop_loss": target,
+        "target_take_profit": _safe_float(position.get("tp") or position.get("take_profit")),
+        "reduce_fraction": 0.0,
+    }
 
 
 def _extended_tp(

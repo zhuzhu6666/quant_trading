@@ -186,6 +186,8 @@ def test_meta_model_lightgbm_trains_or_reports_missing_dependency(tmp_path):
     assert "model_lift_vs_rule" in result["metrics"]["holdout"]
     assert "rule_lift_vs_majority" in result["metrics"]["holdout"]
     assert result["metrics"]["walk_forward"]["split"] == "expanding_time_ordered"
+    assert "distribution_stability" in result["metrics"]
+    assert result["feature_schema_version"] == "pit.v2.meta_residual_rate"
     assert "generalization_gap" in result["metrics"]["governance_readiness"]["checks"]
     assert result["metrics"]["governance_readiness"]["status"] in {
         "model_shadow_candidate",
@@ -220,7 +222,7 @@ def test_meta_model_lightgbm_trains_or_reports_missing_dependency(tmp_path):
     assert set(report["confusion_matrix"]) == {"contract", "observe", "recover"}
     assert report["rule_comparison"]["compared_count"] == 11
     assert report["capabilities"]["live_trading"] is False
-    assert report["artifact_summary"]["model_version"] == "1.1"
+    assert report["artifact_summary"]["model_version"] == "4.0"
 
 
 def test_meta_model_lightgbm_blocks_unsafe_artifact(tmp_path):
@@ -263,13 +265,13 @@ def test_meta_model_lightgbm_v2_features_include_risk_and_shadow_signals(tmp_pat
     enriched = next(item for item in samples if item["created_at"] >= 1007.0)
     features = enriched["features"]
 
-    assert features["future_window_trade_count"] == 3.0
-    assert features["risk_blocked_count"] >= 1.0
-    assert features["risk_allowed_count"] >= 1.0
-    assert features["supervisor_close_count"] >= 1.0
-    assert features["supervisor_tighten_count"] >= 1.0
-    assert features["amend_skipped_count"] >= 1.0
-    assert features["amend_failed_count"] >= 1.0
+    assert "future_window_trade_count" not in features
+    assert features["risk_blocked_rate_per_hour"] > 0.0
+    assert features["risk_allowed_rate_per_hour"] > 0.0
+    assert features["supervisor_close_rate_per_hour"] > 0.0
+    assert features["supervisor_tighten_rate_per_hour"] > 0.0
+    assert features["amend_skipped_rate_per_hour"] > 0.0
+    assert features["amend_failed_rate_per_hour"] > 0.0
     assert features["position_quality_weak_rate"] == 1.0
     assert features["factor_governance_weak_rate"] == 1.0
     assert features["counterfactual_premature_rate"] == 1.0

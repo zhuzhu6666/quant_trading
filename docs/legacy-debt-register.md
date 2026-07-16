@@ -64,9 +64,9 @@
 
 - 状态: `fixed`
 - 旧理解: 搜索出来的因子容易被直接注册或进入主链。
-- 当前口径: shadow 永不直接交易；discovered 必须经证据门槛和治理晋升；live 才进入主链路。
+- 当前口径: shadow 永不直接交易；discovered 必须经证据门槛和治理晋升；所有 directional alpha 还必须有 `factor_health` 非 UNKNOWN、`n_obs>0` 的持久化观测证据；live 进程把实际选择发布到 `runtime_kv[runtime_factor_selection.v1]`，Catalog 不再依赖自身进程的 registry 副本猜测主链。
 - 影响面: discovery、registry、runtime selection、AWE、readiness、Catalog。
-- 收口方式: `runtime_factor_selection` 返回 selected/excluded/reason；治理动作由 Orchestrator 执行。
+- 收口方式: `runtime_factor_selection` 返回 selected/excluded/reason 并由 live 发布跨进程投影；治理动作由 Orchestrator 执行。
 - 验证方式: runtime selection 明确排除 `shadow_only` / `lifecycle_dead`，Factor Governance 是唯一 lifecycle executor。
 
 ## 3. 自治治理旧债
@@ -503,6 +503,24 @@
 - 影响面: `/metrics`、监控告警和 readiness。
 - 收口方式: requirements 固定依赖并公开 metrics backend 状态。
 - 验证方式: `tests/test_metrics_endpoint.py`、`tests/test_backend_readiness_contract.py`。
+
+### LightGBM 影子权限与真实影响之间没有统一晋级边界
+
+- 状态: fixed
+- 旧理解: 四个 LightGBM 要么永久 shadow，要么由各调用点自行解释分数，缺少统一的 PIT、晋级、影响审计和回滚口径。
+- 当前口径: 训练统一发布 `pit.v2` 工件；`ModelInfluenceGovernanceService` 执行时间隔离、样本、基线提升和哈希门，V16 只下达一次性 `model_stage` 委派，RuntimeConfig 记录 shadow/demo_canary/demo_active/quarantined 阶段。
+- 影响面: open candidate、position supervisor、factor governance、meta risk sizing、learning worker、readiness、runtime overlay。
+- 收口方式: 模型只允许 veto/收紧/治理建议/额度收缩，不能放宽规则或获得 broker 权限；工件漂移、门槛回退和动作率超限自动 quarantine。
+- 验证方式: `tests/test_model_influence.py`、四个 LightGBM 测试、live/risk/runtime contract 回归。
+
+### LightGBM 训练混用版本、终局标签和规则重复标签
+
+- 状态: fixed
+- 旧理解: 只要样本数量够就可以把不同策略代际混训；持仓用最终平仓结果反标任意 trace，因子使用当期贡献预测自身结果，meta 直接重复预测规则 posture。
+- 当前口径: open 使用稳定语义血缘隔离代际；position 使用固定 30 分钟前瞻 PnL 保全标签且同仓位降权，并修复 completed-bars 缺省值；factor 使用显式/可回溯的 bounded generation、独立 trade 数和同因子滚动历史预测下一结果；meta 使用固定 24 小时事件率、预测相对规则输出的残差，并以分布稳定性阻断规则输出塌缩。
+- 影响面: 四套 LightGBM 的样本选择、标签、特征、artifact schema、promotion gate 和推理审计。
+- 收口方式: 训练发布具体 `pit.v2.*` 子契约；因子展开行不得冒充独立样本，旧 unbounded generation 不与当前 bounded generation 混训，meta 的未来 posture 漂移超过 0.25 或规则单 posture 占比超过 0.90 时不得晋级；样本不足或不胜基线时保留 shadow/blocked。
+- 验证方式: 四套 LightGBM 定向测试、真实 PostgreSQL 重训结果、`ModelInfluenceGovernanceService.evaluate_artifact()`。
 
 ## 5. 新旧债登记模板
 

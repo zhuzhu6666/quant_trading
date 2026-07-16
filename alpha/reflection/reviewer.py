@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import sqlite3
 import time
@@ -572,6 +573,19 @@ class TradeReviewer:
         if alpha_contributions:
             top_factor, top_factor_mc = max(alpha_contributions.items(), key=lambda kv: abs(kv[1]))
 
+        factor_names = sorted(str(name) for name in contributions)
+        factor_generation = "runtime_bounded_v1" if len(factor_names) <= 64 else "legacy_unbounded"
+        factor_training_lineage = {
+            "schema_version": "factor_training_lineage.v1",
+            "generation": factor_generation,
+            "composer_version": str(decision_quality_context.get("composer_version") or ""),
+            "decision_quality_schema": str(decision_quality_context.get("schema_version") or ""),
+            "factor_count": len(factor_names),
+            "factor_universe_sha256": hashlib.sha256(
+                json.dumps(factor_names, ensure_ascii=False).encode("utf-8")
+            ).hexdigest(),
+        }
+
         review_json = {
             "contract_version": "phase_d.v1",
             "position_id": position_id,
@@ -606,6 +620,7 @@ class TradeReviewer:
             "signal_score": entry_score,
             "action_score": entry_score,
             "entry_action": entry_action if isinstance(entry_action, dict) else {},
+            "factor_training_lineage": factor_training_lineage,
             "entry_risk_state": entry_risk_state if isinstance(entry_risk_state, dict) else {},
             "direction": _safe_int((entry_action or {}).get("direction") if isinstance(entry_action, dict) else 0),
             "same_direction_open_count": same_direction_open_count,
@@ -799,6 +814,8 @@ class TradeReviewer:
                         json.dumps(
                             {
                                 "source": "rule_review",
+                                "factor_generation": factor_generation,
+                                "factor_training_lineage": factor_training_lineage,
                                 "primary_responsibility": taxonomy["primary_responsibility"],
                                 "responsibility_labels": taxonomy["responsibility_labels"],
                                 "system_contaminated": bool((system_issue or {}).get("contaminates_learning")),
