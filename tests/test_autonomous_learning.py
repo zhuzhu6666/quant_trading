@@ -4,6 +4,7 @@ import time
 
 from backend.core.db import STATE_DB_DDL
 from backend.services import autonomous_learning as al
+from backend.services import evolution_ledger
 from backend.services.evolution_ledger import expire_stale_evolution_runs, start_evolution_run
 from config import runtime_config as rc
 
@@ -329,6 +330,30 @@ def test_expire_stale_evolution_runs_marks_only_old_running_rows(tmp_path):
         conn.close()
     assert rows[stale["run_id"]] == "expired"
     assert rows[fresh["run_id"]] == "running"
+
+
+def test_start_evolution_run_does_not_return_snapshot_run_id(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(
+        evolution_ledger,
+        "current_runtime_config_snapshot",
+        lambda **_kwargs: {
+            "run_id": "snapshot_owner",
+            "config_version": 7,
+            "config_hash": "cfg_hash",
+        },
+    )
+
+    run = start_evolution_run(run_type="factor_governance_autonomous", db_path=db_path)
+
+    assert run["run_id"].startswith("evorun_")
+    assert run["run_id"] != "snapshot_owner"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        stored = conn.execute("SELECT run_id FROM evolution_run").fetchone()[0]
+    finally:
+        conn.close()
+    assert stored == run["run_id"]
 
 
 def test_materialize_autonomous_learning_orders_decisions_by_event_time(tmp_path):

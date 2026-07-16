@@ -6,6 +6,10 @@ import math
 from typing import Any, Mapping
 
 
+DATA_SYNC_CRON = "*/5 * * * *"
+DATA_SYNC_INTERVAL_SECONDS = 5 * 60
+
+
 BAR_FRESHNESS_THRESHOLDS: dict[str, float] = {
     "M1": 180,
     "M5": 900,

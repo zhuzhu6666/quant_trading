@@ -89,7 +89,7 @@
 | 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk 等运行态统一输入口径；`open_pending_quote` 或 `broker_connected_market_data_stale` 仅在 API/连接证据健康时按 RuntimeConfig 的75分钟上限标记 `maintenance_wait`，到期仍无行情必须恢复 critical；市场快照必须复用最新 spot quote，不能因调用方未传 bridge 丢失实时状态 |
 | 跨进程运行健康投影 | PostgreSQL `runtime_kv[runtime_health_projection.v1]` + `backend.services.runtime_health_projection` | live 进程发布 market session、cTrader 连接和 loop 状态；`/api/health`、readiness、learning worker 只消费同一只读投影，不重复推测 broker 状态；该投影不授权交易 |
 | 指标后端 | `monitor.metrics.metrics_backend_status` + backend readiness | 生产默认使用 `prometheus-client`；缺失时保留 text fallback，但 readiness 必须显示 `metrics_backend=fallback` 和 degraded |
-| 决策 K 线/信号新鲜度 | `backend.services.live_data_sync_helpers` + `_live_state.decision_bar_freshness` + `_live_state.last_processed_decision_bar_ts` + `RiskPolicyService.evaluate("open_trade")` | live tick 只用最新已闭合 bar；缺应有闭合 bar 时先经主 cTrader bridge 回补月库并重载，修复失败以 `decision_bar_stale` 阻断开仓；同一根已闭合决策 bar 只推进一次 signal/open，重复 tick 只运行持仓观察/保护；即使 bar fresh，信号 age 超过 `max(180s, 1.5 * timeframe)` 时以 `decision_signal_age_stale` 阻断开仓 |
+| 决策 K 线/信号新鲜度 | `backend.services.live_data_sync_helpers` + `_live_state.decision_bar_freshness` + `_live_state.last_processed_decision_bar_ts` + `RiskPolicyService.evaluate("open_trade")` | live tick 只用最新已闭合 bar；缺应有闭合 bar 时先经主 cTrader bridge 回补月库并重载，但统一 market session 处于 closed 或有界 `maintenance_wait` 时抑制即时回补和 spot 重订阅；修复失败以 `decision_bar_stale` 阻断开仓；同一根已闭合决策 bar 只推进一次 signal/open，重复 tick 只运行持仓观察/保护；即使 bar fresh，信号 age 超过 `max(180s, 1.5 * timeframe)` 时以 `decision_signal_age_stale` 阻断开仓 |
 | 下单/改仓/平仓 | cTrader bridge + ledger + `execution.deal_sync` | broker 执行事实与账本共同追溯；live 开仓先经 `_run_open_trade_pipeline()` 生成 candidate/risk verdict/order block，再触达 broker；同一 position 的部分平仓和最终平仓 close deals 必须聚合，`trade_executions` 以 `reduce`/`close` 保留完整执行路径；生命周期 `reduced.realized_pnl` 固定为 0，部分腿 PnL 只保留在 execution details，最终 `closed.realized_pnl` 才承载整仓聚合值 |
 | 后端进程退出 | `BackendRuntimeLifecycle` + `stop_loop_for_process_shutdown()` + `live.loop.last_shutdown` | 进程退出保留 persisted desired loop state，同步等待当前 tick drain；`completed/timed_out/not_running` 写结构化 shutdown 结果，超时以 `recovery_required=true` 审计，不平仓、不主动断开 cTrader；手工 `/api/live/stop` 仍负责显式关闭 desired state |
 | 信号门槛 | `ExecutionGate` + context policy effect | gate 前应用有效阈值；live 只负责信号/冷却，不作为事件风险最终裁决口 |
@@ -247,7 +247,7 @@
 判断原则：
 
 - live 实时执行状态以 cTrader 为准。
-- live 决策 K 线以月库中的已闭合 bar 为准；`data_sync` 和 live tick 即时修复都可以通过主 cTrader bridge 回补月库，但不能把未闭合 bar 当成 `complete=true` 的决策输入。
+- live 决策 K 线以月库中的已闭合 bar 为准；`data_sync` 和 live tick 即时修复都可以通过主 cTrader bridge 回补月库，但 closed/有界 maintenance wait 必须共同抑制无效回补，不能把未闭合 bar 当成 `complete=true` 的决策输入。
 - 外部研究数据不能替代 broker 实时行情和执行状态。
 - 不新增生产路径写入 SQLite state。
 

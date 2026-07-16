@@ -1081,6 +1081,7 @@ def test_ensure_live_decision_bars_repairs_from_primary_bridge(monkeypatch):
         df_new=stale_df,
         tick=99,
         log=logs.append,
+        market_session={"status": "open_confirmed"},
     )
 
     assert repaired.index[-1] == pd.Timestamp("2026-07-07T03:45:00Z")
@@ -1091,6 +1092,91 @@ def test_ensure_live_decision_bars_repairs_from_primary_bridge(monkeypatch):
     assert snapshot["fresh"] is True
     assert snapshot["repair_attempted"] is True
     assert snapshot["repair_status"] == "inserted"
+
+
+def test_ensure_live_decision_bars_suppresses_repair_during_maintenance(monkeypatch):
+    import pandas as pd
+
+    now_ts = 1_783_396_219.0
+    stale_df = pd.DataFrame(
+        [{"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1}],
+        index=pd.to_datetime(["2026-07-07T03:40:00Z"]),
+    )
+    fetch_calls = []
+
+    class _Bridge:
+        is_connected = True
+
+        def fetch_bars(self, timeframe, n_bars):
+            fetch_calls.append((timeframe, n_bars))
+            return stale_df
+
+    monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
+    monkeypatch.setattr(
+        live_service,
+        "_market_session_snapshot",
+        lambda _bridge: {
+            "status": "open_pending_quote",
+            "api_available": True,
+            "broker_connected": True,
+            "evidence": ["market_data_stale"],
+        },
+    )
+    monkeypatch.setattr(
+        "config.runtime_config.shared",
+        lambda: SimpleNamespace(market_open_pending_quote_grace_seconds=4500.0),
+    )
+
+    result = live_service._ensure_live_decision_bars_fresh(
+        bridge=_Bridge(),
+        symbol="XAUUSD+",
+        timeframe="M5",
+        df_new=stale_df,
+        tick=100,
+        log=lambda _msg: None,
+    )
+
+    assert len(result) == 1
+    assert fetch_calls == []
+    snapshot = live_service._live_state_get("decision_bar_freshness", {}, clone=True)
+    assert snapshot["repair_attempted"] is False
+    assert snapshot["repair_status"] == "maintenance_wait"
+
+
+def test_spot_subscription_refresh_is_suppressed_during_maintenance(monkeypatch):
+    now_ts = 1_783_396_219.0
+    subscribe_calls = []
+
+    class _Bridge:
+        is_connected = True
+
+        @staticmethod
+        def get_spot_quote():
+            return {"ts": now_ts - 600, "bid": 1.0, "ask": 1.1, "mid": 1.05}
+
+        @staticmethod
+        def subscribe_spots():
+            subscribe_calls.append(True)
+
+    monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
+    monkeypatch.setattr(
+        live_service,
+        "_market_session_snapshot",
+        lambda _bridge: {
+            "status": "open_pending_quote",
+            "api_available": True,
+            "broker_connected": True,
+            "evidence": ["market_data_stale"],
+        },
+    )
+    monkeypatch.setattr(
+        "config.runtime_config.shared",
+        lambda: SimpleNamespace(market_open_pending_quote_grace_seconds=4500.0),
+    )
+
+    live_service._ensure_spot_subscription(_Bridge())
+
+    assert subscribe_calls == []
 
 
 def test_ensure_live_decision_bars_does_not_fallback_to_current_partial(monkeypatch):

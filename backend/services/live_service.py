@@ -51,6 +51,7 @@ from backend.services.live_runtime_state import (
 from backend.services.live_ctrader_runtime import CTraderRuntime
 from backend.services.live_data_sync_job import make_data_sync_job as _make_data_sync_job
 from backend.services.live_data_sync_helpers import (
+    DATA_SYNC_CRON as _DATA_SYNC_CRON,
     classify_decision_bar_freshness as _sync_classify_decision_bar_freshness,
     dataframe_to_store_bars as _sync_dataframe_to_store_bars,
 )
@@ -4049,6 +4050,7 @@ def _ensure_spot_subscription(
     bridge,
     *,
     log=None,
+    market_session: dict[str, Any] | None = None,
 ) -> None:
     global _last_spot_subscription_attempt_ts
     if bridge is None or not getattr(bridge, "is_connected", False):
@@ -4066,6 +4068,21 @@ def _ensure_spot_subscription(
     )
     if not spot_needed:
         return
+    try:
+        from backend.services.market_session import maintenance_wait_evidence
+        from config.runtime_config import shared as _runtime_cfg
+
+        session = dict(market_session or _market_session_snapshot(bridge) or {})
+        maintenance = maintenance_wait_evidence(
+            session,
+            latest_market_data_ts=float((quote or {}).get("ts") or 0.0),
+            now_ts=now_ts,
+            grace_seconds=float(_runtime_cfg().market_open_pending_quote_grace_seconds),
+        )
+        if maintenance["active"]:
+            return
+    except Exception:
+        logger.debug("[market_session] spot subscription maintenance check failed", exc_info=True)
     if now_ts - _last_spot_subscription_attempt_ts < 60:
         return
     _last_spot_subscription_attempt_ts = now_ts
@@ -4616,7 +4633,7 @@ def _start_live_scheduler():
 
     sched.add_job(
         "data_sync",
-        "*/5 * * * *",
+        _DATA_SYNC_CRON,
         _make_data_sync_job(
             lock=_DATA_SYNC_LOCK,
             logger=logger,
@@ -5210,6 +5227,7 @@ def _ensure_live_decision_bars_fresh(
     df_new: "pd.DataFrame",
     tick: int,
     log,
+    market_session: dict[str, Any] | None = None,
 ) -> "pd.DataFrame":
     now_ts = time.time()
     closed_df = _closed_decision_bar_frame(df_new, timeframe=timeframe, now_ts=now_ts)
@@ -5218,6 +5236,42 @@ def _ensure_live_decision_bars_fresh(
         snapshot.update({"repair_attempted": False, "repair_status": "fresh", "source": "live_decision_bar"})
         _record_decision_bar_freshness(snapshot)
         return closed_df if closed_df is not None and len(closed_df) > 0 else df_new
+
+    repair_suppressed = ""
+    try:
+        from backend.services.market_session import maintenance_wait_evidence
+        from config.runtime_config import shared as _runtime_cfg
+
+        session = dict(market_session or _market_session_snapshot(bridge) or {})
+        session_status = str(session.get("status") or "")
+        if session_status in {
+            "closed_confirmed",
+            "closed_pending_confirmation",
+            "closed_pending_positions",
+        }:
+            repair_suppressed = "market_closed"
+        else:
+            maintenance = maintenance_wait_evidence(
+                session,
+                latest_market_data_ts=float(snapshot.get("latest_bar_ts", 0.0) or 0.0),
+                now_ts=now_ts,
+                grace_seconds=float(_runtime_cfg().market_open_pending_quote_grace_seconds),
+            )
+            if maintenance["active"]:
+                repair_suppressed = "maintenance_wait"
+    except Exception:
+        logger.debug("[live] decision bar repair market-session check failed", exc_info=True)
+
+    if repair_suppressed:
+        snapshot.update(
+            {
+                "repair_attempted": False,
+                "repair_status": repair_suppressed,
+                "source": "live_decision_bar_repair_suppressed",
+            }
+        )
+        _record_decision_bar_freshness(snapshot)
+        return closed_df if closed_df is not None else df_new
 
     repair = _repair_live_decision_bars(
         bridge=bridge,
@@ -5342,6 +5396,7 @@ def _run_live_loop_tick_body(
             _ensure_spot_subscription(
                 bridge,
                 log=log,
+                market_session=market_session,
             )
         except Exception as _spot_sub_err:
             logger.debug("[live] spot subscription refresh skipped: %s", _spot_sub_err)
@@ -5370,6 +5425,7 @@ def _run_live_loop_tick_body(
         df_new=df_new,
         tick=tick,
         log=log,
+        market_session=market_session,
     )
     if df_new is None or len(df_new) == 0:
         log(f"tick {tick}: no closed decision bars available after repair")

@@ -377,7 +377,10 @@ def start_evolution_run(
             ),
         )
         conn.commit()
-        return {"run_id": rid, **snapshot, "started_at": now}
+        # Runtime-config snapshots also carry the run_id that created the
+        # snapshot. The evolution ledger owns a distinct run id, so it must
+        # win when callers later pass this payload to finish_evolution_run().
+        return {**snapshot, "run_id": rid, "started_at": now}
     finally:
         conn.close()
 

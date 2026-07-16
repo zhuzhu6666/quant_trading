@@ -2,10 +2,16 @@ import pandas as pd
 
 from backend.services.live_data_sync_helpers import (
     BAR_FRESHNESS_THRESHOLDS,
+    DATA_SYNC_INTERVAL_SECONDS,
     classify_decision_bar_freshness,
     classify_bar_freshness,
     dataframe_to_store_bars,
 )
+from monitor.system_health import THRESHOLDS
+
+
+def test_m1_health_window_covers_sync_boundary_and_health_tick():
+    assert THRESHOLDS["m1_max_age"] == DATA_SYNC_INTERVAL_SECONDS + 120
 
 
 def test_classify_bar_freshness_detects_missing_closed_m5_bar():

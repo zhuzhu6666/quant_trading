@@ -490,10 +490,10 @@
 
 - 状态: fixed
 - 旧理解: 计划交易时段内没有新 bar 一律按 stale data 升级 critical，并持续重复回补。
-- 当前口径: 统一 market session 返回 open_pending_quote 或 broker_connected_market_data_stale、API/连接健康且无 broker error 时，按 RuntimeConfig 的75分钟上限进入 maintenance_wait；快照复用最新 spot quote，正常 open、到期或断连状态仍严格判 stale。
-- 影响面: system health、data sync、告警和 readiness。
-- 收口方式: 使用市场证据和限时宽限，不写死每日钟点；维护期抑制无效回补，首个新 bar 后自然恢复。
-- 验证方式: `tests/test_market_maintenance_wait.py`、`tests/test_live_data_sync_job.py`。
+- 当前口径: 统一 market session 返回 open_pending_quote 或 broker_connected_market_data_stale、API/连接健康且无 broker error 时，按 RuntimeConfig 的75分钟上限进入 maintenance_wait；快照复用最新 spot quote，正常 open、到期或断连状态仍严格判 stale；定时 data sync、live decision-bar 即时修复和 stale quote spot 重订阅共同遵守该窗口。
+- 影响面: system health、data sync、live decision bar repair、spot subscription、告警和 readiness。
+- 收口方式: 使用市场证据和限时宽限，不写死每日钟点；维护期抑制无效回补和重复订阅，首个新 bar 后自然恢复。
+- 验证方式: `tests/test_market_maintenance_wait.py`、`tests/test_live_data_sync_job.py`、`tests/test_live_service_lifecycle.py::test_ensure_live_decision_bars_suppresses_repair_during_maintenance`。
 
 ### Prometheus 依赖未纳入生产安装
 

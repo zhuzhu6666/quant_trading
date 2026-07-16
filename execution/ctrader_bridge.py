@@ -167,6 +167,7 @@ class CTraderBridge(BaseBrokerBridge):
         self._spot_ask: float | None = None
         self._spot_ts: float = 0.0
         self._spot_lock = threading.Lock()
+        self._spot_subscribed_symbol_ids: set[int] = set()
         # ── 熔断 / 退避 ──
         self._fail_count: int = 0
         self._last_fail_time: float = 0.0
@@ -310,6 +311,7 @@ class CTraderBridge(BaseBrokerBridge):
             self._connect_inflight = True
             self._connect_attempt_id += 1
             attempt_id = self._connect_attempt_id
+            self._spot_subscribed_symbol_ids.clear()
 
         try:
             self._apply_proxy_socket_patch()
@@ -922,14 +924,22 @@ class CTraderBridge(BaseBrokerBridge):
         if not sid:
             logger.error("subscribe_spots: no symbol_id")
             return False
+        sid = int(sid)
+        if sid in self._spot_subscribed_symbol_ids:
+            return True
         try:
             req = ProtoOASubscribeSpotsReq()
             req.ctidTraderAccountId = self.account_id
             req.symbolId.append(sid)
             self._send(req, timeout=5.0)
+            self._spot_subscribed_symbol_ids.add(sid)
             logger.info(f"subscribe_spots OK for symbol_id={sid}")
             return True
         except Exception as e:
+            if "ALREADY_SUBSCRIBED" in str(e):
+                self._spot_subscribed_symbol_ids.add(sid)
+                logger.info(f"subscribe_spots already active for symbol_id={sid}")
+                return True
             logger.warning(f"subscribe_spots failed: {e}")
             return False
 
@@ -958,6 +968,7 @@ class CTraderBridge(BaseBrokerBridge):
             self._connected = False
         self._app_authed = False
         self._account_authed = False
+        self._spot_subscribed_symbol_ids.clear()
         logger.info("cTrader disconnected (reactor 留着, 给下次 connect 复用)")
 
     @property

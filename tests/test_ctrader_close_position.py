@@ -45,6 +45,28 @@ def test_spot_event_still_updates_realtime_quote_after_depth_removal(monkeypatch
     assert quote["ts"] > 0
 
 
+def test_subscribe_spots_is_idempotent_per_connection(monkeypatch):
+    bridge = _bridge(monkeypatch)
+    sent = []
+    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: sent.append(req))
+
+    assert bridge.subscribe_spots() is True
+    assert bridge.subscribe_spots() is True
+    assert len(sent) == 1
+
+
+def test_subscribe_spots_treats_already_subscribed_as_success(monkeypatch):
+    bridge = _bridge(monkeypatch)
+
+    def _already_subscribed(_req, timeout=None):
+        raise RuntimeError("errorCode=ALREADY_SUBSCRIBED")
+
+    monkeypatch.setattr(bridge, "_send", _already_subscribed)
+
+    assert bridge.subscribe_spots() is True
+    assert bridge._symbol_id in bridge._spot_subscribed_symbol_ids
+
+
 def test_close_position_refreshes_for_full_close_and_rejects_order_error(monkeypatch):
     bridge = _bridge(monkeypatch)
     refresh_calls = []

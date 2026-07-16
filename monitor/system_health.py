@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from backend.core.db import duckdb_readonly_connection
+from backend.services.live_data_sync_helpers import DATA_SYNC_INTERVAL_SECONDS, timeframe_seconds
 from loguru import logger
 
 # ── 数据类型 ────────────────────────────────────────────────────
@@ -51,7 +52,9 @@ class HealthReport:
 # ── 阈值 ────────────────────────────────────────────────────────
 
 THRESHOLDS = {
-    "m1_max_age": 300,       # 5 分钟
+    # M1 is batch-synced every five minutes. Allow one M1 close plus one
+    # health-check tick because both jobs fire on the same scheduler boundary.
+    "m1_max_age": DATA_SYNC_INTERVAL_SECONDS + (2 * timeframe_seconds("M1")),
     "m1_warn_age": 900,      # 15 分钟
     "m5_max_age": 900,       # 15 分钟
     "m5_warn_age": 1800,     # 30 分钟
