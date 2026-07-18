@@ -1,0 +1,7 @@
+-r requirements.in
+
+# Lock tooling and test-only dependencies.
+pip-tools==7.5.3
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-timeout==2.4.0

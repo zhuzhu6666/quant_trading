@@ -1,0 +1,89 @@
+name: quality-gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: quant_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quant_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PYTHONHASHSEED: "0"
+      QUANT_STATE_BACKEND: postgres
+      QUANT_STATE_PG_DSN: postgresql://postgres:postgres@127.0.0.1:5432/quant_test
+      QUANT_JWT_SECRET: ci-test-jwt-secret-2026-not-for-production
+      QUANT_AUTH_USER: test_user
+      QUANT_PASSWORD_HASH: 32d6f1a942738f25c61fc6d827362d3a4d5a12fe23776c2fa669028bc80c6fe9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Bootstrap pinned lock compiler
+        run: python -m pip install pip-tools==7.5.3
+      - name: Verify Python lock files
+        run: python scripts/compile_python_locks.py --check
+      - name: Install locked Python dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Verify installed dependencies
+        run: python -m pip check
+      - name: ASGI compatibility smoke
+        run: timeout 5s python scripts/asgi_smoke.py
+      - name: OpenAPI contract snapshot
+        run: python scripts/check_openapi_snapshot.py
+      - name: Full pytest suite
+        run: pytest -q -m "not postgres_integration" --timeout=120
+      - name: PostgreSQL integration
+        run: pytest -q -m postgres_integration --timeout=30
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web_frontend/package-lock.json
+      - name: Install Web dependencies
+        working-directory: web_frontend
+        run: npm ci
+      - name: Web tests
+        working-directory: web_frontend
+        run: npm run test
+      - name: Web typecheck
+        working-directory: web_frontend
+        run: npm run typecheck
+      - name: Web production build
+        working-directory: web_frontend
+        run: npm run build
+      - name: Mini-program store reducer
+        run: node --experimental-default-type=module tests/miniprogram_store_reducer.test.mjs
