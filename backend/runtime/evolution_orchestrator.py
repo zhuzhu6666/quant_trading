@@ -464,7 +464,7 @@ def _run_canary_evaluation(
     saved_states: dict[str, dict] = {}
 
     try:
-        from config.runtime_config import shared as runtime_config
+        from config.runtime_config import autonomy_expansion_freeze_applies, shared as runtime_config
         from deployment.canary import ACTIVE, CANARY_STAGES, SHADOW, QUARANTINED, RETIRED, TERMINAL_STAGES, CanaryDirector, CanaryEvalContext
         from alpha.registry_adapter import RegistryAdapter
         adapter = RegistryAdapter.shared()
@@ -485,9 +485,8 @@ def _run_canary_evaluation(
             return promotions, rollbacks, stay
 
         director = CanaryDirector()
-        expansion_frozen = bool(
-            getattr(runtime_config(), "autonomy_expansion_frozen", True)
-        )
+        current_runtime_config = runtime_config()
+        expansion_frozen = autonomy_expansion_freeze_applies(current_runtime_config)
         candidate_names = {name for name, _, _ in candidates}
 
         # 恢复持久化状态到 director

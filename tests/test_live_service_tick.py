@@ -113,6 +113,10 @@ def test_merge_portfolio_configs_includes_active_discovered_factor(monkeypatch):
             return dict(self._meta.get(name, {"source": "builtin"}))
 
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+    monkeypatch.setattr(
+        "alpha.runtime_factor_selection.select_runtime_factors",
+        lambda _config: SimpleNamespace(selected_factor_ids=["rsi_14", discovered]),
+    )
 
     try:
         merged = live_service._merge_portfolio_configs(
@@ -139,7 +143,7 @@ def test_merge_portfolio_configs_does_not_activate_cold_weight_only_factor(monke
         lambda config: [],
     )
     merged = live_service._merge_portfolio_configs(
-        {"rsi_14": {"enabled": True}},
+        {"rsi_14": {"enabled": True, "health_gate_exempt": True}},
         {"rsi_14": 0.5, "dsl_auto_cold": 0.01},
         0.7,
         0.3,
@@ -348,6 +352,11 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
 
     updates = []
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_open_decision_context",
+        lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
+    )
     monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec_repair")
     monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)
     monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: None)

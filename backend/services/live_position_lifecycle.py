@@ -2235,6 +2235,34 @@ def build_supervisor_trace_ledger_payload(
     pid = str(position.get("position_id") or position.get("ticket") or "")
     template = verdict.get("supervisor_template") or {}
     risk_payload = risk_verdict or {}
+    execution_payload = dict(execution or {})
+    is_real_execution = str(stage or "") == "executed" and str(outcome or "") == "applied"
+    if is_real_execution:
+        execution_class = "applied"
+    elif str(stage or "") == "canary_shadow" or str(execution_status or "") == "shadow_only":
+        execution_class = "shadow"
+    elif str(outcome or "") == "blocked" or str(execution_status or "") == "blocked":
+        execution_class = "blocked"
+    elif str(outcome or "") in {"skipped", "hold"} or str(execution_status or "") in {
+        "cooldown",
+        "invalid_action",
+        "not_required",
+        "no_op",
+        "skipped",
+        "superseded",
+    }:
+        execution_class = "skipped"
+    elif str(outcome or "") == "failed" or str(execution_status or "") in {"exception", "failed"}:
+        execution_class = "failed"
+    else:
+        execution_class = "observed"
+    execution_payload.update(
+        {
+            "execution_class": execution_class,
+            "is_real_execution": is_real_execution,
+            "recommended_action": str(verdict.get("action") or ""),
+        }
+    )
     return {
         "position_id": pid,
         "decision_id": str(decision_id or ""),
@@ -2276,8 +2304,36 @@ def build_supervisor_trace_ledger_payload(
         },
         "verdict": verdict,
         "risk_verdict": risk_payload,
-        "execution": execution or {},
+        "execution": execution_payload,
     }
+
+
+def build_supervisor_action_fingerprint(
+    *,
+    position_id: int,
+    action: str,
+    direction: int,
+    controls: dict[str, Any] | None,
+) -> str:
+    """Return a stable fingerprint for a broker-facing supervisor target."""
+    controls = controls or {}
+    payload = {
+        "position_id": int(position_id or 0),
+        "action": str(action or ""),
+        "direction": int(direction or 0),
+        "target_stop_loss": round(float(controls.get("target_stop_loss", 0.0) or 0.0), 8),
+        "target_take_profit": round(float(controls.get("target_take_profit", 0.0) or 0.0), 8),
+        "reduce_fraction": round(float(controls.get("reduce_fraction", 0.0) or 0.0), 8),
+    }
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def supervisor_noop_fingerprint_seen(
+    *,
+    recovery_meta: dict[str, Any] | None,
+    fingerprint: str,
+) -> bool:
+    return bool(fingerprint) and str((recovery_meta or {}).get("last_supervisor_noop_fingerprint") or "") == str(fingerprint)
 
 
 def _recovery_row_value(row: Any, key: str, default: Any = None) -> Any:

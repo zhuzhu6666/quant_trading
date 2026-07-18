@@ -97,7 +97,14 @@ def _fake_bridge(balance=10000.0, equity=10050.0, currency="USD"):
     return b
 
 
-def test_refresh_account_positions_writes_cache():
+def test_refresh_account_positions_writes_cache(monkeypatch):
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_open_decision_context",
+        lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
+    )
+    monkeypatch.setattr(live_service, "_load_recovery_position_row", lambda _position_id: None)
+    monkeypatch.setattr(live_service, "_lookup_entry_decision_id", lambda _position_id: None)
     bridge = _fake_bridge()
     # Synchronous call (no thread spawn) for test determinism
     live_service._refresh_account_positions_sync(bridge, "ctrader")
@@ -122,7 +129,14 @@ def test_refresh_account_positions_writes_cache():
     assert cached["thesis_status"] in {"intact", "weakening"}
 
 
-def test_refresh_account_positions_fills_single_position_pnl_from_account_equity():
+def test_refresh_account_positions_fills_single_position_pnl_from_account_equity(monkeypatch):
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_open_decision_context",
+        lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
+    )
+    monkeypatch.setattr(live_service, "_load_recovery_position_row", lambda _position_id: None)
+    monkeypatch.setattr(live_service, "_lookup_entry_decision_id", lambda _position_id: None)
     bridge = _fake_bridge(balance=503.24, equity=501.81)
     bridge.get_positions.return_value = [
         {"position_id": 88, "symbol_id": 1, "symbol": "XAUUSD", "type": "sell", "volume": 100.0,

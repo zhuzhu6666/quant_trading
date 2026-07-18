@@ -101,6 +101,25 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
         lambda self, **kwargs: {"allowed": True, "status": "admitted"},
     )
     monkeypatch.setattr(
+        "backend.services.learning_experiment_admission.LearningExperimentAdmissionService.reserve_batch",
+        lambda self, decisions, **kwargs: {
+            "status": "reserved",
+            "admissions": {
+                name: {"allowed": True, "status": "reserved", "reservation_id": f"res_{name}"}
+                for name in decisions
+            },
+            "reservations": {name: f"res_{name}" for name in decisions},
+        },
+    )
+    monkeypatch.setattr(
+        "backend.services.learning_experiment_admission.LearningExperimentAdmissionService.finalize_reservation",
+        lambda self, reservation_id, **kwargs: {"status": "consumed"},
+    )
+    monkeypatch.setattr(
+        "backend.services.factor_weight_change.FactorWeightChangeService._replay_admission",
+        lambda self, decisions: {"required": True, "allowed": True, "evidence_grade": "A"},
+    )
+    monkeypatch.setattr(
         "backend.services.learning_application_state.LearningApplicationStateService.prepare",
         lambda self, **kwargs: "app_test",
     )
@@ -132,6 +151,7 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
 
 
 def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
+    monkeypatch.setenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "1")
     rc.reset_for_tests()
     rc.patch({
         "autonomy_expansion_frozen": False,
@@ -159,6 +179,25 @@ def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
         lambda self, **kwargs: {"allowed": True, "status": "admitted"},
     )
     monkeypatch.setattr(
+        "backend.services.learning_experiment_admission.LearningExperimentAdmissionService.reserve_batch",
+        lambda self, decisions, **kwargs: {
+            "status": "reserved",
+            "admissions": {
+                name: {"allowed": True, "status": "reserved", "reservation_id": f"res_{name}"}
+                for name in decisions
+            },
+            "reservations": {name: f"res_{name}" for name in decisions},
+        },
+    )
+    monkeypatch.setattr(
+        "backend.services.learning_experiment_admission.LearningExperimentAdmissionService.release_reservations",
+        lambda self, reservation_ids: None,
+    )
+    monkeypatch.setattr(
+        "backend.services.factor_weight_change.FactorWeightChangeService._replay_admission",
+        lambda self, decisions: {"required": True, "allowed": True, "evidence_grade": "A"},
+    )
+    monkeypatch.setattr(
         "risk.policy_service.RiskPolicyService.shared",
         staticmethod(lambda: risk),
     )
@@ -176,11 +215,12 @@ def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
 
     assert writes == []
     assert rc.shared().factor_portfolio_weights == {"foo": 1.0}
+    assert risk.calls[0][0] == "update_weight"
 
 
 def test_scheduled_awe_adapt_skips_while_expansion_is_frozen(monkeypatch):
     rc.reset_for_tests()
-    rc.patch({"autonomy_expansion_frozen": True, "awe_min_trades": 1})
+    rc.patch({"autonomy_mode": "live_candidate", "autonomy_expansion_frozen": True, "awe_min_trades": 1})
 
     class _ExplodingAttribution:
         def get_all_factor_stats(self):
@@ -221,7 +261,7 @@ def test_canary_intermediate_stage_does_not_execute_promotion(monkeypatch):
 
 def test_canary_stage_does_not_advance_while_expansion_is_frozen(monkeypatch):
     saved = {}
-    rc.patch({"autonomy_expansion_frozen": True})
+    rc.patch({"autonomy_mode": "live_candidate", "autonomy_expansion_frozen": True})
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
     monkeypatch.setattr(evo, "_load_canary_states", lambda: {})
     monkeypatch.setattr(evo, "_save_canary_states", lambda states: saved.update(states))
@@ -237,6 +277,26 @@ def test_canary_stage_does_not_advance_while_expansion_is_frozen(monkeypatch):
     assert rollbacks == []
     assert stay == ["foo"]
     assert saved["foo"]["stage"] == "SHADOW"
+
+
+def test_demo_canary_advances_even_when_global_expansion_freeze_is_configured(monkeypatch):
+    saved = {}
+    rc.patch({"autonomy_mode": "demo_nursery", "autonomy_expansion_frozen": True})
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
+    monkeypatch.setattr(evo, "_load_canary_states", lambda: {})
+    monkeypatch.setattr(evo, "_save_canary_states", lambda states: saved.update(states))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_ctx_from_log",
+        lambda name, score: CanaryEvalContext(oos_bars=10, oos_pnl=0.005),
+    )
+
+    promotions, rollbacks, stay = evo._run_canary_evaluation("XAUUSD+", "M5", 1000)
+
+    assert promotions == []
+    assert rollbacks == []
+    assert stay == ["foo"]
+    assert saved["foo"]["stage"] == CANARY_5
 
 
 def test_canary_canary50_enters_probation_without_execution(monkeypatch):

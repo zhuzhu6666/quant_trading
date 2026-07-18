@@ -143,6 +143,8 @@ runtime:
   live_autonomy_unlocked: false
   live_autonomy_unlock_id: ''
   demo_learning_max_daily_trades: 100
+  # Fail-closed default for non-demo/live authority. Demo nursery/autonomous
+  # keeps governed exploration active through RuntimeConfig mode semantics.
   autonomy_expansion_frozen: true
   supervisor_counterfactual_governance_horizon_minutes: 60
   supervisor_counterfactual_full_horizon_minutes: 120

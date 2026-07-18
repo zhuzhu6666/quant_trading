@@ -1309,6 +1309,12 @@ def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypa
 
 def test_auto_apply_position_supervisor_template_is_blocked_while_expansion_frozen(tmp_path):
     rc.reset_for_tests()
+    rc.replace(
+        rc.RuntimeConfig(
+            autonomy_mode="live_candidate",
+            autonomy_expansion_frozen=True,
+        )
+    )
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))
     try:
@@ -1360,6 +1366,123 @@ def test_auto_apply_position_supervisor_template_is_blocked_while_expansion_froz
             assert conn.execute("SELECT COUNT(*) FROM learning_application_log").fetchone()[0] == 0
         finally:
             conn.close()
+    finally:
+        rc.reset_for_tests()
+
+
+def test_auto_apply_position_supervisor_template_requires_matching_shadow_trace(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    created_at = time.time() - 7200
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, reviewed_at, created_at)
+            VALUES ('psv_shadow_scope', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1', 'increase_min_hold_window',
+                    0.82, 'scope test', '{}', 'approved', ?, ?)
+            """,
+            (time.time(), created_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, position_id, close_ts, evidence_json, created_at, updated_at)
+            VALUES ('cf_unmatched', 'position_without_shadow', ?, ?, ?, ?)
+            """,
+            (
+                created_at + 3600,
+                json.dumps({"regime": "trend", "maturity": {"governance_eligible": True}}),
+                time.time(),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc.replace(
+        rc.RuntimeConfig(
+            autonomy_mode="live_candidate",
+            autonomy_expansion_frozen=False,
+            supervisor_canary_mature_trade_count=1,
+        )
+    )
+    try:
+        result = al._auto_apply_position_supervisor_template_suggestions(
+            db_path=db_path,
+            experiment_id="demoauto_shadow_scope",
+            run_id="evorun_shadow_scope",
+        )
+    finally:
+        rc.reset_for_tests()
+
+    assert result["applied"] == []
+    assert result["skipped"][0]["reason"] == "supervisor_canary_not_ready"
+    assert result["skipped"][0]["mature_trade_count"] == 0
+
+
+def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, reviewed_at, created_at)
+            VALUES ('psv_demo_aggressive', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1', 'increase_min_hold_window',
+                    0.82, 'demo aggressive test', ?, 'approved', ?, ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "replay_summary": {"sample_count": 8},
+                        "counterfactual_summary": {"total": 12},
+                    }
+                ),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc.replace(
+        rc.RuntimeConfig(
+            autonomy_mode="demo_nursery",
+            autonomy_expansion_frozen=True,
+            supervisor_canary_mature_trade_count=50,
+        )
+    )
+    try:
+        result = al._auto_apply_position_supervisor_template_suggestions(
+            db_path=db_path,
+            experiment_id="demoauto_aggressive",
+            run_id="evorun_aggressive",
+        )
+        assert len(result["applied"]) == 1, result
+        assert rc.shared().position_supervisor_template_id == "position_supervisor:conservative.v1"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            details = json.loads(
+                conn.execute(
+                    "SELECT details_json FROM learning_application_log WHERE scope_type='position_supervisor_template'"
+                ).fetchone()[0]
+            )
+        finally:
+            conn.close()
+        assert details["demo_aggressive_governance"] is True
+        assert details["canary_evidence_ready"] is False
     finally:
         rc.reset_for_tests()
 
@@ -1475,6 +1598,33 @@ def test_demo_autonomy_delegates_policy_review_to_governor(monkeypatch, tmp_path
     assert "demo_autonomy_governor_review" in events
     assert "demo_autonomy_apply" in events
     assert ("demo_auto_approve", "factor", "downweight", "approved") not in decisions
+
+
+def test_sync_factor_weights_uses_current_autonomy_mode(monkeypatch):
+    captured = {}
+
+    class _Verdict:
+        def to_dict(self):
+            return {"allowed": True}
+
+    class _Policy:
+        def evaluate(self, action, context):
+            captured["action"] = action
+            captured["context"] = context
+            return _Verdict()
+
+    from risk import policy_service
+    from backend.runtime import evolution_orchestrator
+
+    monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: _Policy()))
+    monkeypatch.setattr(evolution_orchestrator, "_update_weights", lambda: True)
+    monkeypatch.setattr(al, "_autonomy_mode", lambda: "demo_nursery")
+
+    result = al._sync_factor_weights_for_demo(experiment_id="exp_demo")
+
+    assert result["synced"] is True
+    assert captured["action"] == "update_weight"
+    assert captured["context"]["governance"]["autonomy_mode"] == "demo_nursery"
 
 
 def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):

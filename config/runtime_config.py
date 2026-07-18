@@ -26,6 +26,20 @@ from backend.runtime.runtime_state import RuntimeState
 
 logger = logging.getLogger(__name__)
 
+DEMO_AUTONOMY_MODES = frozenset({"demo_autonomous", "demo_nursery"})
+
+
+def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
+    """Return whether the expansion freeze is effective for this runtime.
+
+    Demo accounts are the bounded exploration environment: expansionary
+    governance remains active there even when the global flag is kept set as a
+    fail-closed default for non-demo/live authority surfaces.
+    """
+    current = cfg if cfg is not None else shared()
+    mode = str(getattr(current, "autonomy_mode", "") or "manual").strip().lower()
+    return bool(getattr(current, "autonomy_expansion_frozen", True)) and mode not in DEMO_AUTONOMY_MODES
+
 
 @dataclass
 class RuntimeConfig:
@@ -124,6 +138,8 @@ class RuntimeConfig:
     live_autonomy_unlocked: bool = False
     live_autonomy_unlock_id: str = ""
     demo_learning_max_daily_trades: int = 60
+    # Effective only outside demo_nursery/demo_autonomous. Demo keeps governed
+    # exploration active while RiskPolicy/V16/effect rollback remain mandatory.
     autonomy_expansion_frozen: bool = True
     # Scoped demo-only envelope for bounded model decision influence.  This is
     # deliberately separate from ``autonomy_expansion_frozen`` so an operator

@@ -3242,7 +3242,7 @@ def _sync_factor_weights_for_demo(*, experiment_id: str) -> dict[str, Any]:
                 "required_mode": "governed",
                 "governance": {
                     "experiment_id": experiment_id,
-                    "autonomy_mode": "demo_autonomous",
+                    "autonomy_mode": _autonomy_mode(),
                 },
             },
         ).to_dict()
@@ -3398,13 +3398,17 @@ def _auto_apply_position_supervisor_template_suggestions(
     run_id: str = "",
 ) -> dict[str, Any]:
     from backend.services.position_supervisor_templates import list_position_supervisor_templates
-    from config.runtime_config import shared as runtime_config
+    from config.runtime_config import (
+        DEMO_AUTONOMY_MODES,
+        autonomy_expansion_freeze_applies,
+        shared as runtime_config,
+    )
     from risk.policy_service import RiskPolicyService
     from backend.services.runtime_config_mutation import RuntimeConfigMutationService
     from research.learning.governor import RuleEvolutionGovernor
 
     cfg = runtime_config()
-    if bool(getattr(cfg, "autonomy_expansion_frozen", False)):
+    if autonomy_expansion_freeze_applies(cfg):
         return {
             "applied": [],
             "skipped": [{"reason": "autonomy_expansion_frozen"}],
@@ -3482,25 +3486,39 @@ def _auto_apply_position_supervisor_template_suggestions(
                 "SELECT position_id, close_ts, evidence_json FROM supervisor_counterfactual_review WHERE close_ts>=? ORDER BY close_ts DESC LIMIT 2000",
                 (float(row["created_at"] or 0.0),),
             ).fetchall()
+            shadow_rows = _execute(
+                conn,
+                """
+                SELECT DISTINCT position_id
+                FROM position_supervisor_trace
+                WHERE template_id=? AND stage='canary_shadow' AND event_ts>=?
+                """,
+                (target_template_id, float(row["created_at"] or 0.0)),
+            ).fetchall()
+            shadow_position_ids = {str(item["position_id"] or "") for item in shadow_rows}
             mature_positions: set[str] = set()
             mature_sessions: set[str] = set()
             mature_regimes: set[str] = set()
             for cf_row in cf_rows:
+                position_id = str(cf_row["position_id"] or "")
+                if position_id not in shadow_position_ids:
+                    continue
                 cf_evidence = _loads(cf_row["evidence_json"], {})
                 if not bool((cf_evidence.get("maturity") or {}).get("governance_eligible")):
                     continue
-                mature_positions.add(str(cf_row["position_id"] or ""))
+                mature_positions.add(position_id)
                 close_hour = time.gmtime(float(cf_row["close_ts"] or 0.0)).tm_hour
                 mature_sessions.add("asia" if close_hour < 7 else "europe" if close_hour < 13 else "us")
                 regime = str(cf_evidence.get("regime") or "")
                 if regime and regime != "unknown":
                     mature_regimes.add(regime)
-            canary_ready = (
+            evidence_ready = (
                 len(mature_positions) >= canary_required
                 and len(mature_sessions) >= 2
                 and len(mature_regimes) >= 2
             )
-            if not canary_ready:
+            aggressive_demo = str(getattr(cfg, "autonomy_mode", "") or "").lower() in DEMO_AUTONOMY_MODES
+            if not evidence_ready and not aggressive_demo:
                 skipped.append({
                     "suggestion_id": suggestion_id,
                     "reason": "supervisor_canary_not_ready",
@@ -3622,7 +3640,7 @@ def _auto_apply_position_supervisor_template_suggestions(
             details = {
                 "schema_version": "position_supervisor_template_switch.v1",
                 "experiment_id": experiment_id,
-                "autonomy_mode": "demo_autonomous",
+                "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or "demo_autonomous"),
                 "suggestion_id": suggestion_id,
                 "previous_template_id": previous_template_id,
                 "target_template_id": target_template_id,
@@ -3632,6 +3650,14 @@ def _auto_apply_position_supervisor_template_suggestions(
                 "config_version": int(snapshot.get("config_version") or 0),
                 "config_hash": str(snapshot.get("config_hash") or ""),
                 "experiment_reservation_id": reservation_id,
+                "demo_aggressive_governance": aggressive_demo,
+                "canary_evidence_ready": evidence_ready,
+                "canary_evidence": {
+                    "mature_trade_count": len(mature_positions),
+                    "required_trade_count": canary_required,
+                    "session_count": len(mature_sessions),
+                    "regime_count": len(mature_regimes),
+                },
             }
             _execute(
                 conn,
@@ -3664,9 +3690,14 @@ def _auto_apply_position_supervisor_template_suggestions(
                     now_ts,
                 ),
             )
-            LearningExperimentAdmissionService(db_path).finalize_reservation(
-                reservation_id,
-                application_id=application_id,
+            _execute(
+                conn,
+                """
+                UPDATE learning_experiment_reservation
+                SET status='consumed', application_id=?, updated_at=?
+                WHERE reservation_id=? AND status='reserved'
+                """,
+                (application_id, now_ts, reservation_id),
             )
             _execute(
                 conn,
@@ -3705,7 +3736,11 @@ def _auto_apply_position_supervisor_template_suggestions(
                     review_note=?
                 WHERE suggestion_id=?
                 """,
-                (now_ts, f"demo_autonomous applied experiment {experiment_id}", suggestion_id),
+                (
+                    now_ts,
+                    f"{str(getattr(cfg, 'autonomy_mode', '') or 'demo_autonomous')} applied experiment {experiment_id}",
+                    suggestion_id,
+                ),
             )
             conn.commit()
             record_evolution_decision(
@@ -4074,9 +4109,20 @@ def maybe_auto_unfreeze_learning_repair(*, db_path: str | Path = STATE_DB) -> di
     from backend.services.backend_readiness import BackendReadinessService
     from backend.services.release_control import ReleaseControlService
     from backend.services.runtime_config_mutation import RuntimeConfigMutationService
-    from config.runtime_config import shared as runtime_config
+    from config.runtime_config import (
+        autonomy_expansion_freeze_applies,
+        shared as runtime_config,
+    )
 
-    if not bool(getattr(runtime_config(), "autonomy_expansion_frozen", True)):
+    cfg = runtime_config()
+    if not autonomy_expansion_freeze_applies(cfg):
+        if bool(getattr(cfg, "autonomy_expansion_frozen", True)):
+            return {
+                "status": "demo_governance_not_frozen",
+                "ok": True,
+                "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or ""),
+                "configured_freeze_retained_for_non_demo": True,
+            }
         return {"status": "already_unfrozen", "ok": True}
     readiness = BackendReadinessService(db_path=db_path).build()
     repair = dict(readiness.get("learning_repair") or {})

@@ -69,7 +69,7 @@
 - shadow 因子不直接交易，必须经治理晋升。
 - 上述内置结构候选的 `enabled=true` 只表示允许进入 shadow 计算，不表示参与方向评分；`lifecycle_status=SHADOW` 或权重为 0 时不参与开仓方向，自动启用必须满足健康分 ≥ 70、健康样本 ≥ 500、非衰减且模型弱势证据通过，并保留 runtime snapshot/rollback。
 - Fibonacci 因子不得使用未确认的 swing high/low；摆动点等待右侧确认 K 线后才可作为锚点，回撤位置、水平接近度和反弹确认分别作为 context/context/alpha 候选。
-- `FactorGovernanceOrchestrator` 是因子晋升、Canary 回滚、禁用和退役的唯一调度执行者；Evolution 只能写证据和候选。AWE 只在持有 live attribution pipeline 的 backend 进程运行，扩张冻结时整轮跳过；AWE、Factor Governance 和 Evolution/manual govern 的实际权重 patch 必须统一调用 `FactorWeightChangeService`，先过 `DecisionPolicy`、V16 read-only preflight、有界经验先验、共享 `LearningExperimentAdmissionService` 和 `RiskPolicyService`，在 mutation 前写 `prepared` application，成功后进入 `applied/observing`，并由同一 `learning_application_log/effect` 后验账本收口。缺 V16 委派必须在 reservation/application 之前以 `blocked_by_admission` 收口，不能制造周期性 mutation_failed 账本。
+- `FactorGovernanceOrchestrator` 是因子晋升、Canary 回滚、禁用和退役的唯一调度执行者；Evolution 只能写证据和候选。AWE 只在持有 live attribution pipeline 的 backend 进程运行。`autonomy_expansion_frozen` 仅对非 Demo/实盘权限面生效；`demo_nursery` / `demo_autonomous` 保持 AWE、Factor Governance 和 Canary 推进运行。所有实际权重 patch 仍必须统一调用 `FactorWeightChangeService`，先过 `DecisionPolicy`、V16 read-only preflight、有界经验先验、共享 `LearningExperimentAdmissionService` 和 `RiskPolicyService`，在 mutation 前写 `prepared` application，成功后进入 `applied/observing`，并由同一 `learning_application_log/effect` 后验账本收口。缺 V16 委派必须在 reservation/application 之前以 `blocked_by_admission` 收口，不能制造周期性 mutation_failed 账本。
 - 被治理隔离的 builtin alpha 因子进入 `QUARANTINE` 后，由 `FactorGovernanceOrchestrator` 在 demo 自治周期内按冷却期、最新健康分/样本、模型弱势证据和 `RiskPolicyService.evaluate("restore_factor_live")` 自动恢复；`RETIRED/DEAD`、discovered Canary 终态和非治理来源的显式禁用不走该恢复入口。恢复与再次隔离都必须写 runtime overlay/snapshot 和治理审计。
 - Canary 阶段推进不得重复消费相同历史聚合窗口；首次 SHADOW 可用已有 OOS bootstrap，后续阶段必须满足 `fresh_evidence_bars`，数据/结果指纹和 stage watermark 必须进入审计。
 - 搜索/进化生成的 DSL 因子必须先通过 `parse_dsl()`；解析失败的表达式不能注册为 shadow 因子，历史残留坏 DSL 只能作为健康/治理噪音进入 `invalid_dsl` 审计，不能继续执行计算。
@@ -93,7 +93,7 @@
 | 下单/改仓/平仓 | cTrader bridge + ledger + `execution.deal_sync` | broker 执行事实与账本共同追溯；live 开仓先经 `_run_open_trade_pipeline()` 生成 candidate/risk verdict/order block，再触达 broker；同一 position 的部分平仓和最终平仓 close deals 必须聚合，`trade_executions` 以 `reduce`/`close` 保留完整执行路径；生命周期 `reduced.realized_pnl` 固定为 0，部分腿 PnL 只保留在 execution details，最终 `closed.realized_pnl` 才承载整仓聚合值 |
 | 后端进程退出 | `BackendRuntimeLifecycle` + `stop_loop_for_process_shutdown()` + `live.loop.last_shutdown` | 进程退出保留 persisted desired loop state，同步等待当前 tick drain；`completed/timed_out/not_running` 写结构化 shutdown 结果，超时以 `recovery_required=true` 审计，不平仓、不主动断开 cTrader；手工 `/api/live/stop` 仍负责显式关闭 desired state |
 | 信号门槛 | `ExecutionGate` + context policy effect | gate 前应用有效阈值；live 只负责信号/冷却，不作为事件风险最终裁决口 |
-| 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` | 持仓期间动作建议和 trace |
+| 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` | 持仓期间动作建议和 trace；`tighten` 先做 broker 目标 no-op 预检，再进入 RiskPolicy；trace 仅以 `stage=executed AND outcome=applied` 表示真实执行，shadow/skipped 不得按 action 误判 |
 | 动态仓位 | `backend.services.live_risk_sizing` + live sizing trace | Kelly、event sizing、context policy 统一生成 `position_sizing_trace.v1`；`kelly_risk_per_trade_pct` 是有效 Kelly 风险分数上限，不再与 Kelly 分数相乘；`dynamic_sizing_max_api_volume` 是 demo 硬上限，实际 raw volume 由当前账户 equity、SL distance 和 Kelly 风险预算推导；有效 Kelly 样本少于 `kelly_min_closed_trades`（默认 20）时，`demo_autonomous`/`demo_nursery` 使用 broker 默认最小单进行受控探索，其他模式的单笔 API volume 受 `kelly_canary_max_api_volume`（默认 100）保护；启用动态 Kelly 时，非 demo 的非正 Kelly、缺 equity 或低于 broker 最小量都产生 0 volume/blocked trace；demo 探索写入 `demo_exploration`，`demo_nursery` 同时保留兼容的 `demo_nursery_exploration` trace |
 | 事件缩放 | `execution/event_sizing.py` + `data/events.duckdb` | 事件窗口风控输入 |
 
@@ -106,7 +106,7 @@
 - 宽松 Demo 账户阈值（当前允许日亏损 50%、日交易 100 笔）必须同时满足有效下单和 cTrader host 为 `demo.*`；非 Demo host 启动时最多接受日亏损 5%、日交易 20 笔，否则 `execution_semantics` fail-closed，避免配置迁移把 Demo 风险预算带入真实账户。
 - `autonomy_mode=demo_nursery` 是 demo 学习育苗模式，不是 live 风控旁路；`RiskPolicyService` 只会把 `loss_cooldown_active`、`consecutive_losses`、VaR/CVaR、同向学习冷却、entry quality 和 event-window learning control 记录为 `demo_nursery_observations`，断连、熔断、日亏损、最大回撤、decision stale、仓位/API 上限、重大事件硬窗口和运行健康底线仍硬拦。
 - NFP/GVZ/重大事件等事件风险在 live 中只能作为 `RiskPolicyService` 输入；`ExecutionGate` 的事件过滤保留给 backtest/legacy 兼容。
-- live 因子决策不得使用当前未闭合 K 线；`spot_quote` 只能修正执行参考价，不能把旧 bar 信号变成新信号。同一根已闭合 bar 不得重复 append 到 `StreamingFactorEngine`，也不得重复生成 open 决策；重复 loop tick 只能执行持仓观察、close/reduce/tighten 和保护修复。若 `decision_freshness.schema_version=decision_bar_freshness.v1` 且 `fresh=false`，开仓必须由 `RiskPolicyService` 返回 `decision_bar_stale`；若 bar fresh 但 `age_seconds` 超过 `max(180s, 1.5 * timeframe_seconds)`，开仓必须返回 `decision_signal_age_stale`。持仓监督的 close/reduce/tighten 仍可继续。
+- live 因子决策不得使用当前未闭合 K 线；已闭合 bar 的 OHLC 是不可变因子输入，`spot_quote` 只能用于执行参考价、滑点判断和持仓保护，不得覆盖 bar 的 close/high/low，也不能把旧 bar 信号变成新信号。同一根已闭合 bar 不得重复 append 到 `StreamingFactorEngine`，也不得重复生成 open 决策；重复 loop tick 只能执行持仓观察、close/reduce/tighten 和保护修复。若 `decision_freshness.schema_version=decision_bar_freshness.v1` 且 `fresh=false`，开仓必须由 `RiskPolicyService` 返回 `decision_bar_stale`；若 bar fresh 但 `age_seconds` 超过 `max(180s, 1.5 * timeframe_seconds)`，开仓必须返回 `decision_signal_age_stale`。持仓监督的 close/reduce/tighten 仍可继续。
 - live open-trade pipeline 只编排候选 sizing、`RiskPolicyService.evaluate("open_trade")`、market-session/order block、broker order 和 post-fill audit；它不拥有独立风控事实源。
 - `loop_draining` 是进程生命周期的新增风险闸门，不替代 `RiskPolicyService`：它只阻止尚未进入 admission lock 的新开仓；已获准 market RPC 必须继续完成成交解析、entry protection、SL/TP 和 ledger/recovery，close/reduce/tighten 继续允许。
 - demo autonomous/nursery 的动态 Kelly 默认风险上限为 6%，单笔 API volume 硬顶为 `dynamic_sizing_max_api_volume=1000`；样本少于 `kelly_min_closed_trades=20` 或 Kelly 非正时，使用 broker 默认最小单建立受控样本，达到样本门槛后才按当前 equity、SL distance、Kelly 分数、broker min/step/max 和总仓位上限计算实际档位。event sizing/context policy 的软缩仓不能把该探索最小单压成 0，但重大事件硬窗口和 `RiskPolicyService` 的断连、stale、仓位/API 上限、日亏损、最大回撤等硬拦仍生效。
@@ -337,9 +337,9 @@
 
 ## 11. 2026-07-14 学习闭环修复期事实源
 
-- 扩张性自治由 `RuntimeConfig.autonomy_expansion_frozen` 统一冻结；AWE、因子生命周期晋升、Canary 证据阶段上升和 supervisor template auto-apply 均不得绕过。Canary 证据可以继续刷新，回滚、close/reduce/tighten、样本物化和只读分析不受影响。
+- `RuntimeConfig.autonomy_expansion_frozen` 是非 Demo/实盘权限面的 fail-closed 开关；在 `demo_nursery` / `demo_autonomous` 中配置值可以继续保留为 `true`，但 effective freeze 固定为 `false`，AWE、因子生命周期晋升、Canary 阶段上升和 supervisor template auto-apply 继续运行。Demo 激进治理仍不得绕过 RiskPolicy、DecisionPolicy、V16 单次委派、runtime snapshot、实验 admission、后验 effect reconcile 和自动回滚/隔离。
 - Supervisor 反事实按 5/15/30/60/120 分钟分别成熟，只有完整 M1 覆盖才算成熟；60 分钟是治理门槛，120 分钟是完全成熟。
 - Supervisor thesis-break 使用模板中的完整 bar 窗口和独立证据族；高波动/弱趋势至少 1 根新 M5，其他至少 2 根。硬风险可绕过窗口。
 - Demo nursery 的 `would_block` 探索使用 PostgreSQL 原子 reservation：每原因 5/日、全局 15/日、同 setup 1/日，broker 未成交时释放。
-- Supervisor template auto-apply 还必须满足 50 笔 60 分钟成熟样本及两个 session、两个 regime；冻结期间候选模板只并行产生 `position_supervisor_trace.stage=canary_shadow` 的非权威 verdict，不执行动作。Canary readiness 必须同时匹配候选 `template_id`、候选创建时间和对应仓位的 shadow trace，默认模板交易不得冒充候选样本；readiness 缺项时保持冻结。
+- Supervisor template 的 50 笔 60 分钟成熟样本、两个 session 和两个 regime 仍作为 evidence readiness 展示，并继续按候选 `template_id`、创建时间和 shadow trace 严格归因；跨休市窗口或缺 M1 的记录只作为 ineligible 诊断样本。该 evidence readiness 对非 Demo template auto-apply 仍是硬门；Demo nursery/autonomous 可在证据未满时应用已批准候选，但必须保留 `demo_aggressive_governance=true`、`canary_evidence_ready=false` 审计，并继续经过 RiskPolicy、V16、snapshot、effect monitor 和自动回滚。
 - 新责任归因以 alpha/gate/context/sizing role 为边界；gate/context 不得生成 alpha downweight。

@@ -124,11 +124,11 @@ async def lifespan(app: FastAPI):
         from backend.services.evolution_ledger import persist_runtime_config_snapshot
         from backend.services.position_supervisor_templates import latest_applied_position_supervisor_template_id
         from config.runtime_config import patch as rc_patch
-        from config.runtime_config import shared as rc_shared
+        from config.runtime_config import autonomy_expansion_freeze_applies, shared as rc_shared
 
         active_template_id = latest_applied_position_supervisor_template_id(db_path=STATE_DB)
         current_template_id = str(getattr(rc_shared(), "position_supervisor_template_id", "") or "")
-        expansion_frozen = bool(getattr(rc_shared(), "autonomy_expansion_frozen", False))
+        expansion_frozen = autonomy_expansion_freeze_applies(rc_shared())
         if expansion_frozen:
             active_template_id = ""
             _lg.info("[lifespan] supervisor template restore skipped: autonomy expansion frozen")

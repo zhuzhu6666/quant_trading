@@ -80,6 +80,16 @@ def _patch_live_state_conn(monkeypatch, conn_factory):
     monkeypatch.setattr(live_service, "_get_state_read_conn", conn_factory)
 
 
+def _patch_close_context_metadata(monkeypatch):
+    """Keep broker-action unit tests independent from the PostgreSQL store."""
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_open_decision_context",
+        lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
+    )
+    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *args, **kwargs: None)
+
+
 def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
     close_source = {
         "close_reason_source": "supervisor_tighten_stopout",
@@ -1233,6 +1243,7 @@ def test_ensure_live_decision_bars_does_not_fallback_to_current_partial(monkeypa
 def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     calls = []
     close_calls = []
+    _patch_close_context_metadata(monkeypatch)
 
     class _Policy:
         def evaluate(self, action, context):
@@ -1286,6 +1297,8 @@ def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
 
 
 def test_emergency_close_reports_close_failures(monkeypatch):
+    _patch_close_context_metadata(monkeypatch)
+
     class _Policy:
         def evaluate(self, action, context):
             return SimpleNamespace(
@@ -2040,6 +2053,7 @@ def test_supervisor_tighten_trace_keeps_decision_id(monkeypatch):
     traces = []
     decisions = []
     events = []
+    _patch_close_context_metadata(monkeypatch)
 
     class _Ledger:
         def log_decision(self, **kwargs):
@@ -2123,9 +2137,87 @@ def test_supervisor_tighten_trace_keeps_decision_id(monkeypatch):
     assert events[0]["event_type"] == "tightened"
 
 
+def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch):
+    traces = []
+    remembered = set()
+
+    class _Ledger:
+        def log_decision(self, **kwargs):
+            raise AssertionError("no-op must not enter decision ledger")
+
+        def log_position_supervisor_trace(self, **kwargs):
+            traces.append(kwargs)
+            return "trace_noop"
+
+    class _Policy:
+        def evaluate(self, action, context):
+            raise AssertionError("no-op must not enter RiskPolicy")
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05}
+
+        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
+            raise AssertionError("no-op must not touch broker")
+
+    verdict = {
+        "position_id": "706",
+        "decision_ts": time.time(),
+        "action": "tighten",
+        "confidence": 0.75,
+        "summary_reason": "profit_giveback_after_mfe",
+        "recommended_controls": {"target_stop_loss": 4004.5, "target_take_profit": 4030.0},
+    }
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_evaluate_position_supervisor_for_position", lambda *args, **kwargs: verdict)
+    monkeypatch.setattr(live_service, "_supervisor_recently_applied", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        live_service,
+        "_supervisor_noop_fingerprint_seen",
+        lambda _pid, fingerprint: fingerprint in remembered,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_remember_supervisor_noop",
+        lambda _position, _verdict, *, fingerprint, reason: remembered.add(fingerprint),
+    )
+    position = {
+        "position_id": 706,
+        "symbol": "XAUUSD+",
+        "direction": 1,
+        "entry_price": 4000.0,
+        "current_price": 4010.0,
+        "sl": 4004.5,
+        "tp": 4030.0,
+        "volume": 100.0,
+    }
+    cfg = SimpleNamespace(timeframe="M5", autonomy_expansion_frozen=False)
+
+    for tick in (8, 9):
+        assert live_service._run_position_supervision(
+            _Bridge(),
+            [position],
+            cfg=cfg,
+            acct={"balance": 10000.0, "equity": 10000.0},
+            tick=tick,
+            log=lambda msg: None,
+        ) == {706}
+
+    assert len(traces) == 1
+    assert traces[0]["stage"] == "no_op_suppressed"
+    assert traces[0]["outcome"] == "skipped"
+    assert traces[0]["execution_status"] == "no_op"
+    assert traces[0]["execution"]["execution_class"] == "skipped"
+    assert traces[0]["execution"]["is_real_execution"] is False
+
+
 def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):
     amend_calls = []
     traces = []
+    _patch_close_context_metadata(monkeypatch)
 
     class _Ledger:
         def log_decision(self, **kwargs):
@@ -2224,6 +2316,7 @@ def test_protection_cycle_supersedes_trailing_when_supervisor_handles_position(m
 
     monkeypatch.setattr(live_service, "_update_trailing_stops", lambda *args, **kwargs: [candidate])
     monkeypatch.setattr(live_service, "_enforce_holding_timeout", lambda *args, **kwargs: set())
+    monkeypatch.setattr(live_service, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(live_service, "_run_position_supervision", lambda *args, **kwargs: {703})
     monkeypatch.setattr(
         live_service,
@@ -2257,6 +2350,7 @@ def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(mo
     traces = []
     decisions = []
     protection_states = []
+    _patch_close_context_metadata(monkeypatch)
 
     class _Ledger:
         def log_decision(self, **kwargs):
@@ -2340,6 +2434,7 @@ def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(mo
 def test_trailing_candidate_risk_rejected_logs_trace_without_amend(monkeypatch):
     traces: list[dict] = []
     events: list[dict] = []
+    _patch_close_context_metadata(monkeypatch)
 
     class _Policy:
         def evaluate(self, action, context):
@@ -2387,6 +2482,7 @@ def test_trailing_candidate_amend_failed_logs_event_and_trace(monkeypatch):
     traces: list[dict] = []
     events: list[dict] = []
     logs: list[str] = []
+    _patch_close_context_metadata(monkeypatch)
 
     class _Policy:
         def evaluate(self, action, context):

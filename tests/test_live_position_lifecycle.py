@@ -54,6 +54,7 @@ from backend.services.live_position_lifecycle import (
     build_supervisor_state_upsert_payload,
     build_supervisor_trace_ledger_payload,
     build_supervisor_close_context_inputs,
+    build_supervisor_action_fingerprint,
     build_supervisor_risk_context_payload,
     build_supervisor_tighten_execution_plan,
     build_supervisor_tighten_result_payloads,
@@ -103,6 +104,7 @@ from backend.services.live_position_lifecycle import (
     side_name,
     same_symbol_position,
     supervisor_recently_applied_from_meta,
+    supervisor_noop_fingerprint_seen,
     supervisor_reentry_block_view,
     supervisor_reentry_cooldown_seconds,
     supervisor_reentry_key,
@@ -2590,7 +2592,59 @@ def test_build_supervisor_trace_ledger_payload_preserves_contract():
     }
     assert payload["verdict"] is verdict
     assert payload["risk_verdict"] is risk_verdict
-    assert payload["execution"] is execution
+    assert payload["execution"] == {
+        **execution,
+        "execution_class": "observed",
+        "is_real_execution": False,
+        "recommended_action": "tighten",
+    }
+
+
+def test_supervisor_trace_contract_only_marks_executed_applied_as_real():
+    base = {
+        "position": {"position_id": 91, "direction": 1},
+        "verdict": {"action": "tighten"},
+        "cfg": SimpleNamespace(timeframe="M5"),
+        "tick": 1,
+    }
+    applied = build_supervisor_trace_ledger_payload(
+        **base,
+        stage="executed",
+        outcome="applied",
+        execution_status="applied",
+    )
+    shadow = build_supervisor_trace_ledger_payload(
+        **base,
+        stage="canary_shadow",
+        outcome="shadow",
+        execution_status="shadow_only",
+    )
+
+    assert applied["execution"]["execution_class"] == "applied"
+    assert applied["execution"]["is_real_execution"] is True
+    assert shadow["execution"]["execution_class"] == "shadow"
+    assert shadow["execution"]["is_real_execution"] is False
+
+
+def test_supervisor_action_fingerprint_is_stable_and_persistently_matchable():
+    fingerprint = build_supervisor_action_fingerprint(
+        position_id=92,
+        action="tighten",
+        direction=1,
+        controls={"target_take_profit": 4030, "target_stop_loss": 4004.5},
+    )
+    reordered = build_supervisor_action_fingerprint(
+        position_id=92,
+        action="tighten",
+        direction=1,
+        controls={"target_stop_loss": 4004.5, "target_take_profit": 4030},
+    )
+
+    assert fingerprint == reordered
+    assert supervisor_noop_fingerprint_seen(
+        recovery_meta={"last_supervisor_noop_fingerprint": fingerprint},
+        fingerprint=reordered,
+    ) is True
 
 
 def test_build_supervisor_trace_ledger_payload_uses_safe_defaults():
@@ -2614,7 +2668,11 @@ def test_build_supervisor_trace_ledger_payload_uses_safe_defaults():
     assert payload["context"]["position"]["volume"] == 50.0
     assert payload["context"]["account"] == {"equity": 0.0, "balance": 0.0}
     assert payload["risk_verdict"] == {}
-    assert payload["execution"] == {}
+    assert payload["execution"] == {
+        "execution_class": "observed",
+        "is_real_execution": False,
+        "recommended_action": "",
+    }
 
 
 def test_build_recovered_open_ledger_payloads_preserves_open_repair_contract():

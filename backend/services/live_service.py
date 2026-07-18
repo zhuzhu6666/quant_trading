@@ -64,9 +64,10 @@ from backend.services.live_factor_state import (
     commit_ready_factor_decision as _factor_state_commit_ready_decision,
     resolve_decision_bar_progress as _factor_state_resolve_bar_progress,
 )
+from config.runtime_config import autonomy_expansion_freeze_applies
 from backend.services.live_loop_shell import (
     adaptive_weight_config as _loop_adaptive_weight_config,
-    apply_spot_quote_to_latest_bar as _loop_apply_spot_quote_to_latest_bar,
+    compare_spot_quote_to_latest_bar as _loop_compare_spot_quote_to_latest_bar,
     apply_factor_pipeline_config_update as _loop_apply_factor_pipeline_config_update,
     bridge_readiness_label as _loop_bridge_readiness_label,
     build_extra_symbol_factor_pipelines as _loop_build_extra_symbol_factor_pipelines,
@@ -167,6 +168,7 @@ from backend.services.live_position_lifecycle import (
     build_supervisor_state_upsert_payload as _lifecycle_build_supervisor_state_upsert_payload,
     build_supervisor_trace_ledger_payload as _lifecycle_build_supervisor_trace_ledger_payload,
     build_supervisor_close_context_inputs as _lifecycle_build_supervisor_close_context_inputs,
+    build_supervisor_action_fingerprint as _lifecycle_build_supervisor_action_fingerprint,
     build_supervisor_risk_context_payload as _lifecycle_build_supervisor_risk_context_payload,
     build_supervisor_runtime_risk_evaluation_inputs as _lifecycle_build_supervisor_runtime_risk_evaluation_inputs,
     build_supervisor_tighten_execution_plan as _lifecycle_build_supervisor_tighten_execution_plan,
@@ -214,6 +216,7 @@ from backend.services.live_position_lifecycle import (
     same_symbol_position as _lifecycle_same_symbol_position,
     side_name as _lifecycle_side_name,
     supervisor_recently_applied_from_meta as _lifecycle_supervisor_recently_applied_from_meta,
+    supervisor_noop_fingerprint_seen as _lifecycle_supervisor_noop_fingerprint_seen,
     supervisor_reentry_block_view as _lifecycle_supervisor_reentry_block_view,
     supervisor_reentry_cooldown_seconds as _lifecycle_supervisor_reentry_cooldown_seconds,
     supervisor_reentry_key as _lifecycle_supervisor_reentry_key,
@@ -1945,6 +1948,32 @@ def _supervisor_recently_applied(position_id: int, action: str, cooldown_seconds
     )
 
 
+def _supervisor_noop_fingerprint_seen(position_id: int, fingerprint: str) -> bool:
+    row = _load_recovery_position_row(position_id)
+    return _lifecycle_supervisor_noop_fingerprint_seen(
+        recovery_meta=dict((row or {}).get("recovery_meta") or {}),
+        fingerprint=fingerprint,
+    )
+
+
+def _remember_supervisor_noop(position: dict[str, Any], verdict: dict[str, Any], *, fingerprint: str, reason: str) -> None:
+    pid = int(position.get("position_id") or position.get("ticket") or 0)
+    _remember_supervisor_state(
+        position,
+        verdict,
+        broker="ctrader",
+        strategy_name=str(_loop_strategy_name or "factor_v4"),
+    )
+    _merge_recovery_position_meta(
+        pid,
+        {
+            "last_supervisor_noop_fingerprint": str(fingerprint or ""),
+            "last_supervisor_noop_reason": str(reason or ""),
+            "last_supervisor_noop_ts": time.time(),
+        },
+    )
+
+
 def _log_supervisor_decision(
     *,
     position: dict[str, Any],
@@ -2201,7 +2230,7 @@ def _run_position_supervision(
             broker="ctrader",
             strategy_name=str(_loop_strategy_name or "factor_v4"),
         )
-        if bool(getattr(cfg, "autonomy_expansion_frozen", True)):
+        if autonomy_expansion_freeze_applies(cfg):
             try:
                 from backend.services.position_supervisor_templates import (
                     latest_approved_position_supervisor_candidate,
@@ -2229,9 +2258,10 @@ def _run_position_supervision(
                         cfg=cfg,
                         tick=tick,
                         stage="canary_shadow",
-                        outcome=str(shadow_verdict.get("action") or "hold"),
+                        outcome="shadow",
                         execution_status="shadow_only",
                         execution_reason="autonomy_expansion_frozen",
+                        execution={"shadow_recommendation": str(shadow_verdict.get("action") or "hold")},
                         acct=acct,
                     )
             except Exception as exc:
@@ -2272,6 +2302,65 @@ def _run_position_supervision(
                 acct=acct,
             )
             continue
+
+        controls = verdict.get("recommended_controls") or {}
+        if action == "tighten":
+            stop_policy = {
+                "quote_max_age_seconds": getattr(cfg, "supervisor_quote_max_age_seconds", 10.0),
+                "min_stop_distance_points": getattr(cfg, "supervisor_min_stop_distance_points", 0.20),
+                "stop_safety_buffer_ratio": getattr(cfg, "supervisor_stop_safety_buffer_ratio", 0.00008),
+                "min_tighten_delta_points": getattr(cfg, "supervisor_min_tighten_delta_points", 0.01),
+                "precision": int(position.get("digits", 2) or 2),
+                "require_side_quote": True,
+            }
+            try:
+                quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
+                preflight = _lifecycle_build_supervisor_tighten_execution_plan(
+                    position=position,
+                    controls=controls,
+                    quote=quote,
+                    policy=stop_policy,
+                )
+            except Exception as exc:
+                logger.debug("[live] supervisor tighten preflight unavailable for pos %s: %s", pid, exc)
+                preflight = {}
+            sl_plan = preflight.get("sl_plan") or {}
+            noop_reasons = {
+                "not_tightening_long_stop_loss",
+                "not_tightening_short_stop_loss",
+                "stop_loss_delta_too_small",
+            }
+            if not sl_plan.get("allowed") and str(sl_plan.get("reason") or "") in noop_reasons:
+                fingerprint = _lifecycle_build_supervisor_action_fingerprint(
+                    position_id=pid,
+                    action=action,
+                    direction=int(position.get("direction", 0) or 0),
+                    controls=controls,
+                )
+                if not _supervisor_noop_fingerprint_seen(pid, fingerprint):
+                    _log_supervisor_trace(
+                        position=position,
+                        verdict=verdict,
+                        cfg=cfg,
+                        tick=tick,
+                        stage="no_op_suppressed",
+                        outcome="skipped",
+                        execution_status="no_op",
+                        execution_reason="target_already_applied",
+                        execution={
+                            "action_fingerprint": fingerprint,
+                            "sl_plan": sl_plan,
+                            "applied_controls": controls,
+                        },
+                        acct=acct,
+                    )
+                    _remember_supervisor_noop(
+                        position,
+                        verdict,
+                        fingerprint=fingerprint,
+                        reason=str(sl_plan.get("reason") or ""),
+                    )
+                continue
 
         risk_action = _lifecycle_supervisor_risk_action_for_action(action)
         if not risk_action:
@@ -2322,7 +2411,6 @@ def _run_position_supervision(
             _remember_supervisor_state(position, verdict, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
             continue
 
-        controls = verdict.get("recommended_controls") or {}
         try:
             if action == "tighten":
                 _execute_supervisor_tighten_action(
@@ -4562,7 +4650,7 @@ def _scheduled_awe_adapt():
 
         from config.runtime_config import shared as _rc
         cfg = _rc()
-        if bool(getattr(cfg, "autonomy_expansion_frozen", True)):
+        if autonomy_expansion_freeze_applies(cfg):
             logger.info("[awe_adapt] skipped: autonomy expansion frozen")
             return
 
@@ -5582,7 +5670,7 @@ def _run_live_loop_tick_body(
     quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}
     if quote:
         _live_state_update(spot_quote=quote)
-    spot_result = _loop_apply_spot_quote_to_latest_bar(
+    spot_result = _loop_compare_spot_quote_to_latest_bar(
         df_new=df_new,
         quote=quote,
         quote_is_fresh=_quote_is_fresh,

@@ -344,28 +344,30 @@ def subscribe_spot_once(
     log("subscribed to cTrader spot events")
 
 
-def apply_spot_quote_to_latest_bar(
+def compare_spot_quote_to_latest_bar(
     *,
     df_new: Any,
     quote: dict[str, Any] | None,
     quote_is_fresh: Callable[[dict[str, Any]], bool],
     max_relative_diff: float = 0.20,
 ) -> dict[str, Any]:
+    """Compare execution spot with the latest closed bar without mutating OHLC.
+
+    Closed bars are authoritative factor inputs.  The live spot quote is an
+    execution/position-protection reference only and must never leak into the
+    rolling factor buffer.
+    """
     spot = float((quote or {}).get("mid") or 0.0) if quote_is_fresh(quote or {}) else 0.0
     last_close = float(df_new.iloc[-1]["close"])
-    applied = bool(
+    within_tolerance = bool(
         spot
         and spot > 0
         and last_close > 0
         and abs(spot - last_close) / last_close < float(max_relative_diff or 0.0)
     )
-    if applied:
-        df_new.loc[df_new.index[-1], "close"] = spot
-        df_new.loc[df_new.index[-1], "high"] = max(df_new.iloc[-1]["high"], spot)
-        df_new.loc[df_new.index[-1], "low"] = min(df_new.iloc[-1]["low"], spot)
     return {
         "spot": spot,
         "last_close": last_close,
-        "applied": applied,
-        "too_far": bool(spot and spot > 0 and not applied),
+        "within_tolerance": within_tolerance,
+        "too_far": bool(spot and spot > 0 and not within_tolerance),
     }

@@ -370,13 +370,23 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 标准 `stage / outcome` 口径：
 
 - `evaluated / hold`
+- `canary_shadow / shadow`（非权威建议，不是执行）
 - `cooldown_skipped / skipped`
+- `no_op_suppressed / skipped`（目标保护已生效；同一持久化 action fingerprint 只记录首次）
 - `timeout_delegated / skipped`
 - `risk_rejected / blocked`
 - `execution_skipped / skipped`
 - `executed / applied`
 - `execution_failed / failed`
 - `exception / failed`
+
+展示和 API 消费方不得只根据 `action=tighten/reduce/close` 判断动作已经执行。`execution_json` 统一提供：
+
+- `execution_class=applied/shadow/skipped/blocked/failed/observed`
+- `is_real_execution=true` 仅允许出现在 `stage=executed AND outcome=applied`
+- `recommended_action` 保留 supervisor 建议动作；shadow 建议还在 `shadow_recommendation` 中显式保留
+
+`tighten` 在进入 `RiskPolicyService` 前先比较 broker 当前 SL 与计划 SL。目标已经达到或没有形成更严格保护时，不创建 decision ledger、不调用 RiskPolicy、不触达 broker；首次写 `no_op_suppressed` trace，并把动作目标 fingerprint 保存到 `recovery_position_state.recovery_meta_json`，后续相同目标直接去重。目标变化或当前 SL 重新变得可收紧时会恢复正常风控和执行链路。
 
 这张表服务于后续自治闭环：
 

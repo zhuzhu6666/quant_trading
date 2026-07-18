@@ -21,6 +21,21 @@ def test_initial_version_is_zero() -> None:
     assert rc.version() == 0
 
 
+def test_expansion_freeze_only_applies_outside_demo_modes() -> None:
+    assert rc.autonomy_expansion_freeze_applies(
+        rc.RuntimeConfig(autonomy_mode="demo_nursery", autonomy_expansion_frozen=True)
+    ) is False
+    assert rc.autonomy_expansion_freeze_applies(
+        rc.RuntimeConfig(autonomy_mode="demo_autonomous", autonomy_expansion_frozen=True)
+    ) is False
+    assert rc.autonomy_expansion_freeze_applies(
+        rc.RuntimeConfig(autonomy_mode="live_candidate", autonomy_expansion_frozen=True)
+    ) is True
+    assert rc.autonomy_expansion_freeze_applies(
+        rc.RuntimeConfig(autonomy_mode="live_candidate", autonomy_expansion_frozen=False)
+    ) is False
+
+
 def test_replace_increments_version() -> None:
     v1 = rc.replace(rc.RuntimeConfig(shadow_vote_weight=0.1))
     assert v1 == 1

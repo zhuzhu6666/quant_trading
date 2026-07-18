@@ -4,7 +4,7 @@ import pandas as pd
 
 from backend.services.live_loop_shell import (
     adaptive_weight_config,
-    apply_spot_quote_to_latest_bar,
+    compare_spot_quote_to_latest_bar,
     apply_factor_pipeline_config_update,
     bridge_readiness_label,
     build_extra_symbol_factor_pipelines,
@@ -532,35 +532,45 @@ def test_subscribe_spot_once_skips_when_ready_wait_fails():
     assert logs == ["subscribe_spots skipped: warming timeout"]
 
 
-def test_apply_spot_quote_to_latest_bar_updates_close_high_low_when_reasonable():
+def test_compare_spot_quote_to_latest_bar_never_mutates_closed_ohlc():
     df = pd.DataFrame(
         [{"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0}],
         index=pd.to_datetime(["2026-07-05T00:00:00Z"]),
     )
+    original = df.copy(deep=True)
 
-    result = apply_spot_quote_to_latest_bar(
+    result = compare_spot_quote_to_latest_bar(
         df_new=df,
         quote={"mid": 102.0},
         quote_is_fresh=lambda quote: True,
     )
 
-    assert result == {"spot": 102.0, "last_close": 100.0, "applied": True, "too_far": False}
-    assert df.iloc[-1]["close"] == 102.0
-    assert df.iloc[-1]["high"] == 102.0
-    assert df.iloc[-1]["low"] == 99.0
+    assert result == {
+        "spot": 102.0,
+        "last_close": 100.0,
+        "within_tolerance": True,
+        "too_far": False,
+    }
+    pd.testing.assert_frame_equal(df, original)
 
 
-def test_apply_spot_quote_to_latest_bar_marks_too_far_without_mutating():
+def test_compare_spot_quote_to_latest_bar_marks_too_far_without_mutating():
     df = pd.DataFrame(
         [{"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0}],
         index=pd.to_datetime(["2026-07-05T00:00:00Z"]),
     )
 
-    result = apply_spot_quote_to_latest_bar(
+    original = df.copy(deep=True)
+    result = compare_spot_quote_to_latest_bar(
         df_new=df,
         quote={"mid": 140.0},
         quote_is_fresh=lambda quote: True,
     )
 
-    assert result == {"spot": 140.0, "last_close": 100.0, "applied": False, "too_far": True}
-    assert df.iloc[-1]["close"] == 100.0
+    assert result == {
+        "spot": 140.0,
+        "last_close": 100.0,
+        "within_tolerance": False,
+        "too_far": True,
+    }
+    pd.testing.assert_frame_equal(df, original)

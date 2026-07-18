@@ -1,3 +1,4 @@
+import json
 import time
 
 from backend.services import config_service
@@ -54,6 +55,83 @@ def test_readiness_exposes_mutation_policy_and_audit_health():
     assert "live_dangerous" in policy["classes"]
     assert "governance_mutation" in policy["classes"]
     assert "ok" in audit
+
+
+def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
+    db_path = tmp_path / "state.db"
+    candidate_started_at = 1_700_000_000.0
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, status, created_at)
+            VALUES ('canary_1', 'position_supervisor_template', 'position_supervisor:test.v1',
+                    'switch_position_supervisor_template', 0.9, 'approved', ?)
+            """,
+            (candidate_started_at,),
+        )
+        rows = [
+            ("mature_asia", candidate_started_at + 3600, True, "regime_a", True),
+            ("mature_us", candidate_started_at + 8 * 3600, True, "regime_b", True),
+            ("candidate_market_close_gap", candidate_started_at + 16 * 3600, False, "regime_b", True),
+            ("historical_incomplete", candidate_started_at - 86400, False, "legacy", False),
+        ]
+        for index, (position_id, close_ts, eligible, regime, has_shadow) in enumerate(rows):
+            if has_shadow:
+                conn.execute(
+                    """
+                    INSERT INTO position_supervisor_trace
+                    (trace_id, position_id, template_id, stage, outcome, event_ts, created_at)
+                    VALUES (?, ?, 'position_supervisor:test.v1', 'canary_shadow', 'shadow', ?, ?)
+                    """,
+                    (f"trace_{index}", position_id, close_ts - 60, close_ts - 60),
+                )
+            evidence = {
+                "regime": regime,
+                "maturity": {
+                    "status": "governance_ready" if eligible else "partially_matured",
+                    "governance_eligible": eligible,
+                },
+            }
+            conn.execute(
+                """
+                INSERT INTO supervisor_counterfactual_review
+                (counterfactual_id, position_id, close_ts, evidence_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (f"cf_{index}", position_id, close_ts, json.dumps(evidence), now, now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc.replace(
+        rc.RuntimeConfig(
+            autonomy_expansion_frozen=True,
+            supervisor_canary_mature_trade_count=2,
+            supervisor_counterfactual_governance_horizon_minutes=60,
+        )
+    )
+    try:
+        status = BackendReadinessService(db_path=db_path)._learning_repair_status()
+    finally:
+        rc.reset_for_tests()
+
+    assert status["checks"]["counterfactual_maturity"] is True
+    assert status["checks"]["canary_sample_count"] is True
+    assert status["checks"]["canary_session_coverage"] is True
+    assert status["checks"]["canary_regime_coverage"] is True
+    assert status["configured_expansion_frozen"] is True
+    assert status["expansion_frozen"] is False
+    assert status["blocks_demo_governance"] is False
+    assert status["immature_counterfactual_count"] == 1
+    assert status["historical_immature_excluded_count"] == 1
+    assert status["canary"]["mature_trade_count"] == 2
+    assert status["canary"]["reviewed_position_count"] == 3
+    assert status["ok"] is True
 
 
 def test_readiness_stability_status_reports_phase_h_guards(tmp_path):

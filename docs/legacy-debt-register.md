@@ -337,10 +337,10 @@
 
 - 状态: `fixed`
 - 旧理解: live tick 只要本地 bars 月库有最近几根 bar，就可以直接用最后一根作为 `complete=true` 决策输入；spot quote 可以修正执行价格，数据延迟只靠宽泛 `data_lag_max_seconds` 兜底。
-- 当前口径: live 因子决策只能使用最新已闭合 bar。`classify_bar_freshness()` 按 timeframe 推导应有闭合 bar；`_ensure_live_decision_bars_fresh()` 会在因子计算前过滤未闭合 bar，缺 bar 时通过主 cTrader bridge 回补月库并重载。修复失败时只阻断 open_trade；同一根已闭合 bar 只允许推进一次 signal/open，重复 tick 只运行持仓观察/保护；即使 bar fresh，`RiskPolicyService` 也会在信号 age 超过 `max(180s, 1.5 * timeframe)` 时以 `decision_signal_age_stale` 阻断开仓，持仓监督和平仓链路继续运行。
+- 当前口径: live 因子决策只能使用最新已闭合 bar，且已闭合 OHLC 在进入因子引擎前保持不可变；实时 spot 只服务执行参考价、滑点判断和持仓保护，不得覆盖 close/high/low。`classify_bar_freshness()` 按 timeframe 推导应有闭合 bar；`_ensure_live_decision_bars_fresh()` 会在因子计算前过滤未闭合 bar，缺 bar 时通过主 cTrader bridge 回补月库并重载。修复失败时只阻断 open_trade；同一根已闭合 bar 只允许推进一次 signal/open，重复 tick 只运行持仓观察/保护；即使 bar fresh，`RiskPolicyService` 也会在信号 age 超过 `max(180s, 1.5 * timeframe)` 时以 `decision_signal_age_stale` 阻断开仓，持仓监督和平仓链路继续运行。
 - 影响面: `backend/services/live_data_sync_helpers.py`、`backend/services/live_service.py`、`backend/services/live_position_lifecycle.py`、`risk/policy_service.py`、同步健康、决策审计、学习标签解释。
-- 收口方式: 新增 `decision_bar_freshness.v1` 运行态快照、`last_processed_decision_bar_ts` 和 `decision_freshness` 风控上下文；`StreamingFactorEngine` 拒绝重复/倒序 bar；`RiskPolicyService.evaluate("open_trade")` 对 `fresh=false` 返回 `decision_bar_stale`，对过期信号返回 `decision_signal_age_stale`，不改变 close/reduce/tighten 降风险动作。
-- 验证方式: `tests/test_live_data_sync_helpers.py`、`tests/test_live_service_lifecycle.py::test_ensure_live_decision_bars_repairs_from_primary_bridge`、`tests/risk/test_policy_service.py::test_open_trade_blocks_stale_decision_bar_freshness`。
+- 收口方式: 新增 `decision_bar_freshness.v1` 运行态快照、`last_processed_decision_bar_ts` 和 `decision_freshness` 风控上下文；`StreamingFactorEngine` 拒绝重复/倒序 bar；live loop 对 spot 与 closed bar 只做无副作用偏差检查；`RiskPolicyService.evaluate("open_trade")` 对 `fresh=false` 返回 `decision_bar_stale`，对过期信号返回 `decision_signal_age_stale`，不改变 close/reduce/tighten 降风险动作。
+- 验证方式: `tests/test_live_data_sync_helpers.py`、`tests/test_live_loop_shell.py::test_compare_spot_quote_to_latest_bar_never_mutates_closed_ohlc`、`tests/test_live_service_lifecycle.py::test_ensure_live_decision_bars_repairs_from_primary_bridge`、`tests/risk/test_policy_service.py::test_open_trade_blocks_stale_decision_bar_freshness`。
 
 ### 交易复盘把信号时间当实际入场时间
 
@@ -463,19 +463,19 @@
 
 - 状态: fixed
 - 旧理解: AWE 调度只要捕获异常并继续运行即可，业务阻断和基础设施失败可以共用 warning。
-- 当前口径: `FactorWeightChangeService` 明确返回 applied、blocked_by_admission/risk/replay 或 governance_error；扩张冻结时 AWE 整轮跳过，缺 V16 delegate 在 reservation/application 前收口；异常路径释放 reservation，AWE 使用结构化 Loguru 日志记录 stage、type、message 和 run_id。
+- 当前口径: `FactorWeightChangeService` 明确返回 applied、blocked_by_admission/risk/replay 或 governance_error；非 Demo 扩张冻结时 AWE 整轮跳过，Demo nursery/autonomous 不受该冻结影响；缺 V16 delegate 在 reservation/application 前收口，异常路径释放 reservation，AWE 使用结构化 Loguru 日志记录 stage、type、message 和 run_id。
 - 影响面: AWE、实验准入、application/effect、RuntimeConfig mutation、运维审计。
-- 收口方式: 统一结果契约，不增加权重写入旁路；冻结、预算和 replay 阻断属于正常治理结果。
+- 收口方式: 统一结果契约，不增加权重写入旁路；非 Demo 冻结、预算和 replay 阻断属于正常治理结果，Demo 仍保留 RiskPolicy、DecisionPolicy、V16 和后验回滚。
 - 验证方式: `tests/test_factor_weight_change_service.py`、`tests/test_evolution_closure_fixes.py`。
 
 ### 扩张冻结未覆盖 Canary 证据阶段推进
 
 - 状态: fixed
 - 旧理解: Evolution 只写研究证据，因此其内部 `canary_state` 从 SHADOW 推进到 CANARY 阶段不属于扩张动作。
-- 当前口径: Canary 阶段上升本身就是扩张性状态变化；冻结时仍刷新证据并允许回滚，但任何阶段上升都保持原 stage，并写明确阻断日志。
+- 当前口径: Canary 阶段上升本身就是扩张性状态变化；非 Demo 冻结时仍刷新证据并允许回滚，但任何阶段上升都保持原 stage。Demo nursery/autonomous 的 effective freeze 为 false，允许阶段继续推进。
 - 影响面: Evolution、Canary readiness、Factor Governance 和自动解冻判断。
-- 收口方式: `_run_canary_evaluation()` 在调用 `CanaryDirector.promote()` 前读取 RuntimeConfig 冻结事实源并 fail-closed。
-- 验证方式: `tests/test_evolution_closure_fixes.py::test_canary_stage_does_not_advance_while_expansion_is_frozen`。
+- 收口方式: `_run_canary_evaluation()` 在调用 `CanaryDirector.promote()` 前统一调用 `autonomy_expansion_freeze_applies()`；非 Demo fail-closed，Demo 保持推进。
+- 验证方式: `tests/test_evolution_closure_fixes.py::test_canary_stage_does_not_advance_while_expansion_is_frozen`、`tests/test_evolution_closure_fixes.py::test_demo_canary_advances_even_when_global_expansion_freeze_is_configured`。
 
 ### Supervisor tighten 使用过期的动作起始报价
 

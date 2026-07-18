@@ -482,12 +482,18 @@ class BackendReadinessService:
         return payload
 
     def _learning_repair_status(self) -> dict[str, Any]:
-        from config.runtime_config import shared as runtime_config
+        from config.runtime_config import autonomy_expansion_freeze_applies, shared as runtime_config
 
         cfg = runtime_config()
+        configured_expansion_frozen = bool(getattr(cfg, "autonomy_expansion_frozen", True))
+        effective_expansion_frozen = autonomy_expansion_freeze_applies(cfg)
         result: dict[str, Any] = {
             "schema_version": "learning_repair_readiness.v1",
-            "expansion_frozen": bool(getattr(cfg, "autonomy_expansion_frozen", True)),
+            "expansion_frozen": effective_expansion_frozen,
+            "configured_expansion_frozen": configured_expansion_frozen,
+            "freeze_applies_to_current_mode": effective_expansion_frozen,
+            "blocks_demo_governance": False,
+            "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or "manual"),
             "governance_horizon_minutes": int(
                 getattr(cfg, "supervisor_counterfactual_governance_horizon_minutes", 60) or 60
             ),
@@ -530,6 +536,8 @@ class BackendReadinessService:
             sessions: set[str] = set()
             regimes: set[str] = set()
             immature = 0
+            historical_immature_excluded = 0
+            candidate_review_positions: set[str] = set()
             invalid_evidence = 0
             invalidated_counterfactuals = 0
             now = time.time()
@@ -544,15 +552,25 @@ class BackendReadinessService:
                 counterfactual_invalidated = bool((evidence or {}).get("evidence_invalidated"))
                 if counterfactual_invalidated:
                     invalidated_counterfactuals += 1
-                if not eligible and not counterfactual_invalidated and close_ts <= now - result["governance_horizon_minutes"] * 60:
-                    immature += 1
-                if (
-                    eligible
-                    and canary_started_at > 0
+                position_id = str(item.get("position_id") or "")
+                in_current_canary = (
+                    canary_started_at > 0
                     and close_ts >= canary_started_at
-                    and str(item.get("position_id") or "") in shadow_position_ids
-                ):
-                    mature_positions.add(str(item.get("position_id") or ""))
+                    and position_id in shadow_position_ids
+                )
+                overdue_immature = (
+                    not eligible
+                    and not counterfactual_invalidated
+                    and close_ts <= now - result["governance_horizon_minutes"] * 60
+                )
+                if in_current_canary:
+                    candidate_review_positions.add(position_id)
+                    if overdue_immature:
+                        immature += 1
+                elif overdue_immature:
+                    historical_immature_excluded += 1
+                if eligible and in_current_canary:
+                    mature_positions.add(position_id)
                     hour = time.gmtime(close_ts).tm_hour
                     sessions.add("asia" if hour < 7 else "europe" if hour < 13 else "us")
                     regimes.add(str((evidence or {}).get("regime") or "unknown"))
@@ -581,7 +599,12 @@ class BackendReadinessService:
         checks = {
             "active_effect_capacity": active_effects <= 24,
             "no_invalidated_active_evidence": invalid_evidence == 0,
-            "counterfactual_maturity": immature == 0 and bool(maturity_rows),
+            # Individual trades can remain ineligible when their observation
+            # window crosses a market closure or has missing M1 bars.  They are
+            # excluded from the mature cohort; requiring every observed trade
+            # to mature would make the freeze permanent.  The actual safety
+            # threshold remains canary_sample_count below.
+            "counterfactual_maturity": bool(mature_positions),
             "canary_sample_count": len(mature_positions) >= result["canary_required"],
             "canary_session_coverage": len(sessions - {"unknown"}) >= 2,
             "canary_regime_coverage": len(regimes - {"unknown"}) >= 2,
@@ -591,6 +614,7 @@ class BackendReadinessService:
             "ok": all(checks.values()),
             "checks": checks,
             "immature_counterfactual_count": immature,
+            "historical_immature_excluded_count": historical_immature_excluded,
             "invalid_evidence_count": invalid_evidence,
             "invalidated_counterfactual_count": invalidated_counterfactuals,
             "active_effect_count": active_effects,
@@ -599,10 +623,11 @@ class BackendReadinessService:
                 "over_7d": sum(age >= 7 * 86400 for age in effect_ages),
             },
             "exploration_budget_usage": budget,
-                "canary": {
-                    "started_at": canary_started_at,
-                    "template_id": canary_template_id,
-                    "shadow_position_count": len(shadow_position_ids),
+            "canary": {
+                "started_at": canary_started_at,
+                "template_id": canary_template_id,
+                "shadow_position_count": len(shadow_position_ids),
+                "reviewed_position_count": len(candidate_review_positions),
                 "mature_trade_count": len(mature_positions),
                 "sessions": sorted(sessions - {"unknown"}),
                 "regimes": sorted(regimes - {"unknown"}),
