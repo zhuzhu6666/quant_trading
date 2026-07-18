@@ -37,6 +37,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_run_live_safety_cycle",
         "_recover_execution_outcomes_before_alpha",
         "_attempt_generation_startup_barrier",
+        "_load_authoritative_session_deal_facts",
         "emergency_close",
     ):
         node = definitions[name]
@@ -45,6 +46,13 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
             isinstance(child, (ast.For, ast.While, ast.Try, ast.With))
             for child in ast.walk(node)
         )
+
+
+def test_session_deal_sql_lives_outside_live_facade():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+
+    assert "WITH final_close AS" not in source
+    assert "FROM ctrader_deals d" not in source
 
 
 def test_safety_reconciliation_modules_do_not_depend_on_postgres_or_legacy_refresh():

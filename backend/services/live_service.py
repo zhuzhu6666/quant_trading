@@ -21,7 +21,7 @@ import json
 import threading
 import time
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -105,8 +105,10 @@ from backend.services.live_runtime_state import (
 from backend.services.session_restore import (
     authoritative_close_pnl as _authoritative_close_pnl,
     derive_session_start_balance as _derive_session_start_balance,
+    load_authoritative_session_deal_facts as _session_load_authoritative_deal_facts,
     parse_degraded_session_cache as _parse_degraded_session_cache,
     rebuild_session_risk_projection as _rebuild_session_risk_projection,
+    session_trade_window as _session_restore_trade_window,
 )
 from backend.services.live_ctrader_runtime import CTraderRuntime
 from backend.services.live_data_sync_job import make_data_sync_job as _make_data_sync_job
@@ -3383,10 +3385,7 @@ def _persist_session_state(trade_date: str | None = None) -> None:
 
 
 def _session_trade_window(trade_date: str, timezone_name: str = "UTC") -> tuple[float, float]:
-    """Return a natural-day window in the requested IANA timezone."""
-    tz = timezone.utc if timezone_name == "UTC" else ZoneInfo(timezone_name)
-    day_start = datetime.strptime(str(trade_date), "%Y-%m-%d").replace(tzinfo=tz)
-    return day_start.timestamp(), (day_start + timedelta(days=1)).timestamp()
+    return _session_restore_trade_window(trade_date, timezone_name)
 
 
 def _load_authoritative_session_trades(
@@ -3426,166 +3425,15 @@ def _load_authoritative_session_deal_facts(
     broker_open_position_ids: set[int] | None = None,
     confirmed_closed_position_ids: set[int] | None = None,
 ) -> dict[str, Any] | None:
-    """Load separate realized-leg and completed-position session facts.
-
-    Every close leg in the risk-day window changes broker balance immediately,
-    including a partial close whose position remains open.  Win/loss counts and
-    consecutive losses, however, are position-lifecycle facts and therefore
-    consume only positions absent from a fresh broker reconcile.  Keeping the
-    two streams separate prevents both hidden partial-close losses and double
-    counting a final close aggregate as another realized leg.
-    """
-
-    if broker_open_position_ids is None:
-        logger.warning(
-            "[live] authoritative session trade rebuild requires fresh broker-open position IDs"
-        )
-        return None
-    try:
-        window_start, window_end = _session_trade_window(trade_date, timezone_name)
-        conn = _get_state_read_conn()
-        try:
-            completed_rows = _state_execute(
-                conn,
-                """
-                WITH final_close AS (
-                    SELECT position_id, MAX(exec_timestamp) AS final_close_ts
-                    FROM ctrader_deals
-                    WHERE position_id > 0
-                      AND (is_close=1 OR closed_volume > 0)
-                      AND exec_timestamp > 0
-                    GROUP BY position_id
-                    HAVING MAX(exec_timestamp) >= ?
-                       AND MAX(exec_timestamp) < ?
-                )
-                SELECT d.position_id,
-                       SUM(COALESCE(d.gross_profit, 0.0)) AS gross_profit,
-                       SUM(COALESCE(d.swap, 0.0)) AS swap,
-                       SUM(COALESCE(d.close_commission, 0.0)) AS close_commission,
-                       SUM(COALESCE(d.gross_profit, 0.0)
-                           + COALESCE(d.swap, 0.0)
-                           + COALESCE(d.close_commission, 0.0)) AS net,
-                       MAX(d.exec_timestamp) AS exec_timestamp,
-                       COUNT(*) AS close_deals_count
-                FROM ctrader_deals d
-                JOIN final_close f ON f.position_id = d.position_id
-                WHERE d.is_close=1 OR d.closed_volume > 0
-                GROUP BY d.position_id
-                ORDER BY exec_timestamp ASC, d.position_id ASC
-                """,
-                (window_start, window_end),
-            ).fetchall()
-            realized_rows = _state_execute(
-                conn,
-                """
-                SELECT deal_id, position_id,
-                       COALESCE(gross_profit, 0.0) AS gross_profit,
-                       COALESCE(swap, 0.0) AS swap,
-                       COALESCE(close_commission, 0.0) AS close_commission,
-                       COALESCE(gross_profit, 0.0)
-                           + COALESCE(swap, 0.0)
-                           + COALESCE(close_commission, 0.0) AS net,
-                       exec_timestamp,
-                       COALESCE(closed_volume, 0.0) AS closed_volume
-                FROM ctrader_deals
-                WHERE position_id > 0
-                  AND (is_close=1 OR closed_volume > 0)
-                  AND exec_timestamp >= ?
-                  AND exec_timestamp < ?
-                ORDER BY exec_timestamp ASC, deal_id ASC
-                """,
-                (window_start, window_end),
-            ).fetchall()
-            open_position_ids = {
-                int(position_id)
-                for position_id in (broker_open_position_ids or set())
-                if int(position_id or 0) > 0
-            }
-            confirmed_closed_ids = {
-                int(position_id)
-                for position_id in (confirmed_closed_position_ids or set())
-                if int(position_id or 0) > 0
-            }
-            completed_position_ids = {
-                int(row["position_id"] or 0)
-                for row in completed_rows
-                if int(row["position_id"] or 0) > 0
-            }
-            active_rows = _state_execute(
-                conn,
-                """
-                SELECT position_id, last_seen_at
-                FROM recovery_position_state
-                WHERE broker=? AND status IN ('open', 'recovered')
-                """,
-                ("ctrader",),
-            ).fetchall()
-            tracked_active_ids = {
-                int(row["position_id"] or 0)
-                for row in active_rows
-                if int(row["position_id"] or 0) > 0
-            }
-            unresolved_close_ids = sorted(
-                pid
-                for pid in tracked_active_ids - open_position_ids
-                if (
-                    pid not in completed_position_ids
-                    # A row that was open in the last recovery projection is
-                    # ambiguous even if an older partial leg is close in time.
-                    # Only the current tick's cursor+volume proof may bypass
-                    # this transient projection lag; startup recovery first
-                    # marks the row closed before session restore.
-                    or pid not in confirmed_closed_ids
-                )
-            )
-            if unresolved_close_ids:
-                logger.warning(
-                    "[live] session risk unavailable; broker-missing positions lack close deals: %s",
-                    unresolved_close_ids,
-                )
-                return None
-            completed_position_trades = [
-                {
-                    "position_id": int(row["position_id"] or 0),
-                    "gross": float(row["gross_profit"] or 0.0),
-                    "swap": float(row["swap"] or 0.0),
-                    "commission": float(row["close_commission"] or 0.0),
-                    "net": float(row["net"] or 0.0),
-                    "exec_timestamp": float(row["exec_timestamp"] or 0.0),
-                    "close_deals_count": int(row["close_deals_count"] or 0),
-                }
-                for row in completed_rows
-                if int(row["position_id"] or 0) not in open_position_ids
-            ]
-            realized_close_legs = [
-                {
-                    "deal_id": int(row["deal_id"] or 0),
-                    "position_id": int(row["position_id"] or 0),
-                    "gross": float(row["gross_profit"] or 0.0),
-                    "swap": float(row["swap"] or 0.0),
-                    "commission": float(row["close_commission"] or 0.0),
-                    "net": float(row["net"] or 0.0),
-                    "exec_timestamp": float(row["exec_timestamp"] or 0.0),
-                    "closed_volume": float(row["closed_volume"] or 0.0),
-                }
-                for row in realized_rows
-            ]
-            return {
-                "schema_version": "live_session_deal_facts.v2",
-                "trade_date": str(trade_date),
-                "timezone": str(timezone_name),
-                "window_start": float(window_start),
-                "window_end": float(window_end),
-                "broker_open_position_ids": sorted(open_position_ids),
-                "confirmed_closed_position_ids": sorted(confirmed_closed_ids),
-                "completed_position_trades": completed_position_trades,
-                "realized_close_legs": realized_close_legs,
-            }
-        finally:
-            conn.close()
-    except Exception as exc:
-        logger.warning("[live] authoritative session trade rebuild failed for %s: %s", trade_date, exc)
-        return None
+    return _session_load_authoritative_deal_facts(
+        trade_date,
+        timezone_name,
+        broker_open_position_ids=broker_open_position_ids,
+        confirmed_closed_position_ids=confirmed_closed_position_ids,
+        connection_factory=_get_state_read_conn,
+        execute=_state_execute,
+        warning=logger.warning,
+    )
 
 
 def _calendar_day_trade_summary(timezone_name: str = "Asia/Shanghai") -> dict:

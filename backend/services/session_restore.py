@@ -10,7 +10,190 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+from zoneinfo import ZoneInfo
+
+
+def session_trade_window(
+    trade_date: str,
+    timezone_name: str = "UTC",
+) -> tuple[float, float]:
+    """Return a natural-day window in the requested IANA timezone."""
+
+    tz = timezone.utc if timezone_name == "UTC" else ZoneInfo(timezone_name)
+    day_start = datetime.strptime(str(trade_date), "%Y-%m-%d").replace(tzinfo=tz)
+    return day_start.timestamp(), (day_start + timedelta(days=1)).timestamp()
+
+
+def load_authoritative_session_deal_facts(
+    trade_date: str,
+    timezone_name: str = "UTC",
+    *,
+    broker_open_position_ids: set[int] | None,
+    confirmed_closed_position_ids: set[int] | None = None,
+    connection_factory: Callable[[], Any],
+    execute: Callable[[Any, str, tuple[Any, ...]], Any],
+    warning: Callable[..., Any] | None = None,
+) -> dict[str, Any] | None:
+    """Read deals-first session facts through an injected state-store boundary.
+
+    The module owns the SQL and lifecycle completeness proof, while the live
+    façade supplies only the PostgreSQL connection and placeholder adapter.
+    A missing fresh broker-open set or any ambiguous broker-missing position
+    keeps the session unavailable instead of manufacturing a zero-risk day.
+    """
+
+    warn = warning or (lambda *_args, **_kwargs: None)
+    if broker_open_position_ids is None:
+        warn(
+            "[live] authoritative session trade rebuild requires fresh broker-open position IDs"
+        )
+        return None
+    try:
+        window_start, window_end = session_trade_window(trade_date, timezone_name)
+        conn = connection_factory()
+        try:
+            completed_rows = execute(
+                conn,
+                """
+                WITH final_close AS (
+                    SELECT position_id, MAX(exec_timestamp) AS final_close_ts
+                    FROM ctrader_deals
+                    WHERE position_id > 0
+                      AND (is_close=1 OR closed_volume > 0)
+                      AND exec_timestamp > 0
+                    GROUP BY position_id
+                    HAVING MAX(exec_timestamp) >= ?
+                       AND MAX(exec_timestamp) < ?
+                )
+                SELECT d.position_id,
+                       SUM(COALESCE(d.gross_profit, 0.0)) AS gross_profit,
+                       SUM(COALESCE(d.swap, 0.0)) AS swap,
+                       SUM(COALESCE(d.close_commission, 0.0)) AS close_commission,
+                       SUM(COALESCE(d.gross_profit, 0.0)
+                           + COALESCE(d.swap, 0.0)
+                           + COALESCE(d.close_commission, 0.0)) AS net,
+                       MAX(d.exec_timestamp) AS exec_timestamp,
+                       COUNT(*) AS close_deals_count
+                FROM ctrader_deals d
+                JOIN final_close f ON f.position_id = d.position_id
+                WHERE d.is_close=1 OR d.closed_volume > 0
+                GROUP BY d.position_id
+                ORDER BY exec_timestamp ASC, d.position_id ASC
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            realized_rows = execute(
+                conn,
+                """
+                SELECT deal_id, position_id,
+                       COALESCE(gross_profit, 0.0) AS gross_profit,
+                       COALESCE(swap, 0.0) AS swap,
+                       COALESCE(close_commission, 0.0) AS close_commission,
+                       COALESCE(gross_profit, 0.0)
+                           + COALESCE(swap, 0.0)
+                           + COALESCE(close_commission, 0.0) AS net,
+                       exec_timestamp,
+                       COALESCE(closed_volume, 0.0) AS closed_volume
+                FROM ctrader_deals
+                WHERE position_id > 0
+                  AND (is_close=1 OR closed_volume > 0)
+                  AND exec_timestamp >= ?
+                  AND exec_timestamp < ?
+                ORDER BY exec_timestamp ASC, deal_id ASC
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            open_position_ids = {
+                int(position_id)
+                for position_id in broker_open_position_ids
+                if int(position_id or 0) > 0
+            }
+            confirmed_closed_ids = {
+                int(position_id)
+                for position_id in (confirmed_closed_position_ids or set())
+                if int(position_id or 0) > 0
+            }
+            completed_position_ids = {
+                int(row["position_id"] or 0)
+                for row in completed_rows
+                if int(row["position_id"] or 0) > 0
+            }
+            active_rows = execute(
+                conn,
+                """
+                SELECT position_id, last_seen_at
+                FROM recovery_position_state
+                WHERE broker=? AND status IN ('open', 'recovered')
+                """,
+                ("ctrader",),
+            ).fetchall()
+            tracked_active_ids = {
+                int(row["position_id"] or 0)
+                for row in active_rows
+                if int(row["position_id"] or 0) > 0
+            }
+            unresolved_close_ids = sorted(
+                pid
+                for pid in tracked_active_ids - open_position_ids
+                if (
+                    pid not in completed_position_ids
+                    or pid not in confirmed_closed_ids
+                )
+            )
+            if unresolved_close_ids:
+                warn(
+                    "[live] session risk unavailable; broker-missing positions lack close deals: %s",
+                    unresolved_close_ids,
+                )
+                return None
+            completed_position_trades = [
+                {
+                    "position_id": int(row["position_id"] or 0),
+                    "gross": float(row["gross_profit"] or 0.0),
+                    "swap": float(row["swap"] or 0.0),
+                    "commission": float(row["close_commission"] or 0.0),
+                    "net": float(row["net"] or 0.0),
+                    "exec_timestamp": float(row["exec_timestamp"] or 0.0),
+                    "close_deals_count": int(row["close_deals_count"] or 0),
+                }
+                for row in completed_rows
+                if int(row["position_id"] or 0) not in open_position_ids
+            ]
+            realized_close_legs = [
+                {
+                    "deal_id": int(row["deal_id"] or 0),
+                    "position_id": int(row["position_id"] or 0),
+                    "gross": float(row["gross_profit"] or 0.0),
+                    "swap": float(row["swap"] or 0.0),
+                    "commission": float(row["close_commission"] or 0.0),
+                    "net": float(row["net"] or 0.0),
+                    "exec_timestamp": float(row["exec_timestamp"] or 0.0),
+                    "closed_volume": float(row["closed_volume"] or 0.0),
+                }
+                for row in realized_rows
+            ]
+            return {
+                "schema_version": "live_session_deal_facts.v2",
+                "trade_date": str(trade_date),
+                "timezone": str(timezone_name),
+                "window_start": float(window_start),
+                "window_end": float(window_end),
+                "broker_open_position_ids": sorted(open_position_ids),
+                "confirmed_closed_position_ids": sorted(confirmed_closed_ids),
+                "completed_position_trades": completed_position_trades,
+                "realized_close_legs": realized_close_legs,
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        warn(
+            "[live] authoritative session trade rebuild failed for %s: %s",
+            trade_date,
+            exc,
+        )
+        return None
 
 
 def authoritative_close_pnl(real_pnl: Any) -> bool:
