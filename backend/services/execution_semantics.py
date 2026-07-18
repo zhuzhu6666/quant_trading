@@ -6,6 +6,10 @@ from typing import Any
 import yaml
 
 from config.runtime_config import RuntimeConfig, shared as shared_runtime_config
+from execution.broker_config import (
+    BrokerConnectionConfig,
+    shared_broker_connection_config,
+)
 
 
 VALID_SYSTEM_MODES = {"backtest", "paper", "live"}
@@ -20,6 +24,10 @@ class ExecutionSemantics:
     factor_dry_run: bool
     effective_send_orders: bool
     blocking_reason: str = ""
+    broker_environment: str = "unknown"
+    effective_broker_host: str = ""
+    effective_broker_account_id: int = 0
+    broker_config_hash: str = ""
 
     @property
     def valid(self) -> bool:
@@ -32,6 +40,10 @@ class ExecutionSemantics:
             "factor_dry_run": self.factor_dry_run,
             "effective_send_orders": self.effective_send_orders,
             "blocking_reason": self.blocking_reason,
+            "broker_environment": self.broker_environment,
+            "effective_broker_host": self.effective_broker_host,
+            "effective_broker_account_id": self.effective_broker_account_id,
+            "broker_config_hash": self.broker_config_hash,
         }
 
 
@@ -45,8 +57,11 @@ def system_mode_from_settings(settings: dict[str, Any] | None) -> str:
 def evaluate_execution_semantics(
     settings: dict[str, Any] | None,
     runtime_config: Any | None = None,
+    *,
+    broker_config: BrokerConnectionConfig | None = None,
 ) -> ExecutionSemantics:
     cfg = runtime_config or RuntimeConfig.from_yaml(settings or {})
+    effective_broker = broker_config or BrokerConnectionConfig.from_sources(settings or {})
     mode = system_mode_from_settings(settings or {})
     ctrader_send_orders = bool(getattr(cfg, "ctrader_send_orders", False))
     factor_dry_run = bool(getattr(cfg, "factor_dry_run", False))
@@ -57,11 +72,7 @@ def evaluate_execution_semantics(
     elif mode != "live" and ctrader_send_orders:
         blocking_reason = "ctrader_send_orders_requires_system_mode_live"
     elif mode == "live" and ctrader_send_orders and not factor_dry_run:
-        ctrader = (settings or {}).get("ctrader") if isinstance(settings, dict) else {}
-        ctrader = ctrader if isinstance(ctrader, dict) else {}
-        host = str(ctrader.get("host") or "").strip().lower()
-        is_demo_account = host.startswith("demo.") or ".demo." in host
-        if not is_demo_account:
+        if not effective_broker.is_demo:
             daily_loss = float(getattr(cfg, "risk_max_daily_loss_pct", 5.0) or 5.0)
             daily_trades = max(
                 int(getattr(cfg, "risk_max_daily_trades", 20) or 20),
@@ -79,6 +90,10 @@ def evaluate_execution_semantics(
         factor_dry_run=factor_dry_run,
         effective_send_orders=effective,
         blocking_reason=blocking_reason,
+        broker_environment=effective_broker.environment,
+        effective_broker_host=effective_broker.host,
+        effective_broker_account_id=effective_broker.account_id,
+        broker_config_hash=effective_broker.config_hash,
     )
 
 
@@ -103,7 +118,11 @@ def current_execution_semantics(settings_text: str | None = None) -> ExecutionSe
         parsed = {}
     if not isinstance(parsed, dict):
         parsed = {}
-    return evaluate_execution_semantics(parsed, shared_runtime_config())
+    return evaluate_execution_semantics(
+        parsed,
+        shared_runtime_config(),
+        broker_config=shared_broker_connection_config(),
+    )
 
 
 def effective_send_orders(settings: dict[str, Any] | None = None, runtime_config: Any | None = None) -> bool:

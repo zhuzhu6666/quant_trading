@@ -138,7 +138,7 @@ class RuntimeIncidentControlService:
         cfg = runtime_config()
         mode = str(getattr(cfg, "runtime_incident_mode", "normal") or "normal").strip().lower()
         if mode not in INCIDENT_MODES:
-            mode = "normal"
+            mode = "frozen"
         return {
             "schema_version": "runtime_incident_control.v1",
             "mode": mode,

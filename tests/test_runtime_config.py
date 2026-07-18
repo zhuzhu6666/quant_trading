@@ -36,6 +36,19 @@ def test_expansion_freeze_only_applies_outside_demo_modes() -> None:
     ) is False
 
 
+def test_demo_mode_cannot_bypass_freeze_on_effective_live_broker(monkeypatch) -> None:
+    from execution.broker_config import reset_broker_connection_config_for_tests
+
+    monkeypatch.setenv("CTRADER_HOST", "live.ctraderapi.com")
+    reset_broker_connection_config_for_tests()
+    try:
+        assert rc.autonomy_expansion_freeze_applies(
+            rc.RuntimeConfig(autonomy_mode="demo_autonomous", autonomy_expansion_frozen=True)
+        ) is True
+    finally:
+        reset_broker_connection_config_for_tests()
+
+
 def test_replace_increments_version() -> None:
     v1 = rc.replace(rc.RuntimeConfig(shadow_vote_weight=0.1))
     assert v1 == 1
@@ -102,6 +115,11 @@ def test_unknown_keys_go_to_extra() -> None:
     cfg = rc.RuntimeConfig.from_dict({"shadow_vote_weight": 0.3, "made_up_field": 999})
     assert cfg.shadow_vote_weight == 0.3
     assert cfg.extra.get("made_up_field") == 999
+
+
+def test_invalid_incident_mode_is_rejected_while_loading() -> None:
+    with pytest.raises(ValueError, match="invalid_runtime_incident_mode"):
+        rc.RuntimeConfig.from_yaml({"runtime": {"runtime_incident_mode": "unsafe_typo"}})
 
 
 def test_runtime_config_snapshot_hash_stable_and_reuses_identical_event(tmp_path) -> None:

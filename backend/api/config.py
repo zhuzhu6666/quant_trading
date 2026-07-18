@@ -30,9 +30,13 @@ def write(
     try:
         return put_config(req.yaml, x_confirm=x_confirm, user=_user)
     except PermissionError as e:
+        message = str(e)
         raise HTTPException(
             status_code=403,
-            detail={"error": "missing_x_confirm", "msg": str(e)},
+            detail={
+                "error": "missing_x_confirm" if "missing_x_confirm" in message else "config_mutation_forbidden",
+                "msg": message,
+            },
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"error": str(e)})
@@ -47,9 +51,13 @@ def patch_runtime(
     try:
         return patch_runtime_config(req.patch, x_confirm=x_confirm, user=_user)
     except PermissionError as e:
+        message = str(e)
         raise HTTPException(
             status_code=403,
-            detail={"error": "missing_x_confirm", "msg": str(e)},
+            detail={
+                "error": "missing_x_confirm" if "missing_x_confirm" in message else "config_mutation_forbidden",
+                "msg": message,
+            },
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"error": str(e)})

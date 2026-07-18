@@ -106,3 +106,23 @@ def test_demo_learning_trade_count_cannot_leak_to_non_demo_host():
 
     assert semantics.effective_send_orders is False
     assert semantics.blocking_reason == "demo_daily_trade_limit_requires_demo_ctrader_host"
+
+
+def test_effective_environment_host_overrides_yaml_demo_classification(monkeypatch):
+    monkeypatch.setenv("CTRADER_HOST", "live.ctraderapi.com")
+    semantics = evaluate_execution_semantics(
+        {
+            "system": {"mode": "live"},
+            "ctrader": {"send_orders": True, "host": "demo.ctraderapi.com"},
+        },
+        RuntimeConfig(
+            ctrader_send_orders=True,
+            factor_dry_run=False,
+            risk_max_daily_loss_pct=50.0,
+        ),
+    )
+
+    assert semantics.effective_broker_host == "live.ctraderapi.com"
+    assert semantics.broker_environment == "live"
+    assert semantics.effective_send_orders is False
+    assert semantics.blocking_reason == "demo_daily_loss_limit_requires_demo_ctrader_host"

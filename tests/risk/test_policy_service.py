@@ -898,6 +898,17 @@ def test_incident_control_blocks_new_risk_but_allows_risk_reduction():
     assert rollback_allowed.allowed is True
 
 
+def test_invalid_runtime_incident_mode_fails_closed_as_frozen():
+    service = _service()
+
+    blocked = service.evaluate("open_trade", {"runtime_incident_mode": "typo"})
+    close_allowed = service.evaluate("close_position", {"runtime_incident_mode": "typo"})
+
+    assert blocked.allowed is False
+    assert blocked.reason == "incident_frozen"
+    assert close_allowed.allowed is True
+
+
 def test_incident_control_only_close_blocks_adjustments_and_governance():
     service = _service()
 

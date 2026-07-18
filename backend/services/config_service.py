@@ -22,6 +22,17 @@ SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 BACKUP_SUFFIX = ".bak"
 TEMP_SUFFIX = ".tmp"
 
+# The generic config endpoint is deliberately observability-only.  Risk,
+# execution, broker and governance changes must use their typed domain service
+# or a versioned deployment, never an untyped YAML/runtime patch.
+GENERIC_CONFIG_ALLOWED_PATHS = frozenset(
+    {
+        ("system", "log_level"),
+        ("runtime", "observability_metrics_enabled"),
+    }
+)
+GENERIC_RUNTIME_ALLOWED_KEYS = frozenset({"observability_metrics_enabled"})
+
 _POSITIVE_FLOAT_FIELDS = {
     "risk_sl_atr",
     "risk_tp_atr",
@@ -193,6 +204,26 @@ def _parsed_from_text(yaml_text: str) -> dict[str, Any]:
     return parsed
 
 
+def _changed_leaf_paths(a: Any, b: Any, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+    if isinstance(a, dict) and isinstance(b, dict):
+        changed: set[tuple[str, ...]] = set()
+        for key in set(a) | set(b):
+            changed.update(_changed_leaf_paths(a.get(key), b.get(key), (*prefix, str(key))))
+        return changed
+    return {prefix} if a != b else set()
+
+
+def _validate_generic_config_change(before: dict[str, Any], after: dict[str, Any]) -> None:
+    changed_paths = _changed_leaf_paths(before, after)
+    forbidden = sorted(path for path in changed_paths if path not in GENERIC_CONFIG_ALLOWED_PATHS)
+    if forbidden:
+        rendered = ", ".join(".".join(path) for path in forbidden[:20])
+        raise PermissionError(
+            "generic_config_mutation_forbidden: "
+            f"{rendered}; allowed=system.log_level,runtime.observability_metrics_enabled"
+        )
+
+
 def put_config(
     yaml_text: str,
     *,
@@ -203,11 +234,12 @@ def put_config(
 ) -> dict:
     """Validate + atomically write settings.yaml. Returns changes summary."""
     parsed = _parsed_from_text(yaml_text)
-    _validate_parsed_runtime_config(parsed)
 
     old = yaml.safe_load(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
     if not isinstance(old, dict):
         old = {}
+    _validate_generic_config_change(old, parsed)
+    _validate_parsed_runtime_config(parsed)
     before_runtime = RuntimeConfig.from_yaml(old)
     before_semantics = evaluate_execution_semantics(old, before_runtime)
     after_runtime = RuntimeConfig.from_yaml(parsed)
@@ -280,10 +312,12 @@ def patch_runtime_config(
     if not isinstance(runtime_patch, dict) or not runtime_patch:
         raise ValueError("runtime_patch_must_be_non_empty_object")
 
-    allowed = {k for k in RuntimeConfig.__dataclass_fields__ if k != "extra"}
-    unknown = sorted(k for k in runtime_patch if k not in allowed)
-    if unknown:
-        raise ValueError(f"unknown_runtime_keys: {', '.join(unknown)}")
+    forbidden = sorted(k for k in runtime_patch if k not in GENERIC_RUNTIME_ALLOWED_KEYS)
+    if forbidden:
+        raise PermissionError(
+            "generic_runtime_mutation_forbidden: "
+            f"{', '.join(forbidden)}; allowed=observability_metrics_enabled"
+        )
 
     current = yaml.safe_load(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
     if not isinstance(current, dict):
@@ -313,13 +347,12 @@ def patch_runtime_config(
         )
         raise PermissionError("missing_x_confirm: enable-send-orders")
 
-    current["runtime"] = validated_runtime.to_dict()
-    ctrader_cfg = current.get("ctrader")
-    if not isinstance(ctrader_cfg, dict):
-        ctrader_cfg = {}
-        current["ctrader"] = ctrader_cfg
-    if "ctrader_send_orders" in runtime_patch:
-        ctrader_cfg["send_orders"] = bool(validated_runtime.ctrader_send_orders)
+    runtime_section = current.get("runtime")
+    if not isinstance(runtime_section, dict):
+        runtime_section = {}
+        current["runtime"] = runtime_section
+    for key in GENERIC_RUNTIME_ALLOWED_KEYS & runtime_patch.keys():
+        runtime_section[key] = getattr(validated_runtime, key)
 
     yaml_text = yaml.safe_dump(current, sort_keys=False, allow_unicode=True)
     result = put_config(yaml_text, x_confirm=x_confirm, user=user, endpoint=endpoint, audit=False)

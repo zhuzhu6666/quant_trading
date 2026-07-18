@@ -175,7 +175,9 @@ class RiskPolicyService:
             except Exception:
                 raw = "normal"
         mode = str(raw or "normal").strip().lower()
-        return mode if mode in INCIDENT_MODES else "normal"
+        # Runtime corruption must fail closed.  Config loading rejects invalid
+        # values; this branch protects already-constructed/in-memory objects.
+        return mode if mode in INCIDENT_MODES else "frozen"
 
     def _evaluate_incident_runtime_mode(self, action: str, context: dict[str, Any]) -> RiskVerdict | None:
         if action not in INCIDENT_CONTROLLED_ACTIONS:
@@ -225,7 +227,7 @@ class RiskPolicyService:
                 },
             )
         if current not in INCIDENT_MODES:
-            current = "normal"
+            current = "frozen"
         relaxing = INCIDENT_MODE_RANK[target] < INCIDENT_MODE_RANK[current]
         if relaxing and not bool(context.get("confirm_thaw", False)):
             return RiskVerdict(

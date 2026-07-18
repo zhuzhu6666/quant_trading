@@ -27,6 +27,9 @@ from backend.runtime.runtime_state import RuntimeState
 logger = logging.getLogger(__name__)
 
 DEMO_AUTONOMY_MODES = frozenset({"demo_autonomous", "demo_nursery"})
+VALID_RUNTIME_INCIDENT_MODES = frozenset(
+    {"normal", "shadow_only", "no_new_risk", "only_close", "frozen"}
+)
 
 
 def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
@@ -38,7 +41,14 @@ def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
     """
     current = cfg if cfg is not None else shared()
     mode = str(getattr(current, "autonomy_mode", "") or "manual").strip().lower()
-    return bool(getattr(current, "autonomy_expansion_frozen", True)) and mode not in DEMO_AUTONOMY_MODES
+    try:
+        from execution.broker_config import shared_broker_connection_config
+
+        broker_is_demo = shared_broker_connection_config().is_demo
+    except Exception:
+        broker_is_demo = False
+    bounded_demo = mode in DEMO_AUTONOMY_MODES and broker_is_demo
+    return bool(getattr(current, "autonomy_expansion_frozen", True)) and not bounded_demo
 
 
 @dataclass
@@ -490,6 +500,14 @@ class RuntimeConfig:
         for k, v in d.items():
             if k not in cls.__dataclass_fields__ and k != "extra":
                 extra[k] = v
+        if "runtime_incident_mode" in known:
+            incident_mode = str(known["runtime_incident_mode"] or "").strip().lower()
+            if incident_mode not in VALID_RUNTIME_INCIDENT_MODES:
+                raise ValueError(
+                    "invalid_runtime_incident_mode: "
+                    f"{incident_mode!r}; expected one of {sorted(VALID_RUNTIME_INCIDENT_MODES)}"
+                )
+            known["runtime_incident_mode"] = incident_mode
         known["extra"] = extra
         try:
             return cls(**known)

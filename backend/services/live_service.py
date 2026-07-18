@@ -3954,7 +3954,7 @@ def _cache_get_or_refresh(cache: dict, ttl: float, fetcher):
 
 
 def _make_ctrader_bridge(**overrides):
-    """从 .env 构造 CTraderBridge, 支持 kwargs 覆盖.
+    """从进程级有效配置构造 CTraderBridge, 支持测试 kwargs 覆盖.
     返回 (bridge, error_msg | None)."""
     # 确保 .env 的 CTRADER_* 已灌到 os.environ
     try:
@@ -3966,36 +3966,9 @@ def _make_ctrader_bridge(**overrides):
         from execution.ctrader_bridge import CTraderBridge
     except ImportError as e:
         return None, f"ctrader-open-api not installed: {e}"
-    try:
-        from config import load_config
-        cfg = load_config()
-        ctrader_cfg = cfg.get("ctrader", {}) if isinstance(cfg, dict) else {}
-    except Exception:
-        ctrader_cfg = {}
-    try:
-        from config.runtime_config import shared as _runtime_cfg
+    from execution.broker_config import shared_broker_connection_config
 
-        runtime_cfg = _runtime_cfg()
-    except Exception:
-        runtime_cfg = None
-    kw = dict(
-        client_id=os.getenv("CTRADER_CLIENT_ID", ""),
-        client_secret=os.getenv("CTRADER_CLIENT_SECRET", ""),
-        access_token=os.getenv("CTRADER_ACCESS_TOKEN", ""),
-        account_id=int(os.getenv("CTRADER_ACCOUNT_ID", "0")),
-        host=str(os.getenv("CTRADER_HOST", ctrader_cfg.get("host", "demo.ctraderapi.com")) or "demo.ctraderapi.com"),
-        port=int(os.getenv("CTRADER_PORT", ctrader_cfg.get("port", 5035)) or 5035),
-        symbol=str(os.getenv("CTRADER_SYMBOL", ctrader_cfg.get("symbol", "XAUUSD")) or "XAUUSD"),
-        request_timeout_sec=float(
-            os.getenv("CTRADER_REQUEST_TIMEOUT_SEC", ctrader_cfg.get("request_timeout_sec", 10)) or 10
-        ),
-        proxy_url=str(
-            os.getenv("CTRADER_PROXY_URL", ctrader_cfg.get("proxy_url", "")) or ""
-        ),
-        proxy_rdns=str(
-            os.getenv("CTRADER_PROXY_RDNS", ctrader_cfg.get("proxy_rdns", True))
-        ).strip().lower() not in {"0", "false", "no", "off"},
-    )
+    kw = shared_broker_connection_config().bridge_kwargs()
     kw.update(overrides)
     bridge = CTraderBridge(**kw)
     _install_ctrader_live_listener(bridge)
