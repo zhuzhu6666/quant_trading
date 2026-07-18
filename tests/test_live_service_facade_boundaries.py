@@ -37,6 +37,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_run_live_safety_cycle",
         "_recover_execution_outcomes_before_alpha",
         "_attempt_generation_startup_barrier",
+        "_bootstrap_position_recovery",
         "_load_authoritative_session_deal_facts",
         "emergency_close",
     ):

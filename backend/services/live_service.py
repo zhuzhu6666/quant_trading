@@ -81,6 +81,8 @@ from backend.services.live_loop_v2 import (
 )
 from backend.services.live_execution_recovery import (
     ExecutionRecoveryRuntime,
+    PositionRecoveryRuntime,
+    bootstrap_position_recovery as _runtime_bootstrap_position_recovery,
     recover_execution_outcomes_before_alpha as _loop_recover_execution_outcomes,
 )
 from backend.services.live_emergency import (
@@ -4579,386 +4581,43 @@ def _bootstrap_position_recovery(
     strategy_name: str,
     log,
 ) -> bool:
-    global _prev_position_ids
+    from execution.deal_sync import sync_close_deals_batch
 
-    try:
-        current_positions = _read_positions_for_recovery(bridge)
-    except Exception as exc:
-        log(f"recovery bootstrap skipped: get_positions failed: {exc}")
-        return False
-
-    normalized = [_normalize_position_snapshot(pos) for pos in current_positions]
-    current_ids = {item["position_id"] for item in normalized if item["position_id"] > 0}
-    active_rows = _list_active_recovery_positions(broker)
-    active_rows_by_id = {
-        int(row["position_id"]): row
-        for row in active_rows
-        if int(row.get("position_id") or 0) > 0
-    }
-    pending_close_causes = _pending_session_close_causes()
-    pending_close_ids = set(pending_close_causes)
-    pending_open_ids = pending_close_ids & current_ids
-    pending_missing_ids = pending_close_ids - current_ids
-    recovery_close_ids = set(active_rows_by_id) | pending_missing_ids
-
-    if pending_open_ids:
-        # A transient empty snapshot or a supervisor partial close can leave a
-        # deal-evidence latch while the position is still open.  Refresh only
-        # the realized leg here; never replay/retire an open broker position.
-        from execution.deal_sync import sync_close_deals_batch
-
-        minimum_close_ts = {
-            pid: max(
-                0.0,
-                float(active_rows_by_id[pid].get("last_seen_at") or 0.0) - 5.0,
-            )
-            for pid in pending_open_ids
-            if pid in active_rows_by_id
-        }
-        required_refresh_deltas: dict[int, float] = {}
-        for pid in pending_open_ids:
-            state = active_rows_by_id.get(pid) or _pending_close_fallback_state(
-                pid,
-                broker=broker,
-                recovery_evidence=pending_close_causes.get(pid),
-            )
-            requirements = _pending_close_requirements(
-                state,
-                latch_evidence=pending_close_causes.get(pid),
-            )
-            required_delta = float(
-                requirements.get("required_closed_volume_delta")
-                or state.get("volume")
-                or 0.0
-            )
-            if required_delta > 0.0:
-                required_refresh_deltas[pid] = required_delta
-        conn = _get_state_pg_conn()
-        try:
-            realized = sync_close_deals_batch(
-                bridge,
-                conn,
-                set(pending_open_ids),
-                from_ts=int(max(0.0, time.time() - _RECOVERY_REPLAY_LOOKBACK_SEC)),
-                max_rows=500,
-                min_exec_timestamp_by_position=minimum_close_ts,
-                required_closed_volume_delta_by_position=required_refresh_deltas,
-                baseline_close_cursor_by_position=(
-                    _pending_close_cursor_overrides(
-                        set(pending_open_ids),
-                        active_rows_by_id=active_rows_by_id,
-                        pending_close_causes=pending_close_causes,
-                        broker=broker,
-                    )
-                ),
-            )
-        finally:
-            conn.close()
-        unresolved_open_ids = {
-            pid
-            for pid in pending_open_ids
-            if not _pending_close_result_complete(
-                realized.get(pid),
-                position_state=(
-                    active_rows_by_id.get(pid)
-                    or _pending_close_fallback_state(
-                        pid,
-                        broker=broker,
-                        recovery_evidence=pending_close_causes.get(pid),
-                    )
-                ),
-                require_volume_proof=(pid not in active_rows_by_id),
-                recovery_requirements=_pending_close_requirements(
-                    active_rows_by_id.get(pid)
-                    or _pending_close_fallback_state(
-                        pid,
-                        broker=broker,
-                        recovery_evidence=pending_close_causes.get(pid),
-                    ),
-                    latch_evidence=pending_close_causes.get(pid),
-                ),
-            )
-        }
-        for pid in sorted(pending_open_ids - unresolved_open_ids):
-            _release_session_close_deal_latch(pid, realized[pid])
-        if unresolved_open_ids:
-            for pid in sorted(unresolved_open_ids):
-                _defer_close_until_authoritative_deal(
-                    pid,
-                    broker=broker,
-                    tick=0,
-                    reason="open_position_realized_leg_unavailable",
-                )
-            log(
-                "recovery bootstrap waiting for realized partial-close deals "
-                f"positions={sorted(unresolved_open_ids)}"
-            )
-            return False
-    if not current_ids:
-        _prev_position_ids = set()
-        suffix = (
-            f" while {len(recovery_close_ids)} pending positions remain"
-            if recovery_close_ids
-            else ""
-        )
-        if recovery_close_ids:
-            zero_count = _recovery_zero_confirmations.get(broker, 0) + 1
-            _recovery_zero_confirmations[broker] = zero_count
-            if zero_count < _RECOVERY_ZERO_CONFIRMATIONS_REQUIRED:
-                log(
-                    "recovery bootstrap deferred: broker returned 0 positions"
-                    f"{suffix}; confirmation {zero_count}/{_RECOVERY_ZERO_CONFIRMATIONS_REQUIRED}"
-                )
-                return False
-
-            from execution.deal_sync import sync_close_deals_batch
-
-            missing_ids = set(recovery_close_ids)
-            lookback_from = _lifecycle_recovery_replay_lookback_from(
-                active_rows=active_rows,
-                replay_ids=missing_ids,
-                now_ts=time.time(),
-                lookback_sec=_RECOVERY_REPLAY_LOOKBACK_SEC,
-            )
-            minimum_close_ts = {
-                int(row["position_id"]): max(
-                    0.0,
-                    float(row.get("last_seen_at") or 0.0) - 5.0,
-                )
-                for row in active_rows
-                if int(row["position_id"] or 0) in missing_ids
-            }
-            required_close_deltas = {
-                pid: _pending_close_required_volume_delta(
-                    pid,
-                    active_rows_by_id=active_rows_by_id,
-                    pending_close_causes=pending_close_causes,
-                    broker=broker,
-                )
-                for pid in missing_ids
-            }
-            conn = _get_state_pg_conn()
-            try:
-                replayed = sync_close_deals_batch(
-                    bridge,
-                    conn,
-                    missing_ids,
-                    from_ts=lookback_from,
-                    max_rows=500,
-                    min_exec_timestamp_by_position=minimum_close_ts,
-                    required_closed_volume_delta_by_position=required_close_deltas,
-                    baseline_close_cursor_by_position=(
-                        _pending_close_cursor_overrides(
-                            missing_ids,
-                            active_rows_by_id=active_rows_by_id,
-                            pending_close_causes=pending_close_causes,
-                            broker=broker,
-                        )
-                    ),
-                )
-            finally:
-                conn.close()
-            unresolved_close_ids = {
-                int(position_id)
-                for position_id in missing_ids
-                if not _pending_close_result_complete(
-                    replayed.get(int(position_id)),
-                    position_state=(
-                        active_rows_by_id.get(int(position_id))
-                        or _pending_close_fallback_state(
-                            int(position_id),
-                            broker=broker,
-                            recovery_evidence=pending_close_causes.get(
-                                int(position_id)
-                            ),
-                        )
-                    ),
-                    require_volume_proof=(
-                        int(position_id) not in active_rows_by_id
-                    ),
-                    recovery_requirements=_pending_close_requirements(
-                        active_rows_by_id.get(int(position_id))
-                        or _pending_close_fallback_state(
-                            int(position_id),
-                            broker=broker,
-                            recovery_evidence=pending_close_causes.get(
-                                int(position_id)
-                            ),
-                        ),
-                        latch_evidence=pending_close_causes.get(
-                            int(position_id)
-                        ),
-                    ),
-                )
-            }
-            for position_id in sorted(missing_ids):
-                row = active_rows_by_id.get(position_id) or (
-                    _pending_close_fallback_state(
-                        position_id,
-                        broker=broker,
-                        recovery_evidence=pending_close_causes.get(position_id),
-                    )
-                )
-                if position_id not in unresolved_close_ids:
-                    _replay_recovered_close(
-                        broker=broker,
-                        position_id=position_id,
-                        position_state=row,
-                        real_pnl=replayed.get(position_id),
-                        strategy_name=strategy_name,
-                    )
-                else:
-                    _defer_close_until_authoritative_deal(
-                        position_id,
-                        broker=broker,
-                        tick=0,
-                        reason="recovery_bootstrap_close_deal_unavailable",
-                    )
-            if unresolved_close_ids:
-                log(
-                    "recovery bootstrap waiting for authoritative close deals "
-                    f"positions={sorted(unresolved_close_ids)}"
-                )
-                return False
-            log(
-                "recovery bootstrap reconciled "
-                f"{len(missing_ids)} pending positions as closed after broker returned 0"
-            )
-            return True
-        _recovery_zero_confirmations.pop(broker, None)
-        log("recovery bootstrap confirmed broker has no open positions")
-        return True
-    _recovery_zero_confirmations.pop(broker, None)
-    missing_ids = _lifecycle_recovery_missing_position_ids(
-        active_rows=active_rows,
-        current_ids=current_ids,
-    ) | pending_missing_ids
-
-    if missing_ids:
-        from execution.deal_sync import sync_close_deals_batch
-
-        lookback_from = _lifecycle_recovery_replay_lookback_from(
-            active_rows=active_rows,
-            replay_ids=missing_ids,
-            now_ts=time.time(),
-            lookback_sec=_RECOVERY_REPLAY_LOOKBACK_SEC,
-        )
-        minimum_close_ts = {
-            int(row["position_id"]): max(
-                0.0,
-                float(row.get("last_seen_at") or 0.0) - 5.0,
-            )
-            for row in active_rows
-            if int(row["position_id"] or 0) in missing_ids
-        }
-        required_close_deltas = {
-            pid: _pending_close_required_volume_delta(
-                pid,
-                active_rows_by_id=active_rows_by_id,
-                pending_close_causes=pending_close_causes,
-                broker=broker,
-            )
-            for pid in missing_ids
-        }
-        conn = _get_state_pg_conn()
-        try:
-            replayed = sync_close_deals_batch(
-                bridge,
-                conn,
-                missing_ids,
-                from_ts=lookback_from,
-                max_rows=500,
-                min_exec_timestamp_by_position=minimum_close_ts,
-                required_closed_volume_delta_by_position=required_close_deltas,
-                baseline_close_cursor_by_position=(
-                    _pending_close_cursor_overrides(
-                        missing_ids,
-                        active_rows_by_id=active_rows_by_id,
-                        pending_close_causes=pending_close_causes,
-                        broker=broker,
-                    )
-                ),
-            )
-        finally:
-            conn.close()
-        unresolved_close_ids = {
-            int(position_id)
-            for position_id in missing_ids
-            if not _pending_close_result_complete(
-                replayed.get(int(position_id)),
-                position_state=(
-                    active_rows_by_id.get(int(position_id))
-                    or _pending_close_fallback_state(
-                        int(position_id),
-                        broker=broker,
-                        recovery_evidence=pending_close_causes.get(
-                            int(position_id)
-                        ),
-                    )
-                ),
-                require_volume_proof=(int(position_id) not in active_rows_by_id),
-                recovery_requirements=_pending_close_requirements(
-                    active_rows_by_id.get(int(position_id))
-                    or _pending_close_fallback_state(
-                        int(position_id),
-                        broker=broker,
-                        recovery_evidence=pending_close_causes.get(
-                            int(position_id)
-                        ),
-                    ),
-                    latch_evidence=pending_close_causes.get(int(position_id)),
-                ),
-            )
-        }
-        for position_id in sorted(missing_ids):
-            row = active_rows_by_id.get(position_id) or (
-                _pending_close_fallback_state(
-                    position_id,
-                    broker=broker,
-                    recovery_evidence=pending_close_causes.get(position_id),
-                )
-            )
-            if position_id not in unresolved_close_ids:
-                _replay_recovered_close(
-                    broker=broker,
-                    position_id=position_id,
-                    position_state=row,
-                    real_pnl=replayed.get(position_id),
-                    strategy_name=strategy_name,
-                )
-            else:
-                _defer_close_until_authoritative_deal(
-                    position_id,
-                    broker=broker,
-                    tick=0,
-                    reason="recovery_bootstrap_close_deal_unavailable",
-                )
-        if unresolved_close_ids:
-            log(
-                "recovery bootstrap waiting for authoritative close deals "
-                f"positions={sorted(unresolved_close_ids)}"
-            )
-            return False
-        log(f"recovery bootstrap replayed {len(missing_ids)} missing closes")
-
-    for item in normalized:
-        position_id = item["position_id"]
-        if position_id <= 0:
-            continue
-        _pos_open_prices[position_id] = item["open_price"]
-        _pos_open_api_volume[position_id] = item["volume"]
-        _upsert_recovery_position_state(
-            item["raw"],
-            broker=broker,
-            strategy_name=strategy_name,
-            status="recovered",
-            meta={"recovered_at": time.time()},
-        )
-
-    _prev_position_ids = current_ids.copy()
-    if current_ids:
-        log(f"recovery bootstrap attached {len(current_ids)} live positions after restart")
-    return True
+    runtime = PositionRecoveryRuntime(
+        read_positions=_read_positions_for_recovery,
+        normalize_position=_normalize_position_snapshot,
+        list_active_positions=_list_active_recovery_positions,
+        pending_session_close_causes=_pending_session_close_causes,
+        pending_close_fallback_state=_pending_close_fallback_state,
+        pending_close_requirements=_pending_close_requirements,
+        get_state_connection=_get_state_pg_conn,
+        sync_close_deals_batch=sync_close_deals_batch,
+        pending_close_cursor_overrides=_pending_close_cursor_overrides,
+        pending_close_result_complete=_pending_close_result_complete,
+        release_session_close_latch=_release_session_close_deal_latch,
+        defer_close=_defer_close_until_authoritative_deal,
+        previous_position_ids=_prev_position_ids,
+        zero_confirmations=_recovery_zero_confirmations,
+        zero_confirmations_required=_RECOVERY_ZERO_CONFIRMATIONS_REQUIRED,
+        replay_lookback_seconds=_RECOVERY_REPLAY_LOOKBACK_SEC,
+        recovery_replay_lookback_from=_lifecycle_recovery_replay_lookback_from,
+        pending_close_required_volume_delta=(
+            _pending_close_required_volume_delta
+        ),
+        replay_recovered_close=_replay_recovered_close,
+        recovery_missing_position_ids=_lifecycle_recovery_missing_position_ids,
+        open_prices=_pos_open_prices,
+        open_api_volumes=_pos_open_api_volume,
+        upsert_recovery_position=_upsert_recovery_position_state,
+        now=time.time,
+    )
+    return _runtime_bootstrap_position_recovery(
+        bridge,
+        broker=broker,
+        strategy_name=strategy_name,
+        log=log,
+        runtime=runtime,
+    )
 
 
 def _reset_session_state_for_new_day() -> None:
