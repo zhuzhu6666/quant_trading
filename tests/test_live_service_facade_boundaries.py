@@ -55,6 +55,17 @@ def test_session_deal_sql_lives_outside_live_facade():
     assert "FROM ctrader_deals d" not in source
 
 
+def test_position_supervision_entrypoint_is_dependency_wiring_only():
+    tree = ast.parse(LIVE_SERVICE.read_text(encoding="utf-8"))
+    node = _definitions(tree)["_run_position_supervision"]
+
+    assert int(node.end_lineno or 0) - int(node.lineno) < 100
+    assert not any(
+        isinstance(child, (ast.For, ast.While, ast.Try, ast.With))
+        for child in ast.walk(node)
+    )
+
+
 def test_safety_reconciliation_modules_do_not_depend_on_postgres_or_legacy_refresh():
     for relative_path in (
         "backend/services/live_reconciliation.py",

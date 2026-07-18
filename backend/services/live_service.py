@@ -160,6 +160,10 @@ from backend.services.live_supervision_actions import (
     execute_supervisor_reduce_action as _execute_supervisor_reduce_action,
     execute_supervisor_tighten_action as _execute_supervisor_tighten_action,
 )
+from backend.services.live_supervision_runtime import (
+    LiveSupervisionRuntime,
+    run_position_supervision as _runtime_run_position_supervision,
+)
 from backend.services.live_factor_wiring import (
     merge_portfolio_configs as _merge_portfolio_configs,
 )
@@ -2609,327 +2613,78 @@ def _run_position_supervision(
     candidate_recorder=None,
     planned_verdicts: dict[int, dict[str, Any]] | None = None,
 ) -> set[int]:
-    handled: set[int] = set()
-    skip_position_ids = set(skip_position_ids or set())
-    cycle_ts = float(decision_ts if decision_ts is not None else time.time())
-    if not pos or bridge is None:
-        return handled
-    for raw in pos or []:
-        position = dict(raw)
-        pid = int(position.get("position_id") or position.get("ticket") or 0)
-        if pid <= 0:
-            continue
-        if pid in skip_position_ids:
-            handled.add(pid)
-            continue
-        try:
-            if planned_verdicts is not None and pid in planned_verdicts:
-                verdict = copy.deepcopy(planned_verdicts[pid])
-            else:
-                verdict = _evaluate_position_supervisor_for_position(
-                    position,
-                    cfg=cfg,
-                    acct=acct,
-                    now_ts=cycle_ts,
-                    positions=pos,
-                    persist=True,
-                    broker="ctrader",
-                    strategy_name=str(_loop_strategy_name or "factor_v4"),
-                )
-        except Exception as exc:
-            _record_risk_reduction_aux_failure(
-                "position_supervisor_evaluation_failed",
-                position_id=pid,
-                action="position_supervisor",
-                error=exc,
-            )
-            logger.warning(
-                "[live] supervisor evaluation unavailable for pos %s; other safety stages continue: %s",
-                pid,
-                exc,
-            )
-            continue
-        action = str(verdict.get("action") or "hold")
-        if action == "hold":
-            _log_supervisor_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
+    runtime = LiveSupervisionRuntime(
+        logger=logger,
+        strategy_name=str(_loop_strategy_name or "factor_v4"),
+        ledger=_LEDGER,
+        evaluate_position=_evaluate_position_supervisor_for_position,
+        record_aux_failure=_record_risk_reduction_aux_failure,
+        log_trace=_log_supervisor_trace,
+        make_candidate=safety_candidate,
+        recently_applied=_supervisor_recently_applied,
+        delegate_timeout_close=_delegate_timeout_supervisor_close,
+        build_tighten_execution_plan=_lifecycle_build_supervisor_tighten_execution_plan,
+        build_action_fingerprint=_lifecycle_build_supervisor_action_fingerprint,
+        noop_fingerprint_seen=_supervisor_noop_fingerprint_seen,
+        remember_noop=_remember_supervisor_noop,
+        risk_action_for_action=_lifecycle_supervisor_risk_action_for_action,
+        build_risk_evaluation_inputs=(
+            _lifecycle_build_supervisor_runtime_risk_evaluation_inputs
+        ),
+        supervisor_risk_context=_supervisor_risk_context,
+        live_state_get=_live_state_get,
+        evaluate_risk_policy=_evaluate_risk_reduction_policy,
+        log_decision=_log_supervisor_decision,
+        remember_state=_remember_supervisor_state,
+        execute_tighten=_execute_supervisor_tighten_action,
+        execute_reduce=_execute_supervisor_reduce_action,
+        execute_close=_execute_supervisor_close_action,
+        build_tighten_result_payloads=(
+            _lifecycle_build_supervisor_tighten_result_payloads
+        ),
+        log_position_event=_log_supervisor_position_event,
+        remember_reentry_block=_remember_supervisor_reentry_block,
+        track_local_sl_tp=_track_local_sl_tp,
+        result_is_position_not_found=_result_is_position_not_found,
+        retire_broker_missing_position=_retire_broker_missing_position,
+        reconcile_positions=_explicit_position_reconcile,
+        verify_protection_projection=_verify_position_protection_projection,
+        publish_fresh_positions=lambda result: _publish_fresh_position_reconcile(
+            result,
+            broker="ctrader",
+        ),
+        persist_safety_fail_closed=_persist_safety_fail_closed,
+        floor_api_volume_to_step=_floor_api_volume_to_step,
+        should_full_close_untradeable_reduce=_should_full_close_untradeable_reduce,
+        build_close_position_risk_context=_build_close_position_risk_context,
+        remember_close_reason=_remember_close_reason,
+        remember_close_verdict=_remember_close_verdict,
+        capture_partial_close_session_cursor=lambda **kwargs: (
+            _capture_partial_close_deal_cursor(**kwargs)
+        ),
+        sync_partial_close_session_fact=lambda **kwargs: (
+            _sync_partial_close_session_fact(
+                bridge,
+                broker="ctrader",
                 tick=tick,
-                stage="evaluated",
-                outcome="hold",
-                execution_status="not_required",
-                acct=acct,
+                **kwargs,
             )
-            continue
-        controls = verdict.get("recommended_controls") or {}
-        if action in {"close", "reduce", "tighten"} and candidate_recorder is not None:
-            try:
-                candidate_recorder(
-                    safety_candidate(
-                        action=action,
-                        position_id=pid,
-                        source=f"supervisor_{action}",
-                        controls=controls,
-                    )
-                )
-            except Exception as exc:
-                _record_risk_reduction_aux_failure(
-                    "safety_candidate_record_failed",
-                    position_id=pid,
-                    action=action,
-                    error=exc,
-                )
-        handled.add(pid)
-        if _supervisor_recently_applied(pid, action):
-            _log_supervisor_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="cooldown_skipped",
-                outcome="skipped",
-                execution_status="cooldown",
-                execution_reason="recently_applied_same_action",
-                acct=acct,
-            )
-            continue
-        if action == "close" and str(verdict.get("summary_reason") or "") == "holding_timeout_exceeded":
-            _delegate_timeout_supervisor_close(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                acct=acct,
-            )
-            continue
-
-        if action == "tighten":
-            stop_policy = {
-                "quote_max_age_seconds": getattr(cfg, "supervisor_quote_max_age_seconds", 10.0),
-                "min_stop_distance_points": getattr(cfg, "supervisor_min_stop_distance_points", 0.20),
-                "stop_safety_buffer_ratio": getattr(cfg, "supervisor_stop_safety_buffer_ratio", 0.00008),
-                "min_tighten_delta_points": getattr(cfg, "supervisor_min_tighten_delta_points", 0.01),
-                "precision": int(position.get("digits", 2) or 2),
-                "require_side_quote": True,
-            }
-            try:
-                quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
-                preflight = _lifecycle_build_supervisor_tighten_execution_plan(
-                    position=position,
-                    controls=controls,
-                    quote=quote,
-                    policy=stop_policy,
-                )
-            except Exception as exc:
-                logger.debug("[live] supervisor tighten preflight unavailable for pos %s: %s", pid, exc)
-                preflight = {}
-            sl_plan = preflight.get("sl_plan") or {}
-            noop_reasons = {
-                "not_tightening_long_stop_loss",
-                "not_tightening_short_stop_loss",
-                "stop_loss_delta_too_small",
-            }
-            if not sl_plan.get("allowed") and str(sl_plan.get("reason") or "") in noop_reasons:
-                fingerprint = _lifecycle_build_supervisor_action_fingerprint(
-                    position_id=pid,
-                    action=action,
-                    direction=int(position.get("direction", 0) or 0),
-                    controls=controls,
-                )
-                if not _supervisor_noop_fingerprint_seen(pid, fingerprint):
-                    _log_supervisor_trace(
-                        position=position,
-                        verdict=verdict,
-                        cfg=cfg,
-                        tick=tick,
-                        stage="no_op_suppressed",
-                        outcome="skipped",
-                        execution_status="no_op",
-                        execution_reason="target_already_applied",
-                        execution={
-                            "action_fingerprint": fingerprint,
-                            "sl_plan": sl_plan,
-                            "applied_controls": controls,
-                        },
-                        acct=acct,
-                    )
-                    _remember_supervisor_noop(
-                        position,
-                        verdict,
-                        fingerprint=fingerprint,
-                        reason=str(sl_plan.get("reason") or ""),
-                    )
-                continue
-
-        risk_action = _lifecycle_supervisor_risk_action_for_action(action)
-        if not risk_action:
-            _log_supervisor_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="invalid_action",
-                outcome="skipped",
-                execution_status="invalid_action",
-                execution_reason=action,
-                acct=acct,
-            )
-            continue
-        risk_inputs = _lifecycle_build_supervisor_runtime_risk_evaluation_inputs(
-            action=action,
-            risk_context=_supervisor_risk_context(position, verdict, cfg=cfg),
-            loop_running=bool(_live_state_get("loop_running", True)),
-            bridge_connected=bool(getattr(bridge, "is_connected", False)),
-        )
-        risk_context = risk_inputs.get("risk_context") or {}
-        risk_verdict = _evaluate_risk_reduction_policy(risk_action, risk_context).to_dict()
-        decision_id = _log_supervisor_decision(
-            position=position,
-            verdict=verdict,
-            risk_verdict=risk_verdict,
-            acct=acct,
-            cfg=cfg,
-            event_type=f"supervisor_{action}",
-            tick=tick,
-        )
-        if not risk_verdict.get("allowed", False):
-            _log_supervisor_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="risk_rejected",
-                outcome="blocked",
-                decision_id=decision_id,
-                risk_action=risk_action,
-                risk_verdict=risk_verdict,
-                execution_status="blocked",
-                execution_reason=str(risk_verdict.get("reason") or ""),
-                acct=acct,
-            )
-            _remember_supervisor_state(position, verdict, broker="ctrader", strategy_name=str(_loop_strategy_name or "factor_v4"))
-            continue
-
-        try:
-            if action == "tighten":
-                _execute_supervisor_tighten_action(
-                    bridge=bridge,
-                    position=position,
-                    verdict=verdict,
-                    risk_action=risk_action,
-                    risk_verdict=risk_verdict,
-                    decision_id=decision_id,
-                    cfg=cfg,
-                    tick=tick,
-                    acct=acct,
-                    controls=controls,
-                    log=log,
-                    broker="ctrader",
-                    strategy_name=str(_loop_strategy_name or "factor_v4"),
-                    build_tighten_execution_plan=_lifecycle_build_supervisor_tighten_execution_plan,
-                    build_tighten_result_payloads=_lifecycle_build_supervisor_tighten_result_payloads,
-                    log_supervisor_position_event=_log_supervisor_position_event,
-                    log_supervisor_trace=_log_supervisor_trace,
-                    remember_supervisor_state=_remember_supervisor_state,
-                    remember_supervisor_reentry_block=_remember_supervisor_reentry_block,
-                    track_local_sl_tp=_track_local_sl_tp,
-                    result_is_position_not_found=_result_is_position_not_found,
-                    retire_broker_missing_position=_retire_broker_missing_position,
-                    record_aux_failure=_record_risk_reduction_aux_failure,
-                    reconcile_positions=_explicit_position_reconcile,
-                    verify_protection_projection=_verify_position_protection_projection,
-                    publish_fresh_positions=lambda result: _publish_fresh_position_reconcile(
-                        result,
-                        broker="ctrader",
-                    ),
-                    persist_safety_fail_closed=_persist_safety_fail_closed,
-                )
-            elif action == "reduce":
-                _execute_supervisor_reduce_action(
-                    bridge=bridge,
-                    position=position,
-                    verdict=verdict,
-                    risk_action=risk_action,
-                    risk_verdict=risk_verdict,
-                    decision_id=decision_id,
-                    cfg=cfg,
-                    tick=tick,
-                    acct=acct,
-                    controls=controls,
-                    log=log,
-                    ledger=_LEDGER,
-                    broker="ctrader",
-                    strategy_name=str(_loop_strategy_name or "factor_v4"),
-                    floor_api_volume_to_step=_floor_api_volume_to_step,
-                    should_full_close_untradeable_reduce=_should_full_close_untradeable_reduce,
-                    build_close_position_risk_context=_build_close_position_risk_context,
-                    risk_policy_evaluate=_evaluate_risk_reduction_policy,
-                    log_supervisor_trace=_log_supervisor_trace,
-                    remember_supervisor_state=_remember_supervisor_state,
-                    remember_supervisor_reentry_block=_remember_supervisor_reentry_block,
-                    remember_close_reason=_remember_close_reason,
-                    remember_close_verdict=_remember_close_verdict,
-                    result_is_position_not_found=_result_is_position_not_found,
-                    retire_broker_missing_position=_retire_broker_missing_position,
-                    record_partial_close_execution=record_partial_close_execution,
-                    capture_partial_close_session_cursor=(
-                        lambda **kwargs: _capture_partial_close_deal_cursor(
-                            **kwargs
-                        )
-                    ),
-                    sync_partial_close_session_fact=lambda **kwargs: (
-                        _sync_partial_close_session_fact(
-                            bridge,
-                            broker="ctrader",
-                            tick=tick,
-                            **kwargs,
-                        )
-                    ),
-                    record_aux_failure=_record_risk_reduction_aux_failure,
-                )
-            elif action == "close":
-                _execute_supervisor_close_action(
-                    bridge=bridge,
-                    position=position,
-                    verdict=verdict,
-                    risk_action=risk_action,
-                    risk_verdict=risk_verdict,
-                    decision_id=decision_id,
-                    cfg=cfg,
-                    tick=tick,
-                    acct=acct,
-                    controls=controls,
-                    log=log,
-                    broker="ctrader",
-                    strategy_name=str(_loop_strategy_name or "factor_v4"),
-                    log_supervisor_trace=_log_supervisor_trace,
-                    remember_supervisor_state=_remember_supervisor_state,
-                    remember_supervisor_reentry_block=_remember_supervisor_reentry_block,
-                    remember_close_reason=_remember_close_reason,
-                    remember_close_verdict=_remember_close_verdict,
-                    result_is_position_not_found=_result_is_position_not_found,
-                    retire_broker_missing_position=_retire_broker_missing_position,
-                    record_aux_failure=_record_risk_reduction_aux_failure,
-                )
-        except Exception as exc:
-            _log_supervisor_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="exception",
-                outcome="failed",
-                decision_id=decision_id,
-                risk_action=risk_action,
-                risk_verdict=risk_verdict,
-                execution_status="exception",
-                execution_reason=str(exc),
-                execution={"applied_controls": controls},
-                acct=acct,
-            )
-            logger.debug("[live] supervisor action %s failed for pos %s: %s", action, pid, exc)
-    return handled
+        ),
+    )
+    return _runtime_run_position_supervision(
+        bridge,
+        pos,
+        cfg=cfg,
+        account=acct,
+        tick=tick,
+        log=log,
+        runtime=runtime,
+        skip_position_ids=skip_position_ids,
+        record_partial_close_execution=record_partial_close_execution,
+        decision_ts=decision_ts,
+        candidate_recorder=candidate_recorder,
+        planned_verdicts=planned_verdicts,
+    )
 
 
 def _resolve_position_api_volume(
