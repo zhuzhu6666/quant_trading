@@ -245,6 +245,7 @@
 | 经济事件 | `data/events.duckdb` | 风控事件缩放读取 |
 | 运行态状态 | PostgreSQL `state_v1` | 不再使用 `data/state.db` |
 | 状态库运维边界 | `docs/state-postgres-store.md` | PostgreSQL state store、迁移留痕和旧 SQLite 禁用边界 |
+| 状态 schema 版本 | PostgreSQL `state_schema_migration` + `backend.core.state_schema_migrations` + `scripts/state_schema_migrate.py` | forward DDL 只由显式 `--apply` 迁移命令执行，并在 advisory lock 下与 checksum ledger 同事务提交；backend/worker 启动只校验最低版本，版本不匹配时在 overlay restore 或学习任务前阻断。现存 service-local 动态 DDL 暂作兼容旧债，不是新迁移入口 |
 
 判断原则：
 

@@ -69,3 +69,67 @@ runtime flag was changed in PostgreSQL.
 - `experiments.db` remains separate unless explicitly migrated later.
 - When starting after migration, keep `live.loop.desired_state.enabled=false`
   until frontend/API verification is complete.
+
+## Versioned Forward Migrations
+
+Forward changes to PostgreSQL `state_v1` are now recorded in
+`state_schema_migration`. Checked-in migrations live under
+`migrations/state_pg/` and are applied only by the operator command:
+
+```bash
+# Read-only and the default mode. Exit code 2 means the runtime minimum is not met.
+./.venv/bin/python scripts/state_schema_migrate.py --check
+
+# The only supported write mode; --apply must be explicit.
+./.venv/bin/python scripts/state_schema_migrate.py --apply --runner-id phase0b_deploy
+
+# Verify before deploying/restarting processes that require the new version.
+./.venv/bin/python scripts/state_schema_migrate.py --check
+```
+
+The runner:
+
+- validates the migrated baseline before changing anything;
+- takes a transaction-scoped PostgreSQL advisory lock without waiting
+  indefinitely for another runner;
+- uses a 5-second table-lock timeout and 120-second statement timeout;
+- applies additive DDL and the checksum-protected ledger row in one
+  transaction;
+- treats a changed checksum/name, missing version, missing baseline table, or
+  same-name schema object as a failure;
+- is a no-op when every checked-in migration is already recorded.
+
+`quant-backend` and `quant-learning-worker` do not apply migrations. At startup
+they validate `STATE_SCHEMA_MIN_VERSION`; a version mismatch is blocking even
+when the backend is otherwise in dry-run mode. Backend startup performs this
+gate before restoring RuntimeConfig overlay because overlay restore can ensure
+tables and persist a startup snapshot.
+
+The deployment order is therefore fixed:
+
+```text
+backup/inspect -> migration --apply -> migration --check -> deploy code
+-> restart backend/worker -> health/readiness verification
+```
+
+Migration `0001_phase0b_foundation.sql` only creates additive foundations. It
+does not switch any live writer or backfill historical rows:
+
+- `broker_execution_intent`
+- `governance_mutation_intent`
+- `factor_lifecycle_state`
+- `factor_runtime_projection`
+- `auth_session`
+- mutation/finalization/governance-eligibility linkage columns on existing
+  ledgers
+
+`governance_eligibility_version=''` means a historical row has not been
+evaluated; `system_contaminated=0` alone must not be interpreted as verified
+clean evidence. `governance_effective_weight` is reserved for governance
+mutation aggregation and does not replace the existing model-training
+`train_weight`.
+
+Existing service-local dynamic `CREATE/ALTER` compatibility remains temporarily
+in place. It is not the forward migration authority and will be retired in a
+separate phase after every legacy statement has a versioned equivalent and the
+runtime database role can drop DDL privileges.

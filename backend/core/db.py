@@ -20,6 +20,7 @@ from typing import Final, Iterator
 import duckdb
 
 from backend.core.state_store import STATE_SCHEMA, connect_state_store
+from backend.core.state_schema_migrations import require_state_schema_version
 
 # ═══════════════════════════════════════════
 # 项目根 (兼容 backend/ 和顶层导入)
@@ -1426,18 +1427,17 @@ CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp
 
 
 def init_state_db() -> None:
-    """Verify and idempotently upgrade the PostgreSQL state schema."""
+    """Validate the PostgreSQL schema gate, then retain legacy compatibility DDL.
+
+    Versioned migrations are never applied by an application process.  An
+    operator must run ``scripts/state_schema_migrate.py`` before deploying
+    code that raises the minimum schema version.  The existing narrow dynamic
+    ALTER path remains temporarily for backward compatibility and will be
+    retired separately after its statements have versioned equivalents.
+    """
     conn = get_state_pg_conn()
     try:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS n
-            FROM information_schema.tables
-            WHERE table_schema = current_schema()
-            """
-        ).fetchone()
-        if row is None or int(row["n"] or 0) == 0:
-            raise RuntimeError("PostgreSQL state schema is empty; run scripts/migrate_state_sqlite_to_pg.py first")
+        require_state_schema_version(conn)
         _ensure_state_schema_compatibility(conn)
         conn.commit()
     finally:

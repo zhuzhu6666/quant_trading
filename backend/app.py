@@ -38,6 +38,15 @@ def _init_observability() -> None:
         _lg.warning(f"[lifespan] Metrics.install_into_runtime_state failed (non-fatal): {e}")
 
 
+def _state_db_failure_is_blocking(exc: Exception, execution_semantics) -> bool:
+    """Schema-version mismatches block every backend mode, including dry-run."""
+    from backend.core.state_schema_migrations import StateSchemaVersionError
+
+    return isinstance(exc, StateSchemaVersionError) or bool(
+        execution_semantics and execution_semantics.effective_send_orders
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from loguru import logger as _lg
@@ -65,28 +74,7 @@ async def lifespan(app: FastAPI):
 
         rc, yaml_cfg = load_yaml_runtime_config()
         execution_semantics = validate_execution_semantics(yaml_cfg, rc)
-        try:
-            startup_restore = restore_runtime_config_on_startup(
-                rc,
-                snapshot_source="backend_lifespan_startup",
-            )
-            overlay_restore = startup_restore.get("overlay") or {}
-            rc = startup_restore["config"]
-            if overlay_restore.get("restored"):
-                _lg.info(
-                    "[lifespan] RuntimeConfig autonomous overlay restored hash=%s",
-                    overlay_restore.get("overlay_hash", ""),
-                )
-        except Exception as overlay_exc:
-            if execution_semantics.effective_send_orders:
-                record_startup_issue("runtime_config_overlay", "critical", str(overlay_exc), blocking=True)
-                raise
-            record_startup_issue("runtime_config_overlay", "degraded", str(overlay_exc), blocking=False)
-            _lg.warning(f"[lifespan] RuntimeConfig autonomous overlay restore failed (non-fatal): {overlay_exc}")
-            from config import runtime_config as _runtime_config
-
-            _runtime_config.replace(rc)
-        _lg.info("[lifespan] RuntimeConfig loaded from config/settings.yaml")
+        _lg.info("[lifespan] RuntimeConfig base loaded from config/settings.yaml")
     except Exception as e:
         record_startup_issue("runtime_config", "critical", str(e), blocking=True)
         _lg.error(f"[lifespan] RuntimeConfig load failed: {e}")
@@ -105,12 +93,44 @@ async def lifespan(app: FastAPI):
         if recovery.get("checked"):
             _lg.info(f"[lifespan] governed weight application recovery: {recovery}")
     except Exception as e:
-        effective_send_orders = bool(execution_semantics and execution_semantics.effective_send_orders)
-        record_startup_issue("state_db", "critical" if effective_send_orders else "degraded", str(e), blocking=effective_send_orders)
-        if effective_send_orders:
-            _lg.error(f"[lifespan] db init failed while effective send-orders is enabled: {e}")
+        blocking_state_db = _state_db_failure_is_blocking(e, execution_semantics)
+        record_startup_issue(
+            "state_db",
+            "critical" if blocking_state_db else "degraded",
+            str(e),
+            blocking=blocking_state_db,
+        )
+        if blocking_state_db:
+            _lg.error(f"[lifespan] blocking state db initialization failure: {e}")
             raise
         _lg.warning(f"[lifespan] db init failed (dry-run degraded): {e}")
+
+    # The schema gate above must run before overlay restore because restore may
+    # ensure tables and persist a startup snapshot.  A process with stale code
+    # or a stale database must not perform DDL/DML before compatibility is
+    # established.
+    try:
+        startup_restore = restore_runtime_config_on_startup(
+            rc,
+            snapshot_source="backend_lifespan_startup",
+        )
+        overlay_restore = startup_restore.get("overlay") or {}
+        rc = startup_restore["config"]
+        if overlay_restore.get("restored"):
+            _lg.info(
+                "[lifespan] RuntimeConfig autonomous overlay restored hash=%s",
+                overlay_restore.get("overlay_hash", ""),
+            )
+    except Exception as overlay_exc:
+        if execution_semantics.effective_send_orders:
+            record_startup_issue("runtime_config_overlay", "critical", str(overlay_exc), blocking=True)
+            raise
+        record_startup_issue("runtime_config_overlay", "degraded", str(overlay_exc), blocking=False)
+        _lg.warning(f"[lifespan] RuntimeConfig autonomous overlay restore failed (non-fatal): {overlay_exc}")
+        from config import runtime_config as _runtime_config
+
+        _runtime_config.replace(rc)
+    _lg.info("[lifespan] RuntimeConfig loaded from config/settings.yaml and state overlay")
 
     try:
         from backend.services.parameter_templates import ParameterTemplateService

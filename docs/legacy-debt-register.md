@@ -522,6 +522,15 @@
 - 收口方式: 训练发布具体 `pit.v2.*` 子契约；因子展开行不得冒充独立样本，旧 unbounded generation 不与当前 bounded generation 混训，meta 的未来 posture 漂移超过 0.25 或规则单 posture 占比超过 0.90 时不得晋级；样本不足或不胜基线时保留 shadow/blocked。
 - 验证方式: 四套 LightGBM 定向测试、真实 PostgreSQL 重训结果、`ModelInfluenceGovernanceService.evaluate_artifact()`。
 
+### PostgreSQL state schema 仍由业务服务动态补表补列
+
+- 状态: migrating
+- 旧理解: `init_state_db()` 或任一业务 service 在首次调用时执行 `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE`，即可长期替代正式 forward migration。
+- 当前口径: 新的 PostgreSQL forward DDL 必须进入 `migrations/state_pg/`，由 `scripts/state_schema_migrate.py --apply` 在 advisory lock 下显式执行，并写 checksum 保护的 `state_schema_migration`；backend/worker 只校验最低版本。现有动态 DDL 暂时保留为兼容层，不能继续承接新 schema。
+- 影响面: backend/worker 启动顺序、RuntimeConfig overlay、学习治理表、数据库角色权限和滚动发布。
+- 收口方式: Phase 0B 先建立版本 ledger、runner、最低版本门禁和 additive foundation；后续逐项把 service-local DDL 搬入新版本，增加 disposable PostgreSQL 集成测试，最后移除 runtime role 的 CREATE/ALTER 权限和 `connect_state_store()` 的隐式建 schema。
+- 验证方式: `tests/test_state_schema_migrations.py`、`scripts/state_schema_migrate.py --check`；生产迁移必须遵循先 apply/check、后部署重启的顺序。
+
 ## 5. 新旧债登记模板
 
 复制下面模板新增条目：

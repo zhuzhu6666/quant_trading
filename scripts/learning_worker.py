@@ -59,6 +59,11 @@ def _bootstrap_runtime() -> None:
         if recovery.get("checked"):
             logger.info("[learning_worker] governed weight application recovery: {}", recovery)
     except Exception as exc:
+        from backend.core.state_schema_migrations import StateSchemaVersionError
+
+        if isinstance(exc, StateSchemaVersionError):
+            logger.error("[learning_worker] blocking state schema version failure: {}", exc)
+            raise
         logger.warning("[learning_worker] db init failed: {}", exc)
 
     try:
