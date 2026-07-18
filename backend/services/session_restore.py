@@ -10,9 +10,150 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
+
+
+@dataclass(frozen=True)
+class PartialCloseSessionFactRuntime:
+    get_state_connection: Callable[[], Any]
+    fetch_deals_since_result: Callable[..., Any]
+    store_deals: Callable[[Any, list[Any]], Any]
+    find_close_deal: Callable[[Any, int], dict[str, Any] | None]
+    authoritative_close_pnl: Callable[[Any], bool]
+    defer_close: Callable[..., Any]
+    record_aux_failure: Callable[..., Any]
+    release_close_latch: Callable[[int, dict[str, Any]], Any]
+    update_live_state: Callable[..., Any]
+    no_new_risk_latch_status: Callable[..., dict[str, Any]]
+    open_api_volumes: dict[int, float]
+    now: Callable[[], float]
+
+
+def sync_partial_close_session_fact(
+    bridge: Any,
+    *,
+    broker: str,
+    position_id: int,
+    close_ts: float,
+    volume: float,
+    tick: int,
+    runtime: PartialCloseSessionFactRuntime,
+    deal_cursor: dict[str, Any] | None = None,
+) -> bool:
+    """Ingest a confirmed partial-close deal without rewriting broker success."""
+
+    pid = int(position_id or 0)
+    cursor = dict(deal_cursor or {})
+    baseline_cursor_available = bool(
+        cursor.get("baseline_cursor_available", False)
+    )
+    before_deal_ids = {
+        int(item)
+        for item in list(cursor.get("baseline_deal_ids") or [])
+        if int(item or 0) > 0
+    }
+    before_closed_volume = float(
+        cursor.get("baseline_closed_volume") or 0.0
+    )
+    try:
+        conn = runtime.get_state_connection()
+        try:
+            fetch_result = runtime.fetch_deals_since_result(
+                bridge,
+                from_ts=int(
+                    max(0.0, float(close_ts or runtime.now()) - 60.0)
+                ),
+                max_rows=200,
+            )
+            if not fetch_result.success:
+                raise RuntimeError(
+                    "partial_close_deal_fetch_failed:"
+                    f"{fetch_result.error_code}:"
+                    f"{fetch_result.error_message}"
+                )
+            if fetch_result.empty:
+                raise RuntimeError("partial_close_deal_fetch_valid_empty")
+            runtime.store_deals(conn, list(fetch_result.deals))
+            after = runtime.find_close_deal(conn, pid) or {}
+        finally:
+            conn.close()
+        after_deal_ids = {
+            int(item)
+            for item in list(after.get("deal_ids") or [])
+            if int(item or 0) > 0
+        }
+        new_deal_ids = after_deal_ids - before_deal_ids
+        closed_volume_delta = max(
+            0.0,
+            float(after.get("closed_volume") or 0.0) - before_closed_volume,
+        )
+        payload = {
+            "gross": float(after.get("gross_profit") or 0.0),
+            "swap": float(after.get("swap") or 0.0),
+            "commission": float(after.get("close_commission") or 0.0),
+            "net": float(after.get("gross_profit") or 0.0)
+            + float(after.get("swap") or 0.0)
+            + float(after.get("close_commission") or 0.0),
+            "exec_timestamp": float(after.get("exec_timestamp") or 0.0),
+            "closed_volume": float(after.get("closed_volume") or 0.0),
+            "deal_id": after.get("deal_id"),
+            "deal_ids": sorted(after_deal_ids),
+            "close_deals_count": int(after.get("close_deals_count") or 0),
+            "source": "ctrader_deals",
+        }
+        if (
+            not baseline_cursor_available
+            or not runtime.authoritative_close_pnl(payload)
+            or not new_deal_ids
+            or closed_volume_delta + 1e-9 < max(0.0, float(volume or 0.0))
+        ):
+            raise RuntimeError(
+                "partial_close_deal_unavailable_or_incomplete:"
+                f"new_deals={sorted(new_deal_ids)}:"
+                f"closed_volume_delta={closed_volume_delta}"
+            )
+    except Exception as exc:
+        runtime.defer_close(
+            pid,
+            broker=broker,
+            tick=tick,
+            reason=f"partial_close_deal_unavailable:{type(exc).__name__}",
+            recovery_evidence={
+                "pending_kind": "partial_close",
+                "baseline_cursor_available": baseline_cursor_available,
+                "baseline_deal_ids": sorted(before_deal_ids),
+                "baseline_closed_volume": float(before_closed_volume),
+                "required_closed_volume_delta": float(volume or 0.0),
+                "expected_position_volume": float(
+                    runtime.open_api_volumes.get(pid, 0.0) or 0.0
+                ),
+                "close_requested_at": float(close_ts or 0.0),
+                "cursor_captured_at": float(cursor.get("captured_at") or 0.0),
+                "cursor_error": str(cursor.get("error") or ""),
+            },
+        )
+        runtime.record_aux_failure(
+            "partial_close_session_fact_unavailable",
+            position_id=pid,
+            action="reduce_position",
+            error=exc,
+            payload={"requested_close_volume": float(volume or 0.0)},
+        )
+        return False
+
+    runtime.release_close_latch(pid, payload)
+    runtime.update_live_state(
+        session_state_status="unavailable",
+        session_state_source="partial_close_deal_projection_pending",
+        session_risk_blockers=[f"partial_close_projection_pending:{pid}"],
+        session_observed_at=0.0,
+        accepting_new_risk=False,
+        no_new_risk_latch=runtime.no_new_risk_latch_status(fail_closed=True),
+    )
+    return True
 
 
 def session_trade_window(

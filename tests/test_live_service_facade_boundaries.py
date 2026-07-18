@@ -39,6 +39,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_attempt_generation_startup_barrier",
         "_bootstrap_position_recovery",
         "_load_authoritative_session_deal_facts",
+        "_sync_partial_close_session_fact",
         "emergency_close",
     ):
         node = definitions[name]

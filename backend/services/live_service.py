@@ -105,12 +105,14 @@ from backend.services.live_runtime_state import (
     state_update as _runtime_state_update,
 )
 from backend.services.session_restore import (
+    PartialCloseSessionFactRuntime,
     authoritative_close_pnl as _authoritative_close_pnl,
     derive_session_start_balance as _derive_session_start_balance,
     load_authoritative_session_deal_facts as _session_load_authoritative_deal_facts,
     parse_degraded_session_cache as _parse_degraded_session_cache,
     rebuild_session_risk_projection as _rebuild_session_risk_projection,
     session_trade_window as _session_restore_trade_window,
+    sync_partial_close_session_fact as _session_sync_partial_close_fact,
 )
 from backend.services.live_ctrader_runtime import CTraderRuntime
 from backend.services.live_data_sync_job import make_data_sync_job as _make_data_sync_job
@@ -3814,129 +3816,36 @@ def _sync_partial_close_session_fact(
     tick: int,
     deal_cursor: dict[str, Any] | None = None,
 ) -> bool:
-    """Best-effort ingest of a confirmed partial-close broker deal.
-
-    The broker reduction is already complete when this runs.  Any PostgreSQL,
-    deal-fetch, or projection failure therefore only blocks new risk and is
-    retried by the normal recovery bootstrap; it never rewrites broker success.
-    """
-
-    pid = int(position_id or 0)
-    cursor = dict(deal_cursor or {})
-    baseline_cursor_available = bool(
-        cursor.get("baseline_cursor_available", False)
+    from execution.deal_sync import (
+        fetch_deals_since_result,
+        find_close_deal,
+        store_deals,
     )
-    before_deal_ids = {
-        int(item)
-        for item in list(cursor.get("baseline_deal_ids") or [])
-        if int(item or 0) > 0
-    }
-    before_closed_volume = float(
-        cursor.get("baseline_closed_volume") or 0.0
-    )
-    try:
-        from execution.deal_sync import (
-            fetch_deals_since_result,
-            find_close_deal,
-            store_deals,
-        )
 
-        conn = _get_state_pg_conn()
-        try:
-            fetch_result = fetch_deals_since_result(
-                bridge,
-                from_ts=int(max(0.0, float(close_ts or time.time()) - 60.0)),
-                max_rows=200,
-            )
-            if not fetch_result.success:
-                raise RuntimeError(
-                    "partial_close_deal_fetch_failed:"
-                    f"{fetch_result.error_code}:"
-                    f"{fetch_result.error_message}"
-                )
-            if fetch_result.empty:
-                raise RuntimeError("partial_close_deal_fetch_valid_empty")
-            store_deals(conn, list(fetch_result.deals))
-            after = find_close_deal(conn, pid) or {}
-        finally:
-            conn.close()
-        after_deal_ids = {
-            int(item)
-            for item in list(after.get("deal_ids") or [])
-            if int(item or 0) > 0
-        }
-        new_deal_ids = after_deal_ids - before_deal_ids
-        closed_volume_delta = max(
-            0.0,
-            float(after.get("closed_volume") or 0.0) - before_closed_volume,
-        )
-        payload = {
-            "gross": float(after.get("gross_profit") or 0.0),
-            "swap": float(after.get("swap") or 0.0),
-            "commission": float(after.get("close_commission") or 0.0),
-            "net": float(after.get("gross_profit") or 0.0)
-            + float(after.get("swap") or 0.0)
-            + float(after.get("close_commission") or 0.0),
-            "exec_timestamp": float(after.get("exec_timestamp") or 0.0),
-            "closed_volume": float(after.get("closed_volume") or 0.0),
-            "deal_id": after.get("deal_id"),
-            "deal_ids": sorted(after_deal_ids),
-            "close_deals_count": int(after.get("close_deals_count") or 0),
-            "source": "ctrader_deals",
-        }
-        if (
-            not baseline_cursor_available
-            or not _authoritative_close_pnl(payload)
-            or not new_deal_ids
-            or closed_volume_delta + 1e-9
-            < max(0.0, float(volume or 0.0))
-        ):
-            raise RuntimeError(
-                "partial_close_deal_unavailable_or_incomplete:"
-                f"new_deals={sorted(new_deal_ids)}:"
-                f"closed_volume_delta={closed_volume_delta}"
-            )
-    except Exception as exc:
-        _defer_close_until_authoritative_deal(
-            pid,
-            broker=broker,
-            tick=tick,
-            reason=f"partial_close_deal_unavailable:{type(exc).__name__}",
-            recovery_evidence={
-                "pending_kind": "partial_close",
-                "baseline_cursor_available": baseline_cursor_available,
-                "baseline_deal_ids": sorted(before_deal_ids),
-                "baseline_closed_volume": float(before_closed_volume),
-                "required_closed_volume_delta": float(volume or 0.0),
-                "expected_position_volume": float(
-                    _pos_open_api_volume.get(pid, 0.0) or 0.0
-                ),
-                "close_requested_at": float(close_ts or 0.0),
-                "cursor_captured_at": float(cursor.get("captured_at") or 0.0),
-                "cursor_error": str(cursor.get("error") or ""),
-            },
-        )
-        _record_risk_reduction_aux_failure(
-            "partial_close_session_fact_unavailable",
-            position_id=pid,
-            action="reduce_position",
-            error=exc,
-            payload={"requested_close_volume": float(volume or 0.0)},
-        )
-        return False
-
-    _release_session_close_deal_latch(pid, payload)
-    # A deterministic deals-first rebuild on the next serial loop owns the
-    # session projection.  Until then the old PnL is explicitly unavailable.
-    _live_state_update(
-        session_state_status="unavailable",
-        session_state_source="partial_close_deal_projection_pending",
-        session_risk_blockers=[f"partial_close_projection_pending:{pid}"],
-        session_observed_at=0.0,
-        accepting_new_risk=False,
-        no_new_risk_latch=no_new_risk_latch_status(fail_closed=True),
+    runtime = PartialCloseSessionFactRuntime(
+        get_state_connection=_get_state_pg_conn,
+        fetch_deals_since_result=fetch_deals_since_result,
+        store_deals=store_deals,
+        find_close_deal=find_close_deal,
+        authoritative_close_pnl=_authoritative_close_pnl,
+        defer_close=_defer_close_until_authoritative_deal,
+        record_aux_failure=_record_risk_reduction_aux_failure,
+        release_close_latch=_release_session_close_deal_latch,
+        update_live_state=_live_state_update,
+        no_new_risk_latch_status=no_new_risk_latch_status,
+        open_api_volumes=_pos_open_api_volume,
+        now=time.time,
     )
-    return True
+    return _session_sync_partial_close_fact(
+        bridge,
+        broker=broker,
+        position_id=position_id,
+        close_ts=close_ts,
+        volume=volume,
+        tick=tick,
+        runtime=runtime,
+        deal_cursor=deal_cursor,
+    )
 
 
 def _fresh_cached_broker_open_position_ids(
