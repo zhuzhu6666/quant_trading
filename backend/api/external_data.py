@@ -13,6 +13,10 @@ from threading import Thread
 from fastapi import APIRouter, HTTPException
 
 from backend.core.auth import RequireUser
+from backend.core.static_feature_flags import shared_static_feature_flags
+from backend.jobs import get_job_manager
+from backend.services.api_fact_views import external_data_status_fact_payload
+from backend.services.external_data_refresh import run_external_data_refresh
 from backend.services.mutation_audit import record_api_mutation
 from pydantic import BaseModel
 
@@ -51,17 +55,18 @@ def _run_script_bg(job_id: str, *args: str):
     try:
         with _refresh_jobs_lock:
             job["status"] = "running"
-        result = subprocess.run(
-            [PYTHON, str(REFRESH_SCRIPT), *args],
-            capture_output=True, text=True, timeout=300,
-            encoding="utf-8", errors="replace",  # v11-fix: 显式 UTF-8, 解决 GBK 乱码
+        source = "all"
+        force = "--force" in args
+        if "--source" in args:
+            source_index = args.index("--source") + 1
+            if source_index < len(args):
+                source = str(args[source_index])
+        result = run_external_data_refresh(
+            {"source": source, "force": force},
+            lambda _step, _pct, _message: None,
         )
-        if result.returncode == 0:
-            job["status"] = "completed"
-            job["output"] = result.stdout.strip().splitlines()[-20:]
-        else:
-            job["status"] = "failed"
-            job["output"] = (result.stderr or result.stdout).strip().splitlines()[-20:]
+        job["status"] = "completed"
+        job["output"] = list(result.get("output") or [])
     except Exception as e:
         job["status"] = "failed"
         job["output"] = [str(e)]
@@ -121,7 +126,9 @@ def get_external_status(_user: RequireUser):
             sources = payload.get("sources") or []
         except Exception:
             sources = _parse_status(stdout)
-        return {"sources": sources if sources else stdout.strip().splitlines()}
+        return external_data_status_fact_payload(
+            {"sources": sources if sources else stdout.strip().splitlines()}
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -141,27 +148,39 @@ class RefreshRequest(BaseModel):
 @router.post("/external-refresh")
 def trigger_refresh(_user: RequireUser, req: RefreshRequest = RefreshRequest()):
     """触发外部数据刷新（后台异步），立即返回 job_id"""
-    _cleanup_stale_jobs()
-    job_id = uuid.uuid4().hex[:12]
-    with _refresh_jobs_lock:
-        _refresh_jobs[job_id] = {
-            "status": "pending",
-            "output": [],
-            "started_at": time.time(),
-            "finished_at": None,
-        }
-    args = ["--once"]
-    if req.source and req.source != "all":
-        args += ["--source", req.source]
-    if req.force:
-        args.append("--force")
-
-    t = Thread(target=_run_script_bg, args=(job_id, *args), daemon=True)
-    t.start()
+    params = {"source": req.source, "force": req.force}
+    durable = bool(shared_static_feature_flags().pg_job_queue_v2_enabled)
+    if durable:
+        state = get_job_manager().submit(
+            "external_refresh",
+            params,
+            lambda progress: run_external_data_refresh(params, progress),
+        )
+        job_id = state.id
+        job_status = state.status
+    else:
+        _cleanup_stale_jobs()
+        job_id = uuid.uuid4().hex[:12]
+        with _refresh_jobs_lock:
+            _refresh_jobs[job_id] = {
+                "status": "pending",
+                "output": [],
+                "started_at": time.time(),
+                "finished_at": None,
+            }
+        args = ["--once"]
+        if req.source and req.source != "all":
+            args += ["--source", req.source]
+        if req.force:
+            args.append("--force")
+        Thread(target=_run_script_bg, args=(job_id, *args), daemon=True).start()
+        job_status = "pending"
 
     result = {
         "job_id": job_id,
         "status": "started",
+        "job_status": job_status,
+        "durable": durable,
         "message": "刷新已启动，GET /api/data/external-refresh/{job_id} 查进度",
     }
     record_api_mutation(
@@ -182,6 +201,27 @@ def trigger_refresh_alias(_user: RequireUser, req: RefreshRequest = RefreshReque
 @router.get("/external-refresh/{job_id}")
 def get_refresh_status(_user: RequireUser, job_id: str):
     """查询刷新任务进度"""
+    if shared_static_feature_flags().pg_job_queue_v2_enabled:
+        state = get_job_manager().get(job_id)
+        if state is not None:
+            payload = state.to_dict()
+            status_map = {
+                "done": "completed",
+                "error": "failed",
+                "retry_wait": "pending",
+                "queued": "pending",
+            }
+            return {
+                "job_id": state.id,
+                "status": status_map.get(state.status, state.status),
+                "output": list((state.result or {}).get("output") or [])
+                if isinstance(state.result, dict)
+                else [],
+                "started_at": payload.get("started_at"),
+                "finished_at": payload.get("finished_at"),
+                "error": state.error or "",
+                "durable": True,
+            }
     with _refresh_jobs_lock:
         job = _refresh_jobs.get(job_id)
     if not job:

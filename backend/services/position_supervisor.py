@@ -25,6 +25,20 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _component_state(position: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = position.get(key)
+        if value not in (None, ""):
+            return str(value).strip().lower()
+    return ""
+
+
+def _component_known(position: dict[str, Any], *keys: str) -> bool:
+    # Empty preserves the legacy contract.  An explicit component fact is
+    # fail-closed: only ``known`` may be consumed numerically.
+    return _component_state(position, *keys) in {"", "known"}
+
+
 def _side_name(direction: int) -> str:
     return "long" if int(direction or 0) >= 0 else "short"
 
@@ -58,6 +72,8 @@ def _tightened_sl(
 def build_model_tighten_controls(context: dict[str, Any]) -> dict[str, Any]:
     """Reuse the authoritative supervisor SL policy for model fusion."""
     position = dict(context.get("position") or {})
+    if not _component_known(position, "current_price_state", "price_state"):
+        return {}
     risk = dict(context.get("risk") or {})
     template = normalize_position_supervisor_template(context.get("position_supervisor_template") or {})
     sl_policy = dict(template.get("sl_policy") or {})
@@ -187,6 +203,12 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     current_tp = _safe_float(position.get("tp") or position.get("take_profit"))
     current_pnl = _safe_float(position.get("unrealized_pnl", position.get("profit", position.get("pnl"))))
     volume = _safe_float(position.get("volume") or position.get("api_volume"))
+    price_component_state = _component_state(position, "current_price_state", "price_state")
+    pnl_component_state = _component_state(position, "pnl_state", "unrealized_pnl_state")
+    price_known = _component_known(position, "current_price_state", "price_state")
+    pnl_known = _component_known(position, "pnl_state", "unrealized_pnl_state")
+    path_metrics_state = str(position.get("position_path_metrics_state") or "").strip().lower()
+    path_metrics_known = path_metrics_state in {"", "known"}
 
     holding_seconds = _safe_float(temporal.get("holding_seconds"))
     max_holding_seconds = _safe_float(risk.get("max_holding_seconds"))
@@ -230,14 +252,14 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         current_price=current_price,
         target_price=current_tp,
         target_kind="tp",
-    )
+    ) if price_known else 0.0
     stop_loss_progress = _target_progress(
         direction=direction,
         entry_price=entry_price,
         current_price=current_price,
         target_price=current_sl,
         target_kind="sl",
-    )
+    ) if price_known else 0.0
 
     near_tp_action = str(tp_policy.get("near_take_profit_action") or "close")
     tp_extension_enabled = bool(tp_policy.get("extension_enabled", False))
@@ -245,7 +267,9 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     tp_extension_efficiency_threshold = _safe_float(tp_policy.get("extension_efficiency_threshold"), 0.70)
     tp_extension_profit_capture_min = _safe_float(tp_policy.get("extension_profit_capture_min"), 0.65)
     can_extend_tp = (
-        current_pnl > 0
+        price_known
+        and pnl_known
+        and current_pnl > 0
         and current_tp > 0
         and tp_extension_enabled
         and take_profit_progress >= tp_extension_progress_threshold
@@ -281,9 +305,12 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         thesis_break_evidence_families.append("signal_reversal")
     if regime_shift == "confirmed":
         thesis_break_evidence_families.append("regime_shift")
-    if stop_loss_progress >= near_sl_progress_threshold:
+    if price_known and stop_loss_progress >= near_sl_progress_threshold:
         thesis_break_evidence_families.append("market_structure_risk")
-    if time_decay_score <= time_decay_reduce_threshold or timeout_ratio >= timeout_reduce_ratio:
+    if path_metrics_known and (
+        time_decay_score <= time_decay_reduce_threshold
+        or timeout_ratio >= timeout_reduce_ratio
+    ):
         thesis_break_evidence_families.append("time_decay")
     if thesis_broken_confirmations >= 2:
         thesis_break_evidence_families.append("persistent_price_path")
@@ -292,12 +319,13 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         risk.get("hard_risk_active")
         or risk.get("circuit_breaker_active")
         or risk.get("connection_risk_active")
-        or stop_loss_progress >= 1.0
+        or (price_known and stop_loss_progress >= 1.0)
     )
     thesis_break_ready = (
         thesis_status in {"broken", "confirmed_broken"}
         and holding_seconds >= min_thesis_break_seconds
         and (closed_bar_window_ready or (hard_risk_bypass and hard_risk_active))
+        and path_metrics_known
         and holding_efficiency <= broken_holding_efficiency_threshold
     )
     thesis_break_confirmed = (
@@ -310,18 +338,20 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "close"
         summary_reason = "holding_timeout_exceeded"
         severity = "warn"
-    elif current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold and near_tp_action == "protect":
+    elif price_known and pnl_known and current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold and near_tp_action == "protect":
         trigger_tags.append("near_take_profit")
         action = "tighten"
         summary_reason = "near_take_profit_protect"
         severity = "info"
-    elif current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold:
+    elif price_known and pnl_known and current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold:
         trigger_tags.append("near_take_profit")
         action = "close"
         summary_reason = "near_take_profit_capture"
         severity = "info"
     elif (
-        stop_loss_progress >= near_sl_progress_threshold
+        price_known
+        and pnl_known
+        and stop_loss_progress >= near_sl_progress_threshold
         and current_pnl <= 0
         and (
             thesis_status == "broken"
@@ -345,23 +375,23 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "tighten"
         summary_reason = "thesis_weakening"
         severity = "warn"
-    elif regime_shift == "confirmed" and current_pnl <= 0:
+    elif regime_shift == "confirmed" and pnl_known and current_pnl <= 0:
         trigger_tags.append("regime_shift_detected")
         action = "close"
         summary_reason = "regime_shift_detected"
         severity = "warn"
-    elif giveback_ratio >= giveback_reduce_threshold and mfe > 0 and profit_capture_ratio <= profit_capture_min_threshold:
+    elif path_metrics_known and pnl_known and giveback_ratio >= giveback_reduce_threshold and mfe > 0 and profit_capture_ratio <= profit_capture_min_threshold:
         trigger_tags.append("profit_giveback_after_mfe")
         action = "reduce"
         summary_reason = "profit_giveback_after_mfe"
         severity = "warn"
-    elif time_decay_score <= time_decay_reduce_threshold or (timeout_ratio >= timeout_reduce_ratio and holding_efficiency <= weakening_efficiency_threshold):
+    elif path_metrics_known and (time_decay_score <= time_decay_reduce_threshold or (timeout_ratio >= timeout_reduce_ratio and holding_efficiency <= weakening_efficiency_threshold)):
         trigger_tags.append("time_decay_and_low_efficiency")
         action = "reduce" if current_pnl > 0 else "close"
         summary_reason = "time_decay_and_low_efficiency"
         severity = "warn"
-    elif giveback_ratio >= giveback_tighten_threshold or thesis_status in {"weakening", "broken"} or timeout_ratio >= timeout_tighten_ratio:
-        if giveback_ratio >= giveback_tighten_threshold:
+    elif (path_metrics_known and giveback_ratio >= giveback_tighten_threshold) or thesis_status in {"weakening", "broken"} or timeout_ratio >= timeout_tighten_ratio:
+        if path_metrics_known and giveback_ratio >= giveback_tighten_threshold:
             trigger_tags.append("profit_giveback_after_mfe")
             summary_reason = "profit_giveback_after_mfe"
         elif timeout_ratio >= timeout_tighten_ratio:
@@ -454,6 +484,9 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "signal_reversal": bool(signal_reversal),
         "regime_shift": regime_shift,
         "current_pnl": round(current_pnl, 6),
+        "current_price_component_state": price_component_state or "legacy_unspecified",
+        "pnl_component_state": pnl_component_state or "legacy_unspecified",
+        "position_path_metrics_state": path_metrics_state or "legacy_unspecified",
         "volume": round(volume, 6),
         "distance_to_sl": _safe_float(market_space.get("distance_to_sl")),
         "distance_to_tp": _safe_float(market_space.get("distance_to_tp")),
@@ -496,6 +529,18 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             }
         )
     human_summary = humanize_supervisor_reason(action, summary_reason, evidence)
+    required_components: list[str] = []
+    if action == "tighten":
+        required_components.append("price")
+    if summary_reason in {
+        "near_take_profit_capture",
+        "near_take_profit_protect",
+        "near_stop_loss_preemptive_exit",
+        "regime_shift_detected",
+        "profit_giveback_after_mfe",
+    }:
+        required_components.append("pnl")
+    required_components = list(dict.fromkeys(required_components))
     return {
         "position_id": position_id,
         "decision_ts": _safe_float(temporal.get("decision_ts")),
@@ -509,6 +554,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "evidence": evidence,
         "recommended_controls": recommended_controls,
         "protection_candidates": protection_candidates,
+        "required_components": required_components,
         "supervisor_template": {
             "schema_version": str(template.get("schema_version") or ""),
             "template_id": str(template.get("template_id") or ""),

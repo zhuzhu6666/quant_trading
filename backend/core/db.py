@@ -6,6 +6,7 @@ DuckDB 保留时序数据，PostgreSQL state_v1 承载运行时状态。
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -626,6 +627,7 @@ CREATE TABLE IF NOT EXISTS runtime_config_snapshot (
     source TEXT DEFAULT '',
     config_json TEXT NOT NULL DEFAULT '{}',
     run_id TEXT DEFAULT '',
+    mutation_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -635,6 +637,8 @@ CREATE TABLE IF NOT EXISTS runtime_config_overlay (
     overlay_hash TEXT DEFAULT '',
     source TEXT DEFAULT '',
     run_id TEXT DEFAULT '',
+    mutation_id TEXT NOT NULL DEFAULT '',
+    legacy_authority_json TEXT NOT NULL DEFAULT '{}',
     updated_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -970,6 +974,7 @@ CREATE TABLE IF NOT EXISTS v16_brain_command (
     posterior_fingerprint TEXT DEFAULT '',
     evidence_fingerprint TEXT DEFAULT '',
     last_release_reason TEXT DEFAULT '',
+    authority_issued_at REAL NOT NULL DEFAULT 0.0,
     created_at REAL NOT NULL DEFAULT 0.0,
     updated_at REAL NOT NULL DEFAULT 0.0
 );
@@ -981,6 +986,7 @@ CREATE TABLE IF NOT EXISTS learning_experiment_reservation (
     action TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'reserved',
     application_id TEXT NOT NULL DEFAULT '',
+    mutation_id TEXT NOT NULL DEFAULT '',
     expires_at REAL NOT NULL DEFAULT 0.0,
     created_at REAL NOT NULL DEFAULT 0.0,
     updated_at REAL NOT NULL DEFAULT 0.0
@@ -1111,6 +1117,12 @@ CREATE TABLE IF NOT EXISTS autonomous_learning_sample (
     config_version INTEGER DEFAULT 0,
     config_hash TEXT DEFAULT '',
     evolution_run_id TEXT DEFAULT '',
+    system_contaminated INTEGER NOT NULL DEFAULT 0,
+    governance_eligible INTEGER NOT NULL DEFAULT 0,
+    governance_effective_weight REAL NOT NULL DEFAULT 0.0,
+    governance_eligibility_version TEXT NOT NULL DEFAULT '',
+    governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
+    governance_ineligible_reason TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0,
     updated_at REAL NOT NULL DEFAULT 0.0
 );
@@ -1166,6 +1178,12 @@ CREATE TABLE IF NOT EXISTS experience_pattern_stats (
     win_count INTEGER DEFAULT 0,
     bad_loss_count INTEGER DEFAULT 0,
     avg_reward REAL DEFAULT 0.0,
+    effective_sample_count REAL NOT NULL DEFAULT 0.0,
+    weighted_win_count REAL NOT NULL DEFAULT 0.0,
+    weighted_bad_loss_count REAL NOT NULL DEFAULT 0.0,
+    weighted_avg_reward REAL NOT NULL DEFAULT 0.0,
+    governance_eligibility_version TEXT NOT NULL DEFAULT '',
+    governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
     last_outcome_label TEXT DEFAULT '',
     recommended_action TEXT DEFAULT '',
     updated_at REAL NOT NULL DEFAULT 0.0,
@@ -1183,6 +1201,11 @@ CREATE TABLE IF NOT EXISTS policy_suggestion (
     status TEXT DEFAULT 'proposed',
     reviewed_at REAL DEFAULT 0.0,
     review_note TEXT DEFAULT '',
+    applied_mutation_id TEXT NOT NULL DEFAULT '',
+    governance_eligible INTEGER NOT NULL DEFAULT 0,
+    governance_eligibility_version TEXT NOT NULL DEFAULT '',
+    governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
+    governance_ineligible_reason TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -1198,6 +1221,8 @@ CREATE TABLE IF NOT EXISTS learning_application_log (
     suggestion_ids_json TEXT DEFAULT '[]',
     status TEXT DEFAULT 'applied',
     details_json TEXT DEFAULT '{}',
+    mutation_id TEXT NOT NULL DEFAULT '',
+    governance_eligibility_version TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -1215,6 +1240,8 @@ CREATE TABLE IF NOT EXISTS learning_application_effect (
     post_win_rate REAL DEFAULT 0.0,
     baseline_win_rate REAL DEFAULT 0.0,
     decision_json TEXT DEFAULT '{}',
+    mutation_id TEXT NOT NULL DEFAULT '',
+    governance_eligibility_version TEXT NOT NULL DEFAULT '',
     last_review_at REAL DEFAULT 0.0,
     updated_at REAL NOT NULL DEFAULT 0.0,
     created_at REAL NOT NULL DEFAULT 0.0
@@ -1427,124 +1454,18 @@ CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp
 
 
 def init_state_db() -> None:
-    """Validate the PostgreSQL schema gate, then retain legacy compatibility DDL.
+    """Validate the PostgreSQL schema gate without writing schema or data.
 
     Versioned migrations are never applied by an application process.  An
     operator must run ``scripts/state_schema_migrate.py`` before deploying
-    code that raises the minimum schema version.  The existing narrow dynamic
-    ALTER path remains temporarily for backward compatibility and will be
-    retired separately after its statements have versioned equivalents.
+    code that raises the minimum schema version.  Backend and worker runtime
+    roles therefore only require read access to migration metadata at boot.
     """
-    conn = get_state_pg_conn()
+    conn = get_state_pg_conn(read_only=True)
     try:
         require_state_schema_version(conn)
-        _ensure_state_schema_compatibility(conn)
-        conn.commit()
     finally:
         conn.close()
-
-
-def _ensure_state_schema_compatibility(conn) -> None:
-    """Apply small, additive migrations required by current governance paths.
-
-    The historical SQLite DDL is not replayed against PostgreSQL on every
-    startup.  Keep the live migration surface narrow and idempotent: these
-    objects are append-only audit/read-model support and do not rewrite
-    trading state.
-    """
-    conn.execute(
-        "ALTER TABLE brain_governance_candidate_review "
-        "ADD COLUMN IF NOT EXISTS evidence_fingerprint TEXT NOT NULL DEFAULT ''"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_brain_candidate_review_fingerprint "
-        "ON brain_governance_candidate_review(candidate_id, evidence_fingerprint, created_at)"
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS learning_experiment_reservation (
-            reservation_id TEXT PRIMARY KEY,
-            scope_type TEXT NOT NULL DEFAULT '',
-            scope_key TEXT NOT NULL DEFAULT '',
-            action TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'reserved',
-            application_id TEXT NOT NULL DEFAULT '',
-            expires_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-            created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-            updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_status "
-        "ON learning_experiment_reservation(status, expires_at)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_scope "
-        "ON learning_experiment_reservation(scope_type, scope_key, status)"
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS nursery_exploration_reservation (
-            reservation_id TEXT NOT NULL,
-            trade_date TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            setup_fingerprint TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'reserved',
-            expires_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-            created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-            updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-            PRIMARY KEY (reservation_id, reason)
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_nursery_exploration_budget "
-        "ON nursery_exploration_reservation(trade_date, status, reason, setup_fingerprint)"
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS supervisor_counterfactual_history (
-            history_id TEXT PRIMARY KEY,
-            counterfactual_id TEXT NOT NULL,
-            payload_json TEXT NOT NULL DEFAULT '{}',
-            archived_reason TEXT NOT NULL DEFAULT '',
-            created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_history_source "
-        "ON supervisor_counterfactual_history(counterfactual_id, created_at)"
-    )
-    conn.execute(
-        "ALTER TABLE proposal_registry "
-        "ADD COLUMN IF NOT EXISTS proposal_action TEXT NOT NULL DEFAULT ''"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_proposal_registry_projection_key "
-        "ON proposal_registry(source_agent, proposal_type, control_surface, target_scope, proposal_action)"
-    )
-    for column, ddl in {
-        "claim_status": "TEXT NOT NULL DEFAULT 'available'",
-        "claim_token": "TEXT DEFAULT ''",
-        "claimed_at": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
-        "claim_expires_at": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
-        "apply_count": "INTEGER NOT NULL DEFAULT 0",
-        "max_apply_count": "INTEGER NOT NULL DEFAULT 1",
-        "consumed_at": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
-        "consumed_mutation_id": "TEXT DEFAULT ''",
-        "posterior_fingerprint": "TEXT DEFAULT ''",
-        "evidence_fingerprint": "TEXT DEFAULT ''",
-        "last_release_reason": "TEXT DEFAULT ''",
-    }.items():
-        conn.execute(
-            f'ALTER TABLE v16_brain_command ADD COLUMN IF NOT EXISTS "{column}" {ddl}'
-        )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_v16_brain_command_claim "
-        "ON v16_brain_command(target_agent, scope_type, claim_status, claim_expires_at)"
-    )
 
 
 def get_state_pg_conn(*, read_only: bool = False):
@@ -1586,13 +1507,202 @@ CREATE TABLE IF NOT EXISTS experiments (
 );
 CREATE INDEX IF NOT EXISTS idx_experiments_type ON experiments(experiment_type);
 CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status);
+
+CREATE TABLE IF NOT EXISTS model_registry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_type TEXT NOT NULL,
+    symbol TEXT DEFAULT 'XAUUSD+',
+    timeframe TEXT DEFAULT 'M5',
+    version INTEGER NOT NULL,
+    artifact_path TEXT DEFAULT '',
+    params_json TEXT DEFAULT '{}',
+    metrics_json TEXT DEFAULT '{}',
+    status TEXT DEFAULT 'active',
+    created_at REAL DEFAULT 0.0,
+    UNIQUE(model_type, symbol, timeframe, version)
+);
+CREATE INDEX IF NOT EXISTS idx_model_registry_lookup
+    ON model_registry(model_type, symbol, timeframe);
+
+CREATE TABLE IF NOT EXISTS model_shadow_candidate (
+    candidate_id TEXT PRIMARY KEY,
+    model_type TEXT NOT NULL,
+    artifact_path TEXT NOT NULL,
+    artifact_sha256 TEXT NOT NULL,
+    symbol TEXT DEFAULT 'XAUUSD+',
+    timeframe TEXT DEFAULT 'M5',
+    status TEXT DEFAULT 'queued',
+    gate_decision TEXT DEFAULT '',
+    gate_json TEXT DEFAULT '{}',
+    registry_version_json TEXT DEFAULT 'null',
+    note TEXT DEFAULT '',
+    created_at REAL DEFAULT 0.0,
+    updated_at REAL DEFAULT 0.0,
+    UNIQUE(model_type, artifact_sha256, symbol, timeframe)
+);
+CREATE INDEX IF NOT EXISTS idx_model_shadow_candidate_status
+    ON model_shadow_candidate(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS model_canary_review (
+    review_id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    model_type TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    report_path TEXT DEFAULT '',
+    metrics_json TEXT DEFAULT '{}',
+    thresholds_json TEXT DEFAULT '{}',
+    issues_json TEXT DEFAULT '[]',
+    note TEXT DEFAULT '',
+    created_at REAL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_model_canary_review_candidate
+    ON model_canary_review(candidate_id, created_at);
+
+CREATE TABLE IF NOT EXISTS model_canary_trial (
+    trial_id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    metrics_json TEXT DEFAULT '{}',
+    thresholds_json TEXT DEFAULT '{}',
+    details_json TEXT DEFAULT '{}',
+    created_at REAL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_model_canary_trial_candidate
+    ON model_canary_trial(candidate_id, created_at);
+
+CREATE TABLE IF NOT EXISTS model_inference_audit (
+    inference_id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    model_type TEXT NOT NULL,
+    mode TEXT DEFAULT 'advisory',
+    score REAL DEFAULT 0.0,
+    prediction INTEGER DEFAULT 0,
+    payload_json TEXT DEFAULT '{}',
+    result_json TEXT DEFAULT '{}',
+    created_at REAL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_model_inference_candidate
+    ON model_inference_audit(candidate_id, created_at);
 """
 
+_EXPERIMENTS_REQUIRED_TABLE_COLUMNS: Final[dict[str, frozenset[str]]] = {
+    "experiments": frozenset({
+        "run_id",
+        "experiment_type",
+        "params_json",
+        "metrics_json",
+        "tags_json",
+        "artifacts_json",
+        "status",
+        "timestamp",
+        "created_at",
+    }),
+    "model_registry": frozenset({
+        "id", "model_type", "symbol", "timeframe", "version",
+        "artifact_path", "params_json", "metrics_json", "status", "created_at",
+    }),
+    "model_shadow_candidate": frozenset({
+        "candidate_id", "model_type", "artifact_path", "artifact_sha256",
+        "symbol", "timeframe", "status", "gate_decision", "gate_json",
+        "registry_version_json", "note", "created_at", "updated_at",
+    }),
+    "model_canary_review": frozenset({
+        "review_id", "candidate_id", "model_type", "decision", "report_path",
+        "metrics_json", "thresholds_json", "issues_json", "note", "created_at",
+    }),
+    "model_canary_trial": frozenset({
+        "trial_id", "candidate_id", "status", "metrics_json",
+        "thresholds_json", "details_json", "created_at",
+    }),
+    "model_inference_audit": frozenset({
+        "inference_id", "candidate_id", "model_type", "mode", "score",
+        "prediction", "payload_json", "result_json", "created_at",
+    }),
+}
+_EXPERIMENTS_REQUIRED_INDEXES: Final[frozenset[str]] = frozenset({
+    "idx_experiments_type",
+    "idx_experiments_status",
+    "idx_model_registry_lookup",
+    "idx_model_shadow_candidate_status",
+    "idx_model_canary_review_candidate",
+    "idx_model_canary_trial_candidate",
+    "idx_model_inference_candidate",
+})
 
-def init_experiments_db() -> None:
-    """初始化 experiments.db (幂等)."""
-    EXPERIMENTS_DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = connect_sqlite(EXPERIMENTS_DB)
+
+def validate_experiments_db_schema(
+    db_path: str | Path = EXPERIMENTS_DB,
+) -> None:
+    """Validate the minimum experiments schema without creating or altering it.
+
+    Backend and worker startup must be read-only with respect to database
+    schemas.  The compatibility migration remains available to an explicit
+    operator repair command, but a stale database now fails validation instead
+    of being silently changed by the runtime process.  The offline experiments
+    store remains optional, so startup skips this check when the file is absent.
+    """
+
+    path = _normalize_db_path(db_path)
+    if not path.exists():
+        raise RuntimeError(
+            f"experiments schema missing at {path}; run "
+            "scripts/experiments_schema_migrate.py --apply before starting runtime processes"
+        )
+    conn = connect_sqlite(path, read_only=True)
+    try:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        missing_tables = sorted(set(_EXPERIMENTS_REQUIRED_TABLE_COLUMNS) - tables)
+        if missing_tables:
+            raise RuntimeError(
+                "experiments schema missing tables "
+                f"{','.join(missing_tables)}; run scripts/experiments_schema_migrate.py --apply "
+                "before starting runtime processes"
+            )
+        for table, required_columns in _EXPERIMENTS_REQUIRED_TABLE_COLUMNS.items():
+            existing = {
+                str(row[1])
+                for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+            missing = sorted(required_columns - existing)
+            if missing:
+                raise RuntimeError(
+                    f"experiments schema below minimum version; {table} missing columns "
+                    f"{','.join(missing)}; run scripts/experiments_schema_migrate.py --apply "
+                    "before starting runtime processes"
+                )
+        indexes = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        missing_indexes = sorted(_EXPERIMENTS_REQUIRED_INDEXES - indexes)
+        if missing_indexes:
+            raise RuntimeError(
+                "experiments schema missing indexes "
+                f"{','.join(missing_indexes)}; run scripts/experiments_schema_migrate.py --apply "
+                "before starting runtime processes"
+            )
+    finally:
+        conn.close()
+
+
+def init_experiments_db(db_path: str | Path = EXPERIMENTS_DB) -> None:
+    """Explicit offline compatibility migration for ``experiments.db``.
+
+    Runtime entry points must call :func:`validate_experiments_db_schema`
+    instead.  This function is intentionally retained for the operator-owned
+    ``scripts/db_doctor.py --repair`` path while the offline experiment store
+    is migrated to a versioned schema.
+    """
+    path = _normalize_db_path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect_sqlite(path)
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS experiments (
@@ -1623,11 +1733,52 @@ def init_experiments_db() -> None:
         }.items():
             if name not in existing:
                 conn.execute(f'ALTER TABLE "experiments" ADD COLUMN {ddl}')
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_type ON experiments(experiment_type)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status)")
+        if "data" in existing:
+            rows = conn.execute(
+                "SELECT run_id, data FROM experiments "
+                "WHERE (experiment_type IS NULL OR experiment_type='') AND data IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                try:
+                    payload = json.loads(row[1] or "{}")
+                except Exception:
+                    continue
+                observed_at = float(payload.get("timestamp") or time.time())
+                conn.execute(
+                    """UPDATE experiments SET experiment_type=?, params_json=?, metrics_json=?,
+                       tags_json=?, artifacts_json=?, status=?, timestamp=?, created_at=?
+                       WHERE run_id=?""",
+                    (
+                        str(payload.get("experiment_type") or "unknown"),
+                        json.dumps(payload.get("params") or {}),
+                        json.dumps(payload.get("metrics") or {}),
+                        json.dumps(payload.get("tags") or []),
+                        json.dumps(payload.get("artifacts") or []),
+                        str(payload.get("status") or "running"),
+                        observed_at,
+                        observed_at,
+                        row[0],
+                    ),
+                )
+        conn.executescript(EXPERIMENTS_DB_DDL)
         conn.commit()
     finally:
         conn.close()
+
+
+def prepare_experiments_store(db_path: str | Path = EXPERIMENTS_DB) -> None:
+    """Validate production; migrate only an explicitly isolated SQLite path.
+
+    Production backend/worker callers use the canonical ``EXPERIMENTS_DB`` and
+    therefore never write schema here. Tests and offline tools that pass a
+    different path retain the historical self-contained fixture behavior.
+    """
+
+    path = _normalize_db_path(db_path)
+    if path.resolve() == EXPERIMENTS_DB.resolve():
+        validate_experiments_db_schema(path)
+        return
+    init_experiments_db(path)
 
 
 # ═══════════════════════════════════════════
@@ -1638,13 +1789,14 @@ _initialized = False
 
 
 def init_all() -> None:
-    """应用启动时调用一次，初始化所有数据库。"""
+    """Validate runtime database prerequisites without applying schema DDL."""
     global _initialized
     with _init_lock:
         if _initialized:
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         init_state_db()
-        init_experiments_db()
+        if EXPERIMENTS_DB.exists():
+            validate_experiments_db_schema(EXPERIMENTS_DB)
         _initialized = True
 

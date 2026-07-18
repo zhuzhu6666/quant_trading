@@ -2,6 +2,7 @@
 import json
 import re
 import sqlite3
+import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -10,6 +11,11 @@ from typing import Any
 from backend.core.auth import RequireUser
 from backend.core.db import get_state_pg_conn
 from backend.risk import VaRCalculator, KellyCriterion, StressTest, ConcentrationChecker
+from backend.services.api_fact_views import (
+    policy_verdicts_fact_payload,
+    risk_summary_fact_payload,
+    trade_traces_fact_payload,
+)
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.realized_pnl import get_realized_pnl_series
 from backend.services.review_contract import normalize_trade_review_contract
@@ -366,16 +372,28 @@ def _concentration_from_policy(policy: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _summary_risk_inputs() -> tuple[list[float], list[dict[str, Any]]]:
+def _summary_risk_inputs() -> tuple[list[float], list[dict[str, Any]], dict[str, Any]]:
     try:
         realized = get_realized_pnl_series(scope="30d")
-    except Exception:
-        return [], []
+    except Exception as exc:
+        return [], [], {
+            "ok": False,
+            "observed_at": None,
+            "error": f"{type(exc).__name__}: {exc}"[:300],
+        }
     points = realized.get("points") if isinstance(realized, dict) else []
     if not isinstance(points, list):
-        return [], []
+        return [], [], {
+            "ok": False,
+            "observed_at": None,
+            "error": "realized_pnl_points_invalid",
+        }
     equity_series = _equity_series_from_realized_points(points, current_equity=_current_account_equity())
-    return equity_series, points
+    return equity_series, points, {
+        "ok": True,
+        "observed_at": float(realized.get("to_ts") or time.time()),
+        "error": None,
+    }
 
 
 def _parse_review_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2120,7 +2138,7 @@ def get_risk_summary(_user: RequireUser) -> dict[str, Any]:
     获取风控指标概览: VaR, Kelly, stress, concentration.
     """
     policy = _recent_policy_verdicts(limit=25)
-    equity_series, realized_points = _summary_risk_inputs()
+    equity_series, realized_points, risk_input_fact = _summary_risk_inputs()
     var = _var_calc.get_status(equity_series) if len(equity_series) >= 2 else _var_calc.get_status()
     if len(equity_series) >= 2:
         var.update({"source": "realized_pnl_30d", "limit": _var_limit_usd(_safe_float(var.get("current_equity")))})
@@ -2129,7 +2147,7 @@ def get_risk_summary(_user: RequireUser) -> dict[str, Any]:
     if len(equity_series) >= 2:
         stress.update({"source": "realized_pnl_30d", "stress_var": abs(_safe_float(stress.get("max_drawdown_pct")))})
     conc = _concentration_from_policy(policy)
-    return {
+    payload = {
         "var": _json_safe(var),
         "kelly": _json_safe(kelly),
         "stress": _json_safe(stress),
@@ -2137,12 +2155,17 @@ def get_risk_summary(_user: RequireUser) -> dict[str, Any]:
         "policy": policy,
         "system_health": _system_health_summary(),
     }
+    return risk_summary_fact_payload(
+        payload,
+        risk_observed_at=risk_input_fact.get("observed_at"),
+        risk_error=risk_input_fact.get("error"),
+    )
 
 
 @router.get("/policy/verdicts")
 def get_policy_verdicts(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
     """最近的统一风控裁决，用于 Phase B 风控面板与审计."""
-    return _recent_policy_verdicts(limit=limit)
+    return policy_verdicts_fact_payload(_recent_policy_verdicts(limit=limit))
 
 
 @router.get("/trade-trace")
@@ -2162,7 +2185,7 @@ def get_trade_trace(
 
 @router.get("/trade-trace/recent")
 def get_recent_trade_traces(_user: RequireUser, limit: int = 20) -> dict[str, Any]:
-    return _recent_trade_trace_index(limit=limit)
+    return trade_traces_fact_payload(_recent_trade_trace_index(limit=limit))
 
 
 @router.post("/var")

@@ -10,6 +10,10 @@ from typing import Any
 import httpx
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.state_store import (
+    is_state_schema_write_sql,
+    validate_runtime_state_schema,
+)
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
 
@@ -90,9 +94,12 @@ class LLMAdvisoryService:
         return sql.replace("?", "%s") if self._use_pg() else sql
 
     def _execute(self, conn, sql: str, params: tuple | list | None = None):
+        rendered = self._sql(sql)
+        if self._use_pg() and is_state_schema_write_sql(rendered):
+            return validate_runtime_state_schema(conn, rendered)
         if params is None:
-            return conn.execute(self._sql(sql))
-        return conn.execute(self._sql(sql), tuple(params))
+            return conn.execute(rendered)
+        return conn.execute(rendered, tuple(params))
 
     def _ensure_table(self) -> None:
         conn = self._conn()

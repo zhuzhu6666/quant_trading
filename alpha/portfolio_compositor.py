@@ -115,12 +115,12 @@ class PortfolioCompositor:
             all_weights[name] = 0.0
             if sig is None:
                 continue
-            if not cfg.get("enabled", True):
+            if not cfg.get("enabled", False):
                 continue
             if role != "alpha":
                 context_signals[name] = float(sig)
                 continue
-            w = float(cfg.get("weight", 1.0) or 0.0)
+            w = float(cfg.get("weight", 0.0) or 0.0)
             if w <= 0:
                 continue
             all_weights[name] = w
@@ -210,9 +210,9 @@ class PortfolioCompositor:
             if sig is None:
                 continue
             cfg = self._factor_configs.get(name, self._default_gp_config(name))
-            if not cfg.get("enabled", True) or resolve_factor_role(name, cfg) != "alpha":
+            if not cfg.get("enabled", False) or resolve_factor_role(name, cfg) != "alpha":
                 continue
-            w = float(cfg.get("weight", 1.0) or 0.0)
+            w = float(cfg.get("weight", 0.0) or 0.0)
             if w <= 0:
                 continue
             for t in cfg.get("tags", []):
@@ -328,8 +328,9 @@ class PortfolioCompositor:
         """GP 发现因子的默认配置, 尝试从 GPClassifier 获取标签。"""
         tags = self._try_classify_gp(name)
         return {
-            "enabled": True,
-            "weight": 0.3,
+            # Missing config must never synthesize an executable vote.
+            "enabled": False,
+            "weight": 0.0,
             "tags": tags or ["GP发现"],
             "role": DEFAULT_FACTOR_ROLES.get(name, "alpha"),
             "source": "gp",

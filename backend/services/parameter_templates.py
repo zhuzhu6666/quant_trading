@@ -16,6 +16,8 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
+    state_table_columns,
+    state_table_exists,
     state_pg_enabled,
 )
 from backend.services.factor_cards import FactorCardService
@@ -310,7 +312,12 @@ class ParameterTemplateService:
                 return item
         return None
 
-    def build_runtime_signal_config(self, base_config: dict[str, dict] | None = None) -> dict[str, dict]:
+    def build_runtime_signal_config(
+        self,
+        base_config: dict[str, dict] | None = None,
+        *,
+        active_templates: list[dict[str, Any]] | None = None,
+    ) -> dict[str, dict]:
         from config.runtime_config import shared as _rc_shared
 
         runtime_cfg = _rc_shared()
@@ -324,8 +331,12 @@ class ParameterTemplateService:
             item.pop("parameter_regime_key", None)
             item.pop("parameter_overrides", None)
 
-        active_templates = self.list_active_templates()
-        for active in active_templates:
+        selected_active_templates = (
+            self.list_active_templates()
+            if active_templates is None
+            else list(active_templates)
+        )
+        for active in selected_active_templates:
             template = self.get_template(template_id=str(active.get("template_id") or ""))
             if not template:
                 continue
@@ -339,7 +350,12 @@ class ParameterTemplateService:
                     "window": 100,
                     "min_samples": 30,
                     "tags": list(((card[0].get("expected_regimes") if card else []) or [])),
-                    "enabled": True,
+                    # A parameter template tunes an existing factor; it is not
+                    # factor-lifecycle authority.  Preserve a missing factor as
+                    # observation-only instead of implicitly activating it.
+                    "enabled": False,
+                    "weight": 0.0,
+                    "lifecycle_status": "SHADOW",
                 }
             cfg = signal_config[factor_id]
             cfg["parameter_template_version"] = str(template.get("template_version") or "")
@@ -349,6 +365,111 @@ class ParameterTemplateService:
             cfg["parameter_overrides"] = deepcopy(template.get("parameters") or {})
         return signal_config
 
+    @staticmethod
+    def _legacy_quarantined_restore_allowed(active: dict[str, Any]) -> bool:
+        """Allow only an explicitly backfilled, tightening-only legacy row.
+
+        Merely naming a template ``conservative`` is not proof that every
+        parameter change reduces live risk.  The compatibility exception is
+        therefore opt-in data written by an operator/backfill review, not an
+        inference from template names or caller-supplied labels.
+        """
+
+        context = dict(active.get("context") or {})
+        return bool(
+            str(context.get("governance_authority") or "")
+            == "legacy_quarantined"
+            and str(context.get("risk_class") or "") == "risk_tightening"
+        )
+
+    def _validated_startup_active_templates(self) -> list[dict[str, Any]]:
+        """Return startup projections backed by committed governance facts.
+
+        In ``off`` mode the registry remains as a one-release compatibility
+        source.  It must not silently turn an old ``active`` row into live
+        authority after restart.  A coordinated row is accepted only when its
+        mutation is committed, hash-bound and already projected.  An old row
+        may remain only when an explicit review marked it tightening-only and
+        ``legacy_quarantined``.  Every other row makes startup fail closed;
+        the caller preserves the already-loaded config and installs the
+        durable ``no_new_risk`` latch.
+        """
+
+        active_templates = self.list_active_templates()
+        if not active_templates:
+            return []
+
+        mutation_ids = sorted(
+            {
+                str((item.get("context") or {}).get("mutation_id") or "")
+                for item in active_templates
+                if str((item.get("context") or {}).get("mutation_id") or "")
+            }
+        )
+        committed: set[str] = set()
+        if mutation_ids:
+            with self._conn() as conn:
+                if state_table_exists(conn, "governance_mutation_intent"):
+                    columns = state_table_columns(conn, "governance_mutation_intent")
+                    required = {
+                        "mutation_id",
+                        "status",
+                        "projection_status",
+                        "scope_type",
+                        "committed_config_hash",
+                        "domain_hash",
+                    }
+                    if required <= columns:
+                        placeholders = ",".join("?" for _ in mutation_ids)
+                        rows = _execute(
+                            conn,
+                            f"""
+                            SELECT mutation_id
+                            FROM governance_mutation_intent
+                            WHERE mutation_id IN ({placeholders})
+                              AND status='committed'
+                              AND projection_status='current'
+                              AND scope_type='parameter_template'
+                              AND committed_config_hash<>''
+                              AND domain_hash<>''
+                            """,
+                            tuple(mutation_ids),
+                        ).fetchall()
+                        committed = {
+                            str(dict(row).get("mutation_id") or "") for row in rows
+                        }
+
+        allowed: list[dict[str, Any]] = []
+        blocked: list[str] = []
+        for active in active_templates:
+            item = deepcopy(active)
+            context = dict(item.get("context") or {})
+            mutation_id = str(context.get("mutation_id") or "")
+            key = f"{item.get('factor_id') or ''}:{item.get('regime_key') or 'default'}"
+            if (
+                mutation_id
+                and mutation_id in committed
+                and str(context.get("commit_boundary") or "")
+                == "governance_mutation_coordinator"
+            ):
+                item["governance_authority"] = "committed_mutation"
+                item["committed_mutation_id"] = mutation_id
+                allowed.append(item)
+                continue
+            if self._legacy_quarantined_restore_allowed(item):
+                item["governance_authority"] = "legacy_quarantined"
+                item["committed_mutation_id"] = ""
+                allowed.append(item)
+                continue
+            blocked.append(key)
+
+        if blocked:
+            raise RuntimeError(
+                "legacy_parameter_template_restore_unverified:"
+                + ",".join(sorted(set(blocked)))
+            )
+        return allowed
+
     def sync_runtime_config(
         self,
         *,
@@ -356,22 +477,50 @@ class ParameterTemplateService:
         v16_claim_token: str = "",
         restore_only: bool = False,
     ) -> int:
-        from config.runtime_config import shared as _rc_shared
+        from config.runtime_config import (
+            RuntimeConfig as _RuntimeConfig,
+            replace as _rc_replace,
+            shared as _rc_shared,
+            version as _rc_version,
+        )
+        from backend.services.governance_control_plans import governance_coordinator_mode
         from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 
+        # Startup restore is a legacy projection path.  In dual/enforce the
+        # committed overlay and coordinator recovery are authoritative; a
+        # registry-derived rebuild here would be a second commit authority.
+        if restore_only and governance_coordinator_mode() != "off":
+            return int(_rc_version())
+
         runtime_cfg = _rc_shared()
-        signal_config = self.build_runtime_signal_config()
-        active_templates = self.list_active_templates()
+        active_templates = (
+            self._validated_startup_active_templates()
+            if restore_only
+            else self.list_active_templates()
+        )
+        signal_config = self.build_runtime_signal_config(
+            active_templates=active_templates,
+        )
         active_payload = {
             f"{item['factor_id']}:{item.get('regime_key') or 'default'}": {
                 "template_id": item.get("template_id"),
                 "template_version": item.get("template_version"),
                 "status": item.get("status"),
+                "governance_authority": item.get("governance_authority", ""),
+                "committed_mutation_id": item.get("committed_mutation_id", ""),
             }
             for item in active_templates
         }
         merged_extra = dict(getattr(runtime_cfg, "extra", {}) or {})
         merged_extra["active_parameter_templates"] = active_payload
+        if restore_only:
+            # Startup recovery is a projection, never a new commit.  Writing
+            # the overlay here would clear its authority manifest (or create a
+            # fresh unbound legacy row) merely because the process restarted.
+            payload = runtime_cfg.to_dict()
+            payload["factor_signal_config"] = signal_config
+            payload["extra"] = merged_extra
+            return int(_rc_replace(_RuntimeConfig.from_dict(payload)))
         result = RuntimeConfigMutationService(self.db_path).apply_patch(
             {
                 "factor_signal_config": signal_config,
@@ -686,6 +835,735 @@ class ParameterTemplateService:
         return "parameter evidence suggests reviewing an alternative template"
 
     def activate_template(
+        self,
+        *,
+        factor_id: str,
+        template_id: str,
+        regime_key: str = "",
+        suggestion_id: str = "",
+        note: str = "",
+        allow_offline_deep: bool = False,
+        v16_command_id: str = "",
+    ) -> dict[str, Any]:
+        from backend.services.governance_control_plans import governance_coordinator_mode
+
+        target = self.get_template(template_id=template_id)
+        if target and str(target.get("factor_id") or "") != str(factor_id or ""):
+            raise ValueError(
+                f"template factor mismatch: {template_id} is not for {factor_id}"
+            )
+        if governance_coordinator_mode() == "off":
+            return self._activate_template_legacy(
+                factor_id=factor_id,
+                template_id=template_id,
+                regime_key=regime_key,
+                suggestion_id=suggestion_id,
+                note=note,
+                allow_offline_deep=allow_offline_deep,
+                v16_command_id=v16_command_id,
+            )
+        return self._activate_template_coordinated(
+            factor_id=factor_id,
+            template_id=template_id,
+            regime_key=regime_key,
+            suggestion_id=suggestion_id,
+            note=note,
+            allow_offline_deep=allow_offline_deep,
+            v16_command_id=v16_command_id,
+        )
+
+    def rollback_template_application(
+        self,
+        *,
+        application_id: str,
+        factor_id: str,
+        current_template_id: str,
+        previous_template_id: str,
+        regime_key: str = "",
+        suggestion_ids: list[str] | None = None,
+        reason: str = "parameter_template_effect_rollback",
+        evidence: dict[str, Any] | None = None,
+        v16_command_id: str = "",
+    ) -> dict[str, Any]:
+        """Commit an effect-driven rollback through the typed authority."""
+        from backend.services.governance_control_plans import (
+            ParameterTemplateActivationPlan,
+            governance_coordinator_mode,
+        )
+        from config.runtime_config import shared as _rc_shared
+
+        target = self.get_template(template_id=previous_template_id)
+        if not target:
+            return {
+                "ok": False,
+                "blocked": True,
+                "status": "rollback_template_missing",
+                "previous_template_id": previous_template_id,
+            }
+        if str(target.get("factor_id") or "") != str(factor_id or ""):
+            return {
+                "ok": False,
+                "blocked": True,
+                "status": "rollback_template_factor_mismatch",
+                "previous_template_id": previous_template_id,
+                "factor_id": factor_id,
+            }
+        runtime_cfg = _rc_shared()
+        signal_config = self.build_runtime_signal_config()
+        if factor_id not in signal_config or not isinstance(signal_config.get(factor_id), dict):
+            signal_config[factor_id] = {
+                "mode": "rank_mapping",
+                "window": 100,
+                "min_samples": 30,
+                "tags": [],
+                "enabled": False,
+                "weight": 0.0,
+                "lifecycle_status": "SHADOW",
+            }
+        factor_config = signal_config[factor_id]
+        factor_config["parameter_template_version"] = str(target.get("template_version") or "")
+        factor_config["parameter_template_role"] = str(target.get("template_role") or "")
+        factor_config["parameter_template_source"] = str(target.get("source") or "")
+        factor_config["parameter_regime_key"] = str(target.get("regime_key") or "")
+        factor_config["parameter_overrides"] = deepcopy(target.get("parameters") or {})
+        active_payload = {
+            f"{item['factor_id']}:{item.get('regime_key') or 'default'}": {
+                "template_id": item.get("template_id"),
+                "template_version": item.get("template_version"),
+                "status": item.get("status"),
+            }
+            for item in self.list_active_templates()
+        }
+        active_payload[f"{factor_id}:{regime_key or 'default'}"] = {
+            "template_id": previous_template_id,
+            "template_version": str(target.get("template_version") or ""),
+            "status": "active",
+        }
+        merged_extra = dict(getattr(runtime_cfg, "extra", {}) or {})
+        merged_extra["active_parameter_templates"] = active_payload
+        switch_id = self._new_id("ptsw")
+        now = time.time()
+        rollback_evidence = {
+            "application_id": application_id,
+            "factor_id": factor_id,
+            "regime_key": regime_key,
+            "rolled_back_from": current_template_id,
+            "previous_template_id": previous_template_id,
+            **dict(evidence or {}),
+        }
+        plan = ParameterTemplateActivationPlan(
+            patch={"factor_signal_config": signal_config, "extra": merged_extra},
+            source="parameter_template_effect_rollback",
+            actor="system:rule_evolution_governor",
+            action="rollback_parameter_template",
+            run_id=f"parameter-template-rollback:{application_id}",
+            reason=reason,
+            scope_type="parameter_template",
+            scope_key="online_light",
+            target_agent="autonomous_learning",
+            factor_id=factor_id,
+            regime_key=regime_key,
+            target_template_id=previous_template_id,
+            rollback={
+                "factor_signal_config": deepcopy(runtime_cfg.factor_signal_config),
+                "extra": deepcopy(getattr(runtime_cfg, "extra", {}) or {}),
+            },
+            evidence_refs=rollback_evidence,
+            idempotency_key=(
+                f"parameter-template-rollback:v2:{application_id}:"
+                f"{current_template_id}:{previous_template_id}"
+            ),
+            v16_command_id=v16_command_id,
+        )
+
+        def writer(conn, mutation_id: str, _effective_config) -> dict[str, Any]:
+            context = {
+                "schema_version": "parameter_template_rollback.v2",
+                **rollback_evidence,
+                "reason": reason,
+                "mutation_id": mutation_id,
+                "commit_boundary": "governance_mutation_coordinator",
+            }
+            registry_update = _execute(
+                conn,
+                """UPDATE parameter_template_registry
+                   SET active=CASE WHEN template_id=? THEN 1 ELSE 0 END, updated_at=?
+                   WHERE factor_id=? AND regime_key=?""",
+                (previous_template_id, now, factor_id, regime_key),
+            )
+            if int(registry_update.rowcount or 0) < 1:
+                raise RuntimeError("parameter_template_rollback_target_missing")
+            _execute(
+                conn,
+                """INSERT INTO parameter_template_active
+                   (factor_id, regime_key, template_id, template_version, status,
+                    suggestion_id, context_json, activated_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                   ON CONFLICT(factor_id, regime_key) DO UPDATE SET
+                    template_id=excluded.template_id,
+                    template_version=excluded.template_version,
+                    status=excluded.status,
+                    suggestion_id=excluded.suggestion_id,
+                    context_json=excluded.context_json,
+                    activated_at=excluded.activated_at,
+                    updated_at=excluded.updated_at""",
+                (
+                    factor_id,
+                    regime_key,
+                    previous_template_id,
+                    str(target.get("template_version") or ""),
+                    str((suggestion_ids or [""])[0] or ""),
+                    json.dumps(context, ensure_ascii=False, default=str),
+                    now,
+                    now,
+                ),
+            )
+            _execute(
+                conn,
+                """INSERT INTO parameter_template_switch_log
+                   (switch_id, factor_id, regime_key, old_template_id,
+                    new_template_id, suggestion_id, risk_verdict_json,
+                    context_json, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, '{}', ?, 'rolled_back', ?)
+                   ON CONFLICT(switch_id) DO NOTHING""",
+                (
+                    switch_id,
+                    factor_id,
+                    regime_key,
+                    current_template_id,
+                    previous_template_id,
+                    str((suggestion_ids or [""])[0] or ""),
+                    json.dumps(context, ensure_ascii=False, default=str),
+                    now,
+                ),
+            )
+            app_row = _execute(
+                conn,
+                "SELECT details_json FROM learning_application_log WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+            prior_details = _loads(app_row["details_json"], {}) if app_row else {}
+            app_columns = state_table_columns(conn, "learning_application_log")
+            assignments = ["status='rolled_back'", "details_json=?"]
+            params: list[Any] = [
+                json.dumps(
+                    {**prior_details, "rollback": context},
+                    ensure_ascii=False,
+                    default=str,
+                )
+            ]
+            if "mutation_id" in app_columns:
+                assignments.append("mutation_id=?")
+                params.append(mutation_id)
+            params.append(application_id)
+            application_update = _execute(
+                conn,
+                "UPDATE learning_application_log SET "
+                + ", ".join(assignments)
+                + " WHERE application_id=?",
+                tuple(params),
+            )
+            if int(application_update.rowcount or 0) != 1:
+                raise RuntimeError("parameter_template_rollback_application_missing")
+            effect_columns = state_table_columns(conn, "learning_application_effect")
+            assignments = ["status='rolled_back'", "decision_json=?", "updated_at=?"]
+            params = [json.dumps(context, ensure_ascii=False, default=str), now]
+            if "mutation_id" in effect_columns:
+                assignments.append("mutation_id=?")
+                params.append(mutation_id)
+            params.append(application_id)
+            effect_update = _execute(
+                conn,
+                "UPDATE learning_application_effect SET "
+                + ", ".join(assignments)
+                + " WHERE application_id=?",
+                tuple(params),
+            )
+            if int(effect_update.rowcount or 0) != 1:
+                raise RuntimeError("parameter_template_rollback_effect_missing")
+            for suggestion_id in suggestion_ids or []:
+                suggestion_columns = state_table_columns(conn, "policy_suggestion")
+                assignments = ["status='rolled_back'", "reviewed_at=?", "review_note=?"]
+                params = [now, reason]
+                if "applied_mutation_id" in suggestion_columns:
+                    assignments.append("applied_mutation_id=?")
+                    params.append(mutation_id)
+                params.append(suggestion_id)
+                suggestion_update = _execute(
+                    conn,
+                    "UPDATE policy_suggestion SET "
+                    + ", ".join(assignments)
+                    + " WHERE suggestion_id=?",
+                    tuple(params),
+                )
+                if int(suggestion_update.rowcount or 0) != 1:
+                    raise RuntimeError("parameter_template_rollback_suggestion_missing")
+            return {
+                "application_id": application_id,
+                "switch_id": switch_id,
+                "mutation_id": mutation_id,
+            }
+
+        mode = governance_coordinator_mode()
+        if mode == "off":
+            from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+
+            mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
+                dict(plan.patch),
+                source=plan.source,
+                run_id=plan.run_id,
+                actor=plan.actor,
+                action=plan.action,
+                reason=plan.reason,
+                v16_command_id=v16_command_id,
+                v16_target_agent=plan.target_agent,
+                v16_scope_type=plan.scope_type,
+                v16_scope_key=plan.scope_key,
+                v16_action=plan.action,
+                risk_reduction=True,
+            )
+        else:
+            mutation = plan.execute(self.db_path, transaction_writer=writer)
+        committed = bool(mutation.get("ok")) or str(mutation.get("status") or "") in {
+            "applied",
+            "committed",
+            "committed_projection_degraded",
+        }
+        if committed and mode == "off":
+            with self._conn() as conn:
+                writer(conn, str(mutation.get("mutation_id") or ""), None)
+                conn.commit()
+        return {
+            "ok": committed,
+            "blocked": not committed,
+            "status": str(mutation.get("status") or "governance_mutation_blocked"),
+            "projection_ready": bool(mutation.get("ok")),
+            "mutation_id": str(mutation.get("mutation_id") or ""),
+            "mutation": mutation,
+            "application_id": application_id,
+            "old_template_id": current_template_id,
+            "new_template_id": previous_template_id,
+        }
+
+    def _activate_template_coordinated(
+        self,
+        *,
+        factor_id: str,
+        template_id: str,
+        regime_key: str = "",
+        suggestion_id: str = "",
+        note: str = "",
+        allow_offline_deep: bool = False,
+        v16_command_id: str = "",
+    ) -> dict[str, Any]:
+        from backend.services.governance_control_plans import (
+            ParameterTemplateActivationPlan,
+        )
+        from backend.services.governance_eligibility import (
+            GOVERNANCE_ELIGIBILITY_VERSION,
+        )
+        from backend.services.learning_experiment_admission import (
+            LearningExperimentAdmissionService,
+        )
+        from config.runtime_config import shared as _rc_shared
+
+        target = self.get_template(template_id=template_id)
+        if not target:
+            raise ValueError(f"template not found: {template_id}")
+        if suggestion_id and not self._suggestion_is_approved(suggestion_id):
+            raise ValueError(f"suggestion not approved: {suggestion_id}")
+        current = self.get_active_template(factor_id=factor_id, regime_key=regime_key)
+        if current and str(current.get("template_id") or "") == template_id:
+            return {
+                "ok": True,
+                "blocked": False,
+                "status": "already_active",
+                "factor_id": factor_id,
+                "regime_key": regime_key,
+                "old_template_id": template_id,
+                "new_template_id": template_id,
+            }
+        boundary = self.assess_template_change(
+            factor_id=factor_id,
+            target_template_id=template_id,
+            regime_key=regime_key,
+        )
+        if boundary.get("recommended_scope") != "online_light" and not allow_offline_deep:
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "offline_deep_validation_required",
+                "message": "template requires offline_deep validation and gray release before activation",
+                "boundary": boundary,
+            }
+        verdict = RiskPolicyService().evaluate(
+            "switch_parameter_template",
+            {
+                "required_mode": "governed",
+                "template_context": {
+                    "factor_id": factor_id,
+                    "regime_key": regime_key,
+                    "current_template_id": current.get("template_id", "") if current else "",
+                    "target_template_id": template_id,
+                    "boundary": boundary,
+                    "allow_offline_deep": bool(allow_offline_deep),
+                },
+            },
+        ).to_dict()
+        if not verdict.get("allowed", False):
+            return {
+                "ok": False,
+                "blocked": True,
+                "risk_verdict": verdict,
+                "boundary": boundary,
+            }
+
+        experiment_admission = LearningExperimentAdmissionService(
+            self.db_path
+        ).reserve_scope(
+            scope_type="parameter_template",
+            scope_key=f"{factor_id}:{regime_key or 'default'}",
+            action="switch_parameter_template",
+            allow_active_replacement=True,
+        )
+        if not experiment_admission.get("allowed"):
+            return {
+                "ok": False,
+                "blocked": True,
+                "status": str(
+                    experiment_admission.get("status")
+                    or "blocked_experiment_admission"
+                ),
+                "reason": str(
+                    experiment_admission.get("reason")
+                    or "experiment_admission_failed"
+                ),
+                "experiment_admission": experiment_admission,
+                "boundary": boundary,
+            }
+
+        reservation_id = str(experiment_admission.get("reservation_id") or "")
+        switch_id = self._new_id("ptsw")
+        application_id = self._new_id("lapp")
+        now = time.time()
+        old_template_id = str(current.get("template_id") or "") if current else ""
+        context = {
+            "schema_version": "parameter_template_switch.v2",
+            "note": note,
+            "factor_id": factor_id,
+            "regime_key": regime_key,
+            "old_template_id": old_template_id,
+            "new_template_id": template_id,
+            "boundary": boundary,
+            "allow_offline_deep": bool(allow_offline_deep),
+            "experiment_reservation_id": reservation_id,
+        }
+
+        runtime_cfg = _rc_shared()
+        signal_config = self.build_runtime_signal_config()
+        if factor_id not in signal_config or not isinstance(signal_config.get(factor_id), dict):
+            card = self.cards.list_cards(factor_id=factor_id, limit=1)
+            signal_config[factor_id] = {
+                "mode": "rank_mapping",
+                "window": 100,
+                "min_samples": 30,
+                "tags": list(((card[0].get("expected_regimes") if card else []) or [])),
+                "enabled": False,
+                "weight": 0.0,
+                "lifecycle_status": "SHADOW",
+            }
+        factor_config = signal_config[factor_id]
+        factor_config["parameter_template_version"] = str(target.get("template_version") or "")
+        factor_config["parameter_template_role"] = str(target.get("template_role") or "")
+        factor_config["parameter_template_source"] = str(target.get("source") or "")
+        factor_config["parameter_regime_key"] = str(target.get("regime_key") or "")
+        factor_config["parameter_overrides"] = deepcopy(target.get("parameters") or {})
+
+        active_payload = {
+            f"{item['factor_id']}:{item.get('regime_key') or 'default'}": {
+                "template_id": item.get("template_id"),
+                "template_version": item.get("template_version"),
+                "status": item.get("status"),
+            }
+            for item in self.list_active_templates()
+        }
+        active_payload[f"{factor_id}:{regime_key or 'default'}"] = {
+            "template_id": template_id,
+            "template_version": str(target.get("template_version") or ""),
+            "status": "active",
+        }
+        merged_extra = dict(getattr(runtime_cfg, "extra", {}) or {})
+        merged_extra["active_parameter_templates"] = active_payload
+        patch = {
+            "factor_signal_config": signal_config,
+            "extra": merged_extra,
+        }
+
+        plan = ParameterTemplateActivationPlan(
+            patch=patch,
+            source="parameter_template_activation",
+            actor="system:parameter_template_service",
+            action="switch_parameter_template",
+            run_id=switch_id,
+            reason=note or f"activate parameter template {template_id}",
+            scope_type="parameter_template",
+            scope_key="online_light",
+            target_agent="autonomous_learning",
+            factor_id=factor_id,
+            regime_key=regime_key,
+            target_template_id=template_id,
+            rollback={
+                "factor_signal_config": deepcopy(runtime_cfg.factor_signal_config),
+                "extra": deepcopy(getattr(runtime_cfg, "extra", {}) or {}),
+            },
+            evidence_refs={
+                "suggestion_id": suggestion_id,
+                "boundary": boundary,
+                "risk_verdict": verdict,
+                "old_template_id": old_template_id,
+                "target_template_id": template_id,
+            },
+            idempotency_key=(
+                f"parameter-template-switch:v2:{suggestion_id or v16_command_id or switch_id}:"
+                f"{factor_id}:{regime_key or 'default'}:{old_template_id}:{template_id}"
+            ),
+            v16_command_id=v16_command_id,
+        )
+
+        def upsert(
+            conn,
+            table: str,
+            primary_key: str,
+            values: dict[str, Any],
+            *,
+            immutable: set[str] | None = None,
+        ) -> None:
+            columns = list(values)
+            immutable_columns = set(immutable or ()) | {primary_key}
+            updates = [column for column in columns if column not in immutable_columns]
+            _execute(
+                conn,
+                f"INSERT INTO {table} ({', '.join(columns)}) VALUES "
+                f"({', '.join('?' for _ in columns)}) ON CONFLICT({primary_key}) "
+                f"DO UPDATE SET {', '.join(f'{column}=excluded.{column}' for column in updates)}",
+                tuple(values[column] for column in columns),
+            )
+
+        def writer(conn, mutation_id: str, _effective_config) -> dict[str, Any]:
+            committed_context = {
+                **context,
+                "mutation_id": mutation_id,
+                "commit_boundary": "governance_mutation_coordinator",
+            }
+            registry_update = _execute(
+                conn,
+                """UPDATE parameter_template_registry
+                   SET active=CASE WHEN template_id=? THEN 1 ELSE 0 END, updated_at=?
+                   WHERE factor_id=? AND regime_key=?""",
+                (template_id, now, factor_id, regime_key),
+            )
+            if int(registry_update.rowcount or 0) < 1:
+                raise RuntimeError("parameter_template_registry_target_missing")
+            _execute(
+                conn,
+                """INSERT INTO parameter_template_active
+                   (factor_id, regime_key, template_id, template_version, status,
+                    suggestion_id, context_json, activated_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                   ON CONFLICT(factor_id, regime_key) DO UPDATE SET
+                    template_id=excluded.template_id,
+                    template_version=excluded.template_version,
+                    status=excluded.status,
+                    suggestion_id=excluded.suggestion_id,
+                    context_json=excluded.context_json,
+                    activated_at=excluded.activated_at,
+                    updated_at=excluded.updated_at""",
+                (
+                    factor_id,
+                    regime_key,
+                    template_id,
+                    str(target.get("template_version") or ""),
+                    suggestion_id,
+                    json.dumps(committed_context, ensure_ascii=False, default=str),
+                    now,
+                    now,
+                ),
+            )
+            _execute(
+                conn,
+                """INSERT INTO parameter_template_switch_log
+                   (switch_id, factor_id, regime_key, old_template_id,
+                    new_template_id, suggestion_id, risk_verdict_json,
+                    context_json, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'applied', ?)
+                   ON CONFLICT(switch_id) DO NOTHING""",
+                (
+                    switch_id,
+                    factor_id,
+                    regime_key,
+                    old_template_id,
+                    template_id,
+                    suggestion_id,
+                    json.dumps(verdict, ensure_ascii=False, default=str),
+                    json.dumps(committed_context, ensure_ascii=False, default=str),
+                    now,
+                ),
+            )
+            app_columns = state_table_columns(conn, "learning_application_log")
+            app_values: dict[str, Any] = {
+                "application_id": application_id,
+                "cycle_ts": now,
+                "scope_type": "parameter_template",
+                "scope_key": f"{factor_id}:{regime_key or 'default'}",
+                "action": "switch_parameter_template",
+                "bias_multiplier": 1.0,
+                "old_weight": 0.0,
+                "new_weight": 0.0,
+                "suggestion_ids_json": json.dumps(
+                    [suggestion_id] if suggestion_id else [], ensure_ascii=False
+                ),
+                "status": "applied",
+                "details_json": json.dumps(
+                    committed_context, ensure_ascii=False, default=str
+                ),
+                "created_at": now,
+            }
+            if "mutation_id" in app_columns:
+                app_values["mutation_id"] = mutation_id
+            if "governance_eligibility_version" in app_columns:
+                app_values["governance_eligibility_version"] = GOVERNANCE_ELIGIBILITY_VERSION
+            upsert(
+                conn,
+                "learning_application_log",
+                "application_id",
+                app_values,
+                immutable={"created_at"},
+            )
+            effect_columns = state_table_columns(conn, "learning_application_effect")
+            effect_values: dict[str, Any] = {
+                "application_id": application_id,
+                "scope_type": "parameter_template",
+                "scope_key": f"{factor_id}:{regime_key or 'default'}",
+                "action": "switch_parameter_template",
+                "status": "observing",
+                "decision_json": json.dumps(
+                    committed_context, ensure_ascii=False, default=str
+                ),
+                "updated_at": now,
+                "created_at": now,
+            }
+            if "mutation_id" in effect_columns:
+                effect_values["mutation_id"] = mutation_id
+            if "governance_eligibility_version" in effect_columns:
+                effect_values["governance_eligibility_version"] = GOVERNANCE_ELIGIBILITY_VERSION
+            upsert(
+                conn,
+                "learning_application_effect",
+                "application_id",
+                effect_values,
+                immutable={"created_at"},
+            )
+            reservation_columns = state_table_columns(
+                conn, "learning_experiment_reservation"
+            )
+            assignments = ["status='consumed'", "application_id=?", "updated_at=?"]
+            params: list[Any] = [application_id, now]
+            if "mutation_id" in reservation_columns:
+                assignments.append("mutation_id=?")
+                params.append(mutation_id)
+            params.append(reservation_id)
+            reservation_update = _execute(
+                conn,
+                "UPDATE learning_experiment_reservation SET "
+                + ", ".join(assignments)
+                + " WHERE reservation_id=? AND status='reserved'",
+                tuple(params),
+            )
+            if int(reservation_update.rowcount or 0) != 1:
+                existing = _execute(
+                    conn,
+                    "SELECT status, application_id FROM learning_experiment_reservation WHERE reservation_id=?",
+                    (reservation_id,),
+                ).fetchone()
+                if not existing or str(existing["status"] or "") != "consumed" or str(
+                    existing["application_id"] or ""
+                ) != application_id:
+                    raise RuntimeError("parameter_template_reservation_not_reserved")
+            if suggestion_id:
+                suggestion_columns = state_table_columns(conn, "policy_suggestion")
+                assignments = [
+                    "status='applied'",
+                    "reviewed_at=CASE WHEN reviewed_at > 0 THEN reviewed_at ELSE ? END",
+                    "review_note=?",
+                ]
+                params = [now, note or "applied parameter template switch"]
+                if "applied_mutation_id" in suggestion_columns:
+                    assignments.append("applied_mutation_id=?")
+                    params.append(mutation_id)
+                params.extend(
+                    [
+                        suggestion_id,
+                        GOVERNANCE_ELIGIBILITY_VERSION,
+                    ]
+                )
+                suggestion_update = _execute(
+                    conn,
+                    "UPDATE policy_suggestion SET "
+                    + ", ".join(assignments)
+                    + " WHERE suggestion_id=? AND status IN ('approved', 'applied')"
+                    + " AND governance_eligible=1"
+                    + " AND governance_eligibility_version=?"
+                    + " AND governance_eligibility_fingerprint<>''",
+                    tuple(params),
+                )
+                if int(suggestion_update.rowcount or 0) != 1:
+                    raise RuntimeError("parameter_template_suggestion_not_approved")
+            return {
+                "switch_id": switch_id,
+                "application_id": application_id,
+                "reservation_id": reservation_id,
+                "mutation_id": mutation_id,
+            }
+
+        mutation = plan.execute(self.db_path, transaction_writer=writer)
+        committed = bool(mutation.get("ok")) or str(mutation.get("status") or "") in {
+            "committed",
+            "committed_projection_degraded",
+        }
+        if not committed:
+            LearningExperimentAdmissionService(self.db_path).release_reservations(
+                [reservation_id]
+            )
+            return {
+                "ok": False,
+                "blocked": True,
+                "status": str(mutation.get("status") or "governance_mutation_blocked"),
+                "mutation": mutation,
+                "risk_verdict": verdict,
+                "experiment_admission": experiment_admission,
+                "boundary": boundary,
+            }
+        clear_parameter_template_recommendation_cache(self.db_path)
+        return {
+            "ok": True,
+            "blocked": False,
+            "status": str(mutation.get("status") or "committed"),
+            "projection_ready": bool(mutation.get("ok")),
+            "mutation_id": str(mutation.get("mutation_id") or ""),
+            "mutation": mutation,
+            "switch_id": switch_id,
+            "factor_id": factor_id,
+            "regime_key": regime_key,
+            "old_template_id": old_template_id,
+            "new_template_id": template_id,
+            "risk_verdict": verdict,
+            "v16_authority": dict(mutation.get("v16_authority") or {}),
+            "experiment_admission": experiment_admission,
+            "application_id": application_id,
+            "boundary": boundary,
+        }
+
+    def _activate_template_legacy(
         self,
         *,
         factor_id: str,
@@ -1337,15 +2215,32 @@ class ParameterTemplateService:
         return round(float(value) * factor, 6)
 
     def _suggestion_is_approved(self, suggestion_id: str) -> bool:
+        from backend.services.governance_control_plans import governance_coordinator_mode
+        from backend.services.governance_eligibility import (
+            GOVERNANCE_ELIGIBILITY_VERSION,
+        )
+
         with self._conn() as conn:
             row = _execute(
                 conn,
                 """
-                SELECT status FROM policy_suggestion WHERE suggestion_id=?
+                SELECT status, governance_eligible,
+                       governance_eligibility_version,
+                       governance_eligibility_fingerprint
+                FROM policy_suggestion WHERE suggestion_id=?
                 """,
                 (suggestion_id,),
             ).fetchone()
-        return bool(row and str(row["status"] or "") == "approved")
+        if not row or str(row["status"] or "") != "approved":
+            return False
+        if governance_coordinator_mode() == "off":
+            return True
+        return bool(
+            row["governance_eligible"]
+            and str(row["governance_eligibility_version"] or "")
+            == GOVERNANCE_ELIGIBILITY_VERSION
+            and str(row["governance_eligibility_fingerprint"] or "")
+        )
 
     @staticmethod
     def _max_parameter_delta(current: dict[str, Any], target: dict[str, Any]) -> float:

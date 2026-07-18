@@ -13,6 +13,10 @@ from backend.core.db import (
     is_state_db_path,
     state_table_exists,
 )
+from backend.core.state_store import (
+    is_state_schema_write_sql,
+    validate_runtime_state_schema,
+)
 from backend.services.policy_suggestion_status import count_policy_suggestion_statuses
 
 
@@ -65,9 +69,12 @@ def _sql(conn, sql: str) -> str:
 
 
 def _execute(conn, sql: str, params: Any = None):
+    rendered = _sql(conn, sql)
+    if _conn_is_pg(conn) and is_state_schema_write_sql(rendered):
+        return validate_runtime_state_schema(conn, rendered)
     if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
+        return conn.execute(rendered)
+    return conn.execute(rendered, params)
 
 
 def _ratio(numer: float, denom: float, *, default: float = 1.0) -> float:
@@ -715,12 +722,14 @@ class AutonomyHealthService:
             return "no_new_risk"
         return ""
 
-    @staticmethod
-    def _current_incident_mode() -> str:
+    def _current_incident_mode(self) -> str:
         try:
             from backend.services.incident_controls import RuntimeIncidentControlService
 
-            return str(RuntimeIncidentControlService().status().get("mode") or "normal")
+            return str(
+                RuntimeIncidentControlService(self.db_path).status().get("mode")
+                or "normal"
+            )
         except Exception:
             return "normal"
 

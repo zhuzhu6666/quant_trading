@@ -1,22 +1,27 @@
 """Liveness + db connectivity check."""
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.db import connect_duckdb
 from backend.core.paths import DB_PATH
+from backend.services.api_fact_views import health_fact_payload
 
 router = APIRouter(prefix="/api", tags=["health"])
 
 
 class HealthResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     status: str
     db: str
     ctrader: str
     server_time: str
     uptime_seconds: float
+    fact: dict[str, Any] = Field(alias="_fact")
 
 
 _START_TIME = time.time()
@@ -48,11 +53,12 @@ def health() -> HealthResponse:
     except Exception:
         ctrader_status = "unknown"
 
-    return HealthResponse(
-        status="ok" if db_status in {"connected", "locked_by_writer"} else "degraded",
-        db=db_status,
-        ctrader=ctrader_status,
-        server_time=datetime.now(timezone.utc).isoformat(),
-        uptime_seconds=time.time() - _START_TIME,
-    )
+    payload = health_fact_payload({
+        "status": "ok" if db_status in {"connected", "locked_by_writer"} else "degraded",
+        "db": db_status,
+        "ctrader": ctrader_status,
+        "server_time": datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": time.time() - _START_TIME,
+    })
+    return HealthResponse.model_validate(payload)
 

@@ -81,6 +81,7 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
                 source TEXT DEFAULT '',
                 config_json TEXT NOT NULL DEFAULT '{}',
                 run_id TEXT DEFAULT '',
+                mutation_id TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL DEFAULT 0.0
             )
             """
@@ -93,6 +94,8 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
                 overlay_hash TEXT DEFAULT '',
                 source TEXT DEFAULT '',
                 run_id TEXT DEFAULT '',
+                mutation_id TEXT NOT NULL DEFAULT '',
+                legacy_authority_json TEXT NOT NULL DEFAULT '{}',
                 updated_at REAL NOT NULL DEFAULT 0.0
             )
             """

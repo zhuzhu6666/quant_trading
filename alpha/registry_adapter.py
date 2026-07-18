@@ -368,7 +368,7 @@ class RegistryAdapter:
             conn = _connect_state(read_only=True)
             try:
                 rows = conn.execute(
-                    "SELECT factor, score, status, n_obs, rolling_ic, components_json FROM factor_health"
+                    "SELECT factor, score, status, n_obs, rolling_ic, components_json, updated_at FROM factor_health"
                 ).fetchall()
                 import json as _json
                 for r in rows:
@@ -384,6 +384,7 @@ class RegistryAdapter:
                         status=r["status"] or "UNKNOWN",
                         n_obs=int(r["n_obs"] or 0),
                         rolling_ic=float(r["rolling_ic"] or 0.0),
+                        updated_at=float(r["updated_at"] or 0.0),
                         components=comp,
                     ))
             finally:
@@ -413,6 +414,7 @@ class RegistryAdapter:
                                             status=status_label,
                                             n_obs=int(item.get("n_obs", 0)),
                                             rolling_ic=float(item.get("rolling_ic", 0.0)),
+                                            updated_at=float(item.get("updated_at", 0.0) or 0.0),
                                         ))
             except Exception:
                 pass

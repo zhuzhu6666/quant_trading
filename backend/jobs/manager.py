@@ -1,5 +1,10 @@
-"""In-process job queue + state. Single-process, in-memory, not persisted (v1)."""
+"""Compatibility job manager with optional durable PostgreSQL dispatch.
+
+The manager never creates an event-loop thread.  FastAPI explicitly binds its
+owned loop; callers without a loop execute compatibility/light work inline.
+"""
 import asyncio
+import concurrent.futures
 import inspect
 import json
 import threading
@@ -15,10 +20,10 @@ from backend.jobs.progress import ProgressCB
 from backend.jobs.state import JobState, new_job_id
 
 
-def _state_conn():
+def _state_conn(*, read_only: bool = False):
     from backend.core.db import get_state_pg_conn
 
-    return get_state_pg_conn()
+    return get_state_pg_conn(read_only=read_only)
 
 
 def _state_sql(sql: str) -> str:
@@ -26,54 +31,86 @@ def _state_sql(sql: str) -> str:
 
 
 class JobManager:
-    """Manages long-running tasks. v1: single process, in-memory dict + JSONL persist.
+    """Manage local light tasks and durable heavy-job compatibility queries.
 
     Persisted to data/charts/jobs.jsonl so jobs survive backend restart.
     """
 
     PERSIST_PATH = Path("data/charts/jobs.jsonl")
     MAX_PERSISTED = 200
+    LOCAL_EXECUTOR_MAX_WORKERS = 2
+    PERSISTENT_JOB_KINDS = frozenset(
+        {
+            "backtest",
+            "discover",
+            "tuning",
+            "ab_test",
+            "external_refresh",
+            "sync",
+            "factor_health",
+            "parameter_template_validation",
+        }
+    )
     _instances: "weakref.WeakSet[JobManager]" = weakref.WeakSet()
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        persistent_enabled: bool | None = None,
+        persistent_queue: Any = None,
+        local_executor_factory: Callable[[], concurrent.futures.Executor] | None = None,
+    ) -> None:
         self._jobs: dict[str, JobState] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
-        self._owns_loop = False
         self._lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._accepting = True
+        self._local_executor: concurrent.futures.Executor | None = None
+        self._local_executor_factory = local_executor_factory or (
+            lambda: concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.LOCAL_EXECUTOR_MAX_WORKERS,
+                thread_name_prefix="job-manager-local",
+            )
+        )
+        if persistent_enabled is None:
+            from backend.core.static_feature_flags import shared_static_feature_flags
+
+            persistent_enabled = shared_static_feature_flags().pg_job_queue_v2_enabled
+        self._persistent_enabled = bool(persistent_enabled)
+        self._persistent_queue = persistent_queue
         self._instances.add(self)
-        self._ensure_loop()
-        self._load_persisted()
+        if not self._persistent_enabled:
+            self._load_persisted()
 
-    def _ensure_loop(self) -> None:
+    @property
+    def has_implicit_loop_thread(self) -> bool:
+        return False
+
+    @property
+    def local_executor_started(self) -> bool:
         with self._lock:
-            if self._loop is not None:
-                return
-            loop = asyncio.new_event_loop()
+            return self._local_executor is not None
 
-            def runner() -> None:
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_forever()
-                finally:
-                    try:
-                        loop.run_until_complete(loop.shutdown_asyncgens())
-                        loop.run_until_complete(loop.shutdown_default_executor())
-                    except Exception:
-                        pass
-                    loop.close()
+    def _executor(self) -> concurrent.futures.Executor:
+        with self._lock:
+            if not self._accepting:
+                raise RuntimeError("job_manager_draining")
+            if self._local_executor is None:
+                self._local_executor = self._local_executor_factory()
+            return self._local_executor
 
-            t = threading.Thread(target=runner, name="JobManagerLoop", daemon=True)
-            t.start()
-            self._thread = t
-            self._loop = loop
-            self._owns_loop = True
+    def _queue(self):
+        if self._persistent_queue is None:
+            from backend.jobs.pg_queue import PgJobQueue
+
+            self._persistent_queue = PgJobQueue()
+        return self._persistent_queue
 
     def _load_persisted(self) -> None:
         """从 PostgreSQL state store 加载持久化 jobs。降级到 JSONL。"""
         try:
-            conn = _state_conn()
+            conn = _state_conn(read_only=True)
             try:
                 rows = conn.execute(
                     _state_sql("SELECT * FROM jobs WHERE status IN ('running','pending') ORDER BY updated_at DESC LIMIT ?"),
@@ -191,11 +228,10 @@ class JobManager:
             logger.warning("failed to persist job {}", js.id)
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Optional: rebind to a specific loop (e.g. the FastAPI app loop).
-        If not called, JobManager runs its own background loop."""
+        """Bind the framework-owned loop used for local compatibility work."""
         with self._lock:
+            self._accepting = True
             self._loop = loop
-            self._owns_loop = False
 
     def submit(
         self,
@@ -209,26 +245,72 @@ class JobManager:
         if the service function needs them. params are also stored in JobState
         for visibility via to_dict().
 
-        Always schedules onto self._loop (the background loop or the bound loop)
-        via run_coroutine_threadsafe, so it works from any thread.
+        Heavy supported kinds enter PostgreSQL when the release-time queue flag
+        is enabled.  Other jobs use the explicitly bound framework loop; a
+        non-framework caller executes the compatibility function inline.
         """
-        self._ensure_loop()
+        with self._lock:
+            if not self._accepting:
+                raise RuntimeError("job_manager_draining")
+        if self._persistent_enabled and kind in self.PERSISTENT_JOB_KINDS:
+            idempotency_key = str(params.get("_idempotency_key") or "")
+            return self._queue().enqueue(
+                kind,
+                params,
+                idempotency_key=idempotency_key,
+                priority=int(params.get("_priority") or 0),
+                max_attempts=max(1, int(params.get("_max_attempts") or 3)),
+            )
+
         js = JobState(id=new_job_id(), kind=kind, params=params)
         self._jobs[js.id] = js
-        # Try to use a running loop in the calling thread first (cheaper),
-        # else fall back to the background loop via run_coroutine_threadsafe.
+        # Use the caller loop when available, otherwise hand work to the
+        # explicitly bound framework loop via run_coroutine_threadsafe.
         try:
             caller_loop = asyncio.get_running_loop()
         except RuntimeError:
             caller_loop = None
-        if caller_loop is not None and caller_loop is self._loop:
+        with self._lock:
+            if self._loop is None and caller_loop is not None:
+                self._loop = caller_loop
+            target_loop = self._loop
+        if caller_loop is not None and caller_loop is target_loop:
             task = caller_loop.create_task(self._run(js, fn))
-        else:
-            assert self._loop is not None  # _ensure_loop set it
-            future = asyncio.run_coroutine_threadsafe(self._run(js, fn), self._loop)
+            self._tasks[js.id] = task
+        elif target_loop is not None and target_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(self._run(js, fn), target_loop)
             task = _FutureShim(future)
-        self._tasks[js.id] = task
+            self._tasks[js.id] = task
+        else:
+            self._run_inline(js, fn)
         return js
+
+    def _run_inline(self, js: JobState, fn: Callable[[ProgressCB], Any]) -> None:
+        """Run a compatibility/light task without creating a loop thread."""
+        if inspect.iscoroutinefunction(fn):
+            asyncio.run(self._run(js, fn))
+            return
+        js.status = "running"
+        terminal_status = "done"
+        try:
+            def cb(step: str, pct: float, msg: str) -> None:
+                js.progress_pct = max(0.0, min(100.0, pct))
+                js.current_step = step
+                js.log_tail = (js.log_tail + [f"[{step} {pct:.0f}%] {msg}"])[-50:]
+
+            result = fn(cb)
+            if inspect.isawaitable(result):
+                result = asyncio.run(result)
+            js.result = result if isinstance(result, dict) else {"value": result}
+            js.progress_pct = 100.0
+        except Exception as exc:
+            terminal_status = "error"
+            js.error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-500:]}"
+            logger.error("job {} ({}) failed inline: {}", js.id, js.kind, exc)
+        finally:
+            js.finished_at = datetime.now(timezone.utc)
+            self._append_persisted(js, status=terminal_status)
+            js.status = terminal_status
 
     async def _run(self, js: JobState, fn: Callable[[ProgressCB], Any]) -> None:
         js.status = "running"
@@ -244,9 +326,12 @@ class JobManager:
             if inspect.iscoroutinefunction(fn):
                 result = await fn(cb)
             else:
-                # Allow sync functions too (run in default executor of the job loop).
+                # Sync compatibility work uses an explicitly process-owned,
+                # bounded executor.  Never borrow the framework default
+                # executor: doing so leaves shutdown_default_executor waiting
+                # on threads that the JobManager cannot drain itself.
                 running_loop = asyncio.get_running_loop()
-                result = await running_loop.run_in_executor(None, fn, cb)
+                result = await running_loop.run_in_executor(self._executor(), fn, cb)
 
             js.result = result if isinstance(result, dict) else {"value": result}
             js.progress_pct = 100.0
@@ -265,63 +350,76 @@ class JobManager:
             self._tasks.pop(js.id, None)
 
     def get(self, job_id: str) -> JobState | None:
-        return self._jobs.get(job_id)
+        local = self._jobs.get(job_id)
+        if local is not None:
+            return local
+        if not self._persistent_enabled:
+            return None
+        try:
+            return self._queue().get(job_id)
+        except Exception:
+            return None
 
     def list(self, kind: str | None = None, status: str | None = None) -> list[JobState]:
-        out = list(self._jobs.values())
-        if kind is not None:
-            out = [j for j in out if j.kind == kind]
-        if status is not None:
-            out = [j for j in out if j.status == status]
-        return sorted(out, key=lambda j: j.started_at, reverse=True)
+        merged: dict[str, JobState] = {}
+        if self._persistent_enabled:
+            try:
+                merged.update({job.id: job for job in self._queue().list(kind=kind, status=status)})
+            except Exception:
+                pass
+        for job in self._jobs.values():
+            if kind is not None and job.kind != kind:
+                continue
+            if status is not None and job.status != status:
+                continue
+            merged[job.id] = job
+        return sorted(merged.values(), key=lambda job: job.started_at, reverse=True)
 
     def cancel(self, job_id: str) -> bool:
         task = self._tasks.get(job_id)
-        if task is None or task.done():
+        if task is not None and not task.done():
+            task.cancel()
+            return True
+        if not self._persistent_enabled:
             return False
-        task.cancel()
-        return True
+        try:
+            return bool(self._queue().request_cancel(job_id))
+        except Exception:
+            return False
 
-    def shutdown(self, *, timeout: float = 5.0) -> None:
-        """Stop the owned background loop and its default executor.
+    def shutdown(self, *, timeout: float = 5.0) -> dict[str, Any]:
+        """Stop admission and synchronously join the owned local executor.
 
-        FastAPI may bind a manager to an application loop; that loop is owned
-        by the framework, so this only stops loops created by JobManager itself.
+        Durable PG jobs have no executor in the API process.  Legacy/local
+        closures are bounded to short compatibility work and are drained here;
+        repeated or concurrent shutdown calls share this single join boundary.
+        ``timeout`` remains a compatibility argument -- Python's executor API
+        has no safe timed join, so ownership is retained until running work
+        actually returns instead of abandoning a mutating thread.
         """
-        loop = self._loop
-        thread = self._thread
-        if loop is None or not self._owns_loop:
-            return
-        for task in list(self._tasks.values()):
-            try:
-                if not task.done():
-                    task.cancel()
-            except Exception:
-                pass
-
-        async def _cancel_pending() -> None:
-            current = asyncio.current_task()
-            pending = [task for task in asyncio.all_tasks(loop) if task is not current and not task.done()]
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-
-        if loop.is_running():
-            try:
-                future = asyncio.run_coroutine_threadsafe(_cancel_pending(), loop)
-                future.result(timeout=timeout)
-            except Exception:
-                pass
-            try:
-                loop.call_soon_threadsafe(loop.stop)
-            except Exception:
-                pass
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-        self._loop = None
-        self._thread = None
-        self._owns_loop = False
+        del timeout
+        with self._shutdown_lock:
+            with self._lock:
+                self._accepting = False
+                tasks = list(self._tasks.values())
+                executor = self._local_executor
+                self._local_executor = None
+                self._loop = None
+            for task in tasks:
+                try:
+                    if not task.done():
+                        task.cancel()
+                except Exception:
+                    pass
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            self._tasks.clear()
+            return {
+                "ok": True,
+                "status": "completed" if executor is not None or tasks else "idle",
+                "executor_started": executor is not None,
+                "task_count": len(tasks),
+            }
 
 
 class _FutureShim:
@@ -358,7 +456,7 @@ def get_job_manager() -> JobManager:
 
 
 def shutdown_job_managers_for_tests() -> None:
-    """Shutdown every JobManager loop created in this process."""
+    """Cancel local compatibility tasks held by managers in this process."""
     global _manager
     for manager in list(JobManager._instances):
         manager.shutdown()

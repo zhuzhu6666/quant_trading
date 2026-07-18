@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import backend.runtime.factor_governance_orchestrator as governance_module
 from backend.runtime.factor_governance_orchestrator import FactorGovernanceOrchestrator
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
 from config import runtime_config as rc
@@ -17,22 +18,39 @@ class _AllowRisk:
         )
 
 
-def test_orchestrator_promotes_eligible_shadow_without_human_approval(monkeypatch, tmp_path):
+def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeypatch, tmp_path):
     rc.reset_for_tests()
     orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
     orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
-    promoted = []
+    prepared = []
     audited = []
 
     class _Adapter:
-        def promote(self, name, new_source, reason=""):
-            promoted.append((name, new_source, reason))
-            return True
+        def get_meta(self, name):
+            return {"source": "shadow", "description": "ts_mean(close, 5)"}
+
+    class _Lifecycle:
+        def __init__(self, _db_path, *, adapter):
+            self.adapter = adapter
+
+        def get_state(self, *, factor_name):
+            return {}
+
+        def prepare_promotion(self, **kwargs):
+            prepared.append(kwargs)
+            return {
+                "ok": True,
+                "status": "committed",
+                "lifecycle_stage": "PROMOTION_PREPARED",
+                "mutation_id": "mutation-prepare-1",
+            }
 
     monkeypatch.setattr(
         "alpha.registry_adapter.RegistryAdapter.shared",
         classmethod(lambda cls: _Adapter()),
     )
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
     monkeypatch.setattr(
         "backend.services.factor_weight_change.FactorWeightChangeService._replay_admission",
         lambda _self, _decisions: {
@@ -69,11 +87,84 @@ def test_orchestrator_promotes_eligible_shadow_without_human_approval(monkeypatc
 
     actions = orch._promote_shadow_candidates(catalog, {"run_id": "test-run"})
 
-    assert promoted == [("shadow_alpha_1", "discovered", "autonomous_governance_v3")]
+    assert len(prepared) == 1
+    assert prepared[0]["name"] == "shadow_alpha_1"
+    assert prepared[0]["expression"] == "ts_mean(close, 5)"
+    assert actions[0]["status"] == "promotion_prepared"
+    assert "shadow_alpha_1" not in rc.shared().factor_portfolio_weights
+
+
+def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkeypatch, tmp_path):
+    rc.reset_for_tests()
+    rc.patch({"factor_governance_new_factor_weight": 0.3})
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    activated = []
+
+    class _Adapter:
+        pass
+
+    class _Lifecycle:
+        def __init__(self, _db_path, *, adapter):
+            self.adapter = adapter
+
+        def get_state(self, *, factor_name):
+            return {"factor_name": factor_name, "lifecycle_stage": "PROMOTION_PREPARED"}
+
+        def activate(self, **kwargs):
+            activated.append(kwargs)
+            return {
+                "ok": True,
+                "status": "committed",
+                "lifecycle_stage": "ACTIVE",
+                "mutation_id": "mutation-active-1",
+            }
+
+    monkeypatch.setattr(
+        "alpha.registry_adapter.RegistryAdapter.shared",
+        classmethod(lambda cls: _Adapter()),
+    )
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch,
+        "_audit_action",
+        lambda _run, item, action, status, *_args, **_kwargs: {
+            "factor_id": item["factor_id"], "action": action, "status": status
+        },
+    )
+
+    catalog = [{
+        "factor_id": "shadow_alpha_1",
+        "source": "shadow",
+        "role": "alpha",
+        "canary": {"stage": "ACTIVE"},
+        "shadow_perf": {
+            "oos_bars": 120,
+            "n_valid": 100,
+            "cumulative_pnl": 1.2,
+            "hit_rate": 0.55,
+            "max_drawdown": 0.01,
+        },
+        "health_status": "UNKNOWN",
+        "health_score": 0.0,
+    }]
+
+    actions = orch._promote_shadow_candidates(
+        catalog,
+        {"run_id": "activation-run"},
+        v16_authority={
+            "command_id": "v16-command-1",
+            "target_agent": "factor_governance",
+            "evidence_fingerprint": "evidence-1",
+        },
+    )
+
     assert actions[0]["status"] == "applied"
-    cfg = rc.shared()
-    assert cfg.factor_signal_config["shadow_alpha_1"]["source"] == "discovered"
-    assert cfg.factor_portfolio_weights["shadow_alpha_1"] == 0.3
+    assert activated[0]["name"] == "shadow_alpha_1"
+    assert activated[0]["weight"] == rc.shared().factor_governance_new_factor_weight
+    assert activated[0]["v16"].command_id == "v16-command-1"
+    assert activated[0]["v16"].evidence_fingerprint == "evidence-1"
 
 
 def test_orchestrator_does_not_promote_shadow_without_evidence():
@@ -244,14 +335,15 @@ def test_pending_effect_gate_releases_factor_after_final_effect(monkeypatch):
         "backend.runtime.factor_governance_orchestrator.get_state_pg_conn",
         lambda read_only: _Conn(),
     )
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
 
-    assert FactorGovernanceOrchestrator._factor_has_pending_effect("rsi_14") is False
+    assert orchestrator._factor_has_pending_effect("rsi_14") is False
 
     row.update(application_status="applied", effect_status="mixed")
-    assert FactorGovernanceOrchestrator._factor_has_pending_effect("rsi_14") is True
+    assert orchestrator._factor_has_pending_effect("rsi_14") is True
 
     row.update(application_status="observing", effect_status="reinforced")
-    assert FactorGovernanceOrchestrator._factor_has_pending_effect("rsi_14") is True
+    assert orchestrator._factor_has_pending_effect("rsi_14") is True
 
 
 def test_scoped_factor_rollback_preserves_unrelated_runtime_config():
@@ -270,3 +362,164 @@ def test_scoped_factor_rollback_preserves_unrelated_runtime_config():
     assert patch["factor_signal_config"]["rsi_14"]["enabled"] is True
     assert "ema_slope" not in patch["factor_signal_config"]
     assert patch["factor_portfolio_weights"] == {"rsi_14": 0.4}
+
+
+def test_discovered_disable_uses_lifecycle_coordinator_in_enforce(
+    monkeypatch, tmp_path
+):
+    import backend.services.governance_control_plans as control_plans
+
+    rc.reset_for_tests()
+    rc.patch({
+        "factor_signal_config": {
+            "weak_discovered": {
+                "enabled": True,
+                "lifecycle_status": "ACTIVE",
+            }
+        },
+        "factor_portfolio_weights": {"weak_discovered": 0.2},
+    })
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    quarantined = []
+    audits = []
+
+    class _Adapter:
+        def get_meta(self, name):
+            assert name == "weak_discovered"
+            return {
+                "source": "discovered",
+                "description": "rank(close)",
+                "artifact_hash": "a" * 64,
+            }
+
+    class _Lifecycle:
+        def __init__(self, _db_path, *, adapter):
+            assert isinstance(adapter, _Adapter)
+
+        def quarantine(self, **kwargs):
+            quarantined.append(kwargs)
+            return {
+                "ok": True,
+                "status": "committed",
+                "mutation_id": "mutation-quarantine",
+                "lifecycle_stage": "QUARANTINED",
+            }
+
+    monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "enforce")
+    monkeypatch.setattr(
+        governance_module.RegistryAdapter,
+        "shared",
+        classmethod(lambda cls: _Adapter()),
+    )
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch,
+        "_apply_runtime_patch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("direct runtime lifecycle patch used")
+        ),
+    )
+    monkeypatch.setattr(
+        orch,
+        "_audit_action",
+        lambda _run, _item, action, status, *_args, **kwargs: audits.append(
+            {"action": action, "status": status, "result": kwargs.get("result")}
+        ) or audits[-1],
+    )
+
+    actions = orch._disable_weak_live_alpha(
+        [{
+            "factor_id": "weak_discovered",
+            "source": "discovered",
+            "role": "alpha",
+            "eligible_for_live": True,
+            "health_score": 10.0,
+            "health_status": "DECAYING",
+        }],
+        {"run_id": "disable-run"},
+    )
+
+    assert len(quarantined) == 1
+    assert quarantined[0]["name"] == "weak_discovered"
+    assert actions[0]["status"] == "applied"
+    assert audits[0]["result"]["mutation_id"] == "mutation-quarantine"
+
+
+def test_failed_disable_is_never_audited_as_applied(monkeypatch, tmp_path):
+    rc.reset_for_tests()
+    rc.patch({
+        "factor_signal_config": {"weak_builtin": {"enabled": True}},
+        "factor_portfolio_weights": {"weak_builtin": 0.2},
+    })
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    audits = []
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch,
+        "_apply_runtime_patch",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "status": "blocked_v16_command_required",
+        },
+    )
+    monkeypatch.setattr(
+        orch,
+        "_audit_action",
+        lambda _run, _item, action, status, *_args, **kwargs: audits.append(
+            {"action": action, "status": status, "result": kwargs.get("result")}
+        ) or audits[-1],
+    )
+
+    actions = orch._disable_weak_live_alpha(
+        [{
+            "factor_id": "weak_builtin",
+            "source": "builtin",
+            "role": "alpha",
+            "eligible_for_live": True,
+            "health_score": 10.0,
+            "health_status": "DECAYING",
+        }],
+        {"run_id": "blocked-disable"},
+    )
+
+    assert actions[0]["status"] == "blocked_by_evidence"
+    assert audits[0]["result"]["durably_committed"] is False
+
+
+def test_coordinator_audit_does_not_create_second_executable_fact(
+    monkeypatch, tmp_path
+):
+    import backend.services.governance_control_plans as control_plans
+
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "enforce")
+    monkeypatch.setattr(
+        governance_module,
+        "get_state_pg_conn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("post-commit executable audit write attempted")
+        ),
+    )
+
+    suggestion_id = orch._record_policy_suggestion(
+        "factor",
+        "promote_factor",
+        "applied",
+        {},
+        "decision-1",
+    )
+    orch._record_learning_application(
+        "factor",
+        "promote_factor",
+        "applied",
+        suggestion_id,
+        {},
+        {},
+        {"mutation_id": "mutation-1"},
+    )
+
+    assert suggestion_id == ""

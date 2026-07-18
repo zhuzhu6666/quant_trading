@@ -15,7 +15,7 @@ from backend.services.execution_semantics import (
     validate_execution_semantics,
 )
 from backend.services.mutation_audit import confirm_header_valid, record_api_mutation
-from config.runtime_config import RuntimeConfig, replace as replace_runtime_config
+from config.runtime_config import RuntimeConfig
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
@@ -323,10 +323,21 @@ def patch_runtime_config(
     if not isinstance(current, dict):
         current = {}
 
-    before_runtime = RuntimeConfig.from_yaml(current)
+    # The in-process RuntimeConfig is the live projection of YAML base plus
+    # the committed governance overlay.  Generic observability changes must
+    # patch that authority narrowly; rebuilding from YAML here would silently
+    # reset every overlay-owned governance/risk/execution field.
+    from config import runtime_config
+
+    before_runtime = runtime_config.shared()
     before_semantics = evaluate_execution_semantics(current, before_runtime)
-    merged_runtime = RuntimeConfig.from_yaml(current).to_dict()
-    merged_runtime.update(runtime_patch)
+    if not isinstance(runtime_patch.get("observability_metrics_enabled"), bool):
+        raise ValueError("invalid_runtime_value: observability_metrics_enabled must be boolean")
+    normalized_patch = {
+        "observability_metrics_enabled": bool(runtime_patch["observability_metrics_enabled"]),
+    }
+    merged_runtime = before_runtime.to_dict()
+    merged_runtime.update(normalized_patch)
     validated_runtime = RuntimeConfig.from_dict(merged_runtime)
     _validate_runtime_bounds(validated_runtime.to_dict())
     after_semantics = validate_execution_semantics(current, validated_runtime)
@@ -351,16 +362,25 @@ def patch_runtime_config(
     if not isinstance(runtime_section, dict):
         runtime_section = {}
         current["runtime"] = runtime_section
-    for key in GENERIC_RUNTIME_ALLOWED_KEYS & runtime_patch.keys():
+    for key in GENERIC_RUNTIME_ALLOWED_KEYS & normalized_patch.keys():
         runtime_section[key] = getattr(validated_runtime, key)
 
     yaml_text = yaml.safe_dump(current, sort_keys=False, allow_unicode=True)
     result = put_config(yaml_text, x_confirm=x_confirm, user=user, endpoint=endpoint, audit=False)
-    replace_runtime_config(validated_runtime)
+    # Keep the immutable YAML/base layer current so a later committed-overlay
+    # refresh also retains this operator-owned observability value.  The
+    # overlay itself and its hash are deliberately untouched.
+    runtime_config.register_overlay_base(
+        RuntimeConfig.from_yaml(current),
+        replace_existing=True,
+    )
+    runtime_version = runtime_config.patch(normalized_patch)
+    published_runtime = runtime_config.shared_holder().get()
     result["config_runtime_drift"] = config_runtime_drift(current)
     result["requires_restart"] = bool(result["config_runtime_drift"].get("drift"))
-    result["runtime"] = validated_runtime.to_dict()
-    result["updated_keys"] = sorted(runtime_patch.keys())
+    result["runtime"] = published_runtime.to_dict()
+    result["runtime_version"] = runtime_version
+    result["updated_keys"] = sorted(normalized_patch.keys())
     record_api_mutation(
         user=user,
         endpoint=endpoint,

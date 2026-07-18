@@ -13,6 +13,10 @@ from backend.core.db import (
     is_state_db_path,
     state_table_exists,
 )
+from backend.core.state_store import (
+    is_state_schema_write_sql,
+    validate_runtime_state_schema,
+)
 from backend.services.evolution_ledger import current_runtime_config_snapshot
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.replay_harness import ReplayHarnessService
@@ -53,9 +57,12 @@ def _sql(conn, sql: str) -> str:
 
 
 def _execute(conn, sql: str, params: Any = None):
+    rendered = _sql(conn, sql)
+    if _conn_is_pg(conn) and is_state_schema_write_sql(rendered):
+        return validate_runtime_state_schema(conn, rendered)
     if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
+        return conn.execute(rendered)
+    return conn.execute(rendered, params)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -174,7 +181,21 @@ class ReleaseControlService:
                 "readiness_effect": incident.get("readiness_effect") or {},
             },
             "readiness": {
-                "ready_for_frontend": bool((readiness or {}).get("ready_for_frontend", False)),
+                "ready_for_release": bool(
+                    (readiness or {}).get(
+                        "ready_for_release",
+                        not bool((readiness or {}).get("blockers") or []),
+                    )
+                ),
+                "ready_for_live_execution": bool(
+                    (readiness or {}).get("ready_for_live_execution", False)
+                ),
+                "ready_for_live_alpha": bool(
+                    (readiness or {}).get("ready_for_live_alpha", False)
+                ),
+                "ready_for_autonomous_mutation": bool(
+                    (readiness or {}).get("ready_for_autonomous_mutation", False)
+                ),
                 "autonomy_posture": posture,
                 "blocker_count": len((readiness or {}).get("blockers") or []),
             },
@@ -192,6 +213,7 @@ class ReleaseControlService:
             bool(checklist["runtime_config_snapshot"]["ok"])
             and bool(checklist["replay"]["ok"])
             and replay_grade not in {"failed"}
+            and bool(checklist["readiness"]["ready_for_release"])
         )
         return checklist
 

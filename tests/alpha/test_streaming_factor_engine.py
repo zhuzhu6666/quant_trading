@@ -13,9 +13,24 @@ import pytest
 from alpha.streaming_factor_engine import StreamingFactorEngine
 from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
+from backend.services.factor_identity import canonical_factor_id, factor_definition_fingerprint
 
 
 # ── 测试辅助 ──────────────────────────────────────────────
+
+def _active_discovered_config(expression="ts_mean(close, 5)"):
+    fingerprint = factor_definition_fingerprint(expression)
+    return {
+        "enabled": True,
+        "source": "discovered",
+        "lifecycle_status": "ACTIVE",
+        "committed_mutation_id": "mutation:test",
+        "expression": expression,
+        "factor_id": canonical_factor_id(expression),
+        "definition_fingerprint": fingerprint,
+        "artifact_hash": fingerprint,
+        "weight": 0.1,
+    }
 
 def _make_bar(close=4500.0, open_=4495.0, high=4505.0, low=4490.0,
               volume=100.0, t=None):
@@ -296,6 +311,25 @@ class TestAppendBar:
 
 class TestRefreshFactorList:
 
+    @pytest.fixture(autouse=True)
+    def _persisted_builtin_health(self, monkeypatch):
+        """Keep selection tests focused while satisfying the live health gate."""
+
+        class _Adapter:
+            def list_by_source(self, _source):
+                return []
+
+            def dead_names(self):
+                return []
+
+            def all_statuses(self):
+                return [
+                    SimpleNamespace(factor=name, status="HEALTHY", n_obs=100)
+                    for name in TEST_FACTORS
+                ]
+
+        monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+
     def test_refresh_discovers_new_factors(self):
         """refresh_factor_list 应发现新注册的因子."""
         engine = StreamingFactorEngine()
@@ -392,15 +426,28 @@ class TestRefreshFactorList:
                 return dict(self._meta.get(name, {"source": "builtin"}))
 
             def all_statuses(self):
+                now = time.time()
                 return [
                     SimpleNamespace(factor="rsi_14", status="HEALTHY", n_obs=100),
-                    SimpleNamespace(factor=discovered, status="HEALTHY", n_obs=100),
+                    SimpleNamespace(
+                        factor=discovered,
+                        status="HEALTHY",
+                        score=100.0,
+                        n_obs=1_000,
+                        rolling_ic=0.2,
+                        updated_at=now,
+                    ),
                 ]
 
         monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
 
         try:
-            engine = StreamingFactorEngine(factor_runtime_config={"rsi_14": {"enabled": True}})
+            engine = StreamingFactorEngine(
+                factor_runtime_config={
+                    "rsi_14": {"enabled": True},
+                    discovered: _active_discovered_config(),
+                }
+            )
             assert engine._available_factors == ["rsi_14", discovered]
 
             result = {}

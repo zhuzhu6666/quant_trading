@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from backend.services.live_loop_shell import (
+    acknowledge_prepared_factor_projections,
     adaptive_weight_config,
     compare_spot_quote_to_latest_bar,
     apply_factor_pipeline_config_update,
@@ -39,6 +40,43 @@ def _state_get_factory(state: dict):
         return state.get(key, default)
 
     return _get
+
+
+def test_factor_projection_ack_failure_is_non_fatal_to_live_loop():
+    class _UnavailableLifecycle:
+        def acknowledge_loaded_prepared_factors(self, **_kwargs):
+            raise RuntimeError("state store unavailable")
+
+    logs: list[str] = []
+    result = acknowledge_prepared_factor_projections(
+        engine=object(),
+        generation_id="generation-3",
+        log=logs.append,
+        service=_UnavailableLifecycle(),
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "projection_ack_unavailable"
+    assert result["acknowledged_count"] == 0
+    assert logs and "projection_ack_unavailable" in logs[0]
+
+
+def test_factor_projection_ack_uses_process_boot_id_when_generation_controller_is_off():
+    captured = {}
+
+    class _Lifecycle:
+        def acknowledge_loaded_prepared_factors(self, **kwargs):
+            captured.update(kwargs)
+            return {"ok": True, "status": "projection_ack_complete", "acknowledged_count": 0}
+
+    result = acknowledge_prepared_factor_projections(
+        engine=object(),
+        generation_id="",
+        service=_Lifecycle(),
+    )
+
+    assert result["ok"] is True
+    assert str(captured["boot_id"]).startswith("live-alpha:")
 
 
 def test_loop_status_snapshot_explicit_stopped_preserves_cached_fields():
@@ -128,9 +166,9 @@ def test_mark_loop_stopped_for_display_only_clears_loop_display_fields():
     assert state["account"]["balance"] == 999.0
 
 
-def test_cache_age_seconds_uses_zero_for_missing_timestamp():
+def test_cache_age_seconds_marks_missing_timestamp_unknown():
     assert cache_age_seconds(now_ts=100.0, updated_at=90.0) == 10.0
-    assert cache_age_seconds(now_ts=100.0, updated_at=0.0) == 0.0
+    assert cache_age_seconds(now_ts=100.0, updated_at=0.0) is None
     assert cache_age_seconds(now_ts=100.0, updated_at=120.0) == 0.0
 
 
@@ -172,10 +210,13 @@ def test_collect_open_risk_runtime_health_falls_back_when_collectors_unavailable
     )
 
     assert payload == {
-        "data_lag_seconds": 0.0,
+        "data_lag_seconds": 1_000_000_000_000.0,
         "runtime_health": {
+            "data_lag_state": "unknown",
             "account_cache_age_seconds": 30.0,
-            "positions_cache_age_seconds": 0.0,
+            "account_cache_age_state": "known",
+            "positions_cache_age_seconds": None,
+            "positions_cache_age_state": "unknown",
             "sync_health": {},
             "system_health": {},
         },
@@ -207,8 +248,11 @@ def test_collect_open_risk_runtime_health_uses_injected_collectors():
     assert payload == {
         "data_lag_seconds": 12.5,
         "runtime_health": {
+            "data_lag_state": "known",
             "account_cache_age_seconds": 20.0,
+            "account_cache_age_state": "known",
             "positions_cache_age_seconds": 25.0,
+            "positions_cache_age_state": "known",
             "sync_health": {"ok": True},
             "system_health": {
                 "overall": "ok",

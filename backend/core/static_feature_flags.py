@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 
 SAFETY_PLANE_MODES = frozenset({"off", "shadow", "enforce"})
+GOVERNANCE_COORDINATOR_MODES = frozenset({"off", "dual_record", "enforce"})
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -27,6 +28,8 @@ class StaticFeatureFlags:
     live_safety_plane_v2_mode: str = "off"
     live_generation_controller_v2_enabled: bool = False
     ctrader_execution_outcome_v2_enabled: bool = False
+    governance_mutation_coordinator_v2_mode: str = "off"
+    pg_job_queue_v2_enabled: bool = False
 
     @classmethod
     def from_sources(
@@ -49,6 +52,18 @@ class StaticFeatureFlags:
                 "invalid_live_safety_plane_v2_mode: "
                 f"{safety_mode!r}; expected one of {sorted(SAFETY_PLANE_MODES)}"
             )
+        governance_mode = str(
+            env.get(
+                "QUANT_GOVERNANCE_MUTATION_COORDINATOR_V2_MODE",
+                features.get("governance_mutation_coordinator_v2_mode", "off"),
+            )
+            or "off"
+        ).strip().lower()
+        if governance_mode not in GOVERNANCE_COORDINATOR_MODES:
+            raise ValueError(
+                "invalid_governance_mutation_coordinator_v2_mode: "
+                f"{governance_mode!r}; expected one of {sorted(GOVERNANCE_COORDINATOR_MODES)}"
+            )
         return cls(
             live_safety_plane_v2_mode=safety_mode,
             live_generation_controller_v2_enabled=_as_bool(
@@ -61,6 +76,13 @@ class StaticFeatureFlags:
                 env.get(
                     "QUANT_CTRADER_EXECUTION_OUTCOME_V2_ENABLED",
                     features.get("ctrader_execution_outcome_v2_enabled", False),
+                )
+            ),
+            governance_mutation_coordinator_v2_mode=governance_mode,
+            pg_job_queue_v2_enabled=_as_bool(
+                env.get(
+                    "QUANT_PG_JOB_QUEUE_V2_ENABLED",
+                    features.get("pg_job_queue_v2_enabled", False),
                 )
             ),
         )

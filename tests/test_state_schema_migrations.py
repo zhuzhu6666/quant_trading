@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 from backend.core import db
 from backend.core.state_schema_migrations import (
     STATE_SCHEMA_BASELINE_TABLES,
+    STATE_SCHEMA_MIN_VERSION,
     STATE_SCHEMA_MIGRATION_LOCK_ID,
     STATE_SCHEMA_MIGRATIONS,
     StateSchemaMigrationError,
@@ -107,6 +109,21 @@ def _applied_v1() -> dict[int, dict[str, Any]]:
     }
 
 
+def _applied_all() -> dict[int, dict[str, Any]]:
+    return {
+        migration.version: {
+            "version": migration.version,
+            "migration_name": migration.name,
+            "checksum": migration.checksum(),
+            "statement_count": len(migration.statements()),
+            "runner_id": "test",
+            "execution_ms": 1.0,
+            "applied_at": 1.0,
+        }
+        for migration in STATE_SCHEMA_MIGRATIONS
+    }
+
+
 def test_phase0b_migration_contains_required_tables_and_columns() -> None:
     sql = STATE_SCHEMA_MIGRATIONS[0].sql()
 
@@ -136,6 +153,152 @@ def test_phase0b_migration_contains_required_tables_and_columns() -> None:
     assert "ADD COLUMN IF NOT EXISTS" not in sql
 
 
+def test_phase3_migration_adds_projection_recovery_and_active_scope_gate() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[1].sql()
+
+    for column in (
+        "projection_attempts",
+        "projection_error_json",
+        "rolled_back_at",
+        "rollback_mutation_id",
+        "superseded_at",
+        "superseded_by_mutation_id",
+    ):
+        assert column in sql
+    assert "idx_governance_mutation_active_scope" in sql
+    assert "status IN ('reserved', 'prepared')" in sql
+
+
+def test_phase5_migration_adds_durable_jobs_and_retires_runtime_ddl() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[2].sql()
+
+    for column in (
+        "claim_token",
+        "heartbeat_at",
+        "lease_expires_at",
+        "cancel_requested",
+        "idempotency_key",
+        "max_attempts",
+        "attempt_count",
+        "log_tail_json",
+    ):
+        assert column in sql
+    assert "idx_jobs_claim_ready" in sql
+    assert "idx_jobs_running_lease" in sql
+    assert "idx_jobs_kind_idempotency" in sql
+    assert "handler_version TEXT NOT NULL DEFAULT 'legacy'" in sql
+    assert "SKIP LOCKED" not in sql
+    for compatibility_object in (
+        "supervisor_counterfactual_history",
+        "learning_experiment_reservation",
+        "nursery_exploration_reservation",
+        "idx_proposal_registry_projection_key",
+        "idx_v16_brain_command_claim",
+    ):
+        assert compatibility_object in sql
+
+
+def test_phase5_runtime_schema_writer_retirement_materializes_worker_objects() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[3].sql()
+
+    for table in (
+        "factor_governance_shadow_audit",
+        "llm_advisory_audit",
+        "meta_model_shadow_audit",
+        "meta_shadow_report_snapshot",
+        "model_influence_decision",
+        "model_influence_effect",
+        "offmarket_high_load_job_audit",
+        "open_quality_shadow_audit",
+        "position_quality_shadow_audit",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    for index in (
+        "idx_factor_governance_audit_created",
+        "idx_llm_advisory_audit_target",
+        "idx_meta_shadow_report_snapshot_created",
+        "idx_model_influence_decision_subject_ts",
+        "idx_open_quality_shadow_audit_position",
+        "idx_position_quality_shadow_audit_position",
+        "idx_experience_memory_source",
+        "idx_factor_catalog_snapshot_created",
+    ):
+        assert f"INDEX IF NOT EXISTS {index}" in sql
+
+
+def test_phase3_governance_eligibility_migration_adds_weighted_contract() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[4].sql()
+
+    for column in (
+        "governance_eligibility_fingerprint",
+        "effective_sample_count",
+        "weighted_win_count",
+        "weighted_bad_loss_count",
+        "weighted_avg_reward",
+    ):
+        assert column in sql
+    assert "idx_autonomous_learning_governance_eligible" in sql
+    assert "idx_policy_suggestion_governance_eligible" in sql
+
+
+def test_phase3_factor_lifecycle_identity_migration_adds_unique_name_gate() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[5].sql()
+
+    assert "CREATE UNIQUE INDEX idx_factor_lifecycle_unique_name" in sql
+    assert "ON factor_lifecycle_state(factor_name)" in sql
+
+
+def test_phase3_v16_authority_freshness_migration_is_additive_and_backfills() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[6].sql()
+
+    assert "ADD COLUMN IF NOT EXISTS authority_issued_at" in sql
+    assert "WHEN created_at > 0.0 THEN created_at" in sql
+    assert "WHERE authority_issued_at <= 0.0" in sql
+    assert "idx_v16_brain_command_authority" in sql
+
+
+def test_phase5_runtime_schema_contract_completion_is_additive() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[7].sql()
+
+    for table in ("runtime_kv", "canary_state"):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    for table, column in (
+        ("canary_state", "fresh_evidence_bars"),
+        ("autonomous_learning_sample", "evidence_contract_json"),
+        ("position_supervisor_trace", "trace_integrity"),
+        ("proposal_registry", "source_reliability_json"),
+        ("brain_state_snapshot", "memory_json"),
+        ("brain_medium_impact_governance", "candidate_id"),
+        ("experience_memory", "append_source"),
+    ):
+        assert f"ALTER TABLE {table}" in sql
+        assert column in sql
+    assert "idx_experience_memory_source_append" in sql
+    assert "ON experience_memory(source_table, source_id, append_source)" in sql
+    assert "DROP " not in sql.upper()
+    assert {
+        "brain_governance_candidate_review",
+        "brain_medium_impact_governance",
+        "brain_state_snapshot",
+        "experience_memory",
+        "experience_pattern_stats",
+        "factor_catalog_snapshot",
+        "jobs",
+        "position_supervisor_trace",
+        "proposal_registry",
+    } <= set(STATE_SCHEMA_BASELINE_TABLES)
+
+
+def test_phase3_runtime_overlay_authority_migration_supports_minimal_baseline() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[8].sql()
+
+    assert "ADD COLUMN IF NOT EXISTS legacy_authority_json" in sql
+    assert "ADD COLUMN IF NOT EXISTS updated_at" in sql
+    assert "idx_runtime_config_overlay_mutation" in sql
+    assert "ON runtime_config_overlay(mutation_id, updated_at)" in sql
+    assert "DROP " not in sql.upper()
+
+
 def test_schema_status_fails_closed_without_ledger() -> None:
     conn = _FakePgConn()
 
@@ -143,8 +306,13 @@ def test_schema_status_fails_closed_without_ledger() -> None:
 
     assert status["ok"] is False
     assert status["current_version"] == 0
-    assert status["missing_required_versions"] == [1]
-    with pytest.raises(StateSchemaVersionError, match="current_version=0 minimum_version=1"):
+    assert status["missing_required_versions"] == [
+        migration.version for migration in STATE_SCHEMA_MIGRATIONS
+    ]
+    with pytest.raises(
+        StateSchemaVersionError,
+        match=rf"current_version=0 minimum_version={STATE_SCHEMA_MIN_VERSION}",
+    ):
         require_state_schema_version(conn)
 
 
@@ -167,11 +335,11 @@ def test_runner_applies_once_under_lock_and_records_checksum() -> None:
     )
     second = run_state_schema_migrations(conn, runner_id="pytest")
 
-    assert first["applied_count"] == 1
-    assert first["current_version"] == 1
+    assert first["applied_count"] == len(STATE_SCHEMA_MIGRATIONS)
+    assert first["current_version"] == STATE_SCHEMA_MIGRATIONS[-1].version
     assert first["applied"][0]["checksum"] == STATE_SCHEMA_MIGRATIONS[0].checksum()
     assert second["applied_count"] == 0
-    assert second["current_version"] == 1
+    assert second["current_version"] == STATE_SCHEMA_MIGRATIONS[-1].version
     assert migration_ddl_count == 1
     assert conn.commits == 2
     assert any(sql == "SET LOCAL lock_timeout = '5s'" for sql, _params in conn.executed)
@@ -201,26 +369,29 @@ def test_runner_rejects_checked_in_checksum_drift() -> None:
     assert conn.rollbacks == 1
 
 
-def test_init_state_db_checks_version_before_legacy_compatibility(monkeypatch) -> None:
+def test_init_state_db_only_checks_version_on_read_only_connection(monkeypatch) -> None:
     events: list[str] = []
     conn = _FakePgConn()
-    monkeypatch.setattr(db, "get_state_pg_conn", lambda: conn)
+    read_only_calls: list[bool] = []
+
+    def _connect(*, read_only: bool = False):
+        read_only_calls.append(read_only)
+        return conn
+
+    monkeypatch.setattr(db, "get_state_pg_conn", _connect)
     monkeypatch.setattr(
         db,
         "require_state_schema_version",
         lambda _conn: events.append("version_gate"),
     )
-    monkeypatch.setattr(
-        db,
-        "_ensure_state_schema_compatibility",
-        lambda _conn: events.append("legacy_compatibility"),
-    )
 
     db.init_state_db()
 
-    assert events == ["version_gate", "legacy_compatibility"]
-    assert conn.commits == 1
+    assert events == ["version_gate"]
+    assert read_only_calls == [True]
+    assert conn.commits == 0
     assert conn.closed is True
+    assert not hasattr(db, "_ensure_state_schema_compatibility")
 
 
 def test_backend_treats_schema_version_error_as_blocking_in_dry_run() -> None:
@@ -320,12 +491,48 @@ def test_cli_defaults_to_check_and_requires_explicit_apply(monkeypatch, capsys) 
 
     def _connect(*, read_only: bool):
         read_only_calls.append(read_only)
-        return _FakePgConn(applied=_applied_v1())
+        return _FakePgConn(applied=_applied_all())
+
+    migration_calls: list[str] = []
+
+    def _migration_connect(dsn: str):
+        migration_calls.append(dsn)
+        return _FakePgConn(applied=_applied_all())
 
     monkeypatch.setattr(command, "get_state_pg_conn", _connect)
+    monkeypatch.setattr(command, "state_pg_dsn", lambda: "postgresql://migration-test")
+    monkeypatch.setattr(command, "connect_state_migration_store", _migration_connect)
 
     assert command.main([]) == 0
     assert command.main(["--apply", "--runner-id", "pytest"]) == 0
 
-    assert read_only_calls == [True, False]
+    assert read_only_calls == [True]
+    assert migration_calls == ["postgresql://migration-test"]
     assert '"ok": true' in capsys.readouterr().out
+
+
+def test_ci_bootstraps_and_checks_disposable_postgres_before_integration() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "quality-gates.yml").read_text(
+        encoding="utf-8"
+    )
+
+    bootstrap = "python tests/integration/bootstrap_state_pg.py"
+    schema_check = "python scripts/state_schema_migrate.py --check"
+    integration = "pytest -q -m postgres_integration --timeout=30"
+    assert bootstrap in workflow
+    assert schema_check in workflow
+    assert integration in workflow
+    assert workflow.index(bootstrap) < workflow.index(schema_check) < workflow.index(integration)
+
+
+def test_ci_postgres_bootstrap_is_test_only_and_database_name_guarded() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "tests" / "integration" / "bootstrap_state_pg.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'os.environ.get("CI"' in source
+    assert 'normalized.endswith("_test")' in source
+    assert 'normalized.startswith("test_")' in source
+    assert "run_state_schema_migrations" in source

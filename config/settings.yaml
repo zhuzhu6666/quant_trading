@@ -9,6 +9,8 @@ features:
   live_safety_plane_v2_mode: off
   live_generation_controller_v2_enabled: false
   ctrader_execution_outcome_v2_enabled: false
+  governance_mutation_coordinator_v2_mode: off
+  pg_job_queue_v2_enabled: false
 ctrader:
   client_id_env: CTRADER_CLIENT_ID
   client_secret_env: CTRADER_CLIENT_SECRET
@@ -152,6 +154,9 @@ runtime:
   # Fail-closed default for non-demo/live authority. Demo nursery/autonomous
   # keeps governed exploration active through RuntimeConfig mode semantics.
   autonomy_expansion_frozen: true
+  # Operator-owned all-mode governance expansion kill switch. Observation,
+  # research and explicit risk tightening remain available while paused.
+  governance_expansion_paused: false
   supervisor_counterfactual_governance_horizon_minutes: 60
   supervisor_counterfactual_full_horizon_minutes: 120
   supervisor_canary_mature_trade_count: 50

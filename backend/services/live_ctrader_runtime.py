@@ -82,17 +82,17 @@ class CTraderRuntime:
                 self.next_retry_at = 0.0
                 self.last_error = None
                 try:
-                    if hasattr(bridge, "refresh_account_info"):
-                        bridge.refresh_account_info()
-                    else:
-                        bridge.account_info()
+                    bridge.reconcile_account(
+                        force=True,
+                        allow_cache_fallback=False,
+                    )
                 except Exception as exc:
                     logger.debug("[ctrader] initial account prime failed: %s", exc)
                 try:
-                    if hasattr(bridge, "refresh_positions"):
-                        bridge.refresh_positions()
-                    else:
-                        bridge.get_positions()
+                    bridge.reconcile_positions(
+                        force=True,
+                        allow_cache_fallback=False,
+                    )
                 except Exception as exc:
                     logger.debug("[ctrader] initial positions prime failed: %s", exc)
                 logger.info("[ctrader] background connect OK")

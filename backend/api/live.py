@@ -18,7 +18,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 import re
 
-from backend.core.auth import RequireUser
+from backend.core.auth import RequireRecentStepUp, RequireRiskReductionUser, RequireUser
 from backend.services.mutation_audit import confirm_header_valid, record_api_mutation
 from backend.services.live_service import (
     _should_send_orders,
@@ -29,6 +29,16 @@ from backend.services.live_service import (
     loop_status,
     start_loop,
     stop_loop,
+)
+from backend.services.live_safety_state import append_safety_outbox
+from backend.services.api_fact_views import (
+    account_fact_payload,
+    live_status_fact_payload,
+    loop_fact_payload,
+    positions_fact_payload,
+    realized_fact_payload,
+    session_fact_payload,
+    strategy_fact_payload,
 )
 from backend.services.realized_pnl import get_realized_pnl_series
 
@@ -45,19 +55,42 @@ class EmergencyCloseRequest(BaseModel):
     symbol: str | None = None
 
 
+def _fact_runtime_observation() -> dict:
+    """Read only timestamps/provenance needed by the API fact boundary."""
+    from backend.services.live_service import _live_state_get
+
+    diag = _live_state_get("_diag", {}, clone=True) or {}
+    return {
+        "diagnostic_ts": diag.get("ts"),
+        "session_source": _live_state_get("session_state_source", "none"),
+        # Session freshness is independent from broker position/account
+        # freshness.  A successful position poll must not make a failed or
+        # cached session-risk restore appear current.
+        "session_observed_at": _live_state_get("session_observed_at", 0.0),
+    }
+
+
 @router.get("/status")
 def status(_user: RequireUser) -> dict:
-    return get_status()
+    observation = _fact_runtime_observation()
+    return live_status_fact_payload(
+        get_status(),
+        diagnostic_ts=observation.get("diagnostic_ts"),
+    )
 
 
 @router.get("/loop-status")
 def get_loop_status(_user: RequireUser) -> dict:
-    return loop_status()
+    observation = _fact_runtime_observation()
+    return loop_fact_payload(
+        loop_status(),
+        diagnostic_ts=observation.get("diagnostic_ts"),
+    )
 
 
 @router.get("/account")
 def get_account_endpoint(_user: RequireUser, broker: str = Query("ctrader")) -> dict:
-    return get_account(broker)
+    return account_fact_payload(get_account(broker))
 
 
 @router.get("/positions")
@@ -66,7 +99,7 @@ def get_positions_endpoint(
     broker: str = Query("ctrader"),
     symbol: str | None = Query(None),
 ) -> dict:
-    return get_positions(broker, symbol)
+    return positions_fact_payload(get_positions(broker, symbol))
 
 
 @router.get("/realized-pnl-series")
@@ -84,12 +117,12 @@ def realized_pnl_series_endpoint(
             result["currency"] = currency
     except Exception:
         pass
-    return result
+    return realized_fact_payload(result)
 
 
 @router.post("/start")
 def start(
-    _user: RequireUser,
+    _user: RequireRecentStepUp,
     req: StartRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
@@ -128,14 +161,14 @@ def start(
 
 
 @router.post("/stop")
-def stop(_user: RequireUser) -> dict:
+def stop(_user: RequireRiskReductionUser) -> dict:
     """Stop the in-process live loop thread."""
     return stop_loop()
 
 
 @router.post("/emergency-close")
 def emergency(
-    _user: RequireUser,
+    _user: RequireRiskReductionUser,
     req: EmergencyCloseRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
@@ -155,15 +188,31 @@ def emergency(
             detail={"error": "missing_x_confirm", "msg": "send X-Confirm: emergency header"},
         )
     result = emergency_close(req.broker, req.symbol)
-    record_api_mutation(
-        user=_user,
-        endpoint="/api/live/emergency-close",
-        action="emergency_close",
-        status="applied" if result.get("ok", True) else "blocked",
-        result=result,
-        required_confirm="emergency",
-        confirm_ok=True,
-    )
+    try:
+        record_api_mutation(
+            user=_user,
+            endpoint="/api/live/emergency-close",
+            action="emergency_close",
+            status="applied" if result.get("ok", True) else "blocked",
+            result=result,
+            required_confirm="emergency",
+            confirm_ok=True,
+        )
+    except Exception as exc:
+        # Mutation audit is governance evidence, not broker authority.  A
+        # completed/partial emergency result must still reach the operator.
+        try:
+            append_safety_outbox(
+                event_type="emergency_api_mutation_audit_failed",
+                correlation_id=str(result.get("emergency_id") or ""),
+                payload={
+                    "endpoint": "/api/live/emergency-close",
+                    "result": result,
+                },
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            pass
     return result
 
 
@@ -445,7 +494,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         # 配置读取失败时不阻塞页面, 但仍保留原始投票快照。
         pass
 
-    return {
+    payload = {
         "running": loop.get("running", False),
         "broker": loop.get("broker") or "ctrader",
         "strategy": "factor_pipeline_v4",
@@ -466,13 +515,14 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
         "execution_events": execution_events,
         "execution_summary": execution_summary,
     }
+    return strategy_fact_payload(payload, diagnostic_ts=diag.get("ts"))
 
 
 @router.get("/session-stats")
 def session_stats_endpoint(_user: RequireUser) -> dict:
     """今日会话统计: 盈亏/交易笔数/胜率/回撤. HTTP 后备, 不依赖 WS."""
     from backend.services.live_service import _live_state
-    return {
+    payload = {
         "pnl_today": float(_live_state.get("session_pnl", 0)),
         "trades": int(_live_state.get("session_trades", 0)),
         "wins": int(_live_state.get("session_winning", 0)),
@@ -480,3 +530,9 @@ def session_stats_endpoint(_user: RequireUser) -> dict:
         "drawdown_pct": float(_live_state.get("session_max_drawdown_pct", 0)),
         "consecutive_loss": int(_live_state.get("session_consecutive_loss", 0)),
     }
+    observation = _fact_runtime_observation()
+    return session_fact_payload(
+        payload,
+        source=str(observation.get("session_source") or "none"),
+        observed_at=observation.get("session_observed_at"),
+    )

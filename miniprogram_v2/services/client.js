@@ -3,6 +3,8 @@ import sessionStore from '../stores/session';
 
 let tokenCache = '';
 let unauthorizedRedirecting = false;
+let unauthorizedInFlight = null;
+let refreshInFlight = null;
 
 function getToken() {
   return tokenCache || wx.getStorageSync('jwt_token') || '';
@@ -19,9 +21,25 @@ export function setToken(token) {
   sessionStore.setState({ token: '', user: null, isAuthenticated: false });
 }
 
+export function setRefreshToken(token) {
+  if (token) {
+    wx.setStorageSync('refresh_token', token);
+  } else {
+    wx.removeStorageSync('refresh_token');
+  }
+}
+
+export function setAuthTokens(accessToken, refreshToken = '') {
+  setToken(accessToken);
+  if (refreshToken) setRefreshToken(refreshToken);
+  unauthorizedInFlight = null;
+  unauthorizedRedirecting = false;
+}
+
 export function clearToken() {
   tokenCache = '';
   wx.removeStorageSync('jwt_token');
+  wx.removeStorageSync('refresh_token');
   sessionStore.setState({ token: '', user: null, isAuthenticated: false });
 }
 
@@ -49,6 +67,16 @@ function redirectToLogin() {
       },
     });
   }, 80);
+}
+
+async function handleUnauthorizedOnce() {
+  if (!unauthorizedInFlight) {
+    unauthorizedInFlight = Promise.resolve().then(() => {
+      clearToken();
+      redirectToLogin();
+    });
+  }
+  await unauthorizedInFlight;
 }
 
 export function loadToken() {
@@ -91,12 +119,45 @@ async function request(method, endpoint, data, options = {}) {
     error.statusCode = response && response.statusCode;
     error.payload = payload;
     if (error.statusCode === 401 && !options.skipAuth) {
-      clearToken();
-      redirectToLogin();
+      if (!options.authRetried && endpoint !== '/api/auth/refresh') {
+        const refreshed = await refreshAccessToken();
+        if (refreshed) {
+          return request(method, endpoint, data, { ...options, authRetried: true });
+        }
+      }
+      await handleUnauthorizedOnce();
     }
     throw error;
   }
   return response.data;
+}
+
+async function refreshAccessToken() {
+  if (refreshInFlight) return refreshInFlight;
+  const refreshToken = wx.getStorageSync('refresh_token') || '';
+  if (!refreshToken) return false;
+  refreshInFlight = (async () => {
+    try {
+      const response = await rawRequest({
+        url: CONFIG.SERVER + '/api/auth/refresh',
+        method: 'POST',
+        data: { refresh_token: refreshToken },
+        timeout: 15000,
+        header: { 'Content-Type': 'application/json' },
+      });
+      if (!response || response.statusCode < 200 || response.statusCode >= 300) return false;
+      const payload = response.data || {};
+      const accessToken = payload.access_token || payload.token || '';
+      if (!accessToken || !payload.refresh_token) return false;
+      setAuthTokens(accessToken, payload.refresh_token);
+      return true;
+    } catch (err) {
+      return false;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
 }
 
 export async function get(endpoint, options = {}) {

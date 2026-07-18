@@ -359,11 +359,16 @@ def _position_id_from_payload(position: Any) -> int:
 
 
 def resolve_order_position_id(result: Any, *, positions_before: list[Any] | None) -> int:
+    """Return only the broker-confirmed position ID.
+
+    ``positions_before[0]`` was an unsafe historical guess: it could attach
+    protection/audit records to an unrelated existing position after a timeout
+    or unknown protobuf.  The v2 execution contract resolves IDs from broker
+    order/deal/position differentials before producing the result.
+    """
     pid = int(getattr(result, "position_id", 0) or 0)
     if pid > 0:
         return pid
-    if positions_before:
-        return _position_id_from_payload(positions_before[0])
     return 0
 
 

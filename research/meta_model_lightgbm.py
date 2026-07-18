@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.core.state_store import (
+    is_state_schema_write_sql,
+    validate_runtime_state_schema,
+)
 from backend.ledger.service import DecisionLedger
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
@@ -92,9 +96,12 @@ def _sql(conn: Any, sql: str) -> str:
 
 
 def _execute(conn: Any, sql: str, params: tuple | list | None = None):
+    rendered = _sql(conn, sql)
+    if _conn_is_pg(conn) and is_state_schema_write_sql(rendered):
+        return validate_runtime_state_schema(conn, rendered)
     if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), tuple(params))
+        return conn.execute(rendered)
+    return conn.execute(rendered, tuple(params))
 
 
 def _table_exists(conn: Any, table: str) -> bool:

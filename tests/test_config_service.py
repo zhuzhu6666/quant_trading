@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -41,8 +43,6 @@ def test_put_config_reports_parse_errors(temp_settings_path):
 
     assert "yaml_parse_error" in str(exc.value)
 
-
-
 def test_patch_runtime_config_updates_runtime_only(temp_settings_path):
     result = config_service.patch_runtime_config(
         {"observability_metrics_enabled": False},
@@ -52,6 +52,74 @@ def test_patch_runtime_config_updates_runtime_only(temp_settings_path):
     parsed = config_service.get_config()["parsed"]
     assert result["updated_keys"] == ["observability_metrics_enabled"]
     assert parsed["runtime"] == {"observability_metrics_enabled": False}
+
+
+def test_patch_runtime_config_preserves_committed_projection_and_version_semantics(
+    temp_settings_path,
+):
+    rc.reset_for_tests()
+    temp_settings_path.write_text(
+        "system:\n  mode: live\n  log_level: INFO\n"
+        "ctrader:\n  host: demo.ctraderapi.com\n  send_orders: false\n"
+        "runtime:\n  observability_metrics_enabled: true\n",
+        encoding="utf-8",
+    )
+    yaml_base = rc.RuntimeConfig.from_yaml(config_service.get_config()["parsed"])
+    rc.register_overlay_base(yaml_base, replace_existing=True)
+    authoritative = rc.RuntimeConfig.from_dict(
+        {
+            **yaml_base.to_dict(),
+            "factor_portfolio_weights": {"rsi_14": 0.41, "macd_hist": 0.19},
+            "risk_max_daily_trades": 7,
+            "ctrader_send_orders": True,
+            "runtime_incident_mode": "no_new_risk",
+            "governance_expansion_paused": True,
+        }
+    )
+    rc.replace(authoritative)
+    version_before = rc.version()
+    before = rc.shared_holder().get().to_dict()
+    before_non_observability = {
+        key: value for key, value in before.items() if key != "observability_metrics_enabled"
+    }
+    authority_hash_before = hashlib.sha256(
+        json.dumps(before_non_observability, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    result = config_service.patch_runtime_config(
+        {"observability_metrics_enabled": False},
+        user="tester",
+    )
+
+    after = rc.shared_holder().get().to_dict()
+    after_non_observability = {
+        key: value for key, value in after.items() if key != "observability_metrics_enabled"
+    }
+    authority_hash_after = hashlib.sha256(
+        json.dumps(after_non_observability, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    assert after["observability_metrics_enabled"] is False
+    assert after_non_observability == before_non_observability
+    assert authority_hash_after == authority_hash_before
+    assert result["runtime_version"] == version_before + 1
+    assert rc.version() == version_before + 1
+
+    # A later committed-overlay rebuild starts from the updated YAML base and
+    # therefore cannot revert the operator observability toggle.
+    rebuilt = rc.config_from_overlay(
+        {"factor_portfolio_weights": before["factor_portfolio_weights"]}
+    )
+    assert rebuilt.observability_metrics_enabled is False
+    assert rebuilt.factor_portfolio_weights["rsi_14"] == 0.41
+    assert rebuilt.factor_portfolio_weights["macd_hist"] == 0.19
+    rc.reset_for_tests()
+
+
+def test_patch_runtime_config_requires_typed_boolean(temp_settings_path):
+    with pytest.raises(ValueError) as exc:
+        config_service.patch_runtime_config({"observability_metrics_enabled": "false"})
+
+    assert "must be boolean" in str(exc.value)
 
 
 def test_patch_runtime_config_rejects_send_orders_when_not_live(temp_settings_path):
@@ -145,6 +213,16 @@ def test_generic_put_rejects_risk_change_even_when_full_document_is_preserved(te
         config_service.put_config(yaml.safe_dump(before, sort_keys=False))
 
     assert "runtime.risk_max_daily_trades" in str(exc.value)
+
+
+def test_generic_put_cannot_change_release_time_feature_flags(temp_settings_path):
+    before = config_service.get_config()["parsed"]
+    before["features"] = {"pg_job_queue_v2_enabled": True}
+
+    with pytest.raises(PermissionError) as exc:
+        config_service.put_config(yaml.safe_dump(before, sort_keys=False))
+
+    assert "generic_config_mutation_forbidden: features;" in str(exc.value)
 
 
 def test_deployment_validation_rejects_invalid_incident_mode():

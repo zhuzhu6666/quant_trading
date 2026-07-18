@@ -39,3 +39,19 @@ def test_config_is_immutable_and_safe_projection_excludes_secrets():
     assert "client_secret" not in config.to_safe_dict()
     assert "access_token" not in config.to_safe_dict()
     assert len(config.config_hash) == 64
+
+
+def test_demo_environment_requires_the_canonical_ctrader_demo_host():
+    lookalike = BrokerConnectionConfig.from_sources(
+        {"ctrader": {"host": "demo.attacker.invalid"}},
+        {},
+    )
+    canonical_with_dns_dot = BrokerConnectionConfig.from_sources(
+        {"ctrader": {"host": "DEMO.CTRADERAPI.COM."}},
+        {},
+    )
+
+    assert lookalike.environment == "live"
+    assert lookalike.is_demo is False
+    assert canonical_with_dns_dot.environment == "demo"
+    assert canonical_with_dns_dot.is_demo is True

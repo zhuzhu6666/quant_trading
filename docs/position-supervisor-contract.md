@@ -370,7 +370,8 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 标准 `stage / outcome` 口径：
 
 - `evaluated / hold`
-- `canary_shadow / shadow`（非权威建议，不是执行）
+- `learning_shadow / shadow`（learning worker 对已平仓事实的 recovered 非执行回放；绑定 candidate suggestion ID，不是 live 执行）
+- `canary_shadow / shadow`（仅历史兼容读取；新 live loop 不再生产，不能满足 readiness/auto-unfreeze）
 - `cooldown_skipped / skipped`
 - `no_op_suppressed / skipped`（目标保护已生效；同一持久化 action fingerprint 只记录首次）
 - `timeout_delegated / skipped`
@@ -397,12 +398,13 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 
 `supervisor_execution_trace` 样本默认 `label_status=pending`，不能直接作为强收益标签；只有平仓 review 与 counterfactual 成熟后，才允许升级为更高权重训练/治理证据。
 
-2026-06-30 起，系统支持两类 trace 来源：
+系统支持三类 trace 来源：
 
 - live trace：由 `live_service -> DecisionLedger.log_position_supervisor_trace()` 写入，默认 `trace_integrity=full`
+- candidate observation：由 learning worker 的 `materialize_position_supervisor_candidate_observations()` 基于已平仓 outcome 与成熟 counterfactual 回放，固定 `stage=learning_shadow / execution_status=observation_only / trace_integrity=recovered`；不调用 broker，也不进入 live action arbitration
 - legacy trace：由 `backfill_position_supervisor_traces()` 从历史 `decision_ledger` 回填，标记为 `recovered / partial`
 
-legacy trace 只用于补齐历史审计和弱监督，不应直接进入强治理。
+candidate observation 与 legacy trace 只用于审计/弱监督；前者必须与当前 suggestion ID 精确绑定后才可作为 candidate readiness 的一项输入，二者都不构成 live 控制授权。
 
 ### 7.4 supervisor trace 成熟化
 

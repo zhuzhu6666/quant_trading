@@ -100,8 +100,12 @@ class BrokerConnectionConfig:
 
         host = str(_value(source_env, "CTRADER_HOST", ctrader.get("host", "demo.ctraderapi.com"))).strip()
         host = host or "demo.ctraderapi.com"
-        host_lower = host.lower()
-        if host_lower.startswith("demo.") or ".demo." in host_lower:
+        # Risk semantics may grant the bounded demo profile only to the
+        # canonical cTrader demo endpoint.  Prefix matching (for example
+        # ``demo.attacker.invalid``) can misclassify an arbitrary host as demo
+        # and therefore apply the wrong account-risk contract.
+        host_lower = host.lower().rstrip(".")
+        if host_lower == "demo.ctraderapi.com":
             environment = "demo"
         elif host_lower:
             environment = "live"

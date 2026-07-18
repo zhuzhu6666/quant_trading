@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.state_store import validate_runtime_state_schema
 
 
 PROJECTION_KEY = "runtime_factor_selection.v1"
@@ -42,12 +43,16 @@ class RuntimeFactorSelectionProjectionService:
         }
         conn = self._conn()
         try:
-            conn.execute(self._sql("""
+            declaration = self._sql("""
                 CREATE TABLE IF NOT EXISTS runtime_kv (
                     key TEXT PRIMARY KEY, value_json TEXT NOT NULL DEFAULT '{}',
                     updated_at REAL NOT NULL DEFAULT 0.0
                 )
-            """))
+            """)
+            if self._use_pg():
+                validate_runtime_state_schema(conn, declaration)
+            else:
+                conn.execute(declaration)
             conn.execute(self._sql("""
                 INSERT INTO runtime_kv (key, value_json, updated_at) VALUES (?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,

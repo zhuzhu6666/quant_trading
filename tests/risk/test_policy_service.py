@@ -357,6 +357,29 @@ def test_open_trade_blocks_stale_decision_signal_age_even_when_bar_is_fresh():
     assert verdict.audit_payload["stale_after_seconds"] == 450.0
 
 
+def test_open_trade_treats_missing_decision_signal_timestamp_as_stale():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "decision_freshness": {
+                "schema_version": "decision_bar_freshness.v1",
+                "timeframe": "M5",
+                "timeframe_seconds": 300,
+                "fresh": True,
+            },
+            "trade": {"symbol": "XAUUSD+", "direction": 1},
+            "temporal_context": {"timeframe": "M5", "timeframe_seconds": 300},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "decision_signal_timestamp_unknown"
+    assert verdict.audit_payload["blocked_by"] == "decision_signal_timestamp"
+    assert verdict.audit_payload["signal_age_seconds"] is None
+
+
 def test_open_trade_demo_nursery_keeps_decision_signal_age_hard_block():
     service = _service()
 
@@ -584,6 +607,36 @@ def test_open_trade_blocks_approved_event_window_learning_policy():
     assert verdict.allowed is False
     assert verdict.reason == "learning_event_window_control"
     assert verdict.audit_payload["blocked_by"] == "event_window_learning_policy"
+
+
+def test_open_trade_fails_closed_when_existing_position_open_time_is_unknown():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "account": {"balance": 10000, "equity": 10000},
+            "session": {"pnl": 0, "start_balance": 10000},
+            "total_api_volume": 100,
+            "requested_api_volume": 100,
+            "max_position_api_volume": 1000,
+            "entry_cluster": {
+                "same_direction_open_count_before": 1,
+                "same_direction_open_timestamp_state": "unknown",
+                "seconds_since_last_same_direction_open": None,
+                "unknown_open_timestamp_position_ids": [7],
+            },
+            "entry_cluster_learning_policy": {
+                "active": True,
+                "min_same_direction_open_count": 1,
+            },
+            "same_direction_cooldown_seconds": 300.0,
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "entry_cluster_timestamp_unknown"
+    assert verdict.audit_payload["unknown_position_ids"] == [7]
 
 
 def test_open_trade_demo_nursery_observes_learning_gates():

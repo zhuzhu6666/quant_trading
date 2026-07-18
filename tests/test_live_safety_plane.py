@@ -10,6 +10,7 @@ def _reconcile(*position_ids: int, state: str = "fresh") -> dict:
         "success": state == "fresh",
         "state": state,
         "reconcile_id": "rec-1",
+        "observed_at": 100.0,
         "positions": [{"position_id": pid} for pid in position_ids],
     }
 
@@ -19,16 +20,71 @@ def test_reconcile_failure_blocks_new_risk_without_suppressing_future_safety():
     executor_calls = []
 
     result = plane.run_cycle(
-        reconcile_result=_reconcile(state="failed"),
+        reconcile_result={
+            "success": False,
+            "state": "failed",
+            "reconcile_id": "rec-failed",
+            "positions": [{"position_id": 7}],
+        },
         unknown_execution_count=0,
-        candidate_provider=lambda _positions: [],
+        candidate_provider=lambda _positions: [SafetyCandidate(action="close", position_id=7)],
         executor=lambda candidate: executor_calls.append(candidate) or {"ok": True},
     )
 
     assert result.status == "reconciliation_failed"
     assert result.accepting_new_risk is False
     assert result.blockers == ("positions_reconciliation_failed",)
-    assert executor_calls == []
+    assert [item.position_id for item in executor_calls] == [7]
+
+
+@pytest.mark.parametrize("state", ["cache", "event", "unknown"])
+def test_non_fresh_reconcile_never_authorizes_safety_or_new_risk(state):
+    plane = LiveSafetyPlane(mode="enforce", clock=lambda: 100.0)
+    result = plane.run_cycle(
+        reconcile_result={
+            "success": True,
+            "state": state,
+            "reconcile_id": "rec-stale",
+            "positions": [],
+        },
+        unknown_execution_count=0,
+        candidate_provider=lambda _positions: [],
+        executor=lambda _candidate: {"ok": True},
+    )
+
+    assert result.status == "reconciliation_failed"
+    assert result.accepting_new_risk is False
+
+
+@pytest.mark.parametrize(
+    ("reconcile_state", "observed_at"),
+    [
+        ("fresh", 0.0),
+        ("fresh", 84.9),
+        ("fresh", "invalid"),
+        (None, 100.0),
+    ],
+)
+def test_incomplete_fresh_contract_remains_fail_closed(reconcile_state, observed_at):
+    plane = LiveSafetyPlane(mode="enforce", clock=lambda: 100.0)
+    reconcile = {
+        "success": True,
+        "reconcile_id": "rec-unproven",
+        "observed_at": observed_at,
+        "positions": [],
+    }
+    if reconcile_state is not None:
+        reconcile["state"] = reconcile_state
+    result = plane.run_cycle(
+        reconcile_result=reconcile,
+        unknown_execution_count=0,
+        candidate_provider=lambda _positions: [],
+        executor=lambda _candidate: {"ok": True},
+    )
+
+    assert result.status == "reconciliation_failed"
+    assert result.accepting_new_risk is False
+    assert result.blockers == ("positions_reconciliation_failed",)
 
 
 def test_shadow_compares_candidates_but_never_executes():
@@ -48,6 +104,66 @@ def test_shadow_compares_candidates_but_never_executes():
     assert result.comparison["match"] is True
     assert result.executed == ()
     assert calls == []
+
+
+def test_shadow_mismatch_remains_fail_closed_during_heartbeat_interval():
+    now = [100.0]
+    plane = LiveSafetyPlane(mode="shadow", clock=lambda: now[0])
+    v2 = SafetyCandidate(action="tighten", position_id=7, fingerprint="v2")
+    legacy = SafetyCandidate(action="close", position_id=7, fingerprint="legacy")
+
+    first = plane.run_cycle(
+        reconcile_result=_reconcile(7),
+        unknown_execution_count=0,
+        candidate_provider=lambda _positions: [v2],
+        executor=lambda _candidate: {"ok": True},
+        legacy_candidates=[legacy],
+        comparison_independent=True,
+        require_candidate_match=True,
+    )
+    now[0] = 102.0
+    heartbeat = plane.run_cycle(
+        reconcile_result=_reconcile(7),
+        unknown_execution_count=0,
+        candidate_provider=lambda _positions: (_ for _ in ()).throw(
+            AssertionError("heartbeat must not replan")
+        ),
+        executor=lambda _candidate: {"ok": True},
+        legacy_candidates=(),
+        comparison_independent=True,
+        require_candidate_match=True,
+    )
+
+    assert first.accepting_new_risk is False
+    assert heartbeat.status == "heartbeat"
+    assert heartbeat.comparison["match"] is False
+    assert "safety_candidate_mismatch" in heartbeat.blockers
+    assert heartbeat.accepting_new_risk is False
+
+
+def test_enforce_comparison_error_forces_shadow_before_executor():
+    plane = LiveSafetyPlane(mode="enforce", clock=lambda: 100.0)
+    calls = []
+
+    result = plane.run_cycle(
+        reconcile_result=_reconcile(7),
+        unknown_execution_count=0,
+        candidate_provider=lambda _positions: [
+            {"action": "market_buy", "position_id": 7}
+        ],
+        executor=lambda candidate: calls.append(candidate) or {"ok": True},
+        legacy_candidates=(),
+        comparison_independent=True,
+        require_candidate_match=True,
+    )
+
+    assert calls == []
+    assert result.status == "forced_shadow"
+    assert result.effective_mode == "shadow"
+    assert result.forced_shadow is True
+    assert "safety_candidate_comparison_error" in result.blockers
+    assert "safety_v2_forced_shadow" in result.blockers
+    assert result.accepting_new_risk is False
 
 
 def test_enforce_executes_only_risk_reducing_candidates_and_reports_partial():
@@ -111,9 +227,23 @@ def test_full_cycle_cadence_and_alpha_require_new_closed_bar():
 def test_safety_plane_rejects_entry_order_actions_and_has_no_entry_api_symbols():
     with pytest.raises(ValueError, match="unsafe_safety_plane_action"):
         SafetyCandidate(action="market_buy", position_id=7)
+    with pytest.raises(ValueError, match="unsafe_safety_plane_action"):
+        SafetyCandidate(action="emergency_close", position_id=7)
 
-    source = Path("backend/services/live_safety_plane.py").read_text(encoding="utf-8")
-    forbidden = "market" + "_buy"
-    forbidden_sell = "market" + "_sell"
-    assert forbidden not in source
-    assert forbidden_sell not in source
+    forbidden_symbols = {
+        "market" + "_buy",
+        "market" + "_sell",
+        "_send_market_order",
+        "_submit_open_trade_order",
+    }
+    for relative_path in (
+        "backend/services/live_safety_plane.py",
+        "backend/services/live_safety_planner.py",
+        "backend/services/live_legacy_safety_preview.py",
+        "backend/services/live_emergency.py",
+        "backend/services/live_loop_v2.py",
+    ):
+        source = Path(relative_path).read_text(encoding="utf-8")
+        assert forbidden_symbols.isdisjoint(source.split())
+        for symbol in forbidden_symbols:
+            assert symbol not in source

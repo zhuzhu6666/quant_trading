@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 
 def test_ops_agent_authority_route_returns_registry(monkeypatch, auth_client):
     class FakeAgentAuthorityRegistryService:
@@ -348,7 +350,7 @@ def test_ops_live_autonomy_routes_use_governed_service(monkeypatch, auth_client)
 
     class FakeBackendReadinessService:
         def build(self):
-            return {"generated_at": 10.0, "ready_for_frontend": True}
+            return {"generated_at": time.time(), "ready_for_frontend": True}
 
     class FakeLiveAutonomyService:
         def status(self, *, readiness, refresh_proposals: bool):
@@ -365,8 +367,24 @@ def test_ops_live_autonomy_routes_use_governed_service(monkeypatch, auth_client)
             }
             return {"ok": False, "status": "blocked", "blockers": [{"component": "replay"}]}
 
-        def unlock(self, *, actor: str, reason: str, confirm: bool, readiness):
-            calls["unlock"] = {"actor": actor, "reason": reason, "confirm": confirm, "readiness": readiness}
+        def unlock(
+            self,
+            *,
+            actor: str,
+            reason: str,
+            confirm: bool,
+            readiness,
+            v16_command_id: str,
+            v16_claim_token: str,
+        ):
+            calls["unlock"] = {
+                "actor": actor,
+                "reason": reason,
+                "confirm": confirm,
+                "readiness": readiness,
+                "v16_command_id": v16_command_id,
+                "v16_claim_token": v16_claim_token,
+            }
             return {"ok": True, "status": "unlocked"}
 
         def revoke(self, *, actor: str, reason: str):
@@ -392,8 +410,12 @@ def test_ops_live_autonomy_routes_use_governed_service(monkeypatch, auth_client)
 
     assert status.status_code == 200
     assert status.json()["live_autonomy"]["autonomy_mode"] == "live_candidate"
+    assert status.json()["_fact"]["contract"] == "ops.live-autonomy-status.v2"
+    assert status.json()["_fact"]["state"] == "known"
     assert calls["status"]["refresh_proposals"] is True
     assert evaluate.json()["evaluation"]["status"] == "blocked"
+    assert evaluate.json()["_fact"]["contract"] == "ops.live-autonomy-unlock-evaluation.v2"
+    assert evaluate.json()["_fact"]["state"] == "known"
     assert calls["evaluate"]["persist"] is True
     assert unlock.json()["unlock"]["status"] == "unlocked"
     assert calls["unlock"]["confirm"] is True

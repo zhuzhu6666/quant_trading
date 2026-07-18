@@ -47,3 +47,4 @@ def test_risk_summary_uses_realized_pnl_inputs(monkeypatch):
     assert summary["stress"]["stress_var"] >= 0
     assert summary["concentration"]["status"] in {"ok", "alert"}
     assert summary["concentration"]["source"] == "policy_reason_distribution"
+    assert summary["_fact"]["state"] == "unknown"

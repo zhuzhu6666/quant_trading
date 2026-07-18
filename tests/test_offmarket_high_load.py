@@ -2,15 +2,15 @@ from backend.services import live_service
 
 
 def test_offmarket_high_load_skips_when_market_open(tmp_path, monkeypatch):
-    monkeypatch.setattr("backend.core.db.STATE_DB", tmp_path / "state.db")
     monkeypatch.setattr("backend.core.db.DATA_DIR", tmp_path)
+    db_path = tmp_path / "offmarket-audit.db"
     live_service._live_state["market_session"] = {
         "status": "open_confirmed",
         "high_load_allowed": False,
         "high_load_profile": "disabled",
     }
 
-    result = live_service._scheduled_offmarket_position_quality_lightgbm()
+    result = live_service._scheduled_offmarket_position_quality_lightgbm(db_path=db_path)
 
     assert result["ok"] is True
     assert result["skipped"] is True
@@ -19,7 +19,7 @@ def test_offmarket_high_load_skips_when_market_open(tmp_path, monkeypatch):
 
 
 def test_offmarket_high_load_runs_training_when_closed(monkeypatch, tmp_path):
-    monkeypatch.setattr("backend.core.db.STATE_DB", tmp_path / "state.db")
+    db_path = tmp_path / "offmarket-training.db"
     live_service._live_state["market_session"] = {
         "status": "closed_pending_positions",
         "high_load_allowed": True,
@@ -49,7 +49,7 @@ def test_offmarket_high_load_runs_training_when_closed(monkeypatch, tmp_path):
         FakeService,
     )
 
-    result = live_service._scheduled_offmarket_position_quality_lightgbm()
+    result = live_service._scheduled_offmarket_position_quality_lightgbm(db_path=db_path)
 
     assert result["ok"] is True
     assert result["status"] == "done"

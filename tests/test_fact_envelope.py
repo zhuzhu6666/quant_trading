@@ -1,4 +1,21 @@
-from backend.services.fact_envelope import attach_fact, fact_envelope
+from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC, attach_fact, fact_envelope
+
+
+def test_default_freshness_matches_fact_v1_contract_categories():
+    assert DEFAULT_STALE_AFTER_SEC == {
+        "ws": 5.0,
+        "state": 5.0,
+        "spot": 5.0,
+        "account": 15.0,
+        "positions": 15.0,
+        "loop": 15.0,
+        "risk": 30.0,
+        "session": 30.0,
+        "readiness": 180.0,
+        "learning": 180.0,
+        "ops": 180.0,
+        "recovery": 75.0,
+    }
 
 
 def test_known_fact_requires_observation_inside_freshness_window():
@@ -25,6 +42,31 @@ def test_missing_observation_is_unknown_not_zero_or_healthy():
 
     assert fact.state == "unknown"
     assert fact.reason_code == "missing_observed_at"
+
+
+def test_source_none_is_unknown_even_with_a_fresh_timestamp():
+    fact = fact_envelope(
+        contract="live.state.v2",
+        source="none",
+        observed_at=99.0,
+        stale_after_sec=5.0,
+        now=100.0,
+    )
+
+    assert fact.state == "unknown"
+    assert fact.reason_code == "source_unavailable"
+
+
+def test_iso_observation_is_normalized_for_freshness():
+    fact = fact_envelope(
+        contract="ops.backend-readiness.v2",
+        source="persistent_snapshot",
+        observed_at="1970-01-01T00:01:35Z",
+        stale_after_sec=15.0,
+        now=100.0,
+    )
+
+    assert fact.state == "known"
 
 
 def test_stale_and_error_are_distinct_states():

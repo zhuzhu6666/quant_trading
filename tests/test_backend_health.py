@@ -16,6 +16,8 @@ def test_health_ok_or_degraded():
     assert "server_time" in body
     assert "uptime_seconds" in body
     assert body["uptime_seconds"] >= 0
+    assert body["_fact"]["contract"] == "system.health.v2"
+    assert body["_fact"]["state"] in {"known", "unknown", "error"}
 
 
 def test_health_db_field_present():

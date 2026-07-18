@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.core.db import get_state_pg_conn
+from backend.core.db import get_state_pg_conn, state_pg_dsn
+from backend.core.state_store import connect_state_migration_store
 from backend.core.state_schema_migrations import (
     STATE_SCHEMA_MIN_VERSION,
     StateSchemaError,
@@ -45,7 +46,11 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = None
     try:
-        conn = get_state_pg_conn(read_only=not args.apply)
+        conn = (
+            connect_state_migration_store(state_pg_dsn())
+            if args.apply
+            else get_state_pg_conn(read_only=True)
+        )
         if not args.apply:
             payload = state_schema_status(conn, minimum_version=STATE_SCHEMA_MIN_VERSION)
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))

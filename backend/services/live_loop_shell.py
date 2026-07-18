@@ -7,11 +7,53 @@ service module while the old globals remain the runtime source of truth.
 
 from __future__ import annotations
 
+import os
+import math
+import uuid
 from typing import Any, Callable
 
 
 StateGet = Callable[..., Any]
 StateUpdate = Callable[..., None]
+_LIVE_FACTOR_PROJECTION_BOOT_ID = f"live-alpha:{os.getpid()}:{uuid.uuid4().hex}"
+
+
+def acknowledge_prepared_factor_projections(
+    *,
+    engine: Any,
+    generation_id: str,
+    log: Callable[[str], Any] | None = None,
+    service: Any | None = None,
+) -> dict[str, Any]:
+    """Best-effort live-alpha load ack; never raises into the safety loop."""
+    try:
+        if service is None:
+            from backend.services.factor_lifecycle_service import FactorLifecycleService
+
+            service = FactorLifecycleService()
+        result = service.acknowledge_loaded_prepared_factors(
+            engine=engine,
+            # Generation controller owns this identity when enabled. Legacy
+            # mode still gets a process-boot-unique identity so current demo
+            # can acknowledge without weakening factor generation binding.
+            boot_id=str(generation_id or _LIVE_FACTOR_PROJECTION_BOOT_ID),
+        )
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "status": "projection_ack_unavailable",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "acknowledged_count": 0,
+        }
+    if log is not None:
+        acknowledged = int(result.get("acknowledged_count") or 0)
+        blocked = int(result.get("blocked_count") or 0)
+        if acknowledged or blocked or not result.get("ok"):
+            log(
+                "factor lifecycle projection ack: "
+                f"status={result.get('status')} acknowledged={acknowledged} blocked={blocked}"
+            )
+    return result
 
 
 def loop_status_snapshot(
@@ -70,10 +112,13 @@ def mark_loop_stopped_for_display(*, state_update: StateUpdate) -> None:
     )
 
 
-def cache_age_seconds(*, now_ts: float, updated_at: float) -> float:
+UNKNOWN_STALE_AGE_SECONDS = 1_000_000_000_000.0
+
+
+def cache_age_seconds(*, now_ts: float, updated_at: float) -> float | None:
     ts = float(updated_at or 0.0)
     if ts <= 0:
-        return 0.0
+        return None
     return max(0.0, float(now_ts or 0.0) - ts)
 
 
@@ -111,7 +156,8 @@ def collect_open_risk_runtime_health(
     system_report_provider: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     sync_snapshot: dict[str, Any] = {}
-    data_lag_seconds = 0.0
+    data_lag_seconds = UNKNOWN_STALE_AGE_SECONDS
+    data_lag_state = "unknown"
     system_health_snapshot: dict[str, Any] = {}
     try:
         if sync_health_provider is None:
@@ -121,10 +167,16 @@ def collect_open_risk_runtime_health(
         else:
             sync_health = sync_health_provider()
         sync_snapshot = sync_health.snapshot()
-        data_lag_seconds = float(sync_health.last_bar_age_seconds(str(timeframe or "M5")) or 0.0)
+        raw_data_lag = sync_health.last_bar_age_seconds(str(timeframe or "M5"))
+        if raw_data_lag is not None:
+            parsed_data_lag = float(raw_data_lag)
+            if math.isfinite(parsed_data_lag) and parsed_data_lag >= 0.0:
+                data_lag_seconds = parsed_data_lag
+                data_lag_state = "known"
     except Exception:
         sync_snapshot = {}
-        data_lag_seconds = 0.0
+        data_lag_seconds = UNKNOWN_STALE_AGE_SECONDS
+        data_lag_state = "unknown"
     try:
         if system_report_provider is None:
             from monitor.system_health import shared as _system_health_shared
@@ -138,13 +190,20 @@ def collect_open_risk_runtime_health(
     return {
         "data_lag_seconds": data_lag_seconds,
         "runtime_health": {
+            "data_lag_state": data_lag_state,
             "account_cache_age_seconds": cache_age_seconds(
                 now_ts=now_ts,
                 updated_at=account_updated_at,
             ),
+            "account_cache_age_state": (
+                "known" if float(account_updated_at or 0.0) > 0 else "unknown"
+            ),
             "positions_cache_age_seconds": cache_age_seconds(
                 now_ts=now_ts,
                 updated_at=positions_updated_at,
+            ),
+            "positions_cache_age_state": (
+                "known" if float(positions_updated_at or 0.0) > 0 else "unknown"
             ),
             "sync_health": sync_snapshot,
             "system_health": system_health_snapshot,

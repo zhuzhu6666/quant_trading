@@ -19,6 +19,7 @@ from fastapi import APIRouter, Query
 
 from backend.core.auth import RequireUser
 from backend.core.db import get_state_pg_conn
+from backend.services.ops_governance_fact_views import factor_catalog_fact_payload
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v4", tags=["factor-v4"])
@@ -107,19 +108,19 @@ def get_factor_catalog(
 
     if str(snapshot or "").strip().lower() == "latest":
         latest = latest_factor_catalog_snapshot()
-        return {
+        return factor_catalog_fact_payload({
             "schema_version": "factor_catalog.v3",
             "snapshot_mode": "latest",
             **latest,
-        }
+        })
 
     items = build_factor_catalog()
-    return {
+    return factor_catalog_fact_payload({
         "schema_version": "factor_catalog.v3",
         "snapshot_mode": "live",
         "count": len(items),
         "items": items,
-    }
+    })
 
 
 @router.get("/stats")

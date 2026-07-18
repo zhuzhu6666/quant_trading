@@ -6,10 +6,16 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+)
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_supervisor import evaluate_position_supervisor
 from backend.services.position_supervisor_templates import (
@@ -63,6 +69,227 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value or 0.0)
     except Exception:
         return float(default)
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _stable_supervisor_application_id(suggestion_id: str, target_template_id: str) -> str:
+    digest = hashlib.sha256(
+        f"{suggestion_id}|{target_template_id}".encode("utf-8")
+    ).hexdigest()[:20]
+    return f"psv_apply_{digest}"
+
+
+def _upsert_row(
+    conn,
+    *,
+    table: str,
+    primary_key: str,
+    values: Mapping[str, Any],
+    immutable_columns: set[str] | None = None,
+) -> None:
+    columns = list(values)
+    immutable = set(immutable_columns or ()) | {primary_key}
+    updates = [column for column in columns if column not in immutable]
+    placeholders = ", ".join("?" for _ in columns)
+    update_sql = ", ".join(f"{column}=excluded.{column}" for column in updates)
+    _execute(
+        conn,
+        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT({primary_key}) DO UPDATE SET {update_sql}",
+        tuple(values[column] for column in columns),
+    )
+
+
+def _write_supervisor_switch_domain(
+    conn,
+    *,
+    mutation_id: str,
+    application_id: str,
+    suggestion_id: str,
+    target_template_id: str,
+    reservation_id: str,
+    details: Mapping[str, Any],
+    review_note: str,
+    now: float,
+    require_governance_eligibility: bool = True,
+) -> dict[str, Any]:
+    """Write application/effect/suggestion/reservation in the coordinator tx."""
+    from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
+
+    details_payload = {
+        **dict(details),
+        "mutation_id": mutation_id,
+        "commit_boundary": "governance_mutation_coordinator",
+    }
+    app_columns = state_table_columns(conn, "learning_application_log")
+    app_values: dict[str, Any] = {
+        "application_id": application_id,
+        "cycle_ts": now,
+        "scope_type": "position_supervisor_template",
+        "scope_key": target_template_id,
+        "action": "switch_position_supervisor_template",
+        "bias_multiplier": 1.0,
+        "old_weight": 0.0,
+        "new_weight": 0.0,
+        "suggestion_ids_json": _json([suggestion_id] if suggestion_id else []),
+        "status": "applied",
+        "details_json": _json(details_payload),
+        "created_at": now,
+    }
+    if "mutation_id" in app_columns:
+        app_values["mutation_id"] = mutation_id
+    if "governance_eligibility_version" in app_columns:
+        app_values["governance_eligibility_version"] = GOVERNANCE_ELIGIBILITY_VERSION
+    _upsert_row(
+        conn,
+        table="learning_application_log",
+        primary_key="application_id",
+        values=app_values,
+        immutable_columns={"created_at"},
+    )
+
+    effect_columns = state_table_columns(conn, "learning_application_effect")
+    effect_values: dict[str, Any] = {
+        "application_id": application_id,
+        "scope_type": "position_supervisor_template",
+        "scope_key": target_template_id,
+        "action": "switch_position_supervisor_template",
+        "status": "observing",
+        "decision_json": _json(details_payload),
+        "updated_at": now,
+        "created_at": now,
+    }
+    if "mutation_id" in effect_columns:
+        effect_values["mutation_id"] = mutation_id
+    if "governance_eligibility_version" in effect_columns:
+        effect_values["governance_eligibility_version"] = GOVERNANCE_ELIGIBILITY_VERSION
+    _upsert_row(
+        conn,
+        table="learning_application_effect",
+        primary_key="application_id",
+        values=effect_values,
+        immutable_columns={"created_at"},
+    )
+
+    if reservation_id:
+        reservation_columns = state_table_columns(conn, "learning_experiment_reservation")
+        assignments = ["status='consumed'", "application_id=?", "updated_at=?"]
+        params: list[Any] = [application_id, now]
+        if "mutation_id" in reservation_columns:
+            assignments.append("mutation_id=?")
+            params.append(mutation_id)
+        params.extend([reservation_id])
+        reservation_update = _execute(
+            conn,
+            "UPDATE learning_experiment_reservation SET "
+            + ", ".join(assignments)
+            + " WHERE reservation_id=? AND status='reserved'",
+            tuple(params),
+        )
+        if int(reservation_update.rowcount or 0) != 1:
+            existing = _execute(
+                conn,
+                "SELECT status, application_id FROM learning_experiment_reservation WHERE reservation_id=?",
+                (reservation_id,),
+            ).fetchone()
+            if not existing or str(existing["status"] or "") != "consumed" or str(
+                existing["application_id"] or ""
+            ) != application_id:
+                raise RuntimeError("supervisor_reservation_not_reserved")
+
+    if suggestion_id:
+        suggestion_columns = state_table_columns(conn, "policy_suggestion")
+        assignments = [
+            "status='applied'",
+            "reviewed_at=CASE WHEN reviewed_at > 0 THEN reviewed_at ELSE ? END",
+            "review_note=?",
+        ]
+        params = [now, review_note]
+        if "applied_mutation_id" in suggestion_columns:
+            assignments.append("applied_mutation_id=?")
+            params.append(mutation_id)
+        params.append(suggestion_id)
+        eligibility_predicate = ""
+        if require_governance_eligibility:
+            eligibility_predicate = (
+                " AND governance_eligible=1"
+                " AND governance_eligibility_version=?"
+                " AND governance_eligibility_fingerprint<>''"
+            )
+            params.append(GOVERNANCE_ELIGIBILITY_VERSION)
+        suggestion_update = _execute(
+            conn,
+            "UPDATE policy_suggestion SET "
+            + ", ".join(assignments)
+            + " WHERE suggestion_id=? AND status IN ('approved', 'applied')"
+            + eligibility_predicate,
+            tuple(params),
+        )
+        if int(suggestion_update.rowcount or 0) != 1:
+            raise RuntimeError("supervisor_suggestion_not_approved")
+    return {
+        "application_id": application_id,
+        "reservation_id": reservation_id,
+        "suggestion_id": suggestion_id,
+        "mutation_id": mutation_id,
+    }
+
+
+def _write_supervisor_rollback_domain(
+    conn,
+    *,
+    mutation_id: str,
+    application_id: str,
+    rollback: Mapping[str, Any],
+    now: float,
+) -> dict[str, Any]:
+    details_row = _execute(
+        conn,
+        "SELECT details_json FROM learning_application_log WHERE application_id=?",
+        (application_id,),
+    ).fetchone()
+    previous_details = _loads(details_row["details_json"], {}) if details_row else {}
+    rollback_payload = {
+        **dict(rollback),
+        "mutation_id": mutation_id,
+        "commit_boundary": "governance_mutation_coordinator",
+    }
+    app_columns = state_table_columns(conn, "learning_application_log")
+    assignments = ["status='rolled_back'", "details_json=?"]
+    params: list[Any] = [_json({**previous_details, "rollback": rollback_payload})]
+    if "mutation_id" in app_columns:
+        assignments.append("mutation_id=?")
+        params.append(mutation_id)
+    params.append(application_id)
+    application_update = _execute(
+        conn,
+        "UPDATE learning_application_log SET "
+        + ", ".join(assignments)
+        + " WHERE application_id=?",
+        tuple(params),
+    )
+    if int(application_update.rowcount or 0) != 1:
+        raise RuntimeError("supervisor_rollback_application_missing")
+    effect_columns = state_table_columns(conn, "learning_application_effect")
+    assignments = ["status='rolled_back'", "decision_json=?", "updated_at=?"]
+    params = [_json(rollback_payload), now]
+    if "mutation_id" in effect_columns:
+        assignments.append("mutation_id=?")
+        params.append(mutation_id)
+    params.append(application_id)
+    effect_update = _execute(
+        conn,
+        "UPDATE learning_application_effect SET "
+        + ", ".join(assignments)
+        + " WHERE application_id=?",
+        tuple(params),
+    )
+    if int(effect_update.rowcount or 0) != 1:
+        raise RuntimeError("supervisor_rollback_effect_missing")
+    return {"application_id": application_id, "mutation_id": mutation_id}
 
 
 def _day_bounds(day: str) -> tuple[float, float]:
@@ -220,6 +447,225 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
         "labels": labels,
         "events": events,
     }
+
+
+def materialize_position_supervisor_candidate_observations(
+    *,
+    db_path: str | Path = STATE_DB,
+    limit: int = 500,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Replay approved supervisor candidates in the non-execution learning plane.
+
+    Approved suggestions are observations, never live controls.  This helper
+    reconstructs a closed-position context from the outcome review, evaluates
+    the candidate without a broker dependency, and persists an immutable
+    ``learning_shadow`` trace.  The trace is deliberately marked recovered and
+    non-authoritative so it cannot be mistaken for a broker mutation or a live
+    execution trace.
+    """
+    bounded_limit = max(1, min(int(limit), 5000))
+    now = time.time()
+    conn = _connect(db_path)
+    inserted = 0
+    existing = 0
+    evaluated = 0
+    skipped: list[dict[str, Any]] = []
+    candidate_summaries: list[dict[str, Any]] = []
+    try:
+        if not state_table_columns(conn, "policy_suggestion"):
+            return {
+                "schema_version": "position_supervisor_candidate_observation.v1",
+                "status": "unavailable",
+                "reason": "policy_suggestion_missing",
+                "inserted": 0,
+                "existing": 0,
+                "evaluated": 0,
+                "candidates": [],
+                "skipped": [],
+            }
+        candidates = _execute(
+            conn,
+            """
+            SELECT suggestion_id, scope_key, created_at
+            FROM policy_suggestion
+            WHERE scope_type='position_supervisor_template'
+              AND status='approved'
+            ORDER BY reviewed_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (min(bounded_limit, 100),),
+        ).fetchall()
+        remaining = bounded_limit
+        for candidate_row in candidates:
+            if remaining <= 0:
+                break
+            candidate = dict(candidate_row)
+            suggestion_id = str(candidate.get("suggestion_id") or "")
+            template_id = str(candidate.get("scope_key") or "")
+            candidate_created_at = _safe_float(candidate.get("created_at"))
+            template = get_position_supervisor_template(template_id, db_path=db_path)
+            if str(template.get("template_id") or "") != template_id:
+                skipped.append(
+                    {
+                        "suggestion_id": suggestion_id,
+                        "template_id": template_id,
+                        "reason": "candidate_template_unavailable",
+                    }
+                )
+                continue
+            rows = _execute(
+                conn,
+                """
+                SELECT cf.counterfactual_id, cf.close_ts,
+                       cf.evidence_json AS counterfactual_evidence_json,
+                       tr.review_id, tr.trade_id, tr.position_id,
+                       tr.entry_decision_id, tr.exit_decision_id,
+                       tr.pnl, tr.mae, tr.mfe, tr.outcome_label,
+                       tr.failure_tags_json, tr.summary_text,
+                       tr.review_json, tr.created_at
+                FROM supervisor_counterfactual_review cf
+                JOIN trade_outcome_review tr ON tr.position_id=cf.position_id
+                WHERE cf.close_ts>=?
+                ORDER BY cf.close_ts ASC, tr.created_at DESC
+                LIMIT ?
+                """,
+                (candidate_created_at, min(remaining * 4, 5000)),
+            ).fetchall()
+            seen_positions: set[str] = set()
+            candidate_inserted = 0
+            candidate_existing = 0
+            candidate_evaluated = 0
+            for row in rows:
+                item = dict(row)
+                position_id = str(item.get("position_id") or "")
+                if not position_id or position_id in seen_positions:
+                    continue
+                seen_positions.add(position_id)
+                counterfactual_evidence = _loads(
+                    item.get("counterfactual_evidence_json"), {}
+                )
+                maturity = dict((counterfactual_evidence or {}).get("maturity") or {})
+                if (
+                    not bool(maturity.get("governance_eligible"))
+                    or bool((counterfactual_evidence or {}).get("evidence_invalidated"))
+                ):
+                    continue
+                close_ts = _safe_float(item.get("close_ts"))
+                trace_id = "psvobs_" + hashlib.sha256(
+                    f"{suggestion_id}|{position_id}|{close_ts:.6f}".encode("utf-8")
+                ).hexdigest()
+                already_materialized = _execute(
+                    conn,
+                    "SELECT 1 FROM position_supervisor_trace WHERE trace_id=?",
+                    (trace_id,),
+                ).fetchone()
+                if already_materialized:
+                    existing += 1
+                    candidate_existing += 1
+                    remaining -= 1
+                    if remaining <= 0:
+                        break
+                    continue
+                context = _review_to_supervisor_context(conn, row)
+                context["position_supervisor_template"] = template
+                verdict = evaluate_position_supervisor(context)
+                verdict_evidence = dict(verdict.get("evidence") or {})
+                verdict_evidence.update(
+                    {
+                        "candidate_suggestion_id": suggestion_id,
+                        "counterfactual_id": str(item.get("counterfactual_id") or ""),
+                        "non_authoritative": True,
+                        "observation_source": "learning_worker_closed_position_replay",
+                        "lineage_state": "verified_recovered",
+                    }
+                )
+                verdict = {**dict(verdict), "evidence": verdict_evidence}
+                observation_contract = {
+                    "schema_version": "position_supervisor_candidate_observation.v1",
+                    "candidate_suggestion_id": suggestion_id,
+                    "counterfactual_id": str(item.get("counterfactual_id") or ""),
+                    "source": "learning_worker",
+                    "non_authoritative": True,
+                    "broker_mutation_allowed": False,
+                    "lineage_state": "verified_recovered",
+                    "governance_eligible_counterfactual": True,
+                }
+                cursor = _execute(
+                    conn,
+                    """
+                    INSERT INTO position_supervisor_trace
+                    (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
+                     tick, event_ts, action, summary_reason, confidence, template_id,
+                     template_version, stage, outcome, risk_action, risk_allowed,
+                     risk_reason, execution_status, execution_reason, context_json,
+                     verdict_json, risk_verdict_json, execution_json, trace_integrity,
+                     config_version, config_hash, evolution_run_id, created_at)
+                    VALUES (?, ?, ?, ?, '', '', 0, ?, ?, ?, ?, ?, ?,
+                            'learning_shadow', 'shadow', '', 0, '',
+                            'observation_only', ?,
+                            ?, ?, '{}', ?, 'recovered', 0, '', ?, ?)
+                    ON CONFLICT(trace_id) DO NOTHING
+                    """,
+                    (
+                        trace_id,
+                        str(item.get("exit_decision_id") or ""),
+                        position_id,
+                        str(item.get("trade_id") or position_id),
+                        close_ts,
+                        str(verdict.get("action") or "hold"),
+                        str(verdict.get("summary_reason") or ""),
+                        _safe_float(verdict.get("confidence")),
+                        template_id,
+                        str(template.get("template_version") or ""),
+                        f"learning_worker_candidate_replay:{suggestion_id}",
+                        _json({**context, "observation_contract": observation_contract}),
+                        _json(verdict),
+                        _json(
+                            {
+                                "execution_class": "shadow",
+                                "is_real_execution": False,
+                                "broker_mutation_attempted": False,
+                                "observation_contract": observation_contract,
+                            }
+                        ),
+                        str(run_id or ""),
+                        now,
+                    ),
+                )
+                was_inserted = int(cursor.rowcount or 0) == 1
+                inserted += int(was_inserted)
+                existing += int(not was_inserted)
+                evaluated += 1
+                candidate_inserted += int(was_inserted)
+                candidate_existing += int(not was_inserted)
+                candidate_evaluated += 1
+                remaining -= 1
+                if remaining <= 0:
+                    break
+            candidate_summaries.append(
+                {
+                    "suggestion_id": suggestion_id,
+                    "template_id": template_id,
+                    "evaluated": candidate_evaluated,
+                    "inserted": candidate_inserted,
+                    "existing": candidate_existing,
+                }
+            )
+        conn.commit()
+        return {
+            "schema_version": "position_supervisor_candidate_observation.v1",
+            "status": "completed",
+            "authority": "learning_observation_only",
+            "broker_mutation_allowed": False,
+            "inserted": inserted,
+            "existing": existing,
+            "evaluated": evaluated,
+            "candidates": candidate_summaries,
+            "skipped": skipped,
+        }
+    finally:
+        conn.close()
 
 
 def replay_position_supervisor_templates(
@@ -595,3 +1041,246 @@ def build_position_supervisor_advisories(
         "items": suggestions,
         "skipped": skipped,
     }
+
+
+class PositionSupervisorGovernanceMutationService:
+    """Single typed mutation boundary for supervisor-template controls.
+
+    Evidence selection and RiskPolicy approval stay with the caller.  This
+    service owns only the atomic commit of the runtime target and its durable
+    application/effect/suggestion projections.
+    """
+
+    def __init__(self, db_path: str | Path = STATE_DB):
+        self.db_path = db_path
+
+    @staticmethod
+    def _committed(mutation: Mapping[str, Any]) -> bool:
+        return bool(mutation.get("ok")) or str(mutation.get("status") or "") in {
+            "applied",
+            "committed",
+            "committed_projection_degraded",
+        }
+
+    def switch_template(
+        self,
+        *,
+        suggestion_id: str,
+        previous_template_id: str,
+        target_template_id: str,
+        actor: str,
+        source: str,
+        run_id: str,
+        reason: str,
+        evidence: Mapping[str, Any],
+        risk_verdict: Mapping[str, Any],
+        reservation_id: str = "",
+        application_id: str = "",
+        application_details: Mapping[str, Any] | None = None,
+        v16_command_id: str = "",
+        v16_claim_token: str = "",
+    ) -> dict[str, Any]:
+        from backend.services.governance_control_plans import (
+            PositionSupervisorTemplatePlan,
+            governance_coordinator_mode,
+        )
+
+        now = time.time()
+        application_id = application_id or _stable_supervisor_application_id(
+            suggestion_id, target_template_id
+        )
+        details = {
+            "schema_version": "position_supervisor_template_switch.v2",
+            "suggestion_id": suggestion_id,
+            "previous_template_id": previous_template_id,
+            "target_template_id": target_template_id,
+            "risk_verdict": dict(risk_verdict),
+            "evidence": dict(evidence),
+            "experiment_reservation_id": reservation_id,
+            **dict(application_details or {}),
+        }
+        plan = PositionSupervisorTemplatePlan(
+            patch={"position_supervisor_template_id": target_template_id},
+            source=source,
+            actor=actor,
+            action="switch_position_supervisor_template",
+            run_id=run_id,
+            reason=reason,
+            scope_type="supervisor_template",
+            scope_key="position_supervisor",
+            target_agent="position_supervisor_governance",
+            previous_template_id=previous_template_id,
+            target_template_id=target_template_id,
+            suggestion_id=suggestion_id,
+            application_id=application_id,
+            reservation_id=reservation_id,
+            rollback={"position_supervisor_template_id": previous_template_id},
+            evidence_refs={
+                "suggestion_id": suggestion_id,
+                "risk_verdict": dict(risk_verdict),
+                "evidence": dict(evidence),
+                "previous_template_id": previous_template_id,
+                "target_template_id": target_template_id,
+            },
+            idempotency_key=(
+                f"position-supervisor-switch:v2:{suggestion_id or run_id}:"
+                f"{previous_template_id}:{target_template_id}"
+            ),
+            v16_command_id=v16_command_id,
+            v16_claim_token=v16_claim_token,
+        )
+
+        mode = governance_coordinator_mode()
+
+        def writer(conn, mutation_id: str, _effective_config) -> Mapping[str, Any]:
+            return _write_supervisor_switch_domain(
+                conn,
+                mutation_id=mutation_id,
+                application_id=application_id,
+                suggestion_id=suggestion_id,
+                target_template_id=target_template_id,
+                reservation_id=reservation_id,
+                details=details,
+                review_note=reason,
+                now=now,
+                require_governance_eligibility=mode != "off",
+            )
+
+        mutation = plan.execute(
+            self.db_path,
+            transaction_writer=writer if mode != "off" else None,
+        )
+        committed = self._committed(mutation)
+        if committed and mode == "off":
+            conn = _connect(self.db_path)
+            try:
+                writer(conn, str(mutation.get("mutation_id") or ""), None)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        elif not committed and reservation_id:
+            from backend.services.learning_experiment_admission import (
+                LearningExperimentAdmissionService,
+            )
+
+            LearningExperimentAdmissionService(self.db_path).release_reservations(
+                [reservation_id]
+            )
+        return {
+            "ok": committed,
+            "committed": committed,
+            "projection_ready": bool(mutation.get("ok")),
+            "application_id": application_id,
+            "suggestion_id": suggestion_id,
+            "previous_template_id": previous_template_id,
+            "target_template_id": target_template_id,
+            "mutation": mutation,
+            "mutation_id": str(mutation.get("mutation_id") or ""),
+            "coordinator_mode": mode,
+        }
+
+    def rollback_template(
+        self,
+        *,
+        application_id: str,
+        current_template_id: str,
+        previous_template_id: str,
+        actor: str,
+        source: str,
+        run_id: str,
+        reason: str,
+        evidence: Mapping[str, Any],
+        rollback_details: Mapping[str, Any],
+        v16_command_id: str = "",
+    ) -> dict[str, Any]:
+        from backend.services.governance_control_plans import (
+            PositionSupervisorTemplatePlan,
+            governance_coordinator_mode,
+        )
+
+        now = time.time()
+        plan = PositionSupervisorTemplatePlan(
+            patch={"position_supervisor_template_id": previous_template_id},
+            source=source,
+            actor=actor,
+            action="rollback_position_supervisor_template",
+            run_id=run_id,
+            reason=reason,
+            scope_type="supervisor_template",
+            scope_key="position_supervisor",
+            target_agent="position_supervisor_governance",
+            previous_template_id=current_template_id,
+            target_template_id=previous_template_id,
+            application_id=application_id,
+            rollback={"position_supervisor_template_id": current_template_id},
+            evidence_refs={
+                "application_id": application_id,
+                "current_template_id": current_template_id,
+                "previous_template_id": previous_template_id,
+                **dict(evidence),
+            },
+            idempotency_key=(
+                f"position-supervisor-rollback:v2:{application_id}:"
+                f"{current_template_id}:{previous_template_id}"
+            ),
+            v16_command_id=v16_command_id,
+        )
+
+        def writer(conn, mutation_id: str, _effective_config) -> Mapping[str, Any]:
+            return _write_supervisor_rollback_domain(
+                conn,
+                mutation_id=mutation_id,
+                application_id=application_id,
+                rollback=rollback_details,
+                now=now,
+            )
+
+        mode = governance_coordinator_mode()
+        if mode == "off":
+            # Legacy compatibility only.  dual/enforce always use the typed
+            # plan and coordinator-derived risk classification.
+            from backend.services.runtime_config_mutation import (
+                RuntimeConfigMutationService,
+            )
+
+            mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
+                dict(plan.patch),
+                source=plan.source,
+                run_id=plan.run_id,
+                actor=plan.actor,
+                action=plan.action,
+                reason=plan.reason,
+                v16_command_id=plan.v16_command_id,
+                v16_target_agent=plan.target_agent,
+                v16_scope_type=plan.scope_type,
+                v16_scope_key=plan.scope_key,
+                v16_action=plan.action,
+                risk_reduction=True,
+            )
+        else:
+            mutation = plan.execute(self.db_path, transaction_writer=writer)
+        committed = self._committed(mutation)
+        if committed and mode == "off":
+            conn = _connect(self.db_path)
+            try:
+                writer(conn, str(mutation.get("mutation_id") or ""), None)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        return {
+            "ok": committed,
+            "committed": committed,
+            "projection_ready": bool(mutation.get("ok")),
+            "application_id": application_id,
+            "previous_template_id": previous_template_id,
+            "rolled_back_from": current_template_id,
+            "mutation": mutation,
+            "mutation_id": str(mutation.get("mutation_id") or ""),
+            "coordinator_mode": mode,
+        }

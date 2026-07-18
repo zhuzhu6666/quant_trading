@@ -225,8 +225,30 @@ def _generated_templates_from_state(db_path: str | Path | None = None) -> list[d
             conn.row_factory = sqlite3.Row
     except Exception:
         return []
+    payloads: list[Any] = []
+    # Application snapshots are evaluated first.  ``setdefault`` below then
+    # prevents a newer proposed/approved suggestion with the same template ID
+    # from replacing the content that was actually committed and applied.
     try:
-        rows = conn.execute(
+        application_rows = conn.execute(
+            _sql(
+                conn,
+                """
+                SELECT details_json
+                FROM learning_application_log
+                WHERE scope_type='position_supervisor_template'
+                  AND action='switch_position_supervisor_template'
+                  AND status IN ('applied', 'observing', 'reinforced', 'mixed')
+                ORDER BY created_at DESC
+                LIMIT 100
+                """,
+            )
+        ).fetchall()
+        payloads.extend(row["details_json"] for row in application_rows)
+    except Exception:
+        pass
+    try:
+        suggestion_rows = conn.execute(
             _sql(
                 conn,
                 """
@@ -239,27 +261,9 @@ def _generated_templates_from_state(db_path: str | Path | None = None) -> list[d
                 """,
             )
         ).fetchall()
-        payloads = [row["evidence_json"] for row in rows]
-        try:
-            application_rows = conn.execute(
-                _sql(
-                    conn,
-                    """
-                    SELECT details_json
-                    FROM learning_application_log
-                    WHERE scope_type='position_supervisor_template'
-                      AND action='switch_position_supervisor_template'
-                      AND status IN ('applied', 'observing', 'reinforced', 'mixed')
-                    ORDER BY created_at DESC
-                    LIMIT 100
-                    """,
-                )
-            ).fetchall()
-            payloads.extend(row["details_json"] for row in application_rows)
-        except Exception:
-            pass
+        payloads.extend(row["evidence_json"] for row in suggestion_rows)
     except Exception:
-        return []
+        pass
     finally:
         conn.close()
 
@@ -309,80 +313,167 @@ def get_position_supervisor_template(template_id: str | None = None, *, db_path:
     return deepcopy(_TEMPLATES[DEFAULT_TEMPLATE_ID])
 
 
-def latest_applied_position_supervisor_template_id(*, db_path: str | Path | None = None) -> str:
+def latest_applied_position_supervisor_template_id(
+    *,
+    db_path: str | Path | None = None,
+    require_authority: bool = False,
+) -> str:
+    """Return the newest applied supervisor template.
+
+    ``require_authority`` is the production startup path.  It refuses to turn
+    a legacy application row into live authority unless the row is bound to a
+    committed/current/hash-bound governance mutation.  The only compatibility
+    exception is an explicit operator/backfill marker declaring the legacy
+    control both ``legacy_quarantined`` and tightening-only.  The default
+    remains permissive for one-release read-only compatibility callers.
+    """
+
     try:
-        from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+        from backend.core.db import (
+            STATE_DB,
+            connect_sqlite,
+            get_state_pg_conn,
+            is_state_db_path,
+            state_table_columns,
+            state_table_exists,
+        )
 
         path = Path(db_path or STATE_DB)
         use_pg = is_state_db_path(path)
         conn = get_state_pg_conn(read_only=True) if use_pg else connect_sqlite(path, read_only=True)
         if not use_pg:
             conn.row_factory = __import__("sqlite3").Row
-    except Exception:
+    except Exception as exc:
+        if require_authority:
+            raise RuntimeError(
+                f"position_supervisor_restore_state_unavailable:{type(exc).__name__}:{exc}"
+            ) from exc
         return DEFAULT_TEMPLATE_ID
     try:
-        row = conn.execute(
-            """
-            SELECT scope_key
-            FROM learning_application_log
-            WHERE scope_type='position_supervisor_template'
-              AND action='switch_position_supervisor_template'
-              AND status IN ('applied', 'observing', 'reinforced', 'mixed')
-            ORDER BY cycle_ts DESC, created_at DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        template_id = str(row["scope_key"] or "") if row else ""
-        valid_templates = {str(item.get("template_id") or "") for item in list_position_supervisor_templates(db_path=path)}
-        if template_id in valid_templates:
-            return template_id
-        return DEFAULT_TEMPLATE_ID
-    except Exception:
-        return DEFAULT_TEMPLATE_ID
-    finally:
-        conn.close()
-
-
-def latest_approved_position_supervisor_candidate(*, db_path: str | Path | None = None) -> dict[str, Any]:
-    """Return the newest governed candidate eligible for non-authoritative shadow evaluation."""
-    try:
-        from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
-
-        path = Path(db_path or STATE_DB)
-        use_pg = is_state_db_path(path)
-        conn = get_state_pg_conn(read_only=True) if use_pg else connect_sqlite(path, read_only=True)
-        if not use_pg:
-            conn.row_factory = sqlite3.Row
-    except Exception:
-        return {}
-    try:
+        application_columns = state_table_columns(conn, "learning_application_log")
+        mutation_select = "mutation_id" if "mutation_id" in application_columns else "'' AS mutation_id"
         row = conn.execute(
             _sql(
                 conn,
-                """
-                SELECT suggestion_id, scope_key, created_at
-                FROM policy_suggestion
+                f"""
+                SELECT application_id, scope_key, status, details_json,
+                       {mutation_select}
+                FROM learning_application_log
                 WHERE scope_type='position_supervisor_template'
-                  AND status='approved'
-                ORDER BY created_at DESC
+                  AND action='switch_position_supervisor_template'
+                  AND status IN ('applied', 'observing', 'reinforced', 'mixed')
+                ORDER BY cycle_ts DESC, created_at DESC
                 LIMIT 1
                 """,
             )
         ).fetchone()
         if not row:
-            return {}
-        template_id = str(row["scope_key"] or "")
-        template = get_position_supervisor_template(template_id, db_path=path)
-        if str(template.get("template_id") or "") != template_id:
-            return {}
-        return {
-            "suggestion_id": str(row["suggestion_id"] or ""),
-            "template_id": template_id,
-            "created_at": float(row["created_at"] or 0.0),
-            "template": template,
-        }
-    except Exception:
-        return {}
+            # Strict startup preserves the release/YAML/committed-overlay
+            # projection when no application fact exists.  It must not
+            # implicitly reset a configured template to the built-in default.
+            return "" if require_authority else DEFAULT_TEMPLATE_ID
+
+        template_id = str(row["scope_key"] or "") if row else ""
+        if require_authority:
+            try:
+                details = json.loads(row["details_json"] or "{}")
+            except Exception as exc:
+                raise RuntimeError(
+                    "legacy_position_supervisor_restore_details_invalid:"
+                    f"{row['application_id']}"
+                ) from exc
+            if not isinstance(details, dict):
+                raise RuntimeError(
+                    "legacy_position_supervisor_restore_details_invalid:"
+                    f"{row['application_id']}"
+                )
+
+            mutation_id = str(row["mutation_id"] or "")
+            details_mutation_id = str(details.get("mutation_id") or "")
+            committed = False
+            if (
+                mutation_id
+                and details_mutation_id == mutation_id
+                and str(details.get("commit_boundary") or "")
+                == "governance_mutation_coordinator"
+                and state_table_exists(conn, "governance_mutation_intent")
+            ):
+                intent_columns = state_table_columns(conn, "governance_mutation_intent")
+                required = {
+                    "mutation_id",
+                    "status",
+                    "projection_status",
+                    "scope_type",
+                    "committed_config_hash",
+                    "domain_hash",
+                }
+                if required <= intent_columns:
+                    intent = conn.execute(
+                        _sql(
+                            conn,
+                            """
+                            SELECT mutation_id
+                            FROM governance_mutation_intent
+                            WHERE mutation_id=?
+                              AND status='committed'
+                              AND projection_status='current'
+                              AND scope_type='supervisor_template'
+                              AND committed_config_hash<>''
+                              AND domain_hash<>''
+                            LIMIT 1
+                            """,
+                        ),
+                        (mutation_id,),
+                    ).fetchone()
+                    committed = intent is not None
+
+            legacy_quarantined = bool(
+                str(details.get("governance_authority") or "")
+                == "legacy_quarantined"
+                and str(details.get("risk_class") or "") == "risk_tightening"
+            )
+            if not committed and not legacy_quarantined:
+                raise RuntimeError(
+                    "legacy_position_supervisor_restore_unverified:"
+                    f"{row['application_id']}:{template_id}"
+                )
+
+            if template_id not in _TEMPLATES:
+                evidence = details.get("evidence") if isinstance(details.get("evidence"), dict) else {}
+                snapshot = (
+                    details.get("candidate_template")
+                    or details.get("template_snapshot")
+                    or evidence.get("candidate_template")
+                    or evidence.get("template_snapshot")
+                    or {}
+                )
+                if (
+                    not isinstance(snapshot, dict)
+                    or str(snapshot.get("template_id") or "") != template_id
+                    or not str(snapshot.get("template_version") or "")
+                ):
+                    raise RuntimeError(
+                        "position_supervisor_committed_snapshot_missing:"
+                        f"{row['application_id']}:{template_id}"
+                    )
+
+        valid_templates = {str(item.get("template_id") or "") for item in list_position_supervisor_templates(db_path=path)}
+        if template_id in valid_templates:
+            return template_id
+        if require_authority:
+            raise RuntimeError(
+                "position_supervisor_restore_template_missing:"
+                f"{row['application_id']}:{template_id}"
+            )
+        return DEFAULT_TEMPLATE_ID
+    except Exception as exc:
+        if require_authority:
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError(
+                f"position_supervisor_restore_failed:{type(exc).__name__}:{exc}"
+            ) from exc
+        return DEFAULT_TEMPLATE_ID
     finally:
         conn.close()
 

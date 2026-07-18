@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -28,6 +29,12 @@ class OrderResult:
     comment: str = ""
     price: float = 0.0
     volume: float = 0.0
+    # Additive compatibility field.  cTrader v2 always fills this with one of
+    # confirmed/rejected/unknown/simulated; legacy bridges may leave it empty.
+    outcome: str = ""
+    intent_id: str = ""
+    client_order_id: str = ""
+    client_msg_id: str = ""
 
 
 @dataclass
@@ -50,6 +57,18 @@ class PositionInfo:
     commission: float = 0.0
     swap: float = 0.0
     open_timestamp: float = 0.0  # epoch seconds
+    # Additive component truth.  Empty means a legacy producer that did not
+    # publish component state; the cTrader reconcile/event paths always fill
+    # these fields explicitly.  In particular, ``pnl == 0`` is only a known
+    # flat PnL when ``pnl_state == "known"``.
+    current_price_state: str = ""
+    current_price_source: str = ""
+    current_price_observed_at: float = 0.0
+    current_price_reason_code: str = ""
+    pnl_state: str = ""
+    pnl_source: str = ""
+    pnl_observed_at: float = 0.0
+    pnl_reason_code: str = ""
 
     def get(self, key: str, default: Any = None) -> Any:
         """Dict-like accessor for canonical fields.
@@ -85,6 +104,169 @@ class AccountInfo:
     currency: str = "USD"
     account_id: int = 0
     name: str = ""
+
+
+ReconcileStatus = Literal["fresh", "cache", "event", "failed"]
+_RECONCILE_STATUSES = frozenset({"fresh", "cache", "event", "failed"})
+ReconcileComponentState = Literal["known", "unknown", "stale", "error"]
+_RECONCILE_COMPONENT_STATES = frozenset({"known", "unknown", "stale", "error"})
+
+
+@dataclass(frozen=True)
+class ReconcileComponentFact:
+    """Immutable truth for one component of a broker reconciliation.
+
+    Position identity/volume/SL/TP and price/PnL do not share a freshness
+    boundary in cTrader: ``ProtoOAReconcileRes`` is authoritative for the
+    former, while price comes from spot events and PnL from a separate RPC.
+    Keeping these facts separate prevents a successful identity snapshot from
+    manufacturing a zero PnL or entry-price mark.
+    """
+
+    state: ReconcileComponentState
+    source: str = ""
+    observed_at: float = 0.0
+    reason_code: str = ""
+    known_position_ids: tuple[int, ...] = ()
+    unknown_position_ids: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.state not in _RECONCILE_COMPONENT_STATES:
+            raise ValueError(f"invalid reconcile component state: {self.state!r}")
+
+    @property
+    def known(self) -> bool:
+        return self.state == "known"
+
+
+@dataclass(frozen=True)
+class PositionReconcileResult:
+    """Immutable, explicit result of a broker position reconciliation.
+
+    ``fresh`` is the only authoritative full broker snapshot.  ``cache`` and
+    ``event`` deliberately remain distinguishable so safety callers cannot
+    mistake a stale/cache snapshot (including an empty one) for a successful
+    empty-account reconciliation.  ``failed`` never carries an authoritative
+    answer.
+    """
+
+    reconcile_id: str
+    status: ReconcileStatus
+    positions: tuple[PositionInfo, ...] = ()
+    observed_at: float = 0.0
+    generated_at: float = 0.0
+    error_code: str = ""
+    error_message: str = ""
+    identity_component: ReconcileComponentFact | None = None
+    protection_component: ReconcileComponentFact | None = None
+    price_component: ReconcileComponentFact | None = None
+    pnl_component: ReconcileComponentFact | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in _RECONCILE_STATUSES:
+            raise ValueError(f"invalid position reconcile status: {self.status!r}")
+        position_ids = tuple(
+            sorted(
+                int(position.position_id or 0)
+                for position in self.positions
+                if int(position.position_id or 0) > 0
+            )
+        )
+        if self.status == "fresh":
+            snapshot_state: ReconcileComponentState = "known"
+            snapshot_source = "broker_reconcile"
+            snapshot_reason = ""
+        elif self.status in {"cache", "event"}:
+            snapshot_state = "stale"
+            snapshot_source = self.status
+            snapshot_reason = self.error_code or "not_freshly_reconciled"
+        else:
+            snapshot_state = "error"
+            snapshot_source = "broker_reconcile"
+            snapshot_reason = self.error_code or "position_reconcile_failed"
+        snapshot_fact = ReconcileComponentFact(
+            state=snapshot_state,
+            source=snapshot_source,
+            observed_at=float(self.observed_at or 0.0),
+            reason_code=snapshot_reason,
+            known_position_ids=position_ids if snapshot_state == "known" else (),
+            unknown_position_ids=position_ids if snapshot_state != "known" else (),
+        )
+        if self.identity_component is None:
+            object.__setattr__(self, "identity_component", snapshot_fact)
+        if self.protection_component is None:
+            object.__setattr__(self, "protection_component", snapshot_fact)
+        unspecified = ReconcileComponentFact(
+            state="unknown" if self.status != "failed" else "error",
+            source="legacy_unspecified",
+            observed_at=0.0,
+            reason_code=(
+                "component_not_reported"
+                if self.status != "failed"
+                else self.error_code or "position_reconcile_failed"
+            ),
+            unknown_position_ids=position_ids,
+        )
+        if self.price_component is None:
+            object.__setattr__(self, "price_component", unspecified)
+        if self.pnl_component is None:
+            object.__setattr__(self, "pnl_component", unspecified)
+
+    @property
+    def success(self) -> bool:
+        return self.status != "failed"
+
+    @property
+    def fresh(self) -> bool:
+        return self.status == "fresh"
+
+    @property
+    def authoritative(self) -> bool:
+        """Whether identity/volume/SL/TP are a fresh full snapshot.
+
+        Price and PnL authority must be checked through ``components``.
+        """
+        return self.status == "fresh"
+
+    @property
+    def components(self) -> Mapping[str, ReconcileComponentFact]:
+        return MappingProxyType(
+            {
+                "identity": self.identity_component,
+                "protection": self.protection_component,
+                "price": self.price_component,
+                "pnl": self.pnl_component,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class AccountReconcileResult:
+    """Immutable, explicit result of a broker account reconciliation."""
+
+    reconcile_id: str
+    status: ReconcileStatus
+    account: AccountInfo | None = None
+    observed_at: float = 0.0
+    generated_at: float = 0.0
+    error_code: str = ""
+    error_message: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in _RECONCILE_STATUSES:
+            raise ValueError(f"invalid account reconcile status: {self.status!r}")
+
+    @property
+    def success(self) -> bool:
+        return self.status != "failed"
+
+    @property
+    def fresh(self) -> bool:
+        return self.status == "fresh"
+
+    @property
+    def authoritative(self) -> bool:
+        return self.status == "fresh"
 
 
 # ── 抽象接口 ─────────────────────────────────────────────

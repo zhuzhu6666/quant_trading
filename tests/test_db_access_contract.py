@@ -259,15 +259,20 @@ def test_factor_weight_mutations_are_decided_by_decision_policy():
 def test_live_broker_mutations_are_confined_to_reviewed_execution_adapters():
     """Do not let new production code acquire a side door to cTrader writes.
 
-    These two adapters either evaluate RiskPolicyService themselves or receive
-    its verdict from the risk-gated live pipeline.  The allowlist is kept at a
-    module boundary so internal function extraction does not churn this test.
+    These adapters either evaluate RiskPolicyService themselves or receive its
+    verdict from the risk-gated live pipeline.  Emergency close is deliberately
+    isolated from alpha/PG while remaining close-only.  The allowlist is kept at
+    a module boundary so internal function extraction does not churn this test.
     """
     repo = Path(__file__).resolve().parents[1]
     broker_methods = {"market_buy", "market_sell", "close_position", "amend_position_sltp"}
     approved_modules = {
-        "backend/services/live_service.py",
-        "backend/services/live_supervision_actions.py",
+        "backend/services/live_emergency.py": {"close_position"},
+        "backend/services/live_service.py": broker_methods,
+        "backend/services/live_supervision_actions.py": {
+            "close_position",
+            "amend_position_sltp",
+        },
     }
     offenders: list[str] = []
     for path in _python_files(repo):
@@ -279,7 +284,7 @@ def test_live_broker_mutations_are_confined_to_reviewed_execution_adapters():
         for scope, call in visitor.calls:
             if not isinstance(call.func, ast.Attribute) or call.func.attr not in broker_methods:
                 continue
-            if rel not in approved_modules:
+            if call.func.attr not in approved_modules.get(rel, set()):
                 offenders.append(f"{rel}:{call.lineno} ({scope} -> {call.func.attr})")
     assert offenders == []
 

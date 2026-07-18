@@ -7,9 +7,15 @@ Shadow factors stay in the shadow evaluator.
 from __future__ import annotations
 
 import os
+import re
+import time
 from dataclasses import dataclass, field
 
 from alpha.registry import factor_registry
+from .factor_identity import canonical_factor_id
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass
@@ -76,6 +82,82 @@ def _has_health_evidence(name: str, health: dict[str, object]) -> bool:
     return n_obs > 0 and status not in {"", "UNKNOWN"}
 
 
+def _has_active_health_evidence(
+    name: str,
+    health: dict[str, object],
+    *,
+    now: float | None = None,
+) -> bool:
+    """Require the same fail-closed health class used by ACTIVE admission."""
+
+    item = health.get(name)
+    if item is None:
+        return False
+    try:
+        from config.runtime_config import shared as runtime_config
+
+        cfg = runtime_config()
+        min_score = float(getattr(cfg, "factor_health_healthy_threshold", 70.0))
+        min_n_obs = int(getattr(cfg, "factor_health_min_n_obs", 100))
+        min_abs_ic = float(
+            getattr(cfg, "factor_health_ic_active_threshold", 0.02)
+        )
+    except Exception:
+        min_score = 70.0
+        min_n_obs = 100
+        min_abs_ic = 0.02
+    try:
+        status = str(getattr(item, "status", "UNKNOWN") or "UNKNOWN").upper()
+        score = float(getattr(item, "score", 0.0) or 0.0)
+        n_obs = int(getattr(item, "n_obs", 0) or 0)
+        rolling_ic = abs(float(getattr(item, "rolling_ic", 0.0) or 0.0))
+        updated_at = float(getattr(item, "updated_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    checked_at = float(time.time() if now is None else now)
+    age = checked_at - updated_at if updated_at > 0.0 else float("inf")
+    return bool(
+        status == "HEALTHY"
+        and score >= min_score
+        and n_obs >= min_n_obs
+        and rolling_ic >= min_abs_ic
+        and -5.0 <= age <= 180.0
+    )
+
+
+def _discovered_admission_reason(name: str, cfg: object) -> str:
+    """Require the committed ACTIVE projection produced by lifecycle v2."""
+
+    if not isinstance(cfg, dict):
+        return "explicit_enabled_config_required"
+    if cfg.get("enabled") is not True:
+        return "explicit_enabled_config_required"
+    if str(cfg.get("lifecycle_status") or "").upper() != "ACTIVE":
+        return "lifecycle_not_active"
+    if not str(cfg.get("committed_mutation_id") or "").strip():
+        return "committed_mutation_required"
+    expression = str(cfg.get("expression") or "").strip()
+    factor_id = str(cfg.get("factor_id") or "").strip()
+    definition_fingerprint = str(cfg.get("definition_fingerprint") or "").strip().lower()
+    artifact_hash = str(cfg.get("artifact_hash") or "").strip().lower()
+    if not expression or not factor_id or not _SHA256_RE.fullmatch(definition_fingerprint):
+        return "stable_factor_identity_required"
+    if not _SHA256_RE.fullmatch(artifact_hash):
+        return "stable_artifact_required"
+    try:
+        if canonical_factor_id(expression) != factor_id:
+            return "stable_factor_identity_mismatch"
+    except Exception:
+        return "stable_factor_identity_invalid"
+    try:
+        weight = float(cfg.get("weight"))
+    except (TypeError, ValueError):
+        weight = 0.0
+    if weight <= 0.0:
+        return "explicit_positive_weight_required"
+    return ""
+
+
 def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[str]:
     try:
         from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED
@@ -88,25 +170,25 @@ def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[
         return []
 
     active: list[tuple[int, float, str]] = []
-    explicitly_configured: set[str] = set()
     config = dict(config or {})
     for name in names:
         if name in dead:
             continue
         if factor_registry.get(name) is None:
             continue
-        if not _has_health_evidence(name, health):
+        if not _has_active_health_evidence(name, health):
             continue
         cfg = config.get(name)
-        if isinstance(cfg, dict) and cfg.get("enabled") is False:
+        admission_reason = _discovered_admission_reason(name, cfg)
+        if admission_reason:
             continue
-        explicit = isinstance(cfg, dict)
-        if explicit:
-            explicitly_configured.add(name)
+        explicit = True
         try:
             meta = adapter.get_meta(name) if hasattr(adapter, "get_meta") else {}
         except Exception:
-            meta = {}
+            # Discovered factors require a complete Registry projection.  A
+            # store/adapter failure must never make them look like built-ins.
+            continue
         lifecycle = str((meta or {}).get("lifecycle_status") or (meta or {}).get("status") or "").upper()
         lifecycle_priority = 2 if lifecycle in {"LIVE", "ACTIVE", "CANARY_100"} else (1 if lifecycle.startswith("CANARY") else 0)
         score = max(
@@ -116,7 +198,7 @@ def active_discovered_factor_ids(config: dict[str, dict] | None = None) -> list[
             _score((meta or {}).get("score")),
         )
         active.append((100 + lifecycle_priority if explicit else lifecycle_priority, score, str(name)))
-    budget = max(_discovered_budget(), len(explicitly_configured))
+    budget = _discovered_budget()
     active.sort(key=lambda item: (-item[0], -item[1], item[2]))
     return [name for _, _, name in active[:budget]]
 
@@ -188,10 +270,11 @@ def select_runtime_factors(config: dict[str, dict] | None) -> RuntimeFactorSelec
         for name in adapter.list_by_source(SOURCE_DISCOVERED):
             if name not in selected_discovered and name not in reasons:
                 excluded.append(name)
-                reasons[name] = (
+                admission_reason = _discovered_admission_reason(name, config.get(name))
+                reasons[name] = admission_reason or (
                     "discovered_runtime_budget"
-                    if _has_health_evidence(name, health)
-                    else "missing_health_evidence"
+                    if _has_active_health_evidence(name, health)
+                    else "active_health_invalid_or_stale"
                 )
         for name in adapter.list_by_source(SOURCE_SHADOW):
             if name not in reasons:
@@ -211,6 +294,35 @@ def select_runtime_factors(config: dict[str, dict] | None) -> RuntimeFactorSelec
             cfg = config.get(name) if isinstance(config.get(name), dict) else {}
             role = str((cfg or {}).get("role") or "alpha").lower()
             lifecycle = str((cfg or {}).get("lifecycle_status") or "").upper()
+            meta_unavailable = False
+            try:
+                meta = adapter.get_meta(name) if hasattr(adapter, "get_meta") else {}
+            except Exception:
+                meta = {}
+                meta_unavailable = True
+            source = str(meta.get("source") or "builtin")
+            if (
+                meta_unavailable
+                and role == "alpha"
+                and not bool((cfg or {}).get("health_gate_exempt", False))
+            ):
+                excluded.append(name)
+                reasons[name] = "registry_metadata_unavailable"
+                continue
+            if source == SOURCE_DISCOVERED:
+                admission_reason = _discovered_admission_reason(name, cfg)
+                if admission_reason:
+                    excluded.append(name)
+                    reasons[name] = admission_reason
+                    continue
+                if name not in selected_discovered:
+                    excluded.append(name)
+                    reasons[name] = (
+                        "discovered_runtime_budget"
+                        if _has_active_health_evidence(name, health)
+                        else "active_health_invalid_or_stale"
+                    )
+                    continue
             if lifecycle in {"DEAD", "SHADOW", "QUARANTINE", "QUARANTINED"}:
                 excluded.append(name)
                 reasons[name] = "lifecycle_not_live"
@@ -223,7 +335,20 @@ def select_runtime_factors(config: dict[str, dict] | None) -> RuntimeFactorSelec
             admitted.append(name)
         names = admitted
     except Exception:
-        pass
+        # Registry/health/lifecycle is an admission authority for directional
+        # alpha.  If that authority is unavailable, keep context/gate/sizing
+        # inputs available but reject every non-exempt alpha instead of
+        # falling back to the original configured list.
+        admitted = []
+        for name in names:
+            cfg = config.get(name) if isinstance(config.get(name), dict) else {}
+            role = str((cfg or {}).get("role") or "alpha").lower()
+            if role == "alpha" and not bool((cfg or {}).get("health_gate_exempt", False)):
+                excluded.append(name)
+                reasons[name] = "factor_admission_unavailable"
+                continue
+            admitted.append(name)
+        names = admitted
 
     return RuntimeFactorSelection(
         selected_factor_ids=names,

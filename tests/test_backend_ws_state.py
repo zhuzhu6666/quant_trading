@@ -24,6 +24,8 @@ def test_ws_state_sends_snapshot_on_connect():
         assert "daily" in snapshot
         assert "risk" in snapshot
         assert "server_time" in snapshot
+        assert snapshot["_fact"]["contract"] == "live.state.v2"
+        assert snapshot["_fact"]["state"] in {"known", "unknown", "stale", "error"}
 
 
 def test_ws_state_sends_followup_after_1s():
@@ -34,3 +36,16 @@ def test_ws_state_sends_followup_after_1s():
         assert "equity" in second
         # server_time should differ
         assert first["server_time"] != second["server_time"]
+
+
+def test_http_state_fallback_carries_the_same_fact_contract():
+    token = _ws_token()
+    response = client.get(
+        "/api/state",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    snapshot = response.json()
+    assert snapshot["_fact"]["contract"] == "live.state.v2"
+    assert snapshot["_fact"]["state"] in {"known", "unknown", "stale", "error"}

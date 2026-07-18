@@ -3,8 +3,9 @@
 # Compile with pip-tools 7.5.3 via:
 #   python scripts/compile_python_locks.py
 #
-# The FastAPI/TestClient quartet is pinned intentionally.  It completed the
-# minimal TestClient request in 0.45s on Python 3.12 during the Phase 0B audit.
+# The FastAPI/TestClient quartet is pinned intentionally.  The CI
+# scripts/asgi_smoke.py gate requires both sync TestClient and async
+# ASGITransport requests to complete within five seconds on Python 3.12.
 
 numpy==2.4.6
 pandas==3.0.3
@@ -35,3 +36,4 @@ lightgbm==4.6.0
 loguru==0.7.3
 prometheus-client==0.25.0
 PyJWT==2.13.0
+argon2-cffi==25.1.0

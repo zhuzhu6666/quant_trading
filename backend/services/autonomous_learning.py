@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -27,6 +27,11 @@ from backend.services.evolution_ledger import (
     start_evolution_run,
 )
 from backend.services.failure_taxonomy import build_failure_taxonomy
+from backend.services.governance_eligibility import (
+    GOVERNANCE_ELIGIBILITY_VERSION,
+    GovernanceEligibility,
+    evaluate_governance_eligibility,
+)
 from backend.services.review_contract import (
     build_entry_timing_context,
     extract_decision_freshness_context,
@@ -42,6 +47,15 @@ _stop_event = threading.Event()
 EVENT_WINDOW_CONTEXT_SCHEMA_VERSION = "event_sizing.short_window.v2"
 EVENT_WINDOW_ALLOWED_BUCKETS = {"post_0_5m", "pre_0_15m", "pre_15_30m", "pre_30_60m"}
 EVENT_WINDOW_MIN_VALID_MULTIPLIER = 0.5
+EXECUTABLE_GOVERNANCE_SAMPLE_TYPES = {
+    "shadow_open_decision",
+    "risk_rejection",
+    "entry_supervisor_feedback",
+    "supervisor_trajectory",
+    "supervisor_execution_trace",
+    "trade_review_outcome",
+    "post_close_counterfactual",
+}
 
 
 def _loads(raw: Any, default: Any) -> Any:
@@ -146,6 +160,12 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
                 config_version INTEGER DEFAULT 0,
                 config_hash TEXT DEFAULT '',
                 evolution_run_id TEXT DEFAULT '',
+                system_contaminated INTEGER NOT NULL DEFAULT 0,
+                governance_eligible INTEGER NOT NULL DEFAULT 0,
+                governance_effective_weight REAL NOT NULL DEFAULT 0.0,
+                governance_eligibility_version TEXT NOT NULL DEFAULT '',
+                governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
+                governance_ineligible_reason TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL DEFAULT 0.0,
                 updated_at REAL NOT NULL DEFAULT 0.0
             )
@@ -195,6 +215,18 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
             conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN config_hash TEXT DEFAULT ''")
         if "evolution_run_id" not in cols:
             conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN evolution_run_id TEXT DEFAULT ''")
+        for column, ddl in {
+            "system_contaminated": "INTEGER NOT NULL DEFAULT 0",
+            "governance_eligible": "INTEGER NOT NULL DEFAULT 0",
+            "governance_effective_weight": "REAL NOT NULL DEFAULT 0.0",
+            "governance_eligibility_version": "TEXT NOT NULL DEFAULT ''",
+            "governance_eligibility_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "governance_ineligible_reason": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in cols:
+                conn.execute(
+                    f'ALTER TABLE autonomous_learning_sample ADD COLUMN "{column}" {ddl}'
+                )
         trace_cols = state_table_columns(conn, "position_supervisor_trace")
         if "trace_integrity" not in trace_cols:
             conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN trace_integrity TEXT DEFAULT 'full'")
@@ -237,6 +269,12 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
                 win_count INTEGER DEFAULT 0,
                 bad_loss_count INTEGER DEFAULT 0,
                 avg_reward REAL DEFAULT 0.0,
+                effective_sample_count REAL NOT NULL DEFAULT 0.0,
+                weighted_win_count REAL NOT NULL DEFAULT 0.0,
+                weighted_bad_loss_count REAL NOT NULL DEFAULT 0.0,
+                weighted_avg_reward REAL NOT NULL DEFAULT 0.0,
+                governance_eligibility_version TEXT NOT NULL DEFAULT '',
+                governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
                 last_outcome_label TEXT DEFAULT '',
                 recommended_action TEXT DEFAULT '',
                 updated_at REAL NOT NULL DEFAULT 0.0,
@@ -257,14 +295,112 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
                 status TEXT DEFAULT 'proposed',
                 reviewed_at REAL DEFAULT 0.0,
                 review_note TEXT DEFAULT '',
+                applied_mutation_id TEXT NOT NULL DEFAULT '',
+                governance_eligible INTEGER NOT NULL DEFAULT 0,
+                governance_eligibility_version TEXT NOT NULL DEFAULT '',
+                governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
+                governance_ineligible_reason TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL DEFAULT 0.0
             )
             """
         )
+        stats_cols = state_table_columns(conn, "experience_pattern_stats")
+        for column, ddl in {
+            "effective_sample_count": "REAL NOT NULL DEFAULT 0.0",
+            "weighted_win_count": "REAL NOT NULL DEFAULT 0.0",
+            "weighted_bad_loss_count": "REAL NOT NULL DEFAULT 0.0",
+            "weighted_avg_reward": "REAL NOT NULL DEFAULT 0.0",
+            "governance_eligibility_version": "TEXT NOT NULL DEFAULT ''",
+            "governance_eligibility_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in stats_cols:
+                conn.execute(
+                    f'ALTER TABLE experience_pattern_stats ADD COLUMN "{column}" {ddl}'
+                )
+        suggestion_cols = state_table_columns(conn, "policy_suggestion")
+        for column, ddl in {
+            "applied_mutation_id": "TEXT NOT NULL DEFAULT ''",
+            "governance_eligible": "INTEGER NOT NULL DEFAULT 0",
+            "governance_eligibility_version": "TEXT NOT NULL DEFAULT ''",
+            "governance_eligibility_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "governance_ineligible_reason": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in suggestion_cols:
+                conn.execute(
+                    f'ALTER TABLE policy_suggestion ADD COLUMN "{column}" {ddl}'
+                )
         conn.commit()
     finally:
         conn.close()
     ensure_evolution_columns(db_path)
+
+
+def _sample_is_system_contaminated(item: dict[str, Any]) -> bool:
+    def _contaminated(value: Any) -> bool:
+        if isinstance(value, dict):
+            return bool(value.get("contaminated") or value.get("contaminates_learning"))
+        return bool(value)
+
+    label = item.get("label") if isinstance(item.get("label"), dict) else {}
+    verdict = item.get("verdict") if isinstance(item.get("verdict"), dict) else {}
+    features = item.get("features") if isinstance(item.get("features"), dict) else {}
+    return any(
+        _contaminated(value)
+        for value in (
+            item.get("system_contaminated"),
+            item.get("system_contamination"),
+            label.get("system_contaminated"),
+            label.get("system_contamination"),
+            verdict.get("system_contaminated"),
+            verdict.get("system_contamination"),
+            features.get("system_contamination"),
+            features.get("system_issue_context"),
+        )
+    )
+
+
+def _sample_lineage(item: dict[str, Any]) -> tuple[list[str], bool, bool]:
+    source_table = str(item.get("source_table") or "").strip()
+    source_id = str(item.get("source_id") or "").strip()
+    trace = item.get("trace") if isinstance(item.get("trace"), dict) else {}
+    lineage_ids: list[str] = []
+    if source_table and source_id:
+        lineage_ids.append(f"source:{source_table}:{source_id}")
+    for key, value in sorted(trace.items()):
+        if not (str(key).endswith("_id") or str(key) == "id"):
+            continue
+        text = str(value or "").strip()
+        if text:
+            lineage_ids.append(f"trace:{key}:{text}")
+    complete = bool(source_table and source_id and trace and len(lineage_ids) >= 2)
+    unique = bool(lineage_ids) and len(lineage_ids) == len(set(lineage_ids))
+    return lineage_ids, complete, unique
+
+
+def _evaluate_sample_governance_eligibility(
+    *,
+    item: dict[str, Any],
+    sample_id: str,
+    evidence_contract: dict[str, Any],
+) -> GovernanceEligibility:
+    lineage_ids, lineage_complete, lineage_unique = _sample_lineage(item)
+    trace = item.get("trace") if isinstance(item.get("trace"), dict) else {}
+    eligibility_input = {
+        **item,
+        "sample_id": sample_id,
+        "system_contaminated": _sample_is_system_contaminated(item),
+        "model_ready": bool(evidence_contract.get("model_ready")),
+        "allowed_uses": list(evidence_contract.get("allowed_uses") or []),
+        "evidence_contract": evidence_contract,
+        "verified_recovered": bool(
+            item.get("verified_recovered")
+            or trace.get("verified_recovered")
+        ),
+        "lineage_ids": lineage_ids,
+        "lineage_complete": lineage_complete,
+        "lineage_unique": lineage_unique,
+    }
+    return evaluate_governance_eligibility(eligibility_input)
 
 
 def _upsert_sample(conn, item: dict[str, Any]) -> bool:
@@ -304,6 +440,13 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
             existing_label_status = str(existing[0] or "")
         if existing_label_status == "matured" and label_status != "matured":
             return False
+    model_ready = (
+        label_status == "matured"
+        and integrity in {"full", "recovered"}
+        and bool(features)
+        and bool(label)
+        and bool(trace)
+    )
     evidence_contract = build_evidence_contract(
         sample_id=sample_id,
         sample_kind=sample_type,
@@ -313,12 +456,9 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         trace=trace,
         quality={
             "quality_score": max(0.0, min(1.0, train_weight)),
-            "model_ready": (
-                label_status == "matured"
-                and integrity in {"full", "recovered"}
-                and bool(features)
-                and bool(label)
-                and bool(trace)
+            "model_ready": model_ready,
+            "executable_governance_allowed": bool(
+                item.get("executable_governance_allowed", False)
             ),
             "missing": [],
         },
@@ -327,6 +467,24 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         label_status=label_status,
         explanation={"verdict": verdict},
     )
+    eligibility = _evaluate_sample_governance_eligibility(
+        item={
+            **item,
+            "sample_id": sample_id,
+            "sample_type": sample_type,
+            "source_table": source_table,
+            "source_id": source_id,
+            "label_status": label_status,
+            "integrity": integrity,
+            "features": features,
+            "verdict": verdict,
+            "label": label,
+            "trace": trace,
+        },
+        sample_id=sample_id,
+        evidence_contract=evidence_contract,
+    )
+    evidence_contract["governance_eligibility"] = eligibility.to_dict()
     row_payload = {
         "sample_id": sample_id,
         "sample_type": sample_type,
@@ -349,6 +507,12 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         "config_version": config_version,
         "config_hash": config_hash,
         "evolution_run_id": evolution_run_id,
+        "system_contaminated": 0 if eligibility.uncontaminated else 1,
+        "governance_eligible": 1 if eligibility.eligible else 0,
+        "governance_effective_weight": float(eligibility.effective_weight),
+        "governance_eligibility_version": eligibility.eligibility_version,
+        "governance_eligibility_fingerprint": eligibility.eligibility_fingerprint,
+        "governance_ineligible_reason": ";".join(eligibility.exclusion_reasons),
         "created_at": now,
         "updated_at": now,
     }
@@ -360,8 +524,10 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
          position_id, symbol, timeframe, event_ts, label_status, integrity,
          train_weight, features_json, verdict_json, label_json, trace_json,
          evidence_contract_json, config_version, config_hash, evolution_run_id,
-         created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         system_contaminated, governance_eligible, governance_effective_weight,
+         governance_eligibility_version, governance_eligibility_fingerprint,
+         governance_ineligible_reason, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sample_id) DO UPDATE SET
             decision_id=excluded.decision_id,
             trade_id=excluded.trade_id,
@@ -380,6 +546,12 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
             config_version=excluded.config_version,
             config_hash=excluded.config_hash,
             evolution_run_id=excluded.evolution_run_id,
+            system_contaminated=excluded.system_contaminated,
+            governance_eligible=excluded.governance_eligible,
+            governance_effective_weight=excluded.governance_effective_weight,
+            governance_eligibility_version=excluded.governance_eligibility_version,
+            governance_eligibility_fingerprint=excluded.governance_eligibility_fingerprint,
+            governance_ineligible_reason=excluded.governance_ineligible_reason,
             updated_at=excluded.updated_at
         """,
         tuple(row_payload[k] for k in (
@@ -404,6 +576,12 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
             "config_version",
             "config_hash",
             "evolution_run_id",
+            "system_contaminated",
+            "governance_eligible",
+            "governance_effective_weight",
+            "governance_eligibility_version",
+            "governance_eligibility_fingerprint",
+            "governance_ineligible_reason",
             "created_at",
             "updated_at",
         )),
@@ -604,6 +782,7 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
         "timeframe": str(row["timeframe"] or ""),
         "event_ts": float(row["decision_ts"] or row["created_at"] or 0.0),
         "label_status": label_status,
+        "executable_governance_allowed": sample_type in EXECUTABLE_GOVERNANCE_SAMPLE_TYPES,
         "integrity": (
             _review_integrity_for_training(_loads(outcome_review["review_json"], {}))[0]
             if sample_type == "shadow_open_decision" and outcome_review is not None
@@ -673,6 +852,7 @@ def _sample_from_review(row: Any) -> dict[str, Any]:
         "timeframe": str(review.get("timeframe") or ""),
         "event_ts": float(review.get("close_ts") or row["created_at"] or 0.0),
         "label_status": "matured",
+        "executable_governance_allowed": True,
         "integrity": integrity,
         "train_weight": train_weight,
         "causal_level": "intervention_observed",
@@ -729,6 +909,7 @@ def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
         "position_id": str(row["position_id"] or ""),
         "event_ts": float(row["close_ts"] or row["updated_at"] or 0.0),
         "label_status": label_status,
+        "executable_governance_allowed": True,
         "integrity": "full" if label_status == "matured" else "partial",
         "train_weight": max(0.0, min(1.0, confidence)),
         "causal_level": "counterfactual",
@@ -823,6 +1004,7 @@ def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
         "timeframe": str(review.get("timeframe") or ""),
         "event_ts": float(review.get("close_ts") or row["created_at"] or 0.0),
         "label_status": label_status,
+        "executable_governance_allowed": True,
         "integrity": sample_integrity,
         "train_weight": round(max(0.0, min(1.0, train_weight)), 6),
         "causal_level": "post_trade_feedback",
@@ -897,6 +1079,7 @@ def _sample_from_supervisor_trace(row: Any) -> dict[str, Any]:
         "timeframe": str(row["timeframe"] or ""),
         "event_ts": float(row["event_ts"] or row["created_at"] or 0.0),
         "label_status": label_status,
+        "executable_governance_allowed": True,
         "integrity": "full" if verdict else "partial",
         "train_weight": train_weight,
         "causal_level": "intervention_observed",
@@ -1362,6 +1545,139 @@ def _entry_cluster_bucket_from_features(features: dict[str, Any]) -> tuple[str, 
     return "", {"same_direction_open_count": same_count, "pyramid_depth": depth, "recent_same_direction_entries": recent}
 
 
+def _governance_bucket_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
+    sample_count = len(items)
+    effective_sample_count = sum(float(item.get("governance_weight") or 0.0) for item in items)
+    bad_count = sum(1 for item in items if item.get("bad"))
+    win_count = sum(1 for item in items if float(item.get("pnl") or 0.0) > 0)
+    weighted_bad_count = sum(
+        float(item.get("governance_weight") or 0.0)
+        for item in items
+        if item.get("bad")
+    )
+    weighted_win_count = sum(
+        float(item.get("governance_weight") or 0.0)
+        for item in items
+        if float(item.get("pnl") or 0.0) > 0
+    )
+    pnl_sum = sum(float(item.get("pnl") or 0.0) for item in items)
+    weighted_reward_sum = sum(
+        float(item.get("governance_weight") or 0.0)
+        * max(-1.0, min(1.0, float(item.get("pnl") or 0.0) / 50.0))
+        for item in items
+    )
+    weighted_avg_reward = (
+        weighted_reward_sum / effective_sample_count
+        if effective_sample_count > 0
+        else 0.0
+    )
+    weighted_bad_rate = (
+        weighted_bad_count / effective_sample_count
+        if effective_sample_count > 0
+        else 0.0
+    )
+    fingerprint_items = sorted(
+        (
+            str(item.get("sample_id") or ""),
+            str(item.get("governance_eligibility_fingerprint") or ""),
+            round(float(item.get("governance_weight") or 0.0), 6),
+        )
+        for item in items
+    )
+    eligibility_fingerprint = hashlib.sha256(
+        _dumps(
+            {
+                "schema_version": GOVERNANCE_ELIGIBILITY_VERSION,
+                "samples": fingerprint_items,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "sample_count": sample_count,
+        "effective_sample_count": effective_sample_count,
+        "bad_count": bad_count,
+        "win_count": win_count,
+        "weighted_bad_count": weighted_bad_count,
+        "weighted_win_count": weighted_win_count,
+        "pnl_sum": pnl_sum,
+        "weighted_avg_reward": weighted_avg_reward,
+        "weighted_bad_rate": weighted_bad_rate,
+        "eligibility_fingerprint": eligibility_fingerprint,
+    }
+
+
+def _upsert_governance_pattern_stats(
+    conn: Any,
+    *,
+    scope_type: str,
+    scope_key: str,
+    metrics: dict[str, Any],
+    last_outcome_label: str,
+    recommended_action: str,
+    now: float,
+) -> None:
+    _execute(
+        conn,
+        """
+        INSERT INTO experience_pattern_stats
+        (scope_type, scope_key, sample_count, win_count, bad_loss_count,
+         avg_reward, effective_sample_count, weighted_win_count,
+         weighted_bad_loss_count, weighted_avg_reward,
+         governance_eligibility_version, governance_eligibility_fingerprint,
+         last_outcome_label, recommended_action, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+            sample_count=excluded.sample_count,
+            win_count=excluded.win_count,
+            bad_loss_count=excluded.bad_loss_count,
+            avg_reward=excluded.avg_reward,
+            effective_sample_count=excluded.effective_sample_count,
+            weighted_win_count=excluded.weighted_win_count,
+            weighted_bad_loss_count=excluded.weighted_bad_loss_count,
+            weighted_avg_reward=excluded.weighted_avg_reward,
+            governance_eligibility_version=excluded.governance_eligibility_version,
+            governance_eligibility_fingerprint=excluded.governance_eligibility_fingerprint,
+            last_outcome_label=excluded.last_outcome_label,
+            recommended_action=excluded.recommended_action,
+            updated_at=excluded.updated_at
+        """,
+        (
+            scope_type,
+            scope_key,
+            int(metrics["sample_count"]),
+            int(metrics["win_count"]),
+            int(metrics["bad_count"]),
+            round(float(metrics["weighted_avg_reward"]), 6),
+            round(float(metrics["effective_sample_count"]), 6),
+            round(float(metrics["weighted_win_count"]), 6),
+            round(float(metrics["weighted_bad_count"]), 6),
+            round(float(metrics["weighted_avg_reward"]), 6),
+            GOVERNANCE_ELIGIBILITY_VERSION,
+            str(metrics["eligibility_fingerprint"]),
+            last_outcome_label,
+            recommended_action,
+            now,
+        ),
+    )
+
+
+def _governance_evidence_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sample_count": int(metrics["sample_count"]),
+        "effective_sample_count": round(float(metrics["effective_sample_count"]), 6),
+        "bad_count": int(metrics["bad_count"]),
+        "weighted_bad_count": round(float(metrics["weighted_bad_count"]), 6),
+        "bad_rate": round(float(metrics["weighted_bad_rate"]), 6),
+        "win_count": int(metrics["win_count"]),
+        "weighted_win_count": round(float(metrics["weighted_win_count"]), 6),
+        "pnl_sum": round(float(metrics["pnl_sum"]), 6),
+        "avg_reward": round(float(metrics["weighted_avg_reward"]), 6),
+        "weighted_avg_reward": round(float(metrics["weighted_avg_reward"]), 6),
+        "governance_eligibility_version": GOVERNANCE_ELIGIBILITY_VERSION,
+        "governance_eligibility_fingerprint": str(metrics["eligibility_fingerprint"]),
+    }
+
+
 def materialize_entry_cluster_governance_suggestions(
     *,
     db_path: str | Path = STATE_DB,
@@ -1385,10 +1701,14 @@ def materialize_entry_cluster_governance_suggestions(
             FROM autonomous_learning_sample
             WHERE sample_type='shadow_open_decision'
               AND label_status='matured'
+              AND governance_eligible=1
+              AND governance_effective_weight>0
+              AND governance_eligibility_version=?
+              AND governance_eligibility_fingerprint<>''
             ORDER BY event_ts DESC, created_at DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (GOVERNANCE_ELIGIBILITY_VERSION, max(1, int(limit))),
         ).fetchall()
         for row in rows:
             label = _loads(row["label_json"], {})
@@ -1411,48 +1731,34 @@ def materialize_entry_cluster_governance_suggestions(
                     "outcome_label": outcome,
                     "bad": bad,
                     "cluster": cluster,
+                    "governance_weight": float(row["governance_effective_weight"] or 0.0),
+                    "governance_eligibility_fingerprint": str(row["governance_eligibility_fingerprint"] or ""),
                 }
             )
 
         now = time.time()
         for bucket, items in sorted(buckets.items()):
-            sample_count = len(items)
-            bad_count = sum(1 for item in items if item["bad"])
-            win_count = sum(1 for item in items if item["pnl"] > 0)
-            pnl_sum = sum(float(item["pnl"]) for item in items)
-            avg_reward = sum(max(-1.0, min(1.0, float(item["pnl"]) / 50.0)) for item in items) / max(sample_count, 1)
-            bad_rate = bad_count / max(sample_count, 1)
+            metrics = _governance_bucket_metrics(items)
+            sample_count = int(metrics["sample_count"])
+            effective_sample_count = float(metrics["effective_sample_count"])
+            bad_count = int(metrics["bad_count"])
+            win_count = int(metrics["win_count"])
+            pnl_sum = float(metrics["pnl_sum"])
+            avg_reward = float(metrics["weighted_avg_reward"])
+            bad_rate = float(metrics["weighted_bad_rate"])
             action = "watch"
-            if sample_count >= int(min_samples) and bad_rate >= float(min_bad_rate):
+            if effective_sample_count >= float(min_samples) and bad_rate >= float(min_bad_rate):
                 action = "increase_same_direction_cooldown"
-            elif sample_count >= int(min_samples) and avg_reward <= -0.05:
+            elif effective_sample_count >= float(min_samples) and avg_reward <= -0.05:
                 action = "raise_pyramid_entry_threshold"
-            _execute(
+            _upsert_governance_pattern_stats(
                 conn,
-                """
-                INSERT INTO experience_pattern_stats
-                (scope_type, scope_key, sample_count, win_count, bad_loss_count,
-                 avg_reward, last_outcome_label, recommended_action, updated_at)
-                VALUES ('entry_cluster', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scope_type, scope_key) DO UPDATE SET
-                    sample_count=excluded.sample_count,
-                    win_count=excluded.win_count,
-                    bad_loss_count=excluded.bad_loss_count,
-                    avg_reward=excluded.avg_reward,
-                    last_outcome_label=excluded.last_outcome_label,
-                    recommended_action=excluded.recommended_action,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    bucket,
-                    sample_count,
-                    win_count,
-                    bad_count,
-                    round(avg_reward, 6),
-                    str(items[0].get("outcome_label") or ""),
-                    action,
-                    now,
-                ),
+                scope_type="entry_cluster",
+                scope_key=bucket,
+                metrics=metrics,
+                last_outcome_label=str(items[0].get("outcome_label") or ""),
+                recommended_action=action,
+                now=now,
             )
             stats_upserted += 1
             if action == "watch":
@@ -1475,16 +1781,11 @@ def materialize_entry_cluster_governance_suggestions(
                 skipped += 1
                 continue
             suggestion_id = "psg_entry_cluster_" + hashlib.sha1(f"{bucket}:{action}".encode("utf-8")).hexdigest()[:16]
-            confidence = min(0.92, 0.45 + 0.06 * sample_count + 0.20 * bad_rate)
+            confidence = min(0.92, 0.45 + 0.06 * effective_sample_count + 0.20 * bad_rate)
             evidence = {
                 "schema_version": "entry_cluster_governance_evidence.v1",
                 "bucket": bucket,
-                "sample_count": sample_count,
-                "bad_count": bad_count,
-                "bad_rate": round(bad_rate, 6),
-                "win_count": win_count,
-                "pnl_sum": round(pnl_sum, 6),
-                "avg_reward": round(avg_reward, 6),
+                **_governance_evidence_metrics(metrics),
                 "sample_ids": [item["sample_id"] for item in items[:20]],
                 "position_ids": [item["position_id"] for item in items[:20]],
                 "recommended_controls": {
@@ -1508,8 +1809,10 @@ def materialize_entry_cluster_governance_suggestions(
                 """
                 INSERT INTO policy_suggestion
                 (suggestion_id, scope_type, scope_key, action, confidence,
-                 reason, evidence_json, status, created_at)
-                VALUES (?, 'entry_cluster', ?, ?, ?, ?, ?, 'proposed', ?)
+                 reason, evidence_json, status, governance_eligible,
+                 governance_eligibility_version, governance_eligibility_fingerprint,
+                 governance_ineligible_reason, created_at)
+                VALUES (?, 'entry_cluster', ?, ?, ?, ?, ?, 'proposed', 1, ?, ?, '', ?)
                 ON CONFLICT(suggestion_id) DO NOTHING
                 """,
                 (
@@ -1517,8 +1820,10 @@ def materialize_entry_cluster_governance_suggestions(
                     bucket,
                     action,
                     round(confidence, 6),
-                    f"{bucket} open outcomes show bad_rate={bad_rate:.2f} across {sample_count} samples",
+                    f"{bucket} open outcomes show weighted bad_rate={bad_rate:.2f} across effective_n={effective_sample_count:.2f}",
                     _dumps(evidence),
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    str(metrics["eligibility_fingerprint"]),
                     now,
                 ),
             )
@@ -1626,10 +1931,14 @@ def materialize_event_window_governance_suggestions(
             FROM autonomous_learning_sample
             WHERE sample_type='shadow_open_decision'
               AND label_status='matured'
+              AND governance_eligible=1
+              AND governance_effective_weight>0
+              AND governance_eligibility_version=?
+              AND governance_eligibility_fingerprint<>''
             ORDER BY event_ts DESC, created_at DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (GOVERNANCE_ELIGIBILITY_VERSION, max(1, int(limit))),
         ).fetchall()
         for row in rows:
             label = _loads(row["label_json"], {})
@@ -1652,48 +1961,34 @@ def materialize_event_window_governance_suggestions(
                     "outcome_label": outcome,
                     "bad": bad,
                     "event_window": event_window,
+                    "governance_weight": float(row["governance_effective_weight"] or 0.0),
+                    "governance_eligibility_fingerprint": str(row["governance_eligibility_fingerprint"] or ""),
                 }
             )
 
         now = time.time()
         for bucket, items in sorted(buckets.items()):
-            sample_count = len(items)
-            bad_count = sum(1 for item in items if item["bad"])
-            win_count = sum(1 for item in items if item["pnl"] > 0)
-            pnl_sum = sum(float(item["pnl"]) for item in items)
-            avg_reward = sum(max(-1.0, min(1.0, float(item["pnl"]) / 50.0)) for item in items) / max(sample_count, 1)
-            bad_rate = bad_count / max(sample_count, 1)
+            metrics = _governance_bucket_metrics(items)
+            sample_count = int(metrics["sample_count"])
+            effective_sample_count = float(metrics["effective_sample_count"])
+            bad_count = int(metrics["bad_count"])
+            win_count = int(metrics["win_count"])
+            pnl_sum = float(metrics["pnl_sum"])
+            avg_reward = float(metrics["weighted_avg_reward"])
+            bad_rate = float(metrics["weighted_bad_rate"])
             action = "watch"
-            if sample_count >= int(min_samples) and bad_rate >= float(min_bad_rate):
+            if effective_sample_count >= float(min_samples) and bad_rate >= float(min_bad_rate):
                 action = "tighten_event_window_sizing"
-            elif sample_count >= int(min_samples) and avg_reward <= -0.05:
+            elif effective_sample_count >= float(min_samples) and avg_reward <= -0.05:
                 action = "extend_event_post_window_review"
-            _execute(
+            _upsert_governance_pattern_stats(
                 conn,
-                """
-                INSERT INTO experience_pattern_stats
-                (scope_type, scope_key, sample_count, win_count, bad_loss_count,
-                 avg_reward, last_outcome_label, recommended_action, updated_at)
-                VALUES ('event_window', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scope_type, scope_key) DO UPDATE SET
-                    sample_count=excluded.sample_count,
-                    win_count=excluded.win_count,
-                    bad_loss_count=excluded.bad_loss_count,
-                    avg_reward=excluded.avg_reward,
-                    last_outcome_label=excluded.last_outcome_label,
-                    recommended_action=excluded.recommended_action,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    bucket,
-                    sample_count,
-                    win_count,
-                    bad_count,
-                    round(avg_reward, 6),
-                    str(items[0].get("outcome_label") or ""),
-                    action,
-                    now,
-                ),
+                scope_type="event_window",
+                scope_key=bucket,
+                metrics=metrics,
+                last_outcome_label=str(items[0].get("outcome_label") or ""),
+                recommended_action=action,
+                now=now,
             )
             stats_upserted += 1
             if action == "watch":
@@ -1716,18 +2011,13 @@ def materialize_event_window_governance_suggestions(
                 skipped += 1
                 continue
             suggestion_id = "psg_event_window_" + hashlib.sha1(f"{bucket}:{action}".encode("utf-8")).hexdigest()[:16]
-            confidence = min(0.92, 0.45 + 0.06 * sample_count + 0.20 * bad_rate)
+            confidence = min(0.92, 0.45 + 0.06 * effective_sample_count + 0.20 * bad_rate)
             event_window = dict(items[0].get("event_window") or {})
             evidence = {
                 "schema_version": "event_window_governance_evidence.v1",
                 "bucket": bucket,
                 "event_window": event_window,
-                "sample_count": sample_count,
-                "bad_count": bad_count,
-                "bad_rate": round(bad_rate, 6),
-                "win_count": win_count,
-                "pnl_sum": round(pnl_sum, 6),
-                "avg_reward": round(avg_reward, 6),
+                **_governance_evidence_metrics(metrics),
                 "sample_ids": [item["sample_id"] for item in items[:20]],
                 "position_ids": [item["position_id"] for item in items[:20]],
                 "recommended_controls": {
@@ -1751,8 +2041,10 @@ def materialize_event_window_governance_suggestions(
                 """
                 INSERT INTO policy_suggestion
                 (suggestion_id, scope_type, scope_key, action, confidence,
-                 reason, evidence_json, status, created_at)
-                VALUES (?, 'event_window', ?, ?, ?, ?, ?, 'proposed', ?)
+                 reason, evidence_json, status, governance_eligible,
+                 governance_eligibility_version, governance_eligibility_fingerprint,
+                 governance_ineligible_reason, created_at)
+                VALUES (?, 'event_window', ?, ?, ?, ?, ?, 'proposed', 1, ?, ?, '', ?)
                 ON CONFLICT(suggestion_id) DO NOTHING
                 """,
                 (
@@ -1760,8 +2052,10 @@ def materialize_event_window_governance_suggestions(
                     bucket,
                     action,
                     round(confidence, 6),
-                    f"{bucket} open outcomes show bad_rate={bad_rate:.2f} across {sample_count} samples",
+                    f"{bucket} open outcomes show weighted bad_rate={bad_rate:.2f} across effective_n={effective_sample_count:.2f}",
                     _dumps(evidence),
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    str(metrics["eligibility_fingerprint"]),
                     now,
                 ),
             )
@@ -1819,11 +2113,14 @@ def materialize_entry_quality_governance_suggestions(
             FROM autonomous_learning_sample
             WHERE sample_type='trade_review_outcome'
               AND label_status='matured'
-              AND integrity IN ('full', 'partial', 'recovered')
+              AND governance_eligible=1
+              AND governance_effective_weight>0
+              AND governance_eligibility_version=?
+              AND governance_eligibility_fingerprint<>''
             ORDER BY event_ts DESC, created_at DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (GOVERNANCE_ELIGIBILITY_VERSION, max(1, int(limit))),
         ).fetchall()
         for row in rows:
             label = _loads(row["label_json"], {})
@@ -1843,6 +2140,8 @@ def materialize_entry_quality_governance_suggestions(
                 "entry_score": entry_score,
                 "worst_factor": worst_factor,
                 "failure_tags": sorted(failure_tags),
+                "governance_weight": float(row["governance_effective_weight"] or 0.0),
+                "governance_eligibility_fingerprint": str(row["governance_eligibility_fingerprint"] or ""),
             }
             if bad and failure_tags.intersection({"weak_signal_overtraded", "weak_entry_loss", "avoidable_loss"}):
                 buckets.setdefault("weak_signal", []).append(dict(base_item))
@@ -1853,17 +2152,28 @@ def materialize_entry_quality_governance_suggestions(
 
         now = time.time()
         for bucket, items in sorted(buckets.items()):
-            sample_count = len(items)
-            bad_count = sum(1 for item in items if item["bad"])
-            win_count = sum(1 for item in items if item["pnl"] > 0)
-            pnl_sum = sum(float(item["pnl"]) for item in items)
-            avg_reward = sum(max(-1.0, min(1.0, float(item["pnl"]) / 50.0)) for item in items) / max(sample_count, 1)
-            bad_rate = bad_count / max(sample_count, 1)
-            avg_entry_score = sum(float(item["entry_score"]) for item in items) / max(sample_count, 1)
+            metrics = _governance_bucket_metrics(items)
+            sample_count = int(metrics["sample_count"])
+            effective_sample_count = float(metrics["effective_sample_count"])
+            bad_count = int(metrics["bad_count"])
+            win_count = int(metrics["win_count"])
+            pnl_sum = float(metrics["pnl_sum"])
+            avg_reward = float(metrics["weighted_avg_reward"])
+            bad_rate = float(metrics["weighted_bad_rate"])
+            avg_entry_score = (
+                sum(
+                    float(item["entry_score"])
+                    * float(item.get("governance_weight") or 0.0)
+                    for item in items
+                )
+                / effective_sample_count
+                if effective_sample_count > 0
+                else 0.0
+            )
             action = "watch"
             scope_key = bucket
             recommended_controls: dict[str, Any] = {"advisory_only": False}
-            if sample_count >= int(min_samples) and bad_rate >= float(min_bad_rate):
+            if effective_sample_count >= float(min_samples) and bad_rate >= float(min_bad_rate):
                 if bucket == "weak_signal":
                     action = "raise_weak_signal_threshold"
                     recommended_controls.update(
@@ -1889,32 +2199,14 @@ def materialize_entry_quality_governance_suggestions(
                             "strong_signal_override": 0.78,
                         }
                     )
-            _execute(
+            _upsert_governance_pattern_stats(
                 conn,
-                """
-                INSERT INTO experience_pattern_stats
-                (scope_type, scope_key, sample_count, win_count, bad_loss_count,
-                 avg_reward, last_outcome_label, recommended_action, updated_at)
-                VALUES ('entry_quality', ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scope_type, scope_key) DO UPDATE SET
-                    sample_count=excluded.sample_count,
-                    win_count=excluded.win_count,
-                    bad_loss_count=excluded.bad_loss_count,
-                    avg_reward=excluded.avg_reward,
-                    last_outcome_label=excluded.last_outcome_label,
-                    recommended_action=excluded.recommended_action,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    scope_key,
-                    sample_count,
-                    win_count,
-                    bad_count,
-                    round(avg_reward, 6),
-                    "bad_loss" if bad_count else "",
-                    action,
-                    now,
-                ),
+                scope_type="entry_quality",
+                scope_key=scope_key,
+                metrics=metrics,
+                last_outcome_label="bad_loss" if bad_count else "",
+                recommended_action=action,
+                now=now,
             )
             stats_upserted += 1
             if action == "watch":
@@ -1937,17 +2229,12 @@ def materialize_entry_quality_governance_suggestions(
                 skipped += 1
                 continue
             suggestion_id = "psg_entry_quality_" + hashlib.sha1(f"{scope_key}:{action}".encode("utf-8")).hexdigest()[:16]
-            confidence = min(0.94, 0.48 + 0.05 * sample_count + 0.20 * bad_rate)
+            confidence = min(0.94, 0.48 + 0.05 * effective_sample_count + 0.20 * bad_rate)
             evidence = {
                 "schema_version": "entry_quality_governance_evidence.v1",
                 "bucket": bucket,
                 "scope_key": scope_key,
-                "sample_count": sample_count,
-                "bad_count": bad_count,
-                "bad_rate": round(bad_rate, 6),
-                "win_count": win_count,
-                "pnl_sum": round(pnl_sum, 6),
-                "avg_reward": round(avg_reward, 6),
+                **_governance_evidence_metrics(metrics),
                 "avg_entry_score": round(avg_entry_score, 6),
                 "worst_factor": scope_key if bucket.startswith("worst_factor:") else "",
                 "sample_ids": [item["sample_id"] for item in items[:20]],
@@ -1969,8 +2256,10 @@ def materialize_entry_quality_governance_suggestions(
                 """
                 INSERT INTO policy_suggestion
                 (suggestion_id, scope_type, scope_key, action, confidence,
-                 reason, evidence_json, status, created_at)
-                VALUES (?, 'entry_quality', ?, ?, ?, ?, ?, 'proposed', ?)
+                 reason, evidence_json, status, governance_eligible,
+                 governance_eligibility_version, governance_eligibility_fingerprint,
+                 governance_ineligible_reason, created_at)
+                VALUES (?, 'entry_quality', ?, ?, ?, ?, ?, 'proposed', 1, ?, ?, '', ?)
                 ON CONFLICT(suggestion_id) DO NOTHING
                 """,
                 (
@@ -1978,8 +2267,10 @@ def materialize_entry_quality_governance_suggestions(
                     scope_key,
                     action,
                     round(confidence, 6),
-                    f"{scope_key} entry outcomes show bad_rate={bad_rate:.2f} across {sample_count} samples",
+                    f"{scope_key} entry outcomes show weighted bad_rate={bad_rate:.2f} across effective_n={effective_sample_count:.2f}",
                     _dumps(evidence),
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    str(metrics["eligibility_fingerprint"]),
                     now,
                 ),
             )
@@ -2068,6 +2359,12 @@ def list_autonomous_learning_samples(
                     "config_version": int(row["config_version"] or 0) if "config_version" in row.keys() else 0,
                     "config_hash": str(row["config_hash"] or "") if "config_hash" in row.keys() else "",
                     "evolution_run_id": str(row["evolution_run_id"] or "") if "evolution_run_id" in row.keys() else "",
+                    "system_contaminated": bool(row["system_contaminated"]) if "system_contaminated" in row.keys() else False,
+                    "governance_eligible": bool(row["governance_eligible"]) if "governance_eligible" in row.keys() else False,
+                    "governance_effective_weight": float(row["governance_effective_weight"] or 0.0) if "governance_effective_weight" in row.keys() else 0.0,
+                    "governance_eligibility_version": str(row["governance_eligibility_version"] or "") if "governance_eligibility_version" in row.keys() else "",
+                    "governance_eligibility_fingerprint": str(row["governance_eligibility_fingerprint"] or "") if "governance_eligibility_fingerprint" in row.keys() else "",
+                    "governance_ineligible_reason": str(row["governance_ineligible_reason"] or "") if "governance_ineligible_reason" in row.keys() else "",
                     "features": _loads(row["features_json"], {}),
                     "verdict": _loads(row["verdict_json"], {}),
                     "label": _loads(row["label_json"], {}),
@@ -2092,7 +2389,14 @@ def _rebuilt_evidence_contract_from_sample(row: Any) -> dict[str, Any]:
     train_weight = float(row["train_weight"] if row["train_weight"] is not None else 0.0)
     sample_type = str(row["sample_type"] or "")
     causal_level = _sample_causal_level(sample_type, label_status)
-    return build_evidence_contract(
+    model_ready = (
+        label_status == "matured"
+        and integrity in {"full", "recovered"}
+        and bool(features)
+        and bool(label)
+        and bool(trace)
+    )
+    contract = build_evidence_contract(
         sample_id=str(row["sample_id"] or ""),
         sample_kind=sample_type,
         source={"table": str(row["source_table"] or ""), "source_id": str(row["source_id"] or "")},
@@ -2101,13 +2405,8 @@ def _rebuilt_evidence_contract_from_sample(row: Any) -> dict[str, Any]:
         trace=trace,
         quality={
             "quality_score": max(0.0, min(1.0, train_weight)),
-            "model_ready": (
-                label_status == "matured"
-                and integrity in {"full", "recovered"}
-                and bool(features)
-                and bool(label)
-                and bool(trace)
-            ),
+            "model_ready": model_ready,
+            "executable_governance_allowed": sample_type in EXECUTABLE_GOVERNANCE_SAMPLE_TYPES,
             "missing": [],
         },
         integrity=integrity,
@@ -2115,6 +2414,28 @@ def _rebuilt_evidence_contract_from_sample(row: Any) -> dict[str, Any]:
         label_status=label_status,
         explanation={"verdict": verdict},
     )
+    eligibility = _evaluate_sample_governance_eligibility(
+        item={
+            "sample_id": str(row["sample_id"] or ""),
+            "sample_type": sample_type,
+            "source_table": str(row["source_table"] or ""),
+            "source_id": str(row["source_id"] or ""),
+            "decision_id": str(row["decision_id"] or ""),
+            "trade_id": str(row["trade_id"] or ""),
+            "position_id": str(row["position_id"] or ""),
+            "label_status": label_status,
+            "integrity": integrity,
+            "features": features,
+            "verdict": verdict,
+            "label": label,
+            "trace": trace,
+            "verified_recovered": bool(trace.get("verified_recovered")),
+        },
+        sample_id=str(row["sample_id"] or ""),
+        evidence_contract=contract,
+    )
+    contract["governance_eligibility"] = eligibility.to_dict()
+    return contract
 
 
 def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: int = 10000) -> dict[str, Any]:
@@ -2307,26 +2628,67 @@ def repair_evidence_contracts(*, db_path: str | Path = STATE_DB, limit: int = 10
             """
             SELECT *
             FROM autonomous_learning_sample
-            ORDER BY updated_at DESC, created_at DESC
+            ORDER BY
+                CASE
+                    WHEN governance_eligibility_version<>?
+                      OR governance_eligibility_fingerprint=''
+                    THEN 0 ELSE 1
+                END,
+                updated_at DESC,
+                created_at DESC
             LIMIT ?
             """,
-            (max(1, int(limit)),),
+            (GOVERNANCE_ELIGIBILITY_VERSION, max(1, int(limit))),
         ).fetchall()
         now = time.time()
         for row in rows:
             checked += 1
             rebuilt = _rebuilt_evidence_contract_from_sample(row)
             rebuilt_json = _dumps(rebuilt)
-            if rebuilt_json == str(row["evidence_contract_json"] or "{}"):
+            eligibility_payload = rebuilt.get("governance_eligibility") or {}
+            expected = {
+                "system_contaminated": 0 if eligibility_payload.get("uncontaminated") else 1,
+                "governance_eligible": 1 if eligibility_payload.get("governance_eligible") else 0,
+                "governance_effective_weight": float(eligibility_payload.get("governance_effective_weight") or 0.0),
+                "governance_eligibility_version": str(eligibility_payload.get("governance_eligibility_version") or ""),
+                "governance_eligibility_fingerprint": str(eligibility_payload.get("governance_eligibility_fingerprint") or ""),
+                "governance_ineligible_reason": ";".join(eligibility_payload.get("exclusion_reasons") or []),
+            }
+            current_matches = all(
+                (
+                    float(row[key] or 0.0) == float(value)
+                    if key in {
+                        "system_contaminated",
+                        "governance_eligible",
+                        "governance_effective_weight",
+                    }
+                    else str(row[key] or "") == str(value)
+                )
+                for key, value in expected.items()
+            )
+            if rebuilt_json == str(row["evidence_contract_json"] or "{}") and current_matches:
                 continue
             _execute(
                 conn,
                 """
                 UPDATE autonomous_learning_sample
-                SET evidence_contract_json=?, updated_at=?
+                SET evidence_contract_json=?, system_contaminated=?,
+                    governance_eligible=?, governance_effective_weight=?,
+                    governance_eligibility_version=?, governance_eligibility_fingerprint=?,
+                    governance_ineligible_reason=?, updated_at=?
                 WHERE sample_id=?
                 """,
-                (rebuilt_json, now, str(row["sample_id"] or "")),
+                (
+                    rebuilt_json,
+                    expected["system_contaminated"],
+                    expected["governance_eligible"],
+                    expected["governance_effective_weight"],
+                    expected["governance_eligibility_version"],
+                    expected["governance_eligibility_fingerprint"],
+                    expected["governance_ineligible_reason"],
+                    now,
+                    str(row["sample_id"] or ""),
+                ),
             )
             repaired += 1
         payload = {
@@ -3031,24 +3393,33 @@ def materialize_parameter_template_recommendations(
                     }
                     fn = lambda cb, _params=params: run_parameter_template_offline_validation(_params, cb)
                     js = get_job_manager().submit("parameter_template_validation", params, fn)
-                    _execute(
-                        conn,
-                        """
-                        INSERT INTO jobs
-                        (id, kind, status, params_json, result_json, progress, error, created_at, updated_at)
-                        VALUES (?, 'parameter_template_validation', 'pending', ?, '{}', 0.0, '', ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET
-                            kind=excluded.kind,
-                            status=excluded.status,
-                            params_json=excluded.params_json,
-                            result_json=excluded.result_json,
-                            progress=excluded.progress,
-                            error=excluded.error,
-                            created_at=excluded.created_at,
-                            updated_at=excluded.updated_at
-                        """,
-                        (js.id, _dumps(params), time.time(), time.time()),
+                    from backend.core.static_feature_flags import (
+                        shared_static_feature_flags,
                     )
+
+                    if not shared_static_feature_flags().pg_job_queue_v2_enabled:
+                        # Compatibility jobs still need the historical query
+                        # projection.  The durable queue already committed its
+                        # row atomically in submit(); rewriting it here could
+                        # race a worker claim and turn running back to pending.
+                        _execute(
+                            conn,
+                            """
+                            INSERT INTO jobs
+                            (id, kind, status, params_json, result_json, progress, error, created_at, updated_at)
+                            VALUES (?, 'parameter_template_validation', 'pending', ?, '{}', 0.0, '', ?, ?)
+                            ON CONFLICT(id) DO UPDATE SET
+                                kind=excluded.kind,
+                                status=excluded.status,
+                                params_json=excluded.params_json,
+                                result_json=excluded.result_json,
+                                progress=excluded.progress,
+                                error=excluded.error,
+                                created_at=excluded.created_at,
+                                updated_at=excluded.updated_at
+                            """,
+                            (js.id, _dumps(params), time.time(), time.time()),
+                        )
                     counts["offline_jobs"] += 1
                     items.append({"recommendation_id": recommendation_id, "mode": "offline_validate", "job_id": js.id})
                 else:
@@ -3404,15 +3775,24 @@ def _auto_apply_position_supervisor_template_suggestions(
         shared as runtime_config,
     )
     from risk.policy_service import RiskPolicyService
-    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+    from backend.services.position_supervisor_governance import (
+        PositionSupervisorGovernanceMutationService,
+        materialize_position_supervisor_candidate_observations,
+    )
     from research.learning.governor import RuleEvolutionGovernor
 
     cfg = runtime_config()
+    candidate_observations = materialize_position_supervisor_candidate_observations(
+        db_path=db_path,
+        limit=max(1, int(limit) * 20),
+        run_id=run_id,
+    )
     if autonomy_expansion_freeze_applies(cfg):
         return {
             "applied": [],
             "skipped": [{"reason": "autonomy_expansion_frozen"}],
             "status": "observation_only",
+            "candidate_observations": candidate_observations,
         }
 
     def _template_switch_priority(row) -> tuple[int, float, float]:
@@ -3433,7 +3813,10 @@ def _auto_apply_position_supervisor_template_suggestions(
         )
 
     RuleEvolutionGovernor(str(db_path)).resolve_conflicts()
-    valid_templates = {str(item.get("template_id") or "") for item in list_position_supervisor_templates()}
+    valid_templates = {
+        str(item.get("template_id") or "")
+        for item in list_position_supervisor_templates(db_path=db_path)
+    }
     previous_template_id = str(getattr(cfg, "position_supervisor_template_id", "") or "position_supervisor:default.v1")
     conn = _connect(db_path)
     applied = []
@@ -3491,9 +3874,18 @@ def _auto_apply_position_supervisor_template_suggestions(
                 """
                 SELECT DISTINCT position_id
                 FROM position_supervisor_trace
-                WHERE template_id=? AND stage='canary_shadow' AND event_ts>=?
+                WHERE template_id=?
+                  AND stage='learning_shadow'
+                  AND execution_status='observation_only'
+                  AND trace_integrity='recovered'
+                  AND execution_reason=?
+                  AND event_ts>=?
                 """,
-                (target_template_id, float(row["created_at"] or 0.0)),
+                (
+                    target_template_id,
+                    f"learning_worker_candidate_replay:{suggestion_id}",
+                    float(row["created_at"] or 0.0),
+                ),
             ).fetchall()
             shadow_position_ids = {str(item["position_id"] or "") for item in shadow_rows}
             mature_positions: set[str] = set()
@@ -3613,136 +4005,47 @@ def _auto_apply_position_supervisor_template_suggestions(
                 })
                 continue
             reservation_id = str(experiment_admission.get("reservation_id") or "")
-            mutation = RuntimeConfigMutationService(db_path).apply_patch(
-                {"position_supervisor_template_id": target_template_id},
+            conn.commit()
+            governed = PositionSupervisorGovernanceMutationService(
+                db_path
+            ).switch_template(
+                suggestion_id=suggestion_id,
+                previous_template_id=previous_template_id,
+                target_template_id=target_template_id,
+                actor="system:autonomous_learning",
                 source="position_supervisor_template_switch",
                 run_id=run_id,
-                actor="system:autonomous_learning",
-                action="switch_position_supervisor_template",
                 reason=f"demo_autonomous applied suggestion {suggestion_id}",
-                require_v16_command=is_state_db_path(db_path),
-                v16_target_agent="position_supervisor_governance",
-                v16_scope_type="supervisor_template",
-                v16_scope_key=target_template_id,
-                v16_action="switch_position_supervisor_template",
+                evidence=evidence,
+                risk_verdict=verdict,
+                reservation_id=reservation_id,
+                application_details={
+                    "experiment_id": experiment_id,
+                    "autonomy_mode": str(
+                        getattr(cfg, "autonomy_mode", "") or "demo_autonomous"
+                    ),
+                    "demo_aggressive_governance": aggressive_demo,
+                    "canary_evidence_ready": evidence_ready,
+                    "canary_evidence": {
+                        "mature_trade_count": len(mature_positions),
+                        "required_trade_count": canary_required,
+                        "session_count": len(mature_sessions),
+                        "regime_count": len(mature_regimes),
+                    },
+                },
             )
-            if mutation.get("ok") is False:
-                LearningExperimentAdmissionService(db_path).release_reservations([reservation_id])
+            mutation = dict(governed.get("mutation") or {})
+            if not governed.get("committed"):
                 skipped.append({
                     "suggestion_id": suggestion_id,
-                    "reason": "v16_command_required",
+                    "reason": str(
+                        mutation.get("status") or "governance_mutation_blocked"
+                    ),
                     "mutation": mutation,
                 })
                 continue
             snapshot = dict(mutation.get("snapshot") or {})
-            now_ts = time.time()
-            application_id = f"psv_apply_{int(now_ts)}_{suggestion_id[-8:]}"
-            details = {
-                "schema_version": "position_supervisor_template_switch.v1",
-                "experiment_id": experiment_id,
-                "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or "demo_autonomous"),
-                "suggestion_id": suggestion_id,
-                "previous_template_id": previous_template_id,
-                "target_template_id": target_template_id,
-                "risk_verdict": verdict,
-                "evidence": evidence,
-                "mutation": mutation,
-                "config_version": int(snapshot.get("config_version") or 0),
-                "config_hash": str(snapshot.get("config_hash") or ""),
-                "experiment_reservation_id": reservation_id,
-                "demo_aggressive_governance": aggressive_demo,
-                "canary_evidence_ready": evidence_ready,
-                "canary_evidence": {
-                    "mature_trade_count": len(mature_positions),
-                    "required_trade_count": canary_required,
-                    "session_count": len(mature_sessions),
-                    "regime_count": len(mature_regimes),
-                },
-            }
-            _execute(
-                conn,
-                """
-                INSERT INTO learning_application_log
-                (application_id, cycle_ts, scope_type, scope_key, action,
-                 bias_multiplier, old_weight, new_weight, suggestion_ids_json,
-                 status, details_json, created_at)
-                VALUES (?, ?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
-                        1.0, 0.0, 0.0, ?, 'applied', ?, ?)
-                ON CONFLICT(application_id) DO UPDATE SET
-                    cycle_ts=excluded.cycle_ts,
-                    scope_type=excluded.scope_type,
-                    scope_key=excluded.scope_key,
-                    action=excluded.action,
-                    bias_multiplier=excluded.bias_multiplier,
-                    old_weight=excluded.old_weight,
-                    new_weight=excluded.new_weight,
-                    suggestion_ids_json=excluded.suggestion_ids_json,
-                    status=excluded.status,
-                    details_json=excluded.details_json,
-                    created_at=excluded.created_at
-                """,
-                (
-                    application_id,
-                    now_ts,
-                    target_template_id,
-                    _dumps([suggestion_id]),
-                    _dumps(details),
-                    now_ts,
-                ),
-            )
-            _execute(
-                conn,
-                """
-                UPDATE learning_experiment_reservation
-                SET status='consumed', application_id=?, updated_at=?
-                WHERE reservation_id=? AND status='reserved'
-                """,
-                (application_id, now_ts, reservation_id),
-            )
-            _execute(
-                conn,
-                """
-                INSERT INTO learning_application_effect
-                (application_id, scope_type, scope_key, action, status,
-                 decision_json, updated_at, created_at)
-                VALUES (?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
-                        'observing', ?, ?, COALESCE(
-                            (SELECT created_at FROM learning_application_effect WHERE application_id=?),
-                            ?
-                        ))
-                ON CONFLICT(application_id) DO UPDATE SET
-                    scope_type=excluded.scope_type,
-                    scope_key=excluded.scope_key,
-                    action=excluded.action,
-                    status=excluded.status,
-                    decision_json=excluded.decision_json,
-                    updated_at=excluded.updated_at,
-                    created_at=excluded.created_at
-                """,
-                (
-                    application_id,
-                    target_template_id,
-                    _dumps(details),
-                    now_ts,
-                    application_id,
-                    now_ts,
-                ),
-            )
-            _execute(
-                conn,
-                """
-                UPDATE policy_suggestion
-                SET status='applied', reviewed_at=CASE WHEN reviewed_at > 0 THEN reviewed_at ELSE ? END,
-                    review_note=?
-                WHERE suggestion_id=?
-                """,
-                (
-                    now_ts,
-                    f"{str(getattr(cfg, 'autonomy_mode', '') or 'demo_autonomous')} applied experiment {experiment_id}",
-                    suggestion_id,
-                ),
-            )
-            conn.commit()
+            application_id = str(governed.get("application_id") or "")
             record_evolution_decision(
                 run_id=run_id,
                 decision_type="apply_switch",
@@ -3766,12 +4069,18 @@ def _auto_apply_position_supervisor_template_suggestions(
                     "previous_template_id": previous_template_id,
                     "target_template_id": target_template_id,
                     "application_id": application_id,
+                    "mutation_id": str(governed.get("mutation_id") or ""),
+                    "projection_ready": bool(governed.get("projection_ready")),
                 }
             )
             previous_template_id = target_template_id
             switch_claimed = True
         conn.commit()
-        return {"applied": applied, "skipped": skipped}
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "candidate_observations": candidate_observations,
+        }
     finally:
         conn.close()
 
@@ -3785,7 +4094,9 @@ def _auto_rollback_position_supervisor_template(
     max_delta_avg_reward: float = -0.005,
 ) -> dict[str, Any]:
     from config.runtime_config import shared as runtime_config
-    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+    from backend.services.position_supervisor_governance import (
+        PositionSupervisorGovernanceMutationService,
+    )
 
     conn = _connect(db_path)
     rolled_back = []
@@ -3828,21 +4139,33 @@ def _auto_rollback_position_supervisor_template(
             if current_template_id != target_template_id:
                 skipped.append({"application_id": application_id, "reason": "target_not_current", "current_template_id": current_template_id})
                 continue
-            mutation = RuntimeConfigMutationService(db_path).apply_patch(
-                {"position_supervisor_template_id": previous_template_id},
+            rollback_evidence = {
+                "experiment_id": experiment_id,
+                "application_id": application_id,
+                "previous_template_id": previous_template_id,
+                "rolled_back_from": target_template_id,
+                "observed_trade_count": observed,
+                "delta_avg_reward": delta,
+            }
+            conn.commit()
+            governed = PositionSupervisorGovernanceMutationService(
+                db_path
+            ).rollback_template(
+                application_id=application_id,
+                current_template_id=target_template_id,
+                previous_template_id=previous_template_id,
+                actor="system:autonomous_learning",
                 source="position_supervisor_template_auto_rollback",
                 run_id=run_id,
-                actor="system:autonomous_learning",
-                action="rollback_position_supervisor_template",
                 reason=f"rollback ineffective supervisor template {application_id}",
-                require_v16_command=is_state_db_path(db_path),
-                v16_target_agent="position_supervisor_governance",
-                v16_scope_type="supervisor_template",
-                v16_scope_key=target_template_id,
-                v16_action="rollback_position_supervisor_template",
-                risk_reduction=True,
+                evidence=rollback_evidence,
+                rollback_details={
+                    "schema_version": "position_supervisor_template_rollback.v2",
+                    **rollback_evidence,
+                },
             )
-            if mutation.get("ok") is False:
+            mutation = dict(governed.get("mutation") or {})
+            if not governed.get("committed"):
                 skipped.append({
                     "application_id": application_id,
                     "reason": "runtime_mutation_blocked",
@@ -3850,38 +4173,14 @@ def _auto_rollback_position_supervisor_template(
                 })
                 continue
             snapshot = dict(mutation.get("snapshot") or {})
-            now_ts = time.time()
             rollback = {
-                "schema_version": "position_supervisor_template_rollback.v1",
-                "experiment_id": experiment_id,
-                "application_id": application_id,
-                "previous_template_id": previous_template_id,
-                "rolled_back_from": target_template_id,
-                "observed_trade_count": observed,
-                "delta_avg_reward": delta,
+                "schema_version": "position_supervisor_template_rollback.v2",
+                **rollback_evidence,
                 "mutation": mutation,
+                "mutation_id": str(governed.get("mutation_id") or ""),
                 "config_version": int(snapshot.get("config_version") or 0),
                 "config_hash": str(snapshot.get("config_hash") or ""),
             }
-            _execute(
-                conn,
-                """
-                UPDATE learning_application_log
-                SET status='rolled_back', details_json=?
-                WHERE application_id=?
-                """,
-                (_dumps({**details, "rollback": rollback}), application_id),
-            )
-            _execute(
-                conn,
-                """
-                UPDATE learning_application_effect
-                SET status='rolled_back', decision_json=?, updated_at=?
-                WHERE application_id=?
-                """,
-                (_dumps(rollback), now_ts, application_id),
-            )
-            conn.commit()
             record_evolution_decision(
                 run_id=run_id,
                 decision_type="auto_rollback",
@@ -4108,7 +4407,7 @@ def maybe_auto_unfreeze_learning_repair(*, db_path: str | Path = STATE_DB) -> di
     """Atomically release the repair freeze only after every safety gate passes."""
     from backend.services.backend_readiness import BackendReadinessService
     from backend.services.release_control import ReleaseControlService
-    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+    from backend.services.governance_control_plans import AutonomyControlPlan
     from config.runtime_config import (
         autonomy_expansion_freeze_applies,
         shared as runtime_config,
@@ -4152,13 +4451,35 @@ def maybe_auto_unfreeze_learning_repair(*, db_path: str | Path = STATE_DB) -> di
     if not all(checks.values()):
         return {"ok": False, "status": "freeze_retained", "checks": checks, "learning_repair": repair}
 
-    mutation = RuntimeConfigMutationService(db_path).apply_patch(
-        {"autonomy_expansion_frozen": False},
+    plan = AutonomyControlPlan(
+        patch={"autonomy_expansion_frozen": False},
         source="learning_repair_auto_unfreeze",
         actor="system:learning_repair_release",
         action="auto_unfreeze_expansionary_autonomy",
+        run_id=f"learning_repair_unfreeze_{int(time.time())}",
         reason="all learning repair, replay, canary, drift and broker-alignment gates passed",
+        scope_type="autonomy_control",
+        scope_key="autonomy_expansion_frozen",
+        target_agent="governance_control",
+        rollback={"autonomy_expansion_frozen": True},
+        evidence_refs={
+            "checks": checks,
+            "learning_repair": repair,
+            "verification_timestamp": (
+                float(verification["timestamp"] or 0.0) if verification is not None else 0.0
+            ),
+        },
+        current_mode=str(getattr(cfg, "autonomy_mode", "") or "manual"),
+        target_mode=str(getattr(cfg, "autonomy_mode", "") or "manual"),
     )
+    try:
+        mutation = plan.execute(db_path)
+    except Exception as exc:
+        mutation = {
+            "ok": False,
+            "status": "governance_mutation_unavailable",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
     if not mutation.get("ok"):
         return {"ok": False, "status": "freeze_retained_mutation_failed", "checks": checks, "mutation": mutation}
     release_service = ReleaseControlService(db_path)
@@ -4192,11 +4513,49 @@ def run_autonomous_learning_cycle(
     recommendation_limit: int = 20,
     submit_offline_deep: bool = True,
     apply_demo: bool = False,
+    mutation_capability: bool = True,
 ) -> dict[str, Any]:
     from research.learning.governor import RuleEvolutionGovernor
     from backend.services.supervisor_counterfactual import evaluate_counterfactuals
 
+    from config.runtime_config import governance_expansion_is_paused
+
+    operator_paused = bool(governance_expansion_is_paused())
+    mutation_allowed = bool(mutation_capability and not operator_paused)
+    mutation_block = {
+        "status": "observation_only" if operator_paused else "mutation_circuit_open",
+        "skipped": True,
+        "reason": (
+            "governance_expansion_paused"
+            if operator_paused
+            else "worker_observation_continues_without_runtime_mutation"
+        ),
+    }
+
     counterfactuals = evaluate_counterfactuals(db_path=db_path, limit=sample_limit, materialize=True)
+    try:
+        from backend.services.position_supervisor_governance import (
+            materialize_position_supervisor_candidate_observations,
+        )
+
+        supervisor_candidate_observations = (
+            materialize_position_supervisor_candidate_observations(
+                db_path=db_path,
+                limit=sample_limit,
+                run_id=f"learning_observation_{int(time.time())}",
+            )
+        )
+    except Exception as exc:
+        supervisor_candidate_observations = {
+            "schema_version": "position_supervisor_candidate_observation.v1",
+            "status": "unavailable",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "broker_mutation_allowed": False,
+            "inserted": 0,
+            "existing": 0,
+            "evaluated": 0,
+            "candidates": [],
+        }
     trace_maturation = mature_position_supervisor_traces(db_path=db_path, limit=sample_limit)
     review_integrity_backfill = backfill_trade_review_integrity_markers(db_path=db_path, limit=sample_limit)
     close_source_backfill = backfill_trade_review_close_sources(db_path=db_path, limit=sample_limit)
@@ -4208,9 +4567,21 @@ def run_autonomous_learning_cycle(
     contract_repair = repair_evidence_contracts(db_path=db_path, limit=max(sample_limit, sample_limit * 4))
     gov = RuleEvolutionGovernor(str(db_path))
     governance = {
-        "review_pending": gov.review_pending(),
-        "reconcile_active": gov.reconcile_active(),
-        "reconcile_application_effects": gov.reconcile_application_effects(),
+        "review_pending": (
+            gov.review_pending()
+            if mutation_allowed
+            else dict(mutation_block)
+        ),
+        "reconcile_active": (
+            gov.reconcile_active()
+            if mutation_allowed
+            else dict(mutation_block)
+        ),
+        "reconcile_application_effects": (
+            gov.reconcile_application_effects()
+            if mutation_allowed
+            else dict(mutation_block)
+        ),
     }
     recommendations = materialize_parameter_template_recommendations(
         db_path=db_path,
@@ -4219,20 +4590,38 @@ def run_autonomous_learning_cycle(
     )
     demo_apply = (
         apply_demo_autonomy(db_path=db_path)
-        if apply_demo
+        if apply_demo and mutation_allowed
         else {
             "schema_version": "demo_autonomy_apply.v1",
             "enabled": False,
             "mode": _autonomy_mode(),
-            "status": "skipped_explicit_apply_required",
+            "status": (
+                "skipped_explicit_apply_required"
+                if mutation_allowed
+                else str(mutation_block["status"])
+            ),
+            "reason": (
+                "explicit_apply_not_requested"
+                if mutation_allowed
+                else str(mutation_block["reason"])
+            ),
         }
     )
     conn = _connect(db_path)
     try:
-        auto_unfreeze = maybe_auto_unfreeze_learning_repair(db_path=db_path)
+        auto_unfreeze = (
+            maybe_auto_unfreeze_learning_repair(db_path=db_path)
+            if mutation_allowed
+            else {
+                "ok": False,
+                "status": str(mutation_block["status"]),
+                "reason": str(mutation_block["reason"]),
+            }
+        )
         payload = {
             "schema_version": "autonomous_learning_cycle.v1",
             "counterfactuals": counterfactuals,
+            "supervisor_candidate_observations": supervisor_candidate_observations,
             "trace_maturation": trace_maturation,
             "review_integrity_backfill": review_integrity_backfill,
             "close_source_backfill": close_source_backfill,
@@ -4261,6 +4650,7 @@ def schedule_autonomous_learning(
     sample_limit: int = 500,
     recommendation_limit: int = 20,
     submit_offline_deep: bool = True,
+    mutation_capability: Callable[[], bool] | None = None,
 ) -> bool:
     global _scheduler_thread
     if _scheduler_thread is not None and _scheduler_thread.is_alive():
@@ -4316,6 +4706,11 @@ def schedule_autonomous_learning(
                     sample_limit=sample_limit,
                     recommendation_limit=recommendation_limit,
                     submit_offline_deep=submit_offline_deep,
+                    mutation_capability=(
+                        bool(mutation_capability())
+                        if mutation_capability is not None
+                        else True
+                    ),
                 )
                 watermark_service.mark_completed(gate["current"])
                 logger.info("[autonomous_learning] scheduled run completed: {}", _log_summary(result))

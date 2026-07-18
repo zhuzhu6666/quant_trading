@@ -8,6 +8,7 @@ import { StatusPill } from "@/components/StatusPill";
 import { formatDecimal, formatMoney, formatTime } from "@/lib/format";
 import { asRecord, formatDirection, pick, pickArray, pickNumber, pickString } from "@/lib/compat";
 import { translateDisplayValue, translateScope } from "@/lib/display";
+import { factBoundTone, factHasDisplayValue, factIsKnown, readFact } from "@/api/fact";
 
 const scopes = ["today", "24h", "7d", "30d", "all"] as const;
 
@@ -50,12 +51,18 @@ export function PnlPage() {
     refetchInterval: 10_000,
     staleTime: 5_000,
   });
+  const seriesFact = readFact(seriesQuery.data, "live.realized-pnl.v2");
+  const seriesRequestFailed = seriesQuery.isError || seriesQuery.isRefetchError;
+  const seriesKnown = factIsKnown(seriesFact, seriesRequestFailed);
+  const seriesDisplayable = factHasDisplayValue(seriesFact);
 
   const points = useMemo(
-    () => pickArray(seriesQuery.data, ["points", "data", "items", "payload.points"]) as RealizedPoint[],
-    [seriesQuery.data],
+    () => seriesDisplayable
+      ? pickArray(seriesQuery.data, ["points", "data", "items", "payload.points"]) as RealizedPoint[]
+      : [],
+    [seriesDisplayable, seriesQuery.data],
   );
-  const summary = asRecord(pick(seriesQuery.data, ["summary"]));
+  const summary = seriesDisplayable ? asRecord(pick(seriesQuery.data, ["summary"])) : {};
   const realized = pickNumber(summary, ["realized_pnl", "realizedPnl", "pnl"], 0);
   const trades = pickNumber(summary, ["trades", "count"], points.length);
   const wins = pickNumber(summary, ["wins", "win"], 0);
@@ -86,7 +93,10 @@ export function PnlPage() {
         </div>
         <div className="header-status">
           <StatusPill status={`窗口 ${translateScope(scope)}`} tone="mute" />
-          <StatusPill status={seriesQuery.isFetching ? "刷新中" : "已同步"} tone={seriesQuery.isError ? "bad" : "ok"} />
+          <StatusPill
+            status={seriesRequestFailed ? "刷新失败，保留上次事实" : seriesQuery.isFetching ? "刷新中" : seriesKnown ? "已同步" : seriesFact.state === "stale" ? "事实已过期" : "事实未知"}
+            tone={factBoundTone(seriesFact, seriesKnown ? "ok" : "warn", seriesRequestFailed)}
+          />
         </div>
       </div>
 
@@ -105,23 +115,24 @@ export function PnlPage() {
       </div>
 
       <div className="stat-grid">
-        {hasSummaryData || hasData ? <StatTile icon={realized >= 0 ? TrendingUp : TrendingDown} label="已实现盈亏" value={formatMoney(realized, currency)} detail={lastPoint ? `最新 ${formatMoney(lastPoint.pnl, currency)}` : undefined} tone={numberTone(realized)} /> : null}
-        {hasSummaryData || hasData ? <StatTile icon={ListChecks} label="交易数" value={formatDecimal(trades, 0)} detail={trades ? `胜 ${formatDecimal(wins, 0)} / 负 ${formatDecimal(losses, 0)}` : undefined} tone={trades ? "ok" : "mute"} /> : null}
-        {trades > 0 ? <StatTile icon={Percent} label="胜率" value={`${formatDecimal(winRate, 1)}%`} detail={`均值 ${formatMoney(avgTrade, currency)}`} tone={winRate >= 50 ? "ok" : "warn"} /> : null}
-        <StatTile icon={CalendarClock} label="数据窗口" value={fromTs ? formatTime(fromTs) : ""} detail={toTs ? `至 ${formatTime(toTs)}` : "等待数据"} tone={hasData ? "ok" : "mute"} />
+        {hasSummaryData || hasData ? <StatTile icon={realized >= 0 ? TrendingUp : TrendingDown} label="已实现盈亏" value={formatMoney(realized, currency)} detail={lastPoint ? `最新 ${formatMoney(lastPoint.pnl, currency)}` : undefined} tone={factBoundTone(seriesFact, numberTone(realized), seriesRequestFailed)} /> : null}
+        {hasSummaryData || hasData ? <StatTile icon={ListChecks} label="交易数" value={formatDecimal(trades, 0)} detail={trades ? `胜 ${formatDecimal(wins, 0)} / 负 ${formatDecimal(losses, 0)}` : undefined} tone={factBoundTone(seriesFact, trades ? "ok" : "mute", seriesRequestFailed)} /> : null}
+        {trades > 0 ? <StatTile icon={Percent} label="胜率" value={`${formatDecimal(winRate, 1)}%`} detail={`均值 ${formatMoney(avgTrade, currency)}`} tone={factBoundTone(seriesFact, winRate >= 50 ? "ok" : "warn", seriesRequestFailed)} /> : null}
+        <StatTile icon={CalendarClock} label="数据窗口" value={fromTs ? formatTime(fromTs) : ""} detail={toTs ? `至 ${formatTime(toTs)}` : "等待数据"} tone={factBoundTone(seriesFact, hasData ? "ok" : "mute", seriesRequestFailed)} />
       </div>
 
       <div className="dashboard-grid">
         <MetricCard title="收益曲线" className="wide-panel">
           {seriesQuery.isLoading ? <p className="loading-state">加载中...</p> : null}
-          {seriesQuery.isError ? (
+          {seriesRequestFailed ? (
             <p className="error-text">接口异常：{seriesQuery.error instanceof Error ? seriesQuery.error.message : "请求失败"}</p>
           ) : null}
+          {!seriesDisplayable && !seriesRequestFailed ? <p className="loading-state">收益事实未知，等待权威数据。</p> : null}
           <div className="pnl-window-summary" aria-label="窗口摘要">
             <Field label="币种" value={currency} />
-            <Field label="最佳单笔" value={formatMoney(bestTrade, currency)} tone={bestTrade > 0 ? "ok" : "mute"} />
+            <Field label="最佳单笔" value={formatMoney(bestTrade, currency)} tone={factBoundTone(seriesFact, bestTrade > 0 ? "ok" : "mute", seriesRequestFailed)} />
             <Field label="最差单笔" value={formatMoney(worstTrade, currency)} tone={worstTrade < 0 ? "bad" : "mute"} />
-            <Field label="平均单笔" value={formatMoney(avgTrade, currency)} tone={numberTone(avgTrade)} />
+            <Field label="平均单笔" value={formatMoney(avgTrade, currency)} tone={factBoundTone(seriesFact, numberTone(avgTrade), seriesRequestFailed)} />
             <Field label="首条成交" value={firstTs ? formatTime(firstTs) : ""} />
             <Field label="末条成交" value={lastTs ? formatTime(lastTs) : ""} />
           </div>
@@ -178,7 +189,7 @@ export function PnlPage() {
                     <td>{translateDisplayValue(formatDirection(row.direction))}</td>
                     <td>{row.symbol || ""}</td>
                     <td>{formatMoney(row.cumulative, currency)}</td>
-                    <td className={Number(row.pnl || 0) >= 0 ? "status-ok" : "status-bad"}>{formatMoney(row.pnl, currency)}</td>
+                    <td className={Number(row.pnl || 0) < 0 ? "status-bad" : seriesKnown ? "status-ok" : "status-warn"}>{formatMoney(row.pnl, currency)}</td>
                     <td>{row.source || ""}</td>
                   </tr>
                 ))}

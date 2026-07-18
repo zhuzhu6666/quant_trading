@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.core.auth import RequireUser
+from backend.services.api_fact_views import ctrader_token_status_fact_payload
 
 router = APIRouter(prefix="/api/ctrader", tags=["ctrader-auth"])
 
@@ -185,12 +186,12 @@ def token_status(_user: RequireUser) -> dict:
     if expires:
         try:
             remaining = float(expires) - now
-            return {
+            return ctrader_token_status_fact_payload({
                 "has_token": bool(token),
                 "expires_at": expires,
                 "remaining_hours": round(remaining / 3600, 1),
                 "expired": remaining < 0,
-            }
+            })
         except ValueError:
             pass
-    return {"has_token": bool(token), "expires_at": None}
+    return ctrader_token_status_fact_payload({"has_token": bool(token), "expires_at": None})

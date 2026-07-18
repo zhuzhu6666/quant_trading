@@ -512,6 +512,7 @@ def test_entry_cluster_governance_materializes_policy_suggestion(tmp_path):
     finally:
         conn.close()
 
+    al.repair_evidence_contracts(db_path=db_path)
     result = al.materialize_entry_cluster_governance_suggestions(db_path=db_path, min_samples=3, min_bad_rate=0.5)
 
     assert result["suggestions"] == 1
@@ -593,6 +594,7 @@ def test_event_window_governance_materializes_policy_suggestion(tmp_path):
     finally:
         conn.close()
 
+    al.repair_evidence_contracts(db_path=db_path)
     result = al.materialize_event_window_governance_suggestions(db_path=db_path, min_samples=3, min_bad_rate=0.5)
 
     assert result["suggestions"] == 1
@@ -671,6 +673,7 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
     finally:
         conn.close()
 
+    al.repair_evidence_contracts(db_path=db_path)
     result = al.materialize_entry_quality_governance_suggestions(db_path=db_path, min_samples=3, min_bad_rate=0.5)
 
     assert result["suggestions"] == 3
@@ -1561,6 +1564,35 @@ def test_demo_autonomy_delegates_policy_review_to_governor(monkeypatch, tmp_path
     conn.commit()
     conn.close()
 
+    al.ensure_autonomous_learning_tables(db_path)
+    conn = sqlite3.connect(str(db_path))
+    fingerprint = "eligible-factor-evidence"
+    conn.execute(
+        """
+        UPDATE experience_pattern_stats
+        SET effective_sample_count=4.0,
+            weighted_win_count=0.0,
+            weighted_bad_loss_count=3.0,
+            weighted_avg_reward=-0.35,
+            governance_eligibility_version=?,
+            governance_eligibility_fingerprint=?
+        WHERE scope_type='factor' AND scope_key='ema_slope'
+        """,
+        (al.GOVERNANCE_ELIGIBILITY_VERSION, fingerprint),
+    )
+    conn.execute(
+        """
+        UPDATE policy_suggestion
+        SET governance_eligible=1,
+            governance_eligibility_version=?,
+            governance_eligibility_fingerprint=?
+        WHERE suggestion_id='psg_factor'
+        """,
+        (al.GOVERNANCE_ELIGIBILITY_VERSION, fingerprint),
+    )
+    conn.commit()
+    conn.close()
+
     monkeypatch.setattr(al, "_sync_factor_weights_for_demo", lambda experiment_id: {"synced": True})
     monkeypatch.setattr(
         al,
@@ -1757,3 +1789,21 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
 
     assert result["demo_autonomy"]["status"] == "skipped_explicit_apply_required"
     assert "demo_apply" not in calls
+
+    calls.clear()
+    result = al.run_autonomous_learning_cycle(
+        db_path=db_path,
+        sample_limit=20,
+        apply_demo=True,
+        mutation_capability=False,
+    )
+
+    assert "counterfactual" in calls
+    assert "materialize_samples" in calls
+    assert "recommendations" in calls
+    assert "review_pending" not in calls
+    assert "reconcile_active" not in calls
+    assert "reconcile_application_effects" not in calls
+    assert "demo_apply" not in calls
+    assert result["governance"]["review_pending"]["status"] == "mutation_circuit_open"
+    assert result["demo_autonomy"]["status"] == "mutation_circuit_open"

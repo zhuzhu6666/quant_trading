@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from backend.core.db import EXPERIMENTS_DB
+from backend.core.db import EXPERIMENTS_DB, prepare_experiments_store
 from research.model_inference_contract import ModelInferenceContract
 from research.model_shadow_queue import ModelShadowQueue
 
@@ -54,30 +54,7 @@ class ModelCanaryExecutor:
         return conn
 
     def _ensure_table(self) -> None:
-        conn = self._conn()
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS model_canary_trial (
-                    trial_id TEXT PRIMARY KEY,
-                    candidate_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    metrics_json TEXT DEFAULT '{}',
-                    thresholds_json TEXT DEFAULT '{}',
-                    details_json TEXT DEFAULT '{}',
-                    created_at REAL DEFAULT 0.0
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_model_canary_trial_candidate
-                ON model_canary_trial(candidate_id, created_at)
-                """
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        prepare_experiments_store(self._db_path)
 
     def run_trial(
         self,

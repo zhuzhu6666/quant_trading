@@ -17,10 +17,32 @@ def default_live_state() -> dict[str, Any]:
         "loop_started_at": None,
         "loop_shutdown": None,
         "accepting_new_risk": False,
+        # ``account``/``positions`` remain the compatibility projections used
+        # by existing API/WS consumers.  Only an explicit fresh broker
+        # reconcile may populate the corresponding ``*_reconciled`` snapshot
+        # and advance ``*_updated_at``.  Event-cache projections are kept in
+        # their own fields so an execution/trader event (or estimated equity)
+        # can never manufacture an authoritative freshness timestamp.
         "account": None,
+        "account_reconciled": None,
         "account_updated_at": None,
+        "account_reconcile_id": None,
+        "account_reconcile_failed_at": None,
+        "account_reconcile_error": None,
+        "account_event": None,
+        "account_event_updated_at": None,
+        "account_event_reason": None,
         "positions": [],
+        "positions_reconciled": [],
         "positions_updated_at": None,
+        "positions_reconcile_id": None,
+        "positions_reconcile_failed_at": None,
+        "positions_reconcile_error": None,
+        "positions_component_facts": {},
+        "new_risk_reconcile_blockers": [],
+        "positions_event": [],
+        "positions_event_updated_at": None,
+        "positions_event_reason": None,
         "spot_price": None,
         "spot_quote": None,
         "spot_quote_changed_at": 0.0,
@@ -36,6 +58,11 @@ def default_live_state() -> dict[str, Any]:
         "session_start_balance": 0.0,
         "session_last_trade_ts": 0.0,
         "session_state_source": "runtime_incremental",
+        "session_state_status": "unknown",
+        "session_risk_blockers": [],
+        # Observation time belongs to the session-risk projection itself.
+        # It must never be borrowed from account/position refresh timestamps.
+        "session_observed_at": 0.0,
         "circuit_breaker": False,
         "circuit_reason": "",
         "trade_equity_history": [],

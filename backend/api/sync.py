@@ -4,6 +4,7 @@ from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.jobs import get_job_manager
+from backend.services.api_fact_views import sync_status_fact_payload
 from backend.services.sync_service import get_status, run_sync_once
 from backend.services.mutation_audit import record_api_mutation
 
@@ -22,7 +23,7 @@ class DaemonStartRequest(BaseModel):
 
 @router.get("/status")
 def status(_user: RequireUser) -> dict:
-    return get_status()
+    return sync_status_fact_payload(get_status())
 
 
 @router.post("/once")

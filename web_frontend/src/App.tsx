@@ -1,5 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense } from "react";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -27,21 +26,7 @@ function ProtectedAppLayout() {
 }
 
 export function App() {
-  const [queryClient] = useState(
-    () =>
-      new QueryClient({
-        defaultOptions: {
-          queries: {
-            retry: 1,
-            staleTime: 2000,
-            refetchOnWindowFocus: false,
-          },
-        },
-      }),
-  );
-
   return (
-    <QueryClientProvider client={queryClient}>
       <Routes>
         <Route path="/login" element={<Suspense fallback={<RouteFallback />}><LoginPage /></Suspense>} />
         <Route
@@ -64,6 +49,5 @@ export function App() {
         </Route>
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes>
-    </QueryClientProvider>
   );
 }

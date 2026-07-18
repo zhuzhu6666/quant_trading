@@ -153,6 +153,39 @@ def position_unrealized_pnl(position: Any) -> float:
     return 0.0
 
 
+def position_component_state(position: Any, component: str) -> str:
+    """Return an explicitly published position component state.
+
+    Empty is retained for legacy producers and is intentionally distinct from
+    an explicit ``unknown``/``stale``/``error`` state.
+    """
+
+    normalized = str(component or "").strip().lower()
+    keys = (
+        ("pnl_state", "unrealized_pnl_state")
+        if normalized == "pnl"
+        else ("current_price_state", "price_state")
+        if normalized in {"price", "current_price"}
+        else (f"{normalized}_state",)
+    )
+    for key in keys:
+        value = payload_get(position, key, "")
+        if value not in (None, ""):
+            return str(value).strip().lower()
+    return ""
+
+
+def position_component_is_known(position: Any, component: str) -> bool:
+    """Compatibility-aware component availability.
+
+    Legacy fixtures/producers without a state field keep their historic
+    behavior.  Once a producer publishes component truth, only ``known`` may
+    be consumed as a numeric metric.
+    """
+
+    return position_component_state(position, component) in {"", "known"}
+
+
 def apply_unrealized_pnl_fields(
     positions: list[dict[str, Any]],
     *,
@@ -161,6 +194,8 @@ def apply_unrealized_pnl_fields(
     if not positions:
         return []
     out = [dict(item) for item in positions]
+    component_states = [position_component_state(item, "pnl") for item in out]
+    component_known = [state in {"", "known"} for state in component_states]
     existing_values: list[float] = []
     missing_or_zero = True
     for item in out:
@@ -172,7 +207,8 @@ def apply_unrealized_pnl_fields(
     estimates = [position_price_pnl_estimate(item) for item in out]
     sum_existing = sum(existing_values)
     use_account_fallback = (
-        abs(account_pnl) > 1e-9
+        all(state == "" for state in component_states)
+        and abs(account_pnl) > 1e-9
         and missing_or_zero
         and abs(sum_existing) < 1e-9
     )
@@ -191,12 +227,33 @@ def apply_unrealized_pnl_fields(
             source = "price_estimate"
     else:
         values = [
-            existing if abs(existing) > 1e-9 else estimate
-            for existing, estimate in zip(existing_values, estimates)
+            existing
+            if state == "known" or abs(existing) > 1e-9
+            else estimate
+            for existing, estimate, state in zip(
+                existing_values,
+                estimates,
+                component_states,
+            )
         ]
-        if all(abs(existing) <= 1e-9 for existing in existing_values) and any(abs(v) > 1e-9 for v in values):
+        if (
+            all(state == "" for state in component_states)
+            and all(abs(existing) <= 1e-9 for existing in existing_values)
+            and any(abs(v) > 1e-9 for v in values)
+        ):
             source = "price_estimate"
-    for item, value in zip(out, values):
+    for item, value, pnl_known in zip(out, values, component_known):
+        if not pnl_known:
+            # Never convert an unavailable PnL component into a numeric zero.
+            # Risk-reducing actions can continue using position identity, but
+            # metric-driven supervisor/path logic must see the unknown state.
+            item["profit"] = None
+            item["pnl"] = None
+            item["unrealized"] = None
+            item["unrealized_pnl"] = None
+            item["netUnrealizedPnL"] = None
+            item["pnl_source"] = str(item.get("pnl_source") or "unknown")
+            continue
         pnl = round(float(value or 0.0), 6)
         item["profit"] = pnl
         item["pnl"] = pnl
@@ -385,13 +442,19 @@ def build_entry_cluster_context(
         pos_direction = position_direction_from_payload(pos)
         api_volume = position_api_volume(pos)
         open_ts = position_open_timestamp(pos)
+        open_timestamp_known = open_ts > 0
         item = {
             "position_id": position_id_value(pos),
             "direction": pos_direction,
             "api_volume": api_volume,
             "open_price": position_open_price(pos),
             "open_ts": open_ts,
-            "age_seconds": max(0.0, float(now_ts) - open_ts) if open_ts > 0 else 0.0,
+            "age_seconds": (
+                max(0.0, float(now_ts) - open_ts)
+                if open_timestamp_known
+                else None
+            ),
+            "open_timestamp_state": "known" if open_timestamp_known else "unknown",
         }
         rows.append(item)
         net_api_volume += api_volume * (1 if pos_direction > 0 else -1 if pos_direction < 0 else 0)
@@ -400,7 +463,23 @@ def build_entry_cluster_context(
         elif direction != 0 and pos_direction == -direction:
             opposite_rows.append(item)
 
-    same_ages = [float(item["age_seconds"]) for item in same_rows if float(item.get("age_seconds") or 0.0) > 0]
+    same_ages = [
+        float(item["age_seconds"])
+        for item in same_rows
+        if item.get("age_seconds") is not None
+    ]
+    unknown_open_timestamp_ids = [
+        int(item.get("position_id") or 0)
+        for item in same_rows
+        if item.get("open_timestamp_state") != "known"
+    ]
+    same_timestamp_state = (
+        "unknown"
+        if unknown_open_timestamp_ids
+        else "known"
+        if same_rows
+        else "not_applicable"
+    )
     same_api_volume = sum(float(item.get("api_volume") or 0.0) for item in same_rows)
     opposite_api_volume = sum(float(item.get("api_volume") or 0.0) for item in opposite_rows)
     recent_same = {
@@ -424,7 +503,15 @@ def build_entry_cluster_context(
         "opposite_direction_api_volume_before": opposite_api_volume,
         "net_direction_api_volume_before": net_api_volume,
         "net_direction_api_volume_after": net_api_volume + float(new_api_volume or 0.0) * direction,
-        "seconds_since_last_same_direction_open": min(same_ages) if same_ages else 0.0,
+        "seconds_since_last_same_direction_open": (
+            None
+            if same_timestamp_state == "unknown"
+            else min(same_ages)
+            if same_ages
+            else 0.0
+        ),
+        "same_direction_open_timestamp_state": same_timestamp_state,
+        "unknown_open_timestamp_position_ids": unknown_open_timestamp_ids,
         "recent_same_direction_entries": recent_same,
         "same_direction_position_ids": [item["position_id"] for item in same_rows if item["position_id"]],
         "new_position_id": int(new_position_id or 0),
@@ -1218,16 +1305,22 @@ def enrich_positions_with_lifecycle_metrics(
     for raw in raw_positions:
         item = dict(raw)
         item.update(holding_summary_for_position(item, cfg=cfg, now_ts=now_ts))
-        item.update(
-            position_path_metrics_for_position(
-                item,
-                cfg=cfg,
-                now_ts=now_ts,
-                persist=persist,
-                broker=broker,
-                strategy_name=strategy_name,
+        if position_component_is_known(item, "pnl"):
+            item.update(
+                position_path_metrics_for_position(
+                    item,
+                    cfg=cfg,
+                    now_ts=now_ts,
+                    persist=persist,
+                    broker=broker,
+                    strategy_name=strategy_name,
+                )
             )
-        )
+        else:
+            item["position_path_metrics_state"] = "unknown"
+            item["position_path_metrics_reason_code"] = (
+                str(item.get("pnl_reason_code") or "position_pnl_unknown")
+            )
         supervisor = evaluate_position_supervisor_for_position(
             item,
             cfg=cfg,
@@ -1504,10 +1597,19 @@ def build_close_position_risk_context_payload(
 ) -> dict[str, Any]:
     now = float((temporal_context or {}).get("decision_ts") or 0.0)
     entry_timestamp = float(entry_ts or 0.0)
-    holding_seconds = max(0.0, now - entry_timestamp) if entry_timestamp > 0 else 0.0
     timeframe_seconds = int((temporal_context or {}).get("timeframe_seconds", 0) or 0)
     max_bars = int(max_holding_bars or 0)
     max_holding_seconds = float(max_bars * timeframe_seconds) if max_bars > 0 and timeframe_seconds > 0 else 0.0
+    entry_timestamp_known = entry_timestamp > 0
+    # A missing broker/open-ledger timestamp is not a newborn position.  Use
+    # the configured timeout boundary as a finite, JSON-safe representation
+    # of infinite staleness so the close-only timeout path fails closed while
+    # exposing that the elapsed value itself is unknown.
+    holding_seconds = (
+        max(0.0, now - entry_timestamp)
+        if entry_timestamp_known
+        else max_holding_seconds if max_holding_seconds > 0 else 0.0
+    )
     return {
         "position_id": str(position_id),
         "close_reason": close_reason,
@@ -1516,7 +1618,14 @@ def build_close_position_risk_context_payload(
         "symbol": symbol,
         "entry_ts": entry_timestamp,
         "entry_ts_source": str(entry_ts_source or ""),
+        "entry_ts_state": "known" if entry_timestamp_known else "unknown",
         "holding_seconds": holding_seconds,
+        "holding_seconds_state": (
+            "known" if entry_timestamp_known else "unknown_infinite_stale"
+        ),
+        "holding_timeout_fail_closed": bool(
+            not entry_timestamp_known and max_holding_seconds > 0
+        ),
         "timeframe_seconds": timeframe_seconds,
         "max_holding_bars": max_bars,
         "max_holding_seconds": max_holding_seconds,
@@ -1527,10 +1636,16 @@ def build_close_position_risk_context_payload(
 def build_holding_summary_from_close_context(close_context: dict[str, Any]) -> dict[str, Any]:
     holding_seconds = float(close_context.get("holding_seconds", 0.0) or 0.0)
     max_holding_seconds = float(close_context.get("max_holding_seconds", 0.0) or 0.0)
+    holding_seconds_state = str(
+        close_context.get("holding_seconds_state") or "known"
+    )
+    unknown_timestamp = holding_seconds_state != "known"
     timeout_enabled = bool(max_holding_seconds > 0)
     timeout_ratio = (holding_seconds / max_holding_seconds) if timeout_enabled and max_holding_seconds > 0 else 0.0
     if not timeout_enabled:
         timeout_status = "disabled"
+    elif unknown_timestamp:
+        timeout_status = "expired_unknown_timestamp"
     elif holding_seconds >= max_holding_seconds:
         timeout_status = "expired"
     elif timeout_ratio >= 0.8:
@@ -1540,13 +1655,17 @@ def build_holding_summary_from_close_context(close_context: dict[str, Any]) -> d
     remaining_seconds = max(0.0, max_holding_seconds - holding_seconds) if timeout_enabled else 0.0
     return {
         "holding_seconds": round(holding_seconds, 3),
+        "holding_seconds_state": holding_seconds_state,
         "holding_minutes": round(holding_seconds / 60.0, 2) if holding_seconds > 0 else 0.0,
         "timeout_enabled": timeout_enabled,
         "max_holding_bars": int(close_context.get("max_holding_bars", 0) or 0),
         "max_holding_seconds": round(max_holding_seconds, 3) if max_holding_seconds > 0 else 0.0,
         "holding_timeout_exceeded": bool(
             close_context.get("max_holding_seconds", 0.0)
-            and holding_seconds >= max_holding_seconds
+            and (unknown_timestamp or holding_seconds >= max_holding_seconds)
+        ),
+        "holding_timeout_fail_closed": bool(
+            timeout_enabled and unknown_timestamp
         ),
         "holding_timeout_ratio": round(timeout_ratio, 4) if timeout_enabled else 0.0,
         "holding_timeout_status": timeout_status,
@@ -1557,7 +1676,13 @@ def build_holding_summary_from_close_context(close_context: dict[str, Any]) -> d
 def holding_timeout_is_expired(close_context: dict[str, Any]) -> bool:
     max_holding_seconds = float((close_context or {}).get("max_holding_seconds", 0.0) or 0.0)
     holding_seconds = float((close_context or {}).get("holding_seconds", 0.0) or 0.0)
-    return bool(max_holding_seconds > 0 and holding_seconds >= max_holding_seconds)
+    holding_seconds_state = str(
+        (close_context or {}).get("holding_seconds_state") or "known"
+    )
+    return bool(
+        max_holding_seconds > 0
+        and (holding_seconds_state != "known" or holding_seconds >= max_holding_seconds)
+    )
 
 
 def build_holding_timeout_verdict_payload(
@@ -2495,6 +2620,15 @@ def build_legacy_awe_trailing_update(
     if pid_raw is None:
         return {"position_id": 0, "state": existing_state or {}, "activated_now": False, "candidate": None}
     pid = int(pid_raw)
+    if not position_component_is_known(position, "price"):
+        return {
+            "position_id": pid,
+            "state": existing_state or {},
+            "activated_now": False,
+            "candidate": None,
+            "blocked": True,
+            "reason": "position_price_component_unknown",
+        }
     direction = int((position or {}).get("direction", 0) or 0)
     entry = float((position or {}).get("entry_price", 0) or (position or {}).get("open_price", 0) or 0.0)
     if pid <= 0 or entry <= 0 or direction == 0:
@@ -2677,7 +2811,7 @@ def build_supervisor_tighten_sl_plan(
     bid: float = 0.0,
     ask: float = 0.0,
     mid: float = 0.0,
-    quote_age_seconds: float = 0.0,
+    quote_age_seconds: float | None = None,
     quote_max_age_seconds: float = 10.0,
     min_stop_distance_points: float = 0.20,
     stop_safety_buffer_ratio: float = 0.00008,
@@ -2703,6 +2837,11 @@ def build_supervisor_tighten_sl_plan(
         max(0.0, float(min_stop_distance_points or 0.0)),
         abs(reference_price) * max(0.0, float(stop_safety_buffer_ratio or 0.0)),
     ) if reference_price > 0 else 0.0
+    normalized_quote_age = (
+        max(0.0, float(quote_age_seconds))
+        if quote_age_seconds is not None
+        else None
+    )
     plan = {
         "allowed": False,
         "reason": "",
@@ -2715,12 +2854,15 @@ def build_supervisor_tighten_sl_plan(
         "ask": ask,
         "direction": direction,
         "buffer": buffer,
-        "quote_age_seconds": float(quote_age_seconds or 0.0),
+        "quote_age_seconds": normalized_quote_age,
         "quote_max_age_seconds": float(quote_max_age_seconds or 0.0),
         "precision": int(precision or 0),
         "require_side_quote": bool(require_side_quote),
     }
-    if quote_age_seconds > quote_max_age_seconds >= 0:
+    if normalized_quote_age is None:
+        plan["reason"] = "quote_timestamp_unknown"
+        return plan
+    if normalized_quote_age > quote_max_age_seconds >= 0:
         plan["reason"] = "stale_quote"
         return plan
     if target_sl <= 0:
@@ -2776,10 +2918,14 @@ def build_supervisor_tighten_sl_plan_inputs(
     target_sl: float,
     quote: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
+    evaluated_at_ts: float | None = None,
 ) -> dict[str, Any]:
     quote = quote or {}
     policy = policy or {}
     quote_ts = float(quote.get("ts") or 0.0)
+    evaluated_at = float(
+        time.time() if evaluated_at_ts is None else evaluated_at_ts
+    )
     return {
         "current_sl": float_payload_value(position, "sl", "stop_loss", "stopLoss"),
         "current_price": float_payload_value(position, "current_price", "price_current", "price", "mark_price"),
@@ -2788,7 +2934,9 @@ def build_supervisor_tighten_sl_plan_inputs(
         "bid": float_payload_value(quote, "bid"),
         "ask": float_payload_value(quote, "ask"),
         "mid": float_payload_value(quote, "mid", "price"),
-        "quote_age_seconds": max(0.0, time.time() - quote_ts) if quote_ts > 0 else 0.0,
+        "quote_age_seconds": (
+            max(0.0, evaluated_at - quote_ts) if quote_ts > 0 else None
+        ),
         "quote_max_age_seconds": float(policy.get("quote_max_age_seconds", 10.0) or 10.0),
         "min_stop_distance_points": float(policy.get("min_stop_distance_points", 0.20) or 0.20),
         "stop_safety_buffer_ratio": float(policy.get("stop_safety_buffer_ratio", 0.00008) or 0.00008),
@@ -2880,6 +3028,7 @@ def build_protection_execution_plan(
     source: str,
     entry_protection_repair_source: str,
     quote: dict[str, Any] | None = None,
+    evaluated_at_ts: float | None = None,
 ) -> dict[str, Any]:
     target_sl = float((controls or {}).get("target_stop_loss", 0.0) or 0.0)
     target_tp = float((controls or {}).get("target_take_profit", 0.0) or 0.0)
@@ -2891,6 +3040,7 @@ def build_protection_execution_plan(
             position=position,
             target_sl=target_sl,
             quote=quote,
+            evaluated_at_ts=evaluated_at_ts,
         )
     )
     tp_extension_only = target_tp_is_extension(
@@ -2925,6 +3075,7 @@ def build_supervisor_tighten_execution_plan(
     controls: dict[str, Any],
     quote: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
+    evaluated_at_ts: float | None = None,
 ) -> dict[str, Any]:
     target_sl = float((controls or {}).get("target_stop_loss", 0.0) or 0.0)
     current_tp = float((position or {}).get("tp", 0.0) or 0.0)
@@ -2942,6 +3093,7 @@ def build_supervisor_tighten_execution_plan(
             target_sl=target_sl,
             quote=quote,
             policy=policy,
+            evaluated_at_ts=evaluated_at_ts,
         )
     )
     return {

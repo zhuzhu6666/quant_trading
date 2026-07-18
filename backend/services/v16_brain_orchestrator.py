@@ -54,6 +54,7 @@ def ensure_v16_brain_command_table(db_path: str | Path = STATE_DB) -> None:
                 posterior_fingerprint TEXT DEFAULT '',
                 evidence_fingerprint TEXT DEFAULT '',
                 last_release_reason TEXT DEFAULT '',
+                authority_issued_at REAL NOT NULL DEFAULT 0.0,
                 created_at REAL NOT NULL DEFAULT 0.0,
                 updated_at REAL NOT NULL DEFAULT 0.0
             )""",
@@ -70,6 +71,7 @@ def ensure_v16_brain_command_table(db_path: str | Path = STATE_DB) -> None:
             "posterior_fingerprint": "TEXT DEFAULT ''",
             "evidence_fingerprint": "TEXT DEFAULT ''",
             "last_release_reason": "TEXT DEFAULT ''",
+            "authority_issued_at": "REAL NOT NULL DEFAULT 0.0",
         }
         if is_state_db_path(db_path):
             for name, ddl in columns.items():
@@ -79,10 +81,20 @@ def ensure_v16_brain_command_table(db_path: str | Path = STATE_DB) -> None:
             for name, ddl in columns.items():
                 if name not in existing:
                     execute(conn, f'ALTER TABLE v16_brain_command ADD COLUMN "{name}" {ddl}')
+        if not is_state_db_path(db_path):
+            execute(
+                conn,
+                """UPDATE v16_brain_command
+                   SET authority_issued_at=CASE
+                       WHEN created_at>0.0 THEN created_at ELSE updated_at END
+                   WHERE authority_issued_at<=0.0""",
+            )
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_v16_brain_command_created ON v16_brain_command(created_at)")
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_v16_brain_command_target ON v16_brain_command(target_agent, status, created_at)")
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_v16_brain_command_scope ON v16_brain_command(scope_type, scope_key, created_at)")
         execute(conn, "CREATE INDEX IF NOT EXISTS idx_v16_brain_command_claim ON v16_brain_command(target_agent, scope_type, claim_status, claim_expires_at)")
+        if not is_state_db_path(db_path):
+            execute(conn, "CREATE INDEX IF NOT EXISTS idx_v16_brain_command_authority ON v16_brain_command(target_agent, decision, authority_issued_at)")
         conn.commit()
     finally:
         conn.close()
@@ -269,7 +281,7 @@ class V16BrainOrchestratorService:
                    evidence_json, delegation_json, claim_status, claim_token,
                    claim_expires_at, apply_count, max_apply_count, consumed_at,
                    consumed_mutation_id, posterior_fingerprint, evidence_fingerprint,
-                   created_at, updated_at
+                   authority_issued_at, created_at, updated_at
                    FROM v16_brain_command ORDER BY created_at DESC LIMIT ?""",
                 (min(1000, limit * 10),),
             ).fetchall()
@@ -281,11 +293,14 @@ class V16BrainOrchestratorService:
             if state_table_exists(conn, "supervisor_counterfactual_review"):
                 row = execute(conn, "SELECT MAX(updated_at) AS latest FROM supervisor_counterfactual_review").fetchone()
                 latest_cf = safe_float(row["latest"] if row else 0.0)
-            # A deterministic command may be updated in place when the same
-            # surface receives refreshed evidence.  Closure must use the
-            # command handoff timestamp, not its original creation time.
+            # Claim lifecycle timestamps are operational only. Closure uses
+            # the evidence-bound V16 authority issuance time.
             latest_command = max(
-                (safe_float(item.get("updated_at")) or safe_float(item.get("created_at")) for item in commands),
+                (
+                    safe_float(item.get("authority_issued_at"))
+                    or safe_float(item.get("created_at"))
+                    for item in commands
+                ),
                 default=0.0,
             )
             posterior_closed = latest_cf <= 0.0 or latest_command >= latest_cf
@@ -509,8 +524,8 @@ class V16BrainOrchestratorService:
                     (command_id, snapshot_id, plan_id, eval_id, candidate_id, target_agent,
                      scope_type, scope_key, action, decision, status, evidence_json,
                      delegation_json, posterior_fingerprint, evidence_fingerprint,
-                     max_apply_count, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     max_apply_count, authority_issued_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(command_id) DO UPDATE SET
                       snapshot_id=excluded.snapshot_id,
                       plan_id=excluded.plan_id,
@@ -532,6 +547,7 @@ class V16BrainOrchestratorService:
                         str(item.get("posterior_fingerprint") or ""),
                         str(item.get("evidence_fingerprint") or ""),
                         max(1, int(item.get("max_apply_count") or 1)),
+                        safe_float(item.get("authority_issued_at") or item.get("created_at")),
                         safe_float(item.get("created_at")),
                         safe_float(item.get("updated_at")),
                     ),
@@ -564,6 +580,7 @@ class V16BrainOrchestratorService:
                 "consumed_mutation_id": str(row["consumed_mutation_id"] or ""),
                 "evidence": loads(row["evidence_json"], {}),
             "delegation": loads(row["delegation_json"], {}),
+            "authority_issued_at": safe_float(row["authority_issued_at"]),
             "created_at": safe_float(row["created_at"]),
             "updated_at": safe_float(row["updated_at"]),
             "boundary": V16BrainOrchestratorService.boundary(),

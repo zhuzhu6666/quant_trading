@@ -22,6 +22,15 @@ if str(ROOT) not in sys.path:
 
 from loguru import logger
 
+from backend.services.learning_worker_capability import (
+    LearningWorkerCapability,
+    guarded_mutation_job,
+    mutation_stage_allowed,
+)
+
+
+_worker_capability = LearningWorkerCapability()
+
 
 def _env_enabled(name: str, default: str = "1") -> bool:
     value = str(os.getenv(name, default) or "").strip().lower()
@@ -39,7 +48,27 @@ def _apply_cpu_affinity(raw: str) -> None:
     logger.info("[learning_worker] CPU affinity set to {}", sorted(cpus))
 
 
-def _bootstrap_runtime() -> None:
+def _publish_boot_failure(
+    capability: LearningWorkerCapability,
+    *,
+    stage: str,
+    error: BaseException,
+) -> None:
+    capability.mark_boot_failed(stage=stage, error=error)
+    try:
+        capability.publish()
+    except Exception as publish_exc:
+        logger.error(
+            "[learning_worker] failed to publish boot failure stage={} error={}",
+            stage,
+            publish_exc,
+        )
+
+
+def _bootstrap_runtime(
+    capability: LearningWorkerCapability | None = None,
+) -> LearningWorkerCapability:
+    capability = capability or _worker_capability
     from backend.core.logging import setup_logging
 
     setup_logging()
@@ -48,23 +77,46 @@ def _bootstrap_runtime() -> None:
 
         init_all()
         logger.info("[learning_worker] databases initialized")
+    except Exception as exc:
+        _publish_boot_failure(capability, stage="database_or_schema", error=exc)
+        logger.error("[learning_worker] critical database/schema boot failure: {}", exc)
+        raise
+
+    try:
         from backend.services.evolution_ledger import expire_stale_evolution_runs
+        from backend.services.governance_startup_recovery import (
+            GovernanceStartupRecoveryService,
+        )
 
         expired = expire_stale_evolution_runs(max_age_sec=3600.0)
         if expired.get("expired_count"):
             logger.info("[learning_worker] expired stale interrupted runs: {}", expired)
+        governance_recovery = GovernanceStartupRecoveryService().run(
+            process_role="learning_worker"
+        )
+        if governance_recovery.get("ok") is not True:
+            raise RuntimeError(
+                f"governance_startup_recovery_failed:{governance_recovery}"
+            )
+        if (
+            governance_recovery.get("aborted_intent_count")
+            or governance_recovery.get("released_claim_count")
+        ):
+            logger.info(
+                "[learning_worker] governance crash recovery: {}",
+                governance_recovery,
+            )
         from backend.services.learning_application_state import LearningApplicationStateService
 
         recovery = LearningApplicationStateService().recover_prepared()
+        if recovery.get("ok") is not True:
+            raise RuntimeError(f"learning_application_recovery_failed:{recovery}")
         if recovery.get("checked"):
             logger.info("[learning_worker] governed weight application recovery: {}", recovery)
     except Exception as exc:
-        from backend.core.state_schema_migrations import StateSchemaVersionError
-
-        if isinstance(exc, StateSchemaVersionError):
-            logger.error("[learning_worker] blocking state schema version failure: {}", exc)
-            raise
-        logger.warning("[learning_worker] db init failed: {}", exc)
+        _publish_boot_failure(capability, stage="recovery", error=exc)
+        logger.error("[learning_worker] critical recovery boot failure: {}", exc)
+        raise
 
     try:
         from backend.services.runtime_config_startup import (
@@ -73,25 +125,59 @@ def _bootstrap_runtime() -> None:
         )
 
         base_cfg, _yaml_cfg = load_yaml_runtime_config()
-        try:
-            restored = restore_runtime_config_on_startup(
-                base_cfg,
-                snapshot_source="learning_worker_startup",
-            )
-            overlay = restored.get("overlay") or {}
-            if overlay.get("restored"):
-                logger.info(
-                    "[learning_worker] RuntimeConfig autonomous overlay restored hash={}",
-                    overlay.get("overlay_hash", ""),
-                )
-        except Exception as restore_exc:
-            from config import runtime_config as _runtime_config
-
-            _runtime_config.replace(base_cfg)
-            logger.warning("[learning_worker] RuntimeConfig overlay restore failed, using YAML base: {}", restore_exc)
-        logger.info("[learning_worker] RuntimeConfig loaded")
     except Exception as exc:
-        logger.warning("[learning_worker] RuntimeConfig load failed: {}", exc)
+        _publish_boot_failure(capability, stage="yaml_config", error=exc)
+        logger.error("[learning_worker] critical YAML config boot failure: {}", exc)
+        raise
+
+    try:
+        restored = restore_runtime_config_on_startup(
+            base_cfg,
+            snapshot_source="learning_worker_startup",
+        )
+        if restored.get("ok") is not True:
+            raise RuntimeError(f"runtime_config_restore_failed:{restored}")
+        overlay = restored.get("overlay") or {}
+        if overlay.get("ok") is not True:
+            raise RuntimeError(f"runtime_config_overlay_unavailable:{overlay}")
+        if overlay.get("restored"):
+            logger.info(
+                "[learning_worker] RuntimeConfig autonomous overlay restored hash={}",
+                overlay.get("overlay_hash", ""),
+            )
+    except Exception as exc:
+        _publish_boot_failure(capability, stage="runtime_overlay", error=exc)
+        logger.error("[learning_worker] critical runtime overlay boot failure: {}", exc)
+        raise
+
+    snapshot = dict(restored.get("snapshot") or {})
+    capability.mark_ready(
+        config_hash=str(snapshot.get("config_hash") or ""),
+        overlay_hash=str(overlay.get("overlay_hash") or ""),
+        recovery_status="complete",
+    )
+    # A worker that cannot publish its capability/config hashes is not safe to
+    # start mutation schedulers because backend readiness cannot detect drift.
+    capability.publish()
+    logger.info(
+        "[learning_worker] RuntimeConfig loaded config_hash={} overlay_hash={}",
+        str(snapshot.get("config_hash") or "")[:12],
+        str(overlay.get("overlay_hash") or "")[:12],
+    )
+    return capability
+
+
+def _coordinated_mutation_job(name: str, fn: Callable[[], object]) -> Callable[[], object]:
+    from backend.services.evolution_work_coordinator import coordinated_job
+
+    guarded = guarded_mutation_job(
+        _worker_capability,
+        name,
+        coordinated_job(name, fn),
+    )
+    # Preserve the established scheduler diagnostics and tests.
+    guarded.__name__ = f"coordinated_{name}"
+    return guarded
 
 
 def _add_job(scheduler, name: str, cron_expr: str, fn: Callable[[], object]) -> None:
@@ -116,14 +202,17 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
         scheduler,
         "evolution_hourly",
         "2 * * * *",
-        coordinated_job("evolution_hourly", scheduled_evolution_cycle),
+        _coordinated_mutation_job("evolution_hourly", scheduled_evolution_cycle),
     )
     governance_cron = str(getattr(_runtime_shared(), "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
     _add_job(
         scheduler,
         "factor_governance_autonomous",
         governance_cron,
-        coordinated_job("factor_governance_autonomous", run_autonomous_factor_governance_cycle),
+        _coordinated_mutation_job(
+            "factor_governance_autonomous",
+            run_autonomous_factor_governance_cycle,
+        ),
     )
     if _env_enabled("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_RUNNER", "1"):
         nursery_cron = str(getattr(_runtime_shared(), "autonomous_evolution_nursery_cron", "7,22,37,52 * * * *") or "7,22,37,52 * * * *")
@@ -156,7 +245,10 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
             scheduler,
             "autonomous_evolution_nursery",
             nursery_cron,
-            coordinated_job("autonomous_evolution_nursery", _run_nursery_cycle),
+            _coordinated_mutation_job(
+                "autonomous_evolution_nursery",
+                _run_nursery_cycle,
+            ),
         )
     _add_job(
         scheduler,
@@ -193,7 +285,13 @@ def _start_learning_schedulers() -> None:
 
     schedule_learning_backfill(delay_sec=30.0, limit=100, allow_partial=False, rebuild_learning=True)
     schedule_supervisor_learning(delay_sec=60.0, interval_sec=1800.0, limit=200)
-    schedule_autonomous_learning(delay_sec=90.0, interval_sec=1800.0, sample_limit=500, recommendation_limit=20)
+    schedule_autonomous_learning(
+        delay_sec=90.0,
+        interval_sec=1800.0,
+        sample_limit=500,
+        recommendation_limit=20,
+        mutation_capability=_worker_capability.mutation_allowed,
+    )
     logger.info("[learning_worker] learning schedulers started")
 
 
@@ -216,7 +314,10 @@ def _stop_schedulers() -> None:
         logger.warning("[learning_worker] in-process scheduler stop failed: {}", exc)
 
 
-def _run_once() -> None:
+def _run_once(
+    capability: LearningWorkerCapability | None = None,
+) -> None:
+    capability = capability or _worker_capability
     from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
     from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
     from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
@@ -226,20 +327,42 @@ def _run_once() -> None:
     logger.info("[learning_worker] run-once supervisor learning")
     logger.info("[learning_worker] supervisor result: {}", run_supervisor_learning_cycle(limit=200))
     logger.info("[learning_worker] run-once autonomous learning")
-    logger.info("[learning_worker] autonomous result: {}", run_autonomous_learning_cycle(sample_limit=500, recommendation_limit=20))
+    logger.info(
+        "[learning_worker] autonomous result: {}",
+        run_autonomous_learning_cycle(
+            sample_limit=500,
+            recommendation_limit=20,
+            mutation_capability=mutation_stage_allowed(capability),
+        ),
+    )
     logger.info("[learning_worker] run-once evolution cycle")
-    report = scheduled_evolution_cycle()
+    report = guarded_mutation_job(
+        capability,
+        "evolution_run_once",
+        scheduled_evolution_cycle,
+    )()
     logger.info("[learning_worker] evolution result: {}", report.to_dict() if hasattr(report, "to_dict") else report)
     logger.info("[learning_worker] run-once factor governance")
-    logger.info("[learning_worker] factor governance result: {}", run_autonomous_factor_governance_cycle())
+    logger.info(
+        "[learning_worker] factor governance result: {}",
+        guarded_mutation_job(
+            capability,
+            "factor_governance_run_once",
+            run_autonomous_factor_governance_cycle,
+        )(),
+    )
     logger.info("[learning_worker] run-once autonomous evolution nursery")
     logger.info(
         "[learning_worker] autonomous evolution nursery result: {}",
-        AutonomousEvolutionNurseryRunner().run_once(
-            automatic_demo=True,
-            apply_when_ready=True,
-            full_learning_cycle=True,
-        ),
+        guarded_mutation_job(
+            capability,
+            "autonomous_evolution_nursery_run_once",
+            lambda: AutonomousEvolutionNurseryRunner().run_once(
+                automatic_demo=True,
+                apply_when_ready=True,
+                full_learning_cycle=True,
+            ),
+        )(),
     )
 
 
@@ -251,7 +374,7 @@ def main() -> int:
     args = parser.parse_args()
 
     _apply_cpu_affinity(os.getenv("QUANT_LEARNING_WORKER_CPU_AFFINITY", ""))
-    _bootstrap_runtime()
+    _bootstrap_runtime(_worker_capability)
 
     if args.run_once:
         _run_once()
@@ -274,9 +397,22 @@ def main() -> int:
         logger.info("[learning_worker] learning schedulers disabled")
 
     logger.info("[learning_worker] started")
+    last_heartbeat = 0.0
     while not stop:
+        now = time.monotonic()
+        if now - last_heartbeat >= 30.0:
+            try:
+                _worker_capability.refresh_and_publish_heartbeat()
+            except Exception as exc:
+                logger.warning("[learning_worker] capability heartbeat publish failed: {}", exc)
+            last_heartbeat = now
         time.sleep(5.0)
     _stop_schedulers()
+    _worker_capability.mark_stopped()
+    try:
+        _worker_capability.publish()
+    except Exception as exc:
+        logger.warning("[learning_worker] stopped-state publish failed: {}", exc)
     return 0
 
 

@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.state_store import (
+    is_state_schema_write_sql,
+    validate_runtime_state_schema,
+)
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
 
@@ -232,9 +236,12 @@ class OpenQualityLightGBMService:
         return sql.replace("?", "%s") if self._use_pg() else sql
 
     def _execute(self, conn, sql: str, params: tuple | list | None = None):
+        rendered = self._sql(sql)
+        if self._use_pg() and is_state_schema_write_sql(rendered):
+            return validate_runtime_state_schema(conn, rendered)
         if params is None:
-            return conn.execute(self._sql(sql))
-        return conn.execute(self._sql(sql), tuple(params))
+            return conn.execute(rendered)
+        return conn.execute(rendered, tuple(params))
 
     def _conn(self):
         conn = get_state_pg_conn() if self._use_pg() else connect_sqlite(self.db_path)

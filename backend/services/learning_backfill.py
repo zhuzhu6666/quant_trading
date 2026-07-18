@@ -10,6 +10,10 @@ import uuid
 from typing import Any
 
 from backend.core.db import get_state_pg_conn, state_table_columns
+from backend.core.state_store import (
+    RuntimeStateSchemaMissingError,
+    validate_runtime_state_schema,
+)
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_metrics import update_position_path_metrics
@@ -476,6 +480,23 @@ def insert_review(conn: sqlite3.Connection, record: dict) -> None:
 
 def _ensure_experience_memory_source_columns(conn: sqlite3.Connection) -> None:
     cols = state_table_columns(conn, "experience_memory")
+    required = {"source_table", "source_id", "append_source", "evolution_run_id"}
+    if _conn_is_pg(conn):
+        missing = sorted(required - cols)
+        if missing:
+            raise RuntimeStateSchemaMissingError(
+                "missing PostgreSQL state columns experience_memory:"
+                f"{','.join(missing)}; run scripts/state_schema_migrate.py --apply "
+                "before starting runtime processes"
+            )
+        validate_runtime_state_schema(
+            conn,
+            """
+            CREATE INDEX IF NOT EXISTS idx_experience_memory_source_append
+            ON experience_memory(source_table, source_id, append_source)
+            """,
+        )
+        return
     migrations = {
         "source_table": "ALTER TABLE experience_memory ADD COLUMN source_table TEXT DEFAULT ''",
         "source_id": "ALTER TABLE experience_memory ADD COLUMN source_id TEXT DEFAULT ''",
@@ -487,7 +508,7 @@ def _ensure_experience_memory_source_columns(conn: sqlite3.Connection) -> None:
             _execute(conn, ddl)
     _execute(conn,
         """
-        CREATE INDEX IF NOT EXISTS idx_experience_memory_source
+        CREATE INDEX IF NOT EXISTS idx_experience_memory_source_append
         ON experience_memory(source_table, source_id, append_source)
         """
     )

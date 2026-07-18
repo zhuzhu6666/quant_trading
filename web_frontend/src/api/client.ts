@@ -1,8 +1,26 @@
-type AuthError = {
+export type AuthError = {
   message: string;
   status: number;
   detail?: unknown;
 };
+
+function errorRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+export function getApiErrorCode(error: unknown): string {
+  const body = errorRecord(errorRecord(error).detail);
+  const direct = body.error;
+  if (typeof direct === "string") return direct;
+  const detail = errorRecord(body.detail);
+  return typeof detail.error === "string" ? detail.error : "";
+}
+
+export function isStepUpRequiredError(error: unknown): boolean {
+  return getApiErrorCode(error) === "step_up_required";
+}
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 
@@ -10,10 +28,29 @@ const envBase = typeof import.meta !== "undefined" && import.meta.env
   ? String(import.meta.env.VITE_API_BASE_URL || "")
   : "";
 const API_BASE = envBase.replace(/\/$/, "");
-let onUnauthorized: (() => void) | null = null;
+let onUnauthorized: (() => void | Promise<void>) | null = null;
+let unauthorizedInFlight: Promise<void> | null = null;
+let refreshInFlight: Promise<string | null> | null = null;
 
-export function setUnauthorizedHandler(handler: () => void): void {
+export function setUnauthorizedHandler(handler: () => void | Promise<void>): void {
   onUnauthorized = handler;
+}
+
+export function resetUnauthorizedCoordinator(): void {
+  unauthorizedInFlight = null;
+}
+
+async function runUnauthorizedOnce(): Promise<void> {
+  if (!unauthorizedInFlight) {
+    unauthorizedInFlight = (async () => {
+      if (onUnauthorized) {
+        await onUnauthorized();
+      } else {
+        clearAccessToken();
+      }
+    })();
+  }
+  await unauthorizedInFlight;
 }
 
 export function getApiBaseUrl(): string {
@@ -52,7 +89,40 @@ function parseResponse<T>(response: Response): Promise<T> {
   return response.text().then((text) => text as T);
 }
 
-export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+function publishAccessToken(token: string): void {
+  localStorage.setItem("quant.auth.token", token);
+  window.dispatchEvent(new CustomEvent("quant-auth-token", { detail: { token } }));
+}
+
+function clearAccessToken(): void {
+  localStorage.removeItem("quant.auth.token");
+  window.dispatchEvent(new Event("quant-auth-invalidated"));
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      const response = await fetch(buildHttpUrl("/api/auth/refresh"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        credentials: "include",
+      });
+      if (!response.ok) return null;
+      const body = await parseResponse<LoginResponse>(response);
+      const token = extractLoginToken(body);
+      if (!token) return null;
+      publishAccessToken(token);
+      resetUnauthorizedCoordinator();
+      return token;
+    })().catch(() => null).finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+export async function apiRequest<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const token = localStorage.getItem("quant.auth.token");
   const headers = new Headers(init.headers || {});
   const hasBody = init.body !== undefined && init.body !== null;
@@ -72,7 +142,16 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 
   if (response.status === 401) {
     const body = await parseResponse<unknown>(response);
-    onUnauthorized?.();
+    const authEndpoint = path.startsWith("/api/auth/login") || path.startsWith("/api/auth/refresh");
+    if (!retried && !authEndpoint) {
+      const refreshedToken = await refreshAccessToken();
+      if (refreshedToken) {
+        const retryHeaders = new Headers(init.headers || {});
+        retryHeaders.delete("Authorization");
+        return apiRequest<T>(path, { ...init, headers: retryHeaders }, true);
+      }
+    }
+    await runUnauthorizedOnce();
     throw Object.assign(new Error("unauthorized"), {
       status: 401,
       detail: body,
@@ -113,6 +192,20 @@ export type LoginResponse = {
   access_token?: string;
   token_type?: string;
   expires_in?: number;
+  refresh_token?: string;
+  refresh_expires_in?: number;
+  password_rehash_required?: boolean;
+};
+
+export type StepUpResponse = {
+  user: string;
+  token?: string;
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number;
+  session_id: string;
+  auth_time: number;
+  password_rehash_required?: boolean;
 };
 
 export function extractLoginToken(response: LoginResponse): string {
@@ -332,8 +425,25 @@ export async function login(payload: LoginPayload): Promise<LoginResponse> {
   return postJson<LoginResponse>("/api/auth/login", payload);
 }
 
+export async function stepUpAuth(password: string): Promise<StepUpResponse> {
+  const result = await postJson<StepUpResponse>("/api/auth/step-up", { password });
+  const token = extractLoginToken(result);
+  if (!token) throw new Error("再认证响应缺少 access token");
+  publishAccessToken(token);
+  resetUnauthorizedCoordinator();
+  return result;
+}
+
 export async function getAuthMe(): Promise<AuthMe> {
   return getJson<AuthMe>("/api/auth/me");
+}
+
+export async function logoutAuth(): Promise<void> {
+  await postJson<Record<string, unknown>>("/api/auth/logout", {});
+}
+
+export async function getWsTicket(): Promise<{ ticket: string; expires_in: number; expires_at: number }> {
+  return postJson<{ ticket: string; expires_in: number; expires_at: number }>("/api/auth/ws-ticket", {});
 }
 
 export async function getLoopStatus(): Promise<LoopStatus> {

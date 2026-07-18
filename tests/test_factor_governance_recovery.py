@@ -221,6 +221,11 @@ def test_healthy_builtin_shadow_is_activated_with_governed_initial_weight(monkey
         },
     )
     orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    # This unit test exercises the activation contract, not the production
+    # application-effect ledger.  Keep the latter isolated so a missing or
+    # unavailable PostgreSQL authority correctly remains fail-closed in
+    # production without making the unit test depend on live state.
+    monkeypatch.setattr(orchestrator, "_factor_has_pending_effect", lambda _factor_id: False)
     actions = orchestrator._activate_healthy_builtin_shadow(
         [{
             "factor_id": "htf_trend_alignment",

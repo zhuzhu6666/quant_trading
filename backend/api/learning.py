@@ -24,6 +24,7 @@ from backend.services.parameter_template_validation import (
     run_parameter_template_offline_validation,
 )
 from backend.services.position_supervisor_governance import (
+    PositionSupervisorGovernanceMutationService,
     build_position_supervisor_advisories,
     replay_position_supervisor_templates,
 )
@@ -48,9 +49,36 @@ from backend.services.evolution_ledger import (
     start_evolution_run,
     finish_evolution_run,
 )
+from backend.services.learning_experiment_admission import (
+    LearningExperimentAdmissionService,
+)
 from backend.services.model_permissions import (
     list_model_permission_audits,
     validate_model_artifact,
+)
+from backend.services.learning_fact_views import (
+    active_parameter_templates_fact_payload,
+    applications_fact_payload,
+    autonomous_samples_fact_payload,
+    dataset_quality_health_fact_payload,
+    dataset_readiness_fact_payload,
+    factor_governance_advisories_fact_payload,
+    factor_governance_audits_fact_payload,
+    learning_reviews_fact_payload,
+    learning_summary_fact_payload,
+    lifecycle_fact_payload,
+    model_canary_reviews_fact_payload,
+    model_inference_audits_fact_payload,
+    model_meta_advisories_fact_payload,
+    model_meta_lightgbm_audits_fact_payload,
+    model_meta_lightgbm_shadow_report_fact_payload,
+    model_offmarket_high_load_audits_fact_payload,
+    model_open_quality_audits_fact_payload,
+    model_permission_audits_fact_payload,
+    model_position_quality_audits_fact_payload,
+    model_shadow_queue_fact_payload,
+    observe_learning_dataset_source,
+    suggestions_fact_payload,
 )
 from backend.services.meta_governance import MetaGovernanceService
 from research.features import (
@@ -1698,6 +1726,8 @@ class PositionSupervisorTraceMaterializeRequest(BaseModel):
 class PositionSupervisorTemplateApplySwitchRequest(BaseModel):
     suggestion_id: str
     note: str = ""
+    v16_command_id: str = ""
+    v16_claim_token: str = ""
 
 
 class ModelPermissionValidateRequest(BaseModel):
@@ -1752,6 +1782,7 @@ class ParameterTemplateApplySwitchRequest(BaseModel):
     regime_key: str = ""
     suggestion_id: str = ""
     note: str = ""
+    v16_command_id: str = ""
 
 
 class ParameterTemplateRecommendationActionRequest(BaseModel):
@@ -1810,7 +1841,7 @@ def get_suggestions(
     cache_key = f"suggestions:{status or '*'}:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
-        return cached
+        return suggestions_fact_payload(cached)
     gov = RuleEvolutionGovernor()
     conn = _state_conn(read_only=True)
     try:
@@ -1830,7 +1861,8 @@ def get_suggestions(
             item["progress"] = progress
             item["parameter_template_display"] = parameter_template_display
             items.append(item)
-        return _learning_cache_set(cache_key, {"items": items})
+        payload = suggestions_fact_payload({"items": items})
+        return _learning_cache_set(cache_key, payload)
     finally:
         conn.close()
 
@@ -1989,11 +2021,11 @@ def get_learning_summary(_user: RequireUser) -> dict:
     cache_key = "summary"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
-        return cached
+        return learning_summary_fact_payload(cached)
     with _learning_compute_lock(cache_key):
         cached = _learning_cache_get(cache_key)
         if cached is not None:
-            return cached
+            return learning_summary_fact_payload(cached)
 
         conn = None
         try:
@@ -2206,6 +2238,7 @@ def get_learning_summary(_user: RequireUser) -> dict:
                 "stale_reason": "",
                 "recommendations_source": "cache",
             }
+            payload = learning_summary_fact_payload(payload)
             _learning_last_good_set(cache_key, payload)
             return _learning_cache_set(cache_key, payload)
         except sqlite3.OperationalError as exc:
@@ -2218,7 +2251,7 @@ def get_learning_summary(_user: RequireUser) -> dict:
                 payload["stale_reason"] = "database_locked"
                 payload["stale_at"] = time.time()
                 payload["last_good_age_sec"] = round(max(0.0, time.time() - created_at), 3)
-                return payload
+                return learning_summary_fact_payload(payload)
             suggestion_counts: dict[str, int] = {}
             candidate_counts: dict[str, int] = {}
             recommendation_counts = {"total": 0, "online_light": 0, "offline_deep": 0}
@@ -2255,7 +2288,7 @@ def get_learning_summary(_user: RequireUser) -> dict:
                 "last_good_age_sec": None,
                 "recommendations_source": "cache",
             }
-            return payload
+            return learning_summary_fact_payload(payload)
         finally:
             if conn is not None:
                 conn.close()
@@ -2269,7 +2302,7 @@ def get_reviews(
     cache_key = f"reviews:{int(limit)}"
     cached = _learning_cache_get(cache_key)
     if cached is not None:
-        return cached
+        return learning_reviews_fact_payload(cached)
     conn = _state_conn(read_only=True)
     try:
         rows = _execute(
@@ -2291,7 +2324,10 @@ def get_reviews(
         ]
         for item in items:
             item["trace_locator"] = _trace_locator_from_review_row(item)
-        return _learning_cache_set(cache_key, {"items": items})
+        return _learning_cache_set(
+            cache_key,
+            learning_reviews_fact_payload({"items": items}),
+        )
     finally:
         conn.close()
 
@@ -2458,7 +2494,6 @@ def apply_position_supervisor_template_switch(
             raise HTTPException(status_code=400, detail="invalid_position_supervisor_template")
         try:
             from config.runtime_config import shared as runtime_config
-            from backend.services.runtime_config_mutation import RuntimeConfigMutationService
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"runtime_config_unavailable: {exc}")
         previous_template_id = str(getattr(runtime_config(), "position_supervisor_template_id", "") or "position_supervisor:default.v1")
@@ -2505,108 +2540,84 @@ def apply_position_supervisor_template_switch(
                 result=payload,
             )
             return payload
-        mutation = RuntimeConfigMutationService(_state_db_path()).apply_patch(
-            {"position_supervisor_template_id": scope_key},
+
+        experiment_admission = LearningExperimentAdmissionService(
+            _state_db_path()
+        ).reserve_scope(
+            scope_type="position_supervisor_template",
+            scope_key=scope_key,
+            action="switch_position_supervisor_template",
+            allow_active_replacement=True,
+        )
+        if not experiment_admission.get("allowed"):
+            payload = {
+                "blocked": True,
+                "status": str(
+                    experiment_admission.get("status")
+                    or "blocked_experiment_admission"
+                ),
+                "suggestion_id": suggestion_id,
+                "target_template_id": scope_key,
+                "previous_template_id": previous_template_id,
+                "risk_verdict": verdict,
+                "experiment_admission": experiment_admission,
+            }
+            finish_evolution_run(
+                str(evo_run.get("run_id") or ""),
+                status="blocked",
+                summary=payload,
+                db_path=_state_db_path(),
+            )
+            return payload
+        conn.commit()
+        governed = PositionSupervisorGovernanceMutationService(
+            _state_db_path()
+        ).switch_template(
+            suggestion_id=suggestion_id,
+            previous_template_id=previous_template_id,
+            target_template_id=scope_key,
+            actor=str(_user or "api:learning"),
             source="learning_api.position_supervisor_template_switch",
             run_id=str(evo_run.get("run_id") or ""),
-            actor=str(_user or "api:learning"),
-            action="apply_position_supervisor_template_switch",
             reason=req.note or f"apply supervisor template suggestion {suggestion_id}",
+            evidence=evidence,
+            risk_verdict=verdict,
+            reservation_id=str(experiment_admission.get("reservation_id") or ""),
+            application_details={"note": req.note, "manual_api": True},
+            v16_command_id=req.v16_command_id,
+            v16_claim_token=req.v16_claim_token,
         )
+        mutation = dict(governed.get("mutation") or {})
+        if not governed.get("committed"):
+            payload = {
+                "blocked": True,
+                "status": str(mutation.get("status") or "governance_mutation_blocked"),
+                "suggestion_id": suggestion_id,
+                "target_template_id": scope_key,
+                "previous_template_id": previous_template_id,
+                "risk_verdict": verdict,
+                "mutation": mutation,
+            }
+            finish_evolution_run(
+                str(evo_run.get("run_id") or ""),
+                status="blocked",
+                summary=payload,
+                db_path=_state_db_path(),
+            )
+            return payload
         snapshot = dict(mutation.get("snapshot") or {})
-        now_ts = time.time()
-        application_id = f"psv_apply_{int(now_ts)}_{suggestion_id[-8:]}"
-        details = {
-            "schema_version": "position_supervisor_template_switch.v1",
-            "suggestion_id": suggestion_id,
-            "previous_template_id": previous_template_id,
-            "target_template_id": scope_key,
-            "note": req.note,
-            "risk_verdict": verdict,
-            "evidence": evidence,
-            "mutation": mutation,
-            "config_version": int(snapshot.get("config_version") or 0),
-            "config_hash": str(snapshot.get("config_hash") or ""),
-        }
-        _execute(
-            conn,
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action,
-             bias_multiplier, old_weight, new_weight, suggestion_ids_json,
-             status, details_json, created_at)
-            VALUES (?, ?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
-                    1.0, 0.0, 0.0, ?, 'applied', ?, ?)
-            ON CONFLICT(application_id) DO UPDATE SET
-                cycle_ts=excluded.cycle_ts,
-                scope_type=excluded.scope_type,
-                scope_key=excluded.scope_key,
-                action=excluded.action,
-                bias_multiplier=excluded.bias_multiplier,
-                old_weight=excluded.old_weight,
-                new_weight=excluded.new_weight,
-                suggestion_ids_json=excluded.suggestion_ids_json,
-                status=excluded.status,
-                details_json=excluded.details_json,
-                created_at=excluded.created_at
-            """,
-            (
-                application_id,
-                now_ts,
-                scope_key,
-                json.dumps([suggestion_id], ensure_ascii=False),
-                json.dumps(details, ensure_ascii=False, default=str),
-                now_ts,
-            ),
-        )
-        _execute(
-            conn,
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             decision_json, updated_at, created_at)
-            VALUES (?, 'position_supervisor_template', ?, 'switch_position_supervisor_template',
-                    'observing', ?, ?, COALESCE(
-                        (SELECT created_at FROM learning_application_effect WHERE application_id=?),
-                        ?
-                    ))
-            ON CONFLICT(application_id) DO UPDATE SET
-                scope_type=excluded.scope_type,
-                scope_key=excluded.scope_key,
-                action=excluded.action,
-                status=excluded.status,
-                decision_json=excluded.decision_json,
-                updated_at=excluded.updated_at,
-                created_at=excluded.created_at
-            """,
-            (
-                application_id,
-                scope_key,
-                json.dumps(details, ensure_ascii=False, default=str),
-                now_ts,
-                application_id,
-                now_ts,
-            ),
-        )
-        _execute(
-            conn,
-            """
-            UPDATE policy_suggestion
-            SET status='applied', reviewed_at=CASE WHEN reviewed_at > 0 THEN reviewed_at ELSE ? END,
-                review_note=?
-            WHERE suggestion_id=?
-            """,
-            (now_ts, req.note or "applied position supervisor template switch", suggestion_id),
-        )
-        conn.commit()
+        application_id = str(governed.get("application_id") or "")
         _learning_cache_invalidate("position_supervisor_advisories:", "suggestions:", "summary", "applications:")
         payload = {
             "blocked": False,
+            "status": str(mutation.get("status") or "committed"),
             "suggestion_id": suggestion_id,
             "application_id": application_id,
             "previous_template_id": previous_template_id,
             "target_template_id": scope_key,
             "risk_verdict": verdict,
+            "mutation_id": str(governed.get("mutation_id") or ""),
+            "projection_ready": bool(governed.get("projection_ready")),
         }
         record_evolution_decision(
             run_id=str(evo_run.get("run_id") or ""),
@@ -2751,12 +2762,14 @@ def get_learning_autonomous_samples(
     position_id: str | None = Query(default=None),
     db_path: str | None = Query(default=None),
 ) -> dict:
-    return list_autonomous_learning_samples(
-        db_path=db_path or _state_db_path(),
-        limit=limit,
-        sample_type=sample_type,
-        label_status=label_status,
-        position_id=position_id,
+    return autonomous_samples_fact_payload(
+        list_autonomous_learning_samples(
+            db_path=db_path or _state_db_path(),
+            limit=limit,
+            sample_type=sample_type,
+            label_status=label_status,
+            position_id=position_id,
+        )
     )
 
 
@@ -2792,11 +2805,14 @@ def get_active_parameter_templates(
     factor_id = factor_id if isinstance(factor_id, str) and factor_id else None
     service = ParameterTemplateService()
     cache_key = f"parameter_templates:active:{service.db_path}:{factor_id or '*'}"
-    return _learning_cached_read(
+    payload = _learning_cached_read(
         cache_key,
-        lambda: {"items": service.list_active_templates(factor_id=factor_id)},
+        lambda: active_parameter_templates_fact_payload(
+            {"items": service.list_active_templates(factor_id=factor_id)}
+        ),
         timing_name="api.learning.parameter_templates_active",
     )
+    return active_parameter_templates_fact_payload(payload)
 
 
 @router.get("/parameter-templates/recommendations")
@@ -3029,6 +3045,7 @@ def apply_parameter_template_switch(
             regime_key=req.regime_key,
             suggestion_id=req.suggestion_id,
             note=req.note,
+            v16_command_id=req.v16_command_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -3367,11 +3384,12 @@ def get_applications(
                 except Exception:
                     item["details"] = {}
                 items.append(item)
-            return {"items": items}
+            return applications_fact_payload({"items": items})
         finally:
             conn.close()
 
-    return _learning_cached_read(cache_key, _compute, timing_name="api.learning.applications")
+    payload = _learning_cached_read(cache_key, _compute, timing_name="api.learning.applications")
+    return applications_fact_payload(payload)
 
 
 @router.get("/lifecycle")
@@ -3428,11 +3446,12 @@ def get_lifecycle(
                         "kind": "factor_lifecycle",
                     }
                 )
-            return {"items": items}
+            return lifecycle_fact_payload({"items": items})
         finally:
             conn.close()
 
-    return _learning_cached_read(cache_key, _compute, timing_name="api.learning.lifecycle")
+    payload = _learning_cached_read(cache_key, _compute, timing_name="api.learning.lifecycle")
+    return lifecycle_fact_payload(payload)
 
 
 @router.get("/dataset")
@@ -3509,12 +3528,17 @@ def get_learning_dataset_readiness(
     min_ready_decisions: int = Query(default=200, ge=0, le=50000),
 ) -> dict:
     readiness = LearningDatasetReadiness()
-    return readiness.analyze(
+    payload = readiness.analyze(
         trade_limit=trade_limit,
         decision_limit=decision_limit,
         min_ready_trades=min_ready_trades,
         min_ready_decisions=min_ready_decisions,
     )
+    observation = observe_learning_dataset_source(
+        _state_db_path(),
+        include_trade_reviews=True,
+    )
+    return dataset_readiness_fact_payload(payload, observation=observation)
 
 
 @router.get("/dataset/quality-health")
@@ -3522,11 +3546,16 @@ def get_learning_dataset_quality_health(
     _user: RequireUser,
     limit: int = Query(default=1000, ge=1, le=50000),
 ) -> dict:
-    return {
+    payload = {
         "schema_version": "learning_dataset_quality_health.v1",
         "evidence_contract": validate_evidence_contract_health(db_path=_state_db_path(), limit=limit),
         "entry_context": entry_context_quality_report(db_path=_state_db_path(), limit=min(limit, 5000)),
     }
+    observation = observe_learning_dataset_source(
+        _state_db_path(),
+        include_trade_reviews=False,
+    )
+    return dataset_quality_health_fact_payload(payload, observation=observation)
 
 
 @router.get("/effect-quality")
@@ -3638,7 +3667,7 @@ def list_learning_model_shadow_candidates(
         model_type=model_type,
         limit=limit,
     )
-    return {"items": items, "count": len(items)}
+    return model_shadow_queue_fact_payload({"items": items, "count": len(items)})
 
 
 @router.post("/model/shadow-queue/status")
@@ -3752,7 +3781,7 @@ def list_learning_model_canary_reviews(
         candidate_id=candidate_id,
         limit=limit,
     )
-    return {"items": items, "count": len(items)}
+    return model_canary_reviews_fact_payload({"items": items, "count": len(items)})
 
 
 @router.post("/model/inference")
@@ -3780,7 +3809,7 @@ def list_learning_model_inference_audits(
         candidate_id=candidate_id,
         limit=limit,
     )
-    return {"items": items, "count": len(items)}
+    return model_inference_audits_fact_payload({"items": items, "count": len(items)})
 
 
 @router.post("/model/meta/context")
@@ -3802,7 +3831,9 @@ def list_learning_meta_model_advisories(
     limit: int = Query(default=50, ge=1, le=500),
     db_path: str | None = Query(default=None),
 ) -> dict:
-    return MetaModelSidecar(db_path or _state_db_path()).list_advisories(limit=limit)
+    return model_meta_advisories_fact_payload(
+        MetaModelSidecar(db_path or _state_db_path()).list_advisories(limit=limit)
+    )
 
 
 @router.post("/model/llm/advisory-run")
@@ -3865,12 +3896,13 @@ def list_learning_model_permission_audits(
     status: str | None = Query(default=None),
     db_path: str | None = Query(default=None),
 ) -> dict:
-    return list_model_permission_audits(
+    payload = list_model_permission_audits(
         db_path=db_path or _state_db_path(),
         limit=limit,
         model_type=model_type,
         status=status,
     )
+    return model_permission_audits_fact_payload(payload)
 
 
 @router.post("/model/position-quality-lightgbm/train")
@@ -3920,7 +3952,9 @@ def list_position_quality_lightgbm_audits(
     service = PositionQualityLightGBMService(
         db_path=db_path or _state_db_path(),
     )
-    return service.list_audits(limit=limit, position_id=position_id)
+    return model_position_quality_audits_fact_payload(
+        service.list_audits(limit=limit, position_id=position_id)
+    )
 
 
 @router.post("/model/open-quality-lightgbm/train")
@@ -3970,7 +4004,9 @@ def list_open_quality_lightgbm_audits(
     service = OpenQualityLightGBMService(
         db_path=db_path or _state_db_path(),
     )
-    return service.list_audits(limit=limit, position_id=position_id)
+    return model_open_quality_audits_fact_payload(
+        service.list_audits(limit=limit, position_id=position_id)
+    )
 
 
 @router.post("/model/factor-governance-lightgbm/train")
@@ -4024,7 +4060,9 @@ def list_factor_governance_lightgbm_audits(
     service = FactorGovernanceLightGBMService(
         db_path=db_path or _state_db_path(),
     )
-    return service.list_audits(limit=limit, factor=factor)
+    return factor_governance_audits_fact_payload(
+        service.list_audits(limit=limit, factor=factor)
+    )
 
 
 @router.get("/model/factor-governance-lightgbm/advisories")
@@ -4040,6 +4078,7 @@ def list_factor_governance_lightgbm_advisories(
         db_path=db_path or _state_db_path(),
     )
     audits = service.list_audits(limit=limit, factor=factor)
+    audit_fact = factor_governance_audits_fact_payload(audits)
     payload = service.build_advisories(
         items=audits["items"],
         materialize=bool(materialize),
@@ -4047,7 +4086,11 @@ def list_factor_governance_lightgbm_advisories(
     )
     if materialize:
         _learning_cache_invalidate("suggestions:", "summary")
-    return payload
+    return factor_governance_advisories_fact_payload(
+        payload,
+        audit_observed_at=(audit_fact.get("_fact") or {}).get("observed_at"),
+        audit_count=len(audits.get("items") or []),
+    )
 
 
 @router.post("/model/meta-lightgbm/train")
@@ -4107,7 +4150,9 @@ def list_meta_model_lightgbm_audits(
         db_path=db_path or _state_db_path(),
         artifact_dir=artifact_dir,
     )
-    return service.list_audits(limit=limit, posture=posture)
+    return model_meta_lightgbm_audits_fact_payload(
+        service.list_audits(limit=limit, posture=posture)
+    )
 
 
 @router.get("/model/meta-lightgbm/shadow-report")
@@ -4123,10 +4168,18 @@ def build_meta_model_lightgbm_shadow_report(
         db_path=db_path or _state_db_path(),
         artifact_dir=artifact_dir,
     )
-    return service.build_shadow_report(
+    report = service.build_shadow_report(
         limit=limit,
         posture=posture,
         include_samples=bool(include_samples),
+    )
+    latest = service.list_audits(limit=1, posture=posture)
+    latest_items = latest.get("items") if isinstance(latest, dict) else []
+    latest_item = latest_items[0] if isinstance(latest_items, list) and latest_items else {}
+    return model_meta_lightgbm_shadow_report_fact_payload(
+        report,
+        audit_observed_at=(latest_item or {}).get("created_at"),
+        audit_count=int(report.get("audit_count") or 0),
     )
 
 
@@ -4201,7 +4254,9 @@ def list_offmarket_high_load_audits(
         from backend.core.db import state_table_exists
 
         if not state_table_exists(conn, "offmarket_high_load_job_audit"):
-            return {"items": [], "count": 0}
+            return model_offmarket_high_load_audits_fact_payload(
+                {"items": [], "count": 0}
+            )
         clauses = []
         params: list[Any] = []
         if job_name:
@@ -4243,7 +4298,9 @@ def list_offmarket_high_load_audits(
                     "finished_at": float(row.get("finished_at") or 0.0),
                 }
             )
-        return {"items": items, "count": len(items)}
+        return model_offmarket_high_load_audits_fact_payload(
+            {"items": items, "count": len(items)}
+        )
     finally:
         conn.close()
 

@@ -86,6 +86,60 @@ def test_execute_supervisor_reduce_action_partial_success_logs_reduced_event():
     assert calls["logs"] == ["tick 9: supervisor reduce pos=7 vol=25"]
 
 
+def test_reduce_captures_deal_cursor_before_broker_rpc_and_passes_it_to_sync():
+    calls = {
+        "traces": [],
+        "supervisor_state": [],
+        "reentry": [],
+        "close_reason": [],
+        "close_verdict": [],
+        "retired": [],
+        "logs": [],
+    }
+    order: list[str] = []
+    synced: list[dict] = []
+
+    class _Bridge:
+        _symbol_meta = {"api_min_volume": 1.0, "api_step_volume": 1.0}
+
+        def close_position(self, pid, volume=None):
+            order.append("broker_rpc")
+            return SimpleNamespace(success=True, outcome="confirmed")
+
+    cursor = {
+        "status": "captured",
+        "baseline_cursor_available": True,
+        "baseline_deal_ids": [91],
+        "baseline_closed_volume": 25.0,
+    }
+
+    execute_supervisor_reduce_action(
+        bridge=_Bridge(),
+        position={"position_id": 7, "symbol": "XAUUSD+", "volume": 100.0},
+        verdict={"summary_reason": "trim_risk"},
+        risk_action="reduce_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-cursor",
+        cfg=SimpleNamespace(),
+        tick=9,
+        acct=None,
+        controls={"reduce_fraction": 0.25},
+        log=calls["logs"].append,
+        capture_partial_close_session_cursor=lambda **_kwargs: (
+            order.append("capture_cursor") or cursor
+        ),
+        sync_partial_close_session_fact=lambda **kwargs: (
+            order.append("sync_fact") or synced.append(kwargs) or True
+        ),
+        **_deps(calls),
+    )
+
+    assert order == ["capture_cursor", "broker_rpc", "sync_fact"]
+    assert synced[0]["deal_cursor"] == cursor
+    assert synced[0]["volume"] == 25.0
+    assert calls["traces"][0]["execution"]["session_fact_recorded"] is True
+
+
 def test_execute_supervisor_reduce_action_invalid_volume_skips_when_not_upgradeable():
     calls = {
         "traces": [],
@@ -223,12 +277,23 @@ def test_execute_supervisor_tighten_action_success_records_trace_and_reentry():
     }
 
     class _Bridge:
+        is_connected = True
+
         def get_spot_quote(self):
             return {"mid": 4010.0}
 
         def amend_position_sltp(self, pid, *, sl, tp):
             calls["amend"] = (pid, sl, tp)
             return SimpleNamespace(success=True)
+
+        def reconcile_positions(self, *, force, allow_cache_fallback):
+            calls["reconcile"] = (force, allow_cache_fallback)
+            return SimpleNamespace(
+                status="fresh",
+                observed_at=time.time(),
+                reconcile_id="reconcile-tighten-7",
+                positions=({"position_id": 7, "sl": 4005.0, "tp": 4030.0},),
+            )
 
     def build_plan(**_kwargs):
         return {
@@ -276,6 +341,7 @@ def test_execute_supervisor_tighten_action_success_records_trace_and_reentry():
     )
 
     assert calls["amend"] == (7, 4005.0, 4030.0)
+    assert calls["reconcile"] == (True, False)
     assert calls["tracked"] == [((7,), {"sl": 4005.0, "tp": 4030.0})]
     assert calls["events"][0]["event_type"] == "supervisor_tighten"
     assert calls["state"][0][1]["action_applied"] == "tighten"
@@ -441,3 +507,295 @@ def test_execute_supervisor_close_action_success_remembers_reason_and_verdict():
     assert calls["state"][0][1]["action_applied"] == "close"
     assert calls["traces"][0]["execution_reason"] == "close_position_success"
     assert calls["logs"] == ["tick 9: supervisor close sent pos=7 reason=thesis_broken"]
+
+
+def test_close_broker_success_survives_all_post_broker_audit_failures():
+    broker_calls: list[int] = []
+    failures: list[tuple[str, dict]] = []
+    logs: list[str] = []
+
+    class _Bridge:
+        def close_position(self, pid):
+            broker_calls.append(pid)
+            return SimpleNamespace(success=True)
+
+    def _fail(name):
+        return lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(name))
+
+    execute_supervisor_close_action(
+        bridge=_Bridge(),
+        position={"position_id": 71, "current_price": 4010.0},
+        verdict={"summary_reason": "thesis_broken"},
+        risk_action="close_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-close-audit-failure",
+        cfg=SimpleNamespace(),
+        tick=10,
+        acct=None,
+        controls={"close_reason": "thesis_broken"},
+        log=logs.append,
+        log_supervisor_trace=_fail("trace unavailable"),
+        remember_supervisor_state=_fail("state unavailable"),
+        remember_supervisor_reentry_block=_fail("reentry unavailable"),
+        remember_close_reason=_fail("reason unavailable"),
+        remember_close_verdict=_fail("verdict unavailable"),
+        result_is_position_not_found=lambda _result: False,
+        retire_broker_missing_position=lambda *_args, **_kwargs: None,
+        record_aux_failure=lambda event_type, **kwargs: failures.append((event_type, kwargs)),
+    )
+
+    assert broker_calls == [71]
+    assert len(failures) == 5
+    assert {item[1]["payload"]["stage"] for item in failures} == {
+        "close_reason",
+        "close_verdict",
+        "supervisor_state",
+        "reentry_block",
+        "supervisor_trace",
+    }
+    assert logs[-1] == "tick 10: supervisor close sent pos=71 reason=thesis_broken"
+
+
+def test_reduce_broker_success_survives_accounting_ledger_and_state_failures():
+    broker_calls: list[tuple[int, float]] = []
+    failures: list[tuple[str, dict]] = []
+    logs: list[str] = []
+
+    class _Bridge:
+        _symbol_meta = {"api_min_volume": 1.0, "api_step_volume": 1.0}
+
+        def close_position(self, pid, volume=None):
+            broker_calls.append((pid, volume))
+            return SimpleNamespace(success=True, price=4010.0)
+
+    class _Ledger:
+        def log_position_event(self, **_kwargs):
+            raise RuntimeError("ledger unavailable")
+
+    calls = {
+        "traces": [],
+        "supervisor_state": [],
+        "reentry": [],
+        "close_reason": [],
+        "close_verdict": [],
+        "retired": [],
+        "logs": logs,
+    }
+    deps = _deps(calls)
+    deps["remember_supervisor_state"] = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("state unavailable")
+    )
+    deps["log_supervisor_trace"] = lambda **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("trace unavailable")
+    )
+
+    execute_supervisor_reduce_action(
+        bridge=_Bridge(),
+        position={"position_id": 72, "symbol": "XAUUSD+", "volume": 100.0, "current_price": 4010.0},
+        verdict={"summary_reason": "trim_risk"},
+        risk_action="reduce_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-reduce-audit-failure",
+        cfg=SimpleNamespace(),
+        tick=10,
+        acct=None,
+        controls={"reduce_fraction": 0.25},
+        log=logs.append,
+        ledger=_Ledger(),
+        record_partial_close_execution=lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("accounting unavailable")
+        ),
+        record_aux_failure=lambda event_type, **kwargs: failures.append((event_type, kwargs)),
+        **deps,
+    )
+
+    assert broker_calls == [(72, 25.0)]
+    assert {item[1]["payload"]["stage"] for item in failures} == {
+        "partial_close_accounting",
+        "position_event",
+        "supervisor_state",
+        "supervisor_trace",
+    }
+    assert logs[-1] == "tick 10: supervisor reduce pos=72 vol=25"
+
+
+def test_tighten_broker_success_survives_projection_and_audit_failures():
+    broker_calls: list[tuple[int, float, float]] = []
+    failures: list[tuple[str, dict]] = []
+    logs: list[str] = []
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"mid": 4010.0}
+
+        def amend_position_sltp(self, pid, *, sl, tp):
+            broker_calls.append((pid, sl, tp))
+            return SimpleNamespace(success=True)
+
+        def reconcile_positions(self, *, force, allow_cache_fallback):
+            return SimpleNamespace(
+                status="fresh",
+                observed_at=time.time(),
+                reconcile_id="reconcile-tighten-73",
+                positions=({"position_id": 73, "sl": 4005.0, "tp": 4030.0},),
+            )
+
+    def _plan(**_kwargs):
+        return {
+            "target_sl": 4005.0,
+            "current_tp": 4020.0,
+            "target_tp": 4030.0,
+            "planned_tp": 4030.0,
+            "planned_sl": 4005.0,
+            "sl_plan": {"allowed": True},
+        }
+
+    def _payloads(**kwargs):
+        return {
+            "position_event_type": "supervisor_tighten",
+            "position_event_details": {"result": kwargs["result"]},
+            "trace_fields": {
+                "stage": "executed",
+                "outcome": "applied",
+                "execution_status": "applied",
+                "execution_reason": "tighten_position_success",
+            },
+        }
+
+    def _fail(name):
+        return lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(name))
+
+    execute_supervisor_tighten_action(
+        bridge=_Bridge(),
+        position={"position_id": 73, "current_price": 4010.0},
+        verdict={"summary_reason": "protect_profit"},
+        risk_action="tighten_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-tighten-audit-failure",
+        cfg=SimpleNamespace(),
+        tick=10,
+        acct=None,
+        controls={"target_stop_loss": 4005.0},
+        log=logs.append,
+        build_tighten_execution_plan=_plan,
+        build_tighten_result_payloads=_payloads,
+        log_supervisor_position_event=_fail("event unavailable"),
+        log_supervisor_trace=_fail("trace unavailable"),
+        remember_supervisor_state=_fail("state unavailable"),
+        remember_supervisor_reentry_block=_fail("reentry unavailable"),
+        track_local_sl_tp=_fail("projection unavailable"),
+        result_is_position_not_found=lambda _result: False,
+        retire_broker_missing_position=lambda *_args, **_kwargs: None,
+        record_aux_failure=lambda event_type, **kwargs: failures.append((event_type, kwargs)),
+    )
+
+    assert broker_calls == [(73, 4005.0, 4030.0)]
+    assert {item[1]["payload"]["stage"] for item in failures} == {
+        "track_local_sl_tp",
+        "position_event",
+        "supervisor_state",
+        "reentry_block",
+        "supervisor_trace",
+    }
+    assert logs[-1] == "tick 10: supervisor tighten pos=73 sl->4005.00 tp->4030.00"
+
+
+def test_tighten_accepted_rpc_requires_matching_fresh_broker_projection():
+    calls = {
+        "tracked": [],
+        "events": [],
+        "traces": [],
+        "state": [],
+        "reentry": [],
+        "fail_closed": [],
+        "aux": [],
+        "logs": [],
+    }
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"mid": 4010.0}
+
+        def amend_position_sltp(self, pid, *, sl, tp):
+            calls["amend"] = (pid, sl, tp)
+            return SimpleNamespace(success=True)
+
+        def reconcile_positions(self, *, force, allow_cache_fallback):
+            return SimpleNamespace(
+                status="fresh",
+                observed_at=time.time(),
+                reconcile_id="reconcile-mismatch-74",
+                positions=({"position_id": 74, "sl": 4000.0, "tp": 4030.0},),
+            )
+
+    def _plan(**_kwargs):
+        return {
+            "target_sl": 4005.0,
+            "current_tp": 4020.0,
+            "target_tp": 4030.0,
+            "planned_tp": 4030.0,
+            "planned_sl": 4005.0,
+            "sl_plan": {"allowed": True},
+        }
+
+    def _payloads(**kwargs):
+        return {
+            "position_event_type": "supervisor_tighten_failed",
+            "position_event_details": {
+                "result": kwargs["result"],
+                "failure_reason": kwargs.get("failure_reason"),
+            },
+            "trace_fields": {
+                "stage": "execution_failed",
+                "outcome": "failed",
+                "execution_status": "failed",
+                "execution_reason": kwargs.get("failure_reason"),
+            },
+        }
+
+    execute_supervisor_tighten_action(
+        bridge=_Bridge(),
+        position={"position_id": 74, "current_price": 4010.0, "digits": 2},
+        verdict={"summary_reason": "protect_profit"},
+        risk_action="tighten_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-tighten-mismatch",
+        cfg=SimpleNamespace(),
+        tick=11,
+        acct=None,
+        controls={"target_stop_loss": 4005.0},
+        log=calls["logs"].append,
+        build_tighten_execution_plan=_plan,
+        build_tighten_result_payloads=_payloads,
+        log_supervisor_position_event=lambda **kwargs: calls["events"].append(kwargs),
+        log_supervisor_trace=lambda **kwargs: calls["traces"].append(kwargs),
+        remember_supervisor_state=lambda *args, **kwargs: calls["state"].append((args, kwargs)),
+        remember_supervisor_reentry_block=lambda **kwargs: calls["reentry"].append(kwargs),
+        track_local_sl_tp=lambda *args, **kwargs: calls["tracked"].append((args, kwargs)),
+        result_is_position_not_found=lambda _result: False,
+        retire_broker_missing_position=lambda *_args, **_kwargs: None,
+        record_aux_failure=lambda event_type, **kwargs: calls["aux"].append((event_type, kwargs)),
+        persist_safety_fail_closed=lambda **kwargs: calls["fail_closed"].append(kwargs),
+    )
+
+    assert calls["amend"] == (74, 4005.0, 4030.0)
+    assert calls["tracked"] == []
+    assert calls["reentry"] == []
+    assert not any(kwargs.get("action_applied") for _args, kwargs in calls["state"])
+    assert calls["events"][0]["details"]["result"] == "failed"
+    assert calls["traces"][0]["execution_reason"].endswith("stop_loss_mismatch")
+    assert calls["fail_closed"] == [
+        {
+            "blockers": ("amend_projection_unverified",),
+            "source": "supervisor_tighten",
+            "error": "amend_projection_unverified:stop_loss_mismatch",
+        }
+    ]
+    assert calls["aux"][0][0] == "supervisor_amend_projection_unverified"
+    assert calls["logs"][-1].endswith(
+        "supervisor tighten UNVERIFIED pos=74: amend_projection_unverified:stop_loss_mismatch"
+    )

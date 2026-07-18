@@ -36,6 +36,17 @@ def test_expansion_freeze_only_applies_outside_demo_modes() -> None:
     ) is False
 
 
+def test_global_governance_pause_applies_to_demo_and_defaults_off() -> None:
+    assert rc.RuntimeConfig().governance_expansion_paused is False
+    assert rc.autonomy_expansion_freeze_applies(
+        rc.RuntimeConfig(
+            autonomy_mode="demo_autonomous",
+            autonomy_expansion_frozen=False,
+            governance_expansion_paused=True,
+        )
+    ) is True
+
+
 def test_demo_mode_cannot_bypass_freeze_on_effective_live_broker(monkeypatch) -> None:
     from execution.broker_config import reset_broker_connection_config_for_tests
 
@@ -157,3 +168,82 @@ def test_runtime_mutation_refreshes_yaml_base_before_overlay_snapshot(monkeypatc
     assert result["ok"] is True
     assert rc.shared().ctrader_send_orders is True
     assert result["snapshot"]["config_version"] > 0
+
+
+def test_autonomous_mutation_cannot_change_operator_pause(tmp_path) -> None:
+    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+
+    result = RuntimeConfigMutationService(tmp_path / "state.db").apply_patch(
+        {"governance_expansion_paused": True},
+        source="factor_governance",
+        actor="system:factor_governance",
+        action="pause_governance",
+        audit=False,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "operator_governance_pause_required"
+
+
+def test_operator_pause_blocks_expansion_but_allows_explicit_tightening(tmp_path) -> None:
+    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+
+    service = RuntimeConfigMutationService(tmp_path / "state.db")
+    paused = service.apply_patch(
+        {"governance_expansion_paused": True},
+        source="operator_governance_pause",
+        actor="operator:test",
+        action="pause_governance_expansion",
+        audit=False,
+    )
+    assert paused["ok"] is True
+    assert rc.shared().governance_expansion_paused is True
+
+    expansion = service.apply_patch(
+        {"factor_portfolio_weights": {"new_alpha": 0.1}},
+        source="factor_governance_promote",
+        actor="system:factor_governance",
+        action="promote_factor",
+        audit=False,
+    )
+    assert expansion["ok"] is False
+    assert expansion["status"] == "blocked_governance_expansion_paused"
+
+    tightening = service.apply_patch(
+        {"factor_portfolio_weights": {"new_alpha": 0.0}},
+        source="factor_governance_downweight",
+        actor="system:factor_governance",
+        action="downweight_factor",
+        risk_reduction=True,
+        audit=False,
+    )
+    assert tightening["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    (
+        ("live_safety_plane_v2_mode", "enforce"),
+        ("live_generation_controller_v2_enabled", True),
+        ("ctrader_execution_outcome_v2_enabled", True),
+        ("governance_mutation_coordinator_v2_mode", "enforce"),
+        ("pg_job_queue_v2_enabled", True),
+    ),
+)
+def test_autonomous_mutation_cannot_change_static_release_flags(
+    tmp_path,
+    flag: str,
+    value,
+) -> None:
+    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+
+    result = RuntimeConfigMutationService(tmp_path / "state.db").apply_patch(
+        {flag: value},
+        source="factor_governance",
+        actor="system:factor_governance",
+        audit=False,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "static_feature_flag_mutation_forbidden"
+    assert result["forbidden_keys"] == [flag]

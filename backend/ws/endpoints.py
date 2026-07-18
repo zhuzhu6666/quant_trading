@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from backend.core.logging import setup_logging
+from backend.services.api_fact_views import state_snapshot_fact_payload
 from backend.services.live_service import (
     loop_status as _live_loop_status,
     get_latest_price as _live_get_latest_price,
@@ -44,6 +45,14 @@ def _position_to_dict(p: object) -> dict:
         "sl": p.sl,
         "tp": p.tp,
         'pnl': p.pnl,
+        'current_price_state': getattr(p, 'current_price_state', ''),
+        'current_price_source': getattr(p, 'current_price_source', ''),
+        'current_price_observed_at': getattr(p, 'current_price_observed_at', 0.0),
+        'current_price_reason_code': getattr(p, 'current_price_reason_code', ''),
+        'pnl_state': getattr(p, 'pnl_state', ''),
+        'pnl_source': getattr(p, 'pnl_source', ''),
+        'pnl_observed_at': getattr(p, 'pnl_observed_at', 0.0),
+        'pnl_reason_code': getattr(p, 'pnl_reason_code', ''),
         'commission': p.commission,
         'swap': p.swap,
         'symbol': p.symbol,
@@ -138,10 +147,15 @@ def _read_state_snapshot() -> dict:
     acct = _live_state.get("account") or {}
     positions = _live_state.get("positions") or []
     live_broker = _live_state.get("broker") or loop.get("broker") or "ctrader"
+    account_updated_at = _live_state.get("account_updated_at")
+    positions_updated_at = _live_state.get("positions_updated_at")
+    positions_component_facts = _live_state.get("positions_component_facts") or {}
+    diagnostic_ts = (_live_state.get("_diag") or {}).get("ts")
+    spot_quote = _live_state.get("spot_quote")
 
     # 从未连接过 cTrader → 全零占位
     if not acct and not _live_state.get("loop_started_at"):
-        return {
+        payload = {
             "source": "none",
             "broker": None,
             "equity": 0.0, "balance": 0.0, "pnl_today": 0.0,
@@ -155,6 +169,15 @@ def _read_state_snapshot() -> dict:
             "closed_loop": _read_closed_loop_status(),
             "server_time": datetime.now(timezone.utc).isoformat(),
         }
+        return state_snapshot_fact_payload(
+            payload,
+            account=acct,
+            account_updated_at=account_updated_at,
+            positions_updated_at=positions_updated_at,
+            diagnostic_ts=diagnostic_ts,
+            spot_quote=spot_quote,
+            positions_component_facts=positions_component_facts,
+        )
 
     # 有数据 → 显示 cTrader 状态 (live 或 frozen)
     session_pnl = float(_live_state.get("session_pnl", 0.0))
@@ -217,7 +240,7 @@ def _read_state_snapshot() -> dict:
     source = "live" if live_running else "frozen"
 
     current_price = _live_get_latest_price()
-    return {
+    payload = {
         "source": source,
         "broker": live_broker,
         "equity": float(acct.get("equity") or 0.0),
@@ -244,7 +267,7 @@ def _read_state_snapshot() -> dict:
         "n_positions": n_positions,
         "positions_list": positions_list,
         "current_price": current_price,
-        "spot_quote": _live_state.get("spot_quote"),
+        "spot_quote": spot_quote,
         "active_strategy": {
             "id": _live_state.get("loop_strategy") or loop.get("strategy_name"),
             "mode": "single",
@@ -253,48 +276,62 @@ def _read_state_snapshot() -> dict:
         "closed_loop": _read_closed_loop_status(),
         "server_time": datetime.now(timezone.utc).isoformat(),
     }
+    return state_snapshot_fact_payload(
+        payload,
+        account=acct,
+        account_updated_at=account_updated_at,
+        positions_updated_at=positions_updated_at,
+        diagnostic_ts=diagnostic_ts,
+        spot_quote=spot_quote,
+        positions_component_facts=positions_component_facts,
+    )
 
 
 @router.websocket("/ws/state")
 async def ws_state(ws: WebSocket) -> None:
-    """Push 1s state snapshot. Auth via ?token= query param or WS subprotocol."""
-    import jwt as _jwt
+    """Push 1s state snapshot using a one-time Auth v2 WS ticket.
+
+    A bearer token in the WebSocket subprotocol remains supported. URL JWTs
+    require the explicit migration switch ``QUANT_AUTH_ALLOW_URL_JWT``.
+    """
     import logging
+    import os
     _ws_log = logging.getLogger("ws.auth")
-    from backend.core.auth import JWT_SECRET, JWT_ALGORITHM
-    # 手动从 query string 取 token (FastAPI WebSocket 不自动解析 query params)
-    # 也用 Sec-WebSocket-Protocol 做备选 (避免 token 出现在 proxy log)
+    from backend.core.auth import consume_ws_ticket, decode_access_token
+
     token = ""
+    ticket = ""
     accepted_subprotocol = None
     try:
-        # Starlette WebSocket 提供 query_params
         params = getattr(ws, 'query_params', None)
         if params is not None:
+            ticket = params.get("ticket", "")
+        protocol_header = ws.headers.get("sec-websocket-protocol", "")
+        if protocol_header:
+            token = protocol_header.split(",", 1)[0].strip()
+            accepted_subprotocol = token
+        allow_url_jwt = (os.environ.get("QUANT_AUTH_ALLOW_URL_JWT") or "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if not ticket and not token and allow_url_jwt and params is not None:
             token = params.get("token", "")
-        # 备选: subprotocol header. Multiple values are comma-separated.
-        if not token:
-            protocol_header = ws.headers.get("sec-websocket-protocol", "")
-            if protocol_header:
-                token = protocol_header.split(",", 1)[0].strip()
-                accepted_subprotocol = token
     except Exception:
         pass
-    if not token:
-        _ws_log.warning("WS /ws/state rejected: missing token")
+
+    if not ticket and not token:
+        _ws_log.warning("WS /ws/state rejected: missing ticket")
         await ws.accept()
-        await ws.close(code=4001, reason="missing token")
+        await ws.close(code=4001, reason="missing auth ticket")
         return
     try:
-        _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except _jwt.ExpiredSignatureError:
-        _ws_log.warning("WS /ws/state rejected: token expired")
-        await ws.accept()
-        await ws.close(code=4001, reason="token expired")
-        return
+        if ticket:
+            consume_ws_ticket(ticket)
+        else:
+            decode_access_token(token)
     except Exception as e:
-        _ws_log.warning("WS /ws/state rejected: invalid token (%s)", e)
+        _ws_log.warning("WS /ws/state rejected: invalid auth (%s)", e)
         await ws.accept()
-        await ws.close(code=4001, reason="invalid token")
+        await ws.close(code=4001, reason="invalid auth")
         return
     _ws_log.info("WS /ws/state connected OK")
     mgr = get_connection_manager()

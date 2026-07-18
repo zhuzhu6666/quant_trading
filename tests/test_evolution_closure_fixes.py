@@ -557,7 +557,7 @@ def test_update_shadow_performance_uses_shadow_trader(monkeypatch):
     assert calls[0]["persist"] is True
 
 
-def test_collect_learning_suggestions_separates_proposed_and_approved(tmp_path, monkeypatch):
+def test_collect_learning_suggestions_keeps_approved_observational(tmp_path, monkeypatch):
     import sqlite3
 
     db_path = tmp_path / "state.db"
@@ -603,10 +603,94 @@ def test_collect_learning_suggestions_separates_proposed_and_approved(tmp_path, 
     assert summary["bar"]["approved"] == 1
     assert summary["baz"]["proposed"] == 1
     assert summary["baz"]["approved"] == 1
-    assert biases["foo"]["multiplier"] < 1.0
-    assert biases["bar"]["multiplier"] > 1.0
-    assert biases["baz"]["multiplier"] > 1.0
-    assert biases["foo"]["suggestion_ids"] == ["a2"]
+    assert biases == {}
+
+    original = {"foo": 0.4, "bar": 0.3, "baz": 0.3}
+    adjusted, applied = evo._apply_learning_biases(original, biases)
+    assert adjusted == original
+    assert applied == {}
+
+
+def test_collect_learning_suggestions_requires_applied_authority_for_biases(tmp_path, monkeypatch):
+    import sqlite3
+
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(evo, "_CANARY_DB", db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE policy_suggestion (
+            suggestion_id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            confidence REAL DEFAULT 0.0,
+            reason TEXT DEFAULT '',
+            evidence_json TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'proposed',
+            reviewed_at REAL DEFAULT 0.0,
+            created_at REAL NOT NULL DEFAULT 0.0,
+            applied_mutation_id TEXT DEFAULT ''
+        );
+        CREATE TABLE governance_mutation_intent (
+            mutation_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL
+        );
+        """
+    )
+    rows = [
+        ("legacy_tighten", "foo", "downweight", 0.8, "applied", "", 9_999_999_100),
+        ("legacy_expand", "bar", "boost_small", 0.8, "applied", "", 9_999_999_200),
+        ("committed_expand", "baz", "boost_small", 0.8, "applied", "mut_committed", 9_999_999_300),
+        ("prepared_tighten", "qux", "downweight", 0.8, "applied", "mut_prepared", 9_999_999_400),
+        ("approved_tighten", "watch", "downweight", 0.8, "approved", "", 9_999_999_500),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO policy_suggestion
+        (suggestion_id, scope_type, scope_key, action, confidence, status,
+         applied_mutation_id, reviewed_at, created_at)
+        VALUES (?, 'factor', ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [(*row[:-1], row[-1], row[-1]) for row in rows],
+    )
+    conn.executemany(
+        "INSERT INTO governance_mutation_intent (mutation_id, status) VALUES (?, ?)",
+        [("mut_committed", "committed"), ("mut_prepared", "prepared")],
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(evo._time, "time", lambda: 10_000_000_000)
+    summary, dual_biases = evo._collect_learning_suggestions(
+        max_age_days=30,
+        coordinator_mode="dual_record",
+    )
+
+    assert summary["watch"]["approved"] == 1
+    assert set(dual_biases) == {"foo", "baz"}
+    assert dual_biases["foo"]["governance_authorities"] == ["legacy_quarantined"]
+    assert dual_biases["foo"]["committed_mutation_ids"] == []
+    assert dual_biases["foo"]["multiplier"] < 1.0
+    assert dual_biases["baz"]["governance_authorities"] == ["committed_mutation"]
+    assert dual_biases["baz"]["committed_mutation_ids"] == ["mut_committed"]
+    assert dual_biases["baz"]["multiplier"] > 1.0
+    assert "bar" not in dual_biases
+    assert "qux" not in dual_biases
+    assert "watch" not in dual_biases
+
+    _summary, enforce_biases = evo._collect_learning_suggestions(
+        max_age_days=30,
+        coordinator_mode="enforce",
+    )
+    assert set(enforce_biases) == {"baz"}
+    adjusted, applied = evo._apply_learning_biases(
+        {"baz": 0.5, "other": 0.5},
+        enforce_biases,
+    )
+    assert adjusted["baz"] > 0.5
+    assert adjusted["other"] < 0.5
+    assert applied["baz"]["committed_mutation_ids"] == ["mut_committed"]
 
 
 def test_apply_learning_biases_is_small_and_normalized():
@@ -677,12 +761,15 @@ def test_evolution_shadow_register_blocked_by_risk_policy(monkeypatch):
 
 def test_evolution_shadow_register_skips_invalid_dsl_before_registration(monkeypatch):
     import risk.policy_service as policy_service
+    from alpha.factor_identity import factor_definition_fingerprint
+    import backend.services.governance_control_plans as control_plans
 
     adapter = _Adapter()
     policy = _RiskPolicy(allowed=True)
     stories = []
     monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: policy))
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: adapter))
+    monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "off")
     monkeypatch.setattr(evo, "_emit_evolution_story", lambda event, payload: stories.append((event, payload)))
 
     class _BadExpr:
@@ -694,9 +781,47 @@ def test_evolution_shadow_register_skips_invalid_dsl_before_registration(monkeyp
         expression = "rank(close)"
 
     assert evo._register_shadow_factors([_BadExpr(), _GoodExpr()]) == 1
-    assert adapter.registered == [("dsl_auto_good", "shadow", "rank(close)")]
+    stable_name = f"dsl_auto_{factor_definition_fingerprint('rank(close)')}"
+    assert adapter.registered == [(stable_name, "shadow", "rank(close)")]
     assert stories[0][0] == "shadow_register_invalid_dsl_skipped"
     assert stories[0][1]["factor"] == "dsl_auto_bad"
+
+
+def test_evolution_shadow_register_commits_lifecycle_before_registry_in_enforce(
+    monkeypatch,
+):
+    import risk.policy_service as policy_service
+    from alpha.factor_identity import factor_definition_fingerprint
+    import backend.services.factor_lifecycle_service as lifecycle_module
+    import backend.services.governance_control_plans as control_plans
+
+    adapter = _Adapter()
+    policy = _RiskPolicy(allowed=True)
+    committed = []
+    monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: policy))
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: adapter))
+    monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "enforce")
+
+    class _Lifecycle:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["adapter"] is adapter
+
+        def register_shadow(self, **kwargs):
+            committed.append(kwargs)
+            return {"ok": True, "status": "committed", "mutation_id": "mut-shadow"}
+
+    monkeypatch.setattr(lifecycle_module, "FactorLifecycleService", _Lifecycle)
+
+    class _Expr:
+        name = "human_label_is_not_identity"
+        expression = "rank(close)"
+
+    assert evo._register_shadow_factors([_Expr()]) == 1
+    fingerprint = factor_definition_fingerprint("rank(close)")
+    assert committed[0]["name"] == f"dsl_auto_{fingerprint}"
+    assert committed[0]["artifact_hash"] == fingerprint
+    assert committed[0]["idempotency_key"] == f"evolution-shadow:{fingerprint}"
+    assert adapter.registered == []
 
 
 def test_shadow_promote_blocked_by_risk_policy(monkeypatch):

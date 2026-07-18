@@ -11,11 +11,12 @@ import {
   getSystemDbHealth,
 } from "@/api/domains/system";
 import { MetricCard } from "@/components/Card";
-import { CompactMetric as OpsMiniMetric, Field, toneFromStatus, type Tone } from "@/components/DashboardBits";
+import { CompactMetric as OpsMiniMetric, Field, toneFromStatus } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { formatTime } from "@/lib/format";
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
+import { factBoundTone, factHasDisplayValue, factIsKnown, readFact } from "@/api/fact";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 
 function dbFreshness(data: unknown): "ok" | "warn" | "bad" {
@@ -126,11 +127,35 @@ export function OpsPage() {
   });
 
   const health = asRecord(healthQuery.data);
+  const healthFact = readFact(healthQuery.data, "system.health.v2");
+  const dbFact = readFact(dbQuery.data, "system.db-health.v2");
+  const readinessFact = readFact(readinessQuery.data, "ops.backend-readiness.v2");
+  const recoveryFact = readFact(recoveryQuery.data, "ops.auto-recovery.v2");
+  const alertsFact = readFact(alertsQuery.data, "ops.alerts.v2");
+  const syncFact = readFact(syncQuery.data, "ops.sync-status.v2");
+  const tokenFact = readFact(tokenQuery.data, "ops.ctrader-token-status.v2");
+  const externalFact = readFact(externalQuery.data, "ops.external-data-status.v2");
+  const healthRequestFailed = healthQuery.isError || healthQuery.isRefetchError;
+  const dbRequestFailed = dbQuery.isError || dbQuery.isRefetchError;
+  const readinessRequestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
+  const alertsRequestFailed = alertsQuery.isError || alertsQuery.isRefetchError;
+  const recoveryRequestFailed = recoveryQuery.isError || recoveryQuery.isRefetchError;
+  const syncRequestFailed = syncQuery.isError || syncQuery.isRefetchError;
+  const tokenRequestFailed = tokenQuery.isError || tokenQuery.isRefetchError;
+  const externalRequestFailed = externalQuery.isError || externalQuery.isRefetchError;
+  const healthKnown = factIsKnown(healthFact, healthRequestFailed);
+  const dbKnown = factIsKnown(dbFact, dbRequestFailed);
+  const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
+  const alertsKnown = factIsKnown(alertsFact, alertsRequestFailed);
+  const recoveryKnown = factIsKnown(recoveryFact, recoveryRequestFailed);
+  const syncKnown = factIsKnown(syncFact, syncRequestFailed);
+  const tokenKnown = factIsKnown(tokenFact, tokenRequestFailed);
+  const externalKnown = factIsKnown(externalFact, externalRequestFailed);
   const backendHealth = pickString(health, ["status", "overall"], "");
   const healthDbStatus = statusFromMaybeObject(pick(health, ["db"]));
   const healthTime = pick(health, ["server_time", "updatedAt", "checked_at"]);
 
-  const backendReady = pickBoolean(readinessQuery.data, ["ready_for_frontend", "ready", "ok"], false);
+  const backendReadyReported = pickBoolean(readinessQuery.data, ["ready_for_frontend", "ready", "ok"], false);
   const backendSchema = pickString(readinessQuery.data, ["schema_version", "version"], "");
   const readinessUpdated = pick(readinessQuery.data, ["generated_at", "updated_at", "ts"]);
   const live = pickRecord(readinessQuery.data, ["live"]) || {};
@@ -154,6 +179,9 @@ export function OpsPage() {
   const alertStatus = pickString(alerts, ["status"], "");
   const alertRules = pickNumber(alerts, ["rules_active"], pickArray(alerts, ["rules"]).length);
   const recovery = asRecord(recoveryQuery.data);
+  const recoveryRegisteredReported = pickBoolean(recovery, ["registered"], pickString(recovery, ["status", "state"], "") !== "not_registered");
+  const recoveryDisplayable = factHasDisplayValue(recoveryFact);
+  const recoveryRegisteredVisible = recoveryDisplayable && recoveryRegisteredReported;
   const recoveryRunning = pickBoolean(recovery, ["running"], false);
   const loopHealthy = pickBoolean(recovery, ["loop_healthy"], false);
   const schedulerHealthy = pickBoolean(recovery, ["scheduler_healthy"], false);
@@ -195,7 +223,8 @@ export function OpsPage() {
   }, [dbQuery.data]);
 
   const dbProblemCount = dbList.filter((db) => !db.exists || db.issues.count > 0 || ["missing", "stale", "old", "error"].includes(db.freshness)).length;
-  const hasError = healthQuery.isError || dbQuery.isError || readinessQuery.isError || alertsQuery.isError || recoveryQuery.isError || syncQuery.isError || tokenQuery.isError || externalQuery.isError;
+  const hasError = healthRequestFailed || dbRequestFailed || readinessRequestFailed || alertsRequestFailed || recoveryRequestFailed || syncRequestFailed || tokenRequestFailed || externalRequestFailed;
+  const allOpsFactsKnown = healthKnown && dbKnown && readinessKnown && alertsKnown && recoveryKnown && syncKnown && tokenKnown && externalKnown;
 
   const refreshAll = () => {
     void healthQuery.refetch();
@@ -217,9 +246,9 @@ export function OpsPage() {
           <p>后端服务、数据库、模型权限和高负载信号集中在这里。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={`接口 ${backendHealth}`} tone={toneFromStatus(backendHealth)} />
-          <StatusPill status={`数据库 ${dbStatus}`} tone={dbFresh} />
-          <StatusPill status={backendReady ? "前端就绪" : "前端受限"} tone={backendReady ? "ok" : "warn"} />
+          <StatusPill status={factHasDisplayValue(healthFact) ? `接口 ${backendHealth}` : "接口状态未知"} tone={factBoundTone(healthFact, toneFromStatus(backendHealth), healthRequestFailed)} />
+          <StatusPill status={factHasDisplayValue(dbFact) ? `数据库 ${dbStatus}` : "数据库状态未知"} tone={factBoundTone(dbFact, dbFresh, dbRequestFailed)} />
+          <StatusPill status={factHasDisplayValue(readinessFact) ? (backendReadyReported ? "前端就绪" : "前端受限") : "前端就绪状态未知"} tone={factBoundTone(readinessFact, backendReadyReported ? "ok" : "warn", readinessRequestFailed)} />
           <button className="header-refresh" type="button" onClick={refreshAll}>
             <RefreshCw size={15} />
             刷新
@@ -230,40 +259,40 @@ export function OpsPage() {
       <div className="dashboard-grid ops-dashboard-grid">
         <MetricCard title="运维控制台" className="wide-panel ops-control-panel">
           <div className="ops-mini-grid">
-            <OpsMiniMetric label="后端健康" value={translateDisplayValue(backendHealth)} detail={`cTrader ${translateDisplayValue(ctraderStatus)}`} tone={toneFromStatus(backendHealth)} />
-            <OpsMiniMetric label="数据库" value={translateDisplayValue(dbStatus)} detail={`新鲜 ${dbFreshCount} · 过期 ${dbStale} · 缺失 ${dbMissing}`} tone={dbFresh} />
-            <OpsMiniMetric label="前端就绪" value={backendReady ? "已就绪" : "受限"} detail={`阻断项 ${blockers.length} · ${translateDisplayValue(liveReadinessState)}`} tone={backendReady ? "ok" : blockers.length ? "bad" : "warn"} />
-            <OpsMiniMetric label="高负载" value={cpuHigh || memoryHigh ? "有提示" : "正常"} detail={`CPU ${cpuHigh ? "高" : "正常"} · MEM ${memoryHigh ? "高" : "正常"}`} tone={cpuHigh || memoryHigh ? "warn" : "ok"} />
-            <OpsMiniMetric label="告警恢复" value={alertRules ? `${alertRules} 规则` : "无规则"} detail={`失败 ${recoveryFailures} · 守护 ${recoveryRunning ? "运行" : "待命"}`} tone={recoveryFailures ? "bad" : recoveryRunning ? "warn" : "ok"} />
-            <OpsMiniMetric label="外部数据" value={`${externalSources.length} 源`} detail={`异常/过期 ${externalStale} · TF ${syncTfCount}`} tone={externalStale ? "warn" : "ok"} />
+            <OpsMiniMetric label="后端健康" value={factHasDisplayValue(healthFact) ? translateDisplayValue(backendHealth) : "未知"} detail={`cTrader ${translateDisplayValue(ctraderStatus)}`} tone={factBoundTone(healthFact, toneFromStatus(backendHealth), healthRequestFailed)} />
+            <OpsMiniMetric label="数据库" value={factHasDisplayValue(dbFact) ? translateDisplayValue(dbStatus) : "未知"} detail={`新鲜 ${dbFreshCount} · 过期 ${dbStale} · 缺失 ${dbMissing}`} tone={factBoundTone(dbFact, dbFresh, dbRequestFailed)} />
+            <OpsMiniMetric label="前端就绪" value={factHasDisplayValue(readinessFact) ? (backendReadyReported ? "已就绪" : "受限") : "未知"} detail={`阻断项 ${blockers.length} · ${translateDisplayValue(liveReadinessState)}`} tone={factBoundTone(readinessFact, backendReadyReported ? "ok" : blockers.length ? "bad" : "warn", readinessRequestFailed)} />
+            <OpsMiniMetric label="高负载" value={factHasDisplayValue(readinessFact) ? (cpuHigh || memoryHigh ? "有提示" : "正常") : "未知"} detail={`CPU ${cpuHigh ? "高" : "正常"} · MEM ${memoryHigh ? "高" : "正常"}`} tone={factBoundTone(readinessFact, cpuHigh || memoryHigh ? "warn" : "ok", readinessRequestFailed)} />
+            <OpsMiniMetric label="告警恢复" value={factHasDisplayValue(alertsFact) ? (alertRules ? `${alertRules} 规则` : "无规则") : "未知"} detail={recoveryRegisteredVisible ? `失败 ${recoveryFailures} · 守护 ${recoveryRunning ? "运行" : "待命"}` : "AutoRecovery 未注册或状态未知"} tone={recoveryFailures ? "bad" : "warn"} />
+            <OpsMiniMetric label="外部数据" value={`${externalSources.length} 源`} detail={`异常/过期 ${externalStale} · TF ${syncTfCount}`} tone={externalStale ? "warn" : externalKnown && syncKnown ? "ok" : "warn"} />
           </div>
 
           <div className="ops-control-grid">
             <section className="ops-control-section">
               <div className="learning-section-head">
                 <h3>服务链路</h3>
-                <StatusPill status={serviceStatus} tone={toneFromStatus(serviceStatus)} />
+                <StatusPill status={serviceStatus} tone={factBoundTone(readinessFact, toneFromStatus(serviceStatus), readinessRequestFailed)} />
               </div>
               <div className="field-list ops-compact-fields">
-                <Field label="健康探针" value={backendHealth} tone={toneFromStatus(backendHealth)} />
-                <Field label="cTrader" value={ctraderStatus} tone={toneFromStatus(ctraderStatus)} />
-                <Field label="交易循环" value={loopRunning ? "运行中" : "未运行"} tone={loopRunning ? "ok" : "warn"} />
-                <Field label="主库连接" value={healthDbStatus} tone={toneFromStatus(healthDbStatus)} />
+                <Field label="健康探针" value={factHasDisplayValue(healthFact) ? backendHealth : "未知"} tone={factBoundTone(healthFact, toneFromStatus(backendHealth), healthRequestFailed)} />
+                <Field label="cTrader" value={ctraderStatus} tone={factBoundTone(readinessFact, toneFromStatus(ctraderStatus), readinessRequestFailed)} />
+                <Field label="交易循环" value={loopRunning ? "运行中" : "未运行"} tone={factBoundTone(readinessFact, loopRunning ? "ok" : "warn", readinessRequestFailed)} />
+                <Field label="主库连接" value={healthDbStatus} tone={factBoundTone(healthFact, toneFromStatus(healthDbStatus), healthRequestFailed)} />
                 <Field label="最近健康" value={formatTime(healthTime)} />
-                <Field label="请求异常" value={hasError ? "有" : "无"} tone={hasError ? "bad" : "ok"} />
+                <Field label="请求异常" value={hasError ? "有" : allOpsFactsKnown ? "无" : "事实未确认"} tone={hasError ? "bad" : allOpsFactsKnown ? "ok" : "warn"} />
               </div>
             </section>
 
             <section className="ops-control-section">
               <div className="learning-section-head">
                 <h3>就绪与权限</h3>
-                <StatusPill status={backendReady ? "前端就绪" : "前端受限"} tone={backendReady ? "ok" : "warn"} />
+                <StatusPill status={factHasDisplayValue(readinessFact) ? (backendReadyReported ? "前端就绪" : "前端受限") : "前端就绪状态未知"} tone={factBoundTone(readinessFact, backendReadyReported ? "ok" : "warn", readinessRequestFailed)} />
               </div>
               <div className="field-list ops-compact-fields">
                 <Field label="合约版本" value={backendSchema} />
                 <Field label="更新时间" value={formatTime(readinessUpdated)} />
-                <Field label="实时状态" value={liveReadinessState} tone={toneFromStatus(liveReadinessState)} />
-                <Field label="模型权限" value={modelEligible ? "允许" : "受限"} tone={modelEligible ? "ok" : "warn"} />
+                <Field label="实时状态" value={liveReadinessState} tone={factBoundTone(readinessFact, toneFromStatus(liveReadinessState), readinessRequestFailed)} />
+                <Field label="模型权限" value={modelEligible ? "允许" : "受限"} tone={factBoundTone(readinessFact, modelEligible ? "ok" : "warn", readinessRequestFailed)} />
                 <Field label="因子更新" value={factorDataLast} />
               </div>
               <div className="compact-list ops-inline-badges">
@@ -271,37 +300,56 @@ export function OpsPage() {
                   blockers.slice(0, 8).map((blocker, index) => (
                     <span className="data-badge data-badge-bad" key={`${readableObjectLabel(blocker)}-${index}`}>{readableObjectLabel(blocker)}</span>
                   ))
-                ) : (
+                ) : readinessKnown ? (
                   <span className="data-badge data-badge-ok">无阻断项</span>
-                )}
+                ) : <span className="data-badge data-badge-warn">阻断项状态未知</span>}
               </div>
             </section>
 
             <section className="ops-control-section">
               <div className="learning-section-head">
                 <h3>告警与恢复</h3>
-                <StatusPill status={alertStatus} tone={toneFromStatus(alertStatus)} />
+                <StatusPill
+                  status={!factHasDisplayValue(alertsFact) ? "未知" : recoveryRegisteredVisible ? alertStatus : "规则已配置 · 投递未知"}
+                  tone={alertsKnown && recoveryKnown && recoveryRegisteredReported ? toneFromStatus(alertStatus) : "warn"}
+                />
               </div>
               <div className="field-list ops-compact-fields">
                 <Field label="活跃规则" value={alertRules} />
-                <Field label="恢复守护" value={recoveryRunning ? "运行中" : "待命"} tone={recoveryRunning ? "warn" : "ok"} />
-                <Field label="循环健康" value={loopHealthy ? "正常" : "异常"} tone={loopHealthy ? "ok" : "bad"} />
-                <Field label="调度健康" value={schedulerHealthy ? "正常" : "异常"} tone={schedulerHealthy ? "ok" : "bad"} />
-                <Field label="失败次数" value={recoveryFailures} tone={recoveryFailures ? "bad" : "ok"} />
+                <Field
+                  label="恢复守护"
+                  value={!recoveryRegisteredVisible ? "未注册或未知" : recoveryRunning ? "运行中" : "待命"}
+                  tone={!recoveryRegisteredVisible || recoveryRunning ? "warn" : recoveryKnown ? "ok" : "warn"}
+                />
+                <Field
+                  label="循环健康"
+                  value={!recoveryRegisteredVisible ? "未知" : loopHealthy ? "正常" : "异常"}
+                  tone={!recoveryRegisteredVisible ? "warn" : loopHealthy && recoveryKnown ? "ok" : loopHealthy ? "warn" : "bad"}
+                />
+                <Field
+                  label="调度健康"
+                  value={!recoveryRegisteredVisible ? "未知" : schedulerHealthy ? "正常" : "异常"}
+                  tone={!recoveryRegisteredVisible ? "warn" : schedulerHealthy && recoveryKnown ? "ok" : schedulerHealthy ? "warn" : "bad"}
+                />
+                <Field
+                  label="失败次数"
+                  value={recoveryRegisteredVisible ? recoveryFailures : "未知"}
+                  tone={!recoveryRegisteredVisible ? "warn" : recoveryFailures ? "bad" : recoveryKnown ? "ok" : "warn"}
+                />
               </div>
             </section>
 
             <section className="ops-control-section">
               <div className="learning-section-head">
                 <h3>同步与外部</h3>
-                <StatusPill status={syncStatus} tone={toneFromStatus(syncStatus)} />
+                <StatusPill status={syncStatus} tone={factBoundTone(syncFact, toneFromStatus(syncStatus), syncRequestFailed)} />
               </div>
               <div className="field-list ops-compact-fields">
                 <Field label="最近同步" value={formatTime(syncLast)} />
                 <Field label="周期数" value={syncTfCount} />
-                <Field label="cTrader Token" value={tokenOk ? "有效" : "异常"} tone={tokenOk ? "ok" : "bad"} />
+                <Field label="cTrader Token" value={tokenOk ? "有效" : "异常"} tone={factBoundTone(tokenFact, tokenOk ? "ok" : "bad", tokenRequestFailed)} />
                 <Field label="Token 剩余" value={tokenHours ? `${Math.round(tokenHours)} 小时` : ""} />
-                <Field label="外部异常" value={externalStale} tone={externalStale ? "warn" : "ok"} />
+                <Field label="外部异常" value={externalStale} tone={factBoundTone(externalFact, externalStale ? "warn" : "ok", externalRequestFailed)} />
               </div>
               <div className="compact-list ops-inline-badges">
                 {externalSources.slice(0, 8).map((raw, index) => {
@@ -310,7 +358,7 @@ export function OpsPage() {
                   const status = pickString(item, ["status"], "");
                   const stale = pickBoolean(item, ["stale"], false);
                   return (
-                    <span className={`data-badge ${stale ? "data-badge-warn" : toneFromStatus(status) === "bad" ? "data-badge-bad" : "data-badge-ok"}`} key={`${sourceName}-${index}`}>
+                    <span className={`data-badge ${stale ? "data-badge-warn" : toneFromStatus(status) === "bad" ? "data-badge-bad" : externalKnown ? "data-badge-ok" : "data-badge-warn"}`} key={`${sourceName}-${index}`}>
                       {sourceName} · {translateDisplayValue(status)}
                     </span>
                   );
@@ -322,11 +370,11 @@ export function OpsPage() {
 
         <MetricCard title="数据库资产" className="wide-panel ops-db-panel">
           <div className="ops-db-summary">
-            <OpsMiniMetric label="数据库总数" value={String(dbTotal || dbList.length)} detail={`检查 ${formatTime(dbChecked)}`} tone={dbFresh} />
-            <OpsMiniMetric label="新鲜" value={String(dbFreshCount)} detail={translateDisplayValue(dbStatus)} tone="ok" />
-            <OpsMiniMetric label="过期" value={String(dbStale)} detail="需要关注 freshness" tone={dbStale ? "warn" : "ok"} />
-            <OpsMiniMetric label="缺失" value={String(dbMissing)} detail="文件或注册缺失" tone={dbMissing ? "bad" : "ok"} />
-            <OpsMiniMetric label="异常数据库" value={String(dbProblemCount)} detail="缺失/过期/错误" tone={dbProblemCount ? "bad" : "ok"} />
+            <OpsMiniMetric label="数据库总数" value={String(dbTotal || dbList.length)} detail={`检查 ${formatTime(dbChecked)}`} tone={factBoundTone(dbFact, dbFresh, dbRequestFailed)} />
+            <OpsMiniMetric label="新鲜" value={String(dbFreshCount)} detail={translateDisplayValue(dbStatus)} tone={dbKnown ? "ok" : "warn"} />
+            <OpsMiniMetric label="过期" value={String(dbStale)} detail="需要关注 freshness" tone={dbStale ? "warn" : dbKnown ? "ok" : "warn"} />
+            <OpsMiniMetric label="缺失" value={String(dbMissing)} detail="文件或注册缺失" tone={dbMissing ? "bad" : dbKnown ? "ok" : "warn"} />
+            <OpsMiniMetric label="异常数据库" value={String(dbProblemCount)} detail="缺失/过期/错误" tone={dbProblemCount ? "bad" : dbKnown ? "ok" : "warn"} />
           </div>
 
           <div className="ops-db-card-grid">
@@ -338,14 +386,14 @@ export function OpsPage() {
                     <strong>{db.name}</strong>
                     <span>{db.file}</span>
                   </div>
-                  <StatusPill status={db.exists ? db.freshness : "missing"} tone={db.exists ? toneFromStatus(db.freshness) : "bad"} />
+                  <StatusPill status={db.exists ? db.freshness : "missing"} tone={db.exists ? factBoundTone(dbFact, toneFromStatus(db.freshness), dbRequestFailed) : "bad"} />
                 </div>
                 <div className="ops-db-card-meta">
                   <span>{translateDisplayValue(db.type)}</span>
                   <span>{db.totalRows} 行</span>
                   <span>{formatTime(db.latestTs)}</span>
                 </div>
-                {db.issues.full ? <p title={db.issues.full}>{db.issues.short}</p> : <p className="ops-db-ok">无异常</p>}
+                {db.issues.full ? <p title={db.issues.full}>{db.issues.short}</p> : dbKnown ? <p className="ops-db-ok">无异常</p> : <p>无已确认异常 · 事实未确认</p>}
               </article>
             ))}
           </div>

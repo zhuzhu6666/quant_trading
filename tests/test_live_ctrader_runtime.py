@@ -46,10 +46,14 @@ class _Bridge:
     def connect_backoff_seconds(self):
         return 2.0
 
-    def refresh_account_info(self):
+    def reconcile_account(self, *, force=True, allow_cache_fallback=False):
+        assert force is True
+        assert allow_cache_fallback is False
         self.account_prime_calls += 1
 
-    def refresh_positions(self):
+    def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
+        assert force is True
+        assert allow_cache_fallback is False
         self.position_prime_calls += 1
 
 

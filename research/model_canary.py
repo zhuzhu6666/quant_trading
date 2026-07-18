@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import DATA_DIR, EXPERIMENTS_DB
+from backend.core.db import DATA_DIR, EXPERIMENTS_DB, prepare_experiments_store
 from research.model_shadow_queue import ModelShadowQueue
 
 
@@ -59,33 +59,7 @@ class ModelCanaryReviewer:
         return conn
 
     def _ensure_table(self) -> None:
-        conn = self._conn()
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS model_canary_review (
-                    review_id TEXT PRIMARY KEY,
-                    candidate_id TEXT NOT NULL,
-                    model_type TEXT NOT NULL,
-                    decision TEXT NOT NULL,
-                    report_path TEXT DEFAULT '',
-                    metrics_json TEXT DEFAULT '{}',
-                    thresholds_json TEXT DEFAULT '{}',
-                    issues_json TEXT DEFAULT '[]',
-                    note TEXT DEFAULT '',
-                    created_at REAL DEFAULT 0.0
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_model_canary_review_candidate
-                ON model_canary_review(candidate_id, created_at)
-                """
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        prepare_experiments_store(self._db_path)
 
     def review_candidate(
         self,

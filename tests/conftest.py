@@ -17,6 +17,12 @@ os.environ.setdefault("PYTHONPATH", str(PROJECT_ROOT))
 os.environ.setdefault("QUANT_JWT_SECRET", "test-jwt-secret-2026-do-not-use-in-prod")
 os.environ.setdefault("QUANT_AUTH_USER", "test_user")
 os.environ.setdefault("QUANT_PASSWORD_HASH", hashlib.sha256("test_pass_123".encode()).hexdigest())
+os.environ.setdefault("QUANT_AUTH_ALLOW_LEGACY_SHA256", "1")
+os.environ.setdefault("QUANT_AUTH_ALLOW_LEGACY_ACCESS_TOKEN", "1")
+os.environ.setdefault("QUANT_AUTH_ALLOW_STATELESS_STEP_UP", "1")
+os.environ.setdefault("QUANT_AUTH_SESSION_STORE", "memory")
+os.environ.setdefault("QUANT_AUTH_INSECURE_COOKIE", "1")
+os.environ.setdefault("QUANT_AUTH_ALLOW_URL_JWT", "1")
 
 # ── Auth helper for tests ──
 import pytest
@@ -56,6 +62,21 @@ def _isolate_attribution_duckdb(tmp_path_factory):
     finally:
         attribution_engine.DUCKDB_TRADES = original_path
         attribution_engine._TRADES_SCHEMA_READY = original_schema_ready
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_live_safety_ledgers(tmp_path_factory):
+    """Never let fault-injection tests latch the real demo runtime."""
+
+    previous = os.environ.get("QUANT_SAFETY_STATE_DIR")
+    os.environ["QUANT_SAFETY_STATE_DIR"] = str(tmp_path_factory.mktemp("live_safety"))
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("QUANT_SAFETY_STATE_DIR", None)
+        else:
+            os.environ["QUANT_SAFETY_STATE_DIR"] = previous
 
 
 @pytest.fixture(scope="session", autouse=True)

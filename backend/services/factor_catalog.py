@@ -13,6 +13,7 @@ from alpha.portfolio_compositor import resolve_factor_role
 from alpha.registry import factor_registry
 from alpha.runtime_factor_selection import select_runtime_factors
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.state_store import validate_runtime_state_schema
 from config.runtime_config import shared as runtime_config
 
 
@@ -48,9 +49,9 @@ def _p(db_path: str | Path, sql: str) -> str:
 
 
 def ensure_factor_catalog_snapshot_table(db_path: str | Path = STATE_DB) -> None:
-    conn = _connect_state(db_path)
+    conn = _connect_state(db_path, read_only=is_state_db_path(db_path))
     try:
-        conn.execute(
+        statements = (
             _p(db_path, """
             CREATE TABLE IF NOT EXISTS factor_catalog_snapshot (
                 snapshot_id TEXT PRIMARY KEY,
@@ -60,15 +61,19 @@ def ensure_factor_catalog_snapshot_table(db_path: str | Path = STATE_DB) -> None
                 source TEXT DEFAULT '',
                 created_at REAL NOT NULL DEFAULT 0.0
             )
-            """)
+            """),
+            _p(
+                db_path,
+                "CREATE INDEX IF NOT EXISTS idx_factor_catalog_snapshot_created "
+                "ON factor_catalog_snapshot(created_at)",
+            ),
         )
-        try:
-            conn.execute(
-                _p(db_path, "CREATE INDEX IF NOT EXISTS idx_factor_catalog_snapshot_created ON factor_catalog_snapshot(created_at)")
-            )
-        except Exception:
-            pass
-        conn.commit()
+        if is_state_db_path(db_path):
+            validate_runtime_state_schema(conn, statements)
+        else:
+            for statement in statements:
+                conn.execute(statement)
+            conn.commit()
     finally:
         conn.close()
 
@@ -331,14 +336,21 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
                 or ("ACTIVE" if factor_registry.get(name) else "UNKNOWN")
             )
         )
-        weight = float(weights.get(name, 0.3 if source == "discovered" else 0.0) or 0.0)
+        raw_weight = weights.get(name) if name in weights else None
+        if isinstance(raw_weight, dict):
+            raw_weight = raw_weight.get("weight")
+        try:
+            weight = float(raw_weight) if raw_weight is not None else 0.0
+        except (TypeError, ValueError):
+            weight = 0.0
+        explicit_weight = name in weights and raw_weight is not None
         eligible = (
             name in selected
             and enabled
             and lifecycle_status not in {"DEAD", "SHADOW", "QUARANTINE", "QUARANTINED"}
             and source != "shadow"
         )
-        used_in_score = bool(eligible and role == "alpha" and weight > 0)
+        used_in_score = bool(eligible and role == "alpha" and explicit_weight and weight > 0)
         cadence, sample_policy = infer_factor_cadence(name, cfg_dict)
         policy = latest_policy.get(name, {})
         reason = "" if eligible else excluded_reasons.get(name)
@@ -362,6 +374,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "eligible_for_live": bool(eligible),
             "used_in_score": used_in_score,
             "weight": weight,
+            "explicit_weight": bool(explicit_weight),
             "cadence": cadence,
             "history_sample_policy": sample_policy,
             "health_status": str(h.get("status") or "UNKNOWN"),

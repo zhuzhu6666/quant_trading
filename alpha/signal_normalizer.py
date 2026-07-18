@@ -286,8 +286,11 @@ class SignalNormalizer:
         except Exception as e:
             logger.debug("GP classifier unavailable for '%s': %s", name, e)
         return {
-            "enabled": True,
-            "weight": 0.3,
+            # Unknown/generated factors may collect normalization history, but
+            # they are observation-only until lifecycle governance publishes
+            # an explicit enabled config and positive weight.
+            "enabled": False,
+            "weight": 0.0,
             "mode": "rank_mapping",
             "window": 100,
             "min_samples": 30,

@@ -17,6 +17,7 @@ import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickStr
 import { translateDisplayValue, translateReasonText, translateScopeLabel } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
+import { factBoundTone, factIsKnown, readFact } from "@/api/fact";
 
 function countFrom(record: unknown, key: string): number {
   return pickNumber(record, [key], 0);
@@ -110,6 +111,9 @@ export function LearningPage() {
   const todo = asRecord(pick(summary, ["parameter_template_todo"]));
   const overview = asRecord(pick(summary, ["parameter_template_overview"]));
   const readiness = asRecord(readinessQuery.data);
+  const readinessFact = readFact(readinessQuery.data, "ops.backend-readiness.v2");
+  const readinessRequestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
+  const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
   const governance = asRecord(pick(readiness, ["governance"]));
   const factorData = asRecord(pick(readiness, ["factor_data"]));
   const factorState = asRecord(pick(factorData, ["state"]));
@@ -157,7 +161,7 @@ export function LearningPage() {
   const latestFactorUpdate = asRecord(pick(factorData, ["last_enrichment"]));
   const highLoadProfile = pickString(highLoad, ["profile"], "");
 
-  const hasError = [
+  const learningQueries = [
     summaryQuery,
     suggestionsQuery,
     applicationsQuery,
@@ -167,10 +171,21 @@ export function LearningPage() {
     metaReportQuery,
     permissionQuery,
     readinessQuery,
-  ].some((query) => query.isError);
+  ];
+  const hasError = learningQueries.some((query) => query.isError || query.isRefetchError);
+  const learningFactsKnown = readinessKnown && [
+    factIsKnown(readFact(summaryQuery.data, "learning.summary.v2"), summaryQuery.isError || summaryQuery.isRefetchError),
+    factIsKnown(readFact(suggestionsQuery.data, "learning.suggestions.v2"), suggestionsQuery.isError || suggestionsQuery.isRefetchError),
+    factIsKnown(readFact(applicationsQuery.data, "learning.applications.v2"), applicationsQuery.isError || applicationsQuery.isRefetchError),
+    factIsKnown(readFact(lifecycleQuery.data, "learning.lifecycle.v2"), lifecycleQuery.isError || lifecycleQuery.isRefetchError),
+    factIsKnown(readFact(reviewsQuery.data, "learning.reviews.v2"), reviewsQuery.isError || reviewsQuery.isRefetchError),
+    factIsKnown(readFact(samplesQuery.data, "learning.autonomous-samples.v2"), samplesQuery.isError || samplesQuery.isRefetchError),
+    factIsKnown(readFact(metaReportQuery.data, "learning.model-meta-lightgbm-shadow-report.v2"), metaReportQuery.isError || metaReportQuery.isRefetchError),
+    factIsKnown(readFact(permissionQuery.data, "learning.model-permission-audits.v2"), permissionQuery.isError || permissionQuery.isRefetchError),
+  ].every(Boolean);
 
   return (
-    <section className="dashboard learning-dashboard">
+    <section className={`dashboard learning-dashboard ${learningFactsKnown ? "" : "fact-unverified"}`.trim()}>
       <div className="dashboard-header">
         <div>
           <div className="eyebrow">学习闭环</div>
@@ -178,9 +193,9 @@ export function LearningPage() {
           <p>复盘、样本、策略建议、参数治理和影子模型统一在这里观察。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={automaticExecution ? "自动应用已开" : "人工审核"} tone={automaticExecution ? "warn" : "ok"} />
+          <StatusPill status={readinessKnown ? (automaticExecution ? "自动应用已开" : "人工审核") : "治理状态待确认"} tone={factBoundTone(readinessFact, automaticExecution ? "warn" : "ok", readinessRequestFailed)} />
           <StatusPill status={`模式 ${translateDisplayValue(autonomyMode)}`} tone="mute" />
-          <StatusPill status={hasError ? "接口异常" : "学习链路在线"} tone={hasError ? "bad" : "ok"} />
+          <StatusPill status={hasError ? "接口异常" : learningFactsKnown ? "学习链路在线" : "学习事实未接入"} tone={hasError ? "bad" : learningFactsKnown ? "ok" : "warn"} />
         </div>
       </div>
 

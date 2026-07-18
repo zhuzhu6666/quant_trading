@@ -8,13 +8,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+    state_table_exists,
+)
+from backend.core.state_store import validate_runtime_state_schema
 from backend.services.evolution_ledger import (
     ensure_evolution_ledger_tables,
     persist_runtime_config_snapshot,
@@ -23,6 +32,23 @@ from config.runtime_config import RuntimeConfig
 from config import runtime_config
 
 OVERLAY_ID = "autonomous_factor_governance"
+LEGACY_AUTHORITY_SCHEMA = "runtime_overlay_legacy_authority.v1"
+_LOG = logging.getLogger(__name__)
+
+
+class RuntimeConfigOverlayAuthorityError(RuntimeError):
+    """The persisted overlay is not backed by an accepted governance fact."""
+
+    def __init__(
+        self,
+        report: dict[str, Any],
+        *,
+        quarantined_config: RuntimeConfig | None = None,
+    ):
+        self.report = dict(report)
+        self.quarantined_config = quarantined_config
+        reason = str(report.get("reason") or "runtime_overlay_authority_invalid")
+        super().__init__(f"runtime_config_overlay_authority_invalid:{reason}")
 
 
 def _dumps(value: Any) -> str:
@@ -31,6 +57,27 @@ def _dumps(value: Any) -> str:
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(_dumps(value).encode("utf-8")).hexdigest()
+
+
+def _governance_config_hash(value: Any) -> str:
+    payload = json.dumps(
+        value if value is not None else {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _loads_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _p(db_path: str | Path, sql: str) -> str:
@@ -105,9 +152,13 @@ def _sanitize_patch(patch: dict[str, Any]) -> dict[str, Any]:
         if (
             str(key).startswith("factor_governance_")
             or str(key).startswith("factor_redundancy_")
+            or key == "demo_model_influence_enabled"
+            or key == "model_influence_config"
             or key == "context_policy_enabled"
             or key == "runtime_incident_mode"
             or key == "autonomy_mode"
+            or key == "autonomy_expansion_frozen"
+            or key == "governance_expansion_paused"
             or key == "live_autonomy_unlocked"
             or key == "live_autonomy_unlock_id"
             or key == "position_supervisor_template_id"
@@ -157,21 +208,35 @@ class RuntimeConfigOverlayService:
         self.db_path = db_path
 
     def ensure_table(self) -> None:
-        conn = _connect(self.db_path)
+        production_state = is_state_db_path(self.db_path)
+        conn = _connect(self.db_path, read_only=production_state)
         try:
-            conn.execute(
-                _p(self.db_path, """
+            declaration = _p(self.db_path, """
                 CREATE TABLE IF NOT EXISTS runtime_config_overlay (
                     overlay_id TEXT PRIMARY KEY,
                     overlay_json TEXT NOT NULL DEFAULT '{}',
                     overlay_hash TEXT DEFAULT '',
                     source TEXT DEFAULT '',
                     run_id TEXT DEFAULT '',
+                    mutation_id TEXT NOT NULL DEFAULT '',
+                    legacy_authority_json TEXT NOT NULL DEFAULT '{}',
                     updated_at REAL NOT NULL DEFAULT 0.0
                 )
                 """)
-            )
-            conn.commit()
+            if production_state:
+                validate_runtime_state_schema(conn, declaration)
+            else:
+                conn.execute(declaration)
+                columns = state_table_columns(conn, "runtime_config_overlay")
+                for name, ddl in {
+                    "mutation_id": "TEXT NOT NULL DEFAULT ''",
+                    "legacy_authority_json": "TEXT NOT NULL DEFAULT '{}'",
+                }.items():
+                    if name not in columns:
+                        conn.execute(
+                            f'ALTER TABLE "runtime_config_overlay" ADD COLUMN "{name}" {ddl}'
+                        )
+                conn.commit()
         finally:
             conn.close()
 
@@ -181,7 +246,8 @@ class RuntimeConfigOverlayService:
         try:
             row = conn.execute(
                 _p(self.db_path, """
-                SELECT overlay_id, overlay_json, overlay_hash, source, run_id, updated_at
+                SELECT overlay_id, overlay_json, overlay_hash, source, run_id,
+                       mutation_id, legacy_authority_json, updated_at
                 FROM runtime_config_overlay
                 WHERE overlay_id=?
                 """),
@@ -196,26 +262,269 @@ class RuntimeConfigOverlayService:
                     "updated_at": 0.0,
                     "source": "",
                     "run_id": "",
+                    "mutation_id": "",
+                    "legacy_authority": {},
                 }
             try:
                 overlay = json.loads(row["overlay_json"] or "{}")
             except Exception:
                 overlay = {}
+                overlay_parse_error = True
+            else:
+                overlay_parse_error = not isinstance(overlay, dict)
             return {
                 "ok": True,
                 "status": "available",
                 "overlay": overlay if isinstance(overlay, dict) else {},
+                "overlay_parse_error": overlay_parse_error,
                 "overlay_hash": str(row["overlay_hash"] or ""),
                 "updated_at": float(row["updated_at"] or 0.0),
                 "source": str(row["source"] or ""),
                 "run_id": str(row["run_id"] or ""),
+                "mutation_id": str(row["mutation_id"] or ""),
+                "legacy_authority": _loads_object(row["legacy_authority_json"]),
             }
         finally:
             conn.close()
 
+    @staticmethod
+    def _coordinator_mode() -> str:
+        from backend.core.static_feature_flags import shared_static_feature_flags
+
+        mode = str(
+            shared_static_feature_flags().governance_mutation_coordinator_v2_mode
+            or "off"
+        ).strip().lower()
+        if mode not in {"off", "dual_record", "enforce"}:
+            raise RuntimeConfigOverlayAuthorityError(
+                {"reason": f"invalid_governance_coordinator_mode:{mode}"}
+            )
+        return mode
+
+    def _authority_report(
+        self,
+        *,
+        latest: dict[str, Any],
+        overlay: dict[str, Any],
+        effective_config: RuntimeConfig,
+    ) -> dict[str, Any]:
+        mode = self._coordinator_mode()
+        stored_overlay_hash = str(latest.get("overlay_hash") or "")
+        mutation_id = str(latest.get("mutation_id") or "")
+        # The coordinator's canonical JSON uses compact separators so the
+        # overlay/config/domain bindings share one hash contract.  Legacy
+        # overlay rows retain their historical stable-hash encoding.
+        actual_overlay_hash = (
+            _governance_config_hash(overlay) if mutation_id else _hash(overlay)
+        )
+        common = {
+            "schema_version": "runtime_config_overlay_authority.v1",
+            "coordinator_mode": mode,
+            "overlay_hash": actual_overlay_hash,
+            "stored_overlay_hash": stored_overlay_hash,
+            "mutation_id": mutation_id,
+            "overlay_keys": sorted(str(key) for key in overlay),
+        }
+        if not stored_overlay_hash or stored_overlay_hash != actual_overlay_hash:
+            return {**common, "ok": False, "reason": "overlay_hash_mismatch"}
+
+        if mutation_id:
+            conn = _connect(self.db_path, read_only=True)
+            try:
+                if not state_table_exists(conn, "governance_mutation_intent"):
+                    return {
+                        **common,
+                        "ok": False,
+                        "authority": "committed_mutation",
+                        "reason": "governance_intent_table_missing",
+                    }
+                required = {
+                    "mutation_id",
+                    "status",
+                    "projection_status",
+                    "target_config_hash",
+                    "committed_config_hash",
+                    "domain_hash",
+                }
+                if not required <= state_table_columns(conn, "governance_mutation_intent"):
+                    return {
+                        **common,
+                        "ok": False,
+                        "authority": "committed_mutation",
+                        "reason": "governance_intent_contract_incomplete",
+                    }
+                row = conn.execute(
+                    _p(
+                        self.db_path,
+                        """
+                        SELECT mutation_id, status, projection_status,
+                               target_config_hash, committed_config_hash,
+                               domain_hash
+                        FROM governance_mutation_intent
+                        WHERE mutation_id=?
+                        LIMIT 1
+                        """,
+                    ),
+                    (mutation_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            item = dict(row) if row is not None else {}
+            config_hash = _governance_config_hash(effective_config.to_dict())
+            checks = {
+                "intent_found": bool(item),
+                "committed": str(item.get("status") or "") == "committed",
+                "projection_current": (
+                    str(item.get("projection_status") or "") == "current"
+                ),
+                "target_hash_bound": (
+                    str(item.get("target_config_hash") or "") == config_hash
+                ),
+                "committed_hash_bound": (
+                    str(item.get("committed_config_hash") or "") == config_hash
+                ),
+                "domain_hash_bound": bool(str(item.get("domain_hash") or "")),
+            }
+            ok = all(checks.values())
+            return {
+                **common,
+                "ok": ok,
+                "authority": "committed_mutation",
+                "config_hash": config_hash,
+                "checks": checks,
+                "reason": "committed_mutation_verified" if ok else "committed_mutation_unverified",
+            }
+
+        manifest = dict(latest.get("legacy_authority") or {})
+        controls = manifest.get("controls") if isinstance(manifest.get("controls"), dict) else {}
+        overlay_keys = set(str(key) for key in overlay)
+        control_keys = set(str(key) for key in controls)
+        try:
+            reviewed_at = float(manifest.get("reviewed_at") or 0.0)
+        except (TypeError, ValueError):
+            reviewed_at = 0.0
+        global_valid = bool(
+            manifest.get("schema_version") == LEGACY_AUTHORITY_SCHEMA
+            and str(manifest.get("overlay_hash") or "") == actual_overlay_hash
+            and str(manifest.get("review_id") or "")
+            and str(manifest.get("reviewer") or "").startswith("operator:")
+            and reviewed_at > 0.0
+            and control_keys == overlay_keys
+        )
+        invalid_controls = sorted(
+            key
+            for key in overlay_keys
+            if not isinstance(controls.get(key), dict)
+            or str(controls[key].get("governance_authority") or "")
+            != "legacy_quarantined"
+            or str(controls[key].get("risk_class") or "")
+            != "risk_tightening"
+        )
+        ok = global_valid and not invalid_controls
+        return {
+            **common,
+            "ok": ok,
+            "authority": "legacy_quarantined",
+            "review_id": str(manifest.get("review_id") or ""),
+            "reviewer": str(manifest.get("reviewer") or ""),
+            "reviewed_control_keys": sorted(control_keys),
+            "invalid_control_keys": invalid_controls,
+            "reason": "legacy_quarantine_verified" if ok else "legacy_quarantine_unverified",
+        }
+
+    @staticmethod
+    def _quarantined_projection(
+        *,
+        base_cfg: RuntimeConfig,
+        overlay: dict[str, Any],
+        mutation_id: str,
+    ) -> tuple[RuntimeConfig, dict[str, Any]]:
+        """Preserve protection without granting an unverified risk expansion.
+
+        A blank legacy row represents behavior that may already be protecting
+        live positions, so it remains a read-only projection while a durable
+        no-new-risk latch is active.  A dangling non-empty mutation is more
+        suspicious: only top-level changes derived as tightening survive.
+        In both cases operator control fields are combined monotonically so a
+        legacy row cannot thaw incident/governance state during recovery.
+        """
+
+        from backend.services.governance_mutation_coordinator import (
+            classify_governance_risk,
+        )
+
+        base = base_cfg.to_dict()
+        retained: dict[str, Any] = {}
+        excluded: list[str] = []
+        classifications: dict[str, Any] = {}
+        if not mutation_id:
+            retained = deepcopy(overlay)
+        else:
+            full_target = RuntimeConfig.from_dict(_deep_merge(base, overlay)).to_dict()
+            for key, value in overlay.items():
+                result = classify_governance_risk(
+                    {key: base.get(key)},
+                    {key: full_target.get(key)},
+                )
+                classifications[str(key)] = result.to_dict()
+                if result.risk_class == "risk_tightening":
+                    retained[str(key)] = deepcopy(value)
+                else:
+                    excluded.append(str(key))
+
+        projected = RuntimeConfig.from_dict(_deep_merge(base, retained))
+        payload = projected.to_dict()
+        base_mode = str(base.get("runtime_incident_mode") or "normal")
+        projected_mode = str(payload.get("runtime_incident_mode") or "normal")
+        incident_rank = {
+            "normal": 0,
+            "shadow_only": 1,
+            "no_new_risk": 2,
+            "only_close": 3,
+            "frozen": 4,
+        }
+        payload["runtime_incident_mode"] = max(
+            (base_mode, projected_mode),
+            key=lambda value: incident_rank.get(value, incident_rank["frozen"]),
+        )
+        payload["governance_expansion_paused"] = bool(
+            base.get("governance_expansion_paused", False)
+            or payload.get("governance_expansion_paused", False)
+        )
+        payload["autonomy_expansion_frozen"] = bool(
+            base.get("autonomy_expansion_frozen", False)
+            or payload.get("autonomy_expansion_frozen", False)
+        )
+        payload["live_autonomy_unlocked"] = bool(
+            base.get("live_autonomy_unlocked", False)
+            and payload.get("live_autonomy_unlocked", False)
+        )
+        return RuntimeConfig.from_dict(payload), {
+            "quarantine_projection": (
+                "legacy_behavior_preserved"
+                if not mutation_id
+                else "dangling_mutation_tightening_only"
+            ),
+            "retained_keys": sorted(retained),
+            "excluded_keys": sorted(excluded),
+            "classifications": classifications,
+            "new_risk_authorized": False,
+        }
+
     def restore_on_startup(self, base_cfg: RuntimeConfig) -> dict[str, Any]:
         latest = self.latest()
         overlay = dict(latest.get("overlay") or {})
+        if latest.get("overlay_parse_error"):
+            raise RuntimeConfigOverlayAuthorityError(
+                {
+                    "schema_version": "runtime_config_overlay_authority.v1",
+                    "ok": False,
+                    "reason": "overlay_json_invalid",
+                    "mutation_id": str(latest.get("mutation_id") or ""),
+                    "new_risk_authorized": False,
+                },
+                quarantined_config=base_cfg,
+            )
         suspicion = _overlay_suspicion_report(
             overlay,
             source=str(latest.get("source") or ""),
@@ -239,6 +548,21 @@ class RuntimeConfigOverlayService:
             )
         merged = _deep_merge(base_cfg.to_dict(), overlay)
         restored = RuntimeConfig.from_dict(merged)
+        authority = self._authority_report(
+            latest=latest,
+            overlay=overlay,
+            effective_config=restored,
+        )
+        if not authority.get("ok"):
+            quarantined_config, quarantine = self._quarantined_projection(
+                base_cfg=base_cfg,
+                overlay=overlay,
+                mutation_id=str(latest.get("mutation_id") or ""),
+            )
+            raise RuntimeConfigOverlayAuthorityError(
+                {**authority, **quarantine},
+                quarantined_config=quarantined_config,
+            )
         return {
             "ok": True,
             "restored": True,
@@ -247,6 +571,8 @@ class RuntimeConfigOverlayService:
             "updated_at": latest.get("updated_at", 0.0),
             "source": latest.get("source", ""),
             "run_id": latest.get("run_id", ""),
+            "mutation_id": latest.get("mutation_id", ""),
+            "authority": authority,
             **suspicion,
         }
 
@@ -286,6 +612,169 @@ class RuntimeConfigOverlayService:
         )
         result["status"] = "cleared"
         return result
+
+    def review_legacy_quarantine(
+        self,
+        base_cfg: RuntimeConfig,
+        *,
+        expected_overlay_hash: str,
+        reviewed_keys: list[str] | tuple[str, ...],
+        reviewer: str,
+        review_id: str,
+    ) -> dict[str, Any]:
+        """Add a hash-bound, per-control legacy quarantine review.
+
+        This is an operator/backfill boundary, not a live governance mutation.
+        Risk direction is derived from before/after facts by the coordinator's
+        classifier; the caller cannot self-report a tightening exemption.  A
+        partial review is durable and auditable but startup remains blocked
+        until every key in the exact overlay hash has passed review.
+        """
+
+        reviewer = str(reviewer or "").strip()
+        review_id = str(review_id or "").strip()
+        if not reviewer.startswith("operator:") or not review_id:
+            return {
+                "ok": False,
+                "status": "operator_review_identity_required",
+            }
+        latest = self.latest()
+        overlay = dict(latest.get("overlay") or {})
+        overlay_hash = str(latest.get("overlay_hash") or "")
+        if str(latest.get("mutation_id") or ""):
+            return {
+                "ok": False,
+                "status": "overlay_already_mutation_bound",
+                "mutation_id": str(latest.get("mutation_id") or ""),
+            }
+        if (
+            not overlay
+            or overlay_hash != str(expected_overlay_hash or "")
+            or overlay_hash != _hash(overlay)
+        ):
+            return {
+                "ok": False,
+                "status": "overlay_hash_changed",
+                "overlay_hash": overlay_hash,
+            }
+
+        from backend.services.governance_mutation_coordinator import (
+            classify_governance_risk,
+        )
+
+        effective = RuntimeConfig.from_dict(
+            _deep_merge(base_cfg.to_dict(), overlay)
+        ).to_dict()
+        base = base_cfg.to_dict()
+        requested = sorted({str(key) for key in reviewed_keys if str(key)})
+        missing = sorted(set(requested) - set(overlay))
+        if missing or not requested:
+            return {
+                "ok": False,
+                "status": "review_control_key_invalid",
+                "missing_keys": missing,
+            }
+
+        reviews: dict[str, Any] = {}
+        blocked: dict[str, Any] = {}
+        for key in requested:
+            classification = classify_governance_risk(
+                {key: base.get(key)},
+                {key: effective.get(key)},
+            )
+            payload = classification.to_dict()
+            if classification.risk_class != "risk_tightening":
+                blocked[key] = payload
+                continue
+            reviews[key] = {
+                "governance_authority": "legacy_quarantined",
+                "risk_class": "risk_tightening",
+                "classification": payload,
+            }
+        if blocked:
+            return {
+                "ok": False,
+                "status": "legacy_control_not_tightening",
+                "blocked": blocked,
+                "reviewable": sorted(reviews),
+            }
+
+        existing = dict(latest.get("legacy_authority") or {})
+        existing_controls = (
+            dict(existing.get("controls") or {})
+            if str(existing.get("overlay_hash") or "") == overlay_hash
+            else {}
+        )
+        controls = {**existing_controls, **reviews}
+        now = time.time()
+        manifest = {
+            "schema_version": LEGACY_AUTHORITY_SCHEMA,
+            "overlay_hash": overlay_hash,
+            "review_id": review_id,
+            "reviewer": reviewer,
+            "reviewed_at": now,
+            "controls": controls,
+        }
+        conn = _connect(self.db_path)
+        try:
+            self._begin_serialized_write(conn)
+            row = conn.execute(
+                _p(
+                    self.db_path,
+                    """
+                    SELECT overlay_hash, mutation_id
+                    FROM runtime_config_overlay
+                    WHERE overlay_id=?
+                    """,
+                ),
+                (OVERLAY_ID,),
+            ).fetchone()
+            current = dict(row) if row is not None else {}
+            if (
+                str(current.get("overlay_hash") or "") != overlay_hash
+                or str(current.get("mutation_id") or "")
+            ):
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "status": "overlay_changed_during_review",
+                }
+            update = conn.execute(
+                _p(
+                    self.db_path,
+                    """
+                    UPDATE runtime_config_overlay
+                    SET legacy_authority_json=?
+                    WHERE overlay_id=? AND overlay_hash=? AND mutation_id=''
+                    """,
+                ),
+                (_dumps(manifest), OVERLAY_ID, overlay_hash),
+            )
+            if int(update.rowcount or 0) != 1:
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "status": "overlay_changed_during_review",
+                }
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        remaining = sorted(set(overlay) - set(controls))
+        return {
+            "ok": True,
+            "status": (
+                "legacy_quarantine_complete"
+                if not remaining
+                else "legacy_quarantine_partial"
+            ),
+            "overlay_hash": overlay_hash,
+            "reviewed_keys": sorted(reviews),
+            "remaining_keys": remaining,
+            "manifest": manifest,
+        }
 
     def _read_overlay_in_transaction(self, conn: Any) -> dict[str, Any]:
         row = conn.execute(
@@ -329,13 +818,16 @@ class RuntimeConfigOverlayService:
         conn.execute(
             _p(self.db_path, """
             INSERT INTO runtime_config_overlay
-            (overlay_id, overlay_json, overlay_hash, source, run_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (overlay_id, overlay_json, overlay_hash, source, run_id,
+             mutation_id, legacy_authority_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, '', '{}', ?)
             ON CONFLICT(overlay_id) DO UPDATE SET
                 overlay_json=excluded.overlay_json,
                 overlay_hash=excluded.overlay_hash,
                 source=excluded.source,
                 run_id=excluded.run_id,
+                mutation_id='',
+                legacy_authority_json='{}',
                 updated_at=excluded.updated_at
             """),
             (
@@ -392,6 +884,39 @@ class RuntimeConfigOverlayService:
         finally:
             conn.close()
 
+        # A direct/legacy writer is never allowed to inherit a prior review
+        # manifest.  In production, latch before publishing so an off-mode
+        # mutation cannot create new risk while waiting for explicit review or
+        # coordinator adoption.
+        latch: dict[str, Any] = {}
+        latch_error = ""
+        if is_state_db_path(self.db_path) and overlay:
+            try:
+                from backend.services.live_safety_state import (
+                    activate_no_new_risk_latch,
+                )
+
+                latch = activate_no_new_risk_latch(
+                    reason="runtime_overlay_direct_mutation_unverified",
+                    actor="system:runtime_config_overlay",
+                    metadata={
+                        "overlay_hash": overlay_hash,
+                        "source": str(source or ""),
+                        "run_id": str(run_id or ""),
+                        "updated_keys": sorted(sanitized),
+                    },
+                    cause="governance_authority",
+                    cause_id="runtime_config_overlay_direct_mutation",
+                )
+            except Exception as exc:
+                # The safety-state implementation already installed the
+                # process-local fail-closed latch before raising.
+                latch_error = f"{type(exc).__name__}:{exc}"
+                _LOG.error(
+                    "runtime overlay authority latch persistence failed: %s",
+                    latch_error,
+                )
+
         # Publish only after both the overlay row and its audit snapshot commit.
         version = runtime_config.replace(effective_config)
         return {
@@ -402,6 +927,13 @@ class RuntimeConfigOverlayService:
             "overlay_hash": overlay_hash,
             "updated_at": now,
             "snapshot": snapshot,
+            "authority_status": (
+                "legacy_unverified_no_new_risk"
+                if is_state_db_path(self.db_path) and overlay
+                else "isolated_legacy_compatibility"
+            ),
+            "no_new_risk_latch": latch,
+            "latch_error": latch_error,
         }
 
     def status(self) -> dict[str, Any]:
@@ -419,6 +951,8 @@ class RuntimeConfigOverlayService:
             "updated_at": latest.get("updated_at", 0.0),
             "source": latest.get("source", ""),
             "run_id": latest.get("run_id", ""),
+            "mutation_id": latest.get("mutation_id", ""),
+            "legacy_authority": latest.get("legacy_authority", {}),
             "keys": sorted(overlay.keys()),
             **suspicion,
         }

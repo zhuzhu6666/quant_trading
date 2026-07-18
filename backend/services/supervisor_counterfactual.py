@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.core.state_store import (
+    is_state_schema_write_sql,
+    validate_runtime_state_schema,
+)
 
 
 DEFAULT_HORIZONS_MINUTES = [5, 15, 30, 60, 120]
@@ -33,9 +37,12 @@ def _sql(conn, sql: str) -> str:
 
 
 def _execute(conn, sql: str, params: Any = None):
+    rendered = _sql(conn, sql)
+    if _conn_is_pg(conn) and is_state_schema_write_sql(rendered):
+        return validate_runtime_state_schema(conn, rendered)
     if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
+        return conn.execute(rendered)
+    return conn.execute(rendered, params)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

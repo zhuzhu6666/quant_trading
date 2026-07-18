@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter
 from backend.core.auth import RequireUser
 from backend.core.db import connect_sqlite, duckdb_readonly_connection, get_state_pg_conn, state_pg_enabled, state_table_columns
+from backend.services.api_fact_views import db_health_fact_payload
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -20,6 +21,7 @@ _cache_ts: float = 0
 _cache_lock = threading.Lock()
 _CACHE_REFRESH_INTERVAL = 55  # 秒 (早于旧 TTL 5s, 确保永不过期)
 _refresh_thread: threading.Thread | None = None
+_refresh_thread_lock = threading.Lock()
 _stop_refresh = threading.Event()
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -363,30 +365,70 @@ def _compute_db_health() -> dict:
     }
 
 
-def _refresh_cache():
-    """后台线程: 每 55s 自动刷新缓存, 确保请求永远走缓存秒返。"""
-    global _cache, _cache_ts
-    while not _stop_refresh.is_set():
-        try:
-            result = _compute_db_health()
-            with _cache_lock:
-                _cache = result
-                _cache_ts = time.time()
-        except Exception:
-            pass  # 刷新失败保留旧缓存, 下次重试
-        _stop_refresh.wait(_CACHE_REFRESH_INTERVAL)
+def _refresh_cache(*, initial_delay_sec: float = 0.0):
+    """Process-owned cache refresh loop with interruptible drain semantics."""
+    global _cache, _cache_ts, _refresh_thread
+    try:
+        if _stop_refresh.wait(max(0.0, float(initial_delay_sec))):
+            return
+        while not _stop_refresh.is_set():
+            try:
+                result = _compute_db_health()
+                with _cache_lock:
+                    _cache = result
+                    _cache_ts = time.time()
+            except Exception:
+                pass  # 刷新失败保留旧缓存, 下次重试
+            _stop_refresh.wait(_CACHE_REFRESH_INTERVAL)
+    finally:
+        with _refresh_thread_lock:
+            if _refresh_thread is threading.current_thread():
+                _refresh_thread = None
 
 
-def _start_background_refresh():
-    """启动后台缓存刷新线程 (daemon, 随进程退出)。"""
-    global _refresh_thread, _stop_refresh
-    if _refresh_thread is not None and _refresh_thread.is_alive():
-        return
-    _stop_refresh.clear()
-    _refresh_thread = threading.Thread(
-        target=_refresh_cache, daemon=True, name="db-health-refresh"
-    )
-    _refresh_thread.start()
+def _start_background_refresh(*, initial_delay_sec: float = 0.0) -> dict:
+    """Start the single process-owned refresh worker.
+
+    DuckDB/Python native work must not outlive interpreter teardown.  The
+    worker is therefore non-daemon and is explicitly joined from the FastAPI
+    lifespan shutdown path.
+    """
+    global _refresh_thread
+    with _refresh_thread_lock:
+        if _refresh_thread is not None and _refresh_thread.is_alive():
+            return {
+                "ok": True,
+                "status": "already_running",
+                "thread_alive": True,
+            }
+        _stop_refresh.clear()
+        thread = threading.Thread(
+            target=_refresh_cache,
+            kwargs={"initial_delay_sec": initial_delay_sec},
+            daemon=False,
+            name="db-health-refresh",
+        )
+        _refresh_thread = thread
+        thread.start()
+    return {"ok": True, "status": "started", "thread_alive": True}
+
+
+def _stop_background_refresh(*, timeout_sec: float = 30.0) -> dict:
+    """Reject further cache work and join the currently owned worker."""
+    _stop_refresh.set()
+    with _refresh_thread_lock:
+        thread = _refresh_thread
+    if thread is None:
+        return {"ok": True, "status": "idle", "thread_alive": False}
+    if thread is threading.current_thread():
+        return {"ok": False, "status": "self_join_rejected", "thread_alive": True}
+    thread.join(max(0.0, float(timeout_sec)))
+    alive = thread.is_alive()
+    return {
+        "ok": not alive,
+        "status": "timed_out" if alive else "completed",
+        "thread_alive": alive,
+    }
 
 
 @router.get("/db-health")
@@ -404,7 +446,7 @@ def db_health(_user: RequireUser) -> dict:
             checked_at = result.get("checked_at")
             result["served_at"] = now
             result["cache_age_sec"] = max(0.0, now - float(checked_at or now))
-            return result
+            return db_health_fact_payload(result, now=now)
 
     # 极端情况: 缓存尚未初始化 (刚启动, 预热还没跑完)
     # 此时同步计算一次 (阻塞 ~20s), 但仅发生一次
@@ -412,27 +454,23 @@ def db_health(_user: RequireUser) -> dict:
     with _cache_lock:
         _cache = result
         _cache_ts = now
-    return result
+    return db_health_fact_payload(result, now=now)
 
 
 # ── 启动事件：后台预热 + 持续刷新缓存 ──
 
 def _on_startup():
-    """延迟 3s 后启动后台缓存刷新线程。
+    """Start one interruptibly delayed cache worker owned by app lifespan."""
+    return _start_background_refresh(initial_delay_sec=3.0)
 
-    延迟确保 ctrader reactor 等重资源先初始化完毕。
-    之后每 55s 自动刷新，请求端永远走缓存（<1ms）。
-    """
-    def _delayed_start():
-        time.sleep(3)
-        _start_background_refresh()
 
-    t = threading.Thread(target=_delayed_start, daemon=True, name="db-health-init")
-    t.start()
+def _on_shutdown(*, timeout_sec: float = 30.0) -> dict:
+    return _stop_background_refresh(timeout_sec=timeout_sec)
 
 
 # 注册到 FastAPI app 的 startup 事件
 # (在 backend/app.py 中调用: db_health.register_startup(app))
 def register_startup(app):
     app.add_event_handler("startup", _on_startup)
+    app.add_event_handler("shutdown", _on_shutdown)
 

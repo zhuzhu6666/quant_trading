@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from backend.core.db import EXPERIMENTS_DB
+from backend.core.db import EXPERIMENTS_DB, prepare_experiments_store
 from research.model_promotion import ModelPromotionGate
 from research.offline_trainer import MODEL_TYPE
 
@@ -68,37 +68,7 @@ class ModelShadowQueue:
         return conn
 
     def _ensure_table(self) -> None:
-        conn = self._conn()
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS model_shadow_candidate (
-                    candidate_id TEXT PRIMARY KEY,
-                    model_type TEXT NOT NULL,
-                    artifact_path TEXT NOT NULL,
-                    artifact_sha256 TEXT NOT NULL,
-                    symbol TEXT DEFAULT 'XAUUSD+',
-                    timeframe TEXT DEFAULT 'M5',
-                    status TEXT DEFAULT 'queued',
-                    gate_decision TEXT DEFAULT '',
-                    gate_json TEXT DEFAULT '{}',
-                    registry_version_json TEXT DEFAULT 'null',
-                    note TEXT DEFAULT '',
-                    created_at REAL DEFAULT 0.0,
-                    updated_at REAL DEFAULT 0.0,
-                    UNIQUE(model_type, artifact_sha256, symbol, timeframe)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_model_shadow_candidate_status
-                ON model_shadow_candidate(status, updated_at)
-                """
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        prepare_experiments_store(self._db_path)
 
     def queue_from_gate(
         self,

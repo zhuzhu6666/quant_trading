@@ -10,6 +10,7 @@ from typing import Any
 
 from backend.core import db as state_db
 from backend.core.db import connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.state_store import validate_runtime_state_schema
 from backend.services.runtime_health_projection import RuntimeHealthProjectionService
 
 
@@ -123,19 +124,18 @@ def _record_offmarket_audit(
     }
     conn = _connect(db_path)
     try:
-        conn.execute(
-            _sql(
-                db_path,
-                """
-                CREATE TABLE IF NOT EXISTS offmarket_high_load_job_audit (
-                    audit_id TEXT PRIMARY KEY, job_name TEXT NOT NULL, status TEXT NOT NULL,
-                    session_status TEXT DEFAULT '', high_load_profile TEXT DEFAULT '',
-                    payload_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', error TEXT DEFAULT '',
-                    started_at REAL NOT NULL, finished_at REAL NOT NULL
-                )
-                """,
+        table_declaration = """
+            CREATE TABLE IF NOT EXISTS offmarket_high_load_job_audit (
+                audit_id TEXT PRIMARY KEY, job_name TEXT NOT NULL, status TEXT NOT NULL,
+                session_status TEXT DEFAULT '', high_load_profile TEXT DEFAULT '',
+                payload_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', error TEXT DEFAULT '',
+                started_at REAL NOT NULL, finished_at REAL NOT NULL
             )
-        )
+        """
+        if is_state_db_path(db_path):
+            validate_runtime_state_schema(conn, table_declaration)
+        else:
+            conn.execute(table_declaration)
         conn.execute(
             _sql(
                 db_path,

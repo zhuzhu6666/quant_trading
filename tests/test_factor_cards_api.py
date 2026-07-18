@@ -1,9 +1,11 @@
+import hashlib
 import json
 import sqlite3
 import time
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from alpha.registry_adapter import reset_shared
 from backend.api import learning as learning_api
@@ -14,8 +16,70 @@ from backend.services.parameter_template_validation import (
     ParameterTemplateValidationService,
     run_parameter_template_offline_validation,
 )
+from backend.services.research_evidence import ResearchEvidenceRejected
 from config import runtime_config as rc
 from research.learning.governor import RuleEvolutionGovernor
+
+
+def _valid_parameter_template_research_evidence() -> dict:
+    binding_inputs = {
+        "config_hash": "a" * 64,
+        "data_hash": "b" * 64,
+        "code_hash": "c" * 64,
+        "artifact_hash": "d" * 64,
+    }
+    binding_hash = hashlib.sha256(
+        json.dumps(
+            binding_inputs,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": "parity_replay_report.v1",
+        "contract": "parity_replay_contract.v1",
+        "status": "parity_verified",
+        "engine": "live_parity_replay_v1",
+        "evidence_class": "live_parity",
+        "live_parity": True,
+        "governance_eligible": True,
+        "deployable_candidate": True,
+        "bindings": {**binding_inputs, "binding_hash": binding_hash},
+        "binding_verification": {
+            "expected": dict(binding_inputs),
+            "required_expected_names": list(binding_inputs),
+            "missing_expected": [],
+            "verified": True,
+            "mismatches": [],
+        },
+        "data_source": {"source": "monthly_pit_bars", "point_in_time": True},
+        "causality": {
+            "closed_bar_only": True,
+            "next_bar_execution": True,
+            "native_bid_ask": True,
+        },
+        "components": {
+            name: {"reuse": "exact", "verified": True}
+            for name in (
+                "factor_frame",
+                "runtime_selector",
+                "streaming_factor_engine",
+                "normalizer",
+                "compositor",
+                "execution_gate",
+                "risk_policy",
+                "position_path_metrics",
+                "safety_arbitration",
+                "supervisor",
+                "trailing",
+                "protection_planner",
+                "cost_model",
+                "lifecycle",
+            )
+        },
+        "diagnostic_reasons": [],
+    }
 
 
 def _seed_factor_card_state(db_path: str) -> None:
@@ -1176,6 +1240,7 @@ def test_parameter_template_offline_validation_runs_backtest_and_returns_plan(tm
     monkeypatch.setattr(
         "backend.services.parameter_template_validation.run_backtest",
         lambda params, cb: {
+            **_valid_parameter_template_research_evidence(),
             "rows": [],
             "total_runs": 12,
             "elapsed_seconds": 0.01,
@@ -1333,6 +1398,7 @@ def test_parameter_template_offline_candidates_endpoint_lists_release_candidates
             "config": {"n_folds": 3},
         },
         validation_report_path=str(tmp_path / "report.json"),
+        research_evidence=_valid_parameter_template_research_evidence(),
         recommendation_context={
             "source": "parameter_template_recommendation",
             "recommendation_id": "ptr_candidate_list",
@@ -1413,6 +1479,7 @@ def test_parameter_template_release_candidate_review_release_and_rollback(tmp_pa
             "config": {"n_folds": 3},
         },
         validation_report_path=str(tmp_path / "report.json"),
+        research_evidence=_valid_parameter_template_research_evidence(),
     )
 
     reviewed = validation_service.review_release_candidate(
@@ -1469,7 +1536,7 @@ def test_parameter_template_release_candidate_review_release_and_rollback(tmp_pa
     assert all(row["source"] == "parameter_template" for row in events[-4:])
 
 
-def test_parameter_template_release_candidate_deploy_materializes_snapshot(tmp_path):
+def test_parameter_template_legacy_candidate_requires_revalidation_before_deploy(tmp_path):
     db_path = str(tmp_path / "state.db")
     reset_shared()
     rc.reset_for_tests()
@@ -1533,9 +1600,46 @@ def test_parameter_template_release_candidate_deploy_materializes_snapshot(tmp_p
     finally:
         conn.close()
 
+    legacy = validation_service.get_release_candidate("ptrc_legacy_snapshot")
+    assert legacy is not None
+    assert legacy["status"] == "legacy_quarantined"
+    assert legacy["require_revalidation"] is True
+    with pytest.raises(ResearchEvidenceRejected):
+        validation_service.deploy_release_candidate(
+            candidate_id="ptrc_legacy_snapshot",
+            note="deploy legacy snapshot",
+        )
+    assert template_service.get_template(template_id=template_id) is None
+
+    refreshed = validation_service.register_release_candidate(
+        factor_id="rsi_14",
+        template_id=template_id,
+        regime_key="",
+        boundary={
+            "recommended_scope": "offline_deep",
+            "reasons": ["parameter_delta_too_large"],
+            "target_template": {**snapshot, "template_id": template_id},
+        },
+        walk_forward={
+            "passed": True,
+            "candidate_summary": {"avg_ic": 0.11},
+            "baseline_summary": {"avg_ic": 0.08},
+            "config": {"n_folds": 3},
+        },
+        validation_report_path=str(tmp_path / "verified_report.json"),
+        template_snapshot={**snapshot, "template_id": template_id},
+        research_evidence=_valid_parameter_template_research_evidence(),
+    )
+    assert refreshed["candidate_id"] == "ptrc_legacy_snapshot"
+    assert refreshed["status"] == "pending_review"
+    validation_service.review_release_candidate(
+        candidate_id="ptrc_legacy_snapshot",
+        status="approved",
+        note="revalidated",
+    )
     deployed = validation_service.deploy_release_candidate(
         candidate_id="ptrc_legacy_snapshot",
-        note="deploy legacy snapshot",
+        note="deploy revalidated snapshot",
     )
     materialized = template_service.get_template(template_id=template_id)
 
@@ -1600,6 +1704,7 @@ def test_parameter_template_release_candidate_api_endpoints_work(tmp_path, monke
             "config": {"n_folds": 3},
         },
         validation_report_path=str(tmp_path / "report_api.json"),
+        research_evidence=_valid_parameter_template_research_evidence(),
     )
 
     reviewed = learning_api.review_parameter_template_offline_candidate(
@@ -1658,6 +1763,7 @@ def test_learning_summary_includes_parameter_template_candidate_stats(tmp_path):
         },
         validation_report_path=str(tmp_path / "summary_report.json"),
         recommendation_context={"source": "parameter_template_recommendation", "recommendation_id": "ptr_summary_rsi"},
+        research_evidence=_valid_parameter_template_research_evidence(),
     )
     validation_service.register_release_candidate(
         factor_id="adx",
@@ -1672,6 +1778,7 @@ def test_learning_summary_includes_parameter_template_candidate_stats(tmp_path):
         },
         validation_report_path=str(tmp_path / "summary_report_2.json"),
         recommendation_context={"source": "parameter_template_recommendation", "recommendation_id": "ptr_summary_adx"},
+        research_evidence=_valid_parameter_template_research_evidence(),
     )
 
     class BoundValidationService(ParameterTemplateValidationService):
@@ -1856,6 +1963,7 @@ def test_factor_card_template_state_reflects_release_candidate_status(tmp_path):
             "config": {"n_folds": 3},
         },
         validation_report_path=str(tmp_path / "card_state_report.json"),
+        research_evidence=_valid_parameter_template_research_evidence(),
     )
 
     service = FactorCardService(db_path)
@@ -1922,6 +2030,7 @@ def test_factor_card_governance_state_includes_candidate_trace(tmp_path):
             "config": {"n_folds": 3},
         },
         validation_report_path=str(tmp_path / "candidate_trace_report.json"),
+        research_evidence=_valid_parameter_template_research_evidence(),
         recommendation_context={
             "source": "parameter_template_recommendation",
             "recommendation_id": "ptr_factor_card_trace",
@@ -1984,6 +2093,7 @@ def test_learning_lifecycle_includes_parameter_template_candidate_events(tmp_pat
             "config": {"n_folds": 3},
         },
         validation_report_path=str(tmp_path / "lifecycle_report.json"),
+        research_evidence=_valid_parameter_template_research_evidence(),
         recommendation_context={
             "source": "parameter_template_recommendation",
             "recommendation_id": "ptr_lifecycle_rsi",
@@ -2064,6 +2174,7 @@ def test_offline_candidates_endpoint_includes_trace_locator(tmp_path, monkeypatc
             "config": {"n_folds": 3},
         },
         validation_report_path=str(tmp_path / "offline_trace_report.json"),
+        research_evidence=_valid_parameter_template_research_evidence(),
     )
 
     monkeypatch.setattr(learning_api, "ParameterTemplateValidationService", BoundParameterTemplateValidationService)

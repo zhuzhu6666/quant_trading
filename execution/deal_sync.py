@@ -16,10 +16,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Mapping, MutableMapping
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,31 @@ logger = logging.getLogger(__name__)
 
 _DEAL_WINDOW_SEC = 3600  # 每次拉最近 1 小时成交（足够覆盖平仓检测间隔）
 _MAX_ROWS = 100          # 每批最多 100 条
+
+
+@dataclass(frozen=True)
+class DealFetchResult:
+    """Explicit broker-deal fetch outcome used by safety/recovery callers.
+
+    The compatibility ``fetch_deals_since`` API still returns a list, but an
+    empty list cannot distinguish an authoritative empty broker response from
+    transport failure.  Recovery code must use this contract whenever that
+    distinction affects diagnostics or latch release.
+    """
+
+    status: str
+    deals: tuple[dict, ...]
+    observed_at: float
+    error_code: str = ""
+    error_message: str = ""
+
+    @property
+    def success(self) -> bool:
+        return self.status == "success"
+
+    @property
+    def empty(self) -> bool:
+        return self.success and not self.deals
 
 
 def _conn_is_pg(conn) -> bool:
@@ -43,13 +69,64 @@ def _execute(conn, sql: str, params=None):
     return conn.execute(_sql(conn, sql), params)
 
 
+def fetch_deals_since_result(
+    bridge: Any,
+    from_ts: int | None = None,
+    to_ts: int | None = None,
+    max_rows: int = _MAX_ROWS,
+) -> DealFetchResult:
+    """Fetch broker deals without collapsing failure into valid-empty."""
+
+    now = int(time.time())
+    from_ts = from_ts or (now - _DEAL_WINDOW_SEC)
+    to_ts = to_ts or now
+    observed_at = time.time()
+    if bridge is None or not bool(getattr(bridge, "is_connected", False)):
+        logger.warning("[DealSync] bridge not connected, cannot fetch deals")
+        return DealFetchResult(
+            status="failed",
+            deals=(),
+            observed_at=observed_at,
+            error_code="bridge_not_connected",
+            error_message="cTrader bridge is not connected",
+        )
+    try:
+        raw_deals = bridge.get_deals(
+            from_ts=from_ts,
+            to_ts=to_ts,
+            max_rows=max_rows,
+        )
+        if raw_deals is None:
+            raise RuntimeError("broker_deal_response_missing")
+        deals = tuple(dict(item) for item in raw_deals)
+        logger.info(
+            "[DealSync] fetched %d deals (from_ts=%s)",
+            len(deals),
+            time.strftime("%Y-%m-%d %H:%M", time.gmtime(from_ts)),
+        )
+        return DealFetchResult(
+            status="success",
+            deals=deals,
+            observed_at=time.time(),
+        )
+    except Exception as exc:
+        logger.error("[DealSync] fetch_deals failed: %s", exc)
+        return DealFetchResult(
+            status="failed",
+            deals=(),
+            observed_at=time.time(),
+            error_code="broker_deal_fetch_failed",
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
+
+
 def fetch_deals_since(
     bridge: Any,
     from_ts: int | None = None,
     to_ts: int | None = None,
     max_rows: int = _MAX_ROWS,
 ) -> list[dict]:
-    """从 cTrader 拉成交记录。
+    """Compatibility list API for callers that do not need fetch authority.
 
     Args:
         bridge: CTraderBridge 实例 (已连接).
@@ -60,20 +137,14 @@ def fetch_deals_since(
     Returns:
         get_deals() 返回的 list[dict].
     """
-    now = int(time.time())
-    from_ts = from_ts or (now - _DEAL_WINDOW_SEC)
-    to_ts = to_ts or now
-    if not bridge.is_connected:
-        logger.warning("[DealSync] bridge not connected, cannot fetch deals")
-        return []
-    try:
-        deals = bridge.get_deals(from_ts=from_ts, to_ts=to_ts, max_rows=max_rows)
-        logger.info("[DealSync] fetched %d deals (from_ts=%s)", len(deals),
-                    time.strftime("%Y-%m-%d %H:%M", time.gmtime(from_ts)))
-        return deals
-    except Exception as e:
-        logger.error("[DealSync] fetch_deals failed: %s", e)
-        return []
+    return list(
+        fetch_deals_since_result(
+            bridge,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            max_rows=max_rows,
+        ).deals
+    )
 
 
 def store_deals(
@@ -148,6 +219,8 @@ def store_deals(
 def find_close_deal(
     conn: sqlite3.Connection,
     position_id: int,
+    *,
+    min_exec_timestamp: float = 0.0,
 ) -> dict | None:
     """按 position_id 聚合已存储的平仓成交记录.
 
@@ -170,7 +243,16 @@ def find_close_deal(
     ).fetchall()
     if not rows:
         return None
-    return _aggregate_close_details(rows)
+    detail = _aggregate_close_details(rows)
+    if float(detail.get("exec_timestamp") or 0.0) < max(
+        0.0,
+        float(min_exec_timestamp or 0.0),
+    ):
+        # Existing rows may represent an earlier partial close.  They do not
+        # prove the final close observed after the position's last open broker
+        # snapshot, so force a fresh deal fetch instead of returning stale PnL.
+        return None
+    return detail
 
 
 def _aggregate_close_details(rows: list[sqlite3.Row]) -> dict:
@@ -206,6 +288,7 @@ def sync_close_deal(
     from_ts: int | None = None,
     to_ts: int | None = None,
     max_rows: int = _MAX_ROWS,
+    min_exec_timestamp: float = 0.0,
 ) -> dict | None:
     """一站式: 为单个平仓 position_id 获取真实 PnL.
 
@@ -226,15 +309,28 @@ def sync_close_deal(
         或 None (获取失败).
     """
     # 先查本地
-    cd = find_close_deal(conn, position_id)
+    cd = find_close_deal(
+        conn,
+        position_id,
+        min_exec_timestamp=min_exec_timestamp,
+    )
     if cd is not None:
         return _cd_to_real_pnl(cd)
 
     # 本地没有 → 拉最近成交
-    deals = fetch_deals_since(bridge, from_ts=from_ts, to_ts=to_ts, max_rows=max_rows)
-    if deals:
-        store_deals(conn, deals)
-        cd = find_close_deal(conn, position_id)
+    fetch_result = fetch_deals_since_result(
+        bridge,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        max_rows=max_rows,
+    )
+    if fetch_result.deals:
+        store_deals(conn, list(fetch_result.deals))
+        cd = find_close_deal(
+            conn,
+            position_id,
+            min_exec_timestamp=min_exec_timestamp,
+        )
         if cd is not None:
             return _cd_to_real_pnl(cd)
 
@@ -250,6 +346,10 @@ def sync_close_deals_batch(
     from_ts: int | None = None,
     to_ts: int | None = None,
     max_rows: int = _MAX_ROWS,
+    min_exec_timestamp_by_position: Mapping[int, float] | None = None,
+    required_closed_volume_delta_by_position: Mapping[int, float] | None = None,
+    baseline_close_cursor_by_position: Mapping[int, Mapping[str, Any]] | None = None,
+    observed_close_cursor_out: MutableMapping[int, dict[str, Any]] | None = None,
 ) -> dict[int, dict]:
     """批量版 sync_close_deal.
 
@@ -268,21 +368,114 @@ def sync_close_deals_batch(
     result: dict[int, dict] = {}
     need_fetch: set[int] = set()
 
+    minimums = {
+        int(pid): max(0.0, float(value or 0.0))
+        for pid, value in dict(min_exec_timestamp_by_position or {}).items()
+    }
+    required_deltas = {
+        int(pid): max(0.0, float(value or 0.0))
+        for pid, value in dict(
+            required_closed_volume_delta_by_position or {}
+        ).items()
+    }
+    supplied_cursors = {
+        int(pid): dict(cursor or {})
+        for pid, cursor in dict(
+            baseline_close_cursor_by_position or {}
+        ).items()
+    }
+    baselines: dict[int, dict[str, Any]] = {}
     for pid in position_ids:
-        cd = find_close_deal(conn, pid)
-        if cd is not None:
+        observed_baseline = find_close_deal(conn, pid) or {}
+        if observed_close_cursor_out is not None:
+            observed_close_cursor_out[int(pid)] = {
+                "baseline_cursor_available": True,
+                "baseline_deal_ids": list(
+                    observed_baseline.get("deal_ids") or []
+                ),
+                "baseline_closed_volume": float(
+                    observed_baseline.get("closed_volume") or 0.0
+                ),
+                "required_closed_volume_delta": float(
+                    required_deltas.get(int(pid), 0.0)
+                ),
+            }
+        supplied = supplied_cursors.get(int(pid))
+        baseline = (
+            {
+                "deal_ids": list(
+                    supplied.get("baseline_deal_ids")
+                    or supplied.get("deal_ids")
+                    or []
+                ),
+                "closed_volume": float(
+                    supplied.get("baseline_closed_volume")
+                    or supplied.get("closed_volume")
+                    or 0.0
+                ),
+            }
+            if supplied is not None
+            and supplied.get("baseline_cursor_available", True) is not False
+            else observed_baseline
+        )
+        baselines[int(pid)] = baseline
+        cd = find_close_deal(
+            conn,
+            pid,
+            min_exec_timestamp=minimums.get(int(pid), 0.0),
+        )
+        if cd is not None and required_deltas.get(int(pid), 0.0) <= 0.0:
             result[pid] = _cd_to_real_pnl(cd)
         else:
             need_fetch.add(pid)
 
     # 2. 缺失的拉取
     if need_fetch:
-        deals = fetch_deals_since(bridge, from_ts=from_ts, to_ts=to_ts, max_rows=max_rows)
-        if deals:
-            store_deals(conn, deals)
+        fetch_result = fetch_deals_since_result(
+            bridge,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            max_rows=max_rows,
+        )
+        if fetch_result.deals:
+            store_deals(conn, list(fetch_result.deals))
+        if not fetch_result.success:
+            logger.warning(
+                "[DealSync] batch broker fetch failed code=%s error=%s",
+                fetch_result.error_code,
+                fetch_result.error_message,
+            )
         for pid in list(need_fetch):
-            cd = find_close_deal(conn, pid)
-            if cd is not None:
+            cd = find_close_deal(
+                conn,
+                pid,
+                min_exec_timestamp=minimums.get(int(pid), 0.0),
+            )
+            required_delta = required_deltas.get(int(pid), 0.0)
+            baseline = baselines.get(int(pid)) or {}
+            baseline_ids = {
+                int(item)
+                for item in list(baseline.get("deal_ids") or [])
+                if int(item or 0) > 0
+            }
+            observed_ids = {
+                int(item)
+                for item in list((cd or {}).get("deal_ids") or [])
+                if int(item or 0) > 0
+            }
+            closed_volume_delta = max(
+                0.0,
+                float((cd or {}).get("closed_volume") or 0.0)
+                - float(baseline.get("closed_volume") or 0.0),
+            )
+            delta_proven = bool(
+                required_delta <= 0.0
+                or (
+                    observed_ids - baseline_ids
+                    and closed_volume_delta + 1e-9 >= required_delta
+                )
+            )
+            if cd is not None and delta_proven:
                 result[pid] = _cd_to_real_pnl(cd)
                 need_fetch.discard(pid)
 

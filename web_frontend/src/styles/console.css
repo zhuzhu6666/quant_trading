@@ -236,6 +236,30 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .dashboard-header p { max-width: none; margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .eyebrow { margin-bottom: 2px; color: var(--primary); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: none; }
 .header-status, .page-header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; min-width: 0; flex-wrap: wrap; }
+.fact-boundary { min-width: 0; }
+.fact-boundary-note, .fact-boundary-unknown { display: flex; align-items: center; gap: 5px; color: var(--warn, #a16207); font-size: 11px; }
+.fact-boundary-unknown { min-height: 34px; padding: 7px 9px; border: 1px solid color-mix(in srgb, var(--warn, #a16207) 45%, var(--line)); border-radius: 7px; background: color-mix(in srgb, var(--warn, #a16207) 8%, var(--surface)); }
+.fact-boundary-stale > :last-child { opacity: .82; }
+.fact-boundary-stale .status-ok,
+.fact-boundary-stale .data-badge-ok,
+.fact-unverified .status-ok,
+.fact-unverified .data-badge-ok {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--line));
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+}
+.fact-boundary-stale .compact-metric-ok,
+.fact-unverified .compact-metric-ok {
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--line));
+}
+.fact-boundary-stale .stat-ok,
+.fact-unverified .stat-ok {
+  border-left-color: var(--warn);
+}
+.fact-boundary-stale .stat-ok::before,
+.fact-unverified .stat-ok::before {
+  background: var(--warn);
+}
 
 .panel, .stat-tile, .trading-toolbar, .mobile-card-table tr {
   background: #fff;
@@ -389,6 +413,12 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .confirm-copy p { margin: 6px 28px 0 0; color: var(--muted); font-size: 13px; }
 .confirm-close { position: absolute; top: 8px; right: 8px; display: grid; width: 36px; height: 36px; place-items: center; color: var(--muted); background: transparent; border: 0; border-radius: 6px; }
 .confirm-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.step-up-form { grid-column: 1 / -1; display: grid; gap: 8px; }
+.step-up-form > label { color: var(--ink); font-size: 12px; font-weight: 700; }
+.step-up-form .password-field input { min-height: 44px; font-size: 16px; }
+.step-up-form .password-field button { width: 44px; height: 44px; }
+.step-up-form .confirm-actions { grid-column: auto; margin-top: 2px; }
+.step-up-form .error-text { margin: 0; }
 
 .table-wrap { overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 7px; box-shadow: none; }
 table { width: 100%; min-width: 680px; border-collapse: collapse; }

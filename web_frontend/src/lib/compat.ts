@@ -15,8 +15,6 @@ const WRAPPER_KEYS = [
   "snapshot",
 ] as const;
 
-const INDEX_KEYS = new Set<string>(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
-
 export const isRecord = (value: unknown): value is AnyRecord =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
@@ -46,29 +44,10 @@ function getByPath(input: AnyRecord, path: string): unknown {
   return current;
 }
 
-function pickValueInternal(input: unknown, keys: readonly string[], visited: Set<object>): unknown {
-  if (input === null || input === undefined) {
-    return undefined;
-  }
-
-  if (Array.isArray(input)) {
-    for (const item of input) {
-      const value = pickValueInternal(item, keys, visited);
-      if (value !== undefined && value !== null) {
-        return value;
-      }
-    }
-    return undefined;
-  }
-
+function pickDirectValue(input: unknown, keys: readonly string[]): unknown {
   if (!isRecord(input)) {
     return undefined;
   }
-
-  if (visited.has(input)) {
-    return undefined;
-  }
-  visited.add(input);
 
   for (const key of keys) {
     const candidate = getByPath(input, key);
@@ -82,35 +61,16 @@ function pickValueInternal(input: unknown, keys: readonly string[], visited: Set
       }
     }
   }
-
-  for (const wrapper of WRAPPER_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(input, wrapper)) {
-      const child = input[wrapper];
-      const fromWrapper = pickValueInternal(child, keys, visited);
-      if (fromWrapper !== undefined && fromWrapper !== null) {
-        return fromWrapper;
-      }
-    }
-  }
-
-  for (const [k, v] of Object.entries(input)) {
-    if (!v) {
-      continue;
-    }
-    if (INDEX_KEYS.has(k)) {
-      continue;
-    }
-    const nested = pickValueInternal(v, keys, visited);
-    if (nested !== undefined && nested !== null) {
-      return nested;
-    }
-  }
-
   return undefined;
 }
 
 export const pick = (input: unknown, keys: readonly string[]): unknown => {
-  return pickValueInternal(input, keys, new Set());
+  // Fact-aware pages must bind to the endpoint's declared shape.  Searching
+  // arbitrary descendants for generic names such as ``status``, ``ok`` or
+  // ``items`` can accidentally promote an unrelated nested advisory into the
+  // endpoint's visible state.  Callers may list compatibility aliases or an
+  // explicit dotted path, but every lookup remains rooted at this endpoint.
+  return pickDirectValue(input, keys);
 };
 
 export const pickString = (input: unknown, keys: readonly string[], fallback = ""): string => {

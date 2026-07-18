@@ -48,6 +48,11 @@ class FactorHealthStatus:
     n_obs: int = 0
     rolling_ic: float = 0.0
     n_obs_needed: int = 100
+    # Persisted health observations carry their source timestamp so runtime
+    # admission can reject stale ACTIVE factors.  In-memory evaluations leave
+    # this at zero until they are persisted and are therefore non-authoritative
+    # for live lifecycle admission.
+    updated_at: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)

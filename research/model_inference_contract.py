@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import EXPERIMENTS_DB
+from backend.core.db import EXPERIMENTS_DB, prepare_experiments_store
 from research.features.evidence_contract import stable_hash
 from research.model_shadow_queue import ModelShadowQueue
 from research.offline_trainer import _factor_features, _predict_score
@@ -67,32 +67,7 @@ class ModelInferenceContract:
         return conn
 
     def _ensure_table(self) -> None:
-        conn = self._conn()
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS model_inference_audit (
-                    inference_id TEXT PRIMARY KEY,
-                    candidate_id TEXT NOT NULL,
-                    model_type TEXT NOT NULL,
-                    mode TEXT DEFAULT 'advisory',
-                    score REAL DEFAULT 0.0,
-                    prediction INTEGER DEFAULT 0,
-                    payload_json TEXT DEFAULT '{}',
-                    result_json TEXT DEFAULT '{}',
-                    created_at REAL DEFAULT 0.0
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_model_inference_candidate
-                ON model_inference_audit(candidate_id, created_at)
-                """
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        prepare_experiments_store(self._db_path)
 
     def score(
         self,

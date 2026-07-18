@@ -18,7 +18,7 @@ Linux 服务器后端必须使用仓库内独立虚拟环境，避免污染 Code
 
 ```bash
 cd /home/ubuntu/quant_trading
-./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m pip install --require-hashes -r requirements.txt
 ./.venv/bin/python -m backend
 ```
 
@@ -44,8 +44,27 @@ cd C:\Users\zhu\quant_trading
 ```env
 QUANT_JWT_SECRET=至少 32 字节随机字符串
 QUANT_AUTH_USER=登录用户名
-QUANT_PASSWORD_HASH=登录密码的 SHA256 十六进制摘要
+QUANT_PASSWORD_HASH=登录密码的 Argon2id 编码摘要
+QUANT_AUTH_ALLOW_LEGACY_SHA256=0
+QUANT_AUTH_ALLOW_LEGACY_ACCESS_TOKEN=0
+QUANT_AUTH_ALLOW_URL_JWT=0
+QUANT_AUTH_REVOCATION_STATE_PATH=data/safety/auth_session_revocations.jsonl
 ```
+
+可在服务器虚拟环境内交互式生成 Argon2id 摘要（命令只读取密码并输出摘要，
+不要把明文密码写入 shell history）：
+
+```bash
+.venv/bin/python -c "from argon2 import PasswordHasher; import getpass; print(PasswordHasher().hash(getpass.getpass('Password: ')))"
+```
+
+旧 SHA-256 密码摘要、旧 access token 和 URL JWT 只允许在客户端迁移窗口内分别
+通过上述三个兼容开关显式开启；新部署保持为 `0`。
+logout 会在提交 PostgreSQL `auth_session` family 撤销前 fsync 上述本地投影；
+该文件必须位于持久磁盘且仅由 backend 用户读写，不能放在会随重启清空的临时目录。
+`/api/auth/step-up` 不创建新 refresh session：它只在当前 active `sid/fid` 行内事务更新
+`auth_time`，提交成功后签发新的 15 分钟 access token；PostgreSQL 写失败时 start/unlock
+继续 fail-closed，stop/emergency 不经过该入口。
 
 默认监听:
 
@@ -80,7 +99,34 @@ sudo systemctl enable --now quant-learning-worker.service
 ./.venv/bin/python scripts/learning_worker.py --run-once
 ```
 
-worker 启动时同样会读取 `settings.yaml` base config，恢复 PostgreSQL `runtime_config_overlay`，并写 `learning_worker_startup` snapshot。常驻模式会调度 hourly evolution、默认每 15 分钟的 `factor_governance_autonomous`、AWE、feature engineering 和盘外模型任务。
+worker 启动时同样会读取 `settings.yaml` base config，验证 PostgreSQL `runtime_config_overlay` 的 committed mutation/hash authority（历史空 mutation 必须具有完整的 `legacy_authority_json` operator review），恢复通过验证的投影，并写 `learning_worker_startup` snapshot。缺失/悬空 authority 会 fail closed；不得用来源名或 coordinator off 模式绕过。常驻模式会调度 hourly evolution、默认每 15 分钟的 `factor_governance_autonomous`、AWE、feature engineering 和盘外模型任务。
+
+### 持久化研究任务 worker（发布开关默认关闭）
+
+`backtest/discover/tuning/ab_test/external_refresh/sync/factor_health/parameter_template_validation`
+八类重任务的 PostgreSQL leased queue 由独立 `quant-job-worker.service` 执行，不属于
+backend 或 learning worker。API/学习服务只提交可序列化参数，不把 closure 或 daemon
+thread 留在进程内。当前发布配置必须
+保持 `QUANT_PG_JOB_QUEUE_V2_ENABLED=0`；安装 unit 不等于允许切换：
+
+```bash
+sudo cp /home/ubuntu/quant_trading/deployment/quant-job-worker.service /etc/systemd/system/quant-job-worker.service
+sudo systemctl daemon-reload
+sudo systemctl disable --now quant-job-worker.service
+```
+
+只有在 additive migration、`state_schema_migrate.py --check`、queue 的 PostgreSQL
+集成测试、现有 heavy job 排空和受控观察都通过后，才可通过发布级 systemd override
+把该静态开关改为 `1`，再启动服务。不要从 RuntimeConfig、治理 overlay 或通用
+`/api/config` 热改该开关；回退时先停止 worker，再将开关恢复为 `0`。迁移前遗留
+job 固定为 `handler_version=legacy`，不会被新 worker 自动 claim。
+
+静态开关关闭期间的兼容同步任务使用 backend 进程显式所有、最多两个 worker 的
+`JobManager` executor；它不借用 asyncio default executor，并由 FastAPI lifespan 在
+退出时停止准入、cancel 后 join。持久队列开关开启后，八类重任务的 API 投递不会启动
+这个本地 executor。独立 worker 在构造 queue/claim 前会先完整校验
+`config/settings.yaml`，再执行只读 state schema 最低版本门禁；任一失败均非零退出，
+不会以空默认配置或旧 schema 继续领取任务。
 
 ---
 
@@ -203,9 +249,29 @@ python scripts/refresh_external_data.py --source cot --force
 启动前或排障时优先执行:
 
 ```bash
-# 标准修复 + 体检
+# PostgreSQL state schema：默认只读检查，发布时显式 apply
+python scripts/state_schema_migrate.py --check
+python scripts/state_schema_migrate.py --apply --runner-id release
+
+# canonical experiments.db：默认只读检查，发布时显式 apply
+python scripts/experiments_schema_migrate.py --check
+python scripts/experiments_schema_migrate.py --apply
+
+# broader 数据库兼容修复 + 体检
 python scripts/db_doctor.py --repair
 ```
+
+backend、learning worker 和模型构造器不会在启动/首次调用时补建 schema；缺对象必须
+先由上述 operator migration 修复。非 canonical SQLite 路径只用于隔离 fixture/offline
+工具，可保留自初始化行为。
+
+v9 发布在重启 backend/worker 前还必须完成 overlay authority preflight：读取当前
+`overlay_hash`、`mutation_id` 和全部顶层 key。非空 mutation 必须能追到
+`committed/current` intent 及 matching config/domain hash；历史空 mutation 只能由明确
+`operator:*` 身份调用 `RuntimeConfigOverlayService.review_legacy_quarantine()`，并且中央
+before/after 分类器必须把每个复核 key 判为 `risk_tightening`。复核绑定精确 hash，部分
+复核不会放行；遇到扩张/未知 key 不得伪造 backfill，应保持 no-new-risk，在 typed
+Coordinator mutation 下重建或显式清理 overlay 后再受控重启。
 
 这个命令会检查:
 

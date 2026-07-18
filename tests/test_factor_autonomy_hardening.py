@@ -9,7 +9,10 @@ from backend.services.factor_catalog import latest_factor_catalog_snapshot, pers
 from backend.services.factor_redundancy import RedundancyDetector
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
-from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+from backend.services.runtime_config_overlay import (
+    RuntimeConfigOverlayAuthorityError,
+    RuntimeConfigOverlayService,
+)
 from backend.services.runtime_config_startup import restore_runtime_config_on_startup
 from config import runtime_config as rc
 from config.runtime_config import RuntimeConfig
@@ -46,14 +49,17 @@ def test_runtime_config_overlay_persists_allowed_autonomous_patch_and_restores(t
     assert "risk_per_trade" not in latest["overlay"]
     assert latest["overlay"]["position_supervisor_template_id"] == "position_supervisor:conservative.v1"
 
-    restored = service.restore_on_startup(RuntimeConfig())
-    assert restored["restored"] is True
-    restored_cfg = restored["config"]
-    assert restored_cfg.factor_signal_config["auto_alpha"]["role"] == "alpha"
-    assert restored_cfg.factor_portfolio_weights["auto_alpha"] == 0.22
-    assert restored_cfg.extra["active_parameter_templates"]["rsi_14"] == "fast_mean_revert"
-    assert restored_cfg.position_supervisor_template_id == "position_supervisor:conservative.v1"
-    assert "risk_per_trade" not in restored_cfg.extra
+    with pytest.raises(RuntimeConfigOverlayAuthorityError) as caught:
+        service.restore_on_startup(RuntimeConfig())
+    quarantined_cfg = caught.value.quarantined_config
+    assert quarantined_cfg is not None
+    assert quarantined_cfg.factor_signal_config["auto_alpha"]["role"] == "alpha"
+    assert quarantined_cfg.factor_portfolio_weights["auto_alpha"] == 0.22
+    assert quarantined_cfg.extra["active_parameter_templates"]["rsi_14"] == "fast_mean_revert"
+    assert quarantined_cfg.position_supervisor_template_id == "position_supervisor:conservative.v1"
+    assert "risk_per_trade" not in quarantined_cfg.extra
+    assert caught.value.report["new_risk_authorized"] is False
+    assert caught.value.report["quarantine_projection"] == "legacy_behavior_preserved"
 
 
 def test_runtime_config_overlay_replace_clears_superseded_autonomous_keys(tmp_path):
@@ -120,12 +126,24 @@ def test_runtime_config_overlay_refuses_pytest_write_to_production_store(monkeyp
 def test_startup_restore_applies_overlay_and_writes_snapshot(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
-    service = RuntimeConfigOverlayService(db_path)
-    service.apply_patch(
-        {"factor_portfolio_weights": {"rsi_14": 0.42}},
-        source="factor_governance_update_weight",
-        run_id="run_overlay",
+    from backend.services.governance_mutation_coordinator import (
+        GovernanceMutationCoordinator,
+        GovernanceMutationPlan,
     )
+
+    rc.register_overlay_base(RuntimeConfig(), db_path)
+    committed = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={"factor_portfolio_weights": {"rsi_14": 0.42}},
+            source="factor_governance_update_weight",
+            action="update_weight",
+            control_surface="factor_weight",
+            scope_type="factor_weight",
+            scope_key="rsi_14",
+            run_id="run_overlay",
+        )
+    )
+    assert committed["ok"] is True
     rc.reset_for_tests()
 
     restored = restore_runtime_config_on_startup(

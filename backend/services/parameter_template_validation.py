@@ -6,6 +6,7 @@ import sqlite3
 import time
 import uuid
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,14 @@ from backend.services.factor_cards import clear_factor_card_cache
 from backend.services.parameter_templates import (
     ParameterTemplateService,
     clear_parameter_template_recommendation_cache,
+)
+from backend.services.research_evidence import (
+    RESEARCH_EVIDENCE_POLICY_VERSION,
+    ResearchEvidenceRejected,
+    ResearchEvidenceVerdict,
+    evaluate_research_evidence,
+    has_research_trust_metadata,
+    require_executable_research_evidence,
 )
 from research.learning.governor import RuleEvolutionGovernor
 
@@ -120,6 +129,122 @@ class ParameterTemplateValidationService:
             return ParameterTemplateService()
 
     @staticmethod
+    def _candidate_research_evidence(candidate: dict[str, Any]) -> dict[str, Any]:
+        summary = dict(candidate.get("validation_summary") or {})
+        evidence = summary.get("research_evidence")
+        return dict(evidence) if isinstance(evidence, dict) else {}
+
+    @staticmethod
+    def _research_evidence_gate(
+        summary: dict[str, Any],
+    ) -> tuple[dict[str, Any], ResearchEvidenceVerdict]:
+        evidence = summary.get("research_evidence")
+        evidence = dict(evidence) if isinstance(evidence, dict) else {}
+        recorded_policy_version = str(
+            summary.get("research_evidence_policy_version") or ""
+        ).strip()
+        verdict = evaluate_research_evidence(
+            evidence,
+            executable_use="parameter_template_release",
+        )
+        legacy_record = recorded_policy_version != RESEARCH_EVIDENCE_POLICY_VERSION
+        if legacy_record:
+            blocker = "candidate_research_policy_marker_missing"
+            verdict = replace(
+                verdict,
+                allowed=False,
+                reason=blocker,
+                blockers=tuple(dict.fromkeys((blocker, *verdict.blockers))),
+            )
+        has_metadata = has_research_trust_metadata(evidence)
+        state = (
+            "verified"
+            if verdict.allowed
+            else "legacy_quarantined"
+            if legacy_record
+            else "diagnostic_only"
+            if has_metadata
+            else "require_revalidation"
+        )
+        gate = {
+            "policy_version": RESEARCH_EVIDENCE_POLICY_VERSION,
+            "recorded_policy_version": recorded_policy_version,
+            "state": state,
+            "allowed": bool(verdict.allowed),
+            "legacy_record": legacy_record,
+            "legacy_quarantined": not verdict.allowed,
+            "require_revalidation": not verdict.allowed,
+            "reason": verdict.reason,
+            "blockers": list(verdict.blockers),
+        }
+        return gate, verdict
+
+    @classmethod
+    def _decorate_release_candidate(cls, item: dict[str, Any]) -> dict[str, Any]:
+        candidate = dict(item)
+        summary = dict(candidate.get("validation_summary") or {})
+        gate, _verdict = cls._research_evidence_gate(summary)
+        summary["research_evidence_gate"] = gate
+        candidate["validation_summary"] = summary
+        candidate["research_evidence_gate"] = gate
+        candidate["legacy_quarantined"] = bool(gate["legacy_quarantined"])
+        candidate["require_revalidation"] = bool(gate["require_revalidation"])
+        # Never let a tampered/new actionable row retain an executable-looking
+        # status after central re-evaluation. Historical/manual rows preserve
+        # their payload and deployed rollback semantics, but must be
+        # re-registered with a freshly verified parity artifact.
+        if not gate["allowed"] and str(candidate.get("status") or "") in {
+            "pending_review",
+            "approved",
+        }:
+            candidate["legacy_status"] = str(candidate.get("status") or "")
+            candidate["status"] = (
+                "diagnostic_only"
+                if gate["state"] == "diagnostic_only"
+                else "legacy_quarantined"
+            )
+        return candidate
+
+    def _require_candidate_executable_research_evidence(
+        self,
+        candidate: dict[str, Any],
+        *,
+        executable_use: str,
+    ):
+        summary = dict(candidate.get("validation_summary") or {})
+        gate, verdict = self._research_evidence_gate(summary)
+        if not verdict.allowed:
+            # Persist the additive compatibility marker before rejecting so an
+            # old approved row cannot keep presenting itself as deployable.
+            summary["research_evidence_gate"] = gate
+            summary["legacy_quarantined"] = True
+            summary["require_revalidation"] = True
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if candidate_id:
+                current_status = str(candidate.get("status") or "")
+                quarantine_status = (
+                    current_status
+                    if current_status in {
+                        "deployed",
+                        "rolled_back",
+                        "rejected",
+                        "diagnostic_only",
+                    }
+                    else "legacy_quarantined"
+                )
+                self._update_release_candidate(
+                    candidate_id=candidate_id,
+                    status=quarantine_status,
+                    validation_summary=summary,
+                    updated_at=time.time(),
+                )
+            raise ResearchEvidenceRejected(verdict)
+        return require_executable_research_evidence(
+            self._candidate_research_evidence(candidate),
+            executable_use=executable_use,
+        )
+
+    @staticmethod
     def _candidate_template_snapshot(candidate: dict[str, Any]) -> dict[str, Any] | None:
         factor_id = str(candidate.get("factor_id") or "")
         template_id = str(candidate.get("template_id") or "")
@@ -186,8 +311,11 @@ class ParameterTemplateValidationService:
             clauses.append("factor_id=?")
             params.append(factor_id)
         if status:
-            clauses.append("status=?")
-            params.append(status)
+            if status == "legacy_quarantined":
+                clauses.append("status IN ('pending_review','approved','legacy_quarantined')")
+            else:
+                clauses.append("status=?")
+                params.append(status)
         sql = f"""
             SELECT *
             FROM parameter_template_release_candidate
@@ -205,14 +333,19 @@ class ParameterTemplateValidationService:
         finally:
             conn.close()
         items = [self._parse_release_candidate_row(row) for row in rows]
-        # Group by dedup key, then pick the entry with the highest status priority
-        # Priority: pending_review > approved > deployed > rolled_back > rejected
+        if status:
+            items = [item for item in items if item.get("status") == status]
+        # Group by dedup key, then pick the entry with the highest status
+        # priority. Diagnostic-only records remain visible but never outrank
+        # actionable review/deployment states for the same lineage.
         STATUS_PRIORITY = {
             "pending_review": 0,
             "approved": 1,
             "deployed": 2,
             "rolled_back": 3,
-            "rejected": 4,
+            "legacy_quarantined": 4,
+            "diagnostic_only": 5,
+            "rejected": 6,
         }
         groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
         for item in items:
@@ -267,7 +400,20 @@ class ParameterTemplateValidationService:
         validation_report_path: str,
         recommendation_context: dict[str, Any] | None = None,
         template_snapshot: dict[str, Any] | None = None,
+        research_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        evidence = dict(research_evidence or {})
+        evidence_verdict = evaluate_research_evidence(
+            evidence,
+            executable_use="parameter_template_release",
+        )
+        candidate_status = (
+            "pending_review"
+            if evidence_verdict.allowed
+            else "diagnostic_only"
+            if has_research_trust_metadata(evidence)
+            else "legacy_quarantined"
+        )
         existing = self._find_existing_release_candidate(
             factor_id=factor_id,
             template_id=template_id,
@@ -276,9 +422,12 @@ class ParameterTemplateValidationService:
         )
         if existing:
             existing_status = str(existing.get("status") or "")
-            if existing_status == "rejected":
-                # Rejected candidate gets a fresh chance with new validation data.
-                # Update it back to pending_review instead of creating a new entry.
+            if existing_status == "rejected" or (
+                existing_status in {"legacy_quarantined", "diagnostic_only"}
+                and evidence_verdict.allowed
+            ):
+                # Rejected/quarantined candidates get a fresh chance only after
+                # a new validation run presents centrally verified evidence.
                 now = time.time()
                 summary = {
                     "walk_forward_passed": bool(walk_forward.get("passed")),
@@ -292,7 +441,14 @@ class ParameterTemplateValidationService:
                     ),
                     "fold_count": int((walk_forward.get("config") or {}).get("n_folds") or 0),
                     "recommendation_source": dict(recommendation_context or {}),
+                    "research_evidence": evidence,
+                    "research_evidence_policy_version": RESEARCH_EVIDENCE_POLICY_VERSION,
+                    "research_evidence_verdict": evidence_verdict.to_dict(),
                 }
+                gate, _ = self._research_evidence_gate(summary)
+                summary["research_evidence_gate"] = gate
+                summary["legacy_quarantined"] = bool(gate["legacy_quarantined"])
+                summary["require_revalidation"] = bool(gate["require_revalidation"])
                 snapshot = self._candidate_template_snapshot(
                     {
                         "factor_id": factor_id,
@@ -315,15 +471,15 @@ class ParameterTemplateValidationService:
                     )
                 self._update_release_candidate(
                     candidate_id=existing["candidate_id"],
-                    status="pending_review",
+                    status=candidate_status,
                     validation_summary=summary,
                     updated_at=time.time(),
                 )
                 self._log_lifecycle_event(
                     factor_id=factor_id,
                     event="parameter_template_candidate_updated",
-                    status="pending_review",
-                    description=f"re-registered rejected candidate {existing['candidate_id']} as pending_review",
+                    status=candidate_status,
+                    description=f"re-registered rejected candidate {existing['candidate_id']} as {candidate_status}",
                     reason=(
                         f"offline_deep_validation_passed:{(recommendation_context or {}).get('recommendation_id', '')}"
                         if recommendation_context else
@@ -332,14 +488,14 @@ class ParameterTemplateValidationService:
                     score=float(summary.get("candidate_avg_ic") or 0.0),
                 )
                 self._clear_governance_caches()
-                return {
+                return self._decorate_release_candidate({
                     **existing,
-                    "status": "pending_review",
+                    "status": candidate_status,
                     "validation_summary": summary,
                     "updated_at": now,
                     "boundary": boundary,
                     "validation_report_path": validation_report_path,
-                }
+                })
             return existing
         now = time.time()
         candidate_id = self._new_id("ptrc")
@@ -355,7 +511,14 @@ class ParameterTemplateValidationService:
             ),
             "fold_count": int((walk_forward.get("config") or {}).get("n_folds") or 0),
             "recommendation_source": dict(recommendation_context or {}),
+            "research_evidence": evidence,
+            "research_evidence_policy_version": RESEARCH_EVIDENCE_POLICY_VERSION,
+            "research_evidence_verdict": evidence_verdict.to_dict(),
         }
+        gate, _ = self._research_evidence_gate(summary)
+        summary["research_evidence_gate"] = gate
+        summary["legacy_quarantined"] = bool(gate["legacy_quarantined"])
+        summary["require_revalidation"] = bool(gate["require_revalidation"])
         snapshot = self._candidate_template_snapshot(
             {
                 "factor_id": factor_id,
@@ -385,13 +548,14 @@ class ParameterTemplateValidationService:
                 (candidate_id, factor_id, template_id, regime_key, status,
                  boundary_json, validation_summary_json, validation_report_path,
                  created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'pending_review', ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
                     factor_id,
                     template_id,
                     regime_key,
+                    candidate_status,
                     json.dumps(boundary, ensure_ascii=False, default=str),
                     json.dumps(summary, ensure_ascii=False, default=str),
                     validation_report_path,
@@ -407,7 +571,7 @@ class ParameterTemplateValidationService:
             "factor_id": factor_id,
             "template_id": template_id,
             "regime_key": regime_key,
-            "status": "pending_review",
+            "status": candidate_status,
             "boundary": boundary,
             "validation_summary": summary,
             "validation_report_path": validation_report_path,
@@ -417,8 +581,8 @@ class ParameterTemplateValidationService:
         self._log_lifecycle_event(
             factor_id=factor_id,
             event="parameter_template_candidate_registered",
-            status="pending_review",
-            description=f"registered release candidate {candidate_id} for {template_id}",
+            status=candidate_status,
+            description=f"registered {candidate_status} candidate {candidate_id} for {template_id}",
             reason=(
                 f"offline_deep_validation_passed:{(recommendation_context or {}).get('recommendation_id', '')}"
                 if recommendation_context else
@@ -427,7 +591,7 @@ class ParameterTemplateValidationService:
             score=float(summary.get("candidate_avg_ic") or 0.0),
         )
         self._clear_governance_caches()
-        return item
+        return self._decorate_release_candidate(item)
 
     def _find_existing_release_candidate(
         self,
@@ -444,7 +608,9 @@ class ParameterTemplateValidationService:
             clauses.append("validation_summary_json LIKE ?")
             params.append(f"%{recommendation_id}%")
         else:
-            clauses.append("status IN ('pending_review','approved','deployed')")
+            clauses.append(
+                "status IN ('pending_review','approved','deployed','legacy_quarantined','diagnostic_only')"
+            )
         sql = f"""
             SELECT *
             FROM parameter_template_release_candidate
@@ -473,7 +639,18 @@ class ParameterTemplateValidationService:
         current = self.get_release_candidate(candidate_id)
         if not current:
             raise ValueError(f"candidate not found: {candidate_id}")
-        if current["status"] not in {"pending_review", "approved", "rejected"}:
+        if status == "approved":
+            self._require_candidate_executable_research_evidence(
+                current,
+                executable_use="parameter_template_review",
+            )
+        if current["status"] not in {
+            "pending_review",
+            "approved",
+            "rejected",
+            "legacy_quarantined",
+            "diagnostic_only",
+        }:
             raise ValueError(f"candidate status not reviewable: {current['status']}")
         now = time.time()
         summary = dict(current.get("validation_summary") or {})
@@ -566,6 +743,10 @@ class ParameterTemplateValidationService:
         candidate = self.get_release_candidate(candidate_id)
         if not candidate:
             raise ValueError(f"candidate not found: {candidate_id}")
+        self._require_candidate_executable_research_evidence(
+            candidate,
+            executable_use="parameter_template_deploy",
+        )
         if candidate["status"] not in {"approved", "deployed"}:
             raise ValueError(f"candidate not approved for release: {candidate['status']}")
         template_service = self._template_service()
@@ -735,9 +916,9 @@ class ParameterTemplateValidationService:
         finally:
             conn.close()
 
-    @staticmethod
-    def _parse_release_candidate_row(row: sqlite3.Row) -> dict[str, Any]:
-        return {
+    @classmethod
+    def _parse_release_candidate_row(cls, row: sqlite3.Row) -> dict[str, Any]:
+        return cls._decorate_release_candidate({
             "candidate_id": str(row["candidate_id"] or ""),
             "factor_id": str(row["factor_id"] or ""),
             "template_id": str(row["template_id"] or ""),
@@ -748,7 +929,7 @@ class ParameterTemplateValidationService:
             "validation_report_path": str(row["validation_report_path"] or ""),
             "created_at": float(row["created_at"] or 0.0),
             "updated_at": float(row["updated_at"] or 0.0),
-        }
+        })
 
     @staticmethod
     def _release_candidate_dedupe_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -1067,8 +1248,14 @@ def run_parameter_template_offline_validation(
         validation_report_path=report_path,
         recommendation_context=dict(params.get("recommendation_context") or {}),
         template_snapshot=target_template,
+        research_evidence=backtest_result,
     )
-    plan[3]["status"] = "completed"
+    release_status = str(release_candidate.get("status") or "")
+    plan[3]["status"] = (
+        release_status
+        if release_status in {"diagnostic_only", "legacy_quarantined"}
+        else "completed"
+    )
     return {
         "ok": True,
         "mode": "offline_deep",
@@ -1081,5 +1268,11 @@ def run_parameter_template_offline_validation(
         "walk_forward": walk_forward,
         "release_candidate": release_candidate,
         "report_path": report_path,
-        "note": "offline_deep now emits walk-forward evidence and a pending gray-release candidate",
+        "note": (
+            "legacy sweep is diagnostic_only; candidate cannot be approved or deployed"
+            if release_status == "diagnostic_only"
+            else "research metadata is missing; candidate requires revalidation before review or deploy"
+            if release_status == "legacy_quarantined"
+            else "offline_deep emits walk-forward evidence and a pending gray-release candidate"
+        ),
     }

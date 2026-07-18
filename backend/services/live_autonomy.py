@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_exists
+from backend.core.db import STATE_DB, is_state_db_path, state_table_exists
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.v16_brain_planning import BrainLiveReadyGuardrailService
 from backend.services.proposal_registry import ProposalRegistryService
-from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+from backend.services.governance_control_plans import AutonomyControlPlan
+from backend.services.live_safety_state import (
+    SafetyStatePersistenceError,
+    activate_no_new_risk_latch,
+    append_safety_outbox,
+    no_new_risk_latch_status,
+)
 from config import runtime_config
 from risk.policy_service import RiskPolicyService
 
@@ -70,9 +77,14 @@ class LiveAutonomyService:
             "does_not_submit_orders": True,
             "does_not_bypass_risk_policy": True,
             "runtime_config_mutation_service_required": True,
+            "typed_autonomy_control_plan_required": True,
+            "risk_direction_from_before_after": True,
+            "unlock_requires_v16": True,
             "overlay_snapshot_required": True,
             "llm_advisory_only": True,
             "revoke_sets_live_candidate": True,
+            "revoke_activates_local_no_new_risk_first": True,
+            "revoke_does_not_depend_on_postgres": True,
         }
 
     def status(self, *, readiness: dict[str, Any] | None = None, refresh_proposals: bool = False) -> dict[str, Any]:
@@ -81,12 +93,18 @@ class LiveAutonomyService:
         evaluation = self.evaluate(readiness=readiness, refresh_proposals=refresh_proposals, persist=False)
         latest = self.latest_event()
         cfg = runtime_config.shared()
+        local_safety = (
+            no_new_risk_latch_status(fail_closed=True)
+            if is_state_db_path(self.db_path)
+            else {"active": False, "state": "isolated_state"}
+        )
         unlock_freshness = self._unlock_event_freshness(latest_event=latest)
         operational_posture = self._operational_posture(
             autonomy_mode=str(getattr(cfg, "autonomy_mode", "") or "manual"),
             unlocked=bool(getattr(cfg, "live_autonomy_unlocked", False)),
             evaluation=evaluation,
             unlock_freshness=unlock_freshness,
+            local_safety_latch=local_safety,
         )
         return {
             "ok": True,
@@ -94,10 +112,17 @@ class LiveAutonomyService:
             "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or "manual"),
             "live_autonomy_unlocked": bool(getattr(cfg, "live_autonomy_unlocked", False)),
             "live_autonomy_unlock_id": str(getattr(cfg, "live_autonomy_unlock_id", "") or ""),
+            "autonomy_expansion_frozen": bool(
+                getattr(cfg, "autonomy_expansion_frozen", True)
+            ),
+            "governance_expansion_paused": bool(
+                getattr(cfg, "governance_expansion_paused", False)
+            ),
             "operational_posture": operational_posture,
             "evaluation": evaluation,
             "latest_event": latest,
             "unlock_event_freshness": unlock_freshness,
+            "local_safety_latch": local_safety,
             "boundary": self.boundary(),
         }
 
@@ -172,6 +197,8 @@ class LiveAutonomyService:
         reason: str = "",
         confirm: bool = False,
         readiness: dict[str, Any] | None = None,
+        v16_command_id: str = "",
+        v16_claim_token: str = "",
     ) -> dict[str, Any]:
         readiness = readiness or self._build_readiness()
         evaluation = self.evaluate(readiness=readiness, refresh_proposals=True, persist=False, actor=actor, reason=reason)
@@ -205,8 +232,8 @@ class LiveAutonomyService:
             }
         before_mode = str(getattr(runtime_config.shared(), "autonomy_mode", "") or "manual")
         event_id = f"live_unlock_{uuid.uuid4().hex[:16]}"
-        mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
-            {
+        plan = AutonomyControlPlan(
+            patch={
                 "autonomy_mode": "live_autonomous",
                 "live_autonomy_unlocked": True,
                 "live_autonomy_unlock_id": event_id,
@@ -216,7 +243,33 @@ class LiveAutonomyService:
             actor=actor,
             action="live_autonomy_unlock",
             reason=reason or "manual one-time live autonomy unlock",
+            scope_type="autonomy_control",
+            scope_key="live_autonomy",
+            target_agent="governance_control",
+            rollback={
+                "autonomy_mode": before_mode,
+                "live_autonomy_unlocked": bool(
+                    getattr(runtime_config.shared(), "live_autonomy_unlocked", False)
+                ),
+                "live_autonomy_unlock_id": str(
+                    getattr(runtime_config.shared(), "live_autonomy_unlock_id", "") or ""
+                ),
+            },
+            evidence_refs={"evaluation": evaluation},
+            v16_command_id=str(v16_command_id or ""),
+            v16_claim_token=str(v16_claim_token or ""),
+            current_mode=before_mode,
+            target_mode="live_autonomous",
+            unlock_event_id=event_id,
         )
+        try:
+            mutation = plan.execute(self.db_path)
+        except Exception as exc:
+            mutation = {
+                "ok": False,
+                "status": "governance_mutation_unavailable",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
         event = self._record_event(
             action="unlock",
             status="unlocked" if mutation.get("ok") else "mutation_failed",
@@ -249,8 +302,22 @@ class LiveAutonomyService:
     ) -> dict[str, Any]:
         before_mode = str(getattr(runtime_config.shared(), "autonomy_mode", "") or "manual")
         event_id = f"live_revoke_{uuid.uuid4().hex[:16]}"
-        mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
-            {
+        latch: dict[str, Any] = {}
+        latch_error = ""
+        if is_state_db_path(self.db_path):
+            try:
+                latch = activate_no_new_risk_latch(
+                    reason=reason or "operator revoked live autonomous mode",
+                    actor=actor,
+                    correlation_id=event_id,
+                    metadata={"current_mode": before_mode, "target_mode": "live_candidate"},
+                )
+            except SafetyStatePersistenceError as exc:
+                latch_error = str(exc)
+                latch = no_new_risk_latch_status(fail_closed=True)
+
+        plan = AutonomyControlPlan(
+            patch={
                 "autonomy_mode": "live_candidate",
                 "live_autonomy_unlocked": False,
                 "live_autonomy_unlock_id": "",
@@ -260,27 +327,92 @@ class LiveAutonomyService:
             actor=actor,
             action="live_autonomy_revoke",
             reason=reason or "operator revoked live autonomous mode",
+            scope_type="autonomy_control",
+            scope_key="live_autonomy",
+            target_agent="governance_control",
+            rollback={
+                "autonomy_mode": before_mode,
+                "live_autonomy_unlocked": bool(
+                    getattr(runtime_config.shared(), "live_autonomy_unlocked", False)
+                ),
+                "live_autonomy_unlock_id": str(
+                    getattr(runtime_config.shared(), "live_autonomy_unlock_id", "") or ""
+                ),
+            },
+            evidence_refs={"operator_reason": reason},
+            current_mode=before_mode,
+            target_mode="live_candidate",
+            unlock_event_id=event_id,
         )
-        event = self._record_event(
-            action="revoke",
-            status="revoked" if mutation.get("ok") else "mutation_failed",
-            actor=actor,
-            reason=reason,
-            readiness=self._build_readiness(),
-            proposal_summary=ProposalRegistryService(self.db_path).status(),
-            risk_verdict={},
-            blockers=[] if mutation.get("ok") else [{"component": "runtime_config_mutation", "status": "failed"}],
-            mutation=mutation,
-            event_id=event_id,
-            before_mode=before_mode,
-            after_mode="live_candidate" if mutation.get("ok") else before_mode,
+        try:
+            mutation = plan.execute(self.db_path)
+        except Exception as exc:
+            mutation = {
+                "ok": False,
+                "status": "governance_mutation_unavailable",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        event: dict[str, Any] = {}
+        event_error = ""
+        try:
+            event = self._record_event(
+                action="revoke",
+                status="revoked" if mutation.get("ok") else "projection_pending",
+                actor=actor,
+                reason=reason,
+                readiness=self._build_readiness(),
+                proposal_summary=ProposalRegistryService(self.db_path).status(),
+                risk_verdict={},
+                blockers=[] if mutation.get("ok") else [{"component": "runtime_config_mutation", "status": "failed"}],
+                mutation=mutation,
+                event_id=event_id,
+                before_mode=before_mode,
+                after_mode="live_candidate" if mutation.get("ok") else before_mode,
+            )
+        except Exception as exc:
+            event_error = f"{type(exc).__name__}: {exc}"
+
+        safety_effective = bool(
+            is_state_db_path(self.db_path)
+            and no_new_risk_latch_status(fail_closed=True).get("active")
+        )
+        outbox: dict[str, Any] = {}
+        if is_state_db_path(self.db_path) and (not mutation.get("ok") or event_error):
+            try:
+                outbox = append_safety_outbox(
+                    event_type="live_autonomy_revoke_projection_pending",
+                    correlation_id=event_id,
+                    payload={
+                        "before_mode": before_mode,
+                        "target_mode": "live_candidate",
+                        "mutation": mutation,
+                        "event": event,
+                    },
+                    error=event_error or str(mutation.get("status") or "mutation_failed"),
+                )
+            except Exception as exc:
+                outbox = {
+                    "status": "outbox_append_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+        ok = bool(mutation.get("ok")) or safety_effective
+        status = "revoked" if mutation.get("ok") else (
+            "local_safety_latched_projection_pending"
+            if safety_effective
+            else "mutation_failed"
         )
         return {
-            "ok": bool(mutation.get("ok")),
+            "ok": ok,
             "schema_version": "live_autonomy_revoke.v1",
-            "status": "revoked" if mutation.get("ok") else "mutation_failed",
+            "status": status,
             "mutation": mutation,
             "event": event,
+            "event_error": event_error,
+            "local_safety_latch": latch,
+            "local_safety_effective": safety_effective,
+            "latch_persistence_error": latch_error,
+            "safety_outbox": outbox,
+            "governance_projection_pending": bool(safety_effective and not mutation.get("ok")),
             "boundary": self.boundary(),
         }
 
@@ -314,8 +446,45 @@ class LiveAutonomyService:
         evidence_freshness: dict[str, Any],
     ) -> list[dict[str, Any]]:
         blockers: list[dict[str, Any]] = []
-        if not bool(readiness.get("ready_for_frontend", False)) or readiness.get("blockers"):
-            blockers.append({"component": "backend_readiness", "status": "blocked", "details": readiness.get("blockers") or []})
+        live = dict(readiness.get("live") or {})
+        ctrader = dict(live.get("ctrader") or {})
+        loop = dict(live.get("loop") or {})
+        ready_for_live_alpha = readiness.get("ready_for_live_alpha")
+        if ready_for_live_alpha is None:
+            # Compatibility for stored/read-only v1 readiness fixtures.  This
+            # derives from live facts and never from ready_for_frontend.
+            ready_for_live_alpha = bool(
+                str(ctrader.get("status") or "").lower() == "connected"
+                and loop.get("running")
+                and not readiness.get("blockers")
+            )
+        if not bool(ready_for_live_alpha):
+            blockers.append(
+                {
+                    "component": "live_alpha_readiness",
+                    "status": "blocked",
+                    "details": (
+                        (readiness.get("readiness_dimensions") or {})
+                        .get("blockers", {})
+                        .get("live_alpha", [])
+                    ),
+                }
+            )
+        ready_for_mutation = readiness.get("ready_for_autonomous_mutation")
+        if ready_for_mutation is None:
+            ready_for_mutation = not readiness.get("blockers")
+        if not bool(ready_for_mutation):
+            blockers.append(
+                {
+                    "component": "autonomous_mutation_readiness",
+                    "status": "blocked",
+                    "details": (
+                        (readiness.get("readiness_dimensions") or {})
+                        .get("blockers", {})
+                        .get("autonomous_mutation", [])
+                    ),
+                }
+            )
         for key, payload in (evidence_freshness.get("items") or {}).items():
             if isinstance(payload, dict) and bool(payload.get("stale")):
                 blockers.append({
@@ -325,11 +494,8 @@ class LiveAutonomyService:
                     "age_seconds": payload.get("age_seconds"),
                     "stale_after_seconds": payload.get("stale_after_seconds"),
                 })
-        live = dict(readiness.get("live") or {})
-        ctrader = dict(live.get("ctrader") or {})
         if str(ctrader.get("status") or "").lower() != "connected":
             blockers.append({"component": "ctrader", "status": str(ctrader.get("status") or "unknown")})
-        loop = dict(live.get("loop") or {})
         if not bool(loop.get("running")):
             blockers.append({"component": "live_loop", "status": "not_running"})
         incident = dict(readiness.get("incident_control") or {})
@@ -400,7 +566,18 @@ class LiveAutonomyService:
             or _safe_float(payload.get("generated_at"))
         )
         if timestamp <= 0 and "age_seconds" in payload:
-            age = max(0.0, _safe_float(payload.get("age_seconds")))
+            raw_age = payload.get("age_seconds")
+            try:
+                age = float(raw_age)
+            except (TypeError, ValueError):
+                age = float("nan")
+            if not math.isfinite(age) or age < 0.0:
+                return LiveAutonomyService._freshness_item(
+                    timestamp=0.0,
+                    now=now,
+                    stale_after=stale_after,
+                    required=required,
+                )
             stale_after = _safe_float(payload.get("stale_after_seconds"), stale_after)
             stale = age > stale_after or bool(payload.get("stale", False))
             return {
@@ -467,12 +644,15 @@ class LiveAutonomyService:
         unlocked: bool,
         evaluation: dict[str, Any],
         unlock_freshness: dict[str, Any],
+        local_safety_latch: dict[str, Any],
     ) -> dict[str, Any]:
         live_mode = str(autonomy_mode or "").lower() == "live_autonomous"
+        local_safety_active = bool(local_safety_latch.get("active"))
         degraded = live_mode and (
             not unlocked
             or not bool(evaluation.get("ok"))
             or bool(unlock_freshness.get("stale"))
+            or local_safety_active
         )
         reasons = []
         if live_mode and not unlocked:
@@ -481,13 +661,25 @@ class LiveAutonomyService:
             reasons.append("unlock_evidence_not_current")
         if live_mode and bool(unlock_freshness.get("stale")):
             reasons.append("unlock_event_stale")
+        if local_safety_active:
+            reasons.append("local_no_new_risk_latched")
         return {
             "schema_version": "live_autonomy_operational_posture.v1",
-            "status": "degraded" if degraded else "ok" if live_mode and unlocked else "locked",
+            "status": (
+                "safety_latched"
+                if local_safety_active
+                else "degraded"
+                if degraded
+                else "ok"
+                if live_mode and unlocked
+                else "locked"
+            ),
             "degraded": degraded,
             "reasons": reasons,
-            "recommended_incident_mode": "no_new_risk" if degraded else "normal",
-            "blocks_new_risk": degraded,
+            "recommended_incident_mode": (
+                "no_new_risk" if degraded or local_safety_active else "normal"
+            ),
+            "blocks_new_risk": degraded or local_safety_active,
             "allows_risk_reducing_actions": True,
         }
 
@@ -555,7 +747,13 @@ class LiveAutonomyService:
                     reason,
                     before_mode,
                     after_mode,
-                    _dumps({"generated_at": readiness.get("generated_at"), "ready_for_frontend": readiness.get("ready_for_frontend"), "blockers": readiness.get("blockers") or []}),
+                    _dumps({
+                        "generated_at": readiness.get("generated_at"),
+                        "ready_for_live_alpha": readiness.get("ready_for_live_alpha"),
+                        "ready_for_autonomous_mutation": readiness.get("ready_for_autonomous_mutation"),
+                        "readiness_dimensions": readiness.get("readiness_dimensions") or {},
+                        "blockers": readiness.get("blockers") or [],
+                    }),
                     _dumps(proposal_summary),
                     _dumps(risk_verdict),
                     _dumps(blockers),

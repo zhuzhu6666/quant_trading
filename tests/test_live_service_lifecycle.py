@@ -29,7 +29,8 @@ class _IdleThread:
 
 
 @pytest.fixture(autouse=True)
-def _reset_loop_state():
+def _reset_loop_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
     live_service._process_shutdown_requested = False
     live_service._loop_thread = None
     live_service._loop_stop_flag = None
@@ -46,7 +47,20 @@ def _reset_loop_state():
         loop_strategy=None,
         loop_started_at=None,
         account=None,
+        account_reconciled=None,
         account_updated_at=None,
+        account_reconcile_id=None,
+        account_event=None,
+        account_event_updated_at=None,
+        account_event_reason=None,
+        positions=[],
+        positions_reconciled=[],
+        positions_updated_at=None,
+        positions_reconcile_id=None,
+        positions_component_facts={},
+        positions_event=[],
+        positions_event_updated_at=None,
+        positions_event_reason=None,
         accepting_new_risk=False,
         loop_shutdown=None,
     )
@@ -68,7 +82,20 @@ def _reset_loop_state():
         loop_strategy=None,
         loop_started_at=None,
         account=None,
+        account_reconciled=None,
         account_updated_at=None,
+        account_reconcile_id=None,
+        account_event=None,
+        account_event_updated_at=None,
+        account_event_reason=None,
+        positions=[],
+        positions_reconciled=[],
+        positions_updated_at=None,
+        positions_reconcile_id=None,
+        positions_component_facts={},
+        positions_event=[],
+        positions_event_updated_at=None,
+        positions_event_reason=None,
         accepting_new_risk=False,
         loop_shutdown=None,
     )
@@ -126,7 +153,15 @@ def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
 
     live_service._handle_closed_positions_after_tick(
         closed_pids={123},
-        real_pnls={123: {"net": -1.0}},
+        real_pnls={
+            123: {
+                "net": -1.0,
+                "exec_timestamp": 1234.0,
+                "deal_id": 9001,
+                "close_deals_count": 1,
+                "source": "ctrader_deals",
+            }
+        },
         attr_engine=None,
         current_price=3330.0,
         bar={"time": 1230.0},
@@ -141,10 +176,160 @@ def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
     assert captured["learning_close_source"] == close_source
 
 
-def test_prime_live_loop_state_sets_loop_and_resets_session_when_no_snapshot(monkeypatch):
-    monkeypatch.setattr(live_service, "_restore_session_state_for_day", lambda trade_date=None: False)
+def test_closed_position_without_deal_blocks_session_and_defers_all_consumers(monkeypatch):
+    calls = []
+    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        live_service,
+        "_collect_closed_position_attribution",
+        lambda **_kwargs: calls.append("attribution"),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_run_closed_position_learning_after_tick",
+        lambda **_kwargs: calls.append("learning"),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_cleanup_closed_position_after_tick",
+        lambda **_kwargs: calls.append("cleanup"),
+    )
+    logs = []
+
+    live_service._handle_closed_positions_after_tick(
+        closed_pids={124},
+        real_pnls={},
+        attr_engine=None,
+        current_price=3330.0,
+        bar={"time": 1230.0},
+        cfg=SimpleNamespace(timeframe="M5"),
+        acct={},
+        broker="ctrader",
+        tick=8,
+        log=logs.append,
+    )
+
+    assert calls == []
+    assert live_service._live_state_get("session_state_status") == "unavailable"
+    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.no_new_risk_latched(fail_closed=True) is True
+    assert any("deferred until authoritative" in item for item in logs)
+
+
+def test_close_aux_failure_cannot_skip_same_tick_session_rebuild(monkeypatch):
+    order: list[str] = []
+    now = time.time()
+    monkeypatch.setattr(
+        live_service,
+        "_collect_closed_position_attribution",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("attribution store unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_mark_recovery_position_closed",
+        lambda *_args, **_kwargs: order.append("recovery_closed"),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_record_risk_reduction_aux_failure",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_explicit_account_reconcile",
+        lambda _bridge: SimpleNamespace(
+            status="fresh",
+            reconcile_id="post-close-account-r1",
+            observed_at=now,
+            account={"balance": 995.0, "equity": 995.0},
+        ),
+    )
+
+    def _restore(*_args, **kwargs):
+        order.append("session_rebuilt")
+        assert kwargs["broker_open_position_ids"] == set()
+        assert kwargs["confirmed_closed_position_ids"] == {125}
+        assert live_service._live_state_get("session_state_status") == (
+            "unavailable"
+        )
+        live_service._live_state_update(session_state_status="available")
+        return True
+
+    monkeypatch.setattr(live_service, "_restore_session_state_for_day", _restore)
+    monkeypatch.setattr(
+        live_service,
+        "_release_session_close_deal_latch",
+        lambda *_args, **_kwargs: order.append("latch_released"),
+    )
+
+    live_service._handle_closed_positions_after_tick(
+        closed_pids={125},
+        real_pnls={
+            125: {
+                "net": -5.0,
+                "exec_timestamp": now,
+                "deal_id": 9125,
+                "deal_ids": [9125],
+                "closed_volume": 100.0,
+                "close_deals_count": 1,
+                "source": "ctrader_deals",
+            }
+        },
+        attr_engine=None,
+        current_price=3330.0,
+        bar={"time": now},
+        cfg=SimpleNamespace(timeframe="M5"),
+        acct={},
+        broker="ctrader",
+        tick=9,
+        log=lambda _message: None,
+        broker_open_position_ids=set(),
+        bridge=SimpleNamespace(is_connected=True),
+    )
+
+    assert order == ["recovery_closed", "session_rebuilt", "latch_released"]
+    assert live_service._live_state_get("session_state_status") == "available"
+
+
+def test_session_trade_projection_is_idempotent_by_position_id():
+    live_service._live_state_update(
+        session_pnl=0.0,
+        session_trades=0,
+        session_winning=0,
+        session_losing=0,
+        session_trade_pnls=[],
+        session_consecutive_loss=0,
+        session_recorded_position_ids=[],
+    )
+
+    first = live_service._record_session_trade(-5.0, position_id=812)
+    second = live_service._record_session_trade(-5.0, position_id=812)
+
+    assert first["duplicate_position"] is False
+    assert second["duplicate_position"] is True
+    assert live_service._live_state_get("session_pnl") == pytest.approx(-5.0)
+    assert live_service._live_state_get("session_trades") == 1
+    assert live_service._live_state_get("session_trade_pnls", clone=True) == [-5.0]
+
+
+def test_prime_live_loop_state_preserves_session_when_restore_is_unavailable(monkeypatch):
+    reset_calls = []
+    monkeypatch.setattr(
+        live_service,
+        "_restore_session_state_for_day",
+        lambda trade_date=None, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_reset_session_state_for_new_day",
+        lambda: reset_calls.append(True),
+    )
 
     live_service._live_state_update(
+        positions=[],
+        positions_updated_at=time.time(),
         session_pnl=88.0,
         session_trades=3,
         session_winning=2,
@@ -164,22 +349,28 @@ def test_prime_live_loop_state_sets_loop_and_resets_session_when_no_snapshot(mon
     assert live_service._live_state_get("loop_running") is True
     assert live_service._live_state_get("loop_strategy") == "test_strategy"
     assert live_service._live_state_get("loop_started_at") == 123.0
-    assert live_service._live_state_get("account", clone=True)["balance"] == 1000.0
-    assert live_service._live_state_get("session_pnl") == 0.0
-    assert live_service._live_state_get("session_trades") == 0
-    assert live_service._live_state_get("session_max_drawdown_pct") == 0.0
+    assert live_service._live_state_get("account", clone=True) is None
+    assert live_service._live_state_get("account_reconciled", clone=True) is None
+    assert live_service._live_state_get("account_event", clone=True)["balance"] == 1000.0
+    assert live_service._live_state_get("session_pnl") == 88.0
+    assert live_service._live_state_get("session_trades") == 3
+    assert live_service._live_state_get("session_max_drawdown_pct") == 4.1
+    assert live_service._live_state_get("session_state_status") == "unavailable"
+    assert live_service._live_state_get("accepting_new_risk") is False
+    assert reset_calls == []
 
 
 def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
     reset_called = False
 
-    def _restore(trade_date=None):
+    def _restore(trade_date=None, **_kwargs):
         live_service._live_state_update(
             session_pnl=2.75,
             session_trades=29,
             session_winning=8,
             session_losing=21,
             session_consecutive_loss=1,
+            session_state_status="available",
         )
         return True
 
@@ -189,6 +380,12 @@ def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
 
     monkeypatch.setattr(live_service, "_restore_session_state_for_day", _restore)
     monkeypatch.setattr(live_service, "_reset_session_state_for_new_day", _reset)
+    live_service._live_state_update(
+        positions=[],
+        positions_reconciled=[],
+        positions_updated_at=time.time(),
+        positions_reconcile_id="positions-prime-r1",
+    )
 
     live_service._prime_live_loop_state(
         broker="ctrader",
@@ -253,7 +450,10 @@ def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypat
     finally:
         conn.close()
 
-    assert live_service._restore_session_state_for_day("2026-07-13") is True
+    assert live_service._restore_session_state_for_day(
+        "2026-07-13",
+        broker_open_position_ids=set(),
+    ) is True
     assert live_service._live_state_get("session_pnl") == pytest.approx(1.9)
     assert live_service._live_state_get("session_trades") == 2
     assert live_service._live_state_get("session_winning") == 1
@@ -439,7 +639,11 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     scheduler_calls = []
 
     monkeypatch.setattr(live_service, "_start_live_scheduler", lambda: scheduler_calls.append("started"))
-    monkeypatch.setattr(live_service, "_restore_session_state_for_day", lambda trade_date=None: False)
+    monkeypatch.setattr(
+        live_service,
+        "_restore_session_state_for_day",
+        lambda trade_date=None, **_kwargs: False,
+    )
     monkeypatch.setattr(live_service.threading, "Thread", _IdleThread)
     live_service._live_state_update(loop_shutdown={"status": "completed"})
 
@@ -449,19 +653,168 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     assert result["broker"] == "ctrader"
     assert result["strategy_name"] == "smoke"
     assert result["thread_id"] == 12345
+    assert result["ready"] is False
+    assert result["accepting_new_risk"] is False
     assert scheduler_calls == ["started"]
     assert isinstance(live_service._loop_stop_flag, threading.Event)
     assert live_service._live_state_get("loop_running") is True
     assert live_service._live_state_get("broker") == "ctrader"
     assert live_service._live_state_get("loop_strategy") == "smoke"
     assert live_service._live_state_get("loop_shutdown") is None
+    assert live_service._live_state_get("session_state_status") == "unavailable"
+    assert live_service._live_state_get("accepting_new_risk") is False
 
-    acct = live_service._live_state_get("account", clone=True)
-    assert acct["ok"] is True
+    assert live_service._live_state_get("account", clone=True) is None
+    assert live_service._live_state_get("account_reconciled", clone=True) is None
+    acct = live_service._live_state_get("account_event", clone=True)
+    assert acct["ok"] is False
     assert acct["broker"] == "ctrader"
     assert acct["balance"] == 0
+    assert acct["warming_up"] is True
+    assert not live_service._live_state_get("account_updated_at")
     assert live_service._live_state_get("session_trades") == 0
     assert live_service._live_state_get("session_pnl") == 0.0
+
+
+def test_legacy_stop_retains_ownership_and_rejects_start_while_draining(monkeypatch):
+    class _DrainingThread:
+        ident = 24680
+
+        def __init__(self):
+            self._alive = True
+            self.join_started = threading.Event()
+            self.release = threading.Event()
+
+        def is_alive(self):
+            return self._alive
+
+        def join(self, timeout=None):
+            self.join_started.set()
+            assert self.release.wait(timeout=2.0)
+            self._alive = False
+
+    thread = _DrainingThread()
+    stop_flag = threading.Event()
+    writes = []
+    live_service._loop_thread = thread
+    live_service._loop_stop_flag = stop_flag
+    live_service._loop_broker = "ctrader"
+    live_service._loop_started_at = 123.0
+    live_service._loop_strategy_name = "factor_v4"
+    live_service._live_state_update(
+        loop_running=True,
+        loop_strategy="factor_v4",
+        accepting_new_risk=True,
+    )
+    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
+    monkeypatch.setattr(
+        live_service,
+        "_persist_loop_desired_state",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_runtime_kv_set",
+        lambda key, value: writes.append((key, value)),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_start_live_scheduler",
+        lambda: pytest.fail("a replacement scheduler must not start while draining"),
+    )
+
+    draining = live_service.stop_loop(persist_desired=False)
+    assert thread.join_started.wait(timeout=1.0)
+    replacement = live_service.start_loop("ctrader", persist_desired=False)
+    status = live_service.loop_status()
+
+    assert draining["phase"] == "draining"
+    assert draining["thread_alive"] is True
+    assert replacement["ok"] is False
+    assert replacement["error"] == "live_loop_draining"
+    assert replacement["phase"] == "draining"
+    assert live_service._loop_thread is thread
+    assert live_service._loop_stop_flag is stop_flag
+    assert live_service._live_state_get("loop_running") is True
+    assert live_service._live_state_get("accepting_new_risk") is False
+    assert status["phase"] == "draining"
+    assert status["thread_alive"] is True
+    assert status["accepting_new_risk"] is False
+    assert "live_loop_draining" in status["blockers"]
+
+    thread.release.set()
+    deadline = time.time() + 1.0
+    while live_service._loop_thread is not None and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert live_service._loop_thread is None
+    assert live_service._loop_stop_flag is None
+    assert live_service._live_state_get("loop_running") is False
+    assert live_service._live_state_get("loop_shutdown")["status"] == "completed"
+    assert writes[0][1]["status"] == "draining"
+    assert writes[-1][1]["status"] == "completed"
+
+
+def test_legacy_stop_waits_for_admitted_open_rpc_before_returning(monkeypatch):
+    class _LoopThread:
+        ident = 13579
+
+        def __init__(self):
+            self._alive = True
+            self.release = threading.Event()
+
+        def is_alive(self):
+            return self._alive
+
+        def join(self, timeout=None):
+            assert self.release.wait(timeout=2.0)
+            self._alive = False
+
+    thread = _LoopThread()
+    stop_flag = threading.Event()
+    live_service._loop_thread = thread
+    live_service._loop_stop_flag = stop_flag
+    live_service._loop_broker = "ctrader"
+    live_service._loop_started_at = time.time()
+    live_service._loop_strategy_name = "factor_v4"
+    live_service._live_state_update(
+        loop_running=True,
+        loop_strategy="factor_v4",
+        accepting_new_risk=True,
+    )
+    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
+    monkeypatch.setattr(live_service, "_runtime_kv_set", lambda *_args, **_kwargs: None)
+
+    result = {}
+    live_service._OPEN_TRADE_ADMISSION_LOCK.acquire()
+    try:
+        stop_thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "value", live_service.stop_loop(persist_desired=False)
+            )
+        )
+        stop_thread.start()
+        deadline = time.time() + 1.0
+        while not stop_flag.is_set() and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert stop_flag.is_set() is True
+        assert stop_thread.is_alive() is True
+        assert live_service._loop_thread is thread
+        assert live_service._live_state_get("accepting_new_risk") is False
+    finally:
+        live_service._OPEN_TRADE_ADMISSION_LOCK.release()
+
+    stop_thread.join(timeout=1.0)
+    assert stop_thread.is_alive() is False
+    assert result["value"]["phase"] == "draining"
+    assert live_service._loop_thread is thread
+
+    thread.release.set()
+    deadline = time.time() + 1.0
+    while live_service._loop_thread is not None and time.time() < deadline:
+        time.sleep(0.01)
+    assert live_service._loop_thread is None
 
 
 def test_process_shutdown_joins_loop_preserves_desired_and_releases_ownership(monkeypatch):
@@ -775,7 +1128,13 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
 
 
 def test_record_amend_failure_after_fill_records_context_status_and_ledger(monkeypatch):
-    calls = {"open_context": [], "status": [], "decisions": [], "orders": []}
+    calls = {
+        "open_context": [],
+        "status": [],
+        "decisions": [],
+        "orders": [],
+        "fail_closed": [],
+    }
 
     class _Ledger:
         def log_composite_decision(self, **kwargs):
@@ -800,6 +1159,11 @@ def test_record_amend_failure_after_fill_records_context_status_and_ledger(monke
         live_service,
         "_live_state_get",
         lambda key, *args, **kwargs: {"risk": "state"} if key == "risk" else 0,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_persist_safety_fail_closed",
+        lambda **kwargs: calls["fail_closed"].append(kwargs),
     )
 
     logs: list[str] = []
@@ -846,6 +1210,116 @@ def test_record_amend_failure_after_fill_records_context_status_and_ledger(monke
     assert calls["decisions"][0]["action_reason"] == "bad stops"
     assert calls["orders"][0]["decision_id"] == "dec_amend_failed"
     assert calls["orders"][0]["event_type"] == "amend_failed"
+    assert calls["fail_closed"] == [
+        {
+            "blockers": ("entry_protection_unverified",),
+            "source": "entry_protection",
+            "error": "bad stops",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("actual_sl", "expected_route"),
+    [(3998.0, "success"), (3990.0, "failure")],
+)
+def test_entry_protection_amend_requires_fresh_matching_projection(
+    monkeypatch,
+    actual_sl,
+    expected_route,
+):
+    calls = {"success": [], "failure": [], "aux": [], "published": []}
+
+    class _Bridge:
+        is_connected = True
+        _symbol_meta = {"digits": 2}
+
+        def amend_position_sltp(self, *, position_id, sl, tp):
+            return SimpleNamespace(success=True, position_id=position_id, comment="accepted")
+
+        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
+            return SimpleNamespace(
+                status="fresh",
+                reconcile_id="entry-protection-r1",
+                observed_at=time.time(),
+                generated_at=time.time(),
+                positions=({"position_id": 268, "sl": actual_sl, "tp": 4028.0},),
+            )
+
+    candidate = live_service._OpenTradeCandidate(
+        direction_name="LONG",
+        bridge_meta={"digits": 2},
+        digits=2,
+        sl_dist=10.0,
+        tp_dist=20.0,
+        sl_price=3998.0,
+        tp_price=4028.0,
+        base_volume=100.0,
+        volume=100.0,
+        event_multiplier=1.0,
+        event_sizing_context={},
+        sizing_trace={},
+        risk_verdict=SimpleNamespace(to_dict=lambda: {"allowed": True}),
+        market_session={"status": "open"},
+        order_block={},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_record_amended_open_success_context",
+        lambda **kwargs: calls["success"].append(kwargs),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_record_amend_failure_after_fill",
+        lambda **kwargs: calls["failure"].append(kwargs),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_record_risk_reduction_aux_failure",
+        lambda event_type, **kwargs: calls["aux"].append((event_type, kwargs)),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_publish_fresh_position_reconcile",
+        lambda result, *, broker: calls["published"].append((result, broker)),
+    )
+
+    live_service._attach_open_trade_protection(
+        bridge=_Bridge(),
+        attr_engine=None,
+        broker="ctrader",
+        cfg=SimpleNamespace(),
+        bar={"time": 123.0},
+        tick=9,
+        position_id=268,
+        actual_api_volume=100.0,
+        requested_volume=100.0,
+        base_requested_volume=100.0,
+        fill_price=4008.0,
+        current_price=4008.0,
+        sl_price=3998.0,
+        tp_price=4028.0,
+        sl_dist=10.0,
+        tp_dist=20.0,
+        account={},
+        positions=[],
+        composite=SimpleNamespace(direction=1),
+        gate_result=SimpleNamespace(passed=True),
+        candidate=candidate,
+        entry_protection_plan={"schema_version": "entry_protection_plan.v1"},
+        log=lambda _message: None,
+    )
+
+    if expected_route == "success":
+        assert len(calls["success"]) == 1
+        assert calls["failure"] == []
+        assert calls["published"][0][1] == "ctrader"
+        assert calls["aux"] == []
+    else:
+        assert calls["success"] == []
+        assert calls["published"] == []
+        assert calls["failure"][0]["status_error"].endswith("stop_loss_mismatch")
+        assert calls["aux"][0][0] == "entry_protection_projection_unverified"
 
 
 def test_record_amended_open_success_records_all_contexts(monkeypatch):
@@ -1040,9 +1514,13 @@ def test_run_live_loop_tick_body_returns_wait_when_market_closed(monkeypatch):
         log=logs.append,
     )
 
-    assert result == {"recovery_bootstrapped": False, "wait_seconds": 300.0, "break_loop": False}
+    # Even on a confirmed weekend the default-off compatibility loop keeps a
+    # five-second retry cadence while broker reconciliation is unavailable;
+    # market-session state may block alpha but may not suspend safety.
+    assert result == {"recovery_bootstrapped": False, "wait_seconds": 5.0, "break_loop": False}
     assert diagnostics[0][0][:2] == (12, "market_closed")
-    assert "market closed confirmed (weekend)" in logs[0]
+    assert "market closed confirmed" in logs[0]
+    assert "weekend" in logs[0]
 
 
 def test_closed_decision_bar_frame_drops_current_partial_bar():
@@ -1265,16 +1743,36 @@ def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     class _Bridge:
         is_connected = True
 
-        def refresh_positions(self, *, force=False, allow_cache_fallback=True):
-            self.refresh_args = {
+        def __init__(self):
+            self.reconcile_calls = 0
+
+        def reconcile_positions(self, *, force=False, allow_cache_fallback=True):
+            self.reconcile_calls += 1
+            self.reconcile_args = {
                 "force": force,
                 "allow_cache_fallback": allow_cache_fallback,
             }
-            return [{"position_id": 268, "symbol": "XAUUSD+", "volume": 100.0}]
+            positions = (
+                ({"position_id": 268, "symbol": "XAUUSD+", "volume": 100.0},)
+                if self.reconcile_calls == 1
+                else ()
+            )
+            return SimpleNamespace(
+                reconcile_id=f"emergency-{self.reconcile_calls}",
+                status="fresh",
+                positions=positions,
+                observed_at=time.time(),
+                generated_at=time.time(),
+                success=True,
+                fresh=True,
+                authoritative=True,
+                error_code="",
+                error_message="",
+            )
 
         def close_position(self, pid, volume=0.0):
             close_calls.append((pid, volume))
-            return SimpleNamespace(success=True, position_id=pid)
+            return SimpleNamespace(success=True, outcome="confirmed", position_id=pid)
 
     bridge = _Bridge()
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
@@ -1283,10 +1781,11 @@ def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     result = live_service.emergency_close("ctrader", "XAUUSD+")
 
     assert result["ok"] is True
+    assert result["status"] == "completed"
     assert result["attempted"] == 1
     assert result["closed"] == 1
     assert result["failed"] == 0
-    assert bridge.refresh_args == {"force": True, "allow_cache_fallback": False}
+    assert bridge.reconcile_args == {"force": True, "allow_cache_fallback": False}
     assert close_calls == [(268, 100.0)]
     assert calls[0][0] == "close_position"
     assert calls[0][1]["close_reason"] == "emergency_close"
@@ -1310,8 +1809,19 @@ def test_emergency_close_reports_close_failures(monkeypatch):
     class _Bridge:
         is_connected = True
 
-        def refresh_positions(self, *, force=False, allow_cache_fallback=True):
-            return [{"position_id": 269, "symbol": "XAUUSD+", "volume": 100.0}]
+        def reconcile_positions(self, *, force=False, allow_cache_fallback=True):
+            return SimpleNamespace(
+                reconcile_id="emergency-rejected",
+                status="fresh",
+                positions=({"position_id": 269, "symbol": "XAUUSD+", "volume": 100.0},),
+                observed_at=time.time(),
+                generated_at=time.time(),
+                success=True,
+                fresh=True,
+                authoritative=True,
+                error_code="",
+                error_message="",
+            )
 
         def close_position(self, pid, volume=0.0):
             return SimpleNamespace(
@@ -1327,6 +1837,8 @@ def test_emergency_close_reports_close_failures(monkeypatch):
     result = live_service.emergency_close("ctrader", "XAUUSD+")
 
     assert result["ok"] is False
+    assert result["status"] == "outcome_unknown"
+    assert result["unknown_position_ids"] == [269]
     assert result["attempted"] == 1
     assert result["closed"] == 0
     assert result["failed"] == 1
@@ -1448,12 +1960,23 @@ def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
     )
     live_service._persist_session_state("2026-06-29")
     live_service._reset_session_state_for_new_day()
+    live_service._live_state_update(account={"balance": 1000.0})
 
-    assert live_service._restore_session_state_for_day("2026-06-29") is True
-    assert live_service._live_state_get("session_pnl") == pytest.approx(-18.5)
-    assert live_service._live_state_get("session_consecutive_loss") == 2
-    assert live_service._live_state_get("circuit_breaker") is True
-    assert live_service._live_state_get("trade_equity_history", clone=True) == [1000.0, 981.5]
+    assert live_service._restore_session_state_for_day(
+        "2026-06-29",
+        broker_open_position_ids=set(),
+    ) is True
+    # Broker deals are authoritative even when the compatibility cache still
+    # contains an older non-zero snapshot.  A confirmed empty deal set heals
+    # that cache instead of reopening risk from stale values.
+    assert live_service._live_state_get("session_pnl") == pytest.approx(0.0)
+    assert live_service._live_state_get("session_consecutive_loss") == 0
+    assert live_service._live_state_get("circuit_breaker") is False
+    assert live_service._live_state_get("session_state_status") == "available"
+    # A confirmed empty broker-deal set rebuilds the equity path from the
+    # fresh account balance; the cached prior-day path is never authoritative.
+    assert live_service._live_state_get("session_peak_equity") == pytest.approx(1000.0)
+    assert live_service._live_state_get("trade_equity_history", clone=True) == [1000.0]
 
 
 def test_close_pnl_fallback_reads_recovery_when_memory_cache_missing(monkeypatch, tmp_path):
@@ -1490,7 +2013,12 @@ def test_close_pnl_fallback_reads_recovery_when_memory_cache_missing(monkeypatch
     assert live_service._estimate_close_pnl_from_cached_state(272, 4040.0) == pytest.approx(1000.0)
 
 
-def test_recovery_bootstrap_reconciles_persisted_positions_after_confirmed_broker_zero(monkeypatch, tmp_path):
+def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
+    monkeypatch,
+    tmp_path,
+):
+    from datetime import datetime, timezone
+
     from backend.core import db as db_module
     import execution.deal_sync as deal_sync_module
 
@@ -1536,20 +2064,62 @@ def test_recovery_bootstrap_reconciles_persisted_positions_after_confirmed_broke
         is_connected = True
 
         def __init__(self):
-            self._last_reconcile_at = 0.0
             self.calls = []
 
-        def refresh_positions(self, *, force=False, allow_cache_fallback=True):
+        def reconcile_positions(self, *, force=False, allow_cache_fallback=True):
             self.calls.append((force, allow_cache_fallback))
-            self._last_reconcile_at += 1.0
-            return []
+            now = time.time()
+            return SimpleNamespace(
+                reconcile_id=f"recovery-{len(self.calls)}",
+                status="fresh",
+                positions=(),
+                observed_at=now,
+                generated_at=now,
+            )
 
     bridge = _Bridge()
     logs = []
     live_service._live_state_update(positions=[{"position_id": 301, "volume": 0.0}], positions_updated_at=time.time())
     _patch_live_state_conn(monkeypatch, _conn)
     monkeypatch.setattr(live_service, "_LEDGER", None)
-    monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", lambda *args, **kwargs: {})
+    sync_calls = 0
+
+    def _delayed_close_deal(_bridge, conn, _position_ids, **_kwargs):
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            return {}
+        close_ts = time.time()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ctrader_deals
+            (deal_id, position_id, exec_timestamp, gross_profit, swap,
+             close_commission, closed_volume, is_close)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (9301, 301, close_ts, -9.0, 0.0, -1.0, 100, 1),
+        )
+        conn.commit()
+        return {
+            301: {
+                "net": -10.0,
+                "gross": -9.0,
+                "swap": 0.0,
+                "commission": -1.0,
+                "exec_timestamp": close_ts,
+                "exec_price": 4050.0,
+                "deal_id": 9301,
+                "deal_ids": [9301],
+                "close_deals_count": 1,
+                "source": "ctrader_deals",
+            }
+        }
+
+    monkeypatch.setattr(
+        deal_sync_module,
+        "sync_close_deals_batch",
+        _delayed_close_deal,
+    )
 
     first = live_service._bootstrap_position_recovery(
         bridge,
@@ -1571,13 +2141,333 @@ def test_recovery_bootstrap_reconciles_persisted_positions_after_confirmed_broke
         conn.close()
 
     assert first is False
-    assert second is True
+    assert second is False
     assert bridge.calls == [(True, False), (True, False)]
     assert live_service._live_state_get("positions", clone=True) == []
-    assert row["status"] == "closed_replayed"
-    assert row["close_reason"] == "restart_replay"
+    assert row["status"] == "open"
+    assert row["close_reason"] == ""
+    assert live_service._live_state_get("session_state_status") == "unavailable"
+    assert live_service.no_new_risk_latched(fail_closed=True) is True
     assert any("confirmation 1/2" in item for item in logs)
-    assert any("reconciled 1 persisted positions as closed" in item for item in logs)
+    assert any("waiting for authoritative close deals" in item for item in logs)
+
+    third = live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=logs.append,
+    )
+    conn = _conn()
+    try:
+        resolved_row = conn.execute(
+            "SELECT status, close_reason, close_pnl FROM recovery_position_state "
+            "WHERE position_id=301"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert third is True
+    assert resolved_row["status"] == "closed_replayed"
+    assert resolved_row["close_reason"] == "restart_replay"
+    assert resolved_row["close_pnl"] == pytest.approx(-10.0)
+    assert live_service.no_new_risk_latched(fail_closed=True) is False
+
+    live_service._live_state_update(account={"balance": 990.0})
+    trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert live_service._restore_session_state_for_day(
+        trade_date,
+        broker_open_position_ids=set(),
+    ) is True
+    assert live_service._live_state_get("session_state_status") == "available"
+    assert live_service._live_state_get("session_pnl") == pytest.approx(-10.0)
+
+
+def test_replay_keeps_close_deal_latch_until_recovery_projection_commits(
+    monkeypatch,
+):
+    order: list[str] = []
+    monkeypatch.setattr(
+        live_service,
+        "_lifecycle_build_replayed_close_payloads",
+        lambda **_kwargs: {
+            "total_pnl": -5.0,
+            "close_price": 2400.0,
+            "close_ts": 100.0,
+            "context_integrity": "partial",
+            "recovery_meta": {},
+        },
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_mark_recovery_position_closed",
+        lambda *_args, **_kwargs: (
+            order.append("recovery_projection")
+            or (_ for _ in ()).throw(RuntimeError("postgres unavailable"))
+        ),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_release_session_close_deal_latch",
+        lambda *_args, **_kwargs: order.append("latch_release"),
+    )
+
+    with pytest.raises(RuntimeError, match="postgres unavailable"):
+        live_service._replay_recovered_close(
+            broker="ctrader",
+            position_id=302,
+            position_state={"position_id": 302},
+            real_pnl={
+                "net": -5.0,
+                "exec_timestamp": 100.0,
+                "deal_id": 9302,
+                "source": "ctrader_deals",
+            },
+            strategy_name="factor_v4",
+        )
+
+    assert order == ["recovery_projection"]
+
+
+def test_pending_close_latch_without_recovery_row_is_retried_and_released(
+    monkeypatch,
+    tmp_path,
+):
+    from datetime import datetime, timezone
+
+    from backend.core import db as db_module
+    import execution.deal_sync as deal_sync_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _Bridge:
+        is_connected = True
+
+        def reconcile_positions(self, *, force=False, allow_cache_fallback=True):
+            now = time.time()
+            return SimpleNamespace(
+                reconcile_id=f"pending-only-{now}",
+                status="fresh",
+                positions=(),
+                observed_at=now,
+                generated_at=now,
+            )
+
+    bridge = _Bridge()
+    _patch_live_state_conn(monkeypatch, _conn)
+    monkeypatch.setattr(live_service, "_LEDGER", None)
+    live_service._pos_open_prices[777] = 2400.0
+    live_service._pos_open_api_volume[777] = 100.0
+    live_service._defer_close_until_authoritative_deal(
+        777,
+        broker="ctrader",
+        tick=9,
+        reason="pg_was_unavailable_during_initial_close",
+    )
+
+    def _sync(_bridge, conn, position_ids, **_kwargs):
+        assert position_ids == {777}
+        close_ts = time.time()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ctrader_deals
+            (deal_id, position_id, exec_timestamp, gross_profit, swap,
+             close_commission, closed_volume, is_close)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (9777, 777, close_ts, -5.0, 0.0, -1.0, 100.0, 1),
+        )
+        conn.commit()
+        return {
+            777: {
+                "net": -6.0,
+                "gross": -5.0,
+                "commission": -1.0,
+                "swap": 0.0,
+                "exec_timestamp": close_ts,
+                "closed_volume": 100.0,
+                "deal_id": 9777,
+                "deal_ids": [9777],
+                "close_deals_count": 1,
+                "source": "ctrader_deals",
+            }
+        }
+
+    monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", _sync)
+    logs: list[str] = []
+
+    assert live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=logs.append,
+    ) is False
+    assert live_service.no_new_risk_latched(fail_closed=True) is True
+
+    assert live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=logs.append,
+    ) is True
+    assert live_service.no_new_risk_latched(fail_closed=True) is False
+
+    live_service._live_state_update(account={"balance": 994.0})
+    trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert live_service._restore_session_state_for_day(
+        trade_date,
+        broker_open_position_ids=set(),
+    ) is True
+    assert live_service._live_state_get("session_pnl") == pytest.approx(-6.0)
+    assert live_service._live_state_get("session_trades") == 1
+
+
+def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path):
+    from backend.core import db as db_module
+    import execution.deal_sync as deal_sync_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    now = time.time()
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO recovery_position_state
+            (position_id, broker, symbol, direction, open_price, volume,
+             first_seen_at, last_seen_at, status, strategy_name,
+             entry_decision_id, context_integrity, recovery_meta_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                778,
+                "ctrader",
+                "XAUUSD+",
+                1,
+                2400.0,
+                50.0,
+                now - 100.0,
+                now - 2.0,
+                "open",
+                "factor_v4",
+                "open-778",
+                "full",
+                "{}",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _Bridge:
+        is_connected = True
+
+        def reconcile_positions(self, *, force=False, allow_cache_fallback=True):
+            observed_at = time.time()
+            return SimpleNamespace(
+                reconcile_id=f"partial-open-{observed_at}",
+                status="fresh",
+                positions=(
+                    {
+                        "position_id": 778,
+                        "symbol": "XAUUSD+",
+                        "direction": 1,
+                        "entry_price": 2400.0,
+                        "open_price": 2400.0,
+                        "volume": 50.0,
+                        "pnl": 0.0,
+                    },
+                ),
+                observed_at=observed_at,
+                generated_at=observed_at,
+            )
+
+    bridge = _Bridge()
+    _patch_live_state_conn(monkeypatch, _conn)
+    live_service._defer_close_until_authoritative_deal(
+        778,
+        broker="ctrader",
+        tick=10,
+        reason="partial_close_deal_fetch_failed",
+        recovery_evidence={
+            "pending_kind": "partial_close",
+            "baseline_deal_ids": [1778],
+            "baseline_closed_volume": 50.0,
+            "required_closed_volume_delta": 50.0,
+            "expected_position_volume": 100.0,
+        },
+    )
+    results = [
+        {
+            778: {
+                "net": -2.0,
+                "exec_timestamp": now - 1.0,
+                "closed_volume": 50.0,
+                "deal_id": 1778,
+                "deal_ids": [1778],
+                "close_deals_count": 1,
+                "source": "ctrader_deals",
+            }
+        },
+        {
+            778: {
+                "net": -5.0,
+                "exec_timestamp": now + 1.0,
+                "closed_volume": 100.0,
+                "deal_id": 2778,
+                "deal_ids": [1778, 2778],
+                "close_deals_count": 2,
+                "source": "ctrader_deals",
+            }
+        },
+    ]
+    sync_calls: list[dict] = []
+
+    def _sync(*_args, **kwargs):
+        sync_calls.append(kwargs)
+        return results.pop(0)
+
+    monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", _sync)
+    logs: list[str] = []
+
+    assert live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=logs.append,
+    ) is False
+    assert live_service.no_new_risk_latched(fail_closed=True) is True
+    assert any("realized partial-close deals" in item for item in logs)
+
+    assert live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=logs.append,
+    ) is True
+    assert live_service.no_new_risk_latched(fail_closed=True) is False
+    assert sync_calls[1]["baseline_close_cursor_by_position"][778] == {
+        "baseline_cursor_available": True,
+        "baseline_deal_ids": [1778],
+        "baseline_closed_volume": 50.0,
+    }
 
 
 def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
@@ -2079,10 +2969,19 @@ def test_supervisor_tighten_trace_keeps_decision_id(monkeypatch):
         is_connected = True
 
         def get_spot_quote(self):
-            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05}
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
 
         def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
             return SimpleNamespace(success=True, position_id=pid, sl=sl, tp=tp)
+
+        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
+            return SimpleNamespace(
+                status="fresh",
+                reconcile_id="supervisor-tighten-702",
+                observed_at=time.time(),
+                generated_at=time.time(),
+                positions=({"position_id": 702, "sl": 4005.0, "tp": 4030.0},),
+            )
 
     verdict = {
         "position_id": "702",
@@ -2157,7 +3056,7 @@ def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch)
         is_connected = True
 
         def get_spot_quote(self):
-            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05}
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
 
         def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
             raise AssertionError("no-op must not touch broker")
@@ -2242,11 +3141,20 @@ def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):
         is_connected = True
 
         def get_spot_quote(self):
-            return {"bid": 4028.0, "ask": 4028.1, "mid": 4028.05}
+            return {"bid": 4028.0, "ask": 4028.1, "mid": 4028.05, "ts": time.time()}
 
         def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
             amend_calls.append((pid, sl, tp))
             return SimpleNamespace(success=True, position_id=pid, sl=sl, tp=tp)
+
+        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
+            return SimpleNamespace(
+                status="fresh",
+                reconcile_id="supervisor-tighten-705",
+                observed_at=time.time(),
+                generated_at=time.time(),
+                positions=({"position_id": 705, "sl": 4018.0, "tp": 4038.0},),
+            )
 
     verdict = {
         "position_id": "705",
@@ -2346,6 +3254,81 @@ def test_protection_cycle_supersedes_trailing_when_supervisor_handles_position(m
     assert superseded == [(703, "position_supervisor")]
 
 
+def test_risk_reduction_policy_exception_returns_allow_and_defers_audit(monkeypatch):
+    events = []
+
+    class _UnavailablePolicy:
+        def evaluate(self, action, context):
+            raise RuntimeError("postgres unavailable")
+
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _UnavailablePolicy())
+    monkeypatch.setattr(
+        live_service,
+        "append_safety_outbox",
+        lambda **kwargs: events.append(kwargs) or {},
+    )
+
+    verdict = live_service._evaluate_risk_reduction_policy(
+        "close_position",
+        {"position_id": 704, "close_reason": "holding_timeout"},
+    )
+
+    assert verdict.allowed is True
+    assert verdict.reason == "risk_policy_unavailable_risk_reduction_continues"
+    assert events[0]["event_type"] == "risk_reduction_policy_unavailable"
+
+
+def test_protection_cycle_continues_trailing_when_supervisor_stage_fails(monkeypatch):
+    candidate = live_service.ProtectionCandidate(
+        source="legacy_awe_trailing",
+        action="tighten",
+        priority=50,
+        position_id=704,
+        risk_action="tighten_position",
+        controls={"target_stop_loss": 4005.0},
+        reason="legacy_awe_trailing",
+        position={"position_id": 704, "symbol": "XAUUSD+", "direction": 1},
+    )
+    executed = []
+    outbox = []
+
+    monkeypatch.setattr(live_service, "_update_trailing_stops", lambda *args, **kwargs: [candidate])
+    monkeypatch.setattr(live_service, "_enforce_holding_timeout", lambda *args, **kwargs: set())
+    monkeypatch.setattr(live_service, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        live_service,
+        "_run_position_supervision",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("supervisor PG unavailable")),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_execute_trailing_candidate",
+        lambda item, **kwargs: executed.append(item.position_id) or True,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "append_safety_outbox",
+        lambda **kwargs: outbox.append(kwargs) or {},
+    )
+
+    result = live_service._run_position_protection_cycle(
+        SimpleNamespace(is_connected=True),
+        [{"position_id": 704}],
+        cfg=SimpleNamespace(timeframe="M5"),
+        acct={},
+        pipeline={},
+        current_price=4010.0,
+        atr_price=5.0,
+        tick=4,
+        log=lambda msg: None,
+    )
+
+    assert executed == [704]
+    assert result["trailing_applied"] == [704]
+    assert result["stage_errors"][0]["stage"] == "position_supervisor"
+    assert outbox[0]["event_type"] == "position_protection_stage_failed"
+
+
 def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(monkeypatch):
     traces = []
     decisions = []
@@ -2376,10 +3359,26 @@ def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(mo
         is_connected = True
 
         def get_spot_quote(self):
-            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05}
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
 
         def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
             return SimpleNamespace(success=True, position_id=pid, sl=sl, tp=tp)
+
+        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
+            return SimpleNamespace(
+                status="fresh",
+                reconcile_id="trailing-applied-r1",
+                observed_at=time.time(),
+                generated_at=time.time(),
+                positions=(
+                    {
+                        "position_id": 704,
+                        "symbol": "XAUUSD+",
+                        "sl": 4005.0,
+                        "tp": 4030.0,
+                    },
+                ),
+            )
 
     candidate = live_service.ProtectionCandidate(
         source="legacy_awe_trailing",
@@ -2492,7 +3491,7 @@ def test_trailing_candidate_amend_failed_logs_event_and_trace(monkeypatch):
         is_connected = True
 
         def get_spot_quote(self):
-            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05}
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
 
         def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
             return SimpleNamespace(success=False, comment="bad_stops")
@@ -2534,4 +3533,117 @@ def test_trailing_candidate_amend_failed_logs_event_and_trace(monkeypatch):
     assert events[0]["event_type"] == "amend_failed"
     assert traces[0]["stage"] == "execution_failed"
     assert traces[0]["execution_reason"] == "bad_stops"
+    assert "AMEND FAILED" in logs[0]
+
+
+@pytest.mark.parametrize(
+    ("reconcile_mode", "expected_reason"),
+    [
+        ("unchanged", "stop_loss_mismatch"),
+        ("failed", "position_reconcile_exception"),
+    ],
+)
+def test_trailing_candidate_requires_fresh_broker_projection_before_applied(
+    monkeypatch,
+    reconcile_mode,
+    expected_reason,
+):
+    traces: list[dict] = []
+    events: list[dict] = []
+    logs: list[str] = []
+    fail_closed: list[dict] = []
+    auxiliary_failures: list[tuple[str, dict]] = []
+    tracked: list[tuple] = []
+    _patch_close_context_metadata(monkeypatch)
+
+    class _Policy:
+        def evaluate(self, action, context):
+            return SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"})
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
+
+        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
+            return SimpleNamespace(success=True, outcome="confirmed", position_id=pid)
+
+        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
+            if reconcile_mode == "failed":
+                raise TimeoutError("broker reconcile timeout")
+            return SimpleNamespace(
+                status="fresh",
+                reconcile_id="unchanged-r1",
+                observed_at=time.time(),
+                generated_at=time.time(),
+                positions=(
+                    {
+                        "position_id": 705,
+                        "symbol": "XAUUSD+",
+                        "sl": 3990.0,
+                        "tp": 4030.0,
+                    },
+                ),
+            )
+
+    candidate = live_service.ProtectionCandidate(
+        source="legacy_awe_trailing",
+        action="tighten",
+        priority=50,
+        position_id=705,
+        risk_action="tighten_position",
+        controls={"target_stop_loss": 4005.0, "target_take_profit": 4030.0},
+        evidence={"confidence": 0.4},
+        reason="legacy_awe_trailing",
+        position={
+            "position_id": 705,
+            "symbol": "XAUUSD+",
+            "direction": 1,
+            "current_price": 4010.0,
+            "sl": 3990.0,
+            "tp": 4030.0,
+            "digits": 2,
+        },
+    )
+
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec-unverified")
+    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: traces.append(kwargs))
+    monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: events.append(kwargs))
+    monkeypatch.setattr(live_service, "_track_local_sl_tp", lambda *args, **kwargs: tracked.append((args, kwargs)))
+    monkeypatch.setattr(
+        live_service,
+        "_remember_protection_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unverified amend must not be marked applied")
+        ),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_persist_safety_fail_closed",
+        lambda **kwargs: fail_closed.append(kwargs) or {"status": "no_new_risk_latched"},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_record_risk_reduction_aux_failure",
+        lambda event_type, **kwargs: auxiliary_failures.append((event_type, kwargs)),
+    )
+
+    handled = live_service._execute_trailing_candidate(
+        candidate,
+        bridge=_Bridge(),
+        cfg=SimpleNamespace(timeframe="M5"),
+        tick=8,
+        log=logs.append,
+        acct={},
+    )
+
+    assert handled is True
+    assert tracked == []
+    assert events[0]["event_type"] == "amend_failed"
+    assert traces[0]["stage"] == "execution_failed"
+    assert expected_reason in traces[0]["execution_reason"]
+    assert fail_closed[0]["blockers"] == ("amend_projection_unverified",)
+    assert auxiliary_failures[0][0] == "protection_amend_projection_unverified"
     assert "AMEND FAILED" in logs[0]

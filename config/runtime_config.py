@@ -40,6 +40,8 @@ def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
     fail-closed default for non-demo/live authority surfaces.
     """
     current = cfg if cfg is not None else shared()
+    if governance_expansion_is_paused(current):
+        return True
     mode = str(getattr(current, "autonomy_mode", "") or "manual").strip().lower()
     try:
         from execution.broker_config import shared_broker_connection_config
@@ -49,6 +51,17 @@ def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
         broker_is_demo = False
     bounded_demo = mode in DEMO_AUTONOMY_MODES and broker_is_demo
     return bool(getattr(current, "autonomy_expansion_frozen", True)) and not bounded_demo
+
+
+def governance_expansion_is_paused(cfg: Any | None = None) -> bool:
+    """Return the all-mode operator kill-switch state.
+
+    Unlike ``autonomy_expansion_frozen``, this switch never grants a demo-mode
+    exemption.  It blocks expansionary governance in every mode while leaving
+    observation, research, rollback and risk-tightening paths available.
+    """
+    current = cfg if cfg is not None else shared()
+    return bool(getattr(current, "governance_expansion_paused", False))
 
 
 @dataclass
@@ -151,6 +164,9 @@ class RuntimeConfig:
     # Effective only outside demo_nursery/demo_autonomous. Demo keeps governed
     # exploration active while RiskPolicy/V16/effect rollback remain mandatory.
     autonomy_expansion_frozen: bool = True
+    # Operator-owned, all-mode expansion kill switch.  Autonomous services may
+    # observe it but must never clear or rewrite it through their overlays.
+    governance_expansion_paused: bool = False
     # Scoped demo-only envelope for bounded model decision influence.  This is
     # deliberately separate from ``autonomy_expansion_frozen`` so an operator
     # can canary one validated model without thawing unrelated governance.
@@ -390,7 +406,9 @@ class RuntimeConfig:
     factor_governance_shadow_min_valid: int = 80
     factor_governance_shadow_min_hit_rate: float = 0.50
     factor_governance_shadow_max_drawdown: float = 0.05
-    factor_governance_new_factor_weight: float = 0.30
+    # Zero in the code default is deliberate: autonomous activation requires
+    # an explicit deployment value (settings.yaml currently supplies one).
+    factor_governance_new_factor_weight: float = 0.0
     factor_governance_max_promotions_per_cycle: int = 1
     factor_governance_max_disables_per_cycle: int = 1
     factor_governance_max_retires_per_cycle: int = 1
@@ -399,7 +417,7 @@ class RuntimeConfig:
     factor_governance_builtin_activation_min_health_score: float = 70.0
     factor_governance_builtin_activation_min_n_obs: int = 500
     factor_governance_builtin_activation_max_weakness: float = 0.65
-    factor_governance_builtin_activation_weight: float = 0.05
+    factor_governance_builtin_activation_weight: float = 0.0
     factor_governance_max_builtin_activations_per_cycle: int = 1
     # 被自治治理隔离的因子自动恢复：只针对 QUARANTINE，不恢复 RETIRED/DEAD。
     factor_governance_auto_restore_enabled: bool = True
@@ -576,9 +594,27 @@ class _RuntimeConfigHolder:
         return v
 
     def patch(self, patch: Dict[str, Any]) -> int:
-        cur = self.get().to_dict()
-        cur.update(patch)
-        return self.replace(RuntimeConfig.from_dict(cur))
+        """Atomically apply a typed patch to the current authoritative value.
+
+        ``get()`` followed by ``replace()`` uses two separate critical
+        sections and can therefore lose a concurrent overlay publication.  A
+        narrow operator patch (for example an observability toggle) must be
+        merged with the exact value held at publication time.
+        """
+        with self._lock:
+            cur = self._cfg.to_dict()
+            cur.update(copy.deepcopy(dict(patch or {})))
+            self._cfg = RuntimeConfig.from_dict(cur)
+            self._version += 1
+            v = self._version
+            subs = list(self._subscribers)
+            cfg_ref = self._cfg
+        for cb in subs:
+            try:
+                cb(cfg_ref, v)
+            except Exception:  # noqa: BLE001
+                logger.exception("RuntimeConfig subscriber raised: %r", cb)
+        return v
 
     def subscribe(self, cb: Callable[[RuntimeConfig, int], None]) -> None:
         with self._lock:
@@ -713,7 +749,6 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
         effective_db_path = Path(db_path) if db_path is not None else Path(STATE_DB)
         service = RuntimeConfigOverlayService(effective_db_path)
         latest = service.latest()
-        overlay = dict(latest.get("overlay") or {})
         overlay_hash = str(latest.get("overlay_hash") or "")
         db_key = str(effective_db_path)
         if not latest.get("ok") or not overlay_hash:
@@ -721,10 +756,55 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
             return False
         if not force and _overlay_last_hash_by_db.get(db_key) == overlay_hash:
             return False
-        shared_holder().replace(config_from_overlay(overlay, effective_db_path))
+        base = RuntimeConfig.from_dict(overlay_base_config(effective_db_path))
+        restored = service.restore_on_startup(base)
+        shared_holder().replace(restored["config"])
         _overlay_last_hash_by_db[db_key] = overlay_hash
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from backend.services.runtime_config_overlay import (
+                RuntimeConfigOverlayAuthorityError,
+            )
+
+            if isinstance(exc, RuntimeConfigOverlayAuthorityError):
+                from backend.services.live_safety_state import (
+                    activate_no_new_risk_latch,
+                )
+
+                try:
+                    activate_no_new_risk_latch(
+                        reason="runtime_overlay_refresh_authority_failed",
+                        actor="system:runtime_config_refresh",
+                        metadata={
+                            "error": str(exc)[:500],
+                            "authority": dict(getattr(exc, "report", {}) or {}),
+                        },
+                        cause="governance_authority",
+                        cause_id="runtime_config_overlay_refresh",
+                    )
+                except Exception:
+                    # The latch helper already fails closed in-process before
+                    # surfacing persistence failure.
+                    logger.error(
+                        "RuntimeConfig overlay refresh latch persistence failed",
+                        exc_info=True,
+                    )
+        except Exception:
+            logger.error(
+                "RuntimeConfig overlay authority failure handling failed",
+                exc_info=True,
+            )
+        quarantined_config = getattr(exc, "quarantined_config", None)
+        if isinstance(quarantined_config, RuntimeConfig):
+            shared_holder().replace(quarantined_config)
+            if "db_key" in locals() and "overlay_hash" in locals():
+                _overlay_last_hash_by_db[db_key] = overlay_hash
+            logger.warning(
+                "RuntimeConfig overlay retained as read-only quarantine; "
+                "new risk remains latched"
+            )
+            return True
         logger.debug("RuntimeConfig overlay refresh skipped", exc_info=True)
         return False
     finally:
@@ -759,7 +839,14 @@ def replace(new_cfg: RuntimeConfig) -> int:
 
 
 def patch(patch_dict: Dict[str, Any]) -> int:
-    return shared_holder().patch(patch_dict)
+    """Atomically patch RuntimeConfig and keep RuntimeState in lockstep."""
+    holder = shared_holder()
+    new_version = holder.patch(patch_dict)
+    try:
+        RuntimeState.shared().set_config(holder.get().to_dict())
+    except Exception:  # noqa: BLE001
+        logger.debug("RuntimeState not initialized yet", exc_info=True)
+    return new_version
 
 
 def subscribe(cb: Callable[[RuntimeConfig, int], None]) -> None:

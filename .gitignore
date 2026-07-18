@@ -32,6 +32,7 @@ data/*.db-wal
 data/*.bak
 data/*.pkl
 data/charts/
+data/safety/
 data/charts/*.bak
 data/charts/backtest_*.txt
 data/charts/evolution_story.jsonl

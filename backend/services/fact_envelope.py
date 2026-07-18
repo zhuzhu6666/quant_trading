@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any, Mapping, MutableMapping
 
 
@@ -10,13 +11,53 @@ FACT_STATES = frozenset({"known", "unknown", "stale", "error"})
 DEFAULT_STALE_AFTER_SEC = {
     "ws": 5.0,
     "state": 5.0,
+    "spot": 5.0,
     "account": 15.0,
     "positions": 15.0,
     "loop": 15.0,
     "risk": 30.0,
+    "session": 30.0,
     "readiness": 180.0,
+    "learning": 180.0,
+    "ops": 180.0,
     "recovery": 75.0,
 }
+
+_UNAVAILABLE_SOURCES = frozenset({
+    "",
+    "none",
+    "unknown",
+    "unavailable",
+    "not_registered",
+    "degraded_cache",
+})
+
+
+def observed_epoch(value: float | str | datetime | None) -> float:
+    """Normalize supported fact timestamps to epoch seconds.
+
+    Public APIs already expose a mix of epoch numbers and ISO-8601 strings.
+    Treating every string as zero would incorrectly downgrade fresh facts to
+    ``unknown``, while silently accepting arbitrary text would do the reverse.
+    """
+
+    if isinstance(value, datetime):
+        return float(value.timestamp())
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return 0.0
+        try:
+            return float(raw)
+        except ValueError:
+            try:
+                return float(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 @dataclass(frozen=True)
@@ -58,25 +99,26 @@ def fact_envelope(
     stale_after = float(stale_after_sec)
     state = "known"
     normalized_reason = str(reason_code or "").strip() or None
+    normalized_source = str(source or "none").strip() or "none"
     if error:
         state = "error"
         normalized_reason = normalized_reason or "source_error"
     else:
-        try:
-            observed_epoch = float(observed_at or 0.0)
-        except (TypeError, ValueError):
-            observed_epoch = 0.0
-        if observed_epoch <= 0:
+        observed_ts = observed_epoch(observed_at)
+        if observed_ts <= 0:
             state = "unknown"
             normalized_reason = normalized_reason or "missing_observed_at"
-        elif generated_at - observed_epoch > stale_after:
+        elif normalized_source.lower() in _UNAVAILABLE_SOURCES:
+            state = "unknown"
+            normalized_reason = normalized_reason or "source_unavailable"
+        elif generated_at - observed_ts > stale_after:
             state = "stale"
             normalized_reason = normalized_reason or "freshness_expired"
     return FactEnvelope(
         envelope="fact.v1",
         contract=str(contract),
         state=state,
-        source=str(source or "none"),
+        source=normalized_source,
         observed_at=observed_at,
         generated_at=generated_at,
         stale_after_sec=stale_after,

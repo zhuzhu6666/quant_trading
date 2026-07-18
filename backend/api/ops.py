@@ -1,11 +1,11 @@
 """Ops API endpoints: alerts, auto-recovery, weekly reports, experiments."""
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 import time
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
-from backend.core.auth import RequireUser
+from backend.core.auth import RequireRecentStepUp, RequireUser, require_recent_step_up
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_governance import AgentScorecardService, AgentBriefingContextService
 from backend.services.autonomous_demo_apply_stepper import AutonomousDemoApplyStepper
@@ -14,14 +14,38 @@ from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurs
 from backend.services.autonomy_health import AutonomyHealthService
 from backend.services.backend_readiness import BackendReadinessService
 from backend.services.backend_readiness_snapshot import BackendReadinessSnapshotService
+from backend.services.api_fact_views import (
+    alerts_fact_payload,
+    live_autonomy_evaluation_fact_payload,
+    live_autonomy_status_fact_payload,
+    readiness_fact_payload,
+    recovery_fact_payload,
+)
+from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC, attach_fact
+from backend.services.ops_governance_fact_views import (
+    autonomy_scope_enforcement_fact_payload,
+    governance_mutation_fact_payload,
+    incident_control_status_fact_payload,
+    ledger_read_fact_payload,
+    persisted_record_fact_payload,
+    proposal_refresh_fact_payload,
+    release_approval_trail_fact_payload,
+    runtime_config_projection_observation,
+    scope_approval_fact_payload,
+    scope_enforcement_read_fact_payload,
+    unverified_compat_fact_payload,
+    v15_phase0_fact_payload,
+)
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.factor_governance_effect_tracker import FactorGovernanceEffectTrackerService
 from backend.services.factor_pruning_governance import FactorPruningGovernanceService
+from backend.services.governance_expansion_control import GovernanceExpansionControlService
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.live_autonomy import LiveAutonomyService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.release_control import ReleaseControlService
+from backend.services.parity_replay import ParityReplayService
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.stability import TimedCache
 from backend.services.v15_phase0 import V15Phase0CompletionService
@@ -35,6 +59,7 @@ from backend.services.v16_brain_planning import (
 from monitor.auto_recovery import AutoRecovery
 from research.report_generator import WeeklyReport
 from research.experiment_tracker import ExperimentTracker
+from risk.policy_service import INCIDENT_MODE_RANK
 router = APIRouter(prefix="/api/ops", tags=["ops"])
 
 # Singletons (lazy init)
@@ -48,6 +73,8 @@ class IncidentControlRequest(BaseModel):
     mode: str
     reason: str = ""
     confirm_thaw: bool = False
+    v16_command_id: str = ""
+    v16_claim_token: str = ""
 
 
 class IncidentPlaybookRequest(BaseModel):
@@ -195,11 +222,38 @@ class LiveAutonomyUnlockRequest(BaseModel):
     actor: str = "api:ops.autonomy.live_unlock"
     reason: str = ""
     confirm: bool = False
+    v16_command_id: str = ""
+    v16_claim_token: str = ""
 
 
 class LiveAutonomyRevokeRequest(BaseModel):
     actor: str = "api:ops.autonomy.live_unlock"
     reason: str = ""
+
+
+class GovernanceExpansionControlRequest(BaseModel):
+    paused: bool
+    reason: str = ""
+    confirm_resume: bool = False
+    v16_command_id: str = ""
+    v16_claim_token: str = ""
+
+
+class ParityReplayRunRequest(BaseModel):
+    symbol: str = "XAUUSD+"
+    timeframe: str = "M15"
+    start: str | float | None = None
+    end: str | float | None = None
+    as_of: float | None = None
+    max_bars: int = Field(default=500, ge=2, le=5000)
+    warmup_bars: int = Field(default=150, ge=0, le=1000)
+    initial_equity: float = Field(default=10_000.0, gt=0)
+    volume_lots: float = Field(default=0.01, gt=0)
+    contract_size: float = Field(default=100.0, gt=0)
+    commission_per_lot_round_turn: float = Field(default=6.0, ge=0)
+    slippage_bps: float = Field(default=0.0, ge=0)
+    persist_artifact: bool = True
+    expected_bindings: dict[str, str] = Field(default_factory=dict)
 
 
 def _get_auto_recovery() -> AutoRecovery:
@@ -222,8 +276,9 @@ def get_alert_rules(_user: RequireUser) -> dict[str, Any]:
     """
     获取告警规则配置和状态。
     """
-    return {
+    return alerts_fact_payload({
         "status": "Healthy",
+        "config_status": "configured",
         "rules_active": 6,
         "rules": [
             {"name": "权益回撤 > 5%", "threshold": "5%", "active": True},
@@ -233,7 +288,12 @@ def get_alert_rules(_user: RequireUser) -> dict[str, Any]:
             {"name": "数据同步延迟 > 30min", "threshold": "30min", "active": True},
             {"name": "VaR 95% > 账户 5%", "threshold": "5%", "active": True},
         ],
-    }
+        "delivery": {
+            "status": "not_registered",
+            "registered": False,
+            "source": "not_registered",
+        },
+    })
 
 
 # ── Auto Recovery ──
@@ -242,19 +302,47 @@ def get_recovery_status(_user: RequireUser) -> dict[str, Any]:
     """
     获取 AutoRecovery 当前状态。
     """
-    ar = _get_auto_recovery()
-    return ar.health_status()
+    ar = _auto_recovery
+    if ar is None:
+        return recovery_fact_payload(
+            {
+                "status": "not_registered",
+                "registered": False,
+                "running": False,
+                "loop_healthy": None,
+                "scheduler_healthy": None,
+                "failures": 0,
+                "last_check": 0.0,
+                "restart_attempts": 0,
+            },
+            registered=False,
+        )
+    registered = bool(
+        getattr(ar, "_loop_check_fn", None) is not None
+        or getattr(ar, "_scheduler_check_fn", None) is not None
+    )
+    return recovery_fact_payload(ar.health_status(), registered=registered)
 
 
 @router.get("/recovery/history")
 def get_recovery_history(_user: RequireUser) -> dict[str, Any]:
-    """
-    获取恢复历史记录 (占位)。
-    """
-    return {
+    """Return recovery history without constructing or starting a monitor."""
+    payload = {
         "history": [],
-        "note": "待实现持久化",
+        "note": "AutoRecovery 未注册，尚无权威恢复历史源",
+        "status": "not_registered",
+        "registered": False,
     }
+    return dict(
+        attach_fact(
+            payload,
+            contract="ops.auto-recovery-history.v2",
+            source="not_registered",
+            observed_at=None,
+            stale_after_sec=DEFAULT_STALE_AFTER_SEC["recovery"],
+            reason_code="auto_recovery_history_not_registered",
+        )
+    )
 
 
 @router.get("/backend-readiness")
@@ -263,9 +351,10 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
     cache_key = "backend-readiness"
     payload = _READINESS_CACHE.get(cache_key)
     if payload is not None:
-        payload.setdefault("cache", {})
+        payload = dict(payload)
+        payload["cache"] = dict(payload.get("cache") or {})
         payload["cache"].update({"source": "cache", "ttl_sec": _BACKEND_READINESS_TTL_SEC})
-        return payload
+        return readiness_fact_payload(payload)
 
     snapshots = BackendReadinessSnapshotService()
     current = snapshots.latest()
@@ -279,12 +368,17 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
             "age_sec": round(float(current.get("age_seconds") or 0.0), 3),
             "refresh_status": refresh.get("status"),
         })
-        return _READINESS_CACHE.set(cache_key, payload, ttl_sec=30.0)
-    return {
+        cached = _READINESS_CACHE.set(cache_key, payload, ttl_sec=30.0)
+        return readiness_fact_payload(cached)
+    return readiness_fact_payload({
         "ok": True,
         "schema_version": "backend_readiness.v1",
         "generated_at": time.time(),
         "ready_for_frontend": False,
+        "ready_for_live_execution": False,
+        "ready_for_live_alpha": False,
+        "ready_for_autonomous_mutation": False,
+        "ready_for_release": False,
         "status": "warming_snapshot",
         "blockers": [],
         "known_observations": [{
@@ -294,41 +388,54 @@ def get_backend_readiness(_user: RequireUser) -> dict[str, Any]:
         }],
         "cache": {"source": "warming", "refresh_status": refresh.get("status")},
         "v16": {},
-    }
+    })
 
 
 @router.get("/agent-authority")
 def get_agent_authority(_user: RequireUser) -> dict[str, Any]:
     """Return the machine-readable authority contract for autonomous agents."""
     registry = AgentAuthorityRegistryService()
-    return {
+    return unverified_compat_fact_payload({
         "ok": True,
         "schema_version": "ops_agent_authority.v1",
         "agent_authority": registry.list_agents(),
         "status": registry.status(),
-    }
+    }, contract="ops.agent-authority.v2",
+       reason_code="agent_authority_observation_not_exposed")
 
 
 @router.get("/agent-scorecard")
 def get_agent_scorecard(_user: RequireUser, limit: int = 500) -> dict[str, Any]:
     """Return read-only quality and reliability metrics for autonomous agents."""
     scorecard = AgentScorecardService().scorecard(limit=max(1, min(int(limit), 2000)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(scorecard.get("ok")),
         "schema_version": "ops_agent_scorecard.v1",
         "scorecard": scorecard,
-    }
+    }, contract="ops.agent-scorecard.v2",
+       source="state_v1.agent-governance-ledgers",
+       entity_path=("scorecard",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       item_timestamp_fields=("latest_activity_at",),
+       reason_code="agent_scorecard_observation_missing")
 
 
 @router.get("/agent-briefing")
 def get_agent_briefing(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
     """Return shared read-only briefing context for autonomous agent review."""
     briefing = AgentBriefingContextService().build(limit=max(1, min(int(limit), 200)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(briefing.get("ok")),
         "schema_version": "ops_agent_briefing.v1",
         "briefing": briefing,
-    }
+    }, contract="ops.agent-briefing.v2",
+       source="state_v1.agent-governance-ledgers",
+       entity_path=("briefing",),
+       observed_paths=(),
+       item_paths=(("agent_scorecard", "top_agents"), ("relevant_experience",)),
+       item_timestamp_fields=("latest_activity_at", "created_at"),
+       reason_code="agent_briefing_observation_missing")
 
 
 @router.get("/agent-trade-attribution")
@@ -342,22 +449,29 @@ def get_agent_trade_attribution(
         limit=max(1, min(int(limit), 200)),
         include_external_links=bool(include_external_links),
     )
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(attribution.get("ok")),
         "schema_version": "ops_agent_trade_attribution.v1",
         "trade_attribution": attribution,
-    }
+    }, contract="ops.agent-trade-attribution.v2",
+       source="state_v1.trade_outcome_review",
+       entity_path=("trade_attribution",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       item_timestamp_fields=("created_at",),
+       reason_code="agent_trade_attribution_observation_missing")
 
 
 @router.get("/agent-chain-health")
 def get_agent_chain_health(_user: RequireUser, limit: int = 300) -> dict[str, Any]:
     """Return agent authority, proposal flow, scorecard, and feedback health."""
     health = AgentScorecardService().chain_health(limit=max(1, min(int(limit), 1000)))
-    return {
+    return unverified_compat_fact_payload({
         "ok": bool(health.get("ok")),
         "schema_version": "ops_agent_chain_health.v1",
         "agent_chain_health": health,
-    }
+    }, contract="ops.agent-chain-health.v2",
+       reason_code="agent_chain_health_observation_not_exposed")
 
 
 @router.get("/autonomy/evolution-cycle")
@@ -379,13 +493,19 @@ def get_autonomous_evolution_cycle(
     )
     if refresh_proposals:
         _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(cycle.get("ok")),
         "schema_version": "ops_autonomous_evolution_cycle.v1",
         "cycle": cycle,
         "readiness_generated_at": readiness.get("generated_at"),
         "readiness_mode": "full" if bool(full_readiness) else "light",
-    }
+    }, contract="ops.autonomous-evolution-cycle.v2",
+       source="state_v1.autonomous-evolution-evidence",
+       entity_path=("cycle",),
+       observed_paths=(),
+       item_paths=(("evidence", "tables"), ("effect_monitor", "tables")),
+       item_timestamp_fields=("latest_created_at",),
+       reason_code="autonomous_evolution_cycle_observation_missing")
 
 
 @router.post("/autonomy/evolution-cycle/run")
@@ -420,22 +540,24 @@ def run_autonomous_evolution_nursery_cycle(req: AutonomousEvolutionNurseryRunReq
         recommended_step_allowlist=list(req.recommended_step_allowlist or []),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return unverified_compat_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_autonomous_evolution_nursery_run.v1",
         "run": result,
-    }
+    }, contract="ops.autonomous-evolution-nursery-run.v2",
+       reason_code="nursery_run_commit_not_reconciled")
 
 
 @router.get("/autonomy/demo-apply-plan")
 def get_autonomous_demo_apply_plan(_user: RequireUser) -> dict[str, Any]:
     """Return explicit single-step demo apply plan without mutating state."""
     plan = AutonomousDemoApplyStepper().plan()
-    return {
+    return unverified_compat_fact_payload({
         "ok": bool(plan.get("ok")),
         "schema_version": "ops_autonomous_demo_apply_plan.v1",
         "plan": plan,
-    }
+    }, contract="ops.autonomous-demo-apply-plan.v2",
+       reason_code="demo_apply_plan_observation_not_exposed")
 
 
 @router.post("/autonomy/demo-apply-step")
@@ -475,11 +597,15 @@ def run_autonomous_demo_apply_step(
         raise HTTPException(status_code=409, detail=result)
     if not bool(result.get("ok")):
         raise HTTPException(status_code=400, detail=result)
-    return {
+    return persisted_record_fact_payload({
         "ok": True,
         "schema_version": "ops_autonomous_demo_apply_step.v1",
         "step_result": result,
-    }
+    }, contract="ops.autonomous-demo-apply-step.v2",
+       source="state_v1.evolution_run",
+       record_path=("step_result",),
+       id_fields=("run_id",),
+       observed_paths=(("finished_at",), ("started_at",)))
 
 
 @router.get("/autonomy/proposals")
@@ -495,34 +621,44 @@ def get_autonomy_proposals(
         status=str(status or ""),
         refresh=bool(refresh),
     )
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(proposals.get("ok")),
         "schema_version": "ops_autonomy_proposals.v1",
         "proposals": proposals,
-    }
+    }, contract="ops.autonomy-proposals.v2",
+       source="state_v1.proposal_registry",
+       entity_path=("proposals",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       reason_code="proposal_registry_observation_missing")
 
 
 @router.get("/autonomy/proposals/{proposal_id}")
 def get_autonomy_proposal(proposal_id: str, _user: RequireUser) -> dict[str, Any]:
     """Return one proposal registry item."""
     proposal = ProposalRegistryService().get(proposal_id)
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(proposal.get("ok")),
         "schema_version": "ops_autonomy_proposal.v1",
         "proposal": proposal,
-    }
+    }, contract="ops.autonomy-proposal.v2",
+       source="state_v1.proposal_registry",
+       entity_path=("proposal",),
+       observed_paths=(("proposal", "updated_at"), ("proposal", "created_at")),
+       reason_code="proposal_observation_missing")
 
 
 @router.post("/autonomy/proposals/refresh")
 def refresh_autonomy_proposals(_user: RequireUser, limit: int = 500) -> dict[str, Any]:
     """Refresh the proposal registry from existing governance ledgers."""
-    result = ProposalRegistryService().refresh(limit=max(1, min(int(limit), 5000)))
+    service = ProposalRegistryService()
+    result = service.refresh(limit=max(1, min(int(limit), 5000)))
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return proposal_refresh_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_autonomy_proposals_refresh.v1",
         "refresh": result,
-    }
+    }, reconciled_projection=None)
 
 
 @router.post("/autonomy/proposals/{proposal_id}/review")
@@ -536,11 +672,15 @@ def review_autonomy_proposal(proposal_id: str, req: ProposalReviewRequest, _user
         notes=str(req.notes or ""),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_autonomy_proposal_review.v1",
         "review": result,
-    }
+    }, contract="ops.autonomy-proposal-review.v2",
+       source="state_v1.proposal_registry",
+       record_path=("review",),
+       id_fields=("proposal_id",),
+       observed_paths=(("review", "reviewed_at"),))
 
 
 @router.get("/autonomy/live-status")
@@ -551,12 +691,12 @@ def get_live_autonomy_status(_user: RequireUser, refresh_proposals: bool = False
         readiness=readiness,
         refresh_proposals=bool(refresh_proposals),
     )
-    return {
+    return live_autonomy_status_fact_payload({
         "ok": bool(status.get("ok")),
         "schema_version": "ops_live_autonomy_status.v1",
         "live_autonomy": status,
         "readiness_generated_at": readiness.get("generated_at"),
-    }
+    })
 
 
 @router.post("/autonomy/live-unlock/evaluate")
@@ -571,46 +711,91 @@ def evaluate_live_autonomy_unlock(req: LiveAutonomyUnlockRequest, _user: Require
         reason=str(req.reason or ""),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return live_autonomy_evaluation_fact_payload({
         "ok": bool(evaluation.get("ok")),
         "schema_version": "ops_live_autonomy_unlock_evaluate.v1",
         "evaluation": evaluation,
         "readiness_generated_at": readiness.get("generated_at"),
-    }
+    })
 
 
 @router.post("/autonomy/live-unlock")
-def unlock_live_autonomy(req: LiveAutonomyUnlockRequest, _user: RequireUser) -> dict[str, Any]:
+def unlock_live_autonomy(req: LiveAutonomyUnlockRequest, _user: RequireRecentStepUp) -> dict[str, Any]:
     """Manually unlock live-autonomous mode after evidence gates pass."""
     readiness = BackendReadinessService().build()
     result = LiveAutonomyService().unlock(
-        actor=str(req.actor or "api:ops.autonomy.live_unlock"),
+        actor="api:ops.autonomy.live_unlock",
         reason=str(req.reason or ""),
         confirm=bool(req.confirm),
         readiness=readiness,
+        v16_command_id=str(req.v16_command_id or ""),
+        v16_claim_token=str(req.v16_claim_token or ""),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return governance_mutation_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_live_autonomy_unlock.v1",
         "unlock": result,
         "readiness_generated_at": readiness.get("generated_at"),
-    }
+    }, contract="ops.live-autonomy-unlock.v2",
+       result_path=("unlock",))
+
+
+@router.get("/autonomy/governance-expansion-control")
+def get_governance_expansion_control(_user: RequireUser) -> dict[str, Any]:
+    """Return the operator-owned all-mode governance expansion kill switch."""
+    status = GovernanceExpansionControlService().status()
+    return unverified_compat_fact_payload({
+        "ok": True,
+        "schema_version": "ops_governance_expansion_control.v1",
+        "governance_expansion_paused": bool(
+            status.get("governance_expansion_paused")
+        ),
+        "control": status,
+    }, contract="ops.governance-expansion-control.v2",
+       reason_code="governance_expansion_projection_observation_missing")
+
+
+@router.post("/autonomy/governance-expansion-control")
+def set_governance_expansion_control(
+    req: GovernanceExpansionControlRequest,
+    _user: RequireRecentStepUp,
+) -> dict[str, Any]:
+    """Pause or governably resume all-mode autonomous expansion."""
+    result = GovernanceExpansionControlService().set_paused(
+        bool(req.paused),
+        actor="api:ops.governance_expansion_control",
+        reason=str(req.reason or ""),
+        confirm_resume=bool(req.confirm_resume),
+        v16_command_id=str(req.v16_command_id or ""),
+        v16_claim_token=str(req.v16_claim_token or ""),
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return governance_mutation_fact_payload({
+        "ok": bool(result.get("ok")),
+        "schema_version": "ops_governance_expansion_control.v1",
+        "governance_expansion_paused": bool(
+            result.get("governance_expansion_paused")
+        ),
+        "result": result,
+    }, contract="ops.governance-expansion-control-mutation.v2",
+       result_path=("result",))
 
 
 @router.post("/autonomy/live-unlock/revoke")
 def revoke_live_autonomy(req: LiveAutonomyRevokeRequest, _user: RequireUser) -> dict[str, Any]:
     """Revoke live-autonomous mode back to live_candidate through runtime overlay."""
     result = LiveAutonomyService().revoke(
-        actor=str(req.actor or "api:ops.autonomy.live_unlock"),
+        actor="api:ops.autonomy.live_unlock",
         reason=str(req.reason or ""),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return governance_mutation_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_live_autonomy_revoke.v1",
         "revoke": result,
-    }
+    }, contract="ops.live-autonomy-revoke.v2",
+       result_path=("revoke",))
 
 
 @router.get("/brain/state")
@@ -638,11 +823,15 @@ def get_brain_state(_user: RequireUser, refresh: bool = False) -> dict[str, Any]
                     persist=True,
                     source="api:ops.brain_state",
                 )
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(snapshot.get("ok")),
         "schema_version": "ops_brain_state.v1",
         "brain_state": snapshot,
-    }
+    }, contract="ops.v16-brain-state.v2",
+       source="state_v1.brain_state_snapshot",
+       entity_path=("brain_state",),
+       observed_paths=(("created_at",),),
+       reason_code="brain_state_snapshot_missing")
 
 
 @router.get("/brain/memory")
@@ -661,11 +850,17 @@ def get_brain_memory(_user: RequireUser, refresh: bool = False, limit: int = 50)
         _READINESS_CACHE.invalidate("backend-readiness")
     else:
         memory = service.latest_indexed(limit=max(1, min(int(limit), 200)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(memory.get("ok")),
         "schema_version": "ops_brain_memory.v1",
         "memory": memory,
-    }
+    }, contract="ops.v16-brain-memory.v2",
+       source="state_v1.brain_memory",
+       entity_path=("memory",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       item_timestamp_fields=("last_used_at", "created_at"),
+       reason_code="brain_memory_observation_missing")
 
 
 @router.get("/brain/commands")
@@ -677,11 +872,17 @@ def get_brain_commands(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
     and its existing RiskPolicy/DecisionPolicy gates.
     """
     commands = V16BrainOrchestratorService().latest_commands(limit=max(1, min(int(limit), 200)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(commands.get("ok")),
         "schema_version": "ops_v16_brain_commands.v1",
         "commands": commands,
-    }
+    }, contract="ops.v16-brain-commands.v2",
+       source="state_v1.v16_brain_command",
+       entity_path=("commands",),
+       observed_paths=(),
+       item_paths=(("commands",),),
+       item_timestamp_fields=("created_at",),
+       reason_code="v16_brain_command_observation_missing")
 
 
 @router.get("/brain/action-plans")
@@ -706,11 +907,16 @@ def get_brain_action_plans(_user: RequireUser, refresh: bool = False, limit: int
         _READINESS_CACHE.invalidate("backend-readiness")
     else:
         action_plans = planner.latest_plans(limit=limit)
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(action_plans.get("ok")),
         "schema_version": "ops_brain_action_plans.v1",
         "action_plans": action_plans,
-    }
+    }, contract="ops.v16-action-plans.v2",
+       source="state_v1.brain_action_plan",
+       entity_path=("action_plans",),
+       observed_paths=(("created_at",),),
+       item_paths=(("plans",),),
+       reason_code="brain_action_plan_observation_missing")
 
 
 @router.get("/brain/action-plan-evals")
@@ -739,22 +945,32 @@ def get_brain_action_plan_evals(_user: RequireUser, refresh: bool = False, limit
         _READINESS_CACHE.invalidate("backend-readiness")
     else:
         evals = evaluator.latest_evals(limit=limit)
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(evals.get("ok")),
         "schema_version": "ops_brain_action_plan_evals.v1",
         "action_plan_evals": evals,
-    }
+    }, contract="ops.v16-action-plan-evals.v2",
+       source="state_v1.brain_action_plan_eval",
+       entity_path=("action_plan_evals",),
+       observed_paths=(("created_at",),),
+       item_paths=(("evals",),),
+       reason_code="brain_action_plan_eval_observation_missing")
 
 
 @router.get("/brain/low-impact-executions")
 def get_brain_low_impact_executions(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
     """Return V16 Phase 3 low-impact execution ledger."""
     executions = BrainLowImpactExecutorService().latest_executions(limit=max(1, min(int(limit), 200)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(executions.get("ok")),
         "schema_version": "ops_brain_low_impact_executions.v1",
         "low_impact_executions": executions,
-    }
+    }, contract="ops.v16-low-impact-executions.v2",
+       source="state_v1.brain_low_impact_execution",
+       entity_path=("low_impact_executions",),
+       observed_paths=(),
+       item_paths=(("executions",),),
+       reason_code="low_impact_execution_observation_missing")
 
 
 @router.post("/brain/low-impact-executions/run")
@@ -768,22 +984,33 @@ def run_brain_low_impact_execution(req: BrainLowImpactExecutionRequest, _user: R
         persist=True,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_brain_low_impact_execution_run.v1",
         "execution_run": result,
-    }
+    }, contract="ops.v16-low-impact-execution-run.v2",
+       source="state_v1.brain_low_impact_execution",
+       record_path=("execution_run",),
+       id_fields=(),
+       observed_paths=(("created_at",),),
+       item_paths=(("executions",),),
+       item_id_fields=("execution_id",))
 
 
 @router.get("/brain/medium-impact-governance")
 def get_brain_medium_impact_governance(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
     """Return V16 Phase 4 medium-impact governance candidate ledger."""
     governance = BrainMediumImpactGovernanceService().latest_governance(limit=max(1, min(int(limit), 200)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(governance.get("ok")),
         "schema_version": "ops_brain_medium_impact_governance.v1",
         "medium_impact_governance": governance,
-    }
+    }, contract="ops.v16-medium-impact-governance.v2",
+       source="state_v1.brain_medium_impact_governance",
+       entity_path=("medium_impact_governance",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       reason_code="medium_impact_governance_observation_missing")
 
 
 @router.post("/brain/medium-impact-governance/materialize")
@@ -797,11 +1024,17 @@ def materialize_brain_medium_impact_governance(req: BrainMediumImpactGovernanceR
         persist=True,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_brain_medium_impact_governance_materialize.v1",
         "governance_run": result,
-    }
+    }, contract="ops.v16-medium-impact-governance-materialize.v2",
+       source="state_v1.brain_medium_impact_governance",
+       record_path=("governance_run",),
+       id_fields=(),
+       observed_paths=(("created_at",),),
+       item_paths=(("items",),),
+       item_id_fields=("governance_id",))
 
 
 @router.post("/factor/pruning-governance/materialize")
@@ -813,11 +1046,12 @@ def materialize_factor_pruning_governance(req: FactorPruningGovernanceRequest, _
         persist=True,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return unverified_compat_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_factor_pruning_governance_materialize.v1",
         "governance_run": result,
-    }
+    }, contract="ops.factor-pruning-governance-materialize.v2",
+       reason_code="factor_pruning_materialization_not_reconciled")
 
 
 @router.post("/factor/pruning-governance/promote-ready")
@@ -829,11 +1063,12 @@ def promote_factor_pruning_governance(req: FactorPruningGovernancePromoteRequest
         require_weak_health=bool(req.require_weak_health),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return unverified_compat_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_factor_pruning_governance_promote_ready.v1",
         "promote_run": result,
-    }
+    }, contract="ops.factor-pruning-governance-promote-ready.v2",
+       reason_code="factor_pruning_promotion_not_reconciled")
 
 
 @router.post("/factor/pruning-governance/bridge-ready")
@@ -845,22 +1080,29 @@ def bridge_factor_pruning_governance(req: FactorPruningGovernanceBridgeRequest, 
         actor=str(req.actor or "api:ops.factor_pruning_governance.bridge_ready"),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return unverified_compat_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_factor_pruning_governance_bridge_ready.v1",
         "bridge_run": result,
-    }
+    }, contract="ops.factor-pruning-governance-bridge-ready.v2",
+       reason_code="factor_pruning_bridge_not_reconciled")
 
 
 @router.get("/factor/governance-effects")
 def get_factor_governance_effects(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
     """Return pruning governance application effects using existing learning_application facts."""
     result = FactorGovernanceEffectTrackerService().status(limit=max(1, min(int(limit), 200)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_factor_governance_effects.v1",
         "effects": result,
-    }
+    }, contract="ops.factor-governance-effects.v2",
+       source="state_v1.learning_application_effect",
+       entity_path=("effects",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       item_timestamp_fields=("created_at",),
+       reason_code="factor_governance_effect_observation_missing")
 
 
 @router.post("/factor/governance-effects/reconcile")
@@ -868,11 +1110,17 @@ def reconcile_factor_governance_effects(req: FactorGovernanceEffectReconcileRequ
     """Reconcile pruning governance effects through the existing governor effect engine."""
     result = FactorGovernanceEffectTrackerService().reconcile(limit=max(1, min(int(req.limit), 200)))
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_factor_governance_effects_reconcile.v1",
         "effects": result,
-    }
+    }, contract="ops.factor-governance-effects-reconcile.v2",
+       source="state_v1.learning_application_effect",
+       entity_path=("effects",),
+       observed_paths=(),
+       item_paths=(("effect_status", "items"),),
+       item_timestamp_fields=("created_at",),
+       reason_code="factor_governance_effect_reconcile_observation_missing")
 
 
 @router.get("/brain/governance-candidates")
@@ -882,11 +1130,16 @@ def get_brain_governance_candidates(_user: RequireUser, limit: int = 50, status:
         limit=max(1, min(int(limit), 200)),
         status=str(status or ""),
     )
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(candidates.get("ok")),
         "schema_version": "ops_brain_governance_candidates.v1",
         "governance_candidates": candidates,
-    }
+    }, contract="ops.v16-governance-candidates.v2",
+       source="state_v1.brain_governance_candidate",
+       entity_path=("governance_candidates",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       reason_code="governance_candidate_observation_missing")
 
 
 @router.post("/brain/governance-candidates/{candidate_id}/submit")
@@ -902,7 +1155,7 @@ def submit_brain_governance_candidate(candidate_id: str, req: BrainGovernanceCan
         review = dict(review_result.get("review") or {})
         if not bool(review.get("bridge_ready")):
             _READINESS_CACHE.invalidate("backend-readiness")
-            return {
+            return unverified_compat_fact_payload({
                 "ok": False,
                 "schema_version": "ops_brain_governance_candidate_submit.v1",
                 "submit_result": {
@@ -915,28 +1168,39 @@ def submit_brain_governance_candidate(candidate_id: str, req: BrainGovernanceCan
                     "review": review,
                     "boundary": BrainGovernanceCandidateReviewService.boundary(),
                 },
-            }
+            }, contract="ops.v16-governance-candidate-submit.v2",
+               reason_code="governance_candidate_submit_blocked")
     result = BrainGovernanceCandidateService().submit_candidate_to_policy_suggestion(
         candidate_id,
         actor=str(req.actor or "api:ops.brain.governance_candidate"),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_brain_governance_candidate_submit.v1",
         "submit_result": result,
-    }
+    }, contract="ops.v16-governance-candidate-submit.v2",
+       source="state_v1.policy_suggestion",
+       record_path=("submit_result",),
+       id_fields=("suggestion_id",),
+       observed_paths=(("candidate", "updated_at"), ("candidate", "submitted_at")))
 
 
 @router.get("/brain/governance-candidate-reviews")
 def get_brain_governance_candidate_reviews(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
     """Return latest V16 governance candidate protocol reviews."""
     reviews = BrainGovernanceCandidateReviewService().latest_reviews(limit=max(1, min(int(limit), 200)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(reviews.get("ok")),
         "schema_version": "ops_brain_governance_candidate_reviews.v1",
         "candidate_reviews": reviews,
-    }
+    }, contract="ops.v16-governance-candidate-reviews.v2",
+       source="state_v1.brain_governance_candidate_review",
+       entity_path=("candidate_reviews",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       item_timestamp_fields=("created_at",),
+       reason_code="governance_candidate_review_observation_missing")
 
 
 @router.post("/brain/governance-candidates/review")
@@ -949,22 +1213,34 @@ def review_brain_governance_candidates(req: BrainGovernanceCandidateReviewReques
         persist=True,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_brain_governance_candidate_review_run.v1",
         "review_run": result,
-    }
+    }, contract="ops.v16-governance-candidate-review-run.v2",
+       source="state_v1.brain_governance_candidate_review",
+       record_path=("review_run",),
+       id_fields=(),
+       observed_paths=(("created_at",),),
+       item_paths=(("items",),),
+       item_id_fields=("review_id",),
+       item_timestamp_fields=("created_at",))
 
 
 @router.get("/brain/live-ready-guardrails")
 def get_brain_live_ready_guardrails(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
     """Return V16 Phase 5 live-ready guardrail ledger."""
     guardrails = BrainLiveReadyGuardrailService().latest_guardrails(limit=max(1, min(int(limit), 200)))
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(guardrails.get("ok")),
         "schema_version": "ops_brain_live_ready_guardrails.v1",
         "live_ready_guardrails": guardrails,
-    }
+    }, contract="ops.v16-live-ready-guardrails.v2",
+       source="state_v1.brain_live_ready_guardrail",
+       entity_path=("live_ready_guardrails",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       reason_code="live_ready_guardrail_observation_missing")
 
 
 @router.post("/brain/live-ready-guardrails/evaluate")
@@ -977,11 +1253,15 @@ def evaluate_brain_live_ready_guardrail(req: BrainLiveReadyGuardrailEvaluateRequ
         source=req.source,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(guardrail.get("guardrail_id")),
         "schema_version": "ops_brain_live_ready_guardrail_evaluate.v1",
         "guardrail": guardrail,
-    }
+    }, contract="ops.v16-live-ready-guardrail-evaluate.v2",
+       source="state_v1.brain_live_ready_guardrail",
+       record_path=("guardrail",),
+       id_fields=("guardrail_id",),
+       observed_paths=(("updated_at",), ("created_at",)))
 
 
 @router.post("/brain/live-ready-guardrails/tighten")
@@ -995,22 +1275,28 @@ def tighten_brain_live_ready_guardrail(req: BrainLiveReadyGuardrailTightenReques
         readiness=readiness,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return governance_mutation_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_brain_live_ready_guardrail_tighten.v1",
         "tighten_run": result,
-    }
+    }, contract="ops.v16-live-ready-guardrail-tighten.v2",
+       result_path=("tighten_run",),
+       mutation_path=("incident_control_result", "mutation"))
 
 
 @router.get("/replay/latest")
 def get_latest_replay_report(_user: RequireUser) -> dict[str, Any]:
     """Return latest V15 replay report metadata."""
     report = ReplayHarnessService().latest_report()
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(report.get("replay_run_id")) and not report.get("replay_error"),
         "schema_version": "ops_replay_latest.v1",
         "report": report,
-    }
+    }, contract="ops.replay-latest.v2",
+       source="state_v1.replay_report",
+       entity_path=("report",),
+       observed_paths=(("created_at",),),
+       reason_code="replay_report_observation_missing")
 
 
 @router.post("/replay/run")
@@ -1025,11 +1311,15 @@ def run_replay_harness(
         limit=max(1, min(int(limit), 5000)),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": not bool(report.get("replay_error")),
         "schema_version": "ops_replay_run.v1",
         "report": report,
-    }
+    }, contract="ops.replay-run.v2",
+       source="state_v1.replay_report",
+       record_path=("report",),
+       id_fields=("replay_run_id",),
+       observed_paths=(("created_at",),))
 
 
 @router.post("/replay/bar-run")
@@ -1048,11 +1338,37 @@ def run_bar_replay_harness(
         post_bars=max(0, min(int(post_bars), 20)),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": not bool(report.get("replay_error")),
         "schema_version": "ops_replay_bar_run.v1",
         "report": report,
-    }
+    }, contract="ops.replay-bar-run.v2",
+       source="state_v1.replay_report",
+       record_path=("report",),
+       id_fields=("replay_run_id",),
+       observed_paths=(("created_at",),))
+
+
+@router.post("/replay/parity-run")
+def run_parity_replay_harness(
+    req: ParityReplayRunRequest,
+    _user: RequireUser,
+) -> dict[str, Any]:
+    """Run the causal parity assessment without granting governance authority."""
+    report = ParityReplayService().run(req.model_dump())
+    return persisted_record_fact_payload({
+        "ok": str(report.get("status") or "") not in {"failed", "failed_binding"},
+        "schema_version": "ops_parity_replay_run.v1",
+        "live_parity": bool(report.get("live_parity")),
+        "governance_eligible": bool(report.get("governance_eligible")),
+        "deployable_candidate": bool(report.get("deployable_candidate")),
+        "report": report,
+    }, contract="ops.parity-replay-run.v2",
+       source="filesystem:parity-replay-artifact",
+       record_path=("report",),
+       id_fields=("replay_run_id",),
+       observed_paths=(("created_at",),),
+       required_fields=("artifact_path", "report_artifact_hash"))
 
 
 @router.post("/replay/bar-preview")
@@ -1072,11 +1388,12 @@ def run_bar_replay_preview(
         post_bars=max(0, min(int(post_bars), 48)),
         decision_id=str(decision_id or "").strip(),
     )
-    return {
+    return unverified_compat_fact_payload({
         "ok": not bool(report.get("replay_error")),
         "schema_version": "ops_replay_bar_preview.v1",
         "report": report,
-    }
+    }, contract="ops.replay-bar-preview.v2",
+       reason_code="replay_preview_is_not_persisted")
 
 
 @router.get("/replay/bar-decisions")
@@ -1092,51 +1409,80 @@ def list_bar_replay_decisions(
         limit=max(1, min(int(limit), 100)),
         offset=max(0, int(offset)),
     )
-    return {
+    return ledger_read_fact_payload({
         "ok": True,
         "schema_version": "ops_replay_bar_decisions.v1",
         "choices": choices,
         "items": choices.get("items", []),
-    }
+    }, contract="ops.replay-bar-decisions.v2",
+       source="state_v1.decision_ledger",
+       entity_path=("choices",),
+       observed_paths=(),
+       item_paths=(("items",),),
+       item_timestamp_fields=("decision_ts",),
+       reason_code="replay_decision_observation_missing")
 
 
 @router.get("/incident-control")
 def get_incident_control(_user: RequireUser) -> dict[str, Any]:
     """Return current V15 runtime incident control mode."""
     status = RuntimeIncidentControlService().status()
-    return {
+    projection = runtime_config_projection_observation()
+    return incident_control_status_fact_payload({
         "ok": True,
         "schema_version": "ops_incident_control.v1",
         "incident_control": status,
-    }
+    }, projection_observed_at=projection.get("observed_at"),
+       projection_error=projection.get("error"))
 
 
 @router.post("/incident-control")
-def set_incident_control(req: IncidentControlRequest, _user: RequireUser) -> dict[str, Any]:
+def set_incident_control(
+    req: IncidentControlRequest,
+    _user: RequireUser,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
     """Set V15 incident control mode through RiskPolicyService + runtime overlay."""
-    result = RuntimeIncidentControlService().set_mode(
+    service = RuntimeIncidentControlService()
+    current_mode = str(service.status().get("mode") or "frozen")
+    target_mode = str(req.mode or "").strip().lower()
+    if INCIDENT_MODE_RANK.get(target_mode, -1) < INCIDENT_MODE_RANK.get(
+        current_mode, -1
+    ):
+        # Tightening must stay available with local JWT verification only.
+        # Thawing unlocks risk and additionally requires a fresh server-side
+        # Auth v2 session, failing closed when session authority is unavailable.
+        require_recent_step_up(authorization)
+    result = service.set_mode(
         req.mode,
         reason=req.reason,
         actor="api:ops.incident_control",
         confirm_thaw=req.confirm_thaw,
+        v16_command_id=str(req.v16_command_id or ""),
+        v16_claim_token=str(req.v16_claim_token or ""),
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return governance_mutation_fact_payload({
         "ok": bool(result.get("ok")),
         "schema_version": "ops_incident_control.v1",
         "result": result,
-    }
+    }, contract="ops.incident-control-mutation.v2",
+       result_path=("result",))
 
 
 @router.get("/incident-playbook/latest")
 def get_latest_incident_playbook(_user: RequireUser) -> dict[str, Any]:
     """Return latest V15 incident playbook plan."""
     playbook = RuntimeIncidentControlService().latest_playbook()
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(playbook.get("ok")),
         "schema_version": "ops_incident_playbook_latest.v1",
         "playbook": playbook,
-    }
+    }, contract="ops.incident-playbook-latest.v2",
+       source="state_v1.incident_playbook_run",
+       entity_path=("playbook",),
+       observed_paths=(("created_at",),),
+       reason_code="incident_playbook_observation_missing")
 
 
 @router.post("/incident-playbook/run")
@@ -1148,22 +1494,32 @@ def run_incident_playbook(req: IncidentPlaybookRequest, _user: RequireUser) -> d
         release_run_id=req.release_run_id,
         created_by=req.created_by,
     )
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(playbook.get("ok")),
         "schema_version": "ops_incident_playbook_run.v1",
         "playbook": playbook,
-    }
+    }, contract="ops.incident-playbook-run.v2",
+       source="state_v1.incident_playbook_run",
+       record_path=("playbook",),
+       id_fields=("playbook_id",),
+       observed_paths=(("created_at",),))
 
 
 @router.get("/incident-playbook/{playbook_id}/events")
 def get_incident_playbook_events(playbook_id: str, _user: RequireUser, limit: int = 100) -> dict[str, Any]:
     """Return audit events bound to a V15 incident playbook plan."""
     trail = RuntimeIncidentControlService().playbook_events(playbook_id, limit=limit)
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(trail.get("ok")),
         "schema_version": "ops_incident_playbook_events.v1",
         "event_trail": trail,
-    }
+    }, contract="ops.incident-playbook-events.v2",
+       source="state_v1.incident_playbook_event",
+       entity_path=("event_trail",),
+       observed_paths=(),
+       item_paths=(("events",),),
+       item_timestamp_fields=("created_at",),
+       reason_code="incident_playbook_event_observation_missing")
 
 
 @router.post("/incident-playbook/{playbook_id}/events")
@@ -1181,22 +1537,26 @@ def record_incident_playbook_event(
         evidence_refs=req.evidence_refs,
         notes=req.notes,
     )
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(event.get("ok")),
         "schema_version": "ops_incident_playbook_event.v1",
         "event": event,
-    }
+    }, contract="ops.incident-playbook-event.v2",
+       source="state_v1.incident_playbook_event",
+       record_path=("event",),
+       id_fields=("event_id",),
+       observed_paths=(("created_at",),))
 
 
 @router.get("/autonomy-health/scope-approvals/latest")
 def get_latest_autonomy_scope_approval(_user: RequireUser) -> dict[str, Any]:
     """Return latest V15 autonomy health scope approval audit event."""
     event = AutonomyHealthService().latest_scope_approval()
-    return {
+    return scope_approval_fact_payload({
         "ok": bool(event.get("ok")),
         "schema_version": "ops_autonomy_scope_approval_latest.v1",
         "approval_event": event,
-    }
+    }, mutation=False)
 
 
 @router.post("/autonomy-health/scope-approvals")
@@ -1211,23 +1571,23 @@ def record_autonomy_scope_approval(req: AutonomyScopeApprovalRequest, _user: Req
         decision=req.decision,
         reason=req.reason,
     )
-    return {
+    return scope_approval_fact_payload({
         "ok": bool(event.get("ok")),
         "schema_version": "ops_autonomy_scope_approval_event.v1",
         "approval_event": event,
         "readiness_generated_at": readiness.get("generated_at"),
-    }
+    }, mutation=True)
 
 
 @router.get("/autonomy-health/scope-enforcements/latest")
 def get_latest_autonomy_scope_enforcement(_user: RequireUser) -> dict[str, Any]:
     """Return latest V15 autonomy health scope enforcement event."""
     event = AutonomyHealthService().latest_scope_enforcement()
-    return {
+    return scope_enforcement_read_fact_payload({
         "ok": bool(event.get("ok")),
         "schema_version": "ops_autonomy_scope_enforcement_latest.v1",
         "enforcement_event": event,
-    }
+    })
 
 
 @router.post("/autonomy-health/scope-enforcements")
@@ -1242,12 +1602,12 @@ def enforce_autonomy_scope(req: AutonomyScopeEnforcementRequest, _user: RequireU
         reason=req.reason,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return autonomy_scope_enforcement_fact_payload({
         "ok": bool(event.get("ok")),
         "schema_version": "ops_autonomy_scope_enforcement_event.v1",
         "enforcement_event": event,
         "readiness_generated_at": readiness.get("generated_at"),
-    }
+    })
 
 
 @router.get("/v15/phase0")
@@ -1255,23 +1615,26 @@ def get_v15_phase0_completion(_user: RequireUser) -> dict[str, Any]:
     """Return the machine-readable V15 Phase 0 completion gate."""
     readiness = BackendReadinessService().build()
     phase0 = V15Phase0CompletionService().build(readiness=readiness)
-    return {
+    return v15_phase0_fact_payload({
         "ok": bool(phase0.get("implementation_complete")),
         "schema_version": "ops_v15_phase0_completion.v1",
         "phase0": phase0,
         "readiness_generated_at": readiness.get("generated_at"),
-    }
+    })
 
 
 @router.get("/release/latest")
 def get_latest_release_run(_user: RequireUser) -> dict[str, Any]:
     """Return latest V15 release run ledger row."""
     release = ReleaseControlService().latest_release()
-    return {
+    return ledger_read_fact_payload({
         "ok": bool(release.get("run_id")),
         "schema_version": "ops_release_latest.v1",
         "release": release,
-    }
+    }, contract="ops.release-latest.v2",
+       source="state_v1.release_run",
+       entity_path=("release",),
+       reason_code="release_run_observation_missing")
 
 
 @router.post("/release/start")
@@ -1287,11 +1650,14 @@ def start_release_run(req: ReleaseRunStartRequest, _user: RequireUser) -> dict[s
         readiness=readiness,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(release.get("run_id")),
         "schema_version": "ops_release_start.v1",
         "release": release,
-    }
+    }, contract="ops.release-start.v2",
+       source="state_v1.release_run",
+       record_path=("release",),
+       id_fields=("run_id",))
 
 
 @router.post("/release/{run_id}/finish")
@@ -1307,22 +1673,27 @@ def finish_release_run(run_id: str, req: ReleaseRunFinishRequest, _user: Require
         readiness=readiness,
     )
     _READINESS_CACHE.invalidate("backend-readiness")
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(release.get("ok")) and bool(release.get("run_id")),
         "schema_version": "ops_release_finish.v1",
         "release": release,
-    }
+    }, contract="ops.release-finish.v2",
+       source="state_v1.release_run",
+       record_path=("release",),
+       id_fields=("run_id",))
 
 
 @router.get("/release/{run_id}/approvals")
 def get_release_approval_trail(run_id: str, _user: RequireUser) -> dict[str, Any]:
     """Return V15 release approval audit events for a release run."""
-    trail = ReleaseControlService().approval_trail(run_id)
-    return {
+    service = ReleaseControlService()
+    trail = service.approval_trail(run_id)
+    release = service.get_release(run_id)
+    return release_approval_trail_fact_payload({
         "ok": bool(trail.get("ok")),
         "schema_version": "ops_release_approval_trail.v1",
         "approval_trail": trail,
-    }
+    }, release=release)
 
 
 @router.post("/release/{run_id}/approvals")
@@ -1338,11 +1709,15 @@ def record_release_approval_event(
         reason=req.reason,
         evidence_refs=req.evidence_refs,
     )
-    return {
+    return persisted_record_fact_payload({
         "ok": bool(event.get("ok")),
         "schema_version": "ops_release_approval_event.v1",
         "approval_event": event,
-    }
+    }, contract="ops.release-approval-event.v2",
+       source="state_v1.release_approval_event",
+       record_path=("approval_event",),
+       id_fields=("event_id",),
+       observed_paths=(("created_at",),))
 
 
 # ── Weekly Reports ──
@@ -1364,12 +1739,26 @@ def get_weekly_reports(_user: RequireUser) -> dict[str, Any]:
                         "name": p.name,
                         "modified_at": p.stat().st_mtime,
                     })
-        return {
+        return ledger_read_fact_payload({
             "reports": reports,
             "count": len(reports),
-        }
-    except Exception:
-        return {"reports": [], "count": 0}
+        }, contract="ops.weekly-reports.v2",
+           source="filesystem:data/charts",
+           entity_path=(),
+           observed_paths=(),
+           item_paths=(("reports",),),
+           item_timestamp_fields=("modified_at",),
+           reason_code="weekly_report_observation_missing")
+    except Exception as exc:
+        return unverified_compat_fact_payload(
+            {
+                "reports": [],
+                "count": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            contract="ops.weekly-reports.v2",
+            reason_code="weekly_report_source_failed",
+        )
 
 
 @router.post("/reports/weekly/generate")
@@ -1377,7 +1766,8 @@ def generate_weekly_report(_user: RequireUser) -> dict[str, Any]:
     """
     触发周报生成 (占位)。
     """
-    return {
+    return unverified_compat_fact_payload({
         "status": "queued",
         "note": "周报生成需 ReportGenerator 接口支持",
-    }
+    }, contract="ops.weekly-report-generate.v2",
+       reason_code="weekly_report_generator_not_registered")

@@ -8,6 +8,8 @@ import logging
 import numpy as np
 import pandas as pd
 
+from backend.services.research_evidence import enforce_legacy_backtest_contract
+
 logger = logging.getLogger("quant")
 
 
@@ -25,6 +27,13 @@ def run_backtest(args):
 
     logger.info("=" * 60)
     logger.info(f"BACKTEST — {args.symbol} @ {args.timeframe}")
+    provenance = enforce_legacy_backtest_contract()
+    logger.warning(
+        "LEGACY DIAGNOSTIC ONLY — engine=%s live_parity=%s governance_eligible=%s",
+        provenance["engine"],
+        provenance["live_parity"],
+        provenance["governance_eligible"],
+    )
     logger.info("=" * 60)
 
     # ── 1. 加载数据 ──
@@ -33,7 +42,14 @@ def run_backtest(args):
 
     if df.empty:
         logger.error(f"No {args.timeframe} data. Run scripts/fetch_mt5_data.py first.")
-        return
+        return enforce_legacy_backtest_contract(
+            {
+                "status": "no_data",
+                "symbol": args.symbol,
+                "timeframe": args.timeframe,
+                "rows": [],
+            }
+        )
 
     # backtrader 需要 datetime 列
     if "time" in df.columns:
@@ -232,3 +248,14 @@ def run_backtest(args):
         print(f"  train ret={best['total_return']:+.2f}%({best['trades']}t) "
               f"test ret={best.get('total_return_test', best['total_return']):+.2f}%({best.get('trades_test', best['trades'])}t)")
         print(f"  decay={best['decay']:.0%}  sharpe={best['sharpe']:.3f}  dd={best['max_drawdown']:.2f}%")
+
+    return enforce_legacy_backtest_contract(
+        {
+            "status": "completed",
+            "symbol": args.symbol,
+            "timeframe": args.timeframe,
+            "rows": rows,
+            "best": best,
+            "total_runs": total_runs,
+        }
+    )

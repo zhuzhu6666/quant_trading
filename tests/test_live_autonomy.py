@@ -104,6 +104,29 @@ def test_live_unlock_evaluation_blocks_stale_replay_evidence(tmp_path):
     assert any(item["component"] == "replay" and item["status"] == "stale_evidence" for item in result["blockers"])
 
 
+def test_live_unlock_treats_null_age_without_timestamp_as_missing(tmp_path):
+    db_path = tmp_path / "state.db"
+    ensure_live_autonomy_unlock_table(db_path)
+    ensure_proposal_registry_table(db_path)
+    readiness = _ready_payload()
+    readiness["replay"] = {
+        "ok": True,
+        "age_seconds": None,
+        "stale_after_seconds": 86400.0,
+    }
+
+    result = LiveAutonomyService(db_path).evaluate(
+        readiness=readiness,
+        refresh_proposals=False,
+        persist=False,
+    )
+
+    replay = result["evidence_freshness"]["items"]["replay"]
+    assert replay["status"] == "missing_timestamp"
+    assert replay["age_seconds"] is None
+    assert result["ok"] is False
+
+
 def test_live_autonomy_status_degrades_live_mode_when_evidence_is_stale(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     ensure_live_autonomy_unlock_table(db_path)

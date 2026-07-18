@@ -38,6 +38,7 @@ class LoopGeneration:
         default_factory=lambda: {step: False for step in STARTUP_BARRIER_STEPS}
     )
     blockers: list[str] = field(default_factory=list)
+    runtime_blockers: list[str] = field(default_factory=list)
     components: dict[str, str] = field(default_factory=dict)
     safety_heartbeat_at: float = 0.0
     alpha_heartbeat_at: float = 0.0
@@ -98,8 +99,15 @@ class LiveLoopController:
                 raise RuntimeError(f"barrier_update_invalid_state:{generation.state}")
             generation.startup_barrier[step] = True
             generation.ready = all(generation.startup_barrier.values())
-            generation.accepting_new_risk = generation.ready and not generation.stop_event.is_set()
-            generation.state = "running" if generation.ready else "starting"
+            generation.accepting_new_risk = bool(
+                generation.ready
+                and not generation.runtime_blockers
+                and not generation.stop_event.is_set()
+            )
+            if generation.ready:
+                generation.state = "running" if generation.accepting_new_risk else "degraded"
+            else:
+                generation.state = "starting"
             generation.blockers = [name for name, ok in generation.startup_barrier.items() if not ok]
             generation.updated_at = self._clock()
             return generation.ready
@@ -114,7 +122,43 @@ class LiveLoopController:
             generation.accepting_new_risk = False
             if reason and reason not in generation.blockers:
                 generation.blockers.append(reason)
+            if reason and reason not in generation.runtime_blockers:
+                generation.runtime_blockers.append(reason)
             generation.updated_at = self._clock()
+
+    def update_runtime_health(
+        self,
+        generation_id: str,
+        *,
+        blockers: list[str] | tuple[str, ...],
+    ) -> bool:
+        """Update transient fail-closed blockers without reopening the startup barrier.
+
+        The generation becomes runnable again only when every startup step was
+        completed and the latest runtime safety snapshot has no blocker.
+        """
+        with self._lock:
+            generation = self._require_owner(generation_id)
+            if generation.state == "draining":
+                return False
+            generation.runtime_blockers = sorted(
+                {str(item) for item in blockers if str(item or "").strip()}
+            )
+            generation.ready = all(generation.startup_barrier.values())
+            generation.accepting_new_risk = bool(
+                generation.ready
+                and not generation.runtime_blockers
+                and not generation.stop_event.is_set()
+            )
+            if generation.ready:
+                generation.state = "running" if generation.accepting_new_risk else "degraded"
+            else:
+                generation.state = "starting"
+            generation.blockers = [
+                name for name, ok in generation.startup_barrier.items() if not ok
+            ]
+            generation.updated_at = self._clock()
+            return generation.accepting_new_risk
 
     def heartbeat(self, generation_id: str, plane: str) -> None:
         with self._lock:
@@ -162,31 +206,76 @@ class LiveLoopController:
                     "thread_alive": False,
                     "ready": False,
                     "accepting_new_risk": False,
-                    "safety_heartbeat_at": 0.0,
-                    "alpha_heartbeat_at": 0.0,
+                    "safety_heartbeat_at": None,
+                    "alpha_heartbeat_at": None,
+                    "safety_heartbeat_age_sec": None,
+                    "alpha_heartbeat_age_sec": None,
                     "blockers": [],
                 }
             thread_alive = bool(generation.thread and generation.thread.is_alive())
-            blockers = list(generation.blockers)
+            now = self._clock()
+            safety_age = (
+                max(0.0, now - generation.safety_heartbeat_at)
+                if generation.safety_heartbeat_at > 0
+                else None
+            )
+            alpha_age = (
+                max(0.0, now - generation.alpha_heartbeat_at)
+                if generation.alpha_heartbeat_at > 0
+                else None
+            )
+            pending_startup = [
+                name for name, ok in generation.startup_barrier.items() if not ok
+            ]
+            blockers = pending_startup + list(generation.blockers) + list(generation.runtime_blockers)
+            heartbeat_healthy = safety_age is not None and safety_age <= 15.0
+            if generation.state in {"running", "degraded"} and not heartbeat_healthy:
+                blockers.append(
+                    "safety_heartbeat_unknown" if safety_age is None else "safety_heartbeat_stale"
+                )
             if generation.state in {"stopped", "failed"} and thread_alive:
                 blockers.append("thread_exit_pending")
+            effective_phase = (
+                "degraded"
+                if generation.state == "running" and not heartbeat_healthy
+                else generation.state
+            )
             return {
-                "phase": generation.state,
+                "phase": effective_phase,
                 "generation": generation.generation_id,
                 "thread_alive": thread_alive,
                 "ready": generation.ready,
-                "accepting_new_risk": generation.accepting_new_risk,
+                "accepting_new_risk": bool(
+                    generation.accepting_new_risk and heartbeat_healthy
+                ),
                 "broker": generation.broker,
                 "strategy_name": generation.strategy_name,
                 "created_at": generation.created_at,
                 "updated_at": generation.updated_at,
-                "safety_heartbeat_at": generation.safety_heartbeat_at,
-                "alpha_heartbeat_at": generation.alpha_heartbeat_at,
+                "safety_heartbeat_at": generation.safety_heartbeat_at or None,
+                "alpha_heartbeat_at": generation.alpha_heartbeat_at or None,
+                "safety_heartbeat_age_sec": safety_age,
+                "alpha_heartbeat_age_sec": alpha_age,
                 "startup_barrier": dict(generation.startup_barrier),
                 "blockers": sorted(set(blockers)),
                 "failed_reason": generation.failed_reason,
                 "components": dict(generation.components),
             }
+
+    def accepting_new_risk(self, generation_id: str | None = None) -> bool:
+        with self._lock:
+            generation = self._current
+            if generation is None:
+                return False
+            if generation_id is not None and generation.generation_id != generation_id:
+                return False
+            if generation.state != "running" or generation.stop_event.is_set():
+                return False
+            if not generation.ready or generation.runtime_blockers:
+                return False
+            if generation.safety_heartbeat_at <= 0:
+                return False
+            return self._clock() - generation.safety_heartbeat_at <= 15.0
 
     def current(self) -> LoopGeneration | None:
         with self._lock:

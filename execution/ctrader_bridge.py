@@ -13,11 +13,14 @@ execution/ctrader_bridge.py — cTrader Open API 桥接（当前实盘主链）
 from __future__ import annotations
 
 import logging
+import math
 import os
 import socket
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -25,7 +28,15 @@ logger = logging.getLogger(__name__)
 
 
 # Phase 4: 统一接口
-from execution.base import BaseBrokerBridge, OrderResult, PositionInfo, AccountInfo
+from execution.base import (
+    AccountInfo,
+    AccountReconcileResult,
+    BaseBrokerBridge,
+    OrderResult,
+    PositionInfo,
+    PositionReconcileResult,
+    ReconcileComponentFact,
+)
 from execution.ctrader_ssl_patch import _patch_ctrader_ssl_endpoint
 
 try:
@@ -47,7 +58,22 @@ except ImportError:  # 包未装
 
 # ── 公共结果类型 ──────────────────────────────────────────
 
-@dataclass
+_ORDER_OUTCOMES = frozenset({"confirmed", "rejected", "unknown", "simulated"})
+_RISK_REDUCTION_ACTIONS = frozenset({
+    "amend_position_sltp",
+    "close_position",
+    "reduce_position",
+})
+_POSITION_SPOT_COMPONENT_MAX_AGE_SECONDS = 15.0
+
+
+@dataclass(frozen=True)
+class _BlockedRiskReductionIntent:
+    intent_id: str
+    status: str = "unknown"
+
+
+@dataclass(frozen=True)
 class CTraderOrderResult:
     """统一订单结果（供 cTrader 桥接返回并转换为 BaseBrokerBridge 的 OrderResult）"""
     success: bool
@@ -57,6 +83,22 @@ class CTraderOrderResult:
     comment: str = ""
     price: float = 0.0
     volume: float = 0.0
+    outcome: str = ""
+    intent_id: str = ""
+    client_order_id: str = ""
+    client_msg_id: str = ""
+
+    def __post_init__(self) -> None:
+        outcome = str(self.outcome or ("confirmed" if self.success else "rejected")).strip().lower()
+        if outcome not in _ORDER_OUTCOMES:
+            raise ValueError(f"invalid cTrader order outcome: {outcome!r}")
+        expected_success = outcome in {"confirmed", "simulated"}
+        if bool(self.success) != expected_success:
+            raise ValueError(
+                "CTraderOrderResult.success must be true only for "
+                f"confirmed/simulated outcomes (outcome={outcome!r})"
+            )
+        object.__setattr__(self, "outcome", outcome)
 
 
 # Phase 4: CTraderOrderResult -> OrderResult 转换
@@ -64,6 +106,8 @@ def _to_order_result(r: CTraderOrderResult) -> "OrderResult":
     return OrderResult(
         success=r.success, order_id=r.order_id, position_id=r.position_id,
         error_code=r.error_code, comment=r.comment, price=r.price, volume=r.volume,
+        outcome=r.outcome, intent_id=r.intent_id,
+        client_order_id=r.client_order_id, client_msg_id=r.client_msg_id,
     )
 
 
@@ -134,7 +178,9 @@ class CTraderBridge(BaseBrokerBridge):
                  send_orders: bool = False,
                  proxy_url: str = "",
                  proxy_rdns: bool = True,
-                 forced_symbol_id: int | None = None):
+                 forced_symbol_id: int | None = None,
+                 execution_outcome_v2_enabled: bool | None = None,
+                 execution_intent_store: Any | None = None):
         if not HAS_CTRADER:
             raise ImportError("ctrader-open-api 未装; pip install ctrader-open-api")
         self.client_id = client_id
@@ -159,6 +205,20 @@ class CTraderBridge(BaseBrokerBridge):
         self._symbol_id: int | None = None
         self._symbol_meta: dict[str, Any] = {}
         self._forced_symbol_id = forced_symbol_id  # ProtoOASymbol 无 name, 需外部指定 ID
+        if execution_outcome_v2_enabled is None:
+            try:
+                from backend.core.static_feature_flags import shared_static_feature_flags
+
+                execution_outcome_v2_enabled = bool(
+                    shared_static_feature_flags().ctrader_execution_outcome_v2_enabled
+                )
+            except Exception:
+                # Configuration resolution must not make bridge construction
+                # fail; when v2 is explicitly enabled, its persistence gate
+                # still fails closed before any broker mutation.
+                execution_outcome_v2_enabled = False
+        self._execution_outcome_v2_enabled = bool(execution_outcome_v2_enabled)
+        self._execution_intent_store = execution_intent_store
         self._server_version: str = "v0"  # ★ VersionReq 拿, 给后续 Req clientMsgId 用
         self._trader_login: int = 0  # account_info 返回的 traderLogin, 下单 fallback
         # audit 2026-06-08: 实时报价 (ProtoOASpotEvent 回调更新)
@@ -195,6 +255,20 @@ class CTraderBridge(BaseBrokerBridge):
         self._event_listeners: list[Callable[[str, dict[str, Any]], None]] = []
         self._event_listeners_lock = threading.Lock()
         self._last_reconcile_at: float = 0.0
+        self._last_deals_fetch_ok: bool = False
+        self._positions_cache_observed_at: float = 0.0
+        self._positions_cache_source: str = "cache"
+        self._account_cache_observed_at: float = 0.0
+        self._account_cache_source: str = "cache"
+        # All broker mutations share one process-local serial boundary.  The
+        # live safety plane is single-threaded, but emergency-close is an API
+        # escape hatch and can overlap the loop.  Serializing here keeps the
+        # fresh pre-check, RPC and outcome resolution atomic with respect to
+        # another mutation in this bridge instance.
+        self._broker_mutation_lock = threading.RLock()
+        self._local_unknown_risk_mutations: dict[
+            tuple[str, int], _BlockedRiskReductionIntent
+        ] = {}
 
     def has_token(self) -> bool:
         """检查必要凭证是否已设置 (client_id + client_secret + access_token).
@@ -694,6 +768,10 @@ class CTraderBridge(BaseBrokerBridge):
         )
         with self._account_cache_lock:
             self._account_cache = cached
+            self._account_cache_observed_at = time.time()
+            self._account_cache_source = (
+                "event" if reason in {"trader_updated", "execution_event"} else "cache"
+            )
         if emit:
             self._emit_event("account", {"account": cached, "reason": reason or "cache_update"})
         return cached
@@ -713,6 +791,14 @@ class CTraderBridge(BaseBrokerBridge):
             commission=float(pos.commission or 0.0),
             swap=float(pos.swap or 0.0),
             open_timestamp=float(pos.open_timestamp or 0.0),
+            current_price_state=str(pos.current_price_state or ""),
+            current_price_source=str(pos.current_price_source or ""),
+            current_price_observed_at=float(pos.current_price_observed_at or 0.0),
+            current_price_reason_code=str(pos.current_price_reason_code or ""),
+            pnl_state=str(pos.pnl_state or ""),
+            pnl_source=str(pos.pnl_source or ""),
+            pnl_observed_at=float(pos.pnl_observed_at or 0.0),
+            pnl_reason_code=str(pos.pnl_reason_code or ""),
         )
 
     def _positions_snapshot(self) -> list[PositionInfo]:
@@ -723,6 +809,8 @@ class CTraderBridge(BaseBrokerBridge):
         snapshot = [self._copy_position(pos) for pos in positions]
         with self._positions_cache_lock:
             self._positions_cache = {int(pos.position_id): self._copy_position(pos) for pos in snapshot if int(pos.position_id or 0) > 0}
+            self._positions_cache_observed_at = time.time()
+            self._positions_cache_source = "event" if reason == "execution_event" else "cache"
         if emit:
             self._emit_event("positions", {"positions": self._positions_snapshot(), "reason": reason or "cache_update"})
         return snapshot
@@ -731,6 +819,8 @@ class CTraderBridge(BaseBrokerBridge):
         copied = self._copy_position(position)
         with self._positions_cache_lock:
             self._positions_cache[int(copied.position_id)] = self._copy_position(copied)
+            self._positions_cache_observed_at = time.time()
+            self._positions_cache_source = "event"
         if emit:
             self._emit_event("positions", {"positions": self._positions_snapshot(), "reason": reason or "position_update"})
         return copied
@@ -738,12 +828,19 @@ class CTraderBridge(BaseBrokerBridge):
     def _remove_position_cache(self, position_id: int, *, emit: bool = True, reason: str = "") -> None:
         with self._positions_cache_lock:
             self._positions_cache.pop(int(position_id or 0), None)
+            self._positions_cache_observed_at = time.time()
+            self._positions_cache_source = "event"
         if emit:
             self._emit_event("positions", {"positions": self._positions_snapshot(), "reason": reason or "position_remove"})
 
     def _recompute_account_equity_from_cache(self, *, emit: bool = True, reason: str = "") -> AccountInfo:
         account = self._copy_account_cache()
         positions = self._positions_snapshot()
+        # An execution/reconcile identity event can arrive while the separate
+        # unrealized-PnL RPC is unavailable.  Preserve the last account
+        # projection instead of turning every unknown position into zero PnL.
+        if positions and any(str(pos.pnl_state or "").lower() != "known" for pos in positions):
+            return account
         unrealized = sum(float(pos.pnl or 0.0) for pos in positions)
         account.equity = float(account.balance or 0.0) + unrealized
         return self._set_account_cache(account, emit=emit, reason=reason or "equity_recompute")
@@ -782,8 +879,7 @@ class CTraderBridge(BaseBrokerBridge):
             return None
         direction = 1 if getattr(td, "tradeSide", 0) == TRADE_SIDE["BUY"] else -1
         current_price = float(getattr(proto_position, "currentPrice", 0.0) or 0.0)
-        if current_price <= 0:
-            current_price = float(getattr(proto_position, "price", 0.0) or 0.0)
+        price_known = bool(current_price > 0)
         return PositionInfo(
             position_id=int(getattr(proto_position, "positionId", 0) or 0),
             symbol_id=symbol_id,
@@ -798,6 +894,16 @@ class CTraderBridge(BaseBrokerBridge):
             commission=float(getattr(proto_position, "commission", 0.0) or 0.0) / 100.0,
             swap=float(getattr(proto_position, "swap", 0.0) or 0.0) / 100.0,
             open_timestamp=(float(getattr(td, "openTimestamp", 0.0) or 0.0) / 1000.0) if getattr(td, "openTimestamp", 0) else 0.0,
+            current_price_state="known" if price_known else "unknown",
+            current_price_source="ctrader_execution_event" if price_known else "",
+            current_price_observed_at=time.time() if price_known else 0.0,
+            current_price_reason_code="" if price_known else "execution_event_current_price_missing",
+            # Protobuf scalar zero does not distinguish a known flat PnL from
+            # an omitted projection on execution events.  Only the dedicated
+            # PnL RPC establishes this component as known.
+            pnl_state="unknown",
+            pnl_source="ctrader_execution_event",
+            pnl_reason_code="execution_event_pnl_not_authoritative",
         )
 
     def _handle_spot_event(self, payload):
@@ -843,7 +949,13 @@ class CTraderBridge(BaseBrokerBridge):
             if spot and spot > 0:
                 with self._positions_cache_lock:
                     for pos in self._positions_cache.values():
+                        if self._symbol_id is not None and int(pos.symbol_id or 0) != int(self._symbol_id):
+                            continue
                         pos.current_price = spot
+                        pos.current_price_state = "known"
+                        pos.current_price_source = "ctrader_spot"
+                        pos.current_price_observed_at = float(self._spot_ts or time.time())
+                        pos.current_price_reason_code = ""
                 self._emit_event(
                     "spot",
                     {
@@ -984,7 +1096,13 @@ class CTraderBridge(BaseBrokerBridge):
 
     # ── 内部: App auth / Account auth ──
 
-    def _send(self, msg, timeout: float | None = None) -> Any:
+    def _send(
+        self,
+        msg,
+        timeout: float | None = None,
+        *,
+        client_msg_id: str = "",
+    ) -> Any:
         """Proactive: 走 Client.send, 返回回包 protobuf. 同步阻塞.
 
         ⚠️ SDK Client.send() 回调给的是 ProtoMessage wrapper (payloadType + payload 字节),
@@ -1000,13 +1118,13 @@ class CTraderBridge(BaseBrokerBridge):
             raise RuntimeError("Not connected")
         timeout = timeout or self.request_timeout_sec
         from twisted.internet import defer
-        import uuid
         result_holder: dict = {}
+        effective_client_msg_id = str(client_msg_id or uuid.uuid4())
 
         def _do_send():
             d = self._client.send(
                 msg,
-                clientMsgId=str(uuid.uuid4()),  # ★ UUID 格式, 跟 server 期望匹配
+                clientMsgId=effective_client_msg_id,  # UUID 格式, 可用于 intent 对账
                 responseTimeoutInSeconds=timeout,
             )
             d.addCallback(lambda wrapper: result_holder.update({
@@ -1222,6 +1340,19 @@ class CTraderBridge(BaseBrokerBridge):
                             sl: float = 0.0, tp: float = 0.0,
                             trailing: bool = False,
                             guaranteed: bool = False) -> CTraderOrderResult:
+        with self._broker_mutation_lock:
+            return self._amend_position_sltp_serial(
+                position_id,
+                sl=sl,
+                tp=tp,
+                trailing=trailing,
+                guaranteed=guaranteed,
+            )
+
+    def _amend_position_sltp_serial(self, position_id: int,
+                                    sl: float = 0.0, tp: float = 0.0,
+                                    trailing: bool = False,
+                                    guaranteed: bool = False) -> CTraderOrderResult:
         """
         REFACTOR-8 (audit 2026-06-06): 把 SL/TP 推到 server 端 (消除 1 bar 延迟)
 
@@ -1270,72 +1401,1160 @@ class CTraderBridge(BaseBrokerBridge):
                 f"sl={sl} tp={tp} trailing={trailing} (send_orders=False)"
             )
             return CTraderOrderResult(
-                success=True, position_id=position_id,
+                success=True, outcome="simulated", position_id=position_id,
                 comment=f"DRY-RUN amend sl={sl} tp={tp} (send_orders=False)",
             )
 
-        try:
-            req = TradeMsg.ProtoOAAmendPositionSLTPReq()
-            req.ctidTraderAccountId = self.account_id
-            req.positionId = int(position_id)
-            # Proto3 semantics: 0 = 不设, 非 0 = 设
-            if sl > 0:
-                req.stopLoss = float(sl)
-            if tp > 0:
-                req.takeProfit = float(tp)
-            if trailing:
-                req.trailingStopLoss = True
-            if guaranteed:
-                req.guaranteedStopLoss = True
-            # 注: stopLossTriggerMethod 不传, 用 server 默认 (1=TRADE)
-
-            resp = self._send(req, timeout=10.0)
-            # ⚠️ audit 2026-06-11: amend 可能返回 ProtoOAOrderErrorEvent 而非 raise
-            if type(resp).__name__ == "ProtoOAOrderErrorEvent":
-                err_code = getattr(resp, "errorCode", "?")
-                err_desc = getattr(resp, "description", "")
-                logger.error(f"amend_position_sltp rejected: errorCode={err_code} desc={err_desc!r}")
-                return CTraderOrderResult(
-                    success=False, position_id=position_id,
-                    error_code=err_code,
-                    comment=f"amend rejected: {err_code} — {err_desc}",
+        pre_result = None
+        if self._execution_outcome_v2_enabled:
+            pre_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        if pre_result is not None and pre_result.fresh and not any(
+            int(item.position_id) == int(position_id)
+            for item in pre_result.positions
+        ):
+            self._local_unknown_risk_mutations.pop(
+                ("amend_position_sltp", int(position_id)),
+                None,
+            )
+            try:
+                from backend.services.live_safety_state import (
+                    resolve_broker_outcome_mutation,
                 )
-            # 跟 close_position 一致: amend 异步, 真确认靠 ProtoOAExecutionEvent
+
+                resolve_broker_outcome_mutation(
+                    action="amend_position_sltp",
+                    position_id=int(position_id),
+                    outcome="confirmed",
+                    evidence={
+                        "source": "fresh_pre_reconcile",
+                        "reconcile_id": str(pre_result.reconcile_id or ""),
+                        "position_present": False,
+                    },
+                )
+            except Exception as exc:
+                logger.error("local amend unknown resolution append failed: %s", exc)
             return CTraderOrderResult(
-                success=True, position_id=position_id,
-                comment=f"amend accepted, awaiting ExecutionEvent; resp={type(resp).__name__}",
+                success=True,
+                outcome="confirmed",
+                position_id=int(position_id),
+                comment=f"Position {position_id} already absent in fresh broker reconcile",
             )
-        except Exception as e:
-            err_code = "AMEND_FAILED"
-            err_msg = str(e)
-            # 协议错误细节
-            if hasattr(e, 'description'):
-                err_msg = f"{e} ({e.description})"
+        store, intent_id, client_msg_id, blocked_intent = self._prepare_risk_reduction_intent(
+            action="amend_position_sltp",
+            position_id=int(position_id),
+            target_stop_loss=float(sl or 0.0),
+            target_take_profit=float(tp or 0.0),
+            request={
+                "trailing": bool(trailing),
+                "guaranteed": bool(guaranteed),
+                "pre_reconcile_id": getattr(pre_result, "reconcile_id", ""),
+                "pre_reconcile_status": getattr(pre_result, "status", "not_requested"),
+            },
+        )
+        if blocked_intent is not None:
+            self._latch_unknown_broker_outcome(
+                action="amend_position_sltp",
+                position_id=int(position_id),
+                intent_id=intent_id,
+                evidence={
+                    "reason": "unresolved_risk_reduction_intent",
+                    "existing_status": str(getattr(blocked_intent, "status", "unknown") or "unknown"),
+                },
+            )
+            return CTraderOrderResult(
+                success=False,
+                outcome="unknown",
+                position_id=int(position_id),
+                error_code="DUPLICATE_MUTATION_BLOCKED",
+                comment="unresolved amend intent must be recovered before resubmission",
+                intent_id=intent_id,
+            )
+        req = TradeMsg.ProtoOAAmendPositionSLTPReq()
+        req.ctidTraderAccountId = self.account_id
+        req.positionId = int(position_id)
+        if sl > 0:
+            req.stopLoss = float(sl)
+        if tp > 0:
+            req.takeProfit = float(tp)
+        if trailing:
+            req.trailingStopLoss = True
+        if guaranteed:
+            req.guaranteedStopLoss = True
+
+        resp = None
+        send_error: Exception | None = None
+        try:
+            resp = self._send(req, timeout=10.0, client_msg_id=client_msg_id)
+        except Exception as exc:
+            send_error = exc
             logger.error(
-                f"amend_position_sltp failed pos={position_id} sl={sl} tp={tp}: {err_msg}"
+                "amend_position_sltp RPC outcome uncertain pos=%s sl=%s tp=%s: %s",
+                position_id, sl, tp, exc,
+            )
+        response = self._response_evidence(resp)
+        response.update({
+            "client_msg_id": client_msg_id,
+            "target_stop_loss": float(sl or 0.0),
+            "target_take_profit": float(tp or 0.0),
+        })
+        rejected = self._response_is_explicit_rejection(response)
+        if rejected:
+            err_code = str(response.get("error_code") or "broker_rejected")
+            self._finalize_risk_reduction_intent(
+                store,
+                intent_id,
+                outcome="rejected",
+                position_id=int(position_id),
+                broker_response=response,
+                error={"error_code": err_code, "description": response.get("description")},
             )
             return CTraderOrderResult(
-                success=False, position_id=position_id,
-                error_code=err_code, comment=err_msg,
+                success=False,
+                outcome="rejected",
+                position_id=position_id,
+                error_code=err_code,
+                comment=f"amend rejected: {err_code} — {response.get('description') or ''}",
+                intent_id=intent_id if store is not None else "",
+                client_msg_id=client_msg_id,
             )
+
+        if not self._execution_outcome_v2_enabled:
+            confirmed = (
+                response.get("response_type") == "ProtoOAExecutionEvent"
+                and send_error is None
+            )
+            outcome = "confirmed" if confirmed else "unknown"
+            if not confirmed:
+                self._latch_unknown_broker_outcome(
+                    action="amend_position_sltp",
+                    position_id=int(position_id),
+                    intent_id=intent_id,
+                    evidence={**response, "rpc_error": str(send_error or "")},
+                )
+            return CTraderOrderResult(
+                success=confirmed,
+                outcome=outcome,
+                position_id=position_id,
+                error_code="" if confirmed else "AMEND_OUTCOME_UNKNOWN",
+                comment=(
+                    "amend accepted by ExecutionEvent (compat mode)"
+                    if confirmed
+                    else str(send_error or f"unexpected response: {response.get('response_type') or 'none'}")
+                ),
+                client_msg_id=client_msg_id,
+            )
+
+        post_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        current = next(
+            (item for item in post_result.positions if int(item.position_id) == int(position_id)),
+            None,
+        ) if post_result.fresh else None
+        tolerance = max(1e-9, 0.5 * (10.0 ** (-int(digits))))
+        sl_matches = sl <= 0 or (current is not None and abs(float(current.sl or 0.0) - float(sl)) <= tolerance)
+        tp_matches = tp <= 0 or (current is not None and abs(float(current.tp or 0.0) - float(tp)) <= tolerance)
+        verifiable_fields = sl > 0 or tp > 0
+        confirmed = bool(post_result.fresh and current is not None and verifiable_fields and sl_matches and tp_matches)
+        resolution = {
+            "post_reconcile_id": post_result.reconcile_id,
+            "post_reconcile_status": post_result.status,
+            "position_present": current is not None,
+            "actual_stop_loss": float(current.sl or 0.0) if current is not None else None,
+            "actual_take_profit": float(current.tp or 0.0) if current is not None else None,
+            "sl_matches": bool(sl_matches),
+            "tp_matches": bool(tp_matches),
+            "rpc_error": str(send_error or ""),
+        }
+        outcome = "confirmed" if confirmed else "unknown"
+        self._finalize_risk_reduction_intent(
+            store,
+            intent_id,
+            outcome=outcome,
+            position_id=int(position_id),
+            broker_response={**response, "resolution": resolution},
+            error={} if confirmed else {"reason": "amend_not_freshly_verified"},
+        )
+        if not confirmed:
+            self._latch_unknown_broker_outcome(
+                action="amend_position_sltp",
+                position_id=int(position_id),
+                intent_id=intent_id,
+                evidence={**response, "resolution": resolution},
+            )
+        return CTraderOrderResult(
+            success=confirmed,
+            outcome=outcome,
+            position_id=position_id,
+            error_code="" if confirmed else "AMEND_OUTCOME_UNKNOWN",
+            comment="amend verified by fresh broker reconcile" if confirmed else "amend not freshly verified",
+            intent_id=intent_id if store is not None else "",
+            client_msg_id=client_msg_id,
+        )
 
     # Phase 4: 统一抽象接口方法
     def amend_sl_tp(self, position_id: int, sl: float, tp: float) -> bool:
         r = self.amend_position_sltp(position_id, sl=sl, tp=tp)
         return r.success
 
+    def _intent_store(self):
+        if self._execution_intent_store is None:
+            from backend.services.broker_execution_intent import BrokerExecutionIntentStore
+
+            self._execution_intent_store = BrokerExecutionIntentStore()
+        return self._execution_intent_store
+
+    def _prepare_risk_reduction_intent(
+        self,
+        *,
+        action: str,
+        position_id: int,
+        requested_volume: float = 0.0,
+        target_stop_loss: float = 0.0,
+        target_take_profit: float = 0.0,
+        request: dict[str, Any] | None = None,
+    ) -> tuple[Any | None, str, str, Any | None]:
+        """Best-effort intent ledger for close/reduce/tighten mutations.
+
+        New risk requires PostgreSQL intent persistence before its RPC.  Risk
+        reduction has the opposite availability rule: a state-store failure
+        is written to the local safety outbox but must never suppress the
+        broker mutation.  The returned client message id is always a UUID so
+        broker transport evidence remains correlatable even without PG.
+        """
+
+        intent_id = str(uuid.uuid4())
+        client_msg_id = str(uuid.uuid4())
+        action_key = str(action or "").strip().lower()
+        mutation_key = (action_key, int(position_id))
+        try:
+            from backend.services.live_safety_state import (
+                no_new_risk_latch_status,
+                unresolved_broker_outcome_mutations,
+            )
+
+            if not bool(no_new_risk_latch_status(fail_closed=True).get("active")):
+                self._local_unknown_risk_mutations.clear()
+            blocked_local = self._local_unknown_risk_mutations.get(mutation_key)
+            if blocked_local is not None:
+                return None, blocked_local.intent_id or intent_id, client_msg_id, blocked_local
+            for durable in unresolved_broker_outcome_mutations():
+                if (
+                    str(durable.get("action") or "").strip().lower() == action_key
+                    and int(durable.get("position_id") or 0) == int(position_id)
+                ):
+                    blocked = _BlockedRiskReductionIntent(
+                        intent_id=str(durable.get("intent_id") or intent_id),
+                    )
+                    self._local_unknown_risk_mutations[mutation_key] = blocked
+                    return None, blocked.intent_id, client_msg_id, blocked
+        except Exception as exc:
+            # A failed durable lookup cannot suppress a first risk reduction.
+            # If that RPC becomes unknown, _latch_unknown_broker_outcome keeps
+            # a process-local identity before attempting durable persistence.
+            logger.error("unknown risk-reduction mutation lookup unavailable: %s", exc)
+        if not self._execution_outcome_v2_enabled:
+            return None, intent_id, client_msg_id, None
+        try:
+            store = self._intent_store()
+            for existing in store.unresolved(
+                account_id=str(self.account_id),
+                symbol=str(self.symbol),
+            ):
+                existing_request = dict(getattr(existing, "request", None) or {})
+                if (
+                    str(getattr(existing, "action", "") or "").strip().lower()
+                    == str(action or "").strip().lower()
+                    and int(existing_request.get("position_id") or 0) == int(position_id)
+                ):
+                    # Never replay an unresolved mutation.  Recovery uses fresh
+                    # broker facts and is the only path allowed to resolve it.
+                    return (
+                        store,
+                        str(getattr(existing, "intent_id", "") or intent_id),
+                        client_msg_id,
+                        existing,
+                    )
+            prepared = store.prepare(
+                intent_id=intent_id,
+                idempotency_key=intent_id,
+                broker="ctrader",
+                account_id=str(self.account_id),
+                symbol=str(self.symbol),
+                action=str(action),
+                side="",
+                requested_volume=float(requested_volume or 0.0),
+                target_stop_loss=float(target_stop_loss or 0.0),
+                target_take_profit=float(target_take_profit or 0.0),
+                request={
+                    "schema": "broker_risk_reduction_request.v2",
+                    "position_id": int(position_id),
+                    "client_msg_id": client_msg_id,
+                    "requested_volume": float(requested_volume or 0.0),
+                    "target_stop_loss": float(target_stop_loss or 0.0),
+                    "target_take_profit": float(target_take_profit or 0.0),
+                    **dict(request or {}),
+                },
+            )
+            intent_id = str(prepared.intent_id)
+            store.mark_submitting(
+                intent_id,
+                request={**dict(prepared.request or {}), "submitting_at": time.time()},
+            )
+            return store, intent_id, client_msg_id, None
+        except Exception as exc:
+            logger.error("risk-reduction intent persistence unavailable; broker action continues: %s", exc)
+            try:
+                from backend.services.live_safety_state import append_safety_outbox
+
+                append_safety_outbox(
+                    event_type="broker_risk_reduction_intent_persist_failed",
+                    correlation_id=intent_id,
+                    payload={
+                        "action": str(action),
+                        "position_id": int(position_id),
+                        "requested_volume": float(requested_volume or 0.0),
+                        "target_stop_loss": float(target_stop_loss or 0.0),
+                        "target_take_profit": float(target_take_profit or 0.0),
+                        "client_msg_id": client_msg_id,
+                    },
+                    error=f"{type(exc).__name__}:{exc}",
+                )
+            except Exception as outbox_exc:
+                logger.error("risk-reduction safety outbox also failed: %s", outbox_exc)
+            return None, intent_id, client_msg_id, None
+
+    @staticmethod
+    def _finalize_risk_reduction_intent(
+        store: Any | None,
+        intent_id: str,
+        *,
+        outcome: str,
+        position_id: int,
+        broker_response: dict[str, Any],
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        """Finalize best-effort bookkeeping without rewriting broker truth."""
+
+        if store is None:
+            return
+        try:
+            store.complete(
+                intent_id,
+                outcome=outcome,
+                position_id=position_id,
+                broker_order_id=int(broker_response.get("order_id") or 0),
+                broker_response=broker_response,
+                error=dict(error or {}),
+            )
+        except Exception as exc:
+            logger.error("risk-reduction intent finalize failed: %s", exc)
+            try:
+                from backend.services.live_safety_state import append_safety_outbox
+
+                append_safety_outbox(
+                    event_type="broker_risk_reduction_intent_finalize_failed",
+                    correlation_id=intent_id,
+                    payload={
+                        "outcome": outcome,
+                        "position_id": int(position_id),
+                        "broker_response": broker_response,
+                    },
+                    error=f"{type(exc).__name__}:{exc}",
+                )
+            except Exception as outbox_exc:
+                logger.error("risk-reduction finalize outbox also failed: %s", outbox_exc)
+
+    def _latch_unknown_broker_outcome(
+        self,
+        *,
+        action: str,
+        position_id: int,
+        intent_id: str,
+        evidence: dict[str, Any],
+    ) -> None:
+        """Unknown broker mutation outcomes prohibit further new risk."""
+
+        action_key = str(action or "").strip().lower()
+        if action_key in _RISK_REDUCTION_ACTIONS and int(position_id or 0) > 0:
+            self._local_unknown_risk_mutations[(action_key, int(position_id))] = (
+                _BlockedRiskReductionIntent(intent_id=str(intent_id or ""))
+            )
+
+        try:
+            from backend.services.live_safety_state import activate_no_new_risk_latch
+
+            activate_no_new_risk_latch(
+                reason="broker_execution_outcome_unknown",
+                actor="execution:ctrader_bridge",
+                correlation_id=intent_id,
+                metadata={
+                    "action": str(action),
+                    "position_id": int(position_id),
+                    "evidence": dict(evidence),
+                },
+            )
+        except Exception as exc:
+            # activate_no_new_risk_latch itself installs a process-local
+            # fail-closed latch before raising on durable I/O failure.
+            logger.critical("failed to durably latch unknown broker outcome: %s", exc)
+
+    def unresolved_execution_intent_count(self) -> int:
+        status = self.execution_intent_recovery_status()
+        raw_count = status.get("unresolved_count")
+        if raw_count is None:
+            raise RuntimeError(str(status.get("error") or "execution intent status unavailable"))
+        return int(raw_count or 0)
+
+    def execution_intent_recovery_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.live_safety_state import unresolved_broker_outcome_mutations
+
+            durable_unknown = list(unresolved_broker_outcome_mutations())
+        except Exception as exc:
+            return {
+                "schema": "broker_execution_intent_recovery.v1",
+                "ready": False,
+                "enabled": bool(self._execution_outcome_v2_enabled),
+                "unresolved_count": None,
+                "unresolved": [],
+                "local_safety_latch_status": "unavailable",
+                "error": (
+                    "local_unknown_ledger_unavailable:"
+                    f"{type(exc).__name__}:{exc}"
+                )[:500],
+            }
+        if not self._execution_outcome_v2_enabled:
+            return {
+                "schema": "broker_execution_intent_recovery.v1",
+                "ready": not durable_unknown,
+                "enabled": False,
+                "unresolved_count": len(durable_unknown),
+                "unresolved": [
+                    {**item, "source": "local_safety_latch"}
+                    for item in durable_unknown
+                ],
+            }
+        try:
+            from backend.services.broker_execution_intent import execution_intent_recovery_status
+
+            status = execution_intent_recovery_status(
+                self._intent_store(), account_id=str(self.account_id), symbol=str(self.symbol)
+            )
+            unresolved = list(status.get("unresolved") or [])
+            existing_ids = {
+                str(item.get("intent_id") or "")
+                for item in unresolved
+                if str(item.get("intent_id") or "")
+            }
+            unresolved.extend(
+                {**item, "source": "local_safety_latch"}
+                for item in durable_unknown
+                if not str(item.get("intent_id") or "")
+                or str(item.get("intent_id") or "") not in existing_ids
+            )
+            return {
+                **status,
+                "enabled": True,
+                "ready": not unresolved,
+                "unresolved_count": len(unresolved),
+                "unresolved": unresolved,
+            }
+        except Exception as exc:
+            return {
+                "schema": "broker_execution_intent_recovery.v1",
+                "ready": False,
+                "enabled": True,
+                "unresolved_count": None,
+                "unresolved": [],
+                "error": f"{type(exc).__name__}:{exc}",
+            }
+
+    @staticmethod
+    def _position_snapshot_payload(
+        positions: list[PositionInfo] | tuple[PositionInfo, ...],
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            str(int(pos.position_id)): {
+                "position_id": int(pos.position_id),
+                "symbol_id": int(pos.symbol_id or 0),
+                "direction": int(pos.direction or 0),
+                "volume": float(pos.volume or 0.0),
+                "open_timestamp": float(pos.open_timestamp or 0.0),
+                "stop_loss": float(pos.sl or 0.0),
+                "take_profit": float(pos.tp or 0.0),
+            }
+            for pos in positions
+            if int(pos.position_id or 0) > 0
+        }
+
+    @staticmethod
+    def _deal_snapshot_payload(deals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return {
+            str(int(item.get("deal_id") or 0)): dict(item)
+            for item in deals
+            if int(item.get("deal_id") or 0) > 0
+        }
+
+    def _order_history_for_recovery(
+        self,
+        *,
+        from_ts: float,
+        to_ts: float | None = None,
+    ) -> tuple[dict[str, dict[str, Any]], bool]:
+        """Fetch immutable broker order evidence used only for intent recovery."""
+
+        if not self.is_connected:
+            return {}, False
+        try:
+            req = TradeMsg.ProtoOAOrderListReq()
+            req.ctidTraderAccountId = self.account_id
+            req.fromTimestamp = int(max(0.0, float(from_ts or 0.0)) * 1000)
+            req.toTimestamp = int(float(to_ts or time.time()) * 1000)
+            resp = self._send(req, timeout=15.0)
+            payload: dict[str, dict[str, Any]] = {}
+            for order in list(getattr(resp, "order", ()) or ()):
+                order_id = int(getattr(order, "orderId", 0) or 0)
+                if order_id <= 0:
+                    continue
+                trade_data = getattr(order, "tradeData", None)
+                side_value = int(getattr(trade_data, "tradeSide", 0) or 0)
+                payload[str(order_id)] = {
+                    "order_id": order_id,
+                    "position_id": int(getattr(order, "positionId", 0) or 0),
+                    "symbol_id": int(getattr(trade_data, "symbolId", 0) or 0),
+                    "trade_side": (
+                        "buy" if side_value == TRADE_SIDE["BUY"]
+                        else "sell" if side_value == TRADE_SIDE["SELL"]
+                        else ""
+                    ),
+                    "client_order_id": str(getattr(order, "clientOrderId", "") or ""),
+                    "comment": str(getattr(trade_data, "comment", "") or ""),
+                    "label": str(getattr(trade_data, "label", "") or ""),
+                    "volume": float(getattr(trade_data, "volume", 0.0) or 0.0),
+                    "executed_volume": float(getattr(order, "executedVolume", 0.0) or 0.0),
+                    "order_status": int(getattr(order, "orderStatus", 0) or 0),
+                    "closing_order": bool(getattr(order, "closingOrder", False)),
+                }
+            return payload, True
+        except Exception as exc:
+            logger.warning("broker order history unavailable for intent recovery: %s", exc)
+            return {}, False
+
+    @staticmethod
+    def _response_evidence(resp: Any) -> dict[str, Any]:
+        if resp is None:
+            return {}
+
+        parse_errors: list[str] = []
+
+        def safe_attr(value: Any, field: str, default: Any = None) -> Any:
+            try:
+                return getattr(value, field, default) if value is not None else default
+            except Exception as exc:
+                parse_errors.append(f"{field}:{type(exc).__name__}")
+                return default
+
+        def safe_int(*values: Any) -> int:
+            for value in values:
+                if value is None:
+                    continue
+                try:
+                    if value == "" or value == 0:
+                        continue
+                    return int(value)
+                except Exception as exc:
+                    parse_errors.append(f"integer:{type(exc).__name__}")
+            return 0
+
+        def safe_text(value: Any) -> str:
+            try:
+                return str(value or "")
+            except Exception as exc:
+                parse_errors.append(f"text:{type(exc).__name__}")
+                return ""
+
+        position = safe_attr(resp, "position")
+        order = safe_attr(resp, "order")
+        deal = safe_attr(resp, "deal")
+        evidence = {
+            "response_type": type(resp).__name__,
+            "error_code": safe_text(safe_attr(resp, "errorCode", "")),
+            "description": safe_text(safe_attr(resp, "description", "")),
+            "position_id": safe_int(
+                safe_attr(position, "positionId", 0),
+                safe_attr(deal, "positionId", 0),
+            ),
+            "order_id": safe_int(
+                safe_attr(order, "orderId", 0),
+                safe_attr(deal, "orderId", 0),
+                safe_attr(resp, "orderId", 0),
+            ),
+            "deal_id": safe_int(safe_attr(deal, "dealId", 0)),
+            "client_order_id": safe_text(safe_attr(order, "clientOrderId", "")),
+        }
+        if parse_errors:
+            evidence["parse_errors"] = sorted(set(parse_errors))
+        return evidence
+
+    @staticmethod
+    def _response_is_explicit_rejection(response: dict[str, Any]) -> bool:
+        """Accept rejection only from a documented broker response type.
+
+        A protobuf that is unknown to this client may still expose an
+        ``errorCode`` field.  The field name alone is not enough to prove that
+        an order was rejected; classifying it as terminal would permit a retry
+        after an outcome that is actually unknown.
+        """
+
+        return str(response.get("response_type") or "") in {
+            "ProtoOAOrderErrorEvent",
+            "ProtoOAErrorRes",
+        }
+
+    @staticmethod
+    def _resolve_open_differential(
+        *,
+        side: int,
+        symbol_id: int,
+        pre_positions: dict[str, dict[str, Any]],
+        pre_deals: dict[str, dict[str, Any]],
+        post_positions: dict[str, dict[str, Any]],
+        post_deals: dict[str, dict[str, Any]],
+        response: dict[str, Any],
+        deals_differential_available: bool = True,
+        post_orders: dict[str, dict[str, Any]] | None = None,
+        orders_available: bool = False,
+        client_order_id: str = "",
+        comment_token: str = "",
+    ) -> dict[str, Any]:
+        """Resolve one open mutation only when all broker evidence is unique."""
+        expected_direction = 1 if side == TRADE_SIDE["BUY"] else -1
+        expected_side = "buy" if expected_direction == 1 else "sell"
+        position_candidates: dict[int, set[str]] = {}
+        correlated_position_ids: set[int] = set()
+        order_candidates: set[int] = set()
+        correlated_order_ids: set[int] = set()
+
+        def add_position(raw: Any, source: str, *, correlated: bool = False) -> None:
+            try:
+                pid = int(raw or 0)
+            except (TypeError, ValueError):
+                pid = 0
+            if pid > 0:
+                position_candidates.setdefault(pid, set()).add(source)
+                if correlated:
+                    correlated_position_ids.add(pid)
+
+        response_type = str(response.get("response_type") or "")
+        # Only the documented execution event is an immutable broker receipt.
+        # Unknown protobufs can expose similarly named ``position``/``order``
+        # fields; treating those structural lookalikes as correlated evidence
+        # would turn an unrecognised response into a false confirmation.  Such
+        # responses may still be resolved by an independently unique fresh
+        # position/deal/order differential below.
+        response_is_execution = response_type == "ProtoOAExecutionEvent"
+        response_pid = int(response.get("position_id") or 0) if response_is_execution else 0
+        response_order_id = int(response.get("order_id") or 0) if response_is_execution else 0
+        if response_pid > 0:
+            add_position(response_pid, "execution_response", correlated=True)
+        if response_order_id > 0:
+            order_candidates.add(response_order_id)
+            correlated_order_ids.add(response_order_id)
+
+        normalized_client_order_id = str(client_order_id or "").strip()
+        normalized_comment_token = str(comment_token or "").strip()
+        for order in ((post_orders or {}).values() if orders_available else ()):
+            order_client_id = str(order.get("client_order_id") or "").strip()
+            order_comment = str(order.get("comment") or "")
+            identity_match = bool(
+                (normalized_client_order_id and order_client_id == normalized_client_order_id)
+                or (normalized_comment_token and normalized_comment_token in order_comment)
+            )
+            if not identity_match:
+                continue
+            if symbol_id > 0 and int(order.get("symbol_id") or 0) != int(symbol_id):
+                continue
+            order_side = str(order.get("trade_side") or "").lower()
+            if order_side and order_side != expected_side:
+                continue
+            order_id = int(order.get("order_id") or 0)
+            if order_id > 0:
+                order_candidates.add(order_id)
+                correlated_order_ids.add(order_id)
+            add_position(order.get("position_id"), "client_order_identity", correlated=True)
+
+        for key, current in post_positions.items():
+            if int(current.get("direction") or 0) != expected_direction:
+                continue
+            if symbol_id > 0 and int(current.get("symbol_id") or 0) != int(symbol_id):
+                continue
+            previous = pre_positions.get(str(key))
+            if previous is None:
+                add_position(current.get("position_id"), "new_position")
+            elif float(current.get("volume") or 0.0) > float(previous.get("volume") or 0.0):
+                add_position(current.get("position_id"), "position_volume_increase")
+
+        for deal_id, deal in (post_deals.items() if deals_differential_available else ()):
+            if deal_id in pre_deals:
+                continue
+            if str(deal.get("trade_side") or "").lower() != expected_side:
+                continue
+            if symbol_id > 0 and int(deal.get("symbol_id") or 0) != int(symbol_id):
+                continue
+            if dict(deal.get("close_detail") or {}):
+                continue
+            deal_order_id = int(deal.get("order_id") or 0)
+            if correlated_order_ids and deal_order_id not in correlated_order_ids:
+                continue
+            if response_order_id > 0 and deal_order_id > 0 and deal_order_id != response_order_id:
+                continue
+            add_position(
+                deal.get("position_id"),
+                "correlated_new_deal" if deal_order_id in correlated_order_ids else "new_deal",
+                correlated=deal_order_id in correlated_order_ids,
+            )
+            if deal_order_id > 0:
+                order_candidates.add(deal_order_id)
+
+        candidate_ids = sorted(correlated_position_ids or position_candidates)
+        evidence = {str(pid): sorted(sources) for pid, sources in position_candidates.items()}
+        if len(candidate_ids) != 1:
+            return {
+                "outcome": "unknown",
+                "position_id": 0,
+                "order_id": response_order_id if len(order_candidates) <= 1 else 0,
+                "candidate_position_ids": candidate_ids,
+                "candidate_order_ids": sorted(order_candidates),
+                "correlated_position_ids": sorted(correlated_position_ids),
+                "correlated_order_ids": sorted(correlated_order_ids),
+                "evidence": evidence,
+                "reason": "no_unique_position_match" if not candidate_ids else "multiple_position_matches",
+            }
+        return {
+            "outcome": "confirmed",
+            "position_id": candidate_ids[0],
+            "order_id": response_order_id or (next(iter(order_candidates)) if len(order_candidates) == 1 else 0),
+            "candidate_position_ids": candidate_ids,
+            "candidate_order_ids": sorted(order_candidates),
+            "correlated_position_ids": sorted(correlated_position_ids),
+            "correlated_order_ids": sorted(correlated_order_ids),
+            "evidence": evidence,
+            "reason": (
+                "unique_correlated_broker_match"
+                if correlated_position_ids
+                else "unique_broker_match"
+            ),
+        }
+
+    @staticmethod
+    def _resolve_close_intent_recovery(
+        intent: Any,
+        *,
+        post_positions: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        request = dict(getattr(intent, "request", None) or {})
+        position_id = int(request.get("position_id") or getattr(intent, "position_id", 0) or 0)
+        if position_id <= 0:
+            return {
+                "outcome": "unknown",
+                "position_id": 0,
+                "order_id": 0,
+                "reason": "close_position_identity_missing",
+            }
+        current = post_positions.get(str(position_id))
+        if current is None:
+            return {
+                "outcome": "confirmed",
+                "position_id": position_id,
+                "order_id": 0,
+                "reason": "close_target_absent_in_fresh_reconcile",
+                "position_present": False,
+            }
+        before_volume = float(request.get("position_volume_before") or 0.0)
+        requested_volume = float(
+            getattr(intent, "requested_volume", 0.0)
+            or request.get("requested_volume")
+            or 0.0
+        )
+        current_volume = float(current.get("volume") or 0.0)
+        expected_max_remaining = (
+            max(0.0, before_volume - requested_volume)
+            if before_volume > 0 and requested_volume > 0
+            else None
+        )
+        confirmed_reduced = bool(
+            expected_max_remaining is not None
+            and current_volume < before_volume
+            and current_volume <= expected_max_remaining + 1e-9
+        )
+        return {
+            "outcome": "confirmed" if confirmed_reduced else "unknown",
+            "position_id": position_id,
+            "order_id": 0,
+            "reason": (
+                "close_volume_reduction_freshly_verified"
+                if confirmed_reduced
+                else "close_not_freshly_verified"
+            ),
+            "position_present": True,
+            "position_volume_before": before_volume or None,
+            "position_volume_after": current_volume,
+            "expected_max_remaining": expected_max_remaining,
+        }
+
+    @staticmethod
+    def _resolve_amend_intent_recovery(
+        intent: Any,
+        *,
+        post_positions: dict[str, dict[str, Any]],
+        digits: int,
+    ) -> dict[str, Any]:
+        request = dict(getattr(intent, "request", None) or {})
+        position_id = int(request.get("position_id") or getattr(intent, "position_id", 0) or 0)
+        if position_id <= 0:
+            return {
+                "outcome": "unknown",
+                "position_id": 0,
+                "order_id": 0,
+                "reason": "amend_position_identity_missing",
+            }
+        current = post_positions.get(str(position_id))
+        if current is None:
+            # The position risk no longer exists.  Treat the intended
+            # risk-reducing effect as terminal without claiming an amend fill.
+            return {
+                "outcome": "confirmed",
+                "position_id": position_id,
+                "order_id": 0,
+                "reason": "amend_target_position_absent",
+                "position_present": False,
+            }
+        target_sl = float(
+            getattr(intent, "target_stop_loss", 0.0)
+            or request.get("target_stop_loss")
+            or 0.0
+        )
+        target_tp = float(
+            getattr(intent, "target_take_profit", 0.0)
+            or request.get("target_take_profit")
+            or 0.0
+        )
+        if target_sl <= 0 and target_tp <= 0:
+            return {
+                "outcome": "unknown",
+                "position_id": position_id,
+                "order_id": 0,
+                "reason": "amend_target_fields_missing",
+                "position_present": True,
+            }
+        tolerance = max(1e-9, 0.5 * (10.0 ** (-max(0, int(digits)))))
+        actual_sl = float(current.get("stop_loss") or 0.0)
+        actual_tp = float(current.get("take_profit") or 0.0)
+        sl_matches = target_sl <= 0 or abs(actual_sl - target_sl) <= tolerance
+        tp_matches = target_tp <= 0 or abs(actual_tp - target_tp) <= tolerance
+        confirmed = bool(sl_matches and tp_matches)
+        return {
+            "outcome": "confirmed" if confirmed else "unknown",
+            "position_id": position_id,
+            "order_id": 0,
+            "reason": (
+                "amend_targets_freshly_verified"
+                if confirmed
+                else "amend_not_freshly_verified"
+            ),
+            "position_present": True,
+            "target_stop_loss": target_sl or None,
+            "target_take_profit": target_tp or None,
+            "actual_stop_loss": actual_sl,
+            "actual_take_profit": actual_tp,
+            "sl_matches": bool(sl_matches),
+            "tp_matches": bool(tp_matches),
+        }
+
+    def recover_execution_intents(self) -> dict[str, Any]:
+        """Resolve persisted broker intents by action without resubmitting."""
+        if not self._execution_outcome_v2_enabled:
+            return self._recover_local_execution_outcomes()
+        store = self._intent_store()
+        unresolved = store.unresolved(account_id=str(self.account_id), symbol=str(self.symbol))
+        if not unresolved:
+            return self._recover_local_execution_outcomes()
+        positions_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        if not positions_result.fresh:
+            return {
+                **self.execution_intent_recovery_status(),
+                "ready": False,
+                "recovery_error": positions_result.error_code or "position_reconcile_failed",
+            }
+        earliest_prepared = min(
+            (float(intent.prepared_at or 0.0) for intent in unresolved if intent.prepared_at),
+            default=time.time() - 86400.0,
+        )
+        evidence_from_ts = max(0.0, earliest_prepared - 300.0)
+        deals = self.get_deals(from_ts=int(evidence_from_ts), max_rows=1000)
+        post_deals_available = bool(self._last_deals_fetch_ok)
+        post_positions = self._position_snapshot_payload(positions_result.positions)
+        post_deals = self._deal_snapshot_payload(deals)
+        post_orders, post_orders_available = self._order_history_for_recovery(
+            from_ts=evidence_from_ts,
+        )
+        recovered: list[dict[str, Any]] = []
+        for intent in unresolved:
+            request = dict(intent.request or {})
+            action = str(intent.action or "").strip().lower()
+            if (
+                str(intent.status or "") == "prepared"
+                and int(intent.attempt_count or 0) <= 0
+                and action == "market_open"
+            ):
+                # New-risk submission fails closed when the durable
+                # ``submitting`` transition is unavailable, so this state
+                # proves that no market-open RPC was sent.  Risk-reducing
+                # actions deliberately continue when that PG transition
+                # fails; they must therefore be resolved from fresh broker
+                # facts below instead of being mislabelled rejected.
+                resolution = {
+                    "outcome": "rejected",
+                    "position_id": 0,
+                    "order_id": 0,
+                    "reason": "intent_never_reached_submitting",
+                }
+            elif action == "market_open" and intent.side.lower() in {"buy", "sell"}:
+                resolution = self._resolve_open_differential(
+                    side=(
+                        TRADE_SIDE["BUY"]
+                        if intent.side.lower() == "buy"
+                        else TRADE_SIDE["SELL"]
+                    ),
+                    symbol_id=int(request.get("symbol_id") or self._symbol_id or 0),
+                    pre_positions=dict(request.get("positions_before") or {}),
+                    pre_deals=dict(request.get("deals_before") or {}),
+                    post_positions=post_positions,
+                    post_deals=post_deals,
+                    response=dict(intent.broker_response or {}),
+                    deals_differential_available=bool(
+                        request.get("deals_before_available") and post_deals_available
+                    ),
+                    post_orders=post_orders,
+                    orders_available=post_orders_available,
+                    client_order_id=str(request.get("client_order_id") or ""),
+                    comment_token=str(request.get("comment_token") or ""),
+                )
+            elif action in {"close_position", "reduce_position"}:
+                resolution = self._resolve_close_intent_recovery(
+                    intent,
+                    post_positions=post_positions,
+                )
+            elif action == "amend_position_sltp":
+                resolution = self._resolve_amend_intent_recovery(
+                    intent,
+                    post_positions=post_positions,
+                    digits=int((getattr(self, "_symbol_meta", None) or {}).get("digits", 2)),
+                )
+            else:
+                resolution = {
+                    "outcome": "unknown",
+                    "position_id": 0,
+                    "order_id": 0,
+                    "reason": f"unsupported_intent_action:{action or 'missing'}",
+                }
+            outcome = str(resolution.get("outcome") or "unknown")
+            store.complete(
+                intent.intent_id,
+                outcome=outcome,
+                position_id=int(resolution.get("position_id") or 0),
+                broker_order_id=int(resolution.get("order_id") or 0),
+                broker_response={**dict(intent.broker_response or {}), "recovery": resolution},
+                error={} if outcome == "confirmed" else {"reason": resolution.get("reason")},
+            )
+            local_resolution: dict[str, Any] = {}
+            if outcome in {"confirmed", "rejected"}:
+                try:
+                    from backend.services.live_safety_state import (
+                        resolve_broker_outcome_mutation,
+                    )
+
+                    local_resolution = resolve_broker_outcome_mutation(
+                        intent_id=str(intent.intent_id),
+                        action=action,
+                        position_id=int(resolution.get("position_id") or request.get("position_id") or 0),
+                        outcome=outcome,
+                        evidence={
+                            "source": "fresh_broker_intent_recovery",
+                            "reconcile_id": str(positions_result.reconcile_id or ""),
+                            "resolution": resolution,
+                        },
+                    )
+                    self._local_unknown_risk_mutations.pop(
+                        (action, int(request.get("position_id") or 0)),
+                        None,
+                    )
+                except Exception as exc:
+                    # PostgreSQL recovery remains broker truth, but a failed
+                    # local resolution append must keep admission fail closed.
+                    logger.error("local unknown-outcome resolution append failed: %s", exc)
+                    local_resolution = {
+                        "status": "resolution_append_failed",
+                        "error": f"{type(exc).__name__}:{exc}",
+                    }
+            recovered.append(
+                {
+                    "intent_id": intent.intent_id,
+                    **resolution,
+                    "local_resolution": local_resolution,
+                }
+            )
+        return {**self.execution_intent_recovery_status(), "recovered": recovered}
+
+    def _recover_local_execution_outcomes(self) -> dict[str, Any]:
+        """Resolve compat-mode risk reductions from a fresh broker snapshot."""
+
+        try:
+            from backend.services.live_safety_state import (
+                resolve_broker_outcome_mutation,
+                unresolved_broker_outcome_mutations,
+            )
+
+            unresolved = list(unresolved_broker_outcome_mutations())
+        except Exception as exc:
+            return {
+                **self.execution_intent_recovery_status(),
+                "ready": False,
+                "recovery_error": f"local_unknown_ledger_unavailable:{type(exc).__name__}:{exc}",
+            }
+        if not unresolved:
+            return self.execution_intent_recovery_status()
+        positions_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        if not positions_result.fresh:
+            return {
+                **self.execution_intent_recovery_status(),
+                "ready": False,
+                "recovery_error": positions_result.error_code or "position_reconcile_failed",
+            }
+        post_positions = self._position_snapshot_payload(positions_result.positions)
+        digits = int((getattr(self, "_symbol_meta", None) or {}).get("digits", 2))
+        recovered: list[dict[str, Any]] = []
+        for item in unresolved:
+            action = str(item.get("action") or "").strip().lower()
+            position_id = int(item.get("position_id") or 0)
+            evidence = dict(item.get("evidence") or {})
+            nested_resolution = dict(evidence.get("resolution") or {})
+            request = {
+                "position_id": position_id,
+                "position_volume_before": (
+                    evidence.get("position_volume_before")
+                    or nested_resolution.get("position_volume_before")
+                ),
+                "requested_volume": evidence.get("requested_volume"),
+                "target_stop_loss": (
+                    evidence.get("target_stop_loss")
+                    or nested_resolution.get("target_stop_loss")
+                ),
+                "target_take_profit": (
+                    evidence.get("target_take_profit")
+                    or nested_resolution.get("target_take_profit")
+                ),
+            }
+            local_intent = SimpleNamespace(
+                request=request,
+                position_id=position_id,
+                requested_volume=float(request.get("requested_volume") or 0.0),
+                target_stop_loss=float(request.get("target_stop_loss") or 0.0),
+                target_take_profit=float(request.get("target_take_profit") or 0.0),
+            )
+            if action in {"close_position", "reduce_position"}:
+                resolution = self._resolve_close_intent_recovery(
+                    local_intent,
+                    post_positions=post_positions,
+                )
+            elif action == "amend_position_sltp":
+                resolution = self._resolve_amend_intent_recovery(
+                    local_intent,
+                    post_positions=post_positions,
+                    digits=digits,
+                )
+            else:
+                resolution = {
+                    "outcome": "unknown",
+                    "position_id": position_id,
+                    "order_id": 0,
+                    "reason": f"local_recovery_requires_persisted_identity:{action or 'missing'}",
+                }
+            outcome = str(resolution.get("outcome") or "unknown")
+            local_resolution: dict[str, Any] = {}
+            if outcome in {"confirmed", "rejected"}:
+                try:
+                    local_resolution = resolve_broker_outcome_mutation(
+                        intent_id=str(item.get("intent_id") or ""),
+                        action=action,
+                        position_id=position_id,
+                        outcome=outcome,
+                        evidence={
+                            "source": "fresh_local_ledger_recovery",
+                            "reconcile_id": str(positions_result.reconcile_id or ""),
+                            "resolution": resolution,
+                        },
+                    )
+                    self._local_unknown_risk_mutations.pop((action, position_id), None)
+                except Exception as exc:
+                    logger.error("local unknown-outcome resolution append failed: %s", exc)
+                    local_resolution = {
+                        "status": "resolution_append_failed",
+                        "error": f"{type(exc).__name__}:{exc}",
+                    }
+            recovered.append(
+                {
+                    "intent_id": str(item.get("intent_id") or ""),
+                    **resolution,
+                    "local_resolution": local_resolution,
+                }
+            )
+        return {**self.execution_intent_recovery_status(), "recovered": recovered}
+
     def _send_market_order(self, side: int, volume: float, sl: float, tp: float,
                            comment: str) -> CTraderOrderResult:
+        with self._broker_mutation_lock:
+            return self._send_market_order_serial(side, volume, sl, tp, comment)
+
+    def _send_market_order_serial(self, side: int, volume: float, sl: float, tp: float,
+                                  comment: str) -> CTraderOrderResult:
         if not self._connected or not self._account_authed:
-            return CTraderOrderResult(success=False, comment="Not connected/authed")
-        if self._symbol_id is None:
-            return CTraderOrderResult(success=False, comment="Symbol ID not resolved")
-        # 安全闸: send_orders=False 时仅打印
-        if not self.send_orders:
-            logger.warning(f"[DRY-RUN] cTrader market {side} vol={volume} sl={sl} tp={tp} (send_orders=False)")
             return CTraderOrderResult(
-                success=True, comment="DRY-RUN (send_orders=False)",
-                volume=volume, price=sl or tp,  # 占位
+                success=False, outcome="rejected", error_code="not_connected",
+                comment="Not connected/authed",
+            )
+        if self._symbol_id is None:
+            return CTraderOrderResult(
+                success=False, outcome="rejected", error_code="symbol_unresolved",
+                comment="Symbol ID not resolved",
+            )
+        if not self.send_orders:
+            logger.warning(
+                "[DRY-RUN] cTrader market %s vol=%s sl=%s tp=%s (send_orders=False)",
+                side, volume, sl, tp,
+            )
+            return CTraderOrderResult(
+                success=True, outcome="simulated", comment="DRY-RUN (send_orders=False)",
+                volume=volume, price=sl or tp,
+            )
+
+        try:
+            from backend.services.live_safety_state import no_new_risk_latched
+
+            new_risk_latched = no_new_risk_latched(fail_closed=True)
+        except Exception as exc:
+            logger.error("new-risk latch check failed closed before market RPC: %s", exc)
+            return CTraderOrderResult(
+                success=False,
+                outcome="rejected",
+                error_code="new_risk_latch_unavailable",
+                comment=f"new-risk latch check failed: {type(exc).__name__}: {exc}",
+            )
+        if new_risk_latched:
+            return CTraderOrderResult(
+                success=False,
+                outcome="rejected",
+                error_code="no_new_risk_latched",
+                comment="market open blocked by durable no_new_risk latch",
             )
 
         req = TradeMsg.ProtoOANewOrderReq()
@@ -1343,103 +2562,264 @@ class CTraderBridge(BaseBrokerBridge):
         req.symbolId = self._symbol_id
         req.orderType = ORDER_TYPE["MARKET"]
         req.tradeSide = side
-        # cTrader volume 字段单位: API 原生 volume unit
-        _meta = getattr(self, '_symbol_meta', None) or {}
-        _min_vol_api = int(round(float(_meta.get('api_min_volume') or 0)))
-        if _min_vol_api <= 0:
-            # 未获取到 symbol meta → 尝试懒加载
-            if self._symbol_id is not None:
-                try:
-                    self._resolve_symbol_id()
-                    _meta = getattr(self, '_symbol_meta', None) or {}
-                    _min_vol_api = int(round(float(_meta.get('api_min_volume') or 0)))
-                except Exception:
-                    pass
-        if _min_vol_api <= 0:
-            _min_vol_api = max(1, int(round(volume)))
-        req.volume = int(round(max(volume, _min_vol_api)))
-        req.comment = comment or "quant-live"
-        logger.info(
-            f"market_order: account={self.account_id} symbolId={self._symbol_id} "
-            f"side={side} volume={req.volume} api_units (= {volume} api) "
-            f"sl={sl} tp={tp}"
-        )
-        # ⚠️ 阶段 2 MVP: SL/TP 不上 server (cTrader MARKET 单不支持 SL/TP 字段,
-        # 需用 MARKET_RANGE 或 AmendOrder 后置). runner 在本地 Python 层做 SL/TP 检查
-        # + close_position(). 阶段 3 补 ProtoOAAmendPositionSLTPReq 把 SL/TP 推 server
-        try:
-            resp = self._send(req, timeout=15.0)
-            # ⚠️ audit 2026-06-11: 可能返回 ProtoOAOrderErrorEvent (风控/参数拒)
-            if type(resp).__name__ == "ProtoOAOrderErrorEvent":
-                err_code = getattr(resp, "errorCode", "?")
-                err_desc = getattr(resp, "description", "")
-                logger.error(f"market_order rejected: errorCode={err_code} desc={err_desc!r}")
-                return CTraderOrderResult(
-                    success=False, error_code=err_code,
-                    comment=f"rejected: {err_code} — {err_desc}",
-                )
-            # ProtoOANewOrderRes 不存在! server 回 ProtoOAExecutionEvent (含 position/order/deal)
-            # 或 ProtoOAExecutionEvent with errorCode.
-            resp_name = type(resp).__name__
-            if resp_name == "ProtoOAExecutionEvent":
-                err_code = getattr(resp, "errorCode", "")
-                if err_code:
-                    logger.error(f"market_order execution error: {err_code}")
-                    return CTraderOrderResult(
-                        success=False, error_code=err_code,
-                        comment=f"execution error: {err_code}",
-                    )
-                # 成功 — 取 positionId 和 orderId
-                pos = getattr(resp, "position", None)
-                order = getattr(resp, "order", None)
-                position_id = pos.positionId if pos else 0
-                order_id = order.orderId if order else 0
-                return CTraderOrderResult(
-                    success=True, order_id=order_id, position_id=position_id,
-                    comment=f"filled: orderId={order_id} posId={position_id}",
-                )
-            # fallback: 未知响应类型 (兼容 old SDK)
-            logger.warning(f"market_order unexpected resp type: {resp_name}")
-            order_id = getattr(resp, "orderId", 0)
-            # 注: ProtoOANewOrderRes 返回的是 orderId, 真实成交价要从 ProtoOAExecutionEvent push 拿
-            # MVP 阶段我们后续调 get_positions() 拉真实 entry_price
-            return CTraderOrderResult(
-                success=True, order_id=order_id,
-                comment=f"orderId={order_id}, awaiting get_positions() for entry_price",
-            )
-        except Exception as e:
-            # P0-5: timeout/crash may mask a filled order.
-            # Reconcile by fetching current positions before declaring failure.
-            logger.warning(
-                "market_order send error: %s. Reconciling positions...", e,
-            )
+        meta = getattr(self, "_symbol_meta", None) or {}
+        min_volume = int(round(float(meta.get("api_min_volume") or 0)))
+        if min_volume <= 0 and self._symbol_id is not None:
             try:
-                positions = self.get_positions(self.symbol)
-                expected_side = 1 if side == TRADE_SIDE["BUY"] else -1
-                matching = [
-                    p for p in positions
-                    if p.direction == expected_side
-                ]
-                if matching:
-                    # Use the most recent match (last in list by position_id)
-                    best = max(matching, key=lambda p: p.position_id)
-                    logger.info(
-                        "Reconciliation found position %s — order actually filled",
-                        best.position_id,
+                self._resolve_symbol_id()
+                meta = getattr(self, "_symbol_meta", None) or {}
+                min_volume = int(round(float(meta.get("api_min_volume") or 0)))
+            except Exception:
+                pass
+        if min_volume <= 0:
+            min_volume = max(1, int(round(volume)))
+        req.volume = int(round(max(volume, min_volume)))
+
+        client_order_id = str(uuid.uuid4())
+        client_msg_id = str(uuid.uuid4())
+        intent_id = str(uuid.uuid4())
+        comment_token = f"qid:{intent_id.replace('-', '')[:16]}"
+        base_comment = str(comment or "quant-live").strip()
+        req.comment = f"{base_comment[:72]} {comment_token}".strip()
+        req.clientOrderId = client_order_id
+        logger.info(
+            "market_order: account=%s symbolId=%s side=%s volume=%s "
+            "clientOrderId=%s intent=%s",
+            self.account_id, self._symbol_id, side, req.volume,
+            client_order_id, intent_id,
+        )
+
+        pre_positions: dict[str, dict[str, Any]] = {}
+        pre_deals: dict[str, dict[str, Any]] = {}
+        pre_deals_available = False
+        store = None
+        if self._execution_outcome_v2_enabled:
+            try:
+                store = self._intent_store()
+                unresolved = int(
+                    store.unresolved_count(
+                        account_id=str(self.account_id), symbol=str(self.symbol)
+                    )
+                )
+                if unresolved > 0:
+                    self._latch_unknown_broker_outcome(
+                        action="market_open",
+                        position_id=0,
+                        intent_id=intent_id,
+                        evidence={
+                            "reason": "unresolved_execution_intent",
+                            "unresolved_count": unresolved,
+                        },
                     )
                     return CTraderOrderResult(
-                        success=True,
-                        position_id=int(best.position_id),
-                        comment=f"reconciled after send error: posId={best.position_id}",
+                        success=False, outcome="rejected",
+                        error_code="unresolved_execution_intent",
+                        comment=f"blocked: {unresolved} unresolved broker execution intent(s)",
+                        client_order_id=client_order_id, client_msg_id=client_msg_id,
                     )
-                logger.info(
-                    "Reconciliation: no matching %s position on %s",
-                    "BUY" if side == TRADE_SIDE["BUY"] else "SELL",
-                    self.symbol,
+                pre_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+                if not pre_result.fresh:
+                    return CTraderOrderResult(
+                        success=False, outcome="rejected", error_code="pre_reconcile_failed",
+                        comment=pre_result.error_message or pre_result.error_code,
+                        client_order_id=client_order_id, client_msg_id=client_msg_id,
+                    )
+                pre_positions = self._position_snapshot_payload(pre_result.positions)
+                pre_deal_rows = self.get_deals(from_ts=int(time.time() - 86400), max_rows=1000)
+                pre_deals_available = bool(self._last_deals_fetch_ok)
+                pre_deals = self._deal_snapshot_payload(pre_deal_rows) if pre_deals_available else {}
+                prepared = store.prepare(
+                    intent_id=intent_id, idempotency_key=intent_id,
+                    broker="ctrader", account_id=str(self.account_id), symbol=str(self.symbol),
+                    action="market_open",
+                    side="buy" if side == TRADE_SIDE["BUY"] else "sell",
+                    requested_volume=float(req.volume),
+                    target_stop_loss=float(sl or 0.0),
+                    target_take_profit=float(tp or 0.0),
+                    request={
+                        "schema": "broker_execution_request.v2",
+                        "symbol_id": int(self._symbol_id or 0),
+                        "client_order_id": client_order_id,
+                        "client_msg_id": client_msg_id,
+                        "comment_token": comment_token,
+                        "comment": req.comment,
+                        "positions_before": pre_positions,
+                        "deals_before": pre_deals,
+                        "deals_before_available": pre_deals_available,
+                        "pre_reconcile_id": pre_result.reconcile_id,
+                    },
                 )
-            except Exception as reconcile_err:
-                logger.error("Reconciliation failed: %s", reconcile_err)
-            return CTraderOrderResult(success=False, error_code="SEND_ERR", comment=str(e))
+                intent_id = prepared.intent_id
+                store.mark_submitting(
+                    intent_id,
+                    request={**dict(prepared.request or {}), "submitting_at": time.time()},
+                )
+            except Exception as exc:
+                logger.error("broker execution intent gate failed before RPC: %s", exc)
+                return CTraderOrderResult(
+                    success=False, outcome="rejected",
+                    error_code="execution_intent_persist_failed", comment=str(exc),
+                    intent_id=intent_id,
+                    client_order_id=client_order_id, client_msg_id=client_msg_id,
+                )
+
+        resp = None
+        send_error: Exception | None = None
+        try:
+            resp = self._send(req, timeout=15.0, client_msg_id=client_msg_id)
+        except Exception as exc:
+            send_error = exc
+            logger.warning("market_order RPC result uncertain: %s", exc)
+
+        response = self._response_evidence(resp)
+        error_code = str(response.get("error_code") or "")
+        rejected = self._response_is_explicit_rejection(response)
+        if rejected:
+            broker_code = error_code or "broker_rejected"
+            if store is not None:
+                try:
+                    store.complete(
+                        intent_id, outcome="rejected", broker_response=response,
+                        error={"error_code": broker_code, "description": response.get("description")},
+                    )
+                except Exception as exc:
+                    logger.error("failed to finalize rejected execution intent: %s", exc)
+                    self._latch_unknown_broker_outcome(
+                        action="market_open",
+                        position_id=int(response.get("position_id") or 0),
+                        intent_id=intent_id,
+                        evidence={
+                            **response,
+                            "reason": "intent_finalize_failed_after_rejection",
+                            "finalize_error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                    return CTraderOrderResult(
+                        success=False, outcome="unknown", error_code="INTENT_FINALIZE_FAILED",
+                        comment=str(exc), intent_id=intent_id,
+                        client_order_id=client_order_id, client_msg_id=client_msg_id,
+                    )
+            return CTraderOrderResult(
+                success=False, outcome="rejected", error_code=broker_code,
+                comment=f"broker rejected: {broker_code} — {response.get('description') or ''}",
+                intent_id=intent_id if store is not None else "",
+                client_order_id=client_order_id, client_msg_id=client_msg_id,
+            )
+
+        if not self._execution_outcome_v2_enabled:
+            response_pid = int(response.get("position_id") or 0)
+            if (
+                response.get("response_type") == "ProtoOAExecutionEvent"
+                and response_pid > 0
+                and send_error is None
+            ):
+                return CTraderOrderResult(
+                    success=True, outcome="confirmed",
+                    order_id=int(response.get("order_id") or 0), position_id=response_pid,
+                    comment=f"filled: orderId={int(response.get('order_id') or 0)} posId={response_pid}",
+                    client_order_id=client_order_id, client_msg_id=client_msg_id,
+                )
+            self._latch_unknown_broker_outcome(
+                action="market_open",
+                position_id=int(response.get("position_id") or 0),
+                intent_id=intent_id,
+                evidence={
+                    **response,
+                    "reason": "compat_market_open_outcome_unknown",
+                    "rpc_error": str(send_error or ""),
+                },
+            )
+            return CTraderOrderResult(
+                success=False, outcome="unknown",
+                order_id=int(response.get("order_id") or 0),
+                error_code="SEND_OUTCOME_UNKNOWN",
+                comment=str(send_error or f"unexpected response: {response.get('response_type') or 'none'}"),
+                client_order_id=client_order_id, client_msg_id=client_msg_id,
+            )
+
+        post_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        post_positions = (
+            self._position_snapshot_payload(post_result.positions) if post_result.fresh else {}
+        )
+        post_deal_rows = self.get_deals(from_ts=int(time.time() - 86400), max_rows=1000)
+        post_deals_available = bool(self._last_deals_fetch_ok)
+        post_deals = self._deal_snapshot_payload(post_deal_rows) if post_deals_available else {}
+        post_orders: dict[str, dict[str, Any]] = {}
+        post_orders_available = False
+        if int(response.get("position_id") or 0) <= 0:
+            post_orders, post_orders_available = self._order_history_for_recovery(
+                from_ts=time.time() - 300.0,
+            )
+        resolution = self._resolve_open_differential(
+            side=side, symbol_id=int(self._symbol_id or 0),
+            pre_positions=pre_positions, pre_deals=pre_deals,
+            post_positions=post_positions, post_deals=post_deals,
+            response=response,
+            deals_differential_available=pre_deals_available and post_deals_available,
+            post_orders=post_orders,
+            orders_available=post_orders_available,
+            client_order_id=client_order_id,
+            comment_token=comment_token,
+        )
+        if not post_result.fresh and int(response.get("position_id") or 0) <= 0:
+            resolution = {
+                **resolution, "outcome": "unknown", "position_id": 0,
+                "reason": "post_reconcile_failed",
+                "post_reconcile_error": post_result.error_code,
+            }
+        outcome = str(resolution.get("outcome") or "unknown")
+        try:
+            assert store is not None
+            store.complete(
+                intent_id, outcome=outcome,
+                position_id=int(resolution.get("position_id") or 0),
+                broker_order_id=int(resolution.get("order_id") or 0),
+                broker_response={
+                    **response, "resolution": resolution,
+                    "post_reconcile_id": post_result.reconcile_id,
+                    "post_reconcile_status": post_result.status,
+                },
+                error={} if outcome == "confirmed" else {
+                    "reason": resolution.get("reason"), "rpc_error": str(send_error or "")
+                },
+            )
+        except Exception as exc:
+            logger.error("broker execution intent finalize failed; outcome held unknown: %s", exc)
+            self._latch_unknown_broker_outcome(
+                action="market_open",
+                position_id=int(resolution.get("position_id") or 0),
+                intent_id=intent_id,
+                evidence={
+                    **response,
+                    "resolution": resolution,
+                    "reason": "intent_finalize_failed",
+                    "finalize_error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            return CTraderOrderResult(
+                success=False, outcome="unknown",
+                position_id=int(resolution.get("position_id") or 0),
+                order_id=int(resolution.get("order_id") or 0),
+                error_code="INTENT_FINALIZE_FAILED", comment=str(exc),
+                intent_id=intent_id,
+                client_order_id=client_order_id, client_msg_id=client_msg_id,
+            )
+        if outcome == "unknown":
+            self._latch_unknown_broker_outcome(
+                action="market_open",
+                position_id=int(resolution.get("position_id") or 0),
+                intent_id=intent_id,
+                evidence={**response, "resolution": resolution},
+            )
+        return CTraderOrderResult(
+            success=outcome == "confirmed", outcome=outcome,
+            position_id=int(resolution.get("position_id") or 0),
+            order_id=int(resolution.get("order_id") or 0),
+            error_code="" if outcome == "confirmed" else "SEND_OUTCOME_UNKNOWN",
+            comment=str(resolution.get("reason") or outcome),
+            intent_id=intent_id,
+            client_order_id=client_order_id, client_msg_id=client_msg_id,
+        )
 
     def _normalize_close_volume(self, volume: float) -> tuple[int, str, str]:
         raw_volume = int(round(float(volume or 0.0)))
@@ -1478,6 +2858,11 @@ class CTraderBridge(BaseBrokerBridge):
 
     def close_position(self, position_id: int,
                        volume: float = 0.0) -> OrderResult:
+        with self._broker_mutation_lock:
+            return self._close_position_serial(position_id, volume=volume)
+
+    def _close_position_serial(self, position_id: int,
+                               volume: float = 0.0) -> OrderResult:
         """平仓 (走 ProtoOAClosePositionReq, DRY-RUN 时仅打印).
 
         Args:
@@ -1488,96 +2873,263 @@ class CTraderBridge(BaseBrokerBridge):
         (payloadType/ctidTraderAccountId/positionId/volume). volume 不能省略.
         """
         if not self.is_connected:
-            return OrderResult(success=False, comment="Not connected")
+            return OrderResult(success=False, outcome="rejected", comment="Not connected")
         if not self._account_authed:
-            return OrderResult(success=False, comment="Account not authed")
+            return OrderResult(success=False, outcome="rejected", comment="Account not authed")
         if position_id <= 0:
-            return OrderResult(success=False, comment="position_id required")
+            return OrderResult(success=False, outcome="rejected", comment="position_id required")
         # DRY-RUN 安全闸
         if not self.send_orders:
             logger.warning(f"[DRY-RUN] close_position pos={position_id} vol={volume} (send_orders=False)")
             return OrderResult(
                 success=True, position_id=position_id,
+                outcome="simulated",
                 comment="DRY-RUN close (send_orders=False)",
             )
-        try:
-            # 如果未传 volume, 必须强制刷新 broker 当前仓位后再解析全平手数。
-            # 不能读缓存；缓存 stale 时会把已经不存在的仓位当成可平仓。
-            if volume <= 0.0:
-                positions = self.refresh_positions(force=True, allow_cache_fallback=False)
-                match = [p for p in positions if p.position_id == position_id]
-                if not match:
-                    return OrderResult(
-                        success=False, position_id=position_id,
-                        error_code="position_not_found",
-                        comment=f"Position {position_id} not found in live broker positions",
-                    )
-                volume = match[0].volume
-                logger.info(f"  auto-resolved volume={volume} for full close")
+        close_volume = 0
+        if volume > 0.0:
             close_volume, volume_error_code, volume_error = self._normalize_close_volume(volume)
             if volume_error_code:
                 logger.warning(
                     "close_position rejected locally pos=%s volume=%s: %s",
-                    position_id,
-                    volume,
-                    volume_error,
+                    position_id, volume, volume_error,
                 )
                 return OrderResult(
                     success=False,
+                    outcome="rejected",
                     position_id=position_id,
                     volume=float(volume or 0.0),
                     error_code=volume_error_code,
                     comment=volume_error,
                 )
 
-            req = TradeMsg.ProtoOAClosePositionReq()
-            req.ctidTraderAccountId = self.account_id
-            req.positionId = int(position_id)
-            # cTrader volume 字段: API 原生 volume unit
-            req.volume = close_volume
-            resp = self._send(req, timeout=10.0)
-            resp_name = type(resp).__name__
-            if resp_name == "ProtoOAOrderErrorEvent":
-                err_code = getattr(resp, "errorCode", "?")
-                err_desc = getattr(resp, "description", "")
-                logger.error(
-                    "close_position rejected pos=%s vol=%s errorCode=%s desc=%r",
-                    position_id,
-                    volume,
-                    err_code,
-                    err_desc,
+        pre_result = None
+        pre_position = None
+        # Always attempt a fresh pre-reconcile while the broker mutation lock
+        # is held.  A fresh absence proves a concurrent/previous close already
+        # removed the risk and prevents a duplicate RPC.  Reconcile failure
+        # does not suppress a caller-supplied risk-reducing volume.
+        pre_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        pre_position = next(
+            (item for item in pre_result.positions if int(item.position_id) == int(position_id)),
+            None,
+        ) if pre_result.fresh else None
+        if pre_result is not None and pre_result.fresh and pre_position is None:
+            self._local_unknown_risk_mutations.pop(
+                ("close_position", int(position_id)),
+                None,
+            )
+            self._local_unknown_risk_mutations.pop(
+                ("reduce_position", int(position_id)),
+                None,
+            )
+            try:
+                from backend.services.live_safety_state import (
+                    resolve_broker_outcome_mutation,
                 )
-                return OrderResult(
-                    success=False,
-                    position_id=position_id,
-                    volume=volume,
-                    error_code=str(err_code),
-                    comment=f"close rejected: {err_code} — {err_desc}",
+
+                resolve_broker_outcome_mutation(
+                    action="close_position",
+                    position_id=int(position_id),
+                    outcome="confirmed",
+                    evidence={
+                        "source": "fresh_pre_reconcile",
+                        "reconcile_id": str(pre_result.reconcile_id or ""),
+                        "position_present": False,
+                    },
                 )
-            if resp_name == "ProtoOAExecutionEvent":
-                err_code = getattr(resp, "errorCode", "")
-                if err_code:
-                    logger.error("close_position execution error pos=%s vol=%s errorCode=%s", position_id, volume, err_code)
-                    return OrderResult(
-                        success=False,
-                        position_id=position_id,
-                        volume=volume,
-                        error_code=str(err_code),
-                        comment=f"close execution error: {err_code}",
-                    )
-            logger.info(f"close_position OK pos={position_id} vol={volume} resp={resp_name}")
+            except Exception as exc:
+                logger.error("local close unknown resolution append failed: %s", exc)
             return OrderResult(
                 success=True,
+                outcome="confirmed",
                 position_id=position_id,
-                volume=volume,
-                comment=f"close accepted; resp={resp_name}",
+                volume=float(volume or 0.0),
+                comment=f"Position {position_id} already absent in fresh broker reconcile",
             )
-        except Exception as e:
-            logger.error(f"close_position failed pos={position_id}: {e}")
+        if volume <= 0.0:
+            if pre_result is None or not pre_result.fresh:
+                return OrderResult(
+                    success=False,
+                    outcome="rejected",
+                    position_id=position_id,
+                    error_code="pre_reconcile_failed",
+                    comment=(
+                        pre_result.error_message or pre_result.error_code
+                        if pre_result is not None
+                        else "fresh position reconcile required"
+                    ),
+                )
+            assert pre_position is not None
+            volume = float(pre_position.volume or 0.0)
+            logger.info("auto-resolved fresh broker volume=%s for full close", volume)
+            close_volume, volume_error_code, volume_error = self._normalize_close_volume(volume)
+            if volume_error_code:
+                return OrderResult(
+                    success=False,
+                    outcome="rejected",
+                    position_id=position_id,
+                    volume=float(volume or 0.0),
+                    error_code=volume_error_code,
+                    comment=volume_error,
+                )
+
+        store, intent_id, client_msg_id, blocked_intent = self._prepare_risk_reduction_intent(
+            action="close_position",
+            position_id=int(position_id),
+            requested_volume=float(close_volume),
+            request={
+                "pre_reconcile_id": getattr(pre_result, "reconcile_id", ""),
+                "pre_reconcile_status": getattr(pre_result, "status", "not_requested"),
+                "position_volume_before": (
+                    float(pre_position.volume or 0.0) if pre_position is not None else None
+                ),
+            },
+        )
+        if blocked_intent is not None:
+            self._latch_unknown_broker_outcome(
+                action="close_position",
+                position_id=int(position_id),
+                intent_id=intent_id,
+                evidence={
+                    "reason": "unresolved_risk_reduction_intent",
+                    "existing_status": str(getattr(blocked_intent, "status", "unknown") or "unknown"),
+                },
+            )
             return OrderResult(
-                success=False, position_id=position_id,
-                error_code="close_failed", comment=str(e),
+                success=False,
+                outcome="unknown",
+                position_id=int(position_id),
+                volume=float(close_volume),
+                error_code="DUPLICATE_MUTATION_BLOCKED",
+                comment="unresolved close intent must be recovered before resubmission",
+                intent_id=intent_id,
             )
+        req = TradeMsg.ProtoOAClosePositionReq()
+        req.ctidTraderAccountId = self.account_id
+        req.positionId = int(position_id)
+        req.volume = close_volume
+        resp = None
+        send_error: Exception | None = None
+        try:
+            resp = self._send(req, timeout=10.0, client_msg_id=client_msg_id)
+        except Exception as exc:
+            send_error = exc
+            logger.error("close_position RPC outcome uncertain pos=%s: %s", position_id, exc)
+        response = self._response_evidence(resp)
+        response.update({"client_msg_id": client_msg_id, "requested_volume": close_volume})
+        rejected = self._response_is_explicit_rejection(response)
+        if rejected:
+            err_code = str(response.get("error_code") or "broker_rejected")
+            self._finalize_risk_reduction_intent(
+                store,
+                intent_id,
+                outcome="rejected",
+                position_id=int(position_id),
+                broker_response=response,
+                error={"error_code": err_code, "description": response.get("description")},
+            )
+            return OrderResult(
+                success=False,
+                outcome="rejected",
+                position_id=position_id,
+                volume=float(close_volume),
+                error_code=err_code,
+                comment=f"close rejected: {err_code} — {response.get('description') or ''}",
+                intent_id=intent_id if store is not None else "",
+                client_msg_id=client_msg_id,
+            )
+
+        if not self._execution_outcome_v2_enabled:
+            confirmed = (
+                response.get("response_type") == "ProtoOAExecutionEvent"
+                and send_error is None
+            )
+            outcome = "confirmed" if confirmed else "unknown"
+            evidence = {
+                **response,
+                "rpc_error": str(send_error or ""),
+                "requested_volume": float(close_volume),
+                "position_volume_before": (
+                    float(pre_position.volume or 0.0) if pre_position is not None else None
+                ),
+            }
+            if not confirmed:
+                self._latch_unknown_broker_outcome(
+                    action="close_position",
+                    position_id=int(position_id),
+                    intent_id=intent_id,
+                    evidence=evidence,
+                )
+            return OrderResult(
+                success=confirmed,
+                outcome=outcome,
+                position_id=position_id,
+                volume=float(close_volume),
+                order_id=int(response.get("order_id") or 0),
+                error_code="" if confirmed else "CLOSE_OUTCOME_UNKNOWN",
+                comment=(
+                    "close accepted by ExecutionEvent (compat mode)"
+                    if confirmed
+                    else str(send_error or f"unexpected response: {response.get('response_type') or 'none'}")
+                ),
+                client_msg_id=client_msg_id,
+            )
+
+        post_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        current = next(
+            (item for item in post_result.positions if int(item.position_id) == int(position_id)),
+            None,
+        ) if post_result.fresh else None
+        expected_remaining = None
+        if pre_position is not None:
+            expected_remaining = max(0.0, float(pre_position.volume or 0.0) - float(close_volume))
+        confirmed_absent = bool(post_result.fresh and current is None)
+        confirmed_reduced = bool(
+            post_result.fresh
+            and current is not None
+            and expected_remaining is not None
+            and float(current.volume or 0.0) <= expected_remaining + 1e-9
+        )
+        confirmed = confirmed_absent or confirmed_reduced
+        resolution = {
+            "post_reconcile_id": post_result.reconcile_id,
+            "post_reconcile_status": post_result.status,
+            "position_present": current is not None,
+            "position_volume_before": (
+                float(pre_position.volume or 0.0) if pre_position is not None else None
+            ),
+            "position_volume_after": float(current.volume or 0.0) if current is not None else 0.0,
+            "expected_max_remaining": expected_remaining,
+            "rpc_error": str(send_error or ""),
+        }
+        outcome = "confirmed" if confirmed else "unknown"
+        self._finalize_risk_reduction_intent(
+            store,
+            intent_id,
+            outcome=outcome,
+            position_id=int(position_id),
+            broker_response={**response, "resolution": resolution},
+            error={} if confirmed else {"reason": "close_not_freshly_verified"},
+        )
+        if not confirmed:
+            self._latch_unknown_broker_outcome(
+                action="close_position",
+                position_id=int(position_id),
+                intent_id=intent_id,
+                evidence={**response, "resolution": resolution},
+            )
+        return OrderResult(
+            success=confirmed,
+            outcome=outcome,
+            position_id=position_id,
+            volume=float(close_volume),
+            order_id=int(response.get("order_id") or 0),
+            error_code="" if confirmed else "CLOSE_OUTCOME_UNKNOWN",
+            comment="close verified by fresh broker reconcile" if confirmed else "close not freshly verified",
+            intent_id=intent_id if store is not None else "",
+            client_msg_id=client_msg_id,
+        )
 
     # ── 账户 ──
 
@@ -1602,31 +3154,65 @@ class CTraderBridge(BaseBrokerBridge):
         return self.refresh_account_info()
 
     def refresh_account_info(self) -> AccountInfo:
+        """Legacy value-only wrapper around :meth:`reconcile_account`."""
+        result = self.reconcile_account(force=True, allow_cache_fallback=True)
+        return result.account or AccountInfo()
+
+    def reconcile_account(
+        self,
+        *,
+        force: bool = True,
+        allow_cache_fallback: bool = False,
+    ) -> AccountReconcileResult:
         """
-        查账户余额/净值.
+        Return an explicit broker account result.
 
-        ⚠️ ProtoOATrader 没有 equity/freeMargin 字段; 净值需要从持仓的
-        unrealized PnL 累加算出 (另发 ProtoOAGetPositionUnrealizedPnLReq).
-
-        v3 (2026-06-08): 加 _unrealized_pnl() 逐仓查浮动盈亏, 归入 equity.
-        若查询失败 (无持仓时跳空, 或 broker 不支持), 回退 balance.
-
-        Margin 同理: cTrader ProtoOAMarginReq 可查, v3 暂略, 返 0.0。
+        A zero-valued ``AccountInfo`` is never used to represent a failed
+        reconciliation.  Callers can distinguish a fresh response from a
+        cache/event projection through ``status``.
         """
+        reconcile_id = str(uuid.uuid4())
+        generated_at = time.time()
+
+        def fallback(error_code: str, error_message: str) -> AccountReconcileResult:
+            cached = self._copy_account_cache()
+            with self._account_cache_lock:
+                observed_at = float(self._account_cache_observed_at or 0.0)
+                source = str(self._account_cache_source or "cache")
+            if allow_cache_fallback and observed_at > 0:
+                return AccountReconcileResult(
+                    reconcile_id=reconcile_id,
+                    status="event" if source == "event" else "cache",
+                    account=cached,
+                    observed_at=observed_at,
+                    generated_at=time.time(),
+                    error_code=error_code,
+                    error_message=error_message,
+                )
+            return AccountReconcileResult(
+                reconcile_id=reconcile_id,
+                status="failed",
+                account=None,
+                observed_at=0.0,
+                generated_at=time.time(),
+                error_code=error_code,
+                error_message=error_message,
+            )
+
         if not self.is_connected:
-            return AccountInfo()
-        if self._should_backoff():
-            return self._copy_account_cache()
+            return fallback("not_connected", "cTrader is not connected/authenticated")
+        if not force and self._should_backoff():
+            return fallback("broker_backoff", "cTrader request backoff is active")
         try:
             req = TradeMsg.ProtoOATraderReq()
             req.ctidTraderAccountId = self.account_id
             resp = self._send(req, timeout=10.0)
             t = resp.trader
-            # equity = balance + 逐仓 unrealized PnL (centi-unit)
-            try:
-                unrealized = self._unrealized_pnl()
-            except Exception:
-                unrealized = 0.0
+            # Equity is not fresh unless both the trader balance and the
+            # broker unrealized-PnL projection succeeded.  Treating a failed
+            # PnL request as zero manufactures account equity and can
+            # incorrectly authorize new risk.
+            unrealized = self._unrealized_pnl()
             account = self._account_from_trader(t, unrealized=unrealized)
             balance = account.balance
             equity = account.equity
@@ -1636,14 +3222,25 @@ class CTraderBridge(BaseBrokerBridge):
                 f"leverage={account.leverage:.2f} (leverageInCents={float(getattr(t, 'leverageInCents', 0) or 0):.0f}, maxLeverage={getattr(t, 'maxLeverage', 0)})"
             )
             self._record_success()
-            return self._set_account_cache(account, emit=True, reason="account_info")
+            account = self._set_account_cache(account, emit=True, reason="account_info")
+            observed_at = time.time()
+            with self._account_cache_lock:
+                self._account_cache_observed_at = observed_at
+                self._account_cache_source = "cache"
+            return AccountReconcileResult(
+                reconcile_id=reconcile_id,
+                status="fresh",
+                account=self._copy_account_cache(),
+                observed_at=observed_at,
+                generated_at=time.time(),
+            )
         except Exception as e:
             if not self._is_soft_timeout_error(e):
                 self._mark_disconnected()
             self._record_failure()
             if self._should_log_error(f"account_info failed: {e}"):
                 logger.error(f"account_info failed: {e}")
-            return self._copy_account_cache()
+            return fallback("account_reconcile_failed", str(e))
 
     def _unrealized_pnl(self) -> float:
         """查所有持仓的浮动盈亏总和 (美元, 非 centi-unit).
@@ -1652,12 +3249,9 @@ class CTraderBridge(BaseBrokerBridge):
         ProtoOAGetPositionUnrealizedPnLRes 返 repeated {positionId,
         grossUnrealizedPnL, netUnrealizedPnL}, 单位 centi-unit.
         """
-        try:
-            req = TradeMsg.ProtoOAGetPositionUnrealizedPnLReq()
-            req.ctidTraderAccountId = self.account_id
-            resp = self._send(req, timeout=8.0)
-        except Exception:
-            return 0.0
+        req = TradeMsg.ProtoOAGetPositionUnrealizedPnLReq()
+        req.ctidTraderAccountId = self.account_id
+        resp = self._send(req, timeout=8.0)
         money_digits = getattr(resp, "moneyDigits", 2) or 2
         divisor = 10 ** money_digits
         total = 0.0
@@ -1683,23 +3277,70 @@ class CTraderBridge(BaseBrokerBridge):
         force: bool = False,
         allow_cache_fallback: bool = True,
     ) -> list[PositionInfo]:
-        """
-        查当前持仓. 用 ProtoOAReconcileReq (增量大).
+        """Legacy value-only wrapper around :meth:`reconcile_positions`."""
+        result = self.reconcile_positions(
+            symbol,
+            force=force,
+            allow_cache_fallback=allow_cache_fallback,
+        )
+        return [self._copy_position(pos) for pos in result.positions]
 
-        ⚠️ ProtoOAPosition 没有 tradeSide/volume 顶层字段 — 这些都在
-        position.tradeData (ProtoOATradeData) 里.
+    def reconcile_positions(
+        self,
+        symbol: str = "",
+        *,
+        force: bool = True,
+        allow_cache_fallback: bool = False,
+    ) -> PositionReconcileResult:
         """
-        if not self.is_connected:
-            return []
-        if not force and self._should_backoff():
+        Return an explicit full position reconciliation result.
+
+        A fresh empty tuple means the broker confirmed no positions.  A
+        failed call is never encoded as an empty list, which is the key safety
+        distinction missing from the legacy ``refresh_positions`` API.
+        """
+        reconcile_id = str(uuid.uuid4())
+
+        def filtered_snapshot() -> list[PositionInfo]:
             cached_positions = self._positions_snapshot()
             if symbol and self._symbol_id is not None:
                 return [pos for pos in cached_positions if int(pos.symbol_id or 0) == int(self._symbol_id)]
             return cached_positions
+
+        def fallback(error_code: str, error_message: str) -> PositionReconcileResult:
+            cached_positions = filtered_snapshot()
+            with self._positions_cache_lock:
+                observed_at = float(self._positions_cache_observed_at or 0.0)
+                source = str(self._positions_cache_source or "cache")
+            if allow_cache_fallback and observed_at > 0:
+                return PositionReconcileResult(
+                    reconcile_id=reconcile_id,
+                    status="event" if source == "event" else "cache",
+                    positions=tuple(self._copy_position(pos) for pos in cached_positions),
+                    observed_at=observed_at,
+                    generated_at=time.time(),
+                    error_code=error_code,
+                    error_message=error_message,
+                )
+            return PositionReconcileResult(
+                reconcile_id=reconcile_id,
+                status="failed",
+                positions=(),
+                observed_at=0.0,
+                generated_at=time.time(),
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+        if not self.is_connected:
+            return fallback("not_connected", "cTrader is not connected/authenticated")
+        if not force and self._should_backoff():
+            return fallback("broker_backoff", "cTrader request backoff is active")
         try:
             req = TradeMsg.ProtoOAReconcileReq()
             req.ctidTraderAccountId = self.account_id
             resp = self._send(req, timeout=10.0)
+            snapshot_observed_at = time.time()
             result = []
             for p in resp.position:
                 td = p.tradeData  # symbolId 在 tradeData 里, 不在顶层
@@ -1718,39 +3359,198 @@ class CTraderBridge(BaseBrokerBridge):
                     direction=direction,
                     volume=td.volume,
                     entry_price=p.price,
-                    current_price=p.price,
+                    # ProtoOAPosition.price is the immutable entry price, not
+                    # a current mark.  A fresh spot event may fill this below.
+                    current_price=0.0,
                     sl=p.stopLoss or 0,
                     tp=p.takeProfit or 0,
                     commission=p.commission / 100.0,
                     swap=p.swap / 100.0,
                     open_timestamp=(td.openTimestamp / 1000.0) if td.openTimestamp else 0,
+                    current_price_state="unknown",
+                    current_price_source="ctrader_reconcile",
+                    current_price_reason_code="fresh_spot_unavailable",
+                    pnl_state="unknown",
+                    pnl_source="ctrader_unrealized_pnl",
+                    pnl_reason_code="pnl_projection_pending",
                 ))
-            # 批量查询所有持仓的未实现盈亏 (官方 API)
-            try:
-                pnl_map = self.get_unrealized_pnl()
-                for pos in result:
-                    pos.pnl = pnl_map.get(pos.position_id, 0.0)
-            except Exception:
-                pass
-            self._last_reconcile_at = time.time()
+
+            position_ids = tuple(sorted(int(pos.position_id) for pos in result))
+            quote = self.get_spot_quote()
+            quote_ts = float(quote.get("ts") or 0.0)
+            quote_mid = float(quote.get("mid") or 0.0)
+            quote_age = (
+                max(0.0, snapshot_observed_at - quote_ts)
+                if quote_ts > 0
+                else None
+            )
+            price_known_ids: list[int] = []
+            price_unknown_ids: list[int] = []
+            for pos in result:
+                quote_applies = (
+                    self._symbol_id is not None
+                    and int(pos.symbol_id or 0) == int(self._symbol_id)
+                )
+                if (
+                    quote_applies
+                    and quote_mid > 0
+                    and quote_age is not None
+                    and quote_age <= _POSITION_SPOT_COMPONENT_MAX_AGE_SECONDS
+                ):
+                    pos.current_price = quote_mid
+                    pos.current_price_state = "known"
+                    pos.current_price_source = "ctrader_spot"
+                    pos.current_price_observed_at = quote_ts
+                    pos.current_price_reason_code = ""
+                    price_known_ids.append(int(pos.position_id))
+                else:
+                    pos.current_price = 0.0
+                    pos.current_price_state = "stale" if quote_applies and quote_ts > 0 else "unknown"
+                    pos.current_price_source = "ctrader_spot"
+                    pos.current_price_observed_at = quote_ts
+                    pos.current_price_reason_code = (
+                        "spot_quote_stale"
+                        if quote_applies and quote_ts > 0
+                        else "spot_quote_wrong_symbol"
+                        if not quote_applies
+                        else "spot_quote_unavailable"
+                    )
+                    price_unknown_ids.append(int(pos.position_id))
+
+            pnl_known_ids: list[int] = []
+            pnl_unknown_ids: list[int] = []
+            pnl_error = ""
+            pnl_observed_at = 0.0
+            if result:
+                try:
+                    pnl_map = self._query_unrealized_pnl()
+                    pnl_observed_at = time.time()
+                    for pos in result:
+                        pid = int(pos.position_id)
+                        if pid in pnl_map:
+                            pos.pnl = float(pnl_map[pid])
+                            pos.pnl_state = "known"
+                            pos.pnl_source = "ctrader_unrealized_pnl"
+                            pos.pnl_observed_at = pnl_observed_at
+                            pos.pnl_reason_code = ""
+                            pnl_known_ids.append(pid)
+                        else:
+                            pos.pnl = 0.0
+                            pos.pnl_state = "unknown"
+                            pos.pnl_source = "ctrader_unrealized_pnl"
+                            pos.pnl_observed_at = pnl_observed_at
+                            pos.pnl_reason_code = "position_pnl_entry_missing"
+                            pnl_unknown_ids.append(pid)
+                except Exception as exc:
+                    pnl_error = f"{type(exc).__name__}: {exc}"
+                    for pos in result:
+                        pos.pnl = 0.0
+                        pos.pnl_state = "error"
+                        pos.pnl_source = "ctrader_unrealized_pnl"
+                        pos.pnl_observed_at = 0.0
+                        pos.pnl_reason_code = "unrealized_pnl_rpc_failed"
+                        pnl_unknown_ids.append(int(pos.position_id))
+                    if self._should_log_error(f"position PnL component failed: {exc}"):
+                        logger.error("position PnL component failed: %s", exc)
+            else:
+                # Empty is authoritative without a second RPC: there is no
+                # per-position price or unrealized-PnL component to resolve.
+                pnl_observed_at = snapshot_observed_at
+
+            # Identity/volume/SL/TP were observed when ProtoOAReconcileRes
+            # arrived, not after the independent PnL request completed.
+            self._last_reconcile_at = snapshot_observed_at
             self._set_positions_cache(result, emit=True, reason="reconcile")
-            self._recompute_account_equity_from_cache(emit=True, reason="reconcile")
+            observed_at = float(snapshot_observed_at)
+            with self._positions_cache_lock:
+                self._positions_cache_observed_at = observed_at
+                self._positions_cache_source = "cache"
+            if not pnl_unknown_ids:
+                self._recompute_account_equity_from_cache(emit=True, reason="reconcile")
             self._record_success()
             if symbol and self._symbol_id is not None:
-                return [pos for pos in result if int(pos.symbol_id or 0) == int(self._symbol_id)]
-            return result
+                result = [pos for pos in result if int(pos.symbol_id or 0) == int(self._symbol_id)]
+            return PositionReconcileResult(
+                reconcile_id=reconcile_id,
+                status="fresh",
+                positions=tuple(self._copy_position(pos) for pos in result),
+                observed_at=observed_at,
+                generated_at=time.time(),
+                identity_component=ReconcileComponentFact(
+                    state="known",
+                    source="ctrader_reconcile",
+                    observed_at=snapshot_observed_at,
+                    known_position_ids=position_ids,
+                ),
+                protection_component=ReconcileComponentFact(
+                    state="known",
+                    source="ctrader_reconcile",
+                    observed_at=snapshot_observed_at,
+                    known_position_ids=position_ids,
+                ),
+                price_component=ReconcileComponentFact(
+                    state=("known" if not price_unknown_ids else "unknown"),
+                    source=("ctrader_spot" if result else "ctrader_reconcile_empty"),
+                    observed_at=(quote_ts if result and price_known_ids else snapshot_observed_at if not result else 0.0),
+                    reason_code=("" if not price_unknown_ids else "position_price_component_incomplete"),
+                    known_position_ids=tuple(sorted(price_known_ids)),
+                    unknown_position_ids=tuple(sorted(price_unknown_ids)),
+                ),
+                pnl_component=ReconcileComponentFact(
+                    state=(
+                        "known"
+                        if not pnl_unknown_ids
+                        else "error"
+                        if pnl_error
+                        else "unknown"
+                    ),
+                    source=("ctrader_unrealized_pnl" if result else "ctrader_reconcile_empty"),
+                    observed_at=pnl_observed_at,
+                    reason_code=(
+                        "unrealized_pnl_rpc_failed"
+                        if pnl_error
+                        else "position_pnl_component_incomplete"
+                        if pnl_unknown_ids
+                        else ""
+                    ),
+                    known_position_ids=tuple(sorted(pnl_known_ids)),
+                    unknown_position_ids=tuple(sorted(pnl_unknown_ids)),
+                ),
+            )
         except Exception as e:
             if not self._is_soft_timeout_error(e):
                 self._mark_disconnected()
             self._record_failure()
             if self._should_log_error(f"get_positions failed: {e}"):
                 logger.error(f"get_positions failed: {e}")
-            if not allow_cache_fallback:
-                return []
-            cached_positions = self._positions_snapshot()
-            if symbol and self._symbol_id is not None:
-                return [pos for pos in cached_positions if int(pos.symbol_id or 0) == int(self._symbol_id)]
-            return cached_positions
+            return fallback("position_reconcile_failed", str(e))
+
+    def _query_unrealized_pnl(self) -> dict[int, float]:
+        """Strict broker PnL query used by explicit reconciliation.
+
+        Unlike the compatibility wrapper, failures propagate so the caller
+        can publish an ``error`` component instead of a fabricated empty map.
+        """
+        if not self.is_connected:
+            raise ConnectionError("cTrader is not connected/authenticated")
+        req = TradeMsg.ProtoOAGetPositionUnrealizedPnLReq()
+        req.ctidTraderAccountId = self.account_id
+        resp = self._send(req, timeout=10.0)
+        if not hasattr(resp, "positionUnrealizedPnL"):
+            raise TypeError("unrealized PnL response missing positionUnrealizedPnL")
+        result: dict[int, float] = {}
+        md = getattr(resp, "moneyDigits", 2) or 2
+        divisor = 10.0 ** md
+        for upnl in resp.positionUnrealizedPnL:
+            position_id = int(getattr(upnl, "positionId", 0) or 0)
+            if position_id <= 0:
+                continue
+            net_pnl = float(getattr(upnl, "netUnrealizedPnL", 0.0) or 0.0) / divisor
+            if not math.isfinite(net_pnl):
+                raise ValueError(f"non-finite unrealized PnL for position {position_id}")
+            result[position_id] = net_pnl
+        self._record_success()
+        return result
 
     def get_unrealized_pnl(self) -> dict[int, float]:
         """Query unrealized PnL for all open positions via ProtoOAGetPositionUnrealizedPnLReq.
@@ -1758,20 +3558,8 @@ class CTraderBridge(BaseBrokerBridge):
         Returns dict mapping position_id → netUnrealizedPnL (in real USD, after dividing by moneyDigits).
         Empty dict on error or no positions.
         """
-        if not self.is_connected:
-            return {}
         try:
-            req = TradeMsg.ProtoOAGetPositionUnrealizedPnLReq()
-            req.ctidTraderAccountId = self.account_id
-            resp = self._send(req, timeout=10.0)
-            result: dict[int, float] = {}
-            md = resp.moneyDigits or 2
-            divisor = 10.0 ** md
-            for upnl in resp.positionUnrealizedPnL:
-                net_pnl = upnl.netUnrealizedPnL / divisor if divisor else 0.0
-                result[upnl.positionId] = net_pnl
-            self._record_success()
-            return result
+            return self._query_unrealized_pnl()
         except Exception as e:
             self._record_failure()
             if self._should_log_error(f"get_unrealized_pnl failed: {e}"):
@@ -1845,8 +3633,10 @@ class CTraderBridge(BaseBrokerBridge):
                         time.strftime("%Y-%m-%d", time.gmtime(from_ts)) if from_ts else "∞",
                         time.strftime("%Y-%m-%d", time.gmtime(to_ts)) if to_ts else "∞",
                         max_rows)
+            self._last_deals_fetch_ok = True
             return results
         except Exception as e:
+            self._last_deals_fetch_ok = False
             logger.error(f"get_deals failed: {e}")
             return []
 

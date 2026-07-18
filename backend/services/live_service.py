@@ -16,6 +16,7 @@ hand. v8 added real thread management so the Web 总览 can drive the
 trading loop from the browser.)
 """
 import copy
+from dataclasses import asdict, is_dataclass
 import json
 import threading
 import time
@@ -37,9 +38,61 @@ from backend.ledger.service import DecisionLedger
 from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
-from risk.policy_service import INCIDENT_MODE_RANK, RiskPolicyService
+from risk.policy_service import INCIDENT_MODE_RANK, RiskPolicyService, RiskVerdict
 from risk.runtime_policy import RiskLimitSnapshot
 from backend.services.incident_controls import RuntimeIncidentControlService
+from backend.core.static_feature_flags import shared_static_feature_flags
+from backend.services.live_loop_controller import LiveLoopController
+from backend.services.live_safety_plane import LiveSafetyPlane, SafetyCandidate
+from backend.services.live_safety_planner import (
+    SafetyPlannerRuntime,
+    plan_live_safety_candidates,
+    protection_candidate_to_safety,
+    safety_candidate,
+)
+from backend.services.live_legacy_safety_preview import (
+    preview_legacy_safety_candidates,
+)
+from backend.services.live_safety_state import (
+    activate_no_new_risk_latch,
+    append_safety_outbox,
+    no_new_risk_latched,
+    no_new_risk_latch_status,
+    release_no_new_risk_latch_cause,
+    safety_v2_forced_shadow_status,
+)
+from backend.services.live_safety_watchdog import (
+    LiveSafetyWatchdog,
+    SafetyFreshnessResult,
+    evaluate_safety_freshness,
+)
+from backend.services.live_reconciliation import (
+    explicit_account_reconcile as _explicit_account_reconcile,
+    explicit_position_reconcile as _explicit_position_reconcile,
+    fresh_observation_timestamp as _fresh_observation_timestamp,
+    reconcile_value as _reconcile_value,
+    verify_position_protection_projection as _verify_position_protection_projection,
+)
+from backend.services.live_loop_v2 import (
+    LiveSafetyCycleRuntime,
+    StartupBarrierRuntime,
+    attempt_generation_startup_barrier as _loop_v2_attempt_startup_barrier,
+    run_live_safety_cycle as _loop_v2_run_safety_cycle,
+)
+from backend.services.live_execution_recovery import (
+    ExecutionRecoveryRuntime,
+    recover_execution_outcomes_before_alpha as _loop_recover_execution_outcomes,
+)
+from backend.services.live_emergency import (
+    EmergencyCloseRuntime,
+    fresh_emergency_position_reconcile as _fresh_emergency_position_reconcile,
+    run_emergency_close as _run_emergency_close,
+)
+from backend.services.live_open_admission import (
+    evaluate_final_open_admission as _evaluate_final_open_admission,
+    probe_postgres_authority as _probe_postgres_authority,
+)
+from backend.services.live_committed_policy import load_live_policy_controls
 from backend.services.market_session import evaluate_market_session
 from backend.services.review_contract import build_entry_timing_context
 from backend.services.live_runtime_state import (
@@ -48,6 +101,12 @@ from backend.services.live_runtime_state import (
     state_get as _runtime_state_get,
     state_set as _runtime_state_set,
     state_update as _runtime_state_update,
+)
+from backend.services.session_restore import (
+    authoritative_close_pnl as _authoritative_close_pnl,
+    derive_session_start_balance as _derive_session_start_balance,
+    parse_degraded_session_cache as _parse_degraded_session_cache,
+    rebuild_session_risk_projection as _rebuild_session_risk_projection,
 )
 from backend.services.live_ctrader_runtime import CTraderRuntime
 from backend.services.live_data_sync_job import make_data_sync_job as _make_data_sync_job
@@ -66,6 +125,7 @@ from backend.services.live_factor_state import (
 )
 from config.runtime_config import autonomy_expansion_freeze_applies
 from backend.services.live_loop_shell import (
+    acknowledge_prepared_factor_projections as _loop_ack_prepared_factor_projections,
     adaptive_weight_config as _loop_adaptive_weight_config,
     compare_spot_quote_to_latest_bar as _loop_compare_spot_quote_to_latest_bar,
     apply_factor_pipeline_config_update as _loop_apply_factor_pipeline_config_update,
@@ -97,6 +157,9 @@ from backend.services.live_supervision_actions import (
     execute_supervisor_close_action as _execute_supervisor_close_action,
     execute_supervisor_reduce_action as _execute_supervisor_reduce_action,
     execute_supervisor_tighten_action as _execute_supervisor_tighten_action,
+)
+from backend.services.live_factor_wiring import (
+    merge_portfolio_configs as _merge_portfolio_configs,
 )
 from backend.services.live_tick_pipeline import (
     build_factor_bar as _tick_build_factor_bar,
@@ -980,18 +1043,15 @@ def _active_entry_cluster_learning_policy(*, now_ts: float | None = None) -> dic
 
         conn = get_state_pg_conn(read_only=True)
         try:
-            rows = conn.execute(
-                """
-                SELECT suggestion_id, scope_key, action, confidence, reason,
-                       evidence_json, reviewed_at, created_at
-                FROM policy_suggestion
-                WHERE scope_type='entry_cluster'
-                  AND status IN ('approved', 'applied')
-                  AND action IN ('increase_same_direction_cooldown', 'raise_pyramid_entry_threshold')
-                ORDER BY reviewed_at DESC, created_at DESC
-                LIMIT 20
-                """
-            ).fetchall()
+            rows = load_live_policy_controls(
+                conn,
+                scope_type="entry_cluster",
+                allowed_actions={
+                    "increase_same_direction_cooldown",
+                    "raise_pyramid_entry_threshold",
+                },
+                limit=20,
+            )
         finally:
             conn.close()
         for row in rows:
@@ -1017,6 +1077,8 @@ def _active_entry_cluster_learning_policy(*, now_ts: float | None = None) -> dic
                     "action": str(item.get("action") or ""),
                     "confidence": float(item.get("confidence") or 0.0),
                     "reason": str(item.get("reason") or ""),
+                    "governance_authority": str(item.get("governance_authority") or ""),
+                    "committed_mutation_id": str(item.get("committed_mutation_id") or ""),
                     "min_same_direction_open_count": threshold,
                     "evidence": {
                         "sample_count": (evidence or {}).get("sample_count"),
@@ -1056,22 +1118,16 @@ def _active_entry_quality_learning_policy(*, now_ts: float | None = None) -> dic
 
         conn = get_state_pg_conn(read_only=True)
         try:
-            rows = conn.execute(
-                """
-                SELECT suggestion_id, scope_key, action, confidence, reason,
-                       evidence_json, reviewed_at, created_at
-                FROM policy_suggestion
-                WHERE scope_type='entry_quality'
-                  AND status IN ('approved', 'applied')
-                  AND action IN (
-                      'raise_weak_signal_threshold',
-                      'require_factor_agreement',
-                      'suppress_recent_worst_factor'
-                  )
-                ORDER BY reviewed_at DESC, created_at DESC
-                LIMIT 50
-                """
-            ).fetchall()
+            rows = load_live_policy_controls(
+                conn,
+                scope_type="entry_quality",
+                allowed_actions={
+                    "raise_weak_signal_threshold",
+                    "require_factor_agreement",
+                    "suppress_recent_worst_factor",
+                },
+                limit=50,
+            )
         finally:
             conn.close()
         for row in rows:
@@ -1090,6 +1146,8 @@ def _active_entry_quality_learning_policy(*, now_ts: float | None = None) -> dic
                     "action": str(item.get("action") or ""),
                     "confidence": float(item.get("confidence") or 0.0),
                     "reason": str(item.get("reason") or ""),
+                    "governance_authority": str(item.get("governance_authority") or ""),
+                    "committed_mutation_id": str(item.get("committed_mutation_id") or ""),
                     "min_abs_signal_score": float(controls_payload.get("min_abs_signal_score") or 0.0),
                     "max_factor_conflict_ratio": float(controls_payload.get("max_factor_conflict_ratio") or 0.0),
                     "strong_signal_override": float(controls_payload.get("strong_signal_override") or 0.0),
@@ -1130,18 +1188,15 @@ def _active_event_window_learning_policy(*, now_ts: float | None = None) -> dict
 
         conn = get_state_pg_conn(read_only=True)
         try:
-            rows = conn.execute(
-                """
-                SELECT suggestion_id, scope_key, action, confidence, reason,
-                       evidence_json, reviewed_at, created_at
-                FROM policy_suggestion
-                WHERE scope_type='event_window'
-                  AND status IN ('approved', 'applied')
-                  AND action IN ('tighten_event_window_sizing', 'extend_event_post_window_review')
-                ORDER BY reviewed_at DESC, created_at DESC
-                LIMIT 50
-                """
-            ).fetchall()
+            rows = load_live_policy_controls(
+                conn,
+                scope_type="event_window",
+                allowed_actions={
+                    "tighten_event_window_sizing",
+                    "extend_event_post_window_review",
+                },
+                limit=50,
+            )
         finally:
             conn.close()
         for row in rows:
@@ -1163,6 +1218,8 @@ def _active_event_window_learning_policy(*, now_ts: float | None = None) -> dict
                     "action": str(item.get("action") or ""),
                     "confidence": float(item.get("confidence") or 0.0),
                     "reason": str(item.get("reason") or ""),
+                    "governance_authority": str(item.get("governance_authority") or ""),
+                    "committed_mutation_id": str(item.get("committed_mutation_id") or ""),
                     "evidence": {
                         "sample_count": (evidence or {}).get("sample_count"),
                         "bad_rate": (evidence or {}).get("bad_rate"),
@@ -1447,8 +1504,35 @@ def _build_close_position_risk_context(
         except Exception:
             cfg = None
     now = float(decision_ts or time.time())
-    open_meta = _lookup_open_decision_context(int(position_id))
-    entry_ts = _position_open_timestamp(position) or float(open_meta.get("entry_ts", 0.0) or 0.0)
+    broker_entry_ts = _position_open_timestamp(position)
+    open_meta: dict[str, Any] = {}
+    try:
+        # PostgreSQL is enrichment only for a risk-reducing action.  Broker
+        # position/openTimestamp remains primary and a state-store outage must
+        # never prevent close/reduce/tighten/emergency-close.
+        open_meta = _lookup_open_decision_context(int(position_id))
+    except Exception as exc:
+        try:
+            append_safety_outbox(
+                event_type="close_risk_context_enrichment_failed",
+                payload={
+                    "position_id": int(position_id),
+                    "close_reason": str(close_reason or ""),
+                    "broker": str(broker or ""),
+                    "symbol": str(symbol or ""),
+                    "broker_entry_ts": float(broker_entry_ts or 0.0),
+                },
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception as outbox_exc:
+            logger.error(
+                "[live] close risk context PG failure and safety outbox failure: pg=%s outbox=%s",
+                exc,
+                outbox_exc,
+            )
+        logger.warning("[live] close risk context PG enrichment unavailable position=%s: %s", position_id, exc)
+    entry_ts = float(broker_entry_ts or 0.0) or float(open_meta.get("entry_ts", 0.0) or 0.0)
+    entry_ts_source = "broker_position" if float(broker_entry_ts or 0.0) > 0 else str(open_meta.get("source") or "")
     timeframe = str(open_meta.get("timeframe") or getattr(cfg, "timeframe", "M5") or "M5")
     temporal_context = _temporal_context_for_trade(
         decision_ts=now,
@@ -1462,10 +1546,130 @@ def _build_close_position_risk_context(
         broker=broker,
         symbol=symbol,
         entry_ts=entry_ts,
-        entry_ts_source=str(open_meta.get("source") or ("broker_position" if position is not None else "")),
+        entry_ts_source=entry_ts_source,
         temporal_context=temporal_context,
         max_holding_bars=max_holding_bars,
     )
+
+
+def _record_risk_reduction_aux_failure(
+    event_type: str,
+    *,
+    position_id: int = 0,
+    action: str = "",
+    error: Exception | str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Persist auxiliary safety failures without affecting broker actions."""
+
+    error_text = (
+        f"{type(error).__name__}: {error}"
+        if isinstance(error, Exception)
+        else str(error or "")
+    )
+    try:
+        append_safety_outbox(
+            event_type=event_type,
+            correlation_id=str(position_id or ""),
+            payload={
+                "position_id": int(position_id or 0),
+                "action": str(action or ""),
+                **dict(payload or {}),
+            },
+            error=error_text,
+        )
+    except Exception as outbox_exc:
+        logger.error(
+            "[live] risk-reduction auxiliary failure and safety outbox failure: event=%s error=%s outbox=%s",
+            event_type,
+            error_text,
+            outbox_exc,
+        )
+
+
+def _load_recovery_row_for_risk_reduction(
+    position_id: int,
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    try:
+        return dict(_load_recovery_position_row(int(position_id)) or {})
+    except Exception as exc:
+        _record_risk_reduction_aux_failure(
+            "risk_reduction_pg_enrichment_failed",
+            position_id=position_id,
+            action=operation,
+            error=exc,
+        )
+        return {}
+
+
+def _lookup_entry_context_for_risk_reduction(
+    position_id: int,
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    try:
+        return dict(_lookup_open_decision_context(int(position_id)) or {})
+    except Exception as exc:
+        _record_risk_reduction_aux_failure(
+            "risk_reduction_entry_context_failed",
+            position_id=position_id,
+            action=operation,
+            error=exc,
+        )
+        return {}
+
+
+def _lookup_entry_decision_for_risk_reduction(
+    position_id: int,
+    *,
+    operation: str,
+) -> str:
+    try:
+        return str(_lookup_entry_decision_id(int(position_id)) or "")
+    except Exception as exc:
+        _record_risk_reduction_aux_failure(
+            "risk_reduction_entry_decision_failed",
+            position_id=position_id,
+            action=operation,
+            error=exc,
+        )
+        return ""
+
+
+def _evaluate_risk_reduction_policy(
+    action: str,
+    context: dict[str, Any],
+) -> RiskVerdict:
+    """Risk-policy availability may not suppress close/reduce/tighten."""
+
+    normalized = str(action or "").strip().lower()
+    if normalized not in {"close_position", "reduce_position", "tighten_position"}:
+        return _RISK_POLICY.evaluate(normalized, context)
+    try:
+        return _RISK_POLICY.evaluate(normalized, context)
+    except Exception as exc:
+        position_id = int(context.get("position_id") or 0)
+        _record_risk_reduction_aux_failure(
+            "risk_reduction_policy_unavailable",
+            position_id=position_id,
+            action=normalized,
+            error=exc,
+            payload={"close_reason": str(context.get("close_reason") or "")},
+        )
+        return RiskVerdict(
+            allowed=True,
+            reason="risk_policy_unavailable_risk_reduction_continues",
+            severity="warning",
+            required_mode="risk_reduction_only",
+            audit_payload={
+                "action": normalized,
+                "source": "risk_reduction_fail_safe",
+                "position_id": position_id,
+                "policy_error": f"{type(exc).__name__}: {exc}",
+            },
+        )
 
 
 def _holding_summary_for_position(position: Any, *, cfg=None, now_ts: float | None = None) -> dict:
@@ -1627,6 +1831,117 @@ def _remember_pending_open_attach(position_id: int) -> None:
     )
 
 
+def _activate_entry_protection_pending_latch(
+    position_id: int,
+    *,
+    broker: str,
+    tick: int,
+) -> dict[str, Any]:
+    """Block additional risk before any fallible post-fill processing.
+
+    A confirmed market-open creates broker risk immediately.  The durable cause
+    must therefore exist before refreshing positions, resolving volume/prices,
+    writing PostgreSQL audit state, or attempting SL/TP attachment.  Storage
+    failure remains fail-closed in-process via ``activate_no_new_risk_latch``.
+    """
+
+    pid = int(position_id or 0)
+    cause_id = str(pid) if pid > 0 else f"tick:{int(tick)}"
+    error = ""
+    try:
+        activate_no_new_risk_latch(
+            reason="entry_protection_pending",
+            actor="system:live_open",
+            correlation_id=cause_id,
+            metadata={"broker": str(broker or ""), "position_id": pid, "tick": int(tick)},
+            cause="entry_protection_pending",
+            cause_id=cause_id,
+        )
+    except Exception as exc:
+        # The activation primitive has already installed a process-local latch.
+        # Continue toward risk reduction, but retain explicit durability evidence.
+        error = f"{type(exc).__name__}:{exc}"
+        try:
+            append_safety_outbox(
+                event_type="entry_protection_pending_latch_persist_failed",
+                payload={"broker": str(broker or ""), "position_id": pid, "tick": int(tick)},
+                error=error,
+            )
+        except Exception:
+            pass
+    latch = no_new_risk_latch_status(fail_closed=True)
+    _live_state_update(
+        accepting_new_risk=False,
+        no_new_risk_latch=latch,
+        entry_protection_pending={
+            "position_id": pid,
+            "tick": int(tick),
+            "status": "pending",
+            "error": error,
+        },
+    )
+    return latch
+
+
+def _release_entry_protection_pending_latch(
+    position_id: int,
+    *,
+    reconcile: Any,
+    expected_stop_loss: float,
+    expected_take_profit: float,
+) -> dict[str, Any]:
+    """Release only the matching pending cause after fresh broker proof."""
+
+    pid = int(position_id or 0)
+    reconcile_id = str(_reconcile_value(reconcile, "reconcile_id", "") or "")
+    evidence = {
+        "position_id": pid,
+        "reconcile_id": reconcile_id,
+        "observed_at": float(_reconcile_value(reconcile, "observed_at", 0.0) or 0.0),
+        "expected_stop_loss": float(expected_stop_loss or 0.0),
+        "expected_take_profit": float(expected_take_profit or 0.0),
+    }
+    try:
+        release_no_new_risk_latch_cause(
+            cause="entry_protection_pending",
+            cause_id=str(pid),
+            reason="entry_protection_verified_by_fresh_broker_reconcile",
+            actor="system:live_safety",
+            correlation_id=reconcile_id,
+            evidence=evidence,
+        )
+        _pending_open_attach_until.pop(pid, None)
+        latch = no_new_risk_latch_status(fail_closed=True)
+        _live_state_update(
+            no_new_risk_latch=latch,
+            entry_protection_pending={
+                **evidence,
+                "status": "verified",
+                "verified_at": time.time(),
+            },
+        )
+        return latch
+    except Exception as exc:
+        # A release failure may delay new entries but must never invalidate the
+        # already-verified broker protection or trigger a duplicate amend.
+        error = f"{type(exc).__name__}:{exc}"
+        try:
+            append_safety_outbox(
+                event_type="entry_protection_pending_latch_release_failed",
+                payload=evidence,
+                error=error,
+            )
+        except Exception:
+            pass
+        latch = no_new_risk_latch_status(fail_closed=True)
+        _live_state_update(
+            accepting_new_risk=False,
+            no_new_risk_latch=latch,
+            entry_protection_pending={**evidence, "status": "release_failed", "error": error},
+        )
+        return latch
+
+
 def _active_pending_open_attach_ids(current_position_ids: set[int] | None = None) -> list[int]:
     return _lifecycle_active_pending_open_attach_ids(
         _pending_open_attach_until,
@@ -1686,8 +2001,14 @@ def _position_path_metrics_for_position(
         return {}
 
     holding = _holding_summary_for_position(position, cfg=cfg, now_ts=now_ts)
-    recovery_row = _load_recovery_position_row(pid)
-    entry_ctx = _lookup_open_decision_context(pid)
+    recovery_row = _load_recovery_row_for_risk_reduction(
+        pid,
+        operation="position_path_metrics",
+    )
+    entry_ctx = _lookup_entry_context_for_risk_reduction(
+        pid,
+        operation="position_path_metrics",
+    )
     inputs = _lifecycle_build_position_path_metrics_inputs(
         position=position,
         recovery_row=recovery_row,
@@ -1715,14 +2036,22 @@ def _position_path_metrics_for_position(
 
     if persist:
         upsert_defaults = inputs["upsert_defaults"]
-        _upsert_recovery_position_state(
-            position,
-            broker=upsert_defaults["broker"],
-            strategy_name=upsert_defaults["strategy_name"],
-            status=upsert_defaults["status"],
-            context_integrity=upsert_defaults["context_integrity"],
-            meta=path_update["next_meta"],
-        )
+        try:
+            _upsert_recovery_position_state(
+                position,
+                broker=upsert_defaults["broker"],
+                strategy_name=upsert_defaults["strategy_name"],
+                status=upsert_defaults["status"],
+                context_integrity=upsert_defaults["context_integrity"],
+                meta=path_update["next_meta"],
+            )
+        except Exception as exc:
+            _record_risk_reduction_aux_failure(
+                "risk_reduction_state_persist_failed",
+                position_id=pid,
+                action="position_path_metrics",
+                error=exc,
+            )
     return path_update["result"]
 
 
@@ -1750,7 +2079,10 @@ def _build_position_supervisor_context(
         cfg=cfg,
         positions=positions,
         account=acct,
-        entry_decision_id=_lookup_entry_decision_id(int(position.get("position_id") or position.get("ticket") or 0)),
+        entry_decision_id=_lookup_entry_decision_for_risk_reduction(
+            int(position.get("position_id") or position.get("ticket") or 0),
+            operation="position_supervisor_context",
+        ),
         risk_snapshot=_live_state_get("risk", {}, clone=True) or {},
         total_api_volume=_tracked_total_api_volume(positions or []),
         loop_running=bool(_live_state_get("loop_running", True)),
@@ -1776,20 +2108,51 @@ def _evaluate_position_supervisor_for_position(
     global _POSITION_QUALITY_ADVISOR
     context = _build_position_supervisor_context(position, cfg=cfg, acct=acct, now_ts=now_ts, positions=positions)
     verdict = evaluate_position_supervisor(context)
-    try:
-        if _POSITION_QUALITY_ADVISOR is None:
-            from research.position_quality_lightgbm import PositionQualityLightGBMService
+    component_states = {
+        "price": str(
+            position.get("current_price_state")
+            or position.get("price_state")
+            or ""
+        ).strip().lower(),
+        "pnl": str(
+            position.get("pnl_state")
+            or position.get("unrealized_pnl_state")
+            or ""
+        ).strip().lower(),
+        "path_metrics": str(
+            position.get("position_path_metrics_state") or ""
+        ).strip().lower(),
+    }
+    unavailable_components = sorted(
+        name
+        for name, state in component_states.items()
+        if state and state != "known"
+    )
+    if unavailable_components:
+        # The sidecar fills missing features with numeric zero.  Do not allow
+        # an explicit broker component failure to become a promoted
+        # reduce/tighten decision through that compatibility behavior.
+        advisory = {
+            "ok": False,
+            "error": "position_component_unknown",
+            "unavailable_components": unavailable_components,
+            "component_states": component_states,
+        }
+    else:
+        try:
+            if _POSITION_QUALITY_ADVISOR is None:
+                from research.position_quality_lightgbm import PositionQualityLightGBMService
 
-            _POSITION_QUALITY_ADVISOR = PositionQualityLightGBMService()
-        from backend.services.model_influence import shared_model_influence_service
+                _POSITION_QUALITY_ADVISOR = PositionQualityLightGBMService()
+            from backend.services.model_influence import shared_model_influence_service
 
-        position_policy = shared_model_influence_service().active_policy("position_quality_lightgbm", cfg)
-        advisory = _POSITION_QUALITY_ADVISOR.score_position_context(
-            context,
-            artifact_path=str((position_policy or {}).get("artifact_path") or "") or None,
-        )
-    except Exception as exc:
-        advisory = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            position_policy = shared_model_influence_service().active_policy("position_quality_lightgbm", cfg)
+            advisory = _POSITION_QUALITY_ADVISOR.score_position_context(
+                context,
+                artifact_path=str((position_policy or {}).get("artifact_path") or "") or None,
+            )
+        except Exception as exc:
+            advisory = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     verdict["position_quality_advisory"] = advisory
     evidence = dict(verdict.get("evidence") or {})
     evidence["position_quality_advisory"] = advisory
@@ -1819,18 +2182,29 @@ def _evaluate_position_supervisor_for_position(
         }
     if persist:
         pid = int(position.get("position_id") or position.get("ticket") or 0)
-        row = _load_recovery_position_row(pid)
-        _upsert_recovery_position_state(
-            position,
-            **_lifecycle_build_supervisor_state_upsert_payload(
-                recovery_row=row,
-                verdict=verdict,
-                broker=broker,
-                strategy_name=strategy_name,
-                loop_strategy_name=_loop_strategy_name,
-                default_context_integrity=_RECOVERY_CONTEXT_FULL,
-            ),
+        row = _load_recovery_row_for_risk_reduction(
+            pid,
+            operation="position_supervisor_evaluation",
         )
+        try:
+            _upsert_recovery_position_state(
+                position,
+                **_lifecycle_build_supervisor_state_upsert_payload(
+                    recovery_row=row,
+                    verdict=verdict,
+                    broker=broker,
+                    strategy_name=strategy_name,
+                    loop_strategy_name=_loop_strategy_name,
+                    default_context_integrity=_RECOVERY_CONTEXT_FULL,
+                ),
+            )
+        except Exception as exc:
+            _record_risk_reduction_aux_failure(
+                "risk_reduction_state_persist_failed",
+                position_id=pid,
+                action="position_supervisor_evaluation",
+                error=exc,
+            )
     return verdict
 
 
@@ -1894,20 +2268,28 @@ def _remember_supervisor_state(
     strategy_name: str = "",
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
-    row = _load_recovery_position_row(pid)
-    _upsert_recovery_position_state(
-        position,
-        **_lifecycle_build_supervisor_state_upsert_payload(
-            recovery_row=row,
-            verdict=verdict,
-            broker=broker,
-            strategy_name=strategy_name,
-            loop_strategy_name=_loop_strategy_name,
-            default_context_integrity=_RECOVERY_CONTEXT_FULL,
-            action_applied=action_applied,
-            applied_ts=time.time() if action_applied else 0.0,
-        ),
-    )
+    row = _load_recovery_row_for_risk_reduction(pid, operation="remember_supervisor_state")
+    try:
+        _upsert_recovery_position_state(
+            position,
+            **_lifecycle_build_supervisor_state_upsert_payload(
+                recovery_row=row,
+                verdict=verdict,
+                broker=broker,
+                strategy_name=strategy_name,
+                loop_strategy_name=_loop_strategy_name,
+                default_context_integrity=_RECOVERY_CONTEXT_FULL,
+                action_applied=action_applied,
+                applied_ts=time.time() if action_applied else 0.0,
+            ),
+        )
+    except Exception as exc:
+        _record_risk_reduction_aux_failure(
+            "risk_reduction_state_persist_failed",
+            position_id=pid,
+            action="remember_supervisor_state",
+            error=exc,
+        )
 
 
 def _remember_protection_state(
@@ -1920,25 +2302,36 @@ def _remember_protection_state(
     strategy_name: str = "",
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
-    row = _load_recovery_position_row(pid)
-    _upsert_recovery_position_state(
-        position,
-        **_lifecycle_build_protection_state_upsert_payload(
-            recovery_row=row,
-            verdict=verdict,
-            source=source,
-            broker=broker,
-            strategy_name=strategy_name,
-            loop_strategy_name=_loop_strategy_name,
-            default_context_integrity=_RECOVERY_CONTEXT_FULL,
-            action_applied=action_applied,
-            applied_ts=time.time() if action_applied else 0.0,
-        ),
-    )
+    row = _load_recovery_row_for_risk_reduction(pid, operation="remember_protection_state")
+    try:
+        _upsert_recovery_position_state(
+            position,
+            **_lifecycle_build_protection_state_upsert_payload(
+                recovery_row=row,
+                verdict=verdict,
+                source=source,
+                broker=broker,
+                strategy_name=strategy_name,
+                loop_strategy_name=_loop_strategy_name,
+                default_context_integrity=_RECOVERY_CONTEXT_FULL,
+                action_applied=action_applied,
+                applied_ts=time.time() if action_applied else 0.0,
+            ),
+        )
+    except Exception as exc:
+        _record_risk_reduction_aux_failure(
+            "risk_reduction_state_persist_failed",
+            position_id=pid,
+            action="remember_protection_state",
+            error=exc,
+        )
 
 
 def _supervisor_recently_applied(position_id: int, action: str, cooldown_seconds: float = 300.0) -> bool:
-    row = _load_recovery_position_row(position_id)
+    row = _load_recovery_row_for_risk_reduction(
+        position_id,
+        operation="supervisor_cooldown",
+    )
     meta = dict((row or {}).get("recovery_meta") or {})
     return _lifecycle_supervisor_recently_applied_from_meta(
         recovery_meta=meta,
@@ -1949,7 +2342,10 @@ def _supervisor_recently_applied(position_id: int, action: str, cooldown_seconds
 
 
 def _supervisor_noop_fingerprint_seen(position_id: int, fingerprint: str) -> bool:
-    row = _load_recovery_position_row(position_id)
+    row = _load_recovery_row_for_risk_reduction(
+        position_id,
+        operation="supervisor_noop_fingerprint",
+    )
     return _lifecycle_supervisor_noop_fingerprint_seen(
         recovery_meta=dict((row or {}).get("recovery_meta") or {}),
         fingerprint=fingerprint,
@@ -2207,9 +2603,13 @@ def _run_position_supervision(
     log,
     skip_position_ids: set[int] | None = None,
     record_partial_close_execution=None,
+    decision_ts: float | None = None,
+    candidate_recorder=None,
+    planned_verdicts: dict[int, dict[str, Any]] | None = None,
 ) -> set[int]:
     handled: set[int] = set()
     skip_position_ids = set(skip_position_ids or set())
+    cycle_ts = float(decision_ts if decision_ts is not None else time.time())
     if not pos or bridge is None:
         return handled
     for raw in pos or []:
@@ -2220,52 +2620,33 @@ def _run_position_supervision(
         if pid in skip_position_ids:
             handled.add(pid)
             continue
-        verdict = _evaluate_position_supervisor_for_position(
-            position,
-            cfg=cfg,
-            acct=acct,
-            now_ts=time.time(),
-            positions=pos,
-            persist=True,
-            broker="ctrader",
-            strategy_name=str(_loop_strategy_name or "factor_v4"),
-        )
-        if autonomy_expansion_freeze_applies(cfg):
-            try:
-                from backend.services.position_supervisor_templates import (
-                    latest_approved_position_supervisor_candidate,
+        try:
+            if planned_verdicts is not None and pid in planned_verdicts:
+                verdict = copy.deepcopy(planned_verdicts[pid])
+            else:
+                verdict = _evaluate_position_supervisor_for_position(
+                    position,
+                    cfg=cfg,
+                    acct=acct,
+                    now_ts=cycle_ts,
+                    positions=pos,
+                    persist=True,
+                    broker="ctrader",
+                    strategy_name=str(_loop_strategy_name or "factor_v4"),
                 )
-
-                canary = latest_approved_position_supervisor_candidate()
-                candidate_template = canary.get("template") or {}
-                if candidate_template:
-                    shadow_context = _build_position_supervisor_context(
-                        position,
-                        cfg=cfg,
-                        acct=acct,
-                        now_ts=time.time(),
-                        positions=pos,
-                    )
-                    shadow_context["position_supervisor_template"] = candidate_template
-                    shadow_verdict = evaluate_position_supervisor(shadow_context)
-                    shadow_evidence = dict(shadow_verdict.get("evidence") or {})
-                    shadow_evidence["canary_suggestion_id"] = str(canary.get("suggestion_id") or "")
-                    shadow_evidence["non_authoritative"] = True
-                    shadow_verdict["evidence"] = shadow_evidence
-                    _log_supervisor_trace(
-                        position=position,
-                        verdict=shadow_verdict,
-                        cfg=cfg,
-                        tick=tick,
-                        stage="canary_shadow",
-                        outcome="shadow",
-                        execution_status="shadow_only",
-                        execution_reason="autonomy_expansion_frozen",
-                        execution={"shadow_recommendation": str(shadow_verdict.get("action") or "hold")},
-                        acct=acct,
-                    )
-            except Exception as exc:
-                logger.warning("[live] supervisor canary shadow evaluation failed: %s", exc)
+        except Exception as exc:
+            _record_risk_reduction_aux_failure(
+                "position_supervisor_evaluation_failed",
+                position_id=pid,
+                action="position_supervisor",
+                error=exc,
+            )
+            logger.warning(
+                "[live] supervisor evaluation unavailable for pos %s; other safety stages continue: %s",
+                pid,
+                exc,
+            )
+            continue
         action = str(verdict.get("action") or "hold")
         if action == "hold":
             _log_supervisor_trace(
@@ -2279,6 +2660,24 @@ def _run_position_supervision(
                 acct=acct,
             )
             continue
+        controls = verdict.get("recommended_controls") or {}
+        if action in {"close", "reduce", "tighten"} and candidate_recorder is not None:
+            try:
+                candidate_recorder(
+                    safety_candidate(
+                        action=action,
+                        position_id=pid,
+                        source=f"supervisor_{action}",
+                        controls=controls,
+                    )
+                )
+            except Exception as exc:
+                _record_risk_reduction_aux_failure(
+                    "safety_candidate_record_failed",
+                    position_id=pid,
+                    action=action,
+                    error=exc,
+                )
         handled.add(pid)
         if _supervisor_recently_applied(pid, action):
             _log_supervisor_trace(
@@ -2303,7 +2702,6 @@ def _run_position_supervision(
             )
             continue
 
-        controls = verdict.get("recommended_controls") or {}
         if action == "tighten":
             stop_policy = {
                 "quote_max_age_seconds": getattr(cfg, "supervisor_quote_max_age_seconds", 10.0),
@@ -2383,7 +2781,7 @@ def _run_position_supervision(
             bridge_connected=bool(getattr(bridge, "is_connected", False)),
         )
         risk_context = risk_inputs.get("risk_context") or {}
-        risk_verdict = _RISK_POLICY.evaluate(risk_action, risk_context).to_dict()
+        risk_verdict = _evaluate_risk_reduction_policy(risk_action, risk_context).to_dict()
         decision_id = _log_supervisor_decision(
             position=position,
             verdict=verdict,
@@ -2436,6 +2834,14 @@ def _run_position_supervision(
                     track_local_sl_tp=_track_local_sl_tp,
                     result_is_position_not_found=_result_is_position_not_found,
                     retire_broker_missing_position=_retire_broker_missing_position,
+                    record_aux_failure=_record_risk_reduction_aux_failure,
+                    reconcile_positions=_explicit_position_reconcile,
+                    verify_protection_projection=_verify_position_protection_projection,
+                    publish_fresh_positions=lambda result: _publish_fresh_position_reconcile(
+                        result,
+                        broker="ctrader",
+                    ),
+                    persist_safety_fail_closed=_persist_safety_fail_closed,
                 )
             elif action == "reduce":
                 _execute_supervisor_reduce_action(
@@ -2456,7 +2862,7 @@ def _run_position_supervision(
                     floor_api_volume_to_step=_floor_api_volume_to_step,
                     should_full_close_untradeable_reduce=_should_full_close_untradeable_reduce,
                     build_close_position_risk_context=_build_close_position_risk_context,
-                    risk_policy_evaluate=_RISK_POLICY.evaluate,
+                    risk_policy_evaluate=_evaluate_risk_reduction_policy,
                     log_supervisor_trace=_log_supervisor_trace,
                     remember_supervisor_state=_remember_supervisor_state,
                     remember_supervisor_reentry_block=_remember_supervisor_reentry_block,
@@ -2465,6 +2871,20 @@ def _run_position_supervision(
                     result_is_position_not_found=_result_is_position_not_found,
                     retire_broker_missing_position=_retire_broker_missing_position,
                     record_partial_close_execution=record_partial_close_execution,
+                    capture_partial_close_session_cursor=(
+                        lambda **kwargs: _capture_partial_close_deal_cursor(
+                            **kwargs
+                        )
+                    ),
+                    sync_partial_close_session_fact=lambda **kwargs: (
+                        _sync_partial_close_session_fact(
+                            bridge,
+                            broker="ctrader",
+                            tick=tick,
+                            **kwargs,
+                        )
+                    ),
+                    record_aux_failure=_record_risk_reduction_aux_failure,
                 )
             elif action == "close":
                 _execute_supervisor_close_action(
@@ -2488,6 +2908,7 @@ def _run_position_supervision(
                     remember_close_verdict=_remember_close_verdict,
                     result_is_position_not_found=_result_is_position_not_found,
                     retire_broker_missing_position=_retire_broker_missing_position,
+                    record_aux_failure=_record_risk_reduction_aux_failure,
                 )
         except Exception as exc:
             _log_supervisor_trace(
@@ -2563,8 +2984,12 @@ _live_state: dict = default_live_state()
 # ★ 保护 _live_state 的读-改-写操作 (多线程: HTTP handler + live loop + scheduler)
 _LIVE_STATE_LOCK = threading.Lock()
 _ACCOUNT_REFRESH_LOCK = threading.Lock()
-_ACCOUNT_REFRESH_MIN_INTERVAL = 15.0
-_POSITION_RECONCILE_MIN_INTERVAL = 120.0
+# Legacy/off-mode keeps a compatibility refresh worker.  Its cadence must
+# still satisfy the public 15-second account/position fact contract: a 5s
+# worker poll with a 10s minimum RPC interval gives room for scheduler jitter
+# without pretending event-cache updates are reconciliations.
+_ACCOUNT_REFRESH_MIN_INTERVAL = 10.0
+_POSITION_RECONCILE_MIN_INTERVAL = 10.0
 _DATA_SYNC_LOCK = threading.Lock()
 
 
@@ -2580,6 +3005,20 @@ def _live_state_update(**kwargs) -> None:
     _runtime_state_update(_live_state, _LIVE_STATE_LOCK, **kwargs)
 
 
+def _mark_account_reconcile_failed(error: str) -> None:
+    _live_state_update(
+        account_reconcile_failed_at=time.time(),
+        account_reconcile_error=str(error or "account_reconcile_failed")[:500],
+    )
+
+
+def _mark_positions_reconcile_failed(error: str) -> None:
+    _live_state_update(
+        positions_reconcile_failed_at=time.time(),
+        positions_reconcile_error=str(error or "positions_reconcile_failed")[:500],
+    )
+
+
 def _get_state_pg_conn():
     from backend.core.db import get_state_pg_conn
 
@@ -2590,6 +3029,29 @@ def _get_state_read_conn():
     from backend.core.db import get_state_pg_conn
 
     return get_state_pg_conn(read_only=True)
+
+
+def _get_final_open_probe_conn():
+    """Open a bounded read-only PG connection for the open-only liveness gate.
+
+    This connection runs on the single live-loop thread, so both connection
+    setup and ``SELECT 1`` must fail before the 15-second safety SLO.  Other
+    state reads retain their existing transaction semantics.
+    """
+
+    from psycopg.conninfo import make_conninfo
+
+    from backend.core.db import state_pg_dsn, state_pg_enabled
+    from backend.core.state_store import connect_state_store
+
+    if not state_pg_enabled():
+        raise RuntimeError("PostgreSQL state backend is not enabled")
+    bounded_dsn = make_conninfo(
+        state_pg_dsn(),
+        connect_timeout=2,
+        options="-c statement_timeout=2000 -c lock_timeout=1000",
+    )
+    return connect_state_store(bounded_dsn, read_only=True)
 
 
 def _state_conn_is_pg(conn) -> bool:
@@ -2884,16 +3346,27 @@ def _session_state_snapshot(trade_date: str | None = None) -> dict:
         "session_window_end": window_end,
         "calendar_day": calendar_day,
         "source": str(_live_state_get("session_state_source", "runtime_incremental") or "runtime_incremental"),
+        "status": str(_live_state_get("session_state_status", "unknown") or "unknown"),
         "session_pnl": float(_live_state_get("session_pnl", 0.0) or 0.0),
         "session_trades": int(_live_state_get("session_trades", 0) or 0),
         "session_winning": int(_live_state_get("session_winning", 0) or 0),
         "session_losing": int(_live_state_get("session_losing", 0) or 0),
         "session_trade_pnls": list(_live_state_get("session_trade_pnls", [], clone=True) or [])[-200:],
+        "session_realized_pnl_legs": list(
+            _live_state_get("session_realized_pnl_legs", [], clone=True) or []
+        )[-500:],
+        "session_realized_legs": int(
+            _live_state_get("session_realized_legs", 0) or 0
+        ),
+        "session_recorded_position_ids": list(
+            _live_state_get("session_recorded_position_ids", [], clone=True) or []
+        )[-1000:],
         "session_consecutive_loss": int(_live_state_get("session_consecutive_loss", 0) or 0),
         "session_max_drawdown_pct": float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0),
         "session_peak_equity": float(_live_state_get("session_peak_equity", 0.0) or 0.0),
         "session_start_balance": float(_live_state_get("session_start_balance", 0.0) or 0.0),
         "session_last_trade_ts": float(_live_state_get("session_last_trade_ts", 0.0) or 0.0),
+        "session_observed_at": float(_live_state_get("session_observed_at", 0.0) or 0.0),
         "circuit_breaker": bool(_live_state_get("circuit_breaker", False)),
         "circuit_reason": str(_live_state_get("circuit_reason", "") or ""),
         "trade_equity_history": list(_live_state_get("trade_equity_history", [], clone=True) or [])[-500:],
@@ -2916,22 +3389,63 @@ def _session_trade_window(trade_date: str, timezone_name: str = "UTC") -> tuple[
     return day_start.timestamp(), (day_start + timedelta(days=1)).timestamp()
 
 
-def _load_authoritative_session_trades(trade_date: str, timezone_name: str = "UTC") -> list[dict] | None:
+def _load_authoritative_session_trades(
+    trade_date: str,
+    timezone_name: str = "UTC",
+    *,
+    broker_open_position_ids: set[int] | None = None,
+    confirmed_closed_position_ids: set[int] | None = None,
+) -> list[dict] | None:
     """Load one PnL row per position whose final close happened on a date.
 
     ``runtime_kv`` is a recovery cache, not the trade fact source. Broker
     deals are grouped by position so partial-close legs remain one trade and
     their aggregate net PnL matches ``execution.deal_sync``.
 
-    ``None`` means the authoritative query failed and callers may use the
-    persisted cache as a compatibility fallback. An empty list is a valid
-    no-trades result.
+    ``None`` means the authoritative query or completeness proof failed and
+    callers may use the persisted cache only as a degraded display fallback.
+    An empty list is a valid no-trades result only when the broker-open set is
+    itself a fresh explicit fact and every system-tracked missing position has
+    a concrete close deal.
     """
+    facts = _load_authoritative_session_deal_facts(
+        trade_date,
+        timezone_name,
+        broker_open_position_ids=broker_open_position_ids,
+        confirmed_closed_position_ids=confirmed_closed_position_ids,
+    )
+    if facts is None:
+        return None
+    return list(facts.get("completed_position_trades") or [])
+
+
+def _load_authoritative_session_deal_facts(
+    trade_date: str,
+    timezone_name: str = "UTC",
+    *,
+    broker_open_position_ids: set[int] | None = None,
+    confirmed_closed_position_ids: set[int] | None = None,
+) -> dict[str, Any] | None:
+    """Load separate realized-leg and completed-position session facts.
+
+    Every close leg in the risk-day window changes broker balance immediately,
+    including a partial close whose position remains open.  Win/loss counts and
+    consecutive losses, however, are position-lifecycle facts and therefore
+    consume only positions absent from a fresh broker reconcile.  Keeping the
+    two streams separate prevents both hidden partial-close losses and double
+    counting a final close aggregate as another realized leg.
+    """
+
+    if broker_open_position_ids is None:
+        logger.warning(
+            "[live] authoritative session trade rebuild requires fresh broker-open position IDs"
+        )
+        return None
     try:
         window_start, window_end = _session_trade_window(trade_date, timezone_name)
         conn = _get_state_read_conn()
         try:
-            rows = _state_execute(
+            completed_rows = _state_execute(
                 conn,
                 """
                 WITH final_close AS (
@@ -2961,7 +3475,76 @@ def _load_authoritative_session_trades(trade_date: str, timezone_name: str = "UT
                 """,
                 (window_start, window_end),
             ).fetchall()
-            return [
+            realized_rows = _state_execute(
+                conn,
+                """
+                SELECT deal_id, position_id,
+                       COALESCE(gross_profit, 0.0) AS gross_profit,
+                       COALESCE(swap, 0.0) AS swap,
+                       COALESCE(close_commission, 0.0) AS close_commission,
+                       COALESCE(gross_profit, 0.0)
+                           + COALESCE(swap, 0.0)
+                           + COALESCE(close_commission, 0.0) AS net,
+                       exec_timestamp,
+                       COALESCE(closed_volume, 0.0) AS closed_volume
+                FROM ctrader_deals
+                WHERE position_id > 0
+                  AND (is_close=1 OR closed_volume > 0)
+                  AND exec_timestamp >= ?
+                  AND exec_timestamp < ?
+                ORDER BY exec_timestamp ASC, deal_id ASC
+                """,
+                (window_start, window_end),
+            ).fetchall()
+            open_position_ids = {
+                int(position_id)
+                for position_id in (broker_open_position_ids or set())
+                if int(position_id or 0) > 0
+            }
+            confirmed_closed_ids = {
+                int(position_id)
+                for position_id in (confirmed_closed_position_ids or set())
+                if int(position_id or 0) > 0
+            }
+            completed_position_ids = {
+                int(row["position_id"] or 0)
+                for row in completed_rows
+                if int(row["position_id"] or 0) > 0
+            }
+            active_rows = _state_execute(
+                conn,
+                """
+                SELECT position_id, last_seen_at
+                FROM recovery_position_state
+                WHERE broker=? AND status IN ('open', 'recovered')
+                """,
+                ("ctrader",),
+            ).fetchall()
+            tracked_active_ids = {
+                int(row["position_id"] or 0)
+                for row in active_rows
+                if int(row["position_id"] or 0) > 0
+            }
+            unresolved_close_ids = sorted(
+                pid
+                for pid in tracked_active_ids - open_position_ids
+                if (
+                    pid not in completed_position_ids
+                    # A row that was open in the last recovery projection is
+                    # ambiguous even if an older partial leg is close in time.
+                    # Only the current tick's cursor+volume proof may bypass
+                    # this transient projection lag; startup recovery first
+                    # marks the row closed before session restore.
+                    or pid not in confirmed_closed_ids
+                )
+            )
+            if unresolved_close_ids:
+                logger.warning(
+                    "[live] session risk unavailable; broker-missing positions lack close deals: %s",
+                    unresolved_close_ids,
+                )
+                return None
+            completed_position_trades = [
                 {
                     "position_id": int(row["position_id"] or 0),
                     "gross": float(row["gross_profit"] or 0.0),
@@ -2971,8 +3554,33 @@ def _load_authoritative_session_trades(trade_date: str, timezone_name: str = "UT
                     "exec_timestamp": float(row["exec_timestamp"] or 0.0),
                     "close_deals_count": int(row["close_deals_count"] or 0),
                 }
-                for row in rows
+                for row in completed_rows
+                if int(row["position_id"] or 0) not in open_position_ids
             ]
+            realized_close_legs = [
+                {
+                    "deal_id": int(row["deal_id"] or 0),
+                    "position_id": int(row["position_id"] or 0),
+                    "gross": float(row["gross_profit"] or 0.0),
+                    "swap": float(row["swap"] or 0.0),
+                    "commission": float(row["close_commission"] or 0.0),
+                    "net": float(row["net"] or 0.0),
+                    "exec_timestamp": float(row["exec_timestamp"] or 0.0),
+                    "closed_volume": float(row["closed_volume"] or 0.0),
+                }
+                for row in realized_rows
+            ]
+            return {
+                "schema_version": "live_session_deal_facts.v2",
+                "trade_date": str(trade_date),
+                "timezone": str(timezone_name),
+                "window_start": float(window_start),
+                "window_end": float(window_end),
+                "broker_open_position_ids": sorted(open_position_ids),
+                "confirmed_closed_position_ids": sorted(confirmed_closed_ids),
+                "completed_position_trades": completed_position_trades,
+                "realized_close_legs": realized_close_legs,
+            }
         finally:
             conn.close()
     except Exception as exc:
@@ -2984,7 +3592,16 @@ def _calendar_day_trade_summary(timezone_name: str = "Asia/Shanghai") -> dict:
     """Read-only operator-day view; never drives the UTC risk circuit."""
     tz = ZoneInfo(timezone_name)
     trade_date = datetime.now(tz).strftime("%Y-%m-%d")
-    trades = _load_authoritative_session_trades(trade_date, timezone_name)
+    open_position_ids = _fresh_cached_broker_open_position_ids()
+    trades = (
+        _load_authoritative_session_trades(
+            trade_date,
+            timezone_name,
+            broker_open_position_ids=open_position_ids,
+        )
+        if open_position_ids is not None
+        else None
+    )
     if trades is None:
         return {
             "status": "unavailable",
@@ -3013,112 +3630,773 @@ def _build_session_state_from_authoritative_trades(
     *,
     trade_date: str,
     trades: list[dict],
-    persisted_state: dict,
+    realized_close_legs: list[dict] | None = None,
+    persisted_state: dict | None = None,
 ) -> dict:
-    """Project broker close facts into the live risk session state."""
-    all_trade_pnls = [float(row.get("net", 0.0) or 0.0) for row in trades]
-    trade_pnls = all_trade_pnls[-200:]
-    session_pnl = sum(all_trade_pnls)
-    winning = sum(1 for pnl in all_trade_pnls if pnl > 0)
-    losing = sum(1 for pnl in all_trade_pnls if pnl < 0)
-    consecutive_loss = 0
-    for pnl in reversed(all_trade_pnls):
-        if pnl < 0:
-            consecutive_loss += 1
-        elif pnl > 0:
-            break
+    """Project fresh broker account/deal facts into the live risk session.
 
+    ``persisted_state`` remains in the compatibility signature for one release
+    but is intentionally ignored: cache-derived peak/equity history must not
+    contaminate an authoritative reconstruction.
+    """
+    del persisted_state
     account = _live_state_get("account", {}, clone=True) or {}
     current_balance = float(account.get("balance", 0.0) or 0.0)
-    start_balance = current_balance - session_pnl if current_balance > 0 else 0.0
-    if start_balance <= 0:
-        start_balance = float(persisted_state.get("session_start_balance", 0.0) or 0.0)
-
-    max_drawdown_pct = 0.0
-    if start_balance > 0:
-        running_pnl = 0.0
-        for pnl in all_trade_pnls:
-            running_pnl += pnl
-            max_drawdown_pct = max(max_drawdown_pct, max(0.0, -running_pnl) / start_balance * 100.0)
-
-    last_trade_ts = max(
-        (float(row.get("exec_timestamp", 0.0) or 0.0) for row in trades),
-        default=0.0,
+    start_balance = _derive_session_start_balance(
+        current_balance=current_balance,
+        completed_position_trades=trades,
+        realized_close_legs=realized_close_legs,
+    )
+    limits = RiskLimitSnapshot.from_runtime_config()
+    projection = _rebuild_session_risk_projection(
+        trade_date=trade_date,
+        completed_position_trades=trades,
+        session_start_balance=start_balance,
+        max_consecutive_losses=int(limits.max_consecutive_losses),
+        max_daily_loss_pct=float(limits.max_daily_loss_pct),
+        realized_close_legs=realized_close_legs,
     )
     return {
-        "trade_date": trade_date,
-        "session_pnl": session_pnl,
-        "session_trades": len(all_trade_pnls),
-        "session_winning": winning,
-        "session_losing": losing,
-        "session_trade_pnls": trade_pnls,
-        "session_consecutive_loss": consecutive_loss,
-        "session_max_drawdown_pct": max_drawdown_pct,
-        "session_peak_equity": float(persisted_state.get("session_peak_equity", 0.0) or 0.0),
-        "session_start_balance": start_balance,
-        "session_last_trade_ts": last_trade_ts,
+        **projection,
         "session_state_source": "ctrader_deals.final_close_rebuild.v1",
-        "circuit_breaker": False,
-        "circuit_reason": "",
-        "trade_equity_history": list(persisted_state.get("trade_equity_history") or [])[-500:],
+        "session_recorded_position_ids": sorted(
+            {
+                int(item.get("position_id") or 0)
+                for item in trades
+                if int(item.get("position_id") or 0) > 0
+            }
+        ),
     }
 
 
-def _restore_session_state_for_day(trade_date: str | None = None) -> bool:
+def _restore_session_state_for_day(
+    trade_date: str | None = None,
+    *,
+    broker_open_position_ids: set[int] | None = None,
+    confirmed_closed_position_ids: set[int] | None = None,
+) -> bool:
     if not trade_date:
         trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    state = _runtime_kv_get(_session_state_key(trade_date), {}) or {}
-    if not isinstance(state, dict) or state.get("trade_date") != trade_date:
-        return False
-    authoritative_trades = _load_authoritative_session_trades(trade_date)
-    if authoritative_trades is not None and (
-        authoritative_trades
-        or not int(state.get("session_trades", 0) or 0)
-    ):
-        restored = _build_session_state_from_authoritative_trades(
-            trade_date=trade_date,
-            trades=authoritative_trades,
-            persisted_state=state,
+    raw_state = _runtime_kv_get(_session_state_key(trade_date), {}) or {}
+    state = _parse_degraded_session_cache(
+        raw_state,
+        trade_date=trade_date,
+    )
+    authoritative_facts = _load_authoritative_session_deal_facts(
+        trade_date,
+        broker_open_position_ids=broker_open_position_ids,
+        confirmed_closed_position_ids=confirmed_closed_position_ids,
+    )
+    if authoritative_facts is not None:
+        authoritative_trades = list(
+            authoritative_facts.get("completed_position_trades") or []
         )
-        _live_state_update(**restored)
-        # Heal stale runtime_kv snapshots so the next restart sees the same
-        # broker-derived session state without another stale carry-over.
-        _persist_session_state(trade_date)
-        return True
+        realized_close_legs = list(
+            authoritative_facts.get("realized_close_legs") or []
+        )
+        try:
+            restored = _build_session_state_from_authoritative_trades(
+                trade_date=trade_date,
+                trades=authoritative_trades,
+                realized_close_legs=realized_close_legs,
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            # Completed deals without a usable fresh account balance are only
+            # partial broker facts.  Never borrow a baseline from runtime_kv
+            # and call the resulting risk state authoritative.
+            logger.warning(
+                "[live] authoritative session projection unavailable for %s: %s",
+                trade_date,
+                exc,
+            )
+        else:
+            restored["session_state_status"] = "available"
+            restored["session_observed_at"] = time.time()
+            restored["session_risk_blockers"] = []
+            _live_state_update(**restored)
+            # Heal stale runtime_kv snapshots so the next restart sees the same
+            # broker-derived session state without another stale carry-over.
+            _persist_session_state(trade_date)
+            _evaluate_daily_drawdown()
+            return True
 
-    # Compatibility for old snapshots created before ctrader_deals was
-    # available. Keep them only when the authoritative read itself failed or
-    # the old snapshot has trades but no broker rows yet.
+    if not state:
+        # Do not manufacture a zero-risk day when neither PostgreSQL facts nor
+        # a same-day cache can be established.  The generation startup/runtime
+        # gate observes this explicit unavailable state and blocks new risk.
+        _live_state_update(
+            session_state_status="unavailable",
+            session_state_source="unavailable",
+            accepting_new_risk=False,
+        )
+        return False
+
+    # Compatibility cache is protection-only.  It may keep a prior circuit
+    # and statistics visible, but it is never sufficient to authorize alpha.
     logger.warning(
         "[live] restoring legacy session snapshot for %s because broker close facts are unavailable",
         trade_date,
     )
     _live_state_update(
-        session_pnl=float(state.get("session_pnl", 0.0) or 0.0),
-        session_trades=int(state.get("session_trades", 0) or 0),
-        session_winning=int(state.get("session_winning", 0) or 0),
-        session_losing=int(state.get("session_losing", 0) or 0),
-        session_trade_pnls=list(state.get("session_trade_pnls") or [])[-200:],
-        session_consecutive_loss=int(state.get("session_consecutive_loss", 0) or 0),
-        session_max_drawdown_pct=float(state.get("session_max_drawdown_pct", 0.0) or 0.0),
-        session_peak_equity=float(state.get("session_peak_equity", 0.0) or 0.0),
-        session_start_balance=float(state.get("session_start_balance", 0.0) or 0.0),
-        session_last_trade_ts=float(state.get("session_last_trade_ts", 0.0) or 0.0),
+        **state,
         session_state_source="runtime_legacy_snapshot",
-        circuit_breaker=bool(state.get("circuit_breaker", False)),
-        circuit_reason=str(state.get("circuit_reason", "") or ""),
-        trade_equity_history=list(state.get("trade_equity_history") or [])[-500:],
+        session_state_status="degraded_cache",
+        accepting_new_risk=False,
     )
     return True
 
 
-def _remember_close_reason(position_id: int, reason: str) -> None:
-    _lifecycle_remember_close_reason(
-        pending_reasons=_pending_close_reasons,
-        merge_recovery_meta=_merge_recovery_position_meta,
-        position_id=position_id,
-        reason=reason,
+def _retry_legacy_session_restore(
+    *,
+    broker: str,
+    strategy_name: str,
+    trade_date: str,
+    log,
+) -> bool:
+    """Retry delayed close deals before legacy-loop session admission.
+
+    Phase 2 already runs recovery after its broker/account/safety snapshot.
+    The compatibility loop needs the same fail-closed retry or a delayed
+    final/partial deal would leave its durable cause latched forever.  A fresh
+    account reconcile is required because realized legs change the balance
+    used to derive the UTC-day opening balance.
+    """
+
+    if str(broker or "") != "ctrader":
+        _live_state_update(accepting_new_risk=False)
+        return False
+    bridge, error, warming = _get_ctrader()
+    if (
+        error
+        or bridge is None
+        or warming
+        or not bool(getattr(bridge, "is_connected", False))
+    ):
+        _live_state_update(accepting_new_risk=False)
+        log(
+            "legacy session recovery waiting for broker: "
+            f"{error or 'ctrader_not_ready'}"
+        )
+        return False
+    try:
+        if not _bootstrap_position_recovery(
+            bridge,
+            broker="ctrader",
+            strategy_name=str(strategy_name or "factor_v4"),
+            log=log,
+        ):
+            _live_state_update(accepting_new_risk=False)
+            return False
+    except Exception as exc:
+        _live_state_update(accepting_new_risk=False)
+        log(
+            "legacy session close-deal recovery failed closed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+
+    account_reconcile = _explicit_account_reconcile(bridge)
+    account_value = (
+        _reconcile_value(account_reconcile, "account", None)
+        if account_reconcile is not None
+        else None
     )
+    if account_value is None:
+        _mark_account_reconcile_failed("legacy_session_account_reconcile_failed")
+        _live_state_update(accepting_new_risk=False)
+        return False
+    try:
+        account_payload = (
+            asdict(account_value)
+            if is_dataclass(account_value)
+            else dict(account_value)
+        )
+    except (TypeError, ValueError):
+        _mark_account_reconcile_failed("legacy_session_account_payload_invalid")
+        _live_state_update(accepting_new_risk=False)
+        return False
+    account_payload.update({"ok": True, "broker": "ctrader"})
+    _live_state_update(
+        account=account_payload,
+        account_reconciled=copy.deepcopy(account_payload),
+        account_updated_at=float(
+            _reconcile_value(account_reconcile, "observed_at", 0.0) or 0.0
+        ),
+        account_reconcile_id=str(
+            _reconcile_value(account_reconcile, "reconcile_id", "") or ""
+        ),
+        account_reconcile_failed_at=None,
+        account_reconcile_error=None,
+    )
+    open_position_ids = _fresh_cached_broker_open_position_ids()
+    if open_position_ids is None:
+        _live_state_update(accepting_new_risk=False)
+        return False
+    restored = _restore_session_state_for_day(
+        trade_date,
+        broker_open_position_ids=open_position_ids,
+    )
+    if not restored or str(
+        _live_state_get("session_state_status", "unknown") or "unknown"
+    ) != "available":
+        _live_state_update(accepting_new_risk=False)
+        return False
+    return True
+
+
+def _defer_close_until_authoritative_deal(
+    position_id: int,
+    *,
+    broker: str,
+    tick: int,
+    reason: str = "close_deal_missing_or_delayed",
+    recovery_evidence: dict[str, Any] | None = None,
+) -> None:
+    """Keep broker-close evidence pending without inventing realized PnL."""
+
+    pid = int(position_id or 0)
+    detected_at = time.time()
+    evidence = {
+        "position_id": pid,
+        "broker": str(broker or ""),
+        "tick": int(tick),
+        "reason": str(reason or "close_deal_missing_or_delayed"),
+        "detected_at": detected_at,
+        "expected_position_volume": float(
+            _pos_open_api_volume.get(pid, 0.0) or 0.0
+        ),
+        **dict(recovery_evidence or {}),
+    }
+    try:
+        _merge_recovery_position_meta(
+            pid,
+            {
+                "close_deal_pending": {
+                    "status": "pending",
+                    **evidence,
+                }
+            },
+        )
+    except Exception as exc:
+        evidence["recovery_projection_error"] = f"{type(exc).__name__}:{exc}"
+
+    latch = no_new_risk_latch_status(fail_closed=True)
+    cause_key = ("session_risk_unavailable", str(pid))
+    active_causes = {
+        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+        for item in list(latch.get("causes") or [])
+        if isinstance(item, dict)
+    }
+    if cause_key not in active_causes:
+        try:
+            activate_no_new_risk_latch(
+                reason="session_risk_close_deal_unavailable",
+                actor="system:session_restore",
+                correlation_id=str(pid),
+                metadata=evidence,
+                cause=cause_key[0],
+                cause_id=cause_key[1],
+            )
+        except Exception as exc:
+            evidence["latch_error"] = f"{type(exc).__name__}:{exc}"
+    latch = no_new_risk_latch_status(fail_closed=True)
+    _live_state_update(
+        session_state_status="unavailable",
+        session_state_source="close_deal_pending",
+        session_risk_blockers=[f"close_deal_pending:{pid}"],
+        session_observed_at=0.0,
+        accepting_new_risk=False,
+        no_new_risk_latch=latch,
+    )
+    try:
+        append_safety_outbox(
+            event_type="session_close_deal_pending",
+            payload=evidence,
+            error=str(reason or "close_deal_missing_or_delayed"),
+        )
+    except Exception:
+        pass
+
+
+def _release_session_close_deal_latch(position_id: int, real_pnl: dict[str, Any]) -> None:
+    """Release one missing-deal cause only with concrete cTrader deal evidence."""
+
+    pid = int(position_id or 0)
+    if not _authoritative_close_pnl(real_pnl):
+        raise ValueError("authoritative_close_deal_required")
+    latch = no_new_risk_latch_status(fail_closed=True)
+    if ("session_risk_unavailable", str(pid)) not in {
+        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+        for item in list(latch.get("causes") or [])
+        if isinstance(item, dict)
+    }:
+        return
+    evidence = {
+        "position_id": pid,
+        "deal_id": real_pnl.get("deal_id"),
+        "deal_ids": list(real_pnl.get("deal_ids") or []),
+        "exec_timestamp": float(real_pnl.get("exec_timestamp") or 0.0),
+        "net": float(real_pnl.get("net") or 0.0),
+        "source": str(real_pnl.get("source") or "ctrader_deals"),
+    }
+    try:
+        release_no_new_risk_latch_cause(
+            cause="session_risk_unavailable",
+            cause_id=str(pid),
+            reason="authoritative_close_deal_recovered",
+            actor="system:session_restore",
+            correlation_id=str(real_pnl.get("deal_id") or pid),
+            evidence=evidence,
+        )
+    except Exception as exc:
+        # Broker/deal truth remains usable; a release write failure simply keeps
+        # the deployment conservatively latched until operator repair.
+        try:
+            append_safety_outbox(
+                event_type="session_close_deal_latch_release_failed",
+                payload=evidence,
+                error=f"{type(exc).__name__}:{exc}",
+            )
+        except Exception:
+            pass
+
+
+def _pending_session_close_causes() -> dict[int, dict[str, Any]]:
+    """Return durable/local close-deal cursors keyed by broker position."""
+
+    try:
+        causes = list(
+            no_new_risk_latch_status(fail_closed=True).get("causes") or []
+        )
+    except Exception:
+        return {}
+    result: dict[int, dict[str, Any]] = {}
+    for item in causes:
+        if not isinstance(item, dict) or str(item.get("cause") or "") != (
+            "session_risk_unavailable"
+        ):
+            continue
+        try:
+            position_id = int(item.get("cause_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if position_id > 0:
+            metadata = item.get("metadata")
+            result[position_id] = {
+                **(dict(metadata) if isinstance(metadata, dict) else {}),
+                "latch_created_at": float(item.get("created_at") or 0.0),
+            }
+    return result
+
+
+def _pending_session_close_position_ids() -> set[int]:
+    return set(_pending_session_close_causes())
+
+
+def _pending_close_fallback_state(
+    position_id: int,
+    *,
+    broker: str,
+    recovery_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    pid = int(position_id or 0)
+    evidence = dict(recovery_evidence or {})
+    return {
+        "position_id": pid,
+        "broker": str(broker or "ctrader"),
+        "symbol": "XAUUSD+",
+        "open_price": float(_pos_open_prices.get(pid, 0.0) or 0.0),
+        "volume": float(
+            _pos_open_api_volume.get(pid, 0.0)
+            or evidence.get("expected_position_volume", 0.0)
+            or 0.0
+        ),
+        "close_pnl": 0.0,
+        "context_integrity": _RECOVERY_CONTEXT_PARTIAL,
+    }
+
+
+def _pending_close_requirements(
+    position_state: dict[str, Any],
+    *,
+    latch_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    evidence = dict(latch_evidence or {})
+    raw_meta = position_state.get("recovery_meta_json")
+    try:
+        recovery_meta = (
+            json.loads(raw_meta)
+            if isinstance(raw_meta, str) and raw_meta
+            else dict(raw_meta or {})
+        )
+    except Exception:
+        recovery_meta = {}
+    pending = recovery_meta.get("close_deal_pending")
+    if isinstance(pending, dict):
+        evidence = {**evidence, **pending}
+    return evidence
+
+
+def _pending_close_cursor_overrides(
+    position_ids: set[int],
+    *,
+    active_rows_by_id: dict[int, dict[str, Any]],
+    pending_close_causes: dict[int, dict[str, Any]],
+    broker: str,
+) -> dict[int, dict[str, Any]]:
+    """Recover the original pre-RPC cursor for delayed-deal retries."""
+
+    result: dict[int, dict[str, Any]] = {}
+    for pid in position_ids:
+        state = active_rows_by_id.get(pid) or _pending_close_fallback_state(
+            pid,
+            broker=broker,
+            recovery_evidence=pending_close_causes.get(pid),
+        )
+        requirements = _pending_close_requirements(
+            state,
+            latch_evidence=pending_close_causes.get(pid),
+        )
+        if (
+            "baseline_deal_ids" in requirements
+            or "baseline_closed_volume" in requirements
+        ):
+            result[pid] = {
+                "baseline_cursor_available": requirements.get(
+                    "baseline_cursor_available",
+                    True,
+                ),
+                "baseline_deal_ids": list(
+                    requirements.get("baseline_deal_ids") or []
+                ),
+                "baseline_closed_volume": float(
+                    requirements.get("baseline_closed_volume") or 0.0
+                ),
+            }
+    return result
+
+
+def _pending_close_required_volume_delta(
+    position_id: int,
+    *,
+    active_rows_by_id: dict[int, dict[str, Any]],
+    pending_close_causes: dict[int, dict[str, Any]],
+    broker: str,
+) -> float:
+    state = active_rows_by_id.get(position_id) or _pending_close_fallback_state(
+        position_id,
+        broker=broker,
+        recovery_evidence=pending_close_causes.get(position_id),
+    )
+    requirements = _pending_close_requirements(
+        state,
+        latch_evidence=pending_close_causes.get(position_id),
+    )
+    return max(
+        0.0,
+        float(
+            requirements.get("required_closed_volume_delta")
+            or state.get("volume")
+            or 0.0
+        ),
+    )
+
+
+def _pending_close_result_complete(
+    real_pnl: dict[str, Any] | None,
+    *,
+    position_state: dict[str, Any],
+    require_volume_proof: bool,
+    recovery_requirements: dict[str, Any] | None = None,
+) -> bool:
+    """Reject an old partial leg as proof of a broker-missing final close."""
+
+    if not _authoritative_close_pnl(real_pnl):
+        return False
+    requirements = dict(recovery_requirements or {})
+    if str(requirements.get("pending_kind") or "") == "partial_close":
+        # When the pre-RPC cursor could not be captured, a close leg already
+        # present in PostgreSQL cannot be proven to belong to this reduction.
+        # Keep the cause latched instead of treating an arbitrary historical
+        # partial as recovery evidence.
+        if requirements.get("baseline_cursor_available") is False:
+            return False
+        baseline_ids = {
+            int(item)
+            for item in list(requirements.get("baseline_deal_ids") or [])
+            if int(item or 0) > 0
+        }
+        observed_ids = {
+            int(item)
+            for item in list((real_pnl or {}).get("deal_ids") or [])
+            if int(item or 0) > 0
+        }
+        required_delta = float(
+            requirements.get("required_closed_volume_delta") or 0.0
+        )
+        baseline_volume = float(
+            requirements.get("baseline_closed_volume") or 0.0
+        )
+        observed_volume = float((real_pnl or {}).get("closed_volume") or 0.0)
+        return bool(
+            required_delta > 0.0
+            and observed_ids - baseline_ids
+            and observed_volume - baseline_volume + 1e-9 >= required_delta
+        )
+    if not require_volume_proof:
+        return True
+    expected_volume = float(position_state.get("volume") or 0.0)
+    closed_volume = float((real_pnl or {}).get("closed_volume") or 0.0)
+    return bool(
+        expected_volume > 0.0
+        and closed_volume > 0.0
+        and closed_volume + 1e-9 >= expected_volume
+    )
+
+
+def _capture_partial_close_deal_cursor(position_id: int) -> dict[str, Any]:
+    """Capture the durable close-deal cursor immediately before broker RPC."""
+
+    pid = int(position_id or 0)
+    captured_at = time.time()
+    try:
+        from execution.deal_sync import find_close_deal
+
+        conn = _get_state_pg_conn()
+        try:
+            before = find_close_deal(conn, pid) or {}
+        finally:
+            conn.close()
+        return {
+            "status": "captured",
+            "captured_at": captured_at,
+            "baseline_cursor_available": True,
+            "baseline_deal_ids": sorted(
+                {
+                    int(item)
+                    for item in list(before.get("deal_ids") or [])
+                    if int(item or 0) > 0
+                }
+            ),
+            "baseline_closed_volume": float(
+                before.get("closed_volume") or 0.0
+            ),
+        }
+    except Exception as exc:
+        _record_risk_reduction_aux_failure(
+            "partial_close_deal_cursor_unavailable",
+            position_id=pid,
+            action="reduce_position",
+            error=exc,
+        )
+        return {
+            "status": "unavailable",
+            "captured_at": captured_at,
+            "baseline_cursor_available": False,
+            "baseline_deal_ids": [],
+            "baseline_closed_volume": 0.0,
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+
+
+def _sync_partial_close_session_fact(
+    bridge: Any,
+    *,
+    broker: str,
+    position_id: int,
+    close_ts: float,
+    volume: float,
+    tick: int,
+    deal_cursor: dict[str, Any] | None = None,
+) -> bool:
+    """Best-effort ingest of a confirmed partial-close broker deal.
+
+    The broker reduction is already complete when this runs.  Any PostgreSQL,
+    deal-fetch, or projection failure therefore only blocks new risk and is
+    retried by the normal recovery bootstrap; it never rewrites broker success.
+    """
+
+    pid = int(position_id or 0)
+    cursor = dict(deal_cursor or {})
+    baseline_cursor_available = bool(
+        cursor.get("baseline_cursor_available", False)
+    )
+    before_deal_ids = {
+        int(item)
+        for item in list(cursor.get("baseline_deal_ids") or [])
+        if int(item or 0) > 0
+    }
+    before_closed_volume = float(
+        cursor.get("baseline_closed_volume") or 0.0
+    )
+    try:
+        from execution.deal_sync import (
+            fetch_deals_since_result,
+            find_close_deal,
+            store_deals,
+        )
+
+        conn = _get_state_pg_conn()
+        try:
+            fetch_result = fetch_deals_since_result(
+                bridge,
+                from_ts=int(max(0.0, float(close_ts or time.time()) - 60.0)),
+                max_rows=200,
+            )
+            if not fetch_result.success:
+                raise RuntimeError(
+                    "partial_close_deal_fetch_failed:"
+                    f"{fetch_result.error_code}:"
+                    f"{fetch_result.error_message}"
+                )
+            if fetch_result.empty:
+                raise RuntimeError("partial_close_deal_fetch_valid_empty")
+            store_deals(conn, list(fetch_result.deals))
+            after = find_close_deal(conn, pid) or {}
+        finally:
+            conn.close()
+        after_deal_ids = {
+            int(item)
+            for item in list(after.get("deal_ids") or [])
+            if int(item or 0) > 0
+        }
+        new_deal_ids = after_deal_ids - before_deal_ids
+        closed_volume_delta = max(
+            0.0,
+            float(after.get("closed_volume") or 0.0) - before_closed_volume,
+        )
+        payload = {
+            "gross": float(after.get("gross_profit") or 0.0),
+            "swap": float(after.get("swap") or 0.0),
+            "commission": float(after.get("close_commission") or 0.0),
+            "net": float(after.get("gross_profit") or 0.0)
+            + float(after.get("swap") or 0.0)
+            + float(after.get("close_commission") or 0.0),
+            "exec_timestamp": float(after.get("exec_timestamp") or 0.0),
+            "closed_volume": float(after.get("closed_volume") or 0.0),
+            "deal_id": after.get("deal_id"),
+            "deal_ids": sorted(after_deal_ids),
+            "close_deals_count": int(after.get("close_deals_count") or 0),
+            "source": "ctrader_deals",
+        }
+        if (
+            not baseline_cursor_available
+            or not _authoritative_close_pnl(payload)
+            or not new_deal_ids
+            or closed_volume_delta + 1e-9
+            < max(0.0, float(volume or 0.0))
+        ):
+            raise RuntimeError(
+                "partial_close_deal_unavailable_or_incomplete:"
+                f"new_deals={sorted(new_deal_ids)}:"
+                f"closed_volume_delta={closed_volume_delta}"
+            )
+    except Exception as exc:
+        _defer_close_until_authoritative_deal(
+            pid,
+            broker=broker,
+            tick=tick,
+            reason=f"partial_close_deal_unavailable:{type(exc).__name__}",
+            recovery_evidence={
+                "pending_kind": "partial_close",
+                "baseline_cursor_available": baseline_cursor_available,
+                "baseline_deal_ids": sorted(before_deal_ids),
+                "baseline_closed_volume": float(before_closed_volume),
+                "required_closed_volume_delta": float(volume or 0.0),
+                "expected_position_volume": float(
+                    _pos_open_api_volume.get(pid, 0.0) or 0.0
+                ),
+                "close_requested_at": float(close_ts or 0.0),
+                "cursor_captured_at": float(cursor.get("captured_at") or 0.0),
+                "cursor_error": str(cursor.get("error") or ""),
+            },
+        )
+        _record_risk_reduction_aux_failure(
+            "partial_close_session_fact_unavailable",
+            position_id=pid,
+            action="reduce_position",
+            error=exc,
+            payload={"requested_close_volume": float(volume or 0.0)},
+        )
+        return False
+
+    _release_session_close_deal_latch(pid, payload)
+    # A deterministic deals-first rebuild on the next serial loop owns the
+    # session projection.  Until then the old PnL is explicitly unavailable.
+    _live_state_update(
+        session_state_status="unavailable",
+        session_state_source="partial_close_deal_projection_pending",
+        session_risk_blockers=[f"partial_close_projection_pending:{pid}"],
+        session_observed_at=0.0,
+        accepting_new_risk=False,
+        no_new_risk_latch=no_new_risk_latch_status(fail_closed=True),
+    )
+    return True
+
+
+def _fresh_cached_broker_open_position_ids(
+    *,
+    now_ts: float | None = None,
+    stale_after_sec: float = 15.0,
+) -> set[int] | None:
+    """Return broker-open position IDs only from a fresh position fact.
+
+    ``None`` means the open-position set is unknown.  Passing an unknown set
+    into deals-first restore as an empty set could incorrectly classify a
+    partially closed, still-open broker position as a completed trade.
+    """
+
+    observed_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
+    reconcile_id = str(_live_state_get("positions_reconcile_id", "") or "")
+    checked_at = float(time.time() if now_ts is None else now_ts)
+    if (
+        observed_at <= 0.0
+        or not reconcile_id
+        or checked_at < observed_at
+        or checked_at - observed_at > max(0.0, float(stale_after_sec))
+    ):
+        return None
+    positions = _live_state_get("positions_reconciled", [], clone=True)
+    if not isinstance(positions, list):
+        return None
+    position_ids: set[int] = set()
+    for position in positions:
+        try:
+            position_id = int(
+                _payload_get(position, "position_id", 0)
+                or _payload_get(position, "ticket", 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            return None
+        if position_id > 0:
+            position_ids.add(position_id)
+    return position_ids
+
+
+def _remember_close_reason(position_id: int, reason: str) -> None:
+    try:
+        _lifecycle_remember_close_reason(
+            pending_reasons=_pending_close_reasons,
+            merge_recovery_meta=_merge_recovery_position_meta,
+            position_id=position_id,
+            reason=reason,
+        )
+    except Exception as exc:
+        # The lifecycle helper stores the process-local reason before PG
+        # projection.  Preserve that broker-adjacent fact and defer the audit.
+        _pending_close_reasons[int(position_id)] = str(reason or "")
+        _record_risk_reduction_aux_failure(
+            (
+                "emergency_close_audit_deferred"
+                if str(reason or "") == "emergency_close"
+                else "close_reason_projection_failed"
+            ),
+            position_id=position_id,
+            action="close_position",
+            error=exc,
+            payload={"reason": str(reason or "")},
+        )
 
 
 def _consume_close_reason(position_id: int, default: str = "broker_close") -> str:
@@ -3131,12 +4409,26 @@ def _consume_close_reason(position_id: int, default: str = "broker_close") -> st
 
 
 def _remember_close_verdict(position_id: int, verdict) -> None:
-    _lifecycle_remember_close_verdict(
-        pending_verdicts=_pending_close_verdicts,
-        merge_recovery_meta=_merge_recovery_position_meta,
-        position_id=position_id,
-        verdict=verdict,
-    )
+    try:
+        _lifecycle_remember_close_verdict(
+            pending_verdicts=_pending_close_verdicts,
+            merge_recovery_meta=_merge_recovery_position_meta,
+            position_id=position_id,
+            verdict=verdict,
+        )
+    except Exception as exc:
+        try:
+            from backend.services.live_position_lifecycle import serialize_close_verdict
+
+            _pending_close_verdicts[int(position_id)] = serialize_close_verdict(verdict)
+        except Exception:
+            pass
+        _record_risk_reduction_aux_failure(
+            "close_verdict_projection_failed",
+            position_id=position_id,
+            action="close_position",
+            error=exc,
+        )
 
 
 def _consume_close_verdict(position_id: int, close_reason: str) -> dict:
@@ -3342,6 +4634,59 @@ def _list_active_recovery_positions(broker: str) -> list[dict]:
         conn.close()
 
 
+def _recovery_last_seen_by_position(position_ids: set[int]) -> dict[int, float]:
+    """Return the last broker-open observation used to reject stale partial deals."""
+
+    normalized = sorted({int(pid) for pid in position_ids if int(pid or 0) > 0})
+    if not normalized:
+        return {}
+    conn = _get_state_read_conn()
+    try:
+        result: dict[int, float] = {}
+        for pid in normalized:
+            row = _state_execute(
+                conn,
+                "SELECT last_seen_at FROM recovery_position_state WHERE position_id=?",
+                (pid,),
+            ).fetchone()
+            if row and float(row["last_seen_at"] or 0.0) > 0.0:
+                # Allow a small broker/local clock and serialization tolerance;
+                # an older partial close is normally far earlier than this.
+                result[pid] = max(0.0, float(row["last_seen_at"]) - 5.0)
+        return result
+    finally:
+        conn.close()
+
+
+def _recovery_remaining_volume_by_position(
+    position_ids: set[int],
+) -> dict[int, float]:
+    """Return the last fresh broker-open volume for close completeness proof."""
+
+    normalized = sorted({int(pid) for pid in position_ids if int(pid or 0) > 0})
+    if not normalized:
+        return {}
+    conn = _get_state_read_conn()
+    try:
+        result: dict[int, float] = {}
+        for pid in normalized:
+            row = _state_execute(
+                conn,
+                "SELECT volume FROM recovery_position_state WHERE position_id=?",
+                (pid,),
+            ).fetchone()
+            if row and float(row["volume"] or 0.0) > 0.0:
+                result[pid] = float(row["volume"])
+            elif float(_pos_open_api_volume.get(pid, 0.0) or 0.0) > 0.0:
+                # Missing PG rows are still allowed to fail closed with the
+                # process-local original volume.  A too-large fallback delays
+                # release; it cannot create a false confirmed close.
+                result[pid] = float(_pos_open_api_volume[pid])
+        return result
+    finally:
+        conn.close()
+
+
 def _mark_recovery_position_closed(
     position_id: int,
     *,
@@ -3396,7 +4741,15 @@ def _replay_recovered_close(
     position_state: dict,
     real_pnl: dict | None,
     strategy_name: str,
-) -> None:
+) -> bool:
+    if not _authoritative_close_pnl(real_pnl):
+        _defer_close_until_authoritative_deal(
+            int(position_id),
+            broker=broker,
+            tick=0,
+            reason="restart_replay_close_deal_unavailable",
+        )
+        return False
     payloads = _lifecycle_build_replayed_close_payloads(
         position_id=position_id,
         position_state=position_state,
@@ -3410,7 +4763,9 @@ def _replay_recovered_close(
     close_ts = float(payloads["close_ts"])
     context_integrity = str(payloads["context_integrity"])
 
-    _record_session_trade(total_pnl)
+    # Session risk is rebuilt exclusively from ctrader_deals.  Replaying
+    # recovery/audit state must not increment the already deals-derived session
+    # projection a second time.
     _mark_recovery_position_closed(
         position_id,
         close_reason="restart_replay",
@@ -3418,6 +4773,10 @@ def _replay_recovered_close(
         closed_at=close_ts,
         meta=payloads["recovery_meta"],
     )
+    # Do not release the durable cursor before the recovery projection commits.
+    # Otherwise a PG failure leaves an active row but loses the original
+    # pre-fetch baseline needed to resolve the already-stored delayed deal.
+    _release_session_close_deal_latch(int(position_id), real_pnl)
 
     exit_decision_id = ""
     if _LEDGER:
@@ -3458,6 +4817,7 @@ def _replay_recovered_close(
                 _POLICY_SUGGESTER.suggest_from_experience(experience)
         except Exception as exc:
             logger.debug("[live] replay close learning failed for pos %s: %s", position_id, exc)
+    return True
 
 
 def _result_is_position_not_found(result: Any) -> bool:
@@ -3475,10 +4835,16 @@ def _result_is_position_not_found(result: Any) -> bool:
 def _remove_live_position_state(position_id: int) -> None:
     global _prev_position_ids
     pid = int(position_id)
-    positions = _live_state_get("positions", [], clone=True) or []
+    # The caller has already completed and published a fresh broker
+    # reconciliation.  Local cleanup may trim the advisory event projection,
+    # but must never advance the authoritative reconcile timestamp.
+    positions = _live_state_get("positions_event", [], clone=True) or []
     payload = _lifecycle_filter_removed_live_position(positions, position_id=pid)
     if payload["removed"]:
-        _live_state_update(positions=payload["positions"], positions_updated_at=time.time())
+        _live_state_update(
+            positions_event=payload["positions"],
+            positions_event_reason="local_closed_position_cleanup",
+        )
     _prev_position_ids.discard(pid)
     _pos_open_prices.pop(pid, None)
     _pos_open_api_volume.pop(pid, None)
@@ -3543,19 +4909,44 @@ def _retire_broker_missing_position(
                 {pid},
                 from_ts=from_ts,
                 max_rows=200,
+                min_exec_timestamp_by_position={
+                    pid: max(
+                        0.0,
+                        float(position_state.get("last_seen_at") or 0.0) - 5.0,
+                    )
+                },
+                required_closed_volume_delta_by_position={
+                    pid: float(position_state.get("volume") or 0.0)
+                },
             ).get(pid)
         finally:
             write_conn.close()
     except Exception as exc:
         logger.debug("[live] missing-position deal sync failed for pos %s: %s", pid, exc)
 
-    _replay_recovered_close(
+    if not _authoritative_close_pnl(real_pnl):
+        _defer_close_until_authoritative_deal(
+            pid,
+            broker=broker,
+            tick=0,
+            reason="broker_position_missing_close_deal_unavailable",
+        )
+        if log:
+            log(
+                f"broker missing position pending authoritative close deal "
+                f"pos={pid}: {reason}"
+            )
+        return False
+
+    replayed = _replay_recovered_close(
         broker=broker,
         position_id=pid,
         position_state=position_state,
         real_pnl=real_pnl,
         strategy_name=strategy_name,
     )
+    if not replayed:
+        return False
     _mark_recovery_position_closed(
         pid,
         close_reason="broker_position_not_found",
@@ -3570,20 +4961,12 @@ def _retire_broker_missing_position(
 
 
 def _read_positions_for_recovery(bridge) -> list[Any]:
-    if hasattr(bridge, "is_connected") and not bridge.is_connected:
-        raise RuntimeError("broker not connected")
-    if hasattr(bridge, "refresh_positions"):
-        has_reconcile_ts = hasattr(bridge, "_last_reconcile_at")
-        before_reconcile = float(getattr(bridge, "_last_reconcile_at", 0.0) or 0.0)
-        try:
-            positions = bridge.refresh_positions(force=True, allow_cache_fallback=False)
-        except TypeError:
-            positions = bridge.refresh_positions()
-        after_reconcile = float(getattr(bridge, "_last_reconcile_at", 0.0) or 0.0)
-        if has_reconcile_ts and after_reconcile <= before_reconcile:
-            raise RuntimeError("fresh broker reconcile unavailable")
-        return positions or []
-    return bridge.get_positions() or []
+    result = _explicit_position_reconcile(bridge)
+    if str(_reconcile_value(result, "status", "failed") or "failed") != "fresh":
+        raise RuntimeError(
+            str(_reconcile_value(result, "error_code", "") or "fresh broker reconcile unavailable")
+        )
+    return list(_publish_fresh_position_reconcile(result, broker="ctrader"))
 
 
 def _bootstrap_position_recovery(
@@ -3602,14 +4985,120 @@ def _bootstrap_position_recovery(
         return False
 
     normalized = [_normalize_position_snapshot(pos) for pos in current_positions]
-    coerced_positions = _coerce_live_positions(current_positions)
     current_ids = {item["position_id"] for item in normalized if item["position_id"] > 0}
     active_rows = _list_active_recovery_positions(broker)
+    active_rows_by_id = {
+        int(row["position_id"]): row
+        for row in active_rows
+        if int(row.get("position_id") or 0) > 0
+    }
+    pending_close_causes = _pending_session_close_causes()
+    pending_close_ids = set(pending_close_causes)
+    pending_open_ids = pending_close_ids & current_ids
+    pending_missing_ids = pending_close_ids - current_ids
+    recovery_close_ids = set(active_rows_by_id) | pending_missing_ids
+
+    if pending_open_ids:
+        # A transient empty snapshot or a supervisor partial close can leave a
+        # deal-evidence latch while the position is still open.  Refresh only
+        # the realized leg here; never replay/retire an open broker position.
+        from execution.deal_sync import sync_close_deals_batch
+
+        minimum_close_ts = {
+            pid: max(
+                0.0,
+                float(active_rows_by_id[pid].get("last_seen_at") or 0.0) - 5.0,
+            )
+            for pid in pending_open_ids
+            if pid in active_rows_by_id
+        }
+        required_refresh_deltas: dict[int, float] = {}
+        for pid in pending_open_ids:
+            state = active_rows_by_id.get(pid) or _pending_close_fallback_state(
+                pid,
+                broker=broker,
+                recovery_evidence=pending_close_causes.get(pid),
+            )
+            requirements = _pending_close_requirements(
+                state,
+                latch_evidence=pending_close_causes.get(pid),
+            )
+            required_delta = float(
+                requirements.get("required_closed_volume_delta")
+                or state.get("volume")
+                or 0.0
+            )
+            if required_delta > 0.0:
+                required_refresh_deltas[pid] = required_delta
+        conn = _get_state_pg_conn()
+        try:
+            realized = sync_close_deals_batch(
+                bridge,
+                conn,
+                set(pending_open_ids),
+                from_ts=int(max(0.0, time.time() - _RECOVERY_REPLAY_LOOKBACK_SEC)),
+                max_rows=500,
+                min_exec_timestamp_by_position=minimum_close_ts,
+                required_closed_volume_delta_by_position=required_refresh_deltas,
+                baseline_close_cursor_by_position=(
+                    _pending_close_cursor_overrides(
+                        set(pending_open_ids),
+                        active_rows_by_id=active_rows_by_id,
+                        pending_close_causes=pending_close_causes,
+                        broker=broker,
+                    )
+                ),
+            )
+        finally:
+            conn.close()
+        unresolved_open_ids = {
+            pid
+            for pid in pending_open_ids
+            if not _pending_close_result_complete(
+                realized.get(pid),
+                position_state=(
+                    active_rows_by_id.get(pid)
+                    or _pending_close_fallback_state(
+                        pid,
+                        broker=broker,
+                        recovery_evidence=pending_close_causes.get(pid),
+                    )
+                ),
+                require_volume_proof=(pid not in active_rows_by_id),
+                recovery_requirements=_pending_close_requirements(
+                    active_rows_by_id.get(pid)
+                    or _pending_close_fallback_state(
+                        pid,
+                        broker=broker,
+                        recovery_evidence=pending_close_causes.get(pid),
+                    ),
+                    latch_evidence=pending_close_causes.get(pid),
+                ),
+            )
+        }
+        for pid in sorted(pending_open_ids - unresolved_open_ids):
+            _release_session_close_deal_latch(pid, realized[pid])
+        if unresolved_open_ids:
+            for pid in sorted(unresolved_open_ids):
+                _defer_close_until_authoritative_deal(
+                    pid,
+                    broker=broker,
+                    tick=0,
+                    reason="open_position_realized_leg_unavailable",
+                )
+            log(
+                "recovery bootstrap waiting for realized partial-close deals "
+                f"positions={sorted(unresolved_open_ids)}"
+            )
+            return False
     if not current_ids:
-        _live_state_update(positions=[], positions_updated_at=time.time())
         _prev_position_ids = set()
-        suffix = f" while {len(active_rows)} persisted positions remain" if active_rows else ""
-        if active_rows:
+        suffix = (
+            f" while {len(recovery_close_ids)} pending positions remain"
+            if recovery_close_ids
+            else ""
+        )
+        if recovery_close_ids:
             zero_count = _recovery_zero_confirmations.get(broker, 0) + 1
             _recovery_zero_confirmations[broker] = zero_count
             if zero_count < _RECOVERY_ZERO_CONFIRMATIONS_REQUIRED:
@@ -3621,13 +5110,30 @@ def _bootstrap_position_recovery(
 
             from execution.deal_sync import sync_close_deals_batch
 
-            missing_ids = _lifecycle_recovery_active_position_ids(active_rows)
+            missing_ids = set(recovery_close_ids)
             lookback_from = _lifecycle_recovery_replay_lookback_from(
                 active_rows=active_rows,
                 replay_ids=missing_ids,
                 now_ts=time.time(),
                 lookback_sec=_RECOVERY_REPLAY_LOOKBACK_SEC,
             )
+            minimum_close_ts = {
+                int(row["position_id"]): max(
+                    0.0,
+                    float(row.get("last_seen_at") or 0.0) - 5.0,
+                )
+                for row in active_rows
+                if int(row["position_id"] or 0) in missing_ids
+            }
+            required_close_deltas = {
+                pid: _pending_close_required_volume_delta(
+                    pid,
+                    active_rows_by_id=active_rows_by_id,
+                    pending_close_causes=pending_close_causes,
+                    broker=broker,
+                )
+                for pid in missing_ids
+            }
             conn = _get_state_pg_conn()
             try:
                 replayed = sync_close_deals_batch(
@@ -3636,28 +5142,94 @@ def _bootstrap_position_recovery(
                     missing_ids,
                     from_ts=lookback_from,
                     max_rows=500,
+                    min_exec_timestamp_by_position=minimum_close_ts,
+                    required_closed_volume_delta_by_position=required_close_deltas,
+                    baseline_close_cursor_by_position=(
+                        _pending_close_cursor_overrides(
+                            missing_ids,
+                            active_rows_by_id=active_rows_by_id,
+                            pending_close_causes=pending_close_causes,
+                            broker=broker,
+                        )
+                    ),
                 )
             finally:
                 conn.close()
-            for row in active_rows:
-                position_id = int(row["position_id"])
-                _replay_recovered_close(
-                    broker=broker,
-                    position_id=position_id,
-                    position_state=row,
-                    real_pnl=replayed.get(position_id),
-                    strategy_name=strategy_name,
+            unresolved_close_ids = {
+                int(position_id)
+                for position_id in missing_ids
+                if not _pending_close_result_complete(
+                    replayed.get(int(position_id)),
+                    position_state=(
+                        active_rows_by_id.get(int(position_id))
+                        or _pending_close_fallback_state(
+                            int(position_id),
+                            broker=broker,
+                            recovery_evidence=pending_close_causes.get(
+                                int(position_id)
+                            ),
+                        )
+                    ),
+                    require_volume_proof=(
+                        int(position_id) not in active_rows_by_id
+                    ),
+                    recovery_requirements=_pending_close_requirements(
+                        active_rows_by_id.get(int(position_id))
+                        or _pending_close_fallback_state(
+                            int(position_id),
+                            broker=broker,
+                            recovery_evidence=pending_close_causes.get(
+                                int(position_id)
+                            ),
+                        ),
+                        latch_evidence=pending_close_causes.get(
+                            int(position_id)
+                        ),
+                    ),
                 )
-            log(f"recovery bootstrap reconciled {len(active_rows)} persisted positions as closed after broker returned 0")
+            }
+            for position_id in sorted(missing_ids):
+                row = active_rows_by_id.get(position_id) or (
+                    _pending_close_fallback_state(
+                        position_id,
+                        broker=broker,
+                        recovery_evidence=pending_close_causes.get(position_id),
+                    )
+                )
+                if position_id not in unresolved_close_ids:
+                    _replay_recovered_close(
+                        broker=broker,
+                        position_id=position_id,
+                        position_state=row,
+                        real_pnl=replayed.get(position_id),
+                        strategy_name=strategy_name,
+                    )
+                else:
+                    _defer_close_until_authoritative_deal(
+                        position_id,
+                        broker=broker,
+                        tick=0,
+                        reason="recovery_bootstrap_close_deal_unavailable",
+                    )
+            if unresolved_close_ids:
+                log(
+                    "recovery bootstrap waiting for authoritative close deals "
+                    f"positions={sorted(unresolved_close_ids)}"
+                )
+                return False
+            log(
+                "recovery bootstrap reconciled "
+                f"{len(missing_ids)} pending positions as closed after broker returned 0"
+            )
             return True
         _recovery_zero_confirmations.pop(broker, None)
-        log(f"recovery bootstrap deferred: broker returned 0 positions{suffix}")
-        return False
+        log("recovery bootstrap confirmed broker has no open positions")
+        return True
     _recovery_zero_confirmations.pop(broker, None)
     missing_ids = _lifecycle_recovery_missing_position_ids(
         active_rows=active_rows,
         current_ids=current_ids,
-    )
+    ) | pending_missing_ids
 
     if missing_ids:
         from execution.deal_sync import sync_close_deals_batch
@@ -3668,6 +5240,23 @@ def _bootstrap_position_recovery(
             now_ts=time.time(),
             lookback_sec=_RECOVERY_REPLAY_LOOKBACK_SEC,
         )
+        minimum_close_ts = {
+            int(row["position_id"]): max(
+                0.0,
+                float(row.get("last_seen_at") or 0.0) - 5.0,
+            )
+            for row in active_rows
+            if int(row["position_id"] or 0) in missing_ids
+        }
+        required_close_deltas = {
+            pid: _pending_close_required_volume_delta(
+                pid,
+                active_rows_by_id=active_rows_by_id,
+                pending_close_causes=pending_close_causes,
+                broker=broker,
+            )
+            for pid in missing_ids
+        }
         conn = _get_state_pg_conn()
         try:
             replayed = sync_close_deals_batch(
@@ -3676,12 +5265,57 @@ def _bootstrap_position_recovery(
                 missing_ids,
                 from_ts=lookback_from,
                 max_rows=500,
+                min_exec_timestamp_by_position=minimum_close_ts,
+                required_closed_volume_delta_by_position=required_close_deltas,
+                baseline_close_cursor_by_position=(
+                    _pending_close_cursor_overrides(
+                        missing_ids,
+                        active_rows_by_id=active_rows_by_id,
+                        pending_close_causes=pending_close_causes,
+                        broker=broker,
+                    )
+                ),
             )
         finally:
             conn.close()
-        for row in active_rows:
-            position_id = int(row["position_id"])
-            if position_id in missing_ids:
+        unresolved_close_ids = {
+            int(position_id)
+            for position_id in missing_ids
+            if not _pending_close_result_complete(
+                replayed.get(int(position_id)),
+                position_state=(
+                    active_rows_by_id.get(int(position_id))
+                    or _pending_close_fallback_state(
+                        int(position_id),
+                        broker=broker,
+                        recovery_evidence=pending_close_causes.get(
+                            int(position_id)
+                        ),
+                    )
+                ),
+                require_volume_proof=(int(position_id) not in active_rows_by_id),
+                recovery_requirements=_pending_close_requirements(
+                    active_rows_by_id.get(int(position_id))
+                    or _pending_close_fallback_state(
+                        int(position_id),
+                        broker=broker,
+                        recovery_evidence=pending_close_causes.get(
+                            int(position_id)
+                        ),
+                    ),
+                    latch_evidence=pending_close_causes.get(int(position_id)),
+                ),
+            )
+        }
+        for position_id in sorted(missing_ids):
+            row = active_rows_by_id.get(position_id) or (
+                _pending_close_fallback_state(
+                    position_id,
+                    broker=broker,
+                    recovery_evidence=pending_close_causes.get(position_id),
+                )
+            )
+            if position_id not in unresolved_close_ids:
                 _replay_recovered_close(
                     broker=broker,
                     position_id=position_id,
@@ -3689,6 +5323,19 @@ def _bootstrap_position_recovery(
                     real_pnl=replayed.get(position_id),
                     strategy_name=strategy_name,
                 )
+            else:
+                _defer_close_until_authoritative_deal(
+                    position_id,
+                    broker=broker,
+                    tick=0,
+                    reason="recovery_bootstrap_close_deal_unavailable",
+                )
+        if unresolved_close_ids:
+            log(
+                "recovery bootstrap waiting for authoritative close deals "
+                f"positions={sorted(unresolved_close_ids)}"
+            )
+            return False
         log(f"recovery bootstrap replayed {len(missing_ids)} missing closes")
 
     for item in normalized:
@@ -3705,11 +5352,6 @@ def _bootstrap_position_recovery(
             meta={"recovered_at": time.time()},
         )
 
-    if coerced_positions:
-        _live_state_update(
-            positions=coerced_positions,
-            positions_updated_at=time.time(),
-        )
     _prev_position_ids = current_ids.copy()
     if current_ids:
         log(f"recovery bootstrap attached {len(current_ids)} live positions after restart")
@@ -3730,11 +5372,20 @@ def _reset_session_state_for_new_day() -> None:
         session_winning=0,
         session_losing=0,
         session_trade_pnls=[],
+        session_realized_pnl_legs=[],
+        session_realized_legs=0,
+        session_recorded_position_ids=[],
         session_consecutive_loss=0,
         session_max_drawdown_pct=0.0,
+        session_peak_equity=start_balance,
         session_start_balance=start_balance,
         session_last_trade_ts=0.0,
-        session_state_source="ctrader_deals.final_close_rebuild.v1",
+        session_state_source="unavailable",
+        session_state_status="unavailable",
+        session_risk_blockers=["session_not_restored"],
+        session_observed_at=0.0,
+        accepting_new_risk=False,
+        trade_equity_history=[start_balance] if start_balance > 0.0 else [],
     )
     _persist_session_state()
 
@@ -3792,8 +5443,39 @@ def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> di
     }
 
 
-def _record_session_trade(total_pnl: float) -> dict:
+def _record_session_trade(
+    total_pnl: float,
+    *,
+    position_id: int = 0,
+) -> dict:
     with _LIVE_STATE_LOCK:
+        pid = int(position_id or 0)
+        recorded_ids = {
+            int(item)
+            for item in list(
+                _live_state.get("session_recorded_position_ids", []) or []
+            )
+            if int(item or 0) > 0
+        }
+        if pid > 0 and pid in recorded_ids:
+            return {
+                "session_trades": int(_live_state.get("session_trades", 0) or 0),
+                "session_winning": int(_live_state.get("session_winning", 0) or 0),
+                "session_losing": int(_live_state.get("session_losing", 0) or 0),
+                "session_trade_pnls": list(_live_state.get("session_trade_pnls", []) or []),
+                "session_consecutive_loss": int(
+                    _live_state.get("session_consecutive_loss", 0) or 0
+                ),
+                "session_pnl": float(_live_state.get("session_pnl", 0.0) or 0.0),
+                "session_last_trade_ts": float(
+                    _live_state.get("session_last_trade_ts", 0.0) or 0.0
+                ),
+                "session_observed_at": float(
+                    _live_state.get("session_observed_at", 0.0) or 0.0
+                ),
+                "duplicate_position": True,
+                "position_id": pid,
+            }
         trades = int(_live_state.get("session_trades", 0)) + 1
         winning = int(_live_state.get("session_winning", 0))
         losing = int(_live_state.get("session_losing", 0))
@@ -3808,6 +5490,9 @@ def _record_session_trade(total_pnl: float) -> dict:
         elif total_pnl < 0:
             losing += 1
             consecutive_loss += 1
+        observed_at = time.time()
+        if pid > 0:
+            recorded_ids.add(pid)
         _live_state.update(
             session_trades=trades,
             session_winning=winning,
@@ -3815,7 +5500,9 @@ def _record_session_trade(total_pnl: float) -> dict:
             session_trade_pnls=trade_pnls,
             session_consecutive_loss=consecutive_loss,
             session_pnl=session_pnl,
-            session_last_trade_ts=time.time(),
+            session_last_trade_ts=observed_at,
+            session_observed_at=observed_at,
+            session_recorded_position_ids=sorted(recorded_ids)[-1000:],
         )
     _persist_session_state()
     return {
@@ -3826,6 +5513,9 @@ def _record_session_trade(total_pnl: float) -> dict:
         "session_consecutive_loss": consecutive_loss,
         "session_pnl": session_pnl,
         "session_last_trade_ts": float(_live_state.get("session_last_trade_ts", 0.0) or 0.0),
+        "session_observed_at": float(_live_state.get("session_observed_at", 0.0) or 0.0),
+        "duplicate_position": False,
+        "position_id": int(position_id or 0),
     }
 
 
@@ -3874,20 +5564,78 @@ def _prime_live_loop_state(
     strategy_name: str,
     started_at: float,
     account: dict,
+    accepting_new_risk: bool = True,
+    restore_session: bool = True,
+    account_observed: bool = True,
 ) -> None:
+    """Initialize process ownership without manufacturing broker facts.
+
+    ``account`` is a compatibility/startup projection only.  A caller-provided
+    dict (including the historical zero placeholder) is recorded on the event
+    plane and cannot advance the account reconcile clock or authorize risk.
+    Existing reconciled values remain visible with their original observation
+    time until the new generation completes a fresh reconcile.
+    """
+    account_payload = dict(account or {})
+    execution_v2_enabled = bool(
+        _phase2_feature_flags().ctrader_execution_outcome_v2_enabled
+    )
+    if not account_observed:
+        account_payload.update(ok=False, warming_up=True)
     _live_state_update(
         broker=broker,
         loop_running=True,
         loop_strategy=strategy_name,
         loop_started_at=started_at,
         loop_shutdown=None,
-        accepting_new_risk=True,
-        account=account,
-        account_updated_at=time.time(),
+        # Every generation starts fail-closed.  Legacy and v2 loops may reopen
+        # only after their explicit broker/session gates complete.
+        accepting_new_risk=False,
+        account_event=account_payload,
+        account_event_updated_at=(time.time() if account_observed else None),
+        account_event_reason=(
+            "startup_projection" if account_observed else "startup_warming"
+        ),
+        execution_recovery={
+            "schema": "broker_execution_intent_recovery.v1",
+            "enabled": execution_v2_enabled,
+            "ready": not execution_v2_enabled,
+            "unresolved_count": None if execution_v2_enabled else 0,
+            "status": (
+                "pending" if execution_v2_enabled else "disabled"
+            ),
+        },
     )
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if not _restore_session_state_for_day(today_str):
-        _reset_session_state_for_new_day()
+    if restore_session:
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        open_position_ids = _fresh_cached_broker_open_position_ids()
+        restored = bool(
+            open_position_ids is not None
+            and _restore_session_state_for_day(
+                today_str,
+                broker_open_position_ids=open_position_ids,
+            )
+        )
+        session_status = str(
+            _live_state_get("session_state_status", "unknown") or "unknown"
+        )
+        if not restored or session_status != "available":
+            # Preserve the last known risk projection.  A missing/corrupt
+            # cache or unavailable PostgreSQL deal stream is an explicit
+            # authority failure, never evidence for a zero-risk new day.
+            _live_state_update(
+                session_state_status=(
+                    session_status
+                    if session_status in {"unavailable", "degraded_cache"}
+                    else "unavailable"
+                ),
+                session_state_source=(
+                    _live_state_get("session_state_source", "unavailable")
+                    if session_status == "degraded_cache"
+                    else "unavailable"
+                ),
+                accepting_new_risk=False,
+            )
 
 
 
@@ -4015,7 +5763,15 @@ def _install_ctrader_live_listener(bridge) -> None:
                         "changed_at": quote_changed_at,
                         "source": "spot",
                     }
-                    positions = _live_state_get("positions", [], clone=True) or []
+                    # Spot/event projections are useful for display, but they
+                    # are not a full broker position reconciliation.  Patch a
+                    # dedicated event view and leave the authoritative
+                    # position snapshot/timestamp untouched.
+                    positions = (
+                        _live_state_get("positions_event", [], clone=True)
+                        or _live_state_get("positions_reconciled", [], clone=True)
+                        or []
+                    )
                     patched_positions = []
                     for item in positions:
                         if isinstance(item, dict):
@@ -4028,7 +5784,9 @@ def _install_ctrader_live_listener(bridge) -> None:
                         spot_price=price,
                         spot_quote=quote,
                         spot_quote_changed_at=quote_changed_at,
-                        positions=patched_positions or positions,
+                        positions_event=patched_positions or positions,
+                        positions_event_updated_at=float(payload.get("ts") or now_ts),
+                        positions_event_reason="spot_price_patch",
                     )
                 return
             if event_type == "account":
@@ -4039,7 +5797,11 @@ def _install_ctrader_live_listener(bridge) -> None:
                     account = asdict(account)
                 account.setdefault("ok", True)
                 account.setdefault("broker", "ctrader")
-                _live_state_update(account=account, account_updated_at=now_ts)
+                _live_state_update(
+                    account_event=account,
+                    account_event_updated_at=now_ts,
+                    account_event_reason=str(payload.get("reason") or "account_event"),
+                )
                 return
             if event_type == "positions":
                 positions = payload.get("positions") or []
@@ -4053,11 +5815,15 @@ def _install_ctrader_live_listener(bridge) -> None:
                     positions,
                     cfg=cfg,
                     now_ts=now_ts,
-                    persist=True,
+                    persist=False,
                     broker="ctrader",
                     strategy_name=str(_loop_strategy_name or "factor_v4"),
                 )
-                _live_state_update(positions=enriched, positions_updated_at=now_ts)
+                _live_state_update(
+                    positions_event=enriched,
+                    positions_event_updated_at=now_ts,
+                    positions_event_reason=str(payload.get("reason") or "positions_event"),
+                )
                 return
         except Exception as exc:
             logger.debug("[ctrader] live listener ignored %s: %s", event_type, exc)
@@ -4208,7 +5974,7 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
     quote_changed_at = float((quote or {}).get("changed_at") or _live_state_get("spot_quote_changed_at", 0.0) or 0.0)
     if quote:
         quote = {**quote, "changed_at": quote_changed_at}
-    positions = _live_state_get("positions", [], clone=True) or []
+    positions = _live_state_get("positions_reconciled", [], clone=True) or []
     if isinstance(positions, dict):
         positions = positions.get("positions", []) or []
     account_updated_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
@@ -4369,11 +6135,35 @@ def _coerce_live_positions(raw_positions) -> list[dict]:
 
 def get_live_readiness(broker: str = "ctrader") -> dict:
     loop = loop_status()
+    checked_at = time.time()
+    v2_active = _phase2_v2_active()
     diag = _live_state_get("_diag", {}, clone=True) or {}
-    account = _live_state_get("account", {}, clone=True) or {}
+    account = _live_state_get("account_reconciled", {}, clone=True) or {}
     account_updated_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
     positions_updated_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
-    positions = _coerce_live_positions(_live_state_get("positions", clone=True))
+    account_reconcile_id = str(_live_state_get("account_reconcile_id", "") or "")
+    positions_reconcile_id = str(_live_state_get("positions_reconcile_id", "") or "")
+    account_reconcile_failed_at = float(
+        _live_state_get("account_reconcile_failed_at", 0.0) or 0.0
+    )
+    positions_reconcile_failed_at = float(
+        _live_state_get("positions_reconcile_failed_at", 0.0) or 0.0
+    )
+    account_reconcile_error = str(
+        _live_state_get("account_reconcile_error", "") or ""
+    )
+    positions_reconcile_error = str(
+        _live_state_get("positions_reconcile_error", "") or ""
+    )
+    positions = _coerce_live_positions(
+        _live_state_get("positions_reconciled", [], clone=True)
+    )
+    account_event_updated_at = float(
+        _live_state_get("account_event_updated_at", 0.0) or 0.0
+    )
+    positions_event_updated_at = float(
+        _live_state_get("positions_event_updated_at", 0.0) or 0.0
+    )
 
     broker_status = "unknown"
     broker_error = None
@@ -4381,15 +6171,91 @@ def get_live_readiness(broker: str = "ctrader") -> dict:
         broker_status, broker_error = _probe_ctrader()
 
     loop_running = bool(loop.get("running"))
-    account_ready = bool(account and account.get("ok") and account_updated_at > 0)
-    positions_ready = positions_updated_at > 0
+    account_age = (
+        max(0.0, checked_at - account_updated_at)
+        if account_updated_at > 0
+        else None
+    )
+    positions_age = (
+        max(0.0, checked_at - positions_updated_at)
+        if positions_updated_at > 0
+        else None
+    )
+    safety_age_raw = loop.get("safety_heartbeat_age_sec")
+    safety_age = float(safety_age_raw) if safety_age_raw is not None else None
+    safety_payload = loop.get("safety") if isinstance(loop.get("safety"), dict) else {}
+    safety_reconciliation_state = str(
+        safety_payload.get("reconciliation_state") or "unknown"
+    )
+    safety_blockers = sorted(
+        {str(item) for item in list(safety_payload.get("blockers") or []) if str(item)}
+    )
+    safety_accepting_new_risk = bool(
+        safety_payload.get("accepting_new_risk", False)
+    )
+    unknown_raw = safety_payload.get("unknown_execution_count")
+    try:
+        unknown_execution_count = int(unknown_raw) if unknown_raw is not None else None
+    except (TypeError, ValueError):
+        unknown_execution_count = None
+    account_ready = bool(
+        account
+        and account.get("ok")
+        and account_updated_at > 0
+        and bool(account_reconcile_id)
+        and account_age is not None
+        and account_age <= 15.0
+        and account_reconcile_failed_at <= account_updated_at
+    )
+    positions_ready = bool(
+        positions_updated_at > 0
+        and bool(positions_reconcile_id)
+        and positions_age is not None
+        and positions_age <= 15.0
+        and positions_reconcile_failed_at <= positions_updated_at
+    )
+    safety_ready = bool(
+        not loop_running
+        or (
+            loop_running
+            and safety_age is not None
+            and safety_age <= 15.0
+            and unknown_execution_count == 0
+            and safety_reconciliation_state == "fresh"
+            and not safety_blockers
+            and safety_accepting_new_risk
+        )
+    )
     bridge_ready = bool(diag.get("bridge_ready"))
+    loop_phase = str(loop.get("phase") or ("running" if loop_running else "stopped"))
+    loop_ready = bool(loop.get("ready"))
+    loop_accepting_new_risk = bool(loop.get("accepting_new_risk"))
+    loop_blockers = sorted(
+        {str(item) for item in list(loop.get("blockers") or []) if str(item)}
+    )
+    loop_contract_ready = bool(
+        loop_running
+        and loop_phase == "running"
+        and loop_ready
+        and loop_accepting_new_risk
+        and not loop_blockers
+    )
+    overall_ready = bool(
+        loop_contract_ready
+        and bridge_ready
+        and account_ready
+        and positions_ready
+        and safety_ready
+    )
 
     state = "idle"
     if loop_running:
-        if bridge_ready and account_ready and positions_ready:
+        if overall_ready:
             state = "ready"
-        elif broker_status in {"connected", "warming_up"}:
+        elif (
+            loop_phase in {"starting"}
+            and broker_status in {"connected", "warming_up"}
+        ):
             state = "warming_up"
         else:
             state = "degraded"
@@ -4403,25 +6269,94 @@ def get_live_readiness(broker: str = "ctrader") -> dict:
     reasons: list[str] = []
     if not bridge_ready and loop_running:
         reasons.append("bridge_not_ready")
+    if loop_running and loop_phase != "running":
+        reasons.append(f"loop_phase_{loop_phase}")
+    if loop_running and not loop_ready:
+        reasons.append("loop_not_ready")
+    if loop_running and not loop_accepting_new_risk:
+        reasons.append("loop_not_accepting_new_risk")
+    reasons.extend(loop_blockers)
     if not account_ready:
-        reasons.append("account_not_ready")
+        if not account_reconcile_id or account_updated_at <= 0 or not account:
+            reasons.append("account_reconcile_unknown")
+        elif account_age is None or account_age > 15.0:
+            reasons.append("account_reconcile_stale")
+        elif not account.get("ok"):
+            reasons.append("account_reconcile_invalid")
+        elif account_reconcile_failed_at > account_updated_at:
+            reasons.append("account_reconcile_failed")
     if positions_updated_at <= 0:
-        reasons.append("positions_never_synced")
-    elif len(positions) == 0:
-        reasons.append("positions_empty")
+        reasons.append("positions_reconcile_unknown")
+    elif not positions_reconcile_id:
+        reasons.append("positions_reconcile_identity_missing")
+    elif positions_age is None or positions_age > 15.0:
+        reasons.append("positions_reconcile_stale")
+    elif positions_reconcile_failed_at > positions_updated_at:
+        reasons.append("positions_reconcile_failed")
+    if loop_running and not safety_ready:
+        if safety_age is None:
+            reasons.append("safety_heartbeat_unknown")
+        elif safety_age > 15.0:
+            reasons.append("safety_heartbeat_stale")
+        if unknown_execution_count is None:
+            reasons.append("unknown_execution_status_unavailable")
+        elif unknown_execution_count > 0:
+            reasons.append("unresolved_execution_intent")
+        if safety_reconciliation_state != "fresh":
+            reasons.append("safety_position_reconcile_not_fresh")
+        if not safety_accepting_new_risk:
+            reasons.append("safety_not_accepting_new_risk")
+        reasons.extend(safety_blockers)
     if broker_error:
         reasons.append("broker_error")
+    reasons = sorted(set(reasons))
 
     return {
+        "ok": overall_ready,
         "state": state,
         "broker_status": broker_status,
         "broker_error": broker_error,
         "loop_running": loop_running,
+        "loop_phase": loop_phase,
+        "loop_ready": loop_ready,
+        "loop_accepting_new_risk": loop_accepting_new_risk,
+        "loop_blockers": loop_blockers,
         "bridge_ready": bridge_ready,
         "account_ready": account_ready,
         "positions_ready": positions_ready,
+        "safety_ready": safety_ready,
+        "safety_reconciliation_state": safety_reconciliation_state,
+        "safety_accepting_new_risk": safety_accepting_new_risk,
+        "safety_blockers": safety_blockers,
+        "safety_authority": (
+            "phase2_serial_safety_plane" if v2_active else "legacy_authoritative"
+        ),
+        "safety_heartbeat_state": (
+            "current"
+            if safety_age is not None and safety_age <= 15.0
+            else "unknown"
+            if safety_age is None
+            else "stale"
+        ),
+        "safety_heartbeat_age_sec": safety_age,
+        "account_reconcile_age_sec": account_age,
+        "positions_reconcile_age_sec": positions_age,
+        "unknown_execution_count": unknown_execution_count,
+        "account_reconcile_id": account_reconcile_id or None,
+        "positions_reconcile_id": positions_reconcile_id or None,
+        "account_reconcile_failed_at": account_reconcile_failed_at or None,
+        "positions_reconcile_failed_at": positions_reconcile_failed_at or None,
+        "account_reconcile_error": account_reconcile_error or None,
+        "positions_reconcile_error": positions_reconcile_error or None,
         "account_updated_at": account_updated_at or None,
         "positions_updated_at": positions_updated_at or None,
+        "account_event_updated_at": account_event_updated_at or None,
+        "positions_event_updated_at": positions_event_updated_at or None,
+        "account_event_reason": _live_state_get("account_event_reason", None),
+        "positions_event_reason": _live_state_get("positions_event_reason", None),
+        "positions_component_facts": (
+            _live_state_get("positions_component_facts", {}, clone=True) or {}
+        ),
         "positions_count": len(positions),
         "positions": positions,
         "reasons": reasons,
@@ -4438,9 +6373,12 @@ def get_account(broker: str) -> dict:
     readiness = get_live_readiness(broker)
     # ── 缓存短路: loop 在跑 → 只读 _live_state ──
     if _live_state_get("loop_running") and _live_state_get("broker") == broker:
-        acct = _live_state_get("account", clone=True)
+        acct = _live_state_get("account_reconciled", clone=True)
         if acct and acct.get("ok"):
             result = dict(acct)
+            result["reconcile_status"] = (
+                "fresh" if readiness.get("account_ready") else "stale"
+            )
             result["readiness"] = readiness
             return result
         # 缓存没准备好 (loop 刚启动或第一次 tick 未完成)
@@ -4465,18 +6403,52 @@ def get_account(broker: str) -> dict:
                     "error": "cTrader connecting in background, first account query pending (within 30s)",
                     "readiness": readiness,
                 }
-            info = bridge.account_info()
-            if not info:
-                return {"ok": False, "broker": "ctrader", "error": "account_info returned empty"}
-            if not isinstance(info, dict):
-                from dataclasses import asdict
-                info_dict = asdict(info)
-            else:
-                info_dict = info
+            reconcile = _explicit_account_reconcile(bridge)
+            if reconcile is None:
+                cached = _live_state_get("account_reconciled", {}, clone=True) or {}
+                cached_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
+                cached_id = str(_live_state_get("account_reconcile_id", "") or "")
+                if cached and cached_at > 0 and cached_id:
+                    return {
+                        **dict(cached),
+                        "ok": True,
+                        "broker": "ctrader",
+                        "reconcile_status": "failed",
+                        "readiness": get_live_readiness("ctrader"),
+                    }
+                return {
+                    "ok": False,
+                    "broker": "ctrader",
+                    "error": "fresh account reconcile unavailable",
+                    "reconcile_status": "failed",
+                    "readiness": get_live_readiness("ctrader"),
+                }
+            info = _reconcile_value(reconcile, "account", None)
+            observed_at = float(_reconcile_value(reconcile, "observed_at", 0.0) or 0.0)
+            if info is None or observed_at <= 0:
+                return {
+                    "ok": False,
+                    "broker": "ctrader",
+                    "error": "fresh account reconcile returned no observation",
+                    "reconcile_status": "failed",
+                    "readiness": get_live_readiness("ctrader"),
+                }
+            info_dict = asdict(info) if is_dataclass(info) else dict(info)
             info_dict.setdefault("ok", True)
             info_dict.setdefault("broker", "ctrader")
-            # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
-            _live_state_update(account=info_dict, account_updated_at=time.time())
+            info_dict["reconcile_status"] = "fresh"
+            # Preserve the broker observation time. HTTP fetch time is not a
+            # broker fact and must never rejuvenate an older cache projection.
+            _live_state_update(
+                account=info_dict,
+                account_reconciled=copy.deepcopy(info_dict),
+                account_updated_at=observed_at,
+                account_reconcile_id=str(
+                    _reconcile_value(reconcile, "reconcile_id", "") or ""
+                ),
+                account_reconcile_failed_at=None,
+                account_reconcile_error=None,
+            )
             return {"ok": True, "broker": "ctrader", **info_dict, "readiness": get_live_readiness("ctrader")}
         try:
             return _cache_get_or_refresh(_ACCOUNT_CACHE, _CACHE_TTL, _fetch)
@@ -4506,16 +6478,32 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             now_ts=time.time(),
             persist=False,
             broker=broker,
-            account=_live_state_get("account", {}, clone=True) or {},
+            account=_live_state_get("account_reconciled", {}, clone=True) or {},
         )
 
+    def _visible_positions(pos_list: list[Any]) -> list[dict]:
+        visible = _enrich_positions(pos_list)
+        if symbol:
+            expected = str(symbol).upper()
+            visible = [
+                item
+                for item in visible
+                if str(item.get("symbol") or "").upper() == expected
+            ]
+        return visible
+
     if _live_state_get("loop_running") and _live_state_get("broker") == broker:
-        if readiness["positions_ready"]:
+        cached_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
+        cached_id = str(_live_state_get("positions_reconcile_id", "") or "")
+        if cached_at > 0 and cached_id:
             return {
                 "ok": True,
                 "broker": broker,
-                "positions": _enrich_positions(readiness["positions"]),
+                "positions": _visible_positions(readiness["positions"]),
                 "warming_up": False,
+                "reconcile_status": (
+                    "fresh" if readiness.get("positions_ready") else "stale"
+                ),
                 "readiness": readiness,
             }
         return {
@@ -4528,9 +6516,9 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
     if broker == "ctrader":
         # 缓存短路: live loop 在跑 → 只读 _live_state (跟上面 if 分支等价,
         # 保留是为了 cache_fallback 的 robustness — 上层分支没匹配时这里兜底)
-        cached_positions = _live_state_get("positions", clone=True)
+        cached_positions = _live_state_get("positions_reconciled", clone=True)
         if cached_positions is not None and _live_state_get("loop_running"):
-            return {"ok": True, "broker": "ctrader", "positions": _enrich_positions(cached_positions), "readiness": readiness}
+            return {"ok": True, "broker": "ctrader", "positions": _visible_positions(cached_positions), "readiness": readiness}
         # 缓存空 fallback
         def _fetch():
             # audit 2026-06-10: _get_ctrader 返 3-tuple, warming_up 短路
@@ -4545,31 +6533,45 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                     "warming_up": True,
                     "readiness": readiness,
                 }
-            raw = bridge.get_positions(symbol)
-            positions = []
-            for p in raw:
-                api_volume = _position_api_volume(p)
-                item = {
-                    "ticket": p.get("position_id"),
-                    "symbol": p.get("symbol"),
-                    "type": p.get("type"),
-                    "volume": api_volume,
-                    "api_volume": api_volume,
-                    "price_open": p.get("price_open", 0.0),
-                    "price_current": p.get("price_current", p.get("price_open", 0.0)),
-                    "sl": p.get("sl", 0.0),
-                    "tp": p.get("tp", 0.0),
-                    "profit": p.get("profit") or 0.0,
-                    "swap": p.get("swap", 0.0),
-                    "commission": p.get("commission", 0.0),
-                    "magic": p.get("magic"),
-                    "open_time": p.get("open_timestamp", 0),
+            reconcile = _explicit_position_reconcile(bridge)
+            if str(_reconcile_value(reconcile, "status", "failed") or "failed") != "fresh":
+                cached_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
+                cached_id = str(_live_state_get("positions_reconcile_id", "") or "")
+                cached = _coerce_live_positions(
+                    _live_state_get("positions_reconciled", [], clone=True)
+                )
+                if cached_at > 0 and cached_id:
+                    visible = _visible_positions(cached)
+                    return {
+                        "ok": True,
+                        "broker": "ctrader",
+                        "positions": visible,
+                        "reconcile_status": "failed",
+                        "readiness": get_live_readiness("ctrader"),
+                    }
+                return {
+                    "ok": False,
+                    "broker": "ctrader",
+                    "error": str(
+                        _reconcile_value(reconcile, "error_code", "")
+                        or "fresh positions reconcile unavailable"
+                    ),
+                    "positions": [],
+                    "reconcile_status": "failed",
+                    "readiness": get_live_readiness("ctrader"),
                 }
-                item.update(_holding_summary_for_position(item, cfg=cfg))
-                positions.append(item)
-            # ★ 写入 _live_state, 让 WS /ws/state 立即看到数据 (不依赖 live loop)
-            _live_state_update(positions=positions, positions_updated_at=time.time())
-            return {"ok": True, "broker": "ctrader", "positions": positions, "readiness": get_live_readiness("ctrader")}
+            positions = _publish_fresh_position_reconcile(
+                reconcile,
+                broker="ctrader",
+            )
+            visible = _visible_positions(positions)
+            return {
+                "ok": True,
+                "broker": "ctrader",
+                "positions": visible,
+                "reconcile_status": "fresh",
+                "readiness": get_live_readiness("ctrader"),
+            }
         try:
             return _cache_get_or_refresh(_POSITIONS_CACHE, _POSITIONS_CACHE_TTL, _fetch)
         except Exception as e:
@@ -4590,11 +6592,201 @@ _loop_strategy_name: str | None = "factor_pipeline_v4"
 _loop_state_lock = threading.Lock()
 _OPEN_TRADE_ADMISSION_LOCK = threading.Lock()
 _process_shutdown_requested = False
+_LIVE_LOOP_CONTROLLER = LiveLoopController()
+_live_safety_plane: LiveSafetyPlane | None = None
+_live_safety_plane_owner: str = ""
+_live_safety_watchdog: LiveSafetyWatchdog | None = None
 # ★ v9-fix: 重启退避 + 价格僵死检测 + 备份 bar 缓存
 _last_loop_end: float = 0.0
 _MIN_RESTART_INTERVAL = 60  # 最小重启间隔 60s
 _BAR_CACHE_PATH = Path(__file__).resolve().parent.parent.parent / "logs" / ".bar_cache.pkl"
 _PRICE_STUCK_WARNED: dict[str, float] = {}  # {(broker,tf): last_price}
+
+
+def _phase2_feature_flags():
+    return shared_static_feature_flags()
+
+
+def _generation_controller_enabled() -> bool:
+    return bool(_phase2_feature_flags().live_generation_controller_v2_enabled)
+
+
+def _phase2_v2_active() -> bool:
+    flags = _phase2_feature_flags()
+    return bool(
+        _generation_controller_enabled()
+        or str(flags.live_safety_plane_v2_mode) != "off"
+        # Execution-outcome recovery is itself a startup/new-risk barrier.  It
+        # must not silently fall back to the legacy alpha-first loop merely
+        # because generation ownership and Safety v2 are still off.
+        or bool(flags.ctrader_execution_outcome_v2_enabled)
+    )
+
+
+def _current_generation_id() -> str:
+    current = _LIVE_LOOP_CONTROLLER.current()
+    return str(current.generation_id) if current is not None else ""
+
+
+def _get_live_safety_plane(generation_id: str = "") -> LiveSafetyPlane:
+    global _live_safety_plane, _live_safety_plane_owner
+    owner = str(generation_id or "legacy")
+    mode = str(_phase2_feature_flags().live_safety_plane_v2_mode)
+    if (
+        _live_safety_plane is None
+        or _live_safety_plane_owner != owner
+        or _live_safety_plane.mode != mode
+    ):
+        _live_safety_plane = LiveSafetyPlane(mode=mode)
+        _live_safety_plane_owner = owner
+    if mode == "enforce" and not _live_safety_plane.forced_shadow:
+        # Re-read the additive authority cause even for an existing plane so
+        # another process/generation cannot leave this loop enforcing V2 after
+        # a shared comparison failure has already forced the deployment back
+        # to legacy authority.
+        persisted_override = safety_v2_forced_shadow_status()
+        if bool(persisted_override.get("active")):
+            _live_safety_plane.force_shadow(
+                str(
+                    persisted_override.get("reason")
+                    or "persisted_safety_v2_forced_shadow"
+                )
+            )
+    return _live_safety_plane
+
+
+def _live_safety_watchdog_probe() -> dict[str, Any]:
+    """Return process facts only; the watchdog never calls the broker."""
+
+    thread_alive = bool(_loop_thread is not None and _loop_thread.is_alive())
+    safety = _live_state_get("safety_plane", {}, clone=True) or {}
+    heartbeat_at = float(safety.get("heartbeat_at", 0.0) or 0.0)
+    if _generation_controller_enabled():
+        controller = _LIVE_LOOP_CONTROLLER.status()
+        heartbeat_at = float(controller.get("safety_heartbeat_at", 0.0) or 0.0)
+    unknown_raw = safety.get("unknown_execution_count")
+    return {
+        # The feature flag selects the authoritative planner; it must never
+        # disable the heartbeat invariant for a running legacy/off loop.
+        "enabled": bool(thread_alive or _live_state_get("loop_running", False)),
+        "running": thread_alive,
+        "started_at": float(_loop_started_at or 0.0),
+        "safety_heartbeat_at": heartbeat_at,
+        "account_updated_at": float(_live_state_get("account_updated_at", 0.0) or 0.0),
+        "positions_updated_at": float(_live_state_get("positions_updated_at", 0.0) or 0.0),
+        "unknown_execution_count": unknown_raw,
+    }
+
+
+def _persist_safety_fail_closed(
+    *,
+    blockers: list[str] | tuple[str, ...],
+    source: str,
+    error: str = "",
+) -> dict[str, Any]:
+    """Durably block new risk without changing any broker action result."""
+
+    normalized = sorted({str(item) for item in blockers if str(item)}) or [
+        "safety_state_unavailable"
+    ]
+    latch = no_new_risk_latch_status(fail_closed=True)
+    forced_shadow = "safety_v2_forced_shadow" in normalized
+    persisted_forced_shadow = safety_v2_forced_shadow_status()
+    latch_cause = "safety_v2_forced_shadow" if forced_shadow else "safety_freshness"
+    latch_cause_id = (
+        "candidate_comparison" if forced_shadow else str(source or "safety")
+    )
+    active_cause_keys = {
+        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+        for item in list(latch.get("causes") or [])
+        if isinstance(item, dict)
+    }
+    needs_latch_record = (latch_cause, latch_cause_id) not in active_cause_keys or (
+        forced_shadow and not bool(persisted_forced_shadow.get("active"))
+    )
+    if needs_latch_record:
+        try:
+            latch = activate_no_new_risk_latch(
+                reason=(
+                    "safety_v2_forced_shadow"
+                    if forced_shadow
+                    else "safety_freshness_failed"
+                ),
+                actor=f"system:{source or 'safety'}",
+                metadata={
+                    "blockers": normalized,
+                    "error": str(error or "")[:1000],
+                    "forced_shadow": forced_shadow,
+                },
+                cause=latch_cause,
+                cause_id=latch_cause_id,
+            )
+        except Exception as exc:
+            # activate_no_new_risk_latch installs an in-process fail-closed
+            # latch before raising on storage failure.
+            latch = no_new_risk_latch_status(fail_closed=True)
+            error = f"{error}; latch_error={type(exc).__name__}:{exc}".strip("; ")
+    payload = {
+        "schema_version": "live_safety_failure.v1",
+        "status": "no_new_risk_latched",
+        "source": str(source or "safety"),
+        "blockers": normalized,
+        "error": str(error or "")[:2000],
+        "detected_at": time.time(),
+        "latch": dict(latch or {}),
+    }
+    _live_state_update(
+        accepting_new_risk=False,
+        safety_failure=payload,
+        no_new_risk_latch=latch,
+    )
+    if _generation_controller_enabled():
+        current = _LIVE_LOOP_CONTROLLER.current()
+        if current is not None:
+            try:
+                _LIVE_LOOP_CONTROLLER.update_runtime_health(
+                    current.generation_id,
+                    blockers=tuple(normalized),
+                )
+            except RuntimeError:
+                pass
+    if needs_latch_record or error:
+        try:
+            append_safety_outbox(
+                event_type="live_safety_fail_closed",
+                payload=payload,
+                error=str(error or ""),
+            )
+        except Exception as outbox_exc:
+            logger.error("[live] safety fail-closed outbox unavailable: %s", outbox_exc)
+    return payload
+
+
+def _on_live_safety_watchdog_violation(result: SafetyFreshnessResult) -> None:
+    _persist_safety_fail_closed(
+        blockers=result.blockers,
+        source="safety_watchdog",
+    )
+
+
+def _start_live_safety_watchdog() -> bool:
+    global _live_safety_watchdog
+    if _live_safety_watchdog is None:
+        _live_safety_watchdog = LiveSafetyWatchdog(
+            probe=_live_safety_watchdog_probe,
+            on_violation=_on_live_safety_watchdog_violation,
+            interval_sec=5.0,
+            stale_after_sec=15.0,
+        )
+    return _live_safety_watchdog.start()
+
+
+def _stop_live_safety_watchdog() -> None:
+    global _live_safety_watchdog
+    watchdog = _live_safety_watchdog
+    if watchdog is not None:
+        watchdog.stop(timeout_sec=2.0)
+    _live_safety_watchdog = None
 
 
 def _scheduled_awe_adapt():
@@ -4794,13 +6986,16 @@ def _offmarket_high_load_allowed(session: dict[str, Any]) -> tuple[bool, str]:
     return offmarket_high_load_allowed(session)
 
 
-def _scheduled_offmarket_position_quality_lightgbm() -> dict[str, Any]:
+def _scheduled_offmarket_position_quality_lightgbm(
+    *,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
     from backend.services.learning_research_jobs import run_offmarket_position_quality_job
 
     session = _live_state_get("market_session", {}, clone=True) or {}
     if not session:
         session = _market_session_snapshot(None)
-    return run_offmarket_position_quality_job(session=session)
+    return run_offmarket_position_quality_job(session=session, db_path=db_path)
 
 
 
@@ -4895,13 +7090,128 @@ def _stop_live_scheduler():
 def loop_status() -> dict:
     """Whether the live trading loop thread is running. 优先 _live_state 缓存."""
     with _loop_state_lock:
-        return _loop_status_snapshot(
+        legacy = _loop_status_snapshot(
             state_get=_live_state_get,
             thread=_loop_thread,
             broker=_loop_broker,
             started_at=_loop_started_at,
             strategy_name=_loop_strategy_name,
         )
+        if _generation_controller_enabled():
+            generation = _LIVE_LOOP_CONTROLLER.status()
+        else:
+            thread_alive = bool(_loop_thread is not None and _loop_thread.is_alive())
+            draining = bool(
+                thread_alive
+                and _loop_stop_flag is not None
+                and _loop_stop_flag.is_set()
+            )
+            safety = _live_state_get("safety_plane", {}, clone=True) or {}
+            heartbeat_at = float(safety.get("heartbeat_at", 0.0) or 0.0)
+            heartbeat_age = max(0.0, time.time() - heartbeat_at) if heartbeat_at > 0 else None
+            heartbeat_healthy = bool(
+                heartbeat_age is not None and heartbeat_age <= 15.0
+            )
+            generation = {
+                "phase": (
+                    "draining"
+                    if draining
+                    else
+                    "degraded"
+                    if thread_alive and not heartbeat_healthy
+                    else "running"
+                    if thread_alive
+                    else "stopped"
+                ),
+                "generation": "",
+                "thread_alive": thread_alive,
+                "ready": bool(thread_alive and heartbeat_healthy and not draining),
+                "accepting_new_risk": bool(
+                    thread_alive
+                    and heartbeat_healthy
+                    and not draining
+                    and _live_state_get("accepting_new_risk", True)
+                    and not no_new_risk_latched(fail_closed=True)
+                ),
+                "safety_heartbeat_at": heartbeat_at or None,
+                "alpha_heartbeat_at": None,
+                "safety_heartbeat_age_sec": heartbeat_age,
+                "alpha_heartbeat_age_sec": None,
+                "startup_barrier": {},
+                "blockers": sorted(
+                    (
+                        ["live_loop_draining"]
+                        if draining
+                        else []
+                    )
+                    + (
+                        []
+                        if heartbeat_healthy
+                        else [
+                            "safety_heartbeat_unknown"
+                            if heartbeat_age is None
+                            else "safety_heartbeat_stale"
+                        ]
+                    )
+                ),
+                "components": {},
+            }
+        freshness = evaluate_safety_freshness(
+            _live_safety_watchdog_probe(),
+            now=time.time(),
+            stale_after_sec=15.0,
+        )
+        local_blockers: list[str] = []
+        if freshness.enabled and freshness.running and not freshness.ok:
+            local_blockers.extend(freshness.blockers)
+        if no_new_risk_latched(fail_closed=True):
+            local_blockers.append("no_new_risk_latched")
+        if bool(generation.get("thread_alive")):
+            reconcile_blockers = _new_risk_reconciliation_blockers()
+            _live_state_update(new_risk_reconcile_blockers=reconcile_blockers)
+            local_blockers.extend(reconcile_blockers)
+            session_status = str(
+                _live_state_get("session_state_status", "unknown") or "unknown"
+            )
+            if session_status != "available":
+                local_blockers.append(f"session_state_{session_status}")
+            if bool(_live_state_get("circuit_breaker", False)):
+                local_blockers.append("session_circuit_breaker")
+            market_session = _live_state_get("market_session", {}, clone=True) or {}
+            if isinstance(market_session, dict) and (
+                "can_open_positions" in market_session
+                and not bool(market_session.get("can_open_positions"))
+            ):
+                local_blockers.append(
+                    "market_session_blocks_open"
+                )
+        if local_blockers:
+            generation = {
+                **generation,
+                "phase": (
+                    "degraded"
+                    if generation.get("phase") == "running"
+                    else generation.get("phase")
+                ),
+                "accepting_new_risk": False,
+                "blockers": sorted(
+                    set(generation.get("blockers") or ()) | set(local_blockers)
+                ),
+            }
+        return {
+            **legacy,
+            **generation,
+            # Compatibility field remains available during the v2 rollout.
+            "running": bool(generation["thread_alive"] and generation["phase"] != "stopped"),
+            "safety": _live_state_get("safety_plane", {}, clone=True) or {},
+            "safety_authority": (
+                "phase2_serial_safety_plane"
+                if _phase2_v2_active()
+                else "legacy_authoritative"
+            ),
+            "safety_heartbeat_state": freshness.state,
+            "safety_freshness": freshness.to_dict(),
+        }
 
 
 def start_loop(
@@ -4915,6 +7225,7 @@ def start_loop(
     Refuses if a loop is already running. Requires the broker to be reachable."""
     global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at, _loop_strategy_name
     global _last_loop_end
+    generation_enabled = _generation_controller_enabled()
 
     with _loop_state_lock:
         if _process_shutdown_requested:
@@ -4924,13 +7235,37 @@ def start_loop(
                 "broker": broker,
                 "strategy_name": strategy_name,
             }
+        if generation_enabled:
+            controller_status = _LIVE_LOOP_CONTROLLER.status()
+            if controller_status.get("phase") in {"starting", "running", "degraded", "draining"}:
+                return {
+                    "ok": False,
+                    "error": (
+                        "live_loop_generation_busy:"
+                        f"{controller_status.get('phase')}:{controller_status.get('generation')}"
+                    ),
+                    **controller_status,
+                }
         if _loop_thread is not None and _loop_thread.is_alive():
+            draining = bool(
+                not generation_enabled
+                and _loop_stop_flag is not None
+                and _loop_stop_flag.is_set()
+            )
             return {
                 "ok": False,
-                "error": f"live loop already running (broker={_loop_broker})",
+                "error": (
+                    "live_loop_draining"
+                    if draining
+                    else f"live loop already running (broker={_loop_broker})"
+                ),
                 "broker": _loop_broker,
                 "started_at": _loop_started_at,
                 "strategy_name": _loop_strategy_name,
+                "phase": "draining" if draining else "running",
+                "thread_alive": True,
+                "ready": False if draining else None,
+                "accepting_new_risk": False if draining else None,
             }
         if broker not in ("ctrader",):
             return {"ok": False, "error": f"unknown broker: {broker}"}
@@ -4957,42 +7292,116 @@ def start_loop(
                 "strategy_name": strategy_name,
             }
         if _loop_thread is not None and _loop_thread.is_alive():
-            return {"ok": False, "error": "another loop started during backoff wait"}
+            draining = bool(
+                not generation_enabled
+                and _loop_stop_flag is not None
+                and _loop_stop_flag.is_set()
+            )
+            return {
+                "ok": False,
+                "error": (
+                    "live_loop_draining"
+                    if draining
+                    else "another loop started during backoff wait"
+                ),
+                "phase": "draining" if draining else "running",
+                "thread_alive": True,
+                "ready": False if draining else None,
+                "accepting_new_risk": False if draining else None,
+            }
 
         # Pre-flight: broker connection must be live
         acct = {"ok": True, "broker": broker, "balance": 0, "equity": 0,
                 "margin": 0, "margin_free": 0, "leverage": 0, "currency": ""}
 
-        _loop_stop_flag = threading.Event()
-        _loop_broker = broker
-        _loop_started_at = time.time()
-        _loop_strategy_name = strategy_name  # audit 2026-06-08
-        if persist_desired:
-            _persist_loop_desired_state(
-                True,
+        generation = None
+        if generation_enabled:
+            try:
+                generation = _LIVE_LOOP_CONTROLLER.begin_start(
+                    broker=broker,
+                    strategy_name=strategy_name,
+                )
+            except RuntimeError as exc:
+                return {"ok": False, "error": str(exc), **_LIVE_LOOP_CONTROLLER.status()}
+
+        try:
+            _loop_stop_flag = generation.stop_event if generation is not None else threading.Event()
+            _loop_broker = broker
+            _loop_started_at = time.time()
+            _loop_strategy_name = strategy_name  # audit 2026-06-08
+            if persist_desired:
+                _persist_loop_desired_state(
+                    True,
+                    broker=broker,
+                    strategy_name=strategy_name,
+                    reason=trigger_reason,
+                )
+            # A generation starts with an explicit unknown account projection;
+            # only the startup reconcile may turn it into a fresh fact.
+            _prime_live_loop_state(
                 broker=broker,
                 strategy_name=strategy_name,
-                reason=trigger_reason,
+                started_at=_loop_started_at,
+                account=acct,
+                accepting_new_risk=not _phase2_v2_active(),
+                restore_session=not _phase2_v2_active(),
+                # ``acct`` is only a startup placeholder.  No mode may
+                # publish it as a broker observation; the first explicit
+                # account reconcile owns that transition.
+                account_observed=False,
             )
-        # ⚠️ audit 2026-06-09: 启动前立即填充共享缓存, 否则 WS 1s 推送读到
-        # _live_state["account"]=None → equity=0, 要等 60s 第一个 tick 才恢复.
-        _prime_live_loop_state(
-            broker=broker,
-            strategy_name=strategy_name,
-            started_at=_loop_started_at,
-            account=acct,
-        )
-        # 启动自进化 Scheduler (5 job)
-        _start_live_scheduler()
-        _loop_thread = threading.Thread(
-            target=_run_loop,
-            args=(broker, _loop_stop_flag),
-            name=f"live_loop_{broker}",
-            daemon=True,
-        )
-        _loop_thread.start()
-        logger.info(f"live loop started: broker={broker} strategy={strategy_name} thread_id={_loop_thread.ident}")
+            _start_live_safety_watchdog()
+            _start_live_scheduler()
+            if generation is not None:
+                _LIVE_LOOP_CONTROLLER.bind_component(generation.generation_id, "scheduler")
+                _LIVE_LOOP_CONTROLLER.bind_component(generation.generation_id, "refresh_worker_inline")
+            _loop_thread = threading.Thread(
+                target=_run_loop,
+                args=(broker, _loop_stop_flag, generation.generation_id if generation is not None else ""),
+                name=f"live_loop_{broker}",
+                daemon=True,
+            )
+            if generation is not None:
+                _LIVE_LOOP_CONTROLLER.bind_thread(generation.generation_id, _loop_thread)
+            _loop_thread.start()
+            logger.info(f"live loop started: broker={broker} strategy={strategy_name} thread_id={_loop_thread.ident}")
+        except Exception as exc:
+            failed_reason = f"start_failed:{type(exc).__name__}:{exc}"
+            if generation is not None:
+                _LIVE_LOOP_CONTROLLER.acknowledge_exit(
+                    generation.generation_id,
+                    failed_reason=failed_reason,
+                )
+            _loop_thread = None
+            _loop_stop_flag = None
+            _loop_broker = None
+            _loop_started_at = None
+            _loop_strategy_name = None
+            _live_state_update(
+                loop_running=False,
+                accepting_new_risk=False,
+                startup_blocker=failed_reason,
+            )
+            try:
+                _stop_live_scheduler()
+            except Exception:
+                pass
+            _stop_live_safety_watchdog()
+            return {
+                "ok": False,
+                "error": failed_reason,
+                **(_LIVE_LOOP_CONTROLLER.status() if generation is not None else {}),
+            }
 
+    phase2_active = _phase2_v2_active()
+    legacy_ready = bool(
+        not phase2_active
+        and _live_state_get("loop_running", False)
+        and _live_state_get("accepting_new_risk", False)
+        and str(_live_state_get("session_state_status", "unknown") or "unknown")
+        == "available"
+        and not no_new_risk_latched(fail_closed=True)
+    )
     return {
         "ok": True,
         "broker": broker,
@@ -5001,6 +7410,10 @@ def start_loop(
         "pid": _loop_thread.ident,  # audit 2026-06-09: alias for FE uniformity (paper/start returns pid; thread.ident is the closest equivalent for a background thread)
         "strategy_name": strategy_name,
         "trigger_reason": trigger_reason,
+        "generation": generation.generation_id if generation is not None else "",
+        "phase": "starting" if phase2_active else "running",
+        "ready": legacy_ready,
+        "accepting_new_risk": legacy_ready,
         "msg": f"live loop thread started. Read /api/live/loop-status to monitor.",
     }
 
@@ -5056,6 +7469,10 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
             }
         else:
             stop_flag = _loop_stop_flag
+            if _generation_controller_enabled():
+                generation = _LIVE_LOOP_CONTROLLER.current()
+                if generation is not None:
+                    _LIVE_LOOP_CONTROLLER.request_stop(generation.generation_id)
             draining = {
                 "schema_version": "live_loop_process_shutdown.v1",
                 "status": "draining",
@@ -5072,6 +7489,8 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
                 "timeout_sec": timeout,
                 "requested_at": requested_at,
                 "trigger_reason": trigger_reason,
+                "generation": _current_generation_id(),
+                "phase": "draining",
             }
             # Linearize process draining against the final open-order admission
             # check and market RPC.  An RPC admitted before this lock completes;
@@ -5168,53 +7587,225 @@ def stop_loop(
     """Signal the loop thread to stop. Returns immediately;
     blocking cleanup (thread join + scheduler shutdown) runs in background.
     audit v9: 停止后保留最后数据不变 (account/positions/session 冻结), 前端持续显示.
-    audit v3: 立即清 _loop_thread, 让 start_loop 不再误判"already running"
+
+    Thread ownership is retained until the owned thread has actually exited.
+    This applies even while generation v2 is disabled: a draining legacy loop
+    must never overlap a replacement loop or a second factor pipeline.
     """
     global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
-    global _last_loop_end
+    global _loop_strategy_name, _last_loop_end
 
-    with _loop_state_lock:
-        if _loop_thread is None or not _loop_thread.is_alive():
+    if _generation_controller_enabled():
+        with _loop_state_lock:
+            thread = _loop_thread
+            broker = _loop_broker
+            strategy_name = _loop_strategy_name or "factor_v4"
+            generation = _LIVE_LOOP_CONTROLLER.current()
+            if thread is None or not thread.is_alive() or generation is None:
+                if persist_desired:
+                    _persist_loop_desired_state(
+                        False,
+                        broker=broker or "ctrader",
+                        strategy_name=strategy_name,
+                        reason=trigger_reason,
+                    )
+                return {
+                    "ok": True,
+                    "was_running": False,
+                    "broker": broker,
+                    **_LIVE_LOOP_CONTROLLER.status(),
+                    "msg": "no loop running",
+                }
+            _LIVE_LOOP_CONTROLLER.request_stop(generation.generation_id)
+            with _OPEN_TRADE_ADMISSION_LOCK:
+                _live_state_update(accepting_new_risk=False)
             if persist_desired:
                 _persist_loop_desired_state(
                     False,
-                    broker=_loop_broker or "ctrader",
-                    strategy_name=_loop_strategy_name or "factor_v4",
+                    broker=broker or "ctrader",
+                    strategy_name=strategy_name,
                     reason=trigger_reason,
                 )
-            return {"ok": True, "was_running": False, "broker": None, "msg": "no loop running"}
-        broker = _loop_broker
-        if _loop_stop_flag is not None:
-            _loop_stop_flag.set()
+            _runtime_kv_set(
+                _RUNTIME_KV_LAST_SHUTDOWN,
+                {
+                    "broker": broker,
+                    "generation": generation.generation_id,
+                    "status": "draining",
+                    "ts": time.time(),
+                    "trigger_reason": trigger_reason,
+                },
+            )
+
+        def _cleanup_generation() -> None:
+            global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
+            global _loop_strategy_name, _last_loop_end
+            # Ownership is intentionally retained for the entire join.  A new
+            # start observes phase=draining even if this tick takes longer than
+            # the old five-second cleanup timeout.
+            thread.join()
+            with _loop_state_lock:
+                if _loop_thread is thread:
+                    _loop_thread = None
+                    _loop_stop_flag = None
+                    _loop_broker = None
+                    _loop_started_at = None
+                    _loop_strategy_name = None
+                    _last_loop_end = time.time()
+                    _mark_loop_stopped_for_display()
+            logger.info(
+                "[live] generation %s fully stopped; ownership released",
+                generation.generation_id,
+            )
+
+        threading.Thread(
+            target=_cleanup_generation,
+            name=f"stop_loop_cleanup_{generation.generation_id[:8]}",
+            daemon=True,
+        ).start()
+        return {
+            "ok": True,
+            "was_running": True,
+            "broker": broker,
+            "trigger_reason": trigger_reason,
+            **_LIVE_LOOP_CONTROLLER.status(),
+        }
+
+    requested_at = time.time()
+    with _loop_state_lock:
         thread = _loop_thread
-        # ★ 立即清 _loop_thread, 让 start_loop 能检测到"已停止"
-        # 后台清理线程只负责 join + scheduler shutdown
-        _loop_thread = None
-        _loop_stop_flag = None
-        _loop_broker = None
-        _loop_started_at = None
+        broker = _loop_broker
+        strategy_name = _loop_strategy_name or "factor_v4"
+        if thread is None or not thread.is_alive():
+            if _loop_thread is thread:
+                _loop_thread = None
+                _loop_stop_flag = None
+                _loop_broker = None
+                _loop_started_at = None
+                _loop_strategy_name = None
+                _last_loop_end = requested_at
+                _mark_loop_stopped_for_display()
+            was_running = False
+            draining = None
+        else:
+            # Publish the stop request before waiting for the admission lock.
+            # An open RPC already holding that lock is allowed to finish; any
+            # later contender observes this event and is rejected even if it
+            # wins the lock before this stop caller does.
+            if _loop_stop_flag is None:
+                _loop_stop_flag = threading.Event()
+            _loop_stop_flag.set()
+            draining = {
+                "schema_version": "live_loop_shutdown.v2",
+                "status": "draining",
+                "phase": "draining",
+                "ok": True,
+                "was_running": True,
+                "broker": broker,
+                "strategy_name": strategy_name,
+                "thread_id": getattr(thread, "ident", None),
+                "thread_alive": True,
+                "ready": False,
+                "accepting_new_risk": False,
+                "ownership_released": False,
+                "requested_at": requested_at,
+                "trigger_reason": trigger_reason,
+            }
+            _live_state_update(
+                loop_shutdown=draining,
+                accepting_new_risk=False,
+            )
+            was_running = True
 
-    # ★ 立即标记停止, 前端立刻看到状态变化
-    _mark_loop_stopped_for_display()  # 清策略名，防止 WS pipeline 误判运行中
+    if was_running:
+        # Linearize draining against the final open-order admission check and
+        # broker RPC.  The endpoint may wait for one already-admitted RPC, but
+        # it never releases loop ownership while that RPC/tick is still alive.
+        with _OPEN_TRADE_ADMISSION_LOCK:
+            _live_state_update(
+                loop_shutdown=draining,
+                accepting_new_risk=False,
+            )
+
     if persist_desired:
-        _persist_loop_desired_state(False, broker=broker or "ctrader", strategy_name=_loop_strategy_name or "factor_v4", reason=trigger_reason)
-    _runtime_kv_set(
-        _RUNTIME_KV_LAST_SHUTDOWN,
-        {"broker": broker, "ts": time.time(), "trigger_reason": trigger_reason},
-    )
-    _last_loop_end = time.time()
+        try:
+            _persist_loop_desired_state(
+                False,
+                broker=broker or "ctrader",
+                strategy_name=strategy_name,
+                reason=trigger_reason,
+            )
+        except Exception as exc:
+            # Local ownership/admission safety is already active.  Persistence
+            # failure must not prevent the loop from draining; latch restart
+            # admission until an operator can repair the desired-state store.
+            _persist_safety_fail_closed(
+                blockers=["loop_desired_state_persist_failed"],
+                source="legacy_loop_stop",
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
-    # 阻塞清理移到后台线程, stop 端点秒返
-    def _cleanup() -> None:
-        thread.join(timeout=5)
-        if thread.is_alive():
-            logger.warning(f"live loop thread for {broker} did not stop within 5s; will continue in background")
-        _stop_live_scheduler()
-        logger.info("[live] loop stopped, data frozen for display")
+    if not was_running:
+        return {
+            "ok": True,
+            "was_running": False,
+            "broker": broker,
+            "phase": "stopped",
+            "thread_alive": False,
+            "ready": False,
+            "accepting_new_risk": False,
+            "msg": "no loop running",
+        }
 
-    threading.Thread(target=_cleanup, name="stop_loop_cleanup", daemon=True).start()
-    logger.info("[live] stop signaled, cleanup in background")
-    return {"ok": True, "was_running": True, "broker": broker, "trigger_reason": trigger_reason}
+    _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, draining)
+
+    # The production target's ``_run_loop`` finally block stops generation
+    # components before the thread exits.  Cleanup therefore only joins and
+    # conditionally releases the exact ownership it captured.
+    def _cleanup_legacy() -> None:
+        global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
+        global _loop_strategy_name, _last_loop_end
+
+        thread.join()
+        finished_at = time.time()
+        with _loop_state_lock:
+            ownership_released = _loop_thread is thread
+            if ownership_released:
+                _loop_thread = None
+                _loop_stop_flag = None
+                _loop_broker = None
+                _loop_started_at = None
+                _loop_strategy_name = None
+                _last_loop_end = finished_at
+                _mark_loop_stopped_for_display()
+
+        completed = {
+            **draining,
+            "status": "completed",
+            "phase": "stopped",
+            "thread_alive": False,
+            "ownership_released": ownership_released,
+            "replacement_detected": not ownership_released,
+            "finished_at": finished_at,
+        }
+        if ownership_released:
+            _live_state_update(
+                loop_shutdown=completed,
+                accepting_new_risk=False,
+            )
+        _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, completed)
+        logger.info(
+            "[live] legacy loop fully stopped; ownership_released=%s",
+            ownership_released,
+        )
+
+    threading.Thread(
+        target=_cleanup_legacy,
+        name="stop_loop_cleanup_legacy",
+        daemon=True,
+    ).start()
+    logger.info("[live] legacy stop signaled; ownership retained while draining")
+    return dict(draining)
 
 
 def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bars: int = 200) -> "pd.DataFrame | None":
@@ -5545,6 +8136,495 @@ def _load_bar_cache() -> "pd.DataFrame | None":
     return None
 
 
+def _publish_fresh_position_reconcile(result: Any, *, broker: str) -> list[dict[str, Any]]:
+    if str(_reconcile_value(result, "status", "failed") or "failed") != "fresh":
+        return []
+    reconcile_id = str(_reconcile_value(result, "reconcile_id", "") or "")
+    positions = _coerce_live_positions(_reconcile_value(result, "positions", ()) or ())
+    observed_at = float(_reconcile_value(result, "observed_at", 0.0) or 0.0)
+    if not reconcile_id or not _fresh_observation_timestamp(observed_at):
+        return []
+    raw_components = _reconcile_value(result, "components", {}) or {}
+    component_facts: dict[str, dict[str, Any]] = {}
+    if hasattr(raw_components, "items"):
+        for name, fact in raw_components.items():
+            if fact is None:
+                continue
+            if is_dataclass(fact):
+                payload = asdict(fact)
+            elif isinstance(fact, dict):
+                payload = dict(fact)
+            else:
+                payload = {
+                    field: getattr(fact, field)
+                    for field in (
+                        "state",
+                        "source",
+                        "observed_at",
+                        "reason_code",
+                        "known_position_ids",
+                        "unknown_position_ids",
+                    )
+                    if hasattr(fact, field)
+                }
+            for key in ("known_position_ids", "unknown_position_ids"):
+                if isinstance(payload.get(key), tuple):
+                    payload[key] = list(payload[key])
+            component_facts[str(name)] = payload
+    try:
+        from config.runtime_config import shared as _rc
+
+        positions = _enrich_positions_with_path_metrics(
+            positions,
+            cfg=_rc(),
+            now_ts=observed_at,
+            persist=False,
+            broker=broker,
+            strategy_name=str(_loop_strategy_name or "factor_v4"),
+            account=_live_state_get("account", {}, clone=True) or {},
+        )
+    except Exception as exc:
+        # Enrichment/audit is advisory; the broker snapshot remains usable by
+        # the safety plane when PostgreSQL or learning metadata is unavailable.
+        logger.warning("[live] position snapshot enrichment unavailable: %s", exc)
+    _live_state_update(
+        positions=positions,
+        positions_reconciled=copy.deepcopy(positions),
+        positions_updated_at=observed_at,
+        positions_reconcile_id=reconcile_id,
+        positions_reconcile_failed_at=None,
+        positions_reconcile_error=None,
+        positions_component_facts=copy.deepcopy(component_facts),
+    )
+    return positions
+
+
+def _safety_reference_price(bridge: Any, positions: list[dict[str, Any]]) -> float:
+    try:
+        quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}
+        if quote:
+            _live_state_update(spot_quote=quote)
+        if _quote_is_fresh(quote):
+            price = float(quote.get("mid") or 0.0)
+            if price > 0:
+                return price
+    except Exception:
+        pass
+    for position in positions:
+        for field in ("current_price", "price_current", "entry_price", "price_open", "open_price"):
+            try:
+                price = float(position.get(field) or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            if price > 0:
+                return price
+    return float(get_latest_price() or 0.0)
+
+
+def _live_safety_planner_runtime() -> SafetyPlannerRuntime:
+    """Build read-only adapters shared by two independent planning algorithms."""
+
+    def build_timeout_context(position, effective_cfg, now_ts):
+        pid = int(position.get("position_id") or position.get("ticket") or 0)
+        timeframe = str(getattr(effective_cfg, "timeframe", "M5") or "M5")
+        temporal = _temporal_context_for_trade(
+            decision_ts=float(now_ts),
+            timeframe=timeframe,
+        )
+        return _lifecycle_build_close_position_risk_context_payload(
+            position_id=pid,
+            close_reason="holding_timeout",
+            mode="live",
+            broker="ctrader",
+            symbol=str(position.get("symbol") or "XAUUSD+"),
+            entry_ts=float(_position_open_timestamp(position) or 0.0),
+            entry_ts_source="broker_position",
+            temporal_context=temporal,
+            max_holding_bars=int(
+                getattr(effective_cfg, "risk_max_holding_bars", 0) or 0
+            ),
+        )
+
+    def load_entry_plan(position_id: int) -> dict[str, Any]:
+        try:
+            row = _load_recovery_position_row(int(position_id))
+        except Exception:
+            return {}
+        meta = dict((row or {}).get("recovery_meta") or {})
+        return dict(meta.get("entry_protection_plan") or {})
+
+    def evaluate_supervisor_read_only(position, all_positions, effective_cfg, acct, now_ts):
+        existing = position.get("supervisor")
+        if isinstance(existing, dict) and existing.get("action"):
+            return copy.deepcopy(existing)
+        timeout_context = build_timeout_context(position, effective_cfg, now_ts)
+        planner_position = dict(position)
+        planner_position["max_holding_seconds"] = float(
+            timeout_context.get("max_holding_seconds", 0.0) or 0.0
+        )
+        planner_position["holding_timeout_ratio"] = float(
+            timeout_context.get("holding_timeout_ratio", 0.0) or 0.0
+        )
+        metric_names = {
+            "mfe",
+            "mae",
+            "giveback_ratio",
+            "profit_capture_ratio",
+            "time_in_profit",
+            "time_in_profit_seconds",
+            "holding_efficiency",
+            "time_decay_score",
+            "thesis_status",
+            "regime_shift",
+            "entry_regime",
+            "current_regime",
+        }
+        metrics = {
+            name: planner_position[name]
+            for name in metric_names
+            if name in planner_position
+        }
+        context_inputs = _lifecycle_build_position_supervisor_context_inputs(
+            position=planner_position,
+            cfg=effective_cfg,
+            positions=list(all_positions),
+            account=dict(acct or {}),
+            entry_decision_id="",
+            risk_snapshot=_live_state_get("risk", {}, clone=True) or {},
+            total_api_volume=_tracked_total_api_volume(list(all_positions)),
+            loop_running=bool(_live_state_get("loop_running", True)),
+        )
+        context = _lifecycle_build_position_supervisor_context_payload(
+            **context_inputs,
+            temporal_context=timeout_context,
+            position_metrics=metrics,
+        )
+        return evaluate_position_supervisor(context)
+
+    def build_trailing_update(position, existing_state, price, atr, conviction):
+        anchor = _runtime_config_anchor()
+        return _lifecycle_build_legacy_awe_trailing_update(
+            position=dict(position),
+            existing_state=dict(existing_state or {}),
+            current_price=float(price or 0.0),
+            atr_price=float(atr or 0.0),
+            conviction=float(conviction or 0.0),
+            config_version=int(anchor.get("config_version") or 0),
+            config_hash=str(anchor.get("config_hash") or ""),
+        )
+
+    pipeline = _factor_pipeline or {}
+    awe = pipeline.get("awe")
+
+    return SafetyPlannerRuntime(
+        build_timeout_context=build_timeout_context,
+        load_entry_protection_plan=load_entry_plan,
+        evaluate_supervisor=evaluate_supervisor_read_only,
+        build_trailing_update=build_trailing_update,
+        trailing_state=lambda pid: copy.deepcopy(_trailing_state.get(int(pid), {})),
+        composite_conviction=(
+            awe.composite_conviction if awe is not None else lambda: 0.0
+        ),
+    )
+
+
+def _plan_live_safety_candidates(
+    *,
+    positions: list[dict[str, Any]],
+    cfg: Any,
+    account: dict[str, Any],
+    current_price: float,
+    atr_price: float,
+    planned_at: float,
+):
+    """Wire read-only live projections into the pure v2 safety planner."""
+
+    return plan_live_safety_candidates(
+        positions=positions,
+        cfg=cfg,
+        account=account,
+        current_price=current_price,
+        atr_price=atr_price,
+        planned_at=planned_at,
+        entry_repair_cooldown_seconds=_ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS,
+        runtime=_live_safety_planner_runtime(),
+    )
+
+
+def _preview_legacy_live_safety_candidates(
+    *,
+    positions: list[dict[str, Any]],
+    cfg: Any,
+    account: dict[str, Any],
+    current_price: float,
+    atr_price: float,
+    planned_at: float,
+):
+    """Run the separate, read-only legacy arbitration preview."""
+
+    return preview_legacy_safety_candidates(
+        positions=positions,
+        cfg=cfg,
+        account=account,
+        current_price=current_price,
+        atr_price=atr_price,
+        planned_at=planned_at,
+        entry_repair_cooldown_seconds=_ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS,
+        runtime=_live_safety_planner_runtime(),
+    )
+
+
+def _execute_live_safety_candidate(
+    candidate: SafetyCandidate,
+    *,
+    bridge: Any,
+    positions: list[dict[str, Any]],
+    cfg: Any,
+    account: dict[str, Any],
+    pipeline: dict[str, Any],
+    current_price: float,
+    atr_price: float,
+    tick: int,
+    log,
+    decision_ts: float,
+) -> dict[str, Any]:
+    """Dispatch one matched V2 candidate through existing reduction executors."""
+
+    pid = int(candidate.position_id or 0)
+    position = next(
+        (
+            dict(item)
+            for item in positions
+            if int(item.get("position_id") or item.get("ticket") or 0) == pid
+        ),
+        None,
+    )
+    if position is None:
+        return {"ok": False, "status": "position_missing"}
+
+    if candidate.action == "timeout":
+        handled = _enforce_holding_timeout(
+            bridge,
+            [position],
+            cfg=cfg,
+            tick=tick,
+            log=log,
+            decision_ts=decision_ts,
+        )
+        return {
+            "ok": pid in handled,
+            "status": "dispatched" if pid in handled else "candidate_no_longer_due",
+        }
+
+    if candidate.action in {"repair_entry_protection", "trailing"}:
+        source = (
+            _ENTRY_PROTECTION_REPAIR_SOURCE
+            if candidate.action == "repair_entry_protection"
+            else "legacy_awe_trailing"
+        )
+        anchor = _runtime_config_anchor()
+        protection = ProtectionCandidate(
+            source=source,
+            action=(
+                "repair_entry_protection"
+                if candidate.action == "repair_entry_protection"
+                else "tighten"
+            ),
+            priority=20 if candidate.action == "repair_entry_protection" else 50,
+            position_id=pid,
+            risk_action="tighten_position",
+            controls=dict(candidate.controls or {}),
+            reason=source,
+            position=position,
+            config_version=int(anchor.get("config_version") or 0),
+            config_hash=str(anchor.get("config_hash") or ""),
+        )
+        applied = _execute_trailing_candidate(
+            protection,
+            bridge=bridge,
+            cfg=cfg,
+            tick=tick,
+            log=log,
+            acct=account,
+        )
+        return {"ok": bool(applied), "status": "dispatched" if applied else "not_applied"}
+
+    if candidate.action in {"close", "reduce", "tighten"}:
+        verdict = _evaluate_position_supervisor_for_position(
+            position,
+            cfg=cfg,
+            acct=account,
+            now_ts=decision_ts,
+            positions=positions,
+            persist=False,
+        )
+        observed_action = str(verdict.get("action") or "hold").strip().lower()
+        if observed_action not in {"close", "reduce", "tighten"}:
+            return {
+                "ok": False,
+                "status": "candidate_changed_before_execution",
+                "expected_fingerprint": candidate.fingerprint,
+                "observed_action": observed_action,
+            }
+        refreshed = safety_candidate(
+            action=observed_action,
+            position_id=pid,
+            source=f"supervisor_{observed_action}",
+            controls=dict(verdict.get("recommended_controls") or {}),
+        )
+        if refreshed.fingerprint != candidate.fingerprint:
+            return {
+                "ok": False,
+                "status": "candidate_changed_before_execution",
+                "expected_fingerprint": candidate.fingerprint,
+                "observed_fingerprint": refreshed.fingerprint,
+            }
+        recorded: list[SafetyCandidate] = []
+        handled = _run_position_supervision(
+            bridge,
+            [position],
+            cfg=cfg,
+            acct=account,
+            tick=tick,
+            log=log,
+            decision_ts=decision_ts,
+            planned_verdicts={pid: dict(verdict)},
+            candidate_recorder=recorded.append,
+            record_partial_close_execution=(
+                getattr(pipeline.get("attribution"), "record_partial_close", None)
+            ),
+        )
+        exact = any(item.fingerprint == candidate.fingerprint for item in recorded)
+        return {
+            "ok": pid in handled and exact,
+            "status": "dispatched" if pid in handled and exact else "not_applied",
+        }
+
+    return {"ok": False, "status": "unsupported_safety_action"}
+
+
+def _run_live_safety_cycle(
+    *,
+    bridge: Any,
+    broker: str,
+    tick: int,
+    log,
+    generation_id: str = "",
+    reconcile_result: Any | None = None,
+    force_full_cycle: bool = False,
+) -> dict[str, Any]:
+    from config.runtime_config import shared as _runtime_config
+
+    payload = _loop_v2_run_safety_cycle(
+        bridge=bridge,
+        broker=broker,
+        tick=tick,
+        log=log,
+        generation_id=generation_id,
+        reconcile_result=reconcile_result,
+        force_full_cycle=force_full_cycle,
+        runtime=LiveSafetyCycleRuntime(
+            get_safety_plane=_get_live_safety_plane,
+            explicit_position_reconcile=_explicit_position_reconcile,
+            publish_fresh_positions=_publish_fresh_position_reconcile,
+            get_live_state=_live_state_get,
+            update_live_state=_live_state_update,
+            runtime_config=_runtime_config,
+            safety_reference_price=_safety_reference_price,
+            factor_pipeline=_factor_pipeline or {},
+            plan_safety_candidates=_plan_live_safety_candidates,
+            plan_legacy_candidates=_preview_legacy_live_safety_candidates,
+            execute_safety_candidate=_execute_live_safety_candidate,
+            run_position_protection_cycle=_run_position_protection_cycle,
+            persist_safety_fail_closed=_persist_safety_fail_closed,
+            controller=_LIVE_LOOP_CONTROLLER,
+        ),
+    )
+    if str(payload.get("reconciliation_state") or "") != "fresh":
+        _mark_positions_reconcile_failed(
+            str(payload.get("reconciliation_error") or "safety_positions_reconcile_failed")
+        )
+    return payload
+
+
+def _recover_execution_outcomes_before_alpha(
+    *,
+    bridge: Any,
+    broker: str,
+    tick: int,
+    log,
+    generation_id: str,
+    safety_result: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    return _loop_recover_execution_outcomes(
+        enabled=bool(_phase2_feature_flags().ctrader_execution_outcome_v2_enabled),
+        bridge=bridge,
+        broker=broker,
+        tick=tick,
+        log=log,
+        generation_id=generation_id,
+        generation_startup_pending=bool(
+            generation_id and not _LIVE_LOOP_CONTROLLER.status().get("ready")
+        ),
+        safety_result=safety_result,
+        runtime=ExecutionRecoveryRuntime(
+            get_cached_recovery=lambda: _live_state_get(
+                "execution_recovery", {}, clone=True
+            )
+            or {},
+            update_live_state=_live_state_update,
+            explicit_position_reconcile=_explicit_position_reconcile,
+            run_safety_cycle=_run_live_safety_cycle,
+            update_generation_health=_update_execution_recovery_generation_health,
+        ),
+    )
+
+
+def _update_execution_recovery_generation_health(
+    owner: str,
+    blockers: tuple[str, ...],
+) -> None:
+    try:
+        _LIVE_LOOP_CONTROLLER.update_runtime_health(owner, blockers=blockers)
+    except RuntimeError:
+        pass
+
+
+def _attempt_generation_startup_barrier(
+    *,
+    generation_id: str,
+    bridge: Any,
+    broker: str,
+    tick: int,
+    log,
+    account_reconcile: Any,
+    positions_reconcile: Any,
+    safety_result: dict[str, Any],
+) -> bool:
+    return _loop_v2_attempt_startup_barrier(
+        generation_id=generation_id,
+        bridge=bridge,
+        broker=broker,
+        tick=tick,
+        log=log,
+        account_reconcile=account_reconcile,
+        positions_reconcile=positions_reconcile,
+        safety_result=safety_result,
+        runtime=StartupBarrierRuntime(
+            controller=_LIVE_LOOP_CONTROLLER,
+            update_live_state=_live_state_update,
+            get_live_state=_live_state_get,
+            explicit_position_reconcile=_explicit_position_reconcile,
+            publish_fresh_positions=_publish_fresh_position_reconcile,
+            run_safety_cycle=_run_live_safety_cycle,
+            restore_session_state=_restore_session_state_for_day,
+            bootstrap_position_recovery=_bootstrap_position_recovery,
+            factor_pipeline=_factor_pipeline or {},
+            strategy_name=str(_loop_strategy_name or "factor_v4"),
+        ),
+    )
+
+
 def _run_live_loop_tick_body(
     *,
     broker: str,
@@ -5554,33 +8634,379 @@ def _run_live_loop_tick_body(
     recovery_bootstrapped: bool,
     stop_requested,
     log,
+    generation_id: str = "",
 ) -> dict[str, Any]:
-    market_session = _market_session_snapshot(None)
-    if str(market_session.get("status") or "") == "closed_confirmed":
-        bridge, err, warming = _get_ctrader()
-        bridge_ready = bool(bridge is not None and not warming and bridge.is_connected)
-        if err:
-            market_session = _market_session_snapshot(None, broker_error=err)
-        elif bridge is not None:
-            market_session = _market_session_snapshot(bridge)
-        _set_loop_diagnostic(tick, "market_closed", bridge_ready=bridge_ready)
-        log(
-            _loop_market_closed_log_message(
-                tick=tick,
-                market_session=market_session,
-                bridge_ready=bridge_ready,
-                warming=warming,
-            )
+    if not _phase2_v2_active():
+        return _run_live_loop_tick_body_legacy(
+            broker=broker,
+            bridge_cfg=bridge_cfg,
+            timeframe=timeframe,
+            tick=tick,
+            recovery_bootstrapped=recovery_bootstrapped,
+            stop_requested=stop_requested,
+            log=log,
         )
-        return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": 300.0, "break_loop": False}
 
-    bridge, err, warming = _get_ctrader()
-    if err:
-        _market_session_snapshot(None, broker_error=err)
-        log(f"tick {tick}: {err}; reconnect next tick")
-        return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": 60.0, "break_loop": False}
-    bridge_ready = bridge is not None and not warming and bridge.is_connected
+    try:
+        bridge, err, warming = _get_ctrader()
+        bridge_ready = bool(
+            bridge is not None
+            and not warming
+            and getattr(bridge, "is_connected", False)
+        )
+        reconcile = _explicit_position_reconcile(bridge if bridge_ready else None)
+        safety = _run_live_safety_cycle(
+            bridge=bridge if bridge_ready else None,
+            broker=broker,
+            tick=tick,
+            log=log,
+            generation_id=generation_id,
+            reconcile_result=reconcile,
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        failure = _persist_safety_fail_closed(
+            blockers=("safety_cycle_exception",),
+            source="live_loop",
+            error=error,
+        )
+        log(f"tick {tick}: safety cycle failed closed; retry in 5s: {error}")
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": 5.0,
+            "break_loop": False,
+            "safety": {
+                "ok": False,
+                "status": "exception",
+                "accepting_new_risk": False,
+                "blockers": ["safety_cycle_exception"],
+                "failure": failure,
+            },
+        }
+    # Account freshness is required for alpha, but it is intentionally read
+    # after the position safety mutation boundary so an account RPC timeout can
+    # never postpone close/reduce/tighten work.
+    account_reconcile = _explicit_account_reconcile(bridge if bridge_ready else None)
+    account_blockers: list[str] = []
+    if account_reconcile is None:
+        account_blockers.append("fresh_account_unavailable")
+        _mark_account_reconcile_failed("fresh_account_unavailable")
+    else:
+        account = _reconcile_value(account_reconcile, "account", None)
+        if account is None:
+            account_blockers.append("fresh_account_missing")
+            _mark_account_reconcile_failed("fresh_account_missing")
+        else:
+            account_payload = asdict(account) if is_dataclass(account) else dict(account)
+            account_payload.update({"ok": True, "broker": broker})
+            _live_state_update(
+                account=account_payload,
+                account_reconciled=copy.deepcopy(account_payload),
+                account_updated_at=float(_reconcile_value(account_reconcile, "observed_at", 0.0) or 0.0),
+                account_reconcile_id=str(_reconcile_value(account_reconcile, "reconcile_id", "") or ""),
+                account_reconcile_failed_at=None,
+                account_reconcile_error=None,
+            )
+    unknown_count = int(safety.get("unknown_execution_count") or 0)
+    position_ids = list(safety.get("position_ids") or [])
+    # Keep enough margin below the 15-second freshness SLO for scheduler/RPC
+    # jitter while retaining the faster protection cadence for open/unknown
+    # execution state.
+    reconcile_state = str(safety.get("reconciliation_state") or "unknown")
+    wait_seconds = (
+        5.0
+        if position_ids or unknown_count or reconcile_state != "fresh"
+        else 10.0
+    )
+
+    if account_blockers:
+        _live_state_update(accepting_new_risk=False)
+        if generation_id:
+            _LIVE_LOOP_CONTROLLER.update_runtime_health(
+                generation_id,
+                blockers=tuple(safety.get("blockers", [])) + tuple(account_blockers),
+            )
+
+    if not bridge_ready:
+        _set_loop_diagnostic(tick, "bridge_unavailable", bridge_ready=False)
+        log(f"tick {tick}: {err or 'cTrader warming/disconnected'}; safety failed closed")
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": 5.0,
+            "break_loop": False,
+            "safety": safety,
+        }
+
+    safety, execution_recovery_ready = _recover_execution_outcomes_before_alpha(
+        bridge=bridge,
+        broker=broker,
+        tick=tick,
+        log=log,
+        generation_id=generation_id,
+        safety_result=safety,
+    )
+    unknown_count = int(safety.get("unknown_execution_count") or 0)
+    position_ids = list(safety.get("position_ids") or [])
+    reconcile_state = str(safety.get("reconciliation_state") or "unknown")
+    wait_seconds = (
+        5.0
+        if position_ids or unknown_count or reconcile_state != "fresh"
+        else 10.0
+    )
+    if not execution_recovery_ready:
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": 5.0,
+            "break_loop": False,
+            "safety": safety,
+        }
+
+    if generation_id and not _LIVE_LOOP_CONTROLLER.status().get("ready"):
+        if not _attempt_generation_startup_barrier(
+            generation_id=generation_id,
+            bridge=bridge,
+            broker=broker,
+            tick=tick,
+            log=log,
+            account_reconcile=account_reconcile,
+            positions_reconcile=reconcile,
+            safety_result=safety,
+        ):
+            return {
+                "recovery_bootstrapped": recovery_bootstrapped,
+                "wait_seconds": wait_seconds,
+                "break_loop": False,
+                "safety": safety,
+            }
+        recovery_bootstrapped = True
+
+    if account_blockers:
+        log(f"tick {tick}: fresh account unavailable; safety completed and alpha blocked")
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": 5.0,
+            "break_loop": False,
+            "safety": safety,
+        }
+
+    # Session/circuit work comes after safety and before any bar/factor/open.
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    session_status = str(_live_state_get("session_state_status", "") or "")
+    if (
+        str(_live_state_get("trade_date", "") or "") != today_str
+        or session_status != "available"
+    ):
+        # A close deal can arrive after broker position disappearance.  Retry
+        # the persistent recovery/deal sync on the serial loop before rebuilding
+        # session authority; never unblock alpha from an estimated or zero PnL.
+        if not _bootstrap_position_recovery(
+            bridge,
+            broker=broker,
+            strategy_name=str(_loop_strategy_name or "factor_v4"),
+            log=log,
+        ):
+            if generation_id:
+                _LIVE_LOOP_CONTROLLER.update_runtime_health(
+                    generation_id,
+                    blockers=tuple(safety.get("blockers", []))
+                    + ("session_close_deal_unavailable",),
+                )
+            _live_state_update(accepting_new_risk=False)
+            return {
+                "recovery_bootstrapped": False,
+                "wait_seconds": 5.0,
+                "break_loop": False,
+                "safety": safety,
+            }
+        recovery_bootstrapped = True
+        if not _restore_session_state_for_day(
+            today_str,
+            broker_open_position_ids={int(pid) for pid in position_ids},
+        ):
+            if generation_id:
+                _LIVE_LOOP_CONTROLLER.update_runtime_health(
+                    generation_id,
+                    blockers=tuple(safety.get("blockers", [])) + ("session_state_unavailable",),
+                )
+            _live_state_update(accepting_new_risk=False)
+            return {
+                "recovery_bootstrapped": recovery_bootstrapped,
+                "wait_seconds": wait_seconds,
+                "break_loop": False,
+                "safety": safety,
+            }
+    if str(_live_state_get("session_state_status", "") or "") != "available":
+        _live_state_update(accepting_new_risk=False)
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": wait_seconds,
+            "break_loop": False,
+            "safety": safety,
+        }
+    if _live_state_get("circuit_breaker", False) or _evaluate_daily_drawdown()["tripped"]:
+        log(f"tick {tick}: session circuit blocks new risk; safety already completed")
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": wait_seconds,
+            "break_loop": False,
+            "safety": safety,
+        }
+
     market_session = _market_session_snapshot(bridge)
+    if str(market_session.get("status") or "") == "closed_confirmed":
+        _set_loop_diagnostic(tick, "market_closed", bridge_ready=True)
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": wait_seconds,
+            "break_loop": False,
+            "safety": safety,
+        }
+
+    df_new = _warmup_from_local_db("XAUUSD+", timeframe, 5)
+    if df_new is None or len(df_new) == 0:
+        log(f"tick {tick}: local DB has no bars; safety remains active")
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": wait_seconds,
+            "break_loop": False,
+            "safety": safety,
+        }
+    df_new = _ensure_live_decision_bars_fresh(
+        bridge=bridge,
+        symbol="XAUUSD+",
+        timeframe=timeframe,
+        df_new=df_new,
+        tick=tick,
+        log=log,
+        market_session=market_session,
+    )
+    if df_new is None or len(df_new) == 0:
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": wait_seconds,
+            "break_loop": False,
+            "safety": safety,
+        }
+
+    plane = _get_live_safety_plane(generation_id)
+    last_index = df_new.index[-1]
+    closed_bar_id = str(last_index.isoformat() if hasattr(last_index, "isoformat") else last_index)
+    if not plane.alpha_due(closed_bar_id=closed_bar_id):
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": wait_seconds,
+            "break_loop": False,
+            "safety": safety,
+        }
+    if generation_id and not _LIVE_LOOP_CONTROLLER.accepting_new_risk(generation_id):
+        _live_state_update(accepting_new_risk=False)
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": wait_seconds,
+            "break_loop": False,
+            "safety": safety,
+        }
+    if not generation_id and not bool(safety.get("accepting_new_risk", False)):
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": wait_seconds,
+            "break_loop": False,
+            "safety": safety,
+        }
+
+    _process_tick(
+        bridge,
+        None,
+        df_new,
+        df_new.iloc[-1],
+        broker,
+        tick,
+        log,
+        stop_requested=stop_requested,
+        protection_already_run=True,
+    )
+    plane.mark_alpha_run(closed_bar_id=closed_bar_id)
+    if generation_id:
+        _LIVE_LOOP_CONTROLLER.heartbeat(generation_id, "alpha")
+    if stop_requested():
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": None,
+            "break_loop": True,
+            "safety": safety,
+        }
+    return {
+        "recovery_bootstrapped": recovery_bootstrapped,
+        "wait_seconds": wait_seconds,
+        "break_loop": False,
+        "safety": safety,
+    }
+
+
+def _run_live_loop_tick_body_legacy(
+    *,
+    broker: str,
+    bridge_cfg: Any,
+    timeframe: str,
+    tick: int,
+    recovery_bootstrapped: bool,
+    stop_requested,
+    log,
+) -> dict[str, Any]:
+    # The compatibility/off path still owns broker mutations until a staged
+    # Safety v2 rollout reaches enforce.  It must nevertheless share the same
+    # safety-first ordering: fresh broker snapshot and legacy-authoritative
+    # protection happen before session PostgreSQL, circuit, bars, factors, or
+    # any open-order path.
+    try:
+        bridge, err, warming = _get_ctrader()
+        bridge_ready = bool(
+            bridge is not None
+            and not warming
+            and getattr(bridge, "is_connected", False)
+        )
+        reconcile = _explicit_position_reconcile(
+            bridge if bridge_ready else None
+        )
+        safety = _run_live_safety_cycle(
+            bridge=bridge if bridge_ready else None,
+            broker=broker,
+            tick=tick,
+            log=log,
+            reconcile_result=reconcile,
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        _persist_safety_fail_closed(
+            blockers=("legacy_safety_cycle_exception",),
+            source="legacy_live_loop",
+            error=error,
+        )
+        log(f"tick {tick}: legacy safety failed closed; retry in 5s: {error}")
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": 5.0,
+            "break_loop": False,
+        }
+
+    safety_wait_seconds = (
+        5.0
+        if (
+            list(safety.get("position_ids") or [])
+            or int(safety.get("unknown_execution_count") or 0) > 0
+            or str(safety.get("reconciliation_state") or "unknown") != "fresh"
+            or list(safety.get("blockers") or [])
+        )
+        else 10.0
+    )
+    # The safety cycle proves that protection ran; it does not by itself
+    # authorize alpha.  Keep the projection closed until session, circuit,
+    # market, bar, and reconcile gates below have all been revalidated.
+    _live_state_update(accepting_new_risk=False)
+    market_session = _market_session_snapshot(
+        bridge if bridge_ready else None,
+        broker_error=str(err or ""),
+    )
     if str(market_session.get("status") or "") == "closed_confirmed":
         _set_loop_diagnostic(tick, "market_closed", bridge_ready=bridge_ready)
         log(
@@ -5592,41 +9018,112 @@ def _run_live_loop_tick_body(
                 after_broker_check=True,
             )
         )
-        return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": 300.0, "break_loop": False}
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": safety_wait_seconds,
+            "break_loop": False,
+        }
     _set_loop_diagnostic(
         tick,
         _loop_bridge_readiness_label(bridge_ready=bridge_ready, warming=warming),
         bridge_ready=bridge_ready,
     )
     if not bridge_ready:
-        log(f"tick {tick}: cTrader warming/disconnected, running pipeline dry")
-    else:
-        try:
-            _ensure_spot_subscription(
-                bridge,
-                log=log,
-                market_session=market_session,
-            )
-        except Exception as _spot_sub_err:
-            logger.debug("[live] spot subscription refresh skipped: %s", _spot_sub_err)
+        log(f"tick {tick}: {err or 'cTrader warming/disconnected'}; safety remains active")
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": 5.0,
+            "break_loop": False,
+        }
 
-    if bridge_ready:
-        kickoff_account_refresh(bridge, broker, interval_sec=30.0)
+    try:
+        _ensure_spot_subscription(
+            bridge,
+            log=log,
+            market_session=market_session,
+        )
+    except Exception as _spot_sub_err:
+        logger.debug("[live] spot subscription refresh skipped: %s", _spot_sub_err)
+
+    kickoff_account_refresh(bridge, broker, interval_sec=5.0)
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if (
+        not recovery_bootstrapped
+        or str(_live_state_get("trade_date", "") or "") != today_str
+        or str(_live_state_get("session_state_status", "") or "") != "available"
+    ):
+        restored = _retry_legacy_session_restore(
+            broker=broker,
+            strategy_name=str(_loop_strategy_name or "factor_v4"),
+            trade_date=today_str,
+            log=log,
+        )
+        if not restored or str(
+            _live_state_get("session_state_status", "unknown") or "unknown"
+        ) != "available":
+            _live_state_update(accepting_new_risk=False)
+            log(
+                f"tick {tick}: session risk restore pending for {today_str}; "
+                "safety completed and new risk remains blocked"
+            )
+            return {
+                "recovery_bootstrapped": False,
+                "wait_seconds": 5.0,
+                "break_loop": False,
+            }
+        recovery_bootstrapped = True
+
+    if not recovery_bootstrapped:
+        try:
+            recovery_bootstrapped = _bootstrap_position_recovery(
+                bridge,
+                broker=broker,
+                strategy_name=str(_loop_strategy_name or "factor_v4"),
+                log=log,
+            )
+        except Exception as _recovery_err:
+            log(f"tick {tick}: recovery bootstrap failed (non-fatal): {_recovery_err}")
+            recovery_bootstrapped = False
         if not recovery_bootstrapped:
-            try:
-                recovery_bootstrapped = _bootstrap_position_recovery(
-                    bridge,
-                    broker=broker,
-                    strategy_name=str(_loop_strategy_name or "factor_v4"),
-                    log=log,
-                )
-            except Exception as _recovery_err:
-                log(f"tick {tick}: recovery bootstrap failed (non-fatal): {_recovery_err}")
+            _live_state_update(accepting_new_risk=False)
+            log(
+                f"tick {tick}: recovery/deal authority unavailable; "
+                "new risk remains blocked"
+            )
+            return {
+                "recovery_bootstrapped": False,
+                "wait_seconds": 5.0,
+                "break_loop": False,
+            }
+
+    if _live_state_get("circuit_breaker", False):
+        log(f"tick {tick}: circuit breaker tripped; safety completed, skip alpha")
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": safety_wait_seconds,
+            "break_loop": False,
+        }
+    dd_state = _evaluate_daily_drawdown()
+    if dd_state["tripped"]:
+        log(
+            f"tick {tick}: CIRCUIT BREAKER: daily drawdown "
+            f"{dd_state['dd_pct']:.1f}%; safety completed"
+        )
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": safety_wait_seconds,
+            "break_loop": False,
+        }
 
     df_new = _warmup_from_local_db("XAUUSD+", timeframe, 5)
     if df_new is None or len(df_new) == 0:
         log(f"tick {tick}: local DB has no bars (waiting for CTraderPuller)")
-        return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": False}
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": safety_wait_seconds,
+            "break_loop": False,
+        }
     df_new = _ensure_live_decision_bars_fresh(
         bridge=bridge if bridge_ready else None,
         symbol="XAUUSD+",
@@ -5638,7 +9135,27 @@ def _run_live_loop_tick_body(
     )
     if df_new is None or len(df_new) == 0:
         log(f"tick {tick}: no closed decision bars available after repair")
-        return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": False}
+        return {
+            "recovery_bootstrapped": recovery_bootstrapped,
+            "wait_seconds": safety_wait_seconds,
+            "break_loop": False,
+        }
+
+    reconcile_blockers = _new_risk_reconciliation_blockers()
+    accepting_new_risk = bool(
+        safety.get("accepting_new_risk", False)
+        and not reconcile_blockers
+        and str(_live_state_get("session_state_status", "") or "") == "available"
+        and not _live_state_get("circuit_breaker", False)
+        and bool(market_session.get("can_open_positions", False))
+        and not no_new_risk_latched(fail_closed=True)
+        and not _process_shutdown_requested
+        and not stop_requested()
+    )
+    _live_state_update(
+        accepting_new_risk=accepting_new_risk,
+        new_risk_reconcile_blockers=reconcile_blockers,
+    )
 
     quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}
     if quote:
@@ -5654,14 +9171,6 @@ def _run_live_loop_tick_body(
             f"bar close={spot_result['last_close']:.2f}, using DataStore price"
         )
 
-    cb_tripped = _live_state_get("circuit_breaker", False)
-    if cb_tripped:
-        log(f"tick {tick}: circuit breaker tripped, skip trading")
-        return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": False}
-    dd_state = _evaluate_daily_drawdown()
-    if dd_state["tripped"]:
-        log(f"tick {tick}: CIRCUIT BREAKER: daily drawdown {dd_state['dd_pct']:.1f}%")
-        return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": False}
     last_bar = df_new.iloc[-1]
     _process_tick(
         bridge,
@@ -5672,16 +9181,21 @@ def _run_live_loop_tick_body(
         tick,
         log,
         stop_requested=stop_requested,
+        protection_already_run=True,
     )
     if stop_requested():
         log(f"tick {tick}: stop requested during processing, exiting")
         return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": True}
-    return {"recovery_bootstrapped": recovery_bootstrapped, "wait_seconds": None, "break_loop": False}
+    return {
+        "recovery_bootstrapped": recovery_bootstrapped,
+        "wait_seconds": safety_wait_seconds,
+        "break_loop": False,
+    }
 
 
 def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
     try:
-        acct = _live_state_get("account", {}, clone=True) or {}
+        acct = _live_state_get("account_reconciled", {}, clone=True) or {}
         _repair_session_start_balance_from_account()
         equity = float(acct.get("equity") or 0.0)
         eq_hist = _live_state_get("trade_equity_history", [], clone=True) or []
@@ -5747,8 +9261,44 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
         log(f"tick {tick}: risk calculation error (non-fatal): {risk_e}")
 
 
-def _run_loop(broker: str, stop_flag: threading.Event) -> None:
+def _run_loop(
+    broker: str,
+    stop_flag: threading.Event,
+    generation_id: str = "",
+) -> None:
+    """Generation-owned loop entrypoint with a single lifecycle exit path."""
+    failed_reason = ""
+    try:
+        _run_loop_body(broker, stop_flag, generation_id=generation_id)
+    except BaseException as exc:
+        failed_reason = f"{type(exc).__name__}: {exc}"
+        logger.exception("[live] generation %s failed", generation_id or "legacy")
+        raise
+    finally:
+        _live_state_update(accepting_new_risk=False)
+        if generation_id:
+            try:
+                _LIVE_LOOP_CONTROLLER.acknowledge_exit(
+                    generation_id,
+                    failed_reason=failed_reason,
+                )
+            except RuntimeError as exc:
+                logger.error("[live] loop exit ownership mismatch: %s", exc)
+        # A natural/fatal loop exit must not leave scheduler jobs mutating the
+        # state of a dead generation.  stop cleanup calls this again safely.
+        _stop_live_scheduler()
+        _stop_live_safety_watchdog()
+
+
+def _run_loop_body(
+    broker: str,
+    stop_flag: threading.Event,
+    *,
+    generation_id: str = "",
+) -> None:
     """Live trading loop — 全由 Factor Takeover v4 因子管道驱动。"""
+    global _factor_pipeline
+    _factor_pipeline = None
     import sys
     from pathlib import Path
     # ── 时间框架 (从 RuntimeConfig 读取) ──
@@ -5767,6 +9317,68 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
         logger.info(line)
 
     log(f"live loop started (broker={broker}, timeframe={TF})")
+
+    # Safety must become active before factor warmup, bar repair, session PG
+    # work, or any other startup activity that can be slow/fail.  The startup
+    # barrier is completed later in its documented order, but an already-open
+    # broker position receives protection immediately.
+    try:
+        startup_bridge, startup_err, startup_warming = _get_ctrader()
+        startup_ready = bool(
+            startup_bridge is not None
+            and not startup_warming
+            and getattr(startup_bridge, "is_connected", False)
+        )
+        startup_positions = _explicit_position_reconcile(
+            startup_bridge if startup_ready else None
+        )
+        startup_safety = _run_live_safety_cycle(
+            bridge=startup_bridge if startup_ready else None,
+            broker=broker,
+            tick=0,
+            log=log,
+            generation_id=generation_id,
+            reconcile_result=startup_positions,
+        )
+        if startup_ready:
+            startup_account = _explicit_account_reconcile(startup_bridge)
+            if startup_account is not None:
+                raw_account = _reconcile_value(startup_account, "account", None)
+                if raw_account is not None:
+                    account_payload = (
+                        asdict(raw_account)
+                        if is_dataclass(raw_account)
+                        else dict(raw_account)
+                    )
+                    account_payload.update({"ok": True, "broker": broker})
+                    _live_state_update(
+                        account=account_payload,
+                        account_reconciled=copy.deepcopy(account_payload),
+                        account_updated_at=float(
+                            _reconcile_value(startup_account, "observed_at", 0.0)
+                            or 0.0
+                        ),
+                        account_reconcile_id=str(
+                            _reconcile_value(startup_account, "reconcile_id", "")
+                            or ""
+                        ),
+                        account_reconcile_failed_at=None,
+                        account_reconcile_error=None,
+                    )
+        if startup_safety.get("blockers"):
+            log(
+                "startup safety fail-closed: "
+                + ",".join(str(item) for item in startup_safety.get("blockers", []))
+                + (f" broker_error={startup_err}" if startup_err else "")
+            )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        _persist_safety_fail_closed(
+            blockers=("startup_safety_cycle_exception",),
+            source="live_loop_startup",
+            error=error,
+        )
+        log(f"startup safety failed closed; main loop will retry in 5s: {error}")
 
     # ── Phase 1: warmup ──
     # audit 2026-06-08: Pepperstone demo broker ProtoOAGetTrendbarsReq 不返 history
@@ -5834,10 +9446,8 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     _save_bar_cache(df)
 
     # ── Factor Takeover v4 管道初始化 ──
-    global _factor_pipeline
     global _DECISION_LOG, _DECISION_LOG_RUN_ID
     global _LEDGER, _TRADE_REVIEWER, _EXPERIENCE_BUILDER, _POLICY_SUGGESTER
-    _factor_pipeline = None
     try:
         from config.runtime_config import shared as _rcc
         _rcfg = _rcc()
@@ -5892,6 +9502,14 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             from config.runtime_config import subscribe as _rc_subscribe
             def _on_config_change(cfg, version):
                 try:
+                    if generation_id:
+                        current = _LIVE_LOOP_CONTROLLER.current()
+                        if (
+                            current is None
+                            or current.generation_id != generation_id
+                            or current.stop_event.is_set()
+                        ):
+                            return
                     merged_cfg = _merge_portfolio_configs(
                         cfg.factor_signal_config,
                         cfg.factor_portfolio_weights,
@@ -5911,6 +9529,11 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                             RuntimeFactorSelectionProjectionService().publish(_selection)
                     except Exception as _selection_err:
                         logger.warning("[live] factor selection projection refresh failed: %s", _selection_err)
+                    _loop_ack_prepared_factor_projections(
+                        engine=(_factor_pipeline or {}).get("engine"),
+                        generation_id=str(generation_id or ""),
+                        log=log,
+                    )
                     logger.debug("[live] factor pipeline hot-reloaded (v%d)", version)
                 except Exception as _e:
                     logger.debug("[live] factor pipeline hot-reload: %s", _e)
@@ -6040,6 +9663,12 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
             log(f"Factor pipeline warmed up: {len(df)} bars, "
                 f"buffer={fp['engine'].buffer_size}, "
                 f"warm={fp['engine'].is_warm}")
+            if fp["engine"].is_warm:
+                _loop_ack_prepared_factor_projections(
+                    engine=fp["engine"],
+                    generation_id=str(generation_id or ""),
+                    log=log,
+                )
         except Exception as e:
             log(f"Factor pipeline warmup failed: {e}")
 
@@ -6058,29 +9687,10 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     # ── Phase 3: 主循环 (60s tick) ──
     tick = 0
     recovery_bootstrapped = False
-    _current_trade_date: str = ""
     while not stop_flag.is_set():
         tick += 1
         # 诊断: 记录 tick 计数和桥状态
         _set_loop_diagnostic(tick, "checking")
-
-        # ── 跨日重置熔断 + 会话统计 ──
-        try:
-            from datetime import datetime, timezone
-            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            if today_str != _current_trade_date:
-                if _current_trade_date:
-                    log(f"new trading day {today_str}, resetting session stats")
-                    _current_trade_date = today_str
-                    _reset_session_state_for_new_day()
-                elif _restore_session_state_for_day(today_str):
-                    log(f"restored session risk state for {today_str}")
-                    _current_trade_date = today_str
-                else:
-                    _current_trade_date = today_str
-                    _reset_session_state_for_new_day()
-        except Exception as _e2:
-            log(f"tick {tick}: session reset failed (non-fatal): {_e2}")
 
         # ── 主循环体: 账户刷新 + 数据读取 + 交易 ──
         try:
@@ -6092,8 +9702,21 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 recovery_bootstrapped=recovery_bootstrapped,
                 stop_requested=stop_flag.is_set,
                 log=log,
+                generation_id=generation_id,
             )
             recovery_bootstrapped = bool(tick_result["recovery_bootstrapped"])
+            # Keep a prepared factor's live load proof fresh for the next V16
+            # activation cycle. This runs only after the tick's safety/broker
+            # work; failure remains an activation blocker and never escapes
+            # into the safety loop.
+            live_engine = (_factor_pipeline or {}).get("engine")
+            if live_engine is not None and bool(getattr(live_engine, "is_warm", False)):
+                (_factor_pipeline or {})["factor_projection_ack"] = (
+                    _loop_ack_prepared_factor_projections(
+                        engine=live_engine,
+                        generation_id=str(generation_id or ""),
+                    )
+                )
             if tick_result["break_loop"]:
                 break
             wait_seconds = tick_result.get("wait_seconds")
@@ -6103,6 +9726,14 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
                 continue
         except Exception as e:
             log(f"tick {tick} error: {type(e).__name__}: {e}\n{traceback.format_exc()[-300:]}")
+            _live_state_update(accepting_new_risk=False)
+            # Safety is the first operation of every v2 tick.  Any later
+            # uncaught error must return to that boundary quickly instead of
+            # falling through to the legacy 60-second alpha cadence.
+            if _phase2_v2_active():
+                if stop_flag.wait(5.0):
+                    break
+                continue
 
         # ── 风险模块自动计算 (每 tick, 不阻塞主循环) ──
         _update_live_loop_risk_metrics(tick=tick, log=log)
@@ -6113,56 +9744,13 @@ def _run_loop(broker: str, stop_flag: threading.Event) -> None:
     log(f"loop stopped after {tick} ticks")
 
 
-def _merge_portfolio_configs(
-    signal_config: dict, weight_config: dict,
-    tactical_alpha: float, signal_threshold: float,
-) -> dict:
-    """合并 factor_signal_config (含 tags/mode) 和 factor_portfolio_weights (含 weight)
-    为 PortfolioCompositor 所需的格式: {name: {weight, tags, mode, enabled, ...}}"""
-    merged = {}
-    try:
-        from alpha.runtime_factor_selection import select_runtime_factors
-
-        selection = select_runtime_factors(signal_config)
-        selected_names = set(selection.selected_factor_ids if selection is not None else signal_config)
-        discovered_names = (selected_names - set(signal_config)) | {
-            name for name in selected_names
-            if isinstance(signal_config.get(name), dict)
-            and signal_config.get(name, {}).get("source") == "discovered"
-        }
-    except Exception:
-        selected_names = set(signal_config)
-        discovered_names = set()
-    # Runtime weights retain cold candidates for rollback/research, but only
-    # configured or budget-admitted discovered factors enter live scoring.
-    all_names = selected_names
-    for name in all_names:
-        sc = signal_config.get(name, {})
-        if not isinstance(sc, dict):
-            sc = {}
-        default_weight = 0.3 if name in discovered_names and name not in weight_config else 1.0
-        wc = weight_config.get(name, default_weight)
-        weight = wc if isinstance(wc, (int, float)) else wc.get("weight", 1.0)
-        merged[name] = {
-            "weight": weight,
-            "tags": sc.get("tags", ["GP发现"] if name in discovered_names else []),
-            "mode": sc.get("mode", "rank_mapping"),
-            "role": sc.get("role", "alpha"),
-            "enabled": sc.get("enabled", True),
-            "source": sc.get("source", "discovered" if name in discovered_names else "builtin"),
-        }
-    merged["_tactical_alpha"] = tactical_alpha
-    merged["_signal_threshold"] = signal_threshold
-    return merged
-
-
 # ── Background account/positions cache writer ─────────────────────────
 # audit 2026-06-10: 之前 _process_tick 每 60s 同步调 bridge.account_info() +
 # bridge.get_positions() 写共享缓存. 改读缓存后这个写路径被删了, WS 1s
 # 推送就拿到 start_loop 启动时的占位符 (balance=0, equity=0). 修复:
-# _run_loop 的 60s 等待期间, 后台 daemon thread 调一次 account_info +
-# get_positions, 写 _live_state. tick 主体保持非阻塞, 只有这个 writer
-# 异步. 失败时静默 (下次 tick 重试), 不让后台错误炸主循环.
+# _run_loop 的 60s 等待期间, 兼容 worker 调显式 account/position reconcile
+# 并仅按 broker observed_at 写 _live_state。cache/event/failed 绝不刷新事实时间。
+# Phase2 safety plane 启用后不使用这个并发兼容 worker。
 def _refresh_account_positions_sync(bridge, broker: str) -> None:
     """One-shot synchronous write to _live_state. Used by the background
     thread; tests call this directly. Best-effort: never raises.
@@ -6188,73 +9776,64 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
             return
         if not account_fresh:
             try:
-                raw = bridge.refresh_account_info() if hasattr(bridge, "refresh_account_info") else bridge.account_info()
+                account_reconcile = _explicit_account_reconcile(bridge)
             except Exception as e:
-                logger.warning(f"[{broker}] background account_info failed: {e}")
-                raw = None
-            if raw:
+                logger.warning(f"[{broker}] background account reconcile failed: {e}")
+                account_reconcile = None
+            raw = (
+                _reconcile_value(account_reconcile, "account", None)
+                if account_reconcile is not None
+                else None
+            )
+            account_observed_at = float(
+                _reconcile_value(account_reconcile, "observed_at", 0.0) or 0.0
+            )
+            if raw is not None and account_observed_at > 0:
                 # 统一转 dict: CTraderBridge 返 AccountInfo dataclass
-                if not isinstance(raw, dict):
-                    from dataclasses import asdict
-                    acct = asdict(raw)
-                else:
-                    acct = raw
+                acct = asdict(raw) if is_dataclass(raw) else dict(raw)
                 # audit 2026-06-10: ensure the cached account has `ok=True` so the
                 # WS snapshot doesn't mistake it for an error envelope.
                 acct.setdefault("ok", True)
                 acct.setdefault("broker", broker)
-                _live_state_update(account=acct, account_updated_at=now_ts)
-        pos_raw = None
+                _live_state_update(
+                    account=acct,
+                    account_reconciled=copy.deepcopy(acct),
+                    account_updated_at=account_observed_at,
+                    account_reconcile_id=str(
+                        _reconcile_value(account_reconcile, "reconcile_id", "") or ""
+                    ),
+                    account_reconcile_failed_at=None,
+                    account_reconcile_error=None,
+                )
+            else:
+                _mark_account_reconcile_failed("background_account_reconcile_failed")
         if not positions_fresh:
             try:
-                if hasattr(bridge, "refresh_positions"):
-                    has_reconcile_ts = hasattr(bridge, "_last_reconcile_at")
-                    before_reconcile_raw = getattr(bridge, "_last_reconcile_at", 0.0)
-                    before_reconcile = (
-                        float(before_reconcile_raw)
-                        if isinstance(before_reconcile_raw, (int, float))
-                        else 0.0
+                positions_reconcile = _explicit_position_reconcile(bridge)
+                if str(
+                    _reconcile_value(positions_reconcile, "status", "failed") or "failed"
+                ) == "fresh":
+                    _publish_fresh_position_reconcile(
+                        positions_reconcile,
+                        broker=broker,
                     )
-                    try:
-                        pos_raw = bridge.refresh_positions(force=True, allow_cache_fallback=False)
-                    except TypeError:
-                        pos_raw = bridge.refresh_positions()
-                    after_reconcile_raw = getattr(bridge, "_last_reconcile_at", 0.0)
-                    after_reconcile = (
-                        float(after_reconcile_raw)
-                        if isinstance(after_reconcile_raw, (int, float))
-                        else before_reconcile + 1.0
-                    )
-                    if has_reconcile_ts and after_reconcile <= before_reconcile:
-                        logger.warning(f"[{broker}] background positions reconcile did not advance; skip cache write")
-                        pos_raw = None
                 else:
-                    pos_raw = bridge.get_positions() or []
+                    _mark_positions_reconcile_failed(
+                        str(
+                            _reconcile_value(positions_reconcile, "error_code", "")
+                            or "background_positions_reconcile_failed"
+                        )
+                    )
             except Exception as e:
-                logger.warning(f"[{broker}] background get_positions failed: {e}")
-                pos_raw = None
-        if pos_raw is not None:
-            try:
-                from config.runtime_config import shared as _rc
-
-                cfg = _rc()
-            except Exception:
-                cfg = None
-            enriched = _enrich_positions_with_path_metrics(
-                pos_raw,
-                cfg=cfg,
-                now_ts=time.time(),
-                persist=False,
-                broker=broker,
-                strategy_name=str(_loop_strategy_name or "factor_v4"),
-                account=acct,
-            )
-            _live_state_update(positions=enriched, positions_updated_at=time.time())
+                logger.warning(f"[{broker}] background positions reconcile failed: {e}")
+                _mark_positions_reconcile_failed(
+                    f"background_positions_reconcile_exception:{type(e).__name__}"
+                )
     finally:
         _ACCOUNT_REFRESH_LOCK.release()
 
 
-def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 30.0) -> threading.Thread:
+def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 5.0) -> threading.Thread:
     """Spawn a daemon thread that periodically calls
     _refresh_account_positions_sync. Used by _run_loop during its 60s
     wait so the next WS tick has fresh account/positions data.
@@ -6329,6 +9908,7 @@ def _process_tick(
     log,
     *,
     stop_requested=None,
+    protection_already_run: bool = False,
 ) -> None:
     """处理一根新 bar — 全部由 Factor Takeover v4 因子管道驱动。"""
     global _factor_pipeline
@@ -6337,6 +9917,7 @@ def _process_tick(
             return _process_tick_factor_pipeline(
                 bridge, _factor_pipeline, df_new, last_bar, broker, tick, log,
                 stop_requested=stop_requested,
+                protection_already_run=protection_already_run,
             )
         except Exception as e:
             log(f"tick {tick}: factor pipeline error: {e}")
@@ -6479,96 +10060,78 @@ def get_latest_price() -> float | None:
 
 # ── Emergency close ──────────────────────────────────────────────────────
 
+_EMERGENCY_POST_RECONCILE_TIMEOUT_SEC = 20.0
+_EMERGENCY_POST_RECONCILE_INTERVAL_SEC = 0.5
+_EMERGENCY_MONOTONIC = time.monotonic
+_EMERGENCY_SLEEP = time.sleep
+
+
+def _recover_emergency_execution_intents(bridge: Any) -> dict[str, Any]:
+    """Resolve/read execution intents without making emergency close depend on PG.
+
+    The production cTrader bridge owns the full recovery contract.  The
+    compatibility fallback only observes the fsync'd local unknown-outcome
+    ledger; when execution outcome v2 is enabled, a missing bridge recovery
+    API is itself an unresolved state.
+    """
+
+    if hasattr(bridge, "recover_execution_intents"):
+        return dict(bridge.recover_execution_intents() or {})
+    try:
+        from backend.services.live_safety_state import unresolved_broker_outcome_mutations
+
+        unresolved = list(unresolved_broker_outcome_mutations())
+    except Exception as exc:
+        return {
+            "schema": "broker_execution_intent_recovery.v1",
+            "ready": False,
+            "enabled": bool(_phase2_feature_flags().ctrader_execution_outcome_v2_enabled),
+            "unresolved_count": None,
+            "unresolved": [],
+            "error": f"local_execution_recovery_unavailable:{type(exc).__name__}:{exc}",
+        }
+    enabled = bool(_phase2_feature_flags().ctrader_execution_outcome_v2_enabled)
+    if enabled:
+        return {
+            "schema": "broker_execution_intent_recovery.v1",
+            "ready": False,
+            "enabled": True,
+            "unresolved_count": None,
+            "unresolved": unresolved,
+            "error": "bridge_execution_recovery_contract_missing",
+        }
+    return {
+        "schema": "broker_execution_intent_recovery.v1",
+        "ready": not unresolved,
+        "enabled": False,
+        "unresolved_count": len(unresolved),
+        "unresolved": unresolved,
+    }
+
+
 def emergency_close(broker: str, symbol: str | None = None) -> dict:
-    """Close all positions (or one symbol) on the given broker."""
-    if broker == "ctrader":
-        # audit 2026-06-10: 3-tuple + 短等 (emergency close 用户主动点, 可接受 5s 等)
-        bridge, err, warming = _get_ctrader()
-        if err:
-            return {"ok": False, "error": err}
-        if warming or not bridge.is_connected:
-            wait_err = _wait_ctrader_ready(bridge, timeout_sec=5.0)
-            if wait_err:
-                return {"ok": False, "error": f"cTrader not ready: {wait_err}"}
-        try:
-            # cTrader close_position() 必须传 position_id, 没传 server 必拒
-            # (audit 2026-06-08: 之前分支里 close_position() 不带参会 fail).
-            # symbol 路径: 强制走 broker reconcile + filter by symbol_id + close 一个个.
-            # 紧急平仓不能依赖缓存，否则会把 stale position 当成真实持仓。
-            try:
-                positions = bridge.refresh_positions(force=True, allow_cache_fallback=False)
-            except TypeError:
-                positions = bridge.refresh_positions()
-            if symbol:
-                # symbol 这里可能是 symbol 名 (XAUUSD) 或 id (int), 简单按 name 匹配 fallback
-                target_positions = [p for p in positions if str(p.get("symbol_id")) == symbol or p.get("symbol") == symbol]
-            else:
-                target_positions = positions
-            closed = 0
-            failures: list[dict] = []
-            for p in target_positions:
-                # 优先用 position_id; 旧 dict 形式也兼容
-                pid = p.get("position_id") or p.get("ticket")
-                if pid is None:
-                    continue
-                volume = _position_api_volume(p)
-                if volume <= 0:
-                    failures.append({
-                        "position_id": int(pid),
-                        "error_code": "invalid_close_volume",
-                        "comment": f"live broker position has invalid volume={volume}",
-                    })
-                    logger.error("[live] emergency close skipped pos=%s invalid volume=%s", pid, volume)
-                    continue
-                close_context = _build_close_position_risk_context(
-                    position_id=int(pid),
-                    close_reason="emergency_close",
-                    mode="live",
-                    broker=broker,
-                    symbol=str(p.get("symbol") or symbol or ""),
-                    position=p,
-                )
-                close_verdict = _RISK_POLICY.evaluate(
-                    "close_position",
-                    close_context,
-                )
-                if not close_verdict.allowed:
-                    logger.warning(
-                        "[live] emergency close blocked by risk policy pos=%s reason=%s",
-                        pid,
-                        close_verdict.reason,
-                    )
-                    failures.append({
-                        "position_id": int(pid),
-                        "error_code": "risk_blocked",
-                        "comment": str(close_verdict.reason or ""),
-                    })
-                    continue
-                result = bridge.close_position(int(pid), volume=volume)
-                if getattr(result, "success", False):
-                    _remember_close_reason(int(pid), "emergency_close")
-                    _remember_close_verdict(int(pid), close_verdict)
-                    closed += 1
-                else:
-                    failures.append({
-                        "position_id": int(pid),
-                        "error_code": str(getattr(result, "error_code", "") or ""),
-                        "comment": str(getattr(result, "comment", "") or ""),
-                    })
-            attempted = len(target_positions)
-            return {
-                "ok": not failures,
-                "broker": "ctrader",
-                "symbol": symbol or "ALL",
-                "attempted": attempted,
-                "closed": closed,
-                "failed": len(failures),
-                "failures": failures,
-            }
-        except Exception as e:
-            return {"ok": False, "error": f"{type(e).__name__}: {e}", "trace": traceback.format_exc()[-300:]}
-    else:
-        return {"ok": False, "error": f"unknown broker: {broker}"}
+    """Wire process-local callbacks into the strict emergency domain service."""
+    return _run_emergency_close(
+        broker,
+        symbol,
+        runtime=EmergencyCloseRuntime(
+            update_live_state=_live_state_update,
+            admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
+            get_ctrader=_get_ctrader,
+            wait_ctrader_ready=_wait_ctrader_ready,
+            reconcile_positions=_fresh_emergency_position_reconcile,
+            position_volume=_position_api_volume,
+            build_close_risk_context=_build_close_position_risk_context,
+            risk_policy=_RISK_POLICY,
+            remember_close_reason=_remember_close_reason,
+            remember_close_verdict=_remember_close_verdict,
+            recover_execution_intents=_recover_emergency_execution_intents,
+            post_reconcile_timeout_sec=_EMERGENCY_POST_RECONCILE_TIMEOUT_SEC,
+            post_reconcile_interval_sec=_EMERGENCY_POST_RECONCILE_INTERVAL_SEC,
+            monotonic=_EMERGENCY_MONOTONIC,
+            sleep=_EMERGENCY_SLEEP,
+        ),
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -6842,7 +10405,6 @@ def _collect_closed_position_attribution(
         factor_contributions=mc,
         fallback_pnl=fallback_pnl,
     )
-    _record_session_trade(total_pnl)
     log(f"tick {tick}: attribution close pos={cpid} pnl={total_pnl:.2f} factors={len(mc)}")
     _pos_open_api_volume.pop(int(cpid), None)
     return {
@@ -7001,7 +10563,8 @@ def _cleanup_closed_position_after_tick(
     close_ts: float,
     real_pnl: dict | None,
     factor_contributions: dict,
-) -> None:
+) -> bool:
+    recovery_projection_ready = True
     try:
         _mark_recovery_position_closed(
             int(cpid),
@@ -7011,11 +10574,13 @@ def _cleanup_closed_position_after_tick(
             meta={"real_pnl": real_pnl or {}, "factor_contributions": factor_contributions or {}},
         )
     except Exception as _recovery_close_err:
+        recovery_projection_ready = False
         logger.debug("[live] recovery close persist failed for pos %s: %s", cpid, _recovery_close_err)
     _trailing_state.pop(cpid, None)
     _pos_entry_scores.pop(cpid, None)
     _pos_entry_decisions.pop(int(cpid), None)
     _pending_open_attach_until.pop(int(cpid), None)
+    return recovery_projection_ready
 
 
 def _handle_closed_positions_after_tick(
@@ -7030,10 +10595,50 @@ def _handle_closed_positions_after_tick(
     broker: str,
     tick: int,
     log,
+    broker_open_position_ids: set[int] | None = None,
+    bridge: Any | None = None,
+    close_deal_cursors: dict[int, dict[str, Any]] | None = None,
 ) -> None:
+    confirmed_close_ids: set[int] = set()
+    recovery_projected_ids: set[int] = set()
     for cpid in closed_pids:
+        real_pnl = real_pnls.get(cpid)
         try:
-            real_pnl = real_pnls.get(cpid)
+            if not _authoritative_close_pnl(real_pnl):
+                cursor = dict((close_deal_cursors or {}).get(int(cpid)) or {})
+                _defer_close_until_authoritative_deal(
+                    int(cpid),
+                    broker=broker,
+                    tick=tick,
+                    recovery_evidence=(
+                        {
+                            "pending_kind": "final_close",
+                            **cursor,
+                        }
+                        if cursor
+                        else None
+                    ),
+                )
+                log(
+                    f"tick {tick}: close pos={cpid} deferred until authoritative "
+                    "cTrader close deal is available"
+                )
+                continue
+            confirmed_close_ids.add(int(cpid))
+            # The prior risk projection no longer includes all realized broker
+            # facts.  Block admission before any auxiliary attribution/audit
+            # work that may fail; the deterministic rebuild below is the only
+            # path back to ``available``.
+            _live_state_update(
+                session_state_status="unavailable",
+                session_state_source="post_close_projection_pending",
+                session_risk_blockers=[
+                    f"post_close_projection_pending:{pid}"
+                    for pid in sorted(confirmed_close_ids)
+                ],
+                session_observed_at=0.0,
+                accepting_new_risk=False,
+            )
             close_payload = _collect_closed_position_attribution(
                 cpid=int(cpid),
                 real_pnl=real_pnl,
@@ -7088,7 +10693,7 @@ def _handle_closed_positions_after_tick(
                 attribution_integrity=attribution_integrity,
                 close_source=close_source,
             )
-            _cleanup_closed_position_after_tick(
+            recovery_projection_ready = _cleanup_closed_position_after_tick(
                 cpid=int(cpid),
                 close_reason=close_reason,
                 total_pnl=total_pnl,
@@ -7096,8 +10701,141 @@ def _handle_closed_positions_after_tick(
                 real_pnl=real_pnl,
                 factor_contributions=factor_contributions,
             )
+            if recovery_projection_ready is not False:
+                recovery_projected_ids.add(int(cpid))
         except Exception as exc:
             log(f"tick {tick}: attribution close pos={cpid} error: {exc}")
+            if int(cpid) in confirmed_close_ids:
+                _record_risk_reduction_aux_failure(
+                    "post_close_auxiliary_processing_failed",
+                    position_id=int(cpid),
+                    action="close_position",
+                    error=exc,
+                )
+                try:
+                    _mark_recovery_position_closed(
+                        int(cpid),
+                        close_reason="broker_close_auxiliary_deferred",
+                        close_pnl=float((real_pnl or {}).get("net") or 0.0),
+                        closed_at=float(
+                            (real_pnl or {}).get("exec_timestamp")
+                            or time.time()
+                        ),
+                        meta={
+                            "real_pnl": real_pnl or {},
+                            "auxiliary_processing_error": (
+                                f"{type(exc).__name__}:{exc}"
+                            ),
+                        },
+                    )
+                    recovery_projected_ids.add(int(cpid))
+                except Exception as recovery_exc:
+                    _record_risk_reduction_aux_failure(
+                        "post_close_recovery_projection_failed",
+                        position_id=int(cpid),
+                        action="close_position",
+                        error=recovery_exc,
+                    )
+
+    if confirmed_close_ids:
+        trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        account_reconcile = (
+            _explicit_account_reconcile(bridge)
+            if broker_open_position_ids is not None
+            else None
+        )
+        account_value = (
+            _reconcile_value(account_reconcile, "account", None)
+            if account_reconcile is not None
+            else None
+        )
+        account_ready = account_value is not None
+        if account_ready:
+            account_payload = (
+                asdict(account_value)
+                if is_dataclass(account_value)
+                else dict(account_value)
+            )
+            account_payload.update({"ok": True, "broker": broker})
+            _live_state_update(
+                account=account_payload,
+                account_reconciled=copy.deepcopy(account_payload),
+                account_updated_at=float(
+                    _reconcile_value(account_reconcile, "observed_at", 0.0)
+                    or 0.0
+                ),
+                account_reconcile_id=str(
+                    _reconcile_value(account_reconcile, "reconcile_id", "")
+                    or ""
+                ),
+                account_reconcile_failed_at=None,
+                account_reconcile_error=None,
+            )
+        else:
+            _live_state_update(
+                account_reconcile_failed_at=time.time(),
+                account_reconcile_error="post_close_account_reconcile_failed",
+            )
+        restored = bool(
+            account_ready
+            and broker_open_position_ids is not None
+            and _restore_session_state_for_day(
+                trade_date,
+                broker_open_position_ids={
+                    int(pid)
+                    for pid in broker_open_position_ids
+                    if int(pid or 0) > 0
+                },
+                confirmed_closed_position_ids=set(confirmed_close_ids),
+            )
+        )
+        pending_projection_ids = set(confirmed_close_ids)
+        if restored:
+            for position_id in sorted(
+                confirmed_close_ids & recovery_projected_ids
+            ):
+                _release_session_close_deal_latch(
+                    position_id,
+                    real_pnls[position_id],
+                )
+            pending_projection_ids -= recovery_projected_ids
+        if pending_projection_ids:
+            for position_id in sorted(pending_projection_ids):
+                cursor = dict(
+                    (close_deal_cursors or {}).get(position_id) or {}
+                )
+                _defer_close_until_authoritative_deal(
+                    position_id,
+                    broker=broker,
+                    tick=tick,
+                    reason="post_close_session_projection_unavailable",
+                    recovery_evidence={
+                        "pending_kind": "final_close",
+                        **cursor,
+                        "confirmed_deal_ids": list(
+                            real_pnls[position_id].get("deal_ids") or []
+                        ),
+                    },
+                )
+            _live_state_update(
+                session_state_status="unavailable",
+                session_state_source="post_close_projection_unavailable",
+                session_risk_blockers=[
+                    f"post_close_projection_pending:{pid}"
+                    for pid in sorted(pending_projection_ids)
+                ],
+                session_observed_at=0.0,
+                accepting_new_risk=False,
+            )
+            _record_risk_reduction_aux_failure(
+                "post_close_session_projection_unavailable",
+                action="close_position",
+                error="authoritative_session_restore_unavailable",
+                payload={
+                    "position_ids": sorted(pending_projection_ids),
+                    "session_projection_restored": bool(restored),
+                },
+            )
 
 
 def _mark_amended_open_success_local_state(
@@ -7525,6 +11263,27 @@ def _record_amend_failure_after_fill(
     failure_log: str = "",
     log=None,
 ) -> None:
+    # The position already exists at the broker but its required entry
+    # protection is not confirmed.  Block *additional* risk immediately while
+    # leaving the serial safety path free to repair or close this position.
+    # This local latch does not depend on PostgreSQL or the audit ledger below.
+    try:
+        _persist_safety_fail_closed(
+            blockers=("entry_protection_unverified",),
+            source="entry_protection",
+            error=str(status_error or ledger_action_reason or "entry_protection_failed"),
+        )
+    except Exception as latch_exc:
+        try:
+            _record_risk_reduction_aux_failure(
+                "entry_protection_fail_closed_unavailable",
+                position_id=int(pid or 0),
+                action="amend_position_sltp",
+                error=latch_exc,
+                payload={"status_error": str(status_error or "")},
+            )
+        except Exception:
+            pass
     if failure_log and log is not None:
         log(failure_log)
     _record_filled_position_open_context(
@@ -8123,7 +11882,69 @@ def _attach_open_trade_protection(
             tp=tp_price,
         )
         if getattr(amend_res, "success", False):
-            _record_amended_open_success_context(
+            projection = _explicit_position_reconcile(bridge)
+            verification = _verify_position_protection_projection(
+                projection,
+                position_id=position_id,
+                expected_stop_loss=sl_price,
+                expected_take_profit=tp_price,
+                precision=int((getattr(bridge, "_symbol_meta", None) or {}).get("digits", 2) or 2),
+            )
+            if bool(verification.get("ok")):
+                _publish_fresh_position_reconcile(projection, broker=broker)
+                _release_entry_protection_pending_latch(
+                    position_id,
+                    reconcile=projection,
+                    expected_stop_loss=sl_price,
+                    expected_take_profit=tp_price,
+                )
+                _record_amended_open_success_context(
+                    attr_engine=attr_engine,
+                    bridge=bridge,
+                    broker=broker,
+                    cfg=cfg,
+                    bar=bar,
+                    tick=tick,
+                    pid=position_id,
+                    actual_api_volume=actual_api_volume,
+                    requested_volume=requested_volume,
+                    base_requested_volume=base_requested_volume,
+                    fill_price=fill_price,
+                    current_price=current_price,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                    sl_dist=sl_dist,
+                    tp_dist=tp_dist,
+                    acct=account,
+                    pos=positions,
+                    composite=composite,
+                    gate_result=gate_result,
+                    risk_verdict=candidate.risk_verdict,
+                    market_session=candidate.market_session,
+                    event_sizing_context=candidate.event_sizing_context,
+                    sizing_trace=candidate.sizing_trace,
+                    entry_protection_plan=entry_protection_plan,
+                    direction_name=candidate.direction_name,
+                    log=log,
+                    submit_started_at=submit_started_at,
+                    fill_received_at=fill_received_at,
+                )
+                return
+
+            projection_reason = str(
+                verification.get("reason") or "position_reconcile_failed"
+            )
+            amend_failure_reason = (
+                f"entry_protection_projection_unverified:{projection_reason}"
+            )
+            _record_risk_reduction_aux_failure(
+                "entry_protection_projection_unverified",
+                position_id=int(position_id),
+                action="amend_position_sltp",
+                error=amend_failure_reason,
+                payload={"verification": verification},
+            )
+            _record_amend_failure_after_fill(
                 attr_engine=attr_engine,
                 bridge=bridge,
                 broker=broker,
@@ -8138,8 +11959,6 @@ def _attach_open_trade_protection(
                 current_price=current_price,
                 sl_price=sl_price,
                 tp_price=tp_price,
-                sl_dist=sl_dist,
-                tp_dist=tp_dist,
                 acct=account,
                 pos=positions,
                 composite=composite,
@@ -8148,11 +11967,16 @@ def _attach_open_trade_protection(
                 market_session=candidate.market_session,
                 event_sizing_context=candidate.event_sizing_context,
                 sizing_trace=candidate.sizing_trace,
-                entry_protection_plan=entry_protection_plan,
-                direction_name=candidate.direction_name,
+                sl_dist=sl_dist,
+                tp_dist=tp_dist,
+                status_error=amend_failure_reason,
+                ledger_action_reason=amend_failure_reason,
+                ledger_comment=str(getattr(amend_res, "comment", "") or ""),
+                failure_log=(
+                    f"tick {tick}: v4 {candidate.direction_name} AMEND UNVERIFIED "
+                    f"pos={position_id}: {amend_failure_reason}"
+                ),
                 log=log,
-                submit_started_at=submit_started_at,
-                fill_received_at=fill_received_at,
             )
             return
 
@@ -8301,12 +12125,47 @@ def _handle_open_trade_order_success(
     fill_price = _tick_resolve_order_fill_price(result, current_price=current_price)
     position_id = _tick_resolve_order_position_id(result, positions_before=positions)
     if position_id <= 0:
+        failure = _persist_safety_fail_closed(
+            blockers=("confirmed_open_position_identity_missing",),
+            source="entry_protection_initialization",
+            error=(
+                "broker reported a successful market-open without a uniquely "
+                "matched position_id"
+            ),
+        )
+        reconcile = _explicit_position_reconcile(bridge)
+        if bool(reconcile.get("success")):
+            _publish_fresh_position_reconcile(reconcile, broker=broker)
+        try:
+            append_safety_outbox(
+                event_type="confirmed_open_position_identity_missing",
+                payload={
+                    "broker": str(broker or ""),
+                    "tick": int(tick),
+                    "outcome": str(getattr(result, "outcome", "") or ""),
+                    "intent_id": str(getattr(result, "intent_id", "") or ""),
+                    "reconcile_id": str(reconcile.get("reconcile_id") or ""),
+                    "reconcile_success": bool(reconcile.get("success")),
+                    "safety_failure": failure,
+                },
+                error="confirmed_open_position_identity_missing",
+            )
+        except Exception:
+            pass
         log(
-            f"tick {tick}: v4 {candidate.direction_name} ORDER OK (no position_id) "
-            f"vol={candidate.volume}"
+            f"tick {tick}: v4 {candidate.direction_name} ORDER OUTCOME UNKNOWN "
+            f"(confirmed response without position_id) vol={candidate.volume}"
         )
         return
 
+    # Establish both the in-memory attach marker and durable no-new-risk cause
+    # before any fallible broker refresh, price calculation, PG write, or audit.
+    _remember_pending_open_attach(int(position_id))
+    _activate_entry_protection_pending_latch(
+        int(position_id),
+        broker=broker,
+        tick=tick,
+    )
     refreshed_positions = bridge.get_positions(getattr(bridge, "symbol", "") or "")
     actual_api_volume = _resolve_position_api_volume(
         position_id,
@@ -8327,7 +12186,6 @@ def _handle_open_trade_order_success(
     )
     sl_price = float(protection_prices["sl_price"])
     tp_price = float(protection_prices["tp_price"])
-    _remember_pending_open_attach(int(position_id))
     entry_protection_plan = _entry_protection_plan_payload(
         position_id=int(position_id),
         direction=composite.direction,
@@ -8411,9 +12269,31 @@ def _submit_open_trade_candidate(
         except Exception as exc:
             logger.warning("[live] nursery exploration reservation finalize failed: %s", exc)
 
+    final_admission = _probe_final_open_admission(
+        bridge=bridge,
+        candidate=candidate,
+    )
     with _OPEN_TRADE_ADMISSION_LOCK:
         if _open_trade_draining(stop_requested):
             log(f"tick {tick}: v4 open SKIP (loop_draining stage=broker_submit)")
+            _finalize_nursery(False)
+            return False
+        if not bool(final_admission.get("ok")):
+            blockers = tuple(final_admission.get("blockers") or ())
+            failure_error = str(
+                (final_admission.get("postgres") or {}).get("error")
+                or (final_admission.get("spot_quote") or {}).get("error")
+                or ""
+            )
+            _persist_safety_fail_closed(
+                blockers=blockers,
+                source="final_open_admission",
+                error=failure_error,
+            )
+            log(
+                f"tick {tick}: v4 open SKIP (final_open_admission "
+                f"blockers={','.join(str(item) for item in blockers)})"
+            )
             _finalize_nursery(False)
             return False
         try:
@@ -8428,8 +12308,9 @@ def _submit_open_trade_candidate(
     # The market RPC was admitted.  Post-fill resolution, pending protection,
     # SL/TP attach, and ledger/recovery writes must finish even if draining is
     # requested after the RPC returns; process shutdown joins this loop thread.
+    broker_open_succeeded = bool(result is not None and getattr(result, "success", False))
     try:
-        if result is not None and getattr(result, "success", False):
+        if broker_open_succeeded:
             _finalize_nursery(True)
             _handle_open_trade_order_success(
                 result=result,
@@ -8468,14 +12349,135 @@ def _submit_open_trade_candidate(
             _finalize_nursery(False)
             log(f"tick {tick}: v4 {candidate.direction_name} order returned no result")
     except Exception as exc:
-        _finalize_nursery(False)
-        log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
+        if broker_open_succeeded:
+            # Broker risk already exists.  No post-fill exception may fall back
+            # to a log-only path: persist no-new-risk first, then refresh broker
+            # truth so the serial safety cycle can repair or close the position.
+            failure_error = f"{type(exc).__name__}:{exc}"
+            _persist_safety_fail_closed(
+                blockers=("confirmed_open_post_fill_processing_failed",),
+                source="entry_protection_initialization",
+                error=failure_error,
+            )
+            reconcile = _explicit_position_reconcile(bridge)
+            if bool(reconcile.get("success")):
+                _publish_fresh_position_reconcile(reconcile, broker=broker)
+            try:
+                append_safety_outbox(
+                    event_type="confirmed_open_post_fill_processing_failed",
+                    payload={
+                        "broker": str(broker or ""),
+                        "tick": int(tick),
+                        "position_id": int(getattr(result, "position_id", 0) or 0),
+                        "intent_id": str(getattr(result, "intent_id", "") or ""),
+                        "reconcile_id": str(reconcile.get("reconcile_id") or ""),
+                        "reconcile_success": bool(reconcile.get("success")),
+                    },
+                    error=failure_error,
+                )
+            except Exception:
+                pass
+            log(
+                f"tick {tick}: v4 {candidate.direction_name} confirmed open post-fill "
+                f"processing failed closed: {exc}"
+            )
+        else:
+            _finalize_nursery(False)
+            log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
     return True
+
+
+def _probe_final_open_admission(
+    *,
+    bridge: Any,
+    candidate: _OpenTradeCandidate,
+) -> dict[str, Any]:
+    """Collect fresh open-only facts before broker-mutation ownership.
+
+    PostgreSQL probing intentionally happens outside ``_OPEN_TRADE_ADMISSION_LOCK``
+    so a database outage cannot delay emergency close/reduce/tighten ownership.
+    The lock rechecks draining and the durable latch before using this result.
+    """
+
+    postgres = _probe_postgres_authority(_get_final_open_probe_conn)
+    try:
+        quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
+        quote = dict(quote or {})
+    except Exception as exc:
+        quote = {
+            "error": f"{type(exc).__name__}:{exc}"[:500],
+        }
+    result = _evaluate_final_open_admission(
+        postgres=postgres,
+        market_session=getattr(candidate, "market_session", None),
+        spot_quote=quote,
+    ).to_dict()
+    _live_state_update(final_open_admission=result)
+    return result
+
+
+def _new_risk_reconciliation_blockers(*, now_ts: float | None = None) -> list[str]:
+    """Validate broker facts at the final open-order admission boundary."""
+
+    checked_at = float(time.time() if now_ts is None else now_ts)
+    blockers: list[str] = []
+    account = _live_state_get("account_reconciled", {}, clone=True) or {}
+    account_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
+    account_id = str(_live_state_get("account_reconcile_id", "") or "")
+    account_failed_at = float(
+        _live_state_get("account_reconcile_failed_at", 0.0) or 0.0
+    )
+    if not account or not bool(account.get("ok")) or account_at <= 0 or not account_id:
+        blockers.append("account_reconcile_unknown")
+    elif checked_at < account_at - 1.0 or checked_at - account_at > 15.0:
+        blockers.append("account_reconcile_stale")
+    if account_failed_at > account_at:
+        blockers.append("account_reconcile_failed")
+
+    positions = _live_state_get("positions_reconciled", None, clone=True)
+    positions_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
+    positions_id = str(_live_state_get("positions_reconcile_id", "") or "")
+    positions_failed_at = float(
+        _live_state_get("positions_reconcile_failed_at", 0.0) or 0.0
+    )
+    if not isinstance(positions, list) or positions_at <= 0 or not positions_id:
+        blockers.append("positions_reconcile_unknown")
+    elif checked_at < positions_at - 1.0 or checked_at - positions_at > 15.0:
+        blockers.append("positions_reconcile_stale")
+    if positions_failed_at > positions_at:
+        blockers.append("positions_reconcile_failed")
+
+    return sorted(set(blockers))
 
 
 def _open_trade_draining(stop_requested=None) -> bool:
     if _process_shutdown_requested:
         return True
+    # The durable latch is checked again while the admission lock is held by
+    # _submit_open_trade_candidate.  This linearizes emergency activation with
+    # the broker open RPC and fails closed if the latch ledger is unreadable.
+    if no_new_risk_latched(fail_closed=True):
+        return True
+    if _generation_controller_enabled():
+        if not _LIVE_LOOP_CONTROLLER.accepting_new_risk(_current_generation_id()):
+            return True
+    if bool(_live_state_get("loop_running", False)):
+        # Generation ownership and the live/session fact projection are
+        # independent authorities and must both allow admission.  A controller
+        # that was ready before a same-tick close cannot override a failed
+        # post-close session rebuild.  Safety reductions do not use this gate.
+        if not bool(_live_state_get("accepting_new_risk", False)):
+            return True
+        if str(
+            _live_state_get("session_state_status", "unknown") or "unknown"
+        ) != "available":
+            return True
+        if bool(_live_state_get("circuit_breaker", False)):
+            return True
+        reconcile_blockers = _new_risk_reconciliation_blockers()
+        _live_state_update(new_risk_reconcile_blockers=reconcile_blockers)
+        if reconcile_blockers:
+            return True
     return bool(stop_requested is not None and stop_requested())
 
 
@@ -8575,6 +12577,7 @@ def _process_tick_existing_decision_bar(
     tick: int,
     log,
     last_processed_ts: float,
+    protection_already_run: bool = False,
 ) -> None:
     """Run observe/protection work without feeding a duplicate decision bar."""
     global _prev_position_ids
@@ -8621,13 +12624,25 @@ def _process_tick_existing_decision_bar(
         log(f"tick {tick}: attribution restored open contexts={restored_attributions}")
 
     real_pnls: dict[int, dict] = {}
+    close_deal_cursors: dict[int, dict[str, Any]] = {}
     if closed_pids and bridge is not None:
         try:
             from execution.deal_sync import sync_close_deals_batch
 
             _sconn = _get_state_pg_conn()
             try:
-                real_pnls = sync_close_deals_batch(bridge, _sconn, closed_pids)
+                real_pnls = sync_close_deals_batch(
+                    bridge,
+                    _sconn,
+                    closed_pids,
+                    min_exec_timestamp_by_position=(
+                        _recovery_last_seen_by_position(closed_pids)
+                    ),
+                    required_closed_volume_delta_by_position=(
+                        _recovery_remaining_volume_by_position(closed_pids)
+                    ),
+                    observed_close_cursor_out=close_deal_cursors,
+                )
             finally:
                 _sconn.close()
         except Exception as _ds_err:
@@ -8644,6 +12659,9 @@ def _process_tick_existing_decision_bar(
         broker=broker,
         tick=tick,
         log=log,
+        broker_open_position_ids=current_pids,
+        bridge=bridge,
+        close_deal_cursors=close_deal_cursors,
     )
     for p in pos:
         pid = p.get("position_id") or p.get("ticket")
@@ -8653,7 +12671,7 @@ def _process_tick_existing_decision_bar(
     factor_values = dict(pipeline.get("last_factor_values") or {})
     atr_val = factor_values.get("atr_ratio", 0)
     atr_price = atr_val * current_price if atr_val and atr_val > 0 else 0
-    if pos and bridge is not None and cfg is not None:
+    if not protection_already_run and pos and bridge is not None and cfg is not None:
         _run_position_protection_cycle(
             bridge,
             pos,
@@ -8685,7 +12703,7 @@ def _process_tick_existing_decision_bar(
 
 def _process_tick_factor_pipeline(
     bridge, pipeline: dict, df_new, last_bar, broker: str,
-    tick: int, log, *, stop_requested=None,
+    tick: int, log, *, stop_requested=None, protection_already_run: bool = False,
 ) -> None:
     """使用 Factor Takeover v4 管道处理一根新 bar。
 
@@ -8719,6 +12737,7 @@ def _process_tick_factor_pipeline(
             tick=tick,
             log=log,
             last_processed_ts=bar_progress.last_processed_ts,
+            protection_already_run=protection_already_run,
         )
         return
 
@@ -8838,12 +12857,24 @@ def _process_tick_factor_pipeline(
 
     # ── 获取真实 PnL (从 cTrader deals) ──
     _real_pnls: dict[int, dict] = {}
+    _close_deal_cursors: dict[int, dict[str, Any]] = {}
     if closed_pids and bridge is not None:
         try:
             from execution.deal_sync import sync_close_deals_batch
             _sconn = _get_state_pg_conn()
             try:
-                _real_pnls = sync_close_deals_batch(bridge, _sconn, closed_pids)
+                _real_pnls = sync_close_deals_batch(
+                    bridge,
+                    _sconn,
+                    closed_pids,
+                    min_exec_timestamp_by_position=(
+                        _recovery_last_seen_by_position(closed_pids)
+                    ),
+                    required_closed_volume_delta_by_position=(
+                        _recovery_remaining_volume_by_position(closed_pids)
+                    ),
+                    observed_close_cursor_out=_close_deal_cursors,
+                )
             finally:
                 _sconn.close()
         except Exception as _ds_err:
@@ -8860,6 +12891,9 @@ def _process_tick_factor_pipeline(
         broker=broker,
         tick=tick,
         log=log,
+        broker_open_position_ids=current_pids,
+        bridge=bridge,
+        close_deal_cursors=_close_deal_cursors,
     )
     # 记录当前仓位 open price (供下次 close 使用)
     for p in pos:
@@ -8935,7 +12969,7 @@ def _process_tick_factor_pipeline(
     )
 
     # ── 统一持仓保护仲裁: timeout > supervisor > legacy AWE trailing ──
-    if pos and bridge is not None and cfg is not None:
+    if not protection_already_run and pos and bridge is not None and cfg is not None:
         _run_position_protection_cycle(
             bridge,
             pos,
@@ -9011,7 +13045,9 @@ def _entry_protection_repair_candidates(
     *,
     current_price: float,
     tick: int,
+    decision_ts: float | None = None,
 ) -> list[ProtectionCandidate]:
+    now_ts = float(decision_ts if decision_ts is not None else time.time())
     candidates: list[ProtectionCandidate] = []
     for p in pos or []:
         if not isinstance(p, dict):
@@ -9032,7 +13068,7 @@ def _entry_protection_repair_candidates(
         if target_sl <= 0 and target_tp <= 0:
             continue
         last_attempt_ts = float(plan.get("last_attempt_ts") or 0.0)
-        if last_attempt_ts > 0 and time.time() - last_attempt_ts < _ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS:
+        if last_attempt_ts > 0 and now_ts - last_attempt_ts < _ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS:
             continue
         direction = int(plan.get("direction") or _direction_from_position(p) or 0)
         current_sl = _float_payload_value(p, "sl", "stop_loss", "stopLoss")
@@ -9322,7 +13358,7 @@ def _prepare_protection_candidate_execution(
         loop_running=bool(_live_state_get("loop_running", True)),
         bridge_connected=bool(getattr(bridge, "is_connected", False)),
     )
-    risk_verdict = _RISK_POLICY.evaluate(candidate.risk_action, risk_context).to_dict()
+    risk_verdict = _evaluate_risk_reduction_policy(candidate.risk_action, risk_context).to_dict()
     decision_id = _log_supervisor_decision(
         position=position,
         verdict=verdict_payload,
@@ -9420,7 +13456,53 @@ def _execute_trailing_candidate(
     except Exception as exc:
         amend_res = type("AmendResult", (), {"success": False, "comment": str(exc)})()
     if getattr(amend_res, "success", False):
-        return _handle_protection_execution_applied(
+        projection = _explicit_position_reconcile(bridge)
+        verification = _verify_position_protection_projection(
+            projection,
+            position_id=pid,
+            expected_stop_loss=planned_sl,
+            expected_take_profit=current_tp,
+            precision=int(position.get("digits", 2) or 2),
+        )
+        if bool(verification.get("ok")):
+            _publish_fresh_position_reconcile(projection, broker="ctrader")
+            return _handle_protection_execution_applied(
+                candidate=candidate,
+                position=position,
+                verdict_payload=verdict_payload,
+                risk_verdict=risk_verdict,
+                decision_id=decision_id,
+                candidate_payload=candidate_payload,
+                sl_plan=sl_plan,
+                target_sl=target_sl,
+                planned_sl=planned_sl,
+                current_tp=current_tp,
+                cfg=cfg,
+                tick=tick,
+                log=log,
+                acct=acct,
+            )
+
+        projection_reason = str(
+            verification.get("reason") or "position_reconcile_failed"
+        )
+        failure_reason = f"amend_projection_unverified:{projection_reason}"
+        _record_risk_reduction_aux_failure(
+            "protection_amend_projection_unverified",
+            position_id=pid,
+            action=candidate.action,
+            error=failure_reason,
+            payload={
+                "source": candidate.source,
+                "verification": verification,
+            },
+        )
+        _persist_safety_fail_closed(
+            blockers=("amend_projection_unverified",),
+            source="protection_amend",
+            error=failure_reason,
+        )
+        return _handle_protection_execution_failed(
             candidate=candidate,
             position=position,
             verdict_payload=verdict_payload,
@@ -9428,9 +13510,7 @@ def _execute_trailing_candidate(
             decision_id=decision_id,
             candidate_payload=candidate_payload,
             sl_plan=sl_plan,
-            target_sl=target_sl,
-            planned_sl=planned_sl,
-            current_tp=current_tp,
+            reason=failure_reason,
             cfg=cfg,
             tick=tick,
             log=log,
@@ -9460,12 +13540,15 @@ def _enforce_holding_timeout(
     cfg,
     tick: int,
     log,
+    decision_ts: float | None = None,
+    candidate_recorder=None,
 ) -> set[int]:
     handled: set[int] = set()
     max_holding_bars = int(getattr(cfg, "risk_max_holding_bars", 0) or 0)
     if max_holding_bars <= 0:
         return handled
 
+    now_ts = float(decision_ts if decision_ts is not None else time.time())
     for p in pos or []:
         try:
             pid = int(p.get("position_id") or p.get("ticket") or 0)
@@ -9482,16 +13565,27 @@ def _enforce_holding_timeout(
             symbol=str(p.get("symbol") or "XAUUSD+"),
             position=p,
             cfg=cfg,
+            decision_ts=now_ts,
         )
         max_holding_seconds = float(close_context.get("max_holding_seconds", 0.0) or 0.0)
         holding_seconds = float(close_context.get("holding_seconds", 0.0) or 0.0)
         if not _lifecycle_holding_timeout_is_expired(close_context):
             continue
 
-        close_verdict = _RISK_POLICY.evaluate("close_position", close_context)
+        if candidate_recorder is not None:
+            candidate_recorder(
+                safety_candidate(
+                    action="timeout",
+                    position_id=pid,
+                    source="holding_timeout",
+                    controls={"close_reason": "holding_timeout"},
+                )
+            )
+
+        close_verdict = _evaluate_risk_reduction_policy("close_position", close_context)
         verdict_payload = _lifecycle_build_holding_timeout_verdict_payload(
             position_id=pid,
-            decision_ts=time.time(),
+            decision_ts=now_ts,
             holding_seconds=holding_seconds,
             max_holding_seconds=max_holding_seconds,
         )
@@ -9521,7 +13615,13 @@ def _enforce_holding_timeout(
             handled.add(pid)
             continue
         try:
-            result = bridge.close_position(pid)
+            # ``pos`` is the broker snapshot consumed by the safety cycle.
+            # Pass its API volume so a transient auxiliary reconcile failure
+            # cannot suppress the close-only timeout escape hatch.
+            result = bridge.close_position(
+                pid,
+                volume=float(_position_api_volume(p) or 0.0),
+            )
         except Exception as exc:
             logger.warning("[live] holding timeout close exception pos=%s: %s", pid, exc)
             _log_supervisor_trace(
@@ -9585,54 +13685,130 @@ def _run_position_protection_cycle(
     atr_price: float,
     tick: int,
     log,
+    decision_ts: float | None = None,
 ) -> dict[str, Any]:
     if not pos or bridge is None or cfg is None:
         return {"timeout": [], "entry_repair": [], "supervisor": [], "trailing_applied": [], "trailing_superseded": []}
 
-    trailing_candidates: list[ProtectionCandidate] = []
-    if atr_price > 0:
-        trailing_candidates = _update_trailing_stops(
-            bridge,
-            pos,
-            current_price,
-            pipeline,
-            atr_price,
-            tick,
-            log,
+    cycle_ts = float(decision_ts if decision_ts is not None else time.time())
+    stage_errors: list[dict[str, str]] = []
+    selected_candidates: list[SafetyCandidate] = []
+    arbitration: list[dict[str, Any]] = []
+
+    def record_selected(candidate: SafetyCandidate, *, priority: int) -> None:
+        if any(item.fingerprint == candidate.fingerprint for item in selected_candidates):
+            return
+        selected_candidates.append(candidate)
+        arbitration.append({
+            "fingerprint": candidate.fingerprint,
+            "decision": "selected",
+            "priority": int(priority),
+        })
+
+    def record_superseded(candidate: SafetyCandidate, *, priority: int, reason: str) -> None:
+        arbitration.append({
+            "fingerprint": candidate.fingerprint,
+            "decision": "superseded",
+            "priority": int(priority),
+            "reason": str(reason or ""),
+        })
+
+    def record_stage_error(stage: str, exc: Exception, *, position_id: int = 0) -> None:
+        logger.warning(
+            "[live] protection stage %s failed%s: %s",
+            stage,
+            f" for pos {position_id}" if position_id else "",
+            exc,
+        )
+        stage_errors.append({
+            "stage": stage,
+            "position_id": str(int(position_id or 0)),
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        _record_risk_reduction_aux_failure(
+            "position_protection_stage_failed",
+            position_id=position_id,
+            action=stage,
+            error=exc,
         )
 
-    timeout_handled = _enforce_holding_timeout(
-        bridge,
-        pos,
-        cfg=cfg,
-        tick=tick,
-        log=log,
-    )
-    entry_repair_candidates = _entry_protection_repair_candidates(
-        pos,
-        current_price=current_price,
-        tick=tick,
-    )
+    trailing_candidates: list[ProtectionCandidate] = []
+    if atr_price > 0:
+        try:
+            trailing_candidates = _update_trailing_stops(
+                bridge,
+                pos,
+                current_price,
+                pipeline,
+                atr_price,
+                tick,
+                log,
+            )
+        except Exception as exc:
+            record_stage_error("trailing_candidate_collection", exc)
+
+    try:
+        timeout_handled = _enforce_holding_timeout(
+            bridge,
+            pos,
+            cfg=cfg,
+            tick=tick,
+            log=log,
+            decision_ts=cycle_ts,
+            candidate_recorder=lambda candidate: record_selected(candidate, priority=10),
+        )
+    except Exception as exc:
+        record_stage_error("holding_timeout", exc)
+        timeout_handled = set()
+    try:
+        entry_repair_candidates = _entry_protection_repair_candidates(
+            pos,
+            current_price=current_price,
+            tick=tick,
+            decision_ts=cycle_ts,
+        )
+    except Exception as exc:
+        record_stage_error("entry_protection_candidate_collection", exc)
+        entry_repair_candidates = []
     entry_repair_applied: set[int] = set()
     for candidate in sorted(entry_repair_candidates, key=lambda item: item.priority):
         if candidate.position_id in timeout_handled:
             _log_protection_candidate_superseded(candidate, cfg=cfg, tick=tick, reason="holding_timeout", acct=acct)
+            record_superseded(
+                protection_candidate_to_safety(candidate),
+                priority=20,
+                reason="holding_timeout",
+            )
             continue
-        if _execute_trailing_candidate(candidate, bridge=bridge, cfg=cfg, tick=tick, log=log, acct=acct):
-            entry_repair_applied.add(candidate.position_id)
+        try:
+            if _execute_trailing_candidate(candidate, bridge=bridge, cfg=cfg, tick=tick, log=log, acct=acct):
+                entry_repair_applied.add(candidate.position_id)
+                record_selected(protection_candidate_to_safety(candidate), priority=20)
+        except Exception as exc:
+            record_stage_error(
+                "entry_protection_execution",
+                exc,
+                position_id=int(candidate.position_id or 0),
+            )
 
-    supervisor_handled = _run_position_supervision(
-        bridge,
-        pos,
-        cfg=cfg,
-        acct=acct,
-        tick=tick,
-        log=log,
-        skip_position_ids=set(timeout_handled) | set(entry_repair_applied),
-        record_partial_close_execution=(
-            getattr(pipeline.get("attribution"), "record_partial_close", None)
-        ),
-    )
+    try:
+        supervisor_handled = _run_position_supervision(
+            bridge,
+            pos,
+            cfg=cfg,
+            acct=acct,
+            tick=tick,
+            log=log,
+            skip_position_ids=set(timeout_handled) | set(entry_repair_applied),
+            decision_ts=cycle_ts,
+            candidate_recorder=lambda candidate: record_selected(candidate, priority=30),
+            record_partial_close_execution=(
+                getattr(pipeline.get("attribution"), "record_partial_close", None)
+            ),
+        )
+    except Exception as exc:
+        record_stage_error("position_supervisor", exc)
+        supervisor_handled = set()
     protected_pids = set(timeout_handled) | set(entry_repair_applied) | set(supervisor_handled)
     trailing_applied: set[int] = set()
     trailing_superseded: set[int] = set()
@@ -9645,18 +13821,37 @@ def _run_position_protection_cycle(
         if supersede_reason:
             trailing_superseded.add(candidate.position_id)
             _log_protection_candidate_superseded(candidate, cfg=cfg, tick=tick, reason=supersede_reason, acct=acct)
+            record_superseded(
+                protection_candidate_to_safety(candidate),
+                priority=50,
+                reason=supersede_reason,
+            )
             continue
-        if _execute_trailing_candidate(candidate, bridge=bridge, cfg=cfg, tick=tick, log=log, acct=acct):
-            trailing_applied.add(candidate.position_id)
-            protected_pids.add(candidate.position_id)
+        try:
+            if _execute_trailing_candidate(candidate, bridge=bridge, cfg=cfg, tick=tick, log=log, acct=acct):
+                trailing_applied.add(candidate.position_id)
+                protected_pids.add(candidate.position_id)
+                record_selected(protection_candidate_to_safety(candidate), priority=50)
+        except Exception as exc:
+            record_stage_error(
+                "trailing_execution",
+                exc,
+                position_id=int(candidate.position_id or 0),
+            )
 
-    return _lifecycle_build_position_protection_cycle_result(
+    result = _lifecycle_build_position_protection_cycle_result(
         timeout_handled=set(timeout_handled),
         entry_repair_applied=entry_repair_applied,
         supervisor_handled=set(supervisor_handled),
         trailing_applied=trailing_applied,
         trailing_superseded=trailing_superseded,
     )
+    if stage_errors:
+        result["stage_errors"] = stage_errors
+    selected_candidates.sort(key=lambda item: (item.position_id, item.action, item.fingerprint))
+    result["safety_candidates"] = [asdict(item) for item in selected_candidates]
+    result["safety_arbitration"] = arbitration
+    return result
 
 
 def _write_live_trade_log_factor(

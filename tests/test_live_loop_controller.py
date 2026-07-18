@@ -50,11 +50,44 @@ def test_startup_barrier_opens_new_risk_only_after_every_step():
         assert controller.complete_barrier_step(generation.generation_id, step) is False
         assert controller.status()["accepting_new_risk"] is False
 
+    controller.heartbeat(generation.generation_id, "safety")
     assert controller.complete_barrier_step(generation.generation_id, STARTUP_BARRIER_STEPS[-1]) is True
     status = controller.status()
     assert status["phase"] == "running"
     assert status["ready"] is True
     assert status["accepting_new_risk"] is True
+
+
+def test_missing_safety_heartbeat_is_unknown_and_blocks_new_risk():
+    controller = LiveLoopController()
+    generation = controller.begin_start(broker="ctrader", strategy_name="factor_v4")
+    for step in STARTUP_BARRIER_STEPS:
+        controller.complete_barrier_step(generation.generation_id, step)
+
+    status = controller.status()
+
+    assert status["safety_heartbeat_at"] is None
+    assert status["safety_heartbeat_age_sec"] is None
+    assert status["accepting_new_risk"] is False
+    assert "safety_heartbeat_unknown" in status["blockers"]
+
+
+def test_stale_safety_heartbeat_degrades_generation_and_blocks_new_risk():
+    now = [100.0]
+    controller = LiveLoopController(clock=lambda: now[0])
+    generation = controller.begin_start(broker="ctrader", strategy_name="factor_v4")
+    controller.heartbeat(generation.generation_id, "safety")
+    for step in STARTUP_BARRIER_STEPS:
+        controller.complete_barrier_step(generation.generation_id, step)
+    now[0] = 116.0
+
+    status = controller.status()
+
+    assert status["phase"] == "degraded"
+    assert status["safety_heartbeat_age_sec"] == 16.0
+    assert status["accepting_new_risk"] is False
+    assert "safety_heartbeat_stale" in status["blockers"]
+    assert controller.accepting_new_risk(generation.generation_id) is False
 
 
 def test_generation_scopes_components_and_heartbeats():

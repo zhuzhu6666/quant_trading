@@ -1,6 +1,14 @@
 import CONFIG from '../utils/config';
 import { get, post } from './client';
 import liveStore from '../stores/live';
+import {
+  factSource,
+  factUsable,
+  reduceLivePollOutcome,
+  reduceLiveWsDisconnected,
+  reduceLiveWsOutcome,
+} from '../stores/liveReducer';
+import { reducePositionFactSnapshot } from '../stores/livePositionFacts';
 
 let socketTask = null;
 let reconnectTimer = null;
@@ -8,22 +16,6 @@ let pollTimer = null;
 let started = false;
 let pollInFlight = null;
 let lastPollAt = 0;
-
-function normalizePositionsPayload(rawPositions = []) {
-  return (rawPositions || []).map((item) => {
-    const pnl = Number(
-      item.netUnrealizedPnL ?? item.unrealized ?? item.pnl ?? item.profit ?? 0
-    );
-    return {
-      ...item,
-      pnl,
-      unrealized: pnl,
-      current_price: item.current_price ?? item.price_current ?? 0,
-      open_price: item.open_price ?? item.price_open ?? 0,
-      volume: item.volume ?? item.size ?? 0,
-    };
-  });
-}
 
 function buildPositionSummary(positions = []) {
   let buys = 0;
@@ -55,51 +47,80 @@ function buildPositionSummary(positions = []) {
 }
 
 function enrichTradingSnapshot(baseTrading = {}) {
-  const positionsList = normalizePositionsPayload(baseTrading.positions_list || []);
-  const realizedPnl = Number(baseTrading.realized_pnl ?? (baseTrading.daily && baseTrading.daily.pnl) ?? 0);
-  const unrealizedPnl = positionsList.reduce((sum, item) => sum + Number(item.pnl || 0), 0);
+  const positionsList = Array.isArray(baseTrading.positions_list) ? baseTrading.positions_list : [];
   const positionSummary = buildPositionSummary(positionsList);
   return {
     ...baseTrading,
     positions_list: positionsList,
-    n_positions: positionsList.length,
-    realized_pnl: realizedPnl,
-    unrealized_pnl: unrealizedPnl,
-    live_pnl: unrealizedPnl,
     position_summary: positionSummary,
   };
 }
 
-function patchFromStatePayload(data) {
-  if (!data) return;
-  const trading = enrichTradingSnapshot({
-    source: data.source || 'none',
-    equity: data.equity || 0,
-    balance: data.balance || 0,
-    pnl_today: data.pnl_today || 0,
-    realized_pnl: data.pnl_today || 0,
-    position: data.position || { dir: 'FLAT', entry: 0, size: 0, unrealized: 0 },
-    positions_list: data.positions_list || [],
-    daily: data.daily || { trades: 0, win: 0, loss: 0, pnl: 0, drawdown_pct: 0 },
-    risk: data.risk || { circuit_breaker: false, consecutive_loss: 0 },
-    n_positions: data.n_positions || 0,
-    current_price: data.current_price || 0,
-  });
-  liveStore.setState({
-    trading,
-    wsConnected: true,
-    lastUpdate: Date.now(),
-  });
+const POLL_SOURCES = [
+  { name: 'account', contract: 'live.account.v2' },
+  { name: 'positions', contract: 'live.positions.v2' },
+  { name: 'strategy', contract: 'live.strategy.v2' },
+  { name: 'session', contract: 'live.session-risk.v2' },
+  { name: 'loop', contract: 'live.loop.v2' },
+  { name: 'risk', contract: 'risk.summary.v2' },
+  { name: 'realized', contract: 'live.realized-pnl.v2' },
+];
+
+function settledSource(result, now, expectedContract) {
+  if (!result || result.status === 'rejected') {
+    return { state: 'error', reason: 'request_failed', observedAt: 0, staleAfterSec: 0 };
+  }
+  return factSource(result.value, now, expectedContract);
 }
 
-function connectSocket() {
+function patchFromStatePayload(data) {
+  if (!data) return;
+  const attemptedAt = Date.now();
+  const current = liveStore.getState();
+  const patch = reduceLiveWsOutcome(current, data, attemptedAt);
+  const positionOutcome = reducePositionFactSnapshot(current.trading || {}, data, attemptedAt);
+  if (patch.trading || positionOutcome.changed) {
+    patch.trading = enrichTradingSnapshot({
+      ...(patch.trading || current.trading || {}),
+      ...(positionOutcome.patch || {}),
+    });
+  }
+  if (!patch.lastSuccessAt && positionOutcome.usable) {
+    patch.lastSuccessAt = attemptedAt;
+    patch.lastUpdate = attemptedAt;
+  }
+  liveStore.setState(patch);
+}
+
+async function connectSocket() {
   if (socketTask) return;
   const token = wx.getStorageSync('jwt_token') || '';
   if (!token) return;
 
+  let ticket = '';
+  try {
+    const response = await post('/api/auth/ws-ticket', {});
+    ticket = response && response.ticket || '';
+  } catch (err) {
+    liveStore.setState(reduceLiveWsDisconnected(
+      liveStore.getState(),
+      Date.now(),
+      'ws_ticket_failed',
+    ));
+    return;
+  }
+  if (!ticket) {
+    liveStore.setState(reduceLiveWsDisconnected(
+      liveStore.getState(),
+      Date.now(),
+      'ws_ticket_missing',
+    ));
+    return;
+  }
+  if (!started || socketTask) return;
+
   socketTask = wx.connectSocket({
-    url: CONFIG.WS_URL,
-    protocols: [token],
+    url: `${CONFIG.WS_URL}?ticket=${encodeURIComponent(ticket)}`,
     timeout: 6000,
   });
 
@@ -120,17 +141,26 @@ function connectSocket() {
   });
 
   socketTask.onClose(() => {
-    liveStore.setState({ wsConnected: false });
+    const attemptedAt = Date.now();
+    liveStore.setState(reduceLiveWsDisconnected(
+      liveStore.getState(),
+      attemptedAt,
+      'ws_closed',
+    ));
     socketTask = null;
     const tokenNow = wx.getStorageSync('jwt_token') || '';
-    if (!tokenNow) return;
+    if (!tokenNow || !started) return;
     reconnectTimer = setTimeout(() => {
-      connectSocket();
+      void connectSocket();
     }, 4000);
   });
 
   socketTask.onError(() => {
-    liveStore.setState({ wsConnected: false });
+    liveStore.setState(reduceLiveWsDisconnected(
+      liveStore.getState(),
+      Date.now(),
+      'ws_error',
+    ));
   });
 }
 
@@ -152,65 +182,100 @@ async function pollLoop(options = {}) {
 
   lastPollAt = now;
   pollInFlight = (async () => {
+    const attemptedAt = Date.now();
     try {
-    const [account, positions, strategyStatus, sessionStats, loopStatus, riskSummary, realizedPnlSeries] = await Promise.all([
-      get('/api/live/account').catch(() => null),
-      get('/api/live/positions').catch(() => null),
-      get('/api/live/strategy-status').catch(() => null),
-      get('/api/live/session-stats').catch(() => null),
-      get('/api/live/loop-status').catch(() => null),
-      get('/api/risk/summary').catch(() => null),
-      get('/api/live/realized-pnl-series?scope=all').catch(() => null),
+    const settled = await Promise.allSettled([
+      get('/api/live/account'),
+      get('/api/live/positions'),
+      get('/api/live/strategy-status'),
+      get('/api/live/session-stats'),
+      get('/api/live/loop-status'),
+      get('/api/risk/summary'),
+      get('/api/live/realized-pnl-series?scope=all'),
     ]);
+    const sourcePatch = {};
+    const payloads = {};
+    settled.forEach((result, index) => {
+      const source = POLL_SOURCES[index];
+      sourcePatch[source.name] = settledSource(result, attemptedAt, source.contract);
+      if (result.status === 'fulfilled') payloads[source.name] = result.value;
+    });
+    const previous = liveStore.getState();
+    const sources = { ...(previous.sources || {}), ...sourcePatch };
+    const payloadIsUsable = (name) => {
+      const source = POLL_SOURCES.find((item) => item.name === name);
+      return !!source && factUsable(payloads[name], attemptedAt, source.contract);
+    };
+    const positionOutcome = settled[1]?.status === 'fulfilled'
+      ? reducePositionFactSnapshot(previous.trading || {}, payloads.positions || {}, attemptedAt)
+      : { changed: false, usable: false, patch: {} };
+    const topLevelUsableCount = POLL_SOURCES.filter((source) => payloadIsUsable(source.name)).length;
+    const usableCount = topLevelUsableCount
+      + (positionOutcome.usable && !payloadIsUsable('positions') ? 1 : 0);
+    if (usableCount === 0) {
+      const failedPatch = reduceLivePollOutcome(previous, {
+        attemptedAt,
+        sources,
+        usableCount,
+      });
+      if (positionOutcome.changed) {
+        failedPatch.trading = enrichTradingSnapshot({
+          ...(previous.trading || {}),
+          ...positionOutcome.patch,
+        });
+      }
+      liveStore.setState(failedPatch);
+      return liveStore.getState();
+    }
 
-    const currentTrading = liveStore.getState().trading || {};
-    const posList = normalizePositionsPayload((positions && positions.positions) || []);
+    const account = payloadIsUsable('account') ? payloads.account : previous.account;
+    const strategyStatus = payloadIsUsable('strategy') ? payloads.strategy : previous.strategyStatus;
+    const sessionStats = payloadIsUsable('session') ? payloads.session : previous.sessionStats;
+    const loopStatus = payloadIsUsable('loop') ? payloads.loop : previous.loopStatus;
+    const riskSummary = payloadIsUsable('risk') ? payloads.risk : previous.riskSummary;
+    const realizedPnlSeries = payloadIsUsable('realized') ? payloads.realized : previous.realizedPnlSeries;
+
+    const currentTrading = previous.trading || {};
     const realizedSummary = (realizedPnlSeries && realizedPnlSeries.summary) || {};
-    const primaryPosition = posList[0] || null;
     const nextTrading = enrichTradingSnapshot({
       ...currentTrading,
-      equity: (account && account.equity) || currentTrading.equity || 0,
-      balance: (account && account.balance) || currentTrading.balance || 0,
-      positions_list: posList,
-      n_positions: posList.length,
-      realized_pnl: Number(realizedSummary.realized_pnl ?? (sessionStats && sessionStats.pnl_today) ?? 0),
-      position: primaryPosition
-        ? {
-            dir: primaryPosition.type === 'buy' ? 'LONG' : primaryPosition.type === 'sell' ? 'SHORT' : 'FLAT',
-            entry: primaryPosition.open_price || 0,
-            size: primaryPosition.volume || 0,
-            unrealized: primaryPosition.pnl || 0,
-          }
-        : { dir: 'FLAT', entry: 0, size: 0, unrealized: 0 },
-      current_price:
-        (primaryPosition && primaryPosition.current_price) ||
-        currentTrading.current_price ||
-        0,
+      ...positionOutcome.patch,
+      equity: account && account.equity !== undefined ? account.equity : currentTrading.equity,
+      balance: account && account.balance !== undefined ? account.balance : currentTrading.balance,
+      realized_pnl: Number(realizedSummary.realized_pnl ?? (sessionStats && sessionStats.pnl_today) ?? currentTrading.realized_pnl ?? 0),
       daily: sessionStats
         ? {
-            trades: sessionStats.trades || 0,
-            win: sessionStats.wins || 0,
-            loss: sessionStats.losses || 0,
-            pnl: sessionStats.pnl_today || 0,
-            drawdown_pct: sessionStats.drawdown_pct || 0,
+            trades: sessionStats.trades ?? currentTrading.daily?.trades ?? 0,
+            win: sessionStats.wins ?? currentTrading.daily?.win ?? 0,
+            loss: sessionStats.losses ?? currentTrading.daily?.loss ?? 0,
+            pnl: sessionStats.pnl_today ?? currentTrading.daily?.pnl ?? 0,
+            drawdown_pct: sessionStats.drawdown_pct ?? currentTrading.daily?.drawdown_pct ?? 0,
           }
         : currentTrading.daily,
       risk: {
-        circuit_breaker: !!(strategyStatus && strategyStatus.circuit_breaker),
-        consecutive_loss: (sessionStats && sessionStats.consecutive_loss) || 0,
+        circuit_breaker: strategyStatus
+          ? !!strategyStatus.circuit_breaker
+          : !!currentTrading.risk?.circuit_breaker,
+        consecutive_loss: sessionStats && sessionStats.consecutive_loss !== undefined
+          ? sessionStats.consecutive_loss
+          : currentTrading.risk?.consecutive_loss,
       },
     });
 
-    liveStore.setState({
-      account,
-      strategyStatus,
-      sessionStats,
-      loopStatus,
-      riskSummary,
-      realizedPnlSeries: realizedPnlSeries || liveStore.getState().realizedPnlSeries,
-      trading: nextTrading,
-      lastUpdate: Date.now(),
-    });
+    liveStore.setState(reduceLivePollOutcome(previous, {
+      sources,
+      attemptedAt,
+      usableCount,
+      dataPatch: {
+        account,
+        strategyStatus,
+        sessionStats,
+        loopStatus,
+        riskSummary,
+        realizedPnlSeries,
+        trading: nextTrading,
+      },
+    }));
     return liveStore.getState();
   } catch (err) {
     console.warn('[v2-live] poll failed', err && err.statusCode);
@@ -226,7 +291,7 @@ async function pollLoop(options = {}) {
 export function startLiveRuntime() {
   if (started) return;
   started = true;
-  connectSocket();
+  void connectSocket();
   pollLoop({ force: true });
   pollTimer = setInterval(pollLoop, CONFIG.POLL_INTERVAL);
 }
@@ -245,36 +310,14 @@ export function stopLiveRuntime() {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-  liveStore.setState({ wsConnected: false });
+  liveStore.setState(reduceLiveWsDisconnected(
+    liveStore.getState(),
+    Date.now(),
+    'runtime_stopped',
+  ));
 }
 
 export async function refreshLiveSnapshot(options = {}) {
   await pollLoop(options);
   return liveStore.getState();
-}
-
-export async function startTradingLoop(options = {}) {
-  if (!options.confirmed) {
-    throw new Error('startTradingLoop requires explicit confirmation');
-  }
-  return post(
-    '/api/live/start',
-    { broker: 'ctrader', strategy_name: 'factor_v4' },
-    { headers: { 'X-Confirm': 'start-live' } }
-  );
-}
-
-export async function stopTradingLoop() {
-  return post('/api/live/stop', {});
-}
-
-export async function emergencyCloseAll(symbol = null, options = {}) {
-  if (!options.confirmed) {
-    throw new Error('emergencyCloseAll requires explicit confirmation');
-  }
-  return post(
-    '/api/live/emergency-close',
-    { broker: 'ctrader', symbol },
-    { headers: { 'X-Confirm': 'emergency' } }
-  );
 }

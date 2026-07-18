@@ -47,6 +47,53 @@ def _state_db_failure_is_blocking(exc: Exception, execution_semantics) -> bool:
     )
 
 
+def _fail_closed_legacy_governance_restore(
+    *,
+    component: str,
+    error: Exception,
+    record_startup_issue,
+    logger,
+) -> None:
+    """Preserve the loaded config but block new risk on authority ambiguity.
+
+    Startup must keep the loop available for close/reduce/tighten operations,
+    so an unverifiable legacy projection is not a process-fatal error.  It is,
+    however, a governance fact-source failure and therefore installs the same
+    durable local admission latch used by execution recovery.  The latch
+    implementation also fails closed in-process when its append-only ledger
+    cannot be written.
+    """
+
+    message = f"{type(error).__name__}: {error}"
+    record_startup_issue(component, "critical", message, blocking=True)
+    try:
+        from backend.services.live_safety_state import activate_no_new_risk_latch
+
+        activate_no_new_risk_latch(
+            reason="legacy_governance_restore_unverified",
+            actor="system:backend_lifespan",
+            metadata={
+                "component": component,
+                "error_type": type(error).__name__,
+                "error": str(error)[:500],
+            },
+            cause="governance_authority",
+            cause_id=f"legacy_restore:{component}",
+        )
+    except Exception as latch_exc:
+        logger.error(
+            "[lifespan] governance restore latch persistence failed; "
+            "new risk remains blocked in-process: %s",
+            latch_exc,
+        )
+    logger.error(
+        "[lifespan] %s failed authority validation; preserving loaded config "
+        "and blocking new risk: %s",
+        component,
+        error,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from loguru import logger as _lg
@@ -122,77 +169,134 @@ async def lifespan(app: FastAPI):
                 overlay_restore.get("overlay_hash", ""),
             )
     except Exception as overlay_exc:
-        if execution_semantics.effective_send_orders:
-            record_startup_issue("runtime_config_overlay", "critical", str(overlay_exc), blocking=True)
-            raise
-        record_startup_issue("runtime_config_overlay", "degraded", str(overlay_exc), blocking=False)
-        _lg.warning(f"[lifespan] RuntimeConfig autonomous overlay restore failed (non-fatal): {overlay_exc}")
+        # An unbound/dangling overlay is a governance fact-source failure, not
+        # permission to terminate risk reduction or silently reset session
+        # truth.  Keep the release/YAML projection, durably block new risk, and
+        # continue startup so close/reduce/tighten remain available.
+        _fail_closed_legacy_governance_restore(
+            component="runtime_config_overlay",
+            error=overlay_exc,
+            record_startup_issue=record_startup_issue,
+            logger=_lg,
+        )
         from config import runtime_config as _runtime_config
 
+        quarantined_config = getattr(overlay_exc, "quarantined_config", None)
+        if quarantined_config is not None:
+            rc = quarantined_config
+            _lg.error(
+                "[lifespan] unverified overlay retained as read-only quarantine; "
+                "new risk remains latched"
+            )
         _runtime_config.replace(rc)
     _lg.info("[lifespan] RuntimeConfig loaded from config/settings.yaml and state overlay")
 
+    # In coordinator modes the committed overlay is the only startup
+    # projection source.  Replaying application/registry rows directly here
+    # could republish an approved-but-uncommitted control or overwrite a
+    # coordinator recovery decision.  The legacy restore remains available
+    # only while the static rollout flag is explicitly off.
     try:
-        from backend.services.parameter_templates import ParameterTemplateService
-        ParameterTemplateService().sync_runtime_config(restore_only=True)
-        _lg.info("[lifespan] active parameter templates synced into RuntimeConfig")
+        from backend.services.governance_control_plans import governance_coordinator_mode
+
+        coordinator_mode = governance_coordinator_mode()
     except Exception as e:
-        _lg.warning(f"[lifespan] parameter template runtime sync failed (non-fatal): {e}")
+        record_startup_issue("governance_authority", "critical", str(e), blocking=True)
+        _lg.error(f"[lifespan] governance authority mode invalid: {e}")
+        raise
 
-    try:
-        from backend.core.db import STATE_DB
-        from backend.services.evolution_ledger import persist_runtime_config_snapshot
-        from backend.services.position_supervisor_templates import latest_applied_position_supervisor_template_id
-        from config.runtime_config import patch as rc_patch
-        from config.runtime_config import autonomy_expansion_freeze_applies, shared as rc_shared
+    legacy_governance_restore_blocked = False
+    if coordinator_mode == "off":
+        try:
+            from backend.services.parameter_templates import ParameterTemplateService
 
-        active_template_id = latest_applied_position_supervisor_template_id(db_path=STATE_DB)
-        current_template_id = str(getattr(rc_shared(), "position_supervisor_template_id", "") or "")
-        expansion_frozen = autonomy_expansion_freeze_applies(rc_shared())
-        if expansion_frozen:
-            active_template_id = ""
-            _lg.info("[lifespan] supervisor template restore skipped: autonomy expansion frozen")
-        if active_template_id and active_template_id != current_template_id:
-            rc_patch({"position_supervisor_template_id": active_template_id})
-            persist_runtime_config_snapshot(
-                rc_shared(),
-                source="position_supervisor_template_restore",
-                db_path=STATE_DB,
+            ParameterTemplateService().sync_runtime_config(restore_only=True)
+            _lg.info("[lifespan] active parameter templates synced into RuntimeConfig (legacy off mode)")
+        except Exception as e:
+            legacy_governance_restore_blocked = True
+            _fail_closed_legacy_governance_restore(
+                component="parameter_template_restore",
+                error=e,
+                record_startup_issue=record_startup_issue,
+                logger=_lg,
             )
-            _lg.info(f"[lifespan] restored position supervisor template: {active_template_id}")
-    except Exception as e:
-        _lg.warning(f"[lifespan] position supervisor template restore failed (non-fatal): {e}")
+
+        try:
+            from backend.core.db import STATE_DB
+            from backend.services.evolution_ledger import persist_runtime_config_snapshot
+            from backend.services.position_supervisor_templates import latest_applied_position_supervisor_template_id
+            from config.runtime_config import patch as rc_patch
+            from config.runtime_config import autonomy_expansion_freeze_applies, shared as rc_shared
+
+            active_template_id = latest_applied_position_supervisor_template_id(
+                db_path=STATE_DB,
+                require_authority=True,
+            )
+            current_template_id = str(getattr(rc_shared(), "position_supervisor_template_id", "") or "")
+            expansion_frozen = autonomy_expansion_freeze_applies(rc_shared())
+            if expansion_frozen:
+                active_template_id = ""
+                _lg.info("[lifespan] supervisor template restore skipped: autonomy expansion frozen")
+            if active_template_id and active_template_id != current_template_id:
+                rc_patch({"position_supervisor_template_id": active_template_id})
+                persist_runtime_config_snapshot(
+                    rc_shared(),
+                    source="position_supervisor_template_restore",
+                    db_path=STATE_DB,
+                )
+                _lg.info(f"[lifespan] restored position supervisor template: {active_template_id}")
+        except Exception as e:
+            legacy_governance_restore_blocked = True
+            _fail_closed_legacy_governance_restore(
+                component="position_supervisor_template_restore",
+                error=e,
+                record_startup_issue=record_startup_issue,
+                logger=_lg,
+            )
+    else:
+        _lg.info(
+            "[lifespan] coordinator mode=%s; parameter/supervisor startup projection "
+            "is owned by committed overlay recovery",
+            coordinator_mode,
+        )
 
     get_job_manager().bind_loop(asyncio.get_running_loop())
 
-    # Restore only the configured and budgeted runtime factor working set.
-    try:
-        from alpha.persistent_registry import restore_from_log
-        configured_factor_names = {
-            str(name)
-            for name, factor_cfg in dict(getattr(rc, "factor_signal_config", {}) or {}).items()
-            if not isinstance(factor_cfg, dict) or factor_cfg.get("enabled") is not False
-        }
-        restored = restore_from_log(
-            verbose=False,
-            preferred_names=configured_factor_names,
-            discovered_budget=None,
+    # The legacy event log has no committed mutation binding.  Keep its
+    # one-release restore only in off mode; coordinator modes rebuild Registry
+    # from factor_lifecycle_state in BackendRuntimeLifecycle.start().
+    if coordinator_mode == "off":
+        if legacy_governance_restore_blocked:
+            _lg.error(
+                "[lifespan] legacy Registry restore skipped because governance "
+                "authority validation failed; safety loop may run but new risk is latched"
+            )
+        else:
+            try:
+                from alpha.persistent_registry import restore_from_log
+
+                configured_factor_names = {
+                    str(name)
+                    for name, factor_cfg in dict(getattr(rc, "factor_signal_config", {}) or {}).items()
+                    if not isinstance(factor_cfg, dict) or factor_cfg.get("enabled") is not False
+                }
+                restored = restore_from_log(
+                    verbose=False,
+                    preferred_names=configured_factor_names,
+                    discovered_budget=None,
+                )
+                if restored:
+                    _lg.info(f"[lifespan] restored {restored} configured/budgeted runtime factors from lifecycle log")
+            except Exception as e:
+                _lg.warning(f"[lifespan] restore_from_log failed (non-fatal): {e}")
+    else:
+        _lg.info(
+            "[lifespan] coordinator mode=%s; Registry restore requires committed lifecycle state",
+            coordinator_mode,
         )
-        if restored:
-            _lg.info(f"[lifespan] restored {restored} configured/budgeted runtime factors from lifecycle log")
-    except Exception as e:
-        _lg.warning(f"[lifespan] restore_from_log failed (non-fatal): {e}")
 
     runtime_lifecycle = BackendRuntimeLifecycle()
     runtime_lifecycle.start(_lg)
-
-    try:
-        from backend.services.backend_readiness_snapshot import BackendReadinessSnapshotService
-
-        refresh = BackendReadinessSnapshotService().refresh_async(max_age_seconds=180.0)
-        _lg.info(f"[lifespan] backend readiness projection: {refresh.get('status')}")
-    except Exception as e:
-        _lg.warning(f"[lifespan] backend readiness projection startup failed (non-fatal): {e}")
 
     _lg.info("[lifespan] PostgreSQL state store active; legacy state dual-write worker not started")
 

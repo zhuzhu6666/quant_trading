@@ -18,6 +18,10 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
+from backend.core.state_store import (
+    is_state_schema_write_sql,
+    validate_runtime_state_schema,
+)
 
 
 def dumps(value: Any) -> str:
@@ -55,9 +59,12 @@ def sql(conn, raw_sql: str) -> str:
 
 
 def execute(conn, raw_sql: str, params: Any = None):
+    rendered = sql(conn, raw_sql)
+    if conn_is_pg(conn) and is_state_schema_write_sql(rendered):
+        return validate_runtime_state_schema(conn, rendered)
     if params is None:
-        return conn.execute(sql(conn, raw_sql))
-    return conn.execute(sql(conn, raw_sql), params)
+        return conn.execute(rendered)
+    return conn.execute(rendered, params)
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:

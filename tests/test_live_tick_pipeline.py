@@ -440,18 +440,18 @@ def test_open_order_preflight_preserves_percent_fallback_without_atr():
     }
 
 
-def test_order_success_helpers_preserve_fill_and_position_fallbacks():
+def test_order_success_helpers_require_broker_confirmed_position_id():
     assert resolve_order_fill_price(SimpleNamespace(price=0.0), current_price=3333.0) == 3333.0
     assert resolve_order_fill_price(SimpleNamespace(price=3334.5), current_price=3333.0) == 3334.5
     assert resolve_order_position_id(SimpleNamespace(position_id=99), positions_before=[]) == 99
     assert resolve_order_position_id(
         SimpleNamespace(position_id=0),
         positions_before=[{"ticket": "123"}],
-    ) == 123
+    ) == 0
     assert resolve_order_position_id(
         SimpleNamespace(position_id=0),
         positions_before=[SimpleNamespace(position_id=456)],
-    ) == 456
+    ) == 0
 
 
 def test_open_protection_prices_prefers_refreshed_position_open_price():

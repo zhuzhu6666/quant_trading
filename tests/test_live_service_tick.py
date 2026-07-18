@@ -17,14 +17,17 @@ from unittest.mock import MagicMock
 
 from backend.services import live_service
 from backend.services import config_service
+from backend.services.live_safety_state import reset_safety_state_for_tests
 from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
 from config import runtime_config as rc
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
+def _reset_state(monkeypatch, tmp_path):
     """Reset module-level state between tests."""
+    monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
+    reset_safety_state_for_tests()
     rc.reset_for_tests()
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
@@ -35,8 +38,14 @@ def _reset_state():
     live_service._pos_open_api_volume.clear()
     live_service._loop_stop_flag = None
     live_service._process_shutdown_requested = False
+    live_service._live_state_update(
+        loop_running=False,
+        accepting_new_risk=False,
+        session_state_status="unknown",
+    )
     rc.reset_for_tests()
     yield
+    reset_safety_state_for_tests()
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
@@ -46,6 +55,11 @@ def _reset_state():
     live_service._pos_open_api_volume.clear()
     live_service._loop_stop_flag = None
     live_service._process_shutdown_requested = False
+    live_service._live_state_update(
+        loop_running=False,
+        accepting_new_risk=False,
+        session_state_status="unknown",
+    )
 
 
 def _make_df():
@@ -131,7 +145,8 @@ def test_merge_portfolio_configs_includes_active_discovered_factor(monkeypatch):
 
     assert discovered in merged
     assert shadow not in merged
-    assert merged[discovered]["weight"] == 0.3
+    assert merged[discovered]["weight"] == 0.0
+    assert merged[discovered]["enabled"] is True
     assert merged[discovered]["source"] == "discovered"
     assert merged[discovered]["tags"] == ["GP发现"]
     assert merged[discovered]["role"] == "alpha"
@@ -150,6 +165,26 @@ def test_merge_portfolio_configs_does_not_activate_cold_weight_only_factor(monke
     )
     assert "rsi_14" in merged
     assert "dsl_auto_cold" not in merged
+
+
+def test_merge_portfolio_configs_fails_closed_when_factor_admission_raises(monkeypatch):
+    monkeypatch.setattr(
+        "alpha.runtime_factor_selection.select_runtime_factors",
+        lambda _config: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
+    )
+
+    merged = live_service._merge_portfolio_configs(
+        {
+            "alpha_a": {"role": "alpha", "enabled": True},
+            "context_a": {"role": "context", "enabled": True},
+        },
+        {"alpha_a": 0.5, "context_a": 0.2},
+        0.7,
+        0.3,
+    )
+
+    assert "alpha_a" not in merged
+    assert merged["context_a"]["role"] == "context"
 
 
 def test_entry_quality_learning_gate_interprets_factor_context_before_risk():
@@ -265,7 +300,7 @@ def test_supervisor_tighten_sl_plan_clips_long_stop_below_current_price():
     plan = live_service._supervisor_tighten_sl_plan(
         {"direction": 1, "current_price": 4100.0, "sl": 4088.0},
         4102.0,
-        quote={"bid": 4099.50, "ask": 4100.20, "mid": 4099.85},
+        quote={"bid": 4099.50, "ask": 4100.20, "mid": 4099.85, "ts": time.time()},
     )
 
     assert plan["allowed"] is True
@@ -278,7 +313,7 @@ def test_supervisor_tighten_sl_plan_clips_short_stop_above_current_price():
     plan = live_service._supervisor_tighten_sl_plan(
         {"direction": -1, "current_price": 4100.0, "sl": 4112.0},
         4098.0,
-        quote={"bid": 4099.80, "ask": 4100.50, "mid": 4100.15},
+        quote={"bid": 4099.80, "ask": 4100.50, "mid": 4100.15, "ts": time.time()},
     )
 
     assert plan["allowed"] is True
@@ -291,6 +326,7 @@ def test_supervisor_tighten_sl_plan_skips_when_not_more_protective():
     plan = live_service._supervisor_tighten_sl_plan(
         {"direction": 1, "current_price": 4100.0, "sl": 4099.9},
         4102.0,
+        quote={"bid": 4099.8, "ask": 4100.2, "mid": 4100.0, "ts": time.time()},
     )
 
     assert plan["allowed"] is False
@@ -340,15 +376,33 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
             )
 
     class _Bridge:
+        is_connected = True
+
         def __init__(self):
             self.amends = []
 
         def get_spot_quote(self):
-            return {"bid": 3976.39, "ask": 3976.46, "mid": 3976.425}
+            return {"bid": 3976.39, "ask": 3976.46, "mid": 3976.425, "ts": time.time()}
 
         def amend_position_sltp(self, position_id, *, sl, tp):
             self.amends.append((position_id, sl, tp))
             return SimpleNamespace(success=True, position_id=position_id, comment="ok")
+
+        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
+            return SimpleNamespace(
+                status="fresh",
+                reconcile_id="entry-repair-r1",
+                observed_at=time.time(),
+                generated_at=time.time(),
+                positions=(
+                    {
+                        "position_id": 270244024,
+                        "symbol": "XAUUSD+",
+                        "sl": 4014.95,
+                        "tp": 3996.81,
+                    },
+                ),
+            )
 
     updates = []
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
@@ -615,6 +669,11 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
     runtime_writes = []
     candidate = SimpleNamespace(direction_name="LONG", volume=100.0)
     result = SimpleNamespace(success=True)
+    monkeypatch.setattr(
+        live_service,
+        "_probe_final_open_admission",
+        lambda **_kwargs: {"ok": True, "blockers": ()},
+    )
 
     def _order(_bridge, _composite, _volume):
         rpc_entered.set()

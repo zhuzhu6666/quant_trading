@@ -30,6 +30,8 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
+from backend.core.db import prepare_experiments_store
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,30 +96,7 @@ class ModelRegistry:
         return conn
 
     def _ensure_table(self) -> None:
-        conn = self._get_conn()
-        try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS model_registry (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    model_type TEXT NOT NULL,
-                    symbol TEXT DEFAULT 'XAUUSD+',
-                    timeframe TEXT DEFAULT 'M5',
-                    version INTEGER NOT NULL,
-                    artifact_path TEXT DEFAULT '',
-                    params_json TEXT DEFAULT '{}',
-                    metrics_json TEXT DEFAULT '{}',
-                    status TEXT DEFAULT 'active',
-                    created_at REAL DEFAULT 0.0,
-                    UNIQUE(model_type, symbol, timeframe, version)
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_model_registry_lookup
-                ON model_registry(model_type, symbol, timeframe)
-            """)
-            conn.commit()
-        finally:
-            conn.close()
+        prepare_experiments_store(self._db_path or "data/experiments.db")
 
     def register(
         self,

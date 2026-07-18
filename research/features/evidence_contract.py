@@ -86,6 +86,11 @@ def build_evidence_contract(
         allowed_uses.append("supervised_training")
     if integrity == "full" and causal_level == "intervention_observed" and label_status == "matured":
         allowed_uses.append("strong_governance")
+    executable_governance_allowed = bool(
+        (quality or {}).get("executable_governance_allowed")
+    )
+    if executable_governance_allowed and "supervised_training" in allowed_uses:
+        allowed_uses.append("executable_governance")
 
     blockers = []
     if integrity == "missing":
@@ -126,6 +131,7 @@ def build_evidence_contract(
         "quality": {
             "quality_score": quality_score,
             "model_ready": bool((quality or {}).get("model_ready")),
+            "executable_governance_allowed": executable_governance_allowed,
             "missing": list((quality or {}).get("missing") or []),
         },
     }

@@ -28,6 +28,7 @@ import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickStr
 import { translateDisplayValue } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
+import { factBoundTone, factIsKnown, readFact } from "@/api/fact";
 
 function formatPct(value: number): string {
   return `${formatDecimal(value * 100, 1)}%`;
@@ -211,6 +212,9 @@ export function ModelsPage() {
   });
 
   const readiness = asRecord(readinessQuery.data);
+  const readinessFact = readFact(readinessQuery.data, "ops.backend-readiness.v2");
+  const readinessRequestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
+  const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
   const models = asRecord(pick(readiness, ["models"]));
   const metaLightgbm = asRecord(pick(models, ["meta_lightgbm"]));
   const promotionGate = asRecord(pick(metaLightgbm, ["promotion_gate"]));
@@ -307,7 +311,7 @@ export function ModelsPage() {
     },
   ];
 
-  const hasError = [
+  const modelQueries = [
     readinessQuery,
     datasetQuery,
     metaReportQuery,
@@ -315,15 +319,35 @@ export function ModelsPage() {
     positionAuditsQuery,
     openAuditsQuery,
     factorAuditsQuery,
+    factorAdvisoriesQuery,
     shadowQueueQuery,
     canaryQuery,
     inferenceQuery,
     permissionsQuery,
+    metaAdvisoriesQuery,
+    highLoadAuditsQuery,
     qualityHealthQuery,
-  ].some((query) => query.isError);
+  ];
+  const hasError = modelQueries.some((query) => query.isError || query.isRefetchError);
+  const modelFactsKnown = readinessKnown && [
+    factIsKnown(readFact(datasetQuery.data, "learning.dataset-readiness.v2"), datasetQuery.isError || datasetQuery.isRefetchError),
+    factIsKnown(readFact(metaReportQuery.data, "learning.model-meta-lightgbm-shadow-report.v2"), metaReportQuery.isError || metaReportQuery.isRefetchError),
+    factIsKnown(readFact(metaAuditsQuery.data, "learning.model-meta-lightgbm-audits.v2"), metaAuditsQuery.isError || metaAuditsQuery.isRefetchError),
+    factIsKnown(readFact(positionAuditsQuery.data, "learning.model-position-quality-audits.v2"), positionAuditsQuery.isError || positionAuditsQuery.isRefetchError),
+    factIsKnown(readFact(openAuditsQuery.data, "learning.model-open-quality-audits.v2"), openAuditsQuery.isError || openAuditsQuery.isRefetchError),
+    factIsKnown(readFact(factorAuditsQuery.data, "learning.factor-governance-lightgbm-audits.v2"), factorAuditsQuery.isError || factorAuditsQuery.isRefetchError),
+    factIsKnown(readFact(factorAdvisoriesQuery.data, "learning.factor-governance-lightgbm-advisories.v2"), factorAdvisoriesQuery.isError || factorAdvisoriesQuery.isRefetchError),
+    factIsKnown(readFact(shadowQueueQuery.data, "learning.model-shadow-queue.v2"), shadowQueueQuery.isError || shadowQueueQuery.isRefetchError),
+    factIsKnown(readFact(canaryQuery.data, "learning.model-canary-reviews.v2"), canaryQuery.isError || canaryQuery.isRefetchError),
+    factIsKnown(readFact(inferenceQuery.data, "learning.model-inference-audits.v2"), inferenceQuery.isError || inferenceQuery.isRefetchError),
+    factIsKnown(readFact(permissionsQuery.data, "learning.model-permission-audits.v2"), permissionsQuery.isError || permissionsQuery.isRefetchError),
+    factIsKnown(readFact(metaAdvisoriesQuery.data, "learning.model-meta-advisories.v2"), metaAdvisoriesQuery.isError || metaAdvisoriesQuery.isRefetchError),
+    factIsKnown(readFact(highLoadAuditsQuery.data, "learning.model-offmarket-high-load-audits.v2"), highLoadAuditsQuery.isError || highLoadAuditsQuery.isRefetchError),
+    factIsKnown(readFact(qualityHealthQuery.data, "learning.dataset-quality-health.v2"), qualityHealthQuery.isError || qualityHealthQuery.isRefetchError),
+  ].every(Boolean);
 
   return (
-    <section className="dashboard models-dashboard">
+    <section className={`dashboard models-dashboard ${modelFactsKnown ? "" : "fact-unverified"}`.trim()}>
       <div className="dashboard-header">
         <div>
           <div className="eyebrow">模型学习</div>
@@ -331,9 +355,9 @@ export function ModelsPage() {
           <p>影子模型、样本准备度、审计轨迹和准入队列集中展示；当前只观察，不直接接管治理。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={advisoryOnly ? "顾问/影子模式" : "治理候选"} tone={advisoryOnly ? "warn" : "ok"} />
-          <StatusPill status={`门控 ${translateDisplayValue(gateDecision)}`} tone={statusTone(gateDecision)} />
-          <StatusPill status={hasError ? "模型接口异常" : "模型链路在线"} tone={hasError ? "bad" : "ok"} />
+          <StatusPill status={modelFactsKnown ? (advisoryOnly ? "顾问/影子模式" : "治理候选") : "模型事实待接入"} tone={modelFactsKnown ? (advisoryOnly ? "warn" : "ok") : "warn"} />
+          <StatusPill status={`门控 ${translateDisplayValue(gateDecision)}`} tone={factBoundTone(readinessFact, statusTone(gateDecision), readinessRequestFailed)} />
+          <StatusPill status={hasError ? "模型接口异常" : modelFactsKnown ? "模型链路在线" : "模型事实未接入"} tone={hasError ? "bad" : modelFactsKnown ? "ok" : "warn"} />
         </div>
       </div>
 

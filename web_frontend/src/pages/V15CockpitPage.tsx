@@ -41,6 +41,7 @@ import {
   startReleaseRun,
 } from "@/api/client";
 import { ActionButton } from "@/components/ActionButton";
+import { factBoundTone, factHasDisplayValue, factIsKnown, readFact, type FactEnvelope } from "@/api/fact";
 import { MetricCard } from "@/components/Card";
 import { CompactMetric, Field, ProgressMetric, SectionHead, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { JsonBlock } from "@/components/JsonBlock";
@@ -97,6 +98,20 @@ function boolTone(value: boolean): Tone {
   return value ? "ok" : "warn";
 }
 
+/** Keep retained values from the few legacy endpoints without fact.v1 visible,
+ * but never present a success colour as if freshness were proven. */
+function unverifiedTone(tone: Tone): Tone {
+  return tone === "ok" ? "warn" : tone;
+}
+
+function endpointTone(
+  tone: Tone,
+  fact?: FactEnvelope,
+  requestFailed = false,
+): Tone {
+  return fact ? factBoundTone(fact, tone, requestFailed) : unverifiedTone(tone);
+}
+
 function safeLabel(value: unknown): string {
   if (value === undefined || value === null || value === "") return "";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return translateDisplayValue(String(value));
@@ -105,7 +120,17 @@ function safeLabel(value: unknown): string {
   return direct ? translateReasonText(direct) : "";
 }
 
-function DataList({ items, empty = "无记录" }: { items: unknown[]; empty?: string }) {
+function DataList({
+  items,
+  empty = "无记录",
+  fact,
+  requestFailed = false,
+}: {
+  items: unknown[];
+  empty?: string;
+  fact?: FactEnvelope;
+  requestFailed?: boolean;
+}) {
   if (!items.length) {
     return <div className="empty-state-small">{empty}</div>;
   }
@@ -123,7 +148,7 @@ function DataList({ items, empty = "无记录" }: { items: unknown[]; empty?: st
               <strong>{title}</strong>
               <span>{detail ? translateReasonText(detail) : formatTime(ts)}</span>
             </div>
-            {status ? <StatusPill status={status} tone={toneFromStatus(status)} /> : null}
+            {status ? <StatusPill status={status} tone={endpointTone(toneFromStatus(status), fact, requestFailed)} /> : null}
           </div>
         );
       })}
@@ -163,36 +188,15 @@ function factorIdOf(item: unknown): string {
 }
 
 function extractFactorCatalogItems(input: unknown): Record<string, unknown>[] {
-  const visited = new Set<object>();
-  let best: Record<string, unknown>[] = [];
-
-  const visit = (value: unknown) => {
-    if (value === null || value === undefined) {
-      return;
-    }
-    if (Array.isArray(value)) {
-      const records = value.filter(isRecord);
-      const factorRecords = records.filter(isCatalogFactorRecord);
-      if (factorRecords.length > best.length) {
-        best = factorRecords;
-      }
-      for (const item of records) {
-        visit(item);
-      }
-      return;
-    }
-    if (!isRecord(value) || visited.has(value)) {
-      return;
-    }
-    visited.add(value);
-    for (const child of Object.values(value)) {
-      visit(child);
-    }
-  };
-
-  visit(input);
+  // ``GET /api/factor-v4/catalog`` exposes its catalog at the top-level
+  // ``items`` field in both live and latest-snapshot modes.  Do not search
+  // recursively: a nested advisory payload must never be mistaken for the
+  // endpoint's authoritative catalog.
+  const endpoint = isRecord(input) ? input : {};
+  const items = Array.isArray(endpoint.items) ? endpoint.items : [];
+  const records = items.filter(isRecord).filter(isCatalogFactorRecord);
   const byFactorId = new Map<string, Record<string, unknown>>();
-  for (const item of best) {
+  for (const item of records) {
     const factorId = factorIdOf(item);
     if (!factorId) {
       continue;
@@ -224,7 +228,15 @@ function isOperationalFactor(item: unknown): boolean {
   return pickBoolean(item, ["used_in_score"], false) || source === "builtin";
 }
 
-function FactorCatalogList({ items }: { items: unknown[] }) {
+function FactorCatalogList({
+  items,
+  fact,
+  requestFailed = false,
+}: {
+  items: unknown[];
+  fact: FactEnvelope;
+  requestFailed?: boolean;
+}) {
   const records = items.map(asRecord).filter((item) => factorIdOf(item));
   if (!records.length) {
     return <div className="empty-state-small">因子目录暂无条目</div>;
@@ -251,9 +263,9 @@ function FactorCatalogList({ items }: { items: unknown[] }) {
               </span>
             </div>
             <div className="v15-pill-row">
-              <StatusPill status={enabled ? "已启用" : "未启用"} tone={enabled ? "ok" : "warn"} />
-              <StatusPill status={usedInScore ? "参与打分" : eligible ? "可用" : "观察"} tone={usedInScore ? "ok" : eligible ? "warn" : "mute"} />
-              <StatusPill status={health} tone={toneFromStatus(health)} />
+              <StatusPill status={enabled ? "已启用" : "未启用"} tone={endpointTone(enabled ? "ok" : "warn", fact, requestFailed)} />
+              <StatusPill status={usedInScore ? "参与打分" : eligible ? "可用" : "观察"} tone={endpointTone(usedInScore ? "ok" : eligible ? "warn" : "mute", fact, requestFailed)} />
+              <StatusPill status={health} tone={endpointTone(toneFromStatus(health), fact, requestFailed)} />
             </div>
           </div>
         );
@@ -310,7 +322,7 @@ function GovernanceRunList({ items }: { items: unknown[] }) {
               <strong>{runId}</strong>
               <span>{evolutionRunDetail(item)}</span>
             </div>
-            {status ? <StatusPill status={status} tone={toneFromStatus(status)} /> : null}
+            {status ? <StatusPill status={status} tone={unverifiedTone(toneFromStatus(status))} /> : null}
           </div>
         );
       })}
@@ -318,7 +330,15 @@ function GovernanceRunList({ items }: { items: unknown[] }) {
   );
 }
 
-function TemplateList({ items }: { items: unknown[] }) {
+function TemplateList({
+  items,
+  fact,
+  requestFailed = false,
+}: {
+  items: unknown[];
+  fact?: FactEnvelope;
+  requestFailed?: boolean;
+}) {
   const records = items.map(asRecord);
   if (!records.length) {
     return <div className="empty-state-small">暂无模板记录</div>;
@@ -340,7 +360,7 @@ function TemplateList({ items }: { items: unknown[] }) {
               <strong>{factorId}</strong>
               <span>{detail || ""}</span>
             </div>
-            {status ? <StatusPill status={status} tone={toneFromStatus(status)} /> : null}
+            {status ? <StatusPill status={status} tone={endpointTone(toneFromStatus(status), fact, requestFailed)} /> : null}
           </div>
         );
       })}
@@ -403,7 +423,7 @@ function KlineWindowPreview({ preview, pending = false }: { preview: unknown; pe
     <div className="v15-kline">
       <div className="v15-section-head">
         <h3>{pickString(firstWindow, ["symbol"], "XAUUSD+")} / {pickString(firstWindow, ["timeframe"], "M5")}</h3>
-        <StatusPill status={`${formatDecimal(bars.length, 0)} 根K线`} tone="ok" />
+        <StatusPill status={`${formatDecimal(bars.length, 0)} 根K线`} tone="warn" />
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="K线回放窗口预览">
         <line x1={pad} x2={width - pad} y1={height - pad} y2={height - pad} className="v15-kline-axis" />
@@ -470,7 +490,15 @@ function learningTone(status: string): Tone {
   return "mute";
 }
 
-function TradeOutcomeLearningPanel({ preview }: { preview: unknown }) {
+function TradeOutcomeLearningPanel({
+  preview,
+  fact,
+  requestFailed = false,
+}: {
+  preview: unknown;
+  fact: FactEnvelope;
+  requestFailed?: boolean;
+}) {
   const previewRecord = asRecord(preview);
   const items = pickArray(previewRecord, ["items"]).map(asRecord);
   if (!items.length) {
@@ -507,14 +535,14 @@ function TradeOutcomeLearningPanel({ preview }: { preview: unknown }) {
     <div className="v15-outcome-panel">
       <div className="v15-section-head">
         <h3>交易结果与学习</h3>
-        <StatusPill status={translateDisplayValue(learningStatus || status)} tone={learningTone(learningStatus)} />
+        <StatusPill status={translateDisplayValue(learningStatus || status)} tone={endpointTone(learningTone(learningStatus), fact, requestFailed)} />
       </div>
       <div className="v15-mini-grid">
-        <CompactMetric label="开仓方向" value={directionLabel} detail={pickString(item, ["symbol"], "") || ""} tone={directionLabel === "" ? "mute" : "ok"} />
-        <CompactMetric label="这单结果" value={translateDisplayValue(result || status)} detail={label} tone={outcomeTone(result, status)} />
-        <CompactMetric label="实际盈亏" value={pnlText} detail={tradeTitle} tone={outcomeTone(result, status)} />
+        <CompactMetric label="开仓方向" value={directionLabel} detail={pickString(item, ["symbol"], "") || ""} tone={endpointTone(directionLabel === "" ? "mute" : "ok", fact, requestFailed)} />
+        <CompactMetric label="这单结果" value={translateDisplayValue(result || status)} detail={label} tone={endpointTone(outcomeTone(result, status), fact, requestFailed)} />
+        <CompactMetric label="实际盈亏" value={pnlText} detail={tradeTitle} tone={endpointTone(outcomeTone(result, status), fact, requestFailed)} />
         <CompactMetric label="平仓原因" value={closeReason} detail={formatTime(pick(outcome, ["close_ts"]))} tone={closeReason === "" ? "mute" : "warn"} />
-        <CompactMetric label="学习处理" value={translateDisplayValue(learningStatus)} detail={sampleDetail || ""} tone={learningTone(learningStatus)} />
+        <CompactMetric label="学习处理" value={translateDisplayValue(learningStatus)} detail={sampleDetail || ""} tone={endpointTone(learningTone(learningStatus), fact, requestFailed)} />
       </div>
       <div className="v15-replay-reading">
         <strong>系统会怎么学</strong>
@@ -646,6 +674,45 @@ export function V15CockpitPage() {
     staleTime: 15_000,
   });
 
+  const readinessRequestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
+  const phase0RequestFailed = phase0Query.isError || phase0Query.isRefetchError;
+  const replayRequestFailed = replayQuery.isError || replayQuery.isRefetchError;
+  const replayChoicesRequestFailed = replayChoicesQuery.isError || replayChoicesQuery.isRefetchError;
+  const catalogRequestFailed = catalogQuery.isError || catalogQuery.isRefetchError;
+  const catalogSnapshotRequestFailed = catalogSnapshotQuery.isError || catalogSnapshotQuery.isRefetchError;
+  const riskRequestFailed = riskQuery.isError || riskQuery.isRefetchError;
+  const learningSummaryRequestFailed = learningSummaryQuery.isError || learningSummaryQuery.isRefetchError;
+  const learningApplicationsRequestFailed = learningApplicationsQuery.isError || learningApplicationsQuery.isRefetchError;
+  const learningSamplesRequestFailed = learningSamplesQuery.isError || learningSamplesQuery.isRefetchError;
+  const activeTemplatesRequestFailed = activeTemplatesQuery.isError || activeTemplatesQuery.isRefetchError;
+  const incidentControlRequestFailed = incidentControlQuery.isError || incidentControlQuery.isRefetchError;
+  const incidentPlaybookRequestFailed = incidentPlaybookQuery.isError || incidentPlaybookQuery.isRefetchError;
+  const scopeApprovalRequestFailed = scopeApprovalQuery.isError || scopeApprovalQuery.isRefetchError;
+  const scopeEnforcementRequestFailed = scopeEnforcementQuery.isError || scopeEnforcementQuery.isRefetchError;
+  const releaseRequestFailed = releaseQuery.isError || releaseQuery.isRefetchError;
+  const releaseApprovalsRequestFailed = releaseApprovalsQuery.isError || releaseApprovalsQuery.isRefetchError;
+  const readinessFact = readFact(readinessQuery.data, "ops.backend-readiness.v2");
+  const phase0Fact = readFact(phase0Query.data, "ops.v15-phase0-completion.v2");
+  const replayFact = readFact(replayQuery.data, "ops.replay-latest.v2");
+  const replayChoicesFact = readFact(replayChoicesQuery.data, "ops.replay-bar-decisions.v2");
+  const catalogFact = readFact(catalogQuery.data, "factor.catalog.v4");
+  const catalogSnapshotFact = readFact(catalogSnapshotQuery.data, "factor.catalog.v4");
+  const riskFact = readFact(riskQuery.data, "risk.summary.v2");
+  const learningSummaryFact = readFact(learningSummaryQuery.data, "learning.summary.v2");
+  const learningApplicationsFact = readFact(learningApplicationsQuery.data, "learning.applications.v2");
+  const learningSamplesFact = readFact(learningSamplesQuery.data, "learning.autonomous-samples.v2");
+  const activeTemplatesFact = readFact(activeTemplatesQuery.data, "learning.parameter-templates-active.v2");
+  const incidentControlFact = readFact(incidentControlQuery.data, "ops.incident-control.v2");
+  const incidentPlaybookFact = readFact(incidentPlaybookQuery.data, "ops.incident-playbook-latest.v2");
+  const scopeApprovalFact = readFact(scopeApprovalQuery.data, "ops.autonomy-scope-approval-latest.v2");
+  const scopeEnforcementFact = readFact(scopeEnforcementQuery.data, "ops.autonomy-scope-enforcement-latest.v2");
+  const releaseFact = readFact(releaseQuery.data, "ops.release-latest.v2");
+  const releaseApprovalsFact = readFact(releaseApprovalsQuery.data, "ops.release-approval-trail.v2");
+  const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
+  const phase0Known = factIsKnown(phase0Fact, phase0RequestFailed);
+  const riskKnown = factIsKnown(riskFact, riskRequestFailed);
+  const incidentControlKnown = factIsKnown(incidentControlFact, incidentControlRequestFailed);
+
   const refreshAll = () => {
     void queryClient.invalidateQueries({ queryKey: ["v15"] });
   };
@@ -677,21 +744,25 @@ export function V15CockpitPage() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.readiness });
     },
   });
+  const replayPreviewFact = readFact(runReplayMutation.data, "ops.replay-bar-preview.v2");
 
   const readiness = asRecord(readinessQuery.data);
   const v15 = asRecord(pick(readiness, ["v15"]));
   const autonomyHealth = asRecord(pick(readiness, ["autonomy_health"]));
-  const replayStatus = asRecord(pick(readiness, ["replay"]));
   const incidentControl = asRecord(pick(incidentControlQuery.data, ["incident_control"]));
   const phase0 = asRecord(pick(phase0Query.data, ["phase0"]));
   const latestReplay = asRecord(pick(replayQuery.data, ["replay", "latest_report", "report"]));
   const replayRunReport = asRecord(pick(runReplayMutation.data, ["report"]));
-  const replayDisplayReport = pickString(replayRunReport, ["replay_run_id"], "") ? replayRunReport : latestReplay;
+  const hasReplayRunReport = !!pickString(replayRunReport, ["replay_run_id"], "");
+  const replayDisplayReport = hasReplayRunReport ? replayRunReport : latestReplay;
+  const replayDisplayFact = hasReplayRunReport ? replayPreviewFact : replayFact;
+  const replayDisplayRequestFailed = hasReplayRunReport ? runReplayMutation.isError : replayRequestFailed;
   const replayChoices = useMemo(() => {
+    if (!factHasDisplayValue(replayChoicesFact)) return [];
     const direct = pickArray(replayChoicesQuery.data, ["items"]).map(asRecord);
     if (direct.length) return direct;
     return pickArray(pick(replayChoicesQuery.data, ["choices"]), ["items"]).map(asRecord);
-  }, [replayChoicesQuery.data]);
+  }, [replayChoicesFact, replayChoicesQuery.data]);
   const replayMetrics = asRecord(pick(replayDisplayReport, ["metric_summary"]));
   const barReplayMetrics = asRecord(pick(replayMetrics, ["bar_replay"]));
   const barWindowPreview = pick(replayMetrics, ["bar_window_preview"]);
@@ -704,10 +775,20 @@ export function V15CockpitPage() {
   const snapshotCatalogItems = useMemo(() => {
     return extractFactorCatalogItems(catalogSnapshotQuery.data);
   }, [catalogSnapshotQuery.data]);
+  const liveCatalogDisplayable = factHasDisplayValue(catalogFact);
+  const snapshotCatalogDisplayable = factHasDisplayValue(catalogSnapshotFact);
   const catalogItems = useMemo(() => {
-    return liveCatalogItems.length ? liveCatalogItems : snapshotCatalogItems;
-  }, [liveCatalogItems, snapshotCatalogItems]);
-  const catalogSourceLabel = liveCatalogItems.length ? "实时目录" : snapshotCatalogItems.length ? "最近快照" : "无数据";
+    if (liveCatalogDisplayable) return liveCatalogItems;
+    if (snapshotCatalogDisplayable) return snapshotCatalogItems;
+    return [];
+  }, [liveCatalogDisplayable, liveCatalogItems, snapshotCatalogDisplayable, snapshotCatalogItems]);
+  const catalogDisplayFact = liveCatalogDisplayable ? catalogFact : snapshotCatalogDisplayable ? catalogSnapshotFact : catalogFact;
+  const catalogDisplayRequestFailed = liveCatalogDisplayable
+    ? catalogRequestFailed
+    : snapshotCatalogDisplayable
+      ? catalogSnapshotRequestFailed
+      : catalogRequestFailed || catalogSnapshotRequestFailed;
+  const catalogSourceLabel = liveCatalogDisplayable ? "实时目录" : snapshotCatalogDisplayable ? "最近快照" : "事实未知";
   const operationalCatalogItems = useMemo(() => {
     const filtered = catalogItems.filter(isOperationalFactor);
     return filtered.length ? filtered : catalogItems;
@@ -731,15 +812,19 @@ export function V15CockpitPage() {
   const operationallyReady = pickBoolean(phase0, ["operationally_ready"], false);
   const blockers = pickArray(readiness, ["blockers"]);
 
-  const catalogCount = catalogItems.length || pickNumber(liveCatalogItems.length ? factorCatalog : snapshotCatalog, ["count"], 0);
+  const catalogCount = catalogItems.length || pickNumber(liveCatalogDisplayable ? factorCatalog : snapshotCatalogDisplayable ? snapshotCatalog : {}, ["count"], 0);
   const operationalCount = operationalCatalogItems.length;
   const alphaFactors = operationalCatalogItems.filter((item) => pickString(item, ["role"], "") === "alpha").length;
   const scoreFactors = operationalCatalogItems.filter((item) => pickBoolean(item, ["used_in_score"], false)).length;
   const governanceRuns = pickArray(evolutionQuery.data, ["items"]);
   const templateLogs = pickArray(templateLogsQuery.data, ["items"]);
   const activeTemplates = pickArray(activeTemplatesQuery.data, ["items"]);
-  const learningApplications = pickArray(learningApplicationsQuery.data, ["applications", "items", "rows"]);
-  const learningSamples = pickArray(learningSamplesQuery.data, ["samples", "items", "rows"]);
+  const learningApplications = factHasDisplayValue(learningApplicationsFact)
+    ? pickArray(learningApplicationsQuery.data, ["applications", "items", "rows"])
+    : [];
+  const learningSamples = factHasDisplayValue(learningSamplesFact)
+    ? pickArray(learningSamplesQuery.data, ["samples", "items", "rows"])
+    : [];
 
   const replayKeys = [
     "bar_replay",
@@ -762,9 +847,15 @@ export function V15CockpitPage() {
           <p>统一查看运行态、回放证据、自治健康、事故控制和发布审计。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={readyForFrontend ? "后端就绪" : "后端受限"} tone={readyForFrontend ? "ok" : "warn"} />
-          <StatusPill status={`基础证据 ${phase0Complete ? "已完成" : "待补"}`} tone={phase0Complete ? "ok" : "warn"} />
-          <StatusPill status="自治链路已收口" tone="ok" />
+          <StatusPill
+            status={`${readyForFrontend ? "后端就绪" : "后端受限"}${readinessKnown ? "" : "（待确认）"}`}
+            tone={factBoundTone(readinessFact, readyForFrontend ? "ok" : "warn", readinessRequestFailed)}
+          />
+          <StatusPill
+            status={`基础证据 ${phase0Complete ? "已完成" : "待补"}${phase0Known ? "" : "（待确认）"}`}
+            tone={factBoundTone(phase0Fact, phase0Complete ? "ok" : "warn", phase0RequestFailed)}
+          />
+          <StatusPill status="端点事实按来源独立校验" tone="warn" />
           <button className="header-refresh" type="button" onClick={refreshAll}>
             <RefreshCw size={15} />
             刷新
@@ -773,10 +864,10 @@ export function V15CockpitPage() {
       </div>
 
       <div className="stat-grid v15-stat-grid">
-        <StatTile icon={Gauge} label="自治健康" value={`${formatDecimal(healthScore, 1)}%`} detail={translateDisplayValue(healthPosture)} tone={healthPosture === "full" ? "ok" : healthPosture === "frozen" ? "bad" : "warn"} />
-        <StatTile icon={Workflow} label="回放证据" value={latestReplayGrade} detail={`误差 ${formatDecimal(replayMismatch, 0)}${replayError ? " · 有异常" : ""}`} tone={latestReplayGrade === "A" || latestReplayGrade === "B" ? "ok" : latestReplayGrade === "C" ? "warn" : "bad"} />
-        <StatTile icon={Siren} label="事故模式" value={translateDisplayValue(incidentMode)} detail={`阻断项 ${formatDecimal(blockers.length, 0)}`} tone={incidentMode === "normal" ? "ok" : "warn"} />
-        <StatTile icon={Rocket} label="发布审计" value={translateDisplayValue(releaseStatus)} detail={operationallyReady ? "现场证据已齐" : "待补现场证据"} tone={toneFromStatus(releaseStatus)} />
+        <StatTile icon={Gauge} label="自治健康" value={`${formatDecimal(healthScore, 1)}%`} detail={`${translateDisplayValue(healthPosture)}${readinessKnown ? "" : " · 保留值"}`} tone={factBoundTone(readinessFact, healthPosture === "full" ? "ok" : healthPosture === "frozen" ? "bad" : "warn", readinessRequestFailed)} />
+        <StatTile icon={Workflow} label="回放证据" value={latestReplayGrade} detail={`误差 ${formatDecimal(replayMismatch, 0)}${replayError ? " · 有异常" : ""}`} tone={factBoundTone(replayDisplayFact, latestReplayGrade === "A" || latestReplayGrade === "B" ? "ok" : latestReplayGrade === "C" ? "warn" : "bad", replayDisplayRequestFailed)} />
+        <StatTile icon={Siren} label="事故模式" value={translateDisplayValue(incidentMode)} detail={`阻断项 ${formatDecimal(blockers.length, 0)}`} tone={factBoundTone(incidentControlFact, incidentMode === "normal" ? "ok" : "warn", incidentControlRequestFailed)} />
+        <StatTile icon={Rocket} label="发布审计" value={translateDisplayValue(releaseStatus)} detail={phase0Known ? (operationallyReady ? "现场证据已齐" : "待补现场证据") : "现场证据待确认"} tone={factBoundTone(releaseFact, toneFromStatus(releaseStatus), releaseRequestFailed)} />
       </div>
 
       <div className="v15-tabbar" role="tablist" aria-label="运行中枢分区">
@@ -796,24 +887,24 @@ export function V15CockpitPage() {
         <div className="dashboard-grid">
           <MetricCard title="运行态合约" className="wide-panel">
             <div className="v15-mini-grid">
-              <CompactMetric label="就绪状态" value={readyForFrontend ? "就绪" : "受限"} detail={pickString(readiness, ["schema_version"], "")} tone={boolTone(readyForFrontend)} />
-              <CompactMetric label="运行覆盖层" value={safeLabel(pick(v15, ["overlay.status", "snapshot.status"]))} detail={safeLabel(pick(v15, ["snapshot.config_hash", "snapshot.overlay_hash"]))} tone={toneFromStatus(safeLabel(pick(v15, ["overlay.status", "snapshot.status"])))} />
-              <CompactMetric label="回滚快照" value={pickBoolean(v15, ["snapshot.ok"], false) ? "正常" : "缺失"} detail={formatTime(pick(v15, ["snapshot.created_at", "snapshot.updated_at"]))} tone={pickBoolean(v15, ["snapshot.ok"], false) ? "ok" : "warn"} />
-              <CompactMetric label="基础证据" value={phase0Complete ? "已完成" : "未完成"} detail={operationallyReady ? "可运行" : "待补证据"} tone={phase0Complete ? "ok" : "warn"} />
+              <CompactMetric label="就绪状态" value={readyForFrontend ? "就绪" : "受限"} detail={`${pickString(readiness, ["schema_version"], "")}${readinessKnown ? "" : " / 保留值"}`} tone={factBoundTone(readinessFact, boolTone(readyForFrontend), readinessRequestFailed)} />
+              <CompactMetric label="运行覆盖层" value={safeLabel(pick(v15, ["overlay.status", "snapshot.status"]))} detail={safeLabel(pick(v15, ["snapshot.config_hash", "snapshot.overlay_hash"]))} tone={factBoundTone(readinessFact, toneFromStatus(safeLabel(pick(v15, ["overlay.status", "snapshot.status"]))), readinessRequestFailed)} />
+              <CompactMetric label="回滚快照" value={pickBoolean(v15, ["snapshot.ok"], false) ? "正常" : "缺失"} detail={formatTime(pick(v15, ["snapshot.created_at", "snapshot.updated_at"]))} tone={factBoundTone(readinessFact, pickBoolean(v15, ["snapshot.ok"], false) ? "ok" : "warn", readinessRequestFailed)} />
+              <CompactMetric label="基础证据" value={phase0Complete ? "已完成" : "未完成"} detail={phase0Known ? (operationallyReady ? "可运行" : "待补证据") : "事实待确认"} tone={factBoundTone(phase0Fact, phase0Complete ? "ok" : "warn", phase0RequestFailed)} />
             </div>
             <div className="v15-two-col">
               <div>
-                <SectionHead title="控制平面边界" status="已保护" tone="ok" />
+                <SectionHead title="控制平面边界" status="已保护" tone={factBoundTone(readinessFact, "ok", readinessRequestFailed)} />
                 <div className="field-list">
-                  <Field label="RiskPolicyService" value={pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "必须经过" : "缺失"} tone={pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "ok" : "bad"} />
-                  <Field label="DecisionPolicy" value={pickBoolean(v15, ["control_plane_boundaries.decision_policy_required_for_weight_writes"], false) ? "权重写入必经" : "缺失"} tone={pickBoolean(v15, ["control_plane_boundaries.decision_policy_required_for_weight_writes"], false) ? "ok" : "bad"} />
+                  <Field label="RiskPolicyService" value={pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "必须经过" : "缺失"} tone={factBoundTone(readinessFact, pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "ok" : "bad", readinessRequestFailed)} />
+                  <Field label="DecisionPolicy" value={pickBoolean(v15, ["control_plane_boundaries.decision_policy_required_for_weight_writes"], false) ? "权重写入必经" : "缺失"} tone={factBoundTone(readinessFact, pickBoolean(v15, ["control_plane_boundaries.decision_policy_required_for_weight_writes"], false) ? "ok" : "bad", readinessRequestFailed)} />
                   <Field label="覆盖层事实源" value={pickBoolean(v15, ["control_plane_boundaries.runtime_overlay_is_source_of_truth"], false) ? "数据库覆盖层" : "未知"} />
-                  <Field label="快照回滚" value={pickBoolean(v15, ["control_plane_boundaries.runtime_snapshot_required_for_rollback"], false) ? "必须保留" : "缺失"} tone={pickBoolean(v15, ["control_plane_boundaries.runtime_snapshot_required_for_rollback"], false) ? "ok" : "bad"} />
+                  <Field label="快照回滚" value={pickBoolean(v15, ["control_plane_boundaries.runtime_snapshot_required_for_rollback"], false) ? "必须保留" : "缺失"} tone={factBoundTone(readinessFact, pickBoolean(v15, ["control_plane_boundaries.runtime_snapshot_required_for_rollback"], false) ? "ok" : "bad", readinessRequestFailed)} />
                 </div>
               </div>
               <div>
-                <SectionHead title="就绪阻断项" status={`${blockers.length}`} tone={blockers.length ? "warn" : "ok"} />
-                <DataList items={blockers} empty="无阻断项" />
+                <SectionHead title="就绪阻断项" status={`${blockers.length}`} tone={factBoundTone(readinessFact, blockers.length ? "warn" : "ok", readinessRequestFailed)} />
+                <DataList items={blockers} empty="无阻断项" fact={readinessFact} requestFailed={readinessRequestFailed} />
               </div>
             </div>
           </MetricCard>
@@ -824,11 +915,11 @@ export function V15CockpitPage() {
         <div className="dashboard-grid">
           <MetricCard title="因子目录" className="wide-panel">
             <div className="v15-mini-grid">
-              <CompactMetric label="运行条目" value={formatDecimal(operationalCount, 0)} detail={`${catalogSourceLabel} / 候选全集 ${formatDecimal(catalogCount, 0)}`} tone={operationalCount ? "ok" : "warn"} />
-              <CompactMetric label="Alpha 因子" value={formatDecimal(alphaFactors, 0)} detail={`参与打分 ${formatDecimal(scoreFactors, 0)}`} tone={alphaFactors ? "ok" : "warn"} />
-              <CompactMetric label="目录快照" value={pickBoolean(snapshotCatalog, ["ok"], false) ? "可用" : safeLabel(pick(snapshotCatalog, ["status"]))} detail={formatTime(pick(snapshotCatalog, ["created_at", "updated_at"]))} tone={pickBoolean(snapshotCatalog, ["ok"], false) ? "ok" : "warn"} />
+              <CompactMetric label="运行条目" value={formatDecimal(operationalCount, 0)} detail={`${catalogSourceLabel} / 候选全集 ${formatDecimal(catalogCount, 0)}`} tone={factBoundTone(catalogDisplayFact, operationalCount ? "ok" : "warn", catalogDisplayRequestFailed)} />
+              <CompactMetric label="Alpha 因子" value={formatDecimal(alphaFactors, 0)} detail={`参与打分 ${formatDecimal(scoreFactors, 0)}`} tone={factBoundTone(catalogDisplayFact, alphaFactors ? "ok" : "warn", catalogDisplayRequestFailed)} />
+              <CompactMetric label="目录快照" value={pickBoolean(snapshotCatalog, ["ok"], false) ? "可用" : safeLabel(pick(snapshotCatalog, ["status"]))} detail={formatTime(pick(snapshotCatalog, ["created_at", "updated_at"]))} tone={factBoundTone(catalogSnapshotFact, pickBoolean(snapshotCatalog, ["ok"], false) ? "ok" : "warn", catalogSnapshotRequestFailed)} />
             </div>
-            <FactorCatalogList items={operationalCatalogItems} />
+            <FactorCatalogList items={operationalCatalogItems} fact={catalogDisplayFact} requestFailed={catalogDisplayRequestFailed} />
           </MetricCard>
         </div>
       ) : null}
@@ -840,10 +931,14 @@ export function V15CockpitPage() {
           </MetricCard>
           <MetricCard title="参数模板">
             <div className="v15-mini-grid v15-mini-grid-tight">
-              <CompactMetric label="当前模板" value={formatDecimal(activeTemplates.length, 0)} tone={activeTemplates.length ? "ok" : "mute"} />
-              <CompactMetric label="切换记录" value={formatDecimal(templateLogs.length, 0)} tone={templateLogs.length ? "ok" : "mute"} />
+              <CompactMetric label="当前模板" value={formatDecimal(activeTemplates.length, 0)} tone={factBoundTone(activeTemplatesFact, activeTemplates.length ? "ok" : "mute", activeTemplatesRequestFailed)} />
+              <CompactMetric label="切换记录" value={formatDecimal(templateLogs.length, 0)} tone={unverifiedTone(templateLogs.length ? "ok" : "mute")} />
             </div>
-            <TemplateList items={templateLogs.length ? templateLogs : activeTemplates} />
+            <TemplateList
+              items={templateLogs.length ? templateLogs : activeTemplates}
+              fact={templateLogs.length ? undefined : activeTemplatesFact}
+              requestFailed={templateLogs.length ? templateLogsQuery.isError || templateLogsQuery.isRefetchError : activeTemplatesRequestFailed}
+            />
           </MetricCard>
         </div>
       ) : null}
@@ -857,32 +952,33 @@ export function V15CockpitPage() {
             </div>
             <div className="v15-replay-status">
               {runReplayMutation.isPending ? <StatusPill status="正在生成回放窗口" tone="warn" /> : null}
-              {runReplayMutation.isSuccess ? <StatusPill status="回放已完成" tone="ok" /> : null}
+              {runReplayMutation.isSuccess ? <StatusPill status="回放请求已完成（事实未验证）" tone="warn" /> : null}
               {runReplayMutation.isError ? <StatusPill status="回放失败" tone="bad" /> : null}
+              {replayChoicesRequestFailed ? <StatusPill status="历史候选读取异常" tone="bad" /> : null}
               <span>本次显示1个已选择决策窗口 / 前40根 + 后24根K线</span>
               <span>历史候选 {formatDecimal(replayChoices.length, 0)} 条</span>
               <span>最近更新时间 {formatTime(pick(replayDisplayReport, ["created_at"]))}</span>
             </div>
             <KlineWindowPreview preview={barWindowPreview} pending={runReplayMutation.isPending} />
-            <TradeOutcomeLearningPanel preview={tradeOutcomeLearningPreview} />
+            <TradeOutcomeLearningPanel preview={tradeOutcomeLearningPreview} fact={replayDisplayFact} requestFailed={replayDisplayRequestFailed} />
             <div className="v15-mini-grid">
-              <CompactMetric label="回放编号" value={pickString(replayDisplayReport, ["replay_run_id"], "")} detail={formatTime(pick(replayDisplayReport, ["created_at"]))} tone={latestReplayGrade === "missing" ? "warn" : "ok"} />
-              <CompactMetric label="证据等级" value={latestReplayGrade} detail={`误差 ${formatDecimal(replayMismatch, 0)}`} tone={latestReplayGrade === "A" || latestReplayGrade === "B" ? "ok" : latestReplayGrade === "C" ? "warn" : "bad"} />
+              <CompactMetric label="回放编号" value={pickString(replayDisplayReport, ["replay_run_id"], "")} detail={formatTime(pick(replayDisplayReport, ["created_at"]))} tone={factBoundTone(replayDisplayFact, latestReplayGrade === "missing" ? "warn" : "ok", replayDisplayRequestFailed)} />
+              <CompactMetric label="证据等级" value={latestReplayGrade} detail={`误差 ${formatDecimal(replayMismatch, 0)}`} tone={factBoundTone(replayDisplayFact, latestReplayGrade === "A" || latestReplayGrade === "B" ? "ok" : latestReplayGrade === "C" ? "warn" : "bad", replayDisplayRequestFailed)} />
               <CompactMetric label="决策数量" value={formatDecimal(pickNumber(replayDisplayReport, ["decision_count"], 0), 0)} detail={`匹配 ${formatDecimal(pickNumber(replayDisplayReport, ["matched_live_count"], 0), 0)}`} tone="mute" />
-              <CompactMetric label="证据文件" value={pickString(replayDisplayReport, ["artifact_hash"], "").slice(0, 12) || ""} detail={pickString(replayDisplayReport, ["artifact_path"], "")} tone={pickString(replayDisplayReport, ["artifact_hash"], "") ? "ok" : "warn"} />
-              <CompactMetric label="K线覆盖" value={`${formatDecimal(scorePct(pickNumber(barReplayMetrics, ["bar_window_coverage"], 0)), 1)}%`} detail={`缺口 ${formatDecimal(pickNumber(barReplayMetrics, ["missing_bar_window_count"], 0), 0)} / 过期 ${formatDecimal(pickNumber(barReplayMetrics, ["stale_bar_alignment_count"], 0), 0)}`} tone={scorePct(pickNumber(barReplayMetrics, ["bar_window_coverage"], 0)) >= 95 ? "ok" : "warn"} />
-              <CompactMetric label="K线窗口Hash" value={pickString(barReplayMetrics, ["bar_window_hash"], "").slice(0, 12) || ""} detail={`前 ${formatDecimal(pickNumber(barReplayMetrics, ["warmup_bars"], 0), 0)} / 后 ${formatDecimal(pickNumber(barReplayMetrics, ["post_bars"], 0), 0)}`} tone={pickString(barReplayMetrics, ["bar_window_hash"], "") ? "ok" : "warn"} />
+              <CompactMetric label="证据文件" value={pickString(replayDisplayReport, ["artifact_hash"], "").slice(0, 12) || ""} detail={pickString(replayDisplayReport, ["artifact_path"], "")} tone={factBoundTone(replayDisplayFact, pickString(replayDisplayReport, ["artifact_hash"], "") ? "ok" : "warn", replayDisplayRequestFailed)} />
+              <CompactMetric label="K线覆盖" value={`${formatDecimal(scorePct(pickNumber(barReplayMetrics, ["bar_window_coverage"], 0)), 1)}%`} detail={`缺口 ${formatDecimal(pickNumber(barReplayMetrics, ["missing_bar_window_count"], 0), 0)} / 过期 ${formatDecimal(pickNumber(barReplayMetrics, ["stale_bar_alignment_count"], 0), 0)}`} tone={factBoundTone(replayDisplayFact, scorePct(pickNumber(barReplayMetrics, ["bar_window_coverage"], 0)) >= 95 ? "ok" : "warn", replayDisplayRequestFailed)} />
+              <CompactMetric label="K线窗口Hash" value={pickString(barReplayMetrics, ["bar_window_hash"], "").slice(0, 12) || ""} detail={`前 ${formatDecimal(pickNumber(barReplayMetrics, ["warmup_bars"], 0), 0)} / 后 ${formatDecimal(pickNumber(barReplayMetrics, ["post_bars"], 0), 0)}`} tone={factBoundTone(replayDisplayFact, pickString(barReplayMetrics, ["bar_window_hash"], "") ? "ok" : "warn", replayDisplayRequestFailed)} />
             </div>
-            <SectionHead title="K线窗口严重缺口" status={`${barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "blocking").length}`} tone={barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "blocking").length ? "warn" : "ok"} />
+            <SectionHead title="K线窗口严重缺口" status={`${barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "blocking").length}`} tone={factBoundTone(replayDisplayFact, barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "blocking").length ? "warn" : "ok", replayDisplayRequestFailed)} />
             <BarWindowIssueList items={barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "blocking")} />
-            <SectionHead title="预热窗口提示" status={`${barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "notice").length}`} tone={barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "notice").length ? "warn" : "ok"} />
+            <SectionHead title="预热窗口提示" status={`${barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "notice").length}`} tone={factBoundTone(replayDisplayFact, barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "notice").length ? "warn" : "ok", replayDisplayRequestFailed)} />
             <BarWindowIssueList items={barWindowIssues(pickArray(barReplayMetrics, ["mismatch_examples"]), "notice")} />
             {pickString(replayDisplayReport, ["scope.kind"], "") === "bar_replay_evidence" ? (
               <div className="v15-progress-grid">
                 {replayKeys.map((key) => {
                   const metric = asRecord(replayMetrics[key]);
                   const coverage = scorePct(pickNumber(metric, ["coverage", "bar_window_coverage", "factor_frame_coverage", "causality_coverage", "counterfactual_coverage", "agreement_rate"], 0));
-                  return <ProgressMetric key={key} label={replayMetricLabels[key] || key} value={coverage} detail={pickString(metric, ["schema_version"], "")} tone={coverage >= 95 ? "ok" : coverage > 0 ? "warn" : "mute"} />;
+                  return <ProgressMetric key={key} label={replayMetricLabels[key] || key} value={coverage} detail={pickString(metric, ["schema_version"], "")} tone={factBoundTone(replayDisplayFact, coverage >= 95 ? "ok" : coverage > 0 ? "warn" : "mute", replayDisplayRequestFailed)} />;
                 })}
               </div>
             ) : null}
@@ -894,15 +990,15 @@ export function V15CockpitPage() {
         <div className="dashboard-grid">
           <MetricCard title="风控与事故边界">
             <div className="field-list">
-              <Field label="事故模式" value={translateDisplayValue(incidentMode)} tone={incidentMode === "normal" ? "ok" : "warn"} />
-              <Field label="风控摘要" value={safeLabel(pick(risk, ["status", "overall", "system_health.status"]))} tone={toneFromStatus(safeLabel(pick(risk, ["status", "overall", "system_health.status"])))} />
-              <Field label="运行闸门" value={pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "RiskPolicyService" : "未知"} tone={pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "ok" : "bad"} />
+              <Field label="事故模式" value={translateDisplayValue(incidentMode)} tone={factBoundTone(incidentControlFact, incidentMode === "normal" ? "ok" : "warn", incidentControlRequestFailed)} />
+              <Field label="风控摘要" value={`${safeLabel(pick(risk, ["status", "overall", "system_health.status"]))}${riskKnown ? "" : "（待确认）"}`} tone={factBoundTone(riskFact, toneFromStatus(safeLabel(pick(risk, ["status", "overall", "system_health.status"]))), riskRequestFailed)} />
+              <Field label="运行闸门" value={pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "RiskPolicyService" : "未知"} tone={factBoundTone(readinessFact, pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "ok" : "bad", readinessRequestFailed)} />
             </div>
           </MetricCard>
           <MetricCard title="事故模式操作">
             <div className="v15-action-grid">
               {["shadow_only", "no_new_risk", "only_close", "frozen", "normal"].map((mode) => (
-                <ActionButton key={mode} icon={SlidersHorizontal} label={translateDisplayValue(mode)} variant={mode === "normal" ? "ghost" : mode === "frozen" ? "danger" : "primary"} loading={incidentModeMutation.isPending} error={incidentModeMutation.isError ? "切换失败" : null} onAction={() => runAndDiscard(incidentModeMutation.mutateAsync(mode))} />
+                <ActionButton key={mode} icon={SlidersHorizontal} label={translateDisplayValue(mode)} variant={mode === "normal" ? "ghost" : mode === "frozen" ? "danger" : "primary"} loading={incidentModeMutation.isPending} disabled={mode === "normal" && !incidentControlKnown} error={incidentModeMutation.isError ? "切换失败" : null} onAction={() => runAndDiscard(incidentModeMutation.mutateAsync(mode))} />
               ))}
             </div>
           </MetricCard>
@@ -913,14 +1009,14 @@ export function V15CockpitPage() {
         <div className="dashboard-grid">
           <MetricCard title="学习健康">
             <div className="v15-mini-grid v15-mini-grid-tight">
-              <CompactMetric label="应用记录" value={formatDecimal(learningApplications.length, 0)} tone={learningApplications.length ? "ok" : "mute"} />
-              <CompactMetric label="学习样本" value={formatDecimal(learningSamples.length, 0)} tone={learningSamples.length ? "ok" : "mute"} />
-              <CompactMetric label="摘要状态" value={safeLabel(pick(learningSummary, ["status", "schema_version"]))} tone={toneFromStatus(safeLabel(pick(learningSummary, ["status"])))} />
+              <CompactMetric label="应用记录" value={formatDecimal(learningApplications.length, 0)} tone={factBoundTone(learningApplicationsFact, learningApplications.length ? "ok" : "mute", learningApplicationsRequestFailed)} />
+              <CompactMetric label="学习样本" value={formatDecimal(learningSamples.length, 0)} tone={factBoundTone(learningSamplesFact, learningSamples.length ? "ok" : "mute", learningSamplesRequestFailed)} />
+              <CompactMetric label="摘要状态" value={safeLabel(pick(learningSummary, ["status", "schema_version"]))} tone={factBoundTone(learningSummaryFact, toneFromStatus(safeLabel(pick(learningSummary, ["status"]))), learningSummaryRequestFailed)} />
             </div>
-            <DataList items={learningApplications} empty="暂无学习应用记录" />
+            <DataList items={learningApplications} empty="暂无学习应用记录" fact={learningApplicationsFact} requestFailed={learningApplicationsRequestFailed} />
           </MetricCard>
           <MetricCard title="自治学习样本">
-            <DataList items={learningSamples} empty="暂无自治样本" />
+            <DataList items={learningSamples} empty="暂无自治样本" fact={learningSamplesFact} requestFailed={learningSamplesRequestFailed} />
           </MetricCard>
         </div>
       ) : null}
@@ -933,11 +1029,11 @@ export function V15CockpitPage() {
               <ActionButton icon={CheckCircle2} label="执行健康收紧" variant="danger" loading={enforceScopeMutation.isPending} error={enforceScopeMutation.isError ? "执行失败" : null} onAction={() => runAndDiscard(enforceScopeMutation.mutateAsync())} />
             </div>
             <div className="field-list">
-              <Field label="当前模式" value={incidentMode} tone={incidentMode === "normal" ? "ok" : "warn"} />
+              <Field label="当前模式" value={incidentMode} tone={factBoundTone(incidentControlFact, incidentMode === "normal" ? "ok" : "warn", incidentControlRequestFailed)} />
               <Field label="应急预案" value={pickString(latestPlaybook, ["playbook_id", "status"], "")} />
-              <Field label="目标模式" value={pickString(latestPlaybook, ["target_mode"], "")} tone={toneFromStatus(pickString(latestPlaybook, ["target_mode"], ""))} />
-              <Field label="范围审批" value={pickString(latestScopeApproval, ["decision", "status"], "")} />
-              <Field label="范围收紧" value={pickString(latestScopeEnforcement, ["status"], "")} tone={toneFromStatus(pickString(latestScopeEnforcement, ["status"], ""))} />
+              <Field label="目标模式" value={pickString(latestPlaybook, ["target_mode"], "")} tone={factBoundTone(incidentPlaybookFact, toneFromStatus(pickString(latestPlaybook, ["target_mode"], "")), incidentPlaybookRequestFailed)} />
+              <Field label="范围审批" value={pickString(latestScopeApproval, ["decision", "status"], "")} tone={factBoundTone(scopeApprovalFact, toneFromStatus(pickString(latestScopeApproval, ["decision", "status"], "")), scopeApprovalRequestFailed)} />
+              <Field label="范围收紧" value={pickString(latestScopeEnforcement, ["status"], "")} tone={factBoundTone(scopeEnforcementFact, toneFromStatus(pickString(latestScopeEnforcement, ["status"], "")), scopeEnforcementRequestFailed)} />
             </div>
           </MetricCard>
           <MetricCard title="最近应急预案">
@@ -954,14 +1050,14 @@ export function V15CockpitPage() {
             </div>
             <div className="field-list">
               <Field label="发布编号" value={releaseRunId || ""} />
-              <Field label="状态" value={releaseStatus} tone={toneFromStatus(releaseStatus)} />
+              <Field label="状态" value={releaseStatus} tone={factBoundTone(releaseFact, toneFromStatus(releaseStatus), releaseRequestFailed)} />
               <Field label="回放编号" value={pickString(release, ["replay_run_id"], "")} />
               <Field label="运行配置哈希" value={pickString(release, ["runtime_config_hash"], "")} />
               <Field label="就绪姿态" value={pickString(release, ["readiness_posture"], "")} />
             </div>
           </MetricCard>
           <MetricCard title="审批轨迹">
-            <DataList items={releaseApprovals} empty="暂无发布审批事件" />
+            <DataList items={releaseApprovals} empty="暂无发布审批事件" fact={releaseApprovalsFact} requestFailed={releaseApprovalsRequestFailed} />
           </MetricCard>
         </div>
       ) : null}

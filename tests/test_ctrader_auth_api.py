@@ -133,3 +133,6 @@ def test_token_status_does_not_return_token_preview(monkeypatch):
     body = r.json()
     assert body["has_token"] is True
     assert "token_preview" not in body
+    assert body["_fact"]["contract"] == "ops.ctrader-token-status.v2"
+    assert body["_fact"]["state"] == "unknown"
+    assert body["_fact"]["reason_code"] == "token_expiry_not_observed"

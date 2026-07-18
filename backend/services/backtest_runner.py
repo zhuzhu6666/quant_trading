@@ -16,6 +16,24 @@ from typing import Any, Callable, Optional
 import pandas as pd
 
 from backend.core.paths import CHARTS_DIR, DATA_DIR, PROJECT_ROOT
+from backend.services.research_evidence import (
+    LEGACY_BACKTEST_ENGINE,
+    LEGACY_BACKTEST_EVIDENCE_CLASS,
+    enforce_legacy_backtest_contract,
+    legacy_backtest_contract,
+)
+
+
+def legacy_backtest_provenance() -> dict[str, Any]:
+    """Return the immutable trust boundary for the legacy sweep.
+
+    This runner does not reproduce the live FactorFrame, selector/compositor,
+    next-bar bid/ask execution, or supervisor lifecycle.  Its output can still
+    help an operator diagnose parameter sensitivity, but it must never be
+    treated as executable governance evidence or a deployable candidate.
+    """
+
+    return legacy_backtest_contract()
 
 
 def _load_bars(symbol: str, timeframe: str) -> pd.DataFrame:
@@ -157,13 +175,19 @@ def run_backtest_sweep(
     # Write report (same column shape as main.py:run_backtest output)
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = CHARTS_DIR / f"backtest_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+    provenance = legacy_backtest_provenance()
     lines: list[str] = [
         f"# Backtest Report ({symbol} {timeframe})",
+        f"# engine: {provenance['engine']}",
+        f"# evidence_class: {provenance['evidence_class']}",
+        f"# live_parity: {str(provenance['live_parity']).lower()}",
+        f"# governance_eligible: {str(provenance['governance_eligible']).lower()}",
+        f"# deployable_candidate: {str(provenance['deployable_candidate']).lower()}",
         f"# risk_pct: {risk_pct}",
         f"# enable_circuit: {enable_circuit}",
         f"# n_bars: {n}",
         f"# combos: {total_runs}, elapsed: {elapsed:.2f}s",
-        f"# NOTE: in-process stub — real PnL requires `python main.py --mode backtest`",
+        "# NOTE: legacy indicator sweep; metrics are diagnostic and do not reproduce live execution parity",
         "",
         "# sl_atr | tp_atr | cooldown_bars | trades | win_rate | net_pnl | "
         "total_return | sharpe | max_drawdown | total_return_test | trades_test | decay",
@@ -183,13 +207,13 @@ def run_backtest_sweep(
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
     cb("done", 100, f"report: {out_path}")
-    return {
+    return enforce_legacy_backtest_contract({
         "rows": rows,
         "total_runs": total_runs,
         "elapsed_seconds": elapsed,
         "report_path": str(out_path),
-        "note": "in-process sweep; full backtrader optstrategy wiring pending (see _run_single_backtrader_pass)",
-    }
+        "note": "legacy indicator sweep; diagnostic parameter sensitivity only, not live parity",
+    })
 
 
 def find_latest_backtest_report() -> Optional[Path]:

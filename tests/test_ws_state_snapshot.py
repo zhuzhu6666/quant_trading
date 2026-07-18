@@ -21,3 +21,5 @@ def test_state_snapshot_reports_consecutive_not_total_session_losses(monkeypatch
 
     assert snapshot["daily"]["loss"] == 17
     assert snapshot["risk"]["consecutive_loss"] == 2
+    assert snapshot["_fact"]["contract"] == "live.state.v2"
+    assert snapshot["_fact"]["state"] == "unknown"

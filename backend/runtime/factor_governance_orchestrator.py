@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
 import uuid
 from dataclasses import asdict, is_dataclass
@@ -17,8 +18,14 @@ from typing import Any
 
 from alpha.decision_policy import DecisionPolicy
 from alpha.portfolio_compositor import resolve_factor_role
-from backend.core.db import get_state_pg_conn, is_state_db_path
+from alpha.registry_adapter import RegistryAdapter
+from backend.core.db import connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
+from backend.services.factor_lifecycle_service import (
+    FactorLifecycleService,
+    FactorLifecycleStage,
+    FactorV16Binding,
+)
 from backend.services.factor_redundancy import RedundancyDetector
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.factor_weight_change import FactorWeightChangeService
@@ -172,7 +179,13 @@ class FactorGovernanceOrchestrator:
             actions.extend(self._apply_redundancy_report(catalog, redundancy_report, run))
             if redundancy_report.get("group_count"):
                 catalog = build_factor_catalog()
-            actions.extend(self._promote_shadow_candidates(catalog, run))
+            actions.extend(
+                self._promote_shadow_candidates(
+                    catalog,
+                    run,
+                    v16_authority=v16_authority,
+                )
+            )
             catalog = build_factor_catalog()
             actions.extend(self._apply_parameter_template_actions(
                 catalog,
@@ -223,13 +236,24 @@ class FactorGovernanceOrchestrator:
         except Exception:
             return "unknown"
 
-    @staticmethod
-    def _factor_has_pending_effect(factor_id: str) -> bool:
+    def _factor_has_pending_effect(self, factor_id: str) -> bool:
         if not factor_id:
             return False
+        db_path = self.overlay.db_path
+        production_state = is_state_db_path(db_path)
+        if not production_state and not Path(db_path).exists():
+            return False
         try:
-            conn = get_state_pg_conn(read_only=True)
+            conn = (
+                get_state_pg_conn(read_only=True)
+                if production_state
+                else connect_sqlite(db_path, read_only=True)
+            )
+            if not production_state:
+                conn.row_factory = sqlite3.Row
             try:
+                if not state_table_exists(conn, "learning_application_log"):
+                    return False
                 row = conn.execute(
                     _p("""
                     SELECT l.status AS application_status, e.status AS effect_status
@@ -238,14 +262,24 @@ class FactorGovernanceOrchestrator:
                     WHERE l.scope_type='factor' AND l.scope_key=?
                     ORDER BY l.cycle_ts DESC, l.created_at DESC
                     LIMIT 1
-                    """),
+                    """) if production_state else """
+                    SELECT l.status AS application_status, e.status AS effect_status
+                    FROM learning_application_log l
+                    LEFT JOIN learning_application_effect e ON e.application_id=l.application_id
+                    WHERE l.scope_type='factor' AND l.scope_key=?
+                    ORDER BY l.cycle_ts DESC, l.created_at DESC
+                    LIMIT 1
+                    """,
                     (factor_id,),
                 ).fetchone()
                 return LearningExperimentAdmissionService.row_is_active(row)
             finally:
                 conn.close()
         except Exception:
-            return True
+            # Production state uncertainty must block another mutation.  An
+            # isolated test/research store has no live authority and may treat
+            # a missing ledger as no pending experiment.
+            return bool(production_state)
 
     @staticmethod
     def _scoped_factor_rollback_patch(
@@ -293,6 +327,24 @@ class FactorGovernanceOrchestrator:
             v16_action=source,
             risk_reduction=risk_reduction,
         )
+
+    @staticmethod
+    def _mutation_commit_state(result: dict[str, Any] | None) -> tuple[bool, bool, str]:
+        """Return durable-commit, projection-ready and normalized status.
+
+        A coordinator transaction can be committed while its in-process
+        projection is degraded.  Callers must not report a blocked mutation
+        as applied, and must not confuse durable commit with live projection.
+        """
+        payload = dict(result or {})
+        status = str(payload.get("status") or "")
+        committed = bool(payload.get("ok")) or status in {
+            "applied",
+            "committed",
+            "committed_projection_degraded",
+        }
+        projection_ready = bool(payload.get("ok")) and status != "committed_projection_degraded"
+        return committed, projection_ready, status or "mutation_blocked"
 
     def _rollback_failed_actions(self, run: dict[str, Any]) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
@@ -364,6 +416,11 @@ class FactorGovernanceOrchestrator:
                     ))
                     continue
                 rollback_run_id = str(run.get("run_id") or "")
+                rollback_committed = True
+                rollback_projection_ready = True
+                rollback_mutation: dict[str, Any] = {
+                    "status": "no_runtime_change_required"
+                }
                 if "factor_portfolio_weights" in rollback_patch:
                     current_weights = dict(before_cfg.get("factor_portfolio_weights") or {})
                     rollback_weights = dict(rollback_patch.get("factor_portfolio_weights") or {})
@@ -408,18 +465,52 @@ class FactorGovernanceOrchestrator:
                             result={"reason": weight_result.get("status"), "weight_result": weight_result},
                         ))
                         continue
+                    rollback_mutation = dict(weight_result)
+                    rollback_projection_ready = bool(
+                        weight_result.get("projection_ready", True)
+                    )
                     if weight_result.get("status") == "no_admitted_change" and signal_patch:
-                        self._apply_runtime_patch(
+                        rollback_mutation = self._apply_runtime_patch(
                             {"factor_signal_config": signal_patch},
                             source="factor_governance_auto_rollback_config_only",
                             run_id=rollback_run_id,
                         )
+                        (
+                            rollback_committed,
+                            rollback_projection_ready,
+                            _rollback_status,
+                        ) = self._mutation_commit_state(rollback_mutation)
                 else:
-                    self._apply_runtime_patch(
+                    rollback_mutation = self._apply_runtime_patch(
                         rollback_patch,
                         source="factor_governance_auto_rollback_config_only",
                         run_id=rollback_run_id,
                     )
+                    (
+                        rollback_committed,
+                        rollback_projection_ready,
+                        _rollback_status,
+                    ) = self._mutation_commit_state(rollback_mutation)
+                if not rollback_committed:
+                    actions.append(self._audit_action(
+                        run,
+                        item,
+                        "rollback_factor_action",
+                        "blocked_by_evidence",
+                        evidence,
+                        verdict,
+                        before={"runtime_config": before_cfg},
+                        after={"runtime_config": runtime_config.shared().to_dict()},
+                        rollback=rollback_payload,
+                        result={
+                            "reason": str(
+                                rollback_mutation.get("status")
+                                or "rollback_mutation_not_committed"
+                            ),
+                            "mutation": rollback_mutation,
+                        },
+                    ))
+                    continue
                 self._mark_application_rolled_back(
                     application_id=str(row["application_id"] or ""),
                     suggestion_ids=self._loads_list(row["suggestion_ids_json"]),
@@ -429,13 +520,18 @@ class FactorGovernanceOrchestrator:
                     run,
                     item,
                     "rollback_factor_action",
-                    "rolled_back",
+                    "rolled_back" if rollback_projection_ready else "projection_degraded",
                     evidence,
                     verdict,
                     before={"runtime_config": before_cfg},
                     after={"runtime_config": runtime_config.shared().to_dict()},
                     rollback=rollback_payload,
-                    result={"restored": True},
+                    result={
+                        "restored": rollback_projection_ready,
+                        "durably_committed": True,
+                        "projection_ready": rollback_projection_ready,
+                        "mutation": rollback_mutation,
+                    },
                 ))
         except Exception as exc:
             logger.debug("[factor_governance] rollback scan skipped: %s", exc)
@@ -530,19 +626,31 @@ class FactorGovernanceOrchestrator:
             source="factor_governance_redundancy",
             run_id=str(run.get("run_id") or ""),
         )
+        committed, projection_ready, mutation_status = self._mutation_commit_state(result)
         item = {"factor_id": "redundancy", "role": "alpha", "source": "catalog"}
         verdict = RiskVerdict(allowed=True, reason="ok", audit_payload={"action": "update_weight"})
         return [self._audit_action(
             run,
             item,
             "update_redundancy_groups",
-            "applied",
+            (
+                "applied"
+                if projection_ready
+                else "projection_degraded"
+                if committed
+                else "blocked_by_evidence"
+            ),
             report,
             verdict,
             before={"runtime_config": before_cfg},
             after={"runtime_config": runtime_config.shared().to_dict()},
             rollback={"runtime_config": before_cfg},
-            result=result,
+            result={
+                **dict(result or {}),
+                "mutation_status": mutation_status,
+                "durably_committed": committed,
+                "projection_ready": projection_ready,
+            },
         )]
 
     def _apply_parameter_template_actions(
@@ -640,7 +748,13 @@ class FactorGovernanceOrchestrator:
         except Exception as exc:
             return {"blocked": True, "reason": f"offline_validation_submit_failed:{exc}"}
 
-    def _promote_shadow_candidates(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
+    def _promote_shadow_candidates(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+        *,
+        v16_authority: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         cfg = runtime_config.shared()
         max_actions = int(getattr(cfg, "factor_governance_max_promotions_per_cycle", 1) or 1)
         actions: list[dict[str, Any]] = []
@@ -658,20 +772,99 @@ class FactorGovernanceOrchestrator:
             if not verdict.allowed:
                 actions.append(self._audit_action(run, item, "promote_factor", "blocked_by_risk", evidence, verdict))
                 continue
-            before_cfg = runtime_config.shared().to_dict()
-            before = {"source": item.get("source"), "runtime_config": before_cfg}
+            factor_name = str(item.get("factor_id") or "")
+            authority = dict(v16_authority or {})
+            binding = FactorV16Binding(
+                command_id=str(authority.get("command_id") or ""),
+                target_agent=str(authority.get("target_agent") or "factor_governance"),
+                candidate_id=str(authority.get("candidate_id") or ""),
+                posterior_fingerprint=str(authority.get("posterior_fingerprint") or ""),
+                evidence_fingerprint=str(authority.get("evidence_fingerprint") or ""),
+            )
             try:
-                from alpha.registry_adapter import RegistryAdapter, SOURCE_DISCOVERED
-
                 adapter = RegistryAdapter.shared()
-                promoted = adapter.promote(
-                    str(item["factor_id"]),
-                    SOURCE_DISCOVERED,
-                    reason="autonomous_governance_v3",
-                )
-                self._ensure_promoted_runtime_config(str(item["factor_id"]), run_id=str(run.get("run_id") or ""))
-                after_cfg = runtime_config.shared().to_dict()
-                status = "applied" if promoted else "superseded"
+                lifecycle = FactorLifecycleService(self.overlay.db_path, adapter=adapter)
+                state = lifecycle.get_state(factor_name=factor_name)
+                stage = str(state.get("lifecycle_stage") or FactorLifecycleStage.SHADOW.value)
+                if stage == FactorLifecycleStage.SHADOW.value:
+                    meta = adapter.get_meta(factor_name)
+                    result = lifecycle.prepare_promotion(
+                        name=factor_name,
+                        expression=str(meta.get("description") or ""),
+                        artifact_hash=str(meta.get("artifact_hash") or ""),
+                        actor="system:factor_governance",
+                        reason="autonomous governance promotion preparation",
+                        evidence_refs=evidence,
+                        idempotency_key=f"factor_prepare:{factor_name}:{run.get('run_id', '')}",
+                        v16=binding,
+                    )
+                    committed, projection_ready, _mutation_status = (
+                        self._mutation_commit_state(result)
+                    )
+                    status = (
+                        "promotion_prepared"
+                        if projection_ready
+                        else "projection_degraded"
+                        if committed
+                        else "blocked_by_evidence"
+                    )
+                elif stage in {
+                    FactorLifecycleStage.PROMOTION_PREPARED.value,
+                    FactorLifecycleStage.ACTIVE.value,
+                }:
+                    target_weight = float(
+                        getattr(cfg, "factor_governance_new_factor_weight", 0.0) or 0.0
+                    )
+                    if target_weight <= 0.0:
+                        result = {
+                            "ok": False,
+                            "status": "explicit_positive_weight_required",
+                            "lifecycle_stage": stage,
+                        }
+                        status = "blocked_by_evidence"
+                        actions.append(self._audit_action(
+                            run,
+                            item,
+                            "promote_factor",
+                            status,
+                            {**evidence, "activation_weight": target_weight},
+                            verdict,
+                            before={"lifecycle_stage": stage},
+                            after={"lifecycle_stage": stage},
+                            rollback={"target_stage": FactorLifecycleStage.QUARANTINED.value},
+                            result=result,
+                        ))
+                        continue
+                    result = lifecycle.activate(
+                        name=factor_name,
+                        weight=target_weight,
+                        actor="system:factor_governance",
+                        reason="autonomous governance factor activation",
+                        evidence_refs=evidence,
+                        idempotency_key=f"factor_activate:{factor_name}:{run.get('run_id', '')}",
+                        v16=binding,
+                    )
+                    committed, projection_ready, _mutation_status = (
+                        self._mutation_commit_state(result)
+                    )
+                    active_stage = (
+                        str(result.get("lifecycle_stage") or stage)
+                        == FactorLifecycleStage.ACTIVE.value
+                    )
+                    status = (
+                        "applied"
+                        if projection_ready and active_stage
+                        else "projection_degraded"
+                        if committed and active_stage
+                        else "blocked_by_evidence"
+                    )
+                else:
+                    result = {
+                        "ok": False,
+                        "status": "terminal_lifecycle_state",
+                        "lifecycle_stage": stage,
+                    }
+                    status = "superseded"
                 actions.append(self._audit_action(
                     run,
                     item,
@@ -679,23 +872,25 @@ class FactorGovernanceOrchestrator:
                     status,
                     evidence,
                     verdict,
-                    before=before,
-                    after={"source": SOURCE_DISCOVERED, "runtime_config": after_cfg},
-                    rollback={"runtime_config": before_cfg},
-                    result={"promoted": bool(promoted)},
+                    before={"lifecycle_stage": stage},
+                    after={
+                        "lifecycle_stage": str(result.get("lifecycle_stage") or stage),
+                        "mutation_id": str(result.get("mutation_id") or ""),
+                    },
+                    rollback={"target_stage": FactorLifecycleStage.QUARANTINED.value},
+                    result=result,
                 ))
             except Exception as exc:
-                runtime_config.replace(RuntimeConfig.from_dict(before_cfg))
                 actions.append(self._audit_action(
                     run,
                     item,
-                    "rollback_factor_action",
-                    "rolled_back",
+                    "promote_factor",
+                    "failed",
                     {**evidence, "error": str(exc)},
                     verdict,
-                    before=before,
-                    after={"runtime_config": runtime_config.shared().to_dict()},
-                    rollback={"runtime_config": before_cfg},
+                    before={"lifecycle_stage": "unknown"},
+                    after={"lifecycle_stage": "unknown"},
+                    rollback={"target_stage": FactorLifecycleStage.QUARANTINED.value},
                     result={"error": str(exc)},
                 ))
         return actions
@@ -738,35 +933,49 @@ class FactorGovernanceOrchestrator:
                 continue
             before_cfg = runtime_config.shared().to_dict()
             try:
-                from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
+                from alpha.registry_adapter import RegistryAdapter
 
-                rolled_back = RegistryAdapter.shared().promote(
-                    factor_id,
-                    new_source=SOURCE_SHADOW,
-                    reason="canary_regression_via_factor_governance",
+                adapter = RegistryAdapter.shared()
+                meta = adapter.get_meta(factor_id) or {}
+                lifecycle = FactorLifecycleService(self.overlay.db_path, adapter=adapter)
+                result = lifecycle.quarantine(
+                    name=factor_id,
+                    expression=str(meta.get("description") or ""),
+                    artifact_hash=str(meta.get("artifact_hash") or ""),
+                    actor="system:factor_governance",
+                    reason="persisted canary regression",
+                    evidence_refs=evidence,
+                    idempotency_key=f"factor_quarantine:{factor_id}:{run.get('run_id', '')}",
                 )
-                existing = dict(runtime_config.shared().factor_signal_config.get(factor_id, {}) or {})
-                existing.update({
-                    "enabled": False,
-                    "source": "shadow",
-                    "lifecycle_status": "QUARANTINE",
-                })
-                self._apply_runtime_patch(
-                    {"factor_signal_config": {factor_id: existing}},
-                    source="factor_governance_canary_rollback",
-                    run_id=str(run.get("run_id") or ""),
+                committed, projection_ready, mutation_status = (
+                    self._mutation_commit_state(result)
                 )
                 actions.append(self._audit_action(
                     run,
                     item,
                     "rollback_factor_action",
-                    "applied" if rolled_back else "superseded",
+                    (
+                        "applied"
+                        if projection_ready
+                        else "projection_degraded"
+                        if committed
+                        else "blocked_by_evidence"
+                    ),
                     evidence,
                     verdict,
                     before={"source": "discovered", "runtime_config": before_cfg},
-                    after={"source": "shadow", "runtime_config": runtime_config.shared().to_dict()},
+                    after={
+                        "lifecycle_stage": str(result.get("lifecycle_stage") or stage),
+                        "mutation_id": str(result.get("mutation_id") or ""),
+                        "runtime_config": runtime_config.shared().to_dict(),
+                    },
                     rollback={"runtime_config": before_cfg},
-                    result={"rolled_back": bool(rolled_back)},
+                    result={
+                        **dict(result or {}),
+                        "mutation_status": mutation_status,
+                        "durably_committed": committed,
+                        "projection_ready": projection_ready,
+                    },
                 ))
             except Exception as exc:
                 logger.exception("[factor_governance] canary rollback failed for %s", factor_id)
@@ -887,6 +1096,7 @@ class FactorGovernanceOrchestrator:
         partial = DecisionPolicy.to_weights(decisions)
         if weight_result.get("status") != "applied" or not partial:
             return actions
+        projection_ready = bool(weight_result.get("projection_ready", True))
         after_cfg = runtime_config.shared().to_dict()
         for name, decision in decisions.items():
             item = next(item for item in catalog if item["factor_id"] == name)
@@ -894,7 +1104,7 @@ class FactorGovernanceOrchestrator:
                 run,
                 item,
                 "update_weight",
-                "applied",
+                "applied" if projection_ready else "projection_degraded",
                 {**evidence_by_factor.get(name, {}), "decision": decision.to_api()},
                 verdicts[name],
                 before={"runtime_config": before_cfg, "weight": decision.old_weight},
@@ -903,6 +1113,11 @@ class FactorGovernanceOrchestrator:
                 result={
                     "application_id": (weight_result.get("applications") or {}).get(name, ""),
                     "weight_change_status": weight_result.get("status"),
+                    "projection_ready": projection_ready,
+                    "mutation_id": str(
+                        (weight_result.get("mutation") or {}).get("mutation_id")
+                        or ""
+                    ),
                 },
             ))
         return actions
@@ -948,22 +1163,79 @@ class FactorGovernanceOrchestrator:
             # explicit/unknown disable.
             entry["lifecycle_status"] = "QUARANTINE"
             entry["disabled_at"] = time.time()
-            self._apply_runtime_patch(
-                {"factor_signal_config": {name: entry}},
-                source="factor_governance_disable_live",
-                run_id=str(run.get("run_id") or ""),
-            )
+            try:
+                from backend.services.governance_control_plans import (
+                    governance_coordinator_mode,
+                )
+
+                mode = governance_coordinator_mode()
+                if item.get("source") == "discovered" and mode != "off":
+                    # A discovered factor's lifecycle cannot diverge from its
+                    # RuntimeConfig projection.  Commit QUARANTINED through
+                    # the lifecycle transaction; Registry removal happens
+                    # only after that commit.
+                    adapter = RegistryAdapter.shared()
+                    meta = adapter.get_meta(name) or {}
+                    result = FactorLifecycleService(
+                        self.overlay.db_path,
+                        adapter=adapter,
+                    ).quarantine(
+                        name=name,
+                        expression=str(meta.get("description") or ""),
+                        artifact_hash=str(meta.get("artifact_hash") or ""),
+                        actor="system:factor_governance",
+                        reason="weak discovered factor removed from live alpha",
+                        evidence_refs=evidence,
+                        idempotency_key=(
+                            f"factor_weak_quarantine:{name}:"
+                            f"{run.get('run_id', '')}"
+                        ),
+                    )
+                else:
+                    # Builtins have no dynamic Registry lifecycle.  In off
+                    # mode this also preserves the one-release legacy path.
+                    result = self._apply_runtime_patch(
+                        {"factor_signal_config": {name: entry}},
+                        source="factor_governance_disable_live",
+                        run_id=str(run.get("run_id") or ""),
+                    )
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "status": "governance_mutation_failed",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+            committed, projection_ready, mutation_status = self._mutation_commit_state(result)
             after_cfg = runtime_config.shared().to_dict()
+            after_entry = dict(
+                (after_cfg.get("factor_signal_config") or {}).get(name) or {}
+            )
             actions.append(self._audit_action(
                 run,
                 item,
                 "disable_factor_live",
-                "applied",
+                (
+                    "applied"
+                    if projection_ready
+                    else "projection_degraded"
+                    if committed
+                    else "blocked_by_evidence"
+                ),
                 evidence,
                 verdict,
                 before={"runtime_config": before_cfg, "enabled": True},
-                after={"runtime_config": after_cfg, "enabled": False},
+                after={
+                    "runtime_config": after_cfg,
+                    "enabled": after_entry.get("enabled"),
+                    "lifecycle_status": after_entry.get("lifecycle_status"),
+                },
                 rollback={"runtime_config": before_cfg},
+                result={
+                    **dict(result or {}),
+                    "mutation_status": mutation_status,
+                    "durably_committed": committed,
+                    "projection_ready": projection_ready,
+                },
             ))
         return actions
 
@@ -987,16 +1259,23 @@ class FactorGovernanceOrchestrator:
         min_score = float(getattr(cfg, "factor_governance_builtin_activation_min_health_score", 70.0) or 70.0)
         min_n_obs = int(getattr(cfg, "factor_governance_builtin_activation_min_n_obs", 500) or 500)
         max_activations = int(getattr(cfg, "factor_governance_max_builtin_activations_per_cycle", 1) or 1)
-        initial_weight = max(
-            0.01,
-            min(0.50, float(getattr(cfg, "factor_governance_builtin_activation_weight", 0.05) or 0.05)),
+        initial_weight = min(
+            0.50,
+            float(getattr(cfg, "factor_governance_builtin_activation_weight", 0.0) or 0.0),
         )
+        if initial_weight <= 0.0:
+            logger.warning(
+                "[factor_governance] builtin activation disabled: explicit positive weight required"
+            )
+            return []
         signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
         candidates: list[dict[str, Any]] = []
         for item in catalog:
             factor_id = str(item.get("factor_id") or "")
             entry = signal_cfg.get(factor_id)
             if not isinstance(entry, dict):
+                continue
+            if self._factor_has_pending_effect(factor_id):
                 continue
             if item.get("source") != "builtin" or item.get("role") not in {"alpha", "context"}:
                 continue
@@ -1101,6 +1380,22 @@ class FactorGovernanceOrchestrator:
                             result={"reason": weight_result.get("status"), "weight_change": weight_result},
                         ))
                         continue
+                    if not bool(weight_result.get("projection_ready", True)):
+                        actions.append(self._audit_action(
+                            run,
+                            item,
+                            "promote_factor",
+                            "projection_degraded",
+                            {**evidence, "weight_change": weight_result},
+                            verdict,
+                            before={"runtime_config": before_cfg},
+                            after={"runtime_config": runtime_config.shared().to_dict()},
+                            result={
+                                "reason": "committed_projection_degraded",
+                                "weight_change": weight_result,
+                            },
+                        ))
+                        continue
                     result = {"activation": "applied", "weight_change": weight_result}
                 else:
                     result = self._apply_runtime_patch(
@@ -1108,6 +1403,25 @@ class FactorGovernanceOrchestrator:
                         source="factor_governance_builtin_context_activation",
                         run_id=str(run.get("run_id") or ""),
                     )
+                    committed, projection_ready, mutation_status = self._mutation_commit_state(result)
+                    if not projection_ready:
+                        actions.append(self._audit_action(
+                            run,
+                            item,
+                            "promote_factor",
+                            "projection_degraded" if committed else "blocked_by_evidence",
+                            evidence,
+                            verdict,
+                            before={"runtime_config": before_cfg},
+                            after={"runtime_config": runtime_config.shared().to_dict()},
+                            result={
+                                **dict(result or {}),
+                                "mutation_status": mutation_status,
+                                "durably_committed": committed,
+                                "projection_ready": projection_ready,
+                            },
+                        ))
+                        continue
                 activated += 1
                 actions.append(self._audit_action(
                     run,
@@ -1259,21 +1573,37 @@ class FactorGovernanceOrchestrator:
                     source="factor_governance_restore_live",
                     run_id=str(run.get("run_id") or ""),
                 )
+                committed, projection_ready, mutation_status = self._mutation_commit_state(result)
+                after_cfg = runtime_config.shared().to_dict()
+                after_entry = dict(
+                    (after_cfg.get("factor_signal_config") or {}).get(factor_id) or {}
+                )
                 actions.append(self._audit_action(
                     run,
                     item,
                     "restore_factor_live",
-                    "applied",
+                    (
+                        "applied"
+                        if projection_ready
+                        else "projection_degraded"
+                        if committed
+                        else "blocked_by_evidence"
+                    ),
                     evidence,
                     verdict,
                     before={"runtime_config": before_cfg, "enabled": False},
                     after={
-                        "runtime_config": runtime_config.shared().to_dict(),
-                        "enabled": True,
+                        "runtime_config": after_cfg,
+                        "enabled": after_entry.get("enabled"),
                         "weight": float((runtime_config.shared().factor_portfolio_weights or {}).get(factor_id, 0.0) or 0.0),
                     },
                     rollback={"runtime_config": before_cfg},
-                    result=result,
+                    result={
+                        **dict(result or {}),
+                        "mutation_status": mutation_status,
+                        "durably_committed": committed,
+                        "projection_ready": projection_ready,
+                    },
                 ))
             except Exception as exc:
                 logger.exception("[factor_governance] restore failed for %s", factor_id)
@@ -1326,18 +1656,33 @@ class FactorGovernanceOrchestrator:
             before_cfg = runtime_config.shared().to_dict()
             from alpha.registry_adapter import RegistryAdapter
 
-            retired = RegistryAdapter.shared().retire(str(item["factor_id"]), reason="autonomous_governance_v3")
+            adapter = RegistryAdapter.shared()
+            factor_name = str(item["factor_id"])
+            meta = adapter.get_meta(factor_name) or {}
+            lifecycle = FactorLifecycleService(self.overlay.db_path, adapter=adapter)
+            result = lifecycle.retire(
+                name=factor_name,
+                expression=str(meta.get("description") or ""),
+                artifact_hash=str(meta.get("artifact_hash") or ""),
+                actor="system:factor_governance",
+                reason="autonomous governance severe factor retirement",
+                evidence_refs=evidence,
+                idempotency_key=f"factor_retire:{factor_name}:{run.get('run_id', '')}",
+            )
             actions.append(self._audit_action(
                 run,
                 item,
                 "retire_factor",
-                "applied" if retired else "superseded",
+                "applied" if result.get("ok") else "blocked_by_evidence",
                 evidence,
                 verdict,
                 before={"runtime_config": before_cfg, "lifecycle_status": item.get("lifecycle_status")},
-                after={"lifecycle_status": "DEAD"},
+                after={
+                    "lifecycle_status": str(result.get("lifecycle_stage") or ""),
+                    "mutation_id": str(result.get("mutation_id") or ""),
+                },
                 rollback={"runtime_config": before_cfg},
-                result={"retired": bool(retired)},
+                result=result,
             ))
         return actions
 
@@ -1453,7 +1798,9 @@ class FactorGovernanceOrchestrator:
         dp = DecisionPolicy(
             redundancy_max_group_weight=float(getattr(cfg, "factor_redundancy_max_group_weight", 0.35) or 0.35)
         )
-        target = float(getattr(cfg, "factor_governance_new_factor_weight", 0.3) or 0.3)
+        target = float(getattr(cfg, "factor_governance_new_factor_weight", 0.0) or 0.0)
+        if target <= 0.0:
+            raise RuntimeError("explicit_positive_weight_required")
         weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
             source="factor_governance_promote_factor",
             producer="factor_governance_promotion",
@@ -1578,6 +1925,26 @@ class FactorGovernanceOrchestrator:
         evidence: dict[str, Any],
         decision_id: str,
     ) -> str:
+        from backend.services.governance_control_plans import (
+            governance_coordinator_mode,
+        )
+
+        try:
+            coordinator_mode = governance_coordinator_mode()
+        except Exception:
+            # Invalid static authority must never fall through to a legacy
+            # executable suggestion write.
+            return ""
+        if coordinator_mode != "off" and status in {
+            "applied",
+            "rolled_back",
+            "projection_degraded",
+            "promotion_prepared",
+        }:
+            # The coordinator intent/effect row is the committed fact.  This
+            # old audit helper would otherwise create a second post-commit
+            # `policy_suggestion` with no atomic applied_mutation_id binding.
+            return ""
         suggestion_id = f"fgv3_{uuid.uuid4().hex[:16]}"
         now = time.time()
         evidence_payload = {
@@ -1644,6 +2011,19 @@ class FactorGovernanceOrchestrator:
         result: dict[str, Any] | None,
         decision_id: str = "",
     ) -> None:
+        from backend.services.governance_control_plans import (
+            governance_coordinator_mode,
+        )
+
+        try:
+            if governance_coordinator_mode() != "off":
+                # In dual/enforce, applications/effects are written only by
+                # the domain transaction owned by the coordinator.  Audit
+                # callbacks must not synthesize a second application after
+                # commit (or after a degraded projection).
+                return
+        except Exception:
+            return
         if action in STRUCTURAL_AUDIT_ACTIONS or str((result or {}).get("application_id") or ""):
             return
         before = before or {}

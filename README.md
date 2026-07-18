@@ -56,7 +56,7 @@ Runtime state and learning audit state use PostgreSQL `state_v1` as the source o
 ## Quick Start
 
 ```bash
-./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m pip install --require-hashes -r requirements.txt
 ./.venv/bin/python -m backend
 ```
 

@@ -7,8 +7,7 @@ FactorGovernanceOrchestrator，避免两个调度器同时拥有晋升/退役权
 v3 修复 (audit 2026-06-22), PG 迁移更新 (2026-07-01):
   - 全部运行状态读写改用 PostgreSQL state store, 不再用 decision_log.db
   - canary_state / decision_log 都从 PostgreSQL state store 读写
-  - 晋升后真正调用 adapter.promote() 更新因子 source
-  - 退役检查后真正调用 adapter.retire() 移除因子
+  - Evolution 只产生 shadow/canary 证据，晋升、隔离和退役由 FactorGovernance 提交
   - 权重更新推送 factor_portfolio_weights (AWE 读同一字段)
 """
 
@@ -29,6 +28,7 @@ from strategy import mab_router as _mab_router
 logger = logging.getLogger(__name__)
 
 from backend.core.db import connect_sqlite, get_state_pg_conn
+from backend.core.state_store import RuntimeStateSchemaError, validate_runtime_state_schema
 
 
 _CANARY_DB = None
@@ -39,10 +39,12 @@ def _state_conn(*, read_only: bool = False):
 
 
 def _ensure_canary_db() -> None:
-    """确保 PostgreSQL state store 中 canary_state 表存在."""
+    """Validate the migrated PostgreSQL canary contract without writing DDL."""
+    conn = _state_conn(read_only=True)
     try:
-        conn = _state_conn()
-        conn.execute("""
+        validate_runtime_state_schema(
+            conn,
+            """
             CREATE TABLE IF NOT EXISTS canary_state (
                 factor_name TEXT PRIMARY KEY,
                 stage TEXT NOT NULL DEFAULT 'SHADOW',
@@ -58,17 +60,10 @@ def _ensure_canary_db() -> None:
                 events_json TEXT DEFAULT '[]',
                 updated_at REAL DEFAULT 0.0
             )
-        """)
-        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS rollback_count INTEGER DEFAULT 0")
-        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS evidence_hash TEXT DEFAULT ''")
-        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS dataset_hash TEXT DEFAULT ''")
-        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS evidence_end_at TEXT DEFAULT ''")
-        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS stage_evidence_hash TEXT DEFAULT ''")
-        conn.execute("ALTER TABLE canary_state ADD COLUMN IF NOT EXISTS fresh_evidence_bars INTEGER DEFAULT 0")
-        conn.commit()
+            """,
+        )
+    finally:
         conn.close()
-    except Exception as e:
-        logger.debug("[Evolve] canary_state table init: %s", e)
 
 
 def _load_canary_states() -> dict[str, dict]:
@@ -100,6 +95,8 @@ def _load_canary_states() -> dict[str, dict]:
             }
         if states:
             return states
+    except RuntimeStateSchemaError:
+        raise
     except Exception as e:
         logger.debug("[Evolve] load canary from DB: %s", e)
     return {}
@@ -149,6 +146,8 @@ def _save_canary_states(states: dict[str, dict]) -> None:
             ))
         conn.commit()
         conn.close()
+    except RuntimeStateSchemaError:
+        raise
     except Exception as e:
         logger.warning("[Evolve] save canary to PostgreSQL state store failed: %s", e)
 
@@ -415,32 +414,99 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
             })
             return 0
 
+        from alpha.factor_identity import factor_definition_fingerprint
         from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
+        from backend.services.governance_control_plans import (
+            governance_coordinator_mode,
+        )
         adapter = RegistryAdapter.shared()
+        try:
+            coordinator_mode = governance_coordinator_mode()
+        except Exception as exc:
+            logger.warning("[Evolve] shadow register authority unavailable: %s", exc)
+            _emit_evolution_story(
+                "shadow_register_authority_unavailable",
+                {"reason": f"{type(exc).__name__}: {exc}", "applied": False},
+            )
+            return 0
         count = 0
         for expr_score in expressions:
-            name = getattr(expr_score, "name", None) or \
-                   f"dsl_auto_{hash(expr_score.expression or '') & 0xFFFFFFFF:08x}"
             expression_str = getattr(expr_score, "expression", "") or ""
+            proposed_name = str(getattr(expr_score, "name", None) or "")
             func = None
             if expression_str:
                 try:
                     from alpha.factor_dsl import evaluate_dsl, parse_dsl
 
                     parse_dsl(expression_str)
+                    fingerprint = factor_definition_fingerprint(expression_str)
+                    # Registry names remain human-recognisable but are now
+                    # derived from the complete canonical DSL AST SHA-256.
+                    # The durable factor_id is ``dsl:<same 64 hex>``.
+                    name = f"dsl_auto_{fingerprint}"
                     func = lambda df, _expr=expression_str: evaluate_dsl(_expr, df)
                 except Exception as e:
-                    logger.warning("[Evolve] skip invalid DSL expression for %s: %s", name, e)
+                    logger.warning(
+                        "[Evolve] skip invalid DSL expression for %s: %s",
+                        proposed_name or "unnamed",
+                        e,
+                    )
                     _emit_evolution_story("shadow_register_invalid_dsl_skipped", {
-                        "factor": name,
+                        "factor": proposed_name,
                         "reason": str(e),
                     })
                     continue
-            try:
-                ok = adapter.register_runtime(
-                    name=name, func=func, source=SOURCE_SHADOW,
-                    description=expression_str,
+            else:
+                _emit_evolution_story(
+                    "shadow_register_invalid_dsl_skipped",
+                    {
+                        "factor": proposed_name,
+                        "reason": "canonical_dsl_expression_required",
+                    },
                 )
+                continue
+            try:
+                if coordinator_mode == "off":
+                    # One-release compatibility path.  It deliberately keeps
+                    # the current demo behaviour while using stable identity.
+                    ok = adapter.register_runtime(
+                        name=name,
+                        func=func,
+                        source=SOURCE_SHADOW,
+                        description=expression_str,
+                    )
+                else:
+                    # dual/enforce must commit the durable SHADOW fact before
+                    # Registry is published as a post-commit projection.
+                    from backend.services.factor_lifecycle_service import (
+                        FactorLifecycleService,
+                    )
+
+                    result = FactorLifecycleService(adapter=adapter).register_shadow(
+                        name=name,
+                        expression=expression_str,
+                        artifact_hash=fingerprint,
+                        actor="system:evolution_orchestrator",
+                        reason="scheduled GP candidate registered as governed shadow",
+                        evidence_refs={
+                            "producer": "evolution_orchestrator",
+                            "proposed_name": proposed_name,
+                            "definition_fingerprint": fingerprint,
+                        },
+                        idempotency_key=f"evolution-shadow:{fingerprint}",
+                    )
+                    ok = bool(result.get("ok"))
+                    if not ok:
+                        _emit_evolution_story(
+                            "shadow_register_governance_blocked",
+                            {
+                                "factor": name,
+                                "factor_id": f"dsl:{fingerprint}",
+                                "status": str(result.get("status") or "blocked"),
+                                "reason": str(result.get("reason") or ""),
+                                "applied": False,
+                            },
+                        )
                 if ok:
                     count += 1
             except Exception as e:
@@ -740,7 +806,11 @@ def _try_retire(name: str, reason: str) -> bool:
         return False
 
 
-def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dict], dict[str, dict]]:
+def _collect_learning_suggestions(
+    max_age_days: int = 30,
+    *,
+    coordinator_mode: str | None = None,
+) -> tuple[dict[str, dict], dict[str, dict]]:
     """Collect rule-learning suggestions from PostgreSQL state store.
 
     Returns:
@@ -753,7 +823,7 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
                     "latest_confidence": float,
                 }
             }
-        approved_biases:
+        approved_biases (legacy return name; executable applied controls only):
             {
                 factor: {
                     "multiplier": float,
@@ -803,6 +873,22 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
                 """,
                 (cutoff,),
             ).fetchall()
+        from backend.services.live_committed_policy import load_live_policy_controls
+
+        executable_controls = load_live_policy_controls(
+            conn,
+            scope_type="factor",
+            allowed_actions={"downweight", "boost_small"},
+            legacy_tightening_actions={"downweight"},
+            limit=1000,
+            coordinator_mode=coordinator_mode,
+        )
+        executable_by_id = {
+            str(item.get("suggestion_id") or ""): item
+            for item in executable_controls
+            if str(item.get("suggestion_id") or "")
+            and float(item.get("created_at") or 0.0) >= cutoff
+        }
         conn.close()
 
         for row in rows:
@@ -827,15 +913,19 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
             if item["latest_action"] == action and item["latest_confidence"] == confidence:
                 pass
 
-            if not approved_like:
+            # approved/auto_approved remain observation facts only. The
+            # executable bias set is independently rebuilt from applied rows
+            # that pass the committed-mutation/legacy-tightening boundary.
+            control = executable_by_id.get(str(row["suggestion_id"] or ""))
+            if control is None:
                 continue
-            if action not in {"downweight", "boost_small"}:
-                continue
+            action = str(control.get("action") or "watch")
+            confidence = float(control.get("confidence") or 0.0)
 
             source_weight = 0.0
             evidence: dict[str, Any] = {}
             try:
-                raw_evidence = row["evidence_json"] or "{}"
+                raw_evidence = control.get("evidence_json") or "{}"
                 evidence = raw_evidence if isinstance(raw_evidence, dict) else _json.loads(raw_evidence)
                 expected = evidence.get("expected_effect") or {}
                 source_weight = float(expected.get("current_weight") or expected.get("suggested_target_weight") or 0.0)
@@ -888,6 +978,8 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
                     "suggestion_ids": [],
                     "source_weight": source_weight,
                     "model_contributor": False,
+                    "governance_authorities": [],
+                    "committed_mutation_ids": [],
                 },
             )
             if source_weight > 0:
@@ -907,7 +999,15 @@ def _collect_learning_suggestions(max_age_days: int = 30) -> tuple[dict[str, dic
                     and bridge.get("demo_nursery") is True
                 )
             )
-            bias_info["suggestion_ids"].append(str(row["suggestion_id"]))
+            suggestion_id = str(control.get("suggestion_id") or "")
+            if suggestion_id and suggestion_id not in bias_info["suggestion_ids"]:
+                bias_info["suggestion_ids"].append(suggestion_id)
+            authority = str(control.get("governance_authority") or "")
+            if authority and authority not in bias_info["governance_authorities"]:
+                bias_info["governance_authorities"].append(authority)
+            mutation_id = str(control.get("committed_mutation_id") or "")
+            if mutation_id and mutation_id not in bias_info["committed_mutation_ids"]:
+                bias_info["committed_mutation_ids"].append(mutation_id)
             approved_biases[factor] = bias_info
     except Exception as e:
         logger.debug("[Evolve] collect learning suggestions: %s", e)
@@ -919,7 +1019,7 @@ def _apply_learning_biases(
     approved_biases: dict[str, dict],
     base_weights: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict]]:
-    """Apply small approved learning biases on top of WeightPolicy output."""
+    """Apply small committed/applied learning biases on top of WeightPolicy output."""
     if not weights or not approved_biases:
         return dict(weights or {}), {}
 
@@ -937,7 +1037,7 @@ def _apply_learning_biases(
                 adjusted[factor] = float(base_weights[factor] or 0.0)
         elif float(adjusted.get(factor) or 0.0) <= 0.0 and float((bias_info or {}).get("source_weight") or 0.0) > 0.0:
             # WeightPolicy may emit a zero for a factor that still has a
-            # small live weight.  An explicitly approved model downweight is
+            # small live weight.  An executable applied model downweight is
             # a bounded relative change from that live weight; preserve that
             # baseline so DecisionPolicy and the weight service can evaluate
             # the change instead of silently dropping the model contribution.
@@ -952,6 +1052,12 @@ def _apply_learning_biases(
             "multiplier": round(float(mult), 6),
             "action": str((bias_info or {}).get("action", "watch")),
             "suggestion_ids": list((bias_info or {}).get("suggestion_ids", []) or []),
+            "governance_authorities": list(
+                (bias_info or {}).get("governance_authorities", []) or []
+            ),
+            "committed_mutation_ids": list(
+                (bias_info or {}).get("committed_mutation_ids", []) or []
+            ),
             "old_weight": round(old_w, 6),
             "biased_weight": round(new_w, 6),
         }
@@ -969,11 +1075,11 @@ def _apply_model_governed_downweights(
     *,
     approved_biases: dict[str, dict] | None = None,
 ) -> dict[str, Any]:
-    """Apply approved model downweights before the broad health-score sync.
+    """Apply executable applied model downweights before the broad health-score sync.
 
     Model governance must not depend on the much larger health-score/portfolio
     rebuild completing first.  That rebuild can be slow or empty during a
-    worker restart, which used to make an approved model suggestion appear to
+    worker restart, which used to make an applied model suggestion appear to
     be ignored.  This helper is intentionally limited to the demo bridge's
     risk-reducing factor downweight and still uses the normal mutation service.
     """
@@ -1022,11 +1128,11 @@ def _apply_model_governed_downweights(
                 producer="factor_governance",
                 run_id=f"demo_model_weight_{int(_time.time())}",
                 actor="system:evolution_orchestrator.demo_model_governance",
-                reason="approved LightGBM model downweight through demo nursery",
+                reason="applied LightGBM model downweight through demo nursery",
                 awe_patches={
                     factor: {
                         "weight": target_weight,
-                        "reason": "approved_model_downweight",
+                        "reason": "applied_model_downweight",
                     }
                 },
                 weight_policy_weights=None,
@@ -1119,12 +1225,15 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
         if not wp_weights:
             return False
 
-        # 来源 A2: 规则学习建议 (proposed 只做观测, approved 才做小偏置)
+        # 来源 A2: 审批状态只做观测，仅 applied/committed 控制可生成小偏置。
         learning_summary, approved_biases = _collect_learning_suggestions()
         if learning_summary:
             _emit_evolution_story("learning_suggestions_seen", {
                 "factors": len(learning_summary),
                 "summary": learning_summary,
+                "executable_biases": approved_biases,
+                # Compatibility key; values are executable applied controls,
+                # never merely approved observations.
                 "approved_biases": approved_biases,
             })
         if approved_biases:

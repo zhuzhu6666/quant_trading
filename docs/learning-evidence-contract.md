@@ -1,7 +1,7 @@
 # Learning Evidence Contract
 
 > Status: active
-> Last verified: 2026-07-06
+> Last verified: 2026-07-18
 > Scope: evidence semantics for learning samples, model training, governance, and autonomous replay/audit.
 
 状态：第一版已落地，2026-06-29；训练准入语义已收紧，2026-06-30；开仓质量、反事实训练契约、数据健康检查、动态仓位 trace 与事件窗口治理已补齐，2026-07-02；自治治理 V3 继续沿用本文作为证据等级 contract；2026-07-06 补齐学习系统、影子模型和数据精度关系。
@@ -18,7 +18,7 @@
 - `causal_level`: `observational / counterfactual / replay_validated / intervention_observed`
 - `label_status`: `pending / matured / invalid`
 - `train_weight`: `0.0 .. 1.0`
-- `allowed_uses`: `audit / explainability / weak_supervision / counterfactual_training / supervised_training / strong_governance`
+- `allowed_uses`: `audit / explainability / weak_supervision / counterfactual_training / supervised_training / strong_governance / executable_governance`
 - `blockers`: 阻断强训练或强治理的原因
 - `hashes`: features、label、trace、explanation 的稳定 hash
 
@@ -27,6 +27,12 @@
 - `config_version`
 - `config_hash`
 - `evolution_run_id`
+- `system_contaminated`
+- `governance_eligible`
+- `governance_effective_weight`
+- `governance_eligibility_version`
+- `governance_eligibility_fingerprint`
+- `governance_ineligible_reason`
 
 ## Learning Data Flow
 
@@ -102,6 +108,20 @@ train_weight = quality_score * integrity_weight * causal_weight * label_weight
 - `missing` 权重为 0，只能用于审计或解释。
 - `observational` 即使 matured，也不能直接当强因果样本。
 - 高置信 `counterfactual` 可以训练，但必须满足 counterfactual training 条件。
+
+`train_weight` 与 `governance_effective_weight` 是两个独立权力面。前者只控制
+模型训练采样；后者只控制可执行治理聚合，统一由
+`backend.services.governance_eligibility.evaluate_governance_eligibility()`
+计算：
+
+- full、matured、非污染、model-ready、显式允许
+  `executable_governance` 且 lineage 唯一完整：权重 1；
+- 只有显式 `verified_recovered=true` 的 recovered 样本可进入治理，权重上限
+  0.5；
+- partial、missing、未验证 recovered、污染样本、缺 lineage、缺 version 或缺
+  fingerprint：治理权重 0；
+- fingerprint 绑定样本来源、证据 hashes、资格门禁结果与有效权重，历史空值
+  必须先经 repair/backfill 重验，不能按兼容默认放行。
 
 ## Training Gate
 
@@ -189,18 +209,26 @@ readiness 状态语义：
 
 同向簇治理由 `materialize_entry_cluster_governance_suggestions` 消费 matured open outcome 样本：
 
+- 只消费当前 `governance_eligibility.v1` 且 weight > 0 的样本；
 - 统计 `same_direction_ge_1 / same_direction_ge_2 / same_direction_ge_3`
-- 写入 `experience_pattern_stats(scope_type='entry_cluster')`
+- 写入 `experience_pattern_stats(scope_type='entry_cluster')` 的 raw count、effective
+  sample count、weighted win/bad-loss/reward 和聚合 fingerprint；
 - 当坏结果比例或平均 reward 达到阈值时，生成 `policy_suggestion(scope_type='entry_cluster')`
 - 当前建议仍为 governance/advisory，不能直接越过风控下单
 
 事件窗口治理由 `materialize_event_window_governance_suggestions` 消费 matured open outcome 样本：
 
+- 只消费当前 eligibility version、非空 fingerprint 且 weight > 0 的样本；
 - 按 `event_type:window_bucket` 归因，例如 `NFP:pre_0_4h`、`FOMC:post_0_15m`
 - 写入 `experience_pattern_stats(scope_type='event_window')`
 - 当事件窗口内坏结果比例过高时，生成 `policy_suggestion(scope_type='event_window', action='tighten_event_window_sizing')`
 - 当事件后窗口平均 reward 显著偏负时，生成 `policy_suggestion(scope_type='event_window', action='extend_event_post_window_review')`
 - 当前建议仍为 governance/advisory，不能直接改写事件分层、放大仓位或绕过 `RiskPolicyService`
+
+`RuleEvolutionGovernor` 对样本聚合建议只读取 effective sample count 和 weighted
+win/bad-loss/reward。`policy_suggestion` 与 `experience_pattern_stats` 的 eligibility
+version/fingerprint 必须一致；缺失或不一致直接 rejected，样本仍保留在
+observation/research 链路，但不能触发 mutation。
 
 ## Model Output
 

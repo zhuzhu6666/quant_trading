@@ -695,6 +695,52 @@
         "title": "DatasetValidateRequest",
         "type": "object"
       },
+      "DemoteRequest": {
+        "properties": {
+          "artifact_hash": {
+            "default": "",
+            "title": "Artifact Hash",
+            "type": "string"
+          },
+          "evidence_refs": {
+            "title": "Evidence Refs",
+            "type": "object"
+          },
+          "expression": {
+            "default": "",
+            "title": "Expression",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "default": "",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "default": "manual factor quarantine",
+            "title": "Reason",
+            "type": "string"
+          },
+          "target_stage": {
+            "default": "QUARANTINED",
+            "enum": [
+              "QUARANTINED",
+              "RETIRED"
+            ],
+            "title": "Target Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "DemoteRequest",
+        "type": "object"
+      },
       "DiscoverRequest": {
         "properties": {
           "auto_register": {
@@ -984,6 +1030,39 @@
         "title": "FactorPruningGovernanceRequest",
         "type": "object"
       },
+      "GovernanceExpansionControlRequest": {
+        "properties": {
+          "confirm_resume": {
+            "default": false,
+            "title": "Confirm Resume",
+            "type": "boolean"
+          },
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "v16_claim_token": {
+            "default": "",
+            "title": "V16 Claim Token",
+            "type": "string"
+          },
+          "v16_command_id": {
+            "default": "",
+            "title": "V16 Command Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "paused"
+        ],
+        "title": "GovernanceExpansionControlRequest",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -999,6 +1078,10 @@
       },
       "HealthResponse": {
         "properties": {
+          "_fact": {
+            "title": "Fact",
+            "type": "object"
+          },
           "ctrader": {
             "title": "Ctrader",
             "type": "string"
@@ -1025,7 +1108,8 @@
           "db",
           "ctrader",
           "server_time",
-          "uptime_seconds"
+          "uptime_seconds",
+          "_fact"
         ],
         "title": "HealthResponse",
         "type": "object"
@@ -1044,6 +1128,16 @@
           "reason": {
             "default": "",
             "title": "Reason",
+            "type": "string"
+          },
+          "v16_claim_token": {
+            "default": "",
+            "title": "V16 Claim Token",
+            "type": "string"
+          },
+          "v16_command_id": {
+            "default": "",
+            "title": "V16 Command Id",
             "type": "string"
           }
         },
@@ -1263,6 +1357,16 @@
             "default": "",
             "title": "Reason",
             "type": "string"
+          },
+          "v16_claim_token": {
+            "default": "",
+            "title": "V16 Claim Token",
+            "type": "string"
+          },
+          "v16_command_id": {
+            "default": "",
+            "title": "V16 Command Id",
+            "type": "string"
           }
         },
         "title": "LiveAutonomyUnlockRequest",
@@ -1288,10 +1392,28 @@
       },
       "LoginResponse": {
         "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
           "expires_in": {
-            "default": 86400,
+            "default": 900,
             "title": "Expires In",
             "type": "integer"
+          },
+          "password_rehash_required": {
+            "default": false,
+            "title": "Password Rehash Required",
+            "type": "boolean"
+          },
+          "refresh_expires_in": {
+            "default": 604800,
+            "title": "Refresh Expires In",
+            "type": "integer"
+          },
+          "refresh_token": {
+            "title": "Refresh Token",
+            "type": "string"
           },
           "token": {
             "title": "Token",
@@ -1309,9 +1431,22 @@
         },
         "required": [
           "user",
-          "token"
+          "token",
+          "access_token",
+          "refresh_token"
         ],
         "title": "LoginResponse",
+        "type": "object"
+      },
+      "LogoutRequest": {
+        "properties": {
+          "refresh_token": {
+            "default": "",
+            "title": "Refresh Token",
+            "type": "string"
+          }
+        },
+        "title": "LogoutRequest",
         "type": "object"
       },
       "MetaModelAdvisoryRunRequest": {
@@ -2255,19 +2390,6 @@
         "title": "ModelShadowStatusRequest",
         "type": "object"
       },
-      "NameRequest": {
-        "properties": {
-          "name": {
-            "title": "Name",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name"
-        ],
-        "title": "NameRequest",
-        "type": "object"
-      },
       "OnceRequest": {
         "properties": {
           "timeframes": {
@@ -2563,6 +2685,11 @@
           "template_id": {
             "title": "Template Id",
             "type": "string"
+          },
+          "v16_command_id": {
+            "default": "",
+            "title": "V16 Command Id",
+            "type": "string"
           }
         },
         "required": [
@@ -2835,6 +2962,117 @@
         "title": "ParameterTemplateUpsertRequest",
         "type": "object"
       },
+      "ParityReplayRunRequest": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "commission_per_lot_round_turn": {
+            "default": 6.0,
+            "minimum": 0.0,
+            "title": "Commission Per Lot Round Turn",
+            "type": "number"
+          },
+          "contract_size": {
+            "default": 100.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Contract Size",
+            "type": "number"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End"
+          },
+          "expected_bindings": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Expected Bindings",
+            "type": "object"
+          },
+          "initial_equity": {
+            "default": 10000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Initial Equity",
+            "type": "number"
+          },
+          "max_bars": {
+            "default": 500,
+            "maximum": 5000.0,
+            "minimum": 2.0,
+            "title": "Max Bars",
+            "type": "integer"
+          },
+          "persist_artifact": {
+            "default": true,
+            "title": "Persist Artifact",
+            "type": "boolean"
+          },
+          "slippage_bps": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Slippage Bps",
+            "type": "number"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
+          },
+          "symbol": {
+            "default": "XAUUSD+",
+            "title": "Symbol",
+            "type": "string"
+          },
+          "timeframe": {
+            "default": "M15",
+            "title": "Timeframe",
+            "type": "string"
+          },
+          "volume_lots": {
+            "default": 0.01,
+            "exclusiveMinimum": 0.0,
+            "title": "Volume Lots",
+            "type": "number"
+          },
+          "warmup_bars": {
+            "default": 150,
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Warmup Bars",
+            "type": "integer"
+          }
+        },
+        "title": "ParityReplayRunRequest",
+        "type": "object"
+      },
       "PositionQualityLightGBMShadowRequest": {
         "properties": {
           "artifact_dir": {
@@ -2973,6 +3211,16 @@
           "suggestion_id": {
             "title": "Suggestion Id",
             "type": "string"
+          },
+          "v16_claim_token": {
+            "default": "",
+            "title": "V16 Claim Token",
+            "type": "string"
+          },
+          "v16_command_id": {
+            "default": "",
+            "title": "V16 Command Id",
+            "type": "string"
           }
         },
         "required": [
@@ -3001,6 +3249,73 @@
           }
         },
         "title": "PositionSupervisorTraceMaterializeRequest",
+        "type": "object"
+      },
+      "PromoteRequest": {
+        "properties": {
+          "artifact_hash": {
+            "default": "",
+            "title": "Artifact Hash",
+            "type": "string"
+          },
+          "evidence_refs": {
+            "title": "Evidence Refs",
+            "type": "object"
+          },
+          "expression": {
+            "default": "",
+            "title": "Expression",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "default": "",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "default": "manual shadow promotion preparation",
+            "title": "Reason",
+            "type": "string"
+          },
+          "v16_candidate_id": {
+            "default": "",
+            "title": "V16 Candidate Id",
+            "type": "string"
+          },
+          "v16_claim_token": {
+            "default": "",
+            "title": "V16 Claim Token",
+            "type": "string"
+          },
+          "v16_command_id": {
+            "default": "",
+            "title": "V16 Command Id",
+            "type": "string"
+          },
+          "v16_evidence_fingerprint": {
+            "default": "",
+            "title": "V16 Evidence Fingerprint",
+            "type": "string"
+          },
+          "v16_posterior_fingerprint": {
+            "default": "",
+            "title": "V16 Posterior Fingerprint",
+            "type": "string"
+          },
+          "v16_target_agent": {
+            "default": "factor_governance",
+            "title": "V16 Target Agent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "PromoteRequest",
         "type": "object"
       },
       "ProposalReviewRequest": {
@@ -3040,22 +3355,6 @@
           "yaml"
         ],
         "title": "PutRequest",
-        "type": "object"
-      },
-      "RefreshRequest": {
-        "properties": {
-          "force": {
-            "default": false,
-            "title": "Force",
-            "type": "boolean"
-          },
-          "source": {
-            "default": "all",
-            "title": "Source",
-            "type": "string"
-          }
-        },
-        "title": "RefreshRequest",
         "type": "object"
       },
       "ReleaseApprovalEventRequest": {
@@ -3260,6 +3559,67 @@
         "title": "StartRequest",
         "type": "object"
       },
+      "StepUpRequest": {
+        "properties": {
+          "password": {
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "StepUpRequest",
+        "type": "object"
+      },
+      "StepUpResponse": {
+        "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "auth_time": {
+            "title": "Auth Time",
+            "type": "integer"
+          },
+          "expires_in": {
+            "default": 900,
+            "title": "Expires In",
+            "type": "integer"
+          },
+          "password_rehash_required": {
+            "default": false,
+            "title": "Password Rehash Required",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "token_type": {
+            "default": "Bearer",
+            "title": "Token Type",
+            "type": "string"
+          },
+          "user": {
+            "title": "User",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "token",
+          "access_token",
+          "session_id",
+          "auth_time"
+        ],
+        "title": "StepUpResponse",
+        "type": "object"
+      },
       "StressRequest": {
         "properties": {
           "equity_series": {
@@ -3412,6 +3772,33 @@
           "equity_series"
         ],
         "title": "VarRequest",
+        "type": "object"
+      },
+      "backend__api__auth__RefreshRequest": {
+        "properties": {
+          "refresh_token": {
+            "default": "",
+            "title": "Refresh Token",
+            "type": "string"
+          }
+        },
+        "title": "RefreshRequest",
+        "type": "object"
+      },
+      "backend__api__external_data__RefreshRequest": {
+        "properties": {
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          },
+          "source": {
+            "default": "all",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "title": "RefreshRequest",
         "type": "object"
       }
     }
@@ -3633,6 +4020,82 @@
         ]
       }
     },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "logout_api_auth_logout_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "quant_refresh",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Quant Refresh"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Logout Api Auth Logout Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/api/auth/me": {
       "get": {
         "operationId": "me_api_auth_me_get",
@@ -3728,6 +4191,175 @@
           }
         },
         "summary": "Me Strict",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/refresh": {
+      "post": {
+        "operationId": "refresh_api_auth_refresh_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "quant_refresh",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Quant Refresh"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/backend__api__auth__RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/step-up": {
+      "post": {
+        "description": "Re-authenticate the current persistent session without logging in again.",
+        "operationId": "step_up_api_auth_step_up_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepUpRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepUpResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Step Up",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/ws-ticket": {
+      "post": {
+        "operationId": "ws_ticket_api_auth_ws_ticket_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Ws Ticket Api Auth Ws Ticket Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ws Ticket",
         "tags": [
           "auth"
         ]
@@ -4738,7 +5370,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RefreshRequest",
+                "$ref": "#/components/schemas/backend__api__external_data__RefreshRequest",
                 "default": {
                   "force": false,
                   "source": "all"
@@ -5375,7 +6007,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RefreshRequest",
+                "$ref": "#/components/schemas/backend__api__external_data__RefreshRequest",
                 "default": {
                   "force": false,
                   "source": "all"
@@ -13655,6 +14287,116 @@
         ]
       }
     },
+    "/api/ops/autonomy/governance-expansion-control": {
+      "get": {
+        "description": "Return the operator-owned all-mode governance expansion kill switch.",
+        "operationId": "get_governance_expansion_control_api_ops_autonomy_governance_expansion_control_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Get Governance Expansion Control Api Ops Autonomy Governance Expansion Control Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Governance Expansion Control",
+        "tags": [
+          "ops"
+        ]
+      },
+      "post": {
+        "description": "Pause or governably resume all-mode autonomous expansion.",
+        "operationId": "set_governance_expansion_control_api_ops_autonomy_governance_expansion_control_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GovernanceExpansionControlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Set Governance Expansion Control Api Ops Autonomy Governance Expansion Control Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Governance Expansion Control",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
     "/api/ops/autonomy/live-status": {
       "get": {
         "description": "Return governed live-autonomy unlock status.",
@@ -15965,7 +16707,7 @@
     },
     "/api/ops/recovery/history": {
       "get": {
-        "description": "获取恢复历史记录 (占位)。",
+        "description": "Return recovery history without constructing or starting a monitor.",
         "operationId": "get_recovery_history_api_ops_recovery_history_get",
         "parameters": [
           {
@@ -16643,6 +17385,67 @@
           }
         },
         "summary": "Get Latest Replay Report",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/ops/replay/parity-run": {
+      "post": {
+        "description": "Run the causal parity assessment without granting governance authority.",
+        "operationId": "run_parity_replay_harness_api_ops_replay_parity_run_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParityReplayRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Run Parity Replay Harness Api Ops Replay Parity Run Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Parity Replay Harness",
         "tags": [
           "ops"
         ]
@@ -18028,7 +18831,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NameRequest"
+                "$ref": "#/components/schemas/DemoteRequest"
               }
             }
           },
@@ -18088,7 +18891,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NameRequest"
+                "$ref": "#/components/schemas/PromoteRequest"
               }
             }
           },

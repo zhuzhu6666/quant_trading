@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 from backend.services.live_position_lifecycle import (
@@ -371,6 +372,27 @@ def test_build_entry_cluster_context_handles_neutral_direction_without_pyramid()
     assert context["same_direction_open_count_after"] == 0
     assert context["net_direction_api_volume_after"] == 100.0
     assert context["is_pyramid"] is False
+
+
+def test_build_entry_cluster_context_marks_missing_broker_open_time_unknown():
+    context = build_entry_cluster_context(
+        positions_before=[
+            {
+                "position_id": 7,
+                "symbol": "XAUUSD+",
+                "direction": 1,
+                "volume": 100.0,
+            }
+        ],
+        direction=1,
+        symbol="XAUUSD+",
+        now_ts=1000.0,
+    )
+
+    assert context["same_direction_open_timestamp_state"] == "unknown"
+    assert context["seconds_since_last_same_direction_open"] is None
+    assert context["unknown_open_timestamp_position_ids"] == [7]
+    assert context["recent_same_direction_entries"] == {"5m": 0, "15m": 0, "30m": 0}
 
 
 def test_build_market_micro_context_payload_computes_spread_and_slippage():
@@ -1614,7 +1636,10 @@ def test_build_close_position_risk_context_payload_computes_holding_timeout_fiel
         "symbol": "XAUUSD+",
         "entry_ts": 1_000.0,
         "entry_ts_source": "decision_ledger",
+        "entry_ts_state": "known",
         "holding_seconds": 3_900.0,
+        "holding_seconds_state": "known",
+        "holding_timeout_fail_closed": False,
         "timeframe_seconds": 300,
         "max_holding_bars": 12,
         "max_holding_seconds": 3_600.0,
@@ -1638,6 +1663,34 @@ def test_build_close_position_risk_context_payload_handles_missing_entry_and_dis
     assert payload["holding_seconds"] == 0.0
     assert payload["max_holding_seconds"] == 0.0
     assert payload["entry_ts_source"] == ""
+    assert payload["entry_ts_state"] == "unknown"
+    assert payload["holding_seconds_state"] == "unknown_infinite_stale"
+    assert payload["holding_timeout_fail_closed"] is False
+
+
+def test_missing_entry_timestamp_fails_closed_when_holding_timeout_is_enabled():
+    payload = build_close_position_risk_context_payload(
+        position_id=2,
+        close_reason="holding_timeout",
+        mode="live",
+        broker="ctrader",
+        symbol="XAUUSD+",
+        entry_ts=0.0,
+        entry_ts_source="",
+        temporal_context={"decision_ts": 100.0, "timeframe_seconds": 300},
+        max_holding_bars=12,
+    )
+
+    assert payload["entry_ts_state"] == "unknown"
+    assert payload["holding_seconds_state"] == "unknown_infinite_stale"
+    assert payload["holding_seconds"] == 3600.0
+    assert payload["holding_timeout_fail_closed"] is True
+    assert holding_timeout_is_expired(payload) is True
+
+    summary = build_holding_summary_from_close_context(payload)
+    assert summary["holding_timeout_exceeded"] is True
+    assert summary["holding_timeout_fail_closed"] is True
+    assert summary["holding_timeout_status"] == "expired_unknown_timestamp"
 
 
 def test_build_holding_summary_from_close_context_reports_watch_and_remaining_time():
@@ -3055,6 +3108,7 @@ def test_build_supervisor_tighten_sl_plan_clips_long_stop_below_bid():
         bid=4010.0,
         ask=4010.2,
         mid=4010.1,
+        quote_age_seconds=0.0,
     )
 
     assert plan["allowed"] is True
@@ -3073,6 +3127,7 @@ def test_build_supervisor_tighten_sl_plan_clips_short_stop_above_ask():
         bid=4009.8,
         ask=4010.0,
         mid=4009.9,
+        quote_age_seconds=0.0,
     )
 
     assert plan["allowed"] is True
@@ -3089,6 +3144,7 @@ def test_build_supervisor_tighten_sl_plan_skips_when_not_more_protective():
         direction=1,
         target_sl=4008.0,
         bid=4010.0,
+        quote_age_seconds=0.0,
     )
     short_plan = build_supervisor_tighten_sl_plan(
         current_sl=4010.0,
@@ -3096,6 +3152,7 @@ def test_build_supervisor_tighten_sl_plan_skips_when_not_more_protective():
         direction=-1,
         target_sl=4012.0,
         ask=4010.0,
+        quote_age_seconds=0.0,
     )
 
     assert long_plan["allowed"] is False
@@ -3126,6 +3183,21 @@ def test_build_supervisor_tighten_sl_plan_inputs_extracts_legacy_fields():
     }
     assert inputs["min_stop_distance_points"] == 0.2
     assert inputs["quote_max_age_seconds"] == 10.0
+    assert inputs["quote_age_seconds"] is None
+
+
+def test_supervisor_tighten_rejects_quote_without_timestamp():
+    inputs = build_supervisor_tighten_sl_plan_inputs(
+        position={"sl": 3990.0, "current_price": 4010.0, "direction": 1},
+        target_sl=4005.0,
+        quote={"bid": 4010.0, "ask": 4010.2, "mid": 4010.1},
+    )
+
+    plan = build_supervisor_tighten_sl_plan(**inputs)
+
+    assert plan["allowed"] is False
+    assert plan["reason"] == "quote_timestamp_unknown"
+    assert plan["quote_age_seconds"] is None
 
 
 def test_target_tp_is_extension_uses_directional_progress():
@@ -3223,7 +3295,7 @@ def test_build_protection_execution_plan_builds_tightening_plan():
         controls={"target_stop_loss": 4005.0, "target_take_profit": 4038.0},
         source="legacy_awe_trailing",
         entry_protection_repair_source="entry_protection_repair",
-        quote={"bid": 4010.0, "ask": 4010.2, "price": 4010.1},
+        quote={"bid": 4010.0, "ask": 4010.2, "price": 4010.1, "ts": time.time()},
     )
 
     assert result["target_sl"] == 4005.0
@@ -3461,7 +3533,7 @@ def test_build_supervisor_tighten_execution_plan_preserves_live_plan_shape():
             "current_price": 4010.0,
         },
         controls={"target_stop_loss": 4005.0, "target_take_profit": 4038.0},
-        quote={"bid": 4010.0, "ask": 4010.2, "price": 4010.1},
+        quote={"bid": 4010.0, "ask": 4010.2, "price": 4010.1, "ts": time.time()},
     )
 
     assert plan["target_sl"] == 4005.0

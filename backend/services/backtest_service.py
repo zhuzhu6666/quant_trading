@@ -11,6 +11,8 @@ from typing import Any
 from loguru import logger
 
 from backend.jobs.progress import ProgressCB
+from backend.services.backtest_runner import legacy_backtest_provenance
+from backend.services.research_evidence import enforce_legacy_backtest_contract
 
 
 def run_backtest(params: dict[str, Any], progress_cb: ProgressCB) -> dict:
@@ -28,7 +30,16 @@ def run_backtest(params: dict[str, Any], progress_cb: ProgressCB) -> dict:
         enable_circuit=bool(params.get("enable_circuit", False)),
         progress_cb=progress_cb,
     )
-    return result
+    # The legacy runner is diagnostic even if a mocked/old runner returns
+    # optimistic trust flags.  Enforce at the service boundary as well as in
+    # the runner so every job result carries the same immutable contract.
+    return enforce_legacy_backtest_contract(result)
+
+
+def legacy_backtest_contract() -> dict[str, Any]:
+    """Public contract used by API/job callers before a job has completed."""
+
+    return legacy_backtest_provenance()
 
 
 def _find_latest_backtest_report():

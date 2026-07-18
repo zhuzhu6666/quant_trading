@@ -14,6 +14,7 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
+from backend.core.state_store import validate_runtime_state_schema
 
 
 APPEND_SOURCE = "trade_lesson_memory.v1"
@@ -80,11 +81,8 @@ def _execute(conn: Any, sql: str, params: Any = None):
 
 
 def ensure_trade_lesson_memory_schema(conn: Any) -> None:
-    if not state_table_exists(conn, "experience_memory"):
-        _execute(
-            conn,
-            """
-            CREATE TABLE IF NOT EXISTS experience_memory (
+    table_declaration = """
+        CREATE TABLE IF NOT EXISTS experience_memory (
                 experience_id TEXT PRIMARY KEY,
                 trade_id TEXT DEFAULT '',
                 source_table TEXT DEFAULT '',
@@ -101,9 +99,21 @@ def ensure_trade_lesson_memory_schema(conn: Any) -> None:
                 artifact_version TEXT DEFAULT 'v1',
                 evolution_run_id TEXT DEFAULT '',
                 created_at REAL NOT NULL DEFAULT 0.0
-            )
-            """,
         )
+    """
+    index_declaration = """
+        CREATE INDEX IF NOT EXISTS idx_experience_memory_source_append
+        ON experience_memory(source_table, source_id, append_source)
+    """
+    if _conn_is_pg(conn):
+        validate_runtime_state_schema(
+            conn,
+            (table_declaration, index_declaration),
+        )
+        return
+
+    if not state_table_exists(conn, "experience_memory"):
+        _execute(conn, table_declaration)
     cols = state_table_columns(conn, "experience_memory")
     migrations = {
         "source_table": "ALTER TABLE experience_memory ADD COLUMN source_table TEXT DEFAULT ''",
@@ -116,10 +126,7 @@ def ensure_trade_lesson_memory_schema(conn: Any) -> None:
             _execute(conn, ddl)
     _execute(
         conn,
-        """
-        CREATE INDEX IF NOT EXISTS idx_experience_memory_source
-        ON experience_memory(source_table, source_id, append_source)
-        """,
+        index_declaration,
     )
 
 

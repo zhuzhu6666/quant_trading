@@ -180,15 +180,29 @@ class TestTagsBreakdown:
 class TestDefaultGPConfig:
 
     def test_unknown_factor_gets_default_config(self):
-        """未配置的因子自动获得默认 GP 配置。"""
+        """未配置因子保留在诊断输出，但不能获得隐式方向权重。"""
         c = PortfolioCompositor(FULL_CONFIG)
         signals = {
             "rsi_14": 0.5,
             "gp_discovered_001": 0.8,
         }
         result = c.compose(signals, signals)
-        # gp_discovered_001 默认 tags=["GP发现"] → tactical layer
+        # Signal-level count remains compatible, while executable alpha only
+        # contains the explicitly configured factor.
         assert result.n_active_factors == 2
+        assert result.active_weights["gp_discovered_001"] == 0.0
+        assert result.n_active_alpha_factors == 1
+
+    def test_explicit_enabled_without_explicit_weight_is_non_voting(self):
+        c = PortfolioCompositor(
+            {"missing_weight": {"enabled": True, "role": "alpha"}}
+        )
+
+        result = c.compose({"missing_weight": 0.9}, {"missing_weight": 0.9})
+
+        assert result.score == 0.0
+        assert result.active_weights["missing_weight"] == 0.0
+        assert result.n_active_alpha_factors == 0
 
     def test_disabled_factors_excluded(self):
         """enabled=False 的因子不参与组合。"""

@@ -10,6 +10,7 @@ from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from research.learning.effect_reconciliation import EffectEvaluation, evaluate_application_effect
 from research.learning.governance_conflicts import GovernanceConflictResolver
@@ -275,7 +276,10 @@ class RuleEvolutionGovernor:
     def list_suggestions(self, *, status: str | None = None, limit: int = 100) -> list[dict]:
         sql = """
             SELECT suggestion_id, scope_type, scope_key, action, confidence, reason,
-                   evidence_json, status, reviewed_at, review_note, created_at
+                   evidence_json, status, reviewed_at, review_note,
+                   governance_eligible, governance_eligibility_version,
+                   governance_eligibility_fingerprint, governance_ineligible_reason,
+                   created_at
             FROM policy_suggestion
         """
         params: list = []
@@ -324,6 +328,35 @@ class RuleEvolutionGovernor:
                     (scope_type, scope_key),
                 ).fetchone()
                 if not stats:
+                    suggestion_eligibility_ready = bool(
+                        row["governance_eligible"]
+                        and str(row["governance_eligibility_version"] or "")
+                        == GOVERNANCE_ELIGIBILITY_VERSION
+                        and str(row["governance_eligibility_fingerprint"] or "")
+                    )
+                    if not suggestion_eligibility_ready:
+                        note = (
+                            "rejected by governor: executable evidence eligibility "
+                            "version/fingerprint missing"
+                        )
+                        self._execute(
+                            conn,
+                            """
+                            UPDATE policy_suggestion
+                            SET status='rejected', reviewed_at=?, review_note=?,
+                                governance_eligible=0,
+                                governance_ineligible_reason=?
+                            WHERE suggestion_id=?
+                            """,
+                            (
+                                now,
+                                note,
+                                "eligibility_contract_invalid",
+                                row["suggestion_id"],
+                            ),
+                        )
+                        rejected += 1
+                        continue
                     status = "proposed"
                     note = ""
                     if action == "fix_stop_legality":
@@ -374,11 +407,40 @@ class RuleEvolutionGovernor:
                     )
                     continue
 
-                sample_count = int(stats["sample_count"] or 0)
-                win_count = int(stats["win_count"] or 0)
-                bad_loss_count = int(stats["bad_loss_count"] or 0)
-                avg_reward = float(stats["avg_reward"] or 0.0)
-                bad_rate = bad_loss_count / max(sample_count, 1)
+                stats_version = str(stats["governance_eligibility_version"] or "")
+                stats_fingerprint = str(stats["governance_eligibility_fingerprint"] or "")
+                suggestion_version = str(row["governance_eligibility_version"] or "")
+                suggestion_fingerprint = str(row["governance_eligibility_fingerprint"] or "")
+                eligibility_ready = bool(
+                    row["governance_eligible"]
+                    and stats_version == GOVERNANCE_ELIGIBILITY_VERSION
+                    and suggestion_version == GOVERNANCE_ELIGIBILITY_VERSION
+                    and stats_fingerprint
+                    and suggestion_fingerprint == stats_fingerprint
+                )
+                if not eligibility_ready:
+                    note = (
+                        "rejected by governor: executable evidence eligibility "
+                        "version/fingerprint missing or mismatched"
+                    )
+                    self._execute(
+                        conn,
+                        """
+                        UPDATE policy_suggestion
+                        SET status='rejected', reviewed_at=?, review_note=?,
+                            governance_eligible=0, governance_ineligible_reason=?
+                        WHERE suggestion_id=?
+                        """,
+                        (now, note, "eligibility_contract_invalid", row["suggestion_id"]),
+                    )
+                    rejected += 1
+                    continue
+
+                sample_count = float(stats["effective_sample_count"] or 0.0)
+                win_count = float(stats["weighted_win_count"] or 0.0)
+                bad_loss_count = float(stats["weighted_bad_loss_count"] or 0.0)
+                avg_reward = float(stats["weighted_avg_reward"] or 0.0)
+                bad_rate = bad_loss_count / max(sample_count, 1e-12)
                 note = ""
                 status = "proposed"
 
@@ -386,31 +448,31 @@ class RuleEvolutionGovernor:
                     if self._factor_model_evidence_ready(evidence, confidence=confidence):
                         status = "approved"
                         note = "approved by governor: factor model evidence bridged through demo nursery"
-                    elif sample_count >= 3 and bad_loss_count >= 2 and avg_reward <= -0.20 and confidence >= 0.45:
+                    elif sample_count >= 3.0 and bad_loss_count >= 2.0 and avg_reward <= -0.20 and confidence >= 0.45:
                         status = "approved"
                         note = f"approved by governor: samples={sample_count}, avg_reward={avg_reward:.3f}"
-                    elif sample_count >= 4 and avg_reward >= -0.05:
+                    elif sample_count >= 4.0 and avg_reward >= -0.05:
                         status = "rejected"
                         note = f"rejected by governor: negative evidence too weak avg_reward={avg_reward:.3f}"
                 elif action == "boost_small":
-                    if sample_count >= 4 and win_count >= 3 and avg_reward >= 0.20 and confidence >= 0.40:
+                    if sample_count >= 4.0 and win_count >= 3.0 and avg_reward >= 0.20 and confidence >= 0.40:
                         status = "approved"
                         note = f"approved by governor: win_count={win_count}, avg_reward={avg_reward:.3f}"
-                    elif sample_count >= 4 and avg_reward <= 0.05:
+                    elif sample_count >= 4.0 and avg_reward <= 0.05:
                         status = "rejected"
                         note = f"rejected by governor: positive evidence too weak avg_reward={avg_reward:.3f}"
                 elif scope_type == "entry_cluster" and action in {"increase_same_direction_cooldown", "raise_pyramid_entry_threshold"}:
-                    if sample_count >= 10 and bad_rate >= 0.50 and confidence >= 0.55:
+                    if sample_count >= 10.0 and bad_rate >= 0.50 and confidence >= 0.55:
                         status = "approved"
                         note = f"approved by governor: samples={sample_count}, bad_rate={bad_rate:.3f}"
-                    elif sample_count >= 10 and bad_rate < 0.45 and avg_reward >= 0.02:
+                    elif sample_count >= 10.0 and bad_rate < 0.45 and avg_reward >= 0.02:
                         status = "rejected"
                         note = f"rejected by governor: cluster evidence recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
                 elif scope_type == "event_window" and action in {"tighten_event_window_sizing", "extend_event_post_window_review"}:
-                    if sample_count >= 10 and (bad_rate >= 0.50 or avg_reward <= -0.05) and confidence >= 0.55:
+                    if sample_count >= 10.0 and (bad_rate >= 0.50 or avg_reward <= -0.05) and confidence >= 0.55:
                         status = "approved"
                         note = f"approved by governor: samples={sample_count}, bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
-                    elif sample_count >= 10 and bad_rate < 0.45 and avg_reward >= 0.02:
+                    elif sample_count >= 10.0 and bad_rate < 0.45 and avg_reward >= 0.02:
                         status = "rejected"
                         note = f"rejected by governor: event-window evidence recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
                 elif scope_type == "entry_quality" and action in {
@@ -418,10 +480,10 @@ class RuleEvolutionGovernor:
                     "require_factor_agreement",
                     "suppress_recent_worst_factor",
                 }:
-                    if sample_count >= 5 and (bad_rate >= 0.60 or avg_reward <= -0.05) and confidence >= 0.55:
+                    if sample_count >= 5.0 and (bad_rate >= 0.60 or avg_reward <= -0.05) and confidence >= 0.55:
                         status = "approved"
                         note = f"approved by governor: samples={sample_count}, bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
-                    elif sample_count >= 10 and bad_rate < 0.45 and avg_reward >= 0.02:
+                    elif sample_count >= 10.0 and bad_rate < 0.45 and avg_reward >= 0.02:
                         status = "rejected"
                         note = f"rejected by governor: entry-quality evidence recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
                 elif scope_type == "parameter_template" and action == "switch_parameter_template":
@@ -528,26 +590,40 @@ class RuleEvolutionGovernor:
                 if not stats:
                     kept += 1
                     continue
-                sample_count = int(stats["sample_count"] or 0)
-                bad_loss_count = int(stats["bad_loss_count"] or 0)
-                avg_reward = float(stats["avg_reward"] or 0.0)
-                bad_rate = bad_loss_count / max(sample_count, 1)
+                stats_fingerprint = str(stats["governance_eligibility_fingerprint"] or "")
+                eligibility_ready = bool(
+                    row["governance_eligible"]
+                    and str(row["governance_eligibility_version"] or "")
+                    == GOVERNANCE_ELIGIBILITY_VERSION
+                    and str(stats["governance_eligibility_version"] or "")
+                    == GOVERNANCE_ELIGIBILITY_VERSION
+                    and stats_fingerprint
+                    and str(row["governance_eligibility_fingerprint"] or "")
+                    == stats_fingerprint
+                )
+                if not eligibility_ready:
+                    kept += 1
+                    continue
+                sample_count = float(stats["effective_sample_count"] or 0.0)
+                bad_loss_count = float(stats["weighted_bad_loss_count"] or 0.0)
+                avg_reward = float(stats["weighted_avg_reward"] or 0.0)
+                bad_rate = bad_loss_count / max(sample_count, 1e-12)
                 scope_type = str(row["scope_type"] or "")
                 action = str(row["action"] or "watch")
                 should_rollback = False
                 note = ""
-                if action == "downweight" and sample_count >= 5 and avg_reward >= 0.12:
+                if action == "downweight" and sample_count >= 5.0 and avg_reward >= 0.12:
                     should_rollback = True
                     note = f"rolled back: factor recovered avg_reward={avg_reward:.3f}"
-                elif action == "boost_small" and sample_count >= 5 and avg_reward <= -0.08:
+                elif action == "boost_small" and sample_count >= 5.0 and avg_reward <= -0.08:
                     should_rollback = True
                     note = f"rolled back: factor deteriorated avg_reward={avg_reward:.3f}"
                 elif scope_type == "entry_cluster" and action in {"increase_same_direction_cooldown", "raise_pyramid_entry_threshold"}:
-                    if sample_count >= 20 and bad_rate < 0.40 and avg_reward >= 0.03:
+                    if sample_count >= 20.0 and bad_rate < 0.40 and avg_reward >= 0.03:
                         should_rollback = True
                         note = f"rolled back: entry cluster recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
                 elif scope_type == "event_window" and action in {"tighten_event_window_sizing", "extend_event_post_window_review"}:
-                    if sample_count >= 20 and bad_rate < 0.40 and avg_reward >= 0.03:
+                    if sample_count >= 20.0 and bad_rate < 0.40 and avg_reward >= 0.03:
                         should_rollback = True
                         note = f"rolled back: event window recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
                 elif scope_type == "entry_quality" and action in {
@@ -555,7 +631,7 @@ class RuleEvolutionGovernor:
                     "require_factor_agreement",
                     "suppress_recent_worst_factor",
                 }:
-                    if sample_count >= 20 and bad_rate < 0.40 and avg_reward >= 0.03:
+                    if sample_count >= 20.0 and bad_rate < 0.40 and avg_reward >= 0.03:
                         should_rollback = True
                         note = f"rolled back: entry quality recovered bad_rate={bad_rate:.3f}, avg_reward={avg_reward:.3f}"
 
@@ -865,7 +941,8 @@ class RuleEvolutionGovernor:
         waiting = 0
         rechecked_mixed = 0
         inconclusive = 0
-        template_runtime_sync_needed = False
+        rollback_pending = 0
+        pending_parameter_rollbacks: list[dict[str, Any]] = []
 
         with self._conn() as conn:
             now = time.time()
@@ -1152,18 +1229,6 @@ class RuleEvolutionGovernor:
 
                 suggestion_ids = list(app.get("suggestion_ids") or [])
                 if next_status == "ineffective" and suggestion_ids:
-                    self._executemany(conn,
-                        """
-                        UPDATE policy_suggestion
-                        SET status='rolled_back', reviewed_at=?, review_note=?
-                        WHERE suggestion_id=?
-                        """,
-                        [
-                            (now, f"auto rollback by application effect delta={delta:.3f}", sid)
-                            for sid in suggestion_ids
-                        ],
-                    )
-                    rolled_back += 1
                     if scope_type == "parameter_template":
                         details = app.get("details") or {}
                         factor_id = str(details.get("factor_id") or factor)
@@ -1171,79 +1236,31 @@ class RuleEvolutionGovernor:
                         old_template_id = str(details.get("old_template_id") or "")
                         new_template_id = str(details.get("new_template_id") or "")
                         if old_template_id:
-                            self._execute(conn,
-                                """
-                                UPDATE parameter_template_registry
-                                SET active=CASE WHEN template_id=? THEN 1 ELSE 0 END, updated_at=?
-                                WHERE factor_id=? AND regime_key=?
-                                """,
-                                (old_template_id, now, factor_id, regime_key),
+                            pending_parameter_rollbacks.append(
+                                {
+                                    "application_id": str(app["application_id"]),
+                                    "factor_id": factor_id,
+                                    "regime_key": regime_key,
+                                    "old_template_id": old_template_id,
+                                    "new_template_id": new_template_id,
+                                    "suggestion_ids": suggestion_ids,
+                                    "delta": delta,
+                                    "effect_decision": decision,
+                                }
                             )
-                            old_row = self._execute(conn,
-                                """
-                                SELECT template_version FROM parameter_template_registry WHERE template_id=?
-                                """,
-                                (old_template_id,),
-                            ).fetchone()
-                            self._execute(conn,
-                                """
-                                INSERT INTO parameter_template_active
-                                (factor_id, regime_key, template_id, template_version, status, suggestion_id,
-                                 context_json, activated_at, updated_at)
-                                VALUES (?, ?, ?, ?, 'rolled_back', ?, ?, ?, ?)
-                                ON CONFLICT(factor_id, regime_key) DO UPDATE SET
-                                    template_id=excluded.template_id,
-                                    template_version=excluded.template_version,
-                                    status=excluded.status,
-                                    suggestion_id=excluded.suggestion_id,
-                                    context_json=excluded.context_json,
-                                    activated_at=excluded.activated_at,
-                                    updated_at=excluded.updated_at
-                                """,
-                                (
-                                    factor_id,
-                                    regime_key,
-                                    old_template_id,
-                                    str((old_row["template_version"] if old_row else "") or ""),
-                                    suggestion_ids[0],
-                                    json.dumps(
-                                        {
-                                            "rolled_back_from": new_template_id,
-                                            "reason": f"application effect delta={delta:.3f}",
-                                        },
-                                        ensure_ascii=False,
-                                        default=str,
-                                    ),
-                                    now,
-                                    now,
-                                ),
-                            )
-                            self._execute(conn,
-                                """
-                                INSERT INTO parameter_template_switch_log
-                                (switch_id, factor_id, regime_key, old_template_id, new_template_id,
-                                 suggestion_id, risk_verdict_json, context_json, status, created_at)
-                                VALUES (?, ?, ?, ?, ?, ?, '{}', ?, 'rolled_back', ?)
-                                """,
-                                (
-                                    self._new_id("ptsw"),
-                                    factor_id,
-                                    regime_key,
-                                    new_template_id,
-                                    old_template_id,
-                                    suggestion_ids[0],
-                                    json.dumps(
-                                        {
-                                            "application_id": app["application_id"],
-                                            "reason": f"auto rollback by application effect delta={delta:.3f}",
-                                        },
-                                        ensure_ascii=False,
-                                        default=str,
-                                    ),
-                                    now,
-                                ),
-                            )
-                            template_runtime_sync_needed = True
+                    else:
+                        self._executemany(conn,
+                            """
+                            UPDATE policy_suggestion
+                            SET status='rolled_back', reviewed_at=?, review_note=?
+                            WHERE suggestion_id=?
+                            """,
+                            [
+                                (now, f"auto rollback by application effect delta={delta:.3f}", sid)
+                                for sid in suggestion_ids
+                            ],
+                        )
+                        rolled_back += 1
                 elif next_status == "effective" and len(post_reviews) >= observe_trades:
                     suggestion_id = self._new_id("psg")
                     evidence = {
@@ -1259,7 +1276,7 @@ class RuleEvolutionGovernor:
                             scope_type,
                             app["action"],
                             requested_writes=["policy_suggestion"],
-                            status="approved",
+                            status="proposed",
                             impact_level="medium",
                         ),
                     }
@@ -1270,7 +1287,7 @@ class RuleEvolutionGovernor:
                         scope_key=scope_key_for_effect,
                         action=app["action"],
                         requested_writes=["policy_suggestion"],
-                        status="approved",
+                        status="proposed",
                         impact_level="medium",
                         db_path=self.db_path,
                     )
@@ -1278,8 +1295,12 @@ class RuleEvolutionGovernor:
                         """
                         INSERT INTO policy_suggestion
                         (suggestion_id, scope_type, scope_key, action, confidence, reason,
-                         evidence_json, status, reviewed_at, review_note, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
+                         evidence_json, status, reviewed_at, review_note,
+                         governance_eligible, governance_eligibility_version,
+                         governance_eligibility_fingerprint,
+                         governance_ineligible_reason, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', 0, ?,
+                                0, ?, '', ?, ?)
                         """,
                         (
                             suggestion_id,
@@ -1289,8 +1310,10 @@ class RuleEvolutionGovernor:
                             min(0.75, 0.35 + max(0.0, delta)),
                             f"auto reinforced by application effect delta={delta:.3f}",
                             json.dumps(evidence, ensure_ascii=False, default=str),
-                            now,
-                            f"auto reinforce from application {app['application_id']}",
+                            "pending governance eligibility materialization from "
+                            f"application {app['application_id']}",
+                            GOVERNANCE_ELIGIBILITY_VERSION,
+                            "application_effect_requires_governance_eligibility_materialization",
                             now,
                         ),
                     )
@@ -1312,13 +1335,29 @@ class RuleEvolutionGovernor:
                     )
                     reinforced += 1
 
-        if template_runtime_sync_needed:
-            try:
-                from backend.services.parameter_templates import ParameterTemplateService
+        for item in pending_parameter_rollbacks:
+            from backend.services.parameter_templates import ParameterTemplateService
 
-                ParameterTemplateService(str(self.db_path)).sync_runtime_config()
-            except Exception:
-                pass
+            result = ParameterTemplateService(str(self.db_path)).rollback_template_application(
+                application_id=str(item["application_id"]),
+                factor_id=str(item["factor_id"]),
+                regime_key=str(item["regime_key"]),
+                current_template_id=str(item["new_template_id"]),
+                previous_template_id=str(item["old_template_id"]),
+                suggestion_ids=list(item["suggestion_ids"]),
+                reason=(
+                    "auto rollback by application effect "
+                    f"delta={float(item['delta']):.3f}"
+                ),
+                evidence={
+                    "effect_decision": item["effect_decision"],
+                    "delta_avg_reward": float(item["delta"]),
+                },
+            )
+            if result.get("ok"):
+                rolled_back += 1
+            else:
+                rollback_pending += 1
 
         return {
             "observed": observed,
@@ -1327,4 +1366,5 @@ class RuleEvolutionGovernor:
             "waiting": waiting,
             "rechecked_mixed": rechecked_mixed,
             "inconclusive": inconclusive,
+            "rollback_pending": rollback_pending,
         }

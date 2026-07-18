@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from execution.base import PositionInfo
+from execution.base import PositionInfo, PositionReconcileResult
 from execution import ctrader_bridge as ctrader_module
 from execution.ctrader_bridge import CTraderBridge
 
@@ -25,6 +25,16 @@ def _bridge(monkeypatch):
     bridge._account_authed = True
     bridge._symbol_id = 41
     return bridge
+
+
+def _fresh(reconcile_id, positions):
+    return PositionReconcileResult(
+        reconcile_id=reconcile_id,
+        status="fresh",
+        positions=tuple(positions),
+        observed_at=1.0,
+        generated_at=1.0,
+    )
 
 
 def test_spot_event_still_updates_realtime_quote_after_depth_removal(monkeypatch):
@@ -71,12 +81,19 @@ def test_close_position_refreshes_for_full_close_and_rejects_order_error(monkeyp
     bridge = _bridge(monkeypatch)
     refresh_calls = []
 
-    def _refresh_positions(*, force=False, allow_cache_fallback=True):
+    def _reconcile_positions(*, force=False, allow_cache_fallback=True):
         refresh_calls.append((force, allow_cache_fallback))
-        return [PositionInfo(position_id=269, symbol_id=41, symbol="XAUUSD", direction=1, volume=100.0)]
+        return _fresh(
+            "full-close-pre",
+            [PositionInfo(position_id=269, symbol_id=41, symbol="XAUUSD", direction=1, volume=100.0)],
+        )
 
-    monkeypatch.setattr(bridge, "refresh_positions", _refresh_positions)
-    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: ProtoOAOrderErrorEvent())
+    monkeypatch.setattr(bridge, "reconcile_positions", _reconcile_positions)
+    monkeypatch.setattr(
+        bridge,
+        "_send",
+        lambda req, timeout=None, *, client_msg_id="": ProtoOAOrderErrorEvent(),
+    )
 
     result = bridge.close_position(269)
 
@@ -92,10 +109,11 @@ def test_close_position_rejects_zero_volume_before_send(monkeypatch):
     send_calls = []
     monkeypatch.setattr(
         bridge,
-        "refresh_positions",
-        lambda *, force=False, allow_cache_fallback=True: [
-            PositionInfo(position_id=269, symbol_id=41, symbol="XAUUSD", direction=1, volume=0.0)
-        ],
+        "reconcile_positions",
+        lambda *, force=False, allow_cache_fallback=True: _fresh(
+            "zero-volume-pre",
+            [PositionInfo(position_id=269, symbol_id=41, symbol="XAUUSD", direction=1, volume=0.0)],
+        ),
     )
     monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: send_calls.append(req))
 
@@ -124,7 +142,8 @@ def test_close_position_accepts_execution_event(monkeypatch):
     bridge = _bridge(monkeypatch)
     sent = []
 
-    def _send(req, timeout=None):
+    def _send(req, timeout=None, *, client_msg_id=""):
+        assert client_msg_id
         sent.append(SimpleNamespace(positionId=req.positionId, volume=req.volume))
         return ProtoOAExecutionEvent()
 

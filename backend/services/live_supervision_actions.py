@@ -10,6 +10,11 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from backend.services.live_reconciliation import (
+    explicit_position_reconcile,
+    verify_position_protection_projection,
+)
+
 
 class MappingVerdictProxy:
     def __init__(self, payload: dict[str, Any]):
@@ -17,6 +22,46 @@ class MappingVerdictProxy:
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self._payload)
+
+
+def _best_effort_post_broker_effect(
+    callback: Callable[[], Any],
+    *,
+    position_id: int,
+    action: str,
+    stage: str,
+    record_aux_failure: Callable[..., Any] | None,
+    log: Callable[[str], Any],
+) -> bool:
+    """Keep audit/projection failures from rewriting a broker success.
+
+    Each effect is isolated so a failed ledger write cannot skip the local
+    cooldown/projection effects that prevent a duplicate mutation next tick.
+    """
+
+    try:
+        callback()
+        return True
+    except Exception as exc:
+        if record_aux_failure is not None:
+            try:
+                record_aux_failure(
+                    "risk_reduction_post_broker_aux_failure",
+                    position_id=int(position_id or 0),
+                    action=str(action or ""),
+                    error=exc,
+                    payload={"stage": str(stage or "unknown")},
+                )
+            except Exception:
+                pass
+        try:
+            log(
+                f"risk-reduction post-broker auxiliary failure "
+                f"pos={int(position_id or 0)} action={action} stage={stage}: {exc}"
+            )
+        except Exception:
+            pass
+        return False
 
 
 def _resolve_bridge_volume_meta(bridge: Any, position: dict[str, Any]) -> dict[str, Any]:
@@ -61,6 +106,11 @@ def execute_supervisor_tighten_action(
     track_local_sl_tp: Callable[..., Any],
     result_is_position_not_found: Callable[[Any], bool],
     retire_broker_missing_position: Callable[..., Any],
+    record_aux_failure: Callable[..., Any] | None = None,
+    reconcile_positions: Callable[[Any], Any] = explicit_position_reconcile,
+    verify_protection_projection: Callable[..., dict[str, Any]] = verify_position_protection_projection,
+    publish_fresh_positions: Callable[[Any], Any] | None = None,
+    persist_safety_fail_closed: Callable[..., Any] | None = None,
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     stop_policy = {
@@ -160,7 +210,139 @@ def execute_supervisor_tighten_action(
         return
     amend_res = bridge.amend_position_sltp(pid, sl=planned_sl, tp=planned_tp)
     if getattr(amend_res, "success", False):
-        track_local_sl_tp(pid, sl=planned_sl, tp=planned_tp)
+        try:
+            projection = reconcile_positions(bridge)
+            verification = verify_protection_projection(
+                projection,
+                position_id=pid,
+                expected_stop_loss=planned_sl,
+                expected_take_profit=planned_tp,
+                precision=int(position.get("digits", 2) or 2),
+            )
+        except Exception as exc:
+            projection = None
+            verification = {
+                "ok": False,
+                "position_id": pid,
+                "reason": "position_reconcile_exception",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+        if not bool(verification.get("ok")):
+            projection_reason = str(
+                verification.get("reason") or "position_reconcile_failed"
+            )
+            failure_reason = f"amend_projection_unverified:{projection_reason}"
+            if record_aux_failure is not None:
+                try:
+                    record_aux_failure(
+                        "supervisor_amend_projection_unverified",
+                        position_id=pid,
+                        action="tighten_position",
+                        error=failure_reason,
+                        payload={"verification": verification},
+                    )
+                except Exception:
+                    pass
+            if persist_safety_fail_closed is not None:
+                try:
+                    persist_safety_fail_closed(
+                        blockers=("amend_projection_unverified",),
+                        source="supervisor_tighten",
+                        error=failure_reason,
+                    )
+                except Exception as exc:
+                    if record_aux_failure is not None:
+                        try:
+                            record_aux_failure(
+                                "supervisor_amend_fail_closed_unavailable",
+                                position_id=pid,
+                                action="tighten_position",
+                                error=exc,
+                                payload={"verification": verification},
+                            )
+                        except Exception:
+                            pass
+
+            result_payloads = build_tighten_result_payloads(
+                result="failed",
+                action="tighten",
+                verdict=verdict,
+                risk_action=risk_action,
+                risk_verdict=risk_verdict,
+                decision_id=decision_id,
+                controls=controls,
+                sl_plan=sl_plan,
+                target_sl=target_sl,
+                planned_sl=planned_sl,
+                target_tp=target_tp,
+                planned_tp=planned_tp,
+                current_tp=current_tp,
+                failure_reason=failure_reason,
+            )
+            _best_effort_post_broker_effect(
+                lambda: log_supervisor_position_event(
+                    position=position,
+                    event_type=result_payloads["position_event_type"],
+                    details=result_payloads["position_event_details"],
+                ),
+                position_id=pid,
+                action="tighten_position",
+                stage="position_event",
+                record_aux_failure=record_aux_failure,
+                log=log,
+            )
+            _best_effort_post_broker_effect(
+                lambda: remember_supervisor_state(
+                    position,
+                    verdict,
+                    broker=broker,
+                    strategy_name=strategy_name,
+                ),
+                position_id=pid,
+                action="tighten_position",
+                stage="supervisor_state",
+                record_aux_failure=record_aux_failure,
+                log=log,
+            )
+            _best_effort_post_broker_effect(
+                lambda: log_supervisor_trace(
+                    position=position,
+                    verdict=verdict,
+                    cfg=cfg,
+                    tick=tick,
+                    **result_payloads["trace_fields"],
+                    acct=acct,
+                ),
+                position_id=pid,
+                action="tighten_position",
+                stage="supervisor_trace",
+                record_aux_failure=record_aux_failure,
+                log=log,
+            )
+            log(
+                f"tick {tick}: supervisor tighten UNVERIFIED "
+                f"pos={pid}: {failure_reason}"
+            )
+            return
+
+        if publish_fresh_positions is not None:
+            _best_effort_post_broker_effect(
+                lambda: publish_fresh_positions(projection),
+                position_id=pid,
+                action="tighten_position",
+                stage="publish_fresh_position_reconcile",
+                record_aux_failure=record_aux_failure,
+                log=log,
+            )
+        _best_effort_post_broker_effect(
+            lambda: track_local_sl_tp(pid, sl=planned_sl, tp=planned_tp),
+            position_id=pid,
+            action="tighten_position",
+            stage="track_local_sl_tp",
+            record_aux_failure=record_aux_failure,
+            log=log,
+        )
         result_payloads = build_tighten_result_payloads(
             result="applied",
             action="tighten",
@@ -176,33 +358,61 @@ def execute_supervisor_tighten_action(
             planned_tp=planned_tp,
             current_tp=current_tp,
         )
-        log_supervisor_position_event(
-            position=position,
-            event_type=result_payloads["position_event_type"],
-            details=result_payloads["position_event_details"],
+        _best_effort_post_broker_effect(
+            lambda: log_supervisor_position_event(
+                position=position,
+                event_type=result_payloads["position_event_type"],
+                details=result_payloads["position_event_details"],
+            ),
+            position_id=pid,
+            action="tighten_position",
+            stage="position_event",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
-        remember_supervisor_state(
-            position,
-            verdict,
-            action_applied="tighten",
-            broker=broker,
-            strategy_name=strategy_name,
+        _best_effort_post_broker_effect(
+            lambda: remember_supervisor_state(
+                position,
+                verdict,
+                action_applied="tighten",
+                broker=broker,
+                strategy_name=strategy_name,
+            ),
+            position_id=pid,
+            action="tighten_position",
+            stage="supervisor_state",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
-        remember_supervisor_reentry_block(
-            position=position,
-            action="tighten",
-            reason=str(verdict.get("summary_reason") or controls.get("close_reason") or "supervisor_reduce"),
-            cfg=cfg,
-            current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
-            tick=tick,
+        _best_effort_post_broker_effect(
+            lambda: remember_supervisor_reentry_block(
+                position=position,
+                action="tighten",
+                reason=str(verdict.get("summary_reason") or controls.get("close_reason") or "supervisor_reduce"),
+                cfg=cfg,
+                current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                tick=tick,
+            ),
+            position_id=pid,
+            action="tighten_position",
+            stage="reentry_block",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
-        log_supervisor_trace(
-            position=position,
-            verdict=verdict,
-            cfg=cfg,
-            tick=tick,
-            **result_payloads["trace_fields"],
-            acct=acct,
+        _best_effort_post_broker_effect(
+            lambda: log_supervisor_trace(
+                position=position,
+                verdict=verdict,
+                cfg=cfg,
+                tick=tick,
+                **result_payloads["trace_fields"],
+                acct=acct,
+            ),
+            position_id=pid,
+            action="tighten_position",
+            stage="supervisor_trace",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
         tp_suffix = f" tp->{planned_tp:.2f}" if planned_tp != current_tp else ""
         log(f"tick {tick}: supervisor tighten pos={pid} sl->{planned_sl:.2f}{tp_suffix}")
@@ -268,42 +478,85 @@ def execute_supervisor_close_action(
     remember_close_verdict: Callable[[int, Any], Any],
     result_is_position_not_found: Callable[[Any], bool],
     retire_broker_missing_position: Callable[..., Any],
+    record_aux_failure: Callable[..., Any] | None = None,
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     close_reason = str(controls.get("close_reason") or verdict.get("summary_reason") or "supervisor_close")
-    result = bridge.close_position(pid)
+    broker_volume = float(
+        position.get("volume", position.get("api_volume", 0.0)) or 0.0
+    )
+    result = (
+        bridge.close_position(pid, volume=broker_volume)
+        if broker_volume > 0.0
+        else bridge.close_position(pid)
+    )
     if getattr(result, "success", False):
-        remember_close_reason(pid, close_reason)
-        remember_close_verdict(pid, MappingVerdictProxy(risk_verdict))
-        remember_supervisor_state(
-            position,
-            verdict,
-            action_applied="close",
-            broker=broker,
-            strategy_name=strategy_name,
+        _best_effort_post_broker_effect(
+            lambda: remember_close_reason(pid, close_reason),
+            position_id=pid,
+            action="close_position",
+            stage="close_reason",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
-        remember_supervisor_reentry_block(
-            position=position,
-            action="close",
-            reason=close_reason,
-            cfg=cfg,
-            current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
-            tick=tick,
+        _best_effort_post_broker_effect(
+            lambda: remember_close_verdict(pid, MappingVerdictProxy(risk_verdict)),
+            position_id=pid,
+            action="close_position",
+            stage="close_verdict",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
-        log_supervisor_trace(
-            position=position,
-            verdict=verdict,
-            cfg=cfg,
-            tick=tick,
-            stage="executed",
-            outcome="applied",
-            decision_id=decision_id,
-            risk_action=risk_action,
-            risk_verdict=risk_verdict,
-            execution_status="applied",
-            execution_reason="close_position_success",
-            execution={"applied_controls": controls},
-            acct=acct,
+        _best_effort_post_broker_effect(
+            lambda: remember_supervisor_state(
+                position,
+                verdict,
+                action_applied="close",
+                broker=broker,
+                strategy_name=strategy_name,
+            ),
+            position_id=pid,
+            action="close_position",
+            stage="supervisor_state",
+            record_aux_failure=record_aux_failure,
+            log=log,
+        )
+        _best_effort_post_broker_effect(
+            lambda: remember_supervisor_reentry_block(
+                position=position,
+                action="close",
+                reason=close_reason,
+                cfg=cfg,
+                current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                tick=tick,
+            ),
+            position_id=pid,
+            action="close_position",
+            stage="reentry_block",
+            record_aux_failure=record_aux_failure,
+            log=log,
+        )
+        _best_effort_post_broker_effect(
+            lambda: log_supervisor_trace(
+                position=position,
+                verdict=verdict,
+                cfg=cfg,
+                tick=tick,
+                stage="executed",
+                outcome="applied",
+                decision_id=decision_id,
+                risk_action=risk_action,
+                risk_verdict=risk_verdict,
+                execution_status="applied",
+                execution_reason="close_position_success",
+                execution={"applied_controls": controls},
+                acct=acct,
+            ),
+            position_id=pid,
+            action="close_position",
+            stage="supervisor_trace",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
         if result_is_position_not_found(result):
             retire_broker_missing_position(
@@ -363,6 +616,9 @@ def execute_supervisor_reduce_action(
     result_is_position_not_found: Callable[[Any], bool],
     retire_broker_missing_position: Callable[..., Any],
     record_partial_close_execution: Callable[..., Any] | None = None,
+    capture_partial_close_session_cursor: Callable[..., Any] | None = None,
+    sync_partial_close_session_fact: Callable[..., Any] | None = None,
+    record_aux_failure: Callable[..., Any] | None = None,
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     current_volume = float(position.get("volume", position.get("api_volume", 0.0)) or 0.0)
@@ -374,8 +630,31 @@ def execute_supervisor_reduce_action(
     reduce_volume = floor_api_volume_to_step(raw_reduce_volume, bridge_meta)
 
     if reduce_volume >= min_volume and current_volume - reduce_volume >= min_volume:
+        deal_cursor: dict[str, Any] = {
+            "status": "unavailable",
+            "baseline_cursor_available": False,
+        }
+        if capture_partial_close_session_cursor is not None:
+            try:
+                captured = capture_partial_close_session_cursor(position_id=pid)
+                if isinstance(captured, dict):
+                    deal_cursor = dict(captured)
+            except Exception as exc:
+                deal_cursor["error"] = f"{type(exc).__name__}:{exc}"
+                if record_aux_failure is not None:
+                    try:
+                        record_aux_failure(
+                            "partial_close_deal_cursor_unavailable",
+                            position_id=pid,
+                            action="reduce_position",
+                            error=exc,
+                            payload={"stage": "pre_broker_deal_cursor"},
+                        )
+                    except Exception:
+                        pass
         result = bridge.close_position(pid, volume=reduce_volume)
         if getattr(result, "success", False):
+            close_ts = time.time()
             accounting_recorded = None
             if record_partial_close_execution is not None:
                 try:
@@ -387,58 +666,118 @@ def execute_supervisor_reduce_action(
                                 or position.get("current_price", position.get("price_current", 0.0))
                                 or 0.0
                             ),
-                            close_ts=time.time(),
+                            close_ts=close_ts,
                             volume=reduce_volume,
                             reason=str(verdict.get("summary_reason") or "supervisor_reduce"),
                         )
                     )
                 except Exception as exc:
                     log(f"tick {tick}: partial close accounting failed pos={pid}: {exc}")
+                    if record_aux_failure is not None:
+                        try:
+                            record_aux_failure(
+                                "risk_reduction_post_broker_aux_failure",
+                                position_id=pid,
+                                action="reduce_position",
+                                error=exc,
+                                payload={"stage": "partial_close_accounting"},
+                            )
+                        except Exception:
+                            pass
+            session_fact_recorded = None
+            if sync_partial_close_session_fact is not None:
+                try:
+                    session_fact_recorded = bool(
+                        sync_partial_close_session_fact(
+                            position_id=pid,
+                            close_ts=close_ts,
+                            volume=reduce_volume,
+                            deal_cursor=deal_cursor,
+                        )
+                    )
+                except Exception as exc:
+                    log(
+                        f"tick {tick}: partial close session fact failed "
+                        f"pos={pid}: {exc}"
+                    )
+                    if record_aux_failure is not None:
+                        try:
+                            record_aux_failure(
+                                "risk_reduction_post_broker_aux_failure",
+                                position_id=pid,
+                                action="reduce_position",
+                                error=exc,
+                                payload={"stage": "partial_close_session_fact"},
+                            )
+                        except Exception:
+                            pass
             if ledger:
-                ledger.log_position_event(
-                    position_id=str(pid),
-                    trade_id=str(pid),
-                    symbol=str(position.get("symbol") or "XAUUSD+"),
-                    event_type="reduced",
-                    net_volume=max(0.0, current_volume - reduce_volume),
-                    avg_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
-                    # The final ``closed`` event owns the aggregate PnL for
-                    # the position. Partial-close PnL remains in execution
-                    # details and must not be summed again at lifecycle level.
-                    realized_pnl=0.0,
-                    details={
-                        "supervisor_action": "reduce",
-                        "supervisor_reason": verdict.get("summary_reason"),
-                        "risk_verdict_reason": risk_verdict.get("reason"),
-                        "applied_controls": {**(controls or {}), "reduce_volume": reduce_volume},
-                        "realized_pnl_scope": "execution_detail_only",
-                    },
+                _best_effort_post_broker_effect(
+                    lambda: ledger.log_position_event(
+                        position_id=str(pid),
+                        trade_id=str(pid),
+                        symbol=str(position.get("symbol") or "XAUUSD+"),
+                        event_type="reduced",
+                        net_volume=max(0.0, current_volume - reduce_volume),
+                        avg_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                        # The final ``closed`` event owns the aggregate PnL for
+                        # the position. Partial-close PnL remains in execution
+                        # details and must not be summed again at lifecycle level.
+                        realized_pnl=0.0,
+                        details={
+                            "supervisor_action": "reduce",
+                            "supervisor_reason": verdict.get("summary_reason"),
+                            "risk_verdict_reason": risk_verdict.get("reason"),
+                            "applied_controls": {**(controls or {}), "reduce_volume": reduce_volume},
+                            "realized_pnl_scope": "execution_detail_only",
+                        },
+                    ),
+                    position_id=pid,
+                    action="reduce_position",
+                    stage="position_event",
+                    record_aux_failure=record_aux_failure,
+                    log=log,
                 )
-            remember_supervisor_state(
-                position,
-                verdict,
-                action_applied="reduce",
-                broker=broker,
-                strategy_name=strategy_name,
+            _best_effort_post_broker_effect(
+                lambda: remember_supervisor_state(
+                    position,
+                    verdict,
+                    action_applied="reduce",
+                    broker=broker,
+                    strategy_name=strategy_name,
+                ),
+                position_id=pid,
+                action="reduce_position",
+                stage="supervisor_state",
+                record_aux_failure=record_aux_failure,
+                log=log,
             )
-            log_supervisor_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="executed",
-                outcome="applied",
-                decision_id=decision_id,
-                risk_action=risk_action,
-                risk_verdict=risk_verdict,
-                execution_status="applied",
-                execution_reason="partial_close_success",
-                execution={
-                    "reduce_volume": reduce_volume,
-                    "applied_controls": controls,
-                    "accounting_recorded": accounting_recorded,
-                },
-                acct=acct,
+            _best_effort_post_broker_effect(
+                lambda: log_supervisor_trace(
+                    position=position,
+                    verdict=verdict,
+                    cfg=cfg,
+                    tick=tick,
+                    stage="executed",
+                    outcome="applied",
+                    decision_id=decision_id,
+                    risk_action=risk_action,
+                    risk_verdict=risk_verdict,
+                    execution_status="applied",
+                    execution_reason="partial_close_success",
+                    execution={
+                        "reduce_volume": reduce_volume,
+                        "applied_controls": controls,
+                        "accounting_recorded": accounting_recorded,
+                        "session_fact_recorded": session_fact_recorded,
+                    },
+                    acct=acct,
+                ),
+                position_id=pid,
+                action="reduce_position",
+                stage="supervisor_trace",
+                record_aux_failure=record_aux_failure,
+                log=log,
             )
             if result_is_position_not_found(result):
                 retire_broker_missing_position(
@@ -558,39 +897,78 @@ def execute_supervisor_reduce_action(
         remember_supervisor_state(position, verdict, broker=broker, strategy_name=strategy_name)
         return
 
-    result = bridge.close_position(pid)
+    # The fresh broker position supplied to the safety cycle already carries
+    # the executable API volume.  Passing it keeps the close-only escape hatch
+    # available when the bridge's auxiliary pre-reconcile is temporarily
+    # unavailable; PostgreSQL/audit state is never needed for this value.
+    result = bridge.close_position(pid, volume=current_volume)
     if getattr(result, "success", False):
-        remember_close_reason(pid, close_reason)
-        remember_close_verdict(pid, MappingVerdictProxy(close_verdict))
-        remember_supervisor_state(
-            position,
-            verdict,
-            action_applied="close",
-            broker=broker,
-            strategy_name=strategy_name,
+        _best_effort_post_broker_effect(
+            lambda: remember_close_reason(pid, close_reason),
+            position_id=pid,
+            action="close_position",
+            stage="close_reason",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
-        remember_supervisor_reentry_block(
-            position=position,
-            action="close",
-            reason=close_reason,
-            cfg=cfg,
-            current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
-            tick=tick,
+        _best_effort_post_broker_effect(
+            lambda: remember_close_verdict(pid, MappingVerdictProxy(close_verdict)),
+            position_id=pid,
+            action="close_position",
+            stage="close_verdict",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
-        log_supervisor_trace(
-            position=position,
-            verdict=verdict,
-            cfg=cfg,
-            tick=tick,
-            stage="executed",
-            outcome="applied",
-            decision_id=decision_id,
-            risk_action="close_position",
-            risk_verdict=close_verdict,
-            execution_status="applied",
-            execution_reason="minimum_position_reduce_full_close_success",
-            execution=fallback_execution,
-            acct=acct,
+        _best_effort_post_broker_effect(
+            lambda: remember_supervisor_state(
+                position,
+                verdict,
+                action_applied="close",
+                broker=broker,
+                strategy_name=strategy_name,
+            ),
+            position_id=pid,
+            action="close_position",
+            stage="supervisor_state",
+            record_aux_failure=record_aux_failure,
+            log=log,
+        )
+        _best_effort_post_broker_effect(
+            lambda: remember_supervisor_reentry_block(
+                position=position,
+                action="close",
+                reason=close_reason,
+                cfg=cfg,
+                current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
+                tick=tick,
+            ),
+            position_id=pid,
+            action="close_position",
+            stage="reentry_block",
+            record_aux_failure=record_aux_failure,
+            log=log,
+        )
+        _best_effort_post_broker_effect(
+            lambda: log_supervisor_trace(
+                position=position,
+                verdict=verdict,
+                cfg=cfg,
+                tick=tick,
+                stage="executed",
+                outcome="applied",
+                decision_id=decision_id,
+                risk_action="close_position",
+                risk_verdict=close_verdict,
+                execution_status="applied",
+                execution_reason="minimum_position_reduce_full_close_success",
+                execution=fallback_execution,
+                acct=acct,
+            ),
+            position_id=pid,
+            action="close_position",
+            stage="supervisor_trace",
+            record_aux_failure=record_aux_failure,
+            log=log,
         )
         if result_is_position_not_found(result):
             retire_broker_missing_position(

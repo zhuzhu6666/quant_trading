@@ -41,12 +41,27 @@ def _fail(events: list[Any], name: str, message: str):
 def _start_callbacks(events: list[Any], **overrides: Any) -> BackendRuntimeLifecycleCallbacks:
     values = {
         "warm_data_store": _record(events, "data_store"),
+        "recover_governance_projections": _record(
+            events,
+            "governance_recovery",
+            {
+                "ok": True,
+                "attempted_count": 2,
+                "current_count": 2,
+                "degraded_count": 0,
+            },
+        ),
         "warmup_ctrader": _record(events, "ctrader"),
         "schedule_auto_resume_loop": _record(events, "auto_resume", True),
         "schedule_learning_backfill": _record(events, "backfill", True),
         "schedule_supervisor_learning": _record(events, "supervisor", True),
         "schedule_autonomous_learning": _record(events, "autonomous", True),
         "warm_db_health": _record(events, "db_health"),
+        "refresh_backend_readiness": _record(
+            events,
+            "backend_readiness",
+            {"ok": True, "status": "refresh_started"},
+        ),
     }
     values.update(overrides)
     return BackendRuntimeLifecycleCallbacks(**values)
@@ -69,6 +84,12 @@ def test_start_preserves_success_order_arguments_and_logs():
     assert events == [
         ("call", "data_store", (), {}),
         ("info", "[lifespan] DataStore warmed up"),
+        ("call", "governance_recovery", (), {"limit": 100}),
+        (
+            "info",
+            "[lifespan] committed governance projection recovery "
+            "attempted=2 current=2 degraded=0",
+        ),
         ("call", "ctrader", (), {"timeout_sec": 0.0}),
         ("call", "auto_resume", (), {}),
         ("info", "[lifespan] auto-resume loop scheduled from persisted desired state"),
@@ -105,6 +126,13 @@ def test_start_preserves_success_order_arguments_and_logs():
         ("info", "[lifespan] autonomous learning scheduled"),
         ("call", "db_health", (), {}),
         ("info", "[lifespan] db-health cache warmup scheduled"),
+        (
+            "call",
+            "backend_readiness",
+            (),
+            {"max_age_seconds": 180.0},
+        ),
+        ("info", "[lifespan] backend readiness projection: refresh_started"),
     ]
 
 
@@ -114,7 +142,14 @@ def test_start_defaults_backend_learning_schedulers_to_disabled(monkeypatch):
 
     BackendRuntimeLifecycle(_start_callbacks(events)).start(_Logger(events))
 
-    assert _call_names(events) == ["data_store", "ctrader", "auto_resume", "db_health"]
+    assert _call_names(events) == [
+        "data_store",
+        "governance_recovery",
+        "ctrader",
+        "auto_resume",
+        "db_health",
+        "backend_readiness",
+    ]
     assert (
         "info",
         "[lifespan] backend learning schedulers disabled by QUANT_BACKEND_LEARNING_SCHEDULERS",
@@ -144,10 +179,47 @@ def test_data_store_failure_is_non_fatal_and_later_steps_continue():
         _Logger(events)
     )
 
-    assert _call_names(events) == ["data_store", "ctrader", "auto_resume", "db_health"]
+    assert _call_names(events) == [
+        "data_store",
+        "governance_recovery",
+        "ctrader",
+        "auto_resume",
+        "db_health",
+        "backend_readiness",
+    ]
     assert (
         "warning",
         "[lifespan] DataStore warmup failed (non-fatal): store unavailable",
+    ) in events
+
+
+def test_governance_projection_recovery_failure_is_non_fatal_and_broker_warmup_continues():
+    events: list[Any] = []
+    callbacks = _start_callbacks(
+        events,
+        recover_governance_projections=_fail(
+            events,
+            "governance_recovery",
+            "state unavailable",
+        ),
+    )
+
+    BackendRuntimeLifecycle(callbacks, env_enabled=lambda _name, _default: False).start(
+        _Logger(events)
+    )
+
+    assert _call_names(events) == [
+        "data_store",
+        "governance_recovery",
+        "ctrader",
+        "auto_resume",
+        "db_health",
+        "backend_readiness",
+    ]
+    assert (
+        "warning",
+        "[lifespan] committed governance projection recovery failed "
+        "(non-fatal): state unavailable",
     ) in events
 
 
@@ -164,11 +236,13 @@ def test_ctrader_failure_skips_auto_resume_but_later_steps_continue():
 
     assert _call_names(events) == [
         "data_store",
+        "governance_recovery",
         "ctrader",
         "backfill",
         "supervisor",
         "autonomous",
         "db_health",
+        "backend_readiness",
     ]
     assert (
         "warning",
@@ -187,7 +261,14 @@ def test_auto_resume_failure_uses_ctrader_boundary_and_later_steps_continue():
         _Logger(events)
     )
 
-    assert _call_names(events) == ["data_store", "ctrader", "auto_resume", "db_health"]
+    assert _call_names(events) == [
+        "data_store",
+        "governance_recovery",
+        "ctrader",
+        "auto_resume",
+        "db_health",
+        "backend_readiness",
+    ]
     assert (
         "warning",
         "[lifespan] cTrader warmup failed (non-fatal): resume unavailable",
@@ -209,12 +290,14 @@ def test_learning_failures_are_independent_and_db_health_still_runs():
 
     assert _call_names(events) == [
         "data_store",
+        "governance_recovery",
         "ctrader",
         "auto_resume",
         "backfill",
         "supervisor",
         "autonomous",
         "db_health",
+        "backend_readiness",
     ]
     assert (
         "warning",
@@ -264,6 +347,13 @@ def test_stop_preserves_order_and_each_failure_is_independent():
         stop_supervisor_learning=_fail(events, "stop_supervisor", "supervisor stop failed"),
         stop_autonomous_learning=_fail(events, "stop_autonomous", "autonomous stop failed"),
         stop_live_scheduler=_fail(events, "stop_live_scheduler", "scheduler stop failed"),
+        stop_job_manager=_fail(events, "stop_job_manager", "job manager stop failed"),
+        stop_db_health=_fail(events, "stop_db_health", "db health stop failed"),
+        stop_backend_readiness=_fail(
+            events,
+            "stop_backend_readiness",
+            "readiness stop failed",
+        ),
     )
 
     BackendRuntimeLifecycle(callbacks).stop(_Logger(events))
@@ -274,6 +364,9 @@ def test_stop_preserves_order_and_each_failure_is_independent():
         "stop_supervisor",
         "stop_autonomous",
         "stop_live_scheduler",
+        "stop_job_manager",
+        "stop_db_health",
+        "stop_backend_readiness",
     ]
     assert events == [
         ("call", "stop_live_loop", (), {"timeout_sec": 30.0}),
@@ -286,6 +379,15 @@ def test_stop_preserves_order_and_each_failure_is_independent():
         ("warning", "[lifespan] autonomous learning stop failed: autonomous stop failed"),
         ("call", "stop_live_scheduler", (), {}),
         ("warning", "[lifespan] InProcessScheduler stop failed: scheduler stop failed"),
+        ("call", "stop_job_manager", (), {"timeout_sec": 30.0}),
+        ("warning", "[lifespan] local JobManager executor stop failed: job manager stop failed"),
+        ("call", "stop_db_health", (), {"timeout_sec": 30.0}),
+        ("warning", "[lifespan] db-health refresh stop failed: db health stop failed"),
+        ("call", "stop_backend_readiness", (), {"timeout_sec": 30.0}),
+        (
+            "warning",
+            "[lifespan] backend readiness refresh stop failed: readiness stop failed",
+        ),
     ]
 
 
@@ -301,6 +403,21 @@ def test_stop_runs_live_loop_first_and_logs_completed_status():
         stop_supervisor_learning=_record(events, "stop_supervisor"),
         stop_autonomous_learning=_record(events, "stop_autonomous"),
         stop_live_scheduler=_record(events, "stop_live_scheduler"),
+        stop_job_manager=_record(
+            events,
+            "stop_job_manager",
+            {"ok": True, "status": "completed"},
+        ),
+        stop_db_health=_record(
+            events,
+            "stop_db_health",
+            {"ok": True, "status": "completed", "thread_alive": False},
+        ),
+        stop_backend_readiness=_record(
+            events,
+            "stop_backend_readiness",
+            {"ok": True, "status": "completed", "thread_alive": False},
+        ),
     )
 
     BackendRuntimeLifecycle(callbacks).stop(_Logger(events))
@@ -311,6 +428,9 @@ def test_stop_runs_live_loop_first_and_logs_completed_status():
         "stop_supervisor",
         "stop_autonomous",
         "stop_live_scheduler",
+        "stop_job_manager",
+        "stop_db_health",
+        "stop_backend_readiness",
     ]
     assert events[:2] == [
         ("call", "stop_live_loop", (), {"timeout_sec": 30.0}),
@@ -330,6 +450,21 @@ def test_stop_timeout_warns_and_does_not_block_remaining_stops():
         stop_supervisor_learning=_record(events, "stop_supervisor"),
         stop_autonomous_learning=_record(events, "stop_autonomous"),
         stop_live_scheduler=_record(events, "stop_live_scheduler"),
+        stop_job_manager=_record(
+            events,
+            "stop_job_manager",
+            {"ok": True, "status": "idle"},
+        ),
+        stop_db_health=_record(
+            events,
+            "stop_db_health",
+            {"ok": True, "status": "idle", "thread_alive": False},
+        ),
+        stop_backend_readiness=_record(
+            events,
+            "stop_backend_readiness",
+            {"ok": True, "status": "idle", "thread_alive": False},
+        ),
     )
 
     BackendRuntimeLifecycle(callbacks).stop(_Logger(events))
@@ -340,11 +475,57 @@ def test_stop_timeout_warns_and_does_not_block_remaining_stops():
         "stop_supervisor",
         "stop_autonomous",
         "stop_live_scheduler",
+        "stop_job_manager",
+        "stop_db_health",
+        "stop_backend_readiness",
     ]
     assert (
         "warning",
         "[lifespan] live loop process shutdown timed out; recovery required",
     ) in events
+
+
+def test_legacy_governance_restore_failure_records_blocker_and_latches_new_risk(
+    monkeypatch,
+):
+    import backend.app as app_module
+    import backend.services.live_safety_state as safety_state_module
+
+    recorded = []
+    latched = []
+    errors = []
+
+    class _ErrorLogger:
+        def error(self, message, *args):
+            errors.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        safety_state_module,
+        "activate_no_new_risk_latch",
+        lambda **kwargs: latched.append(kwargs) or {"active": True},
+    )
+
+    app_module._fail_closed_legacy_governance_restore(
+        component="parameter_template_restore",
+        error=RuntimeError("unverified legacy row"),
+        record_startup_issue=lambda *args, **kwargs: recorded.append((args, kwargs)),
+        logger=_ErrorLogger(),
+    )
+
+    assert recorded == [
+        (
+            (
+                "parameter_template_restore",
+                "critical",
+                "RuntimeError: unverified legacy row",
+            ),
+            {"blocking": True},
+        )
+    ]
+    assert latched[0]["cause"] == "governance_authority"
+    assert latched[0]["cause_id"] == "legacy_restore:parameter_template_restore"
+    assert latched[0]["reason"] == "legacy_governance_restore_unverified"
+    assert "blocking new risk" in errors[-1]
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,11 @@ def test_post_backtest_returns_job_id():
         }
         r = client.post("/api/backtest/run", json={"symbol": "XAUUSD+", "timeframe": "M15"})
         assert r.status_code == 200
+        assert r.json()["engine"] == "legacy_indicator_sweep"
+        assert r.json()["evidence_class"] == "diagnostic_only"
+        assert r.json()["live_parity"] is False
+        assert r.json()["governance_eligible"] is False
+        assert r.json()["deployable_candidate"] is False
         body = r.json()
         assert "job_id" in body
         assert body["status"] in ("queued", "running", "done", "error")

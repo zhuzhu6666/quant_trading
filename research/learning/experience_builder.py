@@ -11,11 +11,10 @@ from backend.core.db import (
     STATE_DB,
     STATE_DB_DDL,
     connect_sqlite,
-    ensure_sqlite_columns,
     get_state_pg_conn,
     is_state_db_path,
-    state_pg_enabled,
 )
+from backend.services.trade_lesson_memory import ensure_trade_lesson_memory_schema
 
 
 class ExperienceBuilder:
@@ -51,25 +50,8 @@ class ExperienceBuilder:
         with self._conn() as conn:
             if not self._use_pg():
                 conn.executescript(STATE_DB_DDL)
-        if not self._use_pg():
-            ensure_sqlite_columns(
-                self.db_path,
-                "experience_memory",
-                {
-                    "source_table": "source_table TEXT DEFAULT ''",
-                    "source_id": "source_id TEXT DEFAULT ''",
-                    "append_source": "append_source TEXT DEFAULT ''",
-                    "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-                },
-            )
+            ensure_trade_lesson_memory_schema(conn)
         with self._conn() as conn:
-            if not self._use_pg():
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_experience_memory_source
-                    ON experience_memory(source_table, source_id, append_source)
-                    """
-                )
             self._backfill_legacy_experience_sources(conn)
             self._repair_experience_event_timestamps(conn)
 

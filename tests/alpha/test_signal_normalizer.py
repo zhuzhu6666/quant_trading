@@ -209,13 +209,15 @@ class TestSignalNormalize:
         assert -1.0 <= result["dxy_corr_20"] <= 1.0
 
     def test_unknown_factor_uses_default_gp_config(self):
-        """未配置的因子使用默认 GP 配置（rank_mapping）。"""
+        """未配置因子可积累历史，但默认配置不能形成可执行投票。"""
         normalizer = SignalNormalizer(SAMPLE_CONFIG)
         for i in range(60):
             normalizer.normalize({"_unknown_gp_factor": float(i)})
         result = normalizer.normalize({"_unknown_gp_factor": 50.0})
         assert result["_unknown_gp_factor"] is not None
         assert -1.0 <= result["_unknown_gp_factor"] <= 1.0
+        assert normalizer._configs["_unknown_gp_factor"]["enabled"] is False
+        assert normalizer._configs["_unknown_gp_factor"]["weight"] == 0.0
 
     def test_history_is_maintained_across_calls(self):
         """多次 normalize 调用累积历史窗口。"""

@@ -23,8 +23,8 @@
       </view>
       <view class="signal-card">
         <view class="card-label">持仓盈亏</view>
-        <view class="card-value {{livePnlTone === 'positive' ? 'accent-pos' : livePnlTone === 'negative' ? 'accent-neg' : ''}}">{{livePnl}}</view>
-        <view class="card-hint">{{positionSummary}}</view>
+        <view class="card-value {{livePnlTone === 'positive' ? 'accent-pos' : livePnlTone === 'negative' ? 'accent-neg' : livePnlTone === 'warning' ? 'accent-warn' : ''}}">{{livePnl}}</view>
+        <view class="card-hint">{{livePnlHint}}</view>
       </view>
       <view class="signal-card">
         <view class="card-label">会话收益</view>
@@ -54,7 +54,10 @@
         </view>
         <view wx:if="{{xauVisible}}" class="detail-row">
           <view class="detail-label">XAU 现价</view>
-          <view class="detail-value">{{xauPrice}}</view>
+          <view class="detail-value">
+            <view>{{xauPrice}}</view>
+            <view wx:if="{{xauHint}}" class="detail-fact-note">{{xauHint}}</view>
+          </view>
         </view>
         <view class="detail-row">
           <view class="detail-label">更新时间</view>
@@ -86,13 +89,19 @@
 
     <view wx:if="{{hasPositions}}" class="status-card">
       <view class="section-title">当前持仓</view>
+      <view wx:if="{{positionsFactWarning}}" class="position-fact-warning">{{positionsFactWarning}}</view>
       <view class="position-list">
         <view wx:for="{{positionsList}}" wx:key="id" class="position-row">
           <view>
             <view class="position-main">{{item.symbol}} · {{item.direction}}</view>
             <view class="position-sub">量 {{item.volume}} · 开仓 {{item.openPrice}}</view>
+            <view class="position-sub">{{item.protection}} · 现价 {{item.price}}</view>
+            <view wx:if="{{item.protectionHint || item.priceHint}}" class="position-fact-note">{{item.protectionHint || item.priceHint}}</view>
           </view>
-          <view class="position-pnl {{item.tone === 'positive' ? 'accent-pos' : item.tone === 'negative' ? 'accent-neg' : ''}}">{{item.pnl}}</view>
+          <view class="position-right">
+            <view class="position-pnl {{item.tone === 'positive' ? 'accent-pos' : item.tone === 'negative' ? 'accent-neg' : item.tone === 'warning' ? 'accent-warn' : ''}}">{{item.pnl}}</view>
+            <view wx:if="{{item.pnlHint}}" class="position-fact-note">{{item.pnlHint}}</view>
+          </view>
         </view>
       </view>
     </view>

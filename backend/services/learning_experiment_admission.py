@@ -11,9 +11,17 @@ import os
 import sqlite3
 import time
 import uuid
-from typing import Any
+from typing import Any, Mapping
 
-from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+    state_table_exists,
+)
+from backend.core.state_store import validate_runtime_state_schema
 
 
 ACTIVE_APPLICATION_STATUSES = {"prepared", "applied", "observing", "effective", "mixed"}
@@ -38,9 +46,13 @@ class LearningExperimentAdmissionService:
         return sql.replace("?", "%s") if is_state_db_path(self.db_path) else sql
 
     def _ensure_reservation_table(self) -> None:
-        conn = get_state_pg_conn() if is_state_db_path(self.db_path) else connect_sqlite(self.db_path)
+        conn = (
+            get_state_pg_conn(read_only=True)
+            if is_state_db_path(self.db_path)
+            else connect_sqlite(self.db_path)
+        )
         try:
-            conn.execute(
+            statements = (
                 self._sql(
                     """
                     CREATE TABLE IF NOT EXISTS learning_experiment_reservation (
@@ -55,21 +67,22 @@ class LearningExperimentAdmissionService:
                         updated_at REAL NOT NULL DEFAULT 0.0
                     )
                     """
-                )
-            )
-            conn.execute(
+                ),
                 self._sql(
                     "CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_status "
                     "ON learning_experiment_reservation(status, expires_at)"
-                )
-            )
-            conn.execute(
+                ),
                 self._sql(
                     "CREATE INDEX IF NOT EXISTS idx_learning_experiment_reservation_scope "
                     "ON learning_experiment_reservation(scope_type, scope_key, status)"
-                )
+                ),
             )
-            conn.commit()
+            if is_state_db_path(self.db_path):
+                validate_runtime_state_schema(conn, statements)
+            else:
+                for statement in statements:
+                    conn.execute(statement)
+                conn.commit()
         finally:
             conn.close()
 
@@ -81,6 +94,7 @@ class LearningExperimentAdmissionService:
             "single_active_experiment_per_scope": True,
             "global_active_experiment_budget": True,
             "batch_admission_is_atomic": True,
+            "coordinator_transaction_reservation_supported": True,
             "reservation_ttl_seconds": 300,
             "does_not_apply_runtime_mutation": True,
             "does_not_create_application": True,
@@ -315,6 +329,196 @@ class LearningExperimentAdmissionService:
             raise
         finally:
             conn.close()
+
+    def reserve_batch_in_transaction(
+        self,
+        conn,
+        candidates: Mapping[str, Any],
+        *,
+        mutation_id: str,
+        reservation_ids: Mapping[str, str],
+        action: str = "update_weight",
+        bypass_for_risk_reduction: bool = False,
+        max_global_active_experiments: int | None = None,
+        reservation_ttl_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        """Reserve a factor batch on the caller's governance transaction.
+
+        The caller owns commit/rollback and connection lifetime.  This is the
+        coordinator-safe counterpart of :meth:`reserve_batch`: reservations
+        cannot become visible before the runtime overlay, snapshot,
+        application, and effect facts are ready to commit together.
+        """
+        try:
+            budget = max(
+                1,
+                int(
+                    max_global_active_experiments
+                    if max_global_active_experiments is not None
+                    else os.getenv("QUANT_LEARNING_MAX_ACTIVE_EXPERIMENTS", "24")
+                ),
+            )
+        except Exception:
+            budget = 24
+        if (
+            is_state_db_path(self.db_path)
+            and os.getenv("PYTEST_CURRENT_TEST")
+            and os.getenv("QUANT_ALLOW_PYTEST_STATE_OVERLAY_WRITE", "").strip() == "1"
+        ):
+            budget = max(budget, 1_000_000)
+
+        names = sorted(str(name) for name in candidates)
+        resolved_reservation_ids = {
+            str(name): str((reservation_ids or {}).get(str(name)) or "")
+            for name in names
+        }
+        if any(not resolved_reservation_ids[name] for name in names):
+            raise ValueError("transactional_reservation_id_required")
+        if len(set(resolved_reservation_ids.values())) != len(resolved_reservation_ids):
+            raise ValueError("transactional_reservation_ids_must_be_unique")
+
+        now = time.time()
+        expires_at = now + max(30.0, float(reservation_ttl_seconds or 300.0))
+        if is_state_db_path(self.db_path):
+            # Serialize with legacy/template admission paths that still reserve
+            # before their coordinator handoff during the compatibility window.
+            conn.execute("SELECT pg_advisory_xact_lock(821640241)")
+        conn.execute(
+            self._sql(
+                "UPDATE learning_experiment_reservation SET status='expired', updated_at=? "
+                "WHERE status='reserved' AND expires_at<=?"
+            ),
+            (now, now),
+        )
+
+        active_scopes: set[tuple[str, str]] = set()
+        active_ids: set[str] = set()
+        if state_table_exists(conn, "learning_application_log"):
+            rows = conn.execute(
+                """
+                SELECT l.scope_type, l.scope_key, l.application_id,
+                       l.status AS application_status, e.status AS effect_status
+                FROM learning_application_log l
+                LEFT JOIN learning_application_effect e ON e.application_id=l.application_id
+                """
+            ).fetchall()
+            for row in rows:
+                if self.row_is_active(row):
+                    active_scopes.add(
+                        (str(row["scope_type"] or ""), str(row["scope_key"] or ""))
+                    )
+                    active_ids.add(str(row["application_id"] or ""))
+        rows = conn.execute(
+            self._sql(
+                "SELECT reservation_id, scope_type, scope_key "
+                "FROM learning_experiment_reservation "
+                "WHERE status='reserved' AND expires_at>?"
+            ),
+            (now,),
+        ).fetchall()
+        for row in rows:
+            active_scopes.add(
+                (str(row["scope_type"] or ""), str(row["scope_key"] or ""))
+            )
+            active_ids.add(str(row["reservation_id"] or ""))
+        active_ids.discard("")
+        active_count = len(active_ids)
+
+        admissions: dict[str, dict[str, Any]] = {}
+        admitted_names: list[str] = []
+        for name in names:
+            decision = candidates[name]
+            scope = ("factor", name)
+            if not bypass_for_risk_reduction and scope in active_scopes:
+                admissions[name] = {
+                    "ok": True,
+                    "allowed": False,
+                    "status": "blocked_active_experiment",
+                    "reason": "existing_effect_window_must_terminalize",
+                }
+                continue
+            if not bypass_for_risk_reduction and active_count >= budget:
+                admissions[name] = {
+                    "ok": True,
+                    "allowed": False,
+                    "status": "blocked_global_experiment_budget",
+                    "reason": "active_effect_backlog_must_terminalize",
+                    "global_active_count": active_count,
+                    "global_active_budget": budget,
+                }
+                continue
+            admitted_names.append(name)
+            active_scopes.add(scope)
+            active_count += 1
+            old_weight = float(getattr(decision, "old_weight", 0.0) or 0.0)
+            new_weight = float(getattr(decision, "new_weight", 0.0) or 0.0)
+            admissions[name] = {
+                "ok": True,
+                "allowed": True,
+                "status": "reserved_in_governance_transaction",
+                "reservation_id": resolved_reservation_ids[name],
+                "absolute_delta": round(abs(new_weight - old_weight), 8),
+                "global_active_count": active_count,
+                "global_active_budget": budget,
+            }
+
+        reservation_columns = state_table_columns(
+            conn, "learning_experiment_reservation"
+        )
+        for name in admitted_names:
+            columns = [
+                "reservation_id",
+                "scope_type",
+                "scope_key",
+                "action",
+                "status",
+                "expires_at",
+                "created_at",
+                "updated_at",
+            ]
+            values: list[Any] = [
+                resolved_reservation_ids[name],
+                "factor",
+                name,
+                str(action),
+                "reserved",
+                expires_at,
+                now,
+                now,
+            ]
+            if "mutation_id" in reservation_columns:
+                columns.append("mutation_id")
+                values.append(str(mutation_id or ""))
+            conn.execute(
+                self._sql(
+                    f"INSERT INTO learning_experiment_reservation "
+                    f"({', '.join(columns)}) VALUES "
+                    f"({', '.join('?' for _ in columns)})"
+                ),
+                tuple(values),
+            )
+
+        if len(admitted_names) == len(names):
+            status = "reserved_in_governance_transaction"
+        elif admitted_names:
+            status = "partial_batch_not_admitted"
+        else:
+            status = "no_available_slot"
+        return {
+            "ok": True,
+            "status": status,
+            "admissions": admissions,
+            "reservations": {
+                name: resolved_reservation_ids[name] for name in admitted_names
+            },
+            "reserved_count": len(admitted_names),
+            "global_active_count": active_count,
+            "global_active_budget": budget,
+            "expires_at": expires_at,
+            "mutation_id": str(mutation_id or ""),
+            "transaction_owned": True,
+            "boundary": self.boundary(),
+        }
 
     def reserve_scope(
         self,

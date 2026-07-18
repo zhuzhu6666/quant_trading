@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 from backend.services.parameter_templates import ParameterTemplateService
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from research.learning.governor import RuleEvolutionGovernor
 
 
@@ -23,20 +24,31 @@ def test_governor_reviews_pending_and_rolls_back(tmp_path):
             """
             INSERT INTO experience_pattern_stats
             (scope_type, scope_key, sample_count, win_count, bad_loss_count,
-             avg_reward, last_outcome_label, recommended_action, updated_at)
+             avg_reward, effective_sample_count, weighted_win_count,
+             weighted_bad_loss_count, weighted_avg_reward,
+             governance_eligibility_version, governance_eligibility_fingerprint,
+             last_outcome_label, recommended_action, updated_at)
             VALUES
-            ('factor', 'fragile_factor', 4, 1, 3, -0.45, 'bad_loss', 'downweight', 1.0),
-            ('factor', 'strong_factor', 5, 4, 0, 0.32, 'good_win', 'boost_small', 1.0)
-            """
+            ('factor', 'fragile_factor', 4, 1, 3, -0.45, 4.0, 1.0, 3.0, -0.45,
+             ?, 'fragile-fingerprint', 'bad_loss', 'downweight', 1.0),
+            ('factor', 'strong_factor', 5, 4, 0, 0.32, 5.0, 4.0, 0.0, 0.32,
+             ?, 'strong-fingerprint', 'good_win', 'boost_small', 1.0)
+            """,
+            (GOVERNANCE_ELIGIBILITY_VERSION, GOVERNANCE_ELIGIBILITY_VERSION),
         )
         conn.execute(
             """
             INSERT INTO policy_suggestion
-            (suggestion_id, scope_type, scope_key, action, confidence, reason, status, created_at)
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             status, governance_eligible, governance_eligibility_version,
+             governance_eligibility_fingerprint, created_at)
             VALUES
-            ('p1', 'factor', 'fragile_factor', 'downweight', 0.8, 'test', 'proposed', 1.0),
-            ('p2', 'factor', 'strong_factor', 'boost_small', 0.7, 'test', 'proposed', 1.0)
-            """
+            ('p1', 'factor', 'fragile_factor', 'downweight', 0.8, 'test',
+             'proposed', 1, ?, 'fragile-fingerprint', 1.0),
+            ('p2', 'factor', 'strong_factor', 'boost_small', 0.7, 'test',
+             'proposed', 1, ?, 'strong-fingerprint', 1.0)
+            """,
+            (GOVERNANCE_ELIGIBILITY_VERSION, GOVERNANCE_ELIGIBILITY_VERSION),
         )
         conn.commit()
     finally:
@@ -53,7 +65,8 @@ def test_governor_reviews_pending_and_rolls_back(tmp_path):
         conn.execute(
             """
             UPDATE experience_pattern_stats
-            SET sample_count=6, avg_reward=0.20
+            SET sample_count=6, avg_reward=0.20,
+                effective_sample_count=6.0, weighted_avg_reward=0.20
             WHERE scope_key='fragile_factor'
             """
         )
@@ -68,7 +81,59 @@ def test_governor_reviews_pending_and_rolls_back(tmp_path):
     assert rolled[0]["scope_key"] == "fragile_factor"
 
 
-def test_governor_accepts_strong_demo_model_bridge_without_experience_stats(tmp_path):
+def test_governor_accepts_eligible_demo_model_bridge_without_experience_stats(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    evidence = {
+        "schema_version": "factor_governance_advisory.v1",
+        "source_agent": "lightgbm_shadow_models",
+        "model_type": "factor_governance_lightgbm",
+        "advisory_only": True,
+        "sample_count": 2,
+        "weak_sample_count": 2,
+        "min_weakness_score": 0.85,
+        "avg_weakness_score": 0.92,
+        "governed_action": "downweight",
+        "active_factor_context": {"used_in_score": True, "role": "alpha"},
+        "bridge": {
+            "automatic_demo": True,
+            "demo_nursery": True,
+            "actor": "system:autonomous_learning.demo_nursery_model_governance",
+        },
+    }
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, governance_eligible,
+             governance_eligibility_version,
+             governance_eligibility_fingerprint, created_at)
+            VALUES ('model_bridge_1', 'factor', 'weak_factor', 'downweight',
+                    0.55, 'model evidence', ?, 'proposed', 1, ?, ?, 1.0)
+            """,
+            (
+                json.dumps(evidence),
+                GOVERNANCE_ELIGIBILITY_VERSION,
+                "eligible-model-bridge-fingerprint",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reviewed = gov.review_pending()
+
+    assert reviewed["approved"] == 1
+    row = _connect(db_path).execute(
+        "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='model_bridge_1'"
+    ).fetchone()
+    assert row["status"] == "approved"
+    assert "factor model evidence bridged" in row["review_note"]
+
+
+def test_governor_rejects_model_bridge_without_eligibility_contract(tmp_path):
     db_path = str(tmp_path / "state.db")
     gov = RuleEvolutionGovernor(db_path)
     evidence = {
@@ -95,8 +160,8 @@ def test_governor_accepts_strong_demo_model_bridge_without_experience_stats(tmp_
             INSERT INTO policy_suggestion
             (suggestion_id, scope_type, scope_key, action, confidence, reason,
              evidence_json, status, created_at)
-            VALUES ('model_bridge_1', 'factor', 'weak_factor', 'downweight',
-                    0.55, 'model evidence', ?, 'proposed', 1.0)
+            VALUES ('model_bridge_unverified', 'factor', 'weak_factor',
+                    'downweight', 0.9, 'model evidence', ?, 'proposed', 1.0)
             """,
             (json.dumps(evidence),),
         )
@@ -106,12 +171,21 @@ def test_governor_accepts_strong_demo_model_bridge_without_experience_stats(tmp_
 
     reviewed = gov.review_pending()
 
-    assert reviewed["approved"] == 1
-    row = _connect(db_path).execute(
-        "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='model_bridge_1'"
-    ).fetchone()
-    assert row["status"] == "approved"
-    assert "factor model evidence bridged" in row["review_note"]
+    assert reviewed["approved"] == 0
+    assert reviewed["rejected"] == 1
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT status, governance_eligible,
+                      governance_ineligible_reason
+               FROM policy_suggestion
+               WHERE suggestion_id='model_bridge_unverified'"""
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "rejected"
+    assert row["governance_eligible"] == 0
+    assert row["governance_ineligible_reason"] == "eligibility_contract_invalid"
 
 
 def test_governor_logs_learning_application(tmp_path):
@@ -449,7 +523,7 @@ def test_reconcile_application_effects_reinforces_positive_application(tmp_path)
     assert int(effect_row["baseline_trade_count"]) == 3
     assert float(effect_row["delta_avg_reward"]) > 0
     assert len(reinforced_rows) == 2
-    assert reinforced_rows[0]["status"] == "approved"
+    assert reinforced_rows[0]["status"] == "proposed"
     assert reinforced_rows[0]["action"] == "boost_small"
 
 
@@ -1016,12 +1090,17 @@ def test_governor_approves_online_light_parameter_template_switch(tmp_path):
         conn.execute(
             """
             INSERT INTO policy_suggestion
-            (suggestion_id, scope_type, scope_key, action, confidence, reason, evidence_json, status, created_at)
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, governance_eligible,
+             governance_eligibility_version,
+             governance_eligibility_fingerprint, created_at)
             VALUES
             ('tpl_switch', 'parameter_template', 'rsi_14:range', 'switch_parameter_template', 0.7, 'test',
              '{"factor_id":"rsi_14","regime_key":"range","target_template_id":"tpl_new","boundary":{"recommended_scope":"online_light"}}',
-             'proposed', 100.0)
+             'proposed', 1, ?, 'eligible-template-switch', 100.0)
             """
+            ,
+            (GOVERNANCE_ELIGIBILITY_VERSION,),
         )
         conn.commit()
     finally:

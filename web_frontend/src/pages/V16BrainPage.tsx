@@ -27,6 +27,7 @@ import {
   getBrainMemory,
   getBrainState,
   getLiveAutonomyStatus,
+  isStepUpRequiredError,
   materializeBrainMediumImpactGovernance,
   refreshAutonomyProposals,
   reviewAutonomyProposal,
@@ -39,8 +40,16 @@ import {
 import { MetricCard } from "@/components/Card";
 import { ActionButton } from "@/components/ActionButton";
 import { CompactMetric, Field, SectionHead, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
+import { FactBoundary } from "@/components/FactBoundary";
 import { JsonBlock } from "@/components/JsonBlock";
 import { StatusPill } from "@/components/StatusPill";
+import {
+  decodeLiveAutonomyEvaluation,
+  decodeLiveAutonomyStatus,
+  factBoundTone,
+  factIsKnown,
+  readFact,
+} from "@/api/fact";
 import { formatDecimal } from "@/lib/format";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 import {
@@ -185,15 +194,37 @@ export function V16BrainPage() {
     },
   });
 
+  const runLiveUnlock = async () => {
+    try {
+      return await liveUnlockMutation.mutateAsync();
+    } catch (error) {
+      if (isStepUpRequiredError(error)) liveUnlockMutation.reset();
+      throw error;
+    }
+  };
+
   const readiness = asRecord(readinessQuery.data);
+  const readinessFact = readFact(readinessQuery.data, "ops.backend-readiness.v2");
+  const readinessRequestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
+  const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
   const v16Readiness = asRecord(pick(readiness, ["v16"]));
   const directBrainState = asRecord(pick(brainStateQuery.data, ["brain_state"]));
+  const hasDirectBrainState = Object.keys(directBrainState).length > 0;
   const readinessBrainState = asRecord(pick(v16Readiness, ["brain_state.latest_snapshot"]));
-  const brainState = Object.keys(directBrainState).length ? directBrainState : readinessBrainState;
+  const brainState = hasDirectBrainState ? directBrainState : readinessBrainState;
+  const brainStateFact = readFact(brainStateQuery.data, "ops.v16-brain-state.v2");
+  const brainStateRequestFailed = brainStateQuery.isError || brainStateQuery.isRefetchError;
+  const brainStateKnown = factIsKnown(brainStateFact, brainStateRequestFailed);
   const worldModel = asRecord(pick(brainState, ["world_model"]));
   const memoryFromState = asRecord(pick(brainState, ["memory"]));
   const memoryFromQuery = asRecord(pick(brainMemoryQuery.data, ["memory"]));
-  const memory = Object.keys(memoryFromState).length ? memoryFromState : memoryFromQuery;
+  const hasMemoryFromState = Object.keys(memoryFromState).length > 0;
+  const memory = hasMemoryFromState ? memoryFromState : memoryFromQuery;
+  const memoryFact = hasMemoryFromState ? brainStateFact : readFact(brainMemoryQuery.data, "ops.v16-brain-memory.v2");
+  const memoryRequestFailed = hasMemoryFromState
+    ? brainStateRequestFailed
+    : brainMemoryQuery.isError || brainMemoryQuery.isRefetchError;
+  const memoryKnown = factIsKnown(memoryFact, memoryRequestFailed);
   const critic = asRecord(pick(brainState, ["critic"]));
   const hypotheses = pickArray(brainState, ["hypotheses"]);
   const memoryItems = pickArray(memory, ["items"]);
@@ -203,39 +234,83 @@ export function V16BrainPage() {
   const boundary = asRecord(pick(brainState, ["boundary"]));
   const sourceGaps = pickArray(memory, ["source_gaps"]);
   const directActionPlanRun = asRecord(pick(brainActionPlansQuery.data, ["action_plans"]));
+  const hasDirectActionPlanRun = Object.keys(directActionPlanRun).length > 0;
   const readinessActionPlans = asRecord(pick(v16Readiness, ["action_plans"]));
-  const actionPlanRun = Object.keys(directActionPlanRun).length ? directActionPlanRun : readinessActionPlans;
+  const actionPlanRun = hasDirectActionPlanRun ? directActionPlanRun : readinessActionPlans;
+  const actionPlanFact = readFact(brainActionPlansQuery.data, "ops.v16-action-plans.v2");
+  const actionPlanRequestFailed = brainActionPlansQuery.isError || brainActionPlansQuery.isRefetchError;
+  const actionPlanKnown = factIsKnown(actionPlanFact, actionPlanRequestFailed);
   const actionPlans = pickArray(actionPlanRun, ["plans"]);
   const directActionPlanEvals = asRecord(pick(brainActionPlanEvalsQuery.data, ["action_plan_evals"]));
+  const hasDirectActionPlanEvals = Object.keys(directActionPlanEvals).length > 0;
   const readinessActionPlanEvals = asRecord(pick(v16Readiness, ["action_plan_evals"]));
-  const actionPlanEvalRun = Object.keys(directActionPlanEvals).length ? directActionPlanEvals : readinessActionPlanEvals;
+  const actionPlanEvalRun = hasDirectActionPlanEvals ? directActionPlanEvals : readinessActionPlanEvals;
+  const actionPlanEvalFact = readFact(brainActionPlanEvalsQuery.data, "ops.v16-action-plan-evals.v2");
+  const actionPlanEvalRequestFailed = brainActionPlanEvalsQuery.isError || brainActionPlanEvalsQuery.isRefetchError;
+  const actionPlanEvalKnown = factIsKnown(actionPlanEvalFact, actionPlanEvalRequestFailed);
   const actionPlanEvals = pickArray(actionPlanEvalRun, ["evals"]);
   const directLowImpactExecutions = asRecord(pick(lowImpactExecutionsQuery.data, ["low_impact_executions"]));
+  const hasDirectLowImpactExecutions = Object.keys(directLowImpactExecutions).length > 0;
   const readinessLowImpactExecutions = asRecord(pick(v16Readiness, ["low_impact_executions"]));
-  const lowImpactExecutionRun = Object.keys(directLowImpactExecutions).length ? directLowImpactExecutions : readinessLowImpactExecutions;
+  const lowImpactExecutionRun = hasDirectLowImpactExecutions ? directLowImpactExecutions : readinessLowImpactExecutions;
+  const lowImpactFact = readFact(lowImpactExecutionsQuery.data, "ops.v16-low-impact-executions.v2");
+  const lowImpactRequestFailed = lowImpactExecutionsQuery.isError || lowImpactExecutionsQuery.isRefetchError;
+  const lowImpactKnown = factIsKnown(lowImpactFact, lowImpactRequestFailed);
   const lowImpactExecutions = pickArray(lowImpactExecutionRun, ["executions"]);
   const directMediumImpactGovernance = asRecord(pick(mediumImpactGovernanceQuery.data, ["medium_impact_governance"]));
+  const hasDirectMediumImpactGovernance = Object.keys(directMediumImpactGovernance).length > 0;
   const readinessMediumImpactGovernance = asRecord(pick(v16Readiness, ["medium_impact_governance"]));
-  const mediumImpactGovernanceRun = Object.keys(directMediumImpactGovernance).length ? directMediumImpactGovernance : readinessMediumImpactGovernance;
+  const mediumImpactGovernanceRun = hasDirectMediumImpactGovernance ? directMediumImpactGovernance : readinessMediumImpactGovernance;
+  const mediumImpactFact = readFact(mediumImpactGovernanceQuery.data, "ops.v16-medium-impact-governance.v2");
+  const mediumImpactRequestFailed = mediumImpactGovernanceQuery.isError || mediumImpactGovernanceQuery.isRefetchError;
+  const mediumImpactKnown = factIsKnown(mediumImpactFact, mediumImpactRequestFailed);
   const mediumImpactGovernance = pickArray(mediumImpactGovernanceRun, ["items"]);
   const directCandidateReviews = asRecord(pick(candidateReviewsQuery.data, ["candidate_reviews"]));
+  const hasDirectCandidateReviews = Object.keys(directCandidateReviews).length > 0;
   const readinessCandidateReviews = asRecord(pick(v16Readiness, ["governance_candidate_reviews"]));
-  const candidateReviewRun = Object.keys(directCandidateReviews).length ? directCandidateReviews : readinessCandidateReviews;
+  const candidateReviewRun = hasDirectCandidateReviews ? directCandidateReviews : readinessCandidateReviews;
+  const candidateReviewFact = readFact(candidateReviewsQuery.data, "ops.v16-governance-candidate-reviews.v2");
+  const candidateReviewRequestFailed = candidateReviewsQuery.isError || candidateReviewsQuery.isRefetchError;
+  const candidateReviewKnown = factIsKnown(candidateReviewFact, candidateReviewRequestFailed);
   const candidateReviews = pickArray(candidateReviewRun, ["items"]);
   const directLiveReadyGuardrails = asRecord(pick(liveReadyGuardrailsQuery.data, ["live_ready_guardrails"]));
+  const hasDirectLiveReadyGuardrails = Object.keys(directLiveReadyGuardrails).length > 0;
   const readinessLiveReadyGuardrails = asRecord(pick(v16Readiness, ["live_ready_guardrails"]));
-  const liveReadyGuardrailRun = Object.keys(directLiveReadyGuardrails).length ? directLiveReadyGuardrails : readinessLiveReadyGuardrails;
+  const liveReadyGuardrailRun = hasDirectLiveReadyGuardrails ? directLiveReadyGuardrails : readinessLiveReadyGuardrails;
+  const liveReadyGuardrailFact = readFact(liveReadyGuardrailsQuery.data, "ops.v16-live-ready-guardrails.v2");
+  const liveReadyGuardrailRequestFailed = liveReadyGuardrailsQuery.isError || liveReadyGuardrailsQuery.isRefetchError;
+  const liveReadyGuardrailKnown = factIsKnown(liveReadyGuardrailFact, liveReadyGuardrailRequestFailed);
   const liveReadyGuardrails = pickArray(liveReadyGuardrailRun, ["items"]);
   const latestGuardrail = asRecord(liveReadyGuardrails[0]);
   const directProposalRegistry = asRecord(pick(proposalRegistryQuery.data, ["proposals"]));
+  const hasDirectProposalRegistry = Object.keys(directProposalRegistry).length > 0;
   const readinessProposalRegistry = asRecord(pick(v16Readiness, ["proposal_registry"]));
-  const proposalRegistry = Object.keys(directProposalRegistry).length ? directProposalRegistry : readinessProposalRegistry;
+  const proposalRegistry = hasDirectProposalRegistry ? directProposalRegistry : readinessProposalRegistry;
+  const proposalRegistryFact = readFact(proposalRegistryQuery.data, "ops.autonomy-proposals.v2");
+  const proposalRegistryRequestFailed = proposalRegistryQuery.isError || proposalRegistryQuery.isRefetchError;
+  const proposalRegistryKnown = factIsKnown(proposalRegistryFact, proposalRegistryRequestFailed);
   const proposalItems = pickArray(proposalRegistry, ["items"]);
   const proposalSummary = asRecord(pick(proposalRegistry, ["summary"]));
-  const directLiveAutonomy = asRecord(pick(liveAutonomyQuery.data, ["live_autonomy"]));
-  const readinessLiveAutonomy = asRecord(pick(v16Readiness, ["live_autonomy"]));
-  const liveAutonomy = Object.keys(directLiveAutonomy).length ? directLiveAutonomy : readinessLiveAutonomy;
-  const liveAutonomyEvaluation = asRecord(pick(liveAutonomy, ["evaluation"]));
+  const liveAutonomyView = decodeLiveAutonomyStatus(
+    liveAutonomyQuery.data,
+    liveAutonomyQuery.isError || liveAutonomyQuery.isRefetchError,
+  );
+  const latestEvaluationView = liveUnlockEvaluateMutation.data
+    ? decodeLiveAutonomyEvaluation(
+        liveUnlockEvaluateMutation.data,
+        liveUnlockEvaluateMutation.isError,
+      )
+    : null;
+  const liveAutonomy = liveAutonomyView.liveAutonomy;
+  const liveAutonomyRequestFailed = liveAutonomyQuery.isError || liveAutonomyQuery.isRefetchError;
+  const liveAutonomyKnown = factIsKnown(liveAutonomyView.fact, liveAutonomyRequestFailed);
+  const latestEvaluationDisplayable = latestEvaluationView?.fact.state === "known"
+    || latestEvaluationView?.fact.state === "stale";
+  const liveAutonomyEvaluation = latestEvaluationDisplayable
+    ? latestEvaluationView?.evaluation ?? liveAutonomyView.evaluation
+    : liveAutonomyView.evaluation;
+  const unlockAllowed = liveAutonomyKnown
+    && (latestEvaluationView?.unlockAllowed ?? liveAutonomyView.unlockAllowed);
   const liveAutonomyBlockers = pickArray(liveAutonomyEvaluation, ["blockers"]);
   const liveAutonomyLatestEvent = asRecord(pick(liveAutonomy, ["latest_event"]));
   const liveAutonomyPosture = asRecord(pick(liveAutonomy, ["operational_posture"]));
@@ -280,9 +355,9 @@ export function V16BrainPage() {
           <p>多智能体权责、提案总线、候选审查、记忆反馈和执行边界。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={displayValue(pickString(autonomousBlueprint, ["status"], ""))} tone={pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn"} />
-          <StatusPill status={displayStage(pickString(v16Readiness, ["phase"], ""))} tone="ok" />
-          <StatusPill status={readOnly && !affectsTrading ? "交易边界正常" : "边界异常"} tone={readOnly && !affectsTrading ? "ok" : "bad"} />
+          <StatusPill status={displayValue(pickString(autonomousBlueprint, ["status"], ""))} tone={factBoundTone(readinessFact, pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn", readinessRequestFailed)} />
+          <StatusPill status={displayStage(pickString(v16Readiness, ["phase"], ""))} tone={factBoundTone(readinessFact, "ok", readinessRequestFailed)} />
+          <StatusPill status={brainStateKnown ? (readOnly && !affectsTrading ? "交易边界正常" : "边界异常") : "交易边界未知"} tone={factBoundTone(brainStateFact, readOnly && !affectsTrading ? "ok" : "bad", brainStateRequestFailed)} />
           <button className="header-refresh" type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>
             <RefreshCw size={15} aria-hidden="true" />
             {refreshMutation.isPending ? "刷新中" : "刷新大脑"}
@@ -307,78 +382,84 @@ export function V16BrainPage() {
       </div>
 
       <div className="stat-grid v15-stat-grid">
-        <StatTile icon={Network} label="大纲对齐" value={displayValue(pickString(autonomousBlueprint, ["status"], ""))} detail={`阻断 ${formatDecimal(blueprintBlockers.length, 0)} / 检查 ${formatDecimal(pickArray(autonomousBlueprint, ["checks"]).length, 0)}`} tone={pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn"} />
-        <StatTile icon={UsersRound} label="Agent 权责" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`未知 ${formatDecimal(countOf(pick(agentAuthority, ["unknown_sources"])), 0)} / 违规 ${formatDecimal(countOf(pick(agentAuthority, ["contract_violations"])), 0)}`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
-        <StatTile icon={Route} label="上下文覆盖" value={displayValue(pickString(proposalContextCoverage, ["status"], ""))} detail={`候选 ${displayValue(pickString(candidateContextCoverage, ["status"], ""))} / 桥接 ${displayValue(pickString(candidateBridgeReviewCoverage, ["status"], ""))}`} tone={statusTone(pickString(proposalContextCoverage, ["status"], ""))} />
-        <StatTile icon={BrainCircuit} label="策略姿态" value={displayValue(pickString(worldModel, ["strategy_posture"], ""))} detail={displayValue(pickString(worldModel, ["market_regime"], ""))} tone={statTone} />
-        <StatTile icon={ShieldCheck} label="审查结论" value={displayValue(criticVerdict)} detail={displayValue(pickString(critic, ["max_allowed_action_scope"], ""))} tone={criticVerdict === "pass" ? "ok" : "warn"} />
-        <StatTile icon={Database} label="记忆命中" value={formatDecimal(memoryItems.length, 0)} detail={`负面 ${formatDecimal(negativeMemory.length, 0)} / 反证 ${formatDecimal(counterEvidence.length, 0)}`} tone={negativeMemory.length ? "warn" : "ok"} />
-        <StatTile icon={Workflow} label="假设" value={formatDecimal(hypotheses.length, 0)} detail={formatTime(pick(brainState, ["created_at"]))} tone={hypotheses.length ? "ok" : "warn"} />
-        {Object.keys(actionPlanRun).length ? <StatTile icon={ListChecks} label="影子计划" value={formatDecimal(actionPlans.length, 0)} detail={displayValue(pickString(actionPlanRun, ["status"], ""))} tone={actionPlans.length ? "ok" : "warn"} /> : null}
-        {Object.keys(actionPlanEvalRun).length ? <StatTile icon={GitBranch} label="后验评价" value={formatDecimal(actionPlanEvals.length, 0)} detail={displayValue(pickString(actionPlanEvalRun, ["status"], ""))} tone={actionPlanEvals.length ? "ok" : "warn"} /> : null}
-        {Object.keys(lowImpactExecutionRun).length ? <StatTile icon={Play} label="低影响执行" value={formatDecimal(lowImpactExecutions.length, 0)} detail={displayValue(pickString(lowImpactExecutionRun, ["status"], ""))} tone={lowImpactExecutions.length ? "ok" : "warn"} /> : null}
-        {Object.keys(mediumImpactGovernanceRun).length ? <StatTile icon={ListChecks} label="治理候选" value={formatDecimal(mediumImpactGovernance.length, 0)} detail={displayValue(pickString(mediumImpactGovernanceRun, ["status"], ""))} tone={mediumImpactGovernance.length ? "ok" : "warn"} /> : null}
-        {Object.keys(candidateReviewRun).length ? <StatTile icon={GitBranch} label="候选审查" value={formatDecimal(candidateReviews.length, 0)} detail={displayValue(pickString(candidateReviewRun, ["status"], ""))} tone={candidateReviews.length ? "ok" : "warn"} /> : null}
-        <StatTile icon={ListChecks} label="提案总线" value={formatDecimal(pickNumber(proposalSummary, ["proposal_count"], proposalItems.length), 0)} detail={`冲突 ${formatDecimal(pickNumber(proposalSummary, ["conflict_count"], 0), 0)}`} tone={pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok"} />
-        {Object.keys(liveAutonomy).length ? <StatTile icon={ShieldCheck} label="实盘自治" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], ""))} detail={displayValue(pickString(liveAutonomyEvaluation, ["status"], ""))} tone={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : liveAutonomyBlockers.length ? "warn" : "mute"} /> : null}
-        <StatTile icon={ShieldCheck} label="实盘护栏" value={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "已锁定" : formatDecimal(liveReadyGuardrails.length, 0)} detail={displayValue(pickString(liveReadyGuardrailRun, ["status"], pickString(latestGuardrail, ["action_recommendation.target_mode"], "live-ready")))} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
+        <StatTile icon={Network} label="大纲对齐" value={displayValue(pickString(autonomousBlueprint, ["status"], ""))} detail={`阻断 ${formatDecimal(blueprintBlockers.length, 0)} / 检查 ${formatDecimal(pickArray(autonomousBlueprint, ["checks"]).length, 0)}`} tone={factBoundTone(readinessFact, pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn", readinessRequestFailed)} />
+        <StatTile icon={UsersRound} label="Agent 权责" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`未知 ${formatDecimal(countOf(pick(agentAuthority, ["unknown_sources"])), 0)} / 违规 ${formatDecimal(countOf(pick(agentAuthority, ["contract_violations"])), 0)}`} tone={factBoundTone(readinessFact, pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn", readinessRequestFailed)} />
+        <StatTile icon={Route} label="上下文覆盖" value={displayValue(pickString(proposalContextCoverage, ["status"], ""))} detail={`候选 ${displayValue(pickString(candidateContextCoverage, ["status"], ""))} / 桥接 ${displayValue(pickString(candidateBridgeReviewCoverage, ["status"], ""))}`} tone={factBoundTone(readinessFact, statusTone(pickString(proposalContextCoverage, ["status"], "")), readinessRequestFailed)} />
+        <StatTile icon={BrainCircuit} label="策略姿态" value={displayValue(pickString(worldModel, ["strategy_posture"], ""))} detail={displayValue(pickString(worldModel, ["market_regime"], ""))} tone={factBoundTone(brainStateFact, statTone, brainStateRequestFailed)} />
+        <StatTile icon={ShieldCheck} label="审查结论" value={displayValue(criticVerdict)} detail={displayValue(pickString(critic, ["max_allowed_action_scope"], ""))} tone={factBoundTone(brainStateFact, criticVerdict === "pass" ? "ok" : "warn", brainStateRequestFailed)} />
+        <StatTile icon={Database} label="记忆命中" value={formatDecimal(memoryItems.length, 0)} detail={`负面 ${formatDecimal(negativeMemory.length, 0)} / 反证 ${formatDecimal(counterEvidence.length, 0)}`} tone={factBoundTone(memoryFact, negativeMemory.length ? "warn" : "ok", memoryRequestFailed)} />
+        <StatTile icon={Workflow} label="假设" value={formatDecimal(hypotheses.length, 0)} detail={formatTime(pick(brainState, ["created_at"]))} tone={factBoundTone(brainStateFact, hypotheses.length ? "ok" : "warn", brainStateRequestFailed)} />
+        {Object.keys(actionPlanRun).length ? <StatTile icon={ListChecks} label="影子计划" value={formatDecimal(actionPlans.length, 0)} detail={displayValue(pickString(actionPlanRun, ["status"], ""))} tone={factBoundTone(actionPlanFact, actionPlans.length ? "ok" : "warn", actionPlanRequestFailed)} /> : null}
+        {Object.keys(actionPlanEvalRun).length ? <StatTile icon={GitBranch} label="后验评价" value={formatDecimal(actionPlanEvals.length, 0)} detail={displayValue(pickString(actionPlanEvalRun, ["status"], ""))} tone={factBoundTone(actionPlanEvalFact, actionPlanEvals.length ? "ok" : "warn", actionPlanEvalRequestFailed)} /> : null}
+        {Object.keys(lowImpactExecutionRun).length ? <StatTile icon={Play} label="低影响执行" value={formatDecimal(lowImpactExecutions.length, 0)} detail={displayValue(pickString(lowImpactExecutionRun, ["status"], ""))} tone={factBoundTone(lowImpactFact, lowImpactExecutions.length ? "ok" : "warn", lowImpactRequestFailed)} /> : null}
+        {Object.keys(mediumImpactGovernanceRun).length ? <StatTile icon={ListChecks} label="治理候选" value={formatDecimal(mediumImpactGovernance.length, 0)} detail={displayValue(pickString(mediumImpactGovernanceRun, ["status"], ""))} tone={factBoundTone(mediumImpactFact, mediumImpactGovernance.length ? "ok" : "warn", mediumImpactRequestFailed)} /> : null}
+        {Object.keys(candidateReviewRun).length ? <StatTile icon={GitBranch} label="候选审查" value={formatDecimal(candidateReviews.length, 0)} detail={displayValue(pickString(candidateReviewRun, ["status"], ""))} tone={factBoundTone(candidateReviewFact, candidateReviews.length ? "ok" : "warn", candidateReviewRequestFailed)} /> : null}
+        <StatTile icon={ListChecks} label="提案总线" value={formatDecimal(pickNumber(proposalSummary, ["proposal_count"], proposalItems.length), 0)} detail={`冲突 ${formatDecimal(pickNumber(proposalSummary, ["conflict_count"], 0), 0)}`} tone={factBoundTone(proposalRegistryFact, pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok", proposalRegistryRequestFailed)} />
+        {Object.keys(liveAutonomy).length ? <StatTile icon={ShieldCheck} label="实盘自治" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], ""))} detail={displayValue(pickString(liveAutonomyEvaluation, ["status"], ""))} tone={factBoundTone(liveAutonomyView.fact, pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : liveAutonomyBlockers.length ? "warn" : "mute", liveAutonomyRequestFailed)} /> : null}
+        <StatTile icon={ShieldCheck} label="实盘护栏" value={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "已锁定" : formatDecimal(liveReadyGuardrails.length, 0)} detail={displayValue(pickString(liveReadyGuardrailRun, ["status"], pickString(latestGuardrail, ["action_recommendation.target_mode"], "live-ready")))} tone={factBoundTone(liveReadyGuardrailFact, pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn", liveReadyGuardrailRequestFailed)} />
       </div>
 
       <div className="dashboard-grid v16-grid">
         <MetricCard title="治理链路总览" className="wide-panel">
-          <BlueprintOverview
-            blueprint={autonomousBlueprint}
-            agentAuthority={agentAuthority}
-            proposalContext={proposalContextCoverage}
-            candidateContext={candidateContextCoverage}
-            candidateReview={candidateBridgeReviewCoverage}
-            chainHealth={agentChainHealth}
-            liveAutonomy={liveAutonomy}
-          />
+          <div className={readinessKnown ? "" : "fact-unverified"}>
+            <BlueprintOverview
+              blueprint={autonomousBlueprint}
+              agentAuthority={agentAuthority}
+              proposalContext={proposalContextCoverage}
+              candidateContext={candidateContextCoverage}
+              candidateReview={candidateBridgeReviewCoverage}
+              chainHealth={agentChainHealth}
+              liveAutonomy={liveAutonomyKnown ? liveAutonomy : {}}
+            />
+          </div>
         </MetricCard>
 
         <MetricCard title="Agent 权责合同" className="wide-panel">
-          <AgentAuthorityPanel
-            agentAuthority={agentAuthority}
-            agentScorecard={agentScorecard}
-            agentBriefing={agentBriefing}
-            chainHealth={agentChainHealth}
-          />
+          <div className={readinessKnown ? "" : "fact-unverified"}>
+            <AgentAuthorityPanel
+              agentAuthority={agentAuthority}
+              agentScorecard={agentScorecard}
+              agentBriefing={agentBriefing}
+              chainHealth={agentChainHealth}
+            />
+          </div>
         </MetricCard>
 
         <MetricCard title="上下文覆盖" className="wide-panel">
-          <CoveragePanel
-            proposalContext={proposalContextCoverage}
-            candidateContext={candidateContextCoverage}
-            candidateReview={candidateBridgeReviewCoverage}
-          />
+          <div className={readinessKnown ? "" : "fact-unverified"}>
+            <CoveragePanel
+              proposalContext={proposalContextCoverage}
+              candidateContext={candidateContextCoverage}
+              candidateReview={candidateBridgeReviewCoverage}
+            />
+          </div>
         </MetricCard>
 
         <MetricCard title="世界模型" className="wide-panel">
-          <div className="v15-mini-grid">
+          <div className={`v15-mini-grid ${brainStateKnown ? "" : "fact-unverified"}`.trim()}>
             <CompactMetric label="市场状态" value={displayValue(pickString(worldModel, ["market_regime"], ""))} tone="mute" />
-            <CompactMetric label="因子姿态" value={displayValue(pickString(worldModel, ["factor_posture"], ""))} tone={toneFromStatus(pickString(worldModel, ["factor_posture"], ""))} />
-            <CompactMetric label="执行姿态" value={displayValue(pickString(worldModel, ["execution_posture"], ""))} tone={toneFromStatus(pickString(worldModel, ["execution_posture"], ""))} />
+            <CompactMetric label="因子姿态" value={displayValue(pickString(worldModel, ["factor_posture"], ""))} tone={factBoundTone(brainStateFact, toneFromStatus(pickString(worldModel, ["factor_posture"], "")), brainStateRequestFailed)} />
+            <CompactMetric label="执行姿态" value={displayValue(pickString(worldModel, ["execution_posture"], ""))} tone={factBoundTone(brainStateFact, toneFromStatus(pickString(worldModel, ["execution_posture"], "")), brainStateRequestFailed)} />
             <CompactMetric label="学习姿态" value={displayValue(pickString(worldModel, ["learning_posture"], ""))} tone="mute" />
-            <CompactMetric label="自治姿态" value={displayValue(pickString(worldModel, ["autonomy_posture"], ""))} tone={toneFromStatus(pickString(worldModel, ["autonomy_posture"], ""))} />
-            <CompactMetric label="事故模式" value={displayValue(pickString(worldModel, ["incident_mode"], "normal"))} tone={pickString(worldModel, ["incident_mode"], "normal") === "normal" ? "ok" : "warn"} />
+            <CompactMetric label="自治姿态" value={displayValue(pickString(worldModel, ["autonomy_posture"], ""))} tone={factBoundTone(brainStateFact, toneFromStatus(pickString(worldModel, ["autonomy_posture"], "")), brainStateRequestFailed)} />
+            <CompactMetric label="事故模式" value={displayValue(pickString(worldModel, ["incident_mode"], "normal"))} tone={factBoundTone(brainStateFact, pickString(worldModel, ["incident_mode"], "normal") === "normal" ? "ok" : "warn", brainStateRequestFailed)} />
           </div>
           <div className="v16-boundary">
-            <Field label="只读" value={readOnly ? "true" : "false"} tone={boolTone(readOnly)} />
-            <Field label="影响交易" value={affectsTrading ? "true" : "false"} tone={affectsTrading ? "bad" : "ok"} />
-            <Field label="不执行计划" value={pickBoolean(boundary, ["does_not_execute_action_plan"], false) ? "true" : "false"} tone={boolTone(pickBoolean(boundary, ["does_not_execute_action_plan"], false))} />
-            <Field label="不写学习样本" value={pickBoolean(boundary, ["does_not_write_learning_samples"], false) ? "true" : "false"} tone={boolTone(pickBoolean(boundary, ["does_not_write_learning_samples"], false))} />
+            <Field label="只读" value={readOnly ? "true" : "false"} tone={factBoundTone(brainStateFact, boolTone(readOnly), brainStateRequestFailed)} />
+            <Field label="影响交易" value={affectsTrading ? "true" : "false"} tone={factBoundTone(brainStateFact, affectsTrading ? "bad" : "ok", brainStateRequestFailed)} />
+            <Field label="不执行计划" value={pickBoolean(boundary, ["does_not_execute_action_plan"], false) ? "true" : "false"} tone={factBoundTone(brainStateFact, boolTone(pickBoolean(boundary, ["does_not_execute_action_plan"], false)), brainStateRequestFailed)} />
+            <Field label="不写学习样本" value={pickBoolean(boundary, ["does_not_write_learning_samples"], false) ? "true" : "false"} tone={factBoundTone(brainStateFact, boolTone(pickBoolean(boundary, ["does_not_write_learning_samples"], false)), brainStateRequestFailed)} />
           </div>
         </MetricCard>
 
         <MetricCard title="提案总线" className="wide-panel">
-          <div className="v16-boundary">
+          <div className={`v16-boundary ${proposalRegistryKnown ? "" : "fact-unverified"}`.trim()}>
             <Field label="提案" value={formatDecimal(pickNumber(proposalSummary, ["proposal_count"], proposalItems.length), 0)} />
             <Field label="活跃" value={formatDecimal(pickNumber(proposalSummary, ["active_count"], 0), 0)} />
-            <Field label="冲突" value={formatDecimal(pickNumber(proposalSummary, ["conflict_count"], 0), 0)} tone={pickNumber(proposalSummary, ["conflict_count"], 0) ? "warn" : "ok"} />
-            <Field label="高危未解" value={formatDecimal(pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0), 0)} tone={pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok"} />
-            <Field label="低可信" value={formatDecimal(pickNumber(proposalSummary, ["low_reliability_count"], 0), 0)} tone={pickNumber(proposalSummary, ["low_reliability_count"], 0) ? "warn" : "ok"} />
-            <Field label="证据过期" value={formatDecimal(pickNumber(proposalSummary, ["stale_evidence_count"], 0), 0)} tone={pickNumber(proposalSummary, ["stale_evidence_count"], 0) ? "warn" : "ok"} />
+            <Field label="冲突" value={formatDecimal(pickNumber(proposalSummary, ["conflict_count"], 0), 0)} tone={factBoundTone(proposalRegistryFact, pickNumber(proposalSummary, ["conflict_count"], 0) ? "warn" : "ok", proposalRegistryRequestFailed)} />
+            <Field label="高危未解" value={formatDecimal(pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0), 0)} tone={factBoundTone(proposalRegistryFact, pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok", proposalRegistryRequestFailed)} />
+            <Field label="低可信" value={formatDecimal(pickNumber(proposalSummary, ["low_reliability_count"], 0), 0)} tone={factBoundTone(proposalRegistryFact, pickNumber(proposalSummary, ["low_reliability_count"], 0) ? "warn" : "ok", proposalRegistryRequestFailed)} />
+            <Field label="证据过期" value={formatDecimal(pickNumber(proposalSummary, ["stale_evidence_count"], 0), 0)} tone={factBoundTone(proposalRegistryFact, pickNumber(proposalSummary, ["stale_evidence_count"], 0) ? "warn" : "ok", proposalRegistryRequestFailed)} />
             <Field label="契约" value={displayContract(pickString(proposalRegistry, ["schema_version"], ""))} />
           </div>
           <div className="brain-card-actions">
@@ -389,35 +470,39 @@ export function V16BrainPage() {
             {proposalRefreshMutation.isError ? <span className="error-text small">总线刷新失败</span> : null}
             {proposalReviewMutation.isError ? <span className="error-text small">审查记录失败</span> : null}
           </div>
-          <ProposalRegistryList
-            items={proposalItems}
-            reviewing={proposalReviewMutation.isPending}
-            onReview={(proposalId, route) => proposalReviewMutation.mutate({ proposalId, route })}
-          />
+          <div className={proposalRegistryKnown ? "" : "fact-unverified"}>
+            <ProposalRegistryList
+              items={proposalItems}
+              reviewing={proposalReviewMutation.isPending}
+              onReview={(proposalId, route) => proposalReviewMutation.mutate({ proposalId, route })}
+            />
+          </div>
         </MetricCard>
 
         <MetricCard title="实盘自治" className="wide-panel">
-          <div className="v16-boundary">
-            <Field label="模式" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], "manual"))} tone={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : "warn"} />
-            <Field label="解锁" value={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "true" : "false"} tone={boolTone(pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false))} />
-            <Field label="姿态" value={displayValue(pickString(liveAutonomyPosture, ["status"], "locked"))} tone={pickString(liveAutonomyPosture, ["status"], "locked") === "degraded" ? "bad" : "ok"} />
-            <Field label="评估" value={displayValue(pickString(liveAutonomyEvaluation, ["status"], "blocked"))} tone={pickBoolean(liveAutonomyEvaluation, ["ok"], false) ? "ok" : "warn"} />
-            <Field label="阻断项" value={formatDecimal(liveAutonomyBlockers.length, 0)} tone={liveAutonomyBlockers.length ? "warn" : "ok"} />
-            <Field label="建议模式" value={displayValue(pickString(liveAutonomyPosture, ["recommended_incident_mode"], "normal"))} tone={pickString(liveAutonomyPosture, ["recommended_incident_mode"], "normal") === "normal" ? "ok" : "warn"} />
-            <Field label="最近事件" value={displayValue(pickString(liveAutonomyLatestEvent, ["status"], "none"))} />
-          </div>
+          <FactBoundary fact={liveAutonomyView.fact} label="实盘自治事实">
+            <div className="v16-boundary">
+              <Field label="模式" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], "manual"))} tone={factBoundTone(liveAutonomyView.fact, pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : "warn", liveAutonomyRequestFailed)} />
+              <Field label="解锁" value={pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "true" : "false"} tone={factBoundTone(liveAutonomyView.fact, boolTone(pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false)), liveAutonomyRequestFailed)} />
+              <Field label="姿态" value={displayValue(pickString(liveAutonomyPosture, ["status"], "locked"))} tone={factBoundTone(liveAutonomyView.fact, pickString(liveAutonomyPosture, ["status"], "locked") === "degraded" ? "bad" : "ok", liveAutonomyRequestFailed)} />
+              <Field label="评估" value={displayValue(pickString(liveAutonomyEvaluation, ["status"], "blocked"))} tone={factBoundTone(liveAutonomyView.fact, unlockAllowed ? "ok" : "warn", liveAutonomyRequestFailed)} />
+              <Field label="阻断项" value={formatDecimal(liveAutonomyBlockers.length, 0)} tone={factBoundTone(liveAutonomyView.fact, liveAutonomyBlockers.length ? "warn" : "ok", liveAutonomyRequestFailed)} />
+              <Field label="建议模式" value={displayValue(pickString(liveAutonomyPosture, ["recommended_incident_mode"], "normal"))} tone={factBoundTone(liveAutonomyView.fact, pickString(liveAutonomyPosture, ["recommended_incident_mode"], "normal") === "normal" ? "ok" : "warn", liveAutonomyRequestFailed)} />
+              <Field label="最近事件" value={displayValue(pickString(liveAutonomyLatestEvent, ["status"], "none"))} />
+            </div>
+          </FactBoundary>
           <div className="brain-card-actions">
             <button className="header-refresh" type="button" disabled={liveUnlockEvaluateMutation.isPending} onClick={() => liveUnlockEvaluateMutation.mutate()}>
               <ShieldCheck size={15} aria-hidden="true" />
               {liveUnlockEvaluateMutation.isPending ? "评估中" : "评估解锁"}
             </button>
-            <ActionButton icon={ShieldCheck} label="一次解锁" variant="danger" disabled={liveUnlockMutation.isPending || !pickBoolean(liveAutonomyEvaluation, ["ok"], false)} loading={liveUnlockMutation.isPending} confirmTitle="确认解锁实盘自治" confirmMessage="只有服务端评估通过时才能执行。解锁后自治链路可能影响实盘，请确认护栏、事故模式和阻断项均已检查。" onAction={() => liveUnlockMutation.mutateAsync()} />
-            <ActionButton icon={ShieldCheck} label="撤销自治" variant="danger" disabled={liveRevokeMutation.isPending || !pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false)} loading={liveRevokeMutation.isPending} confirmMessage="撤销后实盘自治立即回到锁定状态。" onAction={() => liveRevokeMutation.mutateAsync()} />
+            <ActionButton icon={ShieldCheck} label="一次解锁" variant="danger" disabled={liveUnlockMutation.isPending || !unlockAllowed} loading={liveUnlockMutation.isPending} confirmTitle="确认解锁实盘自治" confirmMessage="只有服务端评估通过且事实仍新鲜时才能执行。解锁后自治链路可能影响实盘，请确认护栏、事故模式和阻断项均已检查。" stepUpOnDemand onAction={runLiveUnlock} />
+            <ActionButton icon={ShieldCheck} label="撤销自治" variant="danger" disabled={liveRevokeMutation.isPending} loading={liveRevokeMutation.isPending} confirmMessage="撤销后实盘自治立即回到锁定状态。" onAction={() => liveRevokeMutation.mutateAsync()} />
             {liveUnlockEvaluateMutation.isError ? <span className="error-text small">解锁评估失败</span> : null}
             {liveUnlockMutation.isError ? <span className="error-text small">解锁失败</span> : null}
             {liveRevokeMutation.isError ? <span className="error-text small">撤销失败</span> : null}
           </div>
-          <div className="v15-list compact-v15-list">
+          <div className={`v15-list compact-v15-list ${liveAutonomyKnown ? "" : "fact-unverified"}`.trim()}>
             {(liveAutonomyBlockers.length ? liveAutonomyBlockers : [{ component: "unlock", status: "ok", reason: "ready" }]).slice(0, 6).map((raw, index) => {
               const item = asRecord(raw);
               const component = pickString(item, ["component"], "unlock");
@@ -428,7 +513,7 @@ export function V16BrainPage() {
                     <strong>{displayValue(component)}</strong>
                     <span>{displayValue(pickString(item, ["reason"], status))}</span>
                   </div>
-                  <StatusPill status={displayValue(status)} tone={status === "ok" || status === "ready" ? "ok" : "warn"} />
+                  <StatusPill status={displayValue(status)} tone={factBoundTone(liveAutonomyView.fact, status === "ok" || status === "ready" ? "ok" : "warn", liveAutonomyRequestFailed)} />
                 </div>
               );
             })}
@@ -436,98 +521,100 @@ export function V16BrainPage() {
         </MetricCard>
 
         <MetricCard title="假设">
-          <HypothesisList items={hypotheses} />
+          <div className={brainStateKnown ? "" : "fact-unverified"}><HypothesisList items={hypotheses} /></div>
         </MetricCard>
 
         <MetricCard title="记忆">
-          <SectionHead title="负面记忆" status={`${negativeMemory.length}`} tone={negativeMemory.length ? "warn" : "ok"} />
-          <MemoryList items={negativeMemory} empty="暂无负面记忆命中" />
-          <SectionHead title="反证" status={`${counterEvidence.length}`} tone={counterEvidence.length ? "ok" : "mute"} />
-          <MemoryList items={counterEvidence} empty="暂无反证命中" />
+          <div className={memoryKnown ? "" : "fact-unverified"}>
+            <SectionHead title="负面记忆" status={`${negativeMemory.length}`} tone={factBoundTone(memoryFact, negativeMemory.length ? "warn" : "ok", memoryRequestFailed)} />
+            <MemoryList items={negativeMemory} empty="暂无负面记忆命中" />
+            <SectionHead title="反证" status={`${counterEvidence.length}`} tone={factBoundTone(memoryFact, counterEvidence.length ? "ok" : "mute", memoryRequestFailed)} />
+            <MemoryList items={counterEvidence} empty="暂无反证命中" />
+          </div>
         </MetricCard>
 
         <MetricCard title="影子计划" className="wide-panel">
-          <div className="v16-boundary">
-            <Field label="只读计划" value={pickBoolean(actionPlanRun, ["read_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(actionPlanRun, ["read_only"], true))} />
-            <Field label="影响交易" value={pickBoolean(actionPlanRun, ["affects_trading"], false) ? "true" : "false"} tone={pickBoolean(actionPlanRun, ["affects_trading"], false) ? "bad" : "ok"} />
+          <div className={`v16-boundary ${actionPlanKnown ? "" : "fact-unverified"}`.trim()}>
+            <Field label="只读计划" value={pickBoolean(actionPlanRun, ["read_only"], true) ? "true" : "false"} tone={factBoundTone(actionPlanFact, boolTone(pickBoolean(actionPlanRun, ["read_only"], true)), actionPlanRequestFailed)} />
+            <Field label="影响交易" value={pickBoolean(actionPlanRun, ["affects_trading"], false) ? "true" : "false"} tone={factBoundTone(actionPlanFact, pickBoolean(actionPlanRun, ["affects_trading"], false) ? "bad" : "ok", actionPlanRequestFailed)} />
             <Field label="阶段" value={displayStage(pickString(actionPlanRun, ["phase"], "v16_phase2_shadow_brain"))} />
             <Field label="快照" value={pickString(actionPlanRun, ["snapshot_id"], pickString(brainState, ["snapshot_id"], ""))} />
           </div>
-          <ActionPlanList items={actionPlans} />
+          <div className={actionPlanKnown ? "" : "fact-unverified"}><ActionPlanList items={actionPlans} /></div>
         </MetricCard>
 
         <MetricCard title="后验评价" className="wide-panel">
-          <div className="v16-boundary">
-            <Field label="只读评价" value={pickBoolean(actionPlanEvalRun, ["read_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(actionPlanEvalRun, ["read_only"], true))} />
-            <Field label="影响交易" value={pickBoolean(actionPlanEvalRun, ["affects_trading"], false) ? "true" : "false"} tone={pickBoolean(actionPlanEvalRun, ["affects_trading"], false) ? "bad" : "ok"} />
+          <div className={`v16-boundary ${actionPlanEvalKnown ? "" : "fact-unverified"}`.trim()}>
+            <Field label="只读评价" value={pickBoolean(actionPlanEvalRun, ["read_only"], true) ? "true" : "false"} tone={factBoundTone(actionPlanEvalFact, boolTone(pickBoolean(actionPlanEvalRun, ["read_only"], true)), actionPlanEvalRequestFailed)} />
+            <Field label="影响交易" value={pickBoolean(actionPlanEvalRun, ["affects_trading"], false) ? "true" : "false"} tone={factBoundTone(actionPlanEvalFact, pickBoolean(actionPlanEvalRun, ["affects_trading"], false) ? "bad" : "ok", actionPlanEvalRequestFailed)} />
             <Field label="评价契约" value={displayContract(pickString(actionPlanEvalRun, ["schema_version"], ""))} />
-            <Field label="证据缺口" value={formatDecimal(pickArray(actionPlanEvalRun, ["source_gaps"]).length, 0)} tone={pickArray(actionPlanEvalRun, ["source_gaps"]).length ? "warn" : "ok"} />
+            <Field label="证据缺口" value={formatDecimal(pickArray(actionPlanEvalRun, ["source_gaps"]).length, 0)} tone={factBoundTone(actionPlanEvalFact, pickArray(actionPlanEvalRun, ["source_gaps"]).length ? "warn" : "ok", actionPlanEvalRequestFailed)} />
           </div>
-          <EvaluationList items={actionPlanEvals} />
+          <div className={actionPlanEvalKnown ? "" : "fact-unverified"}><EvaluationList items={actionPlanEvals} /></div>
         </MetricCard>
 
         <MetricCard title="低影响执行" className="wide-panel">
-          <div className="v16-boundary">
-            <Field label="白名单" value={pickBoolean(lowImpactExecutionRun, ["boundary.low_impact_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(lowImpactExecutionRun, ["boundary.low_impact_only"], true))} />
-            <Field label="RiskPolicy" value={pickBoolean(lowImpactExecutionRun, ["boundary.risk_policy_service_required"], true) ? "required" : "missing"} tone={boolTone(pickBoolean(lowImpactExecutionRun, ["boundary.risk_policy_service_required"], true))} />
+          <div className={`v16-boundary ${lowImpactKnown ? "" : "fact-unverified"}`.trim()}>
+            <Field label="白名单" value={pickBoolean(lowImpactExecutionRun, ["boundary.low_impact_only"], true) ? "true" : "false"} tone={factBoundTone(lowImpactFact, boolTone(pickBoolean(lowImpactExecutionRun, ["boundary.low_impact_only"], true)), lowImpactRequestFailed)} />
+            <Field label="RiskPolicy" value={pickBoolean(lowImpactExecutionRun, ["boundary.risk_policy_service_required"], true) ? "required" : "missing"} tone={factBoundTone(lowImpactFact, boolTone(pickBoolean(lowImpactExecutionRun, ["boundary.risk_policy_service_required"], true)), lowImpactRequestFailed)} />
             <Field label="执行契约" value={displayContract(pickString(lowImpactExecutionRun, ["schema_version"], ""))} />
             <Field label="最近更新" value={formatTime(pick(lowImpactExecutionRun, ["latest_created_at"]))} />
           </div>
-          <ExecutionList items={lowImpactExecutions} />
+          <div className={lowImpactKnown ? "" : "fact-unverified"}><ExecutionList items={lowImpactExecutions} /></div>
         </MetricCard>
 
         <MetricCard title="治理候选" className="wide-panel">
-          <div className="v16-boundary">
-            <Field label="只生成候选" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_governance_candidates_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_governance_candidates_only"], true))} />
-            <Field label="手动桥接" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.policy_suggestion_bridge_manual_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.policy_suggestion_bridge_manual_only"], true))} />
-            <Field label="不改权重" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.does_not_apply_factor_weights"], true) ? "true" : "false"} tone={boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.does_not_apply_factor_weights"], true))} />
+          <div className={`v16-boundary ${mediumImpactKnown ? "" : "fact-unverified"}`.trim()}>
+            <Field label="只生成候选" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_governance_candidates_only"], true) ? "true" : "false"} tone={factBoundTone(mediumImpactFact, boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.materializes_governance_candidates_only"], true)), mediumImpactRequestFailed)} />
+            <Field label="手动桥接" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.policy_suggestion_bridge_manual_only"], true) ? "true" : "false"} tone={factBoundTone(mediumImpactFact, boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.policy_suggestion_bridge_manual_only"], true)), mediumImpactRequestFailed)} />
+            <Field label="不改权重" value={pickBoolean(mediumImpactGovernanceRun, ["boundary.does_not_apply_factor_weights"], true) ? "true" : "false"} tone={factBoundTone(mediumImpactFact, boolTone(pickBoolean(mediumImpactGovernanceRun, ["boundary.does_not_apply_factor_weights"], true)), mediumImpactRequestFailed)} />
             <Field label="治理契约" value={displayContract(pickString(mediumImpactGovernanceRun, ["schema_version"], ""))} />
             <Field label="最近更新" value={formatTime(pick(mediumImpactGovernanceRun, ["latest_created_at"]))} />
           </div>
-          <GovernanceList items={mediumImpactGovernance} />
+          <div className={mediumImpactKnown ? "" : "fact-unverified"}><GovernanceList items={mediumImpactGovernance} /></div>
         </MetricCard>
 
         <MetricCard title="候选审查" className="wide-panel">
-          <div className="v16-boundary">
-            <Field label="只读审查" value={pickBoolean(candidateReviewRun, ["boundary.review_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(candidateReviewRun, ["boundary.review_only"], true))} />
-            <Field label="桥接预览" value={pickBoolean(candidateReviewRun, ["boundary.bridge_preview_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(candidateReviewRun, ["boundary.bridge_preview_only"], true))} />
-            <Field label="LLM 只建议" value={pickBoolean(candidateReviewRun, ["boundary.llm_advisory_only"], true) ? "true" : "false"} tone={boolTone(pickBoolean(candidateReviewRun, ["boundary.llm_advisory_only"], true))} />
+          <div className={`v16-boundary ${candidateReviewKnown ? "" : "fact-unverified"}`.trim()}>
+            <Field label="只读审查" value={pickBoolean(candidateReviewRun, ["boundary.review_only"], true) ? "true" : "false"} tone={factBoundTone(candidateReviewFact, boolTone(pickBoolean(candidateReviewRun, ["boundary.review_only"], true)), candidateReviewRequestFailed)} />
+            <Field label="桥接预览" value={pickBoolean(candidateReviewRun, ["boundary.bridge_preview_only"], true) ? "true" : "false"} tone={factBoundTone(candidateReviewFact, boolTone(pickBoolean(candidateReviewRun, ["boundary.bridge_preview_only"], true)), candidateReviewRequestFailed)} />
+            <Field label="LLM 只建议" value={pickBoolean(candidateReviewRun, ["boundary.llm_advisory_only"], true) ? "true" : "false"} tone={factBoundTone(candidateReviewFact, boolTone(pickBoolean(candidateReviewRun, ["boundary.llm_advisory_only"], true)), candidateReviewRequestFailed)} />
             <Field label="最近更新" value={formatTime(pick(candidateReviewRun, ["latest_created_at"]))} />
           </div>
-          <CandidateReviewList items={candidateReviews} />
+          <div className={candidateReviewKnown ? "" : "fact-unverified"}><CandidateReviewList items={candidateReviews} /></div>
         </MetricCard>
 
         <MetricCard title="实盘护栏" className="wide-panel">
-          <div className="v16-boundary">
-            <Field label="能力锁" value={displayValue(pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "locked" : "blocked")} tone={pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn"} />
-            <Field label="偏差" value={displayValue(pickString(latestGuardrail, ["broker_local_divergence.status"], pickString(liveReadyGuardrailRun, ["divergence_status"], "")))} tone={pickString(latestGuardrail, ["broker_local_divergence.status"], "") === "divergent" ? "bad" : "ok"} />
-            <Field label="事故" value={displayValue(pickString(latestGuardrail, ["incident_control.mode"], ""))} tone={pickString(latestGuardrail, ["incident_control.mode"], "normal") === "normal" ? "ok" : "warn"} />
-            <Field label="回滚" value={displayValue(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false) ? "ready" : "missing")} tone={boolTone(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false))} />
+          <div className={`v16-boundary ${liveReadyGuardrailKnown ? "" : "fact-unverified"}`.trim()}>
+            <Field label="能力锁" value={displayValue(pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "locked" : "blocked")} tone={factBoundTone(liveReadyGuardrailFact, pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn", liveReadyGuardrailRequestFailed)} />
+            <Field label="偏差" value={displayValue(pickString(latestGuardrail, ["broker_local_divergence.status"], pickString(liveReadyGuardrailRun, ["divergence_status"], "")))} tone={factBoundTone(liveReadyGuardrailFact, pickString(latestGuardrail, ["broker_local_divergence.status"], "") === "divergent" ? "bad" : "ok", liveReadyGuardrailRequestFailed)} />
+            <Field label="事故" value={displayValue(pickString(latestGuardrail, ["incident_control.mode"], ""))} tone={factBoundTone(liveReadyGuardrailFact, pickString(latestGuardrail, ["incident_control.mode"], "normal") === "normal" ? "ok" : "warn", liveReadyGuardrailRequestFailed)} />
+            <Field label="回滚" value={displayValue(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false) ? "ready" : "missing")} tone={factBoundTone(liveReadyGuardrailFact, boolTone(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false)), liveReadyGuardrailRequestFailed)} />
             <Field label="建议模式" value={displayValue(pickString(latestGuardrail, ["action_recommendation.target_mode"], pickString(liveReadyGuardrailRun, ["recommended_mode"], "")))} />
             <Field label="最近更新" value={formatTime(pick(liveReadyGuardrailRun, ["latest_created_at"]))} />
           </div>
-          <GuardrailList items={liveReadyGuardrails} />
+          <div className={liveReadyGuardrailKnown ? "" : "fact-unverified"}><GuardrailList items={liveReadyGuardrails} /></div>
         </MetricCard>
 
         <MetricCard title="Critic 与证据" className="wide-panel">
           <div className="v15-two-col">
             <div>
-              <SectionHead title="Critic 异议" status={`${pickArray(critic, ["objections"]).length}`} tone={pickArray(critic, ["objections"]).length ? "warn" : "ok"} />
-              <div className="v15-list">
+              <SectionHead title="Critic 异议" status={`${pickArray(critic, ["objections"]).length}`} tone={factBoundTone(brainStateFact, pickArray(critic, ["objections"]).length ? "warn" : "ok", brainStateRequestFailed)} />
+              <div className={`v15-list ${brainStateKnown ? "" : "fact-unverified"}`.trim()}>
                 {(pickArray(critic, ["objections"]).length ? pickArray(critic, ["objections"]) : ["none"]).map((item, index) => (
                   <div className="v15-list-row" key={`${String(item)}-${index}`}>
                     <div>
                       <strong>{String(item)}</strong>
                       <span>{displayValue(pickString(critic, ["max_allowed_action_scope"], "observe_only"))}</span>
                     </div>
-                    <StatusPill status={displayValue(criticVerdict)} tone={criticVerdict === "pass" ? "ok" : "warn"} />
+                    <StatusPill status={displayValue(criticVerdict)} tone={factBoundTone(brainStateFact, criticVerdict === "pass" ? "ok" : "warn", brainStateRequestFailed)} />
                   </div>
                 ))}
               </div>
             </div>
             <div>
-              <SectionHead title="证据缺口" status={`${sourceGaps.length}`} tone={sourceGaps.length ? "warn" : "ok"} />
-              <MemoryList items={sourceGaps.map((gap) => ({ source_table: "source_gap", source_id: String(gap), text_summary: String(gap), polarity: "neutral" }))} empty="无证据缺口" />
+              <SectionHead title="证据缺口" status={`${sourceGaps.length}`} tone={factBoundTone(memoryFact, sourceGaps.length ? "warn" : "ok", memoryRequestFailed)} />
+              <div className={memoryKnown ? "" : "fact-unverified"}><MemoryList items={sourceGaps.map((gap) => ({ source_table: "source_gap", source_id: String(gap), text_summary: String(gap), polarity: "neutral" }))} empty="无证据缺口" /></div>
             </div>
           </div>
           <div className="brain-json-grid">
@@ -543,7 +630,7 @@ export function V16BrainPage() {
         </MetricCard>
 
         <MetricCard title="最近记忆索引" className="wide-panel">
-          <MemoryList items={memoryItems} empty="暂无索引记忆" />
+          <div className={memoryKnown ? "" : "fact-unverified"}><MemoryList items={memoryItems} empty="暂无索引记忆" /></div>
         </MetricCard>
 
         <MetricCard title="契约状态">

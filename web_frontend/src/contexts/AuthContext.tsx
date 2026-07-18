@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AuthMe,
@@ -6,15 +6,14 @@ import {
   login as apiLogin,
   LoginPayload,
   extractLoginToken,
+  logoutAuth,
+  resetUnauthorizedCoordinator,
   setUnauthorizedHandler,
 } from "@/api/client";
+import { queryClient } from "@/api/queryClient";
+import { authStateAfterMeFailure, type AuthSnapshot } from "@/contexts/authState";
 
-type AuthState = {
-  token: string | null;
-  user: string | null;
-  loading: boolean;
-  authenticated: boolean;
-};
+type AuthState = AuthSnapshot;
 
 type AuthContextValue = AuthState & {
   login: (payload: LoginPayload) => Promise<void>;
@@ -35,9 +34,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     authenticated: false,
   });
 
-  const logout = () => {
+  const clearLocalSession = useCallback(() => {
     localStorage.removeItem(STORAGE_KEY);
     setState((prev) => ({ ...prev, token: null, user: null, authenticated: false }));
+    window.dispatchEvent(new Event("quant-auth-invalidated"));
+  }, []);
+
+  const logout = () => {
+    void logoutAuth().catch(() => undefined);
+    void queryClient.cancelQueries();
+    queryClient.clear();
+    clearLocalSession();
     navigate("/login", { replace: true });
   };
 
@@ -49,9 +56,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const me: AuthMe = await getAuthMe();
       setState((prev) => ({ ...prev, user: me.user, authenticated: me.authenticated, loading: false }));
-    } catch {
-      logout();
-      setState((prev) => ({ ...prev, loading: false }));
+    } catch (error) {
+      const status = (error as { status?: number } | null)?.status;
+      setState((prev) => authStateAfterMeFailure(prev, status));
     }
   };
 
@@ -67,6 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw new Error("登录响应缺少 token");
     }
     localStorage.setItem(STORAGE_KEY, token);
+    resetUnauthorizedCoordinator();
     setState((prev) => ({
       ...prev,
       token,
@@ -77,11 +85,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   useEffect(() => {
-    setUnauthorizedHandler(() => () => {
-      logout();
+    setUnauthorizedHandler(async () => {
+      await queryClient.cancelQueries();
+      queryClient.clear();
+      clearLocalSession();
       navigate("/login", { replace: true });
     });
-  }, [navigate]);
+  }, [clearLocalSession, navigate]);
+
+  useEffect(() => {
+    const onToken = (event: Event) => {
+      const token = (event as CustomEvent<{ token?: string }>).detail?.token || "";
+      if (token) {
+        setState((prev) => ({ ...prev, token }));
+      }
+    };
+    window.addEventListener("quant-auth-token", onToken);
+    return () => window.removeEventListener("quant-auth-token", onToken);
+  }, []);
 
   const value = useMemo<AuthContextValue>(
     () => ({

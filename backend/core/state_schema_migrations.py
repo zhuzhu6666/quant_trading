@@ -27,12 +27,21 @@ STATE_SCHEMA_MIGRATION_LOCK_ID: Final[int] = 0x5155414E54534D31  # ASCII: QUANTS
 # creating the new migration ledger and foundation tables.
 STATE_SCHEMA_BASELINE_TABLES: Final[tuple[str, ...]] = (
     "autonomous_learning_sample",
+    "brain_governance_candidate_review",
+    "brain_medium_impact_governance",
+    "brain_state_snapshot",
     "decision_ledger",
+    "experience_memory",
+    "experience_pattern_stats",
+    "factor_catalog_snapshot",
+    "jobs",
     "learning_application_effect",
     "learning_application_log",
     "learning_experiment_reservation",
     "order_lifecycle_event",
     "policy_suggestion",
+    "position_supervisor_trace",
+    "proposal_registry",
     "runtime_config_overlay",
     "runtime_config_snapshot",
     "v16_brain_command",
@@ -102,8 +111,16 @@ class StateSchemaMigration:
 
 STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(1, "phase0b_foundation", "0001_phase0b_foundation.sql"),
+    StateSchemaMigration(2, "phase3_governance_coordinator", "0002_phase3_governance_coordinator.sql"),
+    StateSchemaMigration(3, "phase5_persistent_job_queue", "0003_phase5_persistent_job_queue.sql"),
+    StateSchemaMigration(4, "phase5_runtime_schema_writer_retirement", "0004_phase5_runtime_schema_writer_retirement.sql"),
+    StateSchemaMigration(5, "phase3_governance_eligibility_weighting", "0005_phase3_governance_eligibility_weighting.sql"),
+    StateSchemaMigration(6, "phase3_factor_lifecycle_identity", "0006_phase3_factor_lifecycle_identity.sql"),
+    StateSchemaMigration(7, "phase3_v16_authority_freshness", "0007_phase3_v16_authority_freshness.sql"),
+    StateSchemaMigration(8, "phase5_runtime_schema_contract_completion", "0008_phase5_runtime_schema_contract_completion.sql"),
+    StateSchemaMigration(9, "phase3_runtime_overlay_authority", "0009_phase3_runtime_overlay_authority.sql"),
 )
-STATE_SCHEMA_MIN_VERSION: Final[int] = 1
+STATE_SCHEMA_MIN_VERSION: Final[int] = 9
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 
 

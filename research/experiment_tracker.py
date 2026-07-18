@@ -14,6 +14,8 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from backend.core.db import prepare_experiments_store
+
 
 @dataclass
 class Experiment:
@@ -50,70 +52,11 @@ class ExperimentTracker:
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        """Create/migrate the canonical structured experiment table."""
+        """Validate production schema or prepare an isolated test store."""
         try:
-            with self._connect() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS experiments (
-                        run_id TEXT PRIMARY KEY,
-                        experiment_type TEXT,
-                        params_json TEXT DEFAULT '{}',
-                        metrics_json TEXT DEFAULT '{}',
-                        tags_json TEXT DEFAULT '[]',
-                        artifacts_json TEXT DEFAULT '[]',
-                        status TEXT DEFAULT 'running',
-                        timestamp REAL,
-                        created_at REAL
-                    )
-                    """
-                )
-                columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(experiments)").fetchall()}
-                for name, ddl in {
-                    "experiment_type": "experiment_type TEXT",
-                    "params_json": "params_json TEXT DEFAULT '{}'",
-                    "metrics_json": "metrics_json TEXT DEFAULT '{}'",
-                    "tags_json": "tags_json TEXT DEFAULT '[]'",
-                    "artifacts_json": "artifacts_json TEXT DEFAULT '[]'",
-                    "status": "status TEXT DEFAULT 'running'",
-                    "timestamp": "timestamp REAL",
-                    "created_at": "created_at REAL",
-                }.items():
-                    if name not in columns:
-                        conn.execute(f"ALTER TABLE experiments ADD COLUMN {name} {ddl}")
-                # One older tracker stored a JSON blob in `data`.  Migrate it
-                # in place so both historical rows and the canonical schema
-                # remain readable without creating a second source of truth.
-                columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(experiments)").fetchall()}
-                if "data" in columns:
-                    rows = conn.execute(
-                        "SELECT run_id, data FROM experiments WHERE (experiment_type IS NULL OR experiment_type='') AND data IS NOT NULL"
-                    ).fetchall()
-                    for row in rows:
-                        try:
-                            payload = json.loads(row["data"] or "{}")
-                        except Exception:
-                            continue
-                        conn.execute(
-                            """UPDATE experiments SET experiment_type=?, params_json=?, metrics_json=?,
-                               tags_json=?, artifacts_json=?, status=?, timestamp=?, created_at=?
-                               WHERE run_id=?""",
-                            (
-                                str(payload.get("experiment_type") or "unknown"),
-                                json.dumps(payload.get("params") or {}),
-                                json.dumps(payload.get("metrics") or {}),
-                                json.dumps(payload.get("tags") or []),
-                                json.dumps(payload.get("artifacts") or []),
-                                str(payload.get("status") or "running"),
-                                float(payload.get("timestamp") or self._now()),
-                                float(payload.get("timestamp") or self._now()),
-                                row["run_id"],
-                            ),
-                        )
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_type ON experiments(experiment_type)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status)")
+            prepare_experiments_store(self._db)
             logger.debug("Database table guaranteed to exist.")
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, RuntimeError) as exc:
             logger.error(f"Failed to initialise database: {exc}")
             raise
 

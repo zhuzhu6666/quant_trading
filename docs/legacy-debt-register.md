@@ -1,7 +1,7 @@
 # Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-07-14
+> Last verified: 2026-07-19
 > Scope: known legacy concepts, deprecated paths, migration state, and cleanup rules.
 
 本文登记历史残留。目的不是列 TODO，而是防止旧概念在新实现里反复复活。
@@ -24,6 +24,13 @@
 | `migrating` | 已有新路径，但旧路径还在兼容 |
 | `fixed` | 已完成修复，只保留追溯 |
 | `deprecated` | 明确废弃，不应新增依赖 |
+
+### 兼容债务删除总门槛
+
+- 单测、故障注入或代码完成都不等于运行观察完成。Safety v2 必须 shadow 至少一个完整持仓生命周期且零动作差异；无仓时必须完成 24 小时 shadow 与故障矩阵。当前尚未宣称达成该门槛。
+- `live_safety_plane_v2_mode`、generation controller、execution outcome、governance coordinator 和 PG job queue 保持默认 off/false；只能按发布配置、受控重启和各自验收门分步切换。
+- 旧 safety 尾部执行、loop globals/PID 猜测、V16 consume、direct overlay/Registry mutation、JobManager 本地重任务和 recursive frontend compat 只能在新路径经过一个稳定发布周期后删除。UI 旧字段还必须满足两个小程序版本或 30 天（取更长者）；Auth legacy 路径必须等全部客户端迁移完成。
+- 不得回滚 emergency 严格对账、unknown execution 禁止猜测/重发、session unavailable 不归零、风险缩减不依赖 PG 以及 durable auth revocation 语义。新路径异常时应进入 `no_new_risk`/人工确认，不恢复假成功逻辑。
 
 ## 2. 因子系统旧债
 
@@ -62,12 +69,21 @@
 
 ### shadow/discovered/live 混用
 
-- 状态: `fixed`
+- 状态: `migrating`
 - 旧理解: 搜索出来的因子容易被直接注册或进入主链。
-- 当前口径: shadow 永不直接交易；discovered 必须经证据门槛和治理晋升；所有 directional alpha 还必须有 `factor_health` 非 UNKNOWN、`n_obs>0` 的持久化观测证据；live 进程把实际选择发布到 `runtime_kv[runtime_factor_selection.v1]`，Catalog 不再依赖自身进程的 registry 副本猜测主链。
-- 影响面: discovery、registry、runtime selection、AWE、readiness、Catalog。
-- 收口方式: `runtime_factor_selection` 返回 selected/excluded/reason 并由 live 发布跨进程投影；治理动作由 Orchestrator 执行。
-- 验证方式: runtime selection 明确排除 `shadow_only` / `lifecycle_dead`，Factor Governance 是唯一 lifecycle executor。
+- 当前口径: PostgreSQL `factor_lifecycle_state` 是 lifecycle 事实源，`factor_runtime_projection` 是加载确认事实；兼容 shadow promote 只提交 `PROMOTION_PREPARED`，ACTIVE 必须经 Coordinator/V16、稳定 artifact、fresh health 和 fresh loaded ack。RuntimeConfig/Registry 只作 committed 后投影。
+- 影响面: discovery、shadow API、registry、runtime selection、AWE、readiness、Catalog、recovery。
+- 收口方式: 新 `FactorLifecycleService` 已接管 shadow API 的 prepare/quarantine/retire 和 Factor Governance 的 discovered prepare/activate；live warmup/hot reload 已提供非投票式 loaded ack。其余旧 Canary rollback/retire、builtin lifecycle overlay 路径仍需逐一改成 typed plan，然后删除 direct mutation。
+- 验证方式: `tests/test_factor_lifecycle_service.py` 覆盖稳定 ID、状态机、激活门、投影降级恢复和 route 无 direct registry mutation。
+
+### discovered 因子隐式 0.3 权重
+
+- 状态: `fixed`
+- 旧理解: Catalog 对未显式配置权重的 discovered factor 使用 `0.3`，可能让展示和治理把未准入候选误当成参与评分。
+- 当前口径: 缺失或非法权重一律为 0，`explicit_weight=false`、`used_in_score=false`；ACTIVE 只能由 lifecycle activation 同时写入显式正权重。
+- 影响面: Factor Catalog、runtime config、前端因子治理、ACTIVE admission。
+- 收口方式: 删除默认 `0.3`，保留 additive `explicit_weight` 字段并以状态机测试锁定。
+- 验证方式: `tests/test_factor_lifecycle_service.py::test_discovered_factor_without_explicit_weight_never_gets_implicit_default`。
 
 ## 3. 自治治理旧债
 
@@ -179,6 +195,15 @@
 - 收口方式: `RuntimeConfigOverlayService._mutate_overlay` + registered overlay base + empty-overlay refresh。
 - 验证方式: `tests/test_factor_autonomy_hardening.py` 的 concurrent/failed transaction/empty overlay 测试。
 
+### 历史 runtime overlay 缺少 committed mutation 权威绑定
+
+- 状态: `quarantined`
+- 旧理解: `runtime_config_overlay.mutation_id=''` 可以凭来源名或“当前行为看起来保守”在任意 coordinator mode 下继续恢复，悬空 mutation 也可以回退为普通 legacy overlay。
+- 当前口径: 非空 mutation 必须对应 `status=committed`、`projection_status=current` 且 target/committed config hash 与 domain hash 完整绑定；空 mutation 只能凭 v9 `legacy_authority_json` 恢复，manifest 必须绑定当前 overlay hash、operator identity/review ID/time 和全部顶层 key，且中央 before/after 分类器逐 key 得出 `risk_tightening`。缺失、部分复核、hash 漂移或悬空 intent 一律激活 no-new-risk；已有仓位所需的只读 supervisor/收紧投影可以保留，扩张/未知字段不能据此生效。
+- 影响面: backend/learning worker startup、长期进程 overlay refresh、demo 自治连续性、operator release preflight。
+- 收口方式: 先 apply v9；在不重启 live 服务时读取精确 overlay hash/mutation ID。只有中央分类为 tightening 的历史 key 才能由 operator 调用 `RuntimeConfigOverlayService.review_legacy_quarantine()` 逐项回填；partial review 仍保持 blocked。任何非收紧 key 不得 grandfather，必须在 latch 下用 typed Coordinator mutation 重建或由 operator 显式清理 overlay，确认 committed projection 后再按 cause 身份释放 latch。
+- 验证方式: `tests/test_runtime_overlay_authority.py`、`tests/test_governance_authority_boundaries.py`、`tests/test_factor_autonomy_hardening.py`。
+
 ### Evolution 与 Factor Governance 双生命周期执行者
 
 - 状态: `fixed`
@@ -210,9 +235,9 @@
 
 - 状态: `fixed`
 - 旧理解: `ExperimentTracker` 可用 JSON blob schema，`EvolutionExperimentRegistry` 可在同一库使用 structured schema。
-- 当前口径: `data/experiments.db` 只有 structured canonical schema；未接线的 Evolution registry adapter 已移除，旧 blob 自动原位迁移。
+- 当前口径: `data/experiments.db` 只有 structured canonical schema；未接线的 Evolution registry adapter 已移除。生产 ExperimentTracker/model 构造器只读校验，旧 blob 仅由显式 `scripts/experiments_schema_migrate.py --apply`（或兼容的 broader `db_doctor --repair`）原位迁移。
 - 影响面: experiments API、周报、GP/模型实验记忆、db doctor。
-- 收口方式: 统一到 `research.experiment_tracker.ExperimentTracker`。
+- 收口方式: 统一到 `research.experiment_tracker.ExperimentTracker` 的数据 API，并由 `backend.core.db` 统一持有 schema validation/operator migration。
 - 验证方式: `research.experiment_tracker.ExperimentTracker` 的 API/报告回归测试。
 
 ### 旧 RegimeAwareClassifier
@@ -355,10 +380,10 @@
 
 - 状态: `fixed`
 - 旧理解: AWE、Factor Governance 和 Evolution/manual govern 可以各自调用 DecisionPolicy、RiskPolicy 与 RuntimeConfigMutationService，只要局部链路看起来完整即可。
-- 当前口径: 所有实际因子权重变更统一由 `FactorWeightChangeService` 编排；每次都包含有界经验先验、共享实验准入、RiskPolicy、prepared application、runtime mutation 和后验观察。
+- 当前口径: 所有实际因子权重变更统一由 `FactorWeightChangeService` 编排；每次都包含有界经验先验、共享实验准入、RiskPolicy、runtime mutation 和后验观察。`dual_record/enforce` 下通过 Coordinator transaction writer 原子写 application/effect/reservation 并绑定 mutation；`off` 保留 legacy prepared 兼容恢复。
 - 影响面: live AWE、因子降权/晋升、manual govern API、Evolution、学习效果账本。
-- 收口方式: 三条生产路径已迁入统一业务用例；prepared application 在 mutation 前落库，同 scope prepared 也属于 active experiment。
-- 验证方式: `tests/test_factor_weight_change_service.py`、`tests/test_evolution_closure_fixes.py`。
+- 收口方式: 三条生产路径已迁入统一业务用例；Coordinator 模式不再在 mutation 前落 prepared application/reservation，完整 batch 在 scope/global lock 内一次提交，故障时领域账本和 overlay/snapshot 一起回滚。旧 off 路径继续把 prepared 视为 active experiment 并支持 snapshot recovery。
+- 验证方式: `tests/test_factor_weight_change_service.py`（atomic bind、fault rollback、double worker）、`tests/test_evolution_closure_fixes.py`。
 
 ### learning worker 导入 live_service 巨石
 
@@ -524,12 +549,157 @@
 
 ### PostgreSQL state schema 仍由业务服务动态补表补列
 
-- 状态: migrating
+- 状态: fixed
 - 旧理解: `init_state_db()` 或任一业务 service 在首次调用时执行 `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE`，即可长期替代正式 forward migration。
-- 当前口径: 新的 PostgreSQL forward DDL 必须进入 `migrations/state_pg/`，由 `scripts/state_schema_migrate.py --apply` 在 advisory lock 下显式执行，并写 checksum 保护的 `state_schema_migration`；backend/worker 只校验最低版本。现有动态 DDL 暂时保留为兼容层，不能继续承接新 schema。
+- 当前口径: PostgreSQL forward DDL 只允许进入 `migrations/state_pg/`，由 `scripts/state_schema_migrate.py --apply` 的专用 migration connection 在 advisory lock 下显式执行，并写 checksum 保护的 `state_schema_migration`。普通 backend/worker connection 和 cursor 在代码层禁止 schema write；service-local 旧 `CREATE IF NOT EXISTS` / `ALTER ADD COLUMN` 仅作为非写 catalog assertion，缺 table/column/index 时 fail-closed，不会补建。`init_all()` 与 experiments/model registry/shadow/canary/inference 构造器也不再启动期 ALTER 独立 `experiments.db`：canonical 文件只读校验完整表/列/索引，文件缺失时保持可选而不隐式创建；完整 SQLite schema 只由显式 `scripts/experiments_schema_migrate.py --apply` 写入（`db_doctor --repair` 为 broader 兼容入口），调用方显式提供的非 canonical 路径可作为隔离 fixture 自初始化。
 - 影响面: backend/worker 启动顺序、RuntimeConfig overlay、学习治理表、数据库角色权限和滚动发布。
-- 收口方式: Phase 0B 先建立版本 ledger、runner、最低版本门禁和 additive foundation；后续逐项把 service-local DDL 搬入新版本，增加 disposable PostgreSQL 集成测试，最后移除 runtime role 的 CREATE/ALTER 权限和 `connect_state_store()` 的隐式建 schema。
-- 验证方式: `tests/test_state_schema_migrations.py`、`scripts/state_schema_migrate.py --check`；生产迁移必须遵循先 apply/check、后部署重启的顺序。
+- 收口方式: v3 承接 durable jobs 和旧中央 compatibility 对象；v4 显式物化 worker/research audit、model influence、off-market audit 表与索引；v7 将 V16 委派授权时间从可变的 `updated_at` 分离为不可变 `authority_issued_at`；v8 物化 `runtime_kv`、factor `canary_state`、旧动态补列，并以新名字补齐 experience append-source 正确索引，保留 v4 同名旧索引而不做破坏性重建；v9 为 `runtime_config_overlay` 增加 `legacy_authority_json` 及 mutation/updated_at 查询索引，使历史空 mutation 行只能经 hash-bound operator review 隔离恢复。catalog validator 对索引校验 target table、unique、ordered keys 与 predicate presence，不再只看同名 regclass。高频 worker/model/readiness 路径已显式调用只读 catalog validator；其余 legacy ensure 仍由普通 connection/cursor guard 转为 assertion。`connect_state_store()` 不再隐式建 schema，旧 SQLite restore 命令只在已迁移 schema 上导入数据。数据库 runtime role 的 DDL 权限仍建议在稳定发布后由运维层撤销，作为第二道防线。
+- 验证方式: `tests/test_state_schema_migrations.py`、`tests/test_state_store_schema_guard.py`、`tests/integration/test_postgres_state_store.py`、`scripts/state_schema_migrate.py --check`；生产必须先 apply/check/幂等复跑，再部署或重启当前最低版本 9 的 backend/worker，后续以代码常量为准。
+
+### JobManager 自建事件循环线程承载重任务
+
+- 状态: `migrating`
+- 旧理解: backend API 可以在 `JobManager` 构造时隐式启动 daemon event-loop thread，并把 backtest/discovery/tuning/A-B 重任务留在 Web 进程内运行。
+- 当前口径: `JobManager` 永不创建或拥有 event-loop thread；`pg_job_queue_v2_enabled=true` 时，`backtest/discover/tuning/ab_test/external_refresh/sync/factor_health/parameter_template_validation` 八类重任务只持久化到 PostgreSQL `jobs`，由独立 `scripts/job_worker.py` claim/heartbeat/complete。静态架构测试扫描所有生产 `.submit("kind")` 调用，要求任务种类与 worker handler 完全一致，避免静默退回进程内。flag 默认关闭期间，旧 API closure 仍可在 FastAPI 所属 loop 或调用线程内兼容执行，不产生孤儿 loop thread。
+- 兼容执行所有权: flag-off 的同步 closure 使用 `JobManager` 懒加载、最多两个 worker 的显式 executor，不借用 FastAPI/asyncio default executor；lifespan stop 会先停止准入，再同步 cancel 并 join executor。重复或并发 shutdown 只有一个 join owner，持久队列路径不会启动该 executor。
+- 影响面: backend 进程资源、重启恢复、任务取消/重试、研究并发和 systemd 发布顺序；不涉及 broker mutation 或 live safety authority。
+- 收口方式: 先执行 v3 additive migration，部署 disabled worker，再打开静态 flag 并重启 backend/worker；按全局及 kind 限额观察 lease recovery。稳定发布后删除 flag-off 的本地重任务兼容执行，仅保留轻任务与历史查询。
+- 验证方式: `tests/test_backend_jobs_manager.py`、`tests/test_persistent_job_handlers.py`、`tests/test_persistent_job_worker.py`、`tests/test_backend_runtime_lifecycle.py`、`tests/integration/test_postgres_job_queue.py`。
+
+### backend readiness daemon 在线程退出时遗留原生库工作
+
+- 状态: fixed
+- 旧理解: readiness snapshot 可以为每次 stale 请求临时启动 daemon thread，仅靠全局 lock 单飞；进程退出时无需持有 thread handle 或等待 DuckDB/Pandas 工作完成。
+- 当前口径: readiness refresh 按 state store 绑定 process-owned owner，记录 generation/thread，使用非 daemon 单飞 worker；`BackendRuntimeLifecycle.start()` 统一开启并调度，`stop()` 先拒绝新增 refresh，再 join 当前 worker。API 仍只读持久化快照且非阻塞。
+- 影响面: backend lifespan、`/api/ops/backend-readiness`、DuckDB/native 资源析构、pytest/process exit。
+- 收口方式: 删除 app 中无所有权的直接 thread 启动，把启动和 drain 都收进 lifecycle；timeout 后 owner 仍以非 daemon 保留所有权直到任务完成，不伪报 stopped。
+- 验证方式: `tests/test_backend_readiness_snapshot.py` 单飞/drain 用例、`tests/test_backend_runtime_lifecycle.py`，以及 lifecycle + learning worker 组合进程退出码必须为 0。
+
+### 紧急平仓把空列表和 order success 当作完成
+
+- 状态: migrating
+- 旧理解: `refresh_positions()` 返回空列表即可视为无仓，`close_position.success=true` 即可累计 closed。
+- 当前口径: safety/startup/emergency 只接受带 reconcile ID/observed_at 的显式 fresh authoritative reconcile；push event 只进入非权威 event projection。position reconcile 仅证明 identity/volume/SL/TP，current price 与 PnL 分别要求 fresh spot 和独立 broker PnL RPC；未知组件不能按 entry price、账户差额或零值补齐。emergency 先持久化本地 no-new-risk latch 并与 open admission 线性化，只有 fresh post-reconcile 确认目标 position ID 消失才可报告 completed。
+- 影响面: `backend.services.live_service`、cTrader reconcile contract、live emergency API、运行审计与 operator resume。
+- 收口方式: 新 bridge 使用 immutable `PositionReconcileResult`；legacy `refresh_positions()` 只保留给非 safety 的值兼容调用，startup/recovery/emergency/safety 缺少 explicit `reconcile_positions()` 时一律 fail-closed。PG/审计失败进入 append-only safety outbox，不阻断风险缩减。
+- 验证方式: `tests/test_live_emergency_safety.py`、`tests/test_live_service_lifecycle.py` emergency 定向用例。
+
+### broker 延迟/未知回执被猜测为成功或可重发
+
+- 状态: `migrating`
+- 旧理解: market RPC timeout、未知 protobuf 或仓位差分不唯一时，可以用同方向最大 position ID / `positions_before[0]` 推测成交，或将本次视为失败后重发。
+- 当前口径: `CTraderOrderResult.outcome` 只允许 `confirmed/rejected/unknown/simulated`，`success=true` 只属于 confirmed/simulated。V2 路径在 RPC 前依次 committed `broker_execution_intent.prepared/submitting`，以 UUID client ID、comment token 和 order/deal/position 差分唯一定位；无法唯一解析或 intent finalize 失败时必须 `unknown`、立即增加独立 `broker_execution_unknown` no-new-risk cause、禁止重发，重启先 recovery。同 position/action 未解决 intent 会阻断重复 close/amend RPC，但 PG/审计失败不得阻断首次风险缩减。通用 incident thaw 不得删除 unknown 证据；只有 fresh broker recovery/reconcile 明确得到 confirmed/rejected 后才能追加对应 resolution event 并按 intent 释放。
+- 影响面: cTrader bridge、live open admission、restart recovery、entry protection、close/amend 幂等与 incident latch。
+- 收口方式: `ctrader_execution_outcome_v2_enabled=false` 当前默认保留兼容路径；完成 timeout/延迟回执/未知 protobuf/重启恢复故障矩阵与受控观察后才随发布配置切换。稳定发布后才删除 PID 猜测和旧 result 兼容分支；unknown 禁止假成功/重发的语义不得回滚。
+- 验证方式: `tests/test_ctrader_execution_outcome.py`、`tests/test_broker_execution_intent.py`、`tests/test_live_generation_integration.py`。
+
+### live loop 单例 globals 会在旧线程退出前释放所有权
+
+- 状态: migrating
+- 旧理解: stop 设置 event 后立即清空 `_loop_thread` 即可让新 start 成功；market closed、bar/circuit/PG 失败可在持仓保护前提前 return，缺 session cache 时可以重置为零。
+- 当前口径: generation v2 开关无论开启还是关闭，draining 都一直保留 thread ownership 到真实 exit，stop flag 先阻断后续 open admission、再等待已准入 broker RPC，replacement start 在 owned thread 存活期间固定拒绝；每轮显式 broker snapshot 和 safety 先于 session/circuit/bar/alpha，startup barrier 未完成、safety heartbeat 缺失/过期、unknown execution 或 session `unavailable/degraded_cache` 都阻断新增风险。session 恢复以 deals 为主并排除 broker 仍开放 position。Safety shadow 已不再把 candidate 自己与自己比较：V2 planner 与独立 legacy read-only preview 都覆盖 timeout、entry repair、supervisor close/reduce/tighten 和 trailing，先按稳定 SHA-256 指纹与候选计数比较；重复指纹或同一 position 的多 mutation candidate 不能进入 enforce。shadow 再执行 legacy authoritative cycle 并核对实际仲裁；enforce 只有纯比较匹配后才逐 V2 candidate 执行。不独立、重复/冲突、异常或 mismatch 会在 broker mutation 前持久化 forced-shadow/no-new-risk cause，并让本轮 legacy authoritative protection exactly once、V2 zero；forced shadow 跨后续周期及 generation 重建保持，避免半轮或跨轮混合 mutation authority。
+- 影响面: live start/stop/status、backend shutdown、position protection、account/position freshness、session circuit、AutoRecovery 和前端 loop readiness。
+- 收口方式: `live_generation_controller_v2_enabled=false` 与 `live_safety_plane_v2_mode=off` 默认保留旧运行路径，但“stop 立即清 globals”已从默认路径删除；独立 shadow comparison 的代码和测试已具备，但仍必须实际 shadow 一个完整持仓生命周期，或在无仓时完成 24 小时观察与故障矩阵，才能随发布/重启切换 generation 与 safety enforce。稳定发布后删除其余 loop globals、并发 refresh worker 和旧 safety 尾部执行。
+- 验证方式: `tests/test_live_generation_integration.py`、`tests/test_live_loop_controller.py`、`tests/test_live_safety_plane.py`、`tests/test_live_service_lifecycle.py`。
+
+### live_service 同时承载 reconcile、safety、startup 与 emergency 领域实现
+
+- 状态: `migrating`
+- 旧理解: 为复用进程内 globals，可以继续把 explicit reconcile、safety cycle、startup barrier 和 emergency 状态机直接写进 `live_service.py`。
+- 当前口径: `backend.services.live_reconciliation` 只负责 fresh broker contract，`backend.services.live_loop_v2` 负责 safety/startup 顺序，`backend.services.live_emergency` 负责严格紧急平仓；三者均不依赖 PostgreSQL。`live_service` 仅保留兼容状态发布、process wiring 和 callback 注入。
+- 影响面: live loop façade、broker reconcile、position protection、generation barrier、emergency API；不改变 feature flag 默认值或 broker mutation 串行所有权。
+- 收口方式: 本轮已移出上述新增实现并保留薄兼容入口；后续继续把 session restore、execution recovery 和旧 protection 尾部按同一 dependency-injection 边界迁出，稳定发布后再删除旧 globals。
+- 验证方式: `tests/test_live_service_facade_boundaries.py`、`tests/test_live_emergency_safety.py`、`tests/test_live_generation_integration.py`、`tests/test_live_service_lifecycle.py`。
+
+### 治理 mutation 缺少跨账本事务提交权
+
+- 状态: migrating
+- 旧理解: V16 command 可以在 overlay 写入前 consume，overlay/snapshot 提交后直接发布内存；application/effect、reservation 和 Registry 可由各领域服务分别补写，局部成功即可解释为已应用。
+- 当前口径: `GovernanceMutationCoordinator` 是治理提交权的唯一目标边界。它先 durable reserve，再在同一 PostgreSQL 事务内重验 before、写 prepared intent、legacy overlay/snapshot、领域事实并 finalize V16；commit 后才发布 RuntimeConfig，publish 失败记 `projection_status=degraded` 并从 committed snapshot 重放。风险分类只由 before/after 推导，调用方自报 rollback/risk_reduction 或伪装 action 名不能免闸门。ParameterTemplate、position supervisor、model influence、factor lifecycle、incident control、live autonomy、autonomy freeze 与 operator expansion pause 均已进入 typed plan；旧 `/api/shadow/promote` 只写 `PROMOTION_PREPARED`。
+- 影响面: RuntimeConfig mutation、V16、factor/parameter/supervisor/model/autonomy/incident 治理、application/effect/reservation、本地 safety latch/outbox 与进程投影。
+- 收口方式: release-time `governance_mutation_coordinator_v2_mode=off|dual_record|enforce` 默认 off；dual_record 同时维护旧 overlay/snapshot 与新 intent，不做一次性切换。V16 改为 `available -> claimed -> finalized`，只有 Coordinator 事务 finalize 增加 apply_count 并绑定 mutation/config/domain hash；不可变 `authority_issued_at` 决定授权年龄，claim/release/recovery 不得用 operational `updated_at` 续期。backend 和 learning worker 启动时收口过期 claim 和停滞 intent，但不恢复成新授权。旧 consume 与 typed plan 内明确标注的 `off` 兼容分支保留一版。incident/revoke 收紧在 PG 前先激活本地 latch，PG、RiskPolicy 或审计失败写 outbox 且不依赖治理投影完成；thaw/unlock/unfreeze/operator resume 均视为扩张，要求最近 step-up（operator risk unlock）并 fail-closed 等待 V16。稳定一版后才能删除兼容分支。
+- 验证方式: `tests/test_governance_mutation_coordinator.py`、`tests/test_governance_control_plans.py`、`tests/test_governance_runtime_controls.py`、`tests/test_v16_command_finalize.py`、`tests/test_state_schema_migrations.py`。
+
+### learning worker 启动失败被降级且 mutation 与观察能力耦合
+
+- 状态: fixed
+- 旧理解: PostgreSQL、schema、YAML、overlay 或 recovery 启动失败可以只写 warning 后继续注册治理任务；任一 mutation 依赖故障只能让整个 worker 共同降级，readiness 无法比较 backend/worker 配置事实。
+- 当前口径: 五类关键启动失败全部向上抛出并令进程非零退出；`runtime_kv[learning_worker.capability.v2]` 发布 boot/config/overlay/recovery 与三类 capability。连续三次 mutation 依赖失败只打开锁存 mutation circuit，scheduled sample/backfill/supervisor observation 和独立研究任务继续。
+- 影响面: `quant-learning-worker.service`、factor governance/nursery/evolution 调度、RuntimeConfig 投影与 backend readiness。
+- 收口方式: mutation job 经 `guarded_mutation_job` 统一计数；worker 每 30 秒刷新 committed config/overlay hash 和能力投影，backend 超过 75 秒或 hash 分歧即把 autonomous mutation 判为 unavailable。
+- 验证方式: `tests/test_learning_worker_capability.py`、`tests/test_readiness_dimensions_v2.py`。
+
+### frontend readiness 被控制和发布流程复用为授权
+
+- 状态: fixed
+- 旧理解: `ready_for_frontend=true` 且顶层 blockers 为空可以授权 live autonomy unlock 或 release checklist。
+- 当前口径: readiness v2 分离 frontend、live execution、live alpha、autonomous mutation、release 五个维度；frontend 只表示展示契约可用，绝不授权 control/release。live unlock 同时要求 live-alpha 与 autonomous-mutation，release checklist 只读取 release 维度。
+- 影响面: backend readiness、live autonomy、release ledger、Web 运维展示。
+- 收口方式: 每个维度保留独立 blockers 和 authorization boundary；v1 历史 payload 只从 live facts/顶层 blockers 保守推导，不能回退读取 frontend bool。
+- 验证方式: `tests/test_readiness_dimensions_v2.py`、`tests/test_live_autonomy.py`、`tests/test_v15_runtime_platform_phase0.py`。
+
+### live 直接消费 approved policy suggestion
+
+- 状态: fixed
+- 旧理解: entry cluster、entry quality、event window 风控可把 `approved` 与 `applied` 同时当作 live active control；持仓监督在 expansion freeze 时还会从 live loop 读取最新 approved supervisor template 并生成 `canary_shadow`。
+- 当前口径: live 查询固定只读取 `applied`，绝不读取 `approved/auto_approved`。Evolution 的 factor learning summary 可以观察这些审批状态，但生成权重 bias 时必须复用同一 committed-policy 边界；Supervisor 候选回放也已迁到 learning worker 的 closed-position observation 路径，固定为 `learning_shadow/observation_only/recovered`，不调用 broker，live loop 不再 import 或查询 approved candidate。Coordinator enforce 只接受绑定 committed mutation 的 applied 控制；off/dual 仅兼容保留无 mutation id 的已应用保守控制并标记 `legacy_quarantined`，混合的 `downweight/boost_small` action 集中仅 legacy downweight 可执行，悬空/未提交 mutation 一律拒绝。
+- 影响面: live 开仓风险上下文、持仓监督、Evolution 权重 bias、learning repair readiness/auto-unfreeze、policy suggestion 生命周期、治理切换与回滚。
+- 收口方式: `backend.services.live_committed_policy` 是可执行控制的统一只读过滤边界；`materialize_position_supervisor_candidate_observations()` 是 approved supervisor 候选唯一的非执行观察入口。readiness 只接受与当前 suggestion ID 精确绑定的 learning observation，旧 live `canary_shadow` fail-closed。旧 applied 控制完成重验和显式 committed mutation 回填后，随 coordinator enforce 删除 legacy 兼容。
+- 验证方式: `tests/test_live_committed_policy.py`、`tests/test_evolution_closure_fixes.py` 与 `tests/test_live_policy_authority_boundary.py`；approved/auto-approved 在 dual/enforce 均为零执行影响，Supervisor approved candidate 只生成非执行 learning observation，只有 committed applied 或兼容期 legacy applied tightening 可进入 live bias。
+
+### legacy indicator sweep 被当作部署或治理证据
+
+- 状态: fixed
+- 旧理解: `backend.services.backtest_runner` 的参数 sweep 只要返回收益指标或进入 parameter-template offline report，就可以生成 pending release candidate，调用方也可以用 `governance_eligible=true` 覆盖其可信度。
+- 当前口径: 该引擎固定为 `engine=legacy_indicator_sweep`、`evidence_class=diagnostic_only`、`live_parity=false`、`governance_eligible=false`、`deployable_candidate=false`。CLI、runner、service、job/list/report API 都在最后一步强制覆盖标签；统一 research evidence policy、governance eligibility、参数模板 approve/deploy 和模型 promotion gate 均 fail-closed。
+- 影响面: backtest job/API/report、parameter-template offline validation、model promotion、governance sample eligibility。
+- 收口方式: legacy 输出继续用于参数敏感性诊断，但携带它的新 release candidate 只保存为 `diagnostic_only`，不能 approve/deploy；任何可执行入口必须调用 `backend.services.research_evidence`，不得相信调用方自报字段。
+- 验证方式: `tests/test_research_parity_boundaries.py` 的 contract spoof、report、governance zero、parameter deploy 和 model gate 用例。
+
+### 参数模板缺失 research metadata 可绕过 approve/deploy
+
+- 状态: fixed
+- 旧理解: `parameter_template_release_candidate.validation_summary_json` 没有 `research_evidence` 时，review/deploy 可把“没有证据”解释为无需校验；历史手工 approved 行因此能直接切换模板。
+- 当前口径: 新候选无条件由 `backend.services.research_evidence` 重验，只有完整 executable parity contract 才进入 `pending_review`。缺 metadata 的新候选标记 `require_revalidation`；没有 `research_evidence_policy.v1` 记录标记的历史 pending/approved 行以 `legacy_quarantined` 兼容读取，首次执行尝试会持久化隔离标记并拒绝。调用方缓存的 `research_evidence_verdict.allowed=true` 不构成证据。
+- 影响面: parameter-template candidate 注册、review、deploy、历史候选展示与模板 rollback。
+- 收口方式: 历史候选必须以新的 parity artifact 重新注册并重新 review，不能直接 deploy；历史 deployed 控制保持当前行为和 rollback 通道，回滚不依赖 research evidence。
+- 验证方式: `tests/test_research_parity_boundaries.py` 的 missing metadata、legacy quarantine、valid parity contract 用例，以及 parameter-template release/rollback 回归测试。
+
+### parity replay 尚未具备完整 live lifecycle 等价性
+
+- 状态: migrating
+- 旧理解: 复用 FactorFrame/normalizer/compositor 并按历史 OHLC 计算成本，就足以把离线回放标成 live parity。
+- 当前口径: `backend.services.parity_replay` 已建立 closed-bar → next-bar bid/ask、成本、config/data/code/factor-artifact manifest hash binding 和逐组件 exact/modeled contract。factor/selector/normalizer/compositor、RiskPolicy、position path metrics、safety candidate arbitration、supervisor、trailing 与 protection plan 已复用 live 纯决策原语；历史时间通过显式 `evaluated_at_ts` 进入共享保护计划，避免 wall-clock 污染。首次运行只发现 hash，只有显式提供并匹配 config/data/code/artifact 四个 expected hash 才算 binding verified；月库缺失/命名非法/部分读取错误、代码 binding 文件缺失、所选 generated/discovered factor 缺规范 ID 或存在与规范 AST 不一致的 definition fingerprint、稳定 artifact、ACTIVE committed lifecycle、显式 enabled 或正权重都会成为 blocker，selector 的 selected/excluded/reason 也绑定进 artifact。复用函数不代表端到端等价：历史 factor projection ack/health/Registry generation、broker receipt/reconcile/partial fill、tick 内触发顺序、5 秒 safety cadence 与 AWE 历史、权威 account/session/runtime context、真实 commission/swap 和 amend projection ack 仍不可由月度 bars 验证；当前月库也缺完整原生 bid/ask，因此强制 `diagnostic_only` 且治理数量为零。
+- 影响面: 月度 bars schema、replay artifact、RiskPolicy/supervisor context、研究 API、未来 backtest/live parity 门禁。
+- 收口方式: 先保留只读 `/api/ops/replay/parity-run`、逐文件/逐因子 artifact hash 和 exactness blocker；后续必须接入 PIT runtime factor projection/health/Registry generation、原生 bid/ask PIT、broker intent/order/deal/position/reconcile 事实、tick 级 safety 顺序、真实 account/session/AWE/cost/projection-ack 上下文，并由独立 certification 路径重验后，才可考虑 live-parity evidence。runner 本身永不自授权。
+- 验证方式: `tests/test_research_parity_boundaries.py` 的时间因果、bid/ask 成本、四类 expected hash precondition/mismatch、factor artifact identity、live safety timeout/partial/trailing/protection primitive、确定性 quote age、missing quote 和 diagnostic-only 用例。
+
+### matured 或 supervised-training 样本被等同为可执行治理证据
+
+- 状态: fixed
+- 旧理解: `label_status=matured` 或 evidence contract 允许 supervised training 即可按 raw sample count 进入 entry cluster/event window/entry quality 治理，历史缺失资格字段也可被兼容放行。
+- 当前口径: 所有 sample upsert、maturation 和 evidence repair/backfill 统一调用 `governance_eligibility.v1`，持久化 contamination、eligible、effective weight、version、fingerprint 和 exclusion reason。full 权重 1，verified recovered 上限 0.5，其余为 0；训练资格不等于治理资格。
+- 影响面: `autonomous_learning_sample`、`experience_pattern_stats`、样本型 `policy_suggestion`、`RuleEvolutionGovernor`。
+- 收口方式: materializer 只消费当前 version、非空 fingerprint 且 weight > 0 的行；stats 保存 effective sample count 与 weighted win/bad-loss/reward；Governor 要求 stats/suggestion version+fingerprint 一致，否则拒绝 mutation，但保留 observation/research 数据。
+- 验证方式: `tests/test_governance_eligibility_weighting.py`、`tests/test_autonomous_learning.py`、`tests/research/test_rule_evolution_governor.py`、`tests/integration/test_postgres_state_store.py`。
+
+### API 零值/旧 status 被前端误判为健康事实
+
+- 状态: migrating
+- 旧理解: 页面可递归搜索任意 `status/ok/items`，请求失败时以零值补齐账户、持仓和风险，并继续显示绿色。
+- 当前口径: 后端 additive 输出 `fact.v1`，新客户端只按 `docs/api-fact-contract.md` 的 endpoint-specific contract 和 component 读取；`api_fact_views`、`learning_fact_views` 和 `ops_governance_fact_views` 分别使用 broker/runtime 观测、显式持久化时间、durable commit/mutation 证据。缺 `_fact`、unknown、stale、error 均不得显示绿色或授权 start/unlock，最后 known 值可带时间保留。stop/emergency 始终可触发。
+- 影响面: account/positions/loop/risk/readiness/learning/model/ops/governance API、Web FactBoundary、小程序 reducer/WS merge。
+- 收口方式: 先后端、再 Web、再小程序迁移；旧字段保留两个小程序版本或 30 天取更长者，稳定后删除 recursive compat。
+- 验证方式: `tests/test_api_fact_views.py`、`tests/test_learning_fact_views.py`、`tests/test_ops_governance_fact_views.py`、`tests/test_fact_envelope.py`、`web_frontend/src/tests/fact-behavior.test.mjs`、`tests/miniprogram_store_reducer.test.mjs`。
+
+### SHA-256 登录与 URL JWT 兼容路径
+
+- 状态: migrating
+- 旧理解: 密码固定存 SHA-256，access token 长期使用，WebSocket 可把 JWT 放在 URL，stop/emergency 与普通接口共用会话依赖。
+- 当前口径: 默认 Argon2id、15 分钟 access、7 天旋转 refresh session 和 30 秒单次 WS ticket；高风险扩张要求最近 5 分钟 step-up。`/api/auth/step-up` 以当前 active 持久会话和密码为前提，事务提交 `auth_time` 后才签发新 access；普通 refresh 继承而不刷新该时间。Web 的 start/unlock 收到 `step_up_required` 后原位要求密码并自动重试，stop/emergency 不增加密码障碍。普通 access 绑定 PostgreSQL active session；logout 撤销整个 refresh family，并在 PG 提交前 fsync 本地 append-only session/family 撤销投影，因此 backend 重启后旧 access/risk-reduction token 不会复活。stop/emergency 使用本地可验证的 risk-reduction scope和该撤销投影，PG 故障不阻断风险缩减。
+- 影响面: backend auth、Web/小程序会话、WS、live start/stop/emergency、operator thaw/unlock。
+- 收口方式: 三个 legacy 开关只在客户端迁移窗口显式开启；客户端全部迁移后关闭并删除 SHA-256、legacy access 与 URL JWT 解析。持久 logout 回归必须同时覆盖进程内缓存清空、旋转 family 旧 token 和 PostgreSQL unavailable 的 risk-reduction 路径；step-up 回归覆盖 session/family 绑定、提交失败 fail-closed、refresh 继承和 Web 仅对 start/unlock 提示密码。
+- 验证方式: `tests/test_auth_v2.py`、`tests/test_backend_live_api.py`、`web_frontend/src/tests/fact-auth.test.mjs`。
 
 ## 5. 新旧债登记模板
 

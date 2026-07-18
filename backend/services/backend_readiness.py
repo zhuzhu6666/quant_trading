@@ -127,6 +127,13 @@ class BackendReadinessService:
                 model_status=model_status,
             ),
         )
+        learning_worker = self._timed_component(
+            "learning_worker",
+            lambda: self._learning_worker_capability_status(
+                runtime_snapshot=dict(stability.get("runtime_config_snapshot") or {}),
+                runtime_overlay=dict(stability.get("runtime_config_overlay") or {}),
+            ),
+        )
         autonomy_health = self._timed_component(
             "autonomy_health",
             lambda: self._autonomy_health_status(
@@ -222,11 +229,32 @@ class BackendReadinessService:
                     "readiness_effect": incident_control.get("readiness_effect") or {},
                 }
             )
+        readiness_dimensions = self._build_readiness_dimensions(
+            is_runtime_state_db=is_runtime_state_db,
+            global_blockers=blockers,
+            live_status=live_status,
+            execution_semantics=execution_semantics,
+            startup_status=startup_status,
+            incident_control=incident_control,
+            runtime_weight_integrity=runtime_weight_integrity,
+            factor_blend_health=factor_blend_health,
+            governance=governance,
+            config_runtime_drift=config_runtime_drift,
+            audit_health=audit_health,
+            replay=replay,
+            stability=stability,
+            learning_worker=learning_worker,
+        )
         payload = {
             "ok": True,
             "schema_version": "backend_readiness.v1",
             "generated_at": time.time(),
             "ready_for_frontend": ready_for_frontend,
+            "ready_for_live_execution": readiness_dimensions["ready_for_live_execution"],
+            "ready_for_live_alpha": readiness_dimensions["ready_for_live_alpha"],
+            "ready_for_autonomous_mutation": readiness_dimensions["ready_for_autonomous_mutation"],
+            "ready_for_release": readiness_dimensions["ready_for_release"],
+            "readiness_dimensions": readiness_dimensions,
             "backend_service": self._service_status(),
             "system_health": system_health,
             "metrics": metrics,
@@ -256,6 +284,7 @@ class BackendReadinessService:
             "incident_control": incident_control,
             "release": release,
             "learning_repair": learning_repair,
+            "learning_worker": learning_worker,
             "autonomy_health": autonomy_health,
             "stability": stability,
             "v15": {
@@ -275,6 +304,7 @@ class BackendReadinessService:
                 "worker": {
                     "background_jobs": background_jobs,
                     "governance_freshness": governance_freshness,
+                    "capability": learning_worker,
                 },
                 "replay": replay,
                 "incident_control": incident_control,
@@ -482,17 +512,23 @@ class BackendReadinessService:
         return payload
 
     def _learning_repair_status(self) -> dict[str, Any]:
-        from config.runtime_config import autonomy_expansion_freeze_applies, shared as runtime_config
+        from config.runtime_config import (
+            autonomy_expansion_freeze_applies,
+            governance_expansion_is_paused,
+            shared as runtime_config,
+        )
 
         cfg = runtime_config()
         configured_expansion_frozen = bool(getattr(cfg, "autonomy_expansion_frozen", True))
+        governance_expansion_paused = governance_expansion_is_paused(cfg)
         effective_expansion_frozen = autonomy_expansion_freeze_applies(cfg)
         result: dict[str, Any] = {
             "schema_version": "learning_repair_readiness.v1",
             "expansion_frozen": effective_expansion_frozen,
             "configured_expansion_frozen": configured_expansion_frozen,
+            "governance_expansion_paused": governance_expansion_paused,
             "freeze_applies_to_current_mode": effective_expansion_frozen,
-            "blocks_demo_governance": False,
+            "blocks_demo_governance": governance_expansion_paused,
             "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or "manual"),
             "governance_horizon_minutes": int(
                 getattr(cfg, "supervisor_counterfactual_governance_horizon_minutes", 60) or 60
@@ -512,14 +548,16 @@ class BackendReadinessService:
                     "SELECT position_id, close_ts, evidence_json FROM supervisor_counterfactual_review ORDER BY updated_at DESC LIMIT 5000",
                 ).fetchall()
             canary_started_at = 0.0
+            canary_suggestion_id = ""
             canary_template_id = ""
             shadow_position_ids: set[str] = set()
             if _table_exists(conn, "policy_suggestion"):
                 candidate = _execute(
                     conn,
-                    "SELECT scope_key, created_at FROM policy_suggestion WHERE scope_type='position_supervisor_template' AND status='approved' ORDER BY created_at DESC LIMIT 1",
+                    "SELECT suggestion_id, scope_key, created_at FROM policy_suggestion WHERE scope_type='position_supervisor_template' AND status='approved' ORDER BY created_at DESC LIMIT 1",
                 ).fetchone()
                 canary_started_at = _safe_float(dict(candidate).get("created_at")) if candidate else 0.0
+                canary_suggestion_id = str(dict(candidate).get("suggestion_id") or "") if candidate else ""
                 canary_template_id = str(dict(candidate).get("scope_key") or "") if candidate else ""
             if canary_template_id and _table_exists(conn, "position_supervisor_trace"):
                 shadow_rows = _execute(
@@ -527,9 +565,18 @@ class BackendReadinessService:
                     """
                     SELECT DISTINCT position_id
                     FROM position_supervisor_trace
-                    WHERE template_id=? AND stage='canary_shadow' AND event_ts>=?
+                    WHERE template_id=?
+                      AND stage='learning_shadow'
+                      AND execution_status='observation_only'
+                      AND trace_integrity='recovered'
+                      AND execution_reason=?
+                      AND event_ts>=?
                     """,
-                    (canary_template_id, canary_started_at),
+                    (
+                        canary_template_id,
+                        f"learning_worker_candidate_replay:{canary_suggestion_id}",
+                        canary_started_at,
+                    ),
                 ).fetchall()
                 shadow_position_ids = {str(dict(row).get("position_id") or "") for row in shadow_rows}
             mature_positions: set[str] = set()
@@ -599,6 +646,7 @@ class BackendReadinessService:
         checks = {
             "active_effect_capacity": active_effects <= 24,
             "no_invalidated_active_evidence": invalid_evidence == 0,
+            "candidate_observation_available": bool(shadow_position_ids),
             # Individual trades can remain ineligible when their observation
             # window crosses a market closure or has missing M1 bars.  They are
             # excluded from the mature cohort; requiring every observed trade
@@ -625,7 +673,11 @@ class BackendReadinessService:
             "exploration_budget_usage": budget,
             "canary": {
                 "started_at": canary_started_at,
+                "suggestion_id": canary_suggestion_id,
                 "template_id": canary_template_id,
+                "evidence_source": "learning_worker_closed_position_replay",
+                "stage": "learning_shadow",
+                "broker_mutation_allowed": False,
                 "shadow_position_count": len(shadow_position_ids),
                 "reviewed_position_count": len(candidate_review_positions),
                 "mature_trade_count": len(mature_positions),
@@ -983,17 +1035,25 @@ class BackendReadinessService:
         elif str(latest_run.get("status") or "").lower() == "failed":
             status = "failed"
             ok = False
-            stale = bool((latest_run.get("age_seconds") or 0.0) > stale_after_sec)
+            failed_age = latest_run.get("age_seconds")
+            stale = failed_age is None or float(failed_age) > stale_after_sec
         elif not latest_snapshot:
             status = "missing_catalog_snapshot"
             ok = False
             stale = True
         else:
-            run_age = float(latest_run.get("age_seconds") or 0.0)
-            snapshot_age = float(latest_snapshot.get("age_seconds") or 0.0)
-            stale = run_age > stale_after_sec or snapshot_age > stale_after_sec
-            status = "stale" if stale else "fresh"
-            ok = not stale
+            run_age_raw = latest_run.get("age_seconds")
+            snapshot_age_raw = latest_snapshot.get("age_seconds")
+            if run_age_raw is None or snapshot_age_raw is None:
+                stale = True
+                status = "timestamp_unknown"
+                ok = False
+            else:
+                run_age = float(run_age_raw)
+                snapshot_age = float(snapshot_age_raw)
+                stale = run_age > stale_after_sec or snapshot_age > stale_after_sec
+                status = "stale" if stale else "fresh"
+                ok = not stale
         return {
             "ok": ok,
             "status": status,
@@ -1149,6 +1209,229 @@ class BackendReadinessService:
             return payload
         finally:
             conn.close()
+
+    def _learning_worker_capability_status(
+        self,
+        *,
+        runtime_snapshot: dict[str, Any],
+        runtime_overlay: dict[str, Any],
+    ) -> dict[str, Any]:
+        from backend.services.learning_worker_capability import STATUS_KEY
+
+        try:
+            payload = self._runtime_kv_get(STATUS_KEY, {}) or {}
+        except Exception as exc:
+            return {
+                "schema_version": "learning_worker_readiness.v2",
+                "ok": False,
+                "state": "error",
+                "boot_status": "unknown",
+                "mutation_capability": {"available": False, "status": "unknown"},
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        if not isinstance(payload, dict) or not payload:
+            return {
+                "schema_version": "learning_worker_readiness.v2",
+                "ok": False,
+                "state": "unknown",
+                "boot_status": "unknown",
+                "observation_capability": {"available": False, "status": "unknown"},
+                "research_capability": {"available": False, "status": "unknown"},
+                "mutation_capability": {"available": False, "status": "unknown"},
+                "reason": "learning_worker_projection_missing",
+            }
+
+        now = time.time()
+        updated_at = _safe_float(payload.get("runtime_kv_updated_at") or payload.get("updated_at"))
+        age_seconds = max(0.0, now - updated_at) if updated_at > 0 else None
+        stale_after_seconds = 75.0
+        fresh = age_seconds is not None and age_seconds <= stale_after_seconds
+        worker_config_hash = str(payload.get("config_hash") or "")
+        backend_config_hash = str(runtime_snapshot.get("config_hash") or "")
+        worker_overlay_hash = str(payload.get("overlay_hash") or "")
+        backend_overlay_hash = str(runtime_overlay.get("overlay_hash") or "")
+        config_hash_match = bool(
+            worker_config_hash
+            and backend_config_hash
+            and worker_config_hash == backend_config_hash
+        )
+        overlay_hash_match = (
+            worker_overlay_hash == backend_overlay_hash
+            and (bool(worker_overlay_hash) or not backend_overlay_hash)
+        )
+        boot_status = str(payload.get("boot_status") or "unknown")
+        observation = dict(payload.get("observation_capability") or {})
+        research = dict(payload.get("research_capability") or {})
+        mutation = dict(payload.get("mutation_capability") or {})
+        raw_mutation_available = bool(mutation.get("available"))
+        operational = bool(
+            boot_status == "ready"
+            and fresh
+            and config_hash_match
+            and overlay_hash_match
+        )
+        mutation["available"] = bool(raw_mutation_available and operational)
+        if raw_mutation_available and not operational:
+            mutation["raw_available"] = True
+            mutation["status"] = (
+                "stale_projection"
+                if not fresh
+                else "config_hash_diverged"
+                if not config_hash_match
+                else "overlay_hash_diverged"
+            )
+        return {
+            **payload,
+            "schema_version": "learning_worker_readiness.v2",
+            "ok": operational,
+            "state": "known" if operational else "stale" if not fresh else "error",
+            "boot_status": boot_status,
+            "updated_at": updated_at,
+            "age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+            "stale_after_seconds": stale_after_seconds,
+            "fresh": fresh,
+            "config_hash": worker_config_hash,
+            "backend_config_hash": backend_config_hash,
+            "config_hash_match": config_hash_match,
+            "overlay_hash": worker_overlay_hash,
+            "backend_overlay_hash": backend_overlay_hash,
+            "overlay_hash_match": overlay_hash_match,
+            "hash_match": bool(config_hash_match and overlay_hash_match),
+            "observation_capability": observation,
+            "research_capability": research,
+            "mutation_capability": mutation,
+        }
+
+    @staticmethod
+    def _build_readiness_dimensions(
+        *,
+        is_runtime_state_db: bool,
+        global_blockers: list[dict[str, Any]],
+        live_status: dict[str, Any],
+        execution_semantics: dict[str, Any],
+        startup_status: dict[str, Any],
+        incident_control: dict[str, Any],
+        runtime_weight_integrity: dict[str, Any],
+        factor_blend_health: dict[str, Any],
+        governance: dict[str, Any],
+        config_runtime_drift: dict[str, Any],
+        audit_health: dict[str, Any],
+        replay: dict[str, Any],
+        stability: dict[str, Any],
+        learning_worker: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build independent authorization-oriented readiness dimensions."""
+
+        def blocker(component: str, reason: str, **extra: Any) -> dict[str, Any]:
+            return {"component": component, "reason": reason, **extra}
+
+        execution_blockers: list[dict[str, Any]] = []
+        if not is_runtime_state_db:
+            execution_blockers.append(blocker("state_store", "postgresql_required"))
+        execution_blockers.extend(execution_semantics.get("blocking_components") or [])
+        execution_blockers.extend(startup_status.get("blocking_components") or [])
+        ctrader = dict(live_status.get("ctrader") or {})
+        if str(ctrader.get("status") or "").lower() != "connected":
+            execution_blockers.append(
+                blocker("ctrader", "broker_not_connected", status=str(ctrader.get("status") or "unknown"))
+            )
+        incident_mode = str(incident_control.get("mode") or "unknown")
+        if incident_mode != "normal":
+            execution_blockers.append(
+                blocker("incident_control", "new_risk_not_allowed", mode=incident_mode)
+            )
+        loop = dict(live_status.get("loop") or {})
+        loop_readiness = dict(live_status.get("readiness") or {})
+        if bool(loop.get("running")) and loop_readiness.get("ok") is False:
+            execution_blockers.append(
+                blocker("live_loop", "running_loop_not_ready", details=loop_readiness)
+            )
+        if bool(loop.get("running")) and loop.get("accepting_new_risk") is False:
+            execution_blockers.append(blocker("live_loop", "not_accepting_new_risk"))
+
+        live_alpha_blockers = list(execution_blockers)
+        if runtime_weight_integrity.get("ok") is not True:
+            live_alpha_blockers.append(
+                blocker("runtime_weight_integrity", "factor_weights_not_authoritative")
+            )
+        blend_status = str(factor_blend_health.get("status") or "").lower()
+        if factor_blend_health.get("ok") is False or blend_status in {"error", "critical"}:
+            live_alpha_blockers.append(
+                blocker("factor_blend_health", "live_factor_blend_unhealthy", status=blend_status or "unknown")
+            )
+
+        mutation_blockers: list[dict[str, Any]] = []
+        from config.runtime_config import governance_expansion_is_paused
+
+        if governance_expansion_is_paused():
+            mutation_blockers.append(
+                blocker("governance_expansion", "operator_pause_active")
+            )
+        mutation = dict(learning_worker.get("mutation_capability") or {})
+        if mutation.get("available") is not True:
+            mutation_blockers.append(
+                blocker(
+                    "learning_worker_mutation",
+                    "mutation_capability_unavailable",
+                    status=str(mutation.get("status") or "unknown"),
+                )
+            )
+        governance_runtime = dict(governance.get("factor_governance_runtime") or {})
+        if governance_runtime.get("enabled", True) and governance_runtime.get("ok") is not True:
+            mutation_blockers.append(
+                blocker(
+                    "factor_governance_runtime",
+                    "governance_runtime_not_ready",
+                    status=str(governance_runtime.get("status") or "unknown"),
+                )
+            )
+        if bool(config_runtime_drift.get("drift")) or bool(config_runtime_drift.get("semantic_drift")):
+            mutation_blockers.append(blocker("runtime_config", "config_drift"))
+        overlay = dict(stability.get("runtime_config_overlay") or {})
+        if bool(overlay.get("suspicious")):
+            mutation_blockers.append(blocker("runtime_config_overlay", "suspicious_overlay"))
+
+        release_blockers: list[dict[str, Any]] = []
+        snapshot = dict(stability.get("runtime_config_snapshot") or {})
+        if snapshot.get("ok") is not True:
+            release_blockers.append(blocker("runtime_config_snapshot", "snapshot_missing"))
+        if replay.get("ok") is not True:
+            release_blockers.append(blocker("replay", "release_replay_not_ready"))
+        if bool(config_runtime_drift.get("drift")) or bool(config_runtime_drift.get("semantic_drift")):
+            release_blockers.append(blocker("runtime_config", "config_drift"))
+        if audit_health.get("ok") is False:
+            release_blockers.append(blocker("audit_health", "audit_unhealthy"))
+        if learning_worker.get("ok") is not True:
+            release_blockers.append(
+                blocker("learning_worker", "worker_boot_or_hash_not_ready")
+            )
+        release_blockers.extend(startup_status.get("blocking_components") or [])
+
+        return {
+            "schema_version": "readiness_dimensions.v2",
+            # Frontend rendering is intentionally independent from trading and
+            # governance authorization.  The compatibility bool remains top-level.
+            "ready_for_frontend": not global_blockers,
+            "ready_for_live_execution": not execution_blockers,
+            "ready_for_live_alpha": not live_alpha_blockers,
+            "ready_for_autonomous_mutation": not mutation_blockers,
+            "ready_for_release": not release_blockers,
+            "blockers": {
+                "frontend": list(global_blockers),
+                "live_execution": execution_blockers,
+                "live_alpha": live_alpha_blockers,
+                "autonomous_mutation": mutation_blockers,
+                "release": release_blockers,
+            },
+            "authorization_boundary": {
+                "frontend_readiness_authorizes_controls": False,
+                "frontend_readiness_authorizes_release": False,
+                "live_execution_uses": "ready_for_live_execution",
+                "live_alpha_uses": "ready_for_live_alpha",
+                "autonomous_mutation_uses": "ready_for_autonomous_mutation",
+                "release_uses": "ready_for_release",
+            },
+        }
 
     def _runtime_config_snapshot_status(self) -> dict[str, Any]:
         try:

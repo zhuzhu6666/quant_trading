@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.state_store import (
+    is_state_schema_write_sql,
+    validate_runtime_state_schema,
+)
 
 
 MODEL_STAGES = {"shadow", "demo_canary", "demo_active", "quarantined"}
@@ -75,7 +79,13 @@ class ModelInfluenceService:
 
     @classmethod
     def _execute(cls, conn: Any, sql: str, params: tuple[Any, ...] = ()):
-        return conn.execute(cls._sql(conn, sql), params)
+        rendered = cls._sql(conn, sql)
+        if (
+            conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+            and is_state_schema_write_sql(rendered)
+        ):
+            return validate_runtime_state_schema(conn, rendered)
+        return conn.execute(rendered, params)
 
     def _ensure_tables(self) -> None:
         conn = self._conn()

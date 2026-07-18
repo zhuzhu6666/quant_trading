@@ -84,8 +84,12 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
                 conn.execute(
                     """
                     INSERT INTO position_supervisor_trace
-                    (trace_id, position_id, template_id, stage, outcome, event_ts, created_at)
-                    VALUES (?, ?, 'position_supervisor:test.v1', 'canary_shadow', 'shadow', ?, ?)
+                    (trace_id, position_id, template_id, stage, outcome,
+                     execution_status, execution_reason, trace_integrity,
+                     event_ts, created_at)
+                    VALUES (?, ?, 'position_supervisor:test.v1', 'learning_shadow', 'shadow',
+                            'observation_only', 'learning_worker_candidate_replay:canary_1',
+                            'recovered', ?, ?)
                     """,
                     (f"trace_{index}", position_id, close_ts - 60, close_ts - 60),
                 )
@@ -121,6 +125,7 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
         rc.reset_for_tests()
 
     assert status["checks"]["counterfactual_maturity"] is True
+    assert status["checks"]["candidate_observation_available"] is True
     assert status["checks"]["canary_sample_count"] is True
     assert status["checks"]["canary_session_coverage"] is True
     assert status["checks"]["canary_regime_coverage"] is True
@@ -131,6 +136,8 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
     assert status["historical_immature_excluded_count"] == 1
     assert status["canary"]["mature_trade_count"] == 2
     assert status["canary"]["reviewed_position_count"] == 3
+    assert status["canary"]["stage"] == "learning_shadow"
+    assert status["canary"]["broker_mutation_allowed"] is False
     assert status["ok"] is True
 
 
@@ -230,6 +237,38 @@ def test_factor_governance_runtime_reports_fresh_run_and_catalog_snapshot(tmp_pa
     assert status["status"] == "fresh"
     assert status["latest_run"]["run_id"] == "fg_run_1"
     assert status["latest_catalog_snapshot"]["snapshot_id"] == "snap_1"
+
+
+def test_factor_governance_runtime_rejects_missing_observation_timestamps(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO evolution_run
+            (run_id, run_type, trigger_source, status, config_version, config_hash,
+             summary_json, started_at, ended_at)
+            VALUES ('fg_run_unknown_ts', 'factor_governance_autonomous', 'scheduler',
+                    'completed', 1, 'hash', '{}', 0, 0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_catalog_snapshot
+            (snapshot_id, run_id, catalog_hash, catalog_json, source, created_at)
+            VALUES ('snap_unknown_ts', 'fg_run_unknown_ts', 'hash', '[]', 'test', 0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = BackendReadinessService(db_path=db_path)._factor_governance_runtime_status()
+
+    assert status["ok"] is False
+    assert status["status"] == "timestamp_unknown"
+    assert status["stale"] is True
 
 
 def test_policy_suggestion_status_normalization_separates_legacy_and_autonomous():

@@ -205,6 +205,59 @@ class StreamingFactorEngine:
     def buffer_size(self) -> int:
         return len(self._buffer)
 
+    @property
+    def voting_factor_ids(self) -> tuple[str, ...]:
+        """Factors admitted to normal live computation/voting.
+
+        Prepared shadow factors are validated through
+        :meth:`validate_loaded_factor` without being added to this set.
+        """
+        return tuple(self._available_factors)
+
+    def validate_loaded_factor(self, name: str) -> dict[str, object]:
+        """Execute one Registry factor against the warm buffer without voting.
+
+        This is the live load proof for a PROMOTION_PREPARED shadow candidate.
+        It deliberately does not mutate ``_available_factors`` or the factor
+        cache, so successful validation cannot leak a prepared factor into the
+        composite score.
+        """
+        factor_name = str(name or "").strip()
+        if not self._warm or len(self._buffer) < self.MIN_BARS:
+            return {"ok": False, "status": "factor_engine_not_warm", "factor_name": factor_name}
+        if not factor_name or factor_registry.get(factor_name) is None:
+            return {"ok": False, "status": "factor_not_loaded", "factor_name": factor_name}
+        try:
+            values = self._compute_factor_series(factor_name, self._to_dataframe())
+            if values is None:
+                return {"ok": False, "status": "factor_compute_missing", "factor_name": factor_name}
+            raw = values.to_numpy() if hasattr(values, "to_numpy") else np.asarray(values)
+            flat = np.asarray(raw, dtype=float).reshape(-1)
+            finite_count = int(np.isfinite(flat).sum())
+            latest_finite = bool(len(flat) and np.isfinite(flat[-1]))
+            if finite_count <= 0 or not latest_finite:
+                return {
+                    "ok": False,
+                    "status": "factor_compute_not_finite",
+                    "factor_name": factor_name,
+                    "finite_count": finite_count,
+                }
+            return {
+                "ok": True,
+                "status": "loaded_and_computable",
+                "factor_name": factor_name,
+                "finite_count": finite_count,
+                "sample_count": int(len(flat)),
+                "voting_admitted": factor_name in self._available_factors,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "factor_compute_failed",
+                "factor_name": factor_name,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
     # ── 动态因子支持 ─────────────────────────────────────
 
     def refresh_factor_list(self):

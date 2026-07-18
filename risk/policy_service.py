@@ -7,6 +7,7 @@ single auditable risk verdict instead of scattering pre-trade branches.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -213,6 +214,14 @@ class RiskPolicyService:
     def _evaluate_incident_control_change(self, context: dict[str, Any]) -> RiskVerdict:
         target = str(context.get("target_mode") or context.get("mode") or "").strip().lower()
         current = str(context.get("current_mode") or self._current_incident_mode(context)).strip().lower()
+        local_latch_causes = sorted(
+            {
+                str(item or "").strip()
+                for item in list(context.get("local_latch_causes") or [])
+                if str(item or "").strip()
+            }
+        )
+        release_cause = str(context.get("release_cause") or "").strip()
         if target not in INCIDENT_MODES:
             return RiskVerdict(
                 allowed=False,
@@ -241,6 +250,8 @@ class RiskPolicyService:
                     "current_mode": current,
                     "target_mode": target,
                     "relaxing": True,
+                    "local_latch_causes": local_latch_causes,
+                    "release_cause": release_cause,
                 },
             )
         return RiskVerdict(
@@ -254,6 +265,8 @@ class RiskPolicyService:
                 "target_mode": target,
                 "relaxing": relaxing,
                 "reason": context.get("reason", ""),
+                "local_latch_causes": local_latch_causes,
+                "release_cause": release_cause,
             },
         )
 
@@ -478,10 +491,30 @@ class RiskPolicyService:
             isinstance(decision_freshness, dict)
             and decision_freshness.get("schema_version") == "decision_bar_freshness.v1"
         ):
+            raw_signal_age = decision_freshness.get("age_seconds")
             try:
-                signal_age_seconds = float(decision_freshness.get("age_seconds") or 0.0)
+                signal_age_seconds = float(raw_signal_age)
             except (TypeError, ValueError):
-                signal_age_seconds = 0.0
+                signal_age_seconds = float("inf")
+            if (
+                raw_signal_age is None
+                or not math.isfinite(signal_age_seconds)
+                or signal_age_seconds < 0
+            ):
+                return self._attach_demo_nursery_observations(RiskVerdict(
+                    allowed=False,
+                    reason="decision_signal_timestamp_unknown",
+                    severity="warn",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "live_decision_signal_age",
+                        "blocked_by": "decision_signal_timestamp",
+                        "decision_freshness": decision_freshness,
+                        "signal_age_seconds": None,
+                        "trade": context.get("trade") or {},
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                ), demo_nursery_observations)
             temporal_context = context.get("temporal_context") or {}
             try:
                 timeframe_seconds = float(
@@ -491,8 +524,8 @@ class RiskPolicyService:
                 )
             except (TypeError, ValueError):
                 timeframe_seconds = 0.0
-            stale_after_seconds = max(180.0, timeframe_seconds * 1.5) if timeframe_seconds > 0 else 0.0
-            if stale_after_seconds > 0 and signal_age_seconds > stale_after_seconds:
+            stale_after_seconds = max(180.0, timeframe_seconds * 1.5)
+            if signal_age_seconds > stale_after_seconds:
                 return self._attach_demo_nursery_observations(RiskVerdict(
                     allowed=False,
                     reason="decision_signal_age_stale",
@@ -543,9 +576,55 @@ class RiskPolicyService:
                 or 0
             )
             min_same_count = int(entry_cluster_policy.get("min_same_direction_open_count") or 0)
-            seconds_since = float(entry_cluster.get("seconds_since_last_same_direction_open") or 0.0)
+            seconds_since_raw = entry_cluster.get(
+                "seconds_since_last_same_direction_open"
+            )
+            timestamp_state = str(
+                entry_cluster.get("same_direction_open_timestamp_state")
+                or ("known" if seconds_since_raw is not None else "unknown")
+            )
+            seconds_since = (
+                float(seconds_since_raw)
+                if seconds_since_raw is not None
+                else None
+            )
             cooldown_seconds = float(context.get("same_direction_cooldown_seconds") or 0.0)
-            if min_same_count > 0 and same_count >= min_same_count and 0.0 < seconds_since < cooldown_seconds:
+            if (
+                min_same_count > 0
+                and same_count >= min_same_count
+                and timestamp_state != "known"
+            ):
+                verdict = RiskVerdict(
+                    allowed=False,
+                    reason="entry_cluster_timestamp_unknown",
+                    severity="error",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "broker_positions",
+                        "blocked_by": "entry_cluster_timestamp_freshness",
+                        "same_direction_open_count": same_count,
+                        "min_same_direction_open_count": min_same_count,
+                        "timestamp_state": timestamp_state,
+                        "unknown_position_ids": list(
+                            entry_cluster.get("unknown_open_timestamp_position_ids") or []
+                        ),
+                        "trade": context.get("trade") or {},
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                )
+                observed = self._observe_or_return_demo_nursery(
+                    context,
+                    verdict,
+                    demo_nursery_observations,
+                )
+                if observed is not None:
+                    return observed
+            elif (
+                min_same_count > 0
+                and same_count >= min_same_count
+                and seconds_since is not None
+                and 0.0 < seconds_since < cooldown_seconds
+            ):
                 verdict = RiskVerdict(
                     allowed=False,
                     reason="learning_same_direction_cooldown",

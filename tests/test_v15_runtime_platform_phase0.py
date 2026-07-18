@@ -573,6 +573,22 @@ def test_autonomy_health_enforcement_tightens_scope_through_incident_control(tmp
     rc.reset_for_tests()
 
 
+def test_autonomy_health_reads_incident_mode_from_its_own_state_store(
+    monkeypatch, tmp_path
+):
+    isolated_db = tmp_path / "isolated-state.db"
+    observed_paths = []
+
+    def status(service):
+        observed_paths.append(Path(service.db_path))
+        return {"mode": "normal"}
+
+    monkeypatch.setattr(RuntimeIncidentControlService, "status", status)
+
+    assert AutonomyHealthService(isolated_db)._current_incident_mode() == "normal"
+    assert observed_paths == [isolated_db]
+
+
 def test_autonomy_health_enforcement_never_relaxes_incident_mode(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"

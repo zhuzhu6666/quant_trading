@@ -4,12 +4,20 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB
 from backend.services.model_influence import ACTIVE_STAGES, ModelInfluenceService, normalized_model_influence_config
-from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+from backend.services.research_evidence import (
+    evaluate_research_evidence,
+    has_research_trust_metadata,
+)
+from backend.services.governance_control_plans import (
+    ModelPolicyActivationPlan,
+    governance_coordinator_mode,
+)
 from config.runtime_config import shared as runtime_config
 from risk.policy_service import RiskPolicyService
 
@@ -84,6 +92,25 @@ class ModelInfluenceGovernanceService:
         def check(name: str, passed: bool, actual: Any, required: Any) -> None:
             checks.append({"name": name, "passed": bool(passed), "actual": actual, "required": required})
 
+        # Pass the whole artifact whenever trust metadata is present so an
+        # outer legacy envelope cannot be hidden by optimistic nested claims.
+        research_evidence = (
+            artifact if has_research_trust_metadata(artifact)
+            else artifact.get("research_evidence")
+        )
+        research_verdict = None
+        if isinstance(research_evidence, dict) and has_research_trust_metadata(research_evidence):
+            research_verdict = evaluate_research_evidence(
+                research_evidence,
+                executable_use="model_promotion",
+            )
+            check(
+                "research_evidence",
+                research_verdict.allowed,
+                research_verdict.reason,
+                "executable_research_evidence_verified",
+            )
+
         check("known_model_type", model_type in MODEL_EFFECTS, model_type, sorted(MODEL_EFFECTS))
         feature_schema_version = str(artifact.get("feature_schema_version") or "")
         expected_feature_schema = MODEL_FEATURE_SCHEMAS.get(model_type, "")
@@ -96,8 +123,8 @@ class ModelInfluenceGovernanceService:
         check("time_ordered_split", str(metrics.get("split") or "").startswith("time_ordered"), metrics.get("split"), "time_ordered*")
         check("artifact_fresh", time.time() - _safe_float(artifact.get("created_at")) <= 7 * 86400, artifact.get("created_at"), "age<=7d")
         model_file = Path(str(artifact.get("model_file") or ""))
-        check("model_file", model_file.exists(), str(model_file), "exists")
-        if model_file.exists():
+        check("model_file", model_file.is_file(), str(model_file), "regular_file_exists")
+        if model_file.is_file():
             check("model_file_sha256", _sha256(model_file) == str(artifact.get("model_file_sha256") or ""), _sha256(model_file), artifact.get("model_file_sha256"))
 
         if model_type == "position_quality_lightgbm":
@@ -143,6 +170,7 @@ class ModelInfluenceGovernanceService:
             "artifact_sha256": _sha256(path),
             "feature_schema_version": str(artifact.get("feature_schema_version") or ""),
             "metrics": metrics,
+            "research_evidence_verdict": research_verdict.to_dict() if research_verdict else {},
             "checks": checks,
             "failed_checks": [item["name"] for item in checks if not item["passed"]],
         }
@@ -182,6 +210,7 @@ class ModelInfluenceGovernanceService:
         if not verdict.allowed:
             return {"ok": False, "status": "blocked_by_risk_policy", "reason": verdict.reason, "gate": gate}
         config = normalized_model_influence_config(getattr(cfg, "model_influence_config", {}) or {})
+        previous_config = deepcopy(config)
         config["models"][model_type] = {
             **config["models"][model_type], **effects,
             "stage": stage,
@@ -191,20 +220,28 @@ class ModelInfluenceGovernanceService:
             "promoted_at": time.time(),
             "promotion_gate": {"schema_version": gate["schema_version"], "checks": gate["checks"]},
         }
-        mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
-            {"demo_model_influence_enabled": True, "model_influence_config": config},
+        mutation = ModelPolicyActivationPlan(
+            patch={"demo_model_influence_enabled": True, "model_influence_config": config},
             source="model_influence_governance",
             run_id=f"model-promote:{model_type}:{int(time.time())}",
             actor="system:factor_governance",
             action="promote_model_influence",
             reason="PIT-v2 artifact passed bounded demo promotion gate",
-            require_v16_command=True,
+            scope_type="model_stage",
+            scope_key=model_type,
+            target_agent="factor_governance",
+            model_type=model_type,
+            target_stage=stage,
+            rollback={
+                "demo_model_influence_enabled": bool(
+                    getattr(cfg, "demo_model_influence_enabled", False)
+                ),
+                "model_influence_config": previous_config,
+            },
+            evidence_refs={"promotion_gate": gate},
+            idempotency_key=f"model-promote:{model_type}:{gate['artifact_sha256']}:{stage}",
             v16_command_id=v16_command_id,
-            v16_target_agent="factor_governance",
-            v16_scope_type="model_stage",
-            v16_scope_key=model_type,
-            v16_action="promote_model_influence",
-        )
+        ).execute(self.db_path)
         return {"ok": bool(mutation.get("ok")), "status": mutation.get("status"), "gate": gate, "mutation": mutation}
 
     def demote(self, model_type: str, *, reason: str = "automatic_model_demotion") -> dict[str, Any]:
@@ -212,19 +249,53 @@ class ModelInfluenceGovernanceService:
         config = normalized_model_influence_config(getattr(cfg, "model_influence_config", {}) or {})
         if model_type not in config["models"]:
             return {"ok": False, "status": "unknown_model_type"}
-        config["models"][model_type] = {
-            **config["models"][model_type], "stage": "quarantined",
-            "stage_reason": reason, "demoted_at": time.time(),
-        }
-        mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
-            {"model_influence_config": config},
+        previous_config = deepcopy(getattr(cfg, "model_influence_config", {}) or {})
+        previous_stage = str(config["models"][model_type].get("stage") or "shadow")
+        plan = ModelPolicyActivationPlan(
+            # Keep the restrictive patch minimal.  Audit reason/timestamp live
+            # in evidence_refs; adding arbitrary runtime metadata would turn a
+            # pure stage tightening into an expansionary mixed mutation.
+            patch={
+                "model_influence_config": {
+                    "models": {model_type: {"stage": "quarantined"}}
+                }
+            },
             source="model_influence_governance_demotion",
             run_id=f"model-demote:{model_type}:{int(time.time())}",
             actor="system:factor_governance",
             action="demote_model_influence",
             reason=reason,
-            risk_reduction=True,
+            scope_type="model_stage",
+            scope_key=model_type,
+            target_agent="factor_governance",
+            model_type=model_type,
+            target_stage="quarantined",
+            rollback={"model_influence_config": previous_config},
+            evidence_refs={
+                "model_type": model_type,
+                "previous_stage": previous_stage,
+                "target_stage": "quarantined",
+                "reason": reason,
+            },
+            idempotency_key=f"model-demote:{model_type}:{previous_stage}:{reason}",
         )
+        if governance_coordinator_mode() == "off":
+            # One-release compatibility path.  dual/enforce must derive the
+            # tightening classification from before/after and cannot consume
+            # this historical caller assertion.
+            from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+
+            mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
+                dict(plan.patch),
+                source=plan.source,
+                run_id=plan.run_id,
+                actor=plan.actor,
+                action=plan.action,
+                reason=plan.reason,
+                risk_reduction=True,
+            )
+        else:
+            mutation = plan.execute(self.db_path)
         return {"ok": bool(mutation.get("ok")), "status": mutation.get("status"), "mutation": mutation}
 
     def reconcile_active_models(self) -> dict[str, Any]:

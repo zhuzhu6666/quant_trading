@@ -7,27 +7,32 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import app
-from backend.core.auth import JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET, create_token, get_current_user, require_user
+from backend.core.auth import JWT_ALGORITHM, JWT_EXPIRY_SECONDS, create_token, get_current_user, require_user
 
 # Set a known password hash for testing
 _PW = "test_pass_123"
 _HASH = hashlib.sha256(_PW.encode()).hexdigest()
+_TEST_JWT_SECRET = "test-jwt-secret-2026-do-not-use-in-prod"
 
 
 @pytest.fixture(autouse=True)
 def _set_test_password(monkeypatch):
     """Override the password hash so the login test can use a known password."""
-    monkeypatch.setenv("QUANT_JWT_SECRET", "test-jwt-secret-2026-do-not-use-in-prod")
+    monkeypatch.setenv("QUANT_JWT_SECRET", _TEST_JWT_SECRET)
     monkeypatch.setenv("QUANT_PASSWORD_HASH", _HASH)
     monkeypatch.setenv("QUANT_AUTH_USER", "zhu")
     import backend.core.auth as auth_core
 
+    previous_secret = auth_core._JWT_SECRET
     auth_core._JWT_SECRET = None
     from backend.api.auth import _LOGIN_ATTEMPTS
 
     _LOGIN_ATTEMPTS.clear()
     yield
     _LOGIN_ATTEMPTS.clear()
+    # Other API modules create compatibility tokens during collection.  Do not
+    # leave this module's temporary signing key cached after the fixture exits.
+    auth_core._JWT_SECRET = previous_secret
 
 
 client = TestClient(app)
@@ -41,7 +46,7 @@ def test_login_returns_jwt():
     assert body["token_type"] == "Bearer"
     assert body["expires_in"] == JWT_EXPIRY_SECONDS
     # Verify the token is a real JWT (decodable, has sub/iat/exp)
-    payload = jwt.decode(body["token"], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    payload = jwt.decode(body["token"], _TEST_JWT_SECRET, algorithms=[JWT_ALGORITHM])
     assert payload["sub"] == "zhu"
     assert "iat" in payload
     assert "exp" in payload
@@ -126,7 +131,7 @@ def test_me_strict_expired_token_401():
     """Expired token should raise 401 (not silently fall back)."""
     now = int(time.time())
     payload = {"sub": "alice", "iat": now - 100000, "exp": now - 1}
-    expired_token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    expired_token = jwt.encode(payload, _TEST_JWT_SECRET, algorithm=JWT_ALGORITHM)
     r = client.get("/api/auth/me-strict", headers={"Authorization": f"Bearer {expired_token}"})
     assert r.status_code == 401
     body = r.json()
@@ -136,7 +141,7 @@ def test_me_strict_expired_token_401():
 def test_me_strict_missing_subject_401():
     now = int(time.time())
     payload = {"iat": now, "exp": now + 60}
-    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    token = jwt.encode(payload, _TEST_JWT_SECRET, algorithm=JWT_ALGORITHM)
 
     r = client.get("/api/auth/me-strict", headers={"Authorization": f"Bearer {token}"})
 

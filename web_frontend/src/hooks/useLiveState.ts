@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getStateSnapshot, getWsUrl, SessionStats, StateSnapshot } from "@/api/client";
+import { getStateSnapshot, getWsTicket, getWsUrl, SessionStats, StateSnapshot } from "@/api/client";
+import { factHasDisplayValue, readFactComponent } from "@/api/fact";
 
 type SourceType = "websocket" | "polling" | "offline";
 
@@ -26,6 +27,8 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
   const normalizeSnapshot = (incoming: StateSnapshot) => {
     const merged = { ...incoming };
     const asRecord = incoming as Record<string, unknown>;
+    const accountFact = readFactComponent(incoming, "account", "live.account.v2");
+    const loopFact = readFactComponent(incoming, "loop", "live.loop.v2");
     const daily = asRecord.daily as Record<string, unknown> | undefined;
     if (asRecord.daily && typeof daily === "object" && !asRecord.session_stats) {
       merged.session_stats = {
@@ -38,7 +41,11 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
       } as SessionStats;
     }
 
-    if (!asRecord.account && (asRecord.balance !== undefined || asRecord.equity !== undefined)) {
+    if (
+      factHasDisplayValue(accountFact)
+      && !asRecord.account
+      && (asRecord.balance !== undefined || asRecord.equity !== undefined)
+    ) {
       merged.account = {
         ok: true,
         balance: asRecord.balance,
@@ -51,7 +58,7 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
     }
 
     const closedLoop = asRecord.closed_loop as Record<string, unknown> | undefined;
-    if (!asRecord.loop_status && closedLoop && typeof closedLoop === "object") {
+    if (factHasDisplayValue(loopFact) && !asRecord.loop_status && closedLoop && typeof closedLoop === "object") {
       const execution = (closedLoop.execution as Record<string, unknown>) || {};
       merged.loop_status = {
         running: Boolean(closedLoop.pipeline_active),
@@ -123,20 +130,16 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
     }, pollIntervalMs);
   };
 
-  const startSocket = () => {
+  const startSocket = async () => {
     if (!token) {
       return;
     }
-    const normalized = token.trim();
-    const variants = [
-      { url: wsBase, protocols: [normalized] as string[] },
-      { url: `${wsBase}?token=${encodeURIComponent(normalized)}` },
-    ];
-    const candidate = variants[Math.min(retryRef.current, variants.length - 1)];
 
     closeRequestedRef.current = false;
     try {
-      const socket = new WebSocket(candidate.url, (candidate.protocols as string[]) || []);
+      const wsTicket = await getWsTicket();
+      if (closeRequestedRef.current) return;
+      const socket = new WebSocket(`${wsBase}?ticket=${encodeURIComponent(wsTicket.ticket)}`);
       wsRef.current = socket;
       socket.onopen = () => {
         retryRef.current = 0;
@@ -174,7 +177,7 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
         }
         retryTimerRef.current = window.setTimeout(() => {
           if (!closeRequestedRef.current) {
-            startSocket();
+            void startSocket();
           }
         }, 3000);
       };
@@ -202,12 +205,20 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
     }
     setSource("polling");
     startPolling();
-    startSocket();
+    void startSocket();
+    const onAuthInvalidated = () => {
+      stopPolling();
+      stopSocket();
+      setSource("offline");
+      setConnected(false);
+    };
+    window.addEventListener("quant-auth-invalidated", onAuthInvalidated);
     return () => {
+      window.removeEventListener("quant-auth-invalidated", onAuthInvalidated);
       stopPolling();
       stopSocket();
     };
-  }, [enabled, pollIntervalMs]);
+  }, [enabled, pollIntervalMs, token, wsBase]);
 
   return {
     snapshot,

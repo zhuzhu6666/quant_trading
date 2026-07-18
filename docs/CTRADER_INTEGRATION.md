@@ -23,6 +23,7 @@ cTrader Open API 负责当前 demo 交易闭环:
 | 文件 | 用途 |
 |---|---|
 | `execution/ctrader_bridge.py` | cTrader Open API 桥接 |
+| `backend/services/broker_execution_intent.py` | 开仓 mutation intent、unknown 计数与重启恢复门闩 |
 | `execution/deal_sync.py` | 从 cTrader 同步成交，用于真实 PnL 和学习闭环 |
 | `backend/services/live_service.py` | 实盘 loop，平仓检测，归因和学习触发 |
 | `scripts/validate_ctrader_token.py` | Token 有效性验证 |
@@ -85,6 +86,15 @@ Factor Takeover v4 pipeline
 ```
 
 平仓后的真实 PnL 来自 cTrader deal，同步内容包含 gross / swap / commission / net。归因层和学习闭环应优先使用这条真实成交链路。
+
+## 执行结果与显式对账契约
+
+- `reconcile_positions()` / `reconcile_account()` 返回不可变结果，状态严格为 `fresh/cache/event/failed`。只有带非空 reconcile ID 和 broker `observed_at` 的 `fresh` 表示本次 RPC 得到的 broker 全量事实；fresh 空 tuple 才是确认空仓，failed 空 tuple 不是空仓。
+- position reconcile 的 authoritative 范围只包括 identity、volume、SL/TP。current price 只接受 15 秒内 cTrader spot，PnL 只接受独立 broker PnL RPC；entry price、账户 equity 差额和默认零值都不能填补未知 current price/PnL。组件状态随 `PositionReconcileResult` 和 API `_fact` 发布。
+- `refresh_positions()` / `refresh_account_info()` 继续返回旧 list/dataclass，仅用于兼容展示；startup、safety、emergency 和 execution recovery 必须消费显式 reconcile 结果。
+- cTrader mutation 结果严格为 `confirmed/rejected/unknown/simulated`；`success=true` 只对应 confirmed/simulated。accepted、timeout、未知 protobuf 或无法唯一关联 position 都是 unknown。
+- 启用发布期开关 `ctrader_execution_outcome_v2_enabled` 后，market RPC 前在 PostgreSQL `broker_execution_intent` 依次提交 prepared、submitting；请求携带 UUID `clientOrderId`、UUID `clientMsgId` 和 comment token。结果只允许由 execution response 与 order/deal/position 差分唯一确认。
+- 任一 prepared/submitting/unknown intent 都会按 broker account + symbol 阻断下一次开仓；恢复只能重新拉取 broker positions/deals 并解析旧 intent，绝不重发旧订单。
 
 2026-06-29 起，归因和退出学习的现网口径为：
 
