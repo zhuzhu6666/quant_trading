@@ -1,25 +1,25 @@
 # 全项目分期修复发布状态
 
-> Status: production compatibility rollout active; governance dual-record deployed
-> Snapshot: 2026-07-19 13:02 CST
+> Status: production rollout active; governance dual-record and Safety shadow healthy
+> Snapshot: 2026-07-19 13:33 CST
 > Scope: Phase 0-5 compatibility implementation, migrations, verification, and remaining live evidence gates
 
 ## 1. 当前结论
 
 Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档已经实现并通过本地与隔离 PostgreSQL 验证。生产 PostgreSQL 已在线从 schema v7 升到 v9，`experiments.db` 也在哈希一致的备份后完成显式 additive repair。
 
-目标事实已确认为 `demo_autonomous`：demo 仅表示模拟资金，不表示需要日常人工批准。历史无 mutation 绑定的 nursery overlay 已先备份，再用精确旧 hash 的 CAS 清空；当前 overlay 为 `{}`，由 `settings.yaml` 的 `demo_autonomous` 重新成为配置事实。旧因子权重/config/supervisor 投影不被伪造为 committed，也不会被静默继承。
+目标事实已确认为 `demo_autonomous`：demo 仅表示模拟资金，不表示需要日常人工批准。历史无 mutation 绑定的 nursery overlay 已先备份，再用精确旧 hash 的 CAS 清空，由 `settings.yaml` 的 `demo_autonomous` 重新成为配置事实。清空后 learning worker 已自主提交 11 个 disabled SHADOW 因子 lifecycle 投影；它们都是 `risk_tightening`、`committed/current` 且 config/domain hash 完整，没有恢复旧因子权重或覆盖 autonomy mode。
 
 生产 backend 与 learning worker 已完成受控重启并健康运行。当前 `governance_mutation_coordinator_v2_mode=dual_record`，Safety v2 已推进到 `shadow`，Generation、Execution outcome 与 PG job queue 仍保持 false；新进程启动恢复不再执行无权威 legacy supervisor restore。独立只读 cTrader 对账确认 demo 环境、fresh 空仓、fresh account、unknown execution=0，市场关闭期间 live loop 持续运行且系统健康恢复为 1.00。
 
-发布过程仍保持多原因 `no_new_risk`。历史 overlay/governance 与 release reconstruction cause 在验证完成后按 cause 精确释放；watchdog cause 改为连续三轮 authoritative freshness 后自主释放，避免 demo 正常恢复仍依赖人工操作。
+历史 overlay/governance 与 release reconstruction cause 已在验证完成后按 cause 精确释放；Safety shadow 取得连续三轮 authoritative freshness 后，watchdog 又自主释放了自己的 cause，当前 latch 为 cleared。一次 cTrader account timeout 被正确处理为 safety 继续、alpha 阻断，后续连接自行恢复且未要求人工复位。
 
 ## 2. 已完成的工程门禁
 
 ### Python/backend
 
-- 默认全量：`2223 passed, 9 skipped`；skip 项为显式隔离的 PostgreSQL integration。
-- PostgreSQL integration：`10 passed, 2222 deselected`，使用 PostgreSQL 临时 schema/事务回滚，不以 SQLite 替代。
+- 默认全量：`2226 passed, 10 deselected`；PostgreSQL integration 由独立门禁执行。
+- PostgreSQL integration：`10 passed, 2226 deselected`，使用 PostgreSQL 临时 schema/事务回滚，不以 SQLite 替代。
 - P0 执行/紧急/对账/stop-open/default-off safety 故障矩阵：`296 passed`。
 - 从最小历史 baseline 到 v9 成功；同一迁移第二次执行 `applied_count=0`。
 - `compileall`、`git diff --check`、OpenAPI snapshot、dependency lock check、`pip check` 通过。
@@ -69,6 +69,8 @@ FactBoundary/UI 实现遵循：缺失 `_fact` 按 unknown，stale 保留最后�
 - legacy backtest diagnostic-only 与 parity replay evidence boundary；
 - runtime backend/worker schema-writer retirement。
 
+首轮 dual-record publish 发现 PostgreSQL schema guard 将换行 `ON CONFLICT ... DO UPDATE` 的 `DO` 误判为 DDL，导致 10 个 committed factor projection 暂时 degraded。classifier 已改为只识别 SQL 绝对起点或分号后的语句边界；受控重启后 backend recovery 报告 `attempted=10/current=10/degraded=0`，后续自治 mutation 也直接进入 current。
+
 Phase 5 façade 收敛继续完成：`live_service.py` 当前为 11,452 行，已将
 supervisor re-entry、risk-reduction safeguards、position path metrics、entry
 protection latch、startup safety/bar warmup、factor initialization/warmup 和
@@ -84,20 +86,18 @@ K 线 warmup。
 
 以下内容不能由单测替代，当前保持未完成：
 
-1. 精确释放历史 overlay/governance/reconstruction 的已消除 cause，并验证 watchdog 自主恢复只释放自己的 cause。
-2. `live_safety_plane_v2_mode=shadow` 至少观察一个完整持仓生命周期；无持仓时完成 24 小时 shadow 与故障注入。
-3. generation/execution/governance/job flags 逐项灰度；当前 governance 已在 `dual_record`，不得一次全开。
-4. 真实 demo 环境持续验证 safety heartbeat <=15 秒、account/position reconcile age <=15 秒、unknown intent=0、无 duplicate mutation。
-5. Job worker 开启后验证 global/per-kind lease、SIGTERM drain 与 kill-9 lease recovery。
-6. 客户端迁移窗口结束后才能删除 URL JWT、legacy access token/hash 与其余兼容路径。
-7. 一个稳定发布周期后才能删除旧 safety 尾部、旧 globals、V16 consume、direct overlay/registry mutation 和 recursive frontend compatibility。
+1. `live_safety_plane_v2_mode=shadow` 至少观察一个完整持仓生命周期；无持仓时完成 24 小时 shadow 与故障注入。
+2. generation/execution/governance/job flags 逐项灰度；当前 governance 已在 `dual_record`，不得一次全开。
+3. 真实 demo 环境持续验证 safety heartbeat <=15 秒、account/position reconcile age <=15 秒、unknown intent=0、无 duplicate mutation。
+4. Job worker 开启后验证 global/per-kind lease、SIGTERM drain 与 kill-9 lease recovery。
+5. 客户端迁移窗口结束后才能删除 URL JWT、legacy access token/hash 与其余兼容路径。
+6. 一个稳定发布周期后才能删除旧 safety 尾部、旧 globals、V16 consume、direct overlay/registry mutation 和 recursive frontend compatibility。
 
 ## 6. 下一次发布的固定顺序
 
-1. 精确释放本次已验证消除的 governance/reconstruction cause；watchdog cause 由连续健康检查自行释放。
-2. 记录 broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。
-3. 保持 governance dual-record 观察，不从历史 overlay 恢复任何 expanding control。
-4. 下一次只切 `live_safety_plane_v2_mode=shadow`，完成 24 小时或完整持仓生命周期与故障注入。
-5. shadow 零动作差异后再评估 Safety enforce；Generation、Execution outcome、PG job queue 继续逐项发布。
+1. 持续记录 Safety shadow comparison、broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。
+2. 保持 governance dual-record，不从历史 overlay 恢复任何 expanding control。
+3. 完成 24 小时无仓观察或一个完整持仓生命周期，并执行 shadow 故障注入矩阵。
+4. shadow 零动作差异后再评估 Safety enforce；Generation、Execution outcome、PG job queue 继续逐项发布。
 
 任一 duplicate broker mutation、双 generation、safety heartbeat 丢失、session unavailable 自动归零、emergency 假成功或 committed mutation 缺 hash，都必须立即停止阶段切换并保持 `no_new_risk`。
