@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active release evidence
-> Snapshot: 2026-07-19 14:12 CST
+> Snapshot: 2026-07-19 15:31 CST
 > Scope: Phase 0-5 fault injection, governance, frontend, and remaining live gates
 
 本文只记录可重复执行的证据映射。单元/集成测试证明故障语义；真实
@@ -58,8 +58,11 @@ ledger 证明，二者不能互相替代。
   `269 passed`。
 - spot/factor/fact/auth 补充矩阵：`81 passed`。
 - PostgreSQL job queue 隔离 schema：`6 passed`，未以 SQLite 替代。
-- 全量发布门此前为 `2231 passed, 9 skipped`；唯一 façade 行数门修复后对应
-  回归已通过。
+- 本轮全量非 PostgreSQL 发布门：`2257 passed, 10 deselected`。
+- 本轮显式 opt-in 的真实 PostgreSQL integration：`10 passed`；使用独立临时
+  schema/事务清理，未以 SQLite 替代。
+- 空仓 composite account reconcile 与 overlay authority 瞬态恢复新增组合回归分别
+  纳入执行/Safety 与 governance 门禁；生产侧已观察到 latch 精确自动恢复。
 
 ## 5. 不能由测试替代的剩余证据
 

@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: production rollout active; governance dual-record and Safety shadow healthy
-> Snapshot: 2026-07-19 14:24 CST
+> Snapshot: 2026-07-19 15:31 CST
 > Scope: Phase 0-5 compatibility implementation, migrations, verification, and remaining live evidence gates
 
 ## 1. 当前结论
@@ -13,6 +13,18 @@ Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档�
 生产 backend 与 learning worker 已完成受控重启并健康运行。当前 `governance_mutation_coordinator_v2_mode=dual_record`，Safety v2 已推进到 `shadow`，Generation、Execution outcome 与 PG job queue 仍保持 false；新进程启动恢复不再执行无权威 legacy supervisor restore。独立只读 cTrader 对账确认 demo 环境、fresh 空仓、fresh account、unknown execution=0，市场关闭期间 live loop 持续运行且系统健康恢复为 1.00。
 
 历史 overlay/governance 与 release reconstruction cause 已在验证完成后按 cause 精确释放；Safety shadow 取得连续三轮 authoritative freshness 后，watchdog 又自主释放了自己的 cause，当前 latch 为 cleared。一次 cTrader account timeout 被正确处理为 safety 继续、alpha 阻断，后续连接自行恢复且未要求人工复位。
+
+为消除无仓 shadow 的周期性 freshness 抖动，串行 tick 现在只在刚取得 fresh、
+immutable、明确空仓且不超过 15 秒的 broker position reconcile 时，为紧随其后的
+account reconcile 复用 unrealized PnL=0 事实；有仓、stale、failed、cache/event 或
+兼容投影仍调用 broker PnL 并 fail-closed。部署后连续多个空仓周期未再出现
+`account_info failed` / `fresh account unavailable`。
+
+同时修复了 commit 后 projection publish 前的瞬态治理窗口：失败的 overlay hash 不再
+被标记为已完成，后续轮询在 mutation 成为 committed/current 且 hash 绑定完整后，只
+自动释放 `governance_authority/runtime_config_overlay_refresh` cause。生产 mutation
+`74f1529d-0be8-59d3-8567-72c066b0a9ea` 已用该路径自行恢复；当前 latch cleared、
+cause_count=0，无人工 clear。
 
 无人值守运行层已核实：`quant-backend.service` 与
 `quant-learning-worker.service` 均为 enabled、`Restart=always`、
@@ -30,8 +42,8 @@ proposal registry 的历史 source-ref 索引存在升降序同名漂移；本�
 
 ### Python/backend
 
-- 默认全量：`2226 passed, 10 deselected`；PostgreSQL integration 由独立门禁执行。
-- PostgreSQL integration：`10 passed, 2226 deselected`，使用 PostgreSQL 临时 schema/事务回滚，不以 SQLite 替代。
+- 默认全量：`2257 passed, 10 deselected`；PostgreSQL integration 由独立门禁执行。
+- PostgreSQL integration：`10 passed`，使用 PostgreSQL 临时 schema/事务回滚，不以 SQLite 替代。
 - P0 执行/紧急/对账/stop-open/default-off safety 故障矩阵：`296 passed`。
 - 从最小历史 baseline 到 v10 成功；同一迁移第二次执行 `applied_count=0`。
 - `compileall`、`git diff --check`、OpenAPI snapshot、dependency lock check、`pip check` 通过。
@@ -109,6 +121,11 @@ K 线 warmup。
 5. 客户端迁移窗口结束后才能删除 URL JWT、legacy access token/hash 与其余兼容路径。
 6. 一个稳定发布周期后才能删除旧 safety 尾部、旧 globals、V16 consume、direct overlay/registry mutation 和 recursive frontend compatibility。
 
+15:31 CST 的连续安全后缀已从 15:21 左右自主起算：17 条 full-cycle observation、
+持续约 580 秒，latch cleared、unknown execution=0；release preflight 的唯一 blocker
+为 `safety_shadow_gate_incomplete`。历史 unsafe/reset 记录保留用于审计，不会被删除或
+改写；门禁只以最后一个连续安全后缀判定。
+
 ## 6. 下一次发布的固定顺序
 
 1. 持续记录 Safety shadow comparison、broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。
@@ -128,4 +145,4 @@ InProcessScheduler 每两分钟调用 single-flight refresh owner，max-age 为 
 构建线程仍由 BackendRuntimeLifecycle 在 shutdown 时停止接单并 join，不新增孤儿
 event-loop/native worker。该周期刷新只维护事实投影，不授权任何控制或发布动作。
 
-2026-07-19 14:20 CST 当前 generation 启动前再次完成独立只读 cTrader 预检：有效环境为 demo、account/positions 均为 fresh、broker 确认空仓、unknown execution 为 0。首轮 startup-unknown 与启动期 deferred K 线补充造成的 account RPC timeout 都被 ledger 保留为安全窗口重置点；系统按设计继续 safety、阻断 alpha，并在 14:23:36 补充完成后自主恢复，不要求人工复位。后台 account reconcile 最小间隔已从 10 秒收紧为 5 秒；受保护 `loop-status` 随后报告连续 3 个 full cycle、81 秒，freshness ok、safety heartbeat current、comparison 独立且零差异，唯一 gate blocker 是 `duration_or_lifecycle_incomplete`。loop phase 的 degraded 只来自 `market_session_blocks_open`，不是 safety 故障。连续窗口遇到 reconcile/unknown/freshness/comparison/duplicate/conflict/forced-shadow 异常或超过 75 秒的观测间隔会从异常后重新计时，不会删除历史故障，也不会让一次历史启动故障永久污染后续 24 小时合格窗口。
+2026-07-19 15:19 CST 最后一次代码部署前再次完成独立只读 cTrader 预检：有效环境为 demo、account/positions 均为 fresh、broker 确认空仓、unknown execution 为 0。首轮 startup-unknown 被 ledger 保留为安全窗口重置点；系统按设计继续 safety、阻断 alpha，并自主恢复。无仓 account reconcile 复用同 tick 的 fresh empty-position 事实后，连续周期没有再触发 PnL RPC timeout；`loop-status`/release gate 随后报告 freshness ok、safety heartbeat current、comparison 独立且零差异，唯一 gate blocker 是 `duration_or_lifecycle_incomplete`。loop phase 的 degraded 只来自 `market_session_blocks_open`，不是 safety 故障。连续窗口遇到 reconcile/unknown/freshness/comparison/duplicate/conflict/forced-shadow 异常或超过 75 秒的观测间隔会从异常后重新计时，不会删除历史故障，也不会让一次历史启动故障永久污染后续 24 小时合格窗口。
