@@ -55,6 +55,54 @@ def _safe_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def recover_emergency_execution_intents(
+    bridge: Any,
+    *,
+    enabled: bool,
+    read_local_unresolved: Callable[[], list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Recover emergency-visible execution outcomes without a PG dependency.
+
+    The broker bridge is authoritative when it implements the immutable
+    recovery contract.  The local fsync ledger is compatibility evidence only:
+    once outcome v2 is enabled, a missing bridge contract remains unknown even
+    when that ledger is empty.
+    """
+
+    if hasattr(bridge, "recover_execution_intents"):
+        return dict(bridge.recover_execution_intents() or {})
+    try:
+        unresolved = list(read_local_unresolved() or ())
+    except Exception as exc:
+        return {
+            "schema": "broker_execution_intent_recovery.v1",
+            "ready": False,
+            "enabled": bool(enabled),
+            "unresolved_count": None,
+            "unresolved": [],
+            "error": (
+                "local_execution_recovery_unavailable:"
+                f"{type(exc).__name__}:{exc}"
+            ),
+        }
+    if enabled:
+        return {
+            "schema": "broker_execution_intent_recovery.v1",
+            "ready": False,
+            "enabled": True,
+            "unresolved_count": None,
+            "unresolved": unresolved,
+            "error": "bridge_execution_recovery_contract_missing",
+        }
+    return {
+        "schema": "broker_execution_intent_recovery.v1",
+        "ready": not unresolved,
+        "enabled": False,
+        "unresolved_count": len(unresolved),
+        "unresolved": unresolved,
+    }
+
+
 def recover_execution_outcomes_before_alpha(
     *,
     enabled: bool,

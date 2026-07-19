@@ -60,6 +60,7 @@ from backend.services.live_safety_state import (
     no_new_risk_latch_status,
     release_no_new_risk_latch_cause,
     safety_v2_forced_shadow_status,
+    unresolved_broker_outcome_mutations,
 )
 from backend.services.live_safety_shadow_observation import (
     build_safety_shadow_observer,
@@ -112,6 +113,7 @@ from backend.services.live_execution_recovery import (
     ExecutionRecoveryRuntime,
     PositionRecoveryRuntime,
     bootstrap_position_recovery as _runtime_bootstrap_position_recovery,
+    recover_emergency_execution_intents as _runtime_recover_emergency_intents,
     recover_execution_outcomes_before_alpha as _loop_recover_execution_outcomes,
 )
 from backend.services.live_emergency import (
@@ -7366,46 +7368,13 @@ _EMERGENCY_SLEEP = time.sleep
 
 
 def _recover_emergency_execution_intents(bridge: Any) -> dict[str, Any]:
-    """Resolve/read execution intents without making emergency close depend on PG.
-
-    The production cTrader bridge owns the full recovery contract.  The
-    compatibility fallback only observes the fsync'd local unknown-outcome
-    ledger; when execution outcome v2 is enabled, a missing bridge recovery
-    API is itself an unresolved state.
-    """
-
-    if hasattr(bridge, "recover_execution_intents"):
-        return dict(bridge.recover_execution_intents() or {})
-    try:
-        from backend.services.live_safety_state import unresolved_broker_outcome_mutations
-
-        unresolved = list(unresolved_broker_outcome_mutations())
-    except Exception as exc:
-        return {
-            "schema": "broker_execution_intent_recovery.v1",
-            "ready": False,
-            "enabled": bool(_phase2_feature_flags().ctrader_execution_outcome_v2_enabled),
-            "unresolved_count": None,
-            "unresolved": [],
-            "error": f"local_execution_recovery_unavailable:{type(exc).__name__}:{exc}",
-        }
-    enabled = bool(_phase2_feature_flags().ctrader_execution_outcome_v2_enabled)
-    if enabled:
-        return {
-            "schema": "broker_execution_intent_recovery.v1",
-            "ready": False,
-            "enabled": True,
-            "unresolved_count": None,
-            "unresolved": unresolved,
-            "error": "bridge_execution_recovery_contract_missing",
-        }
-    return {
-        "schema": "broker_execution_intent_recovery.v1",
-        "ready": not unresolved,
-        "enabled": False,
-        "unresolved_count": len(unresolved),
-        "unresolved": unresolved,
-    }
+    return _runtime_recover_emergency_intents(
+        bridge,
+        enabled=bool(
+            _phase2_feature_flags().ctrader_execution_outcome_v2_enabled
+        ),
+        read_local_unresolved=unresolved_broker_outcome_mutations,
+    )
 
 
 def emergency_close(broker: str, symbol: str | None = None) -> dict:

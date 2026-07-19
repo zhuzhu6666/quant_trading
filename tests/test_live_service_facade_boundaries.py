@@ -41,6 +41,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_run_live_safety_cycle",
         "_run_live_loop_tick_body",
         "_run_live_loop_tick_body_legacy",
+        "_recover_emergency_execution_intents",
         "_recover_execution_outcomes_before_alpha",
         "_attempt_generation_startup_barrier",
         "_bootstrap_position_recovery",
@@ -104,6 +105,18 @@ def test_recovery_position_state_writes_live_outside_facade():
     assert "INSERT INTO recovery_position_state" in store_source
     assert "UPDATE recovery_position_state" in store_source
     assert "backend.services.live_service" not in store_source
+
+
+def test_emergency_execution_recovery_decision_lives_outside_facade():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+    recovery_source = Path(
+        "backend/services/live_execution_recovery.py"
+    ).read_text(encoding="utf-8")
+
+    assert "bridge_execution_recovery_contract_missing" not in source
+    assert "local_execution_recovery_unavailable" not in source
+    assert "bridge_execution_recovery_contract_missing" in recovery_source
+    assert "backend.services.live_service" not in recovery_source
 
 
 def test_session_restore_decision_has_no_runtime_or_facade_dependency():

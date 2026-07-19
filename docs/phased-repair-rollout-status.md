@@ -154,6 +154,14 @@ binding 再次按设计失效；12 类、28 个固定用例重新运行全部通
 `099b6f74d0b445153c54c4406094b32b0735cdcc09daf79f5ecbbb81c0b1c098`。
 该迁移不改变 recovery schema、broker mutation、静态 flag 或当前 shadow authority。
 
+18:42 CST 将 emergency execution-intent contract/fallback 决策迁入
+`live_execution_recovery` 后，全量 pytest 为 `2319 passed, 9 skipped`；Safety
+12 类/28 用例与 Execution Outcome 7 类/11 用例均以当前源码重跑通过。
+最新 binding hash 分别为
+`a556e39a0c43f6c85c9d8256cfbc0febb132503fbdf9524fb78b1bdef3348f49` 和
+`f7fc296090503c760054fe1976ac618226114d70add4d57125fb52352f1c8f7f`。
+该迁移不依赖 PostgreSQL，不修改当前静态 flag 或 broker mutation authority。
+
 后续阶段不再仅凭 CLI 新进程解析配置判断 predecessor 已运行。backend readiness
 将持久化实际 process-loaded static flags、fingerprint、PID 与启动时间；从
 `generation_enable` 起若配置已改但 backend 尚未重启，preflight 会以
