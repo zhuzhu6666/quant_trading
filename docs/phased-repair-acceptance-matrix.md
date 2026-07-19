@@ -101,3 +101,8 @@ safety_enforce
 开启后续 flag 或当前值未知时必须以非零退出。Safety shadow continuity/lifecycle
 只在 `safety_enforce` target 强制要求，后续阶段仍持续校验 service、latch、execution
 intent、release/autonomous readiness 与 worker config/overlay hash。
+
+`pg_job_queue_enable` 还必须输出 `job_worker_preflight.ok=true`，证明 canonical
+settings、state schema 最低版本、八类 production heavy-job handler 完整一致，且
+PostgreSQL 中不存在无法处理的 v1 runnable kind 或开启前仍有效的 active lease。
+预检不得 claim、cancel 或修改任何 job。

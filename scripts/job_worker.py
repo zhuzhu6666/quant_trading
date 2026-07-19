@@ -20,24 +20,9 @@ from loguru import logger
 
 def _validate_worker_settings_yaml() -> None:
     """Fail before claiming work when the deployment YAML is unusable."""
-    from backend.services import config_service
+    from backend.jobs.release_preflight import validate_persistent_job_worker_settings
 
-    payload = config_service.get_config()
-    path = str(payload.get("path") or "config/settings.yaml")
-    if not payload.get("exists"):
-        raise RuntimeError(f"job_worker_settings_missing:{path}")
-    if payload.get("parse_error"):
-        raise RuntimeError(
-            f"job_worker_settings_parse_error:{path}:{payload.get('parse_error')}"
-        )
-    try:
-        # Reuse the backend's canonical runtime bounds and execution-semantics
-        # validation instead of maintaining a worker-only YAML interpretation.
-        config_service._validate_parsed_runtime_config(payload.get("parsed"))
-    except Exception as exc:
-        raise RuntimeError(
-            f"job_worker_settings_invalid:{path}:{type(exc).__name__}:{exc}"
-        ) from exc
+    validate_persistent_job_worker_settings()
 
 
 def _validate_worker_startup() -> None:

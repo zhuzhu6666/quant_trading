@@ -27,6 +27,7 @@ def _facts() -> dict:
         "latch_status": {"active": False, "state": "cleared", "cause_count": 0},
         "local_unknown_count": 0,
         "postgres_unknown_count": 0,
+        "job_worker_preflight": {"ok": True, "status": "passed"},
         "readiness_snapshot": {
             "ok": True,
             "status": "available",
@@ -140,6 +141,39 @@ def test_final_transition_preflights_reject_skipped_predecessor(target, flag_pat
 
     assert result["ok"] is False
     assert "static_rollout_flags_unexpected" in result["blockers"]
+
+
+def test_pg_job_queue_transition_requires_worker_preflight():
+    facts = _facts()
+    facts["flags"].update(
+        live_safety_plane_v2_mode="enforce",
+        live_generation_controller_v2_enabled=True,
+        ctrader_execution_outcome_v2_enabled=True,
+        governance_mutation_coordinator_v2_mode="enforce",
+    )
+    facts["job_worker_preflight"] = {
+        "ok": False,
+        "status": "blocked",
+        "blockers": ["persistent_job_active_lease_exists_before_enable"],
+    }
+
+    result = evaluate_phased_release_preflight(
+        target="pg_job_queue_enable", **facts
+    )
+
+    assert result["ok"] is False
+    assert "pg_job_worker_preflight_unavailable" in result["blockers"]
+    assert result["checks"]["job_worker_preflight"]["required_for_target"] is True
+
+
+def test_non_queue_transition_does_not_require_worker_preflight():
+    facts = _facts()
+    facts["job_worker_preflight"] = None
+
+    result = evaluate_safety_enforce_preflight(**facts)
+
+    assert result["ok"] is True
+    assert result["checks"]["job_worker_preflight"]["required_for_target"] is False
 
 
 def test_unknown_release_target_is_total_and_fail_closed():

@@ -70,6 +70,7 @@ def evaluate_phased_release_preflight(
     local_unknown_count: int | None,
     postgres_unknown_count: int | None,
     readiness_snapshot: Mapping[str, Any],
+    job_worker_preflight: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate authoritative facts before one staged static-flag transition."""
 
@@ -136,6 +137,18 @@ def evaluate_phased_release_preflight(
     if not readiness_ok:
         blockers.append("release_readiness_unavailable_or_divergent")
 
+    job_worker_preflight_required = target == "pg_job_queue_enable"
+    job_worker_preflight_payload = (
+        dict(job_worker_preflight or {})
+        if isinstance(job_worker_preflight, Mapping)
+        else {}
+    )
+    if (
+        job_worker_preflight_required
+        and job_worker_preflight_payload.get("ok") is not True
+    ):
+        blockers.append("pg_job_worker_preflight_unavailable")
+
     blockers = sorted(set(blockers))
     return {
         "schema_version": SCHEMA_VERSION,
@@ -182,6 +195,10 @@ def evaluate_phased_release_preflight(
                 "config_hash_match": worker.get("config_hash_match"),
                 "overlay_hash_match": worker.get("overlay_hash_match"),
                 "mutation_capability_status": mutation_capability.get("status"),
+            },
+            "job_worker_preflight": {
+                **job_worker_preflight_payload,
+                "required_for_target": job_worker_preflight_required,
             },
         },
     }
@@ -251,6 +268,13 @@ def collect_phased_release_preflight(
         )
     except Exception:
         postgres_unknown_count = None
+    job_worker_preflight: Mapping[str, Any] | None = None
+    if target == "pg_job_queue_enable":
+        from backend.jobs.release_preflight import (
+            collect_persistent_job_worker_release_preflight,
+        )
+
+        job_worker_preflight = collect_persistent_job_worker_release_preflight()
     return evaluate_phased_release_preflight(
         target=target,
         shadow_gate=safety_shadow_gate_status(
@@ -263,6 +287,7 @@ def collect_phased_release_preflight(
         local_unknown_count=local_unknown_count,
         postgres_unknown_count=postgres_unknown_count,
         readiness_snapshot=BackendReadinessSnapshotService().latest(),
+        job_worker_preflight=job_worker_preflight,
     )
 
 

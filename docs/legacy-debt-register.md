@@ -73,7 +73,7 @@
 - 旧理解: 搜索出来的因子容易被直接注册或进入主链。
 - 当前口径: PostgreSQL `factor_lifecycle_state` 是 lifecycle 事实源，`factor_runtime_projection` 是加载确认事实；兼容 shadow promote 只提交 `PROMOTION_PREPARED`，ACTIVE 必须经 Coordinator/V16、稳定 artifact、fresh health 和 fresh loaded ack。RuntimeConfig/Registry 只作 committed 后投影。
 - 影响面: discovery、shadow API、registry、runtime selection、AWE、readiness、Catalog、recovery。
-- 收口方式: 新 `FactorLifecycleService` 已接管 shadow API 的 prepare/quarantine/retire 和 Factor Governance 的 discovered prepare/activate；live warmup/hot reload 已提供非投票式 loaded ack。其余旧 Canary rollback/retire、builtin lifecycle overlay 路径仍需逐一改成 typed plan，然后删除 direct mutation。
+- 收口方式: 新 `FactorLifecycleService` 已接管 shadow API 的 prepare/quarantine/retire 和 Factor Governance 的 discovered prepare/activate；live warmup/hot reload 已提供非投票式 loaded ack。Canary rollback 现在只更新评估证据，真实 live regression 由 Factor Governance 调用 `FactorLifecycleService.quarantine()` 提交；旧 `CanaryDirector.retire()` 已无生产 caller。builtin lifecycle overlay 路径仍需逐一改成 `FactorLifecycleMutation` typed plan，然后删除 generic compatibility mutation。
 - 验证方式: `tests/test_factor_lifecycle_service.py` 覆盖稳定 ID、状态机、激活门、投影降级恢复和 route 无 direct registry mutation。
 
 ### discovered 因子隐式 0.3 权重
