@@ -126,6 +126,12 @@ K 线 warmup。
 为 `safety_shadow_gate_incomplete`。历史 unsafe/reset 记录保留用于审计，不会被删除或
 改写；门禁只以最后一个连续安全后缀判定。
 
+16:04 CST 已运行 code-bound Safety fault matrix：12 类场景展开为 24 个用例，
+全部通过并以 `live_safety_fault_matrix.v1` append-only/fsync attestation 记录；当前
+binding hash 为 `0030b89298fdceb9daca6a8c9e099a53b19ddf940f4c1039db13e498d991ccd7`。
+release preflight 已验证该记录，当前 Safety target 仍只剩 24 小时/完整 lifecycle
+观察时长 blocker。后续 Safety source 或对应测试变化会自动使 binding stale 并要求重跑。
+
 ## 6. 下一次发布的固定顺序
 
 1. 持续记录 Safety shadow comparison、broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。

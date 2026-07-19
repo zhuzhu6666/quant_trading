@@ -87,6 +87,18 @@ latch cleared、本地/PG unresolved intent 均为 0、持久化 readiness 新�
 release/autonomous mutation ready、worker config/overlay hash 一致。快照过期或任一
 事实不可读都返回非零；该脚本本身不会修改开关或重启服务。
 
+无持仓 24 小时路径还必须先执行：
+
+```bash
+.venv/bin/python scripts/safety_fault_matrix.py
+```
+
+它固定运行 12 类 Safety 故障注入并把通过结果以 append-only、fsync、record hash
+和当前 Safety source/test binding hash 写入本地 ledger。release preflight 会重算
+binding；场景/nodeid 缺失、最近一次失败、记录被改写或 Safety 代码变化都会新增
+`safety_fault_matrix_incomplete` blocker。完整真实持仓 lifecycle 可独立满足 shadow
+观察门，不以合成矩阵替代真实 broker lifecycle。
+
 后续阶段使用同一只读门禁，并严格按以下 target 顺序执行：
 
 ```text

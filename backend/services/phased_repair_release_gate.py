@@ -72,6 +72,7 @@ def evaluate_phased_release_preflight(
     readiness_snapshot: Mapping[str, Any],
     job_worker_preflight: Mapping[str, Any] | None = None,
     governance_preflight: Mapping[str, Any] | None = None,
+    safety_fault_matrix: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate authoritative facts before one staged static-flag transition."""
 
@@ -96,6 +97,19 @@ def evaluate_phased_release_preflight(
     shadow_gate_required = target == "safety_enforce"
     if shadow_gate_required and not bool(shadow_gate.get("ok")):
         blockers.append("safety_shadow_gate_incomplete")
+    safety_fault_matrix_required = bool(
+        shadow_gate_required and not shadow_gate.get("complete_lifecycle")
+    )
+    safety_fault_matrix_payload = (
+        dict(safety_fault_matrix or {})
+        if isinstance(safety_fault_matrix, Mapping)
+        else {}
+    )
+    if (
+        safety_fault_matrix_required
+        and safety_fault_matrix_payload.get("ok") is not True
+    ):
+        blockers.append("safety_fault_matrix_incomplete")
     inactive_services = sorted(
         name for name in REQUIRED_SERVICES if service_states.get(name) != "active"
     )
@@ -176,6 +190,10 @@ def evaluate_phased_release_preflight(
             "shadow_gate": {
                 **dict(shadow_gate),
                 "required_for_target": shadow_gate_required,
+            },
+            "safety_fault_matrix": {
+                **safety_fault_matrix_payload,
+                "required_for_target": safety_fault_matrix_required,
             },
             "static_flags": {
                 "ok": not flag_mismatches,
@@ -302,6 +320,11 @@ def collect_phased_release_preflight(
         )
 
         governance_preflight = collect_governance_release_preflight()
+    safety_fault_matrix: Mapping[str, Any] | None = None
+    if target == "safety_enforce":
+        from backend.services.live_safety_fault_matrix import fault_matrix_status
+
+        safety_fault_matrix = fault_matrix_status()
     return evaluate_phased_release_preflight(
         target=target,
         shadow_gate=safety_shadow_gate_status(
@@ -316,6 +339,7 @@ def collect_phased_release_preflight(
         readiness_snapshot=BackendReadinessSnapshotService().latest(),
         job_worker_preflight=job_worker_preflight,
         governance_preflight=governance_preflight,
+        safety_fault_matrix=safety_fault_matrix,
     )
 
 

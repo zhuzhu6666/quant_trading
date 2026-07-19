@@ -29,6 +29,7 @@ def _facts() -> dict:
         "postgres_unknown_count": 0,
         "job_worker_preflight": {"ok": True, "status": "passed"},
         "governance_preflight": {"ok": True, "status": "passed"},
+        "safety_fault_matrix": {"ok": True, "status": "passed"},
         "readiness_snapshot": {
             "ok": True,
             "status": "available",
@@ -213,6 +214,32 @@ def test_execution_transition_does_not_require_governance_integrity_preflight():
 
     assert result["ok"] is True
     assert result["checks"]["governance_preflight"]["required_for_target"] is False
+
+
+def test_empty_account_safety_transition_requires_fault_matrix():
+    facts = _facts()
+    facts["safety_fault_matrix"] = {
+        "ok": False,
+        "status": "missing",
+        "blockers": ["fault_matrix_attestation_missing"],
+    }
+
+    result = evaluate_safety_enforce_preflight(**facts)
+
+    assert result["ok"] is False
+    assert "safety_fault_matrix_incomplete" in result["blockers"]
+    assert result["checks"]["safety_fault_matrix"]["required_for_target"] is True
+
+
+def test_complete_lifecycle_safety_transition_does_not_require_fault_matrix():
+    facts = _facts()
+    facts["shadow_gate"]["complete_lifecycle"] = True
+    facts["safety_fault_matrix"] = None
+
+    result = evaluate_safety_enforce_preflight(**facts)
+
+    assert result["ok"] is True
+    assert result["checks"]["safety_fault_matrix"]["required_for_target"] is False
 
 
 def test_unknown_release_target_is_total_and_fail_closed():
