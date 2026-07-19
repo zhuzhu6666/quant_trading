@@ -24,6 +24,7 @@ def _facts() -> dict:
         "service_states": {
             "quant-backend.service": "active",
             "quant-learning-worker.service": "active",
+            "quant-job-worker.service": "active",
         },
         "latch_status": {"active": False, "state": "cleared", "cause_count": 0},
         "local_unknown_count": 0,
@@ -31,6 +32,7 @@ def _facts() -> dict:
         "job_worker_preflight": {"ok": True, "status": "passed"},
         "governance_preflight": {"ok": True, "status": "passed"},
         "safety_fault_matrix": {"ok": True, "status": "passed"},
+        "job_worker_capability": {"ok": True, "status": "passed"},
         "readiness_snapshot": {
             "ok": True,
             "status": "available",
@@ -120,6 +122,16 @@ def test_safety_enforce_preflight_passes_only_with_complete_authoritative_facts(
                 "live_generation_controller_v2_enabled": True,
                 "ctrader_execution_outcome_v2_enabled": True,
                 "governance_mutation_coordinator_v2_mode": "enforce",
+            },
+        ),
+        (
+            "pg_job_queue_verify",
+            {
+                "live_safety_plane_v2_mode": "enforce",
+                "live_generation_controller_v2_enabled": True,
+                "ctrader_execution_outcome_v2_enabled": True,
+                "governance_mutation_coordinator_v2_mode": "enforce",
+                "pg_job_queue_v2_enabled": True,
             },
         ),
     ],
@@ -267,6 +279,36 @@ def test_non_queue_transition_does_not_require_worker_preflight():
 
     assert result["ok"] is True
     assert result["checks"]["job_worker_preflight"]["required_for_target"] is False
+
+
+def test_pg_job_queue_verify_requires_live_service_and_capability():
+    facts = _facts()
+    _set_flags(
+        facts,
+        {
+            "live_safety_plane_v2_mode": "enforce",
+            "live_generation_controller_v2_enabled": True,
+            "ctrader_execution_outcome_v2_enabled": True,
+            "governance_mutation_coordinator_v2_mode": "enforce",
+            "pg_job_queue_v2_enabled": True,
+        },
+    )
+    facts["service_states"]["quant-job-worker.service"] = "inactive"
+    facts["job_worker_capability"] = {
+        "ok": False,
+        "status": "blocked",
+        "blockers": ["persistent_job_worker_capability_stale"],
+    }
+
+    result = evaluate_phased_release_preflight(
+        target="pg_job_queue_verify", **facts
+    )
+
+    assert result["ok"] is False
+    assert "required_service_inactive" in result["blockers"]
+    assert "pg_job_worker_capability_unavailable" in result["blockers"]
+    assert result["checks"]["job_worker_preflight"]["required_for_target"] is False
+    assert result["checks"]["job_worker_capability"]["required_for_target"] is True
 
 
 def test_governance_transition_requires_integrity_preflight():

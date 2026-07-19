@@ -107,6 +107,7 @@ safety_enforce
   -> execution_outcome_enable
   -> governance_enforce
   -> pg_job_queue_enable
+  -> pg_job_queue_verify
 ```
 
 每个 target 都要求静态 flags 精确处于上一阶段的完成态；跳过 predecessor、提前
@@ -132,3 +133,10 @@ risk-tightening 继续允许免 V16，但不能免 hash 或 projection 检查。
 settings、state schema 最低版本、八类 production heavy-job handler 完整一致，且
 PostgreSQL 中不存在无法处理的 v1 runnable kind 或开启前仍有效的 active lease。
 预检不得 claim、cancel 或修改任何 job。
+
+开启 queue flag、受控启动 `quant-job-worker.service` 后，必须再运行
+`pg_job_queue_verify`。它不是新的 flag mutation，而是要求 service active、
+`runtime_kv[persistent_job_worker.capability.v1]` 心跳不超过 30 秒、worker/boot/PID
+身份完整、handler 集合与 JobManager 八类生产任务精确一致，并证明该进程实际加载
+queue=true 的最终五项静态 flags。缺记录、过期、handler 漂移或 unit 仍以旧 flag
+启动时均非零退出。

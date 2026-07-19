@@ -117,7 +117,7 @@ K 线 warmup。
 1. `live_safety_plane_v2_mode=shadow` 至少观察一个完整持仓生命周期；无持仓时完成 24 小时 shadow 与故障注入。
 2. generation/execution/governance/job flags 逐项灰度；当前 governance 已在 `dual_record`，不得一次全开。`governance_enforce` 的只读账本门禁当前已证明 31 个 committed/current mutation 的 config/domain hash 完整、无 in-flight mutation；未来 risk-expanding mutation 还必须通过 finalized V16 三重绑定检查。
 3. 真实 demo 环境持续验证 safety heartbeat <=15 秒、account/position reconcile age <=15 秒、unknown intent=0、无 duplicate mutation。
-4. Job worker 开启前的只读 YAML/schema/handler/runnable-kind/active-lease 门禁已接入 `pg_job_queue_enable`；开启后仍需验证 global/per-kind lease、SIGTERM drain 与 kill-9 lease recovery。
+4. Job worker 开启前的只读 YAML/schema/handler/runnable-kind/active-lease 门禁已接入 `pg_job_queue_enable`；开启后的 `pg_job_queue_verify` 已要求 service active、durable capability <=30 秒、worker identity、八类 handler 与 final loaded flags 完整。真实环境仍需验证 global/per-kind lease、SIGTERM drain 与 kill-9 lease recovery。
 5. 客户端迁移窗口结束后才能删除 URL JWT、legacy access token/hash 与其余兼容路径。
 6. 一个稳定发布周期后才能删除旧 safety 尾部、旧 globals、V16 consume、direct overlay/registry mutation 和 recursive frontend compatibility。
 
@@ -139,7 +139,7 @@ release preflight 已验证该记录，当前 Safety target 仍只剩 24 小时/
 投影重启，连续 shadow ledger 仍是当前 backend 已加载 shadow 的直接证据。
 
 Learning worker capability heartbeat 同步新增同构 process-loaded flags 投影；
-`governance_enforce` 与 `pg_job_queue_enable` 必须同时证明 backend/learning worker
+`governance_enforce`、`pg_job_queue_enable` 与后置 `pg_job_queue_verify` 必须同时证明 backend/learning worker
 都已加载 predecessor flags。只重启 backend 不再足以推进治理阶段。
 
 ## 6. 下一次发布的固定顺序
@@ -148,7 +148,7 @@ Learning worker capability heartbeat 同步新增同构 process-loaded flags 投
 2. 保持 governance dual-record，不从历史 overlay 恢复任何 expanding control。
 3. 完成 24 小时无仓观察或一个完整持仓生命周期，并执行 shadow 故障注入矩阵。
 4. 运行 `scripts/phased_repair_release_gate.py --target safety_enforce`；只有所有权威检查为 green 且进程以 0 退出时才评估 Safety enforce。
-5. 其后只允许依次运行 `generation_enable`、`execution_outcome_enable`、`governance_enforce`、`pg_job_queue_enable` 对应预检并逐项发布；每一步必须在前一阶段受控重启、运行事实恢复且新 target 预检为 green 后才可推进。
+5. 其后只允许依次运行 `generation_enable`、`execution_outcome_enable`、`governance_enforce`、`pg_job_queue_enable` 对应预检并逐项发布；queue flag 切换并启动 unit 后必须再运行不改变开关的 `pg_job_queue_verify`。每一步必须在前一阶段受控重启、运行事实恢复且新 target 预检为 green 后才可推进。
 
 任一 duplicate broker mutation、双 generation、safety heartbeat 丢失、session unavailable 自动归零、emergency 假成功或 committed mutation 缺 hash，都必须立即停止阶段切换并保持 `no_new_risk`。
 

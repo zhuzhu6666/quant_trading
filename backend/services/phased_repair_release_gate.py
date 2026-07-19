@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 SCHEMA_VERSION = "phased_repair_release_preflight.v1"
 REQUIRED_SERVICES = ("quant-backend.service", "quant-learning-worker.service")
+JOB_WORKER_SERVICE = "quant-job-worker.service"
 TARGET_EXPECTED_FLAGS = {
     "safety_enforce": {
         "live_safety_plane_v2_mode": "shadow",
@@ -42,6 +43,13 @@ TARGET_EXPECTED_FLAGS = {
         "ctrader_execution_outcome_v2_enabled": True,
         "governance_mutation_coordinator_v2_mode": "enforce",
         "pg_job_queue_v2_enabled": False,
+    },
+    "pg_job_queue_verify": {
+        "live_safety_plane_v2_mode": "enforce",
+        "live_generation_controller_v2_enabled": True,
+        "ctrader_execution_outcome_v2_enabled": True,
+        "governance_mutation_coordinator_v2_mode": "enforce",
+        "pg_job_queue_v2_enabled": True,
     },
 }
 
@@ -112,6 +120,7 @@ def evaluate_phased_release_preflight(
     job_worker_preflight: Mapping[str, Any] | None = None,
     governance_preflight: Mapping[str, Any] | None = None,
     safety_fault_matrix: Mapping[str, Any] | None = None,
+    job_worker_capability: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate authoritative facts before one staged static-flag transition."""
 
@@ -149,8 +158,11 @@ def evaluate_phased_release_preflight(
         and safety_fault_matrix_payload.get("ok") is not True
     ):
         blockers.append("safety_fault_matrix_incomplete")
+    required_services = REQUIRED_SERVICES + (
+        (JOB_WORKER_SERVICE,) if target == "pg_job_queue_verify" else ()
+    )
     inactive_services = sorted(
-        name for name in REQUIRED_SERVICES if service_states.get(name) != "active"
+        name for name in required_services if service_states.get(name) != "active"
     )
     if inactive_services:
         blockers.append("required_service_inactive")
@@ -208,6 +220,7 @@ def evaluate_phased_release_preflight(
     learning_process_flags_required = target in {
         "governance_enforce",
         "pg_job_queue_enable",
+        "pg_job_queue_verify",
     }
     learning_process_flags = _process_static_flags_check(
         worker.get("process_static_feature_flags"),
@@ -229,9 +242,22 @@ def evaluate_phased_release_preflight(
     ):
         blockers.append("pg_job_worker_preflight_unavailable")
 
+    job_worker_capability_required = target == "pg_job_queue_verify"
+    job_worker_capability_payload = (
+        dict(job_worker_capability or {})
+        if isinstance(job_worker_capability, Mapping)
+        else {}
+    )
+    if (
+        job_worker_capability_required
+        and job_worker_capability_payload.get("ok") is not True
+    ):
+        blockers.append("pg_job_worker_capability_unavailable")
+
     governance_preflight_required = target in {
         "governance_enforce",
         "pg_job_queue_enable",
+        "pg_job_queue_verify",
     }
     governance_preflight_payload = (
         dict(governance_preflight or {})
@@ -266,6 +292,7 @@ def evaluate_phased_release_preflight(
             },
             "services": {
                 "ok": not inactive_services,
+                "required": list(required_services),
                 "states": dict(service_states),
                 "inactive": inactive_services,
             },
@@ -305,6 +332,10 @@ def evaluate_phased_release_preflight(
                 **job_worker_preflight_payload,
                 "required_for_target": job_worker_preflight_required,
             },
+            "job_worker_capability": {
+                **job_worker_capability_payload,
+                "required_for_target": job_worker_capability_required,
+            },
             "governance_preflight": {
                 **governance_preflight_payload,
                 "required_for_target": governance_preflight_required,
@@ -319,9 +350,12 @@ def evaluate_safety_enforce_preflight(**facts: Any) -> dict[str, Any]:
     return evaluate_phased_release_preflight(target="safety_enforce", **facts)
 
 
-def _service_states() -> dict[str, str]:
+def _service_states(*, target: str) -> dict[str, str]:
     states: dict[str, str] = {}
-    for name in REQUIRED_SERVICES:
+    names = REQUIRED_SERVICES + (
+        (JOB_WORKER_SERVICE,) if target == "pg_job_queue_verify" else ()
+    )
+    for name in names:
         try:
             result = subprocess.run(
                 ("systemctl", "is-active", name),
@@ -384,8 +418,21 @@ def collect_phased_release_preflight(
         )
 
         job_worker_preflight = collect_persistent_job_worker_release_preflight()
+    job_worker_capability: Mapping[str, Any] | None = None
+    if target == "pg_job_queue_verify":
+        from backend.jobs.release_preflight import (
+            collect_persistent_job_worker_capability,
+        )
+
+        job_worker_capability = collect_persistent_job_worker_capability(
+            expected_flags=flags,
+        )
     governance_preflight: Mapping[str, Any] | None = None
-    if target in {"governance_enforce", "pg_job_queue_enable"}:
+    if target in {
+        "governance_enforce",
+        "pg_job_queue_enable",
+        "pg_job_queue_verify",
+    }:
         from backend.services.governance_release_preflight import (
             collect_governance_release_preflight,
         )
@@ -403,7 +450,7 @@ def collect_phased_release_preflight(
             max_gap_sec=max_gap_sec,
         ),
         flags=flags,
-        service_states=_service_states(),
+        service_states=_service_states(target=target),
         latch_status=no_new_risk_latch_status(fail_closed=True),
         local_unknown_count=local_unknown_count,
         postgres_unknown_count=postgres_unknown_count,
@@ -411,6 +458,7 @@ def collect_phased_release_preflight(
         job_worker_preflight=job_worker_preflight,
         governance_preflight=governance_preflight,
         safety_fault_matrix=safety_fault_matrix,
+        job_worker_capability=job_worker_capability,
     )
 
 

@@ -85,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    from backend.jobs.capability import PersistentJobWorkerCapability
+    from backend.jobs.handlers import persistent_job_handlers
     from backend.jobs.pg_queue import PgJobQueue
     from backend.jobs.worker import PersistentJobWorker
 
@@ -92,14 +94,21 @@ def main(argv: list[str] | None = None) -> int:
     worker_id = str(args.worker_id or "").strip() or (
         f"{socket.gethostname()}:{os.getpid()}"
     )
+    handlers = persistent_job_handlers()
+    capability = PersistentJobWorkerCapability(
+        worker_id=worker_id,
+        handler_kinds=tuple(handlers),
+    )
     worker = PersistentJobWorker(
         queue=PgJobQueue(),
         worker_id=worker_id,
+        handlers=handlers,
         poll_interval_sec=args.poll_sec,
         lease_sec=args.lease_sec,
         heartbeat_interval_sec=args.heartbeat_sec,
         global_limit=args.global_limit,
         kind_limits=_kind_limits(args.kind_limit),
+        status_callback=capability.publish,
     )
     stop_event = threading.Event()
 

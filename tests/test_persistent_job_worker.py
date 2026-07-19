@@ -64,6 +64,7 @@ class _FakeQueue:
 
 def test_worker_completes_claimed_handler_and_publishes_result():
     queue = _FakeQueue()
+    statuses = []
 
     def handler(params, progress):
         progress("calculate", 50, "half")
@@ -73,6 +74,9 @@ def test_worker_completes_claimed_handler_and_publishes_result():
         queue=queue,
         worker_id="worker-1",
         handlers={"backtest": handler},
+        status_callback=lambda status, job_id, kind: statuses.append(
+            (status, job_id, kind)
+        ),
     )
 
     result = worker.run_once()
@@ -80,6 +84,8 @@ def test_worker_completes_claimed_handler_and_publishes_result():
     assert result.status == "done"
     assert queue.completed == [("job-1", "claim-1", {"value": 14})]
     assert queue.failed == []
+    assert statuses[0] == ("busy", "job-1", "backtest")
+    assert statuses[-1] == ("idle", "", "")
     assert queue.claim_kwargs == [
         {
             "worker_id": "worker-1",
@@ -90,6 +96,25 @@ def test_worker_completes_claimed_handler_and_publishes_result():
             "retry_delay_sec": 5.0,
         }
     ]
+
+
+def test_capability_publish_failure_does_not_rewrite_job_result():
+    queue = _FakeQueue()
+
+    worker = PersistentJobWorker(
+        queue=queue,
+        worker_id="worker-1",
+        handlers={"backtest": lambda params, _progress: {"value": params["value"]}},
+        status_callback=lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("capability_store_unavailable")
+        ),
+    )
+
+    result = worker.run_once()
+
+    assert result.status == "done"
+    assert queue.completed == [("job-1", "claim-1", {"value": 7})]
+    assert queue.failed == []
 
 
 def test_worker_defaults_each_registered_kind_to_fail_closed_single_concurrency():

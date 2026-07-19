@@ -42,6 +42,7 @@ class PersistentJobWorker:
         kind_limits: Mapping[str, int] | None = None,
         retry_delay_sec: float = 5.0,
         executor_factory: Callable[[], concurrent.futures.Executor] | None = None,
+        status_callback: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self.queue = queue
         self.worker_id = str(worker_id or "").strip()
@@ -74,6 +75,15 @@ class PersistentJobWorker:
                 thread_name_prefix="pg-job-handler",
             )
         )
+        self._status_callback = status_callback
+
+    def _emit_status(self, status: str, job_id: str = "", kind: str = "") -> None:
+        if self._status_callback is None:
+            return
+        try:
+            self._status_callback(status, job_id, kind)
+        except Exception as exc:
+            logger.warning("[job_worker] capability publish failed: {}", exc)
 
     def _claim(self) -> ClaimedJob | None:
         return self.queue.claim(
@@ -89,8 +99,10 @@ class PersistentJobWorker:
         stop_event = stop_event or threading.Event()
         claim = self._claim()
         if claim is None:
+            self._emit_status("idle")
             return WorkerRunResult(claimed=False)
         job = claim.state
+        self._emit_status("busy", job.id, job.kind)
         handler = self.handlers.get(job.kind)
         if handler is None:
             status = self.queue.fail(
@@ -99,6 +111,7 @@ class PersistentJobWorker:
                 f"unsupported_job_kind:{job.kind}",
                 retryable=False,
             )
+            self._emit_status("idle")
             return WorkerRunResult(True, job.id, job.kind, status)
 
         cancel_event = threading.Event()
@@ -162,6 +175,7 @@ class PersistentJobWorker:
                     )
                     continue
                 heartbeat_retry = False
+                self._emit_status("busy", job.id, job.kind)
                 if not heartbeat.get("ok"):
                     claim_lost_event.set()
                     cancel_event.set()
@@ -201,13 +215,17 @@ class PersistentJobWorker:
             # kill one, and returning early would leave an untracked handler
             # mutating state after its lease was reassigned.
             executor.shutdown(wait=True, cancel_futures=False)
+            self._emit_status("idle")
 
     def run_forever(self, *, stop_event: threading.Event) -> None:
+        self._emit_status("running")
         while not stop_event.is_set():
             try:
                 result = self.run_once(stop_event=stop_event)
                 if not result.claimed:
                     stop_event.wait(self.poll_interval_sec)
             except Exception as exc:
+                self._emit_status("degraded")
                 logger.exception("[job_worker] claim/run cycle failed: {}", exc)
                 stop_event.wait(self.poll_interval_sec)
+        self._emit_status("stopped")

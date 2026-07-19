@@ -128,6 +128,13 @@ job 固定为 `handler_version=legacy`，不会被新 worker 自动 claim。
 `config/settings.yaml`，再执行只读 state schema 最低版本门禁；任一失败均非零退出，
 不会以空默认配置或旧 schema 继续领取任务。
 
+发布时先在 queue=false 前态运行 `pg_job_queue_enable`；切换发布级 flag 并启动 unit
+后，再运行 `scripts/phased_repair_release_gate.py --target pg_job_queue_verify`。worker
+会把 boot identity、PID、当前状态/任务、八类 handler、进程实际加载的完整静态 flags
+写入 `runtime_kv[persistent_job_worker.capability.v1]`。最终门禁要求该心跳不超过 30 秒，
+且不以 systemd 单独显示 active 代替进程能力事实。capability 写入失败只使验证
+fail-closed，不改变已领取任务的 lease/complete/fail 结果。
+
 ---
 
 ## 小程序前端
