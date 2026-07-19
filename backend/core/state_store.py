@@ -30,8 +30,12 @@ class RuntimeStateSchemaMissingError(RuntimeStateSchemaError):
 
 
 _SCHEMA_WRITE_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:^|;)\s*(CREATE|ALTER|DROP|COMMENT|GRANT|REVOKE|TRUNCATE|REINDEX|CLUSTER|DO|CALL)\b",
-    re.IGNORECASE | re.MULTILINE,
+    # ``^`` with MULTILINE also matches PostgreSQL's ``DO UPDATE`` upsert
+    # clause when it is formatted on a new line.  Only the absolute start of
+    # the query or the start of a semicolon-delimited statement is a schema
+    # statement boundary.
+    r"(?:\A|;)\s*(CREATE|ALTER|DROP|COMMENT|GRANT|REVOKE|TRUNCATE|REINDEX|CLUSTER|DO|CALL)\b",
+    re.IGNORECASE,
 )
 _CREATE_TABLE_RE: Final[re.Pattern[str]] = re.compile(
     r"^\s*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+"

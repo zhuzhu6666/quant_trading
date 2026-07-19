@@ -48,10 +48,16 @@ class _Rows:
 
 def test_schema_write_classifier_ignores_dml_and_comments() -> None:
     assert is_state_schema_write_sql("INSERT INTO runtime_kv VALUES (%s, %s, %s)") is False
+    assert is_state_schema_write_sql(
+        "INSERT INTO factor_runtime_projection VALUES (%s)\n"
+        "ON CONFLICT (factor_id)\n"
+        "DO UPDATE SET status=excluded.status"
+    ) is False
     assert is_state_schema_write_sql("-- CREATE TABLE fake\nSELECT 1") is False
     assert is_state_schema_write_sql("CREATE TABLE IF NOT EXISTS runtime_kv (key TEXT)") is True
     assert is_state_schema_write_sql("ALTER TABLE jobs ADD COLUMN unsafe TEXT") is True
     assert is_state_schema_write_sql("DROP TABLE jobs") is True
+    assert is_state_schema_write_sql("SELECT 1;\nDROP TABLE jobs") is True
 
 
 def test_runtime_connection_rejects_unvalidated_schema_mutation() -> None:
