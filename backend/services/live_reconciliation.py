@@ -10,6 +10,8 @@ import time
 import uuid
 from typing import Any, Mapping
 
+from execution.base import PositionReconcileResult
+
 
 def reconcile_value(value: Any, field: str, default: Any = None) -> Any:
     if isinstance(value, dict):
@@ -110,7 +112,11 @@ def explicit_position_reconcile(bridge: Any) -> Any:
     return result
 
 
-def explicit_account_reconcile(bridge: Any) -> Any:
+def explicit_account_reconcile(
+    bridge: Any,
+    *,
+    positions_reconcile: Any = None,
+) -> Any:
     """Request a fresh account snapshot without cache fallback."""
 
     if bridge is None or not bool(getattr(bridge, "is_connected", False)):
@@ -118,9 +124,20 @@ def explicit_account_reconcile(bridge: Any) -> Any:
     if not hasattr(bridge, "reconcile_account"):
         return None
     try:
-        result = bridge.reconcile_account(force=True, allow_cache_fallback=False)
+        kwargs = {"force": True, "allow_cache_fallback": False}
+        if isinstance(positions_reconcile, PositionReconcileResult):
+            kwargs["confirmed_empty_positions"] = positions_reconcile
+        result = bridge.reconcile_account(**kwargs)
     except TypeError:
-        result = bridge.reconcile_account(force=True)
+        # Compatibility for non-cTrader test/adapter bridges that have not
+        # adopted the additive empty-position evidence argument.
+        try:
+            result = bridge.reconcile_account(
+                force=True,
+                allow_cache_fallback=False,
+            )
+        except TypeError:
+            result = bridge.reconcile_account(force=True)
     except Exception:
         return None
     if str(reconcile_value(result, "status", "failed") or "failed") != "fresh":

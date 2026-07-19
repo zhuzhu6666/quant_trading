@@ -116,6 +116,7 @@
 | `ContextPolicyService` | context 只影响阈值/仓位，不改方向 |
 | `live_tick_pipeline` | gate 前后的顺序是否正确 |
 | explicit reconcile | safety/startup/emergency/order recovery 是否只接受 `PositionReconcileResult` / `AccountReconcileResult` 的 fresh 全量快照；cache/event/failed 是否不会被当成空仓、零账户或零未实现 PnL |
+| empty-account composite reconcile | 是否只有 fresh immutable、明确空仓且不超过 15 秒的 `PositionReconcileResult` 能为紧随其后的 account reconcile 证明 unrealized PnL=0；account observed_at 是否继承较早 position 时间；有仓、stale、failed、cache/event 或兼容 dict 是否仍必须调用 broker PnL 且失败时 fail-closed |
 | reconcile component truth | account/position push event 是否只更新 event projection 而不刷新 reconcile 年龄；有仓时 identity/protection/price/PnL 是否分别可追到 broker reconcile、fresh spot 和 PnL RPC；未知 price/PnL 是否阻断 open 但不阻断 timeout/entry repair/close/reduce/tighten；前端是否不把未知组件归零或染绿 |
 | execution intent | market RPC 前是否 committed prepared/submitting；timeout、延迟回执、未知 protobuf、差分不唯一或 finalize 失败是否进入 unknown + durable no-new-risk、禁止重发；是否已删除同方向最大 PID / `positions_before[0]` 猜测 |
 | emergency reconcile | 是否先落盘 no-new-risk latch、等待 open admission、只接受 fresh pre/post reconcile，并仅按 position ID 消失确认成功 |

@@ -3163,6 +3163,7 @@ class CTraderBridge(BaseBrokerBridge):
         *,
         force: bool = True,
         allow_cache_fallback: bool = False,
+        confirmed_empty_positions: PositionReconcileResult | None = None,
     ) -> AccountReconcileResult:
         """
         Return an explicit broker account result.
@@ -3209,10 +3210,29 @@ class CTraderBridge(BaseBrokerBridge):
             resp = self._send(req, timeout=10.0)
             t = resp.trader
             # Equity is not fresh unless both the trader balance and the
-            # broker unrealized-PnL projection succeeded.  Treating a failed
-            # PnL request as zero manufactures account equity and can
-            # incorrectly authorize new risk.
-            unrealized = self._unrealized_pnl()
+            # broker position/PnL projection succeeded.  A fresh immutable
+            # broker reconcile that confirms zero positions is authoritative
+            # proof that unrealized PnL was zero at its observation time, so
+            # avoid a redundant PnL RPC in that narrow case.  This reduces
+            # cTrader timeout pressure without ever inferring zero from a
+            # cache, failed reconcile, stale timestamp, or non-empty account.
+            empty_positions_observed_at = 0.0
+            if (
+                isinstance(confirmed_empty_positions, PositionReconcileResult)
+                and confirmed_empty_positions.fresh
+                and not confirmed_empty_positions.positions
+            ):
+                candidate_observed_at = float(
+                    confirmed_empty_positions.observed_at or 0.0
+                )
+                candidate_age = generated_at - candidate_observed_at
+                if -1.0 <= candidate_age <= 15.0:
+                    empty_positions_observed_at = candidate_observed_at
+            unrealized = (
+                0.0
+                if empty_positions_observed_at > 0.0
+                else self._unrealized_pnl()
+            )
             account = self._account_from_trader(t, unrealized=unrealized)
             balance = account.balance
             equity = account.equity
@@ -3223,7 +3243,11 @@ class CTraderBridge(BaseBrokerBridge):
             )
             self._record_success()
             account = self._set_account_cache(account, emit=True, reason="account_info")
-            observed_at = time.time()
+            observed_at = (
+                empty_positions_observed_at
+                if empty_positions_observed_at > 0.0
+                else time.time()
+            )
             with self._account_cache_lock:
                 self._account_cache_observed_at = observed_at
                 self._account_cache_source = "cache"

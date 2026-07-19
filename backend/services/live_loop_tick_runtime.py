@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from execution.base import PositionReconcileResult
+
 
 @dataclass(frozen=True)
 class LiveLoopTickRuntime:
@@ -373,6 +375,7 @@ def run_live_loop_tick_body(
     account_reconcile, account_blockers = _reconcile_alpha_account(
         bridge=bridge if bridge_ready else None,
         broker=broker,
+        positions_reconcile=reconcile,
         runtime=runtime,
     )
     wait_seconds = _safety_wait_seconds(safety)
@@ -623,9 +626,16 @@ def _reconcile_alpha_account(
     *,
     bridge: Any,
     broker: str,
+    positions_reconcile: Any,
     runtime: LiveLoopTickRuntime,
 ) -> tuple[Any, list[str]]:
-    account_reconcile = runtime.reconcile_account(bridge)
+    if isinstance(positions_reconcile, PositionReconcileResult):
+        account_reconcile = runtime.reconcile_account(
+            bridge,
+            positions_reconcile=positions_reconcile,
+        )
+    else:
+        account_reconcile = runtime.reconcile_account(bridge)
     blockers: list[str] = []
     if account_reconcile is None:
         blockers.append("fresh_account_unavailable")
