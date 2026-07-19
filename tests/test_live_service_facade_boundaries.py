@@ -204,6 +204,33 @@ def test_open_protection_state_machine_lives_outside_facade():
     assert ".close_position(" not in protection_source
 
 
+def test_open_post_fill_processing_lives_outside_facade():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    processing_source = Path(
+        "backend/services/live_open_processing.py"
+    ).read_text(encoding="utf-8")
+
+    for name in (
+        "_record_filled_position_open_context",
+        "_record_amended_open_success_context",
+        "_record_amend_failure_after_fill",
+    ):
+        node = _definitions(tree)[name]
+        assert not any(
+            isinstance(child, (ast.For, ast.While, ast.If, ast.Try, ast.With))
+            for child in ast.walk(node)
+        )
+    assert "entry_protection_fail_closed_unavailable" not in source
+    assert "entry_protection_fail_closed_unavailable" in processing_source
+    assert "def record_filled_position_open_context(" in processing_source
+    assert "def record_amended_open_success_context(" in processing_source
+    assert "backend.services.live_service" not in processing_source
+    assert ".market_buy(" not in processing_source
+    assert ".market_sell(" not in processing_source
+    assert ".close_position(" not in processing_source
+
+
 def test_session_restore_decision_has_no_runtime_or_facade_dependency():
     source = Path("backend/services/session_restore.py").read_text(encoding="utf-8")
 

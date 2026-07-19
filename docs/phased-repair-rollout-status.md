@@ -99,7 +99,7 @@ FactBoundary/UI 实现遵循：缺失 `_fact` 按 unknown，stale 保留最后�
 
 首轮 dual-record publish 发现 PostgreSQL schema guard 将换行 `ON CONFLICT ... DO UPDATE` 的 `DO` 误判为 DDL，导致 10 个 committed factor projection 暂时 degraded。classifier 已改为只识别 SQL 绝对起点或分号后的语句边界；受控重启后 backend recovery 报告 `attempted=10/current=10/degraded=0`，后续自治 mutation 也直接进入 current。
 
-Phase 5 façade 收敛继续完成：`live_service.py` 当前为 10,524 行，已将
+Phase 5 façade 收敛继续完成：`live_service.py` 当前为 10,447 行，已将
 supervisor re-entry、risk-reduction safeguards、position path metrics、entry
 protection latch、startup safety/bar warmup、factor initialization/warmup 和
 generation-bound serial tick runner 迁入独立模块。v2 与 legacy safety-first
@@ -111,7 +111,7 @@ reload。账户刷新源码门禁现检查权威 tick runtime，并继续证明 
 K 线 warmup。recovery position store、recovered-close replay/retirement、emergency
 execution fallback、post-close fail-closed cycle 及 attribution/audit/learning/cleanup
 以及 open submission/draining/post-fill fail-closed、broker-confirmed SL/TP attach/
-fresh projection ack 也已迁入独立领域模块。
+fresh projection ack、filled/amended context/recovery/audit 也已迁入独立领域模块。
 
 Factor lifecycle 的 builtin 活跃路径也已收敛：native callable 以代码 artifact
 SHA-256 建立 durable identity，SHADOW enrollment、prepare、loaded ack/fresh health、
@@ -199,12 +199,12 @@ Learning worker capability heartbeat 同步新增同构 process-loaded flags 投
 `governance_enforce`、`pg_job_queue_enable` 与后置 `pg_job_queue_verify` 必须同时证明 backend/learning worker
 都已加载 predecessor flags。只重启 backend 不再足以推进治理阶段。
 
-Execution outcome 切换现已增加独立代码绑定故障矩阵：8 类场景、14 个固定用例于
+Execution outcome 切换现已增加独立代码绑定故障矩阵：8 类场景、15 个固定用例于
 2026-07-19 全部通过，并以 `execution_outcome_fault_matrix.v1` append-only/fsync
 attestation 记录。`execution_outcome_enable` 预检现在强制读取该证明并重算
 execution source/test binding；记录缺失、最近失败、内容篡改或相关代码变化都会
 fail-closed。当前 binding hash 为
-`202d438d7422655b7e64394fa5ac67df59eadf4aeaf7c99a297954bc39f24871`；这不改变
+`a883c05fb30925cd7141458347cade991b6cdc316e058ec6b2693671adc2b18d`；这不改变
 当前 flag，也不越过 Safety/Generation 的阶段顺序。
 
 19:46 CST 将最终 admission、draining 拒绝、broker RPC 线性化和 confirmed-open
@@ -228,6 +228,23 @@ Outcome 8 类/14 用例随后全部通过，最新 binding 分别为
 `27c96cb0b4658b7934d9ab8d9d2886fce120a8733e66a18b50758aacacd0d472`、
 `202d438d7422655b7e64394fa5ac67df59eadf4aeaf7c99a297954bc39f24871`。
 全量 pytest 为 `2344 passed, 9 skipped`。本批仍不重启服务、不切换 flag。
+
+20:19 CST 将 filled-open attribution/ledger/recovery、amended-success
+local-state/execution-quality/learning/recovery/decision-log，以及 amend-failure
+latch/context/status/audit 三段状态机迁入 `live_open_processing`。直接测试证明 ledger
+辅助失败不阻断 recovery 尝试、amend failure 必须先 latch，109 项 lifecycle/open
+回归通过。Execution Outcome 新增 latch-before-recovery 固定 nodeid 后为 8 类/15
+用例；Safety 12 类/28 用例与 Execution Outcome 均以当前源码通过，最新 binding
+分别为 `dcdfee66a2f0abb8c860c7ce500322f8412ad32e2b63d501d4253a63968ac6bc`、
+`a883c05fb30925cd7141458347cade991b6cdc316e058ec6b2693671adc2b18d`。
+全量 pytest 为 `2350 passed, 9 skipped`。本批未部署、未重启、未切换 flag。
+
+20:24:59–20:26:40 CST 生产 cTrader 出现一轮连续 10 秒 account/positions RPC
+timeout。live loop 每轮仍完成 Safety、以 fresh account/positions unavailable 阻断
+alpha，并将 `positions_reconciliation_failed`/account freshness invalid 写入 shadow
+ledger；未把缓存或空列表当作空仓。20:26:48 起 fresh reconcile 自主恢复，unknown
+execution 仍为 0、latch cleared、服务未重启。该故障按 gate 规则使 24 小时连续窗口
+从恢复后的首个安全 observation 重新计时，历史 unsafe 记录继续保留。
 
 ## 6. 下一次发布的固定顺序
 

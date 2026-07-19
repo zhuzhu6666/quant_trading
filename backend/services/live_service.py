@@ -189,6 +189,17 @@ from backend.services.live_open_protection import (
     OpenProtectionRuntime,
     attach_open_trade_protection as _runtime_attach_open_trade_protection,
 )
+from backend.services.live_open_processing import (
+    AmendFailureRequest,
+    AmendFailureRuntime,
+    AmendedOpenSuccessRequest,
+    AmendedOpenSuccessRuntime,
+    FilledOpenRequest,
+    FilledOpenRuntime,
+    record_amend_failure_after_fill as _runtime_record_amend_failure,
+    record_amended_open_success_context as _runtime_record_amended_success,
+    record_filled_position_open_context as _runtime_record_filled_open,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -7468,6 +7479,17 @@ def _upsert_filled_open_recovery(
         logger.debug("[live] recovery open persist failed for pos %s: %s", pid, recovery_err)
 
 
+def _filled_open_processing_runtime() -> FilledOpenRuntime:
+    return FilledOpenRuntime(
+        ledger_available=bool(_LEDGER),
+        record_attribution=_record_filled_open_attribution,
+        build_learning_context=_open_learning_context_payload,
+        log_ledger=_log_filled_open_ledger,
+        upsert_recovery=_upsert_filled_open_recovery,
+        debug=logger.debug,
+    )
+
+
 def _record_filled_position_open_context(
     *,
     attr_engine,
@@ -7495,59 +7517,35 @@ def _record_filled_position_open_context(
     tp_dist: float = 0.0,
     bridge: Any = None,
 ) -> str:
-    """Persist open context after a market fill, even if SL/TP amend fails."""
-    base_volume = float(base_requested_volume if base_requested_volume is not None else requested_volume or 0.0)
-    trade_attribution_payload = _record_filled_open_attribution(
-        attr_engine=attr_engine,
-        pid=pid,
-        current_price=current_price,
-        actual_api_volume=actual_api_volume,
-        composite=composite,
-    )
-    entry_decision_id = ""
-    if _LEDGER:
-        try:
-            ledger_learning_context = _open_learning_context_payload(
-                bridge=bridge, bar=bar, positions_before=pos, composite=composite,
-                symbol="XAUUSD+", pid=int(pid), actual_api_volume=float(actual_api_volume or 0.0),
-                requested_volume=float(requested_volume or 0.0), base_requested_volume=base_volume,
-                current_price=float(current_price or 0.0), fill_price=float(fill_price or 0.0),
-                sl_price=float(sl_price or 0.0), tp_price=float(tp_price or 0.0),
-                sl_dist=float(sl_dist or 0.0), tp_dist=float(tp_dist or 0.0),
-                event_sizing_context=event_sizing_context or {}, sizing_trace=sizing_trace or {},
-                risk_verdict=risk_verdict, market_session=market_session,
-            )
-            entry_decision_id = _log_filled_open_ledger(
-                cfg=cfg, bar=bar, tick=tick, pid=pid, actual_api_volume=actual_api_volume,
-                requested_volume=requested_volume, fill_price=fill_price, current_price=current_price,
-                sl_price=sl_price, tp_price=tp_price, acct=acct, pos=pos, composite=composite,
-                gate_result=gate_result, learning_context=ledger_learning_context,
-                risk_verdict=risk_verdict, sizing_trace=sizing_trace,
-            )
-        except Exception as ledger_err:
-            logger.debug("[live] ledger open persist failed for pos %s: %s", pid, ledger_err)
-    try:
-        recovery_learning_context = _open_learning_context_payload(
-            bridge=bridge, bar=bar, positions_before=pos, composite=composite,
-            symbol="XAUUSD+", pid=int(pid), actual_api_volume=float(actual_api_volume or 0.0),
-            requested_volume=float(requested_volume or 0.0), base_requested_volume=base_volume,
-            current_price=float(current_price or 0.0), fill_price=float(fill_price or 0.0),
-            sl_price=float(sl_price or 0.0), tp_price=float(tp_price or 0.0),
-            sl_dist=float(sl_dist or 0.0), tp_dist=float(tp_dist or 0.0),
-            event_sizing_context=event_sizing_context or {}, risk_verdict=risk_verdict,
+    return _runtime_record_filled_open(
+        FilledOpenRequest(
+            attr_engine=attr_engine,
+            broker=broker,
+            cfg=cfg,
+            bar=bar,
+            tick=tick,
+            pid=pid,
+            actual_api_volume=actual_api_volume,
+            requested_volume=requested_volume,
+            fill_price=fill_price,
+            current_price=current_price,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            acct=acct,
+            pos=pos,
+            composite=composite,
+            gate_result=gate_result,
+            risk_verdict=risk_verdict,
             market_session=market_session,
-        )
-        _upsert_filled_open_recovery(
-            broker=broker, tick=tick, pid=pid, actual_api_volume=actual_api_volume,
-            requested_volume=requested_volume, fill_price=fill_price, current_price=current_price,
-            sl_price=sl_price, tp_price=tp_price, composite=composite,
-            entry_decision_id=entry_decision_id, trade_attribution_payload=trade_attribution_payload,
-            learning_context=recovery_learning_context,
-        )
-    except Exception as recovery_err:
-        logger.debug("[live] recovery open persist failed for pos %s: %s", pid, recovery_err)
-
-    return entry_decision_id
+            base_requested_volume=base_requested_volume,
+            event_sizing_context=event_sizing_context,
+            sizing_trace=sizing_trace,
+            sl_dist=sl_dist,
+            tp_dist=tp_dist,
+            bridge=bridge,
+        ),
+        runtime=_filled_open_processing_runtime(),
+    )
 
 
 def _closed_position_processing_runtime() -> ClosedPositionProcessingRuntime:
@@ -8027,6 +8025,18 @@ def _write_amended_open_decision_log(
     )
 
 
+def _amended_open_success_processing_runtime() -> AmendedOpenSuccessRuntime:
+    return AmendedOpenSuccessRuntime(
+        mark_local_state=_mark_amended_open_success_local_state,
+        record_execution_quality=_record_amended_open_execution_quality,
+        record_attribution=_record_amended_open_attribution,
+        build_learning_context=_open_learning_context_payload,
+        log_ledger=_log_amended_open_ledger,
+        upsert_recovery=_upsert_amended_open_recovery,
+        write_decision_log=_write_amended_open_decision_log,
+    )
+
+
 def _record_amended_open_success_context(
     *,
     attr_engine: Any,
@@ -8059,48 +8069,11 @@ def _record_amended_open_success_context(
     submit_started_at: float | None = None,
     fill_received_at: float | None = None,
 ) -> None:
-    _mark_amended_open_success_local_state(
-        pid=pid,
-        sl_price=sl_price,
-        tp_price=tp_price,
-        tick=tick,
-        actual_api_volume=actual_api_volume,
-        composite=composite,
-        direction_name=direction_name,
-        log=log,
-    )
-    _record_amended_open_execution_quality(
-        bar=bar, current_price=current_price, fill_price=fill_price,
-        composite=composite, actual_api_volume=actual_api_volume, pid=pid,
-        submit_started_at=submit_started_at, fill_received_at=fill_received_at,
-    )
-    try:
-        trade_attr = _record_amended_open_attribution(
-            attr_engine=attr_engine, pid=pid, current_price=current_price,
-            actual_api_volume=actual_api_volume, composite=composite, tick=tick, log=log,
-        )
-        learning_context = _open_learning_context_payload(
+    _runtime_record_amended_success(
+        AmendedOpenSuccessRequest(
+            attr_engine=attr_engine,
             bridge=bridge,
-            bar=bar,
-            positions_before=pos,
-            composite=composite,
-            symbol="XAUUSD+",
-            pid=int(pid),
-            actual_api_volume=float(actual_api_volume or 0.0),
-            requested_volume=float(requested_volume or 0.0),
-            base_requested_volume=float(base_requested_volume or 0.0),
-            current_price=float(current_price or 0.0),
-            fill_price=float(fill_price or 0.0),
-            sl_price=float(sl_price or 0.0),
-            tp_price=float(tp_price or 0.0),
-            sl_dist=float(sl_dist or 0.0),
-            tp_dist=float(tp_dist or 0.0),
-            event_sizing_context=event_sizing_context,
-            sizing_trace=sizing_trace,
-            risk_verdict=risk_verdict,
-            market_session=market_session,
-        )
-        entry_decision_id = _log_amended_open_ledger(
+            broker=broker,
             cfg=cfg,
             bar=bar,
             tick=tick,
@@ -8112,49 +8085,49 @@ def _record_amended_open_success_context(
             current_price=current_price,
             sl_price=sl_price,
             tp_price=tp_price,
+            sl_dist=sl_dist,
+            tp_dist=tp_dist,
             acct=acct,
             pos=pos,
             composite=composite,
             gate_result=gate_result,
             risk_verdict=risk_verdict,
+            market_session=market_session,
             event_sizing_context=event_sizing_context,
             sizing_trace=sizing_trace,
-            learning_context=learning_context,
-        )
-        _upsert_amended_open_recovery(
-            broker=broker,
-            tick=tick,
-            pid=pid,
-            actual_api_volume=actual_api_volume,
-            requested_volume=requested_volume,
-            fill_price=fill_price,
-            current_price=current_price,
-            sl_price=sl_price,
-            tp_price=tp_price,
-            composite=composite,
-            entry_decision_id=entry_decision_id,
             entry_protection_plan=entry_protection_plan,
-            trade_attr=trade_attr,
-            event_sizing_context=event_sizing_context,
-            sizing_trace=sizing_trace,
-            learning_context=learning_context,
-        )
-        _write_amended_open_decision_log(
-            bar=bar,
-            composite=composite,
-            pid=pid,
-            actual_api_volume=actual_api_volume,
-            requested_volume=requested_volume,
-            base_requested_volume=base_requested_volume,
-            event_sizing_context=event_sizing_context,
-            sizing_trace=sizing_trace,
-            current_price=current_price,
-            sl_price=sl_price,
-            tp_price=tp_price,
-            tick=tick,
-        )
-    except Exception as attr_err:
-        log(f"tick {tick}: attribution record_open error: {attr_err}")
+            direction_name=direction_name,
+            log=log,
+            submit_started_at=submit_started_at,
+            fill_received_at=fill_received_at,
+        ),
+        runtime=_amended_open_success_processing_runtime(),
+    )
+
+
+def _amend_failure_processing_runtime() -> AmendFailureRuntime:
+    ledger = _LEDGER
+    return AmendFailureRuntime(
+        persist_fail_closed=_persist_safety_fail_closed,
+        record_aux_failure=_record_risk_reduction_aux_failure,
+        record_filled_context=lambda request: (
+            _record_filled_position_open_context(**vars(request))
+        ),
+        update_plan_status=_update_entry_protection_plan_status,
+        ledger_available=bool(ledger),
+        build_failed_payloads=_tick_build_amend_failed_ledger_payloads,
+        get_risk_state=lambda: (
+            _live_state_get("risk", {}, clone=True) or {}
+        ),
+        log_composite_decision=(
+            ledger.log_composite_decision if ledger else lambda **_kwargs: ""
+        ),
+        log_order_event=(
+            ledger.log_order_event if ledger else lambda **_kwargs: None
+        ),
+        debug=logger.debug,
+        now=time.time,
+    )
 
 
 def _record_amend_failure_after_fill(
@@ -8191,92 +8164,42 @@ def _record_amend_failure_after_fill(
     failure_log: str = "",
     log=None,
 ) -> None:
-    # The position already exists at the broker but its required entry
-    # protection is not confirmed.  Block *additional* risk immediately while
-    # leaving the serial safety path free to repair or close this position.
-    # This local latch does not depend on PostgreSQL or the audit ledger below.
-    try:
-        _persist_safety_fail_closed(
-            blockers=("entry_protection_unverified",),
-            source="entry_protection",
-            error=str(status_error or ledger_action_reason or "entry_protection_failed"),
-        )
-    except Exception as latch_exc:
-        try:
-            _record_risk_reduction_aux_failure(
-                "entry_protection_fail_closed_unavailable",
-                position_id=int(pid or 0),
-                action="amend_position_sltp",
-                error=latch_exc,
-                payload={"status_error": str(status_error or "")},
-            )
-        except Exception:
-            pass
-    if failure_log and log is not None:
-        log(failure_log)
-    _record_filled_position_open_context(
-        attr_engine=attr_engine,
-        broker=broker,
-        cfg=cfg,
-        bar=bar,
-        tick=tick,
-        pid=pid,
-        actual_api_volume=actual_api_volume,
-        requested_volume=requested_volume,
-        fill_price=fill_price,
-        current_price=current_price,
-        sl_price=sl_price,
-        tp_price=tp_price,
-        acct=acct,
-        pos=pos,
-        composite=composite,
-        gate_result=gate_result,
-        risk_verdict=risk_verdict,
-        market_session=market_session,
-        base_requested_volume=base_requested_volume,
-        event_sizing_context=event_sizing_context,
-        sizing_trace=sizing_trace,
-        sl_dist=sl_dist,
-        tp_dist=tp_dist,
-        bridge=bridge,
+    _runtime_record_amend_failure(
+        AmendFailureRequest(
+            attr_engine=attr_engine,
+            bridge=bridge,
+            broker=broker,
+            cfg=cfg,
+            bar=bar,
+            tick=tick,
+            pid=pid,
+            actual_api_volume=actual_api_volume,
+            requested_volume=requested_volume,
+            base_requested_volume=base_requested_volume,
+            fill_price=fill_price,
+            current_price=current_price,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            sl_dist=sl_dist,
+            tp_dist=tp_dist,
+            acct=acct,
+            pos=pos,
+            composite=composite,
+            gate_result=gate_result,
+            risk_verdict=risk_verdict,
+            market_session=market_session,
+            event_sizing_context=event_sizing_context,
+            sizing_trace=sizing_trace,
+            status_error=status_error,
+            ledger_action_reason=ledger_action_reason,
+            ledger_comment=ledger_comment,
+            ledger_error=ledger_error,
+            ledger_debug_message=ledger_debug_message,
+            failure_log=failure_log,
+            log=log,
+        ),
+        runtime=_amend_failure_processing_runtime(),
     )
-    _update_entry_protection_plan_status(
-        int(pid),
-        status="failed",
-        error=status_error,
-        attempted=True,
-    )
-    if _LEDGER:
-        try:
-            amend_failed_payloads = _tick_build_amend_failed_ledger_payloads(
-                composite=composite,
-                gate_result=gate_result,
-                cfg=cfg,
-                bar=bar,
-                account=acct,
-                positions_before=pos,
-                risk_state=_live_state_get("risk", {}, clone=True) or {},
-                pid=int(pid),
-                requested_volume=float(requested_volume),
-                fill_price=float(fill_price),
-                sl_price=float(sl_price),
-                tp_price=float(tp_price),
-                actual_api_volume=float(actual_api_volume),
-                tick=tick,
-                action_reason=ledger_action_reason,
-                comment=ledger_comment,
-                error=ledger_error,
-                decision_ts_fallback=time.time(),
-            )
-            amend_decision_id = _LEDGER.log_composite_decision(
-                **amend_failed_payloads["decision"]
-            )
-            _LEDGER.log_order_event(
-                decision_id=amend_decision_id,
-                **amend_failed_payloads["order_event"],
-            )
-        except Exception as _ledger_err:
-            logger.debug(ledger_debug_message, pid, _ledger_err)
 
 
 def _resolve_open_trade_bridge_meta(bridge: Any) -> dict[str, Any]:
