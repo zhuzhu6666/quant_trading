@@ -602,6 +602,7 @@ class RuntimeConfigOverlayService:
         *,
         source: str,
         run_id: str = "",
+        expected_overlay_hash: str = "",
     ) -> dict[str, Any]:
         runtime_config.register_overlay_base(base_cfg, self.db_path, replace_existing=True)
         result = self._mutate_overlay(
@@ -609,6 +610,7 @@ class RuntimeConfigOverlayService:
             source=source,
             run_id=run_id,
             replace_overlay=True,
+            expected_overlay_hash=expected_overlay_hash,
         )
         result["status"] = "cleared"
         return result
@@ -847,6 +849,7 @@ class RuntimeConfigOverlayService:
         source: str,
         run_id: str = "",
         replace_overlay: bool,
+        expected_overlay_hash: str = "",
     ) -> dict[str, Any]:
         _refuse_test_write_to_state(self.db_path, source=source, run_id=run_id)
         self.ensure_table()
@@ -855,6 +858,15 @@ class RuntimeConfigOverlayService:
         try:
             self._begin_serialized_write(conn)
             current = self._read_overlay_in_transaction(conn)
+            current_hash = _hash(current)
+            if expected_overlay_hash and current_hash != str(expected_overlay_hash):
+                raise RuntimeConfigOverlayAuthorityError(
+                    {
+                        "reason": "overlay_hash_changed",
+                        "expected_overlay_hash": str(expected_overlay_hash),
+                        "current_overlay_hash": current_hash,
+                    }
+                )
             overlay = deepcopy(sanitized) if replace_overlay else _deep_merge(current, sanitized)
             effective_config = runtime_config.config_from_overlay(overlay, self.db_path)
             now = time.time()

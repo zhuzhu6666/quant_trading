@@ -214,6 +214,55 @@ def test_clear_overlay_to_base_does_not_snapshot_stale_overlay(tmp_path):
     assert "shadow_alpha_1" not in row[2]
 
 
+def test_clear_overlay_to_base_requires_exact_expected_hash(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = RuntimeConfigOverlayService(db_path)
+    service.apply_patch(
+        {"factor_portfolio_weights": {"shadow_alpha_1": 0.3}},
+        source="factor_governance_promote_factor",
+        run_id="run_overlay",
+    )
+    original = service.latest()
+
+    with pytest.raises(
+        RuntimeConfigOverlayAuthorityError,
+        match="overlay_hash_changed",
+    ):
+        service.clear_overlay_to_base(
+            RuntimeConfig(),
+            source="operator_overlay_reconstruction",
+            run_id="operator_run",
+            expected_overlay_hash="stale-hash",
+        )
+
+    latest = service.latest()
+    assert latest["overlay"] == original["overlay"]
+    assert latest["overlay_hash"] == original["overlay_hash"]
+
+
+def test_clear_overlay_to_base_accepts_exact_expected_hash(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = RuntimeConfigOverlayService(db_path)
+    service.apply_patch(
+        {"factor_portfolio_weights": {"shadow_alpha_1": 0.3}},
+        source="factor_governance_promote_factor",
+        run_id="run_overlay",
+    )
+    expected_hash = service.latest()["overlay_hash"]
+
+    result = service.clear_overlay_to_base(
+        RuntimeConfig(),
+        source="operator_overlay_reconstruction",
+        run_id="operator_run",
+        expected_overlay_hash=expected_hash,
+    )
+
+    assert result["status"] == "cleared"
+    assert service.latest()["overlay"] == {}
+
+
 def test_runtime_config_overlay_serializes_concurrent_partial_patches(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
