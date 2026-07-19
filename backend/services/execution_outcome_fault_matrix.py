@@ -38,6 +38,10 @@ REQUIRED_SCENARIOS: dict[str, tuple[str, ...]] = {
         "tests/test_ctrader_execution_outcome.py::test_close_v2_pg_intent_failure_does_not_block_risk_reduction",
         "tests/test_ctrader_execution_outcome.py::test_amend_v2_pg_intent_failure_still_confirms_fresh_broker_projection",
     ),
+    "confirmed_open_post_fill_fail_closed": (
+        "tests/test_live_open_entry_protection_barrier.py::test_submit_contains_confirmed_open_post_fill_exception",
+        "tests/test_live_open_submission.py::test_confirmed_open_post_fill_and_reconcile_failure_stays_fail_closed",
+    ),
 }
 
 
@@ -64,7 +68,9 @@ def binding_paths(*, root: Path | None = None) -> tuple[Path, ...]:
         root / "execution/broker_contract.py",
         root / "backend/services/broker_execution_intent.py",
         root / "backend/services/live_execution_recovery.py",
+        root / "backend/services/live_open_submission.py",
         root / "backend/services/live_safety_state.py",
+        root / "backend/services/live_service.py",
         root / "backend/services/phased_repair_release_gate.py",
         root / "scripts/execution_outcome_fault_matrix.py",
         Path(__file__).resolve(),

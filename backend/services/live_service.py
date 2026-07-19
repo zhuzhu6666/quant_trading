@@ -179,6 +179,11 @@ from backend.services.live_closed_position_processing import (
     run_closed_position_learning as _runtime_run_closed_position_learning,
     write_close_decision_log as _runtime_write_close_decision_log,
 )
+from backend.services.live_open_submission import (
+    OpenSubmissionRuntime,
+    finalize_nursery_reservation as _runtime_finalize_nursery_reservation,
+    submit_open_trade_candidate as _runtime_submit_open_trade_candidate,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -9173,136 +9178,42 @@ def _submit_open_trade_candidate(
     log,
     stop_requested=None,
 ) -> bool:
-    def _finalize_nursery(consumed: bool) -> None:
-        reservation_id = str(getattr(candidate, "nursery_reservation_id", "") or "")
-        if not reservation_id:
-            return
-        try:
-            from backend.services.nursery_exploration_budget import NurseryExplorationBudgetService
-
-            NurseryExplorationBudgetService().finalize(
-                reservation_id,
-                consumed=consumed,
-            )
-        except Exception as exc:
-            logger.warning("[live] nursery exploration reservation finalize failed: %s", exc)
-
-    final_admission = _probe_final_open_admission(
+    return _runtime_submit_open_trade_candidate(
         bridge=bridge,
+        attr_engine=attr_engine,
+        broker=broker,
+        cfg=cfg,
+        bar=bar,
+        tick=tick,
+        account=account,
+        positions=positions,
+        composite=composite,
+        gate_result=gate_result,
         candidate=candidate,
-    )
-    with _OPEN_TRADE_ADMISSION_LOCK:
-        if _open_trade_draining(stop_requested):
-            log(f"tick {tick}: v4 open SKIP (loop_draining stage=broker_submit)")
-            _finalize_nursery(False)
-            return False
-        if not bool(final_admission.get("ok")):
-            blockers = tuple(final_admission.get("blockers") or ())
-            failure_error = str(
-                (final_admission.get("postgres") or {}).get("error")
-                or (final_admission.get("spot_quote") or {}).get("error")
-                or ""
-            )
-            _persist_safety_fail_closed(
-                blockers=blockers,
-                source="final_open_admission",
-                error=failure_error,
-            )
-            log(
-                f"tick {tick}: v4 open SKIP (final_open_admission "
-                f"blockers={','.join(str(item) for item in blockers)})"
-            )
-            _finalize_nursery(False)
-            return False
-        try:
-            submit_started_at = time.time()
-            result = _submit_open_trade_order(bridge, composite, candidate.volume)
-            fill_received_at = time.time()
-        except Exception as exc:
-            log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
-            _finalize_nursery(False)
-            return True
-
-    # The market RPC was admitted.  Post-fill resolution, pending protection,
-    # SL/TP attach, and ledger/recovery writes must finish even if draining is
-    # requested after the RPC returns; process shutdown joins this loop thread.
-    broker_open_succeeded = bool(result is not None and getattr(result, "success", False))
-    try:
-        if broker_open_succeeded:
-            _finalize_nursery(True)
-            _handle_open_trade_order_success(
-                result=result,
-                bridge=bridge,
-                attr_engine=attr_engine,
-                broker=broker,
-                cfg=cfg,
-                bar=bar,
-                tick=tick,
-                account=account,
-                positions=positions,
-                composite=composite,
-                gate_result=gate_result,
-                candidate=candidate,
-                current_price=current_price,
-                log=log,
-                submit_started_at=submit_started_at,
-                fill_received_at=fill_received_at,
-            )
-        elif result is not None and not getattr(result, "success", False):
-            _finalize_nursery(False)
-            _record_open_trade_order_failure(
-                result=result,
-                cfg=cfg,
-                bar=bar,
-                account=account,
-                positions=positions,
-                composite=composite,
-                gate_result=gate_result,
-                candidate=candidate,
-                current_price=current_price,
-                tick=tick,
-                log=log,
-            )
-        else:
-            _finalize_nursery(False)
-            log(f"tick {tick}: v4 {candidate.direction_name} order returned no result")
-    except Exception as exc:
-        if broker_open_succeeded:
-            # Broker risk already exists.  No post-fill exception may fall back
-            # to a log-only path: persist no-new-risk first, then refresh broker
-            # truth so the serial safety cycle can repair or close the position.
-            failure_error = f"{type(exc).__name__}:{exc}"
-            _persist_safety_fail_closed(
-                blockers=("confirmed_open_post_fill_processing_failed",),
-                source="entry_protection_initialization",
-                error=failure_error,
-            )
-            reconcile = _explicit_position_reconcile(bridge)
-            if bool(reconcile.get("success")):
-                _publish_fresh_position_reconcile(reconcile, broker=broker)
-            try:
-                append_safety_outbox(
-                    event_type="confirmed_open_post_fill_processing_failed",
-                    payload={
-                        "broker": str(broker or ""),
-                        "tick": int(tick),
-                        "position_id": int(getattr(result, "position_id", 0) or 0),
-                        "intent_id": str(getattr(result, "intent_id", "") or ""),
-                        "reconcile_id": str(reconcile.get("reconcile_id") or ""),
-                        "reconcile_success": bool(reconcile.get("success")),
-                    },
-                    error=failure_error,
+        current_price=current_price,
+        log=log,
+        stop_requested=stop_requested,
+        runtime=OpenSubmissionRuntime(
+            probe_final_admission=_probe_final_open_admission,
+            admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
+            open_trade_draining=_open_trade_draining,
+            persist_safety_fail_closed=_persist_safety_fail_closed,
+            submit_order=_submit_open_trade_order,
+            handle_order_success=_handle_open_trade_order_success,
+            record_order_failure=_record_open_trade_order_failure,
+            reconcile_positions=_explicit_position_reconcile,
+            publish_positions=_publish_fresh_position_reconcile,
+            append_safety_outbox=append_safety_outbox,
+            finalize_nursery_reservation=lambda reservation_id, consumed: (
+                _runtime_finalize_nursery_reservation(
+                    reservation_id,
+                    consumed,
+                    warning=logger.warning,
                 )
-            except Exception:
-                pass
-            log(
-                f"tick {tick}: v4 {candidate.direction_name} confirmed open post-fill "
-                f"processing failed closed: {exc}"
-            )
-        else:
-            _finalize_nursery(False)
-            log(f"tick {tick}: v4 {candidate.direction_name} order exception: {exc}")
-    return True
+            ),
+            now=time.time,
+        ),
+    )
 
 
 def _probe_final_open_admission(

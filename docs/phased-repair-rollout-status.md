@@ -99,7 +99,7 @@ FactBoundary/UI 实现遵循：缺失 `_fact` 按 unknown，stale 保留最后�
 
 首轮 dual-record publish 发现 PostgreSQL schema guard 将换行 `ON CONFLICT ... DO UPDATE` 的 `DO` 误判为 DDL，导致 10 个 committed factor projection 暂时 degraded。classifier 已改为只识别 SQL 绝对起点或分号后的语句边界；受控重启后 backend recovery 报告 `attempted=10/current=10/degraded=0`，后续自治 mutation 也直接进入 current。
 
-Phase 5 façade 收敛继续完成：`live_service.py` 当前为 10,740 行，已将
+Phase 5 façade 收敛继续完成：`live_service.py` 当前为 10,651 行，已将
 supervisor re-entry、risk-reduction safeguards、position path metrics、entry
 protection latch、startup safety/bar warmup、factor initialization/warmup 和
 generation-bound serial tick runner 迁入独立模块。v2 与 legacy safety-first
@@ -110,7 +110,7 @@ active generation body 已无内嵌 tick loop，stale generation 不能执行 fa
 reload。账户刷新源码门禁现检查权威 tick runtime，并继续证明 kickoff 先于本地
 K 线 warmup。recovery position store、recovered-close replay/retirement、emergency
 execution fallback、post-close fail-closed cycle 及 attribution/audit/learning/cleanup
-也已迁入独立领域模块。
+以及 open submission/draining/post-fill fail-closed 也已迁入独立领域模块。
 
 Factor lifecycle 的 builtin 活跃路径也已收敛：native callable 以代码 artifact
 SHA-256 建立 durable identity，SHADOW enrollment、prepare、loaded ack/fresh health、
@@ -198,13 +198,23 @@ Learning worker capability heartbeat 同步新增同构 process-loaded flags 投
 `governance_enforce`、`pg_job_queue_enable` 与后置 `pg_job_queue_verify` 必须同时证明 backend/learning worker
 都已加载 predecessor flags。只重启 backend 不再足以推进治理阶段。
 
-Execution outcome 切换现已增加独立代码绑定故障矩阵：7 类场景、11 个固定用例于
+Execution outcome 切换现已增加独立代码绑定故障矩阵：8 类场景、13 个固定用例于
 2026-07-19 全部通过，并以 `execution_outcome_fault_matrix.v1` append-only/fsync
 attestation 记录。`execution_outcome_enable` 预检现在强制读取该证明并重算
 execution source/test binding；记录缺失、最近失败、内容篡改或相关代码变化都会
 fail-closed。当前 binding hash 为
-`1ce24cd81f5128fed960117976905b04f3bf22e93925fcd893d954b113d3793d`；这不改变
+`ca13333190e85fea53c0e3e9c998be0ecfd010f8f4210b7fe0fc509b447c7142`；这不改变
 当前 flag，也不越过 Safety/Generation 的阶段顺序。
+
+19:46 CST 将最终 admission、draining 拒绝、broker RPC 线性化和 confirmed-open
+post-fill fail-closed 编排迁入 `live_open_submission`；`live_service` 只保留依赖
+wiring。全量 pytest 在迁移后为 `2339 passed, 9 skipped`，Safety 12 类/28 用例
+以 binding `793c70883df6e8701b50c3fa3786f57bb5addbc9f0b7b198f564f55a02855400`
+通过。审计同时发现 Execution Outcome 旧 binding 未覆盖新 authority，现已将新模块、
+façade wiring 和 confirmed-open 后 post-fill/reconcile 双故障纳入证明；扩展后的 8 类/
+13 用例全部通过，最新 binding 为
+`ca13333190e85fea53c0e3e9c998be0ecfd010f8f4210b7fe0fc509b447c7142`。
+该批不重启服务、不切换 flag、不改变当前 Safety shadow authority。
 
 ## 6. 下一次发布的固定顺序
 

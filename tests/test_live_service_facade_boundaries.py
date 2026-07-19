@@ -83,6 +83,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_release_entry_protection_pending_latch",
         "_remember_supervisor_reentry_block",
         "_sync_partial_close_session_fact",
+        "_submit_open_trade_candidate",
         "emergency_close",
         "get_live_readiness",
         "stop_loop",
@@ -169,6 +170,19 @@ def test_closed_position_processing_lives_outside_facade():
     assert ".market_buy(" not in processing_source
     assert ".market_sell(" not in processing_source
     assert ".close_position(" not in processing_source
+
+
+def test_open_submission_state_machine_lives_outside_facade():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+    submission_source = Path(
+        "backend/services/live_open_submission.py"
+    ).read_text(encoding="utf-8")
+
+    assert "confirmed_open_post_fill_processing_failed" not in source
+    assert "confirmed_open_post_fill_processing_failed" in submission_source
+    assert "backend.services.live_service" not in submission_source
+    assert "bridge.market_buy(" not in submission_source
+    assert "bridge.market_sell(" not in submission_source
 
 
 def test_session_restore_decision_has_no_runtime_or_facade_dependency():
