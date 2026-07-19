@@ -167,6 +167,8 @@ from backend.services.live_supervision_actions import (
 )
 from backend.services.live_supervision_runtime import (
     LiveSupervisionRuntime,
+    PositionSupervisorEvaluationRuntime,
+    evaluate_position_supervisor_for_position as _runtime_evaluate_position,
     run_position_supervision as _runtime_run_position_supervision,
 )
 from backend.services.live_factor_wiring import (
@@ -2105,6 +2107,21 @@ def _build_position_supervisor_context(
     )
 
 
+def _get_position_quality_advisor():
+    return _POSITION_QUALITY_ADVISOR
+
+
+def _set_position_quality_advisor(advisor) -> None:
+    global _POSITION_QUALITY_ADVISOR
+    _POSITION_QUALITY_ADVISOR = advisor
+
+
+def _create_position_quality_advisor():
+    from research.position_quality_lightgbm import PositionQualityLightGBMService
+
+    return PositionQualityLightGBMService()
+
+
 def _evaluate_position_supervisor_for_position(
     position: dict[str, Any],
     *,
@@ -2116,107 +2133,35 @@ def _evaluate_position_supervisor_for_position(
     broker: str = "",
     strategy_name: str = "",
 ) -> dict[str, Any]:
-    global _POSITION_QUALITY_ADVISOR
-    context = _build_position_supervisor_context(position, cfg=cfg, acct=acct, now_ts=now_ts, positions=positions)
-    verdict = evaluate_position_supervisor(context)
-    component_states = {
-        "price": str(
-            position.get("current_price_state")
-            or position.get("price_state")
-            or ""
-        ).strip().lower(),
-        "pnl": str(
-            position.get("pnl_state")
-            or position.get("unrealized_pnl_state")
-            or ""
-        ).strip().lower(),
-        "path_metrics": str(
-            position.get("position_path_metrics_state") or ""
-        ).strip().lower(),
-    }
-    unavailable_components = sorted(
-        name
-        for name, state in component_states.items()
-        if state and state != "known"
+    from backend.services.model_influence import shared_model_influence_service
+    from backend.services.position_supervisor import build_model_tighten_controls
+
+    runtime = PositionSupervisorEvaluationRuntime(
+        build_context=_build_position_supervisor_context,
+        evaluate_rule=evaluate_position_supervisor,
+        get_quality_advisor=_get_position_quality_advisor,
+        set_quality_advisor=_set_position_quality_advisor,
+        quality_advisor_factory=_create_position_quality_advisor,
+        model_influence_service=shared_model_influence_service,
+        build_model_tighten_controls=build_model_tighten_controls,
+        load_recovery_row=_load_recovery_row_for_risk_reduction,
+        upsert_recovery_position=_upsert_recovery_position_state,
+        build_state_upsert_payload=_lifecycle_build_supervisor_state_upsert_payload,
+        loop_strategy_name=str(_loop_strategy_name or ""),
+        default_context_integrity=_RECOVERY_CONTEXT_FULL,
+        record_aux_failure=_record_risk_reduction_aux_failure,
     )
-    if unavailable_components:
-        # The sidecar fills missing features with numeric zero.  Do not allow
-        # an explicit broker component failure to become a promoted
-        # reduce/tighten decision through that compatibility behavior.
-        advisory = {
-            "ok": False,
-            "error": "position_component_unknown",
-            "unavailable_components": unavailable_components,
-            "component_states": component_states,
-        }
-    else:
-        try:
-            if _POSITION_QUALITY_ADVISOR is None:
-                from research.position_quality_lightgbm import PositionQualityLightGBMService
-
-                _POSITION_QUALITY_ADVISOR = PositionQualityLightGBMService()
-            from backend.services.model_influence import shared_model_influence_service
-
-            position_policy = shared_model_influence_service().active_policy("position_quality_lightgbm", cfg)
-            advisory = _POSITION_QUALITY_ADVISOR.score_position_context(
-                context,
-                artifact_path=str((position_policy or {}).get("artifact_path") or "") or None,
-            )
-        except Exception as exc:
-            advisory = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    verdict["position_quality_advisory"] = advisory
-    evidence = dict(verdict.get("evidence") or {})
-    evidence["position_quality_advisory"] = advisory
-    verdict["evidence"] = evidence
-    # Keep raw rule and model confidences separate.  A promoted PIT-v2 model
-    # may only tighten the rule verdict through ModelInfluenceService.
-    if advisory.get("ok") and float(advisory.get("exit_risk_score") or 0.0) >= 0.65:
-        verdict["model_review_priority"] = "high"
-    try:
-        from backend.services.model_influence import shared_model_influence_service
-        from backend.services.position_supervisor import build_model_tighten_controls
-
-        verdict = shared_model_influence_service().fuse_position(
-            verdict=verdict,
-            advisory=advisory,
-            position_id=str(position.get("position_id") or position.get("ticket") or ""),
-            cfg=cfg,
-            tighten_controls=build_model_tighten_controls(context),
-        )
-    except Exception as exc:
-        verdict["model_influence"] = {
-            "schema_version": "model_influence_result.v1",
-            "model_type": "position_quality_lightgbm",
-            "stage": "shadow",
-            "applied": False,
-            "reason": f"model_influence_unavailable:{type(exc).__name__}",
-        }
-    if persist:
-        pid = int(position.get("position_id") or position.get("ticket") or 0)
-        row = _load_recovery_row_for_risk_reduction(
-            pid,
-            operation="position_supervisor_evaluation",
-        )
-        try:
-            _upsert_recovery_position_state(
-                position,
-                **_lifecycle_build_supervisor_state_upsert_payload(
-                    recovery_row=row,
-                    verdict=verdict,
-                    broker=broker,
-                    strategy_name=strategy_name,
-                    loop_strategy_name=_loop_strategy_name,
-                    default_context_integrity=_RECOVERY_CONTEXT_FULL,
-                ),
-            )
-        except Exception as exc:
-            _record_risk_reduction_aux_failure(
-                "risk_reduction_state_persist_failed",
-                position_id=pid,
-                action="position_supervisor_evaluation",
-                error=exc,
-            )
-    return verdict
+    return _runtime_evaluate_position(
+        position,
+        runtime=runtime,
+        cfg=cfg,
+        account=acct,
+        now_ts=now_ts,
+        positions=positions,
+        persist=persist,
+        broker=broker,
+        strategy_name=strategy_name,
+    )
 
 
 def _enrich_positions_with_path_metrics(

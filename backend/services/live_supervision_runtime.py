@@ -57,6 +57,154 @@ class LiveSupervisionRuntime:
     sync_partial_close_session_fact: Any
 
 
+@dataclass(frozen=True)
+class PositionSupervisorEvaluationRuntime:
+    build_context: Any
+    evaluate_rule: Any
+    get_quality_advisor: Any
+    set_quality_advisor: Any
+    quality_advisor_factory: Any
+    model_influence_service: Any
+    build_model_tighten_controls: Any
+    load_recovery_row: Any
+    upsert_recovery_position: Any
+    build_state_upsert_payload: Any
+    loop_strategy_name: str
+    default_context_integrity: str
+    record_aux_failure: Any
+
+
+def evaluate_position_supervisor_for_position(
+    position: dict[str, Any],
+    *,
+    runtime: PositionSupervisorEvaluationRuntime,
+    cfg: Any = None,
+    account: dict[str, Any] | None = None,
+    now_ts: float | None = None,
+    positions: list[Any] | None = None,
+    persist: bool = False,
+    broker: str = "",
+    strategy_name: str = "",
+) -> dict[str, Any]:
+    """Build, augment and optionally persist one supervisor verdict."""
+
+    context = runtime.build_context(
+        position,
+        cfg=cfg,
+        acct=account,
+        now_ts=now_ts,
+        positions=positions,
+    )
+    verdict = runtime.evaluate_rule(context)
+    component_states = {
+        "price": str(
+            position.get("current_price_state")
+            or position.get("price_state")
+            or ""
+        )
+        .strip()
+        .lower(),
+        "pnl": str(
+            position.get("pnl_state")
+            or position.get("unrealized_pnl_state")
+            or ""
+        )
+        .strip()
+        .lower(),
+        "path_metrics": str(
+            position.get("position_path_metrics_state") or ""
+        )
+        .strip()
+        .lower(),
+    }
+    unavailable_components = sorted(
+        name
+        for name, state in component_states.items()
+        if state and state != "known"
+    )
+    if unavailable_components:
+        advisory = {
+            "ok": False,
+            "error": "position_component_unknown",
+            "unavailable_components": unavailable_components,
+            "component_states": component_states,
+        }
+    else:
+        try:
+            advisor = runtime.get_quality_advisor()
+            if advisor is None:
+                advisor = runtime.quality_advisor_factory()
+                runtime.set_quality_advisor(advisor)
+            position_policy = runtime.model_influence_service().active_policy(
+                "position_quality_lightgbm",
+                cfg,
+            )
+            advisory = advisor.score_position_context(
+                context,
+                artifact_path=(
+                    str((position_policy or {}).get("artifact_path") or "")
+                    or None
+                ),
+            )
+        except Exception as exc:
+            advisory = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    verdict["position_quality_advisory"] = advisory
+    evidence = dict(verdict.get("evidence") or {})
+    evidence["position_quality_advisory"] = advisory
+    verdict["evidence"] = evidence
+    if (
+        advisory.get("ok")
+        and float(advisory.get("exit_risk_score") or 0.0) >= 0.65
+    ):
+        verdict["model_review_priority"] = "high"
+    try:
+        verdict = runtime.model_influence_service().fuse_position(
+            verdict=verdict,
+            advisory=advisory,
+            position_id=str(
+                position.get("position_id") or position.get("ticket") or ""
+            ),
+            cfg=cfg,
+            tighten_controls=runtime.build_model_tighten_controls(context),
+        )
+    except Exception as exc:
+        verdict["model_influence"] = {
+            "schema_version": "model_influence_result.v1",
+            "model_type": "position_quality_lightgbm",
+            "stage": "shadow",
+            "applied": False,
+            "reason": f"model_influence_unavailable:{type(exc).__name__}",
+        }
+    if persist:
+        position_id = int(
+            position.get("position_id") or position.get("ticket") or 0
+        )
+        row = runtime.load_recovery_row(
+            position_id,
+            operation="position_supervisor_evaluation",
+        )
+        try:
+            runtime.upsert_recovery_position(
+                position,
+                **runtime.build_state_upsert_payload(
+                    recovery_row=row,
+                    verdict=verdict,
+                    broker=broker,
+                    strategy_name=strategy_name,
+                    loop_strategy_name=runtime.loop_strategy_name,
+                    default_context_integrity=runtime.default_context_integrity,
+                ),
+            )
+        except Exception as exc:
+            runtime.record_aux_failure(
+                "risk_reduction_state_persist_failed",
+                position_id=position_id,
+                action="position_supervisor_evaluation",
+                error=exc,
+            )
+    return verdict
+
+
 def run_position_supervision(
     bridge: Any,
     positions: list[Any],
