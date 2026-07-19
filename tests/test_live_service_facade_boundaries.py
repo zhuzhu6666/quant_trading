@@ -44,6 +44,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_build_open_trade_risk_context",
         "_evaluate_position_supervisor_for_position",
         "_load_authoritative_session_deal_facts",
+        "_open_learning_context_payload",
         "_sync_partial_close_session_fact",
         "emergency_close",
         "get_live_readiness",

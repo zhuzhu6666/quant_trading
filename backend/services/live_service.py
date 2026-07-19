@@ -95,7 +95,9 @@ from backend.services.live_open_admission import (
     probe_postgres_authority as _probe_postgres_authority,
 )
 from backend.services.live_open_risk_context import (
+    OpenLearningContextRuntime,
     OpenRiskContextRuntime,
+    build_open_learning_context as _runtime_build_open_learning_context,
     build_open_trade_risk_context as _runtime_build_open_risk_context,
 )
 from backend.services.live_committed_policy import load_live_policy_controls
@@ -1216,61 +1218,36 @@ def _open_learning_context_payload(
     risk_verdict: Any = None,
     market_session: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    now_ts = time.time()
-    direction = int(getattr(composite, "direction", 0) or 0)
-    entry_cluster = _build_entry_cluster_context(
-        positions_before=positions_before,
-        direction=direction,
-        symbol=symbol,
-        now_ts=now_ts,
-        new_position_id=int(pid or 0),
-        new_api_volume=float(actual_api_volume or 0.0),
+    runtime = OpenLearningContextRuntime(
+        build_entry_cluster_context=_build_entry_cluster_context,
+        market_micro_context_snapshot=_market_micro_context_snapshot,
+        state_get=_live_state_get,
+        build_entry_timing_context=build_entry_timing_context,
+        build_payload=_lifecycle_build_open_learning_context_payload,
+        tracked_total_api_volume=_tracked_total_api_volume,
+        now=time.time,
     )
-    market_micro = _market_micro_context_snapshot(
+    return _runtime_build_open_learning_context(
         bridge=bridge,
-        current_price=float(current_price or 0.0),
-        fill_price=float(fill_price or 0.0),
-        direction=direction,
-        now_ts=now_ts,
-    )
-    risk_payload = risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else (risk_verdict or {})
-    audit_payload = (risk_payload or {}).get("audit_payload") or {}
-    runtime_health = ((audit_payload.get("state") or {}).get("runtime_health") or {})
-    temporal_context = audit_payload.get("temporal_context") or {}
-    decision_freshness = (
-        audit_payload.get("decision_freshness")
-        or _live_state_get("decision_bar_freshness", {}, clone=True)
-        or {}
-    )
-    entry_timing_context = build_entry_timing_context(
-        signal_bar_ts=(bar or {}).get("time", 0.0),
-        decision_evaluated_at=temporal_context.get("evaluated_at", now_ts),
-        order_submitted_at=now_ts,
-        fill_ts=now_ts,
-        timeframe=temporal_context.get("timeframe") or (bar or {}).get("timeframe") or "",
-        source="live_open_learning_context",
-    )
-    return _lifecycle_build_open_learning_context_payload(
-        entry_cluster=entry_cluster,
-        market_micro=market_micro,
         bar=bar,
+        positions_before=positions_before,
         composite=composite,
-        total_api_volume_before=_tracked_total_api_volume(positions_before or []),
+        symbol=symbol,
+        position_id=pid,
         actual_api_volume=actual_api_volume,
         requested_volume=requested_volume,
         base_requested_volume=base_requested_volume,
         current_price=current_price,
         fill_price=fill_price,
-        sl_price=sl_price,
-        tp_price=tp_price,
-        sl_dist=sl_dist,
-        tp_dist=tp_dist,
-        sizing_trace=sizing_trace,
+        stop_loss_price=sl_price,
+        take_profit_price=tp_price,
+        stop_loss_distance=sl_dist,
+        take_profit_distance=tp_dist,
         event_sizing_context=event_sizing_context,
-        runtime_health=runtime_health,
-        market_session=market_session or _live_state_get("market_session", {}, clone=True) or {},
-        decision_freshness=decision_freshness,
-        entry_timing_context=entry_timing_context,
+        runtime=runtime,
+        sizing_trace=sizing_trace,
+        risk_verdict=risk_verdict,
+        market_session=market_session,
     )
 
 

@@ -25,6 +25,114 @@ class OpenRiskContextRuntime:
     now: Any
 
 
+@dataclass(frozen=True)
+class OpenLearningContextRuntime:
+    build_entry_cluster_context: Any
+    market_micro_context_snapshot: Any
+    state_get: Any
+    build_entry_timing_context: Any
+    build_payload: Any
+    tracked_total_api_volume: Any
+    now: Any
+
+
+def build_open_learning_context(
+    *,
+    bridge: Any,
+    bar: dict[str, Any],
+    positions_before: list[Any] | None,
+    composite: Any,
+    symbol: str,
+    position_id: int,
+    actual_api_volume: float,
+    requested_volume: float,
+    base_requested_volume: float,
+    current_price: float,
+    fill_price: float,
+    stop_loss_price: float,
+    take_profit_price: float,
+    stop_loss_distance: float,
+    take_profit_distance: float,
+    event_sizing_context: dict[str, Any] | None,
+    runtime: OpenLearningContextRuntime,
+    sizing_trace: dict[str, Any] | None = None,
+    risk_verdict: Any = None,
+    market_session: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now_ts = float(runtime.now())
+    direction = int(getattr(composite, "direction", 0) or 0)
+    entry_cluster = runtime.build_entry_cluster_context(
+        positions_before=positions_before,
+        direction=direction,
+        symbol=symbol,
+        now_ts=now_ts,
+        new_position_id=int(position_id or 0),
+        new_api_volume=float(actual_api_volume or 0.0),
+    )
+    market_micro = runtime.market_micro_context_snapshot(
+        bridge=bridge,
+        current_price=float(current_price or 0.0),
+        fill_price=float(fill_price or 0.0),
+        direction=direction,
+        now_ts=now_ts,
+    )
+    risk_payload = (
+        risk_verdict.to_dict()
+        if hasattr(risk_verdict, "to_dict")
+        else (risk_verdict or {})
+    )
+    audit_payload = (risk_payload or {}).get("audit_payload") or {}
+    runtime_health = (
+        ((audit_payload.get("state") or {}).get("runtime_health") or {})
+    )
+    temporal_context = audit_payload.get("temporal_context") or {}
+    decision_freshness = (
+        audit_payload.get("decision_freshness")
+        or runtime.state_get("decision_bar_freshness", {}, clone=True)
+        or {}
+    )
+    entry_timing_context = runtime.build_entry_timing_context(
+        signal_bar_ts=(bar or {}).get("time", 0.0),
+        decision_evaluated_at=temporal_context.get("evaluated_at", now_ts),
+        order_submitted_at=now_ts,
+        fill_ts=now_ts,
+        timeframe=(
+            temporal_context.get("timeframe")
+            or (bar or {}).get("timeframe")
+            or ""
+        ),
+        source="live_open_learning_context",
+    )
+    return runtime.build_payload(
+        entry_cluster=entry_cluster,
+        market_micro=market_micro,
+        bar=bar,
+        composite=composite,
+        total_api_volume_before=runtime.tracked_total_api_volume(
+            positions_before or []
+        ),
+        actual_api_volume=actual_api_volume,
+        requested_volume=requested_volume,
+        base_requested_volume=base_requested_volume,
+        current_price=current_price,
+        fill_price=fill_price,
+        sl_price=stop_loss_price,
+        tp_price=take_profit_price,
+        sl_dist=stop_loss_distance,
+        tp_dist=take_profit_distance,
+        sizing_trace=sizing_trace,
+        event_sizing_context=event_sizing_context,
+        runtime_health=runtime_health,
+        market_session=(
+            market_session
+            or runtime.state_get("market_session", {}, clone=True)
+            or {}
+        ),
+        decision_freshness=decision_freshness,
+        entry_timing_context=entry_timing_context,
+    )
+
+
 def build_open_trade_risk_context(
     *,
     cfg: Any,
