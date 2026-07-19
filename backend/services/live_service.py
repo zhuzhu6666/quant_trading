@@ -94,6 +94,10 @@ from backend.services.live_loop_stop import (
     LoopOwnershipSnapshot,
     stop_live_loop as _runtime_stop_live_loop,
 )
+from backend.services.live_loop_start import (
+    LiveLoopStartRuntime,
+    start_live_loop as _runtime_start_live_loop,
+)
 from backend.services.live_loop_tick_runtime import (
     LegacyLiveLoopTickRuntime,
     LiveLoopTickRuntime,
@@ -5712,6 +5716,69 @@ def loop_status() -> dict:
         }
 
 
+def _prepare_loop_ownership(
+    *,
+    stop_flag,
+    broker: str,
+    started_at: float,
+    strategy_name: str,
+) -> None:
+    global _loop_stop_flag, _loop_broker, _loop_started_at, _loop_strategy_name
+
+    _loop_stop_flag = stop_flag
+    _loop_broker = broker
+    _loop_started_at = started_at
+    _loop_strategy_name = strategy_name
+
+
+def _reset_start_ownership() -> None:
+    global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
+    global _loop_strategy_name
+
+    _loop_thread = None
+    _loop_stop_flag = None
+    _loop_broker = None
+    _loop_started_at = None
+    _loop_strategy_name = None
+
+
+def _install_loop_thread(thread) -> None:
+    global _loop_thread
+
+    _loop_thread = thread
+
+
+def _live_loop_start_runtime() -> LiveLoopStartRuntime:
+    return LiveLoopStartRuntime(
+        generation_controller_enabled=_generation_controller_enabled,
+        state_lock=_loop_state_lock,
+        snapshot_ownership=_loop_ownership_snapshot,
+        process_shutdown_requested=lambda: _process_shutdown_requested,
+        controller=_LIVE_LOOP_CONTROLLER,
+        last_loop_end=lambda: _last_loop_end,
+        now=time.time,
+        sleep=time.sleep,
+        logger_warning=logger.warning,
+        logger_info=logger.info,
+        event_factory=threading.Event,
+        prepare_ownership=_prepare_loop_ownership,
+        reset_start_ownership=_reset_start_ownership,
+        persist_desired_state=_persist_loop_desired_state,
+        prime_live_loop_state=_prime_live_loop_state,
+        phase2_active=_phase2_v2_active,
+        start_safety_watchdog=_start_live_safety_watchdog,
+        start_scheduler=_start_live_scheduler,
+        stop_scheduler=_stop_live_scheduler,
+        stop_safety_watchdog=_stop_live_safety_watchdog,
+        thread_factory=threading.Thread,
+        loop_target=_run_loop,
+        install_loop_thread=_install_loop_thread,
+        live_state_update=_live_state_update,
+        live_state_get=_live_state_get,
+        no_new_risk_latched=no_new_risk_latched,
+    )
+
+
 def start_loop(
     broker: str,
     strategy_name: str = "v1_minimal_ma_cross",
@@ -5719,201 +5786,13 @@ def start_loop(
     persist_desired: bool = True,
     trigger_reason: str = "manual",
 ) -> dict:
-    """Spawn the live loop as a background thread in this backend process.
-    Refuses if a loop is already running. Requires the broker to be reachable."""
-    global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at, _loop_strategy_name
-    global _last_loop_end
-    generation_enabled = _generation_controller_enabled()
-
-    with _loop_state_lock:
-        if _process_shutdown_requested:
-            return {
-                "ok": False,
-                "error": "process_shutdown_in_progress",
-                "broker": broker,
-                "strategy_name": strategy_name,
-            }
-        if generation_enabled:
-            controller_status = _LIVE_LOOP_CONTROLLER.status()
-            if controller_status.get("phase") in {"starting", "running", "degraded", "draining"}:
-                return {
-                    "ok": False,
-                    "error": (
-                        "live_loop_generation_busy:"
-                        f"{controller_status.get('phase')}:{controller_status.get('generation')}"
-                    ),
-                    **controller_status,
-                }
-        if _loop_thread is not None and _loop_thread.is_alive():
-            draining = bool(
-                not generation_enabled
-                and _loop_stop_flag is not None
-                and _loop_stop_flag.is_set()
-            )
-            return {
-                "ok": False,
-                "error": (
-                    "live_loop_draining"
-                    if draining
-                    else f"live loop already running (broker={_loop_broker})"
-                ),
-                "broker": _loop_broker,
-                "started_at": _loop_started_at,
-                "strategy_name": _loop_strategy_name,
-                "phase": "draining" if draining else "running",
-                "thread_alive": True,
-                "ready": False if draining else None,
-                "accepting_new_risk": False if draining else None,
-            }
-        if broker not in ("ctrader",):
-            return {"ok": False, "error": f"unknown broker: {broker}"}
-
-        # ★ v9-fix: 重启退避 — 上次停止后至少等 _MIN_RESTART_INTERVAL 秒
-        # audit v3: _MIN_RESTART_INTERVAL=60s 太长, 小程序重启只等2秒就调start
-        # 用户主动重启时不应阻塞, 只对自动重启(如auto_recovery)保留退避
-        since_end = time.time() - _last_loop_end if _last_loop_end else 999
-
-    # 退避只在上次停止后很短时间内生效 (防止 auto_recovery 立即重启崩溃的 loop)
-    # 用户主动 stop→start 间隔一般 >2s, 不会触发
-    if _last_loop_end and since_end < 3:
-        wait = 3 - since_end
-        logger.warning(f"[live] restart backoff: waiting {wait:.1f}s")
-        time.sleep(wait)
-
-    with _loop_state_lock:
-        # 再次检查是否有人在等的时候启动了
-        if _process_shutdown_requested:
-            return {
-                "ok": False,
-                "error": "process_shutdown_in_progress",
-                "broker": broker,
-                "strategy_name": strategy_name,
-            }
-        if _loop_thread is not None and _loop_thread.is_alive():
-            draining = bool(
-                not generation_enabled
-                and _loop_stop_flag is not None
-                and _loop_stop_flag.is_set()
-            )
-            return {
-                "ok": False,
-                "error": (
-                    "live_loop_draining"
-                    if draining
-                    else "another loop started during backoff wait"
-                ),
-                "phase": "draining" if draining else "running",
-                "thread_alive": True,
-                "ready": False if draining else None,
-                "accepting_new_risk": False if draining else None,
-            }
-
-        # Pre-flight: broker connection must be live
-        acct = {"ok": True, "broker": broker, "balance": 0, "equity": 0,
-                "margin": 0, "margin_free": 0, "leverage": 0, "currency": ""}
-
-        generation = None
-        if generation_enabled:
-            try:
-                generation = _LIVE_LOOP_CONTROLLER.begin_start(
-                    broker=broker,
-                    strategy_name=strategy_name,
-                )
-            except RuntimeError as exc:
-                return {"ok": False, "error": str(exc), **_LIVE_LOOP_CONTROLLER.status()}
-
-        try:
-            _loop_stop_flag = generation.stop_event if generation is not None else threading.Event()
-            _loop_broker = broker
-            _loop_started_at = time.time()
-            _loop_strategy_name = strategy_name  # audit 2026-06-08
-            if persist_desired:
-                _persist_loop_desired_state(
-                    True,
-                    broker=broker,
-                    strategy_name=strategy_name,
-                    reason=trigger_reason,
-                )
-            # A generation starts with an explicit unknown account projection;
-            # only the startup reconcile may turn it into a fresh fact.
-            _prime_live_loop_state(
-                broker=broker,
-                strategy_name=strategy_name,
-                started_at=_loop_started_at,
-                account=acct,
-                accepting_new_risk=not _phase2_v2_active(),
-                restore_session=not _phase2_v2_active(),
-                # ``acct`` is only a startup placeholder.  No mode may
-                # publish it as a broker observation; the first explicit
-                # account reconcile owns that transition.
-                account_observed=False,
-            )
-            _start_live_safety_watchdog()
-            _start_live_scheduler()
-            if generation is not None:
-                _LIVE_LOOP_CONTROLLER.bind_component(generation.generation_id, "scheduler")
-                _LIVE_LOOP_CONTROLLER.bind_component(generation.generation_id, "refresh_worker_inline")
-            _loop_thread = threading.Thread(
-                target=_run_loop,
-                args=(broker, _loop_stop_flag, generation.generation_id if generation is not None else ""),
-                name=f"live_loop_{broker}",
-                daemon=True,
-            )
-            if generation is not None:
-                _LIVE_LOOP_CONTROLLER.bind_thread(generation.generation_id, _loop_thread)
-            _loop_thread.start()
-            logger.info(f"live loop started: broker={broker} strategy={strategy_name} thread_id={_loop_thread.ident}")
-        except Exception as exc:
-            failed_reason = f"start_failed:{type(exc).__name__}:{exc}"
-            if generation is not None:
-                _LIVE_LOOP_CONTROLLER.acknowledge_exit(
-                    generation.generation_id,
-                    failed_reason=failed_reason,
-                )
-            _loop_thread = None
-            _loop_stop_flag = None
-            _loop_broker = None
-            _loop_started_at = None
-            _loop_strategy_name = None
-            _live_state_update(
-                loop_running=False,
-                accepting_new_risk=False,
-                startup_blocker=failed_reason,
-            )
-            try:
-                _stop_live_scheduler()
-            except Exception:
-                pass
-            _stop_live_safety_watchdog()
-            return {
-                "ok": False,
-                "error": failed_reason,
-                **(_LIVE_LOOP_CONTROLLER.status() if generation is not None else {}),
-            }
-
-    phase2_active = _phase2_v2_active()
-    legacy_ready = bool(
-        not phase2_active
-        and _live_state_get("loop_running", False)
-        and _live_state_get("accepting_new_risk", False)
-        and str(_live_state_get("session_state_status", "unknown") or "unknown")
-        == "available"
-        and not no_new_risk_latched(fail_closed=True)
+    return _runtime_start_live_loop(
+        broker,
+        strategy_name,
+        persist_desired=persist_desired,
+        trigger_reason=trigger_reason,
+        runtime=_live_loop_start_runtime(),
     )
-    return {
-        "ok": True,
-        "broker": broker,
-        "started_at": _loop_started_at,
-        "thread_id": _loop_thread.ident,
-        "pid": _loop_thread.ident,  # audit 2026-06-09: alias for FE uniformity (paper/start returns pid; thread.ident is the closest equivalent for a background thread)
-        "strategy_name": strategy_name,
-        "trigger_reason": trigger_reason,
-        "generation": generation.generation_id if generation is not None else "",
-        "phase": "starting" if phase2_active else "running",
-        "ready": legacy_ready,
-        "accepting_new_risk": legacy_ready,
-        "msg": f"live loop thread started. Read /api/live/loop-status to monitor.",
-    }
 
 
 def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:

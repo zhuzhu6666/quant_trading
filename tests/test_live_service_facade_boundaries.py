@@ -65,6 +65,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "emergency_close",
         "get_live_readiness",
         "stop_loop",
+        "start_loop",
     ):
         node = definitions[name]
         assert int(node.end_lineno or 0) - int(node.lineno) < 55
