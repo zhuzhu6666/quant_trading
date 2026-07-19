@@ -6,7 +6,7 @@
 
 ## 1. 当前结论
 
-Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档已经实现并通过本地与隔离 PostgreSQL 验证。生产 PostgreSQL 已在线从 schema v7 升到 v9，`experiments.db` 也在哈希一致的备份后完成显式 additive repair。
+Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档已经实现并通过本地与隔离 PostgreSQL 验证。生产 PostgreSQL 已在线从 schema v7 升到 v10，`experiments.db` 也在哈希一致的备份后完成显式 additive repair。
 
 目标事实已确认为 `demo_autonomous`：demo 仅表示模拟资金，不表示需要日常人工批准。历史无 mutation 绑定的 nursery overlay 已先备份，再用精确旧 hash 的 CAS 清空，由 `settings.yaml` 的 `demo_autonomous` 重新成为配置事实。清空后 learning worker 已自主提交 11 个 disabled SHADOW 因子 lifecycle 投影；它们都是 `risk_tightening`、`committed/current` 且 config/domain hash 完整，没有恢复旧因子权重或覆盖 autonomy mode。
 
@@ -33,7 +33,7 @@ proposal registry 的历史 source-ref 索引存在升降序同名漂移；本�
 - 默认全量：`2226 passed, 10 deselected`；PostgreSQL integration 由独立门禁执行。
 - PostgreSQL integration：`10 passed, 2226 deselected`，使用 PostgreSQL 临时 schema/事务回滚，不以 SQLite 替代。
 - P0 执行/紧急/对账/stop-open/default-off safety 故障矩阵：`296 passed`。
-- 从最小历史 baseline 到 v9 成功；同一迁移第二次执行 `applied_count=0`。
+- 从最小历史 baseline 到 v10 成功；同一迁移第二次执行 `applied_count=0`。
 - `compileall`、`git diff --check`、OpenAPI snapshot、dependency lock check、`pip check` 通过。
 - ASGI TestClient 与 async ASGI smoke 在允许线程调度的隔离环境中均小于 5 秒。
 - 分期故障矩阵的逐项测试映射与本轮结果见
@@ -51,9 +51,10 @@ FactBoundary/UI 实现遵循：缺失 `_fact` 按 unknown，stale 保留最后�
 
 ## 3. 已完成的生产 additive migration
 
-- PostgreSQL `state_v1`：v7 -> v9。
+- PostgreSQL `state_v1`：v7 -> v10。
   - v8：runtime schema contract completion。
   - v9：runtime overlay authority manifest/index。
+  - v10：proposal source-ref 显式 `DESC` 的 additive v2 索引契约。
   - apply 后 `--check` 为 `ok=true`；重复 apply 为零变更。
 - `data/experiments.db`：迁移前备份到
   `data/experiments.before-schema-v1-20260718T224646Z.db`，备份 SHA-256 为
