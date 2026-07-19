@@ -1,6 +1,9 @@
 import pytest
 
-from backend.core.static_feature_flags import StaticFeatureFlags
+from backend.core.static_feature_flags import (
+    StaticFeatureFlags,
+    static_feature_flags_fingerprint,
+)
 
 
 def test_static_flags_use_environment_precedence():
@@ -31,6 +34,22 @@ def test_pg_job_queue_defaults_off():
     flags = StaticFeatureFlags.from_sources({}, {})
 
     assert flags.pg_job_queue_v2_enabled is False
+
+
+def test_static_feature_flag_projection_is_stable_and_complete():
+    flags = StaticFeatureFlags(live_safety_plane_v2_mode="shadow")
+    values = flags.to_dict()
+
+    assert set(values) == {
+        "live_safety_plane_v2_mode",
+        "live_generation_controller_v2_enabled",
+        "ctrader_execution_outcome_v2_enabled",
+        "governance_mutation_coordinator_v2_mode",
+        "pg_job_queue_v2_enabled",
+    }
+    assert static_feature_flags_fingerprint(values) == static_feature_flags_fingerprint(
+        dict(reversed(list(values.items())))
+    )
 
 
 def test_invalid_safety_mode_is_rejected_at_load():

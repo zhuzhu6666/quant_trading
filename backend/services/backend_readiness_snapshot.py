@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import sqlite3
 import threading
@@ -15,6 +16,7 @@ from backend.core.state_store import validate_runtime_state_schema
 
 SNAPSHOT_KEY = "backend_readiness_snapshot.v1"
 logger = logging.getLogger(__name__)
+_PROCESS_STARTED_AT = time.time()
 
 
 class _AsyncRefreshOwner:
@@ -227,11 +229,24 @@ class BackendReadinessSnapshotService:
             builder = BackendReadinessService(db_path=self.db_path).build
         started = time.perf_counter()
         payload = builder()
+        from backend.core.static_feature_flags import (
+            shared_static_feature_flags,
+            static_feature_flags_fingerprint,
+        )
+
+        process_flags = shared_static_feature_flags().to_dict()
         payload.setdefault("snapshot", {})
         payload["snapshot"].update({
             "schema_version": "backend_readiness_snapshot.v1",
             "build_seconds": round(time.perf_counter() - started, 3),
             "generated_in_background": True,
+            "process_static_feature_flags": {
+                "schema_version": "static_feature_flags.v1",
+                "values": process_flags,
+                "fingerprint": static_feature_flags_fingerprint(process_flags),
+                "pid": os.getpid(),
+                "process_started_at": _PROCESS_STARTED_AT,
+            },
         })
         self.publish(payload)
         return payload

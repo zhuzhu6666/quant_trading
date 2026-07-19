@@ -18,6 +18,16 @@ def test_readiness_snapshot_publishes_and_reuses_persistent_projection(tmp_path)
     fresh = service.refresh_async(max_age_seconds=60.0)
 
     assert built["snapshot"]["generated_in_background"] is True
+    process_flags = built["snapshot"]["process_static_feature_flags"]
+    assert process_flags["schema_version"] == "static_feature_flags.v1"
+    assert process_flags["values"]["live_safety_plane_v2_mode"] in {
+        "off",
+        "shadow",
+        "enforce",
+    }
+    assert process_flags["fingerprint"]
+    assert process_flags["pid"] > 0
+    assert process_flags["process_started_at"] > 0
     assert latest["ok"] is True
     assert latest["payload"]["ready_for_frontend"] is True
     assert fresh["status"] == "fresh"

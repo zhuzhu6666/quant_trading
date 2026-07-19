@@ -5,9 +5,11 @@ They are resolved once per process and require a deployment/restart to change.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 
@@ -86,6 +88,19 @@ class StaticFeatureFlags:
                 )
             ),
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def static_feature_flags_fingerprint(values: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(values),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 _LOCK = threading.Lock()

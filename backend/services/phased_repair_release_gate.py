@@ -152,6 +152,43 @@ def evaluate_phased_release_preflight(
     if not readiness_ok:
         blockers.append("release_readiness_unavailable_or_divergent")
 
+    process_flags_required = target != "safety_enforce"
+    snapshot_meta = (
+        dict(readiness_payload.get("snapshot") or {})
+        if isinstance(readiness_payload.get("snapshot"), Mapping)
+        else {}
+    )
+    process_flags = (
+        dict(snapshot_meta.get("process_static_feature_flags") or {})
+        if isinstance(snapshot_meta.get("process_static_feature_flags"), Mapping)
+        else {}
+    )
+    process_flag_values = (
+        dict(process_flags.get("values") or {})
+        if isinstance(process_flags.get("values"), Mapping)
+        else {}
+    )
+    from backend.core.static_feature_flags import static_feature_flags_fingerprint
+
+    try:
+        process_pid = int(process_flags.get("pid") or 0)
+    except (TypeError, ValueError):
+        process_pid = 0
+
+    process_flags_ok = bool(
+        not process_flags_required
+        or (
+            process_flags.get("schema_version") == "static_feature_flags.v1"
+            and process_flag_values == dict(flags)
+            and str(process_flags.get("fingerprint") or "")
+            == static_feature_flags_fingerprint(process_flag_values)
+            and process_pid > 0
+            and (_float_or_none(process_flags.get("process_started_at")) or 0.0) > 0.0
+        )
+    )
+    if not process_flags_ok:
+        blockers.append("backend_process_static_flags_unconfirmed")
+
     job_worker_preflight_required = target == "pg_job_queue_enable"
     job_worker_preflight_payload = (
         dict(job_worker_preflight or {})
@@ -229,6 +266,14 @@ def evaluate_phased_release_preflight(
                 "config_hash_match": worker.get("config_hash_match"),
                 "overlay_hash_match": worker.get("overlay_hash_match"),
                 "mutation_capability_status": mutation_capability.get("status"),
+            },
+            "backend_process_static_flags": {
+                "ok": process_flags_ok,
+                "required_for_target": process_flags_required,
+                "values": process_flag_values,
+                "fingerprint": process_flags.get("fingerprint"),
+                "pid": process_flags.get("pid"),
+                "process_started_at": process_flags.get("process_started_at"),
             },
             "job_worker_preflight": {
                 **job_worker_preflight_payload,

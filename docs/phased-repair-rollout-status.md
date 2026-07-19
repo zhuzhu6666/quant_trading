@@ -132,6 +132,12 @@ binding hash 为 `133e586e90fa50b244c3fb6285cb0c49073cf0ab46e279761b3aa8a93e688d
 release preflight 已验证该记录，当前 Safety target 仍只剩 24 小时/完整 lifecycle
 观察时长 blocker。后续 Safety source 或对应测试变化会自动使 binding stale 并要求重跑。
 
+后续阶段不再仅凭 CLI 新进程解析配置判断 predecessor 已运行。backend readiness
+将持久化实际 process-loaded static flags、fingerprint、PID 与启动时间；从
+`generation_enable` 起若配置已改但 backend 尚未重启，preflight 会以
+`backend_process_static_flags_unconfirmed` 阻断。当前 Safety 首阶段不要求为该新增
+投影重启，连续 shadow ledger 仍是当前 backend 已加载 shadow 的直接证据。
+
 ## 6. 下一次发布的固定顺序
 
 1. 持续记录 Safety shadow comparison、broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。

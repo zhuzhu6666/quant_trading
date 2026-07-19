@@ -114,6 +114,11 @@ safety_enforce
 只在 `safety_enforce` target 强制要求，后续阶段仍持续校验 service、latch、execution
 intent、release/autonomous readiness 与 worker config/overlay hash。
 
+从 `generation_enable` 开始，门禁还必须输出
+`backend_process_static_flags.ok=true`：新鲜 readiness 中由 backend 进程投影的五项
+static flags、SHA-256、PID 与 process-start timestamp 必须完整，且 values 精确等于
+CLI 所见 predecessor flags。只修改发布配置但未完成受控重启时必须 fail-closed。
+
 `governance_enforce` 及之后的 target 还必须输出
 `governance_preflight.ok=true`：账本中不得存在 reserved/prepared mutation，所有
 committed projection 必须 current 且带完整 config/domain hash；risk-expanding

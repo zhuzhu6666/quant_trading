@@ -4,6 +4,7 @@ import copy
 
 import pytest
 
+from backend.core.static_feature_flags import static_feature_flags_fingerprint
 from backend.services.phased_repair_release_gate import (
     evaluate_phased_release_preflight,
     evaluate_safety_enforce_preflight,
@@ -11,7 +12,7 @@ from backend.services.phased_repair_release_gate import (
 
 
 def _facts() -> dict:
-    return {
+    facts = {
         "shadow_gate": {"ok": True, "status": "passed"},
         "flags": {
             "live_safety_plane_v2_mode": "shadow",
@@ -43,9 +44,29 @@ def _facts() -> dict:
                     "overlay_hash_match": True,
                     "mutation_capability": {"status": "available"},
                 },
+                "snapshot": {
+                    "process_static_feature_flags": {
+                        "schema_version": "static_feature_flags.v1",
+                        "values": {},
+                        "fingerprint": "",
+                        "pid": 123,
+                        "process_started_at": 900.0,
+                    }
+                },
             },
         },
     }
+    _set_flags(facts, {})
+    return facts
+
+
+def _set_flags(facts: dict, patch: dict) -> None:
+    facts["flags"].update(patch)
+    projection = facts["readiness_snapshot"]["payload"]["snapshot"][
+        "process_static_feature_flags"
+    ]
+    projection["values"] = dict(facts["flags"])
+    projection["fingerprint"] = static_feature_flags_fingerprint(projection["values"])
 
 
 def test_safety_enforce_preflight_passes_only_with_complete_authoritative_facts():
@@ -93,7 +114,7 @@ def test_later_transition_preflights_require_exact_predecessor_flags(
     target, flag_patch
 ):
     facts = _facts()
-    facts["flags"].update(flag_patch)
+    _set_flags(facts, flag_patch)
     facts["shadow_gate"] = {"ok": False, "status": "observation_stream_stale"}
 
     result = evaluate_phased_release_preflight(target=target, **facts)
@@ -105,7 +126,7 @@ def test_later_transition_preflights_require_exact_predecessor_flags(
 
 def test_later_transition_preflight_rejects_skipped_predecessor():
     facts = _facts()
-    facts["flags"].update(live_safety_plane_v2_mode="enforce")
+    _set_flags(facts, {"live_safety_plane_v2_mode": "enforce"})
 
     result = evaluate_phased_release_preflight(
         target="execution_outcome_enable", **facts
@@ -113,6 +134,33 @@ def test_later_transition_preflight_rejects_skipped_predecessor():
 
     assert result["ok"] is False
     assert "static_rollout_flags_unexpected" in result["blockers"]
+
+
+def test_later_transition_rejects_config_changed_without_backend_restart():
+    facts = _facts()
+    facts["flags"].update(live_safety_plane_v2_mode="enforce")
+
+    result = evaluate_phased_release_preflight(
+        target="generation_enable", **facts
+    )
+
+    assert result["ok"] is False
+    assert "backend_process_static_flags_unconfirmed" in result["blockers"]
+
+
+def test_process_static_flag_projection_is_total_for_malformed_pid():
+    facts = _facts()
+    _set_flags(facts, {"live_safety_plane_v2_mode": "enforce"})
+    facts["readiness_snapshot"]["payload"]["snapshot"][
+        "process_static_feature_flags"
+    ]["pid"] = "invalid"
+
+    result = evaluate_phased_release_preflight(
+        target="generation_enable", **facts
+    )
+
+    assert result["ok"] is False
+    assert "backend_process_static_flags_unconfirmed" in result["blockers"]
 
 
 @pytest.mark.parametrize(
@@ -137,7 +185,7 @@ def test_later_transition_preflight_rejects_skipped_predecessor():
 )
 def test_final_transition_preflights_reject_skipped_predecessor(target, flag_patch):
     facts = _facts()
-    facts["flags"].update(flag_patch)
+    _set_flags(facts, flag_patch)
 
     result = evaluate_phased_release_preflight(target=target, **facts)
 
@@ -147,11 +195,14 @@ def test_final_transition_preflights_reject_skipped_predecessor(target, flag_pat
 
 def test_pg_job_queue_transition_requires_worker_preflight():
     facts = _facts()
-    facts["flags"].update(
-        live_safety_plane_v2_mode="enforce",
-        live_generation_controller_v2_enabled=True,
-        ctrader_execution_outcome_v2_enabled=True,
-        governance_mutation_coordinator_v2_mode="enforce",
+    _set_flags(
+        facts,
+        {
+            "live_safety_plane_v2_mode": "enforce",
+            "live_generation_controller_v2_enabled": True,
+            "ctrader_execution_outcome_v2_enabled": True,
+            "governance_mutation_coordinator_v2_mode": "enforce",
+        },
     )
     facts["job_worker_preflight"] = {
         "ok": False,
@@ -180,10 +231,13 @@ def test_non_queue_transition_does_not_require_worker_preflight():
 
 def test_governance_transition_requires_integrity_preflight():
     facts = _facts()
-    facts["flags"].update(
-        live_safety_plane_v2_mode="enforce",
-        live_generation_controller_v2_enabled=True,
-        ctrader_execution_outcome_v2_enabled=True,
+    _set_flags(
+        facts,
+        {
+            "live_safety_plane_v2_mode": "enforce",
+            "live_generation_controller_v2_enabled": True,
+            "ctrader_execution_outcome_v2_enabled": True,
+        },
     )
     facts["governance_preflight"] = {
         "ok": False,
@@ -202,9 +256,12 @@ def test_governance_transition_requires_integrity_preflight():
 
 def test_execution_transition_does_not_require_governance_integrity_preflight():
     facts = _facts()
-    facts["flags"].update(
-        live_safety_plane_v2_mode="enforce",
-        live_generation_controller_v2_enabled=True,
+    _set_flags(
+        facts,
+        {
+            "live_safety_plane_v2_mode": "enforce",
+            "live_generation_controller_v2_enabled": True,
+        },
     )
     facts["governance_preflight"] = None
 
