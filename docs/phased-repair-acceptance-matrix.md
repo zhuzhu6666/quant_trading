@@ -72,3 +72,14 @@ ledger 证明，二者不能互相替代。
 15 秒、unknown execution 为零、independent exact match、无 duplicate/conflict、
 无 forced shadow，且相邻 full-cycle 间隔不超过 75 秒。门未通过前 Safety 保持
 `shadow`，Generation/Execution outcome/PG job queue 不推进。
+
+阶段切换前还必须执行：
+
+```bash
+.venv/bin/python scripts/phased_repair_release_gate.py --target safety_enforce
+```
+
+该命令必须以 0 退出，并同时证明静态 flags 仍处于预期前态、两个服务 active、
+latch cleared、本地/PG unresolved intent 均为 0、持久化 readiness 新鲜、
+release/autonomous mutation ready、worker config/overlay hash 一致。快照过期或任一
+事实不可读都返回非零；该脚本本身不会修改开关或重启服务。
