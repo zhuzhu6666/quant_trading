@@ -23,6 +23,14 @@ os.environ.setdefault("QUANT_AUTH_ALLOW_STATELESS_STEP_UP", "1")
 os.environ.setdefault("QUANT_AUTH_SESSION_STORE", "memory")
 os.environ.setdefault("QUANT_AUTH_INSECURE_COOKIE", "1")
 os.environ.setdefault("QUANT_AUTH_ALLOW_URL_JWT", "1")
+# Release-time feature flags are production deployment state, not test
+# defaults.  Keep the broad compatibility suite deterministic; v2 tests
+# explicitly override the relevant accessor/environment for their scenario.
+os.environ.setdefault("QUANT_LIVE_SAFETY_PLANE_V2_MODE", "off")
+os.environ.setdefault("QUANT_LIVE_GENERATION_CONTROLLER_V2_ENABLED", "0")
+os.environ.setdefault("QUANT_CTRADER_EXECUTION_OUTCOME_V2_ENABLED", "0")
+os.environ.setdefault("QUANT_GOVERNANCE_MUTATION_COORDINATOR_V2_MODE", "off")
+os.environ.setdefault("QUANT_PG_JOB_QUEUE_V2_ENABLED", "0")
 
 # ── Auth helper for tests ──
 import pytest
