@@ -6683,7 +6683,15 @@ def _run_live_safety_cycle(
     def record_shadow_observation(payload: Mapping[str, Any]) -> None:
         try:
             append_safety_shadow_observation(
-                payload=payload,
+                payload={
+                    **dict(payload),
+                    "account_updated_at": float(
+                        _live_state_get("account_updated_at", 0.0) or 0.0
+                    ),
+                    "positions_updated_at": float(
+                        _live_state_get("positions_updated_at", 0.0) or 0.0
+                    ),
+                },
                 generation_id=generation_id,
                 broker=broker,
                 tick=tick,

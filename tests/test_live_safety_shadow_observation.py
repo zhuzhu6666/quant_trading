@@ -18,6 +18,8 @@ def _observation(at: float, *, positions=(), match: bool = True) -> dict:
         "effective_mode": "shadow",
         "status": "shadow",
         "reconciliation_state": "fresh",
+        "account_updated_at": at,
+        "positions_updated_at": at,
         "position_ids": list(positions),
         "unknown_execution_count": 0,
         "forced_shadow": False,
@@ -55,12 +57,12 @@ def test_append_shadow_observation_is_minimal_and_durable(monkeypatch, tmp_path)
 
 
 def test_empty_account_gate_requires_continuous_24_hours():
-    observations = [_observation(float(step * 30)) for step in range(2881)]
+    observations = [_observation(1000.0 + float(step * 30)) for step in range(2881)]
     result = evaluate_safety_shadow_gate(
         observations,
         required_hours=24,
         max_gap_sec=75,
-        now=86400.0,
+        now=87400.0,
     )
 
     assert result["ok"] is True
@@ -69,23 +71,39 @@ def test_empty_account_gate_requires_continuous_24_hours():
 
 
 def test_shadow_mismatch_prevents_gate_even_after_duration():
-    observations = [_observation(float(step * 30)) for step in range(2881)]
-    observations[100] = _observation(3000.0, match=False)
-    result = evaluate_safety_shadow_gate(observations, now=86400.0)
+    observations = [_observation(1000.0 + float(step * 30)) for step in range(2881)]
+    observations[100] = _observation(4000.0, match=False)
+    result = evaluate_safety_shadow_gate(observations, now=87400.0)
 
     assert result["ok"] is False
-    assert "candidate_mismatch" in result["blockers"]
+    assert "candidate_mismatch" in result["last_reset_reasons"]
+    assert "duration_or_lifecycle_incomplete" in result["blockers"]
 
 
 def test_complete_position_lifecycle_can_satisfy_gate_without_24_hours():
     observations = [
-        _observation(0.0),
-        _observation(30.0, positions=(42,)),
-        _observation(60.0, positions=(42,)),
-        _observation(90.0),
+        _observation(1000.0),
+        _observation(1030.0, positions=(42,)),
+        _observation(1060.0, positions=(42,)),
+        _observation(1090.0),
     ]
-    result = evaluate_safety_shadow_gate(observations, now=90.0)
+    result = evaluate_safety_shadow_gate(observations, now=1090.0)
 
     assert result["ok"] is True
     assert result["complete_lifecycle"] is True
     assert result["completed_position_ids"] == [42]
+
+
+def test_startup_failure_resets_window_instead_of_poisoning_future_evidence():
+    failed = _observation(1000.0)
+    failed["reconciliation_state"] = "failed"
+    failed["unknown_execution_count"] = 1
+    observations = [failed] + [
+        _observation(1030.0 + float(step * 30)) for step in range(2881)
+    ]
+
+    result = evaluate_safety_shadow_gate(observations, now=87430.0)
+
+    assert result["ok"] is True
+    assert result["unsafe_observation_count"] == 1
+    assert result["continuous_observation_count"] == 2881
