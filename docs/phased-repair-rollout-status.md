@@ -14,6 +14,14 @@ Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档�
 
 历史 overlay/governance 与 release reconstruction cause 已在验证完成后按 cause 精确释放；Safety shadow 取得连续三轮 authoritative freshness 后，watchdog 又自主释放了自己的 cause，当前 latch 为 cleared。一次 cTrader account timeout 被正确处理为 safety 继续、alpha 阻断，后续连接自行恢复且未要求人工复位。
 
+无人值守运行层已核实：`quant-backend.service` 与
+`quant-learning-worker.service` 均为 enabled、`Restart=always`、
+`RestartSec=10`，当前 active/running。backend readiness 中 worker boot=ready、
+recovery=complete、observation/research/mutation capability 均 available、mutation
+circuit closed、backend/worker config 与 overlay hash 一致，
+`ready_for_autonomous_mutation=true`。休市期间 `ready_for_live_execution/alpha=false`
+只由 `market_session_blocks_open` 产生，不会误报为 broker 或 safety 故障。
+
 ## 2. 已完成的工程门禁
 
 ### Python/backend
