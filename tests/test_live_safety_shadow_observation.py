@@ -6,6 +6,7 @@ from backend.services.live_safety_shadow_observation import (
     append_safety_shadow_observation,
     evaluate_safety_shadow_gate,
     read_safety_shadow_observations,
+    safety_shadow_gate_status,
     safety_shadow_observation_path,
 )
 
@@ -107,3 +108,37 @@ def test_startup_failure_resets_window_instead_of_poisoning_future_evidence():
     assert result["ok"] is True
     assert result["unsafe_observation_count"] == 1
     assert result["continuous_observation_count"] == 2881
+
+
+def test_gate_status_is_fail_closed_when_ledger_is_missing(tmp_path):
+    result = safety_shadow_gate_status(path=tmp_path / "missing.jsonl", now=1000.0)
+
+    assert result["ok"] is False
+    assert result["status"] == "evidence_missing"
+    assert result["blockers"] == ["shadow_observation_missing"]
+
+
+def test_gate_status_reuses_parsed_ledger_until_file_changes(monkeypatch, tmp_path):
+    from backend.services import live_safety_shadow_observation as module
+
+    path = tmp_path / "observations.jsonl"
+    path.write_text(json.dumps(_observation(1000.0)) + "\n", encoding="utf-8")
+    original = module.read_safety_shadow_observations
+    calls = []
+
+    def counted(source):
+        calls.append(source)
+        return original(source)
+
+    monkeypatch.setattr(module, "read_safety_shadow_observations", counted)
+    first = safety_shadow_gate_status(path=path, now=1001.0)
+    second = safety_shadow_gate_status(path=path, now=1002.0)
+    path.write_text(
+        path.read_text(encoding="utf-8") + json.dumps(_observation(1030.0)) + "\n",
+        encoding="utf-8",
+    )
+    third = safety_shadow_gate_status(path=path, now=1031.0)
+
+    assert first["observation_count"] == second["observation_count"] == 1
+    assert third["observation_count"] == 2
+    assert len(calls) == 2

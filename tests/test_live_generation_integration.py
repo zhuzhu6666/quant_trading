@@ -613,6 +613,11 @@ def test_loop_status_exposes_generation_phase_heartbeats_and_blockers(monkeypatc
     monkeypatch.setattr(live_service, "_loop_broker", "ctrader")
     monkeypatch.setattr(live_service, "_loop_started_at", 90.0)
     monkeypatch.setattr(live_service, "_loop_strategy_name", "factor_v4")
+    monkeypatch.setattr(
+        live_service,
+        "safety_shadow_gate_status",
+        lambda: {"status": "observing", "ok": False},
+    )
 
     status = live_service.loop_status()
 
@@ -624,6 +629,7 @@ def test_loop_status_exposes_generation_phase_heartbeats_and_blockers(monkeypatc
     assert status["safety_heartbeat_at"] == 100.0
     assert "fresh_account" in status["blockers"]
     assert "safety" in status
+    assert status["safety_shadow_gate"] == {"status": "observing", "ok": False}
 
 
 @pytest.mark.parametrize(

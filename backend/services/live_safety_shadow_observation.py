@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -15,6 +16,9 @@ from backend.services.live_safety_state import (
 
 
 SCHEMA_VERSION = "live_safety_shadow_observation.v1"
+_GATE_CACHE_LOCK = threading.Lock()
+_GATE_CACHE_KEY: tuple[str, int, int] | None = None
+_GATE_CACHE_OBSERVATIONS: list[dict[str, Any]] = []
 
 
 def safety_shadow_observation_path() -> Path:
@@ -138,6 +142,50 @@ def read_safety_shadow_observations(path: Path | None = None) -> list[dict[str, 
         if isinstance(item, dict) and item.get("schema_version") == SCHEMA_VERSION:
             records.append(item)
     return records
+
+
+def safety_shadow_gate_status(
+    *,
+    required_hours: float = 24.0,
+    max_gap_sec: float = 75.0,
+    path: Path | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Return a fail-closed API projection without reparsing an unchanged ledger."""
+
+    global _GATE_CACHE_KEY, _GATE_CACHE_OBSERVATIONS
+    source = path or safety_shadow_observation_path()
+    try:
+        stat = source.stat()
+        cache_key = (str(source.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+        with _GATE_CACHE_LOCK:
+            if cache_key != _GATE_CACHE_KEY:
+                _GATE_CACHE_OBSERVATIONS = read_safety_shadow_observations(source)
+                _GATE_CACHE_KEY = cache_key
+            observations = list(_GATE_CACHE_OBSERVATIONS)
+        return evaluate_safety_shadow_gate(
+            observations,
+            required_hours=required_hours,
+            max_gap_sec=max_gap_sec,
+            now=now,
+        )
+    except FileNotFoundError:
+        return evaluate_safety_shadow_gate(
+            (),
+            required_hours=required_hours,
+            max_gap_sec=max_gap_sec,
+            now=now,
+        )
+    except Exception as exc:
+        return {
+            "schema_version": "live_safety_shadow_gate.v1",
+            "ok": False,
+            "status": "error",
+            "checked_at": float(time.time() if now is None else now),
+            "observation_count": 0,
+            "blockers": ["shadow_gate_evaluation_failed"],
+            "reason_code": f"{type(exc).__name__}:{exc}"[:300],
+        }
 
 
 def evaluate_safety_shadow_gate(

@@ -107,4 +107,6 @@ K 线 warmup。
 
 Safety shadow 的进程内 last-comparison 不再单独作为观察证据。部署后每个 full cycle 追加 `data/safety/safety_shadow_observations.jsonl`，并以 `scripts/safety_shadow_gate.py` 只读计算 24 小时 continuity 或完整 position lifecycle；ledger 缺失、间隔超限、reconcile 非 fresh、unknown execution、forced shadow、候选 mismatch/duplicate/conflict 任一出现都保持 `observing`，不能切 enforce。
 
+`loop-status` 已加字段投影同一 `safety_shadow_gate` 结果，使 operator/Web 无需登录服务器执行 CLI 也能持续看到 observation count、连续时长和 blocker。该投影只读且按 ledger stat 缓存，不拥有发布开关提交权，gate 通过也不会自行把 shadow 切成 enforce。
+
 2026-07-19 14:03 CST 最终 generation 启动前再次完成独立只读 cTrader 预检：有效环境为 demo、account/positions 均为 fresh、broker 确认空仓、unknown execution 为 0。首轮 startup-unknown 与启动期 K 线补充造成的一次 account RPC timeout 都被 ledger 保留为安全窗口重置点；系统按设计继续 safety、阻断 alpha，并在补充完成后自主恢复，不要求人工复位。后台 account reconcile 最小间隔已从 10 秒收紧为 5 秒，随后连续 4 个 full cycle 覆盖 121 秒，account age 为 11.0/11.0/11.0/11.9 秒、positions age 为 0、comparison 独立且零差异。最新 verifier 的唯一 blocker 是 `duration_or_lifecycle_incomplete`。连续窗口遇到 reconcile/unknown/freshness/comparison/duplicate/conflict/forced-shadow 异常或超过 75 秒的观测间隔会从异常后重新计时，不会删除历史故障，也不会让一次历史启动故障永久污染后续 24 小时合格窗口。

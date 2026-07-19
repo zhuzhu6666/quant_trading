@@ -63,6 +63,7 @@ from backend.services.live_safety_state import (
 )
 from backend.services.live_safety_shadow_observation import (
     build_safety_shadow_observer,
+    safety_shadow_gate_status,
 )
 from backend.services.live_safety_watchdog import (
     LiveSafetyWatchdog,
@@ -5754,6 +5755,7 @@ def loop_status() -> dict:
             ),
             "safety_heartbeat_state": freshness.state,
             "safety_freshness": freshness.to_dict(),
+            "safety_shadow_gate": safety_shadow_gate_status(),
         }
 
 
