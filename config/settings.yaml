@@ -9,7 +9,7 @@ features:
   live_safety_plane_v2_mode: off
   live_generation_controller_v2_enabled: false
   ctrader_execution_outcome_v2_enabled: false
-  governance_mutation_coordinator_v2_mode: off
+  governance_mutation_coordinator_v2_mode: dual_record
   pg_job_queue_v2_enabled: false
 ctrader:
   client_id_env: CTRADER_CLIENT_ID
