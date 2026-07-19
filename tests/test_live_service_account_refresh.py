@@ -663,24 +663,32 @@ def test_kickoff_runs_even_when_fetch_bars_returns_none():
     demo (which returns 0 history bars) will skip the kickoff forever.
     """
     from pathlib import Path as _Path
-    src_path = str(_Path(__file__).resolve().parent.parent / "backend" / "services" / "live_service.py")
-    src = open(src_path, encoding="utf-8").read()
+    src_path = (
+        _Path(__file__).resolve().parent.parent
+        / "backend"
+        / "services"
+        / "live_loop_tick_runtime.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
     lines = src.splitlines()
     # Locate the extracted tick body used by _run_loop's main while loop.
     # Phase2 runs broker reconciliation inline on the single mutation thread;
     # this regression assertion applies only to the compatibility loop, which
     # still owns the background refresh worker.
-    main_loop_idx = next(i for i, ln in enumerate(lines) if "def _run_live_loop_tick_body_legacy" in ln)
+    main_loop_idx = next(
+        i for i, ln in enumerate(lines)
+        if "def run_legacy_live_loop_tick_body" in ln
+    )
     helper_end = next(
         i for i, ln in enumerate(lines[main_loop_idx + 1:], start=main_loop_idx + 1)
-        if ln.startswith("def _update_live_loop_risk_metrics")
+        if ln.startswith("def run_live_loop_tick_body")
     )
     branch_text = "\n".join(lines[main_loop_idx:helper_end])
     kickoff_pos = branch_text.find("kickoff_account_refresh")
     # cTrader reads from local DataStore now
-    warmup_pos = branch_text.find("_warmup_from_local_db")
+    warmup_pos = branch_text.find("warmup_from_local_db")
     assert kickoff_pos > 0, "kickoff_account_refresh not found in cTrader main-loop block"
-    assert warmup_pos > 0, "_warmup_from_local_db not found in cTrader main-loop block"
+    assert warmup_pos > 0, "warmup_from_local_db not found in cTrader main-loop block"
     assert kickoff_pos < warmup_pos, (
         "REGRESSION: kickoff_account_refresh is AFTER _warmup_from_local_db in "
         "the cTrader live tick body. It must be BEFORE so the cache writer still "
