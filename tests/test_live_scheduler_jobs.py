@@ -3,10 +3,12 @@ from types import SimpleNamespace
 import pandas as pd
 
 from backend.services.live_scheduler_jobs import (
+    make_backend_readiness_refresh_job,
     make_initial_ctrader_data_pull,
     make_events_sync_job,
     make_external_data_sync_job,
     register_external_sync_jobs,
+    register_backend_readiness_refresh_job,
     start_initial_ctrader_data_pull,
     start_scheduler_catch_up,
     startup_catch_up_jobs,
@@ -42,6 +44,49 @@ class _FakeStore:
 
     def insert_bars(self, bars, symbol, timeframe):
         self.inserts.append((bars, symbol, timeframe))
+
+
+def test_backend_readiness_refresh_job_is_periodic_and_single_flight_owned():
+    sched = _FakeScheduler()
+    logger = _FakeLogger()
+    calls = []
+
+    class _Service:
+        def open_async_refresh(self):
+            calls.append(("open", None))
+
+        def refresh_async(self, *, max_age_seconds):
+            calls.append(("refresh", max_age_seconds))
+            return {"ok": True, "status": "refresh_started"}
+
+    job = make_backend_readiness_refresh_job(
+        logger=logger,
+        service_factory=_Service,
+    )
+    result = job()
+    register_backend_readiness_refresh_job(sched, logger=logger)
+
+    assert result["status"] == "refresh_started"
+    assert calls == [("open", None), ("refresh", 90.0)]
+    assert [(name, cron) for name, cron, _func in sched.jobs] == [
+        ("backend_readiness_refresh", "*/2 * * * *")
+    ]
+
+
+def test_backend_readiness_refresh_job_contains_failure_without_raising():
+    logger = _FakeLogger()
+
+    def fail():
+        raise RuntimeError("unavailable")
+
+    result = make_backend_readiness_refresh_job(
+        logger=logger,
+        service_factory=fail,
+    )()
+
+    assert result["ok"] is False
+    assert result["status"] == "refresh_failed"
+    assert logger.messages[-1][1] == "[backend_readiness_refresh] failed: {}"
 
 
 def _bar_df():

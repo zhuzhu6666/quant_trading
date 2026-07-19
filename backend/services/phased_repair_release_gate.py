@@ -7,6 +7,29 @@ from typing import Any, Mapping
 
 SCHEMA_VERSION = "phased_repair_release_preflight.v1"
 REQUIRED_SERVICES = ("quant-backend.service", "quant-learning-worker.service")
+TARGET_EXPECTED_FLAGS = {
+    "safety_enforce": {
+        "live_safety_plane_v2_mode": "shadow",
+        "live_generation_controller_v2_enabled": False,
+        "ctrader_execution_outcome_v2_enabled": False,
+        "governance_mutation_coordinator_v2_mode": "dual_record",
+        "pg_job_queue_v2_enabled": False,
+    },
+    "generation_enable": {
+        "live_safety_plane_v2_mode": "enforce",
+        "live_generation_controller_v2_enabled": False,
+        "ctrader_execution_outcome_v2_enabled": False,
+        "governance_mutation_coordinator_v2_mode": "dual_record",
+        "pg_job_queue_v2_enabled": False,
+    },
+    "execution_outcome_enable": {
+        "live_safety_plane_v2_mode": "enforce",
+        "live_generation_controller_v2_enabled": True,
+        "ctrader_execution_outcome_v2_enabled": False,
+        "governance_mutation_coordinator_v2_mode": "dual_record",
+        "pg_job_queue_v2_enabled": False,
+    },
+}
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -23,8 +46,9 @@ def _is_zero_count(value: Any) -> bool:
         return False
 
 
-def evaluate_safety_enforce_preflight(
+def evaluate_phased_release_preflight(
     *,
+    target: str,
     shadow_gate: Mapping[str, Any],
     flags: Mapping[str, Any],
     service_states: Mapping[str, str],
@@ -33,16 +57,19 @@ def evaluate_safety_enforce_preflight(
     postgres_unknown_count: int | None,
     readiness_snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Evaluate facts needed before changing Safety v2 shadow to enforce."""
+    """Evaluate authoritative facts before one staged static-flag transition."""
 
     blockers: list[str] = []
-    expected_flags = {
-        "live_safety_plane_v2_mode": "shadow",
-        "live_generation_controller_v2_enabled": False,
-        "ctrader_execution_outcome_v2_enabled": False,
-        "governance_mutation_coordinator_v2_mode": "dual_record",
-        "pg_job_queue_v2_enabled": False,
-    }
+    if target not in TARGET_EXPECTED_FLAGS:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "target": str(target or ""),
+            "ok": False,
+            "status": "blocked",
+            "blockers": ["release_target_unknown"],
+            "checks": {},
+        }
+    expected_flags = TARGET_EXPECTED_FLAGS[target]
     flag_mismatches = {
         key: {"expected": expected, "actual": flags.get(key)}
         for key, expected in expected_flags.items()
@@ -50,7 +77,8 @@ def evaluate_safety_enforce_preflight(
     }
     if flag_mismatches:
         blockers.append("static_rollout_flags_unexpected")
-    if not bool(shadow_gate.get("ok")):
+    shadow_gate_required = target == "safety_enforce"
+    if shadow_gate_required and not bool(shadow_gate.get("ok")):
         blockers.append("safety_shadow_gate_incomplete")
     inactive_services = sorted(
         name for name in REQUIRED_SERVICES if service_states.get(name) != "active"
@@ -97,12 +125,15 @@ def evaluate_safety_enforce_preflight(
     blockers = sorted(set(blockers))
     return {
         "schema_version": SCHEMA_VERSION,
-        "target": "safety_enforce",
+        "target": target,
         "ok": not blockers,
         "status": "passed" if not blockers else "blocked",
         "blockers": blockers,
         "checks": {
-            "shadow_gate": dict(shadow_gate),
+            "shadow_gate": {
+                **dict(shadow_gate),
+                "required_for_target": shadow_gate_required,
+            },
             "static_flags": {
                 "ok": not flag_mismatches,
                 "mismatches": flag_mismatches,
@@ -142,6 +173,12 @@ def evaluate_safety_enforce_preflight(
     }
 
 
+def evaluate_safety_enforce_preflight(**facts: Any) -> dict[str, Any]:
+    """Backward-compatible evaluator for the first staged transition."""
+
+    return evaluate_phased_release_preflight(target="safety_enforce", **facts)
+
+
 def _service_states() -> dict[str, str]:
     states: dict[str, str] = {}
     for name in REQUIRED_SERVICES:
@@ -159,8 +196,11 @@ def _service_states() -> dict[str, str]:
     return states
 
 
-def collect_safety_enforce_preflight(
-    *, required_hours: float = 24.0, max_gap_sec: float = 75.0
+def collect_phased_release_preflight(
+    *,
+    target: str,
+    required_hours: float = 24.0,
+    max_gap_sec: float = 75.0,
 ) -> dict[str, Any]:
     """Collect authoritative local/PG facts and evaluate the release gate."""
 
@@ -197,7 +237,8 @@ def collect_safety_enforce_preflight(
         )
     except Exception:
         postgres_unknown_count = None
-    return evaluate_safety_enforce_preflight(
+    return evaluate_phased_release_preflight(
+        target=target,
         shadow_gate=safety_shadow_gate_status(
             required_hours=required_hours,
             max_gap_sec=max_gap_sec,
@@ -208,4 +249,16 @@ def collect_safety_enforce_preflight(
         local_unknown_count=local_unknown_count,
         postgres_unknown_count=postgres_unknown_count,
         readiness_snapshot=BackendReadinessSnapshotService().latest(),
+    )
+
+
+def collect_safety_enforce_preflight(
+    *, required_hours: float = 24.0, max_gap_sec: float = 75.0
+) -> dict[str, Any]:
+    """Backward-compatible collector for the first staged transition."""
+
+    return collect_phased_release_preflight(
+        target="safety_enforce",
+        required_hours=required_hours,
+        max_gap_sec=max_gap_sec,
     )

@@ -378,6 +378,7 @@ from backend.services.live_position_lifecycle import (
 )
 from backend.services.live_scheduler_jobs import (
     make_initial_ctrader_data_pull as _make_initial_ctrader_data_pull,
+    register_backend_readiness_refresh_job as _register_backend_readiness_refresh_job,
     register_external_sync_jobs as _register_external_sync_jobs,
     start_initial_ctrader_data_pull as _start_initial_ctrader_data_pull,
     start_scheduler_catch_up as _start_scheduler_catch_up,
@@ -5594,6 +5595,7 @@ def _start_live_scheduler():
         repo_root=Path(__file__).resolve().parent.parent.parent,
         logger=logger,
     )
+    _register_backend_readiness_refresh_job(sched, logger=logger)
     if run_heavy_jobs:
         # evolution_hourly / factor governance / system_health 由 EvolutionKernel 注册;
         # awe_adapt 始终由持有 live pipeline 的 backend 注册。

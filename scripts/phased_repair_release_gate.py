@@ -11,16 +11,24 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.services.phased_repair_release_gate import collect_safety_enforce_preflight
+from backend.services.phased_repair_release_gate import (
+    TARGET_EXPECTED_FLAGS,
+    collect_phased_release_preflight,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--target", choices=("safety_enforce",), default="safety_enforce")
+    parser.add_argument(
+        "--target",
+        choices=tuple(TARGET_EXPECTED_FLAGS),
+        default="safety_enforce",
+    )
     parser.add_argument("--required-hours", type=float, default=24.0)
     parser.add_argument("--max-gap-sec", type=float, default=75.0)
     args = parser.parse_args()
-    result = collect_safety_enforce_preflight(
+    result = collect_phased_release_preflight(
+        target=args.target,
         required_hours=args.required_hours,
         max_gap_sec=args.max_gap_sec,
     )

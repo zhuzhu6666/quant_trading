@@ -97,6 +97,7 @@
 | thaw/unlock/unfreeze | before/target 是否被判为扩张并要求最近 step-up + Coordinator + V16；caller `risk_reduction`、action 命名和 startup/restore 字样是否都不能绕过；收紧是否不依赖 PG session authority；mutation 未 committed 时原 freeze/latch 是否保持 |
 | operator expansion pause | `governance_expansion_paused` 是否对所有 mode 生效、自治服务不可修改；pause 是否免 V16、resume 是否要求 step-up + confirm + V16，且 rollback/retire/quarantine/downweight/tighten 仍可执行 |
 | worker 能力隔离 | DB/schema/YAML/overlay/recovery 启动失败是否非零退出；三次 mutation 依赖失败是否只打开 mutation circuit 而 observation/research 继续 |
+| readiness 自主刷新 | backend readiness persistent snapshot 是否由受管理 scheduler 每两分钟触发；是否复用 single-flight owner、90 秒 max-age 与 lifecycle drain/join；无人访问 API 时是否仍保持 180 秒 freshness，失败时是否保留旧值但 readiness/release preflight fail-closed |
 | worker 配置一致性 | readiness 是否校验 75 秒 heartbeat、boot/config/overlay hash，分歧时 autonomous mutation 是否 fail-closed |
 | live policy authority | live 风险策略、持仓监督与 Evolution 权重 bias 是否都拒绝 approved/auto-approved；supervisor 候选 shadow 是否只在 learning worker closed-position observation 路径生成并绑定 suggestion ID，旧 live `canary_shadow` 是否不能授权 readiness/auto-unfreeze；enforce 是否只接受 applied + committed mutation；legacy applied 是否仅在 off/dual 标记 quarantined 且只允许显式 tightening 子集 |
 | 单一权重用例 | AWE、Factor Governance、Evolution/manual govern 是否都调用 `FactorWeightChangeService`，没有 DecisionPolicy/mutation 之间的旁路 |

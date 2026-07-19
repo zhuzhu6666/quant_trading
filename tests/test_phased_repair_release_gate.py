@@ -4,7 +4,10 @@ import copy
 
 import pytest
 
-from backend.services.phased_repair_release_gate import evaluate_safety_enforce_preflight
+from backend.services.phased_repair_release_gate import (
+    evaluate_phased_release_preflight,
+    evaluate_safety_enforce_preflight,
+)
 
 
 def _facts() -> dict:
@@ -48,6 +51,55 @@ def test_safety_enforce_preflight_passes_only_with_complete_authoritative_facts(
     assert result["ok"] is True
     assert result["status"] == "passed"
     assert result["blockers"] == []
+
+
+@pytest.mark.parametrize(
+    ("target", "flag_patch"),
+    [
+        (
+            "generation_enable",
+            {"live_safety_plane_v2_mode": "enforce"},
+        ),
+        (
+            "execution_outcome_enable",
+            {
+                "live_safety_plane_v2_mode": "enforce",
+                "live_generation_controller_v2_enabled": True,
+            },
+        ),
+    ],
+)
+def test_later_transition_preflights_require_exact_predecessor_flags(
+    target, flag_patch
+):
+    facts = _facts()
+    facts["flags"].update(flag_patch)
+    facts["shadow_gate"] = {"ok": False, "status": "observation_stream_stale"}
+
+    result = evaluate_phased_release_preflight(target=target, **facts)
+
+    assert result["ok"] is True
+    assert result["target"] == target
+    assert result["checks"]["shadow_gate"]["required_for_target"] is False
+
+
+def test_later_transition_preflight_rejects_skipped_predecessor():
+    facts = _facts()
+    facts["flags"].update(live_safety_plane_v2_mode="enforce")
+
+    result = evaluate_phased_release_preflight(
+        target="execution_outcome_enable", **facts
+    )
+
+    assert result["ok"] is False
+    assert "static_rollout_flags_unexpected" in result["blockers"]
+
+
+def test_unknown_release_target_is_total_and_fail_closed():
+    result = evaluate_phased_release_preflight(target="unknown", **_facts())
+
+    assert result["ok"] is False
+    assert result["blockers"] == ["release_target_unknown"]
 
 
 @pytest.mark.parametrize(

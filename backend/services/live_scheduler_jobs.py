@@ -30,6 +30,56 @@ def _default_data_store_factory():
     return DataStore()
 
 
+def _default_readiness_snapshot_service_factory():
+    from backend.services.backend_readiness_snapshot import BackendReadinessSnapshotService
+
+    return BackendReadinessSnapshotService()
+
+
+def make_backend_readiness_refresh_job(
+    *,
+    logger,
+    service_factory: Callable[[], Any] = _default_readiness_snapshot_service_factory,
+    max_age_seconds: float = 90.0,
+):
+    """Build a single-flight refresh trigger owned by the existing scheduler."""
+
+    def _scheduled_backend_readiness_refresh():
+        try:
+            service = service_factory()
+            service.open_async_refresh()
+            result = service.refresh_async(max_age_seconds=max_age_seconds)
+            status = str(result.get("status") or "unknown")
+            if status not in {
+                "fresh",
+                "refresh_started",
+                "refresh_in_progress",
+            }:
+                logger.warning(
+                    "[backend_readiness_refresh] unexpected status: {}", status
+                )
+            return result
+        except Exception as exc:
+            logger.warning("[backend_readiness_refresh] failed: {}", exc)
+            return {
+                "ok": False,
+                "status": "refresh_failed",
+                "error": f"{type(exc).__name__}:{exc}"[:300],
+            }
+
+    return _scheduled_backend_readiness_refresh
+
+
+def register_backend_readiness_refresh_job(sched, *, logger) -> None:
+    """Keep persistent readiness fresh without API/operator polling."""
+
+    sched.add_job(
+        "backend_readiness_refresh",
+        "*/2 * * * *",
+        make_backend_readiness_refresh_job(logger=logger),
+    )
+
+
 def make_events_sync_job(
     *,
     repo_root: Path,
