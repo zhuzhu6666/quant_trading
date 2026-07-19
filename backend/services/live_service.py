@@ -134,6 +134,10 @@ from backend.services.live_reentry_guard import (
     recent_review_reentry_block as _guard_recent_review_reentry_block,
     remember_supervisor_reentry_block as _guard_remember_reentry_block,
 )
+from backend.services.live_safety_candidate_execution import (
+    SafetyCandidateExecutionRuntime,
+    execute_live_safety_candidate as _runtime_execute_safety_candidate,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -6863,6 +6867,21 @@ def _preview_legacy_live_safety_candidates(
     )
 
 
+def _safety_candidate_execution_runtime() -> SafetyCandidateExecutionRuntime:
+    return SafetyCandidateExecutionRuntime(
+        enforce_holding_timeout=_enforce_holding_timeout,
+        entry_protection_repair_source=_ENTRY_PROTECTION_REPAIR_SOURCE,
+        runtime_config_anchor=_runtime_config_anchor,
+        protection_candidate_cls=ProtectionCandidate,
+        execute_trailing_candidate=_execute_trailing_candidate,
+        evaluate_position_supervisor=(
+            _evaluate_position_supervisor_for_position
+        ),
+        build_safety_candidate=safety_candidate,
+        run_position_supervision=_run_position_supervision,
+    )
+
+
 def _execute_live_safety_candidate(
     candidate: SafetyCandidate,
     *,
@@ -6877,119 +6896,19 @@ def _execute_live_safety_candidate(
     log,
     decision_ts: float,
 ) -> dict[str, Any]:
-    """Dispatch one matched V2 candidate through existing reduction executors."""
-
-    pid = int(candidate.position_id or 0)
-    position = next(
-        (
-            dict(item)
-            for item in positions
-            if int(item.get("position_id") or item.get("ticket") or 0) == pid
-        ),
-        None,
+    del current_price, atr_price
+    return _runtime_execute_safety_candidate(
+        candidate,
+        bridge=bridge,
+        positions=positions,
+        cfg=cfg,
+        account=account,
+        pipeline=pipeline,
+        tick=tick,
+        log=log,
+        decision_ts=decision_ts,
+        runtime=_safety_candidate_execution_runtime(),
     )
-    if position is None:
-        return {"ok": False, "status": "position_missing"}
-
-    if candidate.action == "timeout":
-        handled = _enforce_holding_timeout(
-            bridge,
-            [position],
-            cfg=cfg,
-            tick=tick,
-            log=log,
-            decision_ts=decision_ts,
-        )
-        return {
-            "ok": pid in handled,
-            "status": "dispatched" if pid in handled else "candidate_no_longer_due",
-        }
-
-    if candidate.action in {"repair_entry_protection", "trailing"}:
-        source = (
-            _ENTRY_PROTECTION_REPAIR_SOURCE
-            if candidate.action == "repair_entry_protection"
-            else "legacy_awe_trailing"
-        )
-        anchor = _runtime_config_anchor()
-        protection = ProtectionCandidate(
-            source=source,
-            action=(
-                "repair_entry_protection"
-                if candidate.action == "repair_entry_protection"
-                else "tighten"
-            ),
-            priority=20 if candidate.action == "repair_entry_protection" else 50,
-            position_id=pid,
-            risk_action="tighten_position",
-            controls=dict(candidate.controls or {}),
-            reason=source,
-            position=position,
-            config_version=int(anchor.get("config_version") or 0),
-            config_hash=str(anchor.get("config_hash") or ""),
-        )
-        applied = _execute_trailing_candidate(
-            protection,
-            bridge=bridge,
-            cfg=cfg,
-            tick=tick,
-            log=log,
-            acct=account,
-        )
-        return {"ok": bool(applied), "status": "dispatched" if applied else "not_applied"}
-
-    if candidate.action in {"close", "reduce", "tighten"}:
-        verdict = _evaluate_position_supervisor_for_position(
-            position,
-            cfg=cfg,
-            acct=account,
-            now_ts=decision_ts,
-            positions=positions,
-            persist=False,
-        )
-        observed_action = str(verdict.get("action") or "hold").strip().lower()
-        if observed_action not in {"close", "reduce", "tighten"}:
-            return {
-                "ok": False,
-                "status": "candidate_changed_before_execution",
-                "expected_fingerprint": candidate.fingerprint,
-                "observed_action": observed_action,
-            }
-        refreshed = safety_candidate(
-            action=observed_action,
-            position_id=pid,
-            source=f"supervisor_{observed_action}",
-            controls=dict(verdict.get("recommended_controls") or {}),
-        )
-        if refreshed.fingerprint != candidate.fingerprint:
-            return {
-                "ok": False,
-                "status": "candidate_changed_before_execution",
-                "expected_fingerprint": candidate.fingerprint,
-                "observed_fingerprint": refreshed.fingerprint,
-            }
-        recorded: list[SafetyCandidate] = []
-        handled = _run_position_supervision(
-            bridge,
-            [position],
-            cfg=cfg,
-            acct=account,
-            tick=tick,
-            log=log,
-            decision_ts=decision_ts,
-            planned_verdicts={pid: dict(verdict)},
-            candidate_recorder=recorded.append,
-            record_partial_close_execution=(
-                getattr(pipeline.get("attribution"), "record_partial_close", None)
-            ),
-        )
-        exact = any(item.fingerprint == candidate.fingerprint for item in recorded)
-        return {
-            "ok": pid in handled and exact,
-            "status": "dispatched" if pid in handled and exact else "not_applied",
-        }
-
-    return {"ok": False, "status": "unsupported_safety_action"}
 
 
 def _run_live_safety_cycle(

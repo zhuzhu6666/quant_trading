@@ -747,6 +747,8 @@ def test_safety_planner_module_has_no_broker_mutation_or_entry_order_surface():
         ):
             assert forbidden not in source
 
-    dispatcher = inspect.getsource(live_service._execute_live_safety_candidate)
+    dispatcher = Path(
+        "backend/services/live_safety_candidate_execution.py"
+    ).read_text(encoding="utf-8")
     for forbidden in ("market" + "_buy", "market" + "_sell", "open_trade"):
         assert forbidden not in dispatcher

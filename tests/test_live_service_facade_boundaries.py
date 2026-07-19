@@ -48,6 +48,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_build_close_position_risk_context",
         "_evaluate_position_supervisor_for_position",
         "_evaluate_risk_reduction_policy",
+        "_execute_live_safety_candidate",
         "_load_recovery_row_for_risk_reduction",
         "_load_authoritative_session_deal_facts",
         "_lookup_entry_context_for_risk_reduction",
