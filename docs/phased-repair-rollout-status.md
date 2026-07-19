@@ -24,6 +24,9 @@ Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档�
 - 从最小历史 baseline 到 v9 成功；同一迁移第二次执行 `applied_count=0`。
 - `compileall`、`git diff --check`、OpenAPI snapshot、dependency lock check、`pip check` 通过。
 - ASGI TestClient 与 async ASGI smoke 在允许线程调度的隔离环境中均小于 5 秒。
+- 分期故障矩阵的逐项测试映射与本轮结果见
+  `docs/phased-repair-acceptance-matrix.md`；当前显式非 PG 矩阵
+  `269 + 81 passed`，PG job queue 隔离 schema `6 passed`。
 
 ### Web / 小程序
 
