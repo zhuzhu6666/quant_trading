@@ -89,6 +89,10 @@ from backend.services.live_loop_runner import (
     SerialLiveTickRuntime,
     run_serial_live_ticks as _runtime_run_serial_live_ticks,
 )
+from backend.services.live_loop_tick_runtime import (
+    LiveLoopTickRuntime,
+    run_live_loop_tick_body as _runtime_run_live_loop_tick_body,
+)
 from backend.services.live_execution_recovery import (
     ExecutionRecoveryRuntime,
     PositionRecoveryRuntime,
@@ -7108,6 +7112,37 @@ def _attempt_generation_startup_barrier(
     )
 
 
+def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
+    return LiveLoopTickRuntime(
+        phase2_active=_phase2_v2_active,
+        legacy_tick_body=_run_live_loop_tick_body_legacy,
+        get_ctrader=_get_ctrader,
+        reconcile_positions=_explicit_position_reconcile,
+        run_safety_cycle=_run_live_safety_cycle,
+        persist_safety_fail_closed=_persist_safety_fail_closed,
+        reconcile_account=_explicit_account_reconcile,
+        reconcile_value=_reconcile_value,
+        mark_account_reconcile_failed=_mark_account_reconcile_failed,
+        live_state_update=_live_state_update,
+        loop_controller=_LIVE_LOOP_CONTROLLER,
+        set_loop_diagnostic=_set_loop_diagnostic,
+        recover_execution_outcomes=(
+            _recover_execution_outcomes_before_alpha
+        ),
+        attempt_startup_barrier=_attempt_generation_startup_barrier,
+        live_state_get=_live_state_get,
+        bootstrap_position_recovery=_bootstrap_position_recovery,
+        loop_strategy_name=str(_loop_strategy_name or "factor_v4"),
+        restore_session_state=_restore_session_state_for_day,
+        evaluate_daily_drawdown=_evaluate_daily_drawdown,
+        market_session_snapshot=_market_session_snapshot,
+        warmup_from_local_db=_warmup_from_local_db,
+        ensure_decision_bars_fresh=_ensure_live_decision_bars_fresh,
+        get_safety_plane=_get_live_safety_plane,
+        process_tick=_process_tick,
+    )
+
+
 def _run_live_loop_tick_body(
     *,
     broker: str,
@@ -7119,311 +7154,17 @@ def _run_live_loop_tick_body(
     log,
     generation_id: str = "",
 ) -> dict[str, Any]:
-    if not _phase2_v2_active():
-        return _run_live_loop_tick_body_legacy(
-            broker=broker,
-            bridge_cfg=bridge_cfg,
-            timeframe=timeframe,
-            tick=tick,
-            recovery_bootstrapped=recovery_bootstrapped,
-            stop_requested=stop_requested,
-            log=log,
-        )
-
-    try:
-        bridge, err, warming = _get_ctrader()
-        bridge_ready = bool(
-            bridge is not None
-            and not warming
-            and getattr(bridge, "is_connected", False)
-        )
-        reconcile = _explicit_position_reconcile(bridge if bridge_ready else None)
-        safety = _run_live_safety_cycle(
-            bridge=bridge if bridge_ready else None,
-            broker=broker,
-            tick=tick,
-            log=log,
-            generation_id=generation_id,
-            reconcile_result=reconcile,
-        )
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
-        failure = _persist_safety_fail_closed(
-            blockers=("safety_cycle_exception",),
-            source="live_loop",
-            error=error,
-        )
-        log(f"tick {tick}: safety cycle failed closed; retry in 5s: {error}")
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": 5.0,
-            "break_loop": False,
-            "safety": {
-                "ok": False,
-                "status": "exception",
-                "accepting_new_risk": False,
-                "blockers": ["safety_cycle_exception"],
-                "failure": failure,
-            },
-        }
-    # Account freshness is required for alpha, but it is intentionally read
-    # after the position safety mutation boundary so an account RPC timeout can
-    # never postpone close/reduce/tighten work.
-    account_reconcile = _explicit_account_reconcile(bridge if bridge_ready else None)
-    account_blockers: list[str] = []
-    if account_reconcile is None:
-        account_blockers.append("fresh_account_unavailable")
-        _mark_account_reconcile_failed("fresh_account_unavailable")
-    else:
-        account = _reconcile_value(account_reconcile, "account", None)
-        if account is None:
-            account_blockers.append("fresh_account_missing")
-            _mark_account_reconcile_failed("fresh_account_missing")
-        else:
-            account_payload = asdict(account) if is_dataclass(account) else dict(account)
-            account_payload.update({"ok": True, "broker": broker})
-            _live_state_update(
-                account=account_payload,
-                account_reconciled=copy.deepcopy(account_payload),
-                account_updated_at=float(_reconcile_value(account_reconcile, "observed_at", 0.0) or 0.0),
-                account_reconcile_id=str(_reconcile_value(account_reconcile, "reconcile_id", "") or ""),
-                account_reconcile_failed_at=None,
-                account_reconcile_error=None,
-            )
-    unknown_count = int(safety.get("unknown_execution_count") or 0)
-    position_ids = list(safety.get("position_ids") or [])
-    # Keep enough margin below the 15-second freshness SLO for scheduler/RPC
-    # jitter while retaining the faster protection cadence for open/unknown
-    # execution state.
-    reconcile_state = str(safety.get("reconciliation_state") or "unknown")
-    wait_seconds = (
-        5.0
-        if position_ids or unknown_count or reconcile_state != "fresh"
-        else 10.0
-    )
-
-    if account_blockers:
-        _live_state_update(accepting_new_risk=False)
-        if generation_id:
-            _LIVE_LOOP_CONTROLLER.update_runtime_health(
-                generation_id,
-                blockers=tuple(safety.get("blockers", [])) + tuple(account_blockers),
-            )
-
-    if not bridge_ready:
-        _set_loop_diagnostic(tick, "bridge_unavailable", bridge_ready=False)
-        log(f"tick {tick}: {err or 'cTrader warming/disconnected'}; safety failed closed")
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": 5.0,
-            "break_loop": False,
-            "safety": safety,
-        }
-
-    safety, execution_recovery_ready = _recover_execution_outcomes_before_alpha(
-        bridge=bridge,
+    return _runtime_run_live_loop_tick_body(
         broker=broker,
+        bridge_cfg=bridge_cfg,
+        timeframe=timeframe,
         tick=tick,
+        recovery_bootstrapped=recovery_bootstrapped,
+        stop_requested=stop_requested,
         log=log,
         generation_id=generation_id,
-        safety_result=safety,
+        runtime=_live_loop_tick_runtime(),
     )
-    unknown_count = int(safety.get("unknown_execution_count") or 0)
-    position_ids = list(safety.get("position_ids") or [])
-    reconcile_state = str(safety.get("reconciliation_state") or "unknown")
-    wait_seconds = (
-        5.0
-        if position_ids or unknown_count or reconcile_state != "fresh"
-        else 10.0
-    )
-    if not execution_recovery_ready:
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": 5.0,
-            "break_loop": False,
-            "safety": safety,
-        }
-
-    if generation_id and not _LIVE_LOOP_CONTROLLER.status().get("ready"):
-        if not _attempt_generation_startup_barrier(
-            generation_id=generation_id,
-            bridge=bridge,
-            broker=broker,
-            tick=tick,
-            log=log,
-            account_reconcile=account_reconcile,
-            positions_reconcile=reconcile,
-            safety_result=safety,
-        ):
-            return {
-                "recovery_bootstrapped": recovery_bootstrapped,
-                "wait_seconds": wait_seconds,
-                "break_loop": False,
-                "safety": safety,
-            }
-        recovery_bootstrapped = True
-
-    if account_blockers:
-        log(f"tick {tick}: fresh account unavailable; safety completed and alpha blocked")
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": 5.0,
-            "break_loop": False,
-            "safety": safety,
-        }
-
-    # Session/circuit work comes after safety and before any bar/factor/open.
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    session_status = str(_live_state_get("session_state_status", "") or "")
-    if (
-        str(_live_state_get("trade_date", "") or "") != today_str
-        or session_status != "available"
-    ):
-        # A close deal can arrive after broker position disappearance.  Retry
-        # the persistent recovery/deal sync on the serial loop before rebuilding
-        # session authority; never unblock alpha from an estimated or zero PnL.
-        if not _bootstrap_position_recovery(
-            bridge,
-            broker=broker,
-            strategy_name=str(_loop_strategy_name or "factor_v4"),
-            log=log,
-        ):
-            if generation_id:
-                _LIVE_LOOP_CONTROLLER.update_runtime_health(
-                    generation_id,
-                    blockers=tuple(safety.get("blockers", []))
-                    + ("session_close_deal_unavailable",),
-                )
-            _live_state_update(accepting_new_risk=False)
-            return {
-                "recovery_bootstrapped": False,
-                "wait_seconds": 5.0,
-                "break_loop": False,
-                "safety": safety,
-            }
-        recovery_bootstrapped = True
-        if not _restore_session_state_for_day(
-            today_str,
-            broker_open_position_ids={int(pid) for pid in position_ids},
-        ):
-            if generation_id:
-                _LIVE_LOOP_CONTROLLER.update_runtime_health(
-                    generation_id,
-                    blockers=tuple(safety.get("blockers", [])) + ("session_state_unavailable",),
-                )
-            _live_state_update(accepting_new_risk=False)
-            return {
-                "recovery_bootstrapped": recovery_bootstrapped,
-                "wait_seconds": wait_seconds,
-                "break_loop": False,
-                "safety": safety,
-            }
-    if str(_live_state_get("session_state_status", "") or "") != "available":
-        _live_state_update(accepting_new_risk=False)
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": wait_seconds,
-            "break_loop": False,
-            "safety": safety,
-        }
-    if _live_state_get("circuit_breaker", False) or _evaluate_daily_drawdown()["tripped"]:
-        log(f"tick {tick}: session circuit blocks new risk; safety already completed")
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": wait_seconds,
-            "break_loop": False,
-            "safety": safety,
-        }
-
-    market_session = _market_session_snapshot(bridge)
-    if str(market_session.get("status") or "") == "closed_confirmed":
-        _set_loop_diagnostic(tick, "market_closed", bridge_ready=True)
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": wait_seconds,
-            "break_loop": False,
-            "safety": safety,
-        }
-
-    df_new = _warmup_from_local_db("XAUUSD+", timeframe, 5)
-    if df_new is None or len(df_new) == 0:
-        log(f"tick {tick}: local DB has no bars; safety remains active")
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": wait_seconds,
-            "break_loop": False,
-            "safety": safety,
-        }
-    df_new = _ensure_live_decision_bars_fresh(
-        bridge=bridge,
-        symbol="XAUUSD+",
-        timeframe=timeframe,
-        df_new=df_new,
-        tick=tick,
-        log=log,
-        market_session=market_session,
-    )
-    if df_new is None or len(df_new) == 0:
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": wait_seconds,
-            "break_loop": False,
-            "safety": safety,
-        }
-
-    plane = _get_live_safety_plane(generation_id)
-    last_index = df_new.index[-1]
-    closed_bar_id = str(last_index.isoformat() if hasattr(last_index, "isoformat") else last_index)
-    if not plane.alpha_due(closed_bar_id=closed_bar_id):
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": wait_seconds,
-            "break_loop": False,
-            "safety": safety,
-        }
-    if generation_id and not _LIVE_LOOP_CONTROLLER.accepting_new_risk(generation_id):
-        _live_state_update(accepting_new_risk=False)
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": wait_seconds,
-            "break_loop": False,
-            "safety": safety,
-        }
-    if not generation_id and not bool(safety.get("accepting_new_risk", False)):
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": wait_seconds,
-            "break_loop": False,
-            "safety": safety,
-        }
-
-    _process_tick(
-        bridge,
-        None,
-        df_new,
-        df_new.iloc[-1],
-        broker,
-        tick,
-        log,
-        stop_requested=stop_requested,
-        protection_already_run=True,
-    )
-    plane.mark_alpha_run(closed_bar_id=closed_bar_id)
-    if generation_id:
-        _LIVE_LOOP_CONTROLLER.heartbeat(generation_id, "alpha")
-    if stop_requested():
-        return {
-            "recovery_bootstrapped": recovery_bootstrapped,
-            "wait_seconds": None,
-            "break_loop": True,
-            "safety": safety,
-        }
-    return {
-        "recovery_bootstrapped": recovery_bootstrapped,
-        "wait_seconds": wait_seconds,
-        "break_loop": False,
-        "safety": safety,
-    }
 
 
 def _run_live_loop_tick_body_legacy(

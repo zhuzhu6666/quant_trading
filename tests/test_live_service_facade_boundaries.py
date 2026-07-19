@@ -39,6 +39,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_active_event_window_learning_policy",
         "_activate_entry_protection_pending_latch",
         "_run_live_safety_cycle",
+        "_run_live_loop_tick_body",
         "_recover_execution_outcomes_before_alpha",
         "_attempt_generation_startup_barrier",
         "_bootstrap_position_recovery",
