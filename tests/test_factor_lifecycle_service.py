@@ -474,8 +474,17 @@ def test_shadow_service_has_no_direct_registry_mutation():
 
 
 def test_live_warmup_and_hot_reload_call_projection_ack_hook():
-    source = Path("backend/services/live_service.py").read_text(encoding="utf-8")
-    assert source.count("_loop_ack_prepared_factor_projections(") >= 2
+    bootstrap_source = Path(
+        "backend/services/live_factor_bootstrap.py"
+    ).read_text(encoding="utf-8")
+    facade_source = Path("backend/services/live_service.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert bootstrap_source.count("runtime.acknowledge_projections(") >= 2
+    assert "acknowledge_projections=_loop_ack_prepared_factor_projections" in (
+        facade_source
+    )
 
 
 def test_shadow_route_forwards_additive_definition_and_v16(monkeypatch):
