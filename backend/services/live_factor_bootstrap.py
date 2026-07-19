@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +15,282 @@ class FactorWarmupRuntime:
     set_factor_snapshot: Any
     acknowledge_projections: Any
     now: Any
+
+
+@dataclass(frozen=True)
+class FactorInitializationRuntime:
+    config_factory: Any
+    engine_cls: Any
+    normalizer_cls: Any
+    compositor_cls: Any
+    gate_cls: Any
+    attribution_cls: Any
+    adaptive_weight_cls: Any
+    ic_tracker_cls: Any
+    selection_factory: Any
+    projection_service_factory: Any
+    event_sizing_factory: Any
+    subscribe_config: Any
+    generation_active: Any
+    merge_portfolio_configs: Any
+    execution_gate_config: Any
+    adaptive_weight_config: Any
+    unique_factor_pipelines: Any
+    apply_config_update: Any
+    acknowledge_projections: Any
+    enabled_symbols: Any
+    build_extra_symbol_pipelines: Any
+    cross_asset_symbols: Any
+    covariance_cls: Any
+    logger_warning: Any
+    logger_debug: Any
+
+
+@dataclass(frozen=True)
+class FactorInitializationResult:
+    config: Any
+    pipeline: dict[str, Any] | None
+    pipelines: dict[str, dict[str, Any]]
+    cross_asset_covariance: Any
+    error: str = ""
+
+
+def initialize_factor_pipelines(
+    *,
+    generation_id: str,
+    log: Any,
+    runtime: FactorInitializationRuntime,
+) -> FactorInitializationResult:
+    """Build primary/multi-symbol factor state and hot-reload wiring."""
+
+    cfg = None
+    holder: dict[str, Any] = {
+        "pipeline": None,
+        "pipelines": {},
+    }
+    try:
+        cfg = runtime.config_factory()
+        engine = runtime.engine_cls(
+            max_buffer=200,
+            factor_runtime_config=cfg.factor_signal_config,
+        )
+        normalizer = runtime.normalizer_cls(cfg.factor_signal_config)
+        compositor = runtime.compositor_cls(
+            runtime.merge_portfolio_configs(
+                cfg.factor_signal_config,
+                cfg.factor_portfolio_weights,
+                cfg.factor_tactical_alpha,
+                cfg.factor_signal_threshold,
+            )
+        )
+        _publish_factor_selection(
+            cfg.factor_signal_config,
+            runtime=runtime,
+            failure_message="[live] factor selection projection publish failed: %s",
+        )
+        gate = runtime.gate_cls(runtime.execution_gate_config(cfg))
+        attribution = runtime.attribution_cls()
+        ic_tracker = runtime.ic_tracker_cls(window=5000)
+        adaptive_weights = runtime.adaptive_weight_cls(
+            runtime.adaptive_weight_config(cfg),
+            ictracker=ic_tracker,
+        )
+        adaptive_weights.initialize(
+            cfg.factor_portfolio_weights,
+            ictracker=ic_tracker,
+        )
+        event_sizing = _initialize_event_sizing(runtime)
+        primary = {
+            "engine": engine,
+            "normalizer": normalizer,
+            "compositor": compositor,
+            "gate": gate,
+            "attribution": attribution,
+            "awe": adaptive_weights,
+            "ic_tracker": ic_tracker,
+            "event_sizing": event_sizing,
+        }
+        holder["pipeline"] = primary
+        log(
+            "Factor Takeover v4 pipeline initialized "
+            f"(ctrader_demo={cfg.ctrader_send_orders})"
+        )
+        _subscribe_factor_config(
+            holder=holder,
+            generation_id=generation_id,
+            log=log,
+            runtime=runtime,
+        )
+
+        pipelines = _initialize_extra_symbol_pipelines(
+            primary=primary,
+            attribution=attribution,
+            adaptive_weights=adaptive_weights,
+            ic_tracker=ic_tracker,
+            event_sizing=event_sizing,
+            log=log,
+            runtime=runtime,
+        )
+        holder["pipelines"] = pipelines
+        covariance = _initialize_cross_asset_covariance(
+            cfg=cfg,
+            log=log,
+            runtime=runtime,
+        )
+        return FactorInitializationResult(
+            config=cfg,
+            pipeline=primary,
+            pipelines=pipelines,
+            cross_asset_covariance=covariance,
+        )
+    except Exception as exc:
+        log(f"Factor pipeline init failed: {exc}")
+        log(f"  Traceback: {traceback.format_exc()[-600:]}")
+        return FactorInitializationResult(
+            config=cfg,
+            pipeline=None,
+            pipelines={},
+            cross_asset_covariance=None,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def _publish_factor_selection(
+    signal_config: Any,
+    *,
+    runtime: FactorInitializationRuntime,
+    failure_message: str,
+) -> None:
+    try:
+        selection = runtime.selection_factory(signal_config)
+        if selection is not None:
+            runtime.projection_service_factory().publish(selection)
+    except Exception as exc:
+        runtime.logger_warning(failure_message, exc)
+
+
+def _initialize_event_sizing(runtime: FactorInitializationRuntime) -> Any:
+    try:
+        return runtime.event_sizing_factory()
+    except Exception as exc:
+        runtime.logger_debug("[live] event sizing init skipped: %s", exc)
+        return None
+
+
+def _subscribe_factor_config(
+    *,
+    holder: dict[str, Any],
+    generation_id: str,
+    log: Any,
+    runtime: FactorInitializationRuntime,
+) -> None:
+    def on_config_change(cfg: Any, version: int) -> None:
+        try:
+            if not runtime.generation_active(generation_id):
+                return
+            merged = runtime.merge_portfolio_configs(
+                cfg.factor_signal_config,
+                cfg.factor_portfolio_weights,
+                cfg.factor_tactical_alpha,
+                cfg.factor_signal_threshold,
+            )
+            runtime.apply_config_update(
+                pipelines=runtime.unique_factor_pipelines(
+                    holder["pipeline"],
+                    holder["pipelines"],
+                ),
+                cfg=cfg,
+                merged_config=merged,
+            )
+            _publish_factor_selection(
+                cfg.factor_signal_config,
+                runtime=runtime,
+                failure_message=(
+                    "[live] factor selection projection refresh failed: %s"
+                ),
+            )
+            runtime.acknowledge_projections(
+                engine=(holder["pipeline"] or {}).get("engine"),
+                generation_id=str(generation_id or ""),
+                log=log,
+            )
+            runtime.logger_debug(
+                "[live] factor pipeline hot-reloaded (v%d)",
+                version,
+            )
+        except Exception as exc:
+            runtime.logger_debug(
+                "[live] factor pipeline hot-reload: %s",
+                exc,
+            )
+
+    try:
+        runtime.subscribe_config(on_config_change)
+        log(
+            "RuntimeConfig subscription active: factor pipeline will "
+            "hot-reload configs"
+        )
+    except Exception as exc:
+        log(f"RuntimeConfig subscription skipped: {exc}")
+
+
+def _initialize_extra_symbol_pipelines(
+    *,
+    primary: dict[str, Any],
+    attribution: Any,
+    adaptive_weights: Any,
+    ic_tracker: Any,
+    event_sizing: Any,
+    log: Any,
+    runtime: FactorInitializationRuntime,
+) -> dict[str, dict[str, Any]]:
+    try:
+        cfg = runtime.config_factory()
+        symbols = runtime.enabled_symbols(cfg)
+        pipelines = runtime.build_extra_symbol_pipelines(
+            symbols=symbols,
+            primary_symbol="XAUUSD+",
+            primary_pipeline=primary,
+            cfg=cfg,
+            shared_components={
+                "attribution": attribution,
+                "awe": adaptive_weights,
+                "ic_tracker": ic_tracker,
+                "event_sizing": event_sizing,
+            },
+            streaming_engine_cls=runtime.engine_cls,
+            normalizer_cls=runtime.normalizer_cls,
+            compositor_cls=runtime.compositor_cls,
+            gate_cls=runtime.gate_cls,
+            merge_portfolio_configs=runtime.merge_portfolio_configs,
+        )
+        if len(symbols) > 1:
+            log(f"Multi-symbol pipelines initialized: {symbols}")
+        return pipelines
+    except Exception as exc:
+        log(f"Multi-symbol pipeline init skipped: {exc}")
+        return {"XAUUSD+": primary}
+
+
+def _initialize_cross_asset_covariance(
+    *,
+    cfg: Any,
+    log: Any,
+    runtime: FactorInitializationRuntime,
+) -> Any:
+    try:
+        symbols = runtime.cross_asset_symbols(cfg)
+        if not symbols:
+            return None
+        covariance = runtime.covariance_cls(
+            symbols,
+            window=cfg.cross_asset_covariance_window,
+        )
+        log(f"Cross-asset covariance initialized: {symbols}")
+        return covariance
+    except Exception as exc:
+        log(f"Cross-asset covariance init skipped: {exc}")
+        return None
 
 
 def warmup_factor_pipeline(

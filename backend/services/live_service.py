@@ -214,7 +214,10 @@ from backend.services.live_factor_wiring import (
     merge_portfolio_configs as _merge_portfolio_configs,
 )
 from backend.services.live_factor_bootstrap import (
+    FactorInitializationResult,
+    FactorInitializationRuntime,
     FactorWarmupRuntime,
+    initialize_factor_pipelines as _bootstrap_initialize_factor_pipelines,
     warmup_factor_pipeline as _bootstrap_warmup_factor_pipeline,
 )
 from backend.services.live_tick_pipeline import (
@@ -7803,6 +7806,94 @@ def _factor_warmup_runtime() -> FactorWarmupRuntime:
     )
 
 
+def _factor_generation_active(generation_id: str) -> bool:
+    if not generation_id:
+        return True
+    current = _LIVE_LOOP_CONTROLLER.current()
+    return bool(
+        current is not None
+        and current.generation_id == generation_id
+        and not current.stop_event.is_set()
+    )
+
+
+def _factor_event_sizing_factory():
+    from backend.core.db import DUCKDB_EVENTS
+    from execution.event_sizing import EventSizing
+
+    return EventSizing(db_path=str(DUCKDB_EVENTS), enabled=True)
+
+
+def _factor_initialization_runtime() -> FactorInitializationRuntime:
+    from alpha.adaptive_weight_engine import AdaptiveWeightEngine
+    from alpha.attribution_engine import AttributionEngine
+    from alpha.execution_gate import ExecutionGate
+    from alpha.ic_tracker import ICTracker
+    from alpha.portfolio_compositor import PortfolioCompositor
+    from alpha.runtime_factor_selection import select_runtime_factors
+    from alpha.signal_normalizer import SignalNormalizer
+    from alpha.streaming_factor_engine import StreamingFactorEngine
+    from backend.services.runtime_factor_selection_projection import (
+        RuntimeFactorSelectionProjectionService,
+    )
+    from config.runtime_config import shared, subscribe
+    from risk.cross_asset import CrossAssetCovariance
+
+    return FactorInitializationRuntime(
+        config_factory=shared,
+        engine_cls=StreamingFactorEngine,
+        normalizer_cls=SignalNormalizer,
+        compositor_cls=PortfolioCompositor,
+        gate_cls=ExecutionGate,
+        attribution_cls=AttributionEngine,
+        adaptive_weight_cls=AdaptiveWeightEngine,
+        ic_tracker_cls=ICTracker,
+        selection_factory=select_runtime_factors,
+        projection_service_factory=RuntimeFactorSelectionProjectionService,
+        event_sizing_factory=_factor_event_sizing_factory,
+        subscribe_config=subscribe,
+        generation_active=_factor_generation_active,
+        merge_portfolio_configs=_merge_portfolio_configs,
+        execution_gate_config=_loop_execution_gate_config,
+        adaptive_weight_config=_loop_adaptive_weight_config,
+        unique_factor_pipelines=_loop_unique_factor_pipelines,
+        apply_config_update=_loop_apply_factor_pipeline_config_update,
+        acknowledge_projections=_loop_ack_prepared_factor_projections,
+        enabled_symbols=_loop_enabled_symbols_from_config,
+        build_extra_symbol_pipelines=(
+            _loop_build_extra_symbol_factor_pipelines
+        ),
+        cross_asset_symbols=_loop_cross_asset_symbols_for_config,
+        covariance_cls=CrossAssetCovariance,
+        logger_warning=logger.warning,
+        logger_debug=logger.debug,
+    )
+
+
+def _initialize_live_factor_pipelines(
+    *,
+    generation_id: str,
+    log,
+) -> FactorInitializationResult:
+    try:
+        runtime = _factor_initialization_runtime()
+    except Exception as exc:
+        log(f"Factor pipeline init failed: {exc}")
+        log(f"  Traceback: {traceback.format_exc()[-600:]}")
+        return FactorInitializationResult(
+            config=None,
+            pipeline=None,
+            pipelines={},
+            cross_asset_covariance=None,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    return _bootstrap_initialize_factor_pipelines(
+        generation_id=generation_id,
+        log=log,
+        runtime=runtime,
+    )
+
+
 def _run_loop_body(
     broker: str,
     stop_flag: threading.Event,
@@ -7846,163 +7937,39 @@ def _run_loop_body(
     if warmup is None:
         return
     df = warmup.frame
-    df_source = warmup.source
 
-    # ── Factor Takeover v4 管道初始化 ──
     global _DECISION_LOG, _DECISION_LOG_RUN_ID
     global _LEDGER, _TRADE_REVIEWER, _EXPERIENCE_BUILDER, _POLICY_SUGGESTER
-    try:
-        from config.runtime_config import shared as _rcc
-        _rcfg = _rcc()
-        from alpha.streaming_factor_engine import StreamingFactorEngine
-        from alpha.signal_normalizer import SignalNormalizer
-        from alpha.portfolio_compositor import PortfolioCompositor
-        from alpha.execution_gate import ExecutionGate
+    global _factor_pipelines, _cross_asset_covar
 
-        engine = StreamingFactorEngine(max_buffer=200, factor_runtime_config=_rcfg.factor_signal_config)
-        normalizer = SignalNormalizer(_rcfg.factor_signal_config)
-        compositor = PortfolioCompositor(
-            _merge_portfolio_configs(
-                _rcfg.factor_signal_config,
-                _rcfg.factor_portfolio_weights,
-                _rcfg.factor_tactical_alpha,
-                _rcfg.factor_signal_threshold,
-            )
-        )
+    factor_bootstrap = _initialize_live_factor_pipelines(
+        generation_id=generation_id,
+        log=log,
+    )
+    _factor_pipeline = factor_bootstrap.pipeline
+    _factor_pipelines = factor_bootstrap.pipelines
+    _cross_asset_covar = factor_bootstrap.cross_asset_covariance
+    if factor_bootstrap.config is not None:
+        _rcfg = factor_bootstrap.config
+
+    if _factor_pipeline is not None:
         try:
-            from alpha.runtime_factor_selection import select_runtime_factors
-            from backend.services.runtime_factor_selection_projection import RuntimeFactorSelectionProjectionService
-            _selection = select_runtime_factors(_rcfg.factor_signal_config)
-            if _selection is not None:
-                RuntimeFactorSelectionProjectionService().publish(_selection)
-        except Exception as _selection_err:
-            logger.warning("[live] factor selection projection publish failed: %s", _selection_err)
-        gate = ExecutionGate(_loop_execution_gate_config(_rcfg))
-        from alpha.attribution_engine import AttributionEngine
-        from alpha.adaptive_weight_engine import AdaptiveWeightEngine
-        from alpha.ic_tracker import ICTracker
-        attr = AttributionEngine()
-        ictracker = ICTracker(window=5000)
-        awe = AdaptiveWeightEngine(_loop_adaptive_weight_config(_rcfg), ictracker=ictracker)
-        awe.initialize(_rcfg.factor_portfolio_weights, ictracker=ictracker)
-        event_sizing = None
-        try:
-            from backend.core.db import DUCKDB_EVENTS
-            from execution.event_sizing import EventSizing
-            event_sizing = EventSizing(db_path=str(DUCKDB_EVENTS), enabled=True)
-        except Exception as _event_sizing_err:
-            logger.debug("[live] event sizing init skipped: %s", _event_sizing_err)
-        _factor_pipeline = {
-            "engine": engine, "normalizer": normalizer,
-            "compositor": compositor, "gate": gate,
-            "attribution": attr, "awe": awe, "ic_tracker": ictracker,
-            "event_sizing": event_sizing,
-        }
-        log(f"Factor Takeover v4 pipeline initialized "
-            f"(ctrader_demo={_rcfg.ctrader_send_orders})")
-        # ── 订阅 RuntimeConfig 变更, 热更新 compositor 权重 ──
-        try:
-            from config.runtime_config import subscribe as _rc_subscribe
-            def _on_config_change(cfg, version):
-                try:
-                    if generation_id:
-                        current = _LIVE_LOOP_CONTROLLER.current()
-                        if (
-                            current is None
-                            or current.generation_id != generation_id
-                            or current.stop_event.is_set()
-                        ):
-                            return
-                    merged_cfg = _merge_portfolio_configs(
-                        cfg.factor_signal_config,
-                        cfg.factor_portfolio_weights,
-                        cfg.factor_tactical_alpha,
-                        cfg.factor_signal_threshold,
-                    )
-                    _loop_apply_factor_pipeline_config_update(
-                        pipelines=_loop_unique_factor_pipelines(_factor_pipeline, _factor_pipelines),
-                        cfg=cfg,
-                        merged_config=merged_cfg,
-                    )
-                    try:
-                        from alpha.runtime_factor_selection import select_runtime_factors
-                        from backend.services.runtime_factor_selection_projection import RuntimeFactorSelectionProjectionService
-                        _selection = select_runtime_factors(cfg.factor_signal_config)
-                        if _selection is not None:
-                            RuntimeFactorSelectionProjectionService().publish(_selection)
-                    except Exception as _selection_err:
-                        logger.warning("[live] factor selection projection refresh failed: %s", _selection_err)
-                    _loop_ack_prepared_factor_projections(
-                        engine=(_factor_pipeline or {}).get("engine"),
-                        generation_id=str(generation_id or ""),
-                        log=log,
-                    )
-                    logger.debug("[live] factor pipeline hot-reloaded (v%d)", version)
-                except Exception as _e:
-                    logger.debug("[live] factor pipeline hot-reload: %s", _e)
-            _rc_subscribe(_on_config_change)
-            log("RuntimeConfig subscription active: factor pipeline will hot-reload configs")
-        except Exception as e:
-            log(f"RuntimeConfig subscription skipped: {e}")
-        # ── 初始化决策审计日志 ──
-        if _DECISION_LOG is None:
-            _DECISION_LOG = DecisionLogStore()
-            _DECISION_LOG_RUN_ID = int(time.time())
-        if _LEDGER is None:
-            _LEDGER = DecisionLedger()
-        if _TRADE_REVIEWER is None:
-            _TRADE_REVIEWER = TradeReviewer()
-        if _EXPERIENCE_BUILDER is None:
-            _EXPERIENCE_BUILDER = ExperienceBuilder()
-        if _POLICY_SUGGESTER is None:
-            _POLICY_SUGGESTER = PolicySuggester()
-        # ── 多品种管道初始化 (Phase 6: _factor_pipelines) ──
-        global _factor_pipelines
-        _factor_pipelines = {}
-        try:
-            from config.runtime_config import shared as _rcfg2
-            cfg2 = _rcfg2()
-            symbols = _loop_enabled_symbols_from_config(cfg2)
-            _factor_pipelines = _loop_build_extra_symbol_factor_pipelines(
-                symbols=symbols,
-                primary_symbol="XAUUSD+",
-                primary_pipeline=_factor_pipeline,
-                cfg=cfg2,
-                shared_components={
-                    "attribution": attr,
-                    "awe": awe,
-                    "ic_tracker": ictracker,
-                    "event_sizing": event_sizing,
-                },
-                streaming_engine_cls=StreamingFactorEngine,
-                normalizer_cls=SignalNormalizer,
-                compositor_cls=PortfolioCompositor,
-                gate_cls=ExecutionGate,
-                merge_portfolio_configs=_merge_portfolio_configs,
-            )
-            if len(symbols) > 1:
-                log(f"Multi-symbol pipelines initialized: {symbols}")
-        except Exception as e:
-            log(f"Multi-symbol pipeline init skipped: {e}")
-            _factor_pipelines = {"XAUUSD+": _factor_pipeline} if _factor_pipeline else {}
-        # Phase 6: 初始化跨品种协方差
-        global _cross_asset_covar
-        try:
-            from risk.cross_asset import CrossAssetCovariance
-            symbols = _loop_cross_asset_symbols_for_config(_rcfg)
-            if symbols:
-                _cross_asset_covar = CrossAssetCovariance(
-                    symbols, window=_rcfg.cross_asset_covariance_window
-                )
-                log(f"Cross-asset covariance initialized: {symbols}")
-        except Exception as e:
-            log(f"Cross-asset covariance init skipped: {e}")
+            if _DECISION_LOG is None:
+                _DECISION_LOG = DecisionLogStore()
+                _DECISION_LOG_RUN_ID = int(time.time())
+            if _LEDGER is None:
+                _LEDGER = DecisionLedger()
+            if _TRADE_REVIEWER is None:
+                _TRADE_REVIEWER = TradeReviewer()
+            if _EXPERIENCE_BUILDER is None:
+                _EXPERIENCE_BUILDER = ExperienceBuilder()
+            if _POLICY_SUGGESTER is None:
+                _POLICY_SUGGESTER = PolicySuggester()
+        except Exception as exc:
+            log(f"Factor audit bootstrap failed closed: {exc}")
+            _factor_pipeline = None
+            _factor_pipelines = {}
             _cross_asset_covar = None
-    except Exception as e:
-        log(f"Factor pipeline init failed: {e}")
-        import traceback as _tb
-        log(f"  Traceback: {_tb.format_exc()[-600:]}")
-        _factor_pipeline = None
 
     _bootstrap_warmup_factor_pipeline(
         _factor_pipeline,

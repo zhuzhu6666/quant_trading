@@ -3,7 +3,9 @@ from types import SimpleNamespace
 import pandas as pd
 
 from backend.services.live_factor_bootstrap import (
+    FactorInitializationRuntime,
     FactorWarmupRuntime,
+    initialize_factor_pipelines,
     warmup_factor_pipeline,
 )
 
@@ -178,3 +180,174 @@ def test_missing_pipeline_is_explicitly_skipped():
         "warm": False,
         "snapshot_count": 0,
     }
+
+
+def _factor_config():
+    return SimpleNamespace(
+        factor_signal_config={"momentum": {"enabled": True}},
+        factor_portfolio_weights={"momentum": 1.0},
+        factor_tactical_alpha=0.1,
+        factor_signal_threshold=0.2,
+        ctrader_send_orders=False,
+        cross_asset_covariance_window=50,
+    )
+
+
+def _initialization_runtime(
+    *,
+    subscriptions=None,
+    applied=None,
+    acknowledgements=None,
+    projections=None,
+    generation_active=None,
+    engine_cls=None,
+    debug=None,
+):
+    subscriptions = subscriptions if subscriptions is not None else []
+    applied = applied if applied is not None else []
+    acknowledgements = (
+        acknowledgements if acknowledgements is not None else []
+    )
+    projections = projections if projections is not None else []
+    debug = debug if debug is not None else []
+
+    class Engine:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class Normalizer:
+        def __init__(self, config):
+            self.config = config
+
+    class Compositor:
+        def __init__(self, config):
+            self.config = config
+
+    class Gate:
+        def __init__(self, config):
+            self.config = config
+
+    class AdaptiveWeights:
+        def __init__(self, config, *, ictracker):
+            self.config = config
+            self.ictracker = ictracker
+            self.initialized = False
+
+        def initialize(self, _weights, *, ictracker):
+            assert ictracker is self.ictracker
+            self.initialized = True
+
+    class ProjectionService:
+        def publish(self, selection):
+            projections.append(selection)
+
+    class Covariance:
+        def __init__(self, symbols, *, window):
+            self.symbols = list(symbols)
+            self.window = window
+
+    return FactorInitializationRuntime(
+        config_factory=_factor_config,
+        engine_cls=engine_cls or Engine,
+        normalizer_cls=Normalizer,
+        compositor_cls=Compositor,
+        gate_cls=Gate,
+        attribution_cls=object,
+        adaptive_weight_cls=AdaptiveWeights,
+        ic_tracker_cls=lambda **kwargs: SimpleNamespace(**kwargs),
+        selection_factory=lambda config: {"selected": sorted(config)},
+        projection_service_factory=ProjectionService,
+        event_sizing_factory=lambda: {"enabled": True},
+        subscribe_config=lambda callback: subscriptions.append(callback),
+        generation_active=(generation_active or (lambda _generation: True)),
+        merge_portfolio_configs=lambda *args: {"merged": args},
+        execution_gate_config=lambda _cfg: {"gate": True},
+        adaptive_weight_config=lambda _cfg: {"adaptive": True},
+        unique_factor_pipelines=lambda primary, extras: [
+            primary,
+            *extras.values(),
+        ],
+        apply_config_update=lambda **kwargs: applied.append(kwargs),
+        acknowledge_projections=lambda **kwargs: acknowledgements.append(
+            kwargs
+        )
+        or {"acknowledged": True},
+        enabled_symbols=lambda _cfg: ["XAUUSD+", "EURUSD"],
+        build_extra_symbol_pipelines=lambda **kwargs: {
+            "XAUUSD+": kwargs["primary_pipeline"],
+            "EURUSD": {"engine": "secondary"},
+        },
+        cross_asset_symbols=lambda _cfg: ["XAUUSD+", "EURUSD"],
+        covariance_cls=Covariance,
+        logger_warning=lambda *args: debug.append(args),
+        logger_debug=lambda *args: debug.append(args),
+    )
+
+
+def test_factor_initialization_builds_multi_symbol_state_and_hot_reload():
+    subscriptions = []
+    applied = []
+    acknowledgements = []
+    projections = []
+    logs = []
+    runtime = _initialization_runtime(
+        subscriptions=subscriptions,
+        applied=applied,
+        acknowledgements=acknowledgements,
+        projections=projections,
+    )
+
+    result = initialize_factor_pipelines(
+        generation_id="generation-1",
+        log=logs.append,
+        runtime=runtime,
+    )
+
+    assert result.error == ""
+    assert result.pipeline["awe"].initialized is True
+    assert set(result.pipelines) == {"XAUUSD+", "EURUSD"}
+    assert result.cross_asset_covariance.window == 50
+    assert projections == [{"selected": ["momentum"]}]
+    assert len(subscriptions) == 1
+
+    subscriptions[0](_factor_config(), 2)
+    assert applied
+    assert acknowledgements[0]["generation_id"] == "generation-1"
+    assert len(projections) == 2
+
+
+def test_stale_generation_ignores_factor_hot_reload():
+    subscriptions = []
+    applied = []
+    runtime = _initialization_runtime(
+        subscriptions=subscriptions,
+        applied=applied,
+        generation_active=lambda _generation: False,
+    )
+    initialize_factor_pipelines(
+        generation_id="old-generation",
+        log=lambda _message: None,
+        runtime=runtime,
+    )
+
+    subscriptions[0](_factor_config(), 3)
+
+    assert applied == []
+
+
+def test_primary_factor_initialization_failure_returns_no_alpha_pipeline():
+    class UnavailableEngine:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("factor engine unavailable")
+
+    logs = []
+    result = initialize_factor_pipelines(
+        generation_id="generation-4",
+        log=logs.append,
+        runtime=_initialization_runtime(engine_cls=UnavailableEngine),
+    )
+
+    assert result.pipeline is None
+    assert result.pipelines == {}
+    assert "factor engine unavailable" in result.error
+    assert any("init failed" in message for message in logs)
