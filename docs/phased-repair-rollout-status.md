@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: code gates passed; production rollout paused before restart
-> Snapshot: 2026-07-19 08:58 CST
+> Snapshot: 2026-07-19 09:28 CST
 > Scope: Phase 0-5 compatibility implementation, migrations, verification, and remaining live evidence gates
 
 ## 1. 当前结论
@@ -22,8 +22,8 @@ Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档�
 
 ### Python/backend
 
-- 默认全量：`2207 passed, 9 skipped`；skip 项为显式隔离的 PostgreSQL integration。
-- PostgreSQL integration：`10 passed, 2206 deselected`，使用 PostgreSQL 临时 schema/事务回滚，不以 SQLite 替代。
+- 默认全量：`2223 passed, 9 skipped`；skip 项为显式隔离的 PostgreSQL integration。
+- PostgreSQL integration：`10 passed, 2222 deselected`，使用 PostgreSQL 临时 schema/事务回滚，不以 SQLite 替代。
 - P0 执行/紧急/对账/stop-open/default-off safety 故障矩阵：`296 passed`。
 - 从最小历史 baseline 到 v9 成功；同一迁移第二次执行 `applied_count=0`。
 - `compileall`、`git diff --check`、OpenAPI snapshot、dependency lock check、`pip check` 通过。
@@ -73,12 +73,16 @@ FactBoundary/UI 实现遵循：缺失 `_fact` 按 unknown，stale 保留最后�
 - legacy backtest diagnostic-only 与 parity replay evidence boundary；
 - runtime backend/worker schema-writer retirement。
 
-Phase 5 façade 收敛继续完成：`live_service.py` 当前为 12,265 行，已将
+Phase 5 façade 收敛继续完成：`live_service.py` 当前为 11,452 行，已将
 supervisor re-entry、risk-reduction safeguards、position path metrics、entry
 protection latch、startup safety/bar warmup、factor initialization/warmup 和
-generation-bound serial tick runner 迁入独立模块。`_run_loop_body` 仅拥有
-generation 日志资源并通过 `try/finally` 关闭；active generation body 已无内嵌
-tick loop，stale generation 不能执行 factor hot reload。
+generation-bound serial tick runner 迁入独立模块。v2 与 legacy safety-first
+tick orchestration、safety candidate reduction dispatcher，以及 start/drain/stop
+generation ownership 也已从 façade 抽离；dispatcher 模块没有任何 entry order
+surface。`_run_loop_body` 仅拥有 generation 日志资源并通过 `try/finally` 关闭；
+active generation body 已无内嵌 tick loop，stale generation 不能执行 factor hot
+reload。账户刷新源码门禁现检查权威 tick runtime，并继续证明 kickoff 先于本地
+K 线 warmup。
 
 ## 5. 尚未满足的 live rollout 门槛
 
