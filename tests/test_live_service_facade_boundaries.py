@@ -59,6 +59,15 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_position_path_metrics_for_position",
         "_recent_review_reentry_block",
         "_record_risk_reduction_aux_failure",
+        "_recovery_position_store",
+        "_load_recovery_position_row",
+        "_merge_recovery_position_meta",
+        "_upsert_recovery_position_state",
+        "_list_active_recovery_positions",
+        "_recovery_last_seen_by_position",
+        "_recovery_remaining_volume_by_position",
+        "_mark_recovery_position_closed",
+        "_lookup_recovery_context_integrity",
         "_restore_session_state_for_day",
         "_run_position_protection_cycle",
         "_release_entry_protection_pending_latch",
@@ -82,6 +91,19 @@ def test_session_deal_sql_lives_outside_live_facade():
 
     assert "WITH final_close AS" not in source
     assert "FROM ctrader_deals d" not in source
+
+
+def test_recovery_position_state_writes_live_outside_facade():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+    store_source = Path(
+        "backend/services/live_recovery_position_store.py"
+    ).read_text(encoding="utf-8")
+
+    assert "INSERT INTO recovery_position_state" not in source
+    assert "UPDATE recovery_position_state" not in source
+    assert "INSERT INTO recovery_position_state" in store_source
+    assert "UPDATE recovery_position_state" in store_source
+    assert "backend.services.live_service" not in store_source
 
 
 def test_session_restore_decision_has_no_runtime_or_facade_dependency():

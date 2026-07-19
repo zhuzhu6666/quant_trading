@@ -155,6 +155,10 @@ from backend.services.live_position_protection_cycle import (
     PositionProtectionCycleRuntime,
     run_position_protection_cycle as _runtime_run_position_protection_cycle,
 )
+from backend.services.live_recovery_position_store import (
+    RecoveryPositionStore,
+    RecoveryPositionStoreRuntime,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -1377,65 +1381,31 @@ def _position_unrealized_pnl(position: Any) -> float:
     return _lifecycle_position_unrealized_pnl(position)
 
 
+def _recovery_position_store() -> RecoveryPositionStore:
+    return RecoveryPositionStore(
+        RecoveryPositionStoreRuntime(
+            get_read_connection=_get_state_read_conn,
+            get_write_connection=_get_state_pg_conn,
+            execute=_state_execute,
+            normalize_position=_normalize_position_snapshot,
+            normalize_row=_lifecycle_normalize_recovery_position_row,
+            lookup_entry_decision_id=_lookup_entry_decision_id,
+            build_meta_update_payload=_lifecycle_build_recovery_meta_update_payload,
+            build_closed_update_payload=_lifecycle_build_recovery_closed_update_payload,
+            now=time.time,
+            local_open_volumes=_pos_open_api_volume,
+            full_context=_RECOVERY_CONTEXT_FULL,
+            partial_context=_RECOVERY_CONTEXT_PARTIAL,
+        )
+    )
+
+
 def _load_recovery_position_row(position_id: int) -> dict[str, Any]:
-    if position_id <= 0:
-        return {}
-    conn = _get_state_read_conn()
-    try:
-        row = _state_execute(
-            conn,
-            """
-            SELECT *
-            FROM recovery_position_state
-            WHERE position_id=?
-            LIMIT 1
-            """,
-            (int(position_id),),
-        ).fetchone()
-        return _lifecycle_normalize_recovery_position_row(row)
-    finally:
-        conn.close()
+    return _recovery_position_store().load(position_id)
 
 
 def _merge_recovery_position_meta(position_id: int, meta: dict[str, Any] | None) -> None:
-    if position_id <= 0 or not meta:
-        return
-    conn = _get_state_pg_conn()
-    try:
-        row = _state_execute(
-            conn,
-            "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
-            (int(position_id),),
-        ).fetchone()
-        if row is None:
-            return
-        payload = _lifecycle_build_recovery_meta_update_payload(
-            position_id=position_id,
-            existing_meta_json=row["recovery_meta_json"],
-            meta=meta,
-            now_ts=time.time(),
-        )
-        _state_execute(
-            conn,
-            """
-            UPDATE recovery_position_state
-            SET recovery_meta_json=?, last_seen_at=?
-            WHERE position_id=?
-            """,
-            (
-                json.dumps(payload["recovery_meta"], ensure_ascii=False, default=str),
-                payload["last_seen_at"],
-                payload["position_id"],
-            ),
-        )
-        final_row = _state_execute(
-            conn,
-            "SELECT * FROM recovery_position_state WHERE position_id=?",
-            (position_id,),
-        ).fetchone()
-        conn.commit()
-    finally:
-        conn.close()
+    _recovery_position_store().merge_meta(position_id, meta)
 
 
 def _entry_protection_plan_payload(
@@ -2571,16 +2541,10 @@ def _ensure_open_ledger_for_recovered_close(
 
 
 def _lookup_recovery_context_integrity(position_id: int, default: str = _RECOVERY_CONTEXT_FULL) -> str:
-    conn = _get_state_read_conn()
-    try:
-        row = _state_execute(
-            conn,
-            "SELECT context_integrity FROM recovery_position_state WHERE position_id=?",
-            (position_id,),
-        ).fetchone()
-        return str(row["context_integrity"] or default) if row else default
-    finally:
-        conn.close()
+    return _recovery_position_store().context_integrity(
+        position_id,
+        default=default,
+    )
 
 
 def _persist_loop_desired_state(
@@ -3510,166 +3474,30 @@ def _upsert_recovery_position_state(
     context_integrity: str | None = None,
     meta: dict | None = None,
 ) -> None:
-    snapshot = _normalize_position_snapshot(raw_position)
-    position_id = snapshot["position_id"]
-    if position_id <= 0:
-        return
-    now = time.time()
-    entry_decision_id = _lookup_entry_decision_id(position_id)
-    desired_integrity = context_integrity or (_RECOVERY_CONTEXT_FULL if entry_decision_id else _RECOVERY_CONTEXT_PARTIAL)
-    conn = _get_state_pg_conn()
-    try:
-        prev = _state_execute(
-            conn,
-            "SELECT * FROM recovery_position_state WHERE position_id=?",
-            (position_id,),
-        ).fetchone()
-        first_seen_at = float(prev["first_seen_at"]) if prev else now
-        stored_meta = {}
-        if prev and prev["recovery_meta_json"]:
-            try:
-                stored_meta = json.loads(prev["recovery_meta_json"])
-            except Exception:
-                stored_meta = {}
-        next_meta = dict(stored_meta)
-        if meta:
-            next_meta.update(meta)
-        prev_integrity = str(prev["context_integrity"]) if prev and prev["context_integrity"] else ""
-        if prev_integrity == _RECOVERY_CONTEXT_FULL:
-            desired_integrity = _RECOVERY_CONTEXT_FULL
-        _state_execute(
-            conn,
-            """
-            INSERT INTO recovery_position_state
-            (position_id, broker, symbol, direction, open_price, volume,
-             first_seen_at, last_seen_at, status, strategy_name,
-             entry_decision_id, context_integrity, recovery_meta_json,
-             closed_at, close_reason, close_pnl)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, '', 0.0)
-            ON CONFLICT(position_id) DO UPDATE SET
-                broker=excluded.broker,
-                symbol=excluded.symbol,
-                direction=excluded.direction,
-                open_price=excluded.open_price,
-                volume=CASE
-                    WHEN excluded.volume > 0 THEN excluded.volume
-                    WHEN recovery_position_state.volume > 0 THEN recovery_position_state.volume
-                    ELSE excluded.volume
-                END,
-                last_seen_at=excluded.last_seen_at,
-                status=excluded.status,
-                strategy_name=excluded.strategy_name,
-                entry_decision_id=CASE
-                    WHEN recovery_position_state.entry_decision_id='' THEN excluded.entry_decision_id
-                    ELSE recovery_position_state.entry_decision_id
-                END,
-                context_integrity=CASE
-                    WHEN recovery_position_state.context_integrity='full' THEN 'full'
-                    ELSE excluded.context_integrity
-                END,
-                recovery_meta_json=excluded.recovery_meta_json,
-                closed_at=CASE
-                    WHEN excluded.status IN ('open', 'recovered') THEN 0.0
-                    ELSE recovery_position_state.closed_at
-                END,
-                close_reason=CASE
-                    WHEN excluded.status IN ('open', 'recovered') THEN ''
-                    ELSE recovery_position_state.close_reason
-                END,
-                close_pnl=CASE
-                    WHEN excluded.status IN ('open', 'recovered') THEN 0.0
-                    ELSE recovery_position_state.close_pnl
-                END
-            """,
-            (
-                position_id,
-                broker,
-                snapshot["symbol"],
-                snapshot["direction"],
-                snapshot["open_price"],
-                snapshot["volume"],
-                first_seen_at,
-                now,
-                status,
-                strategy_name,
-                entry_decision_id,
-                desired_integrity,
-                json.dumps(next_meta, ensure_ascii=False, default=str),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _recovery_position_store().upsert(
+        raw_position,
+        broker=broker,
+        strategy_name=strategy_name,
+        status=status,
+        context_integrity=context_integrity,
+        meta=meta,
+    )
 
 
 def _list_active_recovery_positions(broker: str) -> list[dict]:
-    conn = _get_state_read_conn()
-    try:
-        rows = _state_execute(
-            conn,
-            """
-            SELECT * FROM recovery_position_state
-            WHERE broker=? AND status IN ('open', 'recovered')
-            ORDER BY last_seen_at ASC
-            """,
-            (broker,),
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+    return _recovery_position_store().list_active(broker)
 
 
 def _recovery_last_seen_by_position(position_ids: set[int]) -> dict[int, float]:
     """Return the last broker-open observation used to reject stale partial deals."""
-
-    normalized = sorted({int(pid) for pid in position_ids if int(pid or 0) > 0})
-    if not normalized:
-        return {}
-    conn = _get_state_read_conn()
-    try:
-        result: dict[int, float] = {}
-        for pid in normalized:
-            row = _state_execute(
-                conn,
-                "SELECT last_seen_at FROM recovery_position_state WHERE position_id=?",
-                (pid,),
-            ).fetchone()
-            if row and float(row["last_seen_at"] or 0.0) > 0.0:
-                # Allow a small broker/local clock and serialization tolerance;
-                # an older partial close is normally far earlier than this.
-                result[pid] = max(0.0, float(row["last_seen_at"]) - 5.0)
-        return result
-    finally:
-        conn.close()
+    return _recovery_position_store().last_seen_by_position(position_ids)
 
 
 def _recovery_remaining_volume_by_position(
     position_ids: set[int],
 ) -> dict[int, float]:
     """Return the last fresh broker-open volume for close completeness proof."""
-
-    normalized = sorted({int(pid) for pid in position_ids if int(pid or 0) > 0})
-    if not normalized:
-        return {}
-    conn = _get_state_read_conn()
-    try:
-        result: dict[int, float] = {}
-        for pid in normalized:
-            row = _state_execute(
-                conn,
-                "SELECT volume FROM recovery_position_state WHERE position_id=?",
-                (pid,),
-            ).fetchone()
-            if row and float(row["volume"] or 0.0) > 0.0:
-                result[pid] = float(row["volume"])
-            elif float(_pos_open_api_volume.get(pid, 0.0) or 0.0) > 0.0:
-                # Missing PG rows are still allowed to fail closed with the
-                # process-local original volume.  A too-large fallback delays
-                # release; it cannot create a false confirmed close.
-                result[pid] = float(_pos_open_api_volume[pid])
-        return result
-    finally:
-        conn.close()
+    return _recovery_position_store().remaining_volume_by_position(position_ids)
 
 
 def _mark_recovery_position_closed(
@@ -3680,43 +3508,13 @@ def _mark_recovery_position_closed(
     closed_at: float,
     meta: dict | None = None,
 ) -> None:
-    conn = _get_state_pg_conn()
-    try:
-        row = _state_execute(
-            conn,
-            "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
-            (position_id,),
-        ).fetchone()
-        payload = _lifecycle_build_recovery_closed_update_payload(
-            position_id=position_id,
-            existing_meta_json=row["recovery_meta_json"] if row else "",
-            close_reason=close_reason,
-            close_pnl=close_pnl,
-            closed_at=closed_at,
-            meta=meta,
-        )
-        _state_execute(
-            conn,
-            """
-            UPDATE recovery_position_state
-            SET status='closed_replayed',
-                closed_at=?,
-                close_reason=?,
-                close_pnl=?,
-                recovery_meta_json=?
-            WHERE position_id=?
-            """,
-            (
-                payload["closed_at"],
-                payload["close_reason"],
-                payload["close_pnl"],
-                json.dumps(payload["recovery_meta"], ensure_ascii=False, default=str),
-                payload["position_id"],
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _recovery_position_store().mark_closed(
+        position_id,
+        close_reason=close_reason,
+        close_pnl=close_pnl,
+        closed_at=closed_at,
+        meta=meta,
+    )
 
 
 def _replay_recovered_close(

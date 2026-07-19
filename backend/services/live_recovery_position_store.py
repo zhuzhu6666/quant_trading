@@ -1,0 +1,334 @@
+"""Persistence boundary for live recovery-position state."""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+import json
+from typing import Any
+
+
+@dataclass(frozen=True)
+class RecoveryPositionStoreRuntime:
+    get_read_connection: Callable[[], Any]
+    get_write_connection: Callable[[], Any]
+    execute: Callable[..., Any]
+    normalize_position: Callable[[Any], dict[str, Any]]
+    normalize_row: Callable[[Any], dict[str, Any]]
+    lookup_entry_decision_id: Callable[[int], str]
+    build_meta_update_payload: Callable[..., dict[str, Any]]
+    build_closed_update_payload: Callable[..., dict[str, Any]]
+    now: Callable[[], float]
+    local_open_volumes: Mapping[int, float]
+    full_context: str = "full"
+    partial_context: str = "partial"
+
+
+class RecoveryPositionStore:
+    """CRUD owner for ``recovery_position_state`` with injected DB mechanics."""
+
+    def __init__(self, runtime: RecoveryPositionStoreRuntime) -> None:
+        self.runtime = runtime
+
+    def load(self, position_id: int) -> dict[str, Any]:
+        if int(position_id or 0) <= 0:
+            return {}
+        conn = self.runtime.get_read_connection()
+        try:
+            row = self.runtime.execute(
+                conn,
+                """
+                SELECT *
+                FROM recovery_position_state
+                WHERE position_id=?
+                LIMIT 1
+                """,
+                (int(position_id),),
+            ).fetchone()
+            return self.runtime.normalize_row(row)
+        finally:
+            conn.close()
+
+    def merge_meta(self, position_id: int, meta: Mapping[str, Any] | None) -> None:
+        if int(position_id or 0) <= 0 or not meta:
+            return
+        conn = self.runtime.get_write_connection()
+        try:
+            row = self.runtime.execute(
+                conn,
+                "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
+                (int(position_id),),
+            ).fetchone()
+            if row is None:
+                return
+            payload = self.runtime.build_meta_update_payload(
+                position_id=position_id,
+                existing_meta_json=row["recovery_meta_json"],
+                meta=dict(meta),
+                now_ts=self.runtime.now(),
+            )
+            self.runtime.execute(
+                conn,
+                """
+                UPDATE recovery_position_state
+                SET recovery_meta_json=?, last_seen_at=?
+                WHERE position_id=?
+                """,
+                (
+                    json.dumps(
+                        payload["recovery_meta"],
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    payload["last_seen_at"],
+                    payload["position_id"],
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def upsert(
+        self,
+        raw_position: Any,
+        *,
+        broker: str,
+        strategy_name: str,
+        status: str = "open",
+        context_integrity: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        snapshot = self.runtime.normalize_position(raw_position)
+        position_id = int(snapshot["position_id"] or 0)
+        if position_id <= 0:
+            return
+        now = float(self.runtime.now())
+        entry_decision_id = str(
+            self.runtime.lookup_entry_decision_id(position_id) or ""
+        )
+        desired_integrity = context_integrity or (
+            self.runtime.full_context
+            if entry_decision_id
+            else self.runtime.partial_context
+        )
+        conn = self.runtime.get_write_connection()
+        try:
+            prev = self.runtime.execute(
+                conn,
+                "SELECT * FROM recovery_position_state WHERE position_id=?",
+                (position_id,),
+            ).fetchone()
+            first_seen_at = float(prev["first_seen_at"]) if prev else now
+            stored_meta: dict[str, Any] = {}
+            if prev and prev["recovery_meta_json"]:
+                try:
+                    candidate = json.loads(prev["recovery_meta_json"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    candidate = None
+                if isinstance(candidate, dict):
+                    stored_meta = candidate
+            next_meta = dict(stored_meta)
+            if meta:
+                next_meta.update(dict(meta))
+            prev_integrity = (
+                str(prev["context_integrity"])
+                if prev and prev["context_integrity"]
+                else ""
+            )
+            if prev_integrity == self.runtime.full_context:
+                desired_integrity = self.runtime.full_context
+            self.runtime.execute(
+                conn,
+                """
+                INSERT INTO recovery_position_state
+                (position_id, broker, symbol, direction, open_price, volume,
+                 first_seen_at, last_seen_at, status, strategy_name,
+                 entry_decision_id, context_integrity, recovery_meta_json,
+                 closed_at, close_reason, close_pnl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, '', 0.0)
+                ON CONFLICT(position_id) DO UPDATE SET
+                    broker=excluded.broker,
+                    symbol=excluded.symbol,
+                    direction=excluded.direction,
+                    open_price=excluded.open_price,
+                    volume=CASE
+                        WHEN excluded.volume > 0 THEN excluded.volume
+                        WHEN recovery_position_state.volume > 0 THEN recovery_position_state.volume
+                        ELSE excluded.volume
+                    END,
+                    last_seen_at=excluded.last_seen_at,
+                    status=excluded.status,
+                    strategy_name=excluded.strategy_name,
+                    entry_decision_id=CASE
+                        WHEN recovery_position_state.entry_decision_id='' THEN excluded.entry_decision_id
+                        ELSE recovery_position_state.entry_decision_id
+                    END,
+                    context_integrity=CASE
+                        WHEN recovery_position_state.context_integrity='full' THEN 'full'
+                        ELSE excluded.context_integrity
+                    END,
+                    recovery_meta_json=excluded.recovery_meta_json,
+                    closed_at=CASE
+                        WHEN excluded.status IN ('open', 'recovered') THEN 0.0
+                        ELSE recovery_position_state.closed_at
+                    END,
+                    close_reason=CASE
+                        WHEN excluded.status IN ('open', 'recovered') THEN ''
+                        ELSE recovery_position_state.close_reason
+                    END,
+                    close_pnl=CASE
+                        WHEN excluded.status IN ('open', 'recovered') THEN 0.0
+                        ELSE recovery_position_state.close_pnl
+                    END
+                """,
+                (
+                    position_id,
+                    broker,
+                    snapshot["symbol"],
+                    snapshot["direction"],
+                    snapshot["open_price"],
+                    snapshot["volume"],
+                    first_seen_at,
+                    now,
+                    status,
+                    strategy_name,
+                    entry_decision_id,
+                    desired_integrity,
+                    json.dumps(next_meta, ensure_ascii=False, default=str),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_active(self, broker: str) -> list[dict[str, Any]]:
+        conn = self.runtime.get_read_connection()
+        try:
+            rows = self.runtime.execute(
+                conn,
+                """
+                SELECT * FROM recovery_position_state
+                WHERE broker=? AND status IN ('open', 'recovered')
+                ORDER BY last_seen_at ASC
+                """,
+                (broker,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def last_seen_by_position(self, position_ids: set[int]) -> dict[int, float]:
+        normalized = sorted(
+            {int(pid) for pid in position_ids if int(pid or 0) > 0}
+        )
+        if not normalized:
+            return {}
+        conn = self.runtime.get_read_connection()
+        try:
+            result: dict[int, float] = {}
+            for position_id in normalized:
+                row = self.runtime.execute(
+                    conn,
+                    "SELECT last_seen_at FROM recovery_position_state WHERE position_id=?",
+                    (position_id,),
+                ).fetchone()
+                if row and float(row["last_seen_at"] or 0.0) > 0.0:
+                    result[position_id] = max(
+                        0.0,
+                        float(row["last_seen_at"]) - 5.0,
+                    )
+            return result
+        finally:
+            conn.close()
+
+    def remaining_volume_by_position(
+        self,
+        position_ids: set[int],
+    ) -> dict[int, float]:
+        normalized = sorted(
+            {int(pid) for pid in position_ids if int(pid or 0) > 0}
+        )
+        if not normalized:
+            return {}
+        conn = self.runtime.get_read_connection()
+        try:
+            result: dict[int, float] = {}
+            for position_id in normalized:
+                row = self.runtime.execute(
+                    conn,
+                    "SELECT volume FROM recovery_position_state WHERE position_id=?",
+                    (position_id,),
+                ).fetchone()
+                if row and float(row["volume"] or 0.0) > 0.0:
+                    result[position_id] = float(row["volume"])
+                    continue
+                local_volume = float(
+                    self.runtime.local_open_volumes.get(position_id, 0.0) or 0.0
+                )
+                if local_volume > 0.0:
+                    result[position_id] = local_volume
+            return result
+        finally:
+            conn.close()
+
+    def mark_closed(
+        self,
+        position_id: int,
+        *,
+        close_reason: str,
+        close_pnl: float,
+        closed_at: float,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        conn = self.runtime.get_write_connection()
+        try:
+            row = self.runtime.execute(
+                conn,
+                "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
+                (position_id,),
+            ).fetchone()
+            payload = self.runtime.build_closed_update_payload(
+                position_id=position_id,
+                existing_meta_json=row["recovery_meta_json"] if row else "",
+                close_reason=close_reason,
+                close_pnl=close_pnl,
+                closed_at=closed_at,
+                meta=dict(meta or {}),
+            )
+            self.runtime.execute(
+                conn,
+                """
+                UPDATE recovery_position_state
+                SET status='closed_replayed',
+                    closed_at=?,
+                    close_reason=?,
+                    close_pnl=?,
+                    recovery_meta_json=?
+                WHERE position_id=?
+                """,
+                (
+                    payload["closed_at"],
+                    payload["close_reason"],
+                    payload["close_pnl"],
+                    json.dumps(
+                        payload["recovery_meta"],
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    payload["position_id"],
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def context_integrity(self, position_id: int, *, default: str) -> str:
+        conn = self.runtime.get_read_connection()
+        try:
+            row = self.runtime.execute(
+                conn,
+                "SELECT context_integrity FROM recovery_position_state WHERE position_id=?",
+                (position_id,),
+            ).fetchone()
+            return str(row["context_integrity"] or default) if row else default
+        finally:
+            conn.close()

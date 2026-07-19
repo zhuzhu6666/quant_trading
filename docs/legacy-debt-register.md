@@ -608,8 +608,8 @@
 - 旧理解: 为复用进程内 globals，可以继续把 explicit reconcile、safety cycle、startup barrier 和 emergency 状态机直接写进 `live_service.py`。
 - 当前口径: `backend.services.live_reconciliation` 只负责 fresh broker contract，`backend.services.live_loop_v2` 负责 safety/startup 顺序，`backend.services.live_emergency` 负责严格紧急平仓；三者均不依赖 PostgreSQL。`live_service` 仅保留兼容状态发布、process wiring 和 callback 注入。
 - 影响面: live loop façade、broker reconcile、position protection、generation barrier、emergency API；不改变 feature flag 默认值或 broker mutation 串行所有权。
-- 收口方式: 本轮已移出上述新增实现并保留薄兼容入口；session restore 的 deals-first 重建及 `available/degraded_cache/unavailable` 选择由 `session_restore.resolve_session_restore()` 纯函数拥有；旧 protection 的 timeout/entry repair/supervisor/trailing 优先级、stage fault isolation 与实际仲裁已迁入 `live_position_protection_cycle.run_position_protection_cycle()`，`live_service` 只注入 callback。后续继续迁出其余 execution recovery wiring；稳定发布后再删除 legacy compatibility authority 与旧 globals。
-- 验证方式: `tests/test_live_service_facade_boundaries.py`、`tests/test_live_emergency_safety.py`、`tests/test_live_generation_integration.py`、`tests/test_live_service_lifecycle.py`。
+- 收口方式: 本轮已移出上述新增实现并保留薄兼容入口；session restore 的 deals-first 重建及 `available/degraded_cache/unavailable` 选择由 `session_restore.resolve_session_restore()` 纯函数拥有；旧 protection 的 timeout/entry repair/supervisor/trailing 优先级、stage fault isolation 与实际仲裁已迁入 `live_position_protection_cycle.run_position_protection_cycle()`；`recovery_position_state` 的 load/upsert/meta/close/freshness/volume/context CRUD 已迁入 `live_recovery_position_store.RecoveryPositionStore`。`live_service` 对这些边界只注入 callback/connection runtime。后续继续迁出 emergency execution-intent fallback 等其余 execution recovery wiring；稳定发布后再删除 legacy compatibility authority 与旧 globals。
+- 验证方式: `tests/test_live_service_facade_boundaries.py` 强制 façade 无 recovery state INSERT/UPDATE 且 wrapper 无循环/异常实现；`tests/test_live_recovery_position_store.py` 覆盖完整持久化 lifecycle、正 volume 保全、full context 保全、local volume fail-closed fallback 与 close transition；其余由 `tests/test_live_service_lifecycle.py`、`tests/test_live_generation_integration.py`、`tests/test_live_emergency_safety.py` 回归。
 
 ### 治理 mutation 缺少跨账本事务提交权
 
