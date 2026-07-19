@@ -113,6 +113,15 @@ from backend.services.live_reentry_guard import (
     recent_review_reentry_block as _guard_recent_review_reentry_block,
     remember_supervisor_reentry_block as _guard_remember_reentry_block,
 )
+from backend.services.live_risk_reduction import (
+    RiskReductionRuntime,
+    build_close_position_risk_context as _risk_reduction_build_close_context,
+    evaluate_risk_reduction_policy as _risk_reduction_evaluate_policy,
+    load_recovery_row_for_risk_reduction as _risk_reduction_load_recovery_row,
+    lookup_entry_context_for_risk_reduction as _risk_reduction_lookup_entry_context,
+    lookup_entry_decision_for_risk_reduction as _risk_reduction_lookup_entry_decision,
+    record_risk_reduction_aux_failure as _risk_reduction_record_aux_failure,
+)
 from backend.services.market_session import evaluate_market_session
 from backend.services.review_contract import build_entry_timing_context
 from backend.services.live_runtime_state import (
@@ -1180,6 +1189,27 @@ def _temporal_context_for_trade(
     )
 
 
+def _risk_reduction_runtime() -> RiskReductionRuntime:
+    from config.runtime_config import shared as _runtime_config
+
+    return RiskReductionRuntime(
+        append_safety_outbox=append_safety_outbox,
+        logger_error=logger.error,
+        logger_warning=logger.warning,
+        now=time.time,
+        config_factory=_runtime_config,
+        position_open_timestamp=_position_open_timestamp,
+        lookup_open_decision_context=_lookup_open_decision_context,
+        temporal_context_for_trade=_temporal_context_for_trade,
+        build_close_context_payload=(
+            _lifecycle_build_close_position_risk_context_payload
+        ),
+        load_recovery_position_row=_load_recovery_position_row,
+        lookup_entry_decision_id=_lookup_entry_decision_id,
+        risk_policy=_RISK_POLICY,
+    )
+
+
 def _build_close_position_risk_context(
     *,
     position_id: int,
@@ -1191,59 +1221,16 @@ def _build_close_position_risk_context(
     cfg=None,
     decision_ts: float | None = None,
 ) -> dict:
-    if cfg is None:
-        try:
-            from config.runtime_config import shared as _rc
-
-            cfg = _rc()
-        except Exception:
-            cfg = None
-    now = float(decision_ts or time.time())
-    broker_entry_ts = _position_open_timestamp(position)
-    open_meta: dict[str, Any] = {}
-    try:
-        # PostgreSQL is enrichment only for a risk-reducing action.  Broker
-        # position/openTimestamp remains primary and a state-store outage must
-        # never prevent close/reduce/tighten/emergency-close.
-        open_meta = _lookup_open_decision_context(int(position_id))
-    except Exception as exc:
-        try:
-            append_safety_outbox(
-                event_type="close_risk_context_enrichment_failed",
-                payload={
-                    "position_id": int(position_id),
-                    "close_reason": str(close_reason or ""),
-                    "broker": str(broker or ""),
-                    "symbol": str(symbol or ""),
-                    "broker_entry_ts": float(broker_entry_ts or 0.0),
-                },
-                error=f"{type(exc).__name__}: {exc}",
-            )
-        except Exception as outbox_exc:
-            logger.error(
-                "[live] close risk context PG failure and safety outbox failure: pg=%s outbox=%s",
-                exc,
-                outbox_exc,
-            )
-        logger.warning("[live] close risk context PG enrichment unavailable position=%s: %s", position_id, exc)
-    entry_ts = float(broker_entry_ts or 0.0) or float(open_meta.get("entry_ts", 0.0) or 0.0)
-    entry_ts_source = "broker_position" if float(broker_entry_ts or 0.0) > 0 else str(open_meta.get("source") or "")
-    timeframe = str(open_meta.get("timeframe") or getattr(cfg, "timeframe", "M5") or "M5")
-    temporal_context = _temporal_context_for_trade(
-        decision_ts=now,
-        timeframe=timeframe,
-    )
-    max_holding_bars = int(getattr(cfg, "risk_max_holding_bars", 0) or 0)
-    return _lifecycle_build_close_position_risk_context_payload(
+    return _risk_reduction_build_close_context(
         position_id=position_id,
         close_reason=close_reason,
         mode=mode,
         broker=broker,
         symbol=symbol,
-        entry_ts=entry_ts,
-        entry_ts_source=entry_ts_source,
-        temporal_context=temporal_context,
-        max_holding_bars=max_holding_bars,
+        position=position,
+        cfg=cfg,
+        decision_ts=decision_ts,
+        runtime=_risk_reduction_runtime(),
     )
 
 
@@ -1255,31 +1242,14 @@ def _record_risk_reduction_aux_failure(
     error: Exception | str,
     payload: dict[str, Any] | None = None,
 ) -> None:
-    """Persist auxiliary safety failures without affecting broker actions."""
-
-    error_text = (
-        f"{type(error).__name__}: {error}"
-        if isinstance(error, Exception)
-        else str(error or "")
+    _risk_reduction_record_aux_failure(
+        event_type,
+        position_id=position_id,
+        action=action,
+        error=error,
+        payload=payload,
+        runtime=_risk_reduction_runtime(),
     )
-    try:
-        append_safety_outbox(
-            event_type=event_type,
-            correlation_id=str(position_id or ""),
-            payload={
-                "position_id": int(position_id or 0),
-                "action": str(action or ""),
-                **dict(payload or {}),
-            },
-            error=error_text,
-        )
-    except Exception as outbox_exc:
-        logger.error(
-            "[live] risk-reduction auxiliary failure and safety outbox failure: event=%s error=%s outbox=%s",
-            event_type,
-            error_text,
-            outbox_exc,
-        )
 
 
 def _load_recovery_row_for_risk_reduction(
@@ -1287,16 +1257,11 @@ def _load_recovery_row_for_risk_reduction(
     *,
     operation: str,
 ) -> dict[str, Any]:
-    try:
-        return dict(_load_recovery_position_row(int(position_id)) or {})
-    except Exception as exc:
-        _record_risk_reduction_aux_failure(
-            "risk_reduction_pg_enrichment_failed",
-            position_id=position_id,
-            action=operation,
-            error=exc,
-        )
-        return {}
+    return _risk_reduction_load_recovery_row(
+        position_id,
+        operation=operation,
+        runtime=_risk_reduction_runtime(),
+    )
 
 
 def _lookup_entry_context_for_risk_reduction(
@@ -1304,16 +1269,11 @@ def _lookup_entry_context_for_risk_reduction(
     *,
     operation: str,
 ) -> dict[str, Any]:
-    try:
-        return dict(_lookup_open_decision_context(int(position_id)) or {})
-    except Exception as exc:
-        _record_risk_reduction_aux_failure(
-            "risk_reduction_entry_context_failed",
-            position_id=position_id,
-            action=operation,
-            error=exc,
-        )
-        return {}
+    return _risk_reduction_lookup_entry_context(
+        position_id,
+        operation=operation,
+        runtime=_risk_reduction_runtime(),
+    )
 
 
 def _lookup_entry_decision_for_risk_reduction(
@@ -1321,50 +1281,22 @@ def _lookup_entry_decision_for_risk_reduction(
     *,
     operation: str,
 ) -> str:
-    try:
-        return str(_lookup_entry_decision_id(int(position_id)) or "")
-    except Exception as exc:
-        _record_risk_reduction_aux_failure(
-            "risk_reduction_entry_decision_failed",
-            position_id=position_id,
-            action=operation,
-            error=exc,
-        )
-        return ""
+    return _risk_reduction_lookup_entry_decision(
+        position_id,
+        operation=operation,
+        runtime=_risk_reduction_runtime(),
+    )
 
 
 def _evaluate_risk_reduction_policy(
     action: str,
     context: dict[str, Any],
 ) -> RiskVerdict:
-    """Risk-policy availability may not suppress close/reduce/tighten."""
-
-    normalized = str(action or "").strip().lower()
-    if normalized not in {"close_position", "reduce_position", "tighten_position"}:
-        return _RISK_POLICY.evaluate(normalized, context)
-    try:
-        return _RISK_POLICY.evaluate(normalized, context)
-    except Exception as exc:
-        position_id = int(context.get("position_id") or 0)
-        _record_risk_reduction_aux_failure(
-            "risk_reduction_policy_unavailable",
-            position_id=position_id,
-            action=normalized,
-            error=exc,
-            payload={"close_reason": str(context.get("close_reason") or "")},
-        )
-        return RiskVerdict(
-            allowed=True,
-            reason="risk_policy_unavailable_risk_reduction_continues",
-            severity="warning",
-            required_mode="risk_reduction_only",
-            audit_payload={
-                "action": normalized,
-                "source": "risk_reduction_fail_safe",
-                "position_id": position_id,
-                "policy_error": f"{type(exc).__name__}: {exc}",
-            },
-        )
+    return _risk_reduction_evaluate_policy(
+        action,
+        context,
+        runtime=_risk_reduction_runtime(),
+    )
 
 
 def _holding_summary_for_position(position: Any, *, cfg=None, now_ts: float | None = None) -> dict:
