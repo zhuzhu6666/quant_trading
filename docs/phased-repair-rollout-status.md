@@ -162,6 +162,14 @@ binding 再次按设计失效；12 类、28 个固定用例重新运行全部通
 `f7fc296090503c760054fe1976ac618226114d70add4d57125fb52352f1c8f7f`。
 该迁移不依赖 PostgreSQL，不修改当前静态 flag 或 broker mutation authority。
 
+18:57 CST 将 recovered-close replay 与 broker-missing retirement 迁入
+`live_recovery_close` 后，全量 pytest 为 `2325 passed, 9 skipped`。Safety
+12 类/28 用例重跑通过，最新 binding hash 为
+`5883ec6c5278c02d2ecda2cceaa5c4d2b7e8711ebff898ce48811ac430e317cc`；
+Execution Outcome 7 类/11 用例仍以当前 binding
+`f7fc296090503c760054fe1976ac618226114d70add4d57125fb52352f1c8f7f` 通过。
+该迁移不触发 broker RPC，不重启服务，不改变 shadow authority。
+
 后续阶段不再仅凭 CLI 新进程解析配置判断 predecessor 已运行。backend readiness
 将持久化实际 process-loaded static flags、fingerprint、PID 与启动时间；从
 `generation_enable` 起若配置已改但 backend 尚未重启，preflight 会以

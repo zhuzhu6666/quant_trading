@@ -69,6 +69,8 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_recovery_remaining_volume_by_position",
         "_mark_recovery_position_closed",
         "_lookup_recovery_context_integrity",
+        "_replay_recovered_close",
+        "_retire_broker_missing_position",
         "_restore_session_state_for_day",
         "_run_position_protection_cycle",
         "_release_entry_protection_pending_latch",
@@ -116,6 +118,19 @@ def test_emergency_execution_recovery_decision_lives_outside_facade():
     assert "bridge_execution_recovery_contract_missing" not in source
     assert "local_execution_recovery_unavailable" not in source
     assert "bridge_execution_recovery_contract_missing" in recovery_source
+    assert "backend.services.live_service" not in recovery_source
+
+
+def test_recovery_close_replay_and_retirement_live_outside_facade():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+    recovery_source = Path(
+        "backend/services/live_recovery_close.py"
+    ).read_text(encoding="utf-8")
+
+    assert "restart_replay_close_deal_unavailable" not in source
+    assert "broker_position_missing_close_deal_unavailable" not in source
+    assert "restart_replay_close_deal_unavailable" in recovery_source
+    assert "broker_position_missing_close_deal_unavailable" in recovery_source
     assert "backend.services.live_service" not in recovery_source
 
 

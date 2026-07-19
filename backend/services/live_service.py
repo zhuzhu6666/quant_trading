@@ -161,6 +161,12 @@ from backend.services.live_recovery_position_store import (
     RecoveryPositionStore,
     RecoveryPositionStoreRuntime,
 )
+from backend.services.live_recovery_close import (
+    MissingPositionRetirementRuntime,
+    RecoveredCloseReplayRuntime,
+    replay_recovered_close as _runtime_replay_recovered_close,
+    retire_broker_missing_position as _runtime_retire_missing_position,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -3527,82 +3533,30 @@ def _replay_recovered_close(
     real_pnl: dict | None,
     strategy_name: str,
 ) -> bool:
-    if not _authoritative_close_pnl(real_pnl):
-        _defer_close_until_authoritative_deal(
-            int(position_id),
-            broker=broker,
-            tick=0,
-            reason="restart_replay_close_deal_unavailable",
-        )
-        return False
-    payloads = _lifecycle_build_replayed_close_payloads(
+    return _runtime_replay_recovered_close(
+        broker=broker,
         position_id=position_id,
         position_state=position_state,
         real_pnl=real_pnl,
         strategy_name=strategy_name,
-        now_ts=time.time(),
-        context_integrity_default=_RECOVERY_CONTEXT_PARTIAL,
+        runtime=RecoveredCloseReplayRuntime(
+            authoritative_close_pnl=_authoritative_close_pnl,
+            defer_close=_defer_close_until_authoritative_deal,
+            build_payloads=_lifecycle_build_replayed_close_payloads,
+            mark_recovery_closed=_mark_recovery_position_closed,
+            release_close_latch=_release_session_close_deal_latch,
+            get_risk_state=lambda: (
+                _live_state_get("risk", {}, clone=True) or {}
+            ),
+            now=time.time,
+            partial_context=_RECOVERY_CONTEXT_PARTIAL,
+            ledger=_LEDGER,
+            trade_reviewer=_TRADE_REVIEWER,
+            experience_builder=_EXPERIENCE_BUILDER,
+            policy_suggester=_POLICY_SUGGESTER,
+            debug=logger.debug,
+        ),
     )
-    total_pnl = float(payloads["total_pnl"])
-    close_price = float(payloads["close_price"])
-    close_ts = float(payloads["close_ts"])
-    context_integrity = str(payloads["context_integrity"])
-
-    # Session risk is rebuilt exclusively from ctrader_deals.  Replaying
-    # recovery/audit state must not increment the already deals-derived session
-    # projection a second time.
-    _mark_recovery_position_closed(
-        position_id,
-        close_reason="restart_replay",
-        close_pnl=total_pnl,
-        closed_at=close_ts,
-        meta=payloads["recovery_meta"],
-    )
-    # Do not release the durable cursor before the recovery projection commits.
-    # Otherwise a PG failure leaves an active row but loses the original
-    # pre-fetch baseline needed to resolve the already-stored delayed deal.
-    _release_session_close_deal_latch(int(position_id), real_pnl)
-
-    exit_decision_id = ""
-    if _LEDGER:
-        try:
-            decision_payload = dict(payloads["decision"])
-            exit_decision_id = _LEDGER.log_decision(
-                event_type=decision_payload["event_type"],
-                symbol=decision_payload["symbol"],
-                timeframe=decision_payload["timeframe"],
-                trade_id=decision_payload["trade_id"],
-                position_id=decision_payload["position_id"],
-                decision_ts=decision_payload["decision_ts"],
-                portfolio_state=decision_payload["portfolio_state"],
-                risk_state=_live_state_get("risk", {}, clone=True) or {},
-                action_score=decision_payload["action_score"],
-                action_reason=decision_payload["action_reason"],
-                action_json=decision_payload["action_json"],
-            )
-            _LEDGER.log_position_event(**payloads["position_event"])
-        except Exception as exc:
-            logger.debug("[live] replay close ledger failed for pos %s: %s", position_id, exc)
-
-    if _TRADE_REVIEWER and _EXPERIENCE_BUILDER and _POLICY_SUGGESTER:
-        try:
-            review = _TRADE_REVIEWER.review_closed_trade(
-                position_id=payloads["review"]["position_id"],
-                pnl=payloads["review"]["pnl"],
-                close_price=payloads["review"]["close_price"],
-                close_ts=payloads["review"]["close_ts"],
-                contributions=payloads["review"]["contributions"],
-                exit_decision_id=exit_decision_id,
-                real_pnl=payloads["review"]["real_pnl"],
-                close_reason=payloads["review"]["close_reason"],
-                context_integrity=payloads["review"]["context_integrity"],
-            )
-            if review.get("accepted", True):
-                experience = _EXPERIENCE_BUILDER.build_from_review(review)
-                _POLICY_SUGGESTER.suggest_from_experience(experience)
-        except Exception as exc:
-            logger.debug("[live] replay close learning failed for pos %s: %s", position_id, exc)
-    return True
 
 
 def _result_is_position_not_found(result: Any) -> bool:
@@ -3649,100 +3603,33 @@ def _retire_broker_missing_position(
     reason: str,
     log=None,
 ) -> bool:
-    pid = int(position_id)
-    try:
-        live_positions = _read_positions_for_recovery(bridge)
-    except Exception as exc:
-        logger.debug("[live] missing-position confirm failed for pos %s: %s", pid, exc)
-        return False
-    live_ids = {
-        int(item["position_id"])
-        for item in (_normalize_position_snapshot(pos) for pos in live_positions)
-        if int(item["position_id"]) > 0
-    }
-    if pid in live_ids:
-        return False
+    from execution.deal_sync import sync_close_deals_batch
 
-    conn = _get_state_read_conn()
-    try:
-        row = _state_execute(
-            conn,
-            "SELECT * FROM recovery_position_state WHERE position_id=?",
-            (pid,),
-        ).fetchone()
-        position_state = dict(row) if row else {
-            "position_id": pid,
-            "broker": broker,
-            "symbol": "XAUUSD+",
-            "open_price": float(_pos_open_prices.get(pid, 0.0) or 0.0),
-            "close_pnl": 0.0,
-            "context_integrity": _RECOVERY_CONTEXT_PARTIAL,
-        }
-    finally:
-        conn.close()
-
-    real_pnl = None
-    try:
-        from execution.deal_sync import sync_close_deals_batch
-
-        write_conn = _get_state_pg_conn()
-        try:
-            from_ts = int(max(0.0, float(position_state.get("last_seen_at") or time.time()) - _RECOVERY_REPLAY_LOOKBACK_SEC))
-            real_pnl = sync_close_deals_batch(
-                bridge,
-                write_conn,
-                {pid},
-                from_ts=from_ts,
-                max_rows=200,
-                min_exec_timestamp_by_position={
-                    pid: max(
-                        0.0,
-                        float(position_state.get("last_seen_at") or 0.0) - 5.0,
-                    )
-                },
-                required_closed_volume_delta_by_position={
-                    pid: float(position_state.get("volume") or 0.0)
-                },
-            ).get(pid)
-        finally:
-            write_conn.close()
-    except Exception as exc:
-        logger.debug("[live] missing-position deal sync failed for pos %s: %s", pid, exc)
-
-    if not _authoritative_close_pnl(real_pnl):
-        _defer_close_until_authoritative_deal(
-            pid,
-            broker=broker,
-            tick=0,
-            reason="broker_position_missing_close_deal_unavailable",
-        )
-        if log:
-            log(
-                f"broker missing position pending authoritative close deal "
-                f"pos={pid}: {reason}"
-            )
-        return False
-
-    replayed = _replay_recovered_close(
+    return _runtime_retire_missing_position(
+        bridge,
+        position_id,
         broker=broker,
-        position_id=pid,
-        position_state=position_state,
-        real_pnl=real_pnl,
         strategy_name=strategy_name,
+        reason=reason,
+        log=log,
+        runtime=MissingPositionRetirementRuntime(
+            read_positions=_read_positions_for_recovery,
+            normalize_position=_normalize_position_snapshot,
+            load_recovery_position=_load_recovery_position_row,
+            open_prices=_pos_open_prices,
+            get_state_connection=_get_state_pg_conn,
+            sync_close_deals_batch=sync_close_deals_batch,
+            authoritative_close_pnl=_authoritative_close_pnl,
+            defer_close=_defer_close_until_authoritative_deal,
+            replay_close=_replay_recovered_close,
+            mark_recovery_closed=_mark_recovery_position_closed,
+            remove_live_position_state=_remove_live_position_state,
+            now=time.time,
+            replay_lookback_seconds=_RECOVERY_REPLAY_LOOKBACK_SEC,
+            partial_context=_RECOVERY_CONTEXT_PARTIAL,
+            debug=logger.debug,
+        ),
     )
-    if not replayed:
-        return False
-    _mark_recovery_position_closed(
-        pid,
-        close_reason="broker_position_not_found",
-        close_pnl=float((real_pnl or {}).get("net", position_state.get("close_pnl", 0.0)) or 0.0),
-        closed_at=float((real_pnl or {}).get("exec_timestamp", time.time()) or time.time()),
-        meta={"broker_position_not_found": True, "failure_reason": reason, "retired_at": time.time()},
-    )
-    _remove_live_position_state(pid)
-    if log:
-        log(f"broker missing position retired pos={pid}: {reason}")
-    return True
 
 
 def _read_positions_for_recovery(bridge) -> list[Any]:
