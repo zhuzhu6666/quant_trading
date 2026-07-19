@@ -1403,7 +1403,7 @@ CREATE INDEX IF NOT EXISTS idx_v16_brain_command_claim ON v16_brain_command(targ
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_updated ON proposal_registry(updated_at);
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_surface ON proposal_registry(control_surface, target_scope, status);
 CREATE INDEX IF NOT EXISTS idx_proposal_registry_source ON proposal_registry(source_agent, source_ref_type, updated_at);
-CREATE INDEX IF NOT EXISTS idx_proposal_registry_source_ref_updated ON proposal_registry(source_ref_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_proposal_registry_source_ref_updated_v2 ON proposal_registry(source_ref_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_live_autonomy_unlock_created ON live_autonomy_unlock_event(created_at);
 CREATE INDEX IF NOT EXISTS idx_live_autonomy_unlock_status ON live_autonomy_unlock_event(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_created ON brain_live_ready_guardrail(created_at);

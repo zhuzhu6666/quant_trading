@@ -119,8 +119,9 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(7, "phase3_v16_authority_freshness", "0007_phase3_v16_authority_freshness.sql"),
     StateSchemaMigration(8, "phase5_runtime_schema_contract_completion", "0008_phase5_runtime_schema_contract_completion.sql"),
     StateSchemaMigration(9, "phase3_runtime_overlay_authority", "0009_phase3_runtime_overlay_authority.sql"),
+    StateSchemaMigration(10, "proposal_registry_source_ref_contract", "0010_proposal_registry_source_ref_contract.sql"),
 )
-STATE_SCHEMA_MIN_VERSION: Final[int] = 9
+STATE_SCHEMA_MIN_VERSION: Final[int] = 10
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 
 

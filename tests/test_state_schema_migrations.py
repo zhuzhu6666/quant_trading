@@ -299,6 +299,17 @@ def test_phase3_runtime_overlay_authority_migration_supports_minimal_baseline() 
     assert "DROP " not in sql.upper()
 
 
+def test_proposal_registry_source_ref_contract_migration_is_additive() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[9].sql()
+
+    assert "ALTER TABLE proposal_registry" in sql
+    assert "ADD COLUMN IF NOT EXISTS source_ref_id" in sql
+    assert "ADD COLUMN IF NOT EXISTS updated_at" in sql
+    assert "idx_proposal_registry_source_ref_updated_v2" in sql
+    assert "ON proposal_registry(source_ref_id, updated_at DESC)" in sql
+    assert "DROP " not in sql.upper()
+
+
 def test_schema_status_fails_closed_without_ledger() -> None:
     conn = _FakePgConn()
 

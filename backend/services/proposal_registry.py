@@ -124,7 +124,11 @@ def ensure_proposal_registry_table(db_path: str | Path = STATE_DB) -> None:
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_updated ON proposal_registry(updated_at)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_surface ON proposal_registry(control_surface, target_scope, status)")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_source ON proposal_registry(source_agent, source_ref_type, updated_at)")
-        _execute(conn, "CREATE INDEX IF NOT EXISTS idx_proposal_registry_source_ref_updated ON proposal_registry(source_ref_id, updated_at)")
+        _execute(
+            conn,
+            "CREATE INDEX IF NOT EXISTS idx_proposal_registry_source_ref_updated_v2 "
+            "ON proposal_registry(source_ref_id, updated_at DESC)",
+        )
         conn.commit()
     finally:
         conn.close()

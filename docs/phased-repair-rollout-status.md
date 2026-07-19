@@ -22,6 +22,10 @@ circuit closed、backend/worker config 与 overlay hash 一致，
 `ready_for_autonomous_mutation=true`。休市期间 `ready_for_live_execution/alpha=false`
 只由 `market_session_blocks_open` 产生，不会误报为 broker 或 safety 故障。
 
+proposal registry 的历史 source-ref 索引存在升降序同名漂移；本轮新增
+`0010_proposal_registry_source_ref_contract.sql`，用显式 `DESC` 的 v2 索引名恢复
+运行时契约。旧索引保持不变，迁移后 agent feedback 与 proposal bus 可自主恢复。
+
 ## 2. 已完成的工程门禁
 
 ### Python/backend
