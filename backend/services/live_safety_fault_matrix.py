@@ -23,6 +23,7 @@ REQUIRED_SCENARIOS: dict[str, tuple[str, ...]] = {
         "tests/test_live_risk_reduction.py::test_close_context_postgres_failure_records_outbox_and_continues",
     ),
     "reconcile_failure": (
+        "tests/test_live_generation_integration.py::test_account_reconcile_failure_blocks_alpha_but_safety_still_runs_first",
         "tests/test_live_generation_integration.py::test_failed_position_reconcile_blocks_open_but_cached_position_protection_continues",
     ),
     "spot_stale": (
@@ -46,6 +47,7 @@ REQUIRED_SCENARIOS: dict[str, tuple[str, ...]] = {
     ),
     "session_cache_missing": (
         "tests/test_live_generation_integration.py::test_session_restore_queries_deals_even_when_runtime_cache_is_missing",
+        "tests/test_live_session_restore.py::test_invalid_cache_never_zeros_last_known_risk_or_opens_new_risk",
     ),
     "partial_close_remains_open": (
         "tests/test_live_session_restore.py::test_partial_close_legs_aggregate_by_position_and_open_position_is_excluded",
