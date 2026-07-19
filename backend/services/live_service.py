@@ -90,6 +90,11 @@ from backend.services.live_emergency import (
     fresh_emergency_position_reconcile as _fresh_emergency_position_reconcile,
     run_emergency_close as _run_emergency_close,
 )
+from backend.services.live_entry_protection import (
+    EntryProtectionLatchRuntime,
+    activate_entry_protection_pending_latch as _entry_protection_activate_latch,
+    release_entry_protection_pending_latch as _entry_protection_release_latch,
+)
 from backend.services.live_open_admission import (
     evaluate_final_open_admission as _evaluate_final_open_admission,
     probe_postgres_authority as _probe_postgres_authority,
@@ -1460,56 +1465,31 @@ def _remember_pending_open_attach(position_id: int) -> None:
     )
 
 
+def _entry_protection_latch_runtime() -> EntryProtectionLatchRuntime:
+    return EntryProtectionLatchRuntime(
+        activate_latch=activate_no_new_risk_latch,
+        release_latch_cause=release_no_new_risk_latch_cause,
+        latch_status=no_new_risk_latch_status,
+        append_safety_outbox=append_safety_outbox,
+        live_state_update=_live_state_update,
+        reconcile_value=_reconcile_value,
+        pending_open_attach_until=_pending_open_attach_until,
+        now=time.time,
+    )
+
+
 def _activate_entry_protection_pending_latch(
     position_id: int,
     *,
     broker: str,
     tick: int,
 ) -> dict[str, Any]:
-    """Block additional risk before any fallible post-fill processing.
-
-    A confirmed market-open creates broker risk immediately.  The durable cause
-    must therefore exist before refreshing positions, resolving volume/prices,
-    writing PostgreSQL audit state, or attempting SL/TP attachment.  Storage
-    failure remains fail-closed in-process via ``activate_no_new_risk_latch``.
-    """
-
-    pid = int(position_id or 0)
-    cause_id = str(pid) if pid > 0 else f"tick:{int(tick)}"
-    error = ""
-    try:
-        activate_no_new_risk_latch(
-            reason="entry_protection_pending",
-            actor="system:live_open",
-            correlation_id=cause_id,
-            metadata={"broker": str(broker or ""), "position_id": pid, "tick": int(tick)},
-            cause="entry_protection_pending",
-            cause_id=cause_id,
-        )
-    except Exception as exc:
-        # The activation primitive has already installed a process-local latch.
-        # Continue toward risk reduction, but retain explicit durability evidence.
-        error = f"{type(exc).__name__}:{exc}"
-        try:
-            append_safety_outbox(
-                event_type="entry_protection_pending_latch_persist_failed",
-                payload={"broker": str(broker or ""), "position_id": pid, "tick": int(tick)},
-                error=error,
-            )
-        except Exception:
-            pass
-    latch = no_new_risk_latch_status(fail_closed=True)
-    _live_state_update(
-        accepting_new_risk=False,
-        no_new_risk_latch=latch,
-        entry_protection_pending={
-            "position_id": pid,
-            "tick": int(tick),
-            "status": "pending",
-            "error": error,
-        },
+    return _entry_protection_activate_latch(
+        position_id,
+        broker=broker,
+        tick=tick,
+        runtime=_entry_protection_latch_runtime(),
     )
-    return latch
 
 
 def _release_entry_protection_pending_latch(
@@ -1519,56 +1499,13 @@ def _release_entry_protection_pending_latch(
     expected_stop_loss: float,
     expected_take_profit: float,
 ) -> dict[str, Any]:
-    """Release only the matching pending cause after fresh broker proof."""
-
-    pid = int(position_id or 0)
-    reconcile_id = str(_reconcile_value(reconcile, "reconcile_id", "") or "")
-    evidence = {
-        "position_id": pid,
-        "reconcile_id": reconcile_id,
-        "observed_at": float(_reconcile_value(reconcile, "observed_at", 0.0) or 0.0),
-        "expected_stop_loss": float(expected_stop_loss or 0.0),
-        "expected_take_profit": float(expected_take_profit or 0.0),
-    }
-    try:
-        release_no_new_risk_latch_cause(
-            cause="entry_protection_pending",
-            cause_id=str(pid),
-            reason="entry_protection_verified_by_fresh_broker_reconcile",
-            actor="system:live_safety",
-            correlation_id=reconcile_id,
-            evidence=evidence,
-        )
-        _pending_open_attach_until.pop(pid, None)
-        latch = no_new_risk_latch_status(fail_closed=True)
-        _live_state_update(
-            no_new_risk_latch=latch,
-            entry_protection_pending={
-                **evidence,
-                "status": "verified",
-                "verified_at": time.time(),
-            },
-        )
-        return latch
-    except Exception as exc:
-        # A release failure may delay new entries but must never invalidate the
-        # already-verified broker protection or trigger a duplicate amend.
-        error = f"{type(exc).__name__}:{exc}"
-        try:
-            append_safety_outbox(
-                event_type="entry_protection_pending_latch_release_failed",
-                payload=evidence,
-                error=error,
-            )
-        except Exception:
-            pass
-        latch = no_new_risk_latch_status(fail_closed=True)
-        _live_state_update(
-            accepting_new_risk=False,
-            no_new_risk_latch=latch,
-            entry_protection_pending={**evidence, "status": "release_failed", "error": error},
-        )
-        return latch
+    return _entry_protection_release_latch(
+        position_id,
+        reconcile=reconcile,
+        expected_stop_loss=expected_stop_loss,
+        expected_take_profit=expected_take_profit,
+        runtime=_entry_protection_latch_runtime(),
+    )
 
 
 def _active_pending_open_attach_ids(current_position_ids: set[int] | None = None) -> list[int]:
