@@ -115,6 +115,19 @@ safety_enforce
 只在 `safety_enforce` target 强制要求，后续阶段仍持续校验 service、latch、execution
 intent、release/autonomous readiness 与 worker config/overlay hash。
 
+在运行 `execution_outcome_enable` 预检前必须先执行：
+
+```bash
+.venv/bin/python scripts/execution_outcome_fault_matrix.py
+```
+
+它固定运行 timeout、延迟回执恢复、未知 protobuf、amend 未实际更新、重启防重复、
+intent 提交/恢复边界、PG 故障下风险缩减七类共 11 个用例，并追加
+`execution_outcome_fault_matrix.v1` fsync attestation。随后
+`scripts/phased_repair_release_gate.py --target execution_outcome_enable` 会重算
+execution source/test binding；缺记录、最近失败、场景/nodeid 不全、record hash 无效
+或相关代码变化都会以 `execution_outcome_fault_matrix_incomplete` 非零阻断。
+
 从 `generation_enable` 开始，门禁还必须输出
 `backend_process_static_flags.ok=true`：新鲜 readiness 中由 backend 进程投影的五项
 static flags、SHA-256、PID 与 process-start timestamp 必须完整，且 values 精确等于

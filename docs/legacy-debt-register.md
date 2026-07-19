@@ -590,8 +590,8 @@
 - 旧理解: market RPC timeout、未知 protobuf 或仓位差分不唯一时，可以用同方向最大 position ID / `positions_before[0]` 推测成交，或将本次视为失败后重发。
 - 当前口径: `CTraderOrderResult.outcome` 只允许 `confirmed/rejected/unknown/simulated`，`success=true` 只属于 confirmed/simulated。V2 路径在 RPC 前依次 committed `broker_execution_intent.prepared/submitting`，以 UUID client ID、comment token 和 order/deal/position 差分唯一定位；无法唯一解析或 intent finalize 失败时必须 `unknown`、立即增加独立 `broker_execution_unknown` no-new-risk cause、禁止重发，重启先 recovery。同 position/action 未解决 intent 会阻断重复 close/amend RPC，但 PG/审计失败不得阻断首次风险缩减。通用 incident thaw 不得删除 unknown 证据；只有 fresh broker recovery/reconcile 明确得到 confirmed/rejected 后才能追加对应 resolution event 并按 intent 释放。
 - 影响面: cTrader bridge、live open admission、restart recovery、entry protection、close/amend 幂等与 incident latch。
-- 收口方式: `ctrader_execution_outcome_v2_enabled=false` 当前默认保留兼容路径；完成 timeout/延迟回执/未知 protobuf/重启恢复故障矩阵与受控观察后才随发布配置切换。稳定发布后才删除 PID 猜测和旧 result 兼容分支；unknown 禁止假成功/重发的语义不得回滚。
-- 验证方式: `tests/test_ctrader_execution_outcome.py`、`tests/test_broker_execution_intent.py`、`tests/test_live_generation_integration.py`。
+- 收口方式: `ctrader_execution_outcome_v2_enabled=false` 当前默认保留兼容路径；timeout/延迟回执/未知 protobuf/amend 未落地/重启防重复/intent 边界/PG-independent reduction 已进入 `execution_outcome_fault_matrix.v1` 的代码绑定持久证明，`execution_outcome_enable` 缺当前 passed attestation 时 fail-closed。仍需按阶段顺序完成受控 demo 观察后才随发布配置切换。稳定发布后才删除 PID 猜测和旧 result 兼容分支；unknown 禁止假成功/重发的语义不得回滚。
+- 验证方式: `scripts/execution_outcome_fault_matrix.py`、`tests/test_execution_outcome_fault_matrix.py`、`tests/test_ctrader_execution_outcome.py`、`tests/test_broker_execution_intent.py`、`tests/test_live_execution_recovery_gate.py`。
 
 ### live loop 单例 globals 会在旧线程退出前释放所有权
 

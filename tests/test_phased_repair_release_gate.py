@@ -32,6 +32,7 @@ def _facts() -> dict:
         "job_worker_preflight": {"ok": True, "status": "passed"},
         "governance_preflight": {"ok": True, "status": "passed"},
         "safety_fault_matrix": {"ok": True, "status": "passed"},
+        "execution_fault_matrix": {"ok": True, "status": "passed"},
         "job_worker_capability": {"ok": True, "status": "passed"},
         "readiness_snapshot": {
             "ok": True,
@@ -353,6 +354,40 @@ def test_execution_transition_does_not_require_governance_integrity_preflight():
 
     assert result["ok"] is True
     assert result["checks"]["governance_preflight"]["required_for_target"] is False
+
+
+def test_execution_transition_requires_code_bound_fault_matrix():
+    facts = _facts()
+    _set_flags(
+        facts,
+        {
+            "live_safety_plane_v2_mode": "enforce",
+            "live_generation_controller_v2_enabled": True,
+        },
+    )
+    facts["execution_fault_matrix"] = {
+        "ok": False,
+        "status": "missing",
+        "blockers": ["execution_fault_matrix_attestation_missing"],
+    }
+
+    result = evaluate_phased_release_preflight(
+        target="execution_outcome_enable", **facts
+    )
+
+    assert result["ok"] is False
+    assert "execution_outcome_fault_matrix_incomplete" in result["blockers"]
+    assert result["checks"]["execution_fault_matrix"]["required_for_target"] is True
+
+
+def test_non_execution_transition_does_not_require_execution_fault_matrix():
+    facts = _facts()
+    facts["execution_fault_matrix"] = None
+
+    result = evaluate_safety_enforce_preflight(**facts)
+
+    assert result["ok"] is True
+    assert result["checks"]["execution_fault_matrix"]["required_for_target"] is False
 
 
 def test_empty_account_safety_transition_requires_fault_matrix():

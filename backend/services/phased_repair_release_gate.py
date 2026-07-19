@@ -120,6 +120,7 @@ def evaluate_phased_release_preflight(
     job_worker_preflight: Mapping[str, Any] | None = None,
     governance_preflight: Mapping[str, Any] | None = None,
     safety_fault_matrix: Mapping[str, Any] | None = None,
+    execution_fault_matrix: Mapping[str, Any] | None = None,
     job_worker_capability: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate authoritative facts before one staged static-flag transition."""
@@ -158,6 +159,17 @@ def evaluate_phased_release_preflight(
         and safety_fault_matrix_payload.get("ok") is not True
     ):
         blockers.append("safety_fault_matrix_incomplete")
+    execution_fault_matrix_required = target == "execution_outcome_enable"
+    execution_fault_matrix_payload = (
+        dict(execution_fault_matrix or {})
+        if isinstance(execution_fault_matrix, Mapping)
+        else {}
+    )
+    if (
+        execution_fault_matrix_required
+        and execution_fault_matrix_payload.get("ok") is not True
+    ):
+        blockers.append("execution_outcome_fault_matrix_incomplete")
     required_services = REQUIRED_SERVICES + (
         (JOB_WORKER_SERVICE,) if target == "pg_job_queue_verify" else ()
     )
@@ -285,6 +297,10 @@ def evaluate_phased_release_preflight(
             "safety_fault_matrix": {
                 **safety_fault_matrix_payload,
                 "required_for_target": safety_fault_matrix_required,
+            },
+            "execution_fault_matrix": {
+                **execution_fault_matrix_payload,
+                "required_for_target": execution_fault_matrix_required,
             },
             "static_flags": {
                 "ok": not flag_mismatches,
@@ -443,6 +459,11 @@ def collect_phased_release_preflight(
         from backend.services.live_safety_fault_matrix import fault_matrix_status
 
         safety_fault_matrix = fault_matrix_status()
+    execution_fault_matrix: Mapping[str, Any] | None = None
+    if target == "execution_outcome_enable":
+        from backend.services.execution_outcome_fault_matrix import fault_matrix_status
+
+        execution_fault_matrix = fault_matrix_status()
     return evaluate_phased_release_preflight(
         target=target,
         shadow_gate=safety_shadow_gate_status(
@@ -458,6 +479,7 @@ def collect_phased_release_preflight(
         job_worker_preflight=job_worker_preflight,
         governance_preflight=governance_preflight,
         safety_fault_matrix=safety_fault_matrix,
+        execution_fault_matrix=execution_fault_matrix,
         job_worker_capability=job_worker_capability,
     )
 

@@ -148,6 +148,14 @@ Learning worker capability heartbeat 同步新增同构 process-loaded flags 投
 `governance_enforce`、`pg_job_queue_enable` 与后置 `pg_job_queue_verify` 必须同时证明 backend/learning worker
 都已加载 predecessor flags。只重启 backend 不再足以推进治理阶段。
 
+Execution outcome 切换现已增加独立代码绑定故障矩阵：7 类场景、11 个固定用例于
+2026-07-19 全部通过，并以 `execution_outcome_fault_matrix.v1` append-only/fsync
+attestation 记录。`execution_outcome_enable` 预检现在强制读取该证明并重算
+execution source/test binding；记录缺失、最近失败、内容篡改或相关代码变化都会
+fail-closed。当前 binding hash 为
+`1ce24cd81f5128fed960117976905b04f3bf22e93925fcd893d954b113d3793d`；这不改变
+当前 flag，也不越过 Safety/Generation 的阶段顺序。
+
 ## 6. 下一次发布的固定顺序
 
 1. 持续记录 Safety shadow comparison、broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。
