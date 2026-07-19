@@ -100,6 +100,10 @@ from backend.services.live_open_risk_context import (
 )
 from backend.services.live_committed_policy import load_live_policy_controls
 from backend.services.live_readiness import build_live_readiness
+from backend.services.live_learning_policy import (
+    LiveLearningPolicyRuntime,
+    load_active_learning_policy,
+)
 from backend.services.market_session import evaluate_market_session
 from backend.services.review_contract import build_entry_timing_context
 from backend.services.live_runtime_state import (
@@ -994,216 +998,59 @@ def _event_filter_context_for_risk_policy(
     }
 
 
-def _active_entry_cluster_learning_policy(*, now_ts: float | None = None) -> dict[str, Any]:
-    now = time.time() if now_ts is None else float(now_ts)
-    with _ENTRY_CLUSTER_POLICY_CACHE_LOCK:
-        cached = _ENTRY_CLUSTER_POLICY_CACHE.get("value") or {}
-        if float(_ENTRY_CLUSTER_POLICY_CACHE.get("expires_at") or 0.0) > now:
-            return copy.deepcopy(cached)
+def _live_learning_policy_runtime(cache: dict, cache_lock) -> LiveLearningPolicyRuntime:
+    from backend.core.db import get_state_pg_conn
 
-    controls: list[dict[str, Any]] = []
-    try:
-        from backend.core.db import get_state_pg_conn
+    return LiveLearningPolicyRuntime(
+        connection_factory=get_state_pg_conn,
+        load_controls=load_live_policy_controls,
+        cache=cache,
+        cache_lock=cache_lock,
+        warning=logger.warning,
+        now=time.time,
+    )
 
-        conn = get_state_pg_conn(read_only=True)
-        try:
-            rows = load_live_policy_controls(
-                conn,
-                scope_type="entry_cluster",
-                allowed_actions={
-                    "increase_same_direction_cooldown",
-                    "raise_pyramid_entry_threshold",
-                },
-                limit=20,
-            )
-        finally:
-            conn.close()
-        for row in rows:
-            item = dict(row)
-            evidence = item.get("evidence_json") or {}
-            if isinstance(evidence, str):
-                try:
-                    evidence = json.loads(evidence or "{}")
-                except Exception:
-                    evidence = {}
-            scope_key = str(item.get("scope_key") or "")
-            threshold = 1
-            if scope_key.endswith("_ge_3"):
-                threshold = 3
-            elif scope_key.endswith("_ge_2"):
-                threshold = 2
-            elif scope_key.endswith("_ge_1"):
-                threshold = 1
-            controls.append(
-                {
-                    "suggestion_id": str(item.get("suggestion_id") or ""),
-                    "scope_key": scope_key,
-                    "action": str(item.get("action") or ""),
-                    "confidence": float(item.get("confidence") or 0.0),
-                    "reason": str(item.get("reason") or ""),
-                    "governance_authority": str(item.get("governance_authority") or ""),
-                    "committed_mutation_id": str(item.get("committed_mutation_id") or ""),
-                    "min_same_direction_open_count": threshold,
-                    "evidence": {
-                        "sample_count": (evidence or {}).get("sample_count"),
-                        "bad_rate": (evidence or {}).get("bad_rate"),
-                        "avg_reward": (evidence or {}).get("avg_reward"),
-                    },
-                }
-            )
-    except Exception as exc:
-        logger.warning("[live] entry_cluster learning policy unavailable: {}", exc)
 
-    value = {
-        "active": bool(controls),
-        "controls": controls,
-        "min_same_direction_open_count": min(
-            [int(item.get("min_same_direction_open_count") or 999) for item in controls] or [0]
+def _active_entry_cluster_learning_policy(
+    *,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    return load_active_learning_policy(
+        "entry_cluster",
+        runtime=_live_learning_policy_runtime(
+            _ENTRY_CLUSTER_POLICY_CACHE,
+            _ENTRY_CLUSTER_POLICY_CACHE_LOCK,
         ),
-        "source": "policy_suggestion",
-        "loaded_at": now,
-    }
-    with _ENTRY_CLUSTER_POLICY_CACHE_LOCK:
-        _ENTRY_CLUSTER_POLICY_CACHE["value"] = copy.deepcopy(value)
-        _ENTRY_CLUSTER_POLICY_CACHE["expires_at"] = now + 60.0
-    return value
+        now_ts=now_ts,
+    )
 
 
-def _active_entry_quality_learning_policy(*, now_ts: float | None = None) -> dict[str, Any]:
-    now = time.time() if now_ts is None else float(now_ts)
-    with _ENTRY_QUALITY_POLICY_CACHE_LOCK:
-        cached = _ENTRY_QUALITY_POLICY_CACHE.get("value") or {}
-        if float(_ENTRY_QUALITY_POLICY_CACHE.get("expires_at") or 0.0) > now:
-            return copy.deepcopy(cached)
-
-    controls: list[dict[str, Any]] = []
-    try:
-        from backend.core.db import get_state_pg_conn
-
-        conn = get_state_pg_conn(read_only=True)
-        try:
-            rows = load_live_policy_controls(
-                conn,
-                scope_type="entry_quality",
-                allowed_actions={
-                    "raise_weak_signal_threshold",
-                    "require_factor_agreement",
-                    "suppress_recent_worst_factor",
-                },
-                limit=50,
-            )
-        finally:
-            conn.close()
-        for row in rows:
-            item = dict(row)
-            evidence = item.get("evidence_json") or {}
-            if isinstance(evidence, str):
-                try:
-                    evidence = json.loads(evidence or "{}")
-                except Exception:
-                    evidence = {}
-            controls_payload = (evidence or {}).get("recommended_controls") or {}
-            controls.append(
-                {
-                    "suggestion_id": str(item.get("suggestion_id") or ""),
-                    "scope_key": str(item.get("scope_key") or ""),
-                    "action": str(item.get("action") or ""),
-                    "confidence": float(item.get("confidence") or 0.0),
-                    "reason": str(item.get("reason") or ""),
-                    "governance_authority": str(item.get("governance_authority") or ""),
-                    "committed_mutation_id": str(item.get("committed_mutation_id") or ""),
-                    "min_abs_signal_score": float(controls_payload.get("min_abs_signal_score") or 0.0),
-                    "max_factor_conflict_ratio": float(controls_payload.get("max_factor_conflict_ratio") or 0.0),
-                    "strong_signal_override": float(controls_payload.get("strong_signal_override") or 0.0),
-                    "suppressed_factor": str(controls_payload.get("suppressed_factor") or item.get("scope_key") or ""),
-                    "evidence": {
-                        "sample_count": (evidence or {}).get("sample_count"),
-                        "bad_rate": (evidence or {}).get("bad_rate"),
-                        "avg_reward": (evidence or {}).get("avg_reward"),
-                        "worst_factor": (evidence or {}).get("worst_factor"),
-                    },
-                }
-            )
-    except Exception as exc:
-        logger.warning("[live] entry_quality learning policy unavailable: {}", exc)
-
-    value = {
-        "active": bool(controls),
-        "controls": controls,
-        "source": "policy_suggestion",
-        "loaded_at": now,
-    }
-    with _ENTRY_QUALITY_POLICY_CACHE_LOCK:
-        _ENTRY_QUALITY_POLICY_CACHE["value"] = copy.deepcopy(value)
-        _ENTRY_QUALITY_POLICY_CACHE["expires_at"] = now + 60.0
-    return value
+def _active_entry_quality_learning_policy(
+    *,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    return load_active_learning_policy(
+        "entry_quality",
+        runtime=_live_learning_policy_runtime(
+            _ENTRY_QUALITY_POLICY_CACHE,
+            _ENTRY_QUALITY_POLICY_CACHE_LOCK,
+        ),
+        now_ts=now_ts,
+    )
 
 
-def _active_event_window_learning_policy(*, now_ts: float | None = None) -> dict[str, Any]:
-    now = time.time() if now_ts is None else float(now_ts)
-    with _EVENT_WINDOW_POLICY_CACHE_LOCK:
-        cached = _EVENT_WINDOW_POLICY_CACHE.get("value") or {}
-        if float(_EVENT_WINDOW_POLICY_CACHE.get("expires_at") or 0.0) > now:
-            return copy.deepcopy(cached)
-
-    controls: list[dict[str, Any]] = []
-    try:
-        from backend.core.db import get_state_pg_conn
-
-        conn = get_state_pg_conn(read_only=True)
-        try:
-            rows = load_live_policy_controls(
-                conn,
-                scope_type="event_window",
-                allowed_actions={
-                    "tighten_event_window_sizing",
-                    "extend_event_post_window_review",
-                },
-                limit=50,
-            )
-        finally:
-            conn.close()
-        for row in rows:
-            item = dict(row)
-            evidence = item.get("evidence_json") or {}
-            if isinstance(evidence, str):
-                try:
-                    evidence = json.loads(evidence or "{}")
-                except Exception:
-                    evidence = {}
-            scope_key = str(item.get("scope_key") or "")
-            event_name, _, window_bucket = scope_key.rpartition(":")
-            controls.append(
-                {
-                    "suggestion_id": str(item.get("suggestion_id") or ""),
-                    "scope_key": scope_key,
-                    "event_name": event_name,
-                    "window_bucket": window_bucket,
-                    "action": str(item.get("action") or ""),
-                    "confidence": float(item.get("confidence") or 0.0),
-                    "reason": str(item.get("reason") or ""),
-                    "governance_authority": str(item.get("governance_authority") or ""),
-                    "committed_mutation_id": str(item.get("committed_mutation_id") or ""),
-                    "evidence": {
-                        "sample_count": (evidence or {}).get("sample_count"),
-                        "bad_rate": (evidence or {}).get("bad_rate"),
-                        "avg_reward": (evidence or {}).get("avg_reward"),
-                    },
-                }
-            )
-    except Exception as exc:
-        logger.warning("[live] event_window learning policy unavailable: {}", exc)
-
-    value = {
-        "active": bool(controls),
-        "controls": controls,
-        "source": "policy_suggestion",
-        "loaded_at": now,
-    }
-    with _EVENT_WINDOW_POLICY_CACHE_LOCK:
-        _EVENT_WINDOW_POLICY_CACHE["value"] = copy.deepcopy(value)
-        _EVENT_WINDOW_POLICY_CACHE["expires_at"] = now + 60.0
-    return value
+def _active_event_window_learning_policy(
+    *,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    return load_active_learning_policy(
+        "event_window",
+        runtime=_live_learning_policy_runtime(
+            _EVENT_WINDOW_POLICY_CACHE,
+            _EVENT_WINDOW_POLICY_CACHE_LOCK,
+        ),
+        now_ts=now_ts,
+    )
 
 
 def _risk_state_with_verdict(verdict) -> dict:

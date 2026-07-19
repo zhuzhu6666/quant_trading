@@ -34,6 +34,9 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
     definitions = _definitions(tree)
 
     for name in (
+        "_active_entry_cluster_learning_policy",
+        "_active_entry_quality_learning_policy",
+        "_active_event_window_learning_policy",
         "_run_live_safety_cycle",
         "_recover_execution_outcomes_before_alpha",
         "_attempt_generation_startup_barrier",
