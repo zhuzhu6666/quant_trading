@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from alpha.registry import factor_registry
-from alpha.registry_adapter import SOURCE_DISCOVERED, SOURCE_REMOVED, SOURCE_SHADOW
+from alpha.registry_adapter import (
+    SOURCE_BUILTIN,
+    SOURCE_DISCOVERED,
+    SOURCE_REMOVED,
+    SOURCE_SHADOW,
+)
 from alpha.streaming_factor_engine import StreamingFactorEngine
 from backend.services.factor_identity import factor_definition_fingerprint
 from backend.services.factor_lifecycle_service import (
@@ -23,6 +28,7 @@ from backend.services.governance_mutation_coordinator import (
     classify_governance_risk,
 )
 from config import runtime_config
+from config.runtime_config import RuntimeConfig
 
 
 class FakeAdapter:
@@ -396,6 +402,88 @@ def test_quarantine_is_v16_exempt_and_registry_projection_is_post_commit(lifecyc
     assert state["runtime_admission"] == "blocked"
     assert runtime_config.shared().factor_signal_config[name]["enabled"] is False
     assert runtime_config.shared().factor_portfolio_weights[name] == 0.0
+
+
+def test_builtin_lifecycle_governs_admission_without_mutating_code_registry(
+    tmp_path, monkeypatch
+):
+    name = "pytest_builtin_lifecycle"
+
+    def builtin_factor(df):
+        return df["close"]
+
+    factor_registry._factors[name] = builtin_factor
+    adapter = FakeAdapter(name, name)
+    adapter.meta[name]["source"] = SOURCE_BUILTIN
+    runtime_config.replace(
+        RuntimeConfig(
+            factor_signal_config={
+                name: {
+                    "enabled": True,
+                    "lifecycle_status": "SHADOW",
+                    "role": "alpha",
+                    "source": SOURCE_BUILTIN,
+                }
+            },
+            factor_portfolio_weights={name: 0.0},
+        )
+    )
+    service = FactorLifecycleService(tmp_path / "builtin.sqlite", adapter=adapter)
+    try:
+        shadow = service.register_shadow(name=name, expression=name)
+        assert shadow["ok"] is True, shadow
+        state = service.get_state(factor_name=name)
+        assert state["origin"] == SOURCE_BUILTIN
+        assert len(state["artifact_hash"]) == 64
+        assert runtime_config.shared().factor_signal_config[name]["enabled"] is True
+
+        prepared = service.prepare_promotion(name=name, expression=name)
+        assert prepared["ok"] is True
+        assert runtime_config.shared().factor_signal_config[name]["enabled"] is True
+        now = time.time()
+        monkeypatch.setattr(
+            "alpha.registry_adapter.RegistryAdapter.shared",
+            classmethod(lambda cls: adapter),
+        )
+        engine = StreamingFactorEngine(
+            max_buffer=80,
+            factor_runtime_config=runtime_config.shared().factor_signal_config,
+        )
+        engine.warmup_bars(
+            [
+                {
+                    "open": 1900.0 + idx,
+                    "high": 1901.0 + idx,
+                    "low": 1899.0 + idx,
+                    "close": 1900.5 + idx,
+                    "volume": 100.0 + idx,
+                    "time": float(idx + 1),
+                    "complete": True,
+                }
+                for idx in range(60)
+            ]
+        )
+        acknowledged = service.acknowledge_loaded_prepared_factors(
+            engine=engine,
+            boot_id="boot-1",
+            process_id="worker-1",
+            observed_at=now,
+        )
+        assert acknowledged["ok"] is True
+        assert acknowledged["acknowledged_count"] == 1
+        assert acknowledged["results"][0]["load_validation"]["voting_admitted"] is False
+        _write_health(service, name, now=now)
+        assert service.activate(name=name, weight=0.05, now=now)["ok"] is True
+        assert adapter.promote_calls == 0
+
+        quarantined = service.quarantine(name=name, reason="native health decay")
+        assert quarantined["ok"] is True
+        assert adapter.unregister_calls == 0
+        assert name in factor_registry
+        assert runtime_config.shared().factor_signal_config[name]["enabled"] is False
+        assert runtime_config.shared().factor_portfolio_weights[name] == 0.0
+    finally:
+        factor_registry._factors.pop(name, None)
 
 
 def test_registry_projection_failure_keeps_commit_and_marks_recovery(lifecycle):

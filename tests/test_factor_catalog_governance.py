@@ -1,6 +1,8 @@
 import sqlite3
 
 from backend.services.factor_catalog import build_factor_catalog
+from config import runtime_config
+from config.runtime_config import RuntimeConfig
 
 
 def test_factor_catalog_includes_factor_governance_shadow_audit(tmp_path):
@@ -51,3 +53,32 @@ def test_factor_catalog_includes_factor_governance_shadow_audit(tmp_path):
     assert shadow["weak_sample_count"] == 2
     assert shadow["latest_inference_id"] == "fg2"
     assert catalog["rsi_14"]["model_weakness_score"] == 0.9
+
+
+def test_factor_catalog_never_marks_prepared_builtin_live_eligible(tmp_path):
+    runtime_config.reset_for_tests()
+    runtime_config.replace(
+        RuntimeConfig(
+            factor_signal_config={
+                "rsi_14": {
+                    "enabled": True,
+                    "role": "alpha",
+                    "source": "builtin",
+                    "lifecycle_status": "PROMOTION_PREPARED",
+                }
+            },
+            factor_portfolio_weights={"rsi_14": 0.0},
+        )
+    )
+    try:
+        catalog = {
+            item["factor_id"]: item
+            for item in build_factor_catalog(tmp_path / "catalog.sqlite")
+        }
+    finally:
+        runtime_config.reset_for_tests()
+
+    assert catalog["rsi_14"]["enabled"] is True
+    assert catalog["rsi_14"]["lifecycle_status"] == "PROMOTION_PREPARED"
+    assert catalog["rsi_14"]["eligible_for_live"] is False
+    assert catalog["rsi_14"]["used_in_score"] is False

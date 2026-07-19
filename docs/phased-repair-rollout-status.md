@@ -110,6 +110,12 @@ active generation body 已无内嵌 tick loop，stale generation 不能执行 fa
 reload。账户刷新源码门禁现检查权威 tick runtime，并继续证明 kickoff 先于本地
 K 线 warmup。
 
+Factor lifecycle 的 builtin 活跃路径也已收敛：native callable 以代码 artifact
+SHA-256 建立 durable identity，SHADOW enrollment、prepare、loaded ack/fresh health、
+ACTIVE+显式正权重分阶段通过 `FactorLifecycleService`；弱 builtin 进入 typed
+QUARANTINED 终态并将 admission/权重收紧，但不删除代码 Registry。dual-record/enforce
+不再用 generic overlay 复活终态，零权重 context 也不再冒充 ACTIVE。
+
 ## 5. 尚未满足的 live rollout 门槛
 
 以下内容不能由单测替代，当前保持未完成：

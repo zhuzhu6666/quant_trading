@@ -198,6 +198,52 @@ def test_registry_metadata_failure_cannot_reclassify_discovered_alpha_as_builtin
     assert selection.reason_excluded[name] == "registry_metadata_unavailable"
 
 
+def test_prepared_builtin_is_observation_only_not_live_admitted(monkeypatch):
+    name = "prepared_builtin"
+    factor_registry._factors[name] = lambda df: np.ones(len(df))
+
+    class _Adapter:
+        def list_by_source(self, _source):
+            return []
+
+        def dead_names(self):
+            return []
+
+        def get_meta(self, _name):
+            return {"source": "builtin"}
+
+        def all_statuses(self):
+            return [
+                SimpleNamespace(
+                    factor=name,
+                    status="HEALTHY",
+                    score=85.0,
+                    n_obs=500,
+                    rolling_ic=0.04,
+                    updated_at=time.time(),
+                )
+            ]
+
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+    try:
+        selection = select_runtime_factors(
+            {
+                name: {
+                    "enabled": True,
+                    "role": "alpha",
+                    "source": "builtin",
+                    "lifecycle_status": "PROMOTION_PREPARED",
+                }
+            }
+        )
+    finally:
+        factor_registry._factors.pop(name, None)
+
+    assert selection is not None
+    assert name not in selection.selected_factor_ids
+    assert selection.reason_excluded[name] == "lifecycle_not_live"
+
+
 def test_active_discovered_factor_requires_fresh_healthy_evidence(monkeypatch):
     name = "disc_stale_health"
     factor_registry._factors[name] = lambda df: np.ones(len(df))

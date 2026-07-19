@@ -323,7 +323,14 @@ def select_runtime_factors(config: dict[str, dict] | None) -> RuntimeFactorSelec
                         else "active_health_invalid_or_stale"
                     )
                     continue
-            if lifecycle in {"DEAD", "SHADOW", "QUARANTINE", "QUARANTINED"}:
+            if lifecycle in {
+                "DEAD",
+                "SHADOW",
+                "PROMOTION_PREPARED",
+                "QUARANTINE",
+                "QUARANTINED",
+                "RETIRED",
+            }:
                 excluded.append(name)
                 reasons[name] = "lifecycle_not_live"
                 continue

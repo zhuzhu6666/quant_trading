@@ -70,7 +70,8 @@
 | 治理证据资格 | executable governance 是否只使用 matured、full/verified recovered、非污染、model-ready、lineage 唯一完整的样本；partial/missing/contaminated 是否权重为 0；sample → stats → suggestion 的 eligibility version/fingerprint 是否一致且 Governor 只使用 effective sample count/weighted 指标 |
 | 研究证据信任边界 | legacy indicator sweep 是否被 CLI、runner、服务、job/list/report 和所有 executable governance 入口强制标记为 `diagnostic_only`；parity replay 是否绑定 config/data/code/factor-artifact manifest，要求显式匹配四类 expected hash，并把月库部分读取、代码绑定缺失、factor identity/artifact/lifecycle/显式权重缺失、非原生 bid/ask 或任一 modeled lifecycle 输入保持 diagnostic-only；parameter-template review/deploy 是否对缺失 metadata 也无条件 fail-closed；历史/手工候选是否标 `legacy_quarantined/require_revalidation` 且只能用新 parity artifact 重验；调用方自报 verdict/`live_parity/governance_eligible/deployable_candidate` 是否无法绕过中央拒绝策略 |
 | 因子稳定身份 | generated DSL factor ID 是否来自规范化 AST 的完整 SHA-256，禁止 Python `hash()`/截断摘要 |
-| 因子生命周期状态机 | promote 是否只到 `PROMOTION_PREPARED`；ACTIVE 是否必须 V16；quarantine/retire 是否由 before/after 判定为 risk tightening 并免 V16；终态是否拒绝重新扩张 |
+| 因子生命周期状态机 | DSL/native builtin promote 是否都只到 `PROMOTION_PREPARED`；ACTIVE 是否必须 V16、fresh loaded ack、fresh health 和显式正权重；native identity/artifact 是否绑定 callable source 且不使用 Python `hash()`；quarantine/retire 是否由 before/after 判定为 risk tightening 并免 V16；builtin callable 是否保留但 admission/权重收紧；终态是否拒绝 generic overlay 重新扩张 |
+| Factor Governance 顺序 | 每周期是否先执行 rollback/downweight/quarantine/retire，再检查 expansion freeze/operator pause/V16；缺 V16 或扩张暂停时风险收紧是否继续，restore/promote/template 等扩张是否 fail-closed |
 | 因子投影绑定 | loaded ack 是否绑定 factor ID、artifact、factor generation、prepared mutation、live loop generation/process/boot 且 freshness 有界；是否先在 warm buffer 真实执行 callable 且仍不进入 voting set；governance coordinator 自身投影是否不能冒充 live ack |
 | `evolution_decision` | 是否记录判断和 rollback_json |
 | `learning_application_log` | 是否记录应用状态 |

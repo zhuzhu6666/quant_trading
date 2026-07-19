@@ -10,6 +10,7 @@ only for isolated tests and offline fixtures.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from typing import Any, Mapping
 from alpha.registry import factor_registry
 from alpha.registry_adapter import (
     RegistryAdapter,
+    SOURCE_BUILTIN,
     SOURCE_DISCOVERED,
     SOURCE_REMOVED,
     SOURCE_SHADOW,
@@ -108,6 +110,7 @@ class FactorDefinition:
     factor_id: str
     definition_fingerprint: str
     artifact_hash: str
+    origin: str = "dsl"
 
 
 @dataclass(frozen=True)
@@ -158,6 +161,34 @@ def _artifact_hash(value: str, *, fallback: str = "") -> str:
     if not _SHA256_RE.fullmatch(normalized):
         raise FactorLifecycleError("stable_artifact_hash_required")
     return normalized
+
+
+def _builtin_artifact_hash(name: str) -> str:
+    """Bind a native factor lifecycle to its executable implementation."""
+
+    func = factor_registry.get(str(name or ""))
+    if func is None:
+        raise FactorLifecycleError("builtin_factor_callable_missing")
+    try:
+        source = inspect.getsource(func)
+    except (OSError, TypeError):
+        code = getattr(func, "__code__", None)
+        source = repr(
+            (
+                getattr(func, "__module__", ""),
+                getattr(func, "__qualname__", ""),
+                getattr(code, "co_code", b"").hex(),
+                getattr(code, "co_consts", ()),
+            )
+        )
+    payload = {
+        "schema_version": "builtin_factor_artifact.v1",
+        "name": str(name),
+        "module": str(getattr(func, "__module__", "")),
+        "qualname": str(getattr(func, "__qualname__", "")),
+        "source": source,
+    }
+    return _hash(payload)
 
 
 class FactorLifecycleService:
@@ -553,25 +584,39 @@ class FactorLifecycleService:
             try:
                 definition = self._definition_from_state(state)
                 meta = self.adapter.get_meta(name)
-                if not meta or str(meta.get("source") or "") != SOURCE_SHADOW:
-                    raise FactorLifecycleError("prepared_factor_not_shadow_loaded")
+                origin = str(state.get("origin") or "dsl").strip().lower()
+                expected_source = (
+                    SOURCE_BUILTIN if origin == SOURCE_BUILTIN else SOURCE_SHADOW
+                )
+                if not meta or str(meta.get("source") or "") != expected_source:
+                    raise FactorLifecycleError("prepared_factor_source_mismatch")
                 if name not in factor_registry:
                     raise FactorLifecycleError("prepared_factor_not_in_registry")
-                registry_expression = str(meta.get("description") or "").strip()
-                if not registry_expression:
-                    raise FactorLifecycleError("registry_factor_expression_missing")
-                registry_fingerprint = factor_definition_fingerprint(registry_expression)
-                if (
-                    canonical_factor_id(registry_expression) != definition.factor_id
-                    or registry_fingerprint != definition.definition_fingerprint
-                ):
-                    raise FactorLifecycleError("registry_factor_identity_mismatch")
-                registry_artifact = str(meta.get("artifact_hash") or "").strip().lower()
-                if registry_artifact:
-                    if _artifact_hash(registry_artifact) != definition.artifact_hash:
+                if origin == SOURCE_BUILTIN:
+                    if _builtin_artifact_hash(name) != definition.artifact_hash:
                         raise FactorLifecycleError("registry_factor_artifact_mismatch")
-                elif definition.artifact_hash != definition.definition_fingerprint:
-                    raise FactorLifecycleError("registry_factor_artifact_unverifiable")
+                else:
+                    registry_expression = str(meta.get("description") or "").strip()
+                    if not registry_expression:
+                        raise FactorLifecycleError("registry_factor_expression_missing")
+                    registry_fingerprint = factor_definition_fingerprint(
+                        registry_expression
+                    )
+                    if (
+                        canonical_factor_id(registry_expression) != definition.factor_id
+                        or registry_fingerprint != definition.definition_fingerprint
+                    ):
+                        raise FactorLifecycleError("registry_factor_identity_mismatch")
+                    registry_artifact = str(meta.get("artifact_hash") or "").strip().lower()
+                    if registry_artifact:
+                        if _artifact_hash(registry_artifact) != definition.artifact_hash:
+                            raise FactorLifecycleError(
+                                "registry_factor_artifact_mismatch"
+                            )
+                    elif definition.artifact_hash != definition.definition_fingerprint:
+                        raise FactorLifecycleError(
+                            "registry_factor_artifact_unverifiable"
+                        )
                 validation = dict(engine.validate_loaded_factor(name) or {})
                 if not validation.get("ok"):
                     raise FactorLifecycleError(
@@ -913,6 +958,7 @@ class FactorLifecycleService:
                 "factor_id": mutation.definition.factor_id,
                 "definition_fingerprint": mutation.definition.definition_fingerprint,
                 "artifact_hash": mutation.definition.artifact_hash,
+                "origin": mutation.definition.origin,
                 "target_stage": mutation.target_stage.value,
                 "reason": mutation.reason,
             },
@@ -953,7 +999,18 @@ class FactorLifecycleService:
         name = mutation.definition.name
         existing = dict((cfg.factor_signal_config or {}).get(name) or {})
         target = mutation.target_stage
-        if target in {FactorLifecycleStage.PROMOTION_PREPARED, FactorLifecycleStage.ACTIVE}:
+        if target in {
+            FactorLifecycleStage.SHADOW,
+            FactorLifecycleStage.PROMOTION_PREPARED,
+            FactorLifecycleStage.ACTIVE,
+        }:
+            observation_enabled = bool(
+                mutation.definition.origin == SOURCE_BUILTIN
+                and target in {
+                    FactorLifecycleStage.SHADOW,
+                    FactorLifecycleStage.PROMOTION_PREPARED,
+                }
+            )
             entry = {
                 **existing,
                 "role": str(existing.get("role") or "alpha"),
@@ -963,7 +1020,7 @@ class FactorLifecycleService:
                 "definition_fingerprint": mutation.definition.definition_fingerprint,
                 "artifact_hash": mutation.definition.artifact_hash,
                 "lifecycle_status": target.value,
-                "enabled": target is FactorLifecycleStage.ACTIVE,
+                "enabled": target is FactorLifecycleStage.ACTIVE or observation_enabled,
                 "committed_mutation_id": str(mutation_id),
             }
         else:
@@ -1046,7 +1103,11 @@ class FactorLifecycleService:
         metadata = {
             **_loads(current.get("metadata_json")),
             "expression": definition.expression,
-            "identity_version": "factor_dsl_ast.v1",
+            "identity_version": (
+                "builtin_factor_identity.v1"
+                if definition.origin == SOURCE_BUILTIN
+                else "factor_dsl_ast.v1"
+            ),
         }
         conn.execute(
             _p(
@@ -1079,7 +1140,7 @@ class FactorLifecycleService:
                 definition.name,
                 definition.definition_fingerprint,
                 definition.artifact_hash,
-                "dsl",
+                definition.origin,
                 mutation.target_stage.value,
                 generation,
                 admission,
@@ -1162,6 +1223,22 @@ class FactorLifecycleService:
     def _project_registry(self, state: Mapping[str, Any]) -> None:
         name = str(state.get("factor_name") or "")
         stage = str(state.get("lifecycle_stage") or "")
+        origin = str(state.get("origin") or "dsl").strip().lower()
+        if origin == SOURCE_BUILTIN:
+            # Native callables remain code-owned. Lifecycle mutations only
+            # govern their RuntimeConfig admission and explicit weight; a
+            # terminal transition must not physically delete builtin code.
+            if stage not in {
+                FactorLifecycleStage.QUARANTINED.value,
+                FactorLifecycleStage.RETIRED.value,
+            }:
+                meta = self.adapter.get_meta(name)
+                if (
+                    name not in factor_registry
+                    or str(meta.get("source") or "") != SOURCE_BUILTIN
+                ):
+                    raise FactorLifecycleError("builtin_factor_projection_missing")
+            return
         if stage in {
             FactorLifecycleStage.SHADOW.value,
             FactorLifecycleStage.PROMOTION_PREPARED.value,
@@ -1433,20 +1510,45 @@ class FactorLifecycleService:
         if not clean_name:
             raise FactorLifecycleError("factor_name_required")
         meta = self.adapter.get_meta(clean_name)
-        clean_expression = str(expression or meta.get("description") or "").strip()
+        origin = (
+            SOURCE_BUILTIN
+            if str(meta.get("source") or "").strip().lower() == SOURCE_BUILTIN
+            else "dsl"
+        )
+        clean_expression = str(
+            expression
+            or (clean_name if origin == SOURCE_BUILTIN else meta.get("description"))
+            or ""
+        ).strip()
         if not clean_expression:
             raise FactorLifecycleError("canonical_dsl_expression_required")
-        fingerprint = factor_definition_fingerprint(clean_expression)
-        stable_artifact = _artifact_hash(
-            artifact_hash,
-            fallback=str(meta.get("artifact_hash") or fingerprint),
-        )
+        if origin == SOURCE_BUILTIN:
+            stable_artifact = _artifact_hash(
+                artifact_hash,
+                fallback=str(meta.get("artifact_hash") or _builtin_artifact_hash(clean_name)),
+            )
+            fingerprint = _hash(
+                {
+                    "schema_version": "builtin_factor_identity.v1",
+                    "name": clean_name,
+                    "artifact_hash": stable_artifact,
+                }
+            )
+            factor_id = f"builtin:{fingerprint}"
+        else:
+            fingerprint = factor_definition_fingerprint(clean_expression)
+            stable_artifact = _artifact_hash(
+                artifact_hash,
+                fallback=str(meta.get("artifact_hash") or fingerprint),
+            )
+            factor_id = canonical_factor_id(clean_expression)
         return FactorDefinition(
             name=clean_name,
             expression=clean_expression,
-            factor_id=canonical_factor_id(clean_expression),
+            factor_id=factor_id,
             definition_fingerprint=fingerprint,
             artifact_hash=stable_artifact,
+            origin=origin,
         )
 
     def _definition_from_state(self, state: Mapping[str, Any]) -> FactorDefinition:

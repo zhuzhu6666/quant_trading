@@ -124,6 +124,19 @@ class FactorGovernanceOrchestrator:
             actions.extend(self._rollback_canary_regressions(catalog, run))
             if actions:
                 catalog = build_factor_catalog()
+            # Tightening is always evaluated before any expansion posture or
+            # V16 authorization gate. A freeze/missing delegate may stop
+            # promotion, restore and template expansion, but must never defer
+            # downweight, quarantine or terminal retirement.
+            actions.extend(self._downweight_weak_alpha(catalog, run))
+            if actions:
+                catalog = build_factor_catalog()
+            actions.extend(self._disable_weak_live_alpha(catalog, run))
+            if actions:
+                catalog = build_factor_catalog()
+            actions.extend(self._retire_quarantined_discovered(catalog, run))
+            if actions:
+                catalog = build_factor_catalog()
             posture = self._autonomy_posture()
             expansion_frozen = runtime_config.autonomy_expansion_freeze_applies(cfg)
             if posture in {"shadow_only", "frozen"} or expansion_frozen:
@@ -168,7 +181,13 @@ class FactorGovernanceOrchestrator:
             actions.extend(self._restore_quarantined_builtin_alpha(catalog, run))
             if actions:
                 catalog = build_factor_catalog()
-            actions.extend(self._activate_healthy_builtin_shadow(catalog, run))
+            actions.extend(
+                self._activate_healthy_builtin_shadow(
+                    catalog,
+                    run,
+                    v16_authority=v16_authority,
+                )
+            )
             if actions:
                 catalog = build_factor_catalog()
             redundancy_report = RedundancyDetector().build_report(
@@ -192,12 +211,6 @@ class FactorGovernanceOrchestrator:
                 run,
                 v16_command_id=str(v16_authority.get("command_id") or ""),
             ))
-            catalog = build_factor_catalog()
-            actions.extend(self._downweight_weak_alpha(catalog, run))
-            catalog = build_factor_catalog()
-            actions.extend(self._disable_weak_live_alpha(catalog, run))
-            catalog = build_factor_catalog()
-            actions.extend(self._retire_quarantined_discovered(catalog, run))
             summary = {
                 "status": "completed_with_errors" if any(
                     str(item.get("status") or "") in {"failed", "error", "mutation_failed"}
@@ -1130,8 +1143,6 @@ class FactorGovernanceOrchestrator:
         for item in catalog:
             if not item.get("eligible_for_live") or item.get("role") != "alpha":
                 continue
-            if self._factor_has_pending_effect(str(item.get("factor_id") or "")):
-                continue
             score = float(item.get("health_score") or 0.0)
             model_evidence = self._model_governance_evidence(item, cfg)
             if (score > 0.0 and score < severe) or bool(model_evidence.get("weak_for_disable")):
@@ -1157,10 +1168,8 @@ class FactorGovernanceOrchestrator:
             name = str(item["factor_id"])
             entry = dict(runtime_config.shared().factor_signal_config.get(name, {}) or {})
             entry["enabled"] = False
-            # A live factor that fails again must re-enter the recoverable
-            # quarantine state.  Preserving ACTIVE here would make the next
-            # automatic recovery cycle unable to distinguish it from an
-            # explicit/unknown disable.
+            # Kept only for the one-release coordinator-off compatibility
+            # path. Typed governance uses the terminal QUARANTINED state.
             entry["lifecycle_status"] = "QUARANTINE"
             entry["disabled_at"] = time.time()
             try:
@@ -1169,22 +1178,24 @@ class FactorGovernanceOrchestrator:
                 )
 
                 mode = governance_coordinator_mode()
-                if item.get("source") == "discovered" and mode != "off":
-                    # A discovered factor's lifecycle cannot diverge from its
-                    # RuntimeConfig projection.  Commit QUARANTINED through
-                    # the lifecycle transaction; Registry removal happens
-                    # only after that commit.
+                if mode != "off":
+                    # Native and discovered factors share one durable state
+                    # machine. Builtin code stays registered, while its
+                    # RuntimeConfig admission and weight become terminal.
                     adapter = RegistryAdapter.shared()
                     meta = adapter.get_meta(name) or {}
+                    builtin = str(item.get("source") or "") == "builtin"
                     result = FactorLifecycleService(
                         self.overlay.db_path,
                         adapter=adapter,
                     ).quarantine(
                         name=name,
-                        expression=str(meta.get("description") or ""),
+                        expression=(
+                            name if builtin else str(meta.get("description") or "")
+                        ),
                         artifact_hash=str(meta.get("artifact_hash") or ""),
                         actor="system:factor_governance",
-                        reason="weak discovered factor removed from live alpha",
+                        reason="weak factor removed from live alpha",
                         evidence_refs=evidence,
                         idempotency_key=(
                             f"factor_weak_quarantine:{name}:"
@@ -1192,8 +1203,7 @@ class FactorGovernanceOrchestrator:
                         ),
                     )
                 else:
-                    # Builtins have no dynamic Registry lifecycle.  In off
-                    # mode this also preserves the one-release legacy path.
+                    # One-release legacy path only.
                     result = self._apply_runtime_patch(
                         {"factor_signal_config": {name: entry}},
                         source="factor_governance_disable_live",
@@ -1243,6 +1253,8 @@ class FactorGovernanceOrchestrator:
         self,
         catalog: list[dict[str, Any]],
         run: dict[str, Any],
+        *,
+        v16_authority: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Autonomously activate explicitly enrolled builtin shadow factors.
 
@@ -1277,9 +1289,12 @@ class FactorGovernanceOrchestrator:
                 continue
             if self._factor_has_pending_effect(factor_id):
                 continue
-            if item.get("source") != "builtin" or item.get("role") not in {"alpha", "context"}:
+            if item.get("source") != "builtin" or item.get("role") != "alpha":
                 continue
-            if str(item.get("lifecycle_status") or "").upper() != "SHADOW":
+            if str(item.get("lifecycle_status") or "").upper() not in {
+                FactorLifecycleStage.SHADOW.value,
+                FactorLifecycleStage.PROMOTION_PREPARED.value,
+            }:
                 continue
             if not bool(entry.get("autonomous_activation")):
                 continue
@@ -1320,7 +1335,7 @@ class FactorGovernanceOrchestrator:
                 "health_status": str(item.get("health_status") or "UNKNOWN"),
                 "health_n_obs": int(item.get("health_n_obs") or 0),
                 "current_weight": float((cfg.factor_portfolio_weights or {}).get(factor_id, 0.0) or 0.0),
-                "target_weight": initial_weight if item.get("role") == "alpha" else 0.0,
+                "target_weight": initial_weight,
                 "model_governance": item.get("_model_governance") or {},
                 "thresholds": {
                     "min_health_score": min_score,
@@ -1334,109 +1349,102 @@ class FactorGovernanceOrchestrator:
                 continue
 
             before_cfg = runtime_config.shared().to_dict()
-            active_entry = dict(entry)
-            active_entry.update({
-                "enabled": True,
-                "lifecycle_status": "ACTIVE",
-                "activation_source": "factor_governance_builtin_health_gate",
-                "activated_at": time.time(),
-            })
             try:
-                if str(item.get("role") or "alpha") == "alpha":
-                    current_weights = dict(cfg.factor_portfolio_weights or {})
-                    factor_configs = self._portfolio_configs(
-                        cfg,
-                        signal_cfg={factor_id: active_entry},
+                authority = dict(v16_authority or {})
+                binding = FactorV16Binding(
+                    command_id=str(authority.get("command_id") or ""),
+                    claim_token=str(authority.get("claim_token") or ""),
+                    target_agent=str(
+                        authority.get("target_agent") or "factor_governance"
+                    ),
+                    candidate_id=str(authority.get("candidate_id") or ""),
+                    posterior_fingerprint=str(
+                        authority.get("posterior_fingerprint") or ""
+                    ),
+                    evidence_fingerprint=str(
+                        authority.get("evidence_fingerprint") or ""
+                    ),
+                )
+                adapter = RegistryAdapter.shared()
+                lifecycle = FactorLifecycleService(
+                    self.overlay.db_path,
+                    adapter=adapter,
+                )
+                state = lifecycle.get_state(factor_name=factor_id)
+                stage = str(state.get("lifecycle_stage") or "")
+                if not stage:
+                    result = lifecycle.register_shadow(
+                        name=factor_id,
+                        expression=factor_id,
+                        actor="system:factor_governance",
+                        reason="enroll builtin shadow in durable lifecycle",
+                        evidence_refs=evidence,
+                        idempotency_key=(
+                            f"builtin_shadow:{factor_id}:{run.get('run_id', '')}"
+                        ),
                     )
-                    weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
-                        source="factor_governance_builtin_activation",
-                        producer="factor_governance_builtin_shadow_activation",
-                        run_id=str(run.get("run_id") or ""),
+                    transition_status = "shadow_registered"
+                elif stage == FactorLifecycleStage.SHADOW.value:
+                    result = lifecycle.prepare_promotion(
+                        name=factor_id,
+                        expression=factor_id,
+                        actor="system:factor_governance",
+                        reason="healthy builtin shadow promotion preparation",
+                        evidence_refs=evidence,
+                        idempotency_key=(
+                            f"builtin_prepare:{factor_id}:{run.get('run_id', '')}"
+                        ),
+                        v16=binding,
+                    )
+                    transition_status = "promotion_prepared"
+                elif stage == FactorLifecycleStage.PROMOTION_PREPARED.value:
+                    result = lifecycle.activate(
+                        name=factor_id,
+                        weight=initial_weight,
                         actor="system:factor_governance",
                         reason="healthy builtin shadow factor activation",
-                        factor_configs=factor_configs,
-                        current_weights=current_weights,
-                        weight_policy_weights={factor_id: initial_weight},
-                        fast=True,
-                        decision_policy=DecisionPolicy(
-                            redundancy_max_group_weight=float(
-                                getattr(cfg, "factor_redundancy_max_group_weight", 0.35) or 0.35
-                            )
+                        evidence_refs=evidence,
+                        idempotency_key=(
+                            f"builtin_activate:{factor_id}:{run.get('run_id', '')}"
                         ),
-                        risk_check=lambda _plan, _verdict=verdict: _verdict,
-                        evidence_by_factor={factor_id: evidence},
-                        additional_patch={"factor_signal_config": {factor_id: active_entry}},
+                        v16=binding,
                     )
-                    if weight_result.get("status") != "applied":
-                        actions.append(self._audit_action(
-                            run,
-                            item,
-                            "promote_factor",
-                            "blocked_by_evidence",
-                            {**evidence, "weight_change": weight_result},
-                            verdict,
-                            before={"runtime_config": before_cfg},
-                            after={"runtime_config": before_cfg},
-                            result={"reason": weight_result.get("status"), "weight_change": weight_result},
-                        ))
-                        continue
-                    if not bool(weight_result.get("projection_ready", True)):
-                        actions.append(self._audit_action(
-                            run,
-                            item,
-                            "promote_factor",
-                            "projection_degraded",
-                            {**evidence, "weight_change": weight_result},
-                            verdict,
-                            before={"runtime_config": before_cfg},
-                            after={"runtime_config": runtime_config.shared().to_dict()},
-                            result={
-                                "reason": "committed_projection_degraded",
-                                "weight_change": weight_result,
-                            },
-                        ))
-                        continue
-                    result = {"activation": "applied", "weight_change": weight_result}
+                    transition_status = "applied"
                 else:
-                    result = self._apply_runtime_patch(
-                        {"factor_signal_config": {factor_id: active_entry}},
-                        source="factor_governance_builtin_context_activation",
-                        run_id=str(run.get("run_id") or ""),
-                    )
-                    committed, projection_ready, mutation_status = self._mutation_commit_state(result)
-                    if not projection_ready:
-                        actions.append(self._audit_action(
-                            run,
-                            item,
-                            "promote_factor",
-                            "projection_degraded" if committed else "blocked_by_evidence",
-                            evidence,
-                            verdict,
-                            before={"runtime_config": before_cfg},
-                            after={"runtime_config": runtime_config.shared().to_dict()},
-                            result={
-                                **dict(result or {}),
-                                "mutation_status": mutation_status,
-                                "durably_committed": committed,
-                                "projection_ready": projection_ready,
-                            },
-                        ))
-                        continue
-                activated += 1
+                    continue
+                committed, projection_ready, mutation_status = (
+                    self._mutation_commit_state(result)
+                )
+                action_status = (
+                    transition_status
+                    if projection_ready
+                    else "projection_degraded"
+                    if committed
+                    else "blocked_by_evidence"
+                )
+                if transition_status == "applied" and projection_ready:
+                    activated += 1
                 actions.append(self._audit_action(
                     run,
                     item,
                     "promote_factor",
-                    "applied",
+                    action_status,
                     evidence,
                     verdict,
                     before={"runtime_config": before_cfg, "lifecycle_status": "SHADOW"},
                     after={
                         "runtime_config": runtime_config.shared().to_dict(),
-                        "lifecycle_status": "ACTIVE",
+                        "lifecycle_status": str(
+                            result.get("lifecycle_stage") or stage or "SHADOW"
+                        ),
                     },
                     rollback={"runtime_config": before_cfg},
-                    result=result,
+                    result={
+                        **dict(result or {}),
+                        "mutation_status": mutation_status,
+                        "durably_committed": committed,
+                        "projection_ready": projection_ready,
+                    },
                 ))
             except Exception as exc:
                 logger.exception("[factor_governance] builtin activation failed for %s", factor_id)
@@ -1459,7 +1467,7 @@ class FactorGovernanceOrchestrator:
         catalog: list[dict[str, Any]],
         run: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """Automatically recover quarantined builtin alpha factors.
+        """Keep one-release restore compatibility outside typed governance.
 
         Governance previously had a one-way path: a weak factor was marked
         ``enabled=false``/``QUARANTINE`` and AWE could only resurrect its
@@ -1468,7 +1476,16 @@ class FactorGovernanceOrchestrator:
         factors after a fresh health evaluation, a cooldown, and (when model
         evidence exists) a cleared weakness verdict.  Discovered factors keep
         their separate Canary lifecycle and are not enabled by this path.
+        Typed lifecycle treats QUARANTINED as terminal. A healthy native
+        implementation must re-enter through a newly code-bound lifecycle,
+        never by rewriting the terminal row back to ACTIVE.
         """
+        from backend.services.governance_control_plans import (
+            governance_coordinator_mode,
+        )
+
+        if governance_coordinator_mode() != "off":
+            return []
         cfg = runtime_config.shared()
         if not bool(getattr(cfg, "factor_governance_auto_restore_enabled", True)):
             return []
@@ -1769,67 +1786,6 @@ class FactorGovernanceOrchestrator:
             "latest_inference_id": str(shadow.get("latest_inference_id") or ""),
             "model_type": str(shadow.get("model_type") or ""),
         }
-
-    def _ensure_promoted_runtime_config(self, factor_id: str, *, run_id: str = "") -> None:
-        cfg = runtime_config.shared()
-        signal_cfg = dict(cfg.factor_signal_config or {})
-        if factor_id not in signal_cfg:
-            entry = {
-                "enabled": True,
-                "mode": "rank_mapping",
-                "window": 100,
-                "min_samples": 30,
-                "direction": 1,
-                "role": "alpha",
-                "source": "discovered",
-                "tags": ["GP发现"],
-                "cadence": "bar",
-                "history_sample_policy": "every_bar",
-            }
-        else:
-            entry = dict(signal_cfg[factor_id] or {})
-            entry["enabled"] = True
-            entry.setdefault("role", "alpha")
-            entry["source"] = "discovered"
-        signal_cfg[factor_id] = entry
-
-        current_weights = dict(cfg.factor_portfolio_weights or {})
-        factor_configs = self._portfolio_configs(cfg, signal_cfg=signal_cfg)
-        dp = DecisionPolicy(
-            redundancy_max_group_weight=float(getattr(cfg, "factor_redundancy_max_group_weight", 0.35) or 0.35)
-        )
-        target = float(getattr(cfg, "factor_governance_new_factor_weight", 0.0) or 0.0)
-        if target <= 0.0:
-            raise RuntimeError("explicit_positive_weight_required")
-        weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
-            source="factor_governance_promote_factor",
-            producer="factor_governance_promotion",
-            run_id=run_id,
-            actor="system:factor_governance",
-            reason="governed factor promotion initial weight",
-            awe_patches=None,
-            weight_policy_weights={factor_id: target},
-            factor_configs=factor_configs,
-            current_weights=current_weights,
-            fast=True,
-            decision_policy=dp,
-            risk_check=lambda _plan: {
-                "allowed": True,
-                "reason": "promotion_risk_verdict_allowed_by_orchestrator",
-            },
-            evidence_by_factor={factor_id: {"promotion": True, "target_weight": target}},
-            additional_patch={"factor_signal_config": {factor_id: entry}},
-        )
-        if weight_result.get("status") == "no_admitted_change":
-            self._apply_runtime_patch(
-                {"factor_signal_config": {factor_id: entry}},
-                source="factor_governance_promote_factor_config_only",
-                run_id=run_id,
-            )
-        elif weight_result.get("status") != "applied":
-            raise RuntimeError(
-                f"factor promotion weight change blocked: {weight_result.get('status')}"
-            )
 
     def _portfolio_configs(self, cfg: Any, *, signal_cfg: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
         signal_cfg = dict(signal_cfg if signal_cfg is not None else (getattr(cfg, "factor_signal_config", {}) or {}))

@@ -130,7 +130,7 @@ def test_quarantined_builtin_alpha_requires_cooldown_fresh_health_and_cleared_mo
     assert actions == []
 
 
-def test_disable_weak_live_alpha_always_enters_recoverable_quarantine(monkeypatch):
+def test_coordinator_off_compatibility_uses_legacy_quarantine_patch(monkeypatch):
     now = time.time()
     rc.replace(RuntimeConfig(
         factor_signal_config={
@@ -147,7 +147,9 @@ def test_disable_weak_live_alpha_always_enters_recoverable_quarantine(monkeypatc
 
     monkeypatch.setattr(orchestrator, "_apply_runtime_patch", apply_patch)
     monkeypatch.setattr(orchestrator, "_audit_action", lambda *_args, **_kwargs: {"status": "applied"})
-    monkeypatch.setattr(orchestrator, "_factor_has_pending_effect", lambda _factor_id: False)
+    # A pending experiment may defer another exploratory weight change, but
+    # must never defer severe risk tightening.
+    monkeypatch.setattr(orchestrator, "_factor_has_pending_effect", lambda _factor_id: True)
 
     actions = orchestrator._disable_weak_live_alpha(
         [{
@@ -165,6 +167,104 @@ def test_disable_weak_live_alpha_always_enters_recoverable_quarantine(monkeypatc
     assert actions == [{"status": "applied"}]
     assert captured[0]["factor_signal_config"]["pin_bar"]["lifecycle_status"] == "QUARANTINE"
     assert captured[0]["factor_signal_config"]["pin_bar"]["disabled_at"] >= now
+
+
+def test_typed_governance_quarantines_builtin_through_lifecycle(monkeypatch):
+    import backend.services.governance_control_plans as control_plans
+
+    rc.replace(
+        RuntimeConfig(
+            factor_signal_config={
+                "pin_bar": {
+                    "enabled": True,
+                    "lifecycle_status": "ACTIVE",
+                    "role": "alpha",
+                    "source": "builtin",
+                }
+            },
+            factor_portfolio_weights={"pin_bar": 0.1},
+        )
+    )
+    calls: list[dict] = []
+
+    class _FakeLifecycle:
+        def __init__(self, _db_path, adapter=None):
+            self.adapter = adapter
+
+        def quarantine(self, **kwargs):
+            calls.append(dict(kwargs))
+            current = rc.shared().to_dict()
+            current["factor_signal_config"]["pin_bar"].update(
+                {"enabled": False, "lifecycle_status": "QUARANTINED"}
+            )
+            current["factor_portfolio_weights"]["pin_bar"] = 0.0
+            rc.replace(RuntimeConfig.from_dict(current))
+            return {
+                "ok": True,
+                "status": "committed",
+                "lifecycle_stage": "QUARANTINED",
+            }
+
+    monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "dual_record")
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _FakeLifecycle)
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(orchestrator, "_factor_has_pending_effect", lambda _factor_id: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_apply_runtime_patch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("generic mutation must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_audit_action",
+        lambda *_args, **_kwargs: {"status": "applied"},
+    )
+
+    actions = orchestrator._disable_weak_live_alpha(
+        [
+            {
+                "factor_id": "pin_bar",
+                "source": "builtin",
+                "role": "alpha",
+                "eligible_for_live": True,
+                "health_score": 20.0,
+                "health_status": "DECAYING",
+                "factor_governance_shadow": {},
+            }
+        ],
+        {"run_id": "typed_builtin_quarantine"},
+    )
+
+    assert actions == [{"status": "applied"}]
+    assert calls[0]["expression"] == "pin_bar"
+    assert rc.shared().factor_signal_config["pin_bar"]["lifecycle_status"] == "QUARANTINED"
+    assert rc.shared().factor_portfolio_weights["pin_bar"] == 0.0
+
+
+def test_typed_governance_never_revives_terminal_builtin(monkeypatch):
+    import backend.services.governance_control_plans as control_plans
+
+    now = time.time()
+    rc.replace(_runtime_config(now - 8 * 86400))
+    monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "enforce")
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(
+        orchestrator,
+        "_apply_runtime_patch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal lifecycle must not be rewritten")
+        ),
+    )
+
+    actions = orchestrator._restore_quarantined_builtin_alpha(
+        _catalog(now),
+        {"run_id": "terminal_builtin_restore"},
+    )
+
+    assert actions == []
+    assert rc.shared().factor_signal_config["pin_bar"]["enabled"] is False
 
 
 def test_risk_policy_dispatches_factor_restore_and_honors_freeze():
@@ -199,20 +299,40 @@ def test_healthy_builtin_shadow_is_activated_with_governed_initial_weight(monkey
         factor_governance_max_builtin_activations_per_cycle=1,
     ))
 
-    class _FakeWeightChange:
-        def __init__(self, _db_path):
-            pass
+    class _FakeLifecycle:
+        stage = ""
 
-        def execute(self, **kwargs):
+        def __init__(self, _db_path, adapter=None):
+            self.adapter = adapter
+
+        def get_state(self, **_kwargs):
+            return {"lifecycle_stage": self.stage} if self.stage else {}
+
+        def register_shadow(self, **_kwargs):
+            type(self).stage = "SHADOW"
+            return {"ok": True, "status": "committed", "lifecycle_stage": "SHADOW"}
+
+        def prepare_promotion(self, **_kwargs):
+            type(self).stage = "PROMOTION_PREPARED"
+            return {
+                "ok": True,
+                "status": "committed",
+                "lifecycle_stage": "PROMOTION_PREPARED",
+            }
+
+        def activate(self, **kwargs):
+            type(self).stage = "ACTIVE"
             current = rc.shared().to_dict()
-            current["factor_signal_config"].update(
-                kwargs["additional_patch"]["factor_signal_config"]
+            current["factor_signal_config"]["htf_trend_alignment"].update(
+                {"enabled": True, "lifecycle_status": "ACTIVE"}
             )
-            current["factor_portfolio_weights"].update(kwargs["weight_policy_weights"])
+            current["factor_portfolio_weights"]["htf_trend_alignment"] = kwargs[
+                "weight"
+            ]
             rc.replace(RuntimeConfig.from_dict(current))
-            return {"status": "applied", "proposed_weights": kwargs["weight_policy_weights"]}
+            return {"ok": True, "status": "applied", "lifecycle_stage": "ACTIVE"}
 
-    monkeypatch.setattr(governance_module, "FactorWeightChangeService", _FakeWeightChange)
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _FakeLifecycle)
     monkeypatch.setattr(
         FactorGovernanceOrchestrator,
         "_audit_action",
@@ -226,8 +346,7 @@ def test_healthy_builtin_shadow_is_activated_with_governed_initial_weight(monkey
     # unavailable PostgreSQL authority correctly remains fail-closed in
     # production without making the unit test depend on live state.
     monkeypatch.setattr(orchestrator, "_factor_has_pending_effect", lambda _factor_id: False)
-    actions = orchestrator._activate_healthy_builtin_shadow(
-        [{
+    catalog = [{
             "factor_id": "htf_trend_alignment",
             "source": "builtin",
             "role": "alpha",
@@ -237,10 +356,20 @@ def test_healthy_builtin_shadow_is_activated_with_governed_initial_weight(monkey
             "health_status": "HEALTHY",
             "health_n_obs": 1000,
             "factor_governance_shadow": {},
-        }],
-        {"run_id": "builtin_activation_test"},
+        }]
+    first = orchestrator._activate_healthy_builtin_shadow(
+        catalog, {"run_id": "builtin_activation_test_1"}
+    )
+    second = orchestrator._activate_healthy_builtin_shadow(
+        catalog, {"run_id": "builtin_activation_test_2"}
+    )
+    catalog[0]["lifecycle_status"] = "PROMOTION_PREPARED"
+    actions = orchestrator._activate_healthy_builtin_shadow(
+        catalog, {"run_id": "builtin_activation_test_3"}
     )
 
+    assert first[0]["status"] == "shadow_registered"
+    assert second[0]["status"] == "promotion_prepared"
     assert actions == [{
         "factor_id": "htf_trend_alignment", "action": "promote_factor", "status": "applied"
     }]

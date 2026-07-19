@@ -347,7 +347,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         eligible = (
             name in selected
             and enabled
-            and lifecycle_status not in {"DEAD", "SHADOW", "QUARANTINE", "QUARANTINED"}
+            and lifecycle_status == "ACTIVE"
             and source != "shadow"
         )
         used_in_score = bool(eligible and role == "alpha" and explicit_weight and weight > 0)
@@ -357,6 +357,8 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         if not reason:
             if source == "shadow":
                 reason = "shadow_only"
+            elif lifecycle_status == "PROMOTION_PREPARED":
+                reason = "awaiting_projection_and_activation"
             elif lifecycle_status == "DEAD":
                 reason = "lifecycle_dead"
             elif not enabled:

@@ -181,6 +181,60 @@ def test_orchestrator_does_not_promote_shadow_without_evidence():
 
     assert orch._promote_shadow_candidates(catalog, {"run_id": "test-run"}) == []
 
+
+def test_run_cycle_executes_tightening_before_expansion_freeze(monkeypatch):
+    import backend.services.evolution_ledger as evolution_ledger
+
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    catalog = [{"factor_id": "weak", "source": "builtin", "role": "alpha"}]
+    monkeypatch.setattr(
+        evolution_ledger,
+        "start_evolution_run",
+        lambda **_kwargs: {"run_id": "tightening-before-freeze"},
+    )
+    monkeypatch.setattr(evolution_ledger, "finish_evolution_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(governance_module, "build_factor_catalog", lambda: list(catalog))
+    monkeypatch.setattr(
+        governance_module,
+        "persist_factor_catalog_snapshot",
+        lambda *_args, **_kwargs: {"snapshot_id": "snapshot-1"},
+    )
+    monkeypatch.setattr(orch, "_rollback_failed_actions", lambda *_args: [])
+    monkeypatch.setattr(orch, "_rollback_canary_regressions", lambda *_args: [])
+    monkeypatch.setattr(
+        orch,
+        "_downweight_weak_alpha",
+        lambda *_args: [{"action": "downweight", "status": "applied"}],
+    )
+    monkeypatch.setattr(
+        orch,
+        "_disable_weak_live_alpha",
+        lambda *_args: [{"action": "quarantine", "status": "applied"}],
+    )
+    monkeypatch.setattr(
+        orch,
+        "_retire_quarantined_discovered",
+        lambda *_args: [{"action": "retire", "status": "applied"}],
+    )
+    monkeypatch.setattr(orch, "_autonomy_posture", lambda: "frozen")
+    monkeypatch.setattr(
+        orch,
+        "_activate_healthy_builtin_shadow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("expansion must remain frozen")
+        ),
+    )
+
+    result = orch.run_cycle(trigger_source="pytest")
+
+    assert result["status"] == "observation_only"
+    assert [item["action"] for item in result["actions"]] == [
+        "downweight",
+        "quarantine",
+        "retire",
+    ]
+
 def test_orchestrator_requires_active_canary_before_shadow_promotion():
     rc.reset_for_tests()
     orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
