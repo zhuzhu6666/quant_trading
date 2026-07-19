@@ -60,6 +60,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_recent_review_reentry_block",
         "_record_risk_reduction_aux_failure",
         "_restore_session_state_for_day",
+        "_run_position_protection_cycle",
         "_release_entry_protection_pending_latch",
         "_remember_supervisor_reentry_block",
         "_sync_partial_close_session_fact",
@@ -100,6 +101,23 @@ def test_position_supervision_entrypoint_is_dependency_wiring_only():
         isinstance(child, (ast.For, ast.While, ast.Try, ast.With))
         for child in ast.walk(node)
     )
+
+
+def test_position_protection_cycle_domain_does_not_import_live_facade():
+    source = Path(
+        "backend/services/live_position_protection_cycle.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imports = {
+        str(node.module or "")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    }
+
+    assert "backend.services.live_service" not in imports
+    assert "market_order" not in source
+    assert "buy" not in source.lower()
+    assert "sell" not in source.lower()
 
 
 def test_live_loop_entrypoint_owns_and_closes_generation_log_resource():

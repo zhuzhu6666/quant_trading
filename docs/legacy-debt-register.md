@@ -336,9 +336,9 @@
 - 状态: `fixed`
 - 旧理解: AWE trailing 可以作为独立持仓保护执行器直接驱动止损。
 - 当前口径: 它只构造 legacy trailing 保护候选，并由统一持仓保护仲裁处理；不能绕过 `PositionSupervisor`、holding timeout 或 `RiskPolicyService`。
-- 影响面: `backend/services/live_service.py`、`backend/services/live_position_lifecycle.py`、持仓保护 trace、历史 close reason、测试兼容。
-- 收口方式: legacy 计算仅作为 `ProtectionCandidate` 兼容适配器保留，统一由持仓保护仲裁、`PositionSupervisor` 和 `RiskPolicyService` 决定是否执行；它不再拥有独立执行权。历史 close reason 映射继续只用于复盘兼容。
-- 验证方式: `tests/test_live_position_lifecycle.py` 覆盖候选生成，`tests/test_live_service_lifecycle.py::test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown` 覆盖统一仲裁边界。
+- 影响面: `backend/services/live_position_protection_cycle.py`、`backend/services/live_position_lifecycle.py`、持仓保护 trace、历史 close reason、测试兼容。
+- 收口方式: legacy 计算仅作为 `ProtectionCandidate` 兼容适配器保留，统一由独立 protection cycle 按 timeout、entry repair、supervisor、trailing 固定优先级仲裁，再由 `PositionSupervisor` 和 `RiskPolicyService` 决定是否执行；它不再拥有独立执行权。历史 close reason 映射继续只用于复盘兼容。
+- 验证方式: `tests/test_live_position_lifecycle.py` 覆盖候选生成，`tests/test_live_position_protection_cycle.py` 覆盖跨 stage 优先级与单仓 mutation authority，`tests/test_live_service_lifecycle.py::test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown` 覆盖执行边界。
 
 ### legacy parameter sweep
 
@@ -608,7 +608,7 @@
 - 旧理解: 为复用进程内 globals，可以继续把 explicit reconcile、safety cycle、startup barrier 和 emergency 状态机直接写进 `live_service.py`。
 - 当前口径: `backend.services.live_reconciliation` 只负责 fresh broker contract，`backend.services.live_loop_v2` 负责 safety/startup 顺序，`backend.services.live_emergency` 负责严格紧急平仓；三者均不依赖 PostgreSQL。`live_service` 仅保留兼容状态发布、process wiring 和 callback 注入。
 - 影响面: live loop façade、broker reconcile、position protection、generation barrier、emergency API；不改变 feature flag 默认值或 broker mutation 串行所有权。
-- 收口方式: 本轮已移出上述新增实现并保留薄兼容入口；session restore 的 deals-first 重建及 `available/degraded_cache/unavailable` 选择现已由 `session_restore.resolve_session_restore()` 纯函数拥有，`live_service` 只采集输入、发布投影、修复 cache 和触发 drawdown。后续继续把其余 execution recovery wiring 和旧 protection 尾部按同一 dependency-injection 边界迁出，稳定发布后再删除旧 globals。
+- 收口方式: 本轮已移出上述新增实现并保留薄兼容入口；session restore 的 deals-first 重建及 `available/degraded_cache/unavailable` 选择由 `session_restore.resolve_session_restore()` 纯函数拥有；旧 protection 的 timeout/entry repair/supervisor/trailing 优先级、stage fault isolation 与实际仲裁已迁入 `live_position_protection_cycle.run_position_protection_cycle()`，`live_service` 只注入 callback。后续继续迁出其余 execution recovery wiring；稳定发布后再删除 legacy compatibility authority 与旧 globals。
 - 验证方式: `tests/test_live_service_facade_boundaries.py`、`tests/test_live_emergency_safety.py`、`tests/test_live_generation_integration.py`、`tests/test_live_service_lifecycle.py`。
 
 ### 治理 mutation 缺少跨账本事务提交权

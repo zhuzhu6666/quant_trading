@@ -151,6 +151,10 @@ from backend.services.live_safety_candidate_execution import (
     SafetyCandidateExecutionRuntime,
     execute_live_safety_candidate as _runtime_execute_safety_candidate,
 )
+from backend.services.live_position_protection_cycle import (
+    PositionProtectionCycleRuntime,
+    run_position_protection_cycle as _runtime_run_position_protection_cycle,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -11184,171 +11188,35 @@ def _run_position_protection_cycle(
     log,
     decision_ts: float | None = None,
 ) -> dict[str, Any]:
-    if not pos or bridge is None or cfg is None:
-        return {"timeout": [], "entry_repair": [], "supervisor": [], "trailing_applied": [], "trailing_superseded": []}
-
-    cycle_ts = float(decision_ts if decision_ts is not None else time.time())
-    stage_errors: list[dict[str, str]] = []
-    selected_candidates: list[SafetyCandidate] = []
-    arbitration: list[dict[str, Any]] = []
-
-    def record_selected(candidate: SafetyCandidate, *, priority: int) -> None:
-        if any(item.fingerprint == candidate.fingerprint for item in selected_candidates):
-            return
-        selected_candidates.append(candidate)
-        arbitration.append({
-            "fingerprint": candidate.fingerprint,
-            "decision": "selected",
-            "priority": int(priority),
-        })
-
-    def record_superseded(candidate: SafetyCandidate, *, priority: int, reason: str) -> None:
-        arbitration.append({
-            "fingerprint": candidate.fingerprint,
-            "decision": "superseded",
-            "priority": int(priority),
-            "reason": str(reason or ""),
-        })
-
-    def record_stage_error(stage: str, exc: Exception, *, position_id: int = 0) -> None:
-        logger.warning(
-            "[live] protection stage %s failed%s: %s",
-            stage,
-            f" for pos {position_id}" if position_id else "",
-            exc,
-        )
-        stage_errors.append({
-            "stage": stage,
-            "position_id": str(int(position_id or 0)),
-            "error": f"{type(exc).__name__}: {exc}",
-        })
-        _record_risk_reduction_aux_failure(
-            "position_protection_stage_failed",
-            position_id=position_id,
-            action=stage,
-            error=exc,
-        )
-
-    trailing_candidates: list[ProtectionCandidate] = []
-    if atr_price > 0:
-        try:
-            trailing_candidates = _update_trailing_stops(
-                bridge,
-                pos,
-                current_price,
-                pipeline,
-                atr_price,
-                tick,
-                log,
-            )
-        except Exception as exc:
-            record_stage_error("trailing_candidate_collection", exc)
-
-    try:
-        timeout_handled = _enforce_holding_timeout(
-            bridge,
-            pos,
-            cfg=cfg,
-            tick=tick,
-            log=log,
-            decision_ts=cycle_ts,
-            candidate_recorder=lambda candidate: record_selected(candidate, priority=10),
-        )
-    except Exception as exc:
-        record_stage_error("holding_timeout", exc)
-        timeout_handled = set()
-    try:
-        entry_repair_candidates = _entry_protection_repair_candidates(
-            pos,
-            current_price=current_price,
-            tick=tick,
-            decision_ts=cycle_ts,
-        )
-    except Exception as exc:
-        record_stage_error("entry_protection_candidate_collection", exc)
-        entry_repair_candidates = []
-    entry_repair_applied: set[int] = set()
-    for candidate in sorted(entry_repair_candidates, key=lambda item: item.priority):
-        if candidate.position_id in timeout_handled:
-            _log_protection_candidate_superseded(candidate, cfg=cfg, tick=tick, reason="holding_timeout", acct=acct)
-            record_superseded(
-                protection_candidate_to_safety(candidate),
-                priority=20,
-                reason="holding_timeout",
-            )
-            continue
-        try:
-            if _execute_trailing_candidate(candidate, bridge=bridge, cfg=cfg, tick=tick, log=log, acct=acct):
-                entry_repair_applied.add(candidate.position_id)
-                record_selected(protection_candidate_to_safety(candidate), priority=20)
-        except Exception as exc:
-            record_stage_error(
-                "entry_protection_execution",
-                exc,
-                position_id=int(candidate.position_id or 0),
-            )
-
-    try:
-        supervisor_handled = _run_position_supervision(
-            bridge,
-            pos,
-            cfg=cfg,
-            acct=acct,
-            tick=tick,
-            log=log,
-            skip_position_ids=set(timeout_handled) | set(entry_repair_applied),
-            decision_ts=cycle_ts,
-            candidate_recorder=lambda candidate: record_selected(candidate, priority=30),
-            record_partial_close_execution=(
-                getattr(pipeline.get("attribution"), "record_partial_close", None)
-            ),
-        )
-    except Exception as exc:
-        record_stage_error("position_supervisor", exc)
-        supervisor_handled = set()
-    protected_pids = set(timeout_handled) | set(entry_repair_applied) | set(supervisor_handled)
-    trailing_applied: set[int] = set()
-    trailing_superseded: set[int] = set()
-    for candidate in sorted(trailing_candidates, key=lambda item: item.priority):
-        supersede_reason = _lifecycle_protection_candidate_supersede_reason(
-            position_id=candidate.position_id,
-            timeout_handled=set(timeout_handled),
-            protected_position_ids=protected_pids,
-        )
-        if supersede_reason:
-            trailing_superseded.add(candidate.position_id)
-            _log_protection_candidate_superseded(candidate, cfg=cfg, tick=tick, reason=supersede_reason, acct=acct)
-            record_superseded(
-                protection_candidate_to_safety(candidate),
-                priority=50,
-                reason=supersede_reason,
-            )
-            continue
-        try:
-            if _execute_trailing_candidate(candidate, bridge=bridge, cfg=cfg, tick=tick, log=log, acct=acct):
-                trailing_applied.add(candidate.position_id)
-                protected_pids.add(candidate.position_id)
-                record_selected(protection_candidate_to_safety(candidate), priority=50)
-        except Exception as exc:
-            record_stage_error(
-                "trailing_execution",
-                exc,
-                position_id=int(candidate.position_id or 0),
-            )
-
-    result = _lifecycle_build_position_protection_cycle_result(
-        timeout_handled=set(timeout_handled),
-        entry_repair_applied=entry_repair_applied,
-        supervisor_handled=set(supervisor_handled),
-        trailing_applied=trailing_applied,
-        trailing_superseded=trailing_superseded,
+    runtime = PositionProtectionCycleRuntime(
+        update_trailing_stops=_update_trailing_stops,
+        enforce_holding_timeout=_enforce_holding_timeout,
+        entry_protection_repair_candidates=_entry_protection_repair_candidates,
+        log_candidate_superseded=_log_protection_candidate_superseded,
+        execute_candidate=_execute_trailing_candidate,
+        run_position_supervision=_run_position_supervision,
+        protection_candidate_to_safety=protection_candidate_to_safety,
+        candidate_supersede_reason=(
+            _lifecycle_protection_candidate_supersede_reason
+        ),
+        build_cycle_result=_lifecycle_build_position_protection_cycle_result,
+        record_aux_failure=_record_risk_reduction_aux_failure,
+        warning=logger.warning,
+        now=time.time,
     )
-    if stage_errors:
-        result["stage_errors"] = stage_errors
-    selected_candidates.sort(key=lambda item: (item.position_id, item.action, item.fingerprint))
-    result["safety_candidates"] = [asdict(item) for item in selected_candidates]
-    result["safety_arbitration"] = arbitration
-    return result
+    return _runtime_run_position_protection_cycle(
+        bridge,
+        pos,
+        cfg=cfg,
+        account=acct,
+        pipeline=pipeline,
+        current_price=current_price,
+        atr_price=atr_price,
+        tick=tick,
+        log=log,
+        runtime=runtime,
+        decision_ts=decision_ts,
+    )
 
 
 def _write_live_trade_log_factor(

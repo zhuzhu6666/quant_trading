@@ -143,6 +143,12 @@ release preflight 已验证该记录，当前 Safety target 仍只剩 24 小时/
 `c97665262e54b3f3fa32cd643012789e81fe8afd00aa18afe6e4e59963d74b9d`。旧 record
 继续保留为历史审计，release gate 只接受 append-only ledger 的最新记录。
 
+18:11 CST 将 legacy protection cycle 从 `live_service` 迁入独立领域模块后，Safety
+binding 再次按设计失效；12 类、28 个固定用例重新运行全部通过，最新 binding hash
+为 `fb5f1dabfa4f68b6e02ed7b9808245899c4a600e3176bfbf74f6d29f26961927`。
+全量 pytest 同时证明 Learning Worker capability 仍由 systemd PID `3069652` 发布，
+未再出现测试进程覆盖生产 runtime fact。
+
 后续阶段不再仅凭 CLI 新进程解析配置判断 predecessor 已运行。backend readiness
 将持久化实际 process-loaded static flags、fingerprint、PID 与启动时间；从
 `generation_enable` 起若配置已改但 backend 尚未重启，preflight 会以
