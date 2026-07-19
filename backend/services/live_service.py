@@ -89,6 +89,11 @@ from backend.services.live_loop_runner import (
     SerialLiveTickRuntime,
     run_serial_live_ticks as _runtime_run_serial_live_ticks,
 )
+from backend.services.live_loop_stop import (
+    LiveLoopStopRuntime,
+    LoopOwnershipSnapshot,
+    stop_live_loop as _runtime_stop_live_loop,
+)
 from backend.services.live_loop_tick_runtime import (
     LegacyLiveLoopTickRuntime,
     LiveLoopTickRuntime,
@@ -6072,233 +6077,70 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
     return result
 
 
+def _loop_ownership_snapshot() -> LoopOwnershipSnapshot:
+    return LoopOwnershipSnapshot(
+        thread=_loop_thread,
+        stop_flag=_loop_stop_flag,
+        broker=_loop_broker,
+        started_at=_loop_started_at,
+        strategy_name=_loop_strategy_name,
+    )
+
+
+def _clear_loop_ownership_if(thread, finished_at: float) -> bool:
+    global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
+    global _loop_strategy_name, _last_loop_end
+
+    if _loop_thread is not thread:
+        return False
+    _loop_thread = None
+    _loop_stop_flag = None
+    _loop_broker = None
+    _loop_started_at = None
+    _loop_strategy_name = None
+    _last_loop_end = float(finished_at)
+    _mark_loop_stopped_for_display()
+    return True
+
+
+def _ensure_loop_stop_event():
+    global _loop_stop_flag
+
+    if _loop_stop_flag is None:
+        _loop_stop_flag = threading.Event()
+    return _loop_stop_flag
+
+
+def _live_loop_stop_runtime() -> LiveLoopStopRuntime:
+    return LiveLoopStopRuntime(
+        generation_controller_enabled=_generation_controller_enabled,
+        state_lock=_loop_state_lock,
+        snapshot_ownership=_loop_ownership_snapshot,
+        clear_ownership_if=_clear_loop_ownership_if,
+        ensure_stop_event=_ensure_loop_stop_event,
+        controller=_LIVE_LOOP_CONTROLLER,
+        admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
+        live_state_update=_live_state_update,
+        persist_desired_state=_persist_loop_desired_state,
+        runtime_kv_set=_runtime_kv_set,
+        last_shutdown_key=_RUNTIME_KV_LAST_SHUTDOWN,
+        now=time.time,
+        thread_factory=threading.Thread,
+        persist_safety_fail_closed=_persist_safety_fail_closed,
+        logger_info=logger.info,
+    )
+
+
 def stop_loop(
     *,
     persist_desired: bool = True,
     trigger_reason: str = "manual",
 ) -> dict:
-    """Signal the loop thread to stop. Returns immediately;
-    blocking cleanup (thread join + scheduler shutdown) runs in background.
-    audit v9: 停止后保留最后数据不变 (account/positions/session 冻结), 前端持续显示.
-
-    Thread ownership is retained until the owned thread has actually exited.
-    This applies even while generation v2 is disabled: a draining legacy loop
-    must never overlap a replacement loop or a second factor pipeline.
-    """
-    global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
-    global _loop_strategy_name, _last_loop_end
-
-    if _generation_controller_enabled():
-        with _loop_state_lock:
-            thread = _loop_thread
-            broker = _loop_broker
-            strategy_name = _loop_strategy_name or "factor_v4"
-            generation = _LIVE_LOOP_CONTROLLER.current()
-            if thread is None or not thread.is_alive() or generation is None:
-                if persist_desired:
-                    _persist_loop_desired_state(
-                        False,
-                        broker=broker or "ctrader",
-                        strategy_name=strategy_name,
-                        reason=trigger_reason,
-                    )
-                return {
-                    "ok": True,
-                    "was_running": False,
-                    "broker": broker,
-                    **_LIVE_LOOP_CONTROLLER.status(),
-                    "msg": "no loop running",
-                }
-            _LIVE_LOOP_CONTROLLER.request_stop(generation.generation_id)
-            with _OPEN_TRADE_ADMISSION_LOCK:
-                _live_state_update(accepting_new_risk=False)
-            if persist_desired:
-                _persist_loop_desired_state(
-                    False,
-                    broker=broker or "ctrader",
-                    strategy_name=strategy_name,
-                    reason=trigger_reason,
-                )
-            _runtime_kv_set(
-                _RUNTIME_KV_LAST_SHUTDOWN,
-                {
-                    "broker": broker,
-                    "generation": generation.generation_id,
-                    "status": "draining",
-                    "ts": time.time(),
-                    "trigger_reason": trigger_reason,
-                },
-            )
-
-        def _cleanup_generation() -> None:
-            global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
-            global _loop_strategy_name, _last_loop_end
-            # Ownership is intentionally retained for the entire join.  A new
-            # start observes phase=draining even if this tick takes longer than
-            # the old five-second cleanup timeout.
-            thread.join()
-            with _loop_state_lock:
-                if _loop_thread is thread:
-                    _loop_thread = None
-                    _loop_stop_flag = None
-                    _loop_broker = None
-                    _loop_started_at = None
-                    _loop_strategy_name = None
-                    _last_loop_end = time.time()
-                    _mark_loop_stopped_for_display()
-            logger.info(
-                "[live] generation %s fully stopped; ownership released",
-                generation.generation_id,
-            )
-
-        threading.Thread(
-            target=_cleanup_generation,
-            name=f"stop_loop_cleanup_{generation.generation_id[:8]}",
-            daemon=True,
-        ).start()
-        return {
-            "ok": True,
-            "was_running": True,
-            "broker": broker,
-            "trigger_reason": trigger_reason,
-            **_LIVE_LOOP_CONTROLLER.status(),
-        }
-
-    requested_at = time.time()
-    with _loop_state_lock:
-        thread = _loop_thread
-        broker = _loop_broker
-        strategy_name = _loop_strategy_name or "factor_v4"
-        if thread is None or not thread.is_alive():
-            if _loop_thread is thread:
-                _loop_thread = None
-                _loop_stop_flag = None
-                _loop_broker = None
-                _loop_started_at = None
-                _loop_strategy_name = None
-                _last_loop_end = requested_at
-                _mark_loop_stopped_for_display()
-            was_running = False
-            draining = None
-        else:
-            # Publish the stop request before waiting for the admission lock.
-            # An open RPC already holding that lock is allowed to finish; any
-            # later contender observes this event and is rejected even if it
-            # wins the lock before this stop caller does.
-            if _loop_stop_flag is None:
-                _loop_stop_flag = threading.Event()
-            _loop_stop_flag.set()
-            draining = {
-                "schema_version": "live_loop_shutdown.v2",
-                "status": "draining",
-                "phase": "draining",
-                "ok": True,
-                "was_running": True,
-                "broker": broker,
-                "strategy_name": strategy_name,
-                "thread_id": getattr(thread, "ident", None),
-                "thread_alive": True,
-                "ready": False,
-                "accepting_new_risk": False,
-                "ownership_released": False,
-                "requested_at": requested_at,
-                "trigger_reason": trigger_reason,
-            }
-            _live_state_update(
-                loop_shutdown=draining,
-                accepting_new_risk=False,
-            )
-            was_running = True
-
-    if was_running:
-        # Linearize draining against the final open-order admission check and
-        # broker RPC.  The endpoint may wait for one already-admitted RPC, but
-        # it never releases loop ownership while that RPC/tick is still alive.
-        with _OPEN_TRADE_ADMISSION_LOCK:
-            _live_state_update(
-                loop_shutdown=draining,
-                accepting_new_risk=False,
-            )
-
-    if persist_desired:
-        try:
-            _persist_loop_desired_state(
-                False,
-                broker=broker or "ctrader",
-                strategy_name=strategy_name,
-                reason=trigger_reason,
-            )
-        except Exception as exc:
-            # Local ownership/admission safety is already active.  Persistence
-            # failure must not prevent the loop from draining; latch restart
-            # admission until an operator can repair the desired-state store.
-            _persist_safety_fail_closed(
-                blockers=["loop_desired_state_persist_failed"],
-                source="legacy_loop_stop",
-                error=f"{type(exc).__name__}: {exc}",
-            )
-
-    if not was_running:
-        return {
-            "ok": True,
-            "was_running": False,
-            "broker": broker,
-            "phase": "stopped",
-            "thread_alive": False,
-            "ready": False,
-            "accepting_new_risk": False,
-            "msg": "no loop running",
-        }
-
-    _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, draining)
-
-    # The production target's ``_run_loop`` finally block stops generation
-    # components before the thread exits.  Cleanup therefore only joins and
-    # conditionally releases the exact ownership it captured.
-    def _cleanup_legacy() -> None:
-        global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
-        global _loop_strategy_name, _last_loop_end
-
-        thread.join()
-        finished_at = time.time()
-        with _loop_state_lock:
-            ownership_released = _loop_thread is thread
-            if ownership_released:
-                _loop_thread = None
-                _loop_stop_flag = None
-                _loop_broker = None
-                _loop_started_at = None
-                _loop_strategy_name = None
-                _last_loop_end = finished_at
-                _mark_loop_stopped_for_display()
-
-        completed = {
-            **draining,
-            "status": "completed",
-            "phase": "stopped",
-            "thread_alive": False,
-            "ownership_released": ownership_released,
-            "replacement_detected": not ownership_released,
-            "finished_at": finished_at,
-        }
-        if ownership_released:
-            _live_state_update(
-                loop_shutdown=completed,
-                accepting_new_risk=False,
-            )
-        _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, completed)
-        logger.info(
-            "[live] legacy loop fully stopped; ownership_released=%s",
-            ownership_released,
-        )
-
-    threading.Thread(
-        target=_cleanup_legacy,
-        name="stop_loop_cleanup_legacy",
-        daemon=True,
-    ).start()
-    logger.info("[live] legacy stop signaled; ownership retained while draining")
-    return dict(draining)
+    return _runtime_stop_live_loop(
+        persist_desired=persist_desired,
+        trigger_reason=trigger_reason,
+        runtime=_live_loop_stop_runtime(),
+    )
 
 
 def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bars: int = 200) -> "pd.DataFrame | None":
