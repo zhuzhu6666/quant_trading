@@ -210,3 +210,95 @@ def test_runtime_refresh_latches_and_keeps_legacy_overlay_read_only(
         runtime_config.shared_holder().get().position_supervisor_template_id
         == "position_supervisor:profit_protection.v1"
     )
+
+
+def test_runtime_refresh_retries_transient_projection_and_releases_exact_cause(
+    tmp_path, monkeypatch
+):
+    from backend.services import live_safety_state
+
+    _set_mode(monkeypatch, "dual_record")
+    db_path = tmp_path / "state.db"
+    base = RuntimeConfig()
+    runtime_config.register_overlay_base(base, db_path)
+    committed = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={"governance_expansion_paused": True},
+            source="operator_pause",
+            actor="operator:test",
+            action="pause_governance_expansion",
+            control_surface="operator_governance_pause",
+            scope_type="operator_governance_pause",
+            scope_key="global",
+            run_id="transient_projection_test",
+        )
+    )
+    assert committed["ok"] is True, committed
+    mutation_id = committed["mutation_id"]
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE governance_mutation_intent SET projection_status='pending' "
+            "WHERE mutation_id=?",
+            (mutation_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    activated = []
+    released = []
+    latch = {
+        "active": True,
+        "causes": [
+            {
+                "cause": "governance_authority",
+                "cause_id": "runtime_config_overlay_refresh",
+            },
+            {"cause": "incident", "cause_id": "operator_freeze"},
+        ],
+    }
+    monkeypatch.setattr(
+        live_safety_state,
+        "activate_no_new_risk_latch",
+        lambda **kwargs: activated.append(kwargs) or latch,
+    )
+    monkeypatch.setattr(
+        live_safety_state,
+        "no_new_risk_latch_status",
+        lambda **_kwargs: latch,
+    )
+
+    def _release(**kwargs):
+        released.append(kwargs)
+        return {
+            "active": True,
+            "causes": [{"cause": "incident", "cause_id": "operator_freeze"}],
+        }
+
+    monkeypatch.setattr(
+        live_safety_state,
+        "release_no_new_risk_latch_cause",
+        _release,
+    )
+
+    assert runtime_config.refresh_from_overlay(db_path, force=True) is True
+    assert activated
+    assert released == []
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE governance_mutation_intent SET projection_status='current' "
+            "WHERE mutation_id=?",
+            (mutation_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert runtime_config.refresh_from_overlay(db_path, force=True) is True
+    assert released[0]["cause"] == "governance_authority"
+    assert released[0]["cause_id"] == "runtime_config_overlay_refresh"
+    assert released[0]["reason"] == "runtime_overlay_authority_recovered"
+    assert runtime_config.shared_holder().get().governance_expansion_paused is True

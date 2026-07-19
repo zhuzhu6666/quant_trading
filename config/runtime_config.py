@@ -717,6 +717,51 @@ def config_from_overlay(
     return RuntimeConfig.from_dict(merged)
 
 
+def _release_recovered_overlay_authority_latch(
+    restored: Dict[str, Any],
+) -> bool:
+    """Release only the refresh-owned cause after authority is current again."""
+
+    try:
+        from backend.services.live_safety_state import (
+            no_new_risk_latch_status,
+            release_no_new_risk_latch_cause,
+        )
+
+        cause = ("governance_authority", "runtime_config_overlay_refresh")
+        status = no_new_risk_latch_status(fail_closed=True)
+        active = {
+            (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+            for item in list(status.get("causes") or [])
+            if isinstance(item, dict)
+        }
+        if cause not in active:
+            return True
+        released = release_no_new_risk_latch_cause(
+            cause=cause[0],
+            cause_id=cause[1],
+            reason="runtime_overlay_authority_recovered",
+            actor="system:runtime_config_refresh",
+            evidence={
+                "overlay_hash": str(restored.get("overlay_hash") or ""),
+                "mutation_id": str(restored.get("mutation_id") or ""),
+                "authority": dict(restored.get("authority") or {}),
+            },
+        )
+        remaining = {
+            (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+            for item in list(released.get("causes") or [])
+            if isinstance(item, dict)
+        }
+        return cause not in remaining
+    except Exception:
+        logger.error(
+            "RuntimeConfig overlay authority recovery latch release failed",
+            exc_info=True,
+        )
+        return False
+
+
 def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = False) -> bool:
     """Refresh the in-process RuntimeConfig from the persisted DB overlay.
 
@@ -759,7 +804,8 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
         base = RuntimeConfig.from_dict(overlay_base_config(effective_db_path))
         restored = service.restore_on_startup(base)
         shared_holder().replace(restored["config"])
-        _overlay_last_hash_by_db[db_key] = overlay_hash
+        if _release_recovered_overlay_authority_latch(restored):
+            _overlay_last_hash_by_db[db_key] = overlay_hash
         return True
     except Exception as exc:  # noqa: BLE001
         try:
@@ -798,11 +844,9 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
         quarantined_config = getattr(exc, "quarantined_config", None)
         if isinstance(quarantined_config, RuntimeConfig):
             shared_holder().replace(quarantined_config)
-            if "db_key" in locals() and "overlay_hash" in locals():
-                _overlay_last_hash_by_db[db_key] = overlay_hash
             logger.warning(
                 "RuntimeConfig overlay retained as read-only quarantine; "
-                "new risk remains latched"
+                "new risk remains latched and authority will be retried"
             )
             return True
         logger.debug("RuntimeConfig overlay refresh skipped", exc_info=True)
