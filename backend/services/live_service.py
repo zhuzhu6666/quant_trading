@@ -213,6 +213,10 @@ from backend.services.live_supervision_runtime import (
 from backend.services.live_factor_wiring import (
     merge_portfolio_configs as _merge_portfolio_configs,
 )
+from backend.services.live_factor_bootstrap import (
+    FactorWarmupRuntime,
+    warmup_factor_pipeline as _bootstrap_warmup_factor_pipeline,
+)
 from backend.services.live_tick_pipeline import (
     build_factor_bar as _tick_build_factor_bar,
     build_factor_snapshot_summary as _tick_build_factor_snapshot_summary,
@@ -7788,6 +7792,17 @@ def _bar_warmup_runtime() -> BarWarmupRuntime:
     )
 
 
+def _factor_warmup_runtime() -> FactorWarmupRuntime:
+    return FactorWarmupRuntime(
+        build_warmup_feed=_loop_build_warmup_feed,
+        build_factor_votes=_tick_build_factor_votes,
+        build_snapshot_summary=_tick_build_factor_snapshot_summary,
+        set_factor_snapshot=_set_factor_snapshot,
+        acknowledge_projections=_loop_ack_prepared_factor_projections,
+        now=time.time,
+    )
+
+
 def _run_loop_body(
     broker: str,
     stop_flag: threading.Event,
@@ -7989,76 +8004,15 @@ def _run_loop_body(
         log(f"  Traceback: {_tb.format_exc()[-600:]}")
         _factor_pipeline = None
 
-    # 把 warmup bars 喂给
-    if _factor_pipeline is not None:
-        fp = _factor_pipeline
-        try:
-            fp["engine"].reset()
-            snapshots = []
-            min_warmup = int(getattr(fp["engine"], "MIN_BARS", 50) or 50)
-            warmup_limit = int(getattr(_rcfg, "live_factor_warmup_bars", 80) or 80)
-            warmup_feed = _loop_build_warmup_feed(
-                df,
-                timeframe=TF,
-                min_warmup=min_warmup,
-                warmup_limit=warmup_limit,
-            )
-            warmup_df = warmup_feed["warmup_df"]
-            warmup_bars = warmup_feed["warmup_bars"]
-            log(f"Factor pipeline warmup feeding {len(warmup_df)} / {len(df)} bars")
-            if hasattr(fp["engine"], "warmup_bars"):
-                snapshots = fp["engine"].warmup_bars(warmup_bars)
-            else:
-                for bar in warmup_bars:
-                    fv = fp["engine"].append_bar(bar)
-                    if fv:
-                        snapshots.append(fv)
-            if snapshots:
-                fp["normalizer"].warmup(snapshots)
-            # ★ 预热完成后立即跑一次 compose+gate, 生成初始因子投票数据
-            if fp["engine"].is_warm and snapshots:
-                try:
-                    last_fv = snapshots[-1]
-                    fp["last_factor_values"] = dict(last_fv or {})
-                    last_bar = {
-                        "open": float(df["open"].iloc[-1]),
-                        "high": float(df["high"].iloc[-1]),
-                        "low": float(df["low"].iloc[-1]),
-                        "close": float(df["close"].iloc[-1]),
-                        "volume": float(df["volume"].iloc[-1]) if "volume" in df.columns else 0.0,
-                        "time": float(df.index[-1].timestamp()) if hasattr(df.index[-1], "timestamp") else 0.0,
-                        "timeframe": TF,
-                        "complete": True,
-                    }
-                    signals = fp["normalizer"].normalize(last_fv)
-                    composite = fp["compositor"].compose(signals, last_fv)
-                    gate_result = fp["gate"].filter(composite, last_fv, last_bar)
-                    fp["gate"].tick()
-                    _set_factor_snapshot(
-                        _tick_build_factor_votes(
-                            signals,
-                            last_fv,
-                            getattr(composite, "factor_roles", {}),
-                            getattr(composite, "active_weights", {}),
-                        ),
-                        _tick_build_factor_snapshot_summary(composite, gate_result, now=time.time()),
-                    )
-                    dir_name = {1: "LONG", -1: "SHORT"}.get(composite.direction, "FLAT")
-                    log(f"warmup signal: {dir_name} score={composite.score:.4f} "
-                        f"n={composite.n_active_factors} gate={gate_result.reason}")
-                except Exception as e:
-                    log(f"warmup signal generation failed (non-fatal): {e}")
-            log(f"Factor pipeline warmed up: {len(df)} bars, "
-                f"buffer={fp['engine'].buffer_size}, "
-                f"warm={fp['engine'].is_warm}")
-            if fp["engine"].is_warm:
-                _loop_ack_prepared_factor_projections(
-                    engine=fp["engine"],
-                    generation_id=str(generation_id or ""),
-                    log=log,
-                )
-        except Exception as e:
-            log(f"Factor pipeline warmup failed: {e}")
+    _bootstrap_warmup_factor_pipeline(
+        _factor_pipeline,
+        df,
+        cfg=_rcfg,
+        timeframe=TF,
+        generation_id=generation_id,
+        log=log,
+        runtime=_factor_warmup_runtime(),
+    )
 
     # 订阅 cTrader 实时报价；warmup local_db 路径从 _get_ctrader() 拿真 bridge 并短等 ready.
     if broker == "ctrader":
