@@ -88,6 +88,24 @@ def test_position_supervision_entrypoint_is_dependency_wiring_only():
     )
 
 
+def test_live_loop_entrypoint_owns_and_closes_generation_log_resource():
+    tree = ast.parse(LIVE_SERVICE.read_text(encoding="utf-8"))
+    node = _definitions(tree)["_run_loop_body"]
+
+    assert int(node.end_lineno or 0) - int(node.lineno) < 55
+    try_nodes = [
+        child for child in ast.walk(node) if isinstance(child, ast.Try)
+    ]
+    assert len(try_nodes) == 1
+    assert try_nodes[0].finalbody
+    assert any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Attribute)
+        and child.func.attr == "close"
+        for child in ast.walk(try_nodes[0].finalbody[0])
+    )
+
+
 def test_safety_reconciliation_modules_do_not_depend_on_postgres_or_legacy_refresh():
     for relative_path in (
         "backend/services/live_reconciliation.py",

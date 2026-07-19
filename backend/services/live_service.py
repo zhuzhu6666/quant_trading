@@ -7900,24 +7900,53 @@ def _run_loop_body(
     *,
     generation_id: str = "",
 ) -> None:
-    """Live trading loop — 全由 Factor Takeover v4 因子管道驱动。"""
-    global _factor_pipeline
-    _factor_pipeline = None
+    """Own the live-loop log resource around one generation."""
     from pathlib import Path
-    # ── 时间框架 (从 RuntimeConfig 读取) ──
-    from config.runtime_config import shared as _rcc
-    _rcfg = _rcc()
-    TF = _rcfg.timeframe  # "M5"
+    from config.runtime_config import shared as _runtime_config
+
+    cfg = _runtime_config()
+    timeframe = cfg.timeframe
     project_root = Path(__file__).resolve().parent.parent.parent
     log_path = project_root / "logs" / "live_loop.log"
     log_path.parent.mkdir(exist_ok=True)
-    log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
+    log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
 
-    def log(msg: str) -> None:
-        line = f"{time.strftime('%H:%M:%S')} [live_loop:{broker}] {msg}"
-        log_fh.write(line + "\n")
-        log_fh.flush()
+    def log(message: str) -> None:
+        line = (
+            f"{time.strftime('%H:%M:%S')} "
+            f"[live_loop:{broker}] {message}"
+        )
+        log_handle.write(line + "\n")
+        log_handle.flush()
         logger.info(line)
+
+    try:
+        _run_loop_body_active(
+            broker,
+            stop_flag,
+            generation_id=generation_id,
+            runtime_config=cfg,
+            timeframe=timeframe,
+            log=log,
+        )
+    finally:
+        log_handle.close()
+
+
+def _run_loop_body_active(
+    broker: str,
+    stop_flag: threading.Event,
+    *,
+    generation_id: str,
+    runtime_config,
+    timeframe: str,
+    log,
+) -> None:
+    """Run one generation after its resources and config are bound."""
+    global _factor_pipeline
+    _factor_pipeline = None
+    _rcfg = runtime_config
+    TF = timeframe
 
     log(f"live loop started (broker={broker}, timeframe={TF})")
 
