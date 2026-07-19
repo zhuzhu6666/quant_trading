@@ -184,6 +184,11 @@ from backend.services.live_open_submission import (
     finalize_nursery_reservation as _runtime_finalize_nursery_reservation,
     submit_open_trade_candidate as _runtime_submit_open_trade_candidate,
 )
+from backend.services.live_open_protection import (
+    OpenProtectionRequest,
+    OpenProtectionRuntime,
+    attach_open_trade_protection as _runtime_attach_open_trade_protection,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -8798,124 +8803,15 @@ def _attach_open_trade_protection(
     submit_started_at: float | None = None,
     fill_received_at: float | None = None,
 ) -> None:
-    try:
-        amend_res = bridge.amend_position_sltp(
+    _runtime_attach_open_trade_protection(
+        OpenProtectionRequest(
+            bridge=bridge,
+            attr_engine=attr_engine,
+            broker=broker,
+            cfg=cfg,
+            bar=bar,
+            tick=tick,
             position_id=position_id,
-            sl=sl_price,
-            tp=tp_price,
-        )
-        if getattr(amend_res, "success", False):
-            projection = _explicit_position_reconcile(bridge)
-            verification = _verify_position_protection_projection(
-                projection,
-                position_id=position_id,
-                expected_stop_loss=sl_price,
-                expected_take_profit=tp_price,
-                precision=int((getattr(bridge, "_symbol_meta", None) or {}).get("digits", 2) or 2),
-            )
-            if bool(verification.get("ok")):
-                _publish_fresh_position_reconcile(projection, broker=broker)
-                _release_entry_protection_pending_latch(
-                    position_id,
-                    reconcile=projection,
-                    expected_stop_loss=sl_price,
-                    expected_take_profit=tp_price,
-                )
-                _record_amended_open_success_context(
-                    attr_engine=attr_engine,
-                    bridge=bridge,
-                    broker=broker,
-                    cfg=cfg,
-                    bar=bar,
-                    tick=tick,
-                    pid=position_id,
-                    actual_api_volume=actual_api_volume,
-                    requested_volume=requested_volume,
-                    base_requested_volume=base_requested_volume,
-                    fill_price=fill_price,
-                    current_price=current_price,
-                    sl_price=sl_price,
-                    tp_price=tp_price,
-                    sl_dist=sl_dist,
-                    tp_dist=tp_dist,
-                    acct=account,
-                    pos=positions,
-                    composite=composite,
-                    gate_result=gate_result,
-                    risk_verdict=candidate.risk_verdict,
-                    market_session=candidate.market_session,
-                    event_sizing_context=candidate.event_sizing_context,
-                    sizing_trace=candidate.sizing_trace,
-                    entry_protection_plan=entry_protection_plan,
-                    direction_name=candidate.direction_name,
-                    log=log,
-                    submit_started_at=submit_started_at,
-                    fill_received_at=fill_received_at,
-                )
-                return
-
-            projection_reason = str(
-                verification.get("reason") or "position_reconcile_failed"
-            )
-            amend_failure_reason = (
-                f"entry_protection_projection_unverified:{projection_reason}"
-            )
-            _record_risk_reduction_aux_failure(
-                "entry_protection_projection_unverified",
-                position_id=int(position_id),
-                action="amend_position_sltp",
-                error=amend_failure_reason,
-                payload={"verification": verification},
-            )
-            _record_amend_failure_after_fill(
-                attr_engine=attr_engine,
-                bridge=bridge,
-                broker=broker,
-                cfg=cfg,
-                bar=bar,
-                tick=tick,
-                pid=position_id,
-                actual_api_volume=actual_api_volume,
-                requested_volume=requested_volume,
-                base_requested_volume=base_requested_volume,
-                fill_price=fill_price,
-                current_price=current_price,
-                sl_price=sl_price,
-                tp_price=tp_price,
-                acct=account,
-                pos=positions,
-                composite=composite,
-                gate_result=gate_result,
-                risk_verdict=candidate.risk_verdict,
-                market_session=candidate.market_session,
-                event_sizing_context=candidate.event_sizing_context,
-                sizing_trace=candidate.sizing_trace,
-                sl_dist=sl_dist,
-                tp_dist=tp_dist,
-                status_error=amend_failure_reason,
-                ledger_action_reason=amend_failure_reason,
-                ledger_comment=str(getattr(amend_res, "comment", "") or ""),
-                failure_log=(
-                    f"tick {tick}: v4 {candidate.direction_name} AMEND UNVERIFIED "
-                    f"pos={position_id}: {amend_failure_reason}"
-                ),
-                log=log,
-            )
-            return
-
-        amend_failure_reason = str(
-            getattr(amend_res, "comment", "")
-            or getattr(amend_res, "error", "")
-            or "amend_failed"
-        )
-        _record_amend_failure_after_fill(
-            attr_engine=attr_engine,
-            bridge=bridge,
-            broker=broker,
-            cfg=cfg,
-            bar=bar,
-            tick=tick,
-            pid=position_id,
             actual_api_volume=actual_api_volume,
             requested_volume=requested_volume,
             base_requested_volume=base_requested_volume,
@@ -8923,58 +8819,35 @@ def _attach_open_trade_protection(
             current_price=current_price,
             sl_price=sl_price,
             tp_price=tp_price,
-            acct=account,
-            pos=positions,
-            composite=composite,
-            gate_result=gate_result,
-            risk_verdict=candidate.risk_verdict,
-            market_session=candidate.market_session,
-            event_sizing_context=candidate.event_sizing_context,
-            sizing_trace=candidate.sizing_trace,
             sl_dist=sl_dist,
             tp_dist=tp_dist,
-            status_error=amend_failure_reason,
-            ledger_action_reason=str(getattr(amend_res, "comment", "amend_failed") or "amend_failed"),
-            ledger_comment=str(getattr(amend_res, "comment", "") or ""),
-            failure_log=(
-                f"tick {tick}: v4 {candidate.direction_name} AMEND FAILED "
-                f"pos={position_id}: {amend_failure_reason}"
+            account=account,
+            positions=positions,
+            composite=composite,
+            gate_result=gate_result,
+            candidate=candidate,
+            entry_protection_plan=entry_protection_plan,
+            log=log,
+            submit_started_at=submit_started_at,
+            fill_received_at=fill_received_at,
+        ),
+        runtime=OpenProtectionRuntime(
+            amend_position=lambda *, bridge, position_id, sl, tp: (
+                bridge.amend_position_sltp(
+                    position_id=position_id,
+                    sl=sl,
+                    tp=tp,
+                )
             ),
-            log=log,
-        )
-    except Exception as exc:
-        _record_amend_failure_after_fill(
-            attr_engine=attr_engine,
-            bridge=bridge,
-            broker=broker,
-            cfg=cfg,
-            bar=bar,
-            tick=tick,
-            pid=position_id,
-            actual_api_volume=actual_api_volume,
-            requested_volume=requested_volume,
-            base_requested_volume=base_requested_volume,
-            fill_price=fill_price,
-            current_price=current_price,
-            sl_price=sl_price,
-            tp_price=tp_price,
-            acct=account,
-            pos=positions,
-            composite=composite,
-            gate_result=gate_result,
-            risk_verdict=candidate.risk_verdict,
-            market_session=None,
-            event_sizing_context=candidate.event_sizing_context,
-            sizing_trace=candidate.sizing_trace,
-            sl_dist=sl_dist,
-            tp_dist=tp_dist,
-            status_error=f"amend_exception:{type(exc).__name__}:{str(exc)[:220]}",
-            ledger_action_reason=f"amend_exception:{type(exc).__name__}",
-            ledger_error=str(exc)[:300],
-            ledger_debug_message="[live] ledger amend exception event failed for pos %s: %s",
-            failure_log=f"tick {tick}: v4 {candidate.direction_name} amend exception: {exc}",
-            log=log,
-        )
+            reconcile_positions=_explicit_position_reconcile,
+            verify_projection=_verify_position_protection_projection,
+            publish_projection=_publish_fresh_position_reconcile,
+            release_pending_latch=_release_entry_protection_pending_latch,
+            record_success=_record_amended_open_success_context,
+            record_failure=_record_amend_failure_after_fill,
+            record_aux_failure=_record_risk_reduction_aux_failure,
+        ),
+    )
 
 
 def _record_open_trade_order_failure(

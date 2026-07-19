@@ -25,6 +25,7 @@ REQUIRED_SCENARIOS: dict[str, tuple[str, ...]] = {
     ),
     "amend_projection_not_applied": (
         "tests/test_ctrader_execution_outcome.py::test_amend_v2_requires_fresh_sltp_projection_ack",
+        "tests/test_live_open_protection.py::test_amend_success_without_projection_ack_remains_unverified",
     ),
     "restart_duplicate_prevention": (
         "tests/test_ctrader_execution_outcome.py::test_durable_unknown_close_blocks_resend_after_bridge_restart",
@@ -69,6 +70,7 @@ def binding_paths(*, root: Path | None = None) -> tuple[Path, ...]:
         root / "backend/services/broker_execution_intent.py",
         root / "backend/services/live_execution_recovery.py",
         root / "backend/services/live_open_submission.py",
+        root / "backend/services/live_open_protection.py",
         root / "backend/services/live_safety_state.py",
         root / "backend/services/live_service.py",
         root / "backend/services/phased_repair_release_gate.py",

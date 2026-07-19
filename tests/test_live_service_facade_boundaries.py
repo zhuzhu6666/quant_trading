@@ -185,6 +185,25 @@ def test_open_submission_state_machine_lives_outside_facade():
     assert "bridge.market_sell(" not in submission_source
 
 
+def test_open_protection_state_machine_lives_outside_facade():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+    node = _definitions(ast.parse(source))["_attach_open_trade_protection"]
+    protection_source = Path(
+        "backend/services/live_open_protection.py"
+    ).read_text(encoding="utf-8")
+
+    assert not any(
+        isinstance(child, (ast.For, ast.While, ast.If, ast.Try, ast.With))
+        for child in ast.walk(node)
+    )
+    assert "entry_protection_projection_unverified:" not in source
+    assert "entry_protection_projection_unverified:" in protection_source
+    assert "backend.services.live_service" not in protection_source
+    assert ".market_buy(" not in protection_source
+    assert ".market_sell(" not in protection_source
+    assert ".close_position(" not in protection_source
+
+
 def test_session_restore_decision_has_no_runtime_or_facade_dependency():
     source = Path("backend/services/session_restore.py").read_text(encoding="utf-8")
 

@@ -99,7 +99,7 @@ FactBoundary/UI 实现遵循：缺失 `_fact` 按 unknown，stale 保留最后�
 
 首轮 dual-record publish 发现 PostgreSQL schema guard 将换行 `ON CONFLICT ... DO UPDATE` 的 `DO` 误判为 DDL，导致 10 个 committed factor projection 暂时 degraded。classifier 已改为只识别 SQL 绝对起点或分号后的语句边界；受控重启后 backend recovery 报告 `attempted=10/current=10/degraded=0`，后续自治 mutation 也直接进入 current。
 
-Phase 5 façade 收敛继续完成：`live_service.py` 当前为 10,651 行，已将
+Phase 5 façade 收敛继续完成：`live_service.py` 当前为 10,524 行，已将
 supervisor re-entry、risk-reduction safeguards、position path metrics、entry
 protection latch、startup safety/bar warmup、factor initialization/warmup 和
 generation-bound serial tick runner 迁入独立模块。v2 与 legacy safety-first
@@ -110,7 +110,8 @@ active generation body 已无内嵌 tick loop，stale generation 不能执行 fa
 reload。账户刷新源码门禁现检查权威 tick runtime，并继续证明 kickoff 先于本地
 K 线 warmup。recovery position store、recovered-close replay/retirement、emergency
 execution fallback、post-close fail-closed cycle 及 attribution/audit/learning/cleanup
-以及 open submission/draining/post-fill fail-closed 也已迁入独立领域模块。
+以及 open submission/draining/post-fill fail-closed、broker-confirmed SL/TP attach/
+fresh projection ack 也已迁入独立领域模块。
 
 Factor lifecycle 的 builtin 活跃路径也已收敛：native callable 以代码 artifact
 SHA-256 建立 durable identity，SHADOW enrollment、prepare、loaded ack/fresh health、
@@ -198,12 +199,12 @@ Learning worker capability heartbeat 同步新增同构 process-loaded flags 投
 `governance_enforce`、`pg_job_queue_enable` 与后置 `pg_job_queue_verify` 必须同时证明 backend/learning worker
 都已加载 predecessor flags。只重启 backend 不再足以推进治理阶段。
 
-Execution outcome 切换现已增加独立代码绑定故障矩阵：8 类场景、13 个固定用例于
+Execution outcome 切换现已增加独立代码绑定故障矩阵：8 类场景、14 个固定用例于
 2026-07-19 全部通过，并以 `execution_outcome_fault_matrix.v1` append-only/fsync
 attestation 记录。`execution_outcome_enable` 预检现在强制读取该证明并重算
 execution source/test binding；记录缺失、最近失败、内容篡改或相关代码变化都会
 fail-closed。当前 binding hash 为
-`ca13333190e85fea53c0e3e9c998be0ecfd010f8f4210b7fe0fc509b447c7142`；这不改变
+`202d438d7422655b7e64394fa5ac67df59eadf4aeaf7c99a297954bc39f24871`；这不改变
 当前 flag，也不越过 Safety/Generation 的阶段顺序。
 
 19:46 CST 将最终 admission、draining 拒绝、broker RPC 线性化和 confirmed-open
@@ -215,6 +216,18 @@ façade wiring 和 confirmed-open 后 post-fill/reconcile 双故障纳入证明�
 13 用例全部通过，最新 binding 为
 `ca13333190e85fea53c0e3e9c998be0ecfd010f8f4210b7fe0fc509b447c7142`。
 该批不重启服务、不切换 flag、不改变当前 Safety shadow authority。
+
+20:01 CST 将 broker-confirmed open 的 SL/TP amend、fresh projection verification、
+matching latch release 与 unverified failure dispatch 迁入 `live_open_protection`；
+`live_service._attach_open_trade_protection` 仅构造 immutable request 并注入 callbacks。
+Execution Outcome 的 amend-projection 场景同步增加 façade 级固定用例，当前矩阵为
+8 类/14 用例，且 binding 显式覆盖新 authority。实现过程中定向回归之外又逐字段
+核对真实 success callback，发现并修复测试替身未暴露的 `bridge` wiring 缺失；该错误
+若保留只会触发 fail-closed，不会假释放风险。Safety 12 类/28 用例与 Execution
+Outcome 8 类/14 用例随后全部通过，最新 binding 分别为
+`27c96cb0b4658b7934d9ab8d9d2886fce120a8733e66a18b50758aacacd0d472`、
+`202d438d7422655b7e64394fa5ac67df59eadf4aeaf7c99a297954bc39f24871`。
+全量 pytest 为 `2344 passed, 9 skipped`。本批仍不重启服务、不切换 flag。
 
 ## 6. 下一次发布的固定顺序
 
