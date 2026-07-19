@@ -50,6 +50,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_evaluate_position_supervisor_for_position",
         "_evaluate_risk_reduction_policy",
         "_execute_live_safety_candidate",
+        "_handle_closed_positions_after_tick",
         "_load_recovery_row_for_risk_reduction",
         "_load_authoritative_session_deal_facts",
         "_lookup_entry_context_for_risk_reduction",
@@ -132,6 +133,20 @@ def test_recovery_close_replay_and_retirement_live_outside_facade():
     assert "restart_replay_close_deal_unavailable" in recovery_source
     assert "broker_position_missing_close_deal_unavailable" in recovery_source
     assert "backend.services.live_service" not in recovery_source
+
+
+def test_closed_position_cycle_lives_outside_facade_and_has_no_order_surface():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+    cycle_source = Path(
+        "backend/services/live_closed_position_cycle.py"
+    ).read_text(encoding="utf-8")
+
+    assert "post_close_session_projection_unavailable" not in source
+    assert "post_close_session_projection_unavailable" in cycle_source
+    assert "backend.services.live_service" not in cycle_source
+    assert ".market_buy(" not in cycle_source
+    assert ".market_sell(" not in cycle_source
+    assert ".close_position(" not in cycle_source
 
 
 def test_session_restore_decision_has_no_runtime_or_facade_dependency():

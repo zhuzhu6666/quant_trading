@@ -99,7 +99,7 @@ FactBoundary/UI 实现遵循：缺失 `_fact` 按 unknown，stale 保留最后�
 
 首轮 dual-record publish 发现 PostgreSQL schema guard 将换行 `ON CONFLICT ... DO UPDATE` 的 `DO` 误判为 DDL，导致 10 个 committed factor projection 暂时 degraded。classifier 已改为只识别 SQL 绝对起点或分号后的语句边界；受控重启后 backend recovery 报告 `attempted=10/current=10/degraded=0`，后续自治 mutation 也直接进入 current。
 
-Phase 5 façade 收敛继续完成：`live_service.py` 当前为 11,452 行，已将
+Phase 5 façade 收敛继续完成：`live_service.py` 当前为 10,779 行，已将
 supervisor re-entry、risk-reduction safeguards、position path metrics、entry
 protection latch、startup safety/bar warmup、factor initialization/warmup 和
 generation-bound serial tick runner 迁入独立模块。v2 与 legacy safety-first
@@ -108,7 +108,8 @@ generation ownership 也已从 façade 抽离；dispatcher 模块没有任何 en
 surface。`_run_loop_body` 仅拥有 generation 日志资源并通过 `try/finally` 关闭；
 active generation body 已无内嵌 tick loop，stale generation 不能执行 factor hot
 reload。账户刷新源码门禁现检查权威 tick runtime，并继续证明 kickoff 先于本地
-K 线 warmup。
+K 线 warmup。recovery position store、recovered-close replay/retirement、emergency
+execution fallback 与 post-close attribution/session rebuild 也已迁入独立领域模块。
 
 Factor lifecycle 的 builtin 活跃路径也已收敛：native callable 以代码 artifact
 SHA-256 建立 durable identity，SHADOW enrollment、prepare、loaded ack/fresh health、
@@ -169,6 +170,14 @@ binding 再次按设计失效；12 类、28 个固定用例重新运行全部通
 Execution Outcome 7 类/11 用例仍以当前 binding
 `f7fc296090503c760054fe1976ac618226114d70add4d57125fb52352f1c8f7f` 通过。
 该迁移不触发 broker RPC，不重启服务，不改变 shadow authority。
+
+19:14 CST 将 close 后 attribution/recovery/session fail-closed 编排迁入
+`live_closed_position_cycle` 后，全量 pytest 为 `2329 passed, 9 skipped`；
+Safety 12 类/28 用例以当前源码重跑通过，最新 binding hash 为
+`a8de9e6f110e4e2aa205fcc7749bda8e3c00bbf3c6366ef3a37ae9cca6269016`。
+Execution Outcome 7 类/11 用例仍以
+`f7fc296090503c760054fe1976ac618226114d70add4d57125fb52352f1c8f7f` 通过。
+新模块没有 broker order/close surface，本批未部署、未重启、未切换 flag。
 
 后续阶段不再仅凭 CLI 新进程解析配置判断 predecessor 已运行。backend readiness
 将持久化实际 process-loaded static flags、fingerprint、PID 与启动时间；从

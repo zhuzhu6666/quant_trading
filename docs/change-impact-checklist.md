@@ -123,6 +123,7 @@
 | protection cycle ownership | timeout、entry repair、supervisor、trailing 是否由 `live_position_protection_cycle` 按固定优先级仲裁；同 position 低优先级 candidate 是否 supersede；单 stage 异常是否记录辅助失败但继续其他风险缩减；`live_service` 是否只做 callback wiring 且不重新嵌入循环/异常分支 |
 | recovery position store | `recovery_position_state` 的 INSERT/UPDATE 是否只存在于 `live_recovery_position_store`；facade wrapper 是否只注入 connection/SQL/payload primitive；零 broker volume 是否保留既有正 volume；full context 是否不可降级；缺 PG volume 的 local fallback 是否只会延迟 resolution；mark-closed 是否保留并合并 recovery meta |
 | recovery close replay | recovery projection 是否在 durable deal cursor release 之前 commit；projection 失败是否保留 cursor；broker-missing retirement 是否要求 fresh absence 与完整权威 close deal；deal/PG 失败是否只 defer 而不伪造 close；recovery row 是否经 store 读取 |
+| post-close cycle | 权威 close deal 确认后是否在任何 attribution/audit 前先将 session 置 unavailable；辅助失败是否仍同 tick 执行 account reconcile 与 deals-first session rebuild；是否只在 recovery projection + session restore 都成功后释放 deal cursor；其余是否 durable defer 且保持 no-new-risk |
 | execution intent | market RPC 前是否 committed prepared/submitting；timeout、延迟回执、未知 protobuf、差分不唯一或 finalize 失败是否进入 unknown + durable no-new-risk、禁止重发；是否已删除同方向最大 PID / `positions_before[0]` 猜测 |
 | emergency execution recovery | bridge recovery contract 是否优先于本地 ledger；outcome v2 开启时缺 contract 是否始终 unknown；本地 fsync ledger 读取失败是否保持 `unresolved_count=null` 而不是假空；该决策是否只存在于 `live_execution_recovery` 而 façade 仅 wiring |
 | emergency reconcile | 是否先落盘 no-new-risk latch、等待 open admission、只接受 fresh pre/post reconcile，并仅按 position ID 消失确认成功 |

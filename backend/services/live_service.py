@@ -167,6 +167,10 @@ from backend.services.live_recovery_close import (
     replay_recovered_close as _runtime_replay_recovered_close,
     retire_broker_missing_position as _runtime_retire_missing_position,
 )
+from backend.services.live_closed_position_cycle import (
+    ClosedPositionCycleRuntime,
+    handle_closed_positions_after_tick as _runtime_handle_closed_positions,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -7754,243 +7758,41 @@ def _handle_closed_positions_after_tick(
     bridge: Any | None = None,
     close_deal_cursors: dict[int, dict[str, Any]] | None = None,
 ) -> None:
-    confirmed_close_ids: set[int] = set()
-    recovery_projected_ids: set[int] = set()
-    for cpid in closed_pids:
-        real_pnl = real_pnls.get(cpid)
-        try:
-            if not _authoritative_close_pnl(real_pnl):
-                cursor = dict((close_deal_cursors or {}).get(int(cpid)) or {})
-                _defer_close_until_authoritative_deal(
-                    int(cpid),
-                    broker=broker,
-                    tick=tick,
-                    recovery_evidence=(
-                        {
-                            "pending_kind": "final_close",
-                            **cursor,
-                        }
-                        if cursor
-                        else None
-                    ),
-                )
-                log(
-                    f"tick {tick}: close pos={cpid} deferred until authoritative "
-                    "cTrader close deal is available"
-                )
-                continue
-            confirmed_close_ids.add(int(cpid))
-            # The prior risk projection no longer includes all realized broker
-            # facts.  Block admission before any auxiliary attribution/audit
-            # work that may fail; the deterministic rebuild below is the only
-            # path back to ``available``.
-            _live_state_update(
-                session_state_status="unavailable",
-                session_state_source="post_close_projection_pending",
-                session_risk_blockers=[
-                    f"post_close_projection_pending:{pid}"
-                    for pid in sorted(confirmed_close_ids)
-                ],
-                session_observed_at=0.0,
-                accepting_new_risk=False,
-            )
-            close_payload = _collect_closed_position_attribution(
-                cpid=int(cpid),
-                real_pnl=real_pnl,
-                attr_engine=attr_engine,
-                current_price=current_price,
-                tick=tick,
-                log=log,
-            )
-            total_pnl = float(close_payload["total_pnl"])
-            close_ts = float(close_payload["close_ts"])
-            close_reason = str(close_payload["close_reason"])
-            close_source = close_payload["close_source"]
-            close_verdict = close_payload["close_verdict"]
-            attribution_integrity = str(close_payload["attribution_integrity"])
-            factor_contributions = close_payload["factor_contributions"]
-            _write_close_decision_log_after_tick(
-                cpid=int(cpid),
-                bar=bar,
-                total_pnl=total_pnl,
-                current_price=current_price,
-                tick=tick,
-            )
-            context_integrity = _lookup_recovery_context_integrity(int(cpid), _RECOVERY_CONTEXT_FULL)
-            exit_decision_id, context_integrity = _log_closed_position_ledger_after_tick(
-                cpid=int(cpid),
-                broker=broker,
-                close_ts=close_ts,
-                current_price=current_price,
-                real_pnl=real_pnl,
-                close_reason=close_reason,
-                context_integrity=context_integrity,
-                cfg=cfg,
-                bar=bar,
-                acct=acct,
-                total_pnl=total_pnl,
-                tick=tick,
-                close_source=close_source,
-                attribution_integrity=attribution_integrity,
-                close_verdict=close_verdict,
-                factor_contributions=factor_contributions,
-            )
-            _run_closed_position_learning_after_tick(
-                cpid=int(cpid),
-                total_pnl=total_pnl,
-                current_price=current_price,
-                close_ts=close_ts,
-                factor_contributions=factor_contributions,
-                exit_decision_id=exit_decision_id,
-                real_pnl=real_pnl,
-                close_reason=close_reason,
-                context_integrity=context_integrity,
-                attribution_integrity=attribution_integrity,
-                close_source=close_source,
-            )
-            recovery_projection_ready = _cleanup_closed_position_after_tick(
-                cpid=int(cpid),
-                close_reason=close_reason,
-                total_pnl=total_pnl,
-                close_ts=close_ts,
-                real_pnl=real_pnl,
-                factor_contributions=factor_contributions,
-            )
-            if recovery_projection_ready is not False:
-                recovery_projected_ids.add(int(cpid))
-        except Exception as exc:
-            log(f"tick {tick}: attribution close pos={cpid} error: {exc}")
-            if int(cpid) in confirmed_close_ids:
-                _record_risk_reduction_aux_failure(
-                    "post_close_auxiliary_processing_failed",
-                    position_id=int(cpid),
-                    action="close_position",
-                    error=exc,
-                )
-                try:
-                    _mark_recovery_position_closed(
-                        int(cpid),
-                        close_reason="broker_close_auxiliary_deferred",
-                        close_pnl=float((real_pnl or {}).get("net") or 0.0),
-                        closed_at=float(
-                            (real_pnl or {}).get("exec_timestamp")
-                            or time.time()
-                        ),
-                        meta={
-                            "real_pnl": real_pnl or {},
-                            "auxiliary_processing_error": (
-                                f"{type(exc).__name__}:{exc}"
-                            ),
-                        },
-                    )
-                    recovery_projected_ids.add(int(cpid))
-                except Exception as recovery_exc:
-                    _record_risk_reduction_aux_failure(
-                        "post_close_recovery_projection_failed",
-                        position_id=int(cpid),
-                        action="close_position",
-                        error=recovery_exc,
-                    )
-
-    if confirmed_close_ids:
-        trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        account_reconcile = (
-            _explicit_account_reconcile(bridge)
-            if broker_open_position_ids is not None
-            else None
-        )
-        account_value = (
-            _reconcile_value(account_reconcile, "account", None)
-            if account_reconcile is not None
-            else None
-        )
-        account_ready = account_value is not None
-        if account_ready:
-            account_payload = (
-                asdict(account_value)
-                if is_dataclass(account_value)
-                else dict(account_value)
-            )
-            account_payload.update({"ok": True, "broker": broker})
-            _live_state_update(
-                account=account_payload,
-                account_reconciled=copy.deepcopy(account_payload),
-                account_updated_at=float(
-                    _reconcile_value(account_reconcile, "observed_at", 0.0)
-                    or 0.0
-                ),
-                account_reconcile_id=str(
-                    _reconcile_value(account_reconcile, "reconcile_id", "")
-                    or ""
-                ),
-                account_reconcile_failed_at=None,
-                account_reconcile_error=None,
-            )
-        else:
-            _live_state_update(
-                account_reconcile_failed_at=time.time(),
-                account_reconcile_error="post_close_account_reconcile_failed",
-            )
-        restored = bool(
-            account_ready
-            and broker_open_position_ids is not None
-            and _restore_session_state_for_day(
-                trade_date,
-                broker_open_position_ids={
-                    int(pid)
-                    for pid in broker_open_position_ids
-                    if int(pid or 0) > 0
-                },
-                confirmed_closed_position_ids=set(confirmed_close_ids),
-            )
-        )
-        pending_projection_ids = set(confirmed_close_ids)
-        if restored:
-            for position_id in sorted(
-                confirmed_close_ids & recovery_projected_ids
-            ):
-                _release_session_close_deal_latch(
-                    position_id,
-                    real_pnls[position_id],
-                )
-            pending_projection_ids -= recovery_projected_ids
-        if pending_projection_ids:
-            for position_id in sorted(pending_projection_ids):
-                cursor = dict(
-                    (close_deal_cursors or {}).get(position_id) or {}
-                )
-                _defer_close_until_authoritative_deal(
-                    position_id,
-                    broker=broker,
-                    tick=tick,
-                    reason="post_close_session_projection_unavailable",
-                    recovery_evidence={
-                        "pending_kind": "final_close",
-                        **cursor,
-                        "confirmed_deal_ids": list(
-                            real_pnls[position_id].get("deal_ids") or []
-                        ),
-                    },
-                )
-            _live_state_update(
-                session_state_status="unavailable",
-                session_state_source="post_close_projection_unavailable",
-                session_risk_blockers=[
-                    f"post_close_projection_pending:{pid}"
-                    for pid in sorted(pending_projection_ids)
-                ],
-                session_observed_at=0.0,
-                accepting_new_risk=False,
-            )
-            _record_risk_reduction_aux_failure(
-                "post_close_session_projection_unavailable",
-                action="close_position",
-                error="authoritative_session_restore_unavailable",
-                payload={
-                    "position_ids": sorted(pending_projection_ids),
-                    "session_projection_restored": bool(restored),
-                },
-            )
+    _runtime_handle_closed_positions(
+        closed_pids=closed_pids,
+        real_pnls=real_pnls,
+        attr_engine=attr_engine,
+        current_price=current_price,
+        bar=bar,
+        cfg=cfg,
+        account=acct,
+        broker=broker,
+        tick=tick,
+        log=log,
+        broker_open_position_ids=broker_open_position_ids,
+        bridge=bridge,
+        close_deal_cursors=close_deal_cursors,
+        runtime=ClosedPositionCycleRuntime(
+            authoritative_close_pnl=_authoritative_close_pnl,
+            defer_close=_defer_close_until_authoritative_deal,
+            update_live_state=_live_state_update,
+            collect_attribution=_collect_closed_position_attribution,
+            write_close_decision_log=_write_close_decision_log_after_tick,
+            lookup_context_integrity=_lookup_recovery_context_integrity,
+            log_closed_position_ledger=_log_closed_position_ledger_after_tick,
+            run_closed_position_learning=_run_closed_position_learning_after_tick,
+            cleanup_closed_position=_cleanup_closed_position_after_tick,
+            record_aux_failure=_record_risk_reduction_aux_failure,
+            mark_recovery_closed=_mark_recovery_position_closed,
+            reconcile_account=_explicit_account_reconcile,
+            reconcile_value=_reconcile_value,
+            restore_session_state=_restore_session_state_for_day,
+            release_close_latch=_release_session_close_deal_latch,
+            trade_date=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            now=time.time,
+            full_context=_RECOVERY_CONTEXT_FULL,
+        ),
+    )
 
 
 def _mark_amended_open_success_local_state(
