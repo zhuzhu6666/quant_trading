@@ -23,7 +23,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from typing import Any
+from typing import Any, Mapping
 
 from loguru import logger
 
@@ -60,6 +60,9 @@ from backend.services.live_safety_state import (
     no_new_risk_latch_status,
     release_no_new_risk_latch_cause,
     safety_v2_forced_shadow_status,
+)
+from backend.services.live_safety_shadow_observation import (
+    append_safety_shadow_observation,
 )
 from backend.services.live_safety_watchdog import (
     LiveSafetyWatchdog,
@@ -6677,6 +6680,29 @@ def _run_live_safety_cycle(
 ) -> dict[str, Any]:
     from config.runtime_config import shared as _runtime_config
 
+    def record_shadow_observation(payload: Mapping[str, Any]) -> None:
+        try:
+            append_safety_shadow_observation(
+                payload=payload,
+                generation_id=generation_id,
+                broker=broker,
+                tick=tick,
+            )
+        except Exception as exc:
+            try:
+                append_safety_outbox(
+                    event_type="safety_shadow_observation_failed",
+                    payload={
+                        "generation_id": generation_id,
+                        "broker": broker,
+                        "tick": tick,
+                    },
+                    error=f"{type(exc).__name__}:{exc}",
+                )
+            except Exception:
+                pass
+            raise
+
     payload = _loop_v2_run_safety_cycle(
         bridge=bridge,
         broker=broker,
@@ -6700,6 +6726,7 @@ def _run_live_safety_cycle(
             run_position_protection_cycle=_run_position_protection_cycle,
             persist_safety_fail_closed=_persist_safety_fail_closed,
             controller=_LIVE_LOOP_CONTROLLER,
+            record_shadow_observation=record_shadow_observation,
         ),
     )
     if str(payload.get("reconciliation_state") or "") != "fresh":

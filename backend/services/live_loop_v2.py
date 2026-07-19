@@ -10,7 +10,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from loguru import logger
 
@@ -84,6 +84,7 @@ class LiveSafetyCycleRuntime:
     run_position_protection_cycle: Callable[..., Any]
     persist_safety_fail_closed: Callable[..., dict[str, Any]]
     controller: Any
+    record_shadow_observation: Callable[[Mapping[str, Any]], Any] | None = None
 
 
 def run_live_safety_cycle(
@@ -536,6 +537,17 @@ def run_live_safety_cycle(
             # Existing-position protection already ran (or remains eligible
             # to run) above.  Only admission of additional risk closes here.
             payload["accepting_new_risk"] = False
+    if (
+        str(payload.get("mode") or "") == "shadow"
+        and str(payload.get("status") or "") != "heartbeat"
+        and runtime.record_shadow_observation is not None
+    ):
+        try:
+            runtime.record_shadow_observation(payload)
+        except Exception as exc:
+            # Observation evidence cannot rewrite a completed broker action.
+            # Missing evidence simply prevents the later enforce gate.
+            logger.error("[live] safety shadow observation unavailable: %s", exc)
     runtime.update_live_state(
         safety_plane=payload,
         accepting_new_risk=bool(payload.get("accepting_new_risk", False)),

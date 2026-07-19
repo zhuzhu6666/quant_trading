@@ -8,6 +8,8 @@ module therefore owns two deliberately small, append-only local ledgers:
   cause-set events determine whether new broker risk is allowed.  Historical
   v1 activate/clear records remain readable.
 * ``safety_outbox.jsonl`` records audit/enrichment failures for later replay.
+* ``safety_shadow_observations.jsonl`` (owned by the shadow-observation
+  service) records full-cycle rollout evidence without granting broker truth.
 
 Neither ledger is a broker-position fact source.  Broker reconciliation stays
 authoritative for deciding whether a close actually completed.
