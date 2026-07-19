@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: production rollout active; governance dual-record and Safety shadow healthy
-> Snapshot: 2026-07-19 13:33 CST
+> Snapshot: 2026-07-19 13:51 CST
 > Scope: Phase 0-5 compatibility implementation, migrations, verification, and remaining live evidence gates
 
 ## 1. 当前结论
@@ -103,3 +103,5 @@ K 线 warmup。
 任一 duplicate broker mutation、双 generation、safety heartbeat 丢失、session unavailable 自动归零、emergency 假成功或 committed mutation 缺 hash，都必须立即停止阶段切换并保持 `no_new_risk`。
 
 Safety shadow 的进程内 last-comparison 不再单独作为观察证据。部署后每个 full cycle 追加 `data/safety/safety_shadow_observations.jsonl`，并以 `scripts/safety_shadow_gate.py` 只读计算 24 小时 continuity 或完整 position lifecycle；ledger 缺失、间隔超限、reconcile 非 fresh、unknown execution、forced shadow、候选 mismatch/duplicate/conflict 任一出现都保持 `observing`，不能切 enforce。
+
+2026-07-19 13:50 CST 受控重启前再次完成独立只读 cTrader 预检：有效环境为 demo、account/positions 均为 fresh、broker 确认空仓、unknown execution 为 0。新 generation 的首轮 startup-unknown 被 ledger 保留为安全窗口重置点；13:51:07 CST 起新格式完整周期已同时记录 account/positions freshness，最新 verifier 结果为 `continuous_observation_count=1`，唯一 blocker 是 `duration_or_lifecycle_incomplete`。连续窗口遇到 reconcile/unknown/freshness/comparison/duplicate/conflict/forced-shadow 异常或超过 75 秒的观测间隔会从异常后重新计时，不会删除历史故障，也不会让一次历史启动故障永久污染后续 24 小时合格窗口。

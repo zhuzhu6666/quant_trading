@@ -62,7 +62,7 @@ from backend.services.live_safety_state import (
     safety_v2_forced_shadow_status,
 )
 from backend.services.live_safety_shadow_observation import (
-    append_safety_shadow_observation,
+    build_safety_shadow_observer,
 )
 from backend.services.live_safety_watchdog import (
     LiveSafetyWatchdog,
@@ -6680,36 +6680,12 @@ def _run_live_safety_cycle(
 ) -> dict[str, Any]:
     from config.runtime_config import shared as _runtime_config
 
-    def record_shadow_observation(payload: Mapping[str, Any]) -> None:
-        try:
-            append_safety_shadow_observation(
-                payload={
-                    **dict(payload),
-                    "account_updated_at": float(
-                        _live_state_get("account_updated_at", 0.0) or 0.0
-                    ),
-                    "positions_updated_at": float(
-                        _live_state_get("positions_updated_at", 0.0) or 0.0
-                    ),
-                },
-                generation_id=generation_id,
-                broker=broker,
-                tick=tick,
-            )
-        except Exception as exc:
-            try:
-                append_safety_outbox(
-                    event_type="safety_shadow_observation_failed",
-                    payload={
-                        "generation_id": generation_id,
-                        "broker": broker,
-                        "tick": tick,
-                    },
-                    error=f"{type(exc).__name__}:{exc}",
-                )
-            except Exception:
-                pass
-            raise
+    record_shadow_observation = build_safety_shadow_observer(
+        generation_id=generation_id,
+        broker=broker,
+        tick=tick,
+        get_live_state=_live_state_get,
+    )
 
     payload = _loop_v2_run_safety_cycle(
         bridge=bridge,

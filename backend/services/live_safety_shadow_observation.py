@@ -5,9 +5,13 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
-from backend.services.live_safety_state import _append_fsynced, safety_outbox_path
+from backend.services.live_safety_state import (
+    _append_fsynced,
+    append_safety_outbox,
+    safety_outbox_path,
+)
 
 
 SCHEMA_VERSION = "live_safety_shadow_observation.v1"
@@ -77,6 +81,45 @@ def append_safety_shadow_observation(
         },
     }
     _append_fsynced(safety_shadow_observation_path(), record)
+    return record
+
+
+def build_safety_shadow_observer(
+    *,
+    generation_id: str,
+    broker: str,
+    tick: int,
+    get_live_state: Callable[[str, Any], Any],
+) -> Callable[[Mapping[str, Any]], None]:
+    """Build the façade callback while keeping telemetry fail-safe and isolated."""
+
+    def record(payload: Mapping[str, Any]) -> None:
+        try:
+            append_safety_shadow_observation(
+                payload={
+                    **dict(payload),
+                    "account_updated_at": float(get_live_state("account_updated_at", 0.0) or 0.0),
+                    "positions_updated_at": float(get_live_state("positions_updated_at", 0.0) or 0.0),
+                },
+                generation_id=generation_id,
+                broker=broker,
+                tick=tick,
+            )
+        except Exception as exc:
+            try:
+                append_safety_outbox(
+                    event_type="safety_shadow_observation_failed",
+                    payload={
+                        "generation_id": generation_id,
+                        "broker": broker,
+                        "tick": tick,
+                    },
+                    error=f"{type(exc).__name__}:{exc}",
+                )
+            except Exception:
+                pass
+            raise
+
     return record
 
 
