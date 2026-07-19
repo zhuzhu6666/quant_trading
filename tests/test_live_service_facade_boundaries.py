@@ -51,6 +51,12 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_evaluate_risk_reduction_policy",
         "_execute_live_safety_candidate",
         "_handle_closed_positions_after_tick",
+        "_closed_position_processing_runtime",
+        "_collect_closed_position_attribution",
+        "_write_close_decision_log_after_tick",
+        "_log_closed_position_ledger_after_tick",
+        "_run_closed_position_learning_after_tick",
+        "_cleanup_closed_position_after_tick",
         "_load_recovery_row_for_risk_reduction",
         "_load_authoritative_session_deal_facts",
         "_lookup_entry_context_for_risk_reduction",
@@ -147,6 +153,22 @@ def test_closed_position_cycle_lives_outside_facade_and_has_no_order_surface():
     assert ".market_buy(" not in cycle_source
     assert ".market_sell(" not in cycle_source
     assert ".close_position(" not in cycle_source
+
+
+def test_closed_position_processing_lives_outside_facade():
+    source = LIVE_SERVICE.read_text(encoding="utf-8")
+    processing_source = Path(
+        "backend/services/live_closed_position_processing.py"
+    ).read_text(encoding="utf-8")
+
+    assert "skipped unverified trade review" not in source
+    assert "recovery close persist failed" not in source
+    assert "skipped unverified trade review" in processing_source
+    assert "recovery close persist failed" in processing_source
+    assert "backend.services.live_service" not in processing_source
+    assert ".market_buy(" not in processing_source
+    assert ".market_sell(" not in processing_source
+    assert ".close_position(" not in processing_source
 
 
 def test_session_restore_decision_has_no_runtime_or_facade_dependency():

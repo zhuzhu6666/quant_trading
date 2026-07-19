@@ -171,6 +171,14 @@ from backend.services.live_closed_position_cycle import (
     ClosedPositionCycleRuntime,
     handle_closed_positions_after_tick as _runtime_handle_closed_positions,
 )
+from backend.services.live_closed_position_processing import (
+    ClosedPositionProcessingRuntime,
+    cleanup_closed_position as _runtime_cleanup_closed_position,
+    collect_closed_position_attribution as _runtime_collect_close_attribution,
+    log_closed_position_ledger as _runtime_log_closed_position_ledger,
+    run_closed_position_learning as _runtime_run_closed_position_learning,
+    write_close_decision_log as _runtime_write_close_decision_log,
+)
 from backend.services.live_risk_reduction import (
     RiskReductionRuntime,
     build_close_position_risk_context as _risk_reduction_build_close_context,
@@ -7532,6 +7540,41 @@ def _record_filled_position_open_context(
     return entry_decision_id
 
 
+def _closed_position_processing_runtime() -> ClosedPositionProcessingRuntime:
+    return ClosedPositionProcessingRuntime(
+        consume_close_reason=_consume_close_reason,
+        consume_close_verdict=_consume_close_verdict,
+        classify_close_source=_classify_close_source,
+        estimate_close_pnl=_estimate_close_pnl_from_cached_state,
+        select_close_total_pnl=_tick_select_close_total_pnl,
+        open_api_volumes=_pos_open_api_volume,
+        decision_log=_DECISION_LOG,
+        decision_log_run_id=_DECISION_LOG_RUN_ID,
+        safe_decision_log=_safe_decision_log,
+        build_close_decision_audit_meta=_tick_build_close_decision_audit_meta,
+        json_dumps=_json.dumps,
+        ledger=_LEDGER,
+        ensure_open_ledger=_ensure_open_ledger_for_recovered_close,
+        lookup_context_integrity=_lookup_recovery_context_integrity,
+        build_close_ledger_payloads=_tick_build_close_ledger_payloads,
+        get_session_pnl=lambda: _live_state_get("session_pnl", 0),
+        risk_state_with_verdict=_risk_state_with_verdict_dict,
+        trade_reviewer=_TRADE_REVIEWER,
+        experience_builder=_EXPERIENCE_BUILDER,
+        policy_suggester=_POLICY_SUGGESTER,
+        build_trade_review_payload=_tick_build_trade_review_payload,
+        mark_recovery_closed=_mark_recovery_position_closed,
+        trailing_state=_trailing_state,
+        entry_scores=_pos_entry_scores,
+        entry_decisions=_pos_entry_decisions,
+        pending_open_attach_until=_pending_open_attach_until,
+        now=time.time,
+        debug=logger.debug,
+        info=logger.info,
+        exception=logger.exception,
+    )
+
+
 def _collect_closed_position_attribution(
     *,
     cpid: int,
@@ -7541,40 +7584,15 @@ def _collect_closed_position_attribution(
     tick: int,
     log,
 ) -> dict[str, Any]:
-    close_reason = _consume_close_reason(int(cpid), "broker_close")
-    close_verdict = _consume_close_verdict(int(cpid), close_reason)
-    close_ts = float((real_pnl or {}).get("exec_timestamp") or time.time())
-    attribution_integrity = (
-        attr_engine.open_integrity(cpid)
-        if attr_engine is not None and hasattr(attr_engine, "open_integrity")
-        else "missing"
-    )
-    mc = attr_engine.record_close(cpid, close_price=current_price, close_ts=close_ts, real_pnl=real_pnl)
-    if not mc:
-        attribution_integrity = "missing"
-    close_source = _classify_close_source(int(cpid), close_reason, close_ts)
-    fallback_pnl = 0.0
-    if not real_pnl and not mc:
-        try:
-            fallback_pnl = _estimate_close_pnl_from_cached_state(int(cpid), float(current_price))
-        except Exception as _e2:
-            log(f"tick {tick}: attribution close pos={cpid} PnL fallback error: {_e2}")
-    total_pnl = _tick_select_close_total_pnl(
+    return _runtime_collect_close_attribution(
+        position_id=cpid,
         real_pnl=real_pnl,
-        factor_contributions=mc,
-        fallback_pnl=fallback_pnl,
+        attr_engine=attr_engine,
+        current_price=current_price,
+        tick=tick,
+        log=log,
+        runtime=_closed_position_processing_runtime(),
     )
-    log(f"tick {tick}: attribution close pos={cpid} pnl={total_pnl:.2f} factors={len(mc)}")
-    _pos_open_api_volume.pop(int(cpid), None)
-    return {
-        "close_reason": close_reason,
-        "close_verdict": close_verdict,
-        "close_ts": close_ts,
-        "attribution_integrity": attribution_integrity,
-        "factor_contributions": mc,
-        "close_source": close_source,
-        "total_pnl": total_pnl,
-    }
 
 
 def _write_close_decision_log_after_tick(
@@ -7585,29 +7603,13 @@ def _write_close_decision_log_after_tick(
     current_price: float,
     tick: int,
 ) -> None:
-    if not _DECISION_LOG:
-        return
-    bar_ts = bar.get("time", 0)
-    bar_date = time.strftime("%Y-%m-%d", time.gmtime(bar_ts)) if bar_ts else ""
-    _safe_decision_log(
-        _DECISION_LOG,
-        run_id=_DECISION_LOG_RUN_ID,
-        ts=bar_ts or time.time(),
-        bar_date=bar_date,
-        decision_type="close",
-        strategy="factor_v4",
-        direction=0,
-        confidence=round(total_pnl, 2),
-        decision="closed",
-        meta=_json.dumps(
-            _tick_build_close_decision_audit_meta(
-                position_id=int(cpid),
-                total_pnl=float(total_pnl),
-                current_price=float(current_price),
-                tick=tick,
-            ),
-            ensure_ascii=False,
-        ),
+    _runtime_write_close_decision_log(
+        position_id=cpid,
+        bar=bar,
+        total_pnl=total_pnl,
+        current_price=current_price,
+        tick=tick,
+        runtime=_closed_position_processing_runtime(),
     )
 
 
@@ -7630,43 +7632,25 @@ def _log_closed_position_ledger_after_tick(
     close_verdict: dict,
     factor_contributions: dict,
 ) -> tuple[str, str]:
-    if not _LEDGER:
-        return "", context_integrity
-    try:
-        repaired_entry_decision_id = _ensure_open_ledger_for_recovered_close(
-            int(cpid),
-            broker=broker,
-            close_ts=close_ts,
-            close_price=float(current_price),
-            real_pnl=real_pnl,
-            close_reason=close_reason,
-        )
-        if repaired_entry_decision_id:
-            context_integrity = _lookup_recovery_context_integrity(int(cpid), context_integrity)
-        close_ledger_payloads = _tick_build_close_ledger_payloads(
-            position_id=int(cpid),
-            timeframe=str(getattr(cfg, "timeframe", "") or ""),
-            decision_ts=bar.get("time", close_ts),
-            close_ts=close_ts,
-            account=acct,
-            session_pnl=_live_state_get("session_pnl", 0),
-            risk_state=_risk_state_with_verdict_dict(close_verdict),
-            total_pnl=float(total_pnl),
-            current_price=float(current_price),
-            tick=tick,
-            close_reason=close_reason,
-            close_source=close_source,
-            attribution_integrity=attribution_integrity,
-            close_verdict=close_verdict,
-            factor_contributions=factor_contributions,
-            real_pnl=real_pnl,
-        )
-        exit_decision_id = _LEDGER.log_decision(**close_ledger_payloads["decision"])
-        _LEDGER.log_position_event(**close_ledger_payloads["position_event"])
-        return exit_decision_id, context_integrity
-    except Exception:
-        logger.exception("[live] ledger close failed for pos {}", cpid)
-        return "", context_integrity
+    return _runtime_log_closed_position_ledger(
+        position_id=cpid,
+        broker=broker,
+        close_ts=close_ts,
+        current_price=current_price,
+        real_pnl=real_pnl,
+        close_reason=close_reason,
+        context_integrity=context_integrity,
+        cfg=cfg,
+        bar=bar,
+        account=acct,
+        total_pnl=total_pnl,
+        tick=tick,
+        close_source=close_source,
+        attribution_integrity=attribution_integrity,
+        close_verdict=close_verdict,
+        factor_contributions=factor_contributions,
+        runtime=_closed_position_processing_runtime(),
+    )
 
 
 def _run_closed_position_learning_after_tick(
@@ -7683,35 +7667,20 @@ def _run_closed_position_learning_after_tick(
     attribution_integrity: str,
     close_source: dict[str, Any] | str | None,
 ) -> None:
-    if not (_TRADE_REVIEWER and _EXPERIENCE_BUILDER and _POLICY_SUGGESTER):
-        return
-    try:
-        review = _TRADE_REVIEWER.review_closed_trade(
-            **_tick_build_trade_review_payload(
-                position_id=int(cpid),
-                total_pnl=float(total_pnl),
-                current_price=float(current_price),
-                close_ts=close_ts,
-                factor_contributions=factor_contributions,
-                exit_decision_id=exit_decision_id,
-                real_pnl=real_pnl,
-                close_reason=close_reason,
-                context_integrity=context_integrity,
-                attribution_integrity=attribution_integrity,
-                close_source=close_source,
-            )
-        )
-        if review.get("accepted", True):
-            experience = _EXPERIENCE_BUILDER.build_from_review(review)
-            _POLICY_SUGGESTER.suggest_from_experience(experience)
-        else:
-            logger.info(
-                "[live] skipped unverified trade review for pos %s: %s",
-                cpid,
-                review.get("skip_reason", "unknown"),
-            )
-    except Exception:
-        logger.exception("[live] post-trade learning failed for pos {}", cpid)
+    _runtime_run_closed_position_learning(
+        position_id=cpid,
+        total_pnl=total_pnl,
+        current_price=current_price,
+        close_ts=close_ts,
+        factor_contributions=factor_contributions,
+        exit_decision_id=exit_decision_id,
+        real_pnl=real_pnl,
+        close_reason=close_reason,
+        context_integrity=context_integrity,
+        attribution_integrity=attribution_integrity,
+        close_source=close_source,
+        runtime=_closed_position_processing_runtime(),
+    )
 
 
 def _cleanup_closed_position_after_tick(
@@ -7723,23 +7692,15 @@ def _cleanup_closed_position_after_tick(
     real_pnl: dict | None,
     factor_contributions: dict,
 ) -> bool:
-    recovery_projection_ready = True
-    try:
-        _mark_recovery_position_closed(
-            int(cpid),
-            close_reason=close_reason,
-            close_pnl=float(total_pnl),
-            closed_at=close_ts,
-            meta={"real_pnl": real_pnl or {}, "factor_contributions": factor_contributions or {}},
-        )
-    except Exception as _recovery_close_err:
-        recovery_projection_ready = False
-        logger.debug("[live] recovery close persist failed for pos %s: %s", cpid, _recovery_close_err)
-    _trailing_state.pop(cpid, None)
-    _pos_entry_scores.pop(cpid, None)
-    _pos_entry_decisions.pop(int(cpid), None)
-    _pending_open_attach_until.pop(int(cpid), None)
-    return recovery_projection_ready
+    return _runtime_cleanup_closed_position(
+        position_id=cpid,
+        close_reason=close_reason,
+        total_pnl=total_pnl,
+        close_ts=close_ts,
+        real_pnl=real_pnl,
+        factor_contributions=factor_contributions,
+        runtime=_closed_position_processing_runtime(),
+    )
 
 
 def _handle_closed_positions_after_tick(
