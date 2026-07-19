@@ -464,16 +464,21 @@ def test_legacy_refresh_cadence_sustains_fifteen_second_fact_window(monkeypatch)
 
     bridge = _Bridge()
     live_service._refresh_account_positions_sync(bridge, "ctrader")
-    clock["now"] = 109.9
+    clock["now"] = 104.9
     live_service._refresh_account_positions_sync(bridge, "ctrader")
     assert (bridge.account_calls, bridge.position_calls) == (1, 1)
+    clock["now"] = 105.1
+    live_service._refresh_account_positions_sync(bridge, "ctrader")
+    assert (bridge.account_calls, bridge.position_calls) == (2, 1)
     clock["now"] = 110.1
     live_service._refresh_account_positions_sync(bridge, "ctrader")
 
-    assert (bridge.account_calls, bridge.position_calls) == (2, 2)
+    assert (bridge.account_calls, bridge.position_calls) == (3, 2)
     assert clock["now"] - live_service._live_state["account_updated_at"] < 15.0
     assert clock["now"] - live_service._live_state["positions_updated_at"] < 15.0
-    assert live_service._ACCOUNT_REFRESH_MIN_INTERVAL <= 10.0
+    # The five-second worker cadence must leave latency headroom below the
+    # 15-second account freshness safety contract.
+    assert live_service._ACCOUNT_REFRESH_MIN_INTERVAL <= 5.0
     assert live_service._POSITION_RECONCILE_MIN_INTERVAL <= 10.0
     assert (
         inspect.signature(live_service.kickoff_account_refresh)

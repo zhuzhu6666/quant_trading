@@ -2259,7 +2259,12 @@ _ACCOUNT_REFRESH_LOCK = threading.Lock()
 # still satisfy the public 15-second account/position fact contract: a 5s
 # worker poll with a 10s minimum RPC interval gives room for scheduler jitter
 # without pretending event-cache updates are reconciliations.
-_ACCOUNT_REFRESH_MIN_INTERVAL = 10.0
+# The worker wakes every five seconds.  A ten-second minimum lets scheduling
+# phase plus broker RPC latency push the recorded account age beyond the
+# 15-second live safety contract on alternating full cycles.  Refreshing once
+# per worker wake leaves explicit latency headroom while positions remain
+# authoritative through the serial safety reconcile.
+_ACCOUNT_REFRESH_MIN_INTERVAL = 5.0
 _POSITION_RECONCILE_MIN_INTERVAL = 10.0
 _DATA_SYNC_LOCK = threading.Lock()
 
