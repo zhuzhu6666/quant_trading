@@ -94,6 +94,10 @@ from backend.services.live_open_admission import (
     evaluate_final_open_admission as _evaluate_final_open_admission,
     probe_postgres_authority as _probe_postgres_authority,
 )
+from backend.services.live_open_risk_context import (
+    OpenRiskContextRuntime,
+    build_open_trade_risk_context as _runtime_build_open_risk_context,
+)
 from backend.services.live_committed_policy import load_live_policy_controls
 from backend.services.live_readiness import build_live_readiness
 from backend.services.market_session import evaluate_market_session
@@ -915,94 +919,41 @@ def _build_open_trade_risk_context(
     decision_quality_context: dict[str, Any] | None = None,
     decision_ts: float | None = None,
 ) -> dict:
-    risk_snapshot = _live_state_get("risk", {}, clone=True) or {}
-    loop_running = bool(_live_state_get("loop_running", True))
-    bridge_connected = bool(getattr(bridge, "is_connected", False))
-    now = time.time()
-    timeframe = str(getattr(cfg, "timeframe", "M5") or "M5")
-    runtime_health_context = _loop_collect_open_risk_runtime_health(
-        timeframe=timeframe,
-        now_ts=now,
-        account_updated_at=float(_live_state_get("account_updated_at", 0.0) or 0.0),
-        positions_updated_at=float(_live_state_get("positions_updated_at", 0.0) or 0.0),
+    runtime = OpenRiskContextRuntime(
+        state_get=_live_state_get,
+        collect_runtime_health=_loop_collect_open_risk_runtime_health,
+        temporal_context_for_trade=_temporal_context_for_trade,
+        active_supervisor_reentry_block=_active_supervisor_reentry_block,
+        recent_review_reentry_block=_recent_review_reentry_block,
+        pending_supervisor_reentry_block=(
+            _pending_supervisor_reentry_block_from_positions
+        ),
+        build_entry_cluster_context=_build_entry_cluster_context,
+        active_entry_quality_policy=_active_entry_quality_learning_policy,
+        entry_quality_gate=_entry_quality_gate_from_learning_policy,
+        build_payload=_lifecycle_build_open_trade_risk_context_payload,
+        tracked_total_api_volume=_tracked_total_api_volume,
+        active_event_window_policy=_active_event_window_learning_policy,
+        active_entry_cluster_policy=_active_entry_cluster_learning_policy,
+        max_abs_entry_score=_max_abs_entry_score_for_positions,
+        now=time.time,
     )
-    temporal_context = _temporal_context_for_trade(
-        decision_ts=float(decision_ts or now),
-        evaluated_at_ts=now,
-        timeframe=timeframe,
-        session_last_trade_ts=float(_live_state_get("session_last_trade_ts", 0.0) or 0.0),
-        loop_started_at=float(_live_state_get("loop_started_at", 0.0) or 0.0),
-    )
-    active_supervisor_block = _active_supervisor_reentry_block(symbol=symbol, direction=direction)
-    retrospective_block = _recent_review_reentry_block(
-        symbol=symbol, direction=direction, now_ts=now,
-    )
-    pending_supervisor_block = _pending_supervisor_reentry_block_from_positions(
-        positions or [],
-        symbol=symbol,
-        direction=direction,
+    return _runtime_build_open_risk_context(
         cfg=cfg,
-    )
-    supervisor_reentry_block = (
-        pending_supervisor_block or active_supervisor_block or retrospective_block
-    )
-    entry_cluster_context = _build_entry_cluster_context(
-        positions_before=positions or [],
-        direction=direction,
-        symbol=symbol,
-        now_ts=now,
-        new_position_id=0,
-        new_api_volume=0.0,
-    )
-    timeframe_seconds = float(temporal_context.get("timeframe_seconds", 0.0) or 0.0)
-    same_direction_cooldown_seconds = max(
-        60.0,
-        float(int(getattr(cfg, "risk_cooldown_bars", 3) or 3)) * (timeframe_seconds or 300.0),
-    )
-
-    decision_quality = dict(decision_quality_context or {})
-    entry_quality_gate = _entry_quality_gate_from_learning_policy(
-        policy=_active_entry_quality_learning_policy(now_ts=now),
-        decision_quality=decision_quality,
-        signal_score=float(signal_score or 0.0),
-    )
-    decision_freshness = _live_state_get("decision_bar_freshness", {}, clone=True) or {}
-
-    return _lifecycle_build_open_trade_risk_context_payload(
-        cfg=cfg,
-        acct=acct,
+        bridge=bridge,
+        account=acct,
         positions=positions,
         requested_api_volume=requested_api_volume,
         signal_score=signal_score,
+        runtime=runtime,
         symbol=symbol,
         direction=direction,
         current_price=current_price,
         atr_price=atr_price,
-        risk_snapshot=risk_snapshot,
-        session_state={
-            "pnl": _live_state_get("session_pnl", 0.0),
-            "start_balance": _live_state_get("session_start_balance", 0.0),
-            "trades": _live_state_get("session_trades", 0),
-            "consecutive_losses": _live_state_get("session_consecutive_loss", 0),
-            "drawdown_pct": _live_state_get("session_max_drawdown_pct", 0.0),
-            "circuit_breaker": _live_state_get("circuit_breaker", False),
-        },
-        total_api_volume=_tracked_total_api_volume(positions or []),
         event_sizing_context=event_sizing_context,
         event_filter_context=event_filter_context,
-        event_window_learning_policy=_active_event_window_learning_policy(now_ts=now),
-        entry_quality_gate=entry_quality_gate,
-        entry_cluster_context=entry_cluster_context,
-        entry_cluster_learning_policy=_active_entry_cluster_learning_policy(now_ts=now),
-        same_direction_cooldown_seconds=same_direction_cooldown_seconds,
-        max_abs_entry_score=_max_abs_entry_score_for_positions(positions or []),
-        loop_running=loop_running,
-        bridge_connected=bridge_connected,
-        data_lag_seconds=float(runtime_health_context.get("data_lag_seconds", 0.0) or 0.0),
-        runtime_health=runtime_health_context.get("runtime_health", {}) or {},
-        temporal_context=temporal_context,
-        decision_freshness=decision_freshness,
-        supervisor_reentry_block=supervisor_reentry_block,
+        decision_quality_context=decision_quality_context,
+        decision_ts=decision_ts,
     )
 
 
