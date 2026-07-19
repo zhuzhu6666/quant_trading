@@ -46,6 +46,12 @@ class LearningWorkerCapability:
         self._now = now
         self._lock = threading.RLock()
         started_at = float(now())
+        from backend.core.static_feature_flags import (
+            shared_static_feature_flags,
+            static_feature_flags_fingerprint,
+        )
+
+        process_flags = shared_static_feature_flags().to_dict()
         self._state: dict[str, Any] = {
             "schema_version": "learning_worker_capability.v2",
             "boot_id": str(boot_id or uuid.uuid4()),
@@ -53,6 +59,13 @@ class LearningWorkerCapability:
             "boot_status": "starting",
             "started_at": started_at,
             "updated_at": started_at,
+            "process_static_feature_flags": {
+                "schema_version": "static_feature_flags.v1",
+                "values": process_flags,
+                "fingerprint": static_feature_flags_fingerprint(process_flags),
+                "pid": int(os.getpid()),
+                "process_started_at": started_at,
+            },
             "config_hash": "",
             "overlay_hash": "",
             "recovery_status": "pending",

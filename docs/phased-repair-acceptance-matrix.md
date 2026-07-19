@@ -118,6 +118,9 @@ intent、release/autonomous readiness 与 worker config/overlay hash。
 `backend_process_static_flags.ok=true`：新鲜 readiness 中由 backend 进程投影的五项
 static flags、SHA-256、PID 与 process-start timestamp 必须完整，且 values 精确等于
 CLI 所见 predecessor flags。只修改发布配置但未完成受控重启时必须 fail-closed。
+`governance_enforce` 及之后还要求
+`learning_worker_process_static_flags.ok=true`；只重启 backend、未重启 learning
+worker 时必须以 `learning_worker_process_static_flags_unconfirmed` 阻断。
 
 `governance_enforce` 及之后的 target 还必须输出
 `governance_preflight.ok=true`：账本中不得存在 reserved/prepared mutation，所有

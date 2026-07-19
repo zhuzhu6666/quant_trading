@@ -138,6 +138,10 @@ release preflight 已验证该记录，当前 Safety target 仍只剩 24 小时/
 `backend_process_static_flags_unconfirmed` 阻断。当前 Safety 首阶段不要求为该新增
 投影重启，连续 shadow ledger 仍是当前 backend 已加载 shadow 的直接证据。
 
+Learning worker capability heartbeat 同步新增同构 process-loaded flags 投影；
+`governance_enforce` 与 `pg_job_queue_enable` 必须同时证明 backend/learning worker
+都已加载 predecessor flags。只重启 backend 不再足以推进治理阶段。
+
 ## 6. 下一次发布的固定顺序
 
 1. 持续记录 Safety shadow comparison、broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。

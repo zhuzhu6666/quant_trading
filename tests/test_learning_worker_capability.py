@@ -397,6 +397,16 @@ def test_learning_worker_projection_exposes_boot_and_hashes(tmp_path) -> None:
     assert status["config_hash_match"] is True
     assert status["overlay_hash_match"] is True
     assert status["mutation_capability"]["available"] is True
+    process_flags = status["process_static_feature_flags"]
+    assert process_flags["schema_version"] == "static_feature_flags.v1"
+    assert process_flags["values"]["governance_mutation_coordinator_v2_mode"] in {
+        "off",
+        "dual_record",
+        "enforce",
+    }
+    assert process_flags["fingerprint"]
+    assert process_flags["pid"] > 0
+    assert process_flags["process_started_at"] > 0
 
     divergent = BackendReadinessService(db_path=db_path)._learning_worker_capability_status(
         runtime_snapshot={"config_hash": "cfg-b"},

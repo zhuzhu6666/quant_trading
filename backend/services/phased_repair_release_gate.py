@@ -60,6 +60,45 @@ def _is_zero_count(value: Any) -> bool:
         return False
 
 
+def _process_static_flags_check(
+    raw: Any,
+    *,
+    expected_flags: Mapping[str, Any],
+    required: bool,
+) -> dict[str, Any]:
+    projection = dict(raw or {}) if isinstance(raw, Mapping) else {}
+    values = (
+        dict(projection.get("values") or {})
+        if isinstance(projection.get("values"), Mapping)
+        else {}
+    )
+    from backend.core.static_feature_flags import static_feature_flags_fingerprint
+
+    try:
+        process_pid = int(projection.get("pid") or 0)
+    except (TypeError, ValueError):
+        process_pid = 0
+    ok = bool(
+        not required
+        or (
+            projection.get("schema_version") == "static_feature_flags.v1"
+            and values == dict(expected_flags)
+            and str(projection.get("fingerprint") or "")
+            == static_feature_flags_fingerprint(values)
+            and process_pid > 0
+            and (_float_or_none(projection.get("process_started_at")) or 0.0) > 0.0
+        )
+    )
+    return {
+        "ok": ok,
+        "required_for_target": required,
+        "values": values,
+        "fingerprint": projection.get("fingerprint"),
+        "pid": projection.get("pid"),
+        "process_started_at": projection.get("process_started_at"),
+    }
+
+
 def evaluate_phased_release_preflight(
     *,
     target: str,
@@ -158,36 +197,25 @@ def evaluate_phased_release_preflight(
         if isinstance(readiness_payload.get("snapshot"), Mapping)
         else {}
     )
-    process_flags = (
-        dict(snapshot_meta.get("process_static_feature_flags") or {})
-        if isinstance(snapshot_meta.get("process_static_feature_flags"), Mapping)
-        else {}
+    backend_process_flags = _process_static_flags_check(
+        snapshot_meta.get("process_static_feature_flags"),
+        expected_flags=flags,
+        required=process_flags_required,
     )
-    process_flag_values = (
-        dict(process_flags.get("values") or {})
-        if isinstance(process_flags.get("values"), Mapping)
-        else {}
-    )
-    from backend.core.static_feature_flags import static_feature_flags_fingerprint
-
-    try:
-        process_pid = int(process_flags.get("pid") or 0)
-    except (TypeError, ValueError):
-        process_pid = 0
-
-    process_flags_ok = bool(
-        not process_flags_required
-        or (
-            process_flags.get("schema_version") == "static_feature_flags.v1"
-            and process_flag_values == dict(flags)
-            and str(process_flags.get("fingerprint") or "")
-            == static_feature_flags_fingerprint(process_flag_values)
-            and process_pid > 0
-            and (_float_or_none(process_flags.get("process_started_at")) or 0.0) > 0.0
-        )
-    )
-    if not process_flags_ok:
+    if not backend_process_flags["ok"]:
         blockers.append("backend_process_static_flags_unconfirmed")
+
+    learning_process_flags_required = target in {
+        "governance_enforce",
+        "pg_job_queue_enable",
+    }
+    learning_process_flags = _process_static_flags_check(
+        worker.get("process_static_feature_flags"),
+        expected_flags=flags,
+        required=learning_process_flags_required,
+    )
+    if not learning_process_flags["ok"]:
+        blockers.append("learning_worker_process_static_flags_unconfirmed")
 
     job_worker_preflight_required = target == "pg_job_queue_enable"
     job_worker_preflight_payload = (
@@ -268,12 +296,10 @@ def evaluate_phased_release_preflight(
                 "mutation_capability_status": mutation_capability.get("status"),
             },
             "backend_process_static_flags": {
-                "ok": process_flags_ok,
-                "required_for_target": process_flags_required,
-                "values": process_flag_values,
-                "fingerprint": process_flags.get("fingerprint"),
-                "pid": process_flags.get("pid"),
-                "process_started_at": process_flags.get("process_started_at"),
+                **backend_process_flags,
+            },
+            "learning_worker_process_static_flags": {
+                **learning_process_flags,
             },
             "job_worker_preflight": {
                 **job_worker_preflight_payload,

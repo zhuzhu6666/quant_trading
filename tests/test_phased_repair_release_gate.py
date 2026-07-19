@@ -43,6 +43,13 @@ def _facts() -> dict:
                     "config_hash_match": True,
                     "overlay_hash_match": True,
                     "mutation_capability": {"status": "available"},
+                    "process_static_feature_flags": {
+                        "schema_version": "static_feature_flags.v1",
+                        "values": {},
+                        "fingerprint": "",
+                        "pid": 456,
+                        "process_started_at": 901.0,
+                    },
                 },
                 "snapshot": {
                     "process_static_feature_flags": {
@@ -67,6 +74,13 @@ def _set_flags(facts: dict, patch: dict) -> None:
     ]
     projection["values"] = dict(facts["flags"])
     projection["fingerprint"] = static_feature_flags_fingerprint(projection["values"])
+    worker_projection = facts["readiness_snapshot"]["payload"]["learning_worker"][
+        "process_static_feature_flags"
+    ]
+    worker_projection["values"] = dict(facts["flags"])
+    worker_projection["fingerprint"] = static_feature_flags_fingerprint(
+        worker_projection["values"]
+    )
 
 
 def test_safety_enforce_preflight_passes_only_with_complete_authoritative_facts():
@@ -161,6 +175,32 @@ def test_process_static_flag_projection_is_total_for_malformed_pid():
 
     assert result["ok"] is False
     assert "backend_process_static_flags_unconfirmed" in result["blockers"]
+
+
+def test_governance_transition_rejects_learning_worker_not_restarted():
+    facts = _facts()
+    worker_projection = facts["readiness_snapshot"]["payload"]["learning_worker"][
+        "process_static_feature_flags"
+    ]
+    _set_flags(
+        facts,
+        {
+            "live_safety_plane_v2_mode": "enforce",
+            "live_generation_controller_v2_enabled": True,
+            "ctrader_execution_outcome_v2_enabled": True,
+        },
+    )
+    worker_projection["values"]["ctrader_execution_outcome_v2_enabled"] = False
+    worker_projection["fingerprint"] = static_feature_flags_fingerprint(
+        worker_projection["values"]
+    )
+
+    result = evaluate_phased_release_preflight(
+        target="governance_enforce", **facts
+    )
+
+    assert result["ok"] is False
+    assert "learning_worker_process_static_flags_unconfirmed" in result["blockers"]
 
 
 @pytest.mark.parametrize(
