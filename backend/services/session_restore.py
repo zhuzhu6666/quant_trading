@@ -560,6 +560,122 @@ def rebuild_session_risk_projection(
     }
 
 
+def build_authoritative_session_state(
+    *,
+    trade_date: str,
+    completed_position_trades: Sequence[Mapping[str, Any]],
+    realized_close_legs: Sequence[Mapping[str, Any]] | None,
+    current_balance: Any,
+    max_consecutive_losses: int,
+    max_daily_loss_pct: float,
+) -> dict[str, Any]:
+    """Build the complete deals-first live session projection from explicit facts."""
+
+    trades = [dict(item) for item in completed_position_trades]
+    realized_legs = (
+        None
+        if realized_close_legs is None
+        else [dict(item) for item in realized_close_legs]
+    )
+    start_balance = derive_session_start_balance(
+        current_balance=current_balance,
+        completed_position_trades=trades,
+        realized_close_legs=realized_legs,
+    )
+    projection = rebuild_session_risk_projection(
+        trade_date=trade_date,
+        completed_position_trades=trades,
+        session_start_balance=start_balance,
+        max_consecutive_losses=max_consecutive_losses,
+        max_daily_loss_pct=max_daily_loss_pct,
+        realized_close_legs=realized_legs,
+    )
+    return {
+        **projection,
+        "session_state_source": "ctrader_deals.final_close_rebuild.v1",
+        "session_recorded_position_ids": sorted(
+            {
+                int(item.get("position_id") or 0)
+                for item in trades
+                if int(item.get("position_id") or 0) > 0
+            }
+        ),
+    }
+
+
+def resolve_session_restore(
+    *,
+    trade_date: str,
+    raw_cache: Mapping[str, Any] | None,
+    authoritative_facts: Mapping[str, Any] | None,
+    current_balance: Any,
+    max_consecutive_losses: int,
+    max_daily_loss_pct: float,
+    observed_at: float,
+) -> dict[str, Any]:
+    """Resolve authoritative, degraded-cache, and unavailable restore states.
+
+    This function is deliberately side-effect free. Callers own PostgreSQL
+    reads, runtime publication, cache healing, and circuit evaluation.
+    """
+
+    authoritative_error: str | None = None
+    if authoritative_facts is not None:
+        try:
+            state = build_authoritative_session_state(
+                trade_date=trade_date,
+                completed_position_trades=list(
+                    authoritative_facts.get("completed_position_trades") or []
+                ),
+                realized_close_legs=(
+                    list(authoritative_facts.get("realized_close_legs") or [])
+                    if "realized_close_legs" in authoritative_facts
+                    else None
+                ),
+                current_balance=current_balance,
+                max_consecutive_losses=max_consecutive_losses,
+                max_daily_loss_pct=max_daily_loss_pct,
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            authoritative_error = f"{type(exc).__name__}:{exc}"
+        else:
+            return {
+                "restored": True,
+                "authoritative": True,
+                "authoritative_error": None,
+                "state": {
+                    **state,
+                    "session_state_status": "available",
+                    "session_observed_at": float(observed_at),
+                    "session_risk_blockers": [],
+                },
+            }
+
+    degraded = parse_degraded_session_cache(raw_cache, trade_date=trade_date)
+    if not degraded:
+        return {
+            "restored": False,
+            "authoritative": False,
+            "authoritative_error": authoritative_error,
+            "state": {
+                "session_state_status": "unavailable",
+                "session_state_source": "unavailable",
+                "accepting_new_risk": False,
+            },
+        }
+    return {
+        "restored": True,
+        "authoritative": False,
+        "authoritative_error": authoritative_error,
+        "state": {
+            **degraded,
+            "session_state_source": "runtime_legacy_snapshot",
+            "session_state_status": "degraded_cache",
+            "accepting_new_risk": False,
+        },
+    }
+
+
 def parse_degraded_session_cache(
     raw_state: Any,
     *,

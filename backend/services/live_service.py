@@ -172,10 +172,9 @@ from backend.services.live_runtime_state import (
 from backend.services.session_restore import (
     PartialCloseSessionFactRuntime,
     authoritative_close_pnl as _authoritative_close_pnl,
-    derive_session_start_balance as _derive_session_start_balance,
+    build_authoritative_session_state as _session_build_authoritative_state,
     load_authoritative_session_deal_facts as _session_load_authoritative_deal_facts,
-    parse_degraded_session_cache as _parse_degraded_session_cache,
-    rebuild_session_risk_projection as _rebuild_session_risk_projection,
+    resolve_session_restore as _session_resolve_restore,
     session_trade_window as _session_restore_trade_window,
     sync_partial_close_session_fact as _session_sync_partial_close_fact,
 )
@@ -2765,32 +2764,17 @@ def _build_session_state_from_authoritative_trades(
     """
     del persisted_state
     account = _live_state_get("account", {}, clone=True) or {}
-    current_balance = float(account.get("balance", 0.0) or 0.0)
-    start_balance = _derive_session_start_balance(
-        current_balance=current_balance,
-        completed_position_trades=trades,
-        realized_close_legs=realized_close_legs,
-    )
     limits = RiskLimitSnapshot.from_runtime_config()
-    projection = _rebuild_session_risk_projection(
+    return _session_build_authoritative_state(
         trade_date=trade_date,
         completed_position_trades=trades,
-        session_start_balance=start_balance,
+        realized_close_legs=(
+            None if realized_close_legs is None else list(realized_close_legs)
+        ),
+        current_balance=float(account.get("balance", 0.0) or 0.0),
         max_consecutive_losses=int(limits.max_consecutive_losses),
         max_daily_loss_pct=float(limits.max_daily_loss_pct),
-        realized_close_legs=realized_close_legs,
     )
-    return {
-        **projection,
-        "session_state_source": "ctrader_deals.final_close_rebuild.v1",
-        "session_recorded_position_ids": sorted(
-            {
-                int(item.get("position_id") or 0)
-                for item in trades
-                if int(item.get("position_id") or 0) > 0
-            }
-        ),
-    }
 
 
 def _restore_session_state_for_day(
@@ -2802,72 +2786,38 @@ def _restore_session_state_for_day(
     if not trade_date:
         trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     raw_state = _runtime_kv_get(_session_state_key(trade_date), {}) or {}
-    state = _parse_degraded_session_cache(
-        raw_state,
-        trade_date=trade_date,
-    )
     authoritative_facts = _load_authoritative_session_deal_facts(
         trade_date,
         broker_open_position_ids=broker_open_position_ids,
         confirmed_closed_position_ids=confirmed_closed_position_ids,
     )
-    if authoritative_facts is not None:
-        authoritative_trades = list(
-            authoritative_facts.get("completed_position_trades") or []
-        )
-        realized_close_legs = list(
-            authoritative_facts.get("realized_close_legs") or []
-        )
-        try:
-            restored = _build_session_state_from_authoritative_trades(
-                trade_date=trade_date,
-                trades=authoritative_trades,
-                realized_close_legs=realized_close_legs,
-            )
-        except (TypeError, ValueError, OverflowError) as exc:
-            # Completed deals without a usable fresh account balance are only
-            # partial broker facts.  Never borrow a baseline from runtime_kv
-            # and call the resulting risk state authoritative.
-            logger.warning(
-                "[live] authoritative session projection unavailable for %s: %s",
-                trade_date,
-                exc,
-            )
-        else:
-            restored["session_state_status"] = "available"
-            restored["session_observed_at"] = time.time()
-            restored["session_risk_blockers"] = []
-            _live_state_update(**restored)
-            # Heal stale runtime_kv snapshots so the next restart sees the same
-            # broker-derived session state without another stale carry-over.
-            _persist_session_state(trade_date)
-            _evaluate_daily_drawdown()
-            return True
-
-    if not state:
-        # Do not manufacture a zero-risk day when neither PostgreSQL facts nor
-        # a same-day cache can be established.  The generation startup/runtime
-        # gate observes this explicit unavailable state and blocks new risk.
-        _live_state_update(
-            session_state_status="unavailable",
-            session_state_source="unavailable",
-            accepting_new_risk=False,
-        )
-        return False
-
-    # Compatibility cache is protection-only.  It may keep a prior circuit
-    # and statistics visible, but it is never sufficient to authorize alpha.
-    logger.warning(
-        "[live] restoring legacy session snapshot for %s because broker close facts are unavailable",
-        trade_date,
+    account = _live_state_get("account", {}, clone=True) or {}
+    limits = RiskLimitSnapshot.from_runtime_config()
+    decision = _session_resolve_restore(
+        trade_date=trade_date,
+        raw_cache=raw_state,
+        authoritative_facts=authoritative_facts,
+        current_balance=account.get("balance", 0.0),
+        max_consecutive_losses=int(limits.max_consecutive_losses),
+        max_daily_loss_pct=float(limits.max_daily_loss_pct),
+        observed_at=time.time(),
     )
-    _live_state_update(
-        **state,
-        session_state_source="runtime_legacy_snapshot",
-        session_state_status="degraded_cache",
-        accepting_new_risk=False,
-    )
-    return True
+    if decision.get("authoritative_error"):
+        logger.warning(
+            "[live] authoritative session projection unavailable for %s: %s",
+            trade_date,
+            decision["authoritative_error"],
+        )
+    if not decision.get("authoritative") and decision.get("restored"):
+        logger.warning(
+            "[live] restoring legacy session snapshot for %s because broker close facts are unavailable",
+            trade_date,
+        )
+    _live_state_update(**dict(decision.get("state") or {}))
+    if decision.get("authoritative"):
+        _persist_session_state(trade_date)
+        _evaluate_daily_drawdown()
+    return bool(decision.get("restored"))
 
 
 def _retry_legacy_session_restore(

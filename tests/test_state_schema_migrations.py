@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -475,8 +476,9 @@ async def test_backend_schema_gate_runs_before_overlay_restore(monkeypatch) -> N
     assert events == []
 
 
-def test_learning_worker_re_raises_schema_version_failure(monkeypatch) -> None:
+def test_learning_worker_re_raises_schema_version_failure(monkeypatch, tmp_path) -> None:
     import backend.core.logging as logging_module
+    from backend.services.learning_worker_capability import LearningWorkerCapability
     import scripts.learning_worker as worker
 
     error = StateSchemaVersionError(
@@ -490,9 +492,24 @@ def test_learning_worker_re_raises_schema_version_failure(monkeypatch) -> None:
     )
     monkeypatch.setattr(logging_module, "setup_logging", lambda: None)
     monkeypatch.setattr(db, "init_all", lambda: (_ for _ in ()).throw(error))
+    capability_db = tmp_path / "worker-capability.db"
+    conn = sqlite3.connect(capability_db)
+    try:
+        conn.execute(
+            "CREATE TABLE runtime_kv (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at REAL NOT NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    capability = LearningWorkerCapability(
+        db_path=capability_db,
+        boot_id="schema-version-failure-test",
+    )
 
     with pytest.raises(StateSchemaVersionError):
-        worker._bootstrap_runtime()
+        worker._bootstrap_runtime(capability)
+
+    assert capability.snapshot()["boot_status"] == "failed"
 
 
 def test_cli_defaults_to_check_and_requires_explicit_apply(monkeypatch, capsys) -> None:

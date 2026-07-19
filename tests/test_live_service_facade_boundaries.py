@@ -59,6 +59,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_position_path_metrics_for_position",
         "_recent_review_reentry_block",
         "_record_risk_reduction_aux_failure",
+        "_restore_session_state_for_day",
         "_release_entry_protection_pending_latch",
         "_remember_supervisor_reentry_block",
         "_sync_partial_close_session_fact",
@@ -80,6 +81,14 @@ def test_session_deal_sql_lives_outside_live_facade():
 
     assert "WITH final_close AS" not in source
     assert "FROM ctrader_deals d" not in source
+
+
+def test_session_restore_decision_has_no_runtime_or_facade_dependency():
+    source = Path("backend/services/session_restore.py").read_text(encoding="utf-8")
+
+    assert "runtime_kv" not in source.replace("``runtime_kv``", "")
+    assert "backend.services.live_service" not in source
+    assert "def resolve_session_restore(" in source
 
 
 def test_position_supervision_entrypoint_is_dependency_wiring_only():

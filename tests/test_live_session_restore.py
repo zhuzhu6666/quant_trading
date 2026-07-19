@@ -12,6 +12,7 @@ from backend.services import live_service
 from backend.services.session_restore import (
     authoritative_close_pnl,
     rebuild_session_risk_projection,
+    resolve_session_restore,
 )
 
 
@@ -71,6 +72,92 @@ def test_rebuild_orders_completed_positions_before_building_equity_path():
     assert projection["session_max_drawdown_pct"] == pytest.approx(50.0 / 1100.0 * 100.0)
     assert projection["session_consecutive_loss"] == 2
     assert projection["session_last_trade_ts"] == 300.0
+
+
+def test_pure_restore_prefers_authoritative_deals_over_poisoned_cache():
+    result = resolve_session_restore(
+        trade_date="2026-07-19",
+        raw_cache={
+            "trade_date": "2026-07-19",
+            "session_pnl": -999.0,
+            "session_trades": 99,
+            "session_start_balance": 1.0,
+        },
+        authoritative_facts={
+            "completed_position_trades": [
+                {"position_id": 7, "net": 20.0, "exec_timestamp": 10.0}
+            ],
+            "realized_close_legs": [
+                {
+                    "deal_id": 11,
+                    "position_id": 7,
+                    "net": 20.0,
+                    "exec_timestamp": 10.0,
+                }
+            ],
+        },
+        current_balance=1020.0,
+        max_consecutive_losses=3,
+        max_daily_loss_pct=5.0,
+        observed_at=100.0,
+    )
+
+    assert result["restored"] is True
+    assert result["authoritative"] is True
+    assert result["state"]["session_state_status"] == "available"
+    assert result["state"]["session_pnl"] == 20.0
+    assert result["state"]["session_start_balance"] == 1000.0
+    assert result["state"]["session_recorded_position_ids"] == [7]
+
+
+def test_pure_restore_cache_is_protection_only():
+    result = resolve_session_restore(
+        trade_date="2026-07-19",
+        raw_cache={
+            "trade_date": "2026-07-19",
+            "session_pnl": -10.0,
+            "session_trades": 1,
+            "session_start_balance": 1000.0,
+            "session_observed_at": 50.0,
+        },
+        authoritative_facts=None,
+        current_balance=1000.0,
+        max_consecutive_losses=3,
+        max_daily_loss_pct=5.0,
+        observed_at=100.0,
+    )
+
+    assert result["restored"] is True
+    assert result["authoritative"] is False
+    assert result["state"]["session_state_status"] == "degraded_cache"
+    assert result["state"]["accepting_new_risk"] is False
+    assert result["state"]["session_observed_at"] == 50.0
+
+
+def test_pure_restore_invalid_authoritative_baseline_is_unavailable():
+    result = resolve_session_restore(
+        trade_date="2026-07-19",
+        raw_cache=None,
+        authoritative_facts={
+            "completed_position_trades": [
+                {"position_id": 7, "net": 20.0, "exec_timestamp": 10.0}
+            ],
+            "realized_close_legs": [],
+        },
+        current_balance=0.0,
+        max_consecutive_losses=3,
+        max_daily_loss_pct=5.0,
+        observed_at=100.0,
+    )
+
+    assert result["restored"] is False
+    assert result["authoritative"] is False
+    assert result["authoritative_error"].startswith("ValueError:")
+    assert result["state"] == {
+        "session_state_status": "unavailable",
+        "session_state_source": "unavailable",
+        "accepting_new_risk": False,
+    }
 
 
 @pytest.mark.parametrize(

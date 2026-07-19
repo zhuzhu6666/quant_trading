@@ -138,6 +138,11 @@ binding hash 为 `133e586e90fa50b244c3fb6285cb0c49073cf0ab46e279761b3aa8a93e688d
 release preflight 已验证该记录，当前 Safety target 仍只剩 24 小时/完整 lifecycle
 观察时长 blocker。后续 Safety source 或对应测试变化会自动使 binding stale 并要求重跑。
 
+17:50 CST 将 session restore 状态选择迁入独立纯函数后，旧 Safety binding 按设计
+变为 stale；同一 12 类、28 个用例已重新运行并全部通过，最新 binding hash 为
+`c97665262e54b3f3fa32cd643012789e81fe8afd00aa18afe6e4e59963d74b9d`。旧 record
+继续保留为历史审计，release gate 只接受 append-only ledger 的最新记录。
+
 后续阶段不再仅凭 CLI 新进程解析配置判断 predecessor 已运行。backend readiness
 将持久化实际 process-loaded static flags、fingerprint、PID 与启动时间；从
 `generation_enable` 起若配置已改但 backend 尚未重启，preflight 会以

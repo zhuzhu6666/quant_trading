@@ -608,7 +608,7 @@
 - 旧理解: 为复用进程内 globals，可以继续把 explicit reconcile、safety cycle、startup barrier 和 emergency 状态机直接写进 `live_service.py`。
 - 当前口径: `backend.services.live_reconciliation` 只负责 fresh broker contract，`backend.services.live_loop_v2` 负责 safety/startup 顺序，`backend.services.live_emergency` 负责严格紧急平仓；三者均不依赖 PostgreSQL。`live_service` 仅保留兼容状态发布、process wiring 和 callback 注入。
 - 影响面: live loop façade、broker reconcile、position protection、generation barrier、emergency API；不改变 feature flag 默认值或 broker mutation 串行所有权。
-- 收口方式: 本轮已移出上述新增实现并保留薄兼容入口；后续继续把 session restore、execution recovery 和旧 protection 尾部按同一 dependency-injection 边界迁出，稳定发布后再删除旧 globals。
+- 收口方式: 本轮已移出上述新增实现并保留薄兼容入口；session restore 的 deals-first 重建及 `available/degraded_cache/unavailable` 选择现已由 `session_restore.resolve_session_restore()` 纯函数拥有，`live_service` 只采集输入、发布投影、修复 cache 和触发 drawdown。后续继续把其余 execution recovery wiring 和旧 protection 尾部按同一 dependency-injection 边界迁出，稳定发布后再删除旧 globals。
 - 验证方式: `tests/test_live_service_facade_boundaries.py`、`tests/test_live_emergency_safety.py`、`tests/test_live_generation_integration.py`、`tests/test_live_service_lifecycle.py`。
 
 ### 治理 mutation 缺少跨账本事务提交权

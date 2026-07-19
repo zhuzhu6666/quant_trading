@@ -105,7 +105,7 @@
 | 单一权重用例 | AWE、Factor Governance、Evolution/manual govern 是否都调用 `FactorWeightChangeService`，没有 DecisionPolicy/mutation 之间的旁路 |
 | 经验先验 | 是否只来自 terminal bounded effects；生产 DecisionPolicy 调用是否传入且保持 0.85~1.15 有界 |
 | 冷却/限频 | 单周期动作数量是否受限 |
-| 测试污染 | pytest/test overlay 是否被生产拒绝 |
+| 测试污染 | pytest/test overlay 是否被生产拒绝；worker boot/capability 故障测试是否显式注入临时 SQLite，绝不调用默认 canonical PostgreSQL publisher；测试前后生产 capability 的 PID/boot_id 是否仍属于 systemd worker |
 
 ## 5. 风控执行改动检查
 
@@ -123,7 +123,7 @@
 | execution intent | market RPC 前是否 committed prepared/submitting；timeout、延迟回执、未知 protobuf、差分不唯一或 finalize 失败是否进入 unknown + durable no-new-risk、禁止重发；是否已删除同方向最大 PID / `positions_before[0]` 猜测 |
 | emergency reconcile | 是否先落盘 no-new-risk latch、等待 open admission、只接受 fresh pre/post reconcile，并仅按 position ID 消失确认成功 |
 | generation ownership | stop 后是否保持 generation/thread/scheduler/pipeline 所有权直到线程真实退出；draining 是否拒绝 start；总入口是否由 `try/finally` 收口 stopped/failed |
-| startup barrier | broker ready、fresh account/positions、unknown intent recovery、session restore、position recovery attach、initial safety、factor warmup 是否依序完成；任一步失败是否 fail-closed |
+| startup barrier | broker ready、fresh account/positions、unknown intent recovery、session restore、position recovery attach、initial safety、factor warmup 是否依序完成；session restore 的 authoritative/degraded/unavailable 是否由独立纯决策函数判定且不读取 runtime globals；任一步失败是否 fail-closed |
 | safety-first 顺序 | 每轮是否严格 broker snapshot → safety → session/circuit → closed bar/factor/open；bars、factor、PG、market session 和 circuit 失败是否仍保留 close/reduce/tighten |
 | safety shadow 独立性 | V2 planner 是否纯只读、无 broker mutation；是否与 legacy 实际选中/覆盖动作做规范化 fingerprint 比较；`independent=false`、mismatch、planner exception 是否持续阻断新增风险；是否禁止把测试 match 冒充 24 小时/完整持仓生命周期观察完成 |
 | session deals-first | runtime_kv 缺失时是否仍查询 `ctrader_deals`；是否要求 broker positions 不超过 15 秒；partial close 后仍开放的 position 是否从 completed trade 排除；`session_observed_at` 是否与 account/positions 独立；unavailable/degraded_cache 是否保留最后值、阻断开仓且不归零 |
