@@ -10,7 +10,7 @@ Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档�
 
 目标事实已确认为 `demo_autonomous`：demo 仅表示模拟资金，不表示需要日常人工批准。历史无 mutation 绑定的 nursery overlay 已先备份，再用精确旧 hash 的 CAS 清空；当前 overlay 为 `{}`，由 `settings.yaml` 的 `demo_autonomous` 重新成为配置事实。旧因子权重/config/supervisor 投影不被伪造为 committed，也不会被静默继承。
 
-生产 backend 与 learning worker 已完成两次受控重启并健康运行。当前仅 `governance_mutation_coordinator_v2_mode=dual_record`，Safety、Generation、Execution outcome 与 PG job queue 仍保持 off/false；新进程启动恢复不再执行无权威 legacy supervisor restore。独立只读 cTrader 对账确认 demo 环境、fresh 空仓、fresh account、unknown execution=0，市场关闭期间 live loop 持续运行且系统健康恢复为 1.00。
+生产 backend 与 learning worker 已完成受控重启并健康运行。当前 `governance_mutation_coordinator_v2_mode=dual_record`，Safety v2 已推进到 `shadow`，Generation、Execution outcome 与 PG job queue 仍保持 false；新进程启动恢复不再执行无权威 legacy supervisor restore。独立只读 cTrader 对账确认 demo 环境、fresh 空仓、fresh account、unknown execution=0，市场关闭期间 live loop 持续运行且系统健康恢复为 1.00。
 
 发布过程仍保持多原因 `no_new_risk`。历史 overlay/governance 与 release reconstruction cause 在验证完成后按 cause 精确释放；watchdog cause 改为连续三轮 authoritative freshness 后自主释放，避免 demo 正常恢复仍依赖人工操作。
 

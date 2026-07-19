@@ -144,7 +144,7 @@
 | replay 生命周期 | factor frame/selector/normalizer/compositor、RiskPolicy、position metrics、safety arbitration、supervisor/trailing/protection plan 是否分别记录“共享原语 exact”和“历史输入 verified”；selector 输出是否进入 artifact 且历史 factor projection ack/health/Registry generation 是否单独验证；broker receipt/reconcile/partial fill、tick 内路径、5 秒 cadence/AWE、account/session/runtime、真实 deal cost/swap、projection ack 或原生 bid/ask 任一缺失时是否只能输出 `diagnostic_only` |
 | PostgreSQL state | 是否避免新增 SQLite state 写入 |
 | schema writer | 新 state_v1 DDL 是否只进入版本化 migration；当前 backend/learning/job worker 是否只启动校验最低 schema version 9；高频 worker/model/readiness ensure 是否显式调用 catalog validation；普通 connection/cursor 是否继续把其余旧 ensure 降为 assertion 并阻断其他 schema write；canonical `experiments.db` 是否只读校验且只允许 `db_doctor --repair` 写 schema；外部 SQLite restore 是否只导入已迁移表；migration connection 是否在 advisory lock 下可重复执行且 checksum ledger 一致 |
-| 静态 rollout flags | safety/generation/execution/governance/job queue 是否与当前分期发布值一致（当前仅 governance 为 `dual_record`，其余仍为 off/false）；是否每次只推进一个开关、只由发布配置+重启切换且不进入 RuntimeConfig overlay/自治 mutation；观察门未达成时是否拒绝 enforce |
+| 静态 rollout flags | safety/generation/execution/governance/job queue 是否与当前分期发布值一致（当前 Safety 为 `shadow`、governance 为 `dual_record`，其余仍为 false）；是否每次只推进一个开关、只由发布配置+重启切换且不进入 RuntimeConfig overlay/自治 mutation；观察门未达成时是否拒绝 enforce |
 | 持久化任务队列 | heavy job 是否只由独立 worker claim；claim token/heartbeat/lease/retry/cancel 是否可恢复；全局与 kind 并发限额是否跨进程生效；flag 默认 off 是否保持当前 demo |
 | worker 线程所有权 | JobManager 是否不创建 daemon event-loop thread；SIGTERM 是否续租排空当前 handler，硬退出是否只在 lease 过期后恢复；backend readiness refresh 是否 process-owned/单飞/非 daemon，并由 `BackendRuntimeLifecycle.stop()` 拒绝新任务且 join 当前 DuckDB/native worker |
 | freshness | readiness 是否暴露数据时效 |

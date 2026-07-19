@@ -6,7 +6,7 @@ system:
 features:
   # Release-time only. These values are not part of RuntimeConfig and cannot
   # be changed by autonomous governance or the generic config API.
-  live_safety_plane_v2_mode: off
+  live_safety_plane_v2_mode: shadow
   live_generation_controller_v2_enabled: false
   ctrader_execution_outcome_v2_enabled: false
   governance_mutation_coordinator_v2_mode: dual_record
