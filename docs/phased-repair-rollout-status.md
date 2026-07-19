@@ -115,7 +115,7 @@ K 线 warmup。
 以下内容不能由单测替代，当前保持未完成：
 
 1. `live_safety_plane_v2_mode=shadow` 至少观察一个完整持仓生命周期；无持仓时完成 24 小时 shadow 与故障注入。
-2. generation/execution/governance/job flags 逐项灰度；当前 governance 已在 `dual_record`，不得一次全开。
+2. generation/execution/governance/job flags 逐项灰度；当前 governance 已在 `dual_record`，不得一次全开。`governance_enforce` 的只读账本门禁当前已证明 31 个 committed/current mutation 的 config/domain hash 完整、无 in-flight mutation；未来 risk-expanding mutation 还必须通过 finalized V16 三重绑定检查。
 3. 真实 demo 环境持续验证 safety heartbeat <=15 秒、account/position reconcile age <=15 秒、unknown intent=0、无 duplicate mutation。
 4. Job worker 开启前的只读 YAML/schema/handler/runnable-kind/active-lease 门禁已接入 `pg_job_queue_enable`；开启后仍需验证 global/per-kind lease、SIGTERM drain 与 kill-9 lease recovery。
 5. 客户端迁移窗口结束后才能删除 URL JWT、legacy access token/hash 与其余兼容路径。

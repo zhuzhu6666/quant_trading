@@ -102,6 +102,12 @@ safety_enforce
 只在 `safety_enforce` target 强制要求，后续阶段仍持续校验 service、latch、execution
 intent、release/autonomous readiness 与 worker config/overlay hash。
 
+`governance_enforce` 及之后的 target 还必须输出
+`governance_preflight.ok=true`：账本中不得存在 reserved/prepared mutation，所有
+committed projection 必须 current 且带完整 config/domain hash；risk-expanding
+mutation 必须关联 finalized V16，并精确匹配 mutation/config/domain 三个绑定。
+risk-tightening 继续允许免 V16，但不能免 hash 或 projection 检查。
+
 `pg_job_queue_enable` 还必须输出 `job_worker_preflight.ok=true`，证明 canonical
 settings、state schema 最低版本、八类 production heavy-job handler 完整一致，且
 PostgreSQL 中不存在无法处理的 v1 runnable kind 或开启前仍有效的 active lease。
