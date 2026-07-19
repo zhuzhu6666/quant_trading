@@ -1,22 +1,18 @@
 # 全项目分期修复发布状态
 
-> Status: code gates passed; production rollout paused before restart
-> Snapshot: 2026-07-19 09:28 CST
+> Status: production compatibility rollout active; governance dual-record deployed
+> Snapshot: 2026-07-19 13:02 CST
 > Scope: Phase 0-5 compatibility implementation, migrations, verification, and remaining live evidence gates
 
 ## 1. 当前结论
 
 Phase 0-5 的兼容代码、additive schema、CI/test gates 和事实源文档已经实现并通过本地与隔离 PostgreSQL 验证。生产 PostgreSQL 已在线从 schema v7 升到 v9，`experiments.db` 也在哈希一致的备份后完成显式 additive repair。
 
-当前生产 backend 和 learning worker 仍运行迁移前启动的旧进程。没有重启、没有切 feature flag、没有修改 broker 订单、没有改写历史 RuntimeConfig overlay。这样可以保持现有 demo loop 连续运行，但也意味着新 Safety/Generation/Governance/Fact/Auth/Job 代码尚未接管生产进程。
+目标事实已确认为 `demo_autonomous`：demo 仅表示模拟资金，不表示需要日常人工批准。历史无 mutation 绑定的 nursery overlay 已先备份，再用精确旧 hash 的 CAS 清空；当前 overlay 为 `{}`，由 `settings.yaml` 的 `demo_autonomous` 重新成为配置事实。旧因子权重/config/supervisor 投影不被伪造为 committed，也不会被静默继承。
 
-禁止当前直接重启。生产 overlay 的 `mutation_id` 为空，且没有 legacy authority manifest。中央 before/after 分类证明其中混合了：
+生产 backend 与 learning worker 已完成两次受控重启并健康运行。当前仅 `governance_mutation_coordinator_v2_mode=dual_record`，Safety、Generation、Execution outcome 与 PG job queue 仍保持 off/false；新进程启动恢复不再执行无权威 legacy supervisor restore。独立只读 cTrader 对账确认 demo 环境、fresh 空仓、fresh account、unknown execution=0，市场关闭期间 live loop 持续运行且系统健康恢复为 1.00。
 
-- `autonomy_mode: demo_autonomous -> demo_nursery`：risk tightening；
-- 大量 factor weights、factor lifecycle/config 与 supervisor template：risk expanding；
-- 若干与 base 相同的 no-change 字段。
-
-因此不能把整行伪标为 `legacy_quarantined`。新代码若现在启动，会按设计持久化 `governance_authority` no-new-risk cause，并拒绝新增风险。
+发布过程仍保持多原因 `no_new_risk`。历史 overlay/governance 与 release reconstruction cause 在验证完成后按 cause 精确释放；watchdog cause 改为连续三轮 authoritative freshness 后自主释放，避免 demo 正常恢复仍依赖人工操作。
 
 ## 2. 已完成的工程门禁
 
@@ -56,7 +52,7 @@ FactBoundary/UI 实现遵循：缺失 `_fact` 按 unknown，stale 保留最后�
 - `/api/health` 为 `status=ok, db=connected, ctrader=connected`；
 - `broker_execution_intent` 当前无记录，因而 unresolved intent 为 0；
 - live loop 仍运行，broker positions 当前为空；
-- 当前旧 API 尚无 `_fact`，证明生产进程仍未加载新代码。
+- `/api/health` 已返回 `system.health.v2` 的 known `_fact`，证明生产进程已加载兼容代码。
 
 ## 4. 已实现的主要安全/治理边界
 
@@ -88,25 +84,20 @@ K 线 warmup。
 
 以下内容不能由单测替代，当前保持未完成：
 
-1. 处理历史 overlay：所有 expanding/no-change 字段必须通过 typed committed mutation 重建，或由 operator 明确清理；只允许 tightening key 做 legacy quarantine。
-2. 确认目标 autonomy mode。`settings.yaml` 是 `demo_autonomous`，当前 committed runtime snapshot/overlay 是 `demo_nursery`。
-3. 部署新代码后受控重启，并验证前后 position IDs、SL/TP、session PnL、circuit 完全一致。
-4. `live_safety_plane_v2_mode=shadow` 至少观察一个完整持仓生命周期；无持仓时完成 24 小时 shadow 与故障注入。
-5. generation/execution/governance/job flags 逐项灰度；不得一次全开。
-6. 实盘/真实 demo 环境验证 safety heartbeat <=15 秒、account/position reconcile age <=15 秒、unknown intent=0、无 duplicate mutation。
-7. Job worker 开启后验证 global/per-kind lease、SIGTERM drain 与 kill-9 lease recovery。
-8. 客户端迁移窗口结束后才能删除 URL JWT、legacy access token/hash 与其余兼容路径。
-9. 一个稳定发布周期后才能删除旧 safety 尾部、旧 globals、V16 consume、direct overlay/registry mutation 和 recursive frontend compatibility。
+1. 精确释放历史 overlay/governance/reconstruction 的已消除 cause，并验证 watchdog 自主恢复只释放自己的 cause。
+2. `live_safety_plane_v2_mode=shadow` 至少观察一个完整持仓生命周期；无持仓时完成 24 小时 shadow 与故障注入。
+3. generation/execution/governance/job flags 逐项灰度；当前 governance 已在 `dual_record`，不得一次全开。
+4. 真实 demo 环境持续验证 safety heartbeat <=15 秒、account/position reconcile age <=15 秒、unknown intent=0、无 duplicate mutation。
+5. Job worker 开启后验证 global/per-kind lease、SIGTERM drain 与 kill-9 lease recovery。
+6. 客户端迁移窗口结束后才能删除 URL JWT、legacy access token/hash 与其余兼容路径。
+7. 一个稳定发布周期后才能删除旧 safety 尾部、旧 globals、V16 consume、direct overlay/registry mutation 和 recursive frontend compatibility。
 
 ## 6. 下一次发布的固定顺序
 
-1. 冻结 overlay 写入，记录精确 overlay/config/domain hash。
-2. 选择 `demo_autonomous` 或 `demo_nursery` 作为目标事实。
-3. 对 expanding controls 生成 typed plan，并满足 V16/evidence/factor lifecycle/projection health；不合格项生成 rollback candidate。
-4. Coordinator committed/current 后，确认 overlay mutation/config/domain hash 完整绑定。
-5. 记录 broker positions、SL/TP、session risk、circuit、unknown intent。
-6. 部署默认 off/shadow 的代码并受控重启。
-7. 验证 startup barrier、fresh account/positions、execution recovery、session restore、safety heartbeat。
-8. 按单一 flag 切 shadow；完成观察门槛后才切 enforce。
+1. 精确释放本次已验证消除的 governance/reconstruction cause；watchdog cause 由连续健康检查自行释放。
+2. 记录 broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。
+3. 保持 governance dual-record 观察，不从历史 overlay 恢复任何 expanding control。
+4. 下一次只切 `live_safety_plane_v2_mode=shadow`，完成 24 小时或完整持仓生命周期与故障注入。
+5. shadow 零动作差异后再评估 Safety enforce；Generation、Execution outcome、PG job queue 继续逐项发布。
 
 任一 duplicate broker mutation、双 generation、safety heartbeat 丢失、session unavailable 自动归零、emergency 假成功或 committed mutation 缺 hash，都必须立即停止阶段切换并保持 `no_new_risk`。

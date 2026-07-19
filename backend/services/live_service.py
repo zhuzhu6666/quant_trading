@@ -5271,12 +5271,45 @@ def _on_live_safety_watchdog_violation(result: SafetyFreshnessResult) -> None:
     )
 
 
+def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
+    """Release only the watchdog-owned cause after sustained fresh facts."""
+
+    cause = ("safety_freshness", "safety_watchdog")
+    latch = no_new_risk_latch_status(fail_closed=True)
+    active_causes = {
+        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+        for item in list(latch.get("causes") or [])
+        if isinstance(item, dict)
+    }
+    if cause not in active_causes:
+        return
+    released = release_no_new_risk_latch_cause(
+        cause=cause[0],
+        cause_id=cause[1],
+        reason="safety_freshness_sustained_recovery",
+        actor="system:safety_watchdog",
+        evidence={
+            "state": result.state,
+            "ages": dict(result.ages),
+            "blockers": list(result.blockers),
+            "recovery_checks": 3,
+        },
+    )
+    safety_failure = _live_state_get("safety_failure", {}, clone=True) or {}
+    updates: dict[str, Any] = {"no_new_risk_latch": released}
+    if str(safety_failure.get("source") or "") == "safety_watchdog":
+        updates["safety_failure"] = {}
+    _live_state_update(**updates)
+
+
 def _start_live_safety_watchdog() -> bool:
     global _live_safety_watchdog
     if _live_safety_watchdog is None:
         _live_safety_watchdog = LiveSafetyWatchdog(
             probe=_live_safety_watchdog_probe,
             on_violation=_on_live_safety_watchdog_violation,
+            on_recovery=_on_live_safety_watchdog_recovery,
+            recovery_checks=3,
             interval_sec=5.0,
             stale_after_sec=15.0,
         )

@@ -119,6 +119,75 @@ def test_watchdog_violation_durably_latches_no_new_risk():
     assert safety_outbox_path().exists()
 
 
+def test_watchdog_requires_consecutive_current_checks_before_recovery():
+    now = {"value": 100.0}
+    snapshot = {
+        "enabled": True,
+        "running": True,
+        "started_at": 1.0,
+        "safety_heartbeat_at": 100.0,
+        "account_updated_at": 100.0,
+        "positions_updated_at": 100.0,
+        "unknown_execution_count": 0,
+    }
+    recovered: list[SafetyFreshnessResult] = []
+    watchdog = LiveSafetyWatchdog(
+        probe=lambda: snapshot,
+        on_violation=lambda _result: None,
+        on_recovery=recovered.append,
+        recovery_checks=3,
+        clock=lambda: now["value"],
+    )
+
+    watchdog.run_once()
+    watchdog.run_once()
+    assert recovered == []
+    watchdog.run_once()
+    assert len(recovered) == 1
+
+    snapshot["unknown_execution_count"] = 1
+    watchdog.run_once()
+    snapshot["unknown_execution_count"] = 0
+    watchdog.run_once()
+    watchdog.run_once()
+    assert len(recovered) == 1
+    watchdog.run_once()
+    assert len(recovered) == 2
+
+
+def test_watchdog_recovery_releases_only_its_own_latch_cause():
+    activate_no_new_risk_latch(
+        reason="incident active",
+        actor="operator:test",
+        cause="incident_control",
+        cause_id="runtime_incident_mode",
+    )
+    live_service._persist_safety_fail_closed(
+        blockers=["unresolved_execution_intent"],
+        source="safety_watchdog",
+    )
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": 1.0,
+            "safety_heartbeat_at": 100.0,
+            "account_updated_at": 100.0,
+            "positions_updated_at": 100.0,
+            "unknown_execution_count": 0,
+        },
+        now=100.0,
+    )
+
+    live_service._on_live_safety_watchdog_recovery(result)
+
+    causes = {
+        (item["cause"], item["cause_id"])
+        for item in no_new_risk_latch_status()["causes"]
+    }
+    assert causes == {("incident_control", "runtime_incident_mode")}
+
+
 def test_watchdog_records_its_own_cause_when_incident_latch_already_active():
     activate_no_new_risk_latch(
         reason="incident active",

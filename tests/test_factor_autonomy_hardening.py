@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -405,7 +406,7 @@ def test_incident_control_service_persists_via_overlay_and_requires_confirm_to_t
     finally:
         conn.close()
     assert row[0] == "v15_incident_control"
-    assert '"runtime_incident_mode": "normal"' in row[1]
+    assert json.loads(row[1])["runtime_incident_mode"] == "normal"
 
 
 def test_runtime_config_overlay_status_flags_suspicious_test_factors(tmp_path):

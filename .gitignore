@@ -58,6 +58,7 @@ data/ml_models/
 data/browser/
 data/archive/
 data/migration_backups/
+data/runtime_overlay_backups/
 tick_vault_data/
 state.db
 runtime/

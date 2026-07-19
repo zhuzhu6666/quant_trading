@@ -131,12 +131,17 @@ class LiveSafetyWatchdog:
         *,
         probe: Callable[[], Mapping[str, Any]],
         on_violation: Callable[[SafetyFreshnessResult], Any],
+        on_recovery: Callable[[SafetyFreshnessResult], Any] | None = None,
+        recovery_checks: int = 3,
         interval_sec: float = 5.0,
         stale_after_sec: float = 15.0,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._probe = probe
         self._on_violation = on_violation
+        self._on_recovery = on_recovery
+        self._recovery_checks = max(1, int(recovery_checks))
+        self._consecutive_current = 0
         self._interval_sec = max(0.1, float(interval_sec))
         self._stale_after_sec = max(1.0, float(stale_after_sec))
         self._clock = clock
@@ -150,7 +155,20 @@ class LiveSafetyWatchdog:
             stale_after_sec=self._stale_after_sec,
         )
         if result.enabled and result.running and not result.ok:
+            self._consecutive_current = 0
             self._on_violation(result)
+        elif result.enabled and result.running and result.state == "current":
+            self._consecutive_current += 1
+            if (
+                self._on_recovery is not None
+                and self._consecutive_current >= self._recovery_checks
+            ):
+                self._on_recovery(result)
+                # Require another complete healthy window before retrying a
+                # failed/idempotent release instead of writing every tick.
+                self._consecutive_current = 0
+        else:
+            self._consecutive_current = 0
         return result
 
     def start(self) -> bool:
