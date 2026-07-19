@@ -106,6 +106,13 @@ from backend.services.live_learning_policy import (
     LiveLearningPolicyRuntime,
     load_active_learning_policy,
 )
+from backend.services.live_reentry_guard import (
+    ReentryGuardRuntime,
+    active_supervisor_reentry_block as _guard_active_reentry_block,
+    pending_supervisor_reentry_block_from_positions as _guard_pending_reentry_block,
+    recent_review_reentry_block as _guard_recent_review_reentry_block,
+    remember_supervisor_reentry_block as _guard_remember_reentry_block,
+)
 from backend.services.market_session import evaluate_market_session
 from backend.services.review_contract import build_entry_timing_context
 from backend.services.live_runtime_state import (
@@ -731,6 +738,26 @@ def _supervisor_reentry_cooldown_seconds(cfg) -> float:
     )
 
 
+def _reentry_guard_runtime() -> ReentryGuardRuntime:
+    from backend.core.db import get_state_pg_conn
+
+    return ReentryGuardRuntime(
+        blocks=_supervisor_reentry_blocks,
+        blocks_lock=_supervisor_reentry_blocks_lock,
+        reentry_key=_supervisor_reentry_key,
+        build_block_payload=_lifecycle_build_supervisor_reentry_block_payload,
+        block_view=_lifecycle_supervisor_reentry_block_view,
+        direction_from_position=_direction_from_position_payload,
+        position_symbol=_position_symbol_value,
+        payload_get=_payload_get,
+        cooldown_seconds=_supervisor_reentry_cooldown_seconds,
+        build_pending_payload=_lifecycle_build_pending_supervisor_reentry_block_payload,
+        state_connection_factory=get_state_pg_conn,
+        warning=logger.warning,
+        now=time.time,
+    )
+
+
 def _remember_supervisor_reentry_block(
     *,
     position: Any,
@@ -740,132 +767,36 @@ def _remember_supervisor_reentry_block(
     current_price: float = 0.0,
     tick: int = 0,
 ) -> None:
-    direction = _direction_from_position_payload(position)
-    if direction == 0:
-        return
-    symbol = _position_symbol_value(position)
-    cooldown_seconds = _supervisor_reentry_cooldown_seconds(cfg)
-    if cooldown_seconds <= 0:
-        return
-    now = time.time()
-    try:
-        pid = int(_payload_get(position, "position_id", 0) or _payload_get(position, "ticket", 0) or 0)
-    except Exception:
-        pid = 0
-    payload = _lifecycle_build_supervisor_reentry_block_payload(
-        symbol=symbol,
-        direction=direction,
-        position_id=pid,
+    _guard_remember_reentry_block(
+        position=position,
         action=action,
         reason=reason,
-        started_at=now,
-        cooldown_seconds=cooldown_seconds,
-        current_price=float(current_price or _payload_get(position, "current_price", 0.0) or 0.0),
+        cfg=cfg,
+        runtime=_reentry_guard_runtime(),
+        current_price=current_price,
         tick=tick,
     )
-    with _supervisor_reentry_blocks_lock:
-        _supervisor_reentry_blocks[_supervisor_reentry_key(symbol, direction)] = payload
 
 
-def _active_supervisor_reentry_block(*, symbol: str, direction: int) -> dict[str, Any] | None:
-    if int(direction or 0) == 0:
-        return None
-    key = _supervisor_reentry_key(symbol, direction)
-    now = time.time()
-    with _supervisor_reentry_blocks_lock:
-        block = dict(_supervisor_reentry_blocks.get(key) or {})
-        view = _lifecycle_supervisor_reentry_block_view(block, now_ts=now)
-        if view is None:
-            _supervisor_reentry_blocks.pop(key, None)
-            return None
-    return view
+def _active_supervisor_reentry_block(
+    *, symbol: str, direction: int,
+) -> dict[str, Any] | None:
+    return _guard_active_reentry_block(
+        symbol=symbol,
+        direction=direction,
+        runtime=_reentry_guard_runtime(),
+    )
 
 
 def _recent_review_reentry_block(
     *, symbol: str, direction: int, now_ts: float | None = None,
 ) -> dict[str, Any] | None:
-    """Reuse mature trade reviews to stop immediate repetition of a failed thesis.
-
-    This is deliberately narrow: two consecutive same-direction bad losses,
-    both carrying conflict/thesis evidence, create a one-hour re-entry block.
-    It does not mutate factors or bypass the existing RiskPolicy decision.
-    """
-    if int(direction or 0) == 0:
-        return None
-    now = float(now_ts or time.time())
-    try:
-        from backend.core.db import get_state_pg_conn
-
-        conn = get_state_pg_conn(read_only=True)
-        try:
-            rows = conn.execute(
-                """
-                SELECT review_id, position_id, outcome_label, failure_tags_json,
-                       review_json, created_at
-                FROM trade_outcome_review
-                WHERE created_at >= %s
-                ORDER BY created_at DESC
-                LIMIT 12
-                """,
-                (now - 3 * 3600.0,),
-            ).fetchall()
-        finally:
-            conn.close()
-    except Exception as exc:
-        logger.warning("[live] recent review reentry evidence unavailable: {}", exc)
-        return None
-
-    matched: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
-        review = item.get("review_json") or {}
-        if isinstance(review, str):
-            try:
-                review = json.loads(review or "{}")
-            except Exception:
-                review = {}
-        if int((review or {}).get("direction") or 0) != int(direction):
-            continue
-        tags = item.get("failure_tags_json") or []
-        if isinstance(tags, str):
-            try:
-                tags = json.loads(tags or "[]")
-            except Exception:
-                tags = []
-        tag_set = {str(tag) for tag in tags}
-        is_failed_thesis = (
-            str(item.get("outcome_label") or "") == "bad_loss"
-            and bool(tag_set.intersection({
-                "factor_conflict", "conflicting_factor_entry",
-                "conflict_entry_loss", "thesis_broken", "regime_mismatch",
-            }))
-        )
-        if not is_failed_thesis:
-            break  # require consecutive same-direction failed reviews
-        matched.append(item)
-        if len(matched) >= 2:
-            break
-    if len(matched) < 2:
-        return None
-
-    latest_close = float(matched[0].get("created_at") or 0.0)
-    expires_at = latest_close + 3600.0
-    if expires_at <= now:
-        return None
-    return {
-        "schema_version": "retrospective_reentry_block.v1",
-        "active": True,
-        "source": "trade_outcome_review",
-        "action": "block_same_direction_reentry",
-        "reason": "repeated_conflicting_thesis_loss",
-        "symbol": str(symbol or ""),
-        "direction": int(direction),
-        "position_id": str(matched[0].get("position_id") or ""),
-        "review_ids": [str(item.get("review_id") or "") for item in matched],
-        "started_at": latest_close,
-        "expires_at": expires_at,
-        "remaining_seconds": round(expires_at - now, 3),
-    }
+    return _guard_recent_review_reentry_block(
+        symbol=symbol,
+        direction=direction,
+        runtime=_reentry_guard_runtime(),
+        now_ts=now_ts,
+    )
 
 
 def _pending_supervisor_reentry_block_from_positions(
@@ -875,37 +806,13 @@ def _pending_supervisor_reentry_block_from_positions(
     direction: int,
     cfg,
 ) -> dict[str, Any] | None:
-    if int(direction or 0) == 0:
-        return None
-    allow_reduce_block = bool(getattr(cfg, "risk_supervisor_reentry_block_reduce", True))
-    for position in positions or []:
-        pos_direction = _direction_from_position_payload(position)
-        if pos_direction != int(direction):
-            continue
-        if _position_symbol_value(position, symbol) != _position_symbol_value({"symbol": symbol}):
-            continue
-        supervisor = _payload_get(position, "supervisor", {}) or {}
-        action = str((supervisor.get("action") if hasattr(supervisor, "get") else "") or _payload_get(position, "supervisor_action", "") or "").lower()
-        reason = str((supervisor.get("summary_reason") if hasattr(supervisor, "get") else "") or _payload_get(position, "supervisor_reason", "") or "")
-        evidence = (supervisor.get("evidence") if hasattr(supervisor, "get") else {}) or {}
-        thesis_status = str(evidence.get("thesis_status") or _payload_get(position, "thesis_status", "") or "").lower()
-        should_block = action == "close" or (allow_reduce_block and action == "reduce") or thesis_status == "broken"
-        if not should_block:
-            continue
-        try:
-            pid = int(_payload_get(position, "position_id", 0) or _payload_get(position, "ticket", 0) or 0)
-        except Exception:
-            pid = 0
-        return _lifecycle_build_pending_supervisor_reentry_block_payload(
-            symbol=_position_symbol_value(position, symbol),
-            direction=direction,
-            position_id=pid,
-            action=action,
-            reason=reason,
-            thesis_status=thesis_status,
-            remaining_seconds=_supervisor_reentry_cooldown_seconds(cfg),
-        )
-    return None
+    return _guard_pending_reentry_block(
+        positions,
+        symbol=symbol,
+        direction=direction,
+        cfg=cfg,
+        runtime=_reentry_guard_runtime(),
+    )
 
 
 def _build_open_trade_risk_context(
