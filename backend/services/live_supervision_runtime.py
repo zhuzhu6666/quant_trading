@@ -74,6 +74,96 @@ class PositionSupervisorEvaluationRuntime:
     record_aux_failure: Any
 
 
+@dataclass(frozen=True)
+class PositionPathMetricsRuntime:
+    position_id: Any
+    holding_summary: Any
+    load_recovery_row: Any
+    lookup_entry_context: Any
+    build_inputs: Any
+    current_regime_hint: Any
+    position_unrealized_pnl: Any
+    now: Any
+    loop_strategy_name: str
+    default_context_integrity: str
+    build_update: Any
+    normalize_path_state: Any
+    update_path_metrics: Any
+    upsert_recovery_position: Any
+    record_aux_failure: Any
+
+
+def position_path_metrics_for_position(
+    position: Any,
+    *,
+    runtime: PositionPathMetricsRuntime,
+    cfg: Any = None,
+    now_ts: float | None = None,
+    persist: bool = False,
+    broker: str = "",
+    strategy_name: str = "",
+) -> dict[str, Any]:
+    """Compute path metrics while treating persistence as enrichment only."""
+
+    position_id = runtime.position_id(position)
+    if position_id <= 0:
+        return {}
+
+    holding = runtime.holding_summary(position, cfg=cfg, now_ts=now_ts)
+    recovery_row = runtime.load_recovery_row(
+        position_id,
+        operation="position_path_metrics",
+    )
+    entry_context = runtime.lookup_entry_context(
+        position_id,
+        operation="position_path_metrics",
+    )
+    inputs = runtime.build_inputs(
+        position=position,
+        recovery_row=recovery_row,
+        entry_context=entry_context,
+        holding_summary=holding,
+        current_regime=runtime.current_regime_hint(),
+        current_pnl=runtime.position_unrealized_pnl(position),
+        now_ts=float(now_ts or runtime.now()),
+        broker=broker,
+        strategy_name=strategy_name,
+        loop_strategy_name=runtime.loop_strategy_name,
+        default_context_integrity=runtime.default_context_integrity,
+    )
+    path_update = runtime.build_update(
+        recovery_meta=inputs["recovery_meta"],
+        entry_context=inputs["entry_context"],
+        current_pnl=inputs["current_pnl"],
+        now_ts=inputs["now_ts"],
+        holding_seconds=inputs["holding_seconds"],
+        max_holding_seconds=inputs["max_holding_seconds"],
+        current_regime=inputs["current_regime"],
+        normalize_path_state_fn=runtime.normalize_path_state,
+        update_position_path_metrics_fn=runtime.update_path_metrics,
+    )
+
+    if persist:
+        defaults = inputs["upsert_defaults"]
+        try:
+            runtime.upsert_recovery_position(
+                position,
+                broker=defaults["broker"],
+                strategy_name=defaults["strategy_name"],
+                status=defaults["status"],
+                context_integrity=defaults["context_integrity"],
+                meta=path_update["next_meta"],
+            )
+        except Exception as exc:
+            runtime.record_aux_failure(
+                "risk_reduction_state_persist_failed",
+                position_id=position_id,
+                action="position_path_metrics",
+                error=exc,
+            )
+    return path_update["result"]
+
+
 def evaluate_position_supervisor_for_position(
     position: dict[str, Any],
     *,

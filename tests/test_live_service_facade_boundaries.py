@@ -52,6 +52,7 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_open_learning_context_payload",
         "_active_supervisor_reentry_block",
         "_pending_supervisor_reentry_block_from_positions",
+        "_position_path_metrics_for_position",
         "_recent_review_reentry_block",
         "_record_risk_reduction_aux_failure",
         "_remember_supervisor_reentry_block",

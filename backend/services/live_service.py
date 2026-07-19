@@ -193,8 +193,10 @@ from backend.services.live_supervision_actions import (
 )
 from backend.services.live_supervision_runtime import (
     LiveSupervisionRuntime,
+    PositionPathMetricsRuntime,
     PositionSupervisorEvaluationRuntime,
     evaluate_position_supervisor_for_position as _runtime_evaluate_position,
+    position_path_metrics_for_position as _runtime_position_path_metrics,
     run_position_supervision as _runtime_run_position_supervision,
 )
 from backend.services.live_factor_wiring import (
@@ -1614,6 +1616,26 @@ def _current_regime_hint() -> str:
     )
 
 
+def _position_path_metrics_runtime() -> PositionPathMetricsRuntime:
+    return PositionPathMetricsRuntime(
+        position_id=_position_id_value,
+        holding_summary=_holding_summary_for_position,
+        load_recovery_row=_load_recovery_row_for_risk_reduction,
+        lookup_entry_context=_lookup_entry_context_for_risk_reduction,
+        build_inputs=_lifecycle_build_position_path_metrics_inputs,
+        current_regime_hint=_current_regime_hint,
+        position_unrealized_pnl=_position_unrealized_pnl,
+        now=time.time,
+        loop_strategy_name=_loop_strategy_name,
+        default_context_integrity=_RECOVERY_CONTEXT_FULL,
+        build_update=_lifecycle_build_position_path_metrics_update,
+        normalize_path_state=normalize_path_state,
+        update_path_metrics=update_position_path_metrics,
+        upsert_recovery_position=_upsert_recovery_position_state,
+        record_aux_failure=_record_risk_reduction_aux_failure,
+    )
+
+
 def _position_path_metrics_for_position(
     position: Any,
     *,
@@ -1623,63 +1645,15 @@ def _position_path_metrics_for_position(
     broker: str = "",
     strategy_name: str = "",
 ) -> dict[str, Any]:
-    pid = _position_id_value(position)
-    if pid <= 0:
-        return {}
-
-    holding = _holding_summary_for_position(position, cfg=cfg, now_ts=now_ts)
-    recovery_row = _load_recovery_row_for_risk_reduction(
-        pid,
-        operation="position_path_metrics",
-    )
-    entry_ctx = _lookup_entry_context_for_risk_reduction(
-        pid,
-        operation="position_path_metrics",
-    )
-    inputs = _lifecycle_build_position_path_metrics_inputs(
-        position=position,
-        recovery_row=recovery_row,
-        entry_context=entry_ctx,
-        holding_summary=holding,
-        current_regime=_current_regime_hint(),
-        current_pnl=_position_unrealized_pnl(position),
-        now_ts=float(now_ts or time.time()),
+    return _runtime_position_path_metrics(
+        position,
+        cfg=cfg,
+        now_ts=now_ts,
+        persist=persist,
         broker=broker,
         strategy_name=strategy_name,
-        loop_strategy_name=_loop_strategy_name,
-        default_context_integrity=_RECOVERY_CONTEXT_FULL,
+        runtime=_position_path_metrics_runtime(),
     )
-    path_update = _lifecycle_build_position_path_metrics_update(
-        recovery_meta=inputs["recovery_meta"],
-        entry_context=inputs["entry_context"],
-        current_pnl=inputs["current_pnl"],
-        now_ts=inputs["now_ts"],
-        holding_seconds=inputs["holding_seconds"],
-        max_holding_seconds=inputs["max_holding_seconds"],
-        current_regime=inputs["current_regime"],
-        normalize_path_state_fn=normalize_path_state,
-        update_position_path_metrics_fn=update_position_path_metrics,
-    )
-
-    if persist:
-        upsert_defaults = inputs["upsert_defaults"]
-        try:
-            _upsert_recovery_position_state(
-                position,
-                broker=upsert_defaults["broker"],
-                strategy_name=upsert_defaults["strategy_name"],
-                status=upsert_defaults["status"],
-                context_integrity=upsert_defaults["context_integrity"],
-                meta=path_update["next_meta"],
-            )
-        except Exception as exc:
-            _record_risk_reduction_aux_failure(
-                "risk_reduction_state_persist_failed",
-                position_id=pid,
-                action="position_path_metrics",
-                error=exc,
-            )
-    return path_update["result"]
 
 
 def _build_position_supervisor_context(
