@@ -106,6 +106,17 @@ def test_live_loop_entrypoint_owns_and_closes_generation_log_resource():
     )
 
 
+def test_live_loop_generation_body_has_no_embedded_tick_loop():
+    tree = ast.parse(LIVE_SERVICE.read_text(encoding="utf-8"))
+    node = _definitions(tree)["_run_loop_body_active"]
+
+    assert int(node.end_lineno or 0) - int(node.lineno) < 100
+    assert not any(
+        isinstance(child, (ast.For, ast.While))
+        for child in ast.walk(node)
+    )
+
+
 def test_safety_reconciliation_modules_do_not_depend_on_postgres_or_legacy_refresh():
     for relative_path in (
         "backend/services/live_reconciliation.py",

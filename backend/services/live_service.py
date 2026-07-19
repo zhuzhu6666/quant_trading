@@ -85,6 +85,10 @@ from backend.services.live_loop_bootstrap import (
     run_startup_safety_cycle as _bootstrap_run_startup_safety,
     warmup_live_bars as _bootstrap_warmup_live_bars,
 )
+from backend.services.live_loop_runner import (
+    SerialLiveTickRuntime,
+    run_serial_live_ticks as _runtime_run_serial_live_ticks,
+)
 from backend.services.live_execution_recovery import (
     ExecutionRecoveryRuntime,
     PositionRecoveryRuntime,
@@ -7894,6 +7898,20 @@ def _initialize_live_factor_pipelines(
     )
 
 
+def _serial_live_tick_runtime() -> SerialLiveTickRuntime:
+    return SerialLiveTickRuntime(
+        set_loop_diagnostic=_set_loop_diagnostic,
+        run_tick_body=_run_live_loop_tick_body,
+        factor_pipeline=lambda: _factor_pipeline,
+        acknowledge_factor_projections=(
+            _loop_ack_prepared_factor_projections
+        ),
+        live_state_update=_live_state_update,
+        phase2_active=_phase2_v2_active,
+        update_risk_metrics=_update_live_loop_risk_metrics,
+    )
+
+
 def _run_loop_body(
     broker: str,
     stop_flag: threading.Event,
@@ -8022,64 +8040,15 @@ def _run_loop_body_active(
         except Exception as e:
             log(f"subscribe_spots failed (non-fatal): {e}")
 
-    # ── Phase 3: 主循环 (60s tick) ──
-    tick = 0
-    recovery_bootstrapped = False
-    while not stop_flag.is_set():
-        tick += 1
-        # 诊断: 记录 tick 计数和桥状态
-        _set_loop_diagnostic(tick, "checking")
-
-        # ── 主循环体: 账户刷新 + 数据读取 + 交易 ──
-        try:
-            tick_result = _run_live_loop_tick_body(
-                broker=broker,
-                bridge_cfg=_rcfg,
-                timeframe=TF,
-                tick=tick,
-                recovery_bootstrapped=recovery_bootstrapped,
-                stop_requested=stop_flag.is_set,
-                log=log,
-                generation_id=generation_id,
-            )
-            recovery_bootstrapped = bool(tick_result["recovery_bootstrapped"])
-            # Keep a prepared factor's live load proof fresh for the next V16
-            # activation cycle. This runs only after the tick's safety/broker
-            # work; failure remains an activation blocker and never escapes
-            # into the safety loop.
-            live_engine = (_factor_pipeline or {}).get("engine")
-            if live_engine is not None and bool(getattr(live_engine, "is_warm", False)):
-                (_factor_pipeline or {})["factor_projection_ack"] = (
-                    _loop_ack_prepared_factor_projections(
-                        engine=live_engine,
-                        generation_id=str(generation_id or ""),
-                    )
-                )
-            if tick_result["break_loop"]:
-                break
-            wait_seconds = tick_result.get("wait_seconds")
-            if wait_seconds is not None:
-                if stop_flag.wait(float(wait_seconds)):
-                    break
-                continue
-        except Exception as e:
-            log(f"tick {tick} error: {type(e).__name__}: {e}\n{traceback.format_exc()[-300:]}")
-            _live_state_update(accepting_new_risk=False)
-            # Safety is the first operation of every v2 tick.  Any later
-            # uncaught error must return to that boundary quickly instead of
-            # falling through to the legacy 60-second alpha cadence.
-            if _phase2_v2_active():
-                if stop_flag.wait(5.0):
-                    break
-                continue
-
-        # ── 风险模块自动计算 (每 tick, 不阻塞主循环) ──
-        _update_live_loop_risk_metrics(tick=tick, log=log)
-
-        if stop_flag.wait(60):
-            break
-
-    log(f"loop stopped after {tick} ticks")
+    _runtime_run_serial_live_ticks(
+        broker=broker,
+        stop_flag=stop_flag,
+        bridge_cfg=_rcfg,
+        timeframe=TF,
+        generation_id=generation_id,
+        log=log,
+        runtime=_serial_live_tick_runtime(),
+    )
 
 
 # ── Background account/positions cache writer ─────────────────────────
