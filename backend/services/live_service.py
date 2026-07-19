@@ -79,6 +79,12 @@ from backend.services.live_loop_v2 import (
     attempt_generation_startup_barrier as _loop_v2_attempt_startup_barrier,
     run_live_safety_cycle as _loop_v2_run_safety_cycle,
 )
+from backend.services.live_loop_bootstrap import (
+    BarWarmupRuntime,
+    StartupSafetyRuntime,
+    run_startup_safety_cycle as _bootstrap_run_startup_safety,
+    warmup_live_bars as _bootstrap_warmup_live_bars,
+)
 from backend.services.live_execution_recovery import (
     ExecutionRecoveryRuntime,
     PositionRecoveryRuntime,
@@ -7756,6 +7762,32 @@ def _run_loop(
         _stop_live_safety_watchdog()
 
 
+def _startup_safety_runtime() -> StartupSafetyRuntime:
+    return StartupSafetyRuntime(
+        get_ctrader=_get_ctrader,
+        reconcile_positions=_explicit_position_reconcile,
+        run_safety_cycle=_run_live_safety_cycle,
+        reconcile_account=_explicit_account_reconcile,
+        reconcile_value=_reconcile_value,
+        live_state_update=_live_state_update,
+        persist_safety_fail_closed=_persist_safety_fail_closed,
+    )
+
+
+def _bar_warmup_runtime() -> BarWarmupRuntime:
+    return BarWarmupRuntime(
+        warmup_from_local_db=_warmup_from_local_db,
+        get_ctrader=_get_ctrader,
+        wait_ctrader_ready=_wait_ctrader_ready,
+        fetch_bars_with_retry=_fetch_bars_with_retry,
+        load_bar_cache=_load_bar_cache,
+        publish_latest_price=_publish_latest_price,
+        save_bar_cache=_save_bar_cache,
+        logger_warning=logger.warning,
+        now=time.time,
+    )
+
+
 def _run_loop_body(
     broker: str,
     stop_flag: threading.Event,
@@ -7765,7 +7797,6 @@ def _run_loop_body(
     """Live trading loop — 全由 Factor Takeover v4 因子管道驱动。"""
     global _factor_pipeline
     _factor_pipeline = None
-    import sys
     from pathlib import Path
     # ── 时间框架 (从 RuntimeConfig 读取) ──
     from config.runtime_config import shared as _rcc
@@ -7784,132 +7815,23 @@ def _run_loop_body(
 
     log(f"live loop started (broker={broker}, timeframe={TF})")
 
-    # Safety must become active before factor warmup, bar repair, session PG
-    # work, or any other startup activity that can be slow/fail.  The startup
-    # barrier is completed later in its documented order, but an already-open
-    # broker position receives protection immediately.
-    try:
-        startup_bridge, startup_err, startup_warming = _get_ctrader()
-        startup_ready = bool(
-            startup_bridge is not None
-            and not startup_warming
-            and getattr(startup_bridge, "is_connected", False)
-        )
-        startup_positions = _explicit_position_reconcile(
-            startup_bridge if startup_ready else None
-        )
-        startup_safety = _run_live_safety_cycle(
-            bridge=startup_bridge if startup_ready else None,
-            broker=broker,
-            tick=0,
-            log=log,
-            generation_id=generation_id,
-            reconcile_result=startup_positions,
-        )
-        if startup_ready:
-            startup_account = _explicit_account_reconcile(startup_bridge)
-            if startup_account is not None:
-                raw_account = _reconcile_value(startup_account, "account", None)
-                if raw_account is not None:
-                    account_payload = (
-                        asdict(raw_account)
-                        if is_dataclass(raw_account)
-                        else dict(raw_account)
-                    )
-                    account_payload.update({"ok": True, "broker": broker})
-                    _live_state_update(
-                        account=account_payload,
-                        account_reconciled=copy.deepcopy(account_payload),
-                        account_updated_at=float(
-                            _reconcile_value(startup_account, "observed_at", 0.0)
-                            or 0.0
-                        ),
-                        account_reconcile_id=str(
-                            _reconcile_value(startup_account, "reconcile_id", "")
-                            or ""
-                        ),
-                        account_reconcile_failed_at=None,
-                        account_reconcile_error=None,
-                    )
-        if startup_safety.get("blockers"):
-            log(
-                "startup safety fail-closed: "
-                + ",".join(str(item) for item in startup_safety.get("blockers", []))
-                + (f" broker_error={startup_err}" if startup_err else "")
-            )
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
-        _persist_safety_fail_closed(
-            blockers=("startup_safety_cycle_exception",),
-            source="live_loop_startup",
-            error=error,
-        )
-        log(f"startup safety failed closed; main loop will retry in 5s: {error}")
+    _bootstrap_run_startup_safety(
+        broker=broker,
+        generation_id=generation_id,
+        log=log,
+        runtime=_startup_safety_runtime(),
+    )
 
-    # ── Phase 1: warmup ──
-    # audit 2026-06-08: Pepperstone demo broker ProtoOAGetTrendbarsReq 不返 history
-    # (任何 period 都 0 bar). 改优先读本地 DataStore("data/ctrader_data.duckdb") 拉 XAUUSD+
-    # M15 200 根, 再 fallback 到 broker fetch_bars.
-    df = None
-    df_source = None
-    if broker == "ctrader":
-        df = _warmup_from_local_db("XAUUSD+", TF, 200)
-        if df is not None and len(df) >= 30:
-            df_source = "local_db"
-            last_ts = df.index[-1]
-            age_hours = (pd.Timestamp.now("UTC").tz_localize(None) - last_ts.tz_localize(None)).total_seconds() / 3600 if last_ts.tzinfo else 0
-            if age_hours > 24:
-                logger.warning(
-                    f"local DB bars are {age_hours:.1f}h stale (last bar: {last_ts}). "
-                    f"Strategy will warm up on outdated data. Consider running live_sync."
-                )
-    if df is None or len(df) < 30:
-        # fallback: broker fetch_bars
-        try:
-            if broker == "ctrader":
-                # audit 2026-06-10: 3-tuple + 阻塞等连好 (loop 线程里可等)
-                bridge, err, warming = _get_ctrader()
-                if err:
-                    log(f"FATAL: {err}")
-                    return
-                if warming or not bridge.is_connected:
-                    wait_err = _wait_ctrader_ready(bridge, timeout_sec=30.0)
-                    if wait_err:
-                        log(f"FATAL: {wait_err}")
-                        return
-                df = _fetch_bars_with_retry(bridge, timeframe=TF, n_bars=200)
-            else:
-                log(f"FATAL: unknown broker {broker}")
-                return
-            df_source = "broker"
-        except Exception as e:
-            log(f"FATAL: warmup exception: {type(e).__name__}: {e}\n{traceback.format_exc()[-500:]}")
-            return
-
-    if df is None or len(df) < 30:
-        # ★ v9-fix: 尝试从备份缓存加载
-        cache_df = _load_bar_cache()
-        if cache_df is not None and len(cache_df) >= 30:
-            df = cache_df
-            df_source = "cache"
-            log(f"WARNING: loaded {len(df)} bars from backup cache, "
-                f"last close={df['close'].iloc[-1]:.2f}")
-        else:
-            log(f"FATAL: insufficient history bars (got {0 if df is None else len(df)} < 30) "
-                f"— local DB empty, broker returned 0, and no backup cache")
-            return
-    warmup_price = float(df["close"].iloc[-1])
-    warmup_ts = time.time()
-    try:
-        last_index = df.index[-1]
-        if hasattr(last_index, "timestamp"):
-            warmup_ts = float(last_index.timestamp())
-    except Exception:
-        warmup_ts = time.time()
-    _publish_latest_price(warmup_price, source=f"warmup_{df_source or 'bar'}", ts=warmup_ts)
-    log(f"warmed up: {len(df)} bars (source={df_source}), last close={warmup_price:.2f}")
-    # ★ v9-fix: 成功后缓存 bar 供下次启动使用
-    _save_bar_cache(df)
+    warmup = _bootstrap_warmup_live_bars(
+        broker=broker,
+        timeframe=TF,
+        log=log,
+        runtime=_bar_warmup_runtime(),
+    )
+    if warmup is None:
+        return
+    df = warmup.frame
+    df_source = warmup.source
 
     # ── Factor Takeover v4 管道初始化 ──
     global _DECISION_LOG, _DECISION_LOG_RUN_ID
