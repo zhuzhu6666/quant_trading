@@ -67,6 +67,23 @@ def test_safety_enforce_preflight_passes_only_with_complete_authoritative_facts(
                 "live_generation_controller_v2_enabled": True,
             },
         ),
+        (
+            "governance_enforce",
+            {
+                "live_safety_plane_v2_mode": "enforce",
+                "live_generation_controller_v2_enabled": True,
+                "ctrader_execution_outcome_v2_enabled": True,
+            },
+        ),
+        (
+            "pg_job_queue_enable",
+            {
+                "live_safety_plane_v2_mode": "enforce",
+                "live_generation_controller_v2_enabled": True,
+                "ctrader_execution_outcome_v2_enabled": True,
+                "governance_mutation_coordinator_v2_mode": "enforce",
+            },
+        ),
     ],
 )
 def test_later_transition_preflights_require_exact_predecessor_flags(
@@ -90,6 +107,36 @@ def test_later_transition_preflight_rejects_skipped_predecessor():
     result = evaluate_phased_release_preflight(
         target="execution_outcome_enable", **facts
     )
+
+    assert result["ok"] is False
+    assert "static_rollout_flags_unexpected" in result["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("target", "flag_patch"),
+    [
+        (
+            "governance_enforce",
+            {
+                "live_safety_plane_v2_mode": "enforce",
+                "live_generation_controller_v2_enabled": True,
+            },
+        ),
+        (
+            "pg_job_queue_enable",
+            {
+                "live_safety_plane_v2_mode": "enforce",
+                "live_generation_controller_v2_enabled": True,
+                "ctrader_execution_outcome_v2_enabled": True,
+            },
+        ),
+    ],
+)
+def test_final_transition_preflights_reject_skipped_predecessor(target, flag_patch):
+    facts = _facts()
+    facts["flags"].update(flag_patch)
+
+    result = evaluate_phased_release_preflight(target=target, **facts)
 
     assert result["ok"] is False
     assert "static_rollout_flags_unexpected" in result["blockers"]

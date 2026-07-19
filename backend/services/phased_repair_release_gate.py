@@ -29,6 +29,20 @@ TARGET_EXPECTED_FLAGS = {
         "governance_mutation_coordinator_v2_mode": "dual_record",
         "pg_job_queue_v2_enabled": False,
     },
+    "governance_enforce": {
+        "live_safety_plane_v2_mode": "enforce",
+        "live_generation_controller_v2_enabled": True,
+        "ctrader_execution_outcome_v2_enabled": True,
+        "governance_mutation_coordinator_v2_mode": "dual_record",
+        "pg_job_queue_v2_enabled": False,
+    },
+    "pg_job_queue_enable": {
+        "live_safety_plane_v2_mode": "enforce",
+        "live_generation_controller_v2_enabled": True,
+        "ctrader_execution_outcome_v2_enabled": True,
+        "governance_mutation_coordinator_v2_mode": "enforce",
+        "pg_job_queue_v2_enabled": False,
+    },
 }
 
 

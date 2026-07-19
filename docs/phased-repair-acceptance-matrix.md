@@ -86,3 +86,18 @@ ledger 证明，二者不能互相替代。
 latch cleared、本地/PG unresolved intent 均为 0、持久化 readiness 新鲜、
 release/autonomous mutation ready、worker config/overlay hash 一致。快照过期或任一
 事实不可读都返回非零；该脚本本身不会修改开关或重启服务。
+
+后续阶段使用同一只读门禁，并严格按以下 target 顺序执行：
+
+```text
+safety_enforce
+  -> generation_enable
+  -> execution_outcome_enable
+  -> governance_enforce
+  -> pg_job_queue_enable
+```
+
+每个 target 都要求静态 flags 精确处于上一阶段的完成态；跳过 predecessor、提前
+开启后续 flag 或当前值未知时必须以非零退出。Safety shadow continuity/lifecycle
+只在 `safety_enforce` target 强制要求，后续阶段仍持续校验 service、latch、execution
+intent、release/autonomous readiness 与 worker config/overlay hash。

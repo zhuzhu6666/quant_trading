@@ -132,7 +132,7 @@ K 线 warmup。
 2. 保持 governance dual-record，不从历史 overlay 恢复任何 expanding control。
 3. 完成 24 小时无仓观察或一个完整持仓生命周期，并执行 shadow 故障注入矩阵。
 4. 运行 `scripts/phased_repair_release_gate.py --target safety_enforce`；只有所有权威检查为 green 且进程以 0 退出时才评估 Safety enforce。
-5. Generation、Execution outcome、PG job queue 继续逐项发布。
+5. 其后只允许依次运行 `generation_enable`、`execution_outcome_enable`、`governance_enforce`、`pg_job_queue_enable` 对应预检并逐项发布；每一步必须在前一阶段受控重启、运行事实恢复且新 target 预检为 green 后才可推进。
 
 任一 duplicate broker mutation、双 generation、safety heartbeat 丢失、session unavailable 自动归零、emergency 假成功或 committed mutation 缺 hash，都必须立即停止阶段切换并保持 `no_new_risk`。
 
