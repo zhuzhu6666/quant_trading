@@ -5015,6 +5015,14 @@ def _scheduled_awe_adapt():
     不阻塞, 异常只 log 不抛。
     """
     try:
+        # The scheduler is process-owned so health/readiness/data maintenance
+        # survives a stopped or recovering live generation.  AWE, however,
+        # consumes generation-owned in-memory attribution and must never adapt
+        # weights from a dead loop's stale pipeline.
+        if not bool(loop_status().get("running")):
+            logger.debug("[awe_adapt] skip: live loop not running")
+            return
+
         # 原子快照 — 防止 live loop 重置 _factor_pipeline 时的 TOCTOU
         fp = _factor_pipeline
         if fp is None:
@@ -6681,10 +6689,20 @@ def _run_loop(
                 )
             except RuntimeError as exc:
                 logger.error("[live] loop exit ownership mismatch: %s", exc)
-        # A natural/fatal loop exit must not leave scheduler jobs mutating the
-        # state of a dead generation.  stop cleanup calls this again safely.
-        _stop_live_scheduler()
+        # The scheduler is process-owned: readiness, health and data
+        # maintenance must remain alive while a generation is stopped or being
+        # recovered.  Generation-sensitive jobs guard on loop ownership.
+        # Only BackendRuntimeLifecycle.stop() shuts the scheduler down.
         _stop_live_safety_watchdog()
+        if not _process_shutdown_requested:
+            try:
+                if schedule_auto_resume_loop():
+                    logger.warning(
+                        "[live] loop exited while desired state remained enabled; "
+                        "auto-resume scheduled"
+                    )
+            except Exception as exc:
+                logger.error("[live] failed to schedule loop auto-resume: %s", exc)
 
 
 def _startup_safety_runtime() -> StartupSafetyRuntime:

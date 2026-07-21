@@ -248,6 +248,27 @@ execution 仍为 0、latch cleared、服务未重启。该故障按 gate 规则�
 
 ## 6. 下一次发布的固定顺序
 
+2026-07-22 收口补充：live loop 的显式 Stop 曾将 desired state 持久化为 disabled，
+并因 generation exit 无条件停止进程内 Scheduler，造成 backend 仍 active 但 readiness、
+health 与 Safety shadow observation 停止推进。Scheduler ownership 现收口到 backend
+lifespan；generation 退出只停止 safety watchdog。非 process shutdown 且 desired state
+仍 enabled 时自动按 backoff 恢复，人工 Stop 仍保持 disabled/粘性 kill switch；AWE
+在 loop 非 running 时跳过，避免消费旧 generation 的内存归因。
+
+同日 04:59–05:02 CST 已完成生产收口：停服释放单会话锁后的独立 cTrader 对账为
+demo、account fresh、positions fresh、明确空仓，随后以
+`reason=autonomous_recovery` 恢复 desired state 并启动新 backend。进程自动恢复
+`factor_pipeline_v4` loop，启动期 unknown/freshness fail-closed 后在 tick 3 起连续写入
+fresh、unknown execution=0、comparison exact-match、accepting-new-risk=true 的 Safety
+shadow observation；safety latch cleared、cause_count=0。进程级 Scheduler 在 loop 启动后
+持续执行 system health/readiness，系统健康为 1.00。当前 market session 根据 broker
+连接、API 与 stale quote 判定为 maintenance/closed，因而 loop 运行但暂不开放 alpha；
+该会话闸会随 fresh spot 自主恢复，不属于 broker/safety 故障。全量 pytest 为
+`2353 passed, 9 skipped`；Safety 12 类/28 用例和 Execution Outcome 8 类/15 用例均按
+当前源码重跑通过，binding 分别为
+`6efa7a8678b60901983b1646f3e3e263d949d4b5a72a14a08b7da0c9cea92c1b`、
+`33998db0ab4db7938d2215b0b93dd92bfd6a7cc3be0da75dacb31846a429a429`。
+
 1. 持续记录 Safety shadow comparison、broker positions、SL/TP、session risk、circuit、unknown intent 与 backend/worker config hash。
 2. 保持 governance dual-record，不从历史 overlay 恢复任何 expanding control。
 3. 完成 24 小时无仓观察或一个完整持仓生命周期，并执行 shadow 故障注入矩阵。

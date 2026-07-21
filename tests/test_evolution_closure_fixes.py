@@ -142,6 +142,7 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
         "_factor_pipeline",
         {"attribution": _Attr(), "awe": _AWE(), "engine": None},
     )
+    monkeypatch.setattr(live_service, "loop_status", lambda: {"running": True})
 
     live_service._scheduled_awe_adapt()
 
@@ -210,6 +211,7 @@ def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):
         "_factor_pipeline",
         {"attribution": _Attr(), "awe": _AWE(), "engine": None},
     )
+    monkeypatch.setattr(live_service, "loop_status", lambda: {"running": True})
 
     live_service._scheduled_awe_adapt()
 
