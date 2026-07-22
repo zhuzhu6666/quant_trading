@@ -1181,6 +1181,33 @@ def test_effect_reconciliation_filters_contaminated_and_wrong_regime_reviews():
     assert mismatched == 1
 
 
+def test_effect_reconciliation_uses_stronger_unstratified_fallback_when_exact_baseline_is_thin():
+    post = [
+        {"review_id": f"post_{idx}", "review": {"regime_id": "trend" if idx < 3 else "range", "context_integrity": "full"}}
+        for idx in range(5)
+    ]
+    baseline = [
+        {"review_id": f"pre_{idx}", "review": {"regime_id": "range", "context_integrity": "full"}}
+        for idx in range(5)
+    ]
+
+    selected = RuleEvolutionGovernor._select_effect_comparison(
+        post,
+        baseline,
+        target_regime="trend",
+        min_trades=3,
+        baseline_min_trades=2,
+        observe_trades=5,
+    )
+
+    selected_post, selected_baseline, _, _, post_mismatch, baseline_mismatch, basis = selected
+    assert len(selected_post) == 5
+    assert len(selected_baseline) == 5
+    assert post_mismatch == 2
+    assert baseline_mismatch == 5
+    assert basis == "unstratified_bounded"
+
+
 def test_effect_reconciliation_closes_window_before_concurrent_same_scope_change(tmp_path):
     db_path = str(tmp_path / "state.db")
     gov = RuleEvolutionGovernor(db_path)

@@ -14,6 +14,7 @@ from backend.services.brain_governance_candidates import (
     BrainGovernanceCandidateService,
     ensure_brain_governance_candidate_table,
 )
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from research.learning.governance_conflicts import ACTIVE_CONFLICT_STATUSES, control_surface
 from research.llm_advisory import LLMAdvisoryService
 
@@ -653,9 +654,13 @@ class BrainGovernanceCandidateReviewService:
                        evidence_json, status, reviewed_at, created_at
                 FROM policy_suggestion
                 WHERE status IN ('proposed', 'approved', 'applied')
+                  AND governance_eligible=1
+                  AND governance_eligibility_version=?
+                  AND COALESCE(governance_eligibility_fingerprint, '') <> ''
                 ORDER BY created_at DESC
                 LIMIT 200
                 """,
+                (GOVERNANCE_ELIGIBILITY_VERSION,),
             ).fetchall()
             return [dict(row) for row in rows if str(row["status"] or "") in ACTIVE_CONFLICT_STATUSES]
         finally:

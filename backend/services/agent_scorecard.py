@@ -12,6 +12,7 @@ from backend.services.agent_authority import (
     policy_suggestion_requested_writes,
 )
 from backend.services._brain_helpers import connect as _connect, execute as _execute
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.proposal_registry import ProposalRegistryService
 
 
@@ -251,6 +252,7 @@ class AgentScorecardService:
             "stale_evidence_count": 0,
             "conflict_count": 0,
             "contract_violation_count": 0,
+            "historical_contract_violation_count": 0,
             "blocked_by_risk_count": 0,
             "status_counts": {},
             "required_gate_counts": {},
@@ -326,7 +328,8 @@ class AgentScorecardService:
             lineage = _loads(row["lineage_json"], {})
             verdict = lineage.get("authority_verdict") if isinstance(lineage, dict) else {}
             if isinstance(verdict, dict) and verdict.get("violations"):
-                metric["contract_violation_count"] += len(verdict.get("violations") or [])
+                key = "contract_violation_count" if _text(row["status"]) == "active" else "historical_contract_violation_count"
+                metric[key] += len(verdict.get("violations") or [])
 
     def _policy_suggestion_metrics(
         self,
@@ -343,7 +346,9 @@ class AgentScorecardService:
             conn,
             """
             SELECT suggestion_id, scope_type, scope_key, action, evidence_json,
-                   status, reviewed_at, created_at
+                   status, reviewed_at, governance_eligible,
+                   governance_eligibility_version,
+                   governance_eligibility_fingerprint, created_at
             FROM policy_suggestion
             ORDER BY created_at DESC
             LIMIT ?
@@ -373,7 +378,14 @@ class AgentScorecardService:
                     impact_level="medium",
                 )
             if verdict.get("violations"):
-                metric["contract_violation_count"] += len(verdict.get("violations") or [])
+                current_executable = bool(
+                    _text(row["status"]) in {"proposed", "approved", "applied"}
+                    and int(row["governance_eligible"] or 0) == 1
+                    and _text(row["governance_eligibility_version"]) == GOVERNANCE_ELIGIBILITY_VERSION
+                    and _text(row["governance_eligibility_fingerprint"])
+                )
+                key = "contract_violation_count" if current_executable else "historical_contract_violation_count"
+                metric[key] += len(verdict.get("violations") or [])
             if _text(row["status"]) == "blocked_by_risk":
                 metric["blocked_by_risk_count"] += 1
         return sources
@@ -762,13 +774,17 @@ class AgentScorecardService:
 
     @staticmethod
     def _quality_score(metric: dict[str, Any]) -> float:
-        proposal_count = max(1, int(metric.get("proposal_count") or 0))
+        proposal_count = int(metric.get("proposal_count") or 0)
+        candidate_count = int(metric.get("candidate_count") or 0)
+        policy_suggestion_count = int(metric.get("policy_suggestion_count") or 0)
+        originated_count = max(1, proposal_count, candidate_count, policy_suggestion_count)
         application_count = int(metric.get("application_count") or 0)
         positive = int(metric.get("positive_effect_count") or 0)
         negative = int(metric.get("negative_effect_count") or 0)
         terminal = int(metric.get("terminal_effect_count") or 0)
         inconclusive = int(metric.get("inconclusive_effect_count") or 0)
         superseded = int((metric.get("status_counts") or {}).get("superseded") or 0)
+        submitted = int((metric.get("status_counts") or {}).get("submitted") or 0)
         outcome_count = positive + negative
         score = 0.55
         # Reward verified outcomes, not proposal volume. A prolific agent with
@@ -778,7 +794,13 @@ class AgentScorecardService:
         if application_count:
             score += 0.08 * min(1.0, terminal / application_count)
             score -= 0.08 * min(1.0, inconclusive / application_count)
-        score -= 0.10 * min(1.0, superseded / proposal_count)
+        score -= 0.10 * min(1.0, superseded / originated_count)
+        # Candidate-only agents hand work to the policy lane instead of owning
+        # applications.  A successful submit is positive lifecycle evidence;
+        # using proposal_count=1 as their denominator used to mark healthy
+        # candidate lanes as maximally superseded.
+        if proposal_count == 0 and candidate_count > 0:
+            score += 0.04 * min(1.0, submitted / originated_count)
         score += min(0.08, 0.01 * int(metric.get("trade_lesson_feedback_count") or 0))
         score -= min(0.18, 0.04 * negative)
         score -= min(0.18, 0.03 * int(metric.get("contract_violation_count") or 0))

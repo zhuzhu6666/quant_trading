@@ -851,6 +851,33 @@ def test_brain_governance_candidate_review_uses_agent_reliability_gate(tmp_path)
     assert review["source_reliability"]["agent_scorecard"]["negative_effect_count"] == 1
 
 
+def test_candidate_review_conflicts_ignore_legacy_ineligible_suggestions(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.executemany(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, status,
+             governance_eligible, governance_eligibility_version,
+             governance_eligibility_fingerprint, created_at)
+            VALUES (?, 'factor', 'rsi_14', 'downweight', 'approved', ?, ?, ?, ?)
+            """,
+            [
+                ("legacy", 0, "", "", 1.0),
+                ("current", 1, "governance_eligibility.v1", "fp", 2.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rows = BrainGovernanceCandidateReviewService(db_path)._active_policy_suggestions()
+
+    assert [row["suggestion_id"] for row in rows] == ["current"]
+
+
 def test_candidate_bridge_review_coverage_flags_missing_required_review(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()

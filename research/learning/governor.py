@@ -192,6 +192,69 @@ class RuleEvolutionGovernor:
         matched = [item for item in clean if cls._review_regime(item) == regime]
         return matched, contaminated, len(clean) - len(matched)
 
+    @classmethod
+    def _select_effect_comparison(
+        cls,
+        post_reviews: list[dict],
+        baseline_reviews: list[dict],
+        *,
+        target_regime: str,
+        min_trades: int,
+        baseline_min_trades: int,
+        observe_trades: int,
+    ) -> tuple[list[dict], list[dict], int, int, int, int, str]:
+        comparison_regime = target_regime if target_regime else ""
+        exact_post, post_contaminated, post_regime_mismatch = cls._comparable_reviews(
+            post_reviews,
+            regime=comparison_regime,
+        )
+        exact_baseline, baseline_contaminated, baseline_regime_mismatch = cls._comparable_reviews(
+            baseline_reviews,
+            regime=comparison_regime,
+        )
+        if not target_regime:
+            return (
+                exact_post,
+                exact_baseline,
+                post_contaminated,
+                baseline_contaminated,
+                0,
+                0,
+                "unstratified_no_regime",
+            )
+        if len(exact_post) >= int(min_trades) and len(exact_baseline) >= int(baseline_min_trades):
+            return (
+                exact_post,
+                exact_baseline,
+                post_contaminated,
+                baseline_contaminated,
+                post_regime_mismatch,
+                baseline_regime_mismatch,
+                "exact_regime",
+            )
+        clean_post, _, _ = cls._comparable_reviews(post_reviews, regime="")
+        clean_baseline, _, _ = cls._comparable_reviews(baseline_reviews, regime="")
+        fallback_min = max(int(observe_trades), int(min_trades), int(baseline_min_trades))
+        if len(clean_post) >= fallback_min and len(clean_baseline) >= fallback_min:
+            return (
+                clean_post,
+                clean_baseline,
+                post_contaminated,
+                baseline_contaminated,
+                post_regime_mismatch,
+                baseline_regime_mismatch,
+                "unstratified_bounded",
+            )
+        return (
+            exact_post,
+            exact_baseline,
+            post_contaminated,
+            baseline_contaminated,
+            post_regime_mismatch,
+            baseline_regime_mismatch,
+            "exact_regime_insufficient",
+        )
+
     @staticmethod
     def _parse_evidence(row: sqlite3.Row) -> dict:
         try:
@@ -1143,14 +1206,22 @@ class RuleEvolutionGovernor:
                     self._review_regime(item)
                     for item in raw_post_reviews + raw_pre_reviews
                 )
-                comparison_regime = target_regime if regime_evidence_available else ""
-                post_reviews, post_contaminated, post_regime_mismatch = self._comparable_reviews(
+                comparison_target = target_regime if regime_evidence_available else ""
+                (
+                    post_reviews,
+                    pre_reviews,
+                    post_contaminated,
+                    pre_contaminated,
+                    post_regime_mismatch,
+                    pre_regime_mismatch,
+                    comparison_basis,
+                ) = self._select_effect_comparison(
                     raw_post_reviews,
-                    regime=comparison_regime,
-                )
-                pre_reviews, pre_contaminated, pre_regime_mismatch = self._comparable_reviews(
                     raw_pre_reviews,
-                    regime=comparison_regime,
+                    target_regime=comparison_target,
+                    min_trades=min_trades,
+                    baseline_min_trades=baseline_min_trades,
+                    observe_trades=observe_trades,
                 )
                 evaluation = evaluate_application_effect(
                     app=app,
@@ -1166,6 +1237,7 @@ class RuleEvolutionGovernor:
                     excluded_regime_mismatch_baseline=pre_regime_mismatch,
                     target_regime=target_regime,
                     regime_evidence_available=regime_evidence_available,
+                    comparison_basis=comparison_basis,
                     next_application=next_application,
                     observation_upper_bound=observation_upper_bound,
                     reward_from_review=reward_from_review,

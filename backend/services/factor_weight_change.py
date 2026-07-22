@@ -214,6 +214,7 @@ class FactorWeightChangeService:
         now = time.time()
         app_columns = state_table_columns(conn, "learning_application_log")
         effect_columns = state_table_columns(conn, "learning_application_effect")
+        suggestion_columns = state_table_columns(conn, "policy_suggestion")
         reservation_columns = state_table_columns(
             conn, "learning_experiment_reservation"
         )
@@ -298,6 +299,56 @@ class FactorWeightChangeService:
                 values=app_values,
                 immutable_columns={"created_at"},
             )
+
+            for suggestion_id in suggestion_ids:
+                suggestion = _execute(
+                    conn,
+                    """
+                    SELECT status, governance_eligible,
+                           governance_eligibility_version,
+                           governance_eligibility_fingerprint,
+                           applied_mutation_id
+                    FROM policy_suggestion
+                    WHERE suggestion_id=?
+                    LIMIT 1
+                    """,
+                    (suggestion_id,),
+                ).fetchone()
+                if suggestion is None:
+                    continue
+                if not bool(
+                    int(suggestion["governance_eligible"] or 0) == 1
+                    and str(suggestion["governance_eligibility_version"] or "")
+                    == GOVERNANCE_ELIGIBILITY_VERSION
+                    and str(suggestion["governance_eligibility_fingerprint"] or "")
+                ):
+                    raise RuntimeError(
+                        f"factor_weight_suggestion_eligibility_invalid:{suggestion_id}"
+                    )
+                if str(suggestion["status"] or "") not in {"approved", "applied"}:
+                    raise RuntimeError(
+                        f"factor_weight_suggestion_not_approved:{suggestion_id}"
+                    )
+                assignments = [
+                    "status='applied'",
+                    "reviewed_at=?",
+                    "review_note=?",
+                ]
+                params: list[Any] = [
+                    now,
+                    f"applied by committed factor weight mutation {mutation_id}",
+                ]
+                if "applied_mutation_id" in suggestion_columns:
+                    assignments.append("applied_mutation_id=?")
+                    params.append(mutation_id)
+                params.append(suggestion_id)
+                _execute(
+                    conn,
+                    "UPDATE policy_suggestion SET "
+                    + ", ".join(assignments)
+                    + " WHERE suggestion_id=?",
+                    params,
+                )
 
             effect_values: dict[str, Any] = {
                 "application_id": application_id,

@@ -3605,6 +3605,138 @@ def _approve_demo_policy_suggestions(
     return {"approved": approved, "skipped": skipped, "review": review_result, "conflicts": conflict_result}
 
 
+def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: int = 1) -> dict[str, Any]:
+    from alpha.decision_policy import DecisionPolicy
+    from backend.services.factor_weight_change import FactorWeightChangeService
+    from config.runtime_config import DEMO_AUTONOMY_MODES, shared as runtime_config
+    from research.learning.governor import RuleEvolutionGovernor
+
+    cfg = runtime_config()
+    mode = str(getattr(cfg, "autonomy_mode", "") or "").strip().lower()
+    if mode not in DEMO_AUTONOMY_MODES:
+        return {"attempted": 0, "applied": False, "reason": "demo_mode_required", "items": []}
+    conn = _connect(STATE_DB, read_only=True)
+    try:
+        rows = _execute(
+            conn,
+            """
+            SELECT suggestion_id, scope_key, action, evidence_json
+            FROM policy_suggestion
+            WHERE scope_type='factor'
+              AND status='approved'
+              AND action IN ('downweight', 'boost_small')
+              AND governance_eligible=1
+              AND governance_eligibility_version=?
+              AND COALESCE(governance_eligibility_fingerprint, '') <> ''
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (
+                GOVERNANCE_ELIGIBILITY_VERSION,
+                max(20, min(max(1, int(limit or 1)) * 20, 200)),
+            ),
+        ).fetchall()
+    finally:
+        conn.close()
+    current_weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
+    items: list[dict[str, Any]] = []
+    actionable_attempted = 0
+    action_limit = max(1, min(int(limit or 1), 20))
+    governor = RuleEvolutionGovernor()
+    for row in rows:
+        suggestion_id = str(row["suggestion_id"] or "")
+        factor = str(row["scope_key"] or "")
+        action = str(row["action"] or "")
+        evidence = _loads(row["evidence_json"], {})
+        expected = dict(evidence.get("expected_effect") or {})
+        if action == "downweight" and factor not in current_weights:
+            note = (
+                "superseded before apply: factor is absent from the current "
+                "RuntimeConfig weight source of truth; restoring its historical "
+                "weight would be a risk expansion"
+            )
+            governor.set_status(suggestion_id, "superseded", note)
+            items.append(
+                {
+                    "suggestion_id": suggestion_id,
+                    "factor": factor,
+                    "status": "superseded_stale_runtime_target",
+                    "reason": "factor_absent_from_current_runtime_weights",
+                }
+            )
+            continue
+        if actionable_attempted >= action_limit:
+            break
+        actionable_attempted += 1
+        old_weight = float(current_weights.get(factor) or 0.0)
+        target_weight = float(expected.get("suggested_target_weight") or 0.0)
+        if action == "downweight":
+            if target_weight <= 0.0 or target_weight >= old_weight:
+                target_weight = old_weight * 0.89
+            target_weight = max(0.0, min(target_weight, old_weight * 0.95))
+        else:
+            if target_weight <= old_weight:
+                target_weight = old_weight * 1.05
+        if old_weight <= 0.0 or abs(target_weight - old_weight) < 1e-9:
+            items.append(
+                {
+                    "suggestion_id": suggestion_id,
+                    "factor": factor,
+                    "status": "skipped_non_actionable_weight",
+                    "old_weight": old_weight,
+                    "target_weight": target_weight,
+                }
+            )
+            continue
+        result = FactorWeightChangeService().execute(
+            source="demo_approved_factor_suggestion",
+            producer="autonomous_demo_apply_stepper",
+            run_id=f"{experiment_id}:{suggestion_id}",
+            actor="system:autonomous_demo_apply_stepper.sync_factor_weights",
+            reason="apply approved factor suggestion through governed weight service",
+            awe_patches={factor: {"weight": target_weight, "reason": f"approved_{action}"}},
+            factor_configs=dict(getattr(cfg, "factor_signal_config", {}) or {}),
+            current_weights=current_weights,
+            fast=True,
+            bypass_for_risk_reduction=action == "downweight",
+            decision_policy=DecisionPolicy(min_weight=0.0),
+            suggestion_ids_by_factor={factor: [suggestion_id]},
+            evidence_by_factor={
+                factor: {
+                    "approved_factor_suggestion": True,
+                    "suggestion_id": suggestion_id,
+                    "action": action,
+                    "target_weight": target_weight,
+                    "governance_evidence": evidence,
+                }
+            },
+            source_agent="factor_governance",
+        )
+        items.append(
+            {
+                "suggestion_id": suggestion_id,
+                "factor": factor,
+                "status": str(result.get("status") or ""),
+                "old_weight": old_weight,
+                "target_weight": target_weight,
+                "applications": result.get("applications") or {},
+                "mutation": result.get("mutation") or {},
+                "reason": result.get("reason") or "",
+            }
+        )
+        if str(result.get("status") or "") == "applied":
+            current_weights.update(dict(result.get("proposed_weights") or {}))
+    return {
+        "attempted": len(items),
+        "actionable_attempted": actionable_attempted,
+        "superseded": sum(
+            item.get("status") == "superseded_stale_runtime_target" for item in items
+        ),
+        "applied": any(item.get("status") == "applied" for item in items),
+        "items": items,
+    }
+
+
 def _sync_factor_weights_for_demo(*, experiment_id: str) -> dict[str, Any]:
     try:
         verdict = __import__("risk.policy_service", fromlist=["RiskPolicyService"]).RiskPolicyService.shared().evaluate(
@@ -3619,9 +3751,33 @@ def _sync_factor_weights_for_demo(*, experiment_id: str) -> dict[str, Any]:
         ).to_dict()
         if not verdict.get("allowed", False):
             return {"synced": False, "blocked": True, "risk_verdict": verdict}
+        approved = _apply_approved_factor_suggestions_for_demo(
+            experiment_id=experiment_id,
+            limit=1,
+        )
+        if approved.get("applied"):
+            return {
+                "synced": True,
+                "blocked": False,
+                "risk_verdict": verdict,
+                "approved_factor_suggestions": approved,
+            }
+        if int(approved.get("actionable_attempted") or 0) > 0:
+            return {
+                "synced": False,
+                "blocked": True,
+                "reason": "approved_factor_suggestion_not_applied",
+                "risk_verdict": verdict,
+                "approved_factor_suggestions": approved,
+            }
         from backend.runtime.evolution_orchestrator import _update_weights
 
-        return {"synced": bool(_update_weights()), "blocked": False, "risk_verdict": verdict}
+        return {
+            "synced": bool(_update_weights()),
+            "blocked": False,
+            "risk_verdict": verdict,
+            "approved_factor_suggestions": approved,
+        }
     except Exception as exc:
         return {"synced": False, "blocked": False, "error": str(exc)}
 

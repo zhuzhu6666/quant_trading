@@ -235,6 +235,34 @@ def test_agent_briefing_includes_governance_coverage(tmp_path):
     assert briefing["review_rules"]["candidate_review_required_before_bridge"] is True
 
 
+def test_candidate_only_quality_uses_candidate_lifecycle_denominator():
+    score = AgentScorecardService._quality_score(
+        {
+            "proposal_count": 0,
+            "candidate_count": 171,
+            "policy_suggestion_count": 0,
+            "application_count": 0,
+            "status_counts": {"superseded": 91, "submitted": 61, "active": 19},
+        }
+    )
+
+    assert score > 0.5
+
+
+def test_candidate_only_quality_still_penalizes_failed_lifecycle():
+    score = AgentScorecardService._quality_score(
+        {
+            "proposal_count": 0,
+            "candidate_count": 20,
+            "policy_suggestion_count": 0,
+            "application_count": 0,
+            "status_counts": {"superseded": 20},
+        }
+    )
+
+    assert score < 0.5
+
+
 def test_agent_generation_context_includes_scope_relevant_experience(tmp_path):
     db_path = tmp_path / "state.db"
     conn = _setup_state(db_path)

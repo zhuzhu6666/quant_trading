@@ -36,6 +36,7 @@ def evaluate_application_effect(
     excluded_regime_mismatch_baseline: int,
     target_regime: str,
     regime_evidence_available: bool,
+    comparison_basis: str,
     next_application: dict[str, Any] | None,
     observation_upper_bound: float,
     reward_from_review: Callable[[dict[str, Any]], float],
@@ -75,7 +76,8 @@ def evaluate_application_effect(
             "causal_claim_allowed": False,
             "target_regime": target_regime,
             "regime_evidence_available": regime_evidence_available,
-            "regime_matched": bool(target_regime and regime_evidence_available),
+            "regime_matched": comparison_basis == "exact_regime",
+            "comparison_basis": comparison_basis,
             "raw_post_count": raw_post_count,
             "raw_baseline_count": raw_baseline_count,
             "excluded_contaminated_post": excluded_contaminated_post,
@@ -110,6 +112,31 @@ def evaluate_application_effect(
     decision["evidence_quality"]["observation_age_seconds"] = observation_age_seconds
     decision["evidence_quality"]["observation_clock_valid"] = observation_clock_valid
     decision["evidence_quality"]["max_observation_age_seconds"] = max(86400.0, float(max_observation_age_seconds or 0.0))
+    exact_bounded = bool(
+        comparison_basis == "exact_regime"
+        and len(post_reviews) >= min_trades
+        and len(baseline_reviews) >= baseline_min_trades
+        and target_regime
+        and regime_evidence_available
+    )
+    no_regime_bounded = bool(
+        comparison_basis == "unstratified_no_regime"
+        and not regime_evidence_available
+        and len(post_reviews) >= min_trades
+        and len(baseline_reviews) >= baseline_min_trades
+    )
+    fallback_bounded = bool(
+        comparison_basis == "unstratified_bounded"
+        and len(post_reviews) >= observe_trades
+        and len(baseline_reviews) >= observe_trades
+    )
+    bounded_attribution_allowed = exact_bounded or no_regime_bounded or fallback_bounded
+    decision["evidence_quality"]["bounded_attribution_allowed"] = bounded_attribution_allowed
+    if status in {"effective", "ineffective", "mixed"} and not bounded_attribution_allowed:
+        status = "inconclusive" if next_application else "observing"
+        decision["evidence_quality"]["causal_status"] = "attribution_gate_insufficient_comparability"
+        if next_application:
+            decision["evidence_quality"]["retry_via_new_application"] = True
     if observation_window_expired(
         status=status,
         cycle_ts=cycle_ts,
@@ -119,12 +146,6 @@ def evaluate_application_effect(
         status = "inconclusive"
         decision["evidence_quality"]["causal_status"] = "observation_window_expired_inconclusive"
         decision["evidence_quality"]["retry_via_new_application"] = True
-    decision["evidence_quality"]["bounded_attribution_allowed"] = bool(
-        len(post_reviews) >= min_trades
-        and len(baseline_reviews) >= baseline_min_trades
-        and target_regime
-        and regime_evidence_available
-    )
     return EffectEvaluation(
         decision=decision,
         status=status,

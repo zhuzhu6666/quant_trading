@@ -227,6 +227,62 @@ def test_factor_pruning_governance_promotes_ready_without_submitting_policy_sugg
     assert preview["policy_suggestion"]["action"] == "downweight"
 
 
+def test_factor_pruning_governance_supersedes_absent_runtime_target(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        "backend.services.factor_pruning_governance.RiskPolicyService.shared",
+        lambda: _Risk(_Verdict(True)),
+    )
+    monkeypatch.setattr(
+        "backend.services.factor_pruning_governance.FactorPruningCandidateService.build",
+        lambda self, limit=50: _source_candidate(),
+    )
+    service = FactorPruningGovernanceService(db_path)
+    service.materialize_latest(limit=10, persist=True)
+    monkeypatch.setattr(service, "_runtime_weights", lambda: {})
+
+    result = service.promote_ready(limit=10, min_evidence_score=0.9)
+
+    assert result["promoted_count"] == 0
+    assert result["superseded_count"] == 1
+    conn = connect_sqlite(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status, proposal_stage FROM brain_governance_candidate "
+            "WHERE candidate_id='factor_pruning:dsl_auto_test'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert tuple(row) == ("superseded", "stale_runtime_target")
+
+
+def test_factor_pruning_materialize_skips_absent_runtime_target(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        "backend.services.factor_pruning_governance.FactorPruningCandidateService.build",
+        lambda self, limit=50: _source_candidate(),
+    )
+    service = FactorPruningGovernanceService(db_path)
+    monkeypatch.setattr(service, "_runtime_weights", lambda: {})
+
+    result = service.materialize_latest(limit=10, persist=True)
+
+    assert result["candidate_count"] == 0
+    assert result["skipped_stale_runtime_target_count"] == 1
+
+
 def test_factor_pruning_governance_counter_evidence_blocks_promotion(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
@@ -314,7 +370,7 @@ def test_factor_pruning_governance_promotes_live_loss_pressure_without_weak_heal
     assert "recent_loss_contribution_pressure" in promoted["items"][0]["reason_codes"]
 
 
-def test_factor_pruning_governance_bridge_is_rejected_without_governance_eligibility(monkeypatch, tmp_path):
+def test_factor_pruning_governance_bridge_binds_governance_eligibility(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
     try:
@@ -357,11 +413,10 @@ def test_factor_pruning_governance_bridge_is_rejected_without_governance_eligibi
     assert candidate[0] == "submitted_to_policy_suggestion"
     assert candidate[1] == "submitted"
     assert candidate[2] == proposed[0]
-
     reviewed = RuleEvolutionGovernor(str(db_path)).review_pending()
 
-    assert reviewed["approved"] == 0
-    assert reviewed["rejected"] == 1
+    assert reviewed["approved"] == 1
+    assert reviewed["rejected"] == 0
     conn = connect_sqlite(db_path)
     try:
         reviewed_status = conn.execute(
@@ -375,10 +430,31 @@ def test_factor_pruning_governance_bridge_is_rejected_without_governance_eligibi
         ).fetchone()
     finally:
         conn.close()
-    assert reviewed_status[0] == "rejected"
-    assert "eligibility version/fingerprint missing" in reviewed_status[1]
-    assert reviewed_status[2] == 0
-    assert reviewed_status[3] == "eligibility_contract_invalid"
+    assert reviewed_status[0] == "approved"
+    assert "factor pruning governance evidence present" in reviewed_status[1]
+    assert reviewed_status[2] == 1
+    assert reviewed_status[3] == ""
+
+
+def test_factor_pruning_governance_bridge_accepts_demo_autonomous_mode(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        "config.runtime_config.shared",
+        lambda: type("Cfg", (), {"autonomy_mode": "demo_autonomous"})(),
+    )
+
+    result = FactorPruningGovernanceService(db_path).bridge_ready_candidates(
+        limit=1,
+        require_demo_nursery=True,
+    )
+
+    assert result["status"] != "blocked_mode"
 
 
 def test_factor_pruning_governance_auto_bridge_requires_candidate_review(monkeypatch, tmp_path):
@@ -451,7 +527,7 @@ def test_factor_pruning_governance_auto_bridge_requires_candidate_review(monkeyp
     assert "agent_negative_effect_history_requires_counter_evidence" in review[2]
 
 
-def test_factor_pruning_governance_live_harm_bridge_is_rejected_without_governance_eligibility(monkeypatch, tmp_path):
+def test_factor_pruning_governance_live_harm_bridge_binds_reviewed_governance_eligibility(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
     try:
@@ -476,8 +552,8 @@ def test_factor_pruning_governance_live_harm_bridge_is_rejected_without_governan
     assert bridge["submitted_count"] == 1
     reviewed = RuleEvolutionGovernor(str(db_path)).review_pending()
 
-    assert reviewed["approved"] == 0
-    assert reviewed["rejected"] == 1
+    assert reviewed["approved"] == 1
+    assert reviewed["rejected"] == 0
     conn = connect_sqlite(db_path)
     try:
         reviewed_status = conn.execute(
@@ -489,11 +565,11 @@ def test_factor_pruning_governance_live_harm_bridge_is_rejected_without_governan
         ).fetchone()
     finally:
         conn.close()
-    assert reviewed_status[0] == "rejected"
+    assert reviewed_status[0] == "approved"
     assert reviewed_status[1] == "dsl_auto_hot_bad"
-    assert "eligibility version/fingerprint missing" in reviewed_status[2]
-    assert reviewed_status[4] == 0
-    assert reviewed_status[5] == "eligibility_contract_invalid"
+    assert "factor pruning governance evidence present" in reviewed_status[2]
+    assert reviewed_status[4] == 1
+    assert reviewed_status[5] == ""
     evidence = json.loads(reviewed_status[3])
     assert evidence["bridge"]["candidate_review_required_before_submit"] is True
     assert evidence["bridge"]["candidate_review"]["bridge_ready"] is True

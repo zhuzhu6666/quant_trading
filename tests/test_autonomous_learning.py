@@ -1650,6 +1650,11 @@ def test_sync_factor_weights_uses_current_autonomy_mode(monkeypatch):
 
     monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: _Policy()))
     monkeypatch.setattr(evolution_orchestrator, "_update_weights", lambda: True)
+    monkeypatch.setattr(
+        al,
+        "_apply_approved_factor_suggestions_for_demo",
+        lambda **_kwargs: {"attempted": 0, "applied": False, "items": []},
+    )
     monkeypatch.setattr(al, "_autonomy_mode", lambda: "demo_nursery")
 
     result = al._sync_factor_weights_for_demo(experiment_id="exp_demo")
@@ -1657,6 +1662,84 @@ def test_sync_factor_weights_uses_current_autonomy_mode(monkeypatch):
     assert result["synced"] is True
     assert captured["action"] == "update_weight"
     assert captured["context"]["governance"]["autonomy_mode"] == "demo_nursery"
+
+
+def test_sync_factor_weights_does_not_bypass_blocked_approved_suggestion(monkeypatch):
+    class _Verdict:
+        def to_dict(self):
+            return {"allowed": True}
+
+    class _Policy:
+        def evaluate(self, _action, _context):
+            return _Verdict()
+
+    from risk import policy_service
+    from backend.runtime import evolution_orchestrator
+
+    monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: _Policy()))
+    monkeypatch.setattr(
+        al,
+        "_apply_approved_factor_suggestions_for_demo",
+        lambda **_kwargs: {
+            "attempted": 1,
+            "actionable_attempted": 1,
+            "applied": False,
+            "items": [{"status": "blocked_by_admission"}],
+        },
+    )
+    monkeypatch.setattr(
+        evolution_orchestrator,
+        "_update_weights",
+        lambda: (_ for _ in ()).throw(AssertionError("broad updater must not run")),
+    )
+
+    result = al._sync_factor_weights_for_demo(experiment_id="exp_blocked")
+
+    assert result["synced"] is False
+    assert result["blocked"] is True
+    assert result["reason"] == "approved_factor_suggestion_not_applied"
+
+
+def test_demo_factor_apply_supersedes_missing_runtime_downweight(monkeypatch):
+    class _Rows:
+        def fetchall(self):
+            return [
+                {
+                    "suggestion_id": "ps_stale",
+                    "scope_key": "retired_factor",
+                    "action": "downweight",
+                    "evidence_json": json.dumps(
+                        {"expected_effect": {"current_weight": 0.4, "suggested_target_weight": 0.2}}
+                    ),
+                }
+            ]
+
+    class _Conn:
+        def close(self):
+            pass
+
+    class _Config:
+        autonomy_mode = "demo_nursery"
+        factor_portfolio_weights = {"active_factor": 0.5}
+        factor_signal_config = {}
+
+    reviewed = []
+    monkeypatch.setattr(al, "_connect", lambda *_args, **_kwargs: _Conn())
+    monkeypatch.setattr(al, "_execute", lambda *_args, **_kwargs: _Rows())
+    monkeypatch.setattr(rc, "shared", lambda: _Config())
+    monkeypatch.setattr(
+        "research.learning.governor.RuleEvolutionGovernor.set_status",
+        lambda _self, suggestion_id, status, note="": reviewed.append(
+            (suggestion_id, status, note)
+        ) or True,
+    )
+
+    result = al._apply_approved_factor_suggestions_for_demo(experiment_id="exp_stale")
+
+    assert result["actionable_attempted"] == 0
+    assert result["superseded"] == 1
+    assert result["items"][0]["status"] == "superseded_stale_runtime_target"
+    assert reviewed[0][0:2] == ("ps_stale", "superseded")
 
 
 def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):

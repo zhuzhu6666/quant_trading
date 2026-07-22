@@ -84,7 +84,7 @@
 | `factor_catalog_snapshot` | 每轮治理是否留痕 |
 | 生命周期单写者 | Evolution 是否只产候选；实际 promote/rollback/retire 是否只由 FactorGovernance 执行 |
 | Canary 证据 | evidence/dataset hash 是否变化；stage 是否累计足够 fresh bars，是否拒绝重复窗口 |
-| 效果证据质量 | 是否过滤污染/regime mismatch；并发 application 是否保持 observing 而非伪归因 |
+| 效果证据质量 | 是否优先精确 regime 并过滤污染；精确基线不足时是否只有前后都达到完整 observation window 才允许 `unstratified_bounded`；其余是否保持 observing/inconclusive；并发 application 是否关闭旧窗口而不伪归因 |
 | 效果闭环 SLO | bounded window 是否归档终态；inconclusive 重试是否要求终态后的新证据且无更新 application |
 | 实验准入 | 同一 scope 是否只有一个 active effect；AWE/Factor Governance 是否共用门；微小 delta 是否被拒绝 |
 | 全局实验预算 | active application/effect 是否按 application_id 去重计数；预算触顶是否仅阻止新增扩张实验且不阻止风险回滚 |

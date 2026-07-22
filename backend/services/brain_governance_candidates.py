@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 import os
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_exists
+from backend.core.db import STATE_DB, state_table_columns, state_table_exists
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 
 
 BRIDGE_READY_STAGES = {"governance_ready", "applyable"}
@@ -81,6 +83,16 @@ def ensure_policy_suggestion_table(db_path: str | Path = STATE_DB) -> None:
             )
             """,
         )
+        columns = state_table_columns(conn, "policy_suggestion")
+        for column, ddl in {
+            "applied_mutation_id": "TEXT NOT NULL DEFAULT ''",
+            "governance_eligible": "INTEGER NOT NULL DEFAULT 0",
+            "governance_eligibility_version": "TEXT NOT NULL DEFAULT ''",
+            "governance_eligibility_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "governance_ineligible_reason": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in columns:
+                _execute(conn, f"ALTER TABLE policy_suggestion ADD COLUMN {column} {ddl}")
         _execute(conn, "CREATE INDEX IF NOT EXISTS idx_policy_suggestion_scope ON policy_suggestion(scope_type, scope_key, status)")
         conn.commit()
     finally:
@@ -539,6 +551,30 @@ class BrainGovernanceCandidateService:
             )
 
         suggestion_id = str(payload["suggestion_id"])
+        eligibility_fingerprint = hashlib.sha256(
+            _dumps(
+                {
+                    "schema_version": GOVERNANCE_ELIGIBILITY_VERSION,
+                    "evidence_class": "reviewed_governance_candidate_bridge",
+                    "candidate_id": candidate_id,
+                    "scope_type": payload["scope_type"],
+                    "scope_key": payload["scope_key"],
+                    "action": payload["action"],
+                    "candidate_review": candidate_review,
+                    "risk_verdict": risk_verdict,
+                    "expected_effect": candidate.get("expected_effect") or {},
+                    "evidence_refs": candidate.get("evidence_refs") or {},
+                    "counter_evidence_refs": candidate.get("counter_evidence_refs") or {},
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        evidence = dict(payload["evidence"])
+        evidence["governance_eligibility"] = {
+            "governance_eligible": True,
+            "governance_eligibility_version": GOVERNANCE_ELIGIBILITY_VERSION,
+            "governance_eligibility_fingerprint": eligibility_fingerprint,
+            "evidence_class": "reviewed_governance_candidate_bridge",
+        }
         now = time.time()
         conn = _connect(self.db_path)
         try:
@@ -547,8 +583,11 @@ class BrainGovernanceCandidateService:
                 """
                 INSERT INTO policy_suggestion
                 (suggestion_id, scope_type, scope_key, action, confidence,
-                 reason, evidence_json, status, reviewed_at, review_note, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', 0, '', ?)
+                 reason, evidence_json, status, reviewed_at, review_note,
+                 governance_eligible, governance_eligibility_version,
+                 governance_eligibility_fingerprint, governance_ineligible_reason,
+                 created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', 0, '', 1, ?, ?, '', ?)
                 """,
                 (
                     suggestion_id,
@@ -557,7 +596,9 @@ class BrainGovernanceCandidateService:
                     payload["action"],
                     _safe_float(payload.get("confidence")),
                     payload["reason"],
-                    _dumps(payload["evidence"]),
+                    _dumps(evidence),
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    eligibility_fingerprint,
                     now,
                 ),
             )

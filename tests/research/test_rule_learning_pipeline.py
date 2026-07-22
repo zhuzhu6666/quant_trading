@@ -1291,10 +1291,17 @@ def test_policy_suggester_downweights_after_repeated_bad_losses(tmp_path):
         suggestion = suggester.suggest_from_experience(
             {
                 "experience_id": f"exp_{idx}",
+                "source_table": "trade_outcome_review",
+                "source_id": f"review_{idx}",
+                "append_source": "live_review",
                 "primary_factor": "fragile_factor",
                 "outcome_label": "bad_loss",
                 "reward_score": -0.8,
                 "failure_tags": ["bad_loss", "regime_mismatch"],
+                "decision_context_json": {
+                    "context_integrity": "full",
+                    "attribution_integrity": "full",
+                },
             }
         )
         actions.append(suggestion["action"] if suggestion else None)
@@ -1307,6 +1314,8 @@ def test_policy_suggester_downweights_after_repeated_bad_losses(tmp_path):
     assert int(stats["sample_count"]) == 3
     assert int(stats["bad_loss_count"]) == 3
     assert float(stats["avg_reward"]) < 0
+    assert float(stats["effective_sample_count"]) == 3.0
+    assert stats["governance_eligibility_version"] == "governance_eligibility.v1"
 
 
 def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path):
@@ -1337,6 +1346,10 @@ def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path
                 "outcome_label": "good_win",
                 "reward_score": reward,
                 "failure_tags": [],
+                "decision_context_json": {
+                    "context_integrity": "full",
+                    "attribution_integrity": "full",
+                },
             }
         )
 
@@ -1351,6 +1364,9 @@ def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path
     assert evidence["source_table"] == "trade_outcome_review"
     assert evidence["source_id"] == "rev_fast_4"
     assert evidence["append_source"] == "live_review"
+    assert evidence["effective_sample_count"] == 4.0
+    assert rows[0]["governance_eligible"] == 1
+    assert rows[0]["governance_eligibility_version"] == "governance_eligibility.v1"
 
 
 def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):

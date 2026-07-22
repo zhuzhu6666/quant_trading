@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from alpha.decision_policy import DecisionPolicy
-from backend.core.db import STATE_DB, state_table_exists
+from backend.core.db import STATE_DB, is_state_db_path, state_table_exists
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService, ensure_brain_governance_candidate_table
 from backend.services.factor_counter_evidence import FactorCounterEvidenceService
@@ -54,11 +54,26 @@ class FactorPruningGovernanceService:
         min_priority = max(0.0, min(1.0, _safe_float(min_priority, DEFAULT_MIN_PRIORITY)))
         source = FactorPruningCandidateService(self.db_path).build(limit=limit)
         now = time.time()
-        candidates = [
+        priority_candidates = [
             item
             for item in list(source.get("candidates") or [])
             if _safe_float(item.get("priority_score")) >= min_priority
+        ]
+        runtime_weights = self._runtime_weights()
+        candidates = [
+            item
+            for item in priority_candidates
+            if runtime_weights is None
+            or _safe_float(runtime_weights.get(str(item.get("factor") or ""))) > 0.0
         ][:limit]
+        stale_runtime_target_count = (
+            0
+            if runtime_weights is None
+            else sum(
+                _safe_float(runtime_weights.get(str(item.get("factor") or ""))) <= 0.0
+                for item in priority_candidates
+            )
+        )
         items = [self._materialize_candidate(item, now=now, persist=persist) for item in candidates]
         return {
             "ok": any(item.get("status") in {"candidate_materialized", "candidate_updated", "already_materialized"} for item in items),
@@ -67,6 +82,7 @@ class FactorPruningGovernanceService:
             "source_status": source.get("status"),
             "source_generated_count": source.get("generated_count", 0),
             "candidate_count": len(candidates),
+            "skipped_stale_runtime_target_count": stale_runtime_target_count,
             "materialized_count": sum(1 for item in items if item.get("status") == "candidate_materialized"),
             "updated_count": sum(1 for item in items if item.get("status") == "candidate_updated"),
             "already_submitted_count": sum(1 for item in items if item.get("status") == "already_submitted"),
@@ -155,12 +171,21 @@ class FactorPruningGovernanceService:
             for row in rows
         ]
         return {
-            "ok": any(item.get("status") in {"promoted", "already_governance_ready"} for item in items),
+            "ok": any(
+                item.get("status")
+                in {"promoted", "already_governance_ready", "superseded_stale_runtime_target"}
+                for item in items
+            ),
             "schema_version": "factor_pruning_governance_promote_run.v1",
             "status": "promoted" if items else "no_candidates",
             "candidate_count": len(items),
             "promoted_count": sum(1 for item in items if item.get("status") == "promoted"),
             "already_ready_count": sum(1 for item in items if item.get("status") == "already_governance_ready"),
+            "superseded_count": sum(
+                1
+                for item in items
+                if item.get("status") == "superseded_stale_runtime_target"
+            ),
             "blocked_count": sum(1 for item in items if str(item.get("status") or "").startswith("blocked_")),
             "items": items,
             "boundary": {**self.boundary(), "promotes_to_governance_ready_only": True, "does_not_submit_policy_suggestion": True},
@@ -179,10 +204,10 @@ class FactorPruningGovernanceService:
         ensure_brain_governance_candidate_table(self.db_path)
         limit = max(1, min(int(limit or 5), 20))
         if require_demo_nursery:
-            from config.runtime_config import shared as runtime_config
+            from config.runtime_config import DEMO_AUTONOMY_MODES, shared as runtime_config
 
-            mode = str(getattr(runtime_config(), "autonomy_mode", "") or "")
-            if mode != "demo_nursery":
+            mode = str(getattr(runtime_config(), "autonomy_mode", "") or "").strip().lower()
+            if mode not in DEMO_AUTONOMY_MODES:
                 return {
                     "ok": False,
                     "schema_version": "factor_pruning_governance_bridge_run.v1",
@@ -204,11 +229,23 @@ class FactorPruningGovernanceService:
             review_service = BrainGovernanceCandidateReviewService(self.db_path)
         items = []
         submitted_seen = 0
+        runtime_weights = self._runtime_weights()
         for row in rows:
             if submitted_seen >= limit:
                 break
             candidate_id = str(row["candidate_id"] or "")
             factor = str(row["scope_key"] or "")
+            if runtime_weights is not None and _safe_float(runtime_weights.get(factor)) <= 0.0:
+                self._supersede_stale_runtime_candidate(candidate_id)
+                items.append(
+                    {
+                        "status": "superseded_stale_runtime_target",
+                        "candidate_id": candidate_id,
+                        "factor": factor,
+                        "reason": "factor_absent_from_current_runtime_weights",
+                    }
+                )
+                continue
             if self._has_policy_conflict(factor):
                 items.append({"status": "blocked_conflict", "candidate_id": candidate_id, "factor": factor})
                 continue
@@ -271,6 +308,11 @@ class FactorPruningGovernanceService:
             "candidate_count": len(items),
             "submitted_count": sum(1 for item in items if item.get("status") == "submitted_to_policy_suggestion"),
             "already_submitted_count": sum(1 for item in items if item.get("status") == "already_submitted"),
+            "superseded_count": sum(
+                1
+                for item in items
+                if item.get("status") == "superseded_stale_runtime_target"
+            ),
             "blocked_count": sum(1 for item in items if str(item.get("status") or "").startswith("blocked_")),
             "items": items,
             "boundary": {
@@ -422,6 +464,40 @@ class FactorPruningGovernanceService:
         except Exception:
             return rows
 
+    def _runtime_weights(self) -> dict[str, float] | None:
+        if not is_state_db_path(self.db_path):
+            return None
+        try:
+            from config.runtime_config import shared as runtime_config
+
+            raw = getattr(runtime_config(), "factor_portfolio_weights", None)
+            if not isinstance(raw, dict):
+                return None
+            return {str(name): _safe_float(weight) for name, weight in raw.items()}
+        except Exception:
+            return None
+
+    def _supersede_stale_runtime_candidate(self, candidate_id: str) -> None:
+        conn = _connect(self.db_path)
+        try:
+            _execute(
+                conn,
+                """
+                UPDATE brain_governance_candidate
+                SET status='superseded',
+                    proposal_stage='stale_runtime_target',
+                    updated_at=?
+                WHERE candidate_id=?
+                  AND source_agent='factor_pruning_governance'
+                  AND status='active'
+                  AND COALESCE(submitted_suggestion_id, '') = ''
+                """,
+                (time.time(), candidate_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def _promote_candidate(
         self,
         row: Any,
@@ -444,6 +520,16 @@ class FactorPruningGovernanceService:
         decision = dict(decision_policy.get("decision") or {})
         current_weight = _safe_float(expected.get("current_weight"))
         target_weight = _safe_float(expected.get("suggested_target_weight"))
+        runtime_weights = self._runtime_weights()
+        factor = str(row["scope_key"] or "")
+        if runtime_weights is not None and _safe_float(runtime_weights.get(factor)) <= 0.0:
+            self._supersede_stale_runtime_candidate(candidate_id)
+            return {
+                "status": "superseded_stale_runtime_target",
+                "candidate_id": candidate_id,
+                "factor": factor,
+                "reason": "factor_absent_from_current_runtime_weights",
+            }
         blockers = []
         if evidence_score < min_evidence_score:
             blockers.append("evidence_score_below_threshold")

@@ -227,8 +227,8 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
                 automatic_demo=True,
                 apply_when_ready=True,
                 full_learning_cycle=True,
-                consume_recommended_step=False,
-                recommended_step_limit=int(os.getenv("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_STEP_LIMIT", "1") or "1"),
+                consume_recommended_step=True,
+                recommended_step_limit=int(os.getenv("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_STEP_LIMIT", "5") or "5"),
             )
             logger.info(
                 "[learning_worker] autonomous evolution nursery result: {}",
@@ -361,6 +361,8 @@ def _run_once(
                 automatic_demo=True,
                 apply_when_ready=True,
                 full_learning_cycle=True,
+                consume_recommended_step=True,
+                recommended_step_limit=int(os.getenv("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_STEP_LIMIT", "5") or "5"),
             ),
         )(),
     )

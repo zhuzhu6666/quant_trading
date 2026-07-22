@@ -20,6 +20,7 @@ from backend.services.autonomous_learning import (
     ensure_autonomous_learning_tables,
 )
 from backend.services.evolution_ledger import finish_evolution_run, start_evolution_run
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 
 
 class AutonomousDemoApplyStepper:
@@ -539,8 +540,12 @@ class AutonomousDemoApplyStepper:
                        evidence_json, status, reviewed_at, created_at
                 FROM policy_suggestion
                 WHERE status IN ('proposed', 'approved', 'applied')
+                  AND governance_eligible=1
+                  AND governance_eligibility_version=?
+                  AND COALESCE(governance_eligibility_fingerprint, '') <> ''
                 ORDER BY created_at ASC
                 """,
+                (GOVERNANCE_ELIGIBILITY_VERSION,),
             ).fetchall()
             result = GovernanceConflictResolver().resolve([dict(row) for row in rows])
             superseded = list(result.get("superseded") or [])
@@ -596,7 +601,13 @@ class AutonomousDemoApplyStepper:
                 ),
                 "governor_review": self._count_policy(conn, "status='proposed'"),
                 "resolve_conflicts": self._count_conflict_superseded(conn),
-                "sync_factor_weights": self._count_policy(conn, "status='approved' AND scope_type='factor'"),
+                "sync_factor_weights": self._count_policy(
+                    conn,
+                    "status='approved' AND scope_type='factor' "
+                    "AND governance_eligible=1 "
+                    f"AND governance_eligibility_version='{GOVERNANCE_ELIGIBILITY_VERSION}' "
+                    "AND COALESCE(governance_eligibility_fingerprint, '') <> ''",
+                ),
                 "apply_parameter_templates": self._count_policy(conn, "status='approved' AND scope_type='parameter_template' AND action='switch_parameter_template'"),
                 "release_parameter_candidates": self._count_table(conn, "parameter_template_release_candidate", "status IN ('pending_review','approved')"),
                 "apply_supervisor_templates": self._count_policy(conn, "status='approved' AND scope_type='position_supervisor_template'"),
@@ -663,8 +674,12 @@ class AutonomousDemoApplyStepper:
                        evidence_json, status, reviewed_at, created_at
                 FROM policy_suggestion
                 WHERE status IN ('proposed', 'approved', 'applied')
+                  AND governance_eligible=1
+                  AND governance_eligibility_version=?
+                  AND COALESCE(governance_eligibility_fingerprint, '') <> ''
                 ORDER BY created_at ASC
                 """,
+                (GOVERNANCE_ELIGIBILITY_VERSION,),
             ).fetchall()
             result = GovernanceConflictResolver().resolve([dict(row) for row in rows])
             return len(result.get("superseded") or [])

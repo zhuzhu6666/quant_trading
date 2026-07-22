@@ -210,7 +210,6 @@ class AutonomousEvolutionNurseryRunner:
 
         if (
             consume_recommended_step
-            and not apply_when_ready
             and bool(repaired_cycle.get("stable_demo_nursery_ready"))
         ):
             actions.append(
@@ -663,6 +662,7 @@ class AutonomousEvolutionNurseryRunner:
             "governor_review",
             "resolve_conflicts",
             "rollback_supervisor_templates",
+            "sync_factor_weights",
             "factor_pruning_bridge",
         ))
         recommended_by_step = {

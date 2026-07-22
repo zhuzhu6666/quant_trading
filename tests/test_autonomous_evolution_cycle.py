@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from backend.core.db import connect_sqlite
+from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.autonomous_demo_apply_stepper import AutonomousDemoApplyStepper
 from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
 from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
@@ -393,6 +393,57 @@ def test_autonomous_evolution_runner_consumes_one_recommended_step(tmp_path, mon
     ]
 
 
+def test_autonomous_evolution_runner_consumes_step_before_automatic_apply(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    _create_core_tables(db_path, include_replay=True, include_effect=True)
+    _create_candidate_review(db_path)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        AutonomousEvolutionCycleService,
+        "_chain_health",
+        lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
+    )
+    monkeypatch.setattr(AutonomousEvolutionNurseryRunner, "_build_readiness", lambda self: _readiness())
+    monkeypatch.setattr(
+        AutonomousEvolutionNurseryRunner,
+        "_consume_recommended_step",
+        lambda self, *, limit, allowlist: calls.append("step") or {"ok": True, "status": "completed"},
+    )
+    monkeypatch.setattr(
+        AutonomousEvolutionNurseryRunner,
+        "_run_learning_cycle",
+        lambda self, *, sample_limit, recommendation_limit: calls.append("learning") or {"ok": True, "status": "completed"},
+    )
+
+    result = AutonomousEvolutionNurseryRunner(db_path).run_once(
+        refresh_proposals=False,
+        apply_when_ready=True,
+        full_learning_cycle=True,
+        consume_recommended_step=True,
+    )
+
+    assert result["status"] == "completed"
+    assert calls == ["step", "learning"]
+    assert [item["action"] for item in result["actions"]] == [
+        "consume_recommended_demo_apply_step",
+        "run_autonomous_learning_cycle",
+    ]
+
+
+def test_recommended_step_closes_approved_weight_before_bridging_more_candidates():
+    selected = AutonomousEvolutionNurseryRunner._select_recommended_step(
+        {
+            "steps": [
+                {"step": "factor_pruning_bridge", "pending_count": 7, "recommended": True},
+                {"step": "sync_factor_weights", "pending_count": 1, "recommended": True},
+            ]
+        }
+    )
+
+    assert selected["step"] == "sync_factor_weights"
+
+
 def test_replay_freshness_records_lightweight_report(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     service = ReplayHarnessService(db_path)
@@ -472,6 +523,34 @@ def test_autonomous_demo_apply_stepper_plan_reports_known_steps(tmp_path, monkey
     assert all(item["requires_confirm_step"] for item in plan["steps"])
 
 
+def test_autonomous_demo_apply_plan_excludes_legacy_factor_approvals(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr("backend.services.autonomous_demo_apply_stepper._demo_autonomous_enabled", lambda: True)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.executemany(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, status,
+             governance_eligible, governance_eligibility_version,
+             governance_eligibility_fingerprint, created_at)
+            VALUES (?, 'factor', ?, 'downweight', 'approved', ?, ?, ?, ?)
+            """,
+            [
+                ("legacy", "rsi_14", 0, "", "", 1.0),
+                ("current", "macd_hist", 1, "governance_eligibility.v1", "fp", 2.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = AutonomousDemoApplyStepper(db_path).plan()
+
+    assert plan["pending"]["sync_factor_weights"] == 1
+
+
 def test_autonomous_demo_apply_stepper_limits_conflict_resolution(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     monkeypatch.setattr("backend.services.autonomous_demo_apply_stepper._demo_autonomous_enabled", lambda: True)
@@ -489,6 +568,9 @@ def test_autonomous_demo_apply_stepper_limits_conflict_resolution(tmp_path, monk
                 status TEXT,
                 review_note TEXT,
                 reviewed_at REAL,
+                governance_eligible INTEGER NOT NULL DEFAULT 0,
+                governance_eligibility_version TEXT NOT NULL DEFAULT '',
+                governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
                 created_at REAL
             )
             """
@@ -501,8 +583,10 @@ def test_autonomous_demo_apply_stepper_limits_conflict_resolution(tmp_path, monk
         conn.executemany(
             """
             INSERT INTO policy_suggestion
-            (suggestion_id, scope_type, scope_key, action, confidence, evidence_json, status, review_note, reviewed_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (suggestion_id, scope_type, scope_key, action, confidence, evidence_json,
+             status, review_note, reviewed_at, governance_eligible,
+             governance_eligibility_version, governance_eligibility_fingerprint, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'governance_eligibility.v1', 'fp', ?)
             """,
             rows,
         )
