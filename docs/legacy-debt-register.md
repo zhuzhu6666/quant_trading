@@ -67,6 +67,15 @@
 - 收口方式: 保留默认 `bar/every_bar` 兼容；宏观/COT/ETF/事件使用低频策略。
 - 验证方式: `tests/test_signal_normalizer.py::test_low_frequency_factor_history_samples_only_on_value_change`、`tests/alpha/test_low_frequency_factors.py`。
 
+### 低频因子只用分钟线预热
+
+- 状态: `fixed`
+- 旧理解: live 启动喂入 150 根 M5 已足以预热所有 normalizer 窗口。
+- 当前口径: 日频宏观因子必须从闭合 D1 K 线和 PIT 外部数据重建独立历史样本，再追加最新 M5 观察；M5 短缓冲无法计算 `dxy_corr_20` 等日级长窗口时，以同一 D1/PIT 计算的最新有限值补充并定期刷新。进程重启不能把 30 样本窗口重置成单个 forward-filled 值。
+- 影响面: live startup barrier、`FactorFrameBuilder`、`SignalNormalizer`、宏观评分和决策审计。
+- 收口方式: `low_frequency_factor_warmup.v1` 使用 Registry 原始 callable 生成 D1 历史；失败只让 alpha 保持 abstain，不影响 safety/broker 风险缩减链路。
+- 验证方式: `tests/test_low_frequency_factor_warmup.py`、`tests/test_live_factor_bootstrap.py::test_factor_warmup_seeds_daily_history_before_intraday_history`。
+
 ### shadow/discovered/live 混用
 
 - 状态: `migrating`

@@ -291,6 +291,9 @@ from backend.services.live_supervision_runtime import (
 from backend.services.live_factor_wiring import (
     merge_portfolio_configs as _merge_portfolio_configs,
 )
+from backend.services.low_frequency_factor_warmup import (
+    build_low_frequency_factor_snapshots as _build_low_frequency_factor_snapshots,
+)
 from backend.services.live_factor_bootstrap import (
     FactorInitializationResult,
     FactorInitializationRuntime,
@@ -6814,6 +6817,7 @@ def _factor_warmup_runtime() -> FactorWarmupRuntime:
         set_factor_snapshot=_set_factor_snapshot,
         acknowledge_projections=_loop_ack_prepared_factor_projections,
         now=time.time,
+        build_low_frequency_snapshots=_build_low_frequency_factor_snapshots,
     )
 
 

@@ -24,6 +24,14 @@ class _Normalizer:
         return {key: float(value) for key, value in factor_values.items()}
 
 
+class _FallbackNormalizer(_Normalizer):
+    def resolve_factor_values(self, factor_values):
+        resolved = dict(factor_values)
+        if resolved.get("dxy_corr_20") is None:
+            resolved["dxy_corr_20"] = -0.42
+        return resolved
+
+
 class _Compositor:
     def compose(self, signals, factor_values, timestamp=None):
         return SimpleNamespace(
@@ -101,6 +109,22 @@ def test_live_decision_pipeline_applies_context_policy_before_gate():
     assert gate.tick_count == 1
 
 
+def test_live_decision_pipeline_applies_daily_raw_fallback_before_scoring():
+    gate = _Gate()
+    frame = run_live_decision_pipeline(
+        engine=_Engine(factor_values={"dxy_corr_20": None}, is_warm=True),
+        normalizer=_FallbackNormalizer(),
+        compositor=_Compositor(),
+        gate=gate,
+        bar={"time": 1000.0},
+        cfg=SimpleNamespace(context_policy_enabled=False),
+    )
+
+    assert frame.factor_values == {"dxy_corr_20": -0.42}
+    assert frame.signals == {"dxy_corr_20": -0.42}
+    assert gate.filter_calls[0][1] == {"dxy_corr_20": -0.42}
+
+
 def test_signal_decision_log_payload_matches_legacy_shape():
     composite = SimpleNamespace(
         direction=1,
@@ -108,6 +132,9 @@ def test_signal_decision_log_payload_matches_legacy_shape():
         tactical_score=0.7,
         macro_score=0.1,
         n_active_factors=3,
+        n_available_factors=3,
+        n_scoring_factors=2,
+        n_contributing_factors=1,
         n_abstain_factors=1,
     )
     gate_result = SimpleNamespace(passed=True, reason="passed")
@@ -133,6 +160,9 @@ def test_signal_decision_log_payload_matches_legacy_shape():
             "tactical_score": 0.7,
             "macro_score": 0.1,
             "n_active": 3,
+            "n_available": 3,
+            "n_scoring": 2,
+            "n_contributing": 1,
             "n_abstain": 1,
         },
     }

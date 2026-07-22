@@ -35,6 +35,9 @@ class CompositeSignal:
     context_signals: dict[str, float] = field(default_factory=dict)
     factor_roles: dict[str, str] = field(default_factory=dict)
     n_active_alpha_factors: int = 0
+    n_available_factors: int = 0
+    n_scoring_factors: int = 0
+    n_contributing_factors: int = 0
     context_state: dict[str, Any] = field(default_factory=dict)
     redundancy_groups: dict[str, list[str]] = field(default_factory=dict)
     effective_alpha_factor_count: int = 0
@@ -169,6 +172,12 @@ class PortfolioCompositor:
         context_state = self._build_context_state(signals, factor_values, factor_roles)
         redundancy_groups = self._build_redundancy_groups(factor_roles)
         n_alpha = len(tactical) + len(macro)
+        n_available = sum(1 for signal in signals.values() if signal is not None)
+        n_contributing = sum(
+            1
+            for signal, weight in (*tactical.values(), *macro.values())
+            if abs(float(signal) * float(weight)) > 1e-12
+        )
 
         # 7. 构建 CompositeSignal
         return CompositeSignal(
@@ -182,9 +191,9 @@ class PortfolioCompositor:
             factor_values=dict(factor_values),
             active_weights=all_weights,
             tags_breakdown=tags_breakdown,
-            n_active_factors=sum(
-                1 for s in signals.values() if s is not None
-            ),
+            # Backward-compatible alias.  New consumers must use the explicit
+            # available/scoring/contributing counters below.
+            n_active_factors=n_available,
             n_abstain_factors=sum(
                 1 for s in signals.values() if s is None
             ),
@@ -193,6 +202,9 @@ class PortfolioCompositor:
             context_signals=context_signals,
             factor_roles=factor_roles,
             n_active_alpha_factors=n_alpha,
+            n_available_factors=n_available,
+            n_scoring_factors=n_alpha,
+            n_contributing_factors=n_contributing,
             context_state=context_state,
             redundancy_groups=redundancy_groups,
             effective_alpha_factor_count=n_alpha,

@@ -57,6 +57,9 @@ def test_factor_snapshot_helpers_preserve_vote_and_summary_payloads():
         alpha_score=0.123456,
         n_active_factors=3,
         n_active_alpha_factors=2,
+        n_available_factors=3,
+        n_scoring_factors=2,
+        n_contributing_factors=1,
         effective_alpha_factor_count=2,
         n_abstain_factors=1,
         composer_version="factor_roles.v2",
@@ -79,9 +82,33 @@ def test_factor_snapshot_helpers_preserve_vote_and_summary_payloads():
     summary = build_factor_snapshot_summary(composite, gate, now=123.0)
 
     assert votes == {
-        "trend": {"signal": 0.1235, "raw": 9.8765, "direction": 1, "role": "alpha", "used_in_score": True},
-        "noise": {"signal": 0.0, "raw": 1.0, "direction": 0, "role": "context", "used_in_score": False},
-        "mean": {"signal": -0.25, "raw": None, "direction": -1, "role": "alpha", "used_in_score": True},
+        "trend": {
+            "signal": 0.1235,
+            "raw": 9.8765,
+            "direction": 1,
+            "role": "alpha",
+            "used_in_score": True,
+            "available": True,
+            "abstained": False,
+        },
+        "noise": {
+            "signal": None,
+            "raw": 1.0,
+            "direction": 0,
+            "role": "context",
+            "used_in_score": False,
+            "available": False,
+            "abstained": True,
+        },
+        "mean": {
+            "signal": -0.25,
+            "raw": None,
+            "direction": -1,
+            "role": "alpha",
+            "used_in_score": True,
+            "available": True,
+            "abstained": False,
+        },
     }
     assert summary == {
         "direction": 1,
@@ -90,6 +117,9 @@ def test_factor_snapshot_helpers_preserve_vote_and_summary_payloads():
         "macro_score": -0.1,
         "alpha_score": 0.1235,
         "n_active": 3,
+        "n_available": 3,
+        "n_scoring": 2,
+        "n_contributing": 1,
         "n_active_alpha": 2,
         "effective_alpha_factor_count": 2,
         "n_abstain": 1,
@@ -127,7 +157,7 @@ def test_build_signal_log_suffix_only_emits_directional_signals():
 
     assert build_signal_log_suffix(flat_signal, gate) == ""
     assert build_signal_log_suffix(long_signal, gate) == (
-        " signal=LONG score=0.7000 tactical=0.2000 macro=0.5000 n=4 gate=passed"
+        " signal=LONG score=0.7000 tactical=0.2000 macro=0.5000 available=4 scoring=0 contributing=0 gate=passed"
     )
 
 

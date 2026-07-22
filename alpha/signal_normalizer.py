@@ -12,6 +12,7 @@
 
 import logging
 import math
+import time
 from collections import deque
 from typing import Any
 
@@ -171,6 +172,11 @@ class SignalNormalizer:
         self._configs: dict[str, dict] = config or {}
         self._histories: dict[str, deque[float]] = {}
         self._last_history_values: dict[str, float] = {}
+        self._low_frequency_fallback_loader = None
+        self._low_frequency_fallback_config: dict[str, dict] = dict(config or {})
+        self._low_frequency_fallback_values: dict[str, float] = {}
+        self._low_frequency_fallback_refreshed_at = 0.0
+        self._low_frequency_fallback_retry_after = 0.0
 
     def normalize(
         self, factor_values: dict[str, float | None]
@@ -254,6 +260,75 @@ class SignalNormalizer:
 
     def update_configs(self, config: dict[str, dict] | None) -> None:
         self._configs = dict(config or {})
+        self._low_frequency_fallback_config = dict(config or {})
+
+    def configure_low_frequency_fallback(
+        self,
+        loader,
+        signal_config: dict[str, dict] | None,
+    ) -> None:
+        """Configure live-only PIT refresh for daily raw factor fallbacks."""
+        self._low_frequency_fallback_loader = loader
+        self._low_frequency_fallback_config = dict(signal_config or {})
+
+    def seed_low_frequency_fallback(self, payload: dict, *, refreshed_at) -> None:
+        """Load finite latest D1 values produced by the canonical factor code."""
+        latest_values = dict((payload or {}).get("latest_values") or {})
+        seeded: dict[str, float] = {}
+        for name, value in latest_values.items():
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                seeded[str(name)] = numeric
+        self._low_frequency_fallback_values = seeded
+        self._low_frequency_fallback_refreshed_at = self._as_epoch(refreshed_at)
+        self._low_frequency_fallback_retry_after = 0.0
+
+    @staticmethod
+    def _as_epoch(value) -> float:
+        if hasattr(value, "timestamp"):
+            return float(value.timestamp())
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def resolve_factor_values(
+        self,
+        factor_values: dict[str, float | None],
+    ) -> dict[str, float | None]:
+        """Fill only missing daily values; finite live values always win."""
+        self._maybe_refresh_low_frequency_fallback()
+        resolved = dict(factor_values or {})
+        for name, fallback in self._low_frequency_fallback_values.items():
+            current = resolved.get(name)
+            try:
+                current_finite = current is not None and math.isfinite(float(current))
+            except (TypeError, ValueError):
+                current_finite = False
+            if not current_finite and name in resolved:
+                resolved[name] = fallback
+        return resolved
+
+    def _maybe_refresh_low_frequency_fallback(self) -> None:
+        loader = self._low_frequency_fallback_loader
+        now = time.time()
+        if loader is None or now < self._low_frequency_fallback_retry_after:
+            return
+        age = now - self._low_frequency_fallback_refreshed_at
+        if self._low_frequency_fallback_refreshed_at > 0 and age < 6 * 3600:
+            return
+        try:
+            payload = loader(
+                signal_config=self._low_frequency_fallback_config,
+                as_of=now,
+            )
+            self.seed_low_frequency_fallback(payload or {}, refreshed_at=now)
+        except Exception as exc:
+            self._low_frequency_fallback_retry_after = now + 15 * 60
+            logger.warning("Low-frequency factor fallback refresh failed: %s", exc)
 
     def _ensure_history(self, name: str, cfg: dict) -> None:
         if name not in self._histories:

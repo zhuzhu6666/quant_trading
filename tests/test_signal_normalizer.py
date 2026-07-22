@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import math
+import time
 from collections import deque
 
 import pytest
@@ -195,3 +196,41 @@ def test_bar_factor_history_samples_every_bar():
     for _ in range(5):
         norm.normalize({"rsi_14": 50.0})
     assert len(norm._histories["rsi_14"]) == 5
+
+
+def test_low_frequency_fallback_fills_only_missing_live_raw_values():
+    norm = SignalNormalizer({
+        "dxy_corr_20": {
+            "mode": "rank_mapping",
+            "window": 100,
+            "min_samples": 2,
+        },
+    })
+    norm.seed_low_frequency_fallback(
+        {"latest_values": {"dxy_corr_20": -0.42}},
+        refreshed_at=time.time(),
+    )
+
+    assert norm.resolve_factor_values({"dxy_corr_20": None}) == {
+        "dxy_corr_20": -0.42,
+    }
+    assert norm.resolve_factor_values({"dxy_corr_20": 0.25}) == {
+        "dxy_corr_20": 0.25,
+    }
+
+
+def test_low_frequency_fallback_refreshes_from_configured_pit_loader():
+    calls = []
+    config = {"dxy_corr_20": {"mode": "rank_mapping"}}
+    norm = SignalNormalizer(config)
+    norm.configure_low_frequency_fallback(
+        lambda **kwargs: calls.append(kwargs)
+        or {"latest_values": {"dxy_corr_20": -0.6}},
+        config,
+    )
+
+    resolved = norm.resolve_factor_values({"dxy_corr_20": None})
+
+    assert resolved == {"dxy_corr_20": -0.6}
+    assert calls[0]["signal_config"] == config
+    assert calls[0]["as_of"] > 0

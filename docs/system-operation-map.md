@@ -486,7 +486,7 @@ _process_tick_factor_pipeline(...)
 - 只有战术 alpha 时 tactical layer 权重为 1。
 - 只有宏观 alpha 时 macro layer 权重为 1。
 - 两边都没有 alpha 时返回无信号。
-- 输出保留旧字段，同时新增 `alpha_score/context_signals/factor_roles/n_active_alpha_factors/context_state/redundancy_groups/effective_alpha_factor_count`。
+- 输出保留旧 `n_active_factors`（仅作“本轮非空输出数”兼容别名），同时新增 `n_available_factors/n_scoring_factors/n_contributing_factors`，分别表达本轮可用、实际带权 alpha 和产生非零贡献的因子数；另保留 `alpha_score/context_signals/factor_roles/n_active_alpha_factors/context_state/redundancy_groups/effective_alpha_factor_count`。
 
 ## 8. 因子自治治理主循环
 

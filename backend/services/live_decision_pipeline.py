@@ -137,6 +137,8 @@ def run_live_decision_pipeline(
             factor_values=factor_values,
         )
 
+    if hasattr(normalizer, "resolve_factor_values"):
+        factor_values = normalizer.resolve_factor_values(factor_values)
     signals = dict(normalizer.normalize(factor_values) or {})
     composite = compositor.compose(
         signals,
@@ -201,6 +203,25 @@ def build_signal_decision_log_payload(
             "tactical_score": composite.tactical_score,
             "macro_score": composite.macro_score,
             "n_active": composite.n_active_factors,
+            "n_available": int(
+                getattr(
+                    composite,
+                    "n_available_factors",
+                    composite.n_active_factors,
+                )
+                or 0
+            ),
+            "n_scoring": int(
+                getattr(
+                    composite,
+                    "n_scoring_factors",
+                    getattr(composite, "n_active_alpha_factors", 0),
+                )
+                or 0
+            ),
+            "n_contributing": int(
+                getattr(composite, "n_contributing_factors", 0) or 0
+            ),
             "n_abstain": composite.n_abstain_factors,
         },
     }

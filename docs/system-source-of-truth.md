@@ -55,6 +55,7 @@
 | 事项 | 权威来源 | 说明 |
 |---|---|---|
 | 因子输入帧 | `FactorFrameBuilder` | live、health、evolution 统一 PIT 数据入口 |
+| 低频归一化预热 | `backend.services.low_frequency_factor_warmup` + `SignalNormalizer` | live 启动先从闭合 D1 K 线和 PIT 外部数据重建日频因子历史，再追加 M5 warmup；D1 计算的最新有限值只补充 M5 短缓冲无法计算的日级长窗口原始值（有限 live 值优先），并每 6 小时按 PIT 事实刷新。不得用大量重复的单日日频值冒充 30 个独立样本，也不得因进程重启把宏观 rank/zscore 永久留在 cold-start |
 | 因子角色 | `factor_signal_config.role` / registry fallback | `alpha/context/gate/sizing` |
 | 方向评分 | `PortfolioCompositor` | 只使用 enabled、weight > 0、role=alpha 的因子 |
 | live 信号决策编排 | `backend.services.live_decision_pipeline.LiveDecisionFrame` | factor refresh/append、normalizer、compositor、context policy、ExecutionGate 的单 tick 决策输出；不读账户、不触发 RiskPolicy、不下单 |

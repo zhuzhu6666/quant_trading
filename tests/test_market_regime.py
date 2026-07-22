@@ -71,3 +71,30 @@ def test_composite_decision_persists_regime_for_trade_review(tmp_path):
     action = json.loads(row["action_json"])
     assert action["regime_id"] == row["regime_id"]
     assert action["regime_source"] == "context_state.market_dimensions"
+
+
+def test_composite_decision_preserves_abstain_null_values(tmp_path):
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+    decision_id = ledger.log_composite_decision(
+        event_type="signal",
+        composite=_composite(
+            factor_signals={"macro": None},
+            factor_values={"macro": None},
+            active_weights={"macro": 0.0},
+            factor_roles={"macro": "alpha"},
+        ),
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT raw_value, normalized_value, gated, gated_reason "
+            "FROM decision_factor_snapshot WHERE decision_id=?",
+            (decision_id,),
+        ).fetchone()
+
+    assert row["raw_value"] is None
+    assert row["normalized_value"] is None
+    assert row["gated"] == 1
+    assert row["gated_reason"] == "abstain"

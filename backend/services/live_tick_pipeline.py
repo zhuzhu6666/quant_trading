@@ -41,7 +41,7 @@ def build_factor_votes(
     weights = active_weights or {}
     for name, sig in (signals or {}).items():
         raw_val = factor_values.get(name)
-        signal_value = sig if isinstance(sig, (int, float)) else 0.0
+        signal_value = sig if isinstance(sig, (int, float)) else None
         raw_value = raw_val if isinstance(raw_val, (int, float)) else None
         role = str(roles.get(name) or "alpha")
         try:
@@ -49,16 +49,25 @@ def build_factor_votes(
         except (TypeError, ValueError):
             used_in_score = False
         votes[str(name)] = {
-            "signal": round(signal_value, 4),
+            "signal": round(signal_value, 4) if signal_value is not None else None,
             "raw": round(raw_value, 4) if raw_value is not None else None,
-            "direction": (1 if signal_value > 0 else -1 if signal_value < 0 else 0) if used_in_score else 0,
+            "direction": (
+                1 if signal_value > 0 else -1 if signal_value < 0 else 0
+            ) if used_in_score and signal_value is not None else 0,
             "role": role,
             "used_in_score": used_in_score,
+            "available": signal_value is not None,
+            "abstained": signal_value is None,
         }
     return votes
 
 
-def build_factor_snapshot_summary(composite: Any, gate_result: Any, *, now: float) -> dict[str, Any]:
+def build_factor_snapshot_summary(
+    composite: Any,
+    gate_result: Any,
+    *,
+    now: float,
+) -> dict[str, Any]:
     return {
         "direction": composite.direction,
         "score": round(composite.score, 4),
@@ -66,7 +75,27 @@ def build_factor_snapshot_summary(composite: Any, gate_result: Any, *, now: floa
         "macro_score": round(composite.macro_score, 4),
         "alpha_score": round(getattr(composite, "alpha_score", composite.score), 4),
         "n_active": composite.n_active_factors,
-        "n_active_alpha": int(getattr(composite, "n_active_alpha_factors", composite.n_active_factors) or 0),
+        "n_available": int(
+            getattr(composite, "n_available_factors", composite.n_active_factors)
+            or 0
+        ),
+        "n_scoring": int(
+            getattr(
+                composite,
+                "n_scoring_factors",
+                getattr(composite, "n_active_alpha_factors", 0),
+            )
+            or 0
+        ),
+        "n_contributing": int(getattr(composite, "n_contributing_factors", 0) or 0),
+        "n_active_alpha": int(
+            getattr(
+                composite,
+                "n_active_alpha_factors",
+                composite.n_active_factors,
+            )
+            or 0
+        ),
         "effective_alpha_factor_count": int(getattr(
             composite,
             "effective_alpha_factor_count",
@@ -88,11 +117,22 @@ def build_signal_log_suffix(composite: Any, gate_result: Any) -> str:
     if int(getattr(composite, "direction", 0) or 0) == 0:
         return ""
     direction_name = {1: "LONG", -1: "SHORT"}.get(composite.direction, "?")
+    available = getattr(
+        composite, "n_available_factors", composite.n_active_factors
+    )
+    scoring = getattr(
+        composite,
+        "n_scoring_factors",
+        getattr(composite, "n_active_alpha_factors", 0),
+    )
+    contributing = getattr(composite, "n_contributing_factors", 0)
     return (
         f" signal={direction_name} score={composite.score:.4f}"
         f" tactical={composite.tactical_score:.4f}"
         f" macro={composite.macro_score:.4f}"
-        f" n={composite.n_active_factors}"
+        f" available={available}"
+        f" scoring={scoring}"
+        f" contributing={contributing}"
         f" gate={gate_result.reason}"
     )
 

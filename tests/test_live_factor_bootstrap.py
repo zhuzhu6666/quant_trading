@@ -42,9 +42,11 @@ class _Engine:
 class _Normalizer:
     def __init__(self):
         self.warmed = []
+        self.warmup_calls = []
 
     def warmup(self, snapshots):
         self.warmed = list(snapshots)
+        self.warmup_calls.append(self.warmed)
 
     def normalize(self, values):
         return {"momentum": values["momentum"]}
@@ -61,7 +63,7 @@ class _Gate:
         self.ticks += 1
 
 
-def _runtime(*, snapshots=None, acknowledgements=None):
+def _runtime(*, snapshots=None, acknowledgements=None, low_frequency=None):
     snapshots = snapshots if snapshots is not None else []
     acknowledgements = (
         acknowledgements if acknowledgements is not None else []
@@ -84,6 +86,7 @@ def _runtime(*, snapshots=None, acknowledgements=None):
         )
         or {"acknowledged": True},
         now=lambda: 1_000.0,
+        build_low_frequency_snapshots=low_frequency,
     )
 
 
@@ -130,6 +133,53 @@ def test_factor_warmup_publishes_initial_signal_and_projection_ack():
     assert gate.ticks == 1
     assert snapshots
     assert acknowledgements[0]["generation_id"] == "generation-1"
+
+
+def test_factor_warmup_seeds_daily_history_before_intraday_history():
+    engine = _Engine()
+    normalizer = _Normalizer()
+    pipeline = {
+        "engine": engine,
+        "normalizer": normalizer,
+        "compositor": SimpleNamespace(
+            compose=lambda _signals, _values: SimpleNamespace(
+                direction=0,
+                score=0.0,
+                n_active_factors=1,
+                factor_roles={"momentum": "alpha"},
+                active_weights={"momentum": 1.0},
+            )
+        ),
+        "gate": _Gate(),
+    }
+
+    result = warmup_factor_pipeline(
+        pipeline,
+        _frame(),
+        cfg=SimpleNamespace(
+            live_factor_warmup_bars=5,
+            factor_signal_config={"macro": {"window": 100}},
+        ),
+        timeframe="M5",
+        generation_id="generation-low-frequency",
+        log=lambda _message: None,
+        runtime=_runtime(
+            low_frequency=lambda **_kwargs: {
+                "snapshots": [{"macro": float(i)} for i in range(40)],
+                "factor_counts": {"macro": 40},
+                "daily_bar_count": 40,
+            }
+        ),
+    )
+
+    assert normalizer.warmup_calls[0][0] == {"macro": 0.0}
+    assert normalizer.warmup_calls[1][0] == {"momentum": 0.0}
+    assert result["low_frequency_warmup"] == {
+        "daily_bar_count": 40,
+        "snapshot_count": 40,
+        "factor_counts": {"macro": 40},
+        "factor_errors": {},
+    }
 
 
 def test_initial_signal_failure_is_nonfatal_after_engine_warmup():

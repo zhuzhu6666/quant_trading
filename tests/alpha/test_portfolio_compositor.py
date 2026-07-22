@@ -85,6 +85,9 @@ class TestCompose:
         assert result.n_active_factors == 2
         assert result.n_abstain_factors == 2
         assert result.n_active_alpha_factors == 2
+        assert result.n_available_factors == 2
+        assert result.n_scoring_factors == 2
+        assert result.n_contributing_factors == 2
         assert result.tactical_weight == 1.0
         assert result.macro_weight == pytest.approx(0.0)
         assert result.tactical_score == pytest.approx(1.9 / 2.75, rel=1e-3)

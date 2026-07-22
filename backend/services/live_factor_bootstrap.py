@@ -15,6 +15,7 @@ class FactorWarmupRuntime:
     set_factor_snapshot: Any
     acknowledge_projections: Any
     now: Any
+    build_low_frequency_snapshots: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -341,7 +342,48 @@ def warmup_factor_pipeline(
                 values = engine.append_bar(bar)
                 if values:
                     snapshots.append(values)
+        low_frequency_warmup = {
+            "snapshots": [],
+            "factor_counts": {},
+            "daily_bar_count": 0,
+        }
+        if runtime.build_low_frequency_snapshots is not None:
+            try:
+                as_of = warmup_frame.index[-1] if len(warmup_frame) else None
+                low_frequency_warmup = runtime.build_low_frequency_snapshots(
+                    signal_config=getattr(cfg, "factor_signal_config", {}) or {},
+                    as_of=as_of,
+                ) or low_frequency_warmup
+                daily_snapshots = list(
+                    low_frequency_warmup.get("snapshots") or []
+                )
+                normalizer = pipeline["normalizer"]
+                if hasattr(normalizer, "configure_low_frequency_fallback"):
+                    normalizer.configure_low_frequency_fallback(
+                        runtime.build_low_frequency_snapshots,
+                        getattr(cfg, "factor_signal_config", {}) or {},
+                    )
+                if hasattr(normalizer, "seed_low_frequency_fallback"):
+                    normalizer.seed_low_frequency_fallback(
+                        low_frequency_warmup,
+                        refreshed_at=as_of,
+                    )
+                if daily_snapshots:
+                    normalizer.warmup(daily_snapshots)
+                log(
+                    "Low-frequency factor warmup: "
+                    f"daily_bars={int(low_frequency_warmup.get('daily_bar_count', 0) or 0)} "
+                    f"snapshots={len(daily_snapshots)} "
+                    f"factors={low_frequency_warmup.get('factor_counts', {})}"
+                )
+            except Exception as exc:
+                log(
+                    "Low-frequency factor warmup failed non-fatally: "
+                    f"{type(exc).__name__}: {exc}"
+                )
         if snapshots:
+            # Intraday history follows daily history so the newest closed M5
+            # observation is the final sample seen by the normalizer.
             pipeline["normalizer"].warmup(snapshots)
 
         initial_signal = _publish_initial_factor_signal(
@@ -369,6 +411,20 @@ def warmup_factor_pipeline(
             "reason": "warmed",
             "warm": bool(engine.is_warm),
             "snapshot_count": len(snapshots),
+            "low_frequency_warmup": {
+                "daily_bar_count": int(
+                    low_frequency_warmup.get("daily_bar_count", 0) or 0
+                ),
+                "snapshot_count": len(
+                    low_frequency_warmup.get("snapshots") or []
+                ),
+                "factor_counts": dict(
+                    low_frequency_warmup.get("factor_counts") or {}
+                ),
+                "factor_errors": dict(
+                    low_frequency_warmup.get("factor_errors") or {}
+                ),
+            },
             "initial_signal": initial_signal,
             "projection_ack": projection_ack,
         }
@@ -397,7 +453,10 @@ def _publish_initial_factor_signal(
     if not engine.is_warm or not snapshots:
         return {"published": False, "reason": "not_warm"}
     try:
-        last_values = snapshots[-1]
+        last_values = dict(snapshots[-1] or {})
+        normalizer = pipeline["normalizer"]
+        if hasattr(normalizer, "resolve_factor_values"):
+            last_values = normalizer.resolve_factor_values(last_values)
         pipeline["last_factor_values"] = dict(last_values or {})
         last_bar = {
             "open": float(frame["open"].iloc[-1]),
@@ -417,7 +476,7 @@ def _publish_initial_factor_signal(
             "timeframe": timeframe,
             "complete": True,
         }
-        signals = pipeline["normalizer"].normalize(last_values)
+        signals = normalizer.normalize(last_values)
         composite = pipeline["compositor"].compose(signals, last_values)
         gate_result = pipeline["gate"].filter(
             composite,

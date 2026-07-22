@@ -28,6 +28,15 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _timeframe_seconds(timeframe: str) -> int:
     mapping = {
         "M1": 60,
@@ -251,8 +260,8 @@ class DecisionLedger:
                     "decision_id": decision_id,
                     "factor": str(row.get("factor", "")),
                     "source": str(row.get("source", "registry")),
-                    "raw_value": float(row.get("raw_value", 0.0) or 0.0),
-                    "normalized_value": float(row.get("normalized_value", 0.0) or 0.0),
+                    "raw_value": _optional_float(row.get("raw_value")),
+                    "normalized_value": _optional_float(row.get("normalized_value")),
                     "direction": float(row.get("direction", 0.0) or 0.0),
                     "base_weight": float(row.get("base_weight", 0.0) or 0.0),
                     "policy_weight": float(row.get("policy_weight", 0.0) or 0.0),
@@ -349,8 +358,8 @@ class DecisionLedger:
             factor_snapshots.append(
                 {
                     "factor": factor,
-                    "raw_value": values.get(factor, 0.0) or 0.0,
-                    "normalized_value": signal if signal is not None else 0.0,
+                    "raw_value": values.get(factor),
+                    "normalized_value": signal,
                     "direction": (
                         1.0 if (signal or 0.0) > 0 else -1.0 if (signal or 0.0) < 0 else 0.0
                     ) if used_in_score else 0.0,
@@ -373,8 +382,23 @@ class DecisionLedger:
             "tactical_score": getattr(composite, "tactical_score", 0.0),
             "macro_score": getattr(composite, "macro_score", 0.0),
             "n_active_factors": getattr(composite, "n_active_factors", 0),
+            "n_available_factors": getattr(
+                composite,
+                "n_available_factors",
+                getattr(composite, "n_active_factors", 0),
+            ),
+            "n_scoring_factors": getattr(
+                composite,
+                "n_scoring_factors",
+                getattr(composite, "n_active_alpha_factors", 0),
+            ),
+            "n_contributing_factors": getattr(composite, "n_contributing_factors", 0),
             "n_active_alpha_factors": getattr(composite, "n_active_alpha_factors", 0),
-            "effective_alpha_factor_count": getattr(composite, "effective_alpha_factor_count", getattr(composite, "n_active_alpha_factors", 0)),
+            "effective_alpha_factor_count": getattr(
+                composite,
+                "effective_alpha_factor_count",
+                getattr(composite, "n_active_alpha_factors", 0),
+            ),
             "n_abstain_factors": getattr(composite, "n_abstain_factors", 0),
             "factor_roles": roles,
             "context_signals": getattr(composite, "context_signals", {}) or {},
